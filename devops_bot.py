@@ -566,7 +566,7 @@ def post_comment_to_gitcode(repo, number, body, event_type):
 
 # ========== Feishu / IM Chat Processing ==========
 
-def build_chat_prompt(user_text: str, repo_key: str, history: list) -> str:
+def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None) -> str:
     """Build prompt for IM chat (Feishu/Dingtalk/Slack) queries"""
     parts = []
     parts.append(f"User asks about {repo_key}: {user_text}")
@@ -578,6 +578,8 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list) -> str:
             parts.append(f"  [{status}] {t}")
     else:
         parts.append("No events yet for this repository.")
+    if skills:
+        parts.append(f"Skills: {', '.join(skills)}")
     parts.append(build_role_definition())
     return "\n".join(parts)
 
@@ -657,7 +659,7 @@ def process_chat(parsed: dict):
 
         sess, history, oc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
-        prompt = build_chat_prompt(text, repo_key, history)
+        prompt = build_chat_prompt(text, repo_key, history, ["comment", "gitcode-api-guidance"])
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
         wsd = os.path.join(WORKSPACE_DIR, repository.replace("/", "\\"))
