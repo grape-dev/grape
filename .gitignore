@@ -1,0 +1,5 @@
+data/
+*.db
+*.exe
+devops-bot
+.env

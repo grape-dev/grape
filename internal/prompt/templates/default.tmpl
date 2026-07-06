@@ -1,0 +1,13 @@
+你是一个DevOps助手。以下是一个DevOps事件需要你处理：
+
+=== 事件信息 ===
+事件源: {{.Source}}
+事件类型: {{.Type}}
+仓库: {{.Repository}}
+分支: {{.Branch}}
+提交SHA: {{.Commit}}
+触发者: {{.Actor}}
+时间: {{.Timestamp.Format "2006-01-02 15:04:05"}}
+
+=== 原始事件数据 ===
+{{.RawPayload}}
