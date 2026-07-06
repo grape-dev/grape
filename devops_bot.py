@@ -102,7 +102,7 @@ def update_session(sid, history, status, oc_session_id=None):
         db.commit()
 
 def extract_event_number(payload):
-    for key in ["issue", "pull_request"]:
+    for key in ["issue", "pull_request", "merge_request"]:
         obj = payload.get(key, {})
         if isinstance(obj, dict):
             if "number" in obj:
@@ -119,7 +119,11 @@ def extract_event_number(payload):
             return obj_attrs["iid"]
         if "id" in obj_attrs:
             log.info(f"DEBUG extract_number: obj_attrs.id={obj_attrs['id']} (noteable_id fallback)")
-    return payload.get("number", None)
+            return obj_attrs["id"]
+    if "number" in payload:
+        return payload["number"]
+    log.warning(f"extract_event_number: could not find number in payload keys={list(payload.keys())}")
+    return None
 
 def build_role_definition() -> str:
     return (
@@ -190,7 +194,8 @@ def build_prompt(evt, history, oc_session_id, skills):
     body = json.dumps(issue_data.get("body", issue_data.get("description", "")), ensure_ascii=True)[:500]
 
     parts = []
-    parts.append(f"Event: issue #{number} on {repo}")
+    num_str = str(number) if number is not None else "unknown"
+    parts.append(f"Event: issue #{num_str} on {repo}")
     parts.append(f"Title: {title}")
     parts.append(f"Body: {body}")
 
