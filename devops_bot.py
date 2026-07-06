@@ -555,7 +555,7 @@ def _process_event_inner(evt, repo_key):
 
         skill_map = {
             "issue_opened": ["devops-event-ops", "gitcode-api-guidance"],
-            "issue_comment": ["comment", "gitcode-api-guidance"],
+            "issue_comment": ["devops-event-ops", "comment", "gitcode-api-guidance"],
             "pull_request_opened": ["devops-event-ops", "code-review", "security-scan", "gitcode-api-guidance"],
             "push": ["devops-event-ops", "code-review", "security-scan"],
             "build_failure": ["devops-event-ops", "build-debug", "incident-triage"],
@@ -777,7 +777,7 @@ def process_chat(parsed: dict):
 def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new):
     """飞书消息处理主体（受 per-repo 锁保护）"""
     try:
-        prompt = build_chat_prompt(text, repo_key, history, ["comment", "gitcode-api-guidance"])
+        prompt = build_chat_prompt(text, repo_key, history, ["devops-event-ops", "comment", "gitcode-api-guidance"])
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
         wsd = os.path.join(WORKSPACE_DIR, repository.replace("/", "\\"))
