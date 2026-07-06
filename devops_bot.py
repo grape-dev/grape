@@ -435,6 +435,33 @@ def normalize_event(raw, event_header):
         branch = ref[11:]
     return {"source":"gitcode","type":evt_type,"repository":repo,"branch":branch,"actor":actor,"payload":payload}
 
+_recent_events = {}
+_DEDUP_WINDOW = 120  # seconds
+
+
+def _is_duplicate_event(evt) -> bool:
+    """检查短时间内的重复事件（Issue Hook + Note Hook 同时到达导致双评论）"""
+    number = extract_event_number(evt['payload'])
+    if not number:
+        return False
+    key = f"{evt['repository']}:{number}:{evt['type']}"
+    now = time.time()
+    if key in _recent_events:
+        if now - _recent_events[key] < _DEDUP_WINDOW:
+            log.info(f"Duplicate event skipped: {key}")
+            return True
+    # Also check if same issue was already processed under a different event type
+    for other_key, ts in list(_recent_events.items()):
+        if now - ts > _DEDUP_WINDOW:
+            continue
+        other_repo, other_num, _ = other_key.split(":", 2)
+        if other_repo == evt['repository'] and other_num == str(number):
+            log.info(f"Duplicate issue #{number} skipped (already processed as {other_key})")
+            return True
+    _recent_events[key] = now
+    return False
+
+
 def process_event(raw_body, headers):
     global evt
     try:
@@ -451,6 +478,10 @@ def process_event(raw_body, headers):
             if note.startswith('[DevOps Bot]') and username in ('hwc-skills-bot', 'skill-bot'):
                 log.info(f"Skip: self-comment from {username}")
                 return
+
+        # 重复事件去重（同一 Issue 短时间内只处理一次）
+        if _is_duplicate_event(evt):
+            return
 
         ws = os.path.join(WORKSPACE_DIR, evt['repository'].replace("/", "\\"))
         os.makedirs(ws, exist_ok=True)
