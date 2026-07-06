@@ -437,6 +437,16 @@ def normalize_event(raw, event_header):
 
 _recent_events = {}
 _DEDUP_WINDOW = 120  # seconds
+_repo_locks = {}
+_repo_locks_lock = threading.Lock()
+
+
+def _acquire_repo_lock(repo_key: str) -> threading.Lock:
+    """获取 per-repo 处理锁，同 repo 的事件串行处理"""
+    with _repo_locks_lock:
+        if repo_key not in _repo_locks:
+            _repo_locks[repo_key] = threading.Lock()
+        return _repo_locks[repo_key]
 
 
 def _is_duplicate_event(evt) -> bool:
@@ -483,6 +493,23 @@ def process_event(raw_body, headers):
         if _is_duplicate_event(evt):
             return
 
+        # per-repo 串行锁：同一仓库的事件排队处理
+        lock = _acquire_repo_lock(repo_key)
+        lock.acquire()
+        try:
+            _process_event_inner(evt, repo_key)
+        finally:
+            lock.release()
+
+    except Exception as e:
+        import traceback
+        log.error(f"Error processing event: {e}")
+        traceback.print_exc()
+
+
+def _process_event_inner(evt, repo_key):
+    """事件处理主体（受 per-repo 锁保护，同 repo 串行）"""
+    try:
         ws = os.path.join(WORKSPACE_DIR, evt['repository'].replace("/", "\\"))
         os.makedirs(ws, exist_ok=True)
 
@@ -690,6 +717,29 @@ def process_chat(parsed: dict):
 
         sess, history, oc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
+        # per-repo 串行：与 GitCode 事件共享队列
+        lock = _acquire_repo_lock(repo_key)
+        lock.acquire()
+        try:
+            _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new)
+        finally:
+            lock.release()
+
+    except Exception as e:
+        import traceback
+        log.error(f"Feishu process error: {e}")
+        traceback.print_exc()
+        try:
+            local_vars = locals()
+            if 'msg_id' in local_vars and local_vars['msg_id']:
+                reply_text(local_vars['msg_id'], "❌ 处理消息时出错，请稍后重试")
+        except:
+            pass
+
+
+def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new):
+    """飞书消息处理主体（受 per-repo 锁保护）"""
+    try:
         prompt = build_chat_prompt(text, repo_key, history, ["comment", "gitcode-api-guidance"])
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
