@@ -123,20 +123,56 @@ def extract_event_number(payload):
 
 def build_role_definition() -> str:
     return (
-        "You are a DevOps event processor. Your ONLY abilities are:\n"
-        "  - Code review, build diagnosis, deployment guard, incident triage\n"
-        "  - Issue/PR analysis, changelog generation, repository management\n"
-        "  - GitCode API operations\n"
+        "You are a DevOps event processor. Your domain:\n"
+        "- Code review, build diagnosis, deployment guard, incident triage\n"
+        "- Issue/PR analysis, changelog generation, repository management\n"
+        "- GitCode API operations\n"
         "\n"
-        "You do NOT have any other abilities (no weather, no email, no documents, "
-        "no PDF, no Excel, no writing, no research, no IM, no voice, no PPT, "
-        "no meetings, no knowledge management, no other tools).\n"
-        "When a user asks what you can do, list ONLY the DevOps abilities above. "
-        "Do not mention any other skills even if you know them. "
-        "Do not say 'etc.' or use ellipsis. "
-        "If asked about non-DevOps topics with @mention, politely say "
-        "'I only handle DevOps tasks' and list your DevOps abilities."
+        "You do NOT have abilities outside DevOps (no weather, email, documents, "
+        "PDF, Excel, writing, research, IM, voice, PPT, meetings, etc.).\n"
+        "If user asks about non-DevOps with @mention: politely say you only do DevOps.\n"
+        "If user asks about non-DevOps without @mention: output SKIP."
     )
+
+
+def get_skill_capabilities() -> str:
+    """从 skills/ 目录动态读取所有技能，构建能力列表"""
+    emoji_map = {
+        "code-review": "📦 代码审查",
+        "build-debug": "🔧 构建诊断",
+        "deploy-guard": "🛡️ 部署守卫",
+        "incident-triage": "🚨 事件分诊",
+        "security-scan": "🔒 安全扫描",
+        "changelog-gen": "📝 变更日志",
+        "gitcode-api-guidance": "🔗 GitCode API 操作",
+        "devops-event-ops": "🔄 事件编排",
+        "comment": "💬 评论处理",
+    }
+    lines = ["我是 DevOps Bot，专注于以下领域：\n"]
+    try:
+        for entry in sorted(os.listdir(SKILLS_DIR)):
+            skill_dir = os.path.join(SKILLS_DIR, entry)
+            if not os.path.isdir(skill_dir) or entry.startswith("."):
+                continue
+            md_path = os.path.join(skill_dir, "SKILL.md")
+            if not os.path.exists(md_path):
+                continue
+            display = emoji_map.get(entry, entry)
+            # Read description from frontmatter
+            desc = ""
+            with open(md_path, encoding="utf-8") as f:
+                content = f.read()
+            if "description: |" in content:
+                desc_block = content.split("description: |", 1)[1].split("---", 1)[0].strip()
+                desc = desc_block.split("\n")[0].strip().rstrip(".。").strip('"').strip("'")
+            lines.append(f"  {display}")
+            if desc:
+                lines[-1] += f" — {desc}"
+        lines.append("\n我的能力范围仅限于 DevOps 相关领域。")
+        return "\n".join(lines)
+    except Exception as e:
+        log.warning(f"Failed to read skills: {e}")
+        return "我是 DevOps Bot，专注于 DevOps 相关领域。"
 
 
 def build_prompt(evt, history, oc_session_id, skills):
@@ -557,6 +593,18 @@ def process_chat(parsed: dict):
         msg_id = parsed["message_id"]
 
         log.info(f"Feishu message: {text[:100]} (chat={chat_id})")
+
+        # 能力询问检测：Bot 层直接回复，不送 Agent
+        capability_patterns = [
+            r'(?:你|您)(?:有|会|能|可以)?\s*什么\s*(?:能力|功能|本领|技能|用处|作用)',
+            r'(?:你|您)(?:会|能|可以)\s*(?:做|干|处理|干嘛)\s*(?:什么|哪些)',
+            r'what\s*(?:can|are)\s*(?:you|your)\s*(?:do|capabilities|skills|features)',
+            r'(?:介绍|说说|告诉)(?:一下|下)?\s*(?:你|你自己)',
+        ]
+        is_capability_inquiry = any(re.search(p, text, re.IGNORECASE) for p in capability_patterns)
+        if is_capability_inquiry:
+            reply_text(msg_id, get_skill_capabilities())
+            return
 
         # Handle commands
         if text.startswith("/"):
