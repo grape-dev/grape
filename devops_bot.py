@@ -199,10 +199,15 @@ def build_prompt(evt, history, oc_session_id, skills):
     body = json.dumps(issue_data.get("body", issue_data.get("description", "")), ensure_ascii=True)[:500]
 
     parts = []
-    num_str = str(number) if number is not None else "unknown"
-    parts.append(f"Event: issue #{num_str} on {repo}")
-    parts.append(f"Title: {title}")
-    parts.append(f"Body: {body}")
+    evt_type = evt.get("type", "event")
+    if number is not None:
+        parts.append(f"Event: {evt_type} #{number} on {repo}")
+    else:
+        parts.append(f"Event: {evt_type} on {repo}")
+    if title != '""':
+        parts.append(f"Title: {title}")
+    if body != '""':
+        parts.append(f"Body: {body}")
 
     if history:
         parts.append(f"Previous events in this session: {len(history)}")
