@@ -441,11 +441,21 @@ _repo_locks = {}
 _repo_locks_lock = threading.Lock()
 
 _MAX_WORKERS = 10
+_MAX_QUEUE = 5
 _event_executor = None
+_task_slot = threading.BoundedSemaphore(_MAX_QUEUE)
+
+
+def _run_with_slot(fn, *args, **kwargs):
+    """执行任务，完成后释放槽位"""
+    try:
+        fn(*args, **kwargs)
+    finally:
+        _task_slot.release()
 
 
 def _init_executor():
-    """初始化全局线程池，控制最大并发数"""
+    """初始化全局线程池"""
     global _event_executor
     if _event_executor is None:
         _event_executor = concurrent.futures.ThreadPoolExecutor(
@@ -455,12 +465,12 @@ def _init_executor():
 
 
 def _submit_event(fn, *args, **kwargs):
-    """提交事件到线程池，队列满时丢弃"""
+    """提交事件，等待+运行最多 5 个，超出的丢弃"""
+    if not _task_slot.acquire(blocking=False):
+        log.error(f"Task queue full (max={_MAX_QUEUE})! Dropping event")
+        return
     _init_executor()
-    try:
-        _event_executor.submit(fn, *args, **kwargs)
-    except concurrent.futures.RejectedExecutionException:
-        log.error(f"Event queue full! Dropping event (max_workers={_MAX_WORKERS})")
+    _event_executor.submit(_run_with_slot, fn, *args, **kwargs)
 
 
 def _acquire_repo_lock(repo_key: str) -> threading.Lock:
