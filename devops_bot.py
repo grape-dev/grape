@@ -234,7 +234,10 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
     args = ["run", "--format", "json", "--dangerously-skip-permissions"]
     if oc_session_id:
         args.extend(["--session", oc_session_id])
-    args.append(prompt)
+    prompt_file = os.path.join(os.environ.get("TEMP", "/tmp"), f"devops-prompt-{uuid.uuid4().hex[:8]}.md")
+    with open(prompt_file, "w", encoding="utf-8") as pf:
+        pf.write(prompt)
+    args.extend(["--file", prompt_file, "Read the attached file and follow its instructions."])
 
     log.info(f"opencode args: {' '.join(args)}")
     log.info(f"opencode cwd: {cwd}")
@@ -344,6 +347,11 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
 
     full_text = "\n".join(collected_text)
     exit_code = proc.returncode
+
+    try:
+        os.unlink(prompt_file)
+    except OSError:
+        pass
 
     yield ("done", {
         "exit_code": exit_code,
