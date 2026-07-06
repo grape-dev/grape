@@ -3,3 +3,5 @@ data/
 *.exe
 devops-bot
 .env
+cloudflare/
+tunnel-*.log
