@@ -10,6 +10,10 @@ from urllib.error import URLError
 import lark_oapi
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
+# 全局 Feishu 消息并发限制（独立于 webhook 的线程池）
+import concurrent.futures
+_feishu_executor = concurrent.futures.ThreadPoolExecutor(max_workers=5, thread_name_prefix="fs")
+
 log = logging.getLogger("devops-bot")
 
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
@@ -303,7 +307,10 @@ def _handle_message(event, on_message_callback):
         log.info(f"Feishu message: {text[:100]} (chat={parsed['chat_id'][:20]})")
 
         if on_message_callback and text:
-            threading.Thread(target=on_message_callback, args=(parsed,), daemon=True).start()
+            try:
+                _feishu_executor.submit(on_message_callback, parsed)
+            except concurrent.futures.RejectedExecutionException:
+                log.warning("Feishu: message queue full, dropping message")
 
     except Exception as e:
         log.error(f"Feishu: WS message handler error: {e}", exc_info=True)

@@ -5,7 +5,7 @@ Bot listens events → builds prompt → spawns opencode with NDJSON streaming
 Agent autonomously reads skills, calls GitCode API, takes actions
 Bot monitors & logs the Agent's execution process
 """
-import json, os, subprocess, sys, time, sqlite3, uuid, threading, logging, re, socket
+import json, os, subprocess, sys, time, sqlite3, uuid, threading, logging, re, socket, concurrent.futures
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from urllib.request import Request, urlopen
@@ -345,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
-        threading.Thread(target=process_event, args=(body, self.headers), daemon=True).start()
+        _submit_event(process_event, body, self.headers)
 
     def do_GET(self):
         if self.path == "/health":
@@ -439,6 +439,28 @@ _recent_events = {}
 _DEDUP_WINDOW = 120  # seconds
 _repo_locks = {}
 _repo_locks_lock = threading.Lock()
+
+_MAX_WORKERS = 10
+_event_executor = None
+
+
+def _init_executor():
+    """初始化全局线程池，控制最大并发数"""
+    global _event_executor
+    if _event_executor is None:
+        _event_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=_MAX_WORKERS,
+            thread_name_prefix="evt"
+        )
+
+
+def _submit_event(fn, *args, **kwargs):
+    """提交事件到线程池，队列满时丢弃"""
+    _init_executor()
+    try:
+        _event_executor.submit(fn, *args, **kwargs)
+    except concurrent.futures.RejectedExecutionException:
+        log.error(f"Event queue full! Dropping event (max_workers={_MAX_WORKERS})")
 
 
 def _acquire_repo_lock(repo_key: str) -> threading.Lock:
