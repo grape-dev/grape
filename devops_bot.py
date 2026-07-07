@@ -256,7 +256,11 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
     log.info(f"opencode cwd: {cwd}")
 
     # 自动发现 opencode CLI 路径
-    agent_cmd = shutil.which("opencode") or shutil.which("opencode.cmd") or "C:\\Users\\janso\\AppData\\Roaming\\npm\\opencode.cmd"
+    agent_cmd = shutil.which("opencode") or shutil.which("opencode.cmd")
+    if not agent_cmd:
+        log.error("opencode CLI not found in PATH")
+        yield ("done", {"exit_code": -1, "text": "", "oc_session_id": oc_session_id, "errors": ["opencode not found"], "stderr": "opencode CLI not found"})
+        return
 
     proc = subprocess.Popen(
         [agent_cmd] + args,
