@@ -167,6 +167,39 @@ def update_message(message_id: str, text: str) -> bool:
         return False
 
 
+def add_reaction(message_id: str, emoji_type: str = "OK") -> str:
+    """Add an emoji reaction to a Feishu message. Returns reaction_id on success."""
+    if not message_id or not ensure_configured():
+        return ""
+    token = get_tenant_token()
+    if not token:
+        return ""
+    url = f"{FEISHU_BASE}/im/v1/messages/{message_id}/reactions"
+    payload = json.dumps({
+        "reaction_type": {"emoji_type": emoji_type}
+    }).encode()
+    try:
+        resp = urlopen(Request(url, data=payload, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }), timeout=10)
+        data = json.loads(resp.read())
+        reaction_id = data.get("data", {}).get("reaction_id", "")
+        log.info(f"Feishu: reaction added ({emoji_type}), rid={reaction_id[:20]}")
+        return reaction_id
+    except URLError as e:
+        err_body = ""
+        try:
+            err_body = e.read().decode()[:200]
+        except:
+            pass
+        log.info(f"Feishu: reaction skipped ({emoji_type}): {e.code if hasattr(e,'code') else e.reason} {err_body}")
+        return ""
+    except Exception as e:
+        log.info(f"Feishu: reaction exception ({emoji_type}): {e}")
+        return ""
+
+
 BIND_PATTERNS = [
     re.compile(r'(?:绑定|连接|关联|设置|使用|切换到|帮我绑定)\s*(?:到)?\s*([\w.-]+/[\w.-]+)'),
     re.compile(r'(?:把|将|让)\s*([\w.-]+/[\w.-]+)\s*(?:绑定|连上|设置)'),
