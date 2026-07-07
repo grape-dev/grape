@@ -99,6 +99,44 @@ def reply_text(message_id: str, text: str) -> str:
         return ""
 
 
+def reply_card(message_id: str, text: str) -> str:
+    """Reply with a card that can be updated later. Returns the reply message_id."""
+    if not message_id or not text or not ensure_configured():
+        return ""
+    token = get_tenant_token()
+    if not token:
+        return ""
+    url = f"{FEISHU_BASE}/im/v1/messages/{message_id}/reply"
+    card = {
+        "elements": [{"tag": "markdown", "content": text[:2000]}],
+        "header": {"title": {"tag": "plain_text", "content": ""}, "template": "blue"}
+    }
+    payload = json.dumps({
+        "content": json.dumps(card),
+        "msg_type": "interactive"
+    }).encode()
+    try:
+        resp = urlopen(Request(url, data=payload, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }), timeout=15)
+        data = json.loads(resp.read())
+        reply_id = data.get("data", {}).get("message_id", "")
+        log.info(f"Feishu: card sent, rid={reply_id[:20]}")
+        return reply_id
+    except URLError as e:
+        err_body = ""
+        try:
+            err_body = e.read().decode()[:200]
+        except:
+            pass
+        log.warning(f"Feishu: card reply failed: {e.code if hasattr(e,'code') else e.reason} {err_body}")
+        return ""
+    except Exception as e:
+        log.warning(f"Feishu: card exception: {e}")
+        return ""
+
+
 def update_message(message_id: str, text: str) -> bool:
     """Edit/replace an existing message sent by the bot."""
     if not message_id or not text or not ensure_configured():
