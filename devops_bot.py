@@ -5,7 +5,7 @@ Bot listens events → builds prompt → spawns opencode with NDJSON streaming
 Agent autonomously reads skills, calls GitCode API, takes actions
 Bot monitors & logs the Agent's execution process
 """
-import json, os, subprocess, sys, time, sqlite3, uuid, threading, logging, logging.handlers, re, socket, concurrent.futures
+import json, os, subprocess, sys, time, sqlite3, uuid, threading, logging, logging.handlers, re, socket, concurrent.futures, shutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from urllib.request import Request, urlopen
@@ -255,8 +255,11 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
     log.info(f"opencode args: {' '.join(args)[:200]}...")
     log.info(f"opencode cwd: {cwd}")
 
+    # 自动发现 opencode CLI 路径
+    agent_cmd = shutil.which("opencode") or shutil.which("opencode.cmd") or "C:\\Users\\janso\\AppData\\Roaming\\npm\\opencode.cmd"
+
     proc = subprocess.Popen(
-        ["C:\\Users\\janso\\AppData\\Roaming\\npm\\opencode.cmd"] + args,
+        [agent_cmd] + args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=cwd,
