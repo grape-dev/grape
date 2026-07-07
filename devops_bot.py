@@ -33,6 +33,7 @@ from feishu_handler import (
 
 GITCODE_TOKEN = os.environ.get("GITCODE_WEBHOOK_TOKEN", "")
 GITCODE_ACCESS_KEY = os.environ.get("GITCODE_ACCESS_KEY", "")
+BOT_USERNAMES = [u.strip() for u in os.environ.get("BOT_USERNAMES", "hwc-skills-bot,skill-bot").split(",")]
 SKILLS_DIR = os.path.abspath("skills")
 WORKSPACE_DIR = os.path.abspath("data/workspaces")
 LOG_DIR = os.path.abspath("data/logs")
@@ -552,7 +553,7 @@ def _acquire_repo_lock(repo_key: str) -> threading.Lock:
 
 
 def _is_duplicate_event(evt) -> bool:
-    """检查短时间内的重复事件（Issue Hook + Note Hook 同时到达导致双评论）"""
+    """只读检查：事件是否与 120s 内已处理的事件重复（不写入）"""
     number = extract_event_number(evt['payload'])
     if not number:
         return False
@@ -562,7 +563,6 @@ def _is_duplicate_event(evt) -> bool:
         if now - _recent_events[key] < _DEDUP_WINDOW:
             log.info(f"Duplicate event skipped: {key}")
             return True
-    # Also check if same issue was already processed under a different event type
     for other_key, ts in list(_recent_events.items()):
         if now - ts > _DEDUP_WINDOW:
             continue
@@ -570,8 +570,16 @@ def _is_duplicate_event(evt) -> bool:
         if other_repo == evt['repository'] and other_num == str(number):
             log.info(f"Duplicate issue #{number} skipped (already processed as {other_key})")
             return True
-    _recent_events[key] = now
     return False
+
+
+def _record_event(evt):
+    """记录事件到去重缓存（在 _process_event_inner 实际处理时调用）"""
+    number = extract_event_number(evt['payload'])
+    if not number:
+        return
+    key = f"{evt['repository']}:{number}:{evt['type']}"
+    _recent_events[key] = time.time()
 
 
 def process_event(raw_body, headers):
@@ -587,7 +595,7 @@ def process_event(raw_body, headers):
             note = evt['payload'].get('object_attributes', {}).get('note', '')
             user = evt['payload'].get('user', {})
             username = user.get('username', '') if isinstance(user, dict) else ''
-            if note.startswith('[DevOps Bot]') and username in ('hwc-skills-bot', 'skill-bot'):
+            if note.startswith('[DevOps Bot]') and username in BOT_USERNAMES:
                 log.info(f"Skip: self-comment from {username}")
                 return
 
@@ -611,6 +619,7 @@ def process_event(raw_body, headers):
 
 def _process_event_inner(evt, repo_key):
     """事件处理主体（受 per-repo 锁保护，同 repo 串行）"""
+    _record_event(evt)
     try:
         ws = os.path.join(WORKSPACE_DIR, evt['repository'])
         os.makedirs(ws, exist_ok=True)
