@@ -209,6 +209,17 @@ def build_prompt(evt, history, oc_session_id, skills):
     if body != '""':
         parts.append(f"Body: {body}")
 
+    # issue_comment 事件：追加评论原文并标记 @提及
+    if evt.get("type") == "issue_comment":
+        note = ""
+        if isinstance(payload.get("object_attributes"), dict):
+            note = payload["object_attributes"].get("note", "")
+        if note:
+            has_mention = "@hwc-skills-bot" in note or "@skill-bot" in note
+            parts.append(f"Comment: {json.dumps(note, ensure_ascii=True)[:1000]}")
+            if has_mention:
+                parts.append("(User @mentioned the bot in this comment)")
+
     if history:
         parts.append(f"Previous events in this session: {len(history)}")
         for h in history[-3:]:
