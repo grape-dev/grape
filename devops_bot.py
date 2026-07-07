@@ -793,8 +793,6 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         wsd = os.path.join(WORKSPACE_DIR, repository.replace("/", "\\"))
         os.makedirs(wsd, exist_ok=True)
 
-        reply_text(msg_id, "🤔 正在查询，请稍候...")
-
         final_text = ""
         new_oc_session_id = oc_sid
         for event_type, data in stream_opencode(prompt, wsd, oc_sid, "chat"):
