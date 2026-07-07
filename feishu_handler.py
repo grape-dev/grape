@@ -65,13 +65,13 @@ def get_tenant_token() -> str:
             return ""
 
 
-def reply_text(message_id: str, text: str) -> bool:
-    """Reply to a Feishu message"""
+def reply_text(message_id: str, text: str) -> str:
+    """Reply to a Feishu message. Returns the reply message_id or empty string on failure."""
     if not message_id or not text or not ensure_configured():
-        return False
+        return ""
     token = get_tenant_token()
     if not token:
-        return False
+        return ""
     url = f"{FEISHU_BASE}/im/v1/messages/{message_id}/reply"
     payload = json.dumps({
         "content": json.dumps({"text": text[:2000]}),
@@ -82,8 +82,10 @@ def reply_text(message_id: str, text: str) -> bool:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }), timeout=15)
-        log.info(f"Feishu: reply sent, status={resp.status}")
-        return True
+        data = json.loads(resp.read())
+        reply_id = data.get("data", {}).get("message_id", "")
+        log.info(f"Feishu: reply sent, rid={reply_id[:20]}, status={resp.status}")
+        return reply_id
     except URLError as e:
         err_body = ""
         try:
@@ -91,9 +93,39 @@ def reply_text(message_id: str, text: str) -> bool:
         except:
             pass
         log.error(f"Feishu: reply failed: {e.code if hasattr(e,'code') else e.reason} {err_body}")
-        return False
+        return ""
     except Exception as e:
         log.error(f"Feishu: reply exception: {e}")
+        return ""
+
+
+def update_message(message_id: str, text: str) -> bool:
+    """Edit/replace an existing message sent by the bot."""
+    if not message_id or not text or not ensure_configured():
+        return False
+    token = get_tenant_token()
+    if not token:
+        return False
+    url = f"{FEISHU_BASE}/im/v1/messages/{message_id}"
+    payload = json.dumps({
+        "content": json.dumps({"text": text[:2000]}),
+        "msg_type": "text"
+    }).encode()
+    try:
+        req = Request(url, data=payload, method="PATCH", headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        })
+        resp = urlopen(req, timeout=15)
+        log.info(f"Feishu: message updated, status={resp.status}")
+        return True
+    except URLError as e:
+        err_body = ""
+        try:
+            err_body = e.read().decode()[:200]
+        except:
+            pass
+        log.error(f"Feishu: update failed: {e.code if hasattr(e,'code') else e.reason} {err_body}")
         return False
 
 
