@@ -31,6 +31,7 @@ from feishu_handler import (
 )
 
 GITCODE_TOKEN = os.environ.get("GITCODE_WEBHOOK_TOKEN", "")
+GITCODE_ACCESS_KEY = os.environ.get("GITCODE_ACCESS_KEY", "")
 SKILLS_DIR = os.path.abspath("skills")
 WORKSPACE_DIR = os.path.abspath("data/workspaces")
 LOG_DIR = os.path.abspath("data/logs")
@@ -380,6 +381,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length > 0 else b""
+
+        # Webhook 来源验证
+        if self.path == "/webhook/gitcode" and GITCODE_ACCESS_KEY:
+            token = self.headers.get("X-GitCode-Token", "")
+            if token != GITCODE_ACCESS_KEY:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"invalid webhook token")
+                log.warning(f"Rejected webhook: invalid token (got='{token[:20]}', expected match)")
+                return
+
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
@@ -858,6 +870,7 @@ log.info("═══ DevOps Bot v2 (NDJSON streaming) starting on :8080 ═══
 log.info(f"Skills dir: {SKILLS_DIR}")
 log.info(f"Workspace dir: {WORKSPACE_DIR}")
 log.info(f"GitCode token: {'YES' if GITCODE_TOKEN else 'NO'}")
+log.info(f"GitCode access key: {'YES' if GITCODE_ACCESS_KEY else 'NO (webhook not verified)'}")
 log.info(f"Feishu bot: {'CONFIGURED' if FEISHU_APP_ID else 'NOT CONFIGURED (set FEISHU_APP_ID)'}")
 log.info(f"Routes: /webhook/gitcode /health /api/sessions")
 
