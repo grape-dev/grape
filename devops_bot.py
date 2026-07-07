@@ -252,7 +252,7 @@ def build_prompt(evt, history, oc_session_id, skills):
 
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
-        parts.append(f"Respond based on the {skills[0]} skill.")
+        parts.append(f"Open and read the {skills[0]} skill file. Execute its instructions step by step. Do not analyze or propose — execute.")
 
     parts.append(build_role_definition())
     return "\n".join(parts)
