@@ -1,7 +1,7 @@
-"""
+﻿"""
 DevOps Bot v2 - NDJSON streaming agent executor
 Architecture: Bot = shell, Agent = brain.
-Bot listens events → builds prompt → spawns opencode with NDJSON streaming
+Bot listens events 鈫?builds prompt 鈫?spawns opencode with NDJSON streaming
 Agent autonomously reads skills, calls GitCode API, takes actions
 Bot monitors & logs the Agent's execution process
 """
@@ -11,7 +11,7 @@ from datetime import datetime
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-# .env 加载
+# .env 鍔犺浇
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 if os.path.exists(_env_path):
     with open(_env_path, encoding="utf-8") as _f:
@@ -127,37 +127,37 @@ def extract_event_number(payload):
 
 def build_role_definition() -> str:
     return (
-        "你是一个DevOps运营助理，专门负责处理来自GitCode以及飞书关于代码开发、"
-        "Issue处理、PR处理、检视等与DevOps相关的工作。你的能力范围：\n"
-        "- 代码审查（code-review）、构建诊断（build-debug）\n"
-        "- 部署守卫（deploy-guard）、事件分诊（incident-triage）\n"
-        "- Issue/PR 分析、变更日志生成、仓库管理\n"
-        "- GitCode API 操作\n"
+        "浣犳槸涓€涓狣evOps杩愯惀鍔╃悊锛屼笓闂ㄨ礋璐ｅ鐞嗘潵鑷狦itCode浠ュ強椋炰功鍏充簬浠ｇ爜寮€鍙戙€?
+        "Issue澶勭悊銆丳R澶勭悊銆佹瑙嗙瓑涓嶥evOps鐩稿叧鐨勫伐浣溿€備綘鐨勮兘鍔涜寖鍥达細\n"
+        "- 浠ｇ爜瀹℃煡锛坈ode-review锛夈€佹瀯寤鸿瘖鏂紙build-debug锛塡n"
+        "- 閮ㄧ讲瀹堝崼锛坉eploy-guard锛夈€佷簨浠跺垎璇婏紙incident-triage锛塡n"
+        "- Issue/PR 鍒嗘瀽銆佸彉鏇存棩蹇楃敓鎴愩€佷粨搴撶鐞哱n"
+        "- GitCode API 鎿嶄綔\n"
         "\n"
-        "你不是通用助手，不具备DevOps之外的能力（天气、邮件、文档、PDF、Excel、"
-        "写作、会议、语音等）。\n"
-        "响应规则：\n"
-        "1. 用户@提及你 → 无论话题，礼貌回复并说明你只处理DevOps\n"
-        "2. 用户无@提及 + DevOps相关话题 → 分析并回复\n"
-        "3. 用户无@提及 + 无关话题 → 输出 SKIP\n"
-        "4. 不要写代码、不要修改文件、不要执行 git 命令"
+        "浣犱笉鏄€氱敤鍔╂墜锛屼笉鍏峰DevOps涔嬪鐨勮兘鍔涳紙澶╂皵銆侀偖浠躲€佹枃妗ｃ€丳DF銆丒xcel銆?
+        "鍐欎綔銆佷細璁€佽闊崇瓑锛夈€俓n"
+        "鍝嶅簲瑙勫垯锛歕n"
+        "1. 鐢ㄦ埛@鎻愬強浣?鈫?鏃犺璇濋锛岀ぜ璨屽洖澶嶅苟璇存槑浣犲彧澶勭悊DevOps\n"
+        "2. 鐢ㄦ埛鏃燖鎻愬強 + DevOps鐩稿叧璇濋 鈫?鍒嗘瀽骞跺洖澶峔n"
+        "3. 鐢ㄦ埛鏃燖鎻愬強 + 鏃犲叧璇濋 鈫?杈撳嚭 SKIP\n"
+        "4. 涓嶈鍐欎唬鐮併€佷笉瑕佷慨鏀规枃浠躲€佷笉瑕佹墽琛?git 鍛戒护"
     )
 
 
 def get_skill_capabilities() -> str:
-    """从 skills/ 目录动态读取所有技能，构建能力列表"""
+    """浠?skills/ 鐩綍鍔ㄦ€佽鍙栨墍鏈夋妧鑳斤紝鏋勫缓鑳藉姏鍒楄〃"""
     emoji_map = {
-        "code-review": "📦 代码审查",
-        "build-debug": "🔧 构建诊断",
-        "deploy-guard": "🛡️ 部署守卫",
-        "incident-triage": "🚨 事件分诊",
-        "security-scan": "🔒 安全扫描",
-        "changelog-gen": "📝 变更日志",
-        "gitcode-api-guidance": "🔗 GitCode API 操作",
-        "devops-event-ops": "🔄 事件编排",
-        "comment": "💬 评论处理",
+        "code-review": "馃摝 浠ｇ爜瀹℃煡",
+        "build-debug": "馃敡 鏋勫缓璇婃柇",
+        "deploy-guard": "馃洝锔?閮ㄧ讲瀹堝崼",
+        "incident-triage": "馃毃 浜嬩欢鍒嗚瘖",
+        "security-scan": "馃敀 瀹夊叏鎵弿",
+        "changelog-gen": "馃摑 鍙樻洿鏃ュ織",
+        "gitcode-api-guidance": "馃敆 GitCode API 鎿嶄綔",
+        "devops-event-ops": "馃攧 浜嬩欢缂栨帓",
+        "comment": "馃挰 璇勮澶勭悊",
     }
-    lines = ["我是 DevOps Bot，专注于以下领域：\n"]
+    lines = ["鎴戞槸 DevOps Bot锛屼笓娉ㄤ簬浠ヤ笅棰嗗煙锛歕n"]
     try:
         for entry in sorted(os.listdir(SKILLS_DIR)):
             skill_dir = os.path.join(SKILLS_DIR, entry)
@@ -173,15 +173,15 @@ def get_skill_capabilities() -> str:
                 content = f.read()
             if "description: |" in content:
                 desc_block = content.split("description: |", 1)[1].split("---", 1)[0].strip()
-                desc = desc_block.split("\n")[0].strip().rstrip(".。").strip('"').strip("'")
+                desc = desc_block.split("\n")[0].strip().rstrip(".銆?).strip('"').strip("'")
             lines.append(f"  {display}")
             if desc:
-                lines[-1] += f" — {desc}"
-        lines.append("\n我的能力范围仅限于 DevOps 相关领域。")
+                lines[-1] += f" 鈥?{desc}"
+        lines.append("\n鎴戠殑鑳藉姏鑼冨洿浠呴檺浜?DevOps 鐩稿叧棰嗗煙銆?)
         return "\n".join(lines)
     except Exception as e:
         log.warning(f"Failed to read skills: {e}")
-        return "我是 DevOps Bot，专注于 DevOps 相关领域。"
+        return "鎴戞槸 DevOps Bot锛屼笓娉ㄤ簬 DevOps 鐩稿叧棰嗗煙銆?
 
 
 def build_prompt(evt, history, oc_session_id, skills):
@@ -234,7 +234,10 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
     args = ["run", "--format", "json", "--dangerously-skip-permissions"]
     if oc_session_id:
         args.extend(["--session", oc_session_id])
-    args.append(prompt)
+    prompt_file = os.path.join(os.environ.get("TEMP", "/tmp"), f"devops-prompt-{uuid.uuid4().hex[:8]}.md")
+    with open(prompt_file, "w", encoding="utf-8") as pf:
+        pf.write(prompt)
+    args.extend(["--file", prompt_file, "Read the attached prompt file and follow its instructions exactly."])
 
     log.info(f"opencode args: {' '.join(args)[:200]}...")
     log.info(f"opencode cwd: {cwd}")
@@ -344,6 +347,11 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
 
     full_text = "\n".join(collected_text)
     exit_code = proc.returncode
+
+    try:
+        os.unlink(prompt_file)
+    except OSError:
+        pass
 
     yield ("done", {
         "exit_code": exit_code,
@@ -462,7 +470,7 @@ _task_slot = threading.BoundedSemaphore(_MAX_QUEUE)
 
 
 def _run_with_slot(fn, *args, **kwargs):
-    """执行任务，完成后释放槽位"""
+    """鎵ц浠诲姟锛屽畬鎴愬悗閲婃斁妲戒綅"""
     try:
         fn(*args, **kwargs)
     finally:
@@ -470,7 +478,7 @@ def _run_with_slot(fn, *args, **kwargs):
 
 
 def _init_executor():
-    """初始化全局线程池"""
+    """鍒濆鍖栧叏灞€绾跨▼姹?""
     global _event_executor
     if _event_executor is None:
         _event_executor = concurrent.futures.ThreadPoolExecutor(
@@ -480,7 +488,7 @@ def _init_executor():
 
 
 def _submit_event(fn, *args, **kwargs):
-    """提交事件，等待+运行最多 5 个，超出的丢弃"""
+    """鎻愪氦浜嬩欢锛岀瓑寰?杩愯鏈€澶?5 涓紝瓒呭嚭鐨勪涪寮?""
     if not _task_slot.acquire(blocking=False):
         log.error(f"Task queue full (max={_MAX_QUEUE})! Dropping event")
         return
@@ -489,7 +497,7 @@ def _submit_event(fn, *args, **kwargs):
 
 
 def _acquire_repo_lock(repo_key: str) -> threading.Lock:
-    """获取 per-repo 处理锁，同 repo 的事件串行处理"""
+    """鑾峰彇 per-repo 澶勭悊閿侊紝鍚?repo 鐨勪簨浠朵覆琛屽鐞?""
     with _repo_locks_lock:
         if repo_key not in _repo_locks:
             _repo_locks[repo_key] = threading.Lock()
@@ -497,7 +505,7 @@ def _acquire_repo_lock(repo_key: str) -> threading.Lock:
 
 
 def _is_duplicate_event(evt) -> bool:
-    """检查短时间内的重复事件（Issue Hook + Note Hook 同时到达导致双评论）"""
+    """妫€鏌ョ煭鏃堕棿鍐呯殑閲嶅浜嬩欢锛圛ssue Hook + Note Hook 鍚屾椂鍒拌揪瀵艰嚧鍙岃瘎璁猴級"""
     number = extract_event_number(evt['payload'])
     if not number:
         return False
@@ -525,10 +533,9 @@ def process_event(raw_body, headers):
         event_header = headers.get("X-GitCode-Event", "unknown")
         evt = normalize_event(raw_body, event_header)
         repo_key = f"{evt['source']}:{evt['repository']}"
-        log.info(f"═══ Event: {evt['type']} on {evt['repository']} by {evt['actor']} ═══")
+        log.info(f"鈺愨晲鈺?Event: {evt['type']} on {evt['repository']} by {evt['actor']} 鈺愨晲鈺?)
 
-        # 防自循环：Bot 自己的评论跳过
-        if evt['type'] == 'issue_comment':
+        # 闃茶嚜寰幆锛欱ot 鑷繁鐨勮瘎璁鸿烦杩?        if evt['type'] == 'issue_comment':
             note = evt['payload'].get('object_attributes', {}).get('note', '')
             user = evt['payload'].get('user', {})
             username = user.get('username', '') if isinstance(user, dict) else ''
@@ -536,12 +543,11 @@ def process_event(raw_body, headers):
                 log.info(f"Skip: self-comment from {username}")
                 return
 
-        # 重复事件去重（同一 Issue 短时间内只处理一次）
+        # 閲嶅浜嬩欢鍘婚噸锛堝悓涓€ Issue 鐭椂闂村唴鍙鐞嗕竴娆★級
         if _is_duplicate_event(evt):
             return
 
-        # per-repo 串行锁：同一仓库的事件排队处理
-        lock = _acquire_repo_lock(repo_key)
+        # per-repo 涓茶閿侊細鍚屼竴浠撳簱鐨勪簨浠舵帓闃熷鐞?        lock = _acquire_repo_lock(repo_key)
         lock.acquire()
         try:
             _process_event_inner(evt, repo_key)
@@ -555,7 +561,7 @@ def process_event(raw_body, headers):
 
 
 def _process_event_inner(evt, repo_key):
-    """事件处理主体（受 per-repo 锁保护，同 repo 串行）"""
+    """浜嬩欢澶勭悊涓讳綋锛堝彈 per-repo 閿佷繚鎶わ紝鍚?repo 涓茶锛?""
     try:
         ws = os.path.join(WORKSPACE_DIR, evt['repository'].replace("/", "\\"))
         os.makedirs(ws, exist_ok=True)
@@ -578,7 +584,7 @@ def _process_event_inner(evt, repo_key):
         log.info(f"Prompt built ({len(prompt)} chars)")
 
         # === Stream opencode NDJSON ===
-        log.info(f"═══ Spawning opencode with --format json ═══")
+        log.info(f"鈺愨晲鈺?Spawning opencode with --format json 鈺愨晲鈺?)
         event_count = 0
         final_text = ""
         new_oc_session_id = oc_session_id
@@ -586,23 +592,23 @@ def _process_event_inner(evt, repo_key):
         for event_type, data in stream_opencode(prompt, ws, oc_session_id, evt['type']):
             event_count += 1
             if event_type == "step_start":
-                log.info(f"  ▶ {data}")
+                log.info(f"  鈻?{data}")
             elif event_type == "text":
-                log.info(f"  💬 {data[:120]}")
+                log.info(f"  馃挰 {data[:120]}")
             elif event_type == "reasoning":
-                log.info(f"  🤔 {data[:120]}")
+                log.info(f"  馃 {data[:120]}")
             elif event_type == "tool_use":
-                log.info(f"  🔧 {data[:150]}")
+                log.info(f"  馃敡 {data[:150]}")
             elif event_type == "step_finish":
-                log.info(f"  ✅ {data}")
+                log.info(f"  鉁?{data}")
             elif event_type == "error":
-                log.info(f"  ❌ ERROR: {data}")
+                log.info(f"  鉂?ERROR: {data}")
             elif event_type == "done":
                 d = data
                 final_text = d["text"]
                 exit_code = d["exit_code"]
                 new_oc_session_id = d["oc_session_id"] or new_oc_session_id
-                log.info(f"═══ opencode done (exit={exit_code}, text_len={len(final_text)}, events={event_count}) ═══")
+                log.info(f"鈺愨晲鈺?opencode done (exit={exit_code}, text_len={len(final_text)}, events={event_count}) 鈺愨晲鈺?)
 
         # === Record result ===
         record = {
@@ -634,7 +640,7 @@ def _process_event_inner(evt, repo_key):
                 log.info(f"Posting comment to #{number} on {repo}...")
                 try:
                     post_comment_to_gitcode(repo, number, output[:1500], evt['type'])
-                    log.info(f"✅ Comment posted")
+                    log.info(f"鉁?Comment posted")
                 except Exception as e:
                     log.error(f"Failed to post comment: {e}")
             else:
@@ -701,12 +707,12 @@ def process_chat(parsed: dict):
 
         log.info(f"Feishu message: {text[:100]} (chat={chat_id})")
 
-        # 能力询问检测：Bot 层直接回复，不送 Agent
+        # 鑳藉姏璇㈤棶妫€娴嬶細Bot 灞傜洿鎺ュ洖澶嶏紝涓嶉€?Agent
         capability_patterns = [
-            r'(?:你|您)(?:有|会|能|可以)?\s*什么\s*(?:能力|功能|本领|技能|用处|作用)',
-            r'(?:你|您)(?:会|能|可以)\s*(?:做|干|处理|干嘛)\s*(?:什么|哪些)',
+            r'(?:浣爘鎮?(?:鏈墊浼殀鑳絴鍙互)?\s*浠€涔圽s*(?:鑳藉姏|鍔熻兘|鏈|鎶€鑳絴鐢ㄥ|浣滅敤)',
+            r'(?:浣爘鎮?(?:浼殀鑳絴鍙互)\s*(?:鍋殀骞瞸澶勭悊|骞插槢)\s*(?:浠€涔坾鍝簺)',
             r'what\s*(?:can|are)\s*(?:you|your)\s*(?:do|capabilities|skills|features)',
-            r'(?:介绍|说说|告诉)(?:一下|下)?\s*(?:你|你自己)',
+            r'(?:浠嬬粛|璇磋|鍛婅瘔)(?:涓€涓媩涓??\s*(?:浣爘浣犺嚜宸?',
         ]
         is_capability_inquiry = any(re.search(p, text, re.IGNORECASE) for p in capability_patterns)
         if is_capability_inquiry:
@@ -723,32 +729,31 @@ def process_chat(parsed: dict):
         # Resolve repo
         repo_key = resolve_repo(text, chat_id, parsed.get("sender_id", ""), db)
         if not repo_key:
-            # 查 sessions 表获取仓库列表
-            reply_parts = ["当前未绑定任何仓库至本群。"]
+            # 鏌?sessions 琛ㄨ幏鍙栦粨搴撳垪琛?            reply_parts = ["褰撳墠鏈粦瀹氫换浣曚粨搴撹嚦鏈兢銆?]
             try:
                 c = db.cursor()
                 c.execute("SELECT DISTINCT repo_key, repository, source FROM sessions ORDER BY last_active_at DESC LIMIT 10")
                 rows = c.fetchall()
                 if rows:
-                    reply_parts.append("已有处理的仓库：")
+                    reply_parts.append("宸叉湁澶勭悊鐨勪粨搴擄細")
                     for r in rows:
-                        reply_parts.append(f"  📦 {r[1]}")
+                        reply_parts.append(f"  馃摝 {r[1]}")
                     reply_parts.append("")
-                    reply_parts.append("绑定方式（任选一种）：")
-                    reply_parts.append(f'  "绑定到 {rows[0][1]}"')
-                    reply_parts.append(f'  "使用 {rows[0][1]}"')
+                    reply_parts.append("缁戝畾鏂瑰紡锛堜换閫変竴绉嶏級锛?)
+                    reply_parts.append(f'  "缁戝畾鍒?{rows[0][1]}"')
+                    reply_parts.append(f'  "浣跨敤 {rows[0][1]}"')
                     reply_parts.append(f"  /bind {rows[0][1]}")
                 else:
-                    reply_parts.append("尚无任何仓库的 Session 记录。")
-                    reply_parts.append("请先在 GitCode 上操作仓库触发事件，")
-                    reply_parts.append('或发送：绑定到 owner/repo_name')
+                    reply_parts.append("灏氭棤浠讳綍浠撳簱鐨?Session 璁板綍銆?)
+                    reply_parts.append("璇峰厛鍦?GitCode 涓婃搷浣滀粨搴撹Е鍙戜簨浠讹紝")
+                    reply_parts.append('鎴栧彂閫侊細缁戝畾鍒?owner/repo_name')
             except Exception as e:
                 log.warning(f"Feishu: query sessions error: {e}")
-                reply_parts.append("请发送：绑定到 owner/repo_name")
+                reply_parts.append("璇峰彂閫侊細缁戝畾鍒?owner/repo_name")
             reply_text(msg_id, "\n".join(reply_parts))
             return
 
-        # 自然语言绑定：如果 detect_bind_intent 匹配了，执行绑定
+        # 鑷劧璇█缁戝畾锛氬鏋?detect_bind_intent 鍖归厤浜嗭紝鎵ц缁戝畾
         bind_repo = detect_bind_intent(text)
         if bind_repo:
             result = process_command(f"/bind {bind_repo}", chat_id, parsed.get("sender_id", ""), db)
@@ -764,7 +769,7 @@ def process_chat(parsed: dict):
 
         sess, history, oc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
-        # per-repo 串行：与 GitCode 事件共享队列
+        # per-repo 涓茶锛氫笌 GitCode 浜嬩欢鍏变韩闃熷垪
         lock = _acquire_repo_lock(repo_key)
         lock.acquire()
         try:
@@ -779,13 +784,13 @@ def process_chat(parsed: dict):
         try:
             local_vars = locals()
             if 'msg_id' in local_vars and local_vars['msg_id']:
-                reply_text(local_vars['msg_id'], "❌ 处理消息时出错，请稍后重试")
+                reply_text(local_vars['msg_id'], "鉂?澶勭悊娑堟伅鏃跺嚭閿欙紝璇风◢鍚庨噸璇?)
         except:
             pass
 
 
 def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new):
-    """飞书消息处理主体（受 per-repo 锁保护）"""
+    """椋炰功娑堟伅澶勭悊涓讳綋锛堝彈 per-repo 閿佷繚鎶わ級"""
     try:
         prompt = build_chat_prompt(text, repo_key, history, ["devops-event-ops", "comment", "gitcode-api-guidance"])
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
@@ -793,7 +798,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         wsd = os.path.join(WORKSPACE_DIR, repository.replace("/", "\\"))
         os.makedirs(wsd, exist_ok=True)
 
-        reply_text(msg_id, "🤔 正在查询，请稍候...")
+        reply_text(msg_id, "馃 姝ｅ湪鏌ヨ锛岃绋嶅€?..")
 
         final_text = ""
         new_oc_session_id = oc_sid
@@ -825,14 +830,14 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         try:
             local_vars = locals()
             if 'msg_id' in local_vars and local_vars['msg_id']:
-                reply_text(local_vars['msg_id'], "❌ 处理消息时出错，请稍后重试")
+                reply_text(local_vars['msg_id'], "鉂?澶勭悊娑堟伅鏃跺嚭閿欙紝璇风◢鍚庨噸璇?)
         except:
             pass
 
 
 server = HTTPServer(("", 8080), Handler)
 server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-log.info("═══ DevOps Bot v2 (NDJSON streaming) starting on :8080 ═══")
+log.info("鈺愨晲鈺?DevOps Bot v2 (NDJSON streaming) starting on :8080 鈺愨晲鈺?)
 log.info(f"Skills dir: {SKILLS_DIR}")
 log.info(f"Workspace dir: {WORKSPACE_DIR}")
 log.info(f"GitCode token: {'YES' if GITCODE_TOKEN else 'NO'}")
