@@ -592,7 +592,7 @@ def process_event(raw_body, headers):
 def _process_event_inner(evt, repo_key):
     """事件处理主体（受 per-repo 锁保护，同 repo 串行）"""
     try:
-        ws = os.path.join(WORKSPACE_DIR, evt['repository'].replace("/", "\\"))
+        ws = os.path.join(WORKSPACE_DIR, evt['repository'])
         os.makedirs(ws, exist_ok=True)
 
         sid, history, oc_session_id, is_new = get_or_create_session(repo_key, evt['source'], evt['repository'])
@@ -824,7 +824,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         prompt = build_chat_prompt(text, repo_key, history, ["chat"])
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
-        wsd = os.path.join(WORKSPACE_DIR, repository.replace("/", "\\"))
+        wsd = os.path.join(WORKSPACE_DIR, repository)
         os.makedirs(wsd, exist_ok=True)
 
         reply_text(msg_id, "🤔 正在查询，请稍候...")
