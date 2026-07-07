@@ -5,7 +5,7 @@ Bot listens events → builds prompt → spawns opencode with NDJSON streaming
 Agent autonomously reads skills, calls GitCode API, takes actions
 Bot monitors & logs the Agent's execution process
 """
-import json, os, subprocess, sys, time, sqlite3, uuid, threading, logging, re, socket, concurrent.futures
+import json, os, subprocess, sys, time, sqlite3, uuid, threading, logging, logging.handlers, re, socket, concurrent.futures
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from urllib.request import Request, urlopen
@@ -40,7 +40,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.handlers.RotatingFileHandler("data/devops-bot.log", maxBytes=10*1024*1024, backupCount=5, encoding="utf-8"), logging.StreamHandler()]
+    handlers=[logging.handlers.TimedRotatingFileHandler("data/devops-bot.log", when="midnight", interval=1, backupCount=30, encoding="utf-8"), logging.StreamHandler()]
 )
 log = logging.getLogger("devops-bot")
 
