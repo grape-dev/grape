@@ -40,7 +40,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.FileHandler("data/devops-bot.log", encoding="utf-8"), logging.StreamHandler()]
+    handlers=[logging.handlers.RotatingFileHandler("data/devops-bot.log", maxBytes=10*1024*1024, backupCount=5, encoding="utf-8"), logging.StreamHandler()]
 )
 log = logging.getLogger("devops-bot")
 
