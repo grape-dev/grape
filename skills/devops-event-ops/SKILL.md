@@ -23,8 +23,6 @@ tools:
 
 # DevOps Event Ops — 事件运营全链路
 
-> **核心定位：Bot 是壳，Agent 是脑。** Bot 不做智能决策，只做事件编排。
-> Agent 通过 `DEVOPS_SKILLS_DIR` 发现并触发所需技能，Bot 不干预 Agent 的技能选择。
 
 ## 事件处理铁律
 
