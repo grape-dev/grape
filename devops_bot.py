@@ -27,7 +27,8 @@ if os.path.exists(_env_path):
 from feishu_handler import (
     FEISHU_BINDINGS_TABLE_SQL, FEISHU_APP_ID, FEISHU_APP_SECRET,
     FEISHU_BOT_NAME, reply_text, add_reaction,
-    resolve_repo, process_command, detect_bind_intent, start_ws, stop_ws
+    resolve_repo, process_command, detect_bind_intent, detect_clean_intent,
+    start_ws, stop_ws
 )
 
 GITCODE_TOKEN = os.environ.get("GITCODE_WEBHOOK_TOKEN", "")
@@ -763,6 +764,13 @@ def process_chat(parsed: dict):
         is_capability_inquiry = any(re.search(p, text, re.IGNORECASE) for p in capability_patterns)
         if is_capability_inquiry:
             reply_text(msg_id, get_skill_capabilities())
+            return
+
+        # 清除 Agent 会话缓存（自然语言）
+        if detect_clean_intent(text):
+            result = process_command("/clean", chat_id, parsed.get("sender_id", ""), db)
+            if result:
+                reply_text(msg_id, result)
             return
 
         # Handle commands

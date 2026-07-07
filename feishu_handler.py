@@ -217,6 +217,21 @@ def detect_bind_intent(text: str) -> str:
     return ""
 
 
+CLEAN_PATTERNS = [
+    r'(?:清除|清理|清空|重置)(?:会话|缓存|上下文|Agent|agent|记忆)',
+    r'(?:重来|从头开始)(?:吧|一下)?',
+]
+
+
+def detect_clean_intent(text: str) -> bool:
+    """自然语言清理检测：用户说'清除会话缓存'等"""
+    for pat in CLEAN_PATTERNS:
+        if re.search(pat, text):
+            log.info("Feishu: detected clean intent")
+            return True
+    return False
+
+
 def resolve_repo(text: str, chat_id: str, sender_id: str, db) -> str:
     # 1. 自然语言绑定检测
     bind_repo = detect_bind_intent(text)
@@ -274,11 +289,25 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
             return "📋 未绑定任何仓库。使用 `/bind owner/repo` 绑定"
         except Exception as e:
             return f"❌ 查询失败: {e}"
+    if cmd in ("/clean", "/cleansession", "/reset", "/cleancache"):
+        try:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            row = c.fetchone()
+            if not row:
+                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后再清理。"
+            repo_key = row[0]
+            c.execute("UPDATE sessions SET oc_session_id='' WHERE repo_key=?", (repo_key,))
+            db.commit()
+            return f"✅ 已清除仓库 `{repo_key}` 的 Agent 会话缓存。下次事件将使用全新的 Agent 上下文。"
+        except Exception as e:
+            return f"❌ 清理失败: {e}"
     if cmd in ("/help", "/start"):
         return (
             f"🤖 DevOps Bot\n\n"
             f"**命令**:\n  `/bind owner/repo`  — 绑定当前群到仓库\n"
             f"  `/unbind`           — 解绑\n  `/status`           — 查看绑定\n"
+            f"  `/clean`            — 清除 Agent 会话缓存\n"
             f"  `/help`             — 帮助\n\n"
             f"**直接提问**:\n  输入问题即可查询仓库状态"
         )
