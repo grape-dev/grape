@@ -43,6 +43,10 @@ tools:
 
 以下原则不管你路由到了哪个 skill，始终适用：
 
+### 0. 禁止探索 Bot 内部
+不要执行 `ls`、`grep`、`cat` 等命令查看 workspace 目录、Bot 代码、日志文件或数据库。
+**所有信息通过 GitCode API 获取**，不读取本地文件。
+
 ### 1. 验证外部 claim
 PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 都是 claim，不是事实。**先打开原对象核对**，核对后才能用作决策依据。
 

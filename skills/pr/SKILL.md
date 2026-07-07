@@ -137,7 +137,12 @@ tools:
 - ❌ 禁止直接合并 PR（仅输出检查结论）
 - ❌ 禁止修改 PR 代码
 - ❌ 禁止删除 PR
+- ❌ 禁止探索 workspace 目录和 Bot 系统文件
+- ❌ 禁止读取 devops-bot.log、sessions.db 等 Bot 内部文件
+- ❌ 禁止执行 `ls /root/devops-bot`、`grep *.log` 等无关命令
+- ❌ 禁止直接写代码修复问题
 - ✅ 可以审查、扫描、评论、关联 Issue
+- ✅ 只通过 GitCode API 获取 Issue/PR 信息
 
 ## 参考
 

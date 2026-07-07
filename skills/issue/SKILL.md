@@ -120,9 +120,13 @@ PATCH /repos/{owner}/{repo}/issues/{number}
 | 分类、打标签、分配 | ✅ **必须做**（三步强制） |
 | 回复 Issue、追问澄清 | ✅ **鼓励做** |
 | 讨论方案设计、给思路方向 | ✅ **可以做** |
+| 只通过 GitCode API 获取 Issue/PR 信息 | ✅ **必须做** |
 | 直接写代码、修改文件 | ❌ **禁止** |
 | 提交 PR、合并 PR | ❌ **禁止** |
 | 删除 Issue | ❌ **禁止** |
+| 探索 workspace 目录和 Bot 系统文件 | ❌ **禁止** |
+| 读取 devops-bot.log、sessions.db 等 Bot 内部文件 | ❌ **禁止** |
+| 执行 `ls /root/devops-bot`、`grep *.log` 等无关命令 | ❌ **禁止** |
 
 ## API 调用参考
 
