@@ -10,10 +10,12 @@ description: |
 triggers:
   - event_type: push
   - event_type: pull_request_opened
+  - event_type: pull_request_updated
   - event_type: issue_opened
   - event_type: issue_comment
   - event_type: build_failure
   - event_type: deploy_start
+  - event_type: release_created
 tools:
   - curl
   - git
@@ -40,17 +42,19 @@ tools:
 
 你是所有 GitCode 事件的统一入口。根据事件类型决定处理流程：
 
-| 触发事件 | 处理方式 | 参考 Skill |
+| 触发事件 | 处理方式 | 加载 Skill |
 |---------|---------|-----------|
-| push | 代码审查 | 参考 `code-review`, `security-scan` |
-| pull_request_opened/updated | PR 审查 | 参考 `code-review`, `security-scan` |
-| issue_opened | Issue 分析 | 参考相关 skill |
-| issue_comment | 用户评论回复 | 参考 `comment` |
-| build_failure | 构建失败诊断 | 参考 `build-debug`, `incident-triage` |
-| build_success | 构建成功 → 部署守卫 | 参考 `deploy-guard` |
-| deploy_failure | 部署失败分诊 | 参考 `incident-triage`, `deploy-guard` |
-| deploy_start | 部署前检查 | 参考 `deploy-guard` |
-| release_created | 发布处理 | 参考 `changelog-gen` |
+| issue_opened | Issue 创建全流程 | `issue` — 分类、打标签、分配、里程碑、评论 |
+| issue_comment | Issue 评论回复 | `issue` — 分析评论、更新标签/状态 |
+| pull_request_opened | PR 创建全流程 | `pr` — 关联 Issue、代码审查、安全扫描、合并检查 |
+| pull_request_updated | PR 代码更新 | `pr` — 增量审查 + 扫描 |
+| push | 代码推送 | `pr` — 简要审查（非 PR）或 `build-debug`（CI 相关） |
+| note_hook_pr | PR 评论 | `pr` — 分析并回复 |
+| build_failure | 构建失败诊断 | `build-debug`, `incident-triage` |
+| build_success | 构建检查 | `deploy-guard` |
+| deploy_failure | 部署失败分诊 | `incident-triage`, `deploy-guard` |
+| deploy_start | 部署前检查 | `deploy-guard` |
+| release_created | 发布处理 | `changelog-gen` |
 
 需要调用 GitCode API 时，读取当前目录下的 `references/gitcode-api-reference.md`。
 
@@ -153,15 +157,14 @@ Agent 执行失败
 
 本 skill 是**编排层**，不实现具体逻辑。具体能力由 Agent 加载的 Skills 提供：
 
-| 场景 | Agent 应加载的 Skill |
-|------|---------------------|
-| 代码审查 | `code-review` |
-| 安全扫描 | `security-scan` |
+| 场景 | 加载 Skill |
+|------|-----------|
+| Issue 全生命周期 | `issue` — 分类、标签、分配、里程碑、评论 |
+| PR 全生命周期 | `pr` — 代码审查、安全扫描、合并检查、评论 |
 | 构建失败诊断 | `build-debug` |
 | 部署守卫 | `deploy-guard` |
 | 事件分诊 | `incident-triage` |
 | 变更日志 | `changelog-gen` |
-| GitCode API 交互 | `gitcode-api-guidance` |
 
 ## 进阶参考
 

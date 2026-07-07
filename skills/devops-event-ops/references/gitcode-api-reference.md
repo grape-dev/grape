@@ -23,8 +23,11 @@ PRIVATE-TOKEN: {token}
 | Create issue | POST | `/repos/:owner/issues` (body: `repo`, `title`, `body`) |
 | List issues | GET | `/repos/:owner/:repo/issues` |
 | Get issue | GET | `/repos/:owner/:repo/issues/:number` |
+| Update issue | PATCH | `/repos/:owner/:repo/issues/:number` (JSON body: `labels` string, `assignee_ids` array, `milestone_id` int) |
 | Create comment | POST | `/repos/:owner/:repo/issues/:number/comments` (body: `body`) |
 | List comments | GET | `/repos/:owner/:repo/issues/:number/comments` |
+| Get issue labels | GET | `/repos/:owner/:repo/issues/:number/labels` |
+| Clear issue labels | DELETE | `/repos/:owner/:repo/issues/:number/labels` |
 
 ### Pull Requests
 
@@ -65,6 +68,21 @@ PRIVATE-TOKEN: {token}
 | Search repos | GET | `/search/repositories?q=:keyword` |
 | Search code | GET | `/search/code?q=:keyword` |
 
+### Labels
+
+| Action | Method | Endpoint |
+|--------|--------|----------|
+| List labels | GET | `/repos/:owner/:repo/labels` |
+| Create label | POST | `/repos/:owner/:repo/labels` (form-encoded: `name`, `color`) |
+| Update label | PATCH | `/repos/:owner/:repo/labels/:name` (form-encoded: `name`, `color`) |
+| Delete label | DELETE | `/repos/:owner/:repo/labels/:name` |
+
+### Milestones
+
+| Action | Method | Endpoint |
+|--------|--------|----------|
+| List milestones | GET | `/repos/:owner/:repo/milestones?state=all` |
+
 ### User
 
 | Action | Method | Endpoint |
@@ -72,6 +90,7 @@ PRIVATE-TOKEN: {token}
 | Get current user | GET | `/user` |
 | Get user repos | GET | `/users/:username/repos` |
 | Create user repo | POST | `/user/repos` (body: `name`, `description`) |
+| List collaborators | GET | `/repos/:owner/:repo/collaborators` |
 
 ## Pagination
 
