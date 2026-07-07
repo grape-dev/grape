@@ -18,16 +18,19 @@ Agent     = 收到 Skills 路径后，自行发现、匹配、触发技能
 ## 工作机制
 
 ```
-1. Webhook 事件到达
-2. Bot 路由匹配 → 创建 Session
+1. GitCode 事件到达
+2. Bot 创建 Session，统一加载 `devops-event-ops` skill
 3. Bot 调用 Agent CLI，传入:
    - DEVOPS_SKILLS_DIR=/path/to/skills   ← Skills 路径
    - DEVOPS_SESSION_ID=sess-xxx          ← Session 标识
-   - Prompt（事件模板渲染结果）
+   - Prompt 包含事件信息 + devops-event-ops 指令
 4. Agent 启动后:
-   - 读取 DEVOPS_SKILLS_DIR 下的技能目录
-   - 根据事件类型和上下文，自行匹配并加载需要的 Skills
+   - 读取 `devops-event-ops` skill → 查看场景路由表
+   - 根据事件类型，自行决定加载哪些子技能
+    - 需要调用 API 时，读取相应 Skill 目录下的 `references/gitcode-api-reference.md`
    - 执行技能中定义的步骤
+
+飞书消息同理，但统一加载 `chat` skill。
 ```
 
 ## 目录结构
@@ -40,15 +43,15 @@ skills/
 │   └── SKILL.md
 ├── changelog-gen/               # 变更日志生成技能
 │   └── SKILL.md
+├── chat/                        # 飞书 IM 对话技能
+│   └── SKILL.md
 ├── code-review/                 # 代码审查技能
 │   └── SKILL.md
-├── comment/                     # 用户评论处理技能
+├── comment/                     # 仓库评论回复技能
 │   └── SKILL.md
 ├── deploy-guard/                # 部署安全守卫技能
 │   └── SKILL.md
 ├── devops-event-ops/            # 事件运营全链路技能
-│   └── SKILL.md
-├── gitcode-api-guidance/        # GitCode API 交互技能
 │   └── SKILL.md
 ├── incident-triage/             # 事件分诊技能
 │   └── SKILL.md
@@ -73,14 +76,16 @@ Agent 启动时通过这两个环境变量获知上下文，`DEVOPS_SKILLS_DIR` 
 
 ## 已有 Skills
 
-| Skill | 说明 | 适用事件 |
+| Skill | 说明 | 适用入口 |
 |-------|------|---------|
-| `code-review` | 代码审查最佳实践、检查清单 | push, pull_request |
-| `build-debug` | 构建失败诊断方法论 | build_failure |
-| `deploy-guard` | 部署前安全与合规检查 | deploy_start, build_success |
-| `incident-triage` | 生产事件分诊与定级 | deploy_failure, build_failure |
-| `security-scan` | 安全漏洞扫描与修复建议 | push, pull_request |
-| `changelog-gen` | 自动生成变更日志 | push, release |
-| `gitcode-api-guidance` | GitCode API 交互指南 | 任意 GitCode 事件 |
-| `devops-event-ops` | 事件运营全链路编排 | 任意 DevOps 事件 |
-| `comment` | 用户评论处理与能力边界管理 | issue_comment, chat |
+| `devops-event-ops` | 事件编排全链路管理，所有 GitCode 事件的统一入口 | GitCode 事件 |
+| `chat` | 飞书等 IM 对话处理 | 飞书消息 |
+| `code-review` | 代码审查最佳实践与检查清单 | 参考 skill |
+| `build-debug` | 构建失败诊断方法论与常见模式 | 参考 skill |
+| `deploy-guard` | 部署前安全与合规检查守卫 | 参考 skill |
+| `incident-triage` | 生产事件分诊与定级方法论 | 参考 skill |
+| `security-scan` | 安全漏洞扫描与修复建议 | 参考 skill |
+| `changelog-gen` | 自动生成变更日志 | 参考 skill |
+| `comment` | 仓库 Issue/PR 评论回复 | 参考 skill |
+
+每个技能目录下都有 `references/gitcode-api-reference.md`，需要调用 GitCode API 时直接读取。

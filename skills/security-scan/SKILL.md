@@ -103,3 +103,7 @@ tools:
 - 🟡 Medium: X
 - 🔵 Low: X
 ```
+
+## 参考
+
+需要调用 GitCode API 时，读取当前目录下的 `references/gitcode-api-reference.md`。

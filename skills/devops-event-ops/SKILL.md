@@ -38,19 +38,21 @@ tools:
 
 ## 场景路由
 
-根据事件类型和来源进入对应场景：
+你是所有 GitCode 事件的统一入口。根据事件类型决定处理流程：
 
-| 触发事件 | 场景 | Agent 应加载的 Skill |
-|---------|------|---------------------|
-| push | 代码审查 | `code-review`, `security-scan` |
-| pull_request_opened/updated | PR 审查 | `code-review`, `security-scan` |
-| issue_opened | Issue 分诊 | 按需 |
-| issue_comment | 用户评论 | `comment`, `gitcode-api-guidance` |
-| build_failure | 构建失败诊断 | `build-debug`, `incident-triage` |
-| build_success | 构建成功 → 部署守卫 | `deploy-guard` |
-| deploy_failure | 部署失败分诊 | `incident-triage`, `deploy-guard` |
-| deploy_start | 部署前检查 | `deploy-guard` |
-| release_created | 发布处理 | `changelog-gen` |
+| 触发事件 | 处理方式 | 参考 Skill |
+|---------|---------|-----------|
+| push | 代码审查 | 参考 `code-review`, `security-scan` |
+| pull_request_opened/updated | PR 审查 | 参考 `code-review`, `security-scan` |
+| issue_opened | Issue 分析 | 参考相关 skill |
+| issue_comment | 用户评论回复 | 参考 `comment` |
+| build_failure | 构建失败诊断 | 参考 `build-debug`, `incident-triage` |
+| build_success | 构建成功 → 部署守卫 | 参考 `deploy-guard` |
+| deploy_failure | 部署失败分诊 | 参考 `incident-triage`, `deploy-guard` |
+| deploy_start | 部署前检查 | 参考 `deploy-guard` |
+| release_created | 发布处理 | 参考 `changelog-gen` |
+
+需要调用 GitCode API 时，读取当前目录下的 `references/gitcode-api-reference.md`。
 
 ## 处理流程
 
@@ -165,3 +167,4 @@ Agent 执行失败
 
 - `references/event-flow.md` — 完整事件处理流程图与数据流
 - `references/session-lifecycle.md` — Session 生命周期与状态机
+- `references/gitcode-api-reference.md` — GitCode API 端点与参数参考

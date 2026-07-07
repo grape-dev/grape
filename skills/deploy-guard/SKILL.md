@@ -96,3 +96,7 @@ tools:
 ### 建议项（推荐修复）
 [列出所有未通过的 High/Low 检查项及修复方法]
 ```
+
+## 参考
+
+需要调用 GitCode API 时，读取当前目录下的 `references/gitcode-api-reference.md`。

@@ -127,20 +127,18 @@ def extract_event_number(payload):
 
 def build_role_definition() -> str:
     return (
-        "你是一个DevOps运营助理，专门负责处理来自GitCode以及飞书关于代码开发、"
-        "Issue处理、PR处理、检视等与DevOps相关的工作。你的能力范围：\n"
-        "- 代码审查（code-review）、构建诊断（build-debug）\n"
-        "- 部署守卫（deploy-guard）、事件分诊（incident-triage）\n"
-        "- Issue/PR 分析、变更日志生成、仓库管理\n"
-        "- GitCode API 操作\n"
+        "You are a DevOps operations assistant. Your domain:\n"
+        "- Code review, build diagnosis, deployment guard, incident triage\n"
+        "- Issue/PR analysis, changelog generation, repository management\n"
+        "- GitCode API operations\n"
         "\n"
-        "你不是通用助手，不具备DevOps之外的能力（天气、邮件、文档、PDF、Excel、"
-        "写作、会议、语音等）。\n"
-        "响应规则：\n"
-        "1. 用户@提及你 → 无论话题，礼貌回复并说明你只处理DevOps\n"
-        "2. 用户无@提及 + DevOps相关话题 → 分析并回复\n"
-        "3. 用户无@提及 + 无关话题 → 输出 SKIP\n"
-        "4. 不要写代码、不要修改文件、不要执行 git 命令"
+        "You have no abilities outside DevOps (no weather, email, documents, "
+        "PDF, Excel, writing, meetings, voice, etc.).\n"
+        "Reply rules:\n"
+        "1. User @mentioned you: always reply politely, state you only do DevOps\n"
+        "2. User NOT @mentioned + DevOps topic: analyze and reply\n"
+        "3. User NOT @mentioned + off-topic: output SKIP\n"
+        "4. Never write code, modify files, or execute git commands"
     )
 
 
@@ -153,9 +151,9 @@ def get_skill_capabilities() -> str:
         "incident-triage": "🚨 事件分诊",
         "security-scan": "🔒 安全扫描",
         "changelog-gen": "📝 变更日志",
-        "gitcode-api-guidance": "🔗 GitCode API 操作",
         "devops-event-ops": "🔄 事件编排",
-        "comment": "💬 评论处理",
+        "comment": "💬 仓库评论回复",
+        "chat": "🗨️ 飞书对话",
     }
     lines = ["我是 DevOps Bot，专注于以下领域：\n"]
     try:
@@ -200,25 +198,31 @@ def build_prompt(evt, history, oc_session_id, skills):
 
     parts = []
     evt_type = evt.get("type", "event")
-    if number is not None:
-        parts.append(f"Event: {evt_type} #{number} on {repo}")
-    else:
-        parts.append(f"Event: {evt_type} on {repo}")
-    if title != '""':
-        parts.append(f"Title: {title}")
-    if body != '""':
-        parts.append(f"Body: {body}")
 
-    # issue_comment 事件：追加评论原文并标记 @提及
-    if evt.get("type") == "issue_comment":
+    if evt_type == "issue_comment":
+        # issue_comment 使用"用户评论"风格，非"事件"风格
         note = ""
         if isinstance(payload.get("object_attributes"), dict):
             note = payload["object_attributes"].get("note", "")
+        prefix = ""
+        if number is not None:
+            prefix = f"User commented on issue #{number} of {repo}"
+        else:
+            prefix = f"User commented on {repo}"
+        parts.append(prefix)
         if note:
-            has_mention = "@hwc-skills-bot" in note or "@skill-bot" in note
-            parts.append(f"Comment: {json.dumps(note, ensure_ascii=True)[:1000]}")
-            if has_mention:
-                parts.append("(User @mentioned the bot in this comment)")
+            parts.append(f'Comment: {json.dumps(note, ensure_ascii=True)[:1000]}')
+            if "@hwc-skills-bot" in note or "@skill-bot" in note:
+                parts.append("(User @mentioned the bot)")
+    else:
+        if number is not None:
+            parts.append(f"Event: {evt_type} #{number} on {repo}")
+        else:
+            parts.append(f"Event: {evt_type} on {repo}")
+        if title != '""':
+            parts.append(f"Title: {title}")
+        if body != '""':
+            parts.append(f"Body: {body}")
 
     if history:
         parts.append(f"Previous events in this session: {len(history)}")
@@ -228,6 +232,7 @@ def build_prompt(evt, history, oc_session_id, skills):
 
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
+        parts.append(f"Respond based on the {skills[0]} skill.")
 
     parts.append(build_role_definition())
     return "\n".join(parts)
@@ -574,16 +579,8 @@ def _process_event_inner(evt, repo_key):
         sid, history, oc_session_id, is_new = get_or_create_session(repo_key, evt['source'], evt['repository'])
         log.info(f"Session: {sid} (new={is_new}, history={len(history)} events, oc_session={oc_session_id[:30] if oc_session_id else 'none'})")
 
-        skill_map = {
-            "issue_opened": ["devops-event-ops", "gitcode-api-guidance"],
-            "issue_comment": ["devops-event-ops", "comment", "gitcode-api-guidance"],
-            "pull_request_opened": ["devops-event-ops", "code-review", "security-scan", "gitcode-api-guidance"],
-            "push": ["devops-event-ops", "code-review", "security-scan"],
-            "build_failure": ["devops-event-ops", "build-debug", "incident-triage"],
-            "deploy_failure": ["devops-event-ops", "incident-triage", "deploy-guard"],
-            "release_created": ["devops-event-ops", "changelog-gen"],
-        }
-        skills = skill_map.get(evt["type"], ["devops-event-ops"])
+        skills = ["devops-event-ops"]
+        log.info(f"Skills: {skills}")
 
         prompt = build_prompt(evt, history, oc_session_id, skills)
         log.info(f"Prompt built ({len(prompt)} chars)")
@@ -642,9 +639,15 @@ def _process_event_inner(evt, repo_key):
             number = extract_event_number(evt['payload'])
             repo = evt['repository']
             if number and repo and 0 < number < 100000:
+                # issue_comment 追加引用原文
+                body = output[:1500]
+                if evt['type'] == 'issue_comment':
+                    note = evt['payload'].get('object_attributes', {}).get('note', '')
+                    if note:
+                        body = f'> {note[:200]}\n\n{body}'
                 log.info(f"Posting comment to #{number} on {repo}...")
                 try:
-                    post_comment_to_gitcode(repo, number, output[:1500], evt['type'])
+                    post_comment_to_gitcode(repo, number, body, evt['type'])
                     log.info(f"✅ Comment posted")
                 except Exception as e:
                     log.error(f"Failed to post comment: {e}")
@@ -696,6 +699,7 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
         parts.append("No events yet for this repository.")
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
+        parts.append(f"Respond based on the {skills[0]} skill.")
     parts.append(build_role_definition())
     return "\n".join(parts)
 
@@ -798,7 +802,7 @@ def process_chat(parsed: dict):
 def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new):
     """飞书消息处理主体（受 per-repo 锁保护）"""
     try:
-        prompt = build_chat_prompt(text, repo_key, history, ["devops-event-ops", "comment", "gitcode-api-guidance"])
+        prompt = build_chat_prompt(text, repo_key, history, ["chat"])
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
         wsd = os.path.join(WORKSPACE_DIR, repository.replace("/", "\\"))

@@ -78,3 +78,7 @@ CI/CD 流水线构建失败时，需要快速定位根因并给出修复方案�
 ### 预防建议
 [避免同类问题再次发生的建议]
 ```
+
+## 参考
+
+需要调用 GitCode API 时，读取当前目录下的 `references/gitcode-api-reference.md`。

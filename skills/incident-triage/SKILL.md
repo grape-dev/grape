@@ -110,3 +110,7 @@ kubectl logs <pod> --tail=100 | grep -iE 'error|fatal|panic|exception'
 ### 建议行动
 [下一步处理建议]
 ```
+
+## 参考
+
+需要调用 GitCode API 时，读取当前目录下的 `references/gitcode-api-reference.md`。

@@ -79,3 +79,7 @@ tools:
 - 🟡 警告: X 个
 - 🔵 建议: X 个
 ```
+
+## 参考
+
+需要调用 GitCode API 时，读取当前目录下的 `references/gitcode-api-reference.md`。
