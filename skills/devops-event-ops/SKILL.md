@@ -56,6 +56,17 @@ tools:
 | deploy_start | 部署前检查 | `deploy-guard` |
 | release_created | 发布处理 | `changelog-gen` |
 
+### 路由执行指令（必须遵守）
+
+**收到 `issue_opened` 或 `issue_comment` 事件：**
+1. 立即打开并完整阅读 `skills/issue/SKILL.md`
+2. 严格按照其中的强制流程执行每一步
+3. 不得跳过标签设置、分配、评论回复步骤
+
+**收到 `pull_request_opened`、`pull_request_updated` 或 PR 评论事件：**
+1. 立即打开并完整阅读 `skills/pr/SKILL.md`
+2. 严格按照其中流程执行
+
 需要调用 GitCode API 时，读取当前目录下的 `references/gitcode-api-reference.md`。
 
 ## 处理流程
