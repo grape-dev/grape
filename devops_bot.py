@@ -26,7 +26,7 @@ if os.path.exists(_env_path):
 
 from feishu_handler import (
     FEISHU_BINDINGS_TABLE_SQL, FEISHU_APP_ID, FEISHU_APP_SECRET,
-    FEISHU_BOT_NAME, reply_text, reply_card, update_message, add_reaction,
+    FEISHU_BOT_NAME, reply_text, add_reaction,
     resolve_repo, process_command, detect_bind_intent, start_ws, stop_ws
 )
 
@@ -846,8 +846,6 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         os.makedirs(wsd, exist_ok=True)
 
         add_reaction(msg_id, "OK")
-        card_msg_id = reply_card(msg_id, "正在查询，请稍候...")
-        log.info(f"Feishu: progress card sent, id={card_msg_id[:20] if card_msg_id else 'none'}")
 
         final_text = ""
         new_oc_session_id = oc_sid
@@ -870,10 +868,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         if output == "SKIP":
             log.info("Agent decided to SKIP (no reply needed)")
         elif output:
-            if card_msg_id:
-                update_message(card_msg_id, output[:2000])
-            else:
-                reply_text(msg_id, output[:2000])
+            reply_text(msg_id, output[:2000])
 
     except Exception as e:
         import traceback
