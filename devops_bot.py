@@ -143,6 +143,24 @@ def build_role_definition() -> str:
     )
 
 
+def build_chat_role_definition() -> str:
+    caps = get_skill_capabilities()
+    return (
+        "You are a DevOps operations assistant. Your domain:\n"
+        "- Code review, build diagnosis, deployment guard, incident triage\n"
+        "- Issue/PR analysis, changelog generation, repository management\n"
+        "- GitCode API operations\n"
+        "\n"
+        "You have no abilities outside DevOps (no weather, email, documents, "
+        "PDF, Excel, writing, meetings, voice, etc.).\n"
+        f"Your capabilities:\n{caps}\n\n"
+        "Reply rules:\n"
+        "1. DevOps topic: analyze and reply\n"
+        "2. NOT DevOps topic: politely explain you only handle DevOps, list your capabilities above\n"
+        "3. Never write code, modify files, or execute git commands"
+    )
+
+
 def get_skill_capabilities() -> str:
     """从 skills/ 目录动态读取所有技能，构建能力列表"""
     emoji_map = {
@@ -719,7 +737,7 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
         parts.append(f"Respond based on the {skills[0]} skill.")
-    parts.append(build_role_definition())
+    parts.append(build_chat_role_definition())
     return "\n".join(parts)
 
 
