@@ -297,9 +297,10 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
             if not row:
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后再清理。"
             repo_key = row[0]
-            c.execute("UPDATE sessions SET oc_session_id='' WHERE repo_key=?", (repo_key,))
+            full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
+            c.execute("UPDATE sessions SET oc_session_id='' WHERE repo_key=? OR repo_key=?", (repo_key, full_key))
             db.commit()
-            return f"✅ 已清除仓库 `{repo_key}` 的 Agent 会话缓存。下次事件将使用全新的 Agent 上下文。"
+            return f"✅ 已清除仓库 `{full_key}` 的 Agent 会话缓存。下次事件将使用全新的 Agent 上下文。"
         except Exception as e:
             return f"❌ 清理失败: {e}"
     if cmd in ("/help", "/start"):
