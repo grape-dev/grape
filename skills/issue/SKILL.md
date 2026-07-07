@@ -127,6 +127,12 @@ PATCH /repos/{owner}/{repo}/issues/{number}
 ## API 调用参考
 
 ```bash
+# 所有 API 调用使用：
+#   Authorization: Bearer $GITCODE_API_TOKEN
+# 或
+#   PRIVATE-TOKEN: $GITCODE_API_TOKEN
+# （不要使用其他值，那不是正确的 API token。）
+
 # 更新 Issue（标签/负责人/里程碑）
 PATCH /repos/:owner/:repo/issues/:number
 Content-Type: application/json

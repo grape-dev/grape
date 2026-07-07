@@ -266,6 +266,7 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
     env = os.environ.copy()
     env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
     env["DEVOPS_EVENT_TYPE"] = event_type
+    env["GITCODE_API_TOKEN"] = GITCODE_TOKEN
 
     args = ["run", "--format", "json", "--dangerously-skip-permissions"]
     if oc_session_id:
