@@ -32,7 +32,7 @@ from feishu_handler import (
 
 GITCODE_API_TOKEN = os.environ.get("GITCODE_API_TOKEN", "")
 GITCODE_WEBHOOK_TOKEN = os.environ.get("GITCODE_WEBHOOK_TOKEN", "")
-BOT_USERNAMES = [u.strip() for u in os.environ.get("BOT_USERNAMES", "hwc-dev-bot").split(",")]
+BOT_USERNAMES = [u.strip() for u in os.environ.get("BOT_USERNAMES", "").split(",") if u.strip()]
 SKILLS_DIR = os.path.abspath("skills")
 WORKSPACE_DIR = os.path.abspath("data/workspaces")
 LOG_DIR = os.path.abspath("data/logs")
