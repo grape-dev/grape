@@ -590,6 +590,11 @@ def process_event(raw_body, headers):
         repo_key = f"{evt['source']}:{evt['repository']}"
         log.info(f"═══ Event: {evt['type']} on {evt['repository']} by {evt['actor']} ═══")
 
+        # 前置过滤：无效事件不处理（空仓库、未知类型、恶意请求）
+        if not evt['repository'] or evt['type'] == 'unknown':
+            log.info(f"Skipped malformed event: type={evt['type']}, repo={evt['repository']}")
+            return
+
         # 防自循环：Bot 自己的评论跳过
         if evt['type'] == 'issue_comment':
             note = evt['payload'].get('object_attributes', {}).get('note', '')
@@ -598,11 +603,6 @@ def process_event(raw_body, headers):
             if note.startswith('[DevOps Bot]') and username in BOT_USERNAMES:
                 log.info(f"Skip: self-comment from {username}")
                 return
-
-        # 前置过滤：无效事件不处理（空仓库、未知类型、恶意请求）
-        if not evt['repository'] or evt['type'] == 'unknown':
-            log.info(f"Skipped malformed event: type={evt['type']}, repo={evt['repository']}")
-            return
 
         # 重复事件去重（同一 Issue 短时间内只处理一次）
         if _is_duplicate_event(evt):
