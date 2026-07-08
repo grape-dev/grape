@@ -58,9 +58,15 @@ Content-Type: application/json
 
 3. **能确定负责人 → 立即调用 API 分配（必须先执行，再评论）：**
    ```bash
-   PATCH /repos/{owner}/{repo}/issues/{number}
-   Content-Type: application/json
-   {"assignee_ids": [用户数字ID]}
+   # 先获取用户数字 ID
+   curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+     "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators"
+   
+   # 然后 PATCH 分配
+   curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"assignee_ids": [用户数字ID]}' \
+     "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}"
    ```
    评论中 @ 该负责人
 
@@ -209,10 +215,15 @@ PATCH /repos/{owner}/{repo}/issues/{number}
 POST /repos/:owner/:repo/labels
 name=feature&color=a2eeef
 
+# 获取协作者列表（查用户数字 ID）
+curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  https://api.gitcode.com/api/v5/repos/:owner/:repo/collaborators
+
 # 更新 Issue（标签/负责人/里程碑）
-PATCH /repos/:owner/:repo/issues/:number
-Content-Type: application/json
-Body: {"labels": "bug,triaged", "assignee_ids": [12345], "milestone_id": 1}
+curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"labels": "bug,triaged", "assignee_ids": [12345], "milestone_id": 1}' \
+  https://api.gitcode.com/api/v5/repos/:owner/:repo/issues/:number
 
 # 清除标签
 DELETE /repos/:owner/:repo/issues/:number/labels
