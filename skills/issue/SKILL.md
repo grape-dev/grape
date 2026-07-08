@@ -35,6 +35,7 @@ tools: []
 | `bug` | `#d73a4a` | 缺陷报告 | 标题含"bug/故障/报错/错误/不生效/白屏/异常/500"或正文含堆栈 |
 | `need-info` | `#d4c5f9` | 信息不足 | 正文 < 30 字、无复现步骤、无日志/截图 |
 | `triaged` | `#bfdadc` | 已分诊完成 | **与主标签一起加**，表示已完成分诊 |
+| `invalid` | `#e4e669` | 与仓库无关 | 标题/正文与本仓库 DevOps 主题完全无关 |
 
 **打标签流程（两步）：**
 
@@ -133,7 +134,7 @@ Content-Type: application/json
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $GITCODE_API_TOKEN
 Content-Type: application/json
-{"body": "[DevOps Bot] 已标记为 feature 标签，建议关闭。"}
+{"body": "[DevOps Bot] 已标记为 feature 标签。"}
 ```
 
 这是强制步骤，不能省略。
@@ -152,13 +153,8 @@ Content-Type: application/json
    - **已实现** → 回复 "该功能已在 master 实现（commit xxx），建议关闭。"
    - **未实现** → 回复 "该功能尚未在 master 实现，当前进展：[摘要]。"
    - **与仓库完全无关** → **按顺序执行以下两步（缺一不可）：**
-     ① 评论说明理由
-     ② **立即调用 API 关闭 Issue（必须执行，不得省略）：**
-     ```bash
-     PATCH /repos/{owner}/{repo}/issues/{number}
-     Content-Type: application/json
-     {"state": "closed"}
-     ```
+     ① 打标签：`PATCH /issues/{number}` `{"labels": "invalid"}`
+     ② 评论说明理由，建议手动关闭
 
 ## 里程碑设置（可选）
 
