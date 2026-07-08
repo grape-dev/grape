@@ -512,7 +512,7 @@ _repo_locks = {}
 _repo_locks_lock = threading.Lock()
 
 _MAX_WORKERS = 10
-_MAX_QUEUE = 5
+_MAX_QUEUE = 20
 _event_executor = None
 _task_slot = threading.BoundedSemaphore(_MAX_QUEUE)
 
@@ -568,13 +568,12 @@ def process_event(raw_body, headers):
             log.info(f"Skipped malformed event: type={evt['type']}, repo={evt['repository']}")
             return
 
-        # 防自循环：Bot 自己的评论跳过（基于用户名，不依赖评论前缀）
-        if evt['type'] == 'issue_comment':
-            user = evt['payload'].get('user', {})
-            username = user.get('username', '') if isinstance(user, dict) else ''
-            if username in BOT_USERNAMES:
-                log.info(f"Skip: self-comment from {username}")
-                return
+        # 防自循环：Bot 账号触发的所有事件跳过（不依赖事件类型，不依赖评论前缀）
+        user = evt['payload'].get('user', {})
+        username = user.get('username', '') if isinstance(user, dict) else ''
+        if username in BOT_USERNAMES:
+            log.info(f"Skip: self-triggered event from {username}")
+            return
 
         # per-repo 串行锁：同一仓库的事件排队处理
         lock = _acquire_repo_lock(repo_key)
