@@ -401,6 +401,7 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        client_ip = self.client_address[0]
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length > 0 else b""
 
@@ -414,6 +415,7 @@ class Handler(BaseHTTPRequestHandler):
                 log.warning(f"Rejected webhook: invalid token (got='{token[:20]}', expected match)")
                 return
 
+        log.info(f"Webhook from {client_ip}, path={self.path}, length={length}")
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
