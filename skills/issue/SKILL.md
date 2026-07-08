@@ -25,6 +25,8 @@ tools: []
 
 ## 强制流程（每一步都必须执行）
 
+> 所有步骤完成后，**必须**用 curl 将结果 POST 到 Issue 评论，body 以 `[DevOps Bot]` 开头。这是最终强制步骤。
+
 ### 第一步：分类与打标签
 
 读取 Issue 标题和正文 → 按以下标准判定 → **立即调用 API 设置标签**。
@@ -93,11 +95,11 @@ PATCH /repos/{owner}/{repo}/issues/{number}
 
 | 场景 | 行为 |
 |------|------|
-| 用户 @提及机器人 | 分析评论并回复 |
-| 评论补充了信息（原为 need-info） | 重新分类，PATCH 更新 labels |
-| 评论请求关闭 Issue | 验证后关闭或回复说明 |
-| 评论讨论方案设计 | 可以参与讨论，给出建议 |
-| 其他 DevOps 相关评论 | 分析并回复 |
+| 用户 @提及机器人 | 分析评论并回复，**最后 curl POST 评论到 Issue** |
+| 评论补充了信息（原为 need-info） | 重新分类，PATCH 更新 labels，**最后 curl POST 评论到 Issue** |
+| 评论请求关闭 Issue | 验证后回复说明，**最后 curl POST 评论到 Issue** |
+| 评论讨论方案设计 | 可以参与讨论给出建议，**最后 curl POST 评论到 Issue** |
+| 其他 DevOps 相关评论 | 分析并回复，**最后 curl POST 评论到 Issue** |
 
 ### 评论输出规范
 
@@ -128,7 +130,7 @@ Content-Type: application/json
 
 ### 必须执行：发评论
 
-所有事件处理完成后，**必须**用 curl 发送一条评论到 Issue，body 以 `[DevOps Bot]` 开头：
+这是强制流程的最后一步。将你的回复内容通过 curl POST 到 Issue 评论：
 
 ```bash
 POST /repos/{owner}/{repo}/issues/{number}/comments
@@ -137,7 +139,9 @@ Content-Type: application/json
 {"body": "[DevOps Bot] 已标记为 feature 标签。"}
 ```
 
-这是强制步骤，不能省略。
+- body **必须**以 `[DevOps Bot]` 开头
+- `issue_comment` 事件需引用原文：`{"body": "[DevOps Bot] > 用户原文\n\n回复内容"}`
+- 跳过此步 = 事件未完成处理
 
 ## 关闭建议
 
