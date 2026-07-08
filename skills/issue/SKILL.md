@@ -112,18 +112,18 @@ PATCH /repos/{owner}/{repo}/issues/{number}
 | ❌ 输出内部术语 | "加载 skill"、"事件类型"、"获取详情"、"路由到" |
 | ❌ 输出流程报告 | "已完成 Issue 处理流程"、"任务完成" |
 
-### 评论前缀要求
+### 评论格式要求
 
-Agent 通过 curl 直接发送评论时，body 必须以 `[DevOps Bot]` 开头：
+通过 curl 发送评论时，body 必须以 `[DevOps Bot]` 开头，且 issue_comment 事件应引用原文：
 
 ```bash
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $GITCODE_API_TOKEN
 Content-Type: application/json
-{"body": "[DevOps Bot] 已标记为 feature 标签。"}
+{"body": "[DevOps Bot] > 用户的问题原文\n\n这是机器人的回复内容。"}
 ```
 
-否则自循环检测无法识别，会导致 Bot 重复处理自己的评论。
+引用原文的格式：`> {用户评论}\n\n{机器人回复}`
 
 ## 关闭建议
 

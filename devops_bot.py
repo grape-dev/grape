@@ -8,8 +8,7 @@ Bot monitors & logs the Agent's execution process
 import json, os, subprocess, sys, time, sqlite3, uuid, threading, logging, logging.handlers, re, socket, concurrent.futures, shutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-from urllib.request import Request, urlopen
-from urllib.error import URLError
+
 
 # .env 加载
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -680,61 +679,14 @@ def _process_event_inner(evt, repo_key):
         if exit_code != 0:
             log.warning(f"Agent failed (exit={exit_code})")
             return
-
         log.info(f"Agent response ({len(final_text)} chars)")
         for line in final_text.strip().split("\n")[:15]:
             log.info(f"  | {line[:200]}")
-
-        # Bot posts comment (skip if Agent said SKIP)
-        output = final_text.strip()
-        if output == "SKIP":
-            log.info("Agent decided to SKIP (no response needed)")
-        elif output:
-            number = extract_event_number(evt['payload'])
-            repo = evt['repository']
-            if number and repo and 0 < number < 100000:
-                # issue_comment 追加引用原文
-                body = output[:1500]
-                if evt['type'] == 'issue_comment':
-                    note = evt['payload'].get('object_attributes', {}).get('note', '')
-                    if note:
-                        body = f'> {note[:200]}\n\n{body}'
-                log.info(f"Posting comment to #{number} on {repo}...")
-                try:
-                    post_comment_to_gitcode(repo, number, body, evt['type'])
-                    log.info(f"✅ Comment posted")
-                except Exception as e:
-                    log.error(f"Failed to post comment: {e}")
-            else:
-                log.info(f"No comment posted (number={number}, repo={repo})")
 
     except Exception as e:
         import traceback
         log.error(f"Error processing event: {e}")
         traceback.print_exc()
-
-def post_comment_to_gitcode(repo, number, body, event_type):
-    if not GITCODE_TOKEN:
-        log.warning("No GITCODE_TOKEN, cannot post comment")
-        return
-    if "issue" in event_type.lower():
-        url = f"https://api.gitcode.com/api/v5/repos/{repo}/issues/{number}/comments"
-    else:
-        url = f"https://api.gitcode.com/api/v5/repos/{repo}/pulls/{number}/comments"
-    log.info(f"DEBUG post_comment: url={url}, event_type={event_type}, repo={repo}, number={number}, body_len={len(body)}")
-    payload = json.dumps({"body": f"[DevOps Bot] {body}"}).encode()
-    req = Request(url, data=payload, headers={
-        "Authorization": f"Bearer {GITCODE_TOKEN}",
-        "Content-Type": "application/json"
-    })
-    try:
-        resp = urlopen(req, timeout=15)
-        log.info(f"Comment posted: HTTP {resp.status}")
-    except URLError as e:
-        if hasattr(e, 'code') and e.code:
-            err_body = e.read().decode()[:200] if hasattr(e, 'read') else ""
-            raise Exception(f"API {e.code}: {err_body}")
-        raise
 
 
 # ========== Feishu / IM Chat Processing ==========

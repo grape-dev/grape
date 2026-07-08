@@ -121,6 +121,16 @@ tools:
 ### 语言要求
 始终使用中文回复。不得包含英文推理过程、内部处理步骤或术语。
 
+### 评论格式要求
+通过 curl 发送评论时，body 必须以 `[DevOps Bot]` 开头，回复 PR 评论时应引用原文：
+
+```bash
+POST /repos/{owner}/{repo}/pulls/{number}/comments
+Authorization: Bearer $GITCODE_API_TOKEN
+Content-Type: application/json
+{"body": "[DevOps Bot] > 用户的问题原文\n\n这是机器人的回复内容。"}
+```
+
 ## 输出规范
 
 ```markdown
