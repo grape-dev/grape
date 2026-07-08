@@ -29,27 +29,30 @@ tools: []
 
 读取 Issue 标题和正文 → 按以下标准判定 → **立即调用 API 设置标签**。
 
-| 标签 | 适用场景 | 判定线索 |
-|------|---------|---------|
-| `feature` | 新功能请求 | 标题含"建议/需求/新增/支持/实现/希望/能不能" |
-| `bug` | 缺陷报告 | 标题含"bug/故障/报错/错误/不生效/白屏/异常/500"或正文含堆栈 |
-| `need-info` | 信息不足 | 正文 < 30 字、无复现步骤、无日志/截图 |
-| `triaged` | 已分诊完成 | **与主标签一起加**，表示已完成分诊 |
+| 标签 | 颜色 | 适用场景 | 判定线索 |
+|------|------|---------|---------|
+| `feature` | `#a2eeef` | 新功能请求 | 标题含"建议/需求/新增/支持/实现/希望/能不能" |
+| `bug` | `#d73a4a` | 缺陷报告 | 标题含"bug/故障/报错/错误/不生效/白屏/异常/500"或正文含堆栈 |
+| `need-info` | `#d4c5f9` | 信息不足 | 正文 < 30 字、无复现步骤、无日志/截图 |
+| `triaged` | `#bfdadc` | 已分诊完成 | **与主标签一起加**，表示已完成分诊 |
 
-**判定后立即执行：**
+**打标签流程（两步）：**
+
+1. **确保标签存在且有颜色：** 如果标签尚未创建，用以下 API 创建（带上颜色参数）：
 ```bash
-# 可判定分类：
-PATCH /repos/{owner}/{repo}/issues/{number}
-{"labels": "feature,triaged"}
-# 或
-{"labels": "bug,triaged"}
-
-# 信息不足：
-PATCH /repos/{owner}/{repo}/issues/{number}
-{"labels": "need-info"}
+POST /repos/{owner}/{repo}/labels
+# Body (form-encoded, 不要 Content-Type 头):
+name=feature&color=a2eeef
 ```
 
-> 标签不存在时 API 会自动创建。同时符合多个分类则逗号分隔。
+2. **设置标签到 Issue：**
+```bash
+PATCH /repos/{owner}/{repo}/issues/{number}
+Content-Type: application/json
+{"labels": "feature,triaged"}
+```
+
+> 多个标签用逗号分隔。如果标签已存在则跳过创建步骤，直接 PATCH issue。
 
 ### 第二步：分配负责人
 
@@ -149,6 +152,10 @@ PATCH /repos/{owner}/{repo}/issues/{number}
 # 或
 #   PRIVATE-TOKEN: $GITCODE_API_TOKEN
 # （不要使用其他值，那不是正确的 API token。）
+
+# 创建标签（带上颜色，form-encoded，不加 Content-Type 头）
+POST /repos/:owner/:repo/labels
+name=feature&color=a2eeef
 
 # 更新 Issue（标签/负责人/里程碑）
 PATCH /repos/:owner/:repo/issues/:number
