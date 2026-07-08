@@ -117,10 +117,10 @@ PATCH /repos/{owner}/{repo}/issues/{number}
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $GITCODE_API_TOKEN
 Content-Type: application/json
-{"body": "[DevOps Bot] > 用户的问题原文\n\n这是机器人的回复内容。"}
+{"body": "> 用户的问题原文\n\n[DevOps Bot] 这是机器人的回复内容。"}
 ```
 
-引用原文的格式：`> {用户评论}\n\n{机器人回复}`
+引用原文的格式：`> {用户评论}\n\n[DevOps Bot] {机器人回复}`
 
 ### 必须执行：发评论
 
@@ -134,7 +134,7 @@ Content-Type: application/json
 ```
 
 - body **必须**以 `[DevOps Bot]` 开头
-- `issue_comment` 事件需引用原文：`{"body": "[DevOps Bot] > 用户原文\n\n回复内容"}`
+- `issue_comment` 事件需引用原文：`{"body": "> 用户原文\n\n[DevOps Bot] 回复内容"}`
 - 跳过此步 = 事件未完成处理
 
 ## 关闭建议

@@ -128,7 +128,7 @@ tools:
 POST /repos/{owner}/{repo}/pulls/{number}/comments
 Authorization: Bearer $GITCODE_API_TOKEN
 Content-Type: application/json
-{"body": "[DevOps Bot] > 用户的问题原文\n\n这是机器人的回复内容。"}
+{"body": "> 用户的问题原文\n\n[DevOps Bot] 这是机器人的回复内容。"}
 ```
 
 ### 必须执行：发评论
