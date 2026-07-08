@@ -597,12 +597,11 @@ def process_event(raw_body, headers):
             log.info(f"Skipped malformed event: type={evt['type']}, repo={evt['repository']}")
             return
 
-        # 防自循环：Bot 自己的评论跳过
+        # 防自循环：Bot 自己的评论跳过（基于用户名，不依赖评论前缀）
         if evt['type'] == 'issue_comment':
-            note = evt['payload'].get('object_attributes', {}).get('note', '')
             user = evt['payload'].get('user', {})
             username = user.get('username', '') if isinstance(user, dict) else ''
-            if note.startswith('[DevOps Bot]') and username in BOT_USERNAMES:
+            if username in BOT_USERNAMES:
                 log.info(f"Skip: self-comment from {username}")
                 return
 
