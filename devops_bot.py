@@ -30,8 +30,8 @@ from feishu_handler import (
     start_ws, stop_ws
 )
 
-GITCODE_TOKEN = os.environ.get("GITCODE_WEBHOOK_TOKEN", "")
-GITCODE_ACCESS_KEY = os.environ.get("GITCODE_ACCESS_KEY", "")
+GITCODE_API_TOKEN = os.environ.get("GITCODE_API_TOKEN", "")
+GITCODE_WEBHOOK_TOKEN = os.environ.get("GITCODE_WEBHOOK_TOKEN", "")
 BOT_USERNAMES = [u.strip() for u in os.environ.get("BOT_USERNAMES", "hwc-skills-bot,skill-bot").split(",")]
 SKILLS_DIR = os.path.abspath("skills")
 WORKSPACE_DIR = os.path.abspath("data/workspaces")
@@ -267,7 +267,7 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
     env = os.environ.copy()
     env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
     env["DEVOPS_EVENT_TYPE"] = event_type
-    env["GITCODE_API_TOKEN"] = GITCODE_TOKEN
+    env["GITCODE_API_TOKEN"] = GITCODE_API_TOKEN
 
     args = ["run", "--format", "json", "--dangerously-skip-permissions"]
     if oc_session_id:
@@ -405,9 +405,9 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length > 0 else b""
 
         # Webhook 来源验证
-        if self.path == "/webhook/gitcode" and GITCODE_ACCESS_KEY:
+        if self.path == "/webhook/gitcode" and GITCODE_WEBHOOK_TOKEN:
             token = self.headers.get("X-GitCode-Token", "")
-            if token != GITCODE_ACCESS_KEY:
+            if token != GITCODE_WEBHOOK_TOKEN:
                 self.send_response(403)
                 self.end_headers()
                 self.wfile.write(b"invalid webhook token")
@@ -830,8 +830,8 @@ server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 log.info("═══ DevOps Bot v2 (NDJSON streaming) starting on :8080 ═══")
 log.info(f"Skills dir: {SKILLS_DIR}")
 log.info(f"Workspace dir: {WORKSPACE_DIR}")
-log.info(f"GitCode token: {'YES' if GITCODE_TOKEN else 'NO'}")
-log.info(f"GitCode access key: {'YES' if GITCODE_ACCESS_KEY else 'NO (webhook not verified)'}")
+log.info(f"GitCode API token: {'YES' if GITCODE_API_TOKEN else 'NO'}")
+log.info(f"GitCode webhook token: {'YES' if GITCODE_WEBHOOK_TOKEN else 'NO (webhook not verified)'}")
 log.info(f"Feishu bot: {'CONFIGURED' if FEISHU_APP_ID else 'NOT CONFIGURED (set FEISHU_APP_ID)'}")
 log.info(f"Routes: /webhook/gitcode /health /api/sessions")
 
