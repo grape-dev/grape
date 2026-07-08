@@ -121,6 +121,16 @@ tools:
 ### 语言要求
 始终使用中文回复。不得包含英文推理过程、内部处理步骤或术语。
 
+### 链接格式规范
+
+评论中引用 commit、Issue、PR 时，必须使用 Markdown 链接格式，方便用户点击跳转：
+
+| 引用类型 | 示例 |
+|---------|------|
+| commit | `` [`fd7e659`](https://gitcode.com/{owner}/{repo}/commit/fd7e659) `` |
+| Issue | `[#14](https://gitcode.com/{owner}/{repo}/issues/14)` |
+| PR | `[#2](https://gitcode.com/{owner}/{repo}/pulls/2)` |
+
 ### 评论格式要求
 通过 curl 发送评论时，body 必须以 `[DevOps Bot]` 开头，回复 PR 评论时应引用原文：
 

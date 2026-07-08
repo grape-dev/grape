@@ -122,6 +122,16 @@ Content-Type: application/json
 
 引用原文的格式：`> {用户评论}\n\n[DevOps Bot] {机器人回复}`
 
+### 链接格式规范
+
+评论中引用 commit、Issue、PR 时，必须使用 Markdown 链接格式，方便用户点击跳转：
+
+| 引用类型 | 示例 |
+|---------|------|
+| commit | `` [`fd7e659`](https://gitcode.com/{owner}/{repo}/commit/fd7e659) `` |
+| Issue | `[#14](https://gitcode.com/{owner}/{repo}/issues/14)` |
+| PR | `[#2](https://gitcode.com/{owner}/{repo}/pulls/2)` |
+
 ### 必须执行：发评论
 
 这是强制流程的最后一步。将你的回复内容通过 curl POST 到 Issue 评论：
@@ -148,7 +158,7 @@ Content-Type: application/json
    搜索 commit message 是否包含 Issue 标题关键词、编号或功能关键词。
 
 2. **回复建议（不亲自关闭，除非与仓库完全无关）**
-   - **已实现** → 回复 "该功能已在 master 实现（commit xxx），建议关闭。"
+   - **已实现** → 回复 "该功能已在 master 实现（commit [`xxx`](https://gitcode.com/{owner}/{repo}/commit/xxx)），建议关闭。"
    - **未实现** → 回复 "该功能尚未在 master 实现，当前进展：[摘要]。"
    - **与仓库完全无关** → **按顺序执行以下两步（缺一不可）：**
      ① 打标签：`PATCH /issues/{number}` `{"labels": "invalid"}`
