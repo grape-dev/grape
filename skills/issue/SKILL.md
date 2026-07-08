@@ -53,18 +53,18 @@ Content-Type: application/json
 
 ### 第二步：分配负责人
 
-1. 检查 Issue 正文中的 `@用户名`（优先作为分配目标）
-2. 检查仓库根目录是否有 `CODEOWNERS` 文件
-3. 确定所属领域（前端/后端/DevOps/文档）
-4. 获取用户数字 ID：`GET /repos/{owner}/{repo}/collaborators`
-5. 调用 API 分配：
+1. 检查 `CODEOWNERS` 文件，确定所属模块的负责人
+2. 获取用户数字 ID：`GET /repos/{owner}/{repo}/collaborators`
 
-```bash
-PATCH /repos/{owner}/{repo}/issues/{number}
-{"assignee_ids": [用户数字ID]}
-```
+3. **能确定负责人 → 立即调用 API 分配（必须先执行，再评论）：**
+   ```bash
+   PATCH /repos/{owner}/{repo}/issues/{number}
+   Content-Type: application/json
+   {"assignee_ids": [用户数字ID]}
+   ```
+   评论中 @ 该负责人
 
-> 不确定分配谁 → 不强制设 assignee_ids，在评论中建议即可。
+4. **不能确定 → 跳过 API 分配**，评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
 
 ### 第三步：评论回复
 
