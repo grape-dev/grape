@@ -1,0 +1,27 @@
+# DevOps Bot - CODEOWNERS
+# 项目模块责任人分配
+
+# 核心引擎
+devops_bot.py          @Jason7602
+feishu_handler.py      @Jason7602
+
+# 事件源适配
+internal/source/       @wanglei_0526
+
+# 技能库 - Issue/PR 运营
+skills/issue/              @younger_eric
+skills/pr/                 @younger_eric
+skills/devops-event-ops/   @younger_eric
+
+# 技能库 - CI/CD
+skills/build-debug/     @wanglei_0526
+skills/deploy-guard/    @wanglei_0526
+skills/changelog-gen/   @wanglei_0526
+
+# 技能库 - 事件响应 & IM
+skills/incident-triage/ @zhirong
+skills/chat/            @zhirong
+
+# 基础设施
+cloudflare/            @Jason7602
+Makefile               @Jason7602
