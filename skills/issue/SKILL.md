@@ -151,7 +151,9 @@ Content-Type: application/json
 2. **回复建议（不亲自关闭，除非与仓库完全无关）**
    - **已实现** → 回复 "该功能已在 master 实现（commit xxx），建议关闭。"
    - **未实现** → 回复 "该功能尚未在 master 实现，当前进展：[摘要]。"
-   - **与仓库完全无关** → 评论说明理由，然后直接关闭：
+   - **与仓库完全无关** → **按顺序执行以下两步（缺一不可）：**
+     ① 评论说明理由
+     ② **立即调用 API 关闭 Issue（必须执行，不得省略）：**
      ```bash
      PATCH /repos/{owner}/{repo}/issues/{number}
      Content-Type: application/json
