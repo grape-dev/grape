@@ -72,6 +72,17 @@ Content-Type: application/json
 
 4. **不能确定 → 跳过 API 分配**，评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
 
+### 跨仓 Issue 同步
+
+分配负责人后，打开 `CODEOWNERS` 文件，读取底部"跨仓 Issue 同步映射"区域。
+
+1. **负责人有映射仓库**（如 `@younger_eric → Jason7602/devops-bot-test`）：
+   - 在目标仓库创建 Issue，标题和内容与原 Issue 一致
+   - body 末尾注明 `源自 [owner/repo#N](https://gitcode.com/owner/repo/issues/N)`
+   - 在原 Issue 评论 `已同步到 [目标仓库#N](https://gitcode.com/目标仓库/issues/N)`
+
+2. **负责人无映射或为空** → 跳过同步，只在本仓正常分配
+
 ### 第三步：评论回复
 
 在 Issue 中发表评论，说明已完成的操作：

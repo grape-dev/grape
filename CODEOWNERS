@@ -25,3 +25,12 @@ skills/chat/            @zhirong
 # 基础设施
 cloudflare/            @Jason7602
 Makefile               @Jason7602
+
+# ===== 跨仓 Issue 同步映射 =====
+# 分配 Issue 给该负责人时，同时在目标仓库创建 Issue。
+# 格式：@用户名 → owner/目标仓库
+# 留空或不存在时跳过同步。
+
+@younger_eric  → Jason7602/devops-bot-test
+# @wanglei_0526  → owner/目标仓库
+# @zhirong       → owner/目标仓库
