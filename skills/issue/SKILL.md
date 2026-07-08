@@ -54,23 +54,17 @@ Content-Type: application/json
 ### 第二步：分配负责人
 
 1. 检查 `CODEOWNERS` 文件，确定所属模块的负责人
-2. 获取用户数字 ID：`GET /repos/{owner}/{repo}/collaborators`
-
-3. **能确定负责人 → 立即调用 API 分配（必须先执行，再评论）：**
+2. **能确定负责人 → 立即调用 API 分配（必须先执行，再评论）：**
    ```bash
-   # 先获取用户数字 ID
-   curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
-     "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators"
-   
-   # 然后 PATCH 分配
    curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"assignee_ids": [用户数字ID]}' \
-     "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}"
+     -d '{"assignee": "younger_eric"}' \
+     https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}
    ```
-   评论中 @ 该负责人
+   `assignee` 的值为用户的 **login 用户名**（如 `younger_eric`），直接传入即可。
+   然后在评论中 @ 该负责人，说明已分配
 
-4. **不能确定 → 跳过 API 分配**，评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
+3. **不能确定 →** 评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
 
 ### 跨仓 Issue 同步
 
@@ -233,8 +227,9 @@ curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 # 更新 Issue（标签/负责人/里程碑）
 curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"labels": "bug,triaged", "assignee_ids": [12345], "milestone_id": 1}' \
+  -d '{"labels": "bug,triaged", "assignee": "younger_eric", "milestone_id": 1}' \
   https://api.gitcode.com/api/v5/repos/:owner/:repo/issues/:number
+# assignee 值为用户 login 用户名（如 "younger_eric"），直接传入即可
 
 # 清除标签
 DELETE /repos/:owner/:repo/issues/:number/labels
