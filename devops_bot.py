@@ -508,8 +508,6 @@ def normalize_event(raw, event_header):
         branch = ref[11:]
     return {"source":"gitcode","type":evt_type,"repository":repo,"branch":branch,"actor":actor,"payload":payload}
 
-_recent_events = {}
-_DEDUP_WINDOW = 120  # seconds
 _repo_locks = {}
 _repo_locks_lock = threading.Lock()
 
@@ -554,34 +552,7 @@ def _acquire_repo_lock(repo_key: str) -> threading.Lock:
         return _repo_locks[repo_key]
 
 
-def _is_duplicate_event(evt) -> bool:
-    """只读检查：事件是否与 120s 内已处理的事件重复（不写入）"""
-    number = extract_event_number(evt['payload'])
-    if not number:
-        return False
-    key = f"{evt['repository']}:{number}:{evt['type']}"
-    now = time.time()
-    if key in _recent_events:
-        if now - _recent_events[key] < _DEDUP_WINDOW:
-            log.info(f"Duplicate event skipped: {key}")
-            return True
-    for other_key, ts in list(_recent_events.items()):
-        if now - ts > _DEDUP_WINDOW:
-            continue
-        other_repo, other_num, _ = other_key.split(":", 2)
-        if other_repo == evt['repository'] and other_num == str(number):
-            log.info(f"Duplicate issue #{number} skipped (already processed as {other_key})")
-            return True
-    return False
 
-
-def _record_event(evt):
-    """记录事件到去重缓存（在 _process_event_inner 实际处理时调用）"""
-    number = extract_event_number(evt['payload'])
-    if not number:
-        return
-    key = f"{evt['repository']}:{number}:{evt['type']}"
-    _recent_events[key] = time.time()
 
 
 def process_event(raw_body, headers):
@@ -605,10 +576,6 @@ def process_event(raw_body, headers):
                 log.info(f"Skip: self-comment from {username}")
                 return
 
-        # 重复事件去重（同一 Issue 短时间内只处理一次）
-        if _is_duplicate_event(evt):
-            return
-
         # per-repo 串行锁：同一仓库的事件排队处理
         lock = _acquire_repo_lock(repo_key)
         lock.acquire()
@@ -625,7 +592,6 @@ def process_event(raw_body, headers):
 
 def _process_event_inner(evt, repo_key):
     """事件处理主体（受 per-repo 锁保护，同 repo 串行）"""
-    _record_event(evt)
     try:
         ws = os.path.join(WORKSPACE_DIR, evt['repository'])
         os.makedirs(ws, exist_ok=True)
