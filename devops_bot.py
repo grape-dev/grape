@@ -141,7 +141,8 @@ def build_role_definition() -> str:
         "1. User @mentioned you: always reply politely, state you only do DevOps\n"
         "2. User NOT @mentioned + DevOps topic: analyze and reply\n"
         "3. User NOT @mentioned + off-topic: output SKIP\n"
-        "4. Never write code, modify files, or execute git commands"
+        "4. Never write code, modify files, or execute git commands\n"
+        "5. Always reply in Chinese. Never include internal reasoning, process steps, or English analysis in your reply."
     )
 
 
@@ -159,7 +160,8 @@ def build_chat_role_definition() -> str:
         "Reply rules:\n"
         "1. DevOps topic: analyze and reply\n"
         "2. NOT DevOps topic: politely explain you only handle DevOps, list your capabilities above\n"
-        "3. Never write code, modify files, or execute git commands"
+        "3. Never write code, modify files, or execute git commands\n"
+        "4. Always reply in Chinese. Never include internal reasoning or process steps."
     )
 
 

@@ -112,6 +112,39 @@ PATCH /repos/{owner}/{repo}/issues/{number}
 | ❌ 输出内部术语 | "加载 skill"、"事件类型"、"获取详情"、"路由到" |
 | ❌ 输出流程报告 | "已完成 Issue 处理流程"、"任务完成" |
 
+### 评论前缀要求
+
+Agent 通过 curl 直接发送评论时，body 必须以 `[DevOps Bot]` 开头：
+
+```bash
+POST /repos/{owner}/{repo}/issues/{number}/comments
+Authorization: Bearer $GITCODE_API_TOKEN
+Content-Type: application/json
+{"body": "[DevOps Bot] 已标记为 feature 标签。"}
+```
+
+否则自循环检测无法识别，会导致 Bot 重复处理自己的评论。
+
+## 关闭建议
+
+用户请求关闭 Issue 时，按以下流程执行：
+
+1. **检查 master 分支是否已实现**
+   ```bash
+   git log --oneline -20 --all
+   ```
+   搜索 commit message 是否包含 Issue 标题关键词、编号或功能关键词。
+
+2. **回复建议（不亲自关闭，除非与仓库完全无关）**
+   - **已实现** → 回复 "该功能已在 master 实现（commit xxx），建议关闭。"
+   - **未实现** → 回复 "该功能尚未在 master 实现，当前进展：[摘要]。"
+   - **与仓库完全无关** → 评论说明理由，然后直接关闭：
+     ```bash
+     PATCH /repos/{owner}/{repo}/issues/{number}
+     Content-Type: application/json
+     {"state": "closed"}
+     ```
+
 ## 里程碑设置（可选）
 
 仅当 Issue 正文明确提及版本号（如 v1.2.0）时执行：
