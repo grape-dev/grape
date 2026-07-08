@@ -254,6 +254,10 @@ def build_prompt(evt, history, oc_session_id, skills):
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
         parts.append(f"Open and read the {skills[0]} skill file. Execute its instructions step by step. Do not analyze or propose — execute.")
+        if evt_type in ("issue_opened", "issue_comment"):
+            parts.append("After reading the entry skill, also read skills/issue/SKILL.md and follow its mandatory flow.")
+        elif evt_type in ("pull_request_opened", "pull_request_updated"):
+            parts.append("After reading the entry skill, also read skills/pr/SKILL.md and follow its instructions.")
 
     parts.append(build_role_definition())
     return "\n".join(parts)
