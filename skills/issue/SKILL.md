@@ -125,6 +125,19 @@ Content-Type: application/json
 
 引用原文的格式：`> {用户评论}\n\n{机器人回复}`
 
+### 必须执行：发评论
+
+所有事件处理完成后，**必须**用 curl 发送一条评论到 Issue，body 以 `[DevOps Bot]` 开头：
+
+```bash
+POST /repos/{owner}/{repo}/issues/{number}/comments
+Authorization: Bearer $GITCODE_API_TOKEN
+Content-Type: application/json
+{"body": "[DevOps Bot] 已标记为 feature 标签，建议关闭。"}
+```
+
+这是强制步骤，不能省略。
+
 ## 关闭建议
 
 用户请求关闭 Issue 时，按以下流程执行：

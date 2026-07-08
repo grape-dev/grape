@@ -131,6 +131,19 @@ Content-Type: application/json
 {"body": "[DevOps Bot] > 用户的问题原文\n\n这是机器人的回复内容。"}
 ```
 
+### 必须执行：发评论
+
+所有事件处理完成后，**必须**用 curl 发送一条评论到 Issue，body 以 `[DevOps Bot]` 开头：
+
+```bash
+POST /repos/{owner}/{repo}/pulls/{number}/comments
+Authorization: Bearer $GITCODE_API_TOKEN
+Content-Type: application/json
+{"body": "[DevOps Bot] 代码审查完成，结论：通过。"}
+```
+
+这是强制步骤，不能省略。
+
 ## 输出规范
 
 ```markdown
