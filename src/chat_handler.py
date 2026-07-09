@@ -123,7 +123,17 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         final_text = ""
         new_oc_session_id = oc_sid
         for event_type, data in stream_opencode(prompt, wsd, oc_sid, "chat"):
-            if event_type == "done":
+            if event_type == "step_start":
+                log.info(f"  ▶ {data}")
+            elif event_type == "text":
+                log.info(f"  💬 {data[:120]}")
+            elif event_type == "reasoning":
+                log.info(f"  🤔 {data[:120]}")
+            elif event_type == "tool_use":
+                log.info(f"  🔧 {data[:150]}")
+            elif event_type == "step_finish":
+                log.info(f"  ✅ {data}")
+            elif event_type == "done":
                 d = data
                 final_text = d["text"]
                 new_oc_session_id = d["oc_session_id"] or new_oc_session_id
