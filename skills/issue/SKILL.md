@@ -119,6 +119,16 @@ Content-Type: application/json
 - ❌ 不要提交 PR
 - ❌ 不要合并 PR
 
+### 应对分配质疑
+
+当用户或负责人质疑分配结果时：
+
+1. **重新核对，不盲从** — 重新读取 Issue 标题和正文，重新读取 CODEOWNERS 中该模块的触发词和描述
+2. **如果模块描述与 Issue 内容匹配** → 维持原分配，明确说明匹配依据
+3. **如果确实不匹配** → 重新匹配其他模块，并说明原因
+
+> 评论人的观点可能是错的，Agent 应基于 CODEOWNERS 描述和自己的分析做独立判断。
+
 ## 评论回复（issue_comment 事件）
 
 | 场景 | 行为 |
@@ -127,6 +137,7 @@ Content-Type: application/json
 | 评论补充了信息（原为 need-info） | 重新分类，PATCH 更新 labels，**最后 curl POST 评论到 Issue** |
 | 评论请求关闭 Issue | 验证后回复说明，**最后 curl POST 评论到 Issue** |
 | 评论讨论方案设计 | 可以参与讨论给出建议，**最后 curl POST 评论到 Issue** |
+| **用户质疑分配结果** | 重新核对 CODEOWNERS 描述，**基于自己的分析维持或调整**，不盲从评论，**最后 curl POST 评论到 Issue** |
 | 其他 DevOps 相关评论 | 分析并回复，**最后 curl POST 评论到 Issue** |
 
 ### 评论输出规范
