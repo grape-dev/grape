@@ -207,9 +207,16 @@ Content-Type: application/json
 2. **回复建议（不亲自关闭，除非与仓库完全无关）**
    - **已实现** → 回复 "该功能已在 master 实现（commit [`xxx`](https://gitcode.com/{owner}/{repo}/commit/xxx)），建议关闭。"
    - **未实现** → 回复 "该功能尚未在 master 实现，当前进展：[摘要]。"
-   - **与仓库完全无关** → **按顺序执行以下两步（缺一不可）：**
+   - **与仓库完全无关** → **按顺序执行以下三步（缺一不可）：**
      ① 打标签：`PATCH /issues/{number}` `{"labels": "invalid"}`
-     ② 评论说明理由，建议手动关闭
+     ② 关闭 Issue：
+        ```bash
+        curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{"state": "close"}' \
+          https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}
+        ```
+     ③ 评论说明理由已关闭
 
 ## 里程碑设置（可选）
 
@@ -266,6 +273,12 @@ curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   -d '{"labels": "bug,triaged", "assignee": "younger_eric", "milestone_id": 1}' \
   https://api.gitcode.com/api/v5/repos/:owner/:repo/issues/:number
 # assignee 值为用户 login 用户名（如 "younger_eric"），直接传入即可
+
+# 关闭 Issue（值为 "close" 而非 "closed"）
+curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"state": "close"}' \
+  https://api.gitcode.com/api/v5/repos/:owner/:repo/issues/:number
 
 # 清除标签
 DELETE /repos/:owner/:repo/issues/:number/labels

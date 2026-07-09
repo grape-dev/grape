@@ -26,7 +26,7 @@ Token 从环境变量读取：`$GITCODE_API_TOKEN`
 | Create issue | POST | `/repos/:owner/issues` (body: `repo`, `title`, `body`) |
 | List issues | GET | `/repos/:owner/:repo/issues` |
 | Get issue | GET | `/repos/:owner/:repo/issues/:number` |
-| Update issue | PATCH | `/repos/:owner/:repo/issues/:number` (JSON body: `labels` string, `assignee_ids` array, `milestone_id` int) |
+| Update issue | PATCH | `/repos/:owner/:repo/issues/:number` (JSON body: `labels` string, `assignee` string, `milestone_id` int, `state` string — 值为 `"close"` 非 `"closed"`) |
 | Create comment | POST | `/repos/:owner/:repo/issues/:number/comments` (body: `body`) |
 | List comments | GET | `/repos/:owner/:repo/issues/:number/comments` |
 | Get issue labels | GET | `/repos/:owner/:repo/issues/:number/labels` |
