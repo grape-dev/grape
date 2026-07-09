@@ -72,7 +72,12 @@ Content-Type: application/json
    - **描述** → 语义确认：对比 Issue 核心领域与模块描述，判断是否真正匹配
 3. **选择最匹配的模块**：从候选模块中选择描述最贴近的那个
 4. **如命中多个模块** → 选择描述匹配度最高的
-5. **如未命中任何模块** → 走兜底负责人
+5. **如未命中任何模块** → 判断 Issue 是否与仓库项目范围完全无关：
+   - **完全无关**（天气、闲聊、非技术内容等）→ **不分配，直接关闭：**
+     ① `PATCH /issues/{number}` `{"labels": "invalid"}`
+     ② `PATCH /issues/{number}` `{"state": "close"}`
+     ③ 评论说明该 Issue 与项目无关，已关闭
+   - **可能相关但无法确认** → 走兜底负责人，让人工判断
 
 6. **能确定负责人 → 立即调用 API 分配（必须先执行，再评论）：**
    ```bash
@@ -204,19 +209,10 @@ Content-Type: application/json
    ```
    搜索 commit message 是否包含 Issue 标题关键词、编号或功能关键词。
 
-2. **回复建议（不亲自关闭，除非与仓库完全无关）**
+2. **回复建议（不亲自关闭）**
    - **已实现** → 回复 "该功能已在 master 实现（commit [`xxx`](https://gitcode.com/{owner}/{repo}/commit/xxx)），建议关闭。"
    - **未实现** → 回复 "该功能尚未在 master 实现，当前进展：[摘要]。"
-   - **与仓库完全无关** → **按顺序执行以下三步（缺一不可）：**
-     ① 打标签：`PATCH /issues/{number}` `{"labels": "invalid"}`
-     ② 关闭 Issue：
-        ```bash
-        curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
-          -H "Content-Type: application/json" \
-          -d '{"state": "close"}' \
-          https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}
-        ```
-     ③ 评论说明理由已关闭
+   - **与仓库完全无关** → 已在分配步骤中直接关闭，此处无需重复处理
 
 ## 里程碑设置（可选）
 
