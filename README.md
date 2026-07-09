@@ -9,7 +9,6 @@
 | 入口 | 方式 | 状态 |
 |------|------|------|
 | GitCode | HTTP Webhook | ✅ 运行中 |
-| GitHub/GitLab/Jenkins/Spanner | HTTP Webhook | ✅ 代码就绪 |
 | 飞书 | WebSocket 长连接（lark-oapi SDK） | ✅ 运行中 |
 
 ## Skills 库（8 个）
@@ -33,7 +32,7 @@ cd devops-bot
 pip install lark-oapi websocket-client
 cp .env.example .env
 # 编辑 .env 填入 Token
-python devops_bot.py
+python -m src.main
 ```
 
 ## 飞书命令
@@ -50,21 +49,28 @@ python devops_bot.py
 
 ```
 devops-bot/
-├── devops_bot.py          # 主程序
-├── feishu_handler.py      # 飞书集成
+├── src/                   # Python 源码
+│   ├── main.py            # 启动入口
+│   ├── config.py          # 环境变量 + 配置
+│   ├── session_manager.py # Session + DB 管理
+│   ├── prompt_builder.py  # Prompt 构建
+│   ├── event_processor.py # 事件路由 + 处理
+│   ├── agent_executor.py  # opencode 调度
+│   ├── chat_handler.py    # 飞书对话处理
+│   ├── webhook_handler.py # HTTP webhook 处理
+│   └── feishu_handler.py  # 飞书 WS 集成
 ├── configs/               # 配置文件
 │   └── event-routing.json # 事件路由配置
 ├── skills/                # 技能库（8 个）
 │   ├── devops-event-ops/
 │   ├── issue/
-│   │   └── references/    # API 参考
 │   ├── pr/
-│   │   └── references/    # API 参考
 │   ├── build-debug/
 │   ├── deploy-guard/
 │   ├── incident-triage/
 │   ├── changelog-gen/
 │   └── chat/
+├── tests/                 # 测试文件
 ├── CODEOWNERS             # 模块责任人
 ├── data/                  # 运行时数据
 └── .env                   # 环境变量

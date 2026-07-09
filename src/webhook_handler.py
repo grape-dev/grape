@@ -1,0 +1,58 @@
+"""HTTP Webhook 处理器"""
+import json, os
+from http.server import BaseHTTPRequestHandler
+from src.config import log, SKILLS_DIR, GITCODE_WEBHOOK_TOKEN
+from src.event_processor import _submit_event, process_event
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        client_ip = self.client_address[0]
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length > 0 else b""
+
+        if self.path == "/webhook/gitcode" and GITCODE_WEBHOOK_TOKEN:
+            token = self.headers.get("X-GitCode-Token", "")
+            if token != GITCODE_WEBHOOK_TOKEN:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"invalid webhook token")
+                log.warning(f"Rejected webhook: invalid token (got='{token[:20]}', expected match)")
+                return
+
+        log.info(f"Webhook from {client_ip}, path={self.path}, length={length}")
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+        _submit_event(process_event, body, self.headers)
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            skills = [d for d in os.listdir(SKILLS_DIR) if os.path.isdir(os.path.join(SKILLS_DIR, d))]
+            self.wfile.write(json.dumps({"status": "ok", "agents": ["opencode"], "skills": skills}).encode())
+        elif self.path == "/api/sessions":
+            from src.session_manager import db
+            with __import__("src.session_manager", fromlist=["db_lock"]).db_lock:
+                c = db.cursor()
+                c.execute("SELECT id, repo_key, source, repository, status, event_history, oc_session_id, created_at, last_active_at FROM sessions ORDER BY last_active_at DESC")
+                rows = c.fetchall()
+            sessions = []
+            for r in rows:
+                sessions.append({
+                    "id": r[0], "repo_key": r[1], "source": r[2], "repository": r[3], "status": r[4],
+                    "event_history": json.loads(r[5] or "[]"), "oc_session_id": r[6],
+                    "created_at": r[7], "last_active_at": r[8]
+                })
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(sessions, ensure_ascii=False).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, fmt, *args):
+        pass
