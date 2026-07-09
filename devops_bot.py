@@ -274,7 +274,8 @@ def build_prompt(evt, history, oc_session_id, skills):
             parts.append(f"  [{s}] {h.get('type','')}")
 
     if skills:
-        parts.append(f"Read the file at skills/{skills[0]}/SKILL.md using the read tool. Execute its instructions step by step. Do not analyze or propose — execute.")
+        skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
+        parts.append(f"Read the file at {skill_path} using the read tool. Execute its instructions step by step. Do not analyze or propose — execute.")
 
     parts.append(build_role_definition())
     return "\n".join(parts)
