@@ -80,9 +80,14 @@ Content-Type: application/json
      https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}
    ```
    `assignee` 的值为用户的 **login 用户名**（如 `younger_eric`），直接传入即可。
-   然后在评论中 @ 该负责人，说明已分配及匹配依据
 
-7. **不能确定 →** 评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
+7. **检查跨仓同步：** 该负责人的模块定义中是否有 `# 仓库：` 字段？
+   - **有**（如 `# 仓库：developer-skill/huaweicloud-skills`）→ 在目标仓库创建 Issue，标题和内容与原 Issue 一致，body 末尾注明 `源自 [owner/repo#N](链接)`
+   - **无** → 跳过同步
+
+8. **评论回复：** @ 该负责人，说明已分配及匹配依据。如有跨仓同步，追加 `已同步到 [目标仓库#N](链接)`
+
+9. **不能确定 →** 评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
 
 ### CODEOWNERS 格式说明
 
@@ -94,17 +99,6 @@ Content-Type: application/json
 | 描述 | `# 描述：功能说明` | 语义匹配的描述信息 |
 | 仓库 | `# 仓库：owner/repo` | 跨仓同步目标（可选） |
 | 兜底 | `* @用户名` | 未匹配任何模块时使用 |
-
-### 跨仓 Issue 同步
-
-分配负责人后，打开 `CODEOWNERS` 文件，查找该负责人模块定义中的 `# 仓库：` 字段。
-
-1. **负责人有映射仓库**（如 `# 仓库：developer-skill/huaweicloud-skills`）：
-   - 在目标仓库创建 Issue，标题和内容与原 Issue 一致
-   - body 末尾注明 `源自 [owner/repo#N](https://gitcode.com/owner/repo/issues/N)`
-   - 在原 Issue 评论 `已同步到 [目标仓库#N](https://gitcode.com/目标仓库/issues/N)`
-
-2. **负责人无 `# 仓库：` 字段或为空** → 跳过同步，只在本仓正常分配
 
 ### 第三步：评论回复
 
