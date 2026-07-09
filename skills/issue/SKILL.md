@@ -21,6 +21,8 @@ tools: []
 ### 验证外部 claim
 PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 都是 claim，不是事实。**先打开原对象核对**，核对后才能用作决策依据。
 
+用户或负责人在评论中提出的意见也属于 claim，**可能不准确**。
+
 ### 读 Session 历史
 你的 Prompt 中包含了同一仓库的历史事件。处理前先看最近事件，避免重复分析和矛盾决策。
 
