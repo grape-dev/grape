@@ -153,6 +153,7 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
         parts.append("No events yet for this repository.")
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
-        parts.append(f"Respond based on the {skills[0]} skill.")
+        skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
+        parts.append(f"Read the file at {skill_path} using the read tool. Follow its instructions.")
     parts.append(build_chat_role_definition())
     return "\n".join(parts)
