@@ -1,8 +1,4 @@
 {
-  "事件路由配置": {
-    "说明": "事件类型到 domain skill 的映射。修改后重启 Bot 生效。",
-    "未知事件类型将使用兜底 skill：devops-event-ops"
-  },
   "routing": {
     "issue_opened": "issue",
     "issue_comment": "issue",

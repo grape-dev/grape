@@ -36,26 +36,33 @@ BOT_USERNAMES = [u.strip() for u in os.environ.get("BOT_USERNAMES", "").split(",
 SKILLS_DIR = os.path.abspath("skills")
 CONFIG_DIR = os.path.abspath("configs")
 
-# 事件路由配置
+# 事件路由配置（占位，logging 初始化后加载）
 EVENT_ROUTING = {}
 _EVENT_ROUTING_FALLBACK = "devops-event-ops"
-_routing_path = os.path.join(CONFIG_DIR, "event-routing.json")
-if os.path.exists(_routing_path):
-    try:
-        with open(_routing_path, encoding="utf-8") as _f:
-            _routing_data = json.load(_f)
-        EVENT_ROUTING = _routing_data.get("routing", {})
-        _EVENT_ROUTING_FALLBACK = _routing_data.get("fallback_skill", "devops-event-ops")
-        log = logging.getLogger("devops-bot")
-        log.info(f"Event routing loaded: {len(EVENT_ROUTING)} rules, fallback={_EVENT_ROUTING_FALLBACK}")
-    except Exception as _e:
-        log = logging.getLogger("devops-bot")
-        log.warning(f"Failed to load event routing config: {_e}")
 
 
 def get_domain_skill(evt_type: str) -> str:
     """根据事件类型获取对应的 domain skill 名称"""
     return EVENT_ROUTING.get(evt_type, _EVENT_ROUTING_FALLBACK)
+
+
+def _load_routing_config():
+    """加载事件路由配置文件"""
+    global EVENT_ROUTING, _EVENT_ROUTING_FALLBACK
+    _routing_path = os.path.join(CONFIG_DIR, "event-routing.json")
+    if not os.path.exists(_routing_path):
+        log.info(f"Event routing config not found at {_routing_path}, using fallback={_EVENT_ROUTING_FALLBACK}")
+        return
+    try:
+        with open(_routing_path, encoding="utf-8") as _f:
+            _routing_data = json.load(_f)
+        EVENT_ROUTING = _routing_data.get("routing", {})
+        _EVENT_ROUTING_FALLBACK = _routing_data.get("fallback_skill", "devops-event-ops")
+        log.info(f"Event routing loaded: {len(EVENT_ROUTING)} rules, fallback={_EVENT_ROUTING_FALLBACK}")
+    except Exception as _e:
+        log.warning(f"Failed to load event routing config: {_e}")
+
+
 WORKSPACE_DIR = os.path.abspath("data/workspaces")
 LOG_DIR = os.path.abspath("data/logs")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
@@ -67,6 +74,7 @@ logging.basicConfig(
     handlers=[logging.handlers.TimedRotatingFileHandler("data/devops-bot.log", when="midnight", interval=1, backupCount=30, encoding="utf-8"), logging.StreamHandler()]
 )
 log = logging.getLogger("devops-bot")
+_load_routing_config()
 
 db_lock = threading.Lock()
 
