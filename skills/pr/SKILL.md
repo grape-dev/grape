@@ -16,10 +16,20 @@ tools:
 
 # PR 运营
 
-## 场景
+## 核心原则
 
-开发者创建/更新 Pull Request 或提交代码时，Agent 需要执行完整 PR 运营流程：
-关联 Issue、代码审查、安全扫描、合并检查、回复评论。
+### 验证外部 claim
+PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 claim，不是事实。**先打开原对象核对**。
+
+### 已有 PR 修此 issue → 默认 review
+如果关联 PR 已存在，下一步默认是 review 现有 PR，不是从零实现。只有 PR 方向不对、质量不达标、或作者明确放弃时，才考虑其他方案。
+
+### Consult freely, decide carefully
+可以自主拉取上下文做评估/review，但 merge/close/roadmap 等硬决策需要人工确认。
+
+### 禁止探索 Bot 内部
+不要执行 `ls`、`grep`、`cat` 等命令查看 workspace 目录、Bot 代码、日志文件或数据库。
+**所有信息通过 GitCode API 获取**，不读取本地文件。
 
 ## 事件处理
 
@@ -195,4 +205,4 @@ Content-Type: application/json
 
 ## 参考
 
-需要调用 GitCode API 时，读取 `devops-event-ops/references/gitcode-api-reference.md`。
+需要调用 GitCode API 时，读取 `references/gitcode-api-reference.md`。

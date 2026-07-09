@@ -15,7 +15,18 @@ tools: []
 
 ## 核心原则
 
+### 守门不修 bug
+可以打标签、发评论、分配负责人，但**不要直接写代码修 bug**。除非是 P0 安全事故需要紧急止血。
 
+### 验证外部 claim
+PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 都是 claim，不是事实。**先打开原对象核对**，核对后才能用作决策依据。
+
+### 读 Session 历史
+你的 Prompt 中包含了同一仓库的历史事件。处理前先看最近事件，避免重复分析和矛盾决策。
+
+### 禁止探索 Bot 内部
+不要执行 `ls`、`grep`、`cat` 等命令查看 workspace 目录、Bot 代码、日志文件或数据库。
+**所有信息通过 GitCode API 获取**，不读取本地文件。
 
 ## 强制流程（每一步都必须执行）
 
@@ -262,4 +273,4 @@ GET /repos/:owner/:repo/collaborators
 
 ## 参考
 
-需要调用更多 GitCode API 时，读取 `devops-event-ops/references/gitcode-api-reference.md`。
+需要调用更全面的 GitCode API 时，读取 `references/gitcode-api-reference.md`。

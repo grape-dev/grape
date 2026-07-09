@@ -2,6 +2,8 @@
 
 **无智能的事件编排器**，通过 CLI 调用外部 Agent（opencode）实现 DevOps 事件的智能化处理。Bot 是壳，Agent 是脑。
 
+事件 → 配置文件路由 → domain skill（自包含原则 + API 参考）→ Agent 按流程执行。
+
 ## 支持的入口
 
 | 入口 | 方式 | 状态 |
@@ -14,7 +16,7 @@
 
 | Skill | 说明 |
 |-------|------|
-| `devops-event-ops` | 事件路由入口 + 公共规范 |
+| `devops-event-ops` | 非 Issue/PR 事件路由入口 |
 | `issue` | Issue 全生命周期（分类、标签、分配、评论） |
 | `pr` | PR 全生命周期（代码审查、安全扫描、合并检查） |
 | `build-debug` | 构建失败诊断 |
@@ -50,10 +52,14 @@ python devops_bot.py
 devops-bot/
 ├── devops_bot.py          # 主程序
 ├── feishu_handler.py      # 飞书集成
+├── configs/               # 配置文件
+│   └── event-routing.json # 事件路由配置
 ├── skills/                # 技能库（8 个）
 │   ├── devops-event-ops/
 │   ├── issue/
+│   │   └── references/    # API 参考
 │   ├── pr/
+│   │   └── references/    # API 参考
 │   ├── build-debug/
 │   ├── deploy-guard/
 │   ├── incident-triage/

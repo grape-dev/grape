@@ -34,6 +34,28 @@ GITCODE_API_TOKEN = os.environ.get("GITCODE_API_TOKEN", "")
 GITCODE_WEBHOOK_TOKEN = os.environ.get("GITCODE_WEBHOOK_TOKEN", "")
 BOT_USERNAMES = [u.strip() for u in os.environ.get("BOT_USERNAMES", "").split(",") if u.strip()]
 SKILLS_DIR = os.path.abspath("skills")
+CONFIG_DIR = os.path.abspath("configs")
+
+# 事件路由配置
+EVENT_ROUTING = {}
+_EVENT_ROUTING_FALLBACK = "devops-event-ops"
+_routing_path = os.path.join(CONFIG_DIR, "event-routing.json")
+if os.path.exists(_routing_path):
+    try:
+        with open(_routing_path, encoding="utf-8") as _f:
+            _routing_data = json.load(_f)
+        EVENT_ROUTING = _routing_data.get("routing", {})
+        _EVENT_ROUTING_FALLBACK = _routing_data.get("fallback_skill", "devops-event-ops")
+        log = logging.getLogger("devops-bot")
+        log.info(f"Event routing loaded: {len(EVENT_ROUTING)} rules, fallback={_EVENT_ROUTING_FALLBACK}")
+    except Exception as _e:
+        log = logging.getLogger("devops-bot")
+        log.warning(f"Failed to load event routing config: {_e}")
+
+
+def get_domain_skill(evt_type: str) -> str:
+    """根据事件类型获取对应的 domain skill 名称"""
+    return EVENT_ROUTING.get(evt_type, _EVENT_ROUTING_FALLBACK)
 WORKSPACE_DIR = os.path.abspath("data/workspaces")
 LOG_DIR = os.path.abspath("data/logs")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
@@ -233,7 +255,7 @@ def build_prompt(evt, history, oc_session_id, skills):
         parts.append(prefix)
         if note:
             parts.append(f'Comment: {json.dumps(note, ensure_ascii=True)[:1000]}')
-            if "@hwc-skills-bot" in note or "@skill-bot" in note:
+            if any(f"@{u}" in note for u in BOT_USERNAMES):
                 parts.append("(User @mentioned the bot)")
     else:
         if number is not None:
@@ -252,12 +274,7 @@ def build_prompt(evt, history, oc_session_id, skills):
             parts.append(f"  [{s}] {h.get('type','')}")
 
     if skills:
-        parts.append(f"Skills: {', '.join(skills)}")
-        parts.append(f"Open and read the {skills[0]} skill file. Execute its instructions step by step. Do not analyze or propose — execute.")
-        if evt_type in ("issue_opened", "issue_comment"):
-            parts.append("After reading the entry skill, also read skills/issue/SKILL.md and follow its mandatory flow.")
-        elif evt_type in ("pull_request_opened", "pull_request_updated"):
-            parts.append("After reading the entry skill, also read skills/pr/SKILL.md and follow its instructions.")
+        parts.append(f"Read the file at skills/{skills[0]}/SKILL.md using the read tool. Execute its instructions step by step. Do not analyze or propose — execute.")
 
     parts.append(build_role_definition())
     return "\n".join(parts)
@@ -602,7 +619,7 @@ def _process_event_inner(evt, repo_key):
         sid, history, oc_session_id, is_new = get_or_create_session(repo_key, evt['source'], evt['repository'])
         log.info(f"Session: {sid} (new={is_new}, history={len(history)} events, oc_session={oc_session_id[:30] if oc_session_id else 'none'})")
 
-        skills = ["devops-event-ops"]
+        skills = [get_domain_skill(evt['type'])]
         log.info(f"Skills: {skills}")
 
         prompt = build_prompt(evt, history, oc_session_id, skills)
