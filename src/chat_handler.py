@@ -112,7 +112,11 @@ def process_chat(parsed: dict):
 
 def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new):
     try:
-        prompt = build_chat_prompt(text, repo_key, history, ["chat"])
+        user_info = f"User ID: {parsed.get('sender_id','')}"
+        open_id = parsed.get('sender_open_id', '')
+        if open_id:
+            user_info += f"\nFeishu open_id: {open_id}\nTo @mention user, use: <at id={open_id}></at>"
+        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, ["chat"])
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
         wsd = os.path.join(WORKSPACE_DIR, repository)

@@ -65,6 +65,23 @@ def get_tenant_token() -> str:
             return ""
 
 
+def get_user_name(user_id: str) -> str:
+    """通过飞书 API 获取用户昵称"""
+    if not user_id or not ensure_configured():
+        return user_id
+    token = get_tenant_token()
+    if not token:
+        return user_id
+    url = f"{FEISHU_BASE}/im/v1/users/{user_id}"
+    try:
+        resp = urlopen(Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=10)
+        data = json.loads(resp.read())
+        name = data.get("data", {}).get("user", {}).get("name", "") or ""
+        return name if name else user_id
+    except:
+        return user_id
+
+
 def reply_text(message_id: str, text: str) -> str:
     """Reply to a Feishu message. Returns the reply message_id or empty string on failure."""
     if not message_id or not text or not ensure_configured():
@@ -430,11 +447,16 @@ def _handle_message(event, on_message_callback):
         if sender and sender.sender_id:
             sender_id = sender.sender_id.user_id or ""
 
+        sender_open_id = ""
+        if sender and sender.sender_id:
+            sender_open_id = sender.sender_id.open_id or ""
+
         parsed = {
             "type": "message",
             "text": text,
             "chat_id": getattr(message, 'chat_id', "") or "",
             "sender_id": sender_id,
+            "sender_open_id": sender_open_id,
             "message_id": getattr(message, 'message_id', "") or "",
             "message_type": msg_type,
         }

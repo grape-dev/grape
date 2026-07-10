@@ -126,6 +126,14 @@ auto-submitted by DevOps Bot Feishu feedback
 > ✅ 已收到你的建议，已提交到 [#N](链接)
 > 你可以在该 Issue 中继续跟进。
 
+### 在回复中 @ 用户
+
+使用 Feisu @mention 格式：
+```
+<at id={open_id}></at> 回复内容
+```
+open_id 来自 prompt 中的 `Feishu open_id` 字段。
+
 ## 链接格式规范
 
 回复中引用 commit、Issue、PR 时，必须使用 Markdown 链接格式，方便用户点击跳转：
