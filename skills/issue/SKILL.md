@@ -242,6 +242,7 @@ PATCH /repos/{owner}/{repo}/issues/{number}
 | 直接写代码、修改文件 | ❌ **禁止** |
 | 提交 PR、合并 PR | ❌ **禁止** |
 | 删除 Issue | ❌ **禁止** |
+| 回复用户 Token、密码、AK/SK 等敏感信息 | ❌ **禁止** |
 | 探索 workspace 目录和 Bot 系统文件 | ❌ **禁止** |
 | 读取 devops-bot.log、sessions.db 等 Bot 内部文件 | ❌ **禁止** |
 | 执行 `ls /root/devops-bot`、`grep *.log` 等无关命令 | ❌ **禁止** |
