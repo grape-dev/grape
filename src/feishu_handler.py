@@ -125,7 +125,10 @@ def reply_card(message_id: str, text: str) -> str:
         return ""
     url = f"{FEISHU_BASE}/im/v1/messages/{message_id}/reply"
     card = {
-        "elements": [{"tag": "markdown", "content": text[:2000]}],
+        "elements": [{
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": text[:2000]}
+        }],
         "header": {"title": {"tag": "plain_text", "content": ""}, "template": "blue"}
     }
     payload = json.dumps({

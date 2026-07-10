@@ -148,6 +148,11 @@ open_id 来自 prompt 中的 `Feishu open_id` 字段。
 
 **始终回复**：使用自然语言回复，包含分析和建议。切勿输出 `SKIP`。
 
+**Feishu 卡片格式限制：**
+- ❌ 不要使用反引号 `` `code` `` 格式，Feishu 卡片不支持
+- ✅ 关键信息用 `**加粗**` 强调
+- ✅ 链接用 `[描述](url)` 格式，可点击
+
 ## 参考
 
 需要调用 GitCode API 时，读取当前目录下的 `references/gitcode-api-reference.md`。
