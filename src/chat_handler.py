@@ -7,7 +7,7 @@ from src.prompt_builder import build_chat_prompt, get_skill_capabilities, build_
 from src.agent_executor import stream_opencode
 from src.feishu_handler import (
     FEISHU_BINDINGS_TABLE_SQL, FEISHU_APP_ID, FEISHU_APP_SECRET,
-    FEISHU_BOT_NAME, reply_text, add_reaction,
+    FEISHU_BOT_NAME, reply_text, reply_card, add_reaction,
     resolve_repo, process_command, detect_bind_intent, detect_clean_intent,
     start_ws, stop_ws
 )
@@ -151,7 +151,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         if output == "SKIP":
             log.info("Agent decided to SKIP (no reply needed)")
         elif output:
-            reply_text(msg_id, output[:2000])
+            reply_card(msg_id, output[:2000])
 
     except Exception as e:
         import traceback

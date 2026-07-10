@@ -126,6 +126,16 @@ auto-submitted by DevOps Bot Feishu feedback
 > ✅ 已收到你的建议，已提交到 [#N](链接)
 > 你可以在该 Issue 中继续跟进。
 
+## 链接格式规范
+
+回复中引用 commit、Issue、PR 时，必须使用 Markdown 链接格式，方便用户点击跳转：
+
+| 引用类型 | 示例 |
+|---------|------|
+| commit | `` [`fd7e659`](https://gitcode.com/{owner}/{repo}/commit/fd7e659) `` |
+| Issue | `[#14](https://gitcode.com/{owner}/{repo}/issues/14)` |
+| PR | `[#2](https://gitcode.com/{owner}/{repo}/pulls/2)` |
+
 ## 输出格式
 
 **始终回复**：使用自然语言回复，包含分析和建议。切勿输出 `SKIP`。
