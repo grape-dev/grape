@@ -1,36 +1,30 @@
 # DevOps Bot - CODEOWNERS
 # 项目模块责任人分配
+# 当前测试阶段，全部指向 @Jason7602
 
-# 核心引擎
-devops_bot.py          @Jason7602
-feishu_handler.py      @Jason7602
+# ===== 核心引擎 =====
+src/                       @Jason7602
 
-# 事件源适配
-internal/source/       @wanglei_0526
+# ===== 配置文件 =====
+configs/                   @Jason7602
 
-# 技能库 - Issue/PR 运营
-skills/issue/              @younger_eric
-skills/pr/                 @younger_eric
-skills/devops-event-ops/   @younger_eric
+# ===== 技能库 =====
+skills/devops-event-ops/   @Jason7602
+skills/issue/              @Jason7602
+skills/pr/                 @Jason7602
+skills/implementation/     @Jason7602
+skills/chat/               @Jason7602
+skills/build-debug/        @Jason7602
+skills/deploy-guard/       @Jason7602
+skills/incident-triage/    @Jason7602
+skills/changelog-gen/      @Jason7602
+skills/agent/              @Jason7602
 
-# 技能库 - CI/CD
-skills/build-debug/     @wanglei_0526
-skills/deploy-guard/    @wanglei_0526
-skills/changelog-gen/   @wanglei_0526
-
-# 技能库 - 事件响应 & IM
-skills/incident-triage/ @zhirong
-skills/chat/            @zhirong
-
-# 基础设施
-cloudflare/            @Jason7602
-Makefile               @Jason7602
+# ===== 基础设施 =====
+cloudflare/                @Jason7602
+README.md                  @Jason7602
 
 # ===== 跨仓 Issue 同步映射 =====
-# 分配 Issue 给该负责人时，同时在目标仓库创建 Issue。
 # 格式：@用户名 → owner/目标仓库
 # 留空或不存在时跳过同步。
-
-@younger_eric  → Jason7602/devops-bot-test
-# @wanglei_0526  → owner/目标仓库
-# @zhirong       → owner/目标仓库
+# @younger_eric  → Jason7602/devops-bot-test
