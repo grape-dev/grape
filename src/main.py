@@ -5,20 +5,20 @@ Bot listens events → builds prompt → spawns opencode with NDJSON streaming
 Agent autonomously reads skills, calls GitCode API, takes actions
 Bot monitors & logs the Agent's execution process
 """
-import socket, threading, json, urllib.request
+import socket, threading
 from http.server import HTTPServer
 from src.config import log, SKILLS_DIR, WORKSPACE_DIR, GITCODE_API_TOKEN, GITCODE_WEBHOOK_TOKEN
 from src.feishu_handler import (
     FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_BOT_NAME,
-    start_ws, stop_ws, get_chat_members, ensure_configured
+    start_ws, stop_ws, ensure_configured, sync_repo_feishu_mapping
 )
-from src.session_manager import db, db_lock, set_feishu_open_id
+from src.session_manager import db, db_lock
 from src.chat_handler import process_chat
 from src.webhook_handler import Handler
 
 
 def _sync_feishu_users():
-    """Startup: sync Feishu group members to feishu_users table"""
+    """Startup: sync Feishu group members to feishu_users table for all bindings"""
     if not ensure_configured():
         return
     try:
@@ -30,36 +30,8 @@ def _sync_feishu_users():
             log.info("Feishu sync: no bindings found, skipping")
             return
         for chat_id, repo_key in bindings:
-            members = get_chat_members(chat_id)
-            if not members:
-                continue
-            # Get GitCode collaborators
-            parts = repo_key.replace("gitcode:", "").split("/", 1)
-            if len(parts) < 2:
-                continue
-            owner, repo = parts
-            try:
-                resp = urllib.request.urlopen(
-                    urllib.request.Request(f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators"),
-                    timeout=10
-                )
-                collabs = json.loads(resp.read())
-            except Exception as e:
-                log.warning(f"Feishu sync: failed to fetch collaborators for {repo_key}: {e}")
-                continue
-            # Match by nick_name
-            matched = 0
-            for collab in collabs:
-                nick = collab.get("nick_name", "")
-                login = collab.get("username", "")
-                if not nick or not login:
-                    continue
-                for m in members:
-                    if m.get("name") == nick:
-                        set_feishu_open_id(repo_key, login, m["open_id"], nick)
-                        matched += 1
-                        break
-            log.info(f"Feishu sync: {repo_key} -> {matched} users matched from {len(members)} group members")
+            matched = sync_repo_feishu_mapping(repo_key, chat_id)
+            log.info(f"Feishu sync: {repo_key} -> {matched} matched")
     except Exception as e:
         log.warning(f"Feishu sync error: {e}")
 

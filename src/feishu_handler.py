@@ -310,6 +310,42 @@ def get_chat_id_for_repo(repo_key: str) -> str:
         return ""
 
 
+def sync_repo_feishu_mapping(repo_key: str, chat_id: str) -> int:
+    """Sync group members to feishu_users by nick_name matching. Returns match count."""
+    members = get_chat_members(chat_id)
+    if not members:
+        return 0
+    # Get GitCode collaborators
+    parts = repo_key.replace("gitcode:", "").split("/", 1)
+    if len(parts) < 2:
+        return 0
+    owner, repo = parts
+    try:
+        resp = urlopen(Request(
+            f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators",
+            headers={"Authorization": f"Bearer {os.environ.get('GITCODE_API_TOKEN','')}"}
+        ), timeout=10)
+        collabs = json.loads(resp.read())
+    except Exception as e:
+        log.warning(f"Feishu sync: failed to fetch collaborators for {repo_key}: {e}")
+        return 0
+    from src.session_manager import set_feishu_open_id
+    full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
+    matched = 0
+    for collab in collabs:
+        nick = collab.get("nick_name", "")
+        login = collab.get("username", "")
+        if not nick or not login:
+            continue
+        for m in members:
+            if m.get("name") == nick:
+                set_feishu_open_id(full_key, login, m["open_id"], nick)
+                matched += 1
+                break
+    log.info(f"Feishu sync: {repo_key} -> {matched} users matched from {len(members)} group members")
+    return matched
+
+
 BIND_PATTERNS = [
     re.compile(r'(?:绑定|连接|关联|设置|使用|切换到|帮我绑定)\s*(?:到)?\s*([\w.-]+/[\w.-]+)'),
     re.compile(r'(?:把|将|让)\s*([\w.-]+/[\w.-]+)\s*(?:绑定|连上|设置)'),
@@ -378,6 +414,9 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
                 (chat_id, repo_key, "gitcode", sender_id)
             )
             db.commit()
+            matched = sync_repo_feishu_mapping(repo_key, chat_id)
+            if matched > 0:
+                return f"✅ 已绑定 `{repo_key}`，同步了 {matched} 个用户映射"
             return f"✅ 已绑定当前群到 `{repo_key}`"
         except Exception as e:
             return f"❌ 绑定失败: {e}"
