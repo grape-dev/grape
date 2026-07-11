@@ -67,19 +67,34 @@ Content-Type: application/json
 ### 第二步：分配负责人
 
 1. **读取 Issue** 标题和正文，理解该 Issue 所属的核心领域
-2. **打开 CODEOWNERS 文件**，逐模块读取：
+2. **获取 CODEOWNERS 文件** — 不要读本地文件（本地不存在），用 GitCode API 获取：
+
+```bash
+curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/contents/CODEOWNERS
+```
+
+返回 JSON，`content` 字段是 Base64 编码，需解码后读取：
+
+```python
+import base64, json
+data = json.loads(response_text)
+text = base64.b64decode(data['content']).decode('utf-8')
+```
+
+3. 逐模块读取解码后的 CODEOWNERS 内容，按以下字段匹配：
    - **触发词** → 快速预筛选：Issue 内容命中触发词的模块标记为候选
    - **描述** → 语义确认：对比 Issue 核心领域与模块描述，判断是否真正匹配
-3. **选择最匹配的模块**：从候选模块中选择描述最贴近的那个
-4. **如命中多个模块** → 选择描述匹配度最高的
-5. **如未命中任何模块** → 判断 Issue 是否与仓库项目范围完全无关：
+4. **选择最匹配的模块**：从候选模块中选择描述最贴近的那个
+5. **如命中多个模块** → 选择描述匹配度最高的
+6. **如未命中任何模块** → 判断 Issue 是否与仓库项目范围完全无关：
    - **完全无关**（天气、闲聊、非技术内容等）→ **不分配，直接关闭：**
      ① `PATCH /issues/{number}` `{"labels": "invalid"}`
      ② `PATCH /issues/{number}` `{"state": "close"}`
      ③ 评论说明该 Issue 与项目无关，已关闭
    - **可能相关但无法确认** → 走兜底负责人，让人工判断
 
-6. **能确定负责人 → 立即调用 API 分配（必须先执行，再评论）：**
+7. **能确定负责人 → 立即调用 API 分配（必须先执行，再评论）：**
    ```bash
    curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
      -H "Content-Type: application/json" \
@@ -88,17 +103,17 @@ Content-Type: application/json
    ```
    `assignee` 的值为用户的 **login 用户名**（如 `younger_eric`），直接传入即可。
 
-7. **检查跨仓同步：** 该负责人的模块定义中是否有 `# 仓库：` 字段？
+8. **检查跨仓同步：** 该负责人的模块定义中是否有 `# 仓库：` 字段？
    - **有**（如 `# 仓库：developer-skill/huaweicloud-skills`）→ 在目标仓库创建 Issue，标题和内容与原 Issue 一致，body 末尾注明 `源自 [owner/repo#N](链接)`
    - **无** → 跳过同步
 
-8. **评论回复：** @ 该负责人，说明已分配及匹配依据。如有跨仓同步，追加 `已同步到 [目标仓库#N](链接)`
+9. **评论回复：** @ 该负责人，说明已分配及匹配依据。如有跨仓同步，追加 `已同步到 [目标仓库#N](链接)`
 
-9. **不能确定 →** 评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
+10. **不能确定 →** 评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
 
 ### 第二步点五：飞书通知
 
-分诊并分配责任人后，**必须通过飞书发送通知**。发送前先完成第 3 步中的 PATCH 标签操作。
+分诊并分配责任人后，**必须通过飞书发送通知**。
 
 **Bug 类型通知（发送后立即加 PATCH 标签）：**
 
