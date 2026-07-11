@@ -119,7 +119,7 @@ text = base64.b64decode(data['content']).decode('utf-8')
 
 先发飞书通知，card 内容：
 ```
-你负责的模块发现了一个 Bug [#{N}](链接): {标题}
+你负责的模块发现了一个 Bug [#{N}](https://gitcode.com/{owner}/{repo}/issues/{N}): {标题}
 DevOps Bot 已启动自动修复流程，进度可关注该 Issue。
 ```
 
@@ -135,7 +135,7 @@ curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 
 发飞书通知，card 内容：
 ```
-新需求 [#{N}](链接): {标题}
+新需求 [#{N}](https://gitcode.com/{owner}/{repo}/issues/{N}): {标题}
 {正文摘要}
 请回复「同意启动」开始需求开发，或补充更多信息。
 ```
