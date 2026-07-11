@@ -444,6 +444,17 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
             return "📋 未绑定任何仓库。使用 `/bind owner/repo` 绑定"
         except Exception as e:
             return f"❌ 查询失败: {e}"
+    if cmd == "/refresh":
+        try:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            row = c.fetchone()
+            if not row:
+                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后刷新。"
+            matched = sync_repo_feishu_mapping(row[0], chat_id)
+            return f"✅ 已刷新，同步了 {matched} 个用户映射"
+        except Exception as e:
+            return f"❌ 刷新失败: {e}"
     if cmd in ("/clean", "/cleansession", "/reset", "/cleancache"):
         try:
             c = db.cursor()
@@ -462,7 +473,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
         return (
             f"🤖 DevOps Bot\n\n"
             f"**命令**:\n  `/bind owner/repo`  — 绑定当前群到仓库\n"
-            f"  `/unbind`           — 解绑并清除用户映射\n  `/status`           — 查看绑定\n"
+            f"  `/unbind`           — 解绑并清除用户映射\n  `/status`           — 查看绑定\n  `/refresh`          — 刷新用户映射\n"
             f"  `/clean`            — 清除 Agent 会话缓存\n"
             f"  `/help`             — 帮助\n\n"
             f"**直接提问**:\n  输入问题即可查询仓库状态"
