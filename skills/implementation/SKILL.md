@@ -89,11 +89,25 @@ git push origin feat/issue-{number}
 ### 3.5 创建 PR
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   -H "Content-Type: application/json" \
-    -d '{"title": "feat: #{number} 标题", "head": "feat/issue-{number}", "base": "main"}' \
+  -d '{
+    "title": "feat: #{number} 标题",
+    "head": "feat/issue-{number}",
+    "base": "main",
+    "description": "## 概述\n\n自动实现 Issue #{number}",
+    "labels": ["auto-pr"],
+    "assignees": [8091690],
+    "testers": [8091690],
+    "inner_issue_nums": ["#Jason7602/devops-bot#{number}"],
+    "close_related_issue": true
+  }' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls
 ```
+
+> **注意**：`assignees` 和 `testers` 使用 GitCode 数字用户 ID（如 `8091690` 对应 `Jason7602`）。  
+> REST API **不支持** `approval_reviewer_ids`、`approval_approvers_ids`、`approval_testers_ids`，如需设置审批人/测试人员请在 GitCode Web 界面操作。  
+> 创建后可用 `GET /api/v5/repos/{owner}/{repo}/pulls/{number}` 确认 assignees、testers、关联 Issue 已正确设置。
 
 ### 3.6 评论回复
 
