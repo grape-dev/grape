@@ -116,6 +116,17 @@ def reply_text(message_id: str, text: str) -> str:
         return ""
 
 
+def _build_card_payload(text: str) -> dict:
+    """Build Feishu interactive card v2 payload"""
+    return {
+        "elements": [{
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": text[:2000]}
+        }],
+        "header": {"title": {"tag": "plain_text", "content": "DevOps Bot"}, "template": "blue"}
+    }
+
+
 def reply_card(message_id: str, text: str) -> str:
     """Reply with a card that can be updated later. Returns the reply message_id."""
     if not message_id or not text or not ensure_configured():
@@ -124,15 +135,8 @@ def reply_card(message_id: str, text: str) -> str:
     if not token:
         return ""
     url = f"{FEISHU_BASE}/im/v1/messages/{message_id}/reply"
-    card = {
-        "elements": [{
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": text[:2000]}
-        }],
-        "header": {"title": {"tag": "plain_text", "content": ""}, "template": "blue"}
-    }
     payload = json.dumps({
-        "content": json.dumps(card),
+        "content": json.dumps(_build_card_payload(text)),
         "msg_type": "interactive"
     }).encode()
     try:
@@ -154,6 +158,41 @@ def reply_card(message_id: str, text: str) -> str:
         return ""
     except Exception as e:
         log.warning(f"Feishu: card exception: {e}")
+        return ""
+
+
+def send_card_to_user(open_id: str, text: str) -> str:
+    """Proactively send a card to a Feishu user by open_id. Returns message_id."""
+    if not open_id or not text or not ensure_configured():
+        return ""
+    token = get_tenant_token()
+    if not token:
+        return ""
+    url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=open_id"
+    payload = json.dumps({
+        "receive_id": open_id,
+        "content": json.dumps(_build_card_payload(text)),
+        "msg_type": "interactive"
+    }).encode()
+    try:
+        resp = urlopen(Request(url, data=payload, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }), timeout=15)
+        data = json.loads(resp.read())
+        msg_id = data.get("data", {}).get("message_id", "")
+        log.info(f"Feishu: card sent to user (open_id={open_id[:20]}, msg_id={msg_id[:20]})")
+        return msg_id
+    except URLError as e:
+        err_body = ""
+        try:
+            err_body = e.read().decode()[:200]
+        except:
+            pass
+        log.warning(f"Feishu: send to user failed: {e.code if hasattr(e,'code') else e.reason} {err_body}")
+        return ""
+    except Exception as e:
+        log.warning(f"Feishu: send to user exception: {e}")
         return ""
 
 
@@ -217,6 +256,57 @@ def add_reaction(message_id: str, emoji_type: str = "OK") -> str:
         return ""
     except Exception as e:
         log.info(f"Feishu: reaction exception ({emoji_type}): {e}")
+        return ""
+
+
+def get_chat_members(chat_id: str) -> list:
+    """Get all members of a Feishu group chat. Returns [{name, open_id}]."""
+    if not chat_id or not ensure_configured():
+        return []
+    token = get_tenant_token()
+    if not token:
+        return []
+    members = []
+    page_token = ""
+    while True:
+        url = f"{FEISHU_BASE}/im/v1/chats/{chat_id}/members?member_id_type=open_id&page_size=100"
+        if page_token:
+            url += f"&page_token={page_token}"
+        try:
+            resp = urlopen(Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=15)
+            data = json.loads(resp.read())
+            items = data.get("data", {}).get("items", [])
+            for m in items:
+                members.append({
+                    "name": m.get("name", ""),
+                    "open_id": m.get("member_id", "")
+                })
+            if not data.get("data", {}).get("has_more", False):
+                break
+            page_token = data.get("data", {}).get("page_token", "")
+            if not page_token:
+                break
+        except URLError as e:
+            log.warning(f"Feishu: get members failed: {e.code if hasattr(e,'code') else e.reason}")
+            break
+        except Exception as e:
+            log.warning(f"Feishu: get members exception: {e}")
+            break
+    log.info(f"Feishu: got {len(members)} members from chat {chat_id[:20]}")
+    return members
+
+
+def get_chat_id_for_repo(repo_key: str) -> str:
+    """Get the bound Feishu chat_id for a repo."""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT chat_id FROM feishu_bindings WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            return row[0] if row else ""
+    except Exception as e:
+        log.warning(f"Feishu: get chat_id for repo error: {e}")
         return ""
 
 

@@ -1,8 +1,8 @@
 """事件处理器：归一化、验证、路由、执行"""
-import json, os, threading, concurrent.futures, re
+import json, os, threading, concurrent.futures, re, urllib.request
 from datetime import datetime
 from src.config import log, GITCODE_WEBHOOK_TOKEN, BOT_USERNAMES, WORKSPACE_DIR, SKILLS_DIR, get_domain_skill
-from src.session_manager import db_lock, get_or_create_session, update_session
+from src.session_manager import db_lock, get_or_create_session, update_session, get_feishu_mapping, get_feishu_group_name_map
 from src.prompt_builder import build_prompt, extract_event_number
 from src.agent_executor import stream_opencode
 
@@ -147,6 +147,44 @@ def process_event(raw_body, headers):
 
 
 # ====== 事件处理主体 ======
+def _get_feishu_context(repo_key, repository):
+    """Pre-fetch Feishu notification context for prompt injection.
+    Returns dict with collaborators, group_members, mappings, token, chat_id."""
+    ctx = {}
+    try:
+        from src.feishu_handler import get_chat_id_for_repo, get_chat_members, get_tenant_token, ensure_configured
+        if not ensure_configured():
+            return ctx
+        chat_id = get_chat_id_for_repo(repo_key)
+        if not chat_id:
+            return ctx
+        ctx["chat_id"] = chat_id
+        ctx["group_members"] = get_chat_members(chat_id)
+        ctx["mappings"] = get_feishu_mapping(repo_key)
+        ctx["token"] = get_tenant_token()
+        # Fetch GitCode collaborators
+        parts = repository.split("/", 1)
+        if len(parts) == 2:
+            owner, repo = parts
+            url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators"
+        else:
+            url = f"https://api.gitcode.com/api/v5/repos/{repository}/collaborators"
+        try:
+            resp = urllib.request.urlopen(urllib.request.Request(url), timeout=10)
+            collaborators = json.loads(resp.read())
+            ctx["collaborators"] = collaborators
+            for m in collaborators:
+                if m.get("role_name") == "Owner":
+                    ctx["owner_login"] = m.get("username", "")
+                    ctx["owner_nick"] = m.get("nick_name", "")
+                    break
+        except Exception as e:
+            log.warning(f"Failed to fetch collaborators: {e}")
+    except Exception as e:
+        log.warning(f"Feishu context build error: {e}")
+    return ctx
+
+
 def _process_event_inner(evt, repo_key):
     try:
         ws = os.path.join(WORKSPACE_DIR, evt['repository'])
@@ -158,7 +196,8 @@ def _process_event_inner(evt, repo_key):
         skills = [get_domain_skill(evt['type'])]
         log.info(f"Skills: {skills}")
 
-        prompt = build_prompt(evt, history, oc_session_id, skills)
+        feishu_ctx = _get_feishu_context(repo_key, evt['repository'])
+        prompt = build_prompt(evt, history, oc_session_id, skills, feishu_ctx)
         log.info(f"Prompt built ({len(prompt)} chars)")
 
         log.info(f"═══ Spawning opencode with --format json ═══")

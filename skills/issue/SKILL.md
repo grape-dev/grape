@@ -96,6 +96,39 @@ Content-Type: application/json
 
 9. **不能确定 →** 评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
 
+### 第二步点五：飞书通知
+
+分诊并分配责任人后，**必须通过飞书发送通知**。发送前先完成第 3 步中的 PATCH 标签操作。
+
+**Bug 类型通知（发送后立即加 PATCH 标签）：**
+
+先发飞书通知，card 内容：
+```
+你负责的模块发现了一个 Bug [#{N}](链接): {标题}
+DevOps Bot 已启动自动修复流程，进度可关注该 Issue。
+```
+
+发送后立即添加 PATCH 标签：
+```bash
+curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"labels": "bug,triaged,PATCH"}' \
+  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}
+```
+
+**Feature 类型通知（不添加 PATCH 标签）：**
+
+发飞书通知，card 内容：
+```
+新需求 [#{N}](链接): {标题}
+{正文摘要}
+请回复「同意启动」开始需求开发，或补充更多信息。
+```
+
+**注意：** Feature 通知后**不要**添加 PATCH 标签，等待用户在飞书中确认后再由 chat skill 处理。
+
+**发送方式：** 按照 Prompt 中注入的 Feishu Notification Capability 的 curl 模板和 Name Resolution Workflow 执行。先解析目标用户的 open_id，再发送 card 通知。
+
 ### CODEOWNERS 格式说明
 
 | 字段 | 格式 | 说明 |

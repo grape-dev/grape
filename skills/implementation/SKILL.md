@@ -29,9 +29,9 @@ curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 
 | Issue 状况 | 行为 |
 |-----------|------|
-| 标签含 `bug` | → 直接进入修复流程（无论分配给谁） |
-| 标签含 `feature`/`suggestion`，分配给人 | → 评论问询责任人是否启动开发 |
-| 标签含 `feature`/`suggestion`，分配人为 bot | → 直接进入开发流程 |
+| 标签含 `bug` 且含 `PATCH` | → 直接进入修复流程 |
+| 标签含 `feature` 且含 `PATCH` | → 直接进入开发流程 |
+| 标签含 `bug`/`feature` 但不含 `PATCH` | → **跳过**（等待飞书用户确认，由 chat skill 处理） |
 | 其他情况 | → 忽略，不做处理 |
 
 ## 3. 修复 / 开发流程
@@ -86,7 +86,9 @@ git push origin feat/issue-{number}
 - 按严重度标注发现（Critical / Required / Nit）
 - 修复发现的问题后提交修正
 
-### 3.5 创建 PR
+### 3.5 创建 PR 并发飞书通知
+
+**1. 创建 PR：**
 
 ```bash
 curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
@@ -105,21 +107,33 @@ curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls
 ```
 
-> **注意**：`assignees` 和 `testers` 使用 GitCode 数字用户 ID（如 `8091690` 对应 `Jason7602`）。  
-> REST API **不支持** `approval_reviewer_ids`、`approval_approvers_ids`、`approval_testers_ids`，如需设置审批人/测试人员请在 GitCode Web 界面操作。  
-> 创建后可用 `GET /api/v5/repos/{owner}/{repo}/pulls/{number}` 确认 assignees、testers、关联 Issue 已正确设置。
+> **注意**：`assignees` 和 `testers` 使用 GitCode 数字用户 ID。REST API **不支持**审批人设置，需在 Web 界面操作。
 
-### 3.6 评论回复
+**2. 飞书通知 PR 检视人 + Issue 责任人：**
+
+PR 创建成功后，根据 Prompt 中的 Feishu Notification Capability，向以下人员发送通知：
+
+- PR 的 assignees
+- 关联 Issue 的责任人（assignee）
+
+Card 内容：
+```
+PR [#{N}]({PR链接}): {PR标题} 已创建
+请检视合入。
+```
+
+**3. 评论回复：**
 
 在 Issue 中评论：
-
 ```
-✅ 已完成 [bug/feature] 实现，请审查 PR #[number]。
+✅ 已完成 [bug/feature] 实现，请审查 PR [#{number}]。
 ```
 
-## 4. 问询责任人流程
+## 4. 问询责任人流程（Issue 评论兜底）
 
-当标签为 feature/suggestion 且分配给某人时：
+Feature 的启动确认主要通过飞书处理（由 issue skill 发送飞书通知，chat skill 处理回复）。以下 Issue 评论问询为兜底逻辑，仅在飞书不可用时触发：
+
+当标签为 feature 且不含 PATCH 时推送到此 skill（兜底路径），在 Issue 中评论询问：
 
 ```bash
 POST /repos/{owner}/{repo}/issues/{number}/comments
@@ -128,11 +142,11 @@ Content-Type: application/json
 {"body": "此需求是否启动开发？回复「启动」或「暂缓」。如需调整方案，请一并说明。"}
 ```
 
-之后等待责任人回复。**仅接受 Issue 分配的责任人（assignee）本人的回复。** 非责任人回复的直接忽略并提醒。
+之后等待责任人回复。**仅接受 Issue 分配的责任人（assignee）本人的回复。**
 
 | 谁回复了 | 回复内容 | 行为 |
 |---------|---------|------|
-| 责任人 | "启动" / "同意" / "可以" | 进入开发流程 |
+| 责任人 | "启动" / "同意" / "可以" | 添加 PATCH 标签 → 进入开发流程 |
 | 责任人 | "暂缓" / "先不做" | 评论记录，不开发 |
 | 责任人 | 附带建议 | 纳入方案设计后进入开发 |
 | 非责任人 | 任意内容 | 回复 "请 @责任人 本人确认是否启动开发" |

@@ -54,6 +54,75 @@ def build_role_definition() -> str:
     )
 
 
+def _build_feishu_context_section(repo_key: str, ctx: dict) -> str:
+    """Build the Feishu notification context for prompt injection."""
+    lines = ["\n## Feishu Notification Capability\n"]
+
+    if ctx.get("token"):
+        lines.append(f"Feishu tenant token: {ctx['token']}")
+
+    # Collaborators list
+    collabs = ctx.get("collaborators", [])
+    if collabs:
+        lines.append("\n### Repository Collaborators (GitCode)")
+        for m in collabs:
+            lines.append(f"  {m.get('username','?')}  nick={m.get('nick_name','?')}  role={m.get('role_name_cn','?')}  id={m.get('id','?')}")
+
+    # Group members
+    group = ctx.get("group_members", [])
+    if group:
+        lines.append("\n### Feishu Group Members (name -> open_id)")
+        for m in group:
+            lines.append(f"  {m.get('name','?')}  ->  {m.get('open_id','?')}")
+
+    # Known mappings
+    mappings = ctx.get("mappings", {})
+    if mappings:
+        lines.append("\n### Known GitCode -> Feishu Mappings (cached in feishu_users table)")
+        for gitcode_user, info in mappings.items():
+            lines.append(f"  {gitcode_user}  ->  {info['open_id']}")
+
+    # Owner info
+    owner_login = ctx.get("owner_login", "")
+    owner_nick = ctx.get("owner_nick", "")
+    if owner_login:
+        owner_open_id = ""
+        if mappings and owner_login in mappings:
+            owner_open_id = mappings[owner_login]["open_id"]
+        elif group:
+            for m in group:
+                if m.get("name") == owner_nick:
+                    owner_open_id = m.get("open_id", "")
+                    break
+        lines.append(f"\n### Repo Owner\n  {owner_login} (nick={owner_nick})  open_id={owner_open_id}")
+
+    # API instructions
+    lines.append(f"""
+### Send Notification Card
+curl -sL -X POST \\
+  -H "Authorization: Bearer {ctx.get('token','YOUR_TOKEN')}" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"receive_id":"OPEN_ID","msg_type":"interactive","content":"{{\\"header\\":{{\\"title\\":{{\\"tag\\":\\"plain_text\\",\\"content\\":\\"DevOps Bot\\"}},\\"template\\":\\"blue\\"}},\\"elements\\":[{{\\"tag\\":\\"div\\",\\"text\\":{{\\"tag\\":\\"lark_md\\",\\"content\\":\\"MESSAGE\\"}}}}]}}"}}' \\
+  "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
+
+### Save User Mapping (INSERT into feishu_users)
+Use Python to save discovered mappings in /root/devops-bot/data/sessions.db:
+  import sqlite3; db = sqlite3.connect('/root/devops-bot/data/sessions.db')
+  db.execute("INSERT OR REPLACE INTO feishu_users (repo_key,gitcode_user,feishu_open_id,feishu_name,updated_at) VALUES (?,?,?,?,datetime('now'))", ('{repo_key}', GITCODE_USER, OPEN_ID, NAME))
+  db.commit(); db.close()
+
+### Name Resolution Workflow
+1. Determine target user (gitcode_login, e.g. "Jason7602")
+2. If in Known Mappings -> use open_id directly, send notification
+3. Else: find user's nick_name from Collaborators list above
+4. Match nick_name against Group Members name -> get open_id
+5. Match found -> save to feishu_users -> send notification
+6. Match not found -> notify Owner: "{login}({nick_name}) 在飞书群中未找到，请确认昵称一致性"
+7. Card content rules: max 2000 chars, no ```code blocks, use [text](url) for links
+""")
+    return "\n".join(lines)
+
+
 def build_chat_role_definition() -> str:
     caps = get_skill_capabilities()
     return (
@@ -94,7 +163,7 @@ def extract_event_number(payload):
     return None
 
 
-def build_prompt(evt, history, oc_session_id, skills):
+def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
     number = extract_event_number(evt['payload'])
     repo = evt['repository']
     payload = evt['payload']
@@ -137,6 +206,10 @@ def build_prompt(evt, history, oc_session_id, skills):
     if skills:
         skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
         parts.append(f"Read the file at {skill_path} using the read tool. Execute its instructions step by step. Do not analyze or propose — execute.")
+
+    if feishu_ctx:
+        repo_key = f"{evt['source']}:{evt['repository']}"
+        parts.append(_build_feishu_context_section(repo_key, feishu_ctx))
 
     parts.append(build_role_definition())
     return "\n".join(parts)

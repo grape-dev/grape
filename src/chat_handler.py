@@ -118,6 +118,27 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         user_info = f"User: {sender_name or sender_id} (ID: {sender_id})"
         if open_id:
             user_info += f"\nFeishu open_id: {open_id}\nTo @mention user, use: <at id={open_id}></at>"
+            # Resolve GitCode login from feishu_users mapping
+            try:
+                gitcode_login = None
+                c = db.cursor()
+                c.execute("SELECT gitcode_user FROM feishu_users WHERE repo_key=? AND feishu_open_id=?", (repo_key, open_id))
+                row = c.fetchone()
+                if row:
+                    gitcode_login = row[0]
+                if not gitcode_login:
+                    c.execute("SELECT gitcode_user FROM feishu_users WHERE feishu_open_id=?", (open_id,))
+                    row = c.fetchone()
+                    if row:
+                        gitcode_login = row[0]
+                if gitcode_login:
+                    user_info += f"\nGitCode login: {gitcode_login}"
+                    # Check for pending feature issues
+                    repository_part = repo_key.replace("gitcode:", "").split("/", 1)
+                    if len(repository_part) == 2:
+                        user_info += f"\nTo check pending features: GET /api/v5/repos/{repository_part[0]}/{repository_part[1]}/issues?state=open&assignee={gitcode_login}&labels=feature"
+            except Exception as e:
+                log.warning(f"Failed to resolve GitCode login for {sender_name}: {e}")
         prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, ["chat"])
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 

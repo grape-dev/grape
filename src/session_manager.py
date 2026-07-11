@@ -1,4 +1,4 @@
-"""Session 管理：DB 初始化、Session CRUD、飞书绑定"""
+"""Session 管理：DB 初始化、Session CRUD、飞书绑定、Feishu 用户映射"""
 import sqlite3, json, threading, os, time
 from datetime import datetime
 from src.config import log
@@ -10,6 +10,17 @@ CREATE TABLE IF NOT EXISTS feishu_bindings (
     source TEXT DEFAULT 'gitcode',
     bind_by TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
+FEISHU_USERS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS feishu_users (
+    repo_key TEXT NOT NULL,
+    gitcode_user TEXT NOT NULL,
+    feishu_open_id TEXT NOT NULL,
+    feishu_name TEXT DEFAULT '',
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (repo_key, gitcode_user)
 )
 """
 
@@ -28,6 +39,7 @@ db.execute("""
     )
 """)
 db.execute(FEISHU_BINDINGS_TABLE_SQL)
+db.execute(FEISHU_USERS_TABLE_SQL)
 db.commit()
 
 
@@ -67,3 +79,39 @@ def update_session(sid, history, status, oc_session_id=None):
                 (json.dumps(history), status, datetime.now().isoformat(), sid)
             )
         db.commit()
+
+
+def get_feishu_open_id(repo_key, gitcode_user):
+    """获取 GitCode 用户名对应的飞书 open_id"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT feishu_open_id FROM feishu_users WHERE repo_key=? AND gitcode_user=?", (repo_key, gitcode_user))
+        row = c.fetchone()
+        return row[0] if row else None
+
+
+def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name=""):
+    """写入 GitCode → Feishu 用户映射"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO feishu_users (repo_key, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?)",
+            (repo_key, gitcode_user, open_id, feishu_name, datetime.now().isoformat())
+        )
+        db.commit()
+
+
+def get_feishu_mapping(repo_key):
+    """获取某 repo 的所有已知映射 {gitcode_user: {open_id, name}}"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT gitcode_user, feishu_open_id, feishu_name FROM feishu_users WHERE repo_key=?", (repo_key,))
+        return {row[0]: {"open_id": row[1], "name": row[2]} for row in c.fetchall()}
+
+
+def get_feishu_group_name_map(repo_key):
+    """获取 repo 的飞书群成员 {name: open_id}（从 feishu_users 聚合得到）"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT feishu_name, feishu_open_id FROM feishu_users WHERE repo_key=? AND feishu_name!=''", (repo_key,))
+        return {row[0]: row[1] for row in c.fetchall()}
