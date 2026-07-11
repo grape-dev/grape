@@ -36,6 +36,17 @@ curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 
 ## 3. 修复 / 开发流程
 
+### 3.0 创建开发分支
+
+所有开发工作从独立分支进行，不直接在主分支上操作：
+
+```bash
+git checkout -b feat/issue-{number}-{简短描述}
+git push origin feat/issue-{number}
+```
+
+整个 3.1-3.5 的产出（文档 + 代码 + 测试）都在此分支上提交。
+
 ### 3.1 理解需求
 读取并执行 `skills/agent/spec-driven-development/SKILL.md`
 - 编写 PRD：Objective、Commands、Structure、Style、Testing、Boundaries
@@ -59,17 +70,14 @@ curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
    - 每次提交后保持构建绿色
 
 ```bash
-# 创建开发分支
-git checkout -b fix/issue-{number}-{简短描述}
-
 # 增量提交，每个提交一个原子变更
-git add -A && git commit -m "fix: #{number} 描述"
-git push origin fix/issue-{number}
+git add -A && git commit -m "feat: #{number} 描述"
+git push origin feat/issue-{number}
 ```
 
 完成后在 Issue 中评论：
 ```
-📋 实现代码已提交到分支 fix/issue-{number}
+📋 实现代码已提交到分支 feat/issue-{number}
 ```
 
 ### 3.4 自审查
@@ -83,7 +91,7 @@ git push origin fix/issue-{number}
 ```bash
 curl -s -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"title": "fix: #{number} 标题", "head": "fix/issue-{number}", "base": "main"}' \
+    -d '{"title": "feat: #{number} 标题", "head": "feat/issue-{number}", "base": "main"}' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls
 ```
 
