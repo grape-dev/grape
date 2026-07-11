@@ -384,9 +384,15 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
     if cmd == "/unbind":
         try:
             c = db.cursor()
+            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            row = c.fetchone()
             c.execute("DELETE FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            if row:
+                repo_key = row[0]
+                full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
+                c.execute("DELETE FROM feishu_users WHERE repo_key=? OR repo_key=?", (repo_key, full_key))
             db.commit()
-            return "✅ 已解绑当前群"
+            return "✅ 已解绑当前群并清除用户映射"
         except Exception as e:
             return f"❌ 解绑失败: {e}"
     if cmd == "/status":
@@ -417,7 +423,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
         return (
             f"🤖 DevOps Bot\n\n"
             f"**命令**:\n  `/bind owner/repo`  — 绑定当前群到仓库\n"
-            f"  `/unbind`           — 解绑\n  `/status`           — 查看绑定\n"
+            f"  `/unbind`           — 解绑并清除用户映射\n  `/status`           — 查看绑定\n"
             f"  `/clean`            — 清除 Agent 会话缓存\n"
             f"  `/help`             — 帮助\n\n"
             f"**直接提问**:\n  输入问题即可查询仓库状态"
