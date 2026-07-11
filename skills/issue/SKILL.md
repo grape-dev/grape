@@ -115,9 +115,22 @@ text = base64.b64decode(data['content']).decode('utf-8')
 
 分诊并分配责任人后，**必须通过飞书发送通知**。
 
-**Bug 类型通知（发送后立即加 PATCH 标签）：**
+**Bug 类型通知：**
 
-先发飞书通知，card 内容：
+先检查 Prompt 中的 Auto Implementation 状态：
+
+**自动实现 OFF（默认）：**
+
+发飞书通知，card 内容：
+```
+你负责的模块发现了一个 Bug [#{N}](https://gitcode.com/{owner}/{repo}/issues/{N}): {标题}
+请关注并处理。
+```
+**不要**添加 PATCH 标签，等待人工处理。
+
+**自动实现 ON：**
+
+发飞书通知，card 内容：
 ```
 你负责的模块发现了一个 Bug [#{N}](https://gitcode.com/{owner}/{repo}/issues/{N}): {标题}
 DevOps Bot 已启动自动修复流程，进度可关注该 Issue。
@@ -131,16 +144,18 @@ curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}
 ```
 
-**Feature 类型通知（不添加 PATCH 标签）：**
+**Feature 类型通知：**
 
-发飞书通知，card 内容：
+发飞书通知，card 内容（无论自动实现开关状态）：
 ```
 新需求 [#{N}](https://gitcode.com/{owner}/{repo}/issues/{N}): {标题}
 {正文摘要}
 请回复「同意启动」开始需求开发，或补充更多信息。
 ```
 
-**注意：** Feature 通知后**不要**添加 PATCH 标签，等待用户在飞书中确认后再由 chat skill 处理。
+**注意：** 无论自动实现开关状态，Feature 通知后都**不要**添加 PATCH 标签。
+- 自动实现 **OFF**：收集意见后等待人工处理，Issue 不启动自动开发
+- 自动实现 **ON**：等待用户在飞书中回复「同意启动」后，由 chat skill 添加 PATCH 标签触发实施
 
 **发送方式：** 按照 Prompt 中注入的 Feishu Notification Capability 的 curl 模板和 Name Resolution Workflow 执行。先解析目标用户的 open_id，再发送 card 通知。
 

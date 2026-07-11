@@ -455,6 +455,23 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
             return f"✅ 已刷新，同步了 {matched} 个用户映射"
         except Exception as e:
             return f"❌ 刷新失败: {e}"
+    if cmd == "/autodev":
+        try:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            row = c.fetchone()
+            if not row:
+                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后设置。"
+            repo_key = row[0]
+            from src.session_manager import set_auto_impl_enabled, get_auto_impl_enabled
+            if len(parts) >= 2 and parts[1].lower() in ("on", "off"):
+                enabled = parts[1].lower() == "on"
+                set_auto_impl_enabled(repo_key, enabled)
+                return f"✅ 仓库 `{repo_key}` 自动实现已{'开启' if enabled else '关闭'}"
+            current = get_auto_impl_enabled(repo_key)
+            return f"📋 仓库 `{repo_key}` 自动实现：{'✅ 开启' if current else '❌ 关闭'}"
+        except Exception as e:
+            return f"❌ 设置失败: {e}"
     if cmd in ("/clean", "/cleansession", "/reset", "/cleancache"):
         try:
             c = db.cursor()
@@ -474,7 +491,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
             f"🤖 DevOps Bot\n\n"
             f"**命令**:\n  `/bind owner/repo`  — 绑定当前群到仓库\n"
             f"  `/unbind`           — 解绑并清除用户映射\n  `/status`           — 查看绑定\n  `/refresh`          — 刷新用户映射\n"
-            f"  `/clean`            — 清除 Agent 会话缓存\n"
+            f"  `/autodev on/off`   — 自动实现开关\n  `/clean`            — 清除 Agent 会话缓存\n"
             f"  `/help`             — 帮助\n\n"
             f"**直接提问**:\n  输入问题即可查询仓库状态"
         )

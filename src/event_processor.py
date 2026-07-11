@@ -162,6 +162,8 @@ def _get_feishu_context(repo_key, repository):
         ctx["group_members"] = get_chat_members(chat_id)
         ctx["mappings"] = get_feishu_mapping(repo_key)
         ctx["token"] = get_tenant_token()
+        from src.session_manager import get_auto_impl_enabled
+        ctx["auto_impl_enabled"] = get_auto_impl_enabled(repo_key)
         # Fetch GitCode collaborators
         parts = repository.split("/", 1)
         if len(parts) == 2:

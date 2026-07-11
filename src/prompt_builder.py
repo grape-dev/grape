@@ -96,6 +96,17 @@ def _build_feishu_context_section(repo_key: str, ctx: dict) -> str:
                     break
         lines.append(f"\n### Repo Owner\n  {owner_login} (nick={owner_nick})  open_id={owner_open_id}")
 
+    # Auto implementation status
+    auto_enabled = ctx.get("auto_impl_enabled", False)
+    lines.append(f"\n### Auto Implementation\n  Status: {'ON' if auto_enabled else 'OFF (default)'}")
+    if not auto_enabled:
+        lines.append("  - Bug: categorize + assign + notify only, do NOT add PATCH label, do NOT auto-fix")
+        lines.append("  - Feature: categorize + assign + notify only, do NOT add PATCH label, collect feedback")
+        lines.append("  - To enable: send /autodev on in the bound Feishu group")
+    else:
+        lines.append("  - Bug: categorize + assign + notify + add PATCH label -> auto-fix")
+        lines.append("  - Feature: categorize + assign + notify + await approval + add PATCH -> auto-develop")
+
     # API instructions
     lines.append(f"""
 ### Send Notification Card
