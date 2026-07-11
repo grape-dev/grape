@@ -118,12 +118,20 @@ def process_event(raw_body, headers):
             log.info(f"Skipped malformed event: type={evt['type']}, repo={evt['repository']}")
             return
 
-        # 自循环跳过
+        # 自循环跳过（仅评论会导致无限循环）
         user = evt['payload'].get('user', {})
         username = user.get('username', '') if isinstance(user, dict) else ''
         if username in BOT_USERNAMES:
-            log.info(f"Skip: self-triggered event from {username}")
-            return
+            if evt['type'] == 'issue_comment':
+                log.info(f"Skip: self-comment from {username}")
+                return
+            if evt['type'] == 'issue_opened':
+                changes = evt['payload'].get('changes', {})
+                if isinstance(changes, dict) and "labels" in changes:
+                    evt['type'] = 'issue_labeled'
+                    log.info(f"Bot label change, routing to implementation")
+                else:
+                    log.info(f"Self-triggered issue_opened from {username}")
 
         lock = _acquire_repo_lock(repo_key)
         lock.acquire(timeout=180)
