@@ -145,6 +145,8 @@ Content-Type: application/json
 | 评论请求关闭 Issue | 验证后回复说明，**最后 curl POST 评论到 Issue** |
 | 评论讨论方案设计 | 可以参与讨论给出建议，**最后 curl POST 评论到 Issue** |
 | **用户质疑分配结果** | 重新核对 CODEOWNERS 描述，**基于自己的分析维持或调整**，不盲从评论，**最后 curl POST 评论到 Issue** |
+| **用户回复启动确认（"启动"/"同意"）且是分配的责任人** | 加载 `skills/implementation/SKILL.md`，按其中流程执行 |
+| **用户回复启动确认但不是责任人** | 回复 "请 @责任人 本人确认是否启动开发"，**最后 curl POST 评论到 Issue** |
 | 其他 DevOps 相关评论 | 分析并回复，**最后 curl POST 评论到 Issue** |
 
 ### 评论输出规范
