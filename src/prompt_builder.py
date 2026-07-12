@@ -107,6 +107,8 @@ def _build_feishu_context_section(repo_key: str, ctx: dict) -> str:
         lines.append("  - Bug: categorize + assign + notify + add PATCH label -> auto-fix")
         lines.append("  - Feature: categorize + assign + notify + await approval + add PATCH -> auto-develop")
 
+    lines.append("\n### Card Content Rule\n  When mentioning a GitCode user in Feishu notification cards, ALWAYS use `nick_name` from Collaborators (Chinese real name), NEVER use `username`/`login` (English ID).\n  Example: \u5ed6\u5829\u54f2 NOT Jason7602\u3001\u5434\u626c NOT younger_eric")
+
     # API instructions
     lines.append(f"""
 ### Send Notification Card

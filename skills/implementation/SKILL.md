@@ -112,15 +112,17 @@ curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 **2. 飞书通知 PR 检视人 + Issue 责任人：**
 
 PR 创建成功后，根据 Prompt 中的 Feishu Notification Capability，向以下人员发送通知：
-
 - PR 的 assignees
 - 关联 Issue 的责任人（assignee）
+
+通知中引用用户时必须使用 Collaborators 列表中的 `nick_name`（中文真名），禁止使用 `username`/`login`。
 
 Card 内容：
 ```
 PR [#{N}]({PR链接}): {PR标题} 已创建
-请检视合入。
+请 {assignee_nick_name} 检视合入。
 ```
+如有多人，用顿号连接：`请廖堉哲、吴扬检视合入`
 
 **3. 评论回复：**
 
