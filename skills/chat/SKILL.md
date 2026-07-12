@@ -188,6 +188,12 @@ open_id 来自 prompt 中的 `Feishu open_id` 字段。
 - ✅ 关键信息用 `**加粗**` 强调
 - ✅ 链接用 `[描述](url)` 格式，可点击
 
+**用户命名规范：**
+- ❌ 禁止在卡片回复中出现 GitCode `login`/`username`（如 `Jason7602`、`younger_eric`）
+- ✅ 引用用户时**只使用** `nick_name`（中文真名，如 `廖堉哲`、`吴扬`）
+- 当前用户的 `nick_name` 在 Prompt 中 `GitCode nick (use this in cards)` 字段获取
+- 其他 GitCode 用户可通过 API `GET /repos/{owner}/{repo}/collaborators` 查 `nick_name`
+
 ## 参考
 
 需要调用 GitCode API 时，读取当前目录下的 `references/gitcode-api-reference.md`。

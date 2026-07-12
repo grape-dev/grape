@@ -121,18 +121,23 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
             # Resolve GitCode login from feishu_users mapping
             try:
                 gitcode_login = None
+                nick_name = ""
                 c = db.cursor()
-                c.execute("SELECT gitcode_user FROM feishu_users WHERE repo_key=? AND feishu_open_id=?", (repo_key, open_id))
+                c.execute("SELECT gitcode_user, feishu_name FROM feishu_users WHERE repo_key=? AND feishu_open_id=?", (repo_key, open_id))
                 row = c.fetchone()
                 if row:
                     gitcode_login = row[0]
+                    nick_name = row[1] or ""
                 if not gitcode_login:
-                    c.execute("SELECT gitcode_user FROM feishu_users WHERE feishu_open_id=?", (open_id,))
+                    c.execute("SELECT gitcode_user, feishu_name FROM feishu_users WHERE feishu_open_id=?", (open_id,))
                     row = c.fetchone()
                     if row:
                         gitcode_login = row[0]
+                        nick_name = row[1] or ""
                 if gitcode_login:
                     user_info += f"\nGitCode login: {gitcode_login}"
+                    if nick_name and nick_name != gitcode_login:
+                        user_info += f"\nGitCode nick (use this in cards): {nick_name}"
                     # Check for pending feature issues
                     repository_part = repo_key.replace("gitcode:", "").split("/", 1)
                     if len(repository_part) == 2:
