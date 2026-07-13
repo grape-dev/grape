@@ -167,7 +167,7 @@ Chat 对话只做查询和回答，**不修改任何 GitCode 仓库状态**：
 ```
 <at id={open_id}></at> 回复内容
 ```
-open_id 来自 prompt 中的 `Feishu open_id` 字段。
+当前用户的 open_id 来自 prompt 的 `Feishu open_id` 字段；其他用户通过 `/api/user-mapping` API 按需获取。
 
 ## 链接格式规范
 
@@ -195,7 +195,7 @@ open_id 来自 prompt 中的 `Feishu open_id` 字段。
 
 **@引用其他 GitCode 用户（如 Issue 责任人）：**
 
-需要 @ 引用 Issue 责任人时，通过本地 API 获取 open_id：
+需要 @ 引用 GitCode 用户时，通过本地 API 获取 open_id：
 
 ```bash
 curl -s "http://localhost:8080/api/user-mapping?login={gitcode_login}&repo_key={repo_key}"
