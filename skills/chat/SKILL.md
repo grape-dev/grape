@@ -202,7 +202,6 @@ curl -s "http://localhost:8080/api/user-mapping?login={gitcode_login}&repo_key={
 
 **用户命名规范：**
 - ❌ 禁止在卡片回复中出现 GitCode `login`/`username`（如 `Jason7602`、`younger_eric`）
-- ✅ 引用用户时**只使用** `nick_name`（中文真名，如 `廖堉哲`、`吴扬`）
 
 ## 参考
 
