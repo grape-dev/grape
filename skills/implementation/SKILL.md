@@ -119,8 +119,7 @@ PR 创建成功后，根据 Prompt 中的 Feishu Notification Capability，向�
 
 Card 内容：
 ```
-PR [#{N}]({PR链接}): {PR标题} 已创建
-请 {assignee_nick_name} 检视合入。
+{nick_name}，您好！PR [#{N}]({PR链接}): {PR标题} 已创建，请检视合入。
 ```
 如有多人，用顿号连接：`请廖堉哲、吴扬检视合入`
 
