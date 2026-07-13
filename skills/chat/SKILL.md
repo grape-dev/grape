@@ -163,11 +163,23 @@ Chat 对话只做查询和回答，**不修改任何 GitCode 仓库状态**：
 
 ### 在回复中 @ 用户
 
-使用 Feisu @mention 格式：
+使用 Feishu @mention 格式：
 ```
 <at id={open_id}></at> 回复内容
 ```
-当前用户的 open_id 来自 prompt 的 `Feishu open_id` 字段；其他用户通过 `/api/user-mapping` API 按需获取。
+
+当前用户的 `open_id` 来自 prompt 的 `Feishu open_id` 字段。
+
+其他 GitCode 用户通过本地 API 获取 open_id：
+```bash
+curl -s "http://localhost:8080/api/user-mapping?login={gitcode_login}&repo_key={repo_key}"
+```
+返回示例：
+```json
+{"login":"weixin_45218422","open_id":"ou_xxx","nick_name":"肖斐"}
+```
+
+获取到 open_id 后，用 `<at id={open_id}>` 格式回复。**如果 API 返回 404，直接使用 `@nick_name` 文本提及即可**。
 
 ## 链接格式规范
 
@@ -192,21 +204,6 @@ Chat 对话只做查询和回答，**不修改任何 GitCode 仓库状态**：
 - ❌ 禁止在卡片回复中出现 GitCode `login`/`username`（如 `Jason7602`、`younger_eric`）
 - ✅ 引用用户时**只使用** `nick_name`（中文真名，如 `廖堉哲`、`吴扬`）
 - 当前用户的 `nick_name` 在 Prompt 中 `GitCode nick (use this in cards)` 字段获取
-
-**@引用其他 GitCode 用户（如 Issue 责任人）：**
-
-需要 @ 引用 GitCode 用户时，通过本地 API 获取 open_id：
-
-```bash
-curl -s "http://localhost:8080/api/user-mapping?login={gitcode_login}&repo_key={repo_key}"
-```
-
-返回示例：
-```json
-{"login":"weixin_45218422","open_id":"ou_xxx","nick_name":"肖斐"}
-```
-
-获取到 open_id 后，用 `<at id={open_id}>` 格式回复。**如果 API 返回 404，直接使用 `@nick_name` 文本提及即可**。
 
 ## 参考
 
