@@ -112,10 +112,12 @@ def _build_feishu_context_section(repo_key: str, ctx: dict) -> str:
         lines.append("  - Feature: categorize + assign + notify + await approval + add PATCH -> auto-develop")
 
     # Notification status
-    notify_enabled = ctx.get("notify_enabled", True)
-    lines.append(f"\n### Feishu Notification\n  Status: {'ON' if notify_enabled else 'OFF'}")
+    notify_enabled = ctx.get("notify_enabled", False)
+    lines.append(f"\n### Feishu Notification\n  Status: {'ON' if notify_enabled else 'OFF (default)'}")
     if not notify_enabled:
         lines.append("  - Notifications are disabled. Do NOT send any Feishu notification cards.\n  - To enable: send /notify on in the bound Feishu group")
+    else:
+        lines.append("  - Notifications are enabled. Send Feishu notification cards as instructed.")
 
     lines.append("\n### Card Content Rule\n  When mentioning a GitCode user in Feishu notification cards, ALWAYS use `nick_name` from Collaborators (Chinese real name), NEVER use `username`/`login` (English ID).\n  Example: \u5ed6\u5829\u54f2 NOT Jason7602\u3001\u5434\u626c NOT younger_eric")
 

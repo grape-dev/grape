@@ -45,9 +45,10 @@ try:
 except:
     pass
 try:
-    db.execute("ALTER TABLE feishu_bindings ADD COLUMN notify_enabled INTEGER DEFAULT 1")
+    db.execute("ALTER TABLE feishu_bindings ADD COLUMN notify_enabled INTEGER DEFAULT 0")
 except:
     pass
+db.execute("UPDATE feishu_bindings SET notify_enabled=0 WHERE notify_enabled IS NULL")
 db.commit()
 
 
@@ -157,8 +158,8 @@ def get_notify_enabled(repo_key):
         if not row:
             c.execute("SELECT notify_enabled FROM feishu_bindings WHERE repo_key=?", ("gitcode:" + repo_key,))
             row = c.fetchone()
-        # default to 1 (True) if column is NULL
-        return bool(row[0]) if row and row[0] is not None else True
+        # default to 0 (False) if column is NULL
+        return bool(row[0]) if row and row[0] is not None else False
 
 
 def set_notify_enabled(repo_key, enabled):
