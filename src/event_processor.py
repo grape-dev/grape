@@ -173,8 +173,16 @@ def _get_feishu_context(repo_key, repository):
         else:
             url = f"https://api.gitcode.com/api/v5/repos/{repository}/collaborators"
         try:
-            resp = urllib.request.urlopen(urllib.request.Request(url), timeout=10)
-            collaborators = json.loads(resp.read())
+            collaborators = []
+            page = 1
+            while True:
+                page_url = f"{url}?per_page=100&page={page}"
+                resp = urllib.request.urlopen(urllib.request.Request(page_url), timeout=10)
+                data = json.loads(resp.read())
+                if not data:
+                    break
+                collaborators.extend(data)
+                page += 1
             ctx["collaborators"] = collaborators
             for m in collaborators:
                 if m.get("role_name") == "Owner":
