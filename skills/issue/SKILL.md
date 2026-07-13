@@ -113,7 +113,14 @@ text = base64.b64decode(data['content']).decode('utf-8')
 
 ### 第三步：飞书通知
 
-分诊并分配责任人后，**必须通过飞书发送通知**。
+分诊并分配责任人后，先检查 Prompt 中的 Feishu Notification 状态：
+
+**如果 Notifications 为 OFF：**
+- **跳过整个第三步**，不发送任何飞书通知
+- 直接进入第四步评论回复
+
+**如果 Notifications 为 ON（默认）：**
+- 继续以下流程
 
 **通知前先获取责任人 nick_name：**
 

@@ -44,6 +44,10 @@ try:
     db.execute("ALTER TABLE feishu_bindings ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")
 except:
     pass
+try:
+    db.execute("ALTER TABLE feishu_bindings ADD COLUMN notify_enabled INTEGER DEFAULT 1")
+except:
+    pass
 db.commit()
 
 
@@ -141,4 +145,28 @@ def set_auto_impl_enabled(repo_key, enabled):
         if c.rowcount == 0:
             full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
             c.execute("UPDATE feishu_bindings SET auto_impl_enabled=? WHERE repo_key=?", (int(enabled), full_key))
+        db.commit()
+
+
+def get_notify_enabled(repo_key):
+    """查询仓库是否开启了飞书通知"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT notify_enabled FROM feishu_bindings WHERE repo_key=?", (repo_key,))
+        row = c.fetchone()
+        if not row:
+            c.execute("SELECT notify_enabled FROM feishu_bindings WHERE repo_key=?", ("gitcode:" + repo_key,))
+            row = c.fetchone()
+        # default to 1 (True) if column is NULL
+        return bool(row[0]) if row and row[0] is not None else True
+
+
+def set_notify_enabled(repo_key, enabled):
+    """设置仓库的飞书通知开关"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE feishu_bindings SET notify_enabled=? WHERE repo_key=?", (int(enabled), repo_key))
+        if c.rowcount == 0:
+            full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
+            c.execute("UPDATE feishu_bindings SET notify_enabled=? WHERE repo_key=?", (int(enabled), full_key))
         db.commit()
