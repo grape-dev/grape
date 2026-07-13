@@ -321,11 +321,18 @@ def sync_repo_feishu_mapping(repo_key: str, chat_id: str) -> int:
         return 0
     owner, repo = parts
     try:
-        resp = urlopen(Request(
-            f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators",
-            headers={"Authorization": f"Bearer {os.environ.get('GITCODE_API_TOKEN','')}"}
-        ), timeout=10)
-        collabs = json.loads(resp.read())
+        collabs = []
+        page = 1
+        while True:
+            resp = urlopen(Request(
+                f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators?per_page=100&page={page}",
+                headers={"Authorization": f"Bearer {os.environ.get('GITCODE_API_TOKEN','')}"}
+            ), timeout=10)
+            data = json.loads(resp.read())
+            if not data:
+                break
+            collabs.extend(data)
+            page += 1
     except Exception as e:
         log.warning(f"Feishu sync: failed to fetch collaborators for {repo_key}: {e}")
         return 0
