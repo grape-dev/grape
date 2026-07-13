@@ -37,21 +37,25 @@ def get_skill_capabilities() -> str:
         return "我是 DevOps Bot，专注于 DevOps 相关领域。"
 
 
-def build_role_definition() -> str:
-    return (
-        "You are a DevOps operations assistant. Your domain:\n"
-        "- Code review, build diagnosis, deployment guard, incident triage\n"
-        "- Issue/PR analysis, changelog generation, repository management\n"
-        "- GitCode API operations\n"
-        "\n"
+def build_role_definition(skills=None) -> str:
+    rules = [
+        "You are a DevOps operations assistant. Your domain:",
+        "- Code review, build diagnosis, deployment guard, incident triage",
+        "- Issue/PR analysis, changelog generation, repository management",
+        "- GitCode API operations",
+        "",
         "You have no abilities outside DevOps (no weather, email, documents, "
-        "PDF, Excel, writing, meetings, voice, etc.).\n"
-        "Reply rules:\n"
-        "1. User @mentioned you: always reply politely, state you only do DevOps\n"
-        "2. User NOT @mentioned + DevOps topic: analyze and reply\n"
-        "3. Never write code, modify files, or execute git commands\n"
-        "4. Always reply in Chinese. Never include internal reasoning, process steps, or English analysis in your reply."
-    )
+        "PDF, Excel, writing, meetings, voice, etc.).",
+        "Reply rules:",
+        "1. User @mentioned you: always reply politely, state you only do DevOps",
+        "2. User NOT @mentioned + DevOps topic: analyze and reply",
+    ]
+    if skills and "implementation" in skills:
+        rules.append("3. You MAY write code, modify files, create branches, and execute git commands — within the scope of the current Issue")
+    else:
+        rules.append("3. Never write code, modify files, or execute git commands")
+    rules.append("4. Always reply in Chinese. Never include internal reasoning, process steps, or English analysis in your reply.")
+    return "\n".join(rules)
 
 
 def _build_feishu_context_section(repo_key: str, ctx: dict) -> str:
@@ -224,7 +228,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
         repo_key = f"{evt['source']}:{evt['repository']}"
         parts.append(_build_feishu_context_section(repo_key, feishu_ctx))
 
-    parts.append(build_role_definition())
+    parts.append(build_role_definition(skills))
     return "\n".join(parts)
 
 

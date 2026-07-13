@@ -146,16 +146,29 @@ curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 
 **Feature 类型通知：**
 
-发飞书通知，card 内容（无论自动实现开关状态）：
+检查 Prompt 中的 Auto Implementation 状态：
+
+**自动实现 OFF（默认）：**
+
+发飞书通知，card 内容：
+```
+新需求 [#{N}](https://gitcode.com/{owner}/{repo}/issues/{N}): {标题}
+{正文摘要}
+请关注并提供意见。
+```
+
+**自动实现 ON：**
+
+发飞书通知，card 内容：
 ```
 新需求 [#{N}](https://gitcode.com/{owner}/{repo}/issues/{N}): {标题}
 {正文摘要}
 请回复「同意启动」开始需求开发，或补充更多信息。
 ```
 
-**注意：** 无论自动实现开关状态，Feature 通知后都**不要**添加 PATCH 标签。
-- 自动实现 **OFF**：收集意见后等待人工处理，Issue 不启动自动开发
-- 自动实现 **ON**：等待用户在飞书中回复「同意启动」后，由 chat skill 添加 PATCH 标签触发实施
+**注意：** 无论自动实现开关状态，Feature 通知后都**不要**添加 PATCH 标签。Issue 评论中的「同意启动」（由 issue skill 处理）不受此开关限制。
+- 自动实现 **OFF**：飞书仅收集意见，Issue 评论审批走原有流程
+- 自动实现 **ON**：飞书审批 + Issue 评论审批双通道
 
 **发送方式：** 按照 Prompt 中注入的 Feishu Notification Capability 的 curl 模板和 Name Resolution Workflow 执行。先解析目标用户的 open_id，再发送 card 通知。
 
@@ -208,7 +221,7 @@ curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 | 评论请求关闭 Issue | 验证后回复说明，**最后 curl POST 评论到 Issue** |
 | 评论讨论方案设计 | 可以参与讨论给出建议，**最后 curl POST 评论到 Issue** |
 | **用户质疑分配结果** | 重新核对 CODEOWNERS 描述，**基于自己的分析维持或调整**，不盲从评论，**最后 curl POST 评论到 Issue** |
-| **用户回复启动确认（"启动"/"同意"）且是分配的责任人** | 加载 `skills/implementation/SKILL.md`，按其中流程执行 |
+| **用户回复启动确认（"启动"/"同意"）且是分配的责任人** | 添加 PATCH 标签 `{"labels": "feature,triaged,PATCH"}` 以触发 `implementation` skill 自动开发，**最后 curl POST 评论到 Issue** |
 | **用户回复启动确认但不是责任人** | 回复 "请 @责任人 本人确认是否启动开发"，**最后 curl POST 评论到 Issue** |
 | 其他 DevOps 相关评论 | 分析并回复，**最后 curl POST 评论到 Issue** |
 
