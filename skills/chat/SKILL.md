@@ -206,7 +206,7 @@ curl -s "http://localhost:8080/api/user-mapping?login={gitcode_login}&repo_key={
 {"login":"weixin_45218422","open_id":"ou_xxx","nick_name":"肖斐"}
 ```
 
-获取到 open_id 后，用 `{url}` 格式回复。**如果 API 返回 404，不要尝试其他方式获取 open_id，直接使用 nick_name 文本提及即可（不加 @）**。
+获取到 open_id 后，用 `<at id={open_id}>` 格式回复。**如果 API 返回 404，直接使用 `@nick_name` 文本提及即可**。
 
 ## 参考
 
