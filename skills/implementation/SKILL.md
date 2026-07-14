@@ -88,7 +88,11 @@ git push origin feat/issue-{number}
 
 ### 3.5 创建 PR 并发飞书通知
 
+> **重要**：不要依赖 `git push` 自动创建 PR（自动创建的 PR 没有描述、标签、关联 Issue）。必须使用以下 curl 手动创建并补充字段。
+
 **1. 创建 PR：**
+
+先创建 PR（仅 `title`、`head`、`base` 三个字段在 POST 中生效）：
 
 ```bash
 curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
@@ -96,18 +100,29 @@ curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   -d '{
     "title": "feat: #{number} 标题",
     "head": "feat/issue-{number}",
-    "base": "main",
-    "description": "## 概述\n\n自动实现 Issue #{number}",
-    "labels": ["auto-pr"],
-    "assignees": [8091690],
-    "testers": [8091690],
-    "inner_issue_nums": ["#Jason7602/devops-bot#{number}"],
-    "close_related_issue": true
+    "base": "main"
   }' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls
 ```
 
-> **注意**：`assignees` 和 `testers` 使用 GitCode 数字用户 ID。REST API **不支持**审批人设置，需在 Web 界面操作。
+从 response 中提取 `number`，PATCH 补充 `body`（描述）和 `labels`：
+
+```bash
+curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "body": "## 概述\n\n自动实现 Issue #{number}",
+    "labels": "auto-pr,feat-{number}"
+  }' \
+  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{pr_number}
+```
+
+> **注意**：
+> - `body`（不是 `description`）用于设置 PR 描述
+> - `labels` 使用逗号分隔的字符串
+> - `assignees` 和 `testers` 使用 GitCode 数字用户 ID，可在创建时一起传入
+> - REST API **不支持**审批人设置，需在 Web 界面操作
+> - 创建后可用 `GET /api/v5/repos/{owner}/{repo}/pulls/{number}` 确认状态
 
 **2. 飞书通知 PR 检视人 + Issue 责任人：**
 
