@@ -99,7 +99,8 @@ curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
     "title": "feat: #{number} 标题",
     "head": "feat/issue-{number}",
     "base": "main",
-    "inner_issue_nums": "#{owner}/{repo}#{number}"
+    "inner_issue_nums": "#{owner}/{repo}#{number}",
+    "close_related_issue": true
   }' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls
 ```
@@ -118,6 +119,7 @@ curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 
 > **注意**：
 > - `inner_issue_nums` 值为字符串格式 `"#owner/repo#number"`（**不是** JSON 数组）
+> - `close_related_issue: true` 表示 PR 合入时自动关闭关联 Issue
 > - `body`（不是 `description`）用于设置 PR 描述
 > - `labels` 使用逗号分隔的字符串
 > - 创建后可用 `GET /api/v5/repos/{owner}/{repo}/pulls/{number}` 确认状态
