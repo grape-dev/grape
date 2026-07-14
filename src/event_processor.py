@@ -206,6 +206,9 @@ def _process_event_inner(evt, repo_key):
 
         skills = [get_domain_skill(evt['type'])]
         log.info(f"Skills: {skills}")
+        if not skills[0]:
+            log.info(f"No skill for event type {evt['type']}, skipping")
+            return
 
         feishu_ctx = _get_feishu_context(repo_key, evt['repository'])
         prompt = build_prompt(evt, history, oc_session_id, skills, feishu_ctx)

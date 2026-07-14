@@ -6,7 +6,7 @@ EMOJI_MAP = {
     "code-review": "📦 代码审查", "build-debug": "🔧 构建诊断",
     "deploy-guard": "🛡️ 部署守卫", "incident-triage": "🚨 事件分诊",
     "security-scan": "🔒 安全扫描", "changelog-gen": "📝 变更日志",
-    "devops-event-ops": "🔄 事件编排", "comment": "💬 仓库评论回复",
+    "comment": "💬 仓库评论回复",
     "chat": "🗨️ 飞书对话", "issue": "📋 Issue 运营", "pr": "🔄 PR 运营",
 }
 

@@ -5,14 +5,11 @@
     "issue_comment": "issue",
     "pull_request_opened": "pr",
     "pull_request_updated": "pr",
-    "build_failure": "devops-event-ops",
-    "build_success": "devops-event-ops",
-    "deploy_start": "devops-event-ops",
-    "deploy_failure": "devops-event-ops",
-    "release_created": "devops-event-ops",
-    "push": "devops-event-ops",
-    "tag_created": "devops-event-ops",
+    "build_failure": "build-debug",
+    "deploy_start": "deploy-guard",
+    "deploy_failure": "deploy-guard",
+    "release_created": "changelog-gen",
     "note_hook_pr": "pr"
   },
-  "fallback_skill": "devops-event-ops"
+  "fallback_skill": ""
 }
