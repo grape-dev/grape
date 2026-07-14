@@ -105,14 +105,15 @@ curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls
 ```
 
-从 response 中提取 `number`，PATCH 补充 `body`（PR 描述）和 `labels`：
+从 response 中提取 `number`，PATCH 补充 `body`（PR 描述）、`labels` 和 `prune_branch`：
 
 ```bash
 curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "body": "## 概述\n\n自动实现 Issue #{number}",
-    "labels": "auto-pr,feat-{number}"
+    "labels": "auto-pr,feat-{number}",
+    "prune_branch": true
   }' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{pr_number}
 ```
