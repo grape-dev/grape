@@ -5,3 +5,6 @@ devops-bot
 .env
 cloudflare/
 tunnel-*.log
+__pycache__/
+*.pyc
+.pytest_cache/

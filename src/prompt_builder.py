@@ -142,7 +142,7 @@ Use Python to save discovered mappings in /root/devops-bot/data/sessions.db:
 3. Else: find user's nick_name from Collaborators list above
 4. Match nick_name against Group Members name -> get open_id
 5. Match found -> save to feishu_users -> send notification
-6. Match not found -> notify Owner: "{login}({nick_name}) 在飞书群中未找到，请确认昵称一致性"
+   6. Match not found -> notify Owner: "{{login}}({{nick_name}})" in Feishu group, ask to check nickname consistency
 7. Card content rules: max 2000 chars, no ```code blocks, use [text](url) for links
 """)
     return "\n".join(lines)
