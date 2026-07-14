@@ -61,6 +61,8 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(urlparse(self.path).query)
             login = params.get("login", [None])[0]
             repo_key = params.get("repo_key", [None])[0]
+            if repo_key and not repo_key.startswith("gitcode:"):
+                repo_key = f"gitcode:{repo_key}"
             if not login or not repo_key:
                 self._json_response(400, {"error": "missing login or repo_key"})
                 return

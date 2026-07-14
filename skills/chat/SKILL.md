@@ -172,7 +172,7 @@ Chat 对话只做查询和回答，**不修改任何 GitCode 仓库状态**：
 
 其他 GitCode 用户通过本地 API 获取 open_id：
 ```bash
-curl -s "http://localhost:8080/api/user-mapping?login={gitcode_login}&repo_key={repo_key}"
+curl -s "http://localhost:8080/api/user-mapping?login={gitcode_login}&repo_key=gitcode:{owner}/{repo}"
 ```
 返回示例：
 ```json
