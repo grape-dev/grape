@@ -120,8 +120,6 @@ curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 > **注意**：
 > - `body`（不是 `description`）用于设置 PR 描述
 > - `labels` 使用逗号分隔的字符串
-> - `assignees` 和 `testers` 使用 GitCode 数字用户 ID，可在创建时一起传入
-> - REST API **不支持**审批人设置，需在 Web 界面操作
 > - 创建后可用 `GET /api/v5/repos/{owner}/{repo}/pulls/{number}` 确认状态
 
 **2. 飞书通知 PR 检视人 + Issue 责任人：**
