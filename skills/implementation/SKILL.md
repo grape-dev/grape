@@ -90,9 +90,7 @@ git push origin feat/issue-{number}
 
 > **重要**：不要依赖 `git push` 自动创建 PR（自动创建的 PR 没有描述、标签、关联 Issue）。必须使用以下 curl 手动创建并补充字段。
 
-**1. 创建 PR：**
-
-先创建 PR（仅 `title`、`head`、`base` 三个字段在 POST 中生效）：
+**1. 创建 PR（关联 Issue）：**
 
 ```bash
 curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
@@ -100,12 +98,13 @@ curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   -d '{
     "title": "feat: #{number} 标题",
     "head": "feat/issue-{number}",
-    "base": "main"
+    "base": "main",
+    "inner_issue_nums": "#{owner}/{repo}#{number}"
   }' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls
 ```
 
-从 response 中提取 `number`，PATCH 补充 `body`（描述）和 `labels`：
+从 response 中提取 `number`，PATCH 补充 `body`（PR 描述）和 `labels`：
 
 ```bash
 curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
@@ -118,6 +117,7 @@ curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 ```
 
 > **注意**：
+> - `inner_issue_nums` 值为字符串格式 `"#owner/repo#number"`（**不是** JSON 数组）
 > - `body`（不是 `description`）用于设置 PR 描述
 > - `labels` 使用逗号分隔的字符串
 > - 创建后可用 `GET /api/v5/repos/{owner}/{repo}/pulls/{number}` 确认状态
