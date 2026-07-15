@@ -42,83 +42,101 @@ class AdminHandler(BaseHTTPRequestHandler):
             return None
 
     def do_GET(self):
-        # —— Admin page ——
-        if self.path == "/admin/" or self.path == "/admin":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-            self.send_header("Pragma", "no-cache")
-            self.send_header("Expires", "0")
-            self.end_headers()
-            self.wfile.write(_PAGE_HTML.encode("utf-8"))
-            return
-
-        # —— List / Get accounts ——
-        if self.path.startswith("/api/admin/accounts"):
-            if not self._auth():
+        try:
+            # —— Admin page ——
+            if self.path == "/admin/" or self.path == "/admin":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+                self.end_headers()
+                self.wfile.write(_PAGE_HTML.encode("utf-8"))
                 return
-            from src.config import ACCOUNTS, get_account
-            name = self.path.replace("/api/admin/accounts", "").strip("/")
-            if name:
-                acc = get_account(name)
-                if not acc:
-                    self._json(404, {"error": "not found"})
+
+            # —— List / Get accounts ——
+            if self.path.startswith("/api/admin/accounts"):
+                if not self._auth():
                     return
-                self._json(200, acc)
-            else:
-                items = []
-                for n, a in ACCOUNTS.items():
-                    items.append({
-                        "name": n,
-                        "gitcode_api_token": "YES" if a.get("gitcode_api_token") else "NO",
-                        "feishu_app_id": "YES" if a.get("feishu_app_id") else "NO",
-                        "huawei_cloud_ak": "YES" if a.get("huawei_cloud_ak") else "NO",
-                    })
-                self._json(200, items)
-            return
+                from src.config import ACCOUNTS, get_account
+                name = self.path.replace("/api/admin/accounts", "").strip("/")
+                if name:
+                    acc = get_account(name)
+                    if not acc:
+                        self._json(404, {"error": "not found"})
+                        return
+                    self._json(200, acc)
+                else:
+                    items = []
+                    for n, a in ACCOUNTS.items():
+                        items.append({
+                            "name": n,
+                            "gitcode_api_token": "YES" if a.get("gitcode_api_token") else "NO",
+                            "feishu_app_id": "YES" if a.get("feishu_app_id") else "NO",
+                            "huawei_cloud_ak": "YES" if a.get("huawei_cloud_ak") else "NO",
+                        })
+                    self._json(200, items)
+                return
+        except Exception as e:
+            from src.config import log
+            log.warning(f"Admin GET error: {e}")
+            self._json(500, {"error": str(e)})
 
         self.send_response(404)
         self.end_headers()
 
     def do_POST(self):
-        # —— Login ——
-        if self.path == "/api/admin/login":
-            data = self._read_body()
-            if data is None:
+        try:
+            # —— Login ——
+            if self.path == "/api/admin/login":
+                data = self._read_body()
+                if data is None:
+                    return
+                if data.get("username") == ADMIN_USER and data.get("password") == ADMIN_PASS:
+                    token = hashlib.sha256(f"{ADMIN_USER}:{time.time()}:{os.urandom(8).hex()}".encode()).hexdigest()
+                    _admin_tokens[token] = time.time() + 86400
+                    self._json(200, {"token": token})
+                else:
+                    self._json(401, {"error": "invalid credentials"})
                 return
-            if data.get("username") == ADMIN_USER and data.get("password") == ADMIN_PASS:
-                token = hashlib.sha256(f"{ADMIN_USER}:{time.time()}:{os.urandom(8).hex()}".encode()).hexdigest()
-                _admin_tokens[token] = time.time() + 86400
-                self._json(200, {"token": token})
-            else:
-                self._json(401, {"error": "invalid credentials"})
-            return
 
-        # —— Test connection ——
-        if self.path.startswith("/api/admin/accounts/") and self.path.endswith("/test"):
-            if not self._auth():
+            # —— Test connection ——
+            if self.path.startswith("/api/admin/accounts/") and self.path.endswith("/test"):
+                if not self._auth():
+                    return
+                from src.config import get_account
+                name = self.path.replace("/api/admin/accounts/", "").replace("/test", "").split("/")[0]
+                acc = get_account(name)
+                if not acc:
+                    self._json(404, {"error": "not found"})
+                    return
+                gtoken = acc.get("gitcode_api_token", "")
+                if not gtoken:
+                    self._json(400, {"error": "No GitCode token configured"})
+                    return
+                try:
+                    req = urllib.request.Request("https://api.gitcode.com/api/v5/user",
+                                                 headers={"Authorization": f"Bearer {gtoken}"})
+                    resp = urllib.request.urlopen(req, timeout=10)
+                    user = json.loads(resp.read())
+                    self._json(200, {"status": "ok", "login": user.get("login", "?")})
+                except Exception as e:
+                    self._json(502, {"error": f"GitCode API error: {e}"})
                 return
-            from src.config import get_account
-            name = self.path.replace("/api/admin/accounts/", "").replace("/test", "").split("/")[0]
-            acc = get_account(name)
-            if not acc:
-                self._json(404, {"error": "not found"})
-                return
-            gtoken = acc.get("gitcode_api_token", "")
-            if not gtoken:
-                self._json(400, {"error": "No GitCode token configured"})
-                return
-            try:
-                req = urllib.request.Request("https://api.gitcode.com/api/v5/user",
-                                             headers={"Authorization": f"Bearer {gtoken}"})
-                resp = urllib.request.urlopen(req, timeout=10)
-                user = json.loads(resp.read())
-                self._json(200, {"status": "ok", "login": user.get("login", "?")})
-            except Exception as e:
-                self._json(502, {"error": f"GitCode API error: {e}"})
-            return
+        except Exception as e:
+            from src.config import log
+            log.warning(f"Admin POST error: {e}")
+            self._json(500, {"error": str(e)})
 
         self.send_response(404)
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight"""
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.end_headers()
 
     def do_PUT(self):
