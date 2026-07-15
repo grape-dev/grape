@@ -4,7 +4,7 @@ from datetime import datetime
 from src.config import log, GITCODE_WEBHOOK_TOKEN, BOT_USERNAMES, WORKSPACE_DIR, SKILLS_DIR, get_domain_skill, get_agent_backend
 from src.session_manager import db_lock, get_or_create_session, update_session, get_feishu_mapping, get_feishu_group_name_map
 from src.prompt_builder import build_prompt, extract_event_number
-from src.agent_executor import stream_agent
+from src.agent.executor import stream_agent
 
 # ====== 事件队列 ======
 _MAX_WORKERS = 10
@@ -152,7 +152,7 @@ def _get_feishu_context(repo_key, repository):
     Returns dict with collaborators, group_members, mappings, token, chat_id."""
     ctx = {}
     try:
-        from src.feishu_handler import get_chat_id_for_repo, get_chat_members, get_tenant_token, ensure_configured
+        from src.im.feishu import get_chat_id_for_repo, get_chat_members, get_tenant_token, ensure_configured
         if not ensure_configured():
             return ctx
         chat_id = get_chat_id_for_repo(repo_key)

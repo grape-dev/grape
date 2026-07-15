@@ -8,12 +8,12 @@ Bot monitors & logs the Agent's execution process
 import socket, threading
 from http.server import HTTPServer
 from src.config import log, SKILLS_DIR, WORKSPACE_DIR, GITCODE_API_TOKEN, GITCODE_WEBHOOK_TOKEN
-from src.feishu_handler import (
+from src.im.feishu import (
     FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_BOT_NAME,
     start_ws, stop_ws, ensure_configured, sync_repo_feishu_mapping
 )
 from src.session_manager import db, db_lock
-from src.chat_handler import process_chat
+from src.im.handler import process_chat
 from src.webhook_handler import Handler
 
 

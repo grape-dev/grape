@@ -90,7 +90,7 @@ class TestApiUserMapping:
             mock_cursor = MagicMock()
             mock_cursor.fetchone.return_value = None
             mock_db.cursor.return_value = mock_cursor
-            with patch("src.feishu_handler.get_chat_id_for_repo", return_value=None):
+            with patch("src.im.feishu.get_chat_id_for_repo", return_value=None):
                 h.do_GET()
         h._json_response.assert_called_with(404, {"error": "not_found", "login": "nobody"})
 
@@ -108,8 +108,8 @@ class TestApiUserMapping:
             mock_cursor = MagicMock()
             mock_cursor.fetchone.side_effect = fetchone_side_effect
             mock_db.cursor.return_value = mock_cursor
-            with patch("src.feishu_handler.get_chat_id_for_repo", return_value="chat_1"):
-                with patch("src.feishu_handler.sync_repo_feishu_mapping", return_value=1):
+            with patch("src.im.feishu.get_chat_id_for_repo", return_value="chat_1"):
+                with patch("src.im.feishu.sync_repo_feishu_mapping", return_value=1):
                     h.do_GET()
         h._json_response.assert_called_with(200, {
             "login": "newuser", "open_id": "ou_new", "nick_name": "新用户"

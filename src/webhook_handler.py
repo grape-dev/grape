@@ -74,7 +74,7 @@ class Handler(BaseHTTPRequestHandler):
             if row:
                 self._json_response(200, {"login": login, "open_id": row[0], "nick_name": row[1]})
                 return
-            from src.feishu_handler import get_chat_id_for_repo, sync_repo_feishu_mapping
+            from src.im.feishu import get_chat_id_for_repo, sync_repo_feishu_mapping
             chat_id = get_chat_id_for_repo(repo_key)
             if chat_id:
                 sync_repo_feishu_mapping(repo_key, chat_id)

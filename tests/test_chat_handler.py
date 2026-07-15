@@ -38,7 +38,7 @@ class TestProcessChat:
             "sender_open_id": open_id,
         }
 
-    @patch.multiple("src.chat_handler",
+    @patch.multiple("src.im.handler",
                     reply_text=feishu_patches["reply_text"],
                     reply_card=feishu_patches["reply_card"],
                     add_reaction=feishu_patches["add_reaction"],
@@ -49,13 +49,13 @@ class TestProcessChat:
                     get_user_name=feishu_patches["get_user_name"])
     def test_non_message_returns(self):
         """Non-message type should return immediately."""
-        from src.chat_handler import process_chat
+        from src.im.handler import process_chat
         parsed = self._make_parsed(msg_type="event")
         process_chat(parsed)
         feishu_patches["reply_text"].assert_not_called()
         feishu_patches["reply_card"].assert_not_called()
 
-    @patch.multiple("src.chat_handler",
+    @patch.multiple("src.im.handler",
                     reply_text=feishu_patches["reply_text"],
                     reply_card=feishu_patches["reply_card"],
                     add_reaction=feishu_patches["add_reaction"],
@@ -65,14 +65,14 @@ class TestProcessChat:
                     get_user_name=feishu_patches["get_user_name"])
     def test_capability_query_returns_skills(self):
         """User asking 'what can you do' should return capabilities."""
-        from src.chat_handler import process_chat
+        from src.im.handler import process_chat
         parsed = self._make_parsed(text="你有什么能力")
         process_chat(parsed)
         feishu_patches["reply_text"].assert_called_once()
         args = feishu_patches["reply_text"].call_args[0]
         assert "能力" in args[1] or "DevOps" in args[1]
 
-    @patch.multiple("src.chat_handler",
+    @patch.multiple("src.im.handler",
                     reply_text=feishu_patches["reply_text"],
                     reply_card=feishu_patches["reply_card"],
                     add_reaction=feishu_patches["add_reaction"],
@@ -83,14 +83,14 @@ class TestProcessChat:
                     get_user_name=feishu_patches["get_user_name"])
     def test_command_routing(self):
         """/command should route to process_command."""
-        from src.chat_handler import process_chat
+        from src.im.handler import process_chat
         feishu_patches["process_command"].reset_mock()
         feishu_patches["process_command"].return_value = "/status result"
         parsed = self._make_parsed(text="/status")
         process_chat(parsed)
         feishu_patches["process_command"].assert_called_once()
 
-    @patch.multiple("src.chat_handler",
+    @patch.multiple("src.im.handler",
                     reply_text=feishu_patches["reply_text"],
                     reply_card=feishu_patches["reply_card"],
                     add_reaction=feishu_patches["add_reaction"],
@@ -101,18 +101,18 @@ class TestProcessChat:
                     get_user_name=feishu_patches["get_user_name"])
     def test_unbound_repo_shows_help(self):
         """Message with no bound repo should show binding help."""
-        from src.chat_handler import process_chat
+        from src.im.handler import process_chat
         feishu_patches["resolve_repo"].reset_mock()
         feishu_patches["resolve_repo"].return_value = ""
         feishu_patches["reply_text"].reset_mock()
-        with patch("src.chat_handler.db"):
+        with patch("src.im.handler.db"):
             parsed = self._make_parsed(text="check issue")
             process_chat(parsed)
         assert feishu_patches["reply_text"].call_count >= 1
         args = feishu_patches["reply_text"].call_args[0]
         assert "绑定" in args[1] or "未绑定" in args[1]
 
-    @patch.multiple("src.chat_handler",
+    @patch.multiple("src.im.handler",
                     reply_text=feishu_patches["reply_text"],
                     reply_card=feishu_patches["reply_card"],
                     add_reaction=feishu_patches["add_reaction"],
@@ -123,7 +123,7 @@ class TestProcessChat:
                     get_user_name=feishu_patches["get_user_name"])
     def test_bind_intent_detected(self):
         """Natural language bind intent should trigger /bind."""
-        from src.chat_handler import process_chat
+        from src.im.handler import process_chat
         feishu_patches["resolve_repo"].reset_mock()
         feishu_patches["resolve_repo"].return_value = ""
         feishu_patches["detect_bind_intent"].return_value = "owner/repo"
@@ -135,16 +135,16 @@ class TestProcessChat:
 class TestDetectCleanIntent:
     """Direct tests for detect_clean_intent patterns."""
 
-    @patch("src.chat_handler.detect_clean_intent")
+    @patch("src.im.handler.detect_clean_intent")
     def test_clean_intent_called(self, mock_detect):
-        from src.chat_handler import process_chat
+        from src.im.handler import process_chat
         parsed = {
             "type": "message", "text": "清除会话缓存",
             "chat_id": "c1", "message_id": "m1",
             "sender_id": "u1", "sender_open_id": "ou_1"
         }
         mock_detect.return_value = True
-        with patch.multiple("src.chat_handler",
+        with patch.multiple("src.im.handler",
                            reply_text=MagicMock(),
                            reply_card=MagicMock(),
                            add_reaction=MagicMock(),

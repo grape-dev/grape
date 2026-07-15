@@ -16,7 +16,7 @@ if "FEISHU_APP_ID" not in os.environ:
 if "FEISHU_APP_SECRET" not in os.environ:
     os.environ["FEISHU_APP_SECRET"] = "test_secret"
 
-from src.feishu_handler import (
+from src.im.feishu import (
     _build_card_payload,
     get_tenant_token,
     reply_card,
@@ -49,12 +49,12 @@ class TestBuildCardPayload:
 class TestGetTenantToken:
     def _reset_token(self):
         """Force token to None."""
-        from src.feishu_handler import _TOKEN, _TOKEN_EXPIRE
-        import src.feishu_handler as fh
+        from src.im.feishu import _TOKEN, _TOKEN_EXPIRE
+        import src.im.feishu as fh
         fh._TOKEN = None
         fh._TOKEN_EXPIRE = 0
 
-    @patch("src.feishu_handler.urlopen")
+    @patch("src.im.feishu.urlopen")
     def test_fetches_token(self, mock_urlopen):
         self._reset_token()
         mock_response = MagicMock()
@@ -66,10 +66,10 @@ class TestGetTenantToken:
         token = get_tenant_token()
         assert token == "tok_abc123"
 
-    @patch("src.feishu_handler.urlopen")
+    @patch("src.im.feishu.urlopen")
     def test_uses_cached_token(self, mock_urlopen):
         self._reset_token()
-        import src.feishu_handler as fh
+        import src.im.feishu as fh
         import time
         fh._TOKEN = "cached_token"
         fh._TOKEN_EXPIRE = time.time() + 3600
@@ -79,7 +79,7 @@ class TestGetTenantToken:
 
 
 class TestReplyCard:
-    @patch("src.feishu_handler.urlopen")
+    @patch("src.im.feishu.urlopen")
     def test_sends_card(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps({
@@ -87,7 +87,7 @@ class TestReplyCard:
         }).encode()
         mock_urlopen.return_value = mock_response
 
-        with patch("src.feishu_handler.get_tenant_token", return_value="tok_test"):
+        with patch("src.im.feishu.get_tenant_token", return_value="tok_test"):
             msg_id = reply_card("msg_original", "Test card")
         assert msg_id == "msg_test_123"
 
@@ -96,7 +96,7 @@ class TestReplyCard:
 
 
 class TestSendCardToUser:
-    @patch("src.feishu_handler.urlopen")
+    @patch("src.im.feishu.urlopen")
     def test_sends_to_user(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps({
@@ -104,7 +104,7 @@ class TestSendCardToUser:
         }).encode()
         mock_urlopen.return_value = mock_response
 
-        with patch("src.feishu_handler.get_tenant_token", return_value="tok_test"):
+        with patch("src.im.feishu.get_tenant_token", return_value="tok_test"):
             msg_id = send_card_to_user("ou_test_user", "Hello user")
         assert msg_id == "msg_user_456"
 
@@ -113,7 +113,7 @@ class TestSendCardToUser:
 
 
 class TestGetChatMembers:
-    @patch("src.feishu_handler.urlopen")
+    @patch("src.im.feishu.urlopen")
     def test_returns_members(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps({
@@ -127,13 +127,13 @@ class TestGetChatMembers:
         }).encode()
         mock_urlopen.return_value = mock_response
 
-        with patch("src.feishu_handler.get_tenant_token", return_value="tok_test"):
+        with patch("src.im.feishu.get_tenant_token", return_value="tok_test"):
             members = get_chat_members("chat_123")
         assert len(members) == 2
         assert members[0]["name"] == "张三"
         assert members[0]["open_id"] == "ou_zhang"
 
-    @patch("src.feishu_handler.urlopen")
+    @patch("src.im.feishu.urlopen")
     def test_handles_pagination(self, mock_urlopen):
         page1 = MagicMock()
         page1.read.return_value = json.dumps({
@@ -152,7 +152,7 @@ class TestGetChatMembers:
         }).encode()
         mock_urlopen.side_effect = [page1, page2]
 
-        with patch("src.feishu_handler.get_tenant_token", return_value="tok_test"):
+        with patch("src.im.feishu.get_tenant_token", return_value="tok_test"):
             members = get_chat_members("chat_123")
         assert len(members) == 2
         assert mock_urlopen.call_count == 2

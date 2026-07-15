@@ -10,7 +10,7 @@ if SRC_DIR not in sys.path:
 
 os.environ["GITCODE_API_TOKEN"] = "test_token"
 
-from src.agent_executor import (
+from src.agent import (
     OpencodeBackend, CodeArtsBackend, get_backend,
     AgentBackend, stream_agent, stream_opencode
 )
