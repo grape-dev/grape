@@ -22,7 +22,8 @@ def process_chat(parsed: dict):
         text = parsed["text"]
         chat_id = parsed["chat_id"]
         msg_id = parsed["message_id"]
-        log.info(f"Feishu message: {text[:100]} (chat={chat_id})")
+        account = parsed.get("account", "default")
+        log.info(f"Feishu message: {text[:100]} (chat={chat_id[:20]}, account={account})")
 
         # 能力询问
         capability_patterns = [
@@ -37,20 +38,20 @@ def process_chat(parsed: dict):
 
         # 清除会话缓存
         if detect_clean_intent(text):
-            result = process_command("/clean", chat_id, parsed.get("sender_id", ""), db)
+            result = process_command("/clean", chat_id, parsed.get("sender_id", ""), db, account)
             if result:
                 reply_text(msg_id, result)
             return
 
         # 命令处理
         if text.startswith("/"):
-            result = process_command(text, chat_id, parsed.get("sender_id", ""), db)
+            result = process_command(text, chat_id, parsed.get("sender_id", ""), db, account)
             if result:
                 reply_text(msg_id, result)
             return
 
         # 绑定检测
-        repo_key = resolve_repo(text, chat_id, parsed.get("sender_id", ""), db)
+        repo_key = resolve_repo(text, chat_id, parsed.get("sender_id", ""), db, account)
         if not repo_key:
             reply_parts = ["当前未绑定任何仓库至本群。"]
             try:
@@ -78,7 +79,7 @@ def process_chat(parsed: dict):
 
         bind_repo = detect_bind_intent(text)
         if bind_repo:
-            result = process_command(f"/bind {bind_repo}", chat_id, parsed.get("sender_id", ""), db)
+            result = process_command(f"/bind {bind_repo}", chat_id, parsed.get("sender_id", ""), db, account)
             reply_text(msg_id, result)
             return
 

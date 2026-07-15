@@ -385,7 +385,7 @@ def detect_clean_intent(text: str) -> bool:
     return False
 
 
-def resolve_repo(text: str, chat_id: str, sender_id: str, db) -> str:
+def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "default") -> str:
     # 1. 自然语言绑定检测
     bind_repo = detect_bind_intent(text)
     if bind_repo:
@@ -397,7 +397,7 @@ def resolve_repo(text: str, chat_id: str, sender_id: str, db) -> str:
     # 3. 查询群绑定表
     try:
         c = db.cursor()
-        c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+        c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
         row = c.fetchone()
         if row:
             return row[0]
@@ -406,7 +406,7 @@ def resolve_repo(text: str, chat_id: str, sender_id: str, db) -> str:
     return ""
 
 
-def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
+def process_command(text: str, chat_id: str, sender_id: str, db, account: str = "default") -> str:
     text = text.strip()
     parts = text.split()
     if not parts:
@@ -417,8 +417,8 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
         try:
             c = db.cursor()
             c.execute(
-                "INSERT OR REPLACE INTO feishu_bindings (chat_id, repo_key, source, bind_by) VALUES (?,?,?,?)",
-                (chat_id, repo_key, "gitcode", sender_id)
+                "INSERT OR REPLACE INTO feishu_bindings (chat_id, repo_key, source, bind_by, account) VALUES (?,?,?,?,?)",
+                (chat_id, repo_key, "gitcode", sender_id, account)
             )
             db.commit()
             matched = sync_repo_feishu_mapping(repo_key, chat_id)
@@ -430,9 +430,9 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
     if cmd == "/unbind":
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
             row = c.fetchone()
-            c.execute("DELETE FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            c.execute("DELETE FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
             if row:
                 repo_key = row[0]
                 full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
@@ -444,7 +444,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
     if cmd == "/status":
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key, created_at FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            c.execute("SELECT repo_key, created_at FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
             row = c.fetchone()
             if row:
                 return f"📋 当前绑定: `{row[0]}` (since {row[1]})"
@@ -454,7 +454,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
     if cmd == "/refresh":
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
             row = c.fetchone()
             if not row:
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后刷新。"
@@ -465,7 +465,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
     if cmd == "/autodev":
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
             row = c.fetchone()
             if not row:
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后设置。"
@@ -482,7 +482,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
     if cmd == "/notify":
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
             row = c.fetchone()
             if not row:
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后设置。"
@@ -499,7 +499,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
     if cmd in ("/clean", "/cleansession", "/reset", "/cleancache"):
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=?", (chat_id,))
+            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
             row = c.fetchone()
             if not row:
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后再清理。"
