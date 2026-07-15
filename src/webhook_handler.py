@@ -42,13 +42,6 @@ class Handler(BaseHTTPRequestHandler):
         _submit_event(process_event, body, self.headers, "default")
 
     def do_GET(self):
-        # 将 admin 请求重定向到端口 80
-        if self.path == "/admin/" or self.path == "/admin":
-            self.send_response(302)
-            self.send_header("Location", "http://203.0.113.2:80/admin/")
-            self.end_headers()
-            return
-
         if self.path == "/health":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
