@@ -525,7 +525,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db) -> str:
 # ====== WebSocket 事件处理 ======
 # 通过 lark-oapi SDK 的 WSClient 建立长连接
 
-_ws_client = None
+_ws_clients: dict[str, Any] = {}
 
 
 def parse_event_data(event):
@@ -539,40 +539,65 @@ def parse_event_data(event):
         return {"type": "unknown"}
 
 
-def start_ws(on_message_callback):
-    """启动 WebSocket 长连接"""
-    global _ws_client
+def start_ws(on_message_callback, account_name: str = "default"):
+    """启动 WebSocket 长连接。支持多账户，每个 account 一个 WS 连接。"""
+    global _ws_clients
     if not ensure_configured():
         return
 
-    # 创建事件处理器
+    # 从账户配置获取凭据
+    from src.config import get_account
+    acc = get_account(account_name)
+    app_id = acc.get("feishu_app_id", FEISHU_APP_ID)
+    app_secret = acc.get("feishu_app_secret", FEISHU_APP_SECRET)
+    if not app_id or not app_secret:
+        log.warning(f"Feishu: account '{account_name}' not configured, skipping WS")
+        return
+
+    # 创建事件处理器（注入 account_name）
+    def _handle_with_account(event):
+        return _handle_message(event, on_message_callback, account_name)
+
     handler = (lark_oapi.EventDispatcherHandler.builder("", "")
-               .register_p2_im_message_receive_v1(lambda event: _handle_message(event, on_message_callback))
+               .register_p2_im_message_receive_v1(_handle_with_account)
                .build())
 
+    # 设置全局 APP_ID/APP_SECRET（lark-oapi 需要）
+    lark_oapi.APP_ID = app_id
+    lark_oapi.APP_SECRET = app_secret
+
     # 创建并启动 WS Client
-    lark_oapi.APP_ID = FEISHU_APP_ID
-    lark_oapi.APP_SECRET = FEISHU_APP_SECRET
-    _ws_client = lark_oapi.ws.Client(
-        app_id=FEISHU_APP_ID,
-        app_secret=FEISHU_APP_SECRET,
+    client = lark_oapi.ws.Client(
+        app_id=app_id,
+        app_secret=app_secret,
         event_handler=handler,
         auto_reconnect=True,
     )
-    log.info("Feishu WS client starting...")
-    _ws_client.start()
+    _ws_clients[account_name] = client
+    log.info(f"Feishu WS client starting (account={account_name})...")
+    client.start()
 
 
-def stop_ws():
-    global _ws_client
-    if _ws_client:
+def stop_ws(account_name: str | None = None):
+    """停止指定或所有 WS 连接"""
+    global _ws_clients
+    if account_name:
+        client = _ws_clients.pop(account_name, None)
+        if client:
+            try:
+                client.stop()
+            except:
+                pass
+        return
+    for name, client in list(_ws_clients.items()):
         try:
-            _ws_client.stop()
+            client.stop()
         except:
             pass
+    _ws_clients = {}
 
 
-def _handle_message(event, on_message_callback):
+def _handle_message(event, on_message_callback, account_name: str = "default"):
     """处理收到的飞书消息（在 WS 线程中调用）"""
     try:
         log.info(f"Feishu WS event received, type={type(event).__name__}")
@@ -649,6 +674,7 @@ def _handle_message(event, on_message_callback):
             "sender_open_id": sender_open_id,
             "message_id": getattr(message, 'message_id', "") or "",
             "message_type": msg_type,
+            "account": account_name,
         }
 
         log.info(f"Feishu message: {text[:100]} (chat={parsed['chat_id'][:20]})")
