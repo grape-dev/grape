@@ -52,12 +52,13 @@ def _acquire_repo_lock(repo_key: str) -> threading.Lock:
 from src.vcs.adapter import normalize_event, get_event_header
 
 # ====== 事件处理入口 ======
-def process_event(raw_body, headers):
+def process_event(raw_body, headers, account="default"):
     try:
         event_header, source = get_event_header(headers)
         evt = normalize_event(raw_body, event_header, source)
         repo_key = f"{evt['source']}:{evt['repository']}"
-        log.info(f"═══ Event: {evt['type']} on {evt['repository']} by {evt['actor']} ═══")
+        evt["account"] = account
+        log.info(f"═══ Event: {evt['type']} on {evt['repository']} by {evt['actor']} (account={account}) ═══")
 
         # 前置过滤
         if not evt['repository'] or evt['type'] == 'unknown':
@@ -82,7 +83,7 @@ def process_event(raw_body, headers):
         lock = _acquire_repo_lock(repo_key)
         lock.acquire(timeout=180)
         try:
-            _process_event_inner(evt, repo_key)
+            _process_event_inner(evt, repo_key, evt.get("account", "default"))
         finally:
             lock.release()
 
@@ -143,7 +144,7 @@ def _get_feishu_context(repo_key, repository):
     return ctx
 
 
-def _process_event_inner(evt, repo_key):
+def _process_event_inner(evt, repo_key, account="default"):
     try:
         ws = os.path.join(WORKSPACE_DIR, evt['repository'])
         os.makedirs(ws, exist_ok=True)
@@ -192,7 +193,7 @@ def _process_event_inner(evt, repo_key):
         record = {
             "type": evt["type"], "time": datetime.now().isoformat(),
             "success": exit_code == 0, "exit_code": exit_code,
-            "actor": evt["actor"],
+            "actor": evt["actor"], "account": account,
             "stdout": final_text[:2000],
             "oc_session_id": new_oc_session_id
         }

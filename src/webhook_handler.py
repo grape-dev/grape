@@ -2,7 +2,7 @@
 import json, os
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from src.config import log, SKILLS_DIR, GITCODE_WEBHOOK_TOKEN
+from src.config import log, SKILLS_DIR, GITCODE_WEBHOOK_TOKEN, resolve_account_by_webhook_token
 from src.event_processor import _submit_event, process_event
 
 
@@ -18,6 +18,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length > 0 else b""
 
+        account = "default"
         if self.path == "/webhook/gitcode" and GITCODE_WEBHOOK_TOKEN:
             token = self.headers.get("X-GitCode-Token", "")
             if token != GITCODE_WEBHOOK_TOKEN:
@@ -26,12 +27,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"invalid webhook token")
                 log.warning(f"Rejected webhook: invalid token (got='{token[:20]}', expected match)")
                 return
+            resolved = resolve_account_by_webhook_token(token)
+            if resolved:
+                account = resolved
+                log.info(f"Resolved account: {account}")
 
-        log.info(f"Webhook from {client_ip}, path={self.path}, length={length}")
+        log.info(f"Webhook from {client_ip}, path={self.path}, length={length}, account={account}")
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
-        _submit_event(process_event, body, self.headers)
+        _submit_event(process_event, body, self.headers, account)
 
     def do_GET(self):
         if self.path == "/health":
