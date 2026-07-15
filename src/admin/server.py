@@ -2,16 +2,12 @@
 import json, os, time, hashlib, urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Admin dir
 _ADMIN_DIR = os.path.dirname(os.path.abspath(__file__))
 _PAGE_PATH = os.path.join(_ADMIN_DIR, "page.html")
-
-# 认证
 ADMIN_USER = "developer"
 ADMIN_PASS = "YOUR_SSH_PASSWORD"
 _admin_tokens: dict[str, float] = {}
 
-# 加载页面
 _PAGE_HTML = ""
 if os.path.exists(_PAGE_PATH):
     with open(_PAGE_PATH, encoding="utf-8") as f:
@@ -41,9 +37,27 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid JSON"})
             return None
 
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except ConnectionError:
+            pass
+        except Exception as e:
+            try:
+                from src.config import log
+                log.warning(f"Admin handler error: {e}")
+            except:
+                pass
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.end_headers()
+
     def do_GET(self):
         try:
-            # —— Admin page ——
             if self.path == "/admin/" or self.path == "/admin":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -54,7 +68,6 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self.wfile.write(_PAGE_HTML.encode("utf-8"))
                 return
 
-            # —— List / Get accounts ——
             if self.path.startswith("/api/admin/accounts"):
                 if not self._auth():
                     return
@@ -78,16 +91,18 @@ class AdminHandler(BaseHTTPRequestHandler):
                     self._json(200, items)
                 return
         except Exception as e:
-            from src.config import log
-            log.warning(f"Admin GET error: {e}")
+            try:
+                from src.config import log
+                log.warning(f"Admin GET error: {e}")
+            except:
+                pass
             self._json(500, {"error": str(e)})
-
+            return
         self.send_response(404)
         self.end_headers()
 
     def do_POST(self):
         try:
-            # —— Login ——
             if self.path == "/api/admin/login":
                 data = self._read_body()
                 if data is None:
@@ -100,7 +115,6 @@ class AdminHandler(BaseHTTPRequestHandler):
                     self._json(401, {"error": "invalid credentials"})
                 return
 
-            # —— Test connection ——
             if self.path.startswith("/api/admin/accounts/") and self.path.endswith("/test"):
                 if not self._auth():
                     return
@@ -124,19 +138,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                     self._json(502, {"error": f"GitCode API error: {e}"})
                 return
         except Exception as e:
-            from src.config import log
-            log.warning(f"Admin POST error: {e}")
+            try:
+                from src.config import log
+                log.warning(f"Admin POST error: {e}")
+            except:
+                pass
             self._json(500, {"error": str(e)})
-
+            return
         self.send_response(404)
-        self.end_headers()
-
-    def do_OPTIONS(self):
-        """Handle CORS preflight"""
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.end_headers()
 
     def do_PUT(self):
@@ -190,11 +199,17 @@ class AdminHandler(BaseHTTPRequestHandler):
 
 
 def start_admin_server():
-    """在端口 80 启动管理台服务"""
     from src.config import log
-    try:
-        server = HTTPServer(("", 80), AdminHandler)
-        log.info("Admin server started on :80")
-        server.serve_forever()
-    except Exception as e:
-        log.warning(f"Admin server failed on :80 (try running as root): {e}")
+    import time
+    while True:
+        try:
+            server = HTTPServer(("", 80), AdminHandler)
+            server.socket.setsockopt(1, 2, 1)
+            log.info("Admin server started on :80")
+            server.serve_forever()
+        except OSError as e:
+            log.warning(f"Admin server failed on :80: {e}, retrying in 5s")
+            time.sleep(5)
+        except Exception as e:
+            log.warning(f"Admin server error: {e}, restarting in 5s")
+            time.sleep(5)
