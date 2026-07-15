@@ -161,6 +161,12 @@ function loadAccounts(){
 }
 function selectAccount(n){
   CURRENT=n;
+  // Update active class on list items
+  var items=document.getElementById('accountList').getElementsByClassName('account-item');
+  for(var i=0;i<items.length;i++){
+    items[i].className='account-item';
+    if(items[i].textContent.indexOf(n)===0)items[i].className+=' active';
+  }
   api('GET','/'+encodeURIComponent(n),null,function(ok,data){
     if(!ok){showToast('\u52a0\u8f7d\u5931\u8d25','err');return}
     ORIG=data;
@@ -169,7 +175,6 @@ function selectAccount(n){
     document.getElementById('fName').value=data.name;
     document.getElementById('deleteBtn').style.display=(data.name==='default'?'none':'inline-block');
     document.getElementById('panel').classList.add('active');
-    loadAccounts();
   });
 }
 function collectForm(){
