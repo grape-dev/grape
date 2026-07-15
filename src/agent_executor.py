@@ -1,27 +1,123 @@
-"""Agent 执行器：opencode CLI 调度、NDJSON 流式解析"""
+"""Agent 执行器：多后端抽象（opencode / codearts），NDJSON 流式解析"""
 import os, subprocess, json, shutil
 from src.config import log, SKILLS_DIR, GITCODE_API_TOKEN
 
 
-def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
-    env = os.environ.copy()
-    env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
+# ====== 后端抽象 ======
+
+class AgentBackend:
+    """Agent 后端基类"""
+    name = ""
+    binary = ""
+
+    def build_args(self, prompt: str, session_id: str = "") -> list[str]:
+        raise NotImplementedError
+
+    def parse_output(self, line: str) -> dict | None:
+        """NDJSON 逐行解析，返回统一事件 dict 或 None"""
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        et = event.get("type", "unknown")
+        if et == "step_start":
+            step_count = event.get("part", {}).get("step", 0)
+            sid = event.get("sessionID", "")
+            return {"type": "step_start", "sessionID": sid, "step": step_count}
+        elif et == "text":
+            part = event.get("part", {})
+            if isinstance(part, dict):
+                text = part.get("text", "")
+                ptype = part.get("type", "")
+                if text and ptype in ("text", "reasoning"):
+                    return {"type": ptype, "text": text, "sessionID": event.get("sessionID", "")}
+        elif et == "reasoning":
+            part = event.get("part", {})
+            if isinstance(part, dict):
+                text = part.get("text", "")
+                if text:
+                    return {"type": "reasoning", "text": text}
+        elif et == "tool_use":
+            part = event.get("part", {})
+            if isinstance(part, dict):
+                tool = part.get("tool", "")
+                inp = part.get("state", {}).get("input", {})
+                return {"type": "tool_use", "tool": tool, "input": inp}
+        elif et == "step_finish":
+            tokens = event.get("part", {}).get("tokens", {})
+            return {"type": "step_finish", "tokens": tokens.get("total", 0)}
+        elif et == "error":
+            err = event.get("error", {}).get("data", {}).get("message", str(event))
+            return {"type": "error", "message": err}
+        return {"type": "other", "raw": et}
+
+    def get_env(self) -> dict:
+        return {}
+
+
+class OpencodeBackend(AgentBackend):
+    name = "opencode"
+    binary = "opencode"
+
+    def build_args(self, prompt: str, session_id: str = "") -> list[str]:
+        args = ["run", "--format", "json", "--dangerously-skip-permissions"]
+        if session_id:
+            args.extend(["--session", session_id])
+        args.append(prompt)
+        return args
+
+    def get_env(self) -> dict:
+        env = os.environ.copy()
+        env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
+        env["DEVOPS_EVENT_TYPE"] = ""
+        env["GITCODE_API_TOKEN"] = GITCODE_API_TOKEN
+        return env
+
+
+class CodeArtsBackend(AgentBackend):
+    name = "codearts"
+    binary = "codearts"
+
+    def build_args(self, prompt: str, session_id: str = "") -> list[str]:
+        args = ["run", "--format", "json"]
+        if session_id:
+            args.extend(["--sessionID", session_id])
+        args.append(prompt)
+        return args
+
+    def get_env(self) -> dict:
+        env = os.environ.copy()
+        env["GITCODE_API_TOKEN"] = GITCODE_API_TOKEN
+        return env
+
+
+_BACKENDS = {
+    "opencode": OpencodeBackend(),
+    "codearts": CodeArtsBackend(),
+}
+
+
+def get_backend(name: str) -> AgentBackend:
+    return _BACKENDS.get(name, _BACKENDS["opencode"])
+
+
+# ====== Agent 执行 ======
+
+def stream_agent(prompt: str, cwd: str, session_id: str = "", event_type: str = "", backend_name: str = "opencode") -> dict:
+    """流式执行 Agent，yield 事件。与旧 stream_opencode 兼容。"""
+    backend = get_backend(backend_name)
+    env = backend.get_env()
     env["DEVOPS_EVENT_TYPE"] = event_type
-    env["GITCODE_API_TOKEN"] = GITCODE_API_TOKEN
 
-    args = ["run", "--format", "json", "--dangerously-skip-permissions"]
-    if oc_session_id:
-        args.extend(["--session", oc_session_id])
-    args.append(prompt)
-
-    log.info(f"opencode args: {' '.join(args)[:200]}...")
-    log.info(f"opencode cwd: {cwd}")
-
-    agent_cmd = shutil.which("opencode") or shutil.which("opencode.cmd")
+    args = backend.build_args(prompt, session_id)
+    agent_cmd = shutil.which(backend.binary) or shutil.which(backend.binary + ".cmd")
     if not agent_cmd:
-        log.error("opencode CLI not found in PATH")
-        yield ("done", {"exit_code": -1, "text": "", "oc_session_id": oc_session_id, "errors": ["opencode not found"], "stderr": "opencode CLI not found"})
+        log.error(f"{backend.name} CLI not found in PATH")
+        yield ("done", {"exit_code": -1, "text": "", "oc_session_id": session_id, "errors": [f"{backend.name} not found"], "stderr": ""})
         return
+
+    log.info(f"{backend.name} args: {' '.join(args)[:200]}...")
+    log.info(f"{backend.name} cwd: {cwd}")
 
     proc = subprocess.Popen(
         [agent_cmd] + args,
@@ -33,7 +129,7 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
     )
 
     collected_text = []
-    new_oc_session_id = oc_session_id
+    new_session_id = session_id
     error_events = []
     step_count = 0
 
@@ -41,59 +137,38 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
             continue
-        try:
-            event = json.loads(line)
-            et = event.get("type", "unknown")
-            if et == "step_start":
-                step_count += 1
-                sid = event.get("sessionID", "")
-                if sid:
-                    new_oc_session_id = sid
-                yield ("step_start", f"Step {step_count} started (session: {new_oc_session_id})")
-            elif et == "text":
-                part = event.get("part", {})
-                if isinstance(part, dict):
-                    text = part.get("text", "")
-                    ptype = part.get("type", "")
-                    if text:
-                        if ptype == "reasoning":
-                            yield ("reasoning", text[:200])
-                        elif ptype == "text":
-                            collected_text.append(text)
-                            yield ("text", text[:150].replace("\n", " "))
-            elif et == "reasoning":
-                part = event.get("part", {})
-                if isinstance(part, dict):
-                    text = part.get("text", "")
-                    if text:
-                        yield ("reasoning", text[:200])
-            elif et == "tool_use":
-                part = event.get("part", {})
-                tool = ""
-                if isinstance(part, dict):
-                    tool = part.get("tool", "")
-                    inp = part.get("state", {}).get("input", {})
-                yield ("tool_use", f"Tool: {tool} {json.dumps(inp)[:200]}")
-            elif et == "step_finish":
-                tokens = event.get("part", {}).get("tokens", {})
-                total = tokens.get("total", 0)
-                yield ("step_finish", f"Step {step_count} done, tokens={total}")
-            elif et == "error":
-                err = event.get("error", {}).get("data", {}).get("message", str(event))
-                error_events.append(err)
-                yield ("error", err)
-            else:
-                yield ("other", et)
-        except json.JSONDecodeError:
+        parsed = backend.parse_output(line)
+        if parsed is None:
             yield ("raw", line[:200])
+            continue
+        et = parsed["type"]
+        if et == "step_start":
+            step_count += 1
+            if parsed.get("sessionID"):
+                new_session_id = parsed["sessionID"]
+            yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
+        elif et == "text":
+            collected_text.append(parsed["text"])
+            yield ("text", parsed["text"][:150].replace("\n", " "))
+        elif et == "reasoning":
+            yield ("reasoning", parsed["text"][:200])
+        elif et == "tool_use":
+            yield ("tool_use", f"Tool: {parsed['tool']} {json.dumps(parsed.get('input', {}))[:200]}")
+        elif et == "step_finish":
+            yield ("step_finish", f"Step {step_count} done, tokens={parsed['tokens']}")
+        elif et == "error":
+            error_events.append(parsed["message"])
+            yield ("error", parsed["message"])
+        else:
+            yield ("other", et)
 
     try:
         proc.wait(timeout=120)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-        log.warning("opencode timed out after 120s, killed")
-        yield ("done", {"exit_code": -1, "text": "", "oc_session_id": new_oc_session_id, "errors": ["opencode timed out"], "stderr": ""})
+        log.warning(f"{backend.name} timed out after 120s, killed")
+        yield ("done", {"exit_code": -1, "text": "", "oc_session_id": new_session_id, "errors": [f"{backend.name} timed out"], "stderr": ""})
         return
 
     stdout_remainder = ""
@@ -107,16 +182,9 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
             line = line.strip()
             if not line:
                 continue
-            try:
-                event = json.loads(line)
-                if event.get("type") == "text":
-                    part = event.get("part", {})
-                    if isinstance(part, dict):
-                        text = part.get("text", "")
-                        if text:
-                            collected_text.append(text)
-            except json.JSONDecodeError:
-                pass
+            parsed = backend.parse_output(line)
+            if parsed and parsed["type"] == "text":
+                collected_text.append(parsed["text"])
 
     full_text = "\n".join(collected_text)
     stderr_output = ""
@@ -128,7 +196,15 @@ def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
     yield ("done", {
         "exit_code": proc.returncode,
         "text": full_text,
-        "oc_session_id": new_oc_session_id,
+        "oc_session_id": new_session_id,
         "errors": error_events,
-        "stderr": stderr_output
+        "stderr": stderr_output,
+        "backend": backend.name,
     })
+
+
+# ====== 向后兼容 ======
+
+def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
+    """兼容旧接口，默认使用 opencode 后端"""
+    yield from stream_agent(prompt, cwd, oc_session_id, event_type, backend_name="opencode")

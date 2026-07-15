@@ -1,10 +1,10 @@
 """飞书消息处理"""
 import re, os
 from datetime import datetime
-from src.config import log, WORKSPACE_DIR, SKILLS_DIR, get_domain_skill
+from src.config import log, WORKSPACE_DIR, SKILLS_DIR, get_domain_skill, get_agent_backend
 from src.session_manager import get_or_create_session, update_session
 from src.prompt_builder import build_chat_prompt, get_skill_capabilities, build_role_definition
-from src.agent_executor import stream_opencode
+from src.agent_executor import stream_agent
 from src.feishu_handler import (
     FEISHU_BINDINGS_TABLE_SQL, FEISHU_APP_ID, FEISHU_APP_SECRET,
     FEISHU_BOT_NAME, reply_text, reply_card, add_reaction,
@@ -144,7 +144,8 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
                         user_info += f"\nTo check pending features: GET /api/v5/repos/{repository_part[0]}/{repository_part[1]}/issues?state=open&assignee={gitcode_login}&labels=feature"
             except Exception as e:
                 log.warning(f"Failed to resolve GitCode login for {sender_name}: {e}")
-        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, ["chat"])
+        skills = ["chat"]
+        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills)
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
         wsd = os.path.join(WORKSPACE_DIR, repository)
@@ -154,7 +155,8 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
 
         final_text = ""
         new_oc_session_id = oc_sid
-        for event_type, data in stream_opencode(prompt, wsd, oc_sid, "chat"):
+        backend = get_agent_backend(skills[0]) if skills else "opencode"
+        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend):
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")
             elif event_type == "text":

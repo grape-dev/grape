@@ -39,9 +39,17 @@ log = logging.getLogger("devops-bot")
 EVENT_ROUTING = {}
 _EVENT_ROUTING_FALLBACK = "devops-event-ops"
 
+# Agent 后端路由
+AGENT_ROUTING = {"default_backend": "opencode", "skill_backends": {}}
+
 
 def get_domain_skill(evt_type: str) -> str:
     return EVENT_ROUTING.get(evt_type, _EVENT_ROUTING_FALLBACK)
+
+
+def get_agent_backend(skill_name: str) -> str:
+    """返回 skill 对应的 Agent 后端名称（默认 opencode）"""
+    return AGENT_ROUTING.get("skill_backends", {}).get(skill_name, AGENT_ROUTING.get("default_backend", "opencode"))
 
 
 def _load_routing_config():
@@ -60,4 +68,19 @@ def _load_routing_config():
         log.warning(f"Failed to load event routing config: {_e}")
 
 
+def _load_agent_routing_config():
+    global AGENT_ROUTING
+    _path = os.path.join(CONFIG_DIR, "agent-routing.json")
+    if not os.path.exists(_path):
+        log.info(f"Agent routing config not found at {_path}, using defaults")
+        return
+    try:
+        with open(_path, encoding="utf-8") as _f:
+            AGENT_ROUTING = json.load(_f)
+        log.info(f"Agent routing loaded: default={AGENT_ROUTING.get('default_backend')}, {len(AGENT_ROUTING.get('skill_backends', {}))} skill mappings")
+    except Exception as _e:
+        log.warning(f"Failed to load agent routing config: {_e}")
+
+
 _load_routing_config()
+_load_agent_routing_config()

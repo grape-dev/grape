@@ -1,10 +1,10 @@
 """事件处理器：归一化、验证、路由、执行"""
 import json, os, threading, concurrent.futures, re, urllib.request
 from datetime import datetime
-from src.config import log, GITCODE_WEBHOOK_TOKEN, BOT_USERNAMES, WORKSPACE_DIR, SKILLS_DIR, get_domain_skill
+from src.config import log, GITCODE_WEBHOOK_TOKEN, BOT_USERNAMES, WORKSPACE_DIR, SKILLS_DIR, get_domain_skill, get_agent_backend
 from src.session_manager import db_lock, get_or_create_session, update_session, get_feishu_mapping, get_feishu_group_name_map
 from src.prompt_builder import build_prompt, extract_event_number
-from src.agent_executor import stream_opencode
+from src.agent_executor import stream_agent
 
 # ====== 事件队列 ======
 _MAX_WORKERS = 10
@@ -209,17 +209,19 @@ def _process_event_inner(evt, repo_key):
         if not skills[0]:
             log.info(f"No skill for event type {evt['type']}, skipping")
             return
+        backend = get_agent_backend(skills[0])
+        log.info(f"Backend: {backend}")
 
         feishu_ctx = _get_feishu_context(repo_key, evt['repository'])
         prompt = build_prompt(evt, history, oc_session_id, skills, feishu_ctx)
         log.info(f"Prompt built ({len(prompt)} chars)")
 
-        log.info(f"═══ Spawning opencode with --format json ═══")
+        log.info(f"═══ Spawning agent (backend={backend}) with --format json ═══")
         event_count = 0
         final_text = ""
         new_oc_session_id = oc_session_id
 
-        for event_type, data in stream_opencode(prompt, ws, oc_session_id, evt['type']):
+        for event_type, data in stream_agent(prompt, ws, oc_session_id, evt['type'], backend_name=backend):
             event_count += 1
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")

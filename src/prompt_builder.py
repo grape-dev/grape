@@ -230,7 +230,12 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
 
     if skills:
         skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
-        parts.append(f"Read the file at {skill_path} using the read tool. Execute its instructions step by step. Do not analyze or propose — execute.")
+        if os.path.exists(skill_path):
+            with open(skill_path, encoding="utf-8") as f:
+                skill_content = f.read()
+            parts.append(f"## Skill: {skills[0]}\n{skill_content}\n\nExecute the instructions above step by step. Do not analyze or propose — execute.")
+        else:
+            parts.append(f"Read the file at {skill_path} using the read tool. Execute its instructions step by step. Do not analyze or propose — execute.")
 
     if feishu_ctx:
         repo_key = f"{evt['source']}:{evt['repository']}"
@@ -252,6 +257,11 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
         skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
-        parts.append(f"Read the file at {skill_path} using the read tool. Follow its instructions.")
+        if os.path.exists(skill_path):
+            with open(skill_path, encoding="utf-8") as f:
+                skill_content = f.read()
+            parts.append(f"## Skill: {skills[0]}\n{skill_content}\n\nFollow the instructions above.")
+        else:
+            parts.append(f"Read the file at {skill_path} using the read tool. Follow its instructions.")
     parts.append(build_chat_role_definition())
     return "\n".join(parts)

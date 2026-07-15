@@ -1,0 +1,13 @@
+{
+  "default_backend": "opencode",
+  "skill_backends": {
+    "issue": "opencode",
+    "pr": "opencode",
+    "implementation": "codearts",
+    "chat": "opencode",
+    "build-debug": "codearts",
+    "deploy-guard": "codearts",
+    "incident-triage": "opencode",
+    "changelog-gen": "codearts"
+  }
+}
