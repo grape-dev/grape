@@ -49,61 +49,7 @@ def _acquire_repo_lock(repo_key: str) -> threading.Lock:
 
 
 # ====== 事件归一化 ======
-def normalize_event(raw, event_header):
-    if isinstance(raw, bytes):
-        hex_preview = raw[:200].hex()
-        log.info(f"DEBUG normalize: first bytes hex={hex_preview}")
-        text = raw.decode("utf-8", errors="replace")
-        if "\ufffd" in text:
-            log.warning("UTF-8 decode had replacement chars, trying GBK")
-            try:
-                text = raw.decode("gbk")
-            except:
-                text = raw.decode("utf-8", errors="replace")
-        payload = json.loads(text)
-    elif isinstance(raw, str):
-        payload = json.loads(raw)
-    else:
-        payload = raw
-    event_type_map = {
-        "push": "push", "issues": "issue_opened", "issue": "issue_opened",
-        "Issue Hook": "issue_opened", "Note Hook": "issue_comment",
-        "Merge Request Hook": "pull_request_opened", "pull_request": "pull_request_opened",
-        "tag_push": "tag_created", "release": "release_created", "pipeline": "build_start"
-    }
-    evt_type = event_type_map.get(event_header, event_header)
-    repo = ""
-    if "project" in payload:
-        p = payload["project"]
-        if isinstance(p, dict):
-            repo = p.get("path_with_namespace", p.get("full_name", p.get("name", "")))
-    if not repo and "repository" in payload:
-        r = payload["repository"]
-        if isinstance(r, dict):
-            repo = r.get("full_name", r.get("name", ""))
-        elif isinstance(r, str):
-            repo = r
-    actor = payload.get("user_name", "")
-    if not actor:
-        sender = payload.get("sender", {})
-        if isinstance(sender, dict):
-            actor = sender.get("username", sender.get("login", ""))
-    if not actor:
-        issue = payload.get("issue", {})
-        if isinstance(issue, dict):
-            author = issue.get("author", {})
-            if isinstance(author, dict):
-                actor = author.get("username", "")
-    if not actor:
-        user = payload.get("user", {})
-        if isinstance(user, dict):
-            actor = user.get("username", user.get("login", ""))
-    branch = ""
-    ref = payload.get("ref", "")
-    if isinstance(ref, str) and ref.startswith("refs/heads/"):
-        branch = ref[11:]
-    return {"source": "gitcode", "type": evt_type, "repository": repo, "branch": branch, "actor": actor, "payload": payload}
-
+from src.vcs.adapter import normalize_event
 
 # ====== 事件处理入口 ======
 def process_event(raw_body, headers):
