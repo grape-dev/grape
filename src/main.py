@@ -15,6 +15,7 @@ from src.im.feishu import (
 from src.session_manager import db, db_lock
 from src.im.handler import process_chat
 from src.webhook_handler import Handler
+from src.admin.server import start_admin_server
 
 
 def _sync_feishu_users():
@@ -45,7 +46,11 @@ log.info(f"Accounts loaded: {len(ACCOUNTS)} ({', '.join(ACCOUNTS.keys())})")
 log.info(f"GitCode API token: {'YES' if GITCODE_API_TOKEN else 'NO'}")
 log.info(f"GitCode webhook token: {'YES' if GITCODE_WEBHOOK_TOKEN else 'NO (webhook not verified)'}")
 log.info(f"Feishu bot: {'CONFIGURED' if FEISHU_APP_ID else 'NOT CONFIGURED (set FEISHU_APP_ID)'}")
-log.info(f"Routes: /webhook/gitcode /health /api/sessions")
+log.info(f"Port 8080: /webhook/gitcode /health /api/sessions")
+log.info(f"Port 80: /admin/ (management console)")
+
+# 启动管理台（端口 80）
+threading.Thread(target=start_admin_server, daemon=True, name="admin").start()
 
 server = HTTPServer(("", 8080), Handler)
 server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -61,7 +66,6 @@ for name, acc in ACCOUNTS.items():
         )
         t.start()
         ws_started += 1
-# 向下兼容：如果 ACCOUNTS 中没有配置但 FEISHU_APP_ID 存在
 if ws_started == 0 and FEISHU_APP_ID:
     threading.Thread(target=start_ws, args=(process_chat,), daemon=True, name="fs-ws-default").start()
     ws_started = 1
