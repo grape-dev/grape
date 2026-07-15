@@ -59,17 +59,20 @@ class AdminHandler(BaseHTTPRequestHandler):
     def _path(self):
         return self.path.split('?')[0].rstrip('/') or '/'
 
+    def _serve_admin_page(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.end_headers()
+        self.wfile.write(_PAGE_HTML.encode("utf-8"))
+
     def do_GET(self):
         try:
             path = self._path()
-            if path == "/admin":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-                self.send_header("Pragma", "no-cache")
-                self.send_header("Expires", "0")
-                self.end_headers()
-                self.wfile.write(_PAGE_HTML.encode("utf-8"))
+            if path == "/admin" or path == "/admin/panel":
+                self._serve_admin_page()
                 return
 
             if self.path.startswith("/api/admin/accounts"):
@@ -108,15 +111,34 @@ class AdminHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             if self._path() == "/api/admin/login":
-                data = self._read_body()
-                if data is None:
-                    return
-                if data.get("username") == ADMIN_USER and data.get("password") == ADMIN_PASS:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length) if length > 0 else b""
+                ctype = self.headers.get("Content-Type", "")
+                username = ""
+                password = ""
+                if "application/json" in ctype:
+                    import json as _j
+                    data = _j.loads(body.decode("utf-8", errors="replace"))
+                    username = data.get("username", "")
+                    password = data.get("password", "")
+                else:
+                    import urllib.parse
+                    params = urllib.parse.parse_qs(body.decode())
+                    username = params.get("username", [""])[0]
+                    password = params.get("password", [""])[0]
+                from src.config import log
+                if username == ADMIN_USER and password == ADMIN_PASS:
                     token = hashlib.sha256(f"{ADMIN_USER}:{time.time()}:{os.urandom(8).hex()}".encode()).hexdigest()
                     _admin_tokens[token] = time.time() + 86400
-                    self._json(200, {"token": token})
+                    log.info(f"Admin login success: {username}")
+                    self.send_response(302)
+                    self.send_header("Location", f"/admin/panel?token={token}")
+                    self.end_headers()
                 else:
-                    self._json(401, {"error": "invalid credentials"})
+                    log.info(f"Admin login failed: {username}")
+                    self.send_response(302)
+                    self.send_header("Location", "/admin/?error=1")
+                    self.end_headers()
                 return
 
             if self.path.startswith("/api/admin/accounts/") and self.path.endswith("/test"):

@@ -7,72 +7,37 @@
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#333;min-height:100vh}
 .login-page{display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#667eea 0,#764ba2 100%)}
 .login-card{background:#fff;border-radius:12px;padding:40px;width:360px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,.15)}
-.login-card h1{text-align:center;margin-bottom:8px;font-size:22px;color:#333}
+.login-card h1{text-align:center;margin-bottom:8px;font-size:22px}
 .login-card p{text-align:center;color:#888;font-size:13px;margin-bottom:24px}
 .login-card input{width:100%;padding:12px 16px;border:1px solid #d9d9d9;border-radius:8px;font-size:14px;margin-bottom:12px;outline:0}
 .login-card button{width:100%;padding:12px;background:#667eea;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer}
 .login-error{color:#e74c3c;font-size:13px;text-align:center;margin-top:8px;display:none}
-.admin-page{display:none;padding:40px;text-align:center}
-.admin-page h2{font-size:24px;margin-bottom:12px}
+.panel{padding:24px;max-width:800px;margin:0 auto}
+.panel h2{margin-bottom:20px}
 </style>
 </head><body>
 <div id="loginPage" class="login-page">
 <div class="login-card">
-<h1>DevOps Bot</h1><p>管理台登录</p>
-<input type="text" id="userInput" placeholder="用户名" value="developer">
-<input type="password" id="passInput" placeholder="密码" value="YOUR_SSH_PASSWORD">
-<button id="loginBtn" onclick="doLogin()">登录</button>
-<div class="login-error" id="loginError"></div>
+<h1>DevOps Bot</h1>
+<p>管理台登录</p>
+<form action="/api/admin/login" method="POST">
+<input type="text" name="username" value="developer" placeholder="用户名">
+<input type="password" name="password" value="YOUR_SSH_PASSWORD" placeholder="密码">
+<button type="submit">登录</button>
+</form>
 </div></div>
-<div id="adminPage" class="admin-page">
-<h2>管理台</h2>
-<p id="adminMsg">登录成功</p>
-<button onclick="logout()">退出</button>
+<div id="panelPage" class="panel" style="display:none">
+<h2>DevOps Bot 管理台</h2>
+<p>加载中...</p>
 </div>
 <script>
-var TOKEN='';
-function doLogin(){
-  document.getElementById('loginBtn').disabled=true;
-  document.getElementById('loginBtn').textContent='登录中...';
-  var u=document.getElementById('userInput').value;
-  var p=document.getElementById('passInput').value;
-  var e=document.getElementById('loginError');
-  e.style.display='none';
-  var x=new XMLHttpRequest();
-  x.open('POST','/api/admin/login',true);
-  x.setRequestHeader('Content-Type','application/json');
-  x.timeout=10000;
-  x.onload=function(){
-    document.getElementById('loginBtn').disabled=false;
-    document.getElementById('loginBtn').textContent='登录';
-    if(x.status===200){
-      var d=JSON.parse(x.responseText);
-      TOKEN=d.token;
-      document.getElementById('loginPage').style.display='none';
-      document.getElementById('adminPage').style.display='block';
-    }else{
-      e.textContent='登录失败';
-      e.style.display='block';
-    }
-  };
-  x.onerror=function(){
-    document.getElementById('loginBtn').disabled=false;
-    document.getElementById('loginBtn').textContent='登录';
-    e.textContent='网络错误，请重试';
-    e.style.display='block';
-  };
-  x.ontimeout=function(){
-    document.getElementById('loginBtn').disabled=false;
-    document.getElementById('loginBtn').textContent='登录';
-    e.textContent='请求超时';
-    e.style.display='block';
-  };
-  x.send(JSON.stringify({username:u,password:p}));
-}
-function logout(){
-  TOKEN='';
-  document.getElementById('adminPage').style.display='none';
-  document.getElementById('loginPage').style.display='flex';
+// Extract token from URL after redirect
+var params=new URLSearchParams(window.location.search);
+var token=params.get('token');
+if(token && token.length>0){
+  document.getElementById('loginPage').style.display='none';
+  document.getElementById('panelPage').style.display='block';
+  document.getElementById('panelPage').innerHTML='<h2>DevOps Bot 管理台</h2><p>登录成功，Token: '+token.slice(0,8)+'...</p>';
 }
 </script>
 </body></html>
