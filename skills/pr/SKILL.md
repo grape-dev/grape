@@ -48,9 +48,19 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 2. 在对应 Issue 中评论 `📌 关联 PR #{pr_number}`
 3. 对应 Issue 是 bug → 在 Issue 上更新标签 `labels="bug,triaged"`
 
-### 阶段 2：代码审查
+### 阶段 2：审查
 
-读取 `references/code-review-and-quality.md`，按文件中 5 轴标准逐项审查（正确性、可读性、架构、安全、性能）。记录发现的问题并按严重度标注（Critical / Required / Nit）。
+#### 2.1 源码审查
+
+**源码**指编程语言代码（如 Go、Python、Java、C/C++、TypeScript 等）以及配置文件（`.json`、`.yaml`、`.toml` 等）。根据当前 PR 提交的具体变更来判定源码范围，不绑定特定目录。
+
+读取 `references/code-review-and-quality.md`，按 5 轴标准逐项审查（正确性、可读性、架构、安全、性能）。记录发现的问题并按严重度标注（Critical / Required / Nit）。
+
+#### 2.2 Skill 审查
+
+**Skill（技能）**指 `skills/` 目录下的 `SKILL.md` 文件和 `references/` 参考文档。Skill 是 Agent 执行任务所依赖的指令集，定义了特定事件下 Agent 的行为、原则、流程和约束。
+
+仅当 PR 修改了 `skills/` 目录下的文件时执行。读取 `references/skill-review-and-quality.md`，按其中标准审查技能文件的格式规范、完整性、引用路径、向后兼容性。
 
 ### 阶段 3：IaC 安全扫描
 
