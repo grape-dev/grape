@@ -6,7 +6,7 @@ Skill（技能）是 Agent 的能力定义文件，位于仓库 `skills/` 目录
 
 ### 1. 格式规范
 - 文件以 `---` frontmatter 开头
-- frontmatter 包含 `name`、`description`、`tags`、`version` 字段
+- frontmatter 包含 `name`、`description`、`tags` 字段
 - `name` 与目录名一致
 - `description` 清晰说明 skill 的功能概要、适用场景和触发词
 
@@ -23,7 +23,6 @@ Skill（技能）是 Agent 的能力定义文件，位于仓库 `skills/` 目录
 
 ### 4. 向后兼容
 - 已有事件类型的处理流程未被破坏
-- `version` 已递增（破坏性变更升大版本）
 - 无循环引用（不读取自身 SKILL.md）
 - 跨会话 Skill 无隐式状态共享（禁止共享内存/全局变量/DB 中间表）
 
@@ -101,7 +100,7 @@ KooCLI 命令必须遵循的格式：
 | 序号 | 检查项 |
 |------|--------|
 | 1 | □ 目录命名符合规范 `huawei-cloud-{product}-{function}` |
-| 2 | □ SKILL.md Frontmatter 完整（`name`, `description`, `tags`, `version`） |
+| 2 | □ SKILL.md Frontmatter 完整（`name`, `description`, `tags`） |
 | 3 | □ SKILL.md 正文章节齐全（概述→前置条件→工作流→核心命令→参数→参考） |
 | 4 | □ `references/cli-installation-guide.md`（如涉及 CLI 操作） |
 | 5 | □ `references/iam-policies.md` 声明所需权限 |
