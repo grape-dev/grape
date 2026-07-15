@@ -54,26 +54,21 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 ### 阶段 3：安全扫描
 
-#### 扫描维度
+### 阶段 3：IaC 安全扫描
 
-1. **密钥与凭据泄露** — AWS Key（`AKIA[0-9A-Z]{16}`）、GitHub Token（`ghp_`）、私钥、JWT、密码硬编码
-2. **不安全代码模式** — SQL 拼接、命令注入、路径遍历、SSRF、反序列化
-3. **依赖漏洞** — 检查 go.sum、package-lock.json、requirements.txt 中的已知漏洞
-4. **IaC 安全** — Kubernetes 特权容器、hostPath、Terraform 公开 S3 bucket
+在阶段 2 代码审查的安全轴覆盖的应用层安全之外，额外扫描 IaC（基础设施即代码）文件：
 
-#### 严重程度
-
-| 级别 | 处理要求 |
-|------|---------|
-| Critical | 阻止合并，立即修复 |
-| High | 阻止合并，24h 内修复 |
-| Medium | 警告，下个迭代修复 |
-| Low | 记录，择时修复 |
+| 文件类型 | 关注点 |
+|---------|--------|
+| Kubernetes Manifest | 特权容器、hostPath 挂载、`securityContext` 缺失、`runAsRoot`、资源限制未设置 |
+| Terraform / OpenTofu | 公开 S3 bucket、`ingress` 全开放（`0.0.0.0/0`）、硬编码凭据、未启用加密 |
+| Dockerfile | `FROM latest`、`ADD` 替代 `COPY`、root 用户运行、多余端口暴露 |
+| Helm Chart | values 中的敏感默认值、RBAC 权限过度、镜像拉取策略不当 |
 
 ### 阶段 4：合并检查
 
-- [ ] 无 Critical/High 级别安全问题
-- [ ] 代码审查通过或无严重问题
+- [ ] 代码审查通过（阶段 2）无严重问题
+- [ ] IaC 安全扫描（阶段 3）无隐患
 - [ ] 测试通过（PR 描述中声明）
 - [ ] 无合并冲突
 - [ ] 关联 Issue 已 accepted 或 triaged
