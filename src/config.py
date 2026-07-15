@@ -125,6 +125,15 @@ def get_account(name=None) -> dict:
     return ACCOUNTS.get(name or _DEFAULT_ACCOUNT, ACCOUNTS.get("default", {}))
 
 
+def save_accounts(new_accounts: list):
+    """将 accounts 列表写回 accounts.json 并重载"""
+    global ACCOUNTS
+    path = os.path.join(CONFIG_DIR, "accounts.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"default": _DEFAULT_ACCOUNT, "accounts": new_accounts}, f, indent=2, ensure_ascii=False)
+    _load_accounts()
+
+
 def resolve_account_by_webhook_token(token: str) -> str | None:
     for name, a in ACCOUNTS.items():
         if a.get("gitcode_webhook_token") == token:
