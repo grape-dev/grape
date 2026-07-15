@@ -525,7 +525,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
 # ====== WebSocket 事件处理 ======
 # 通过 lark-oapi SDK 的 WSClient 建立长连接
 
-_ws_clients: dict[str, Any] = {}
+_ws_clients: dict = {}
 
 
 def parse_event_data(event):
