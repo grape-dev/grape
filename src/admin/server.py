@@ -56,9 +56,13 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.end_headers()
 
+    def _path(self):
+        return self.path.split('?')[0].rstrip('/') or '/'
+
     def do_GET(self):
         try:
-            if self.path == "/admin/" or self.path == "/admin":
+            path = self._path()
+            if path == "/admin":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -103,7 +107,7 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            if self.path == "/api/admin/login":
+            if self._path() == "/api/admin/login":
                 data = self._read_body()
                 if data is None:
                     return
