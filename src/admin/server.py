@@ -59,20 +59,49 @@ class AdminHandler(BaseHTTPRequestHandler):
     def _path(self):
         return self.path.split('?')[0].rstrip('/') or '/'
 
-    def _serve_admin_page(self):
+    def _serve_admin_page(self, token=""):
+        html = _PAGE_HTML
+        # If token provided, embed account data directly into the page
+        if token and token in _admin_tokens and time.time() < _admin_tokens[token]:
+            from src.config import ACCOUNTS
+            import json as _j
+            items = []
+            for n, a in ACCOUNTS.items():
+                items.append({
+                    "name": n,
+                    "gitcode_api_token": "YES" if a.get("gitcode_api_token") else "NO",
+                    "feishu_app_id": "YES" if a.get("feishu_app_id") else "NO",
+                    "huawei_cloud_ak": "YES" if a.get("huawei_cloud_ak") else "NO",
+                    "detail": {k: a.get(k, "") for k in ["name","gitcode_api_token","gitcode_webhook_token","feishu_app_id","feishu_app_secret","huawei_cloud_ak","huawei_cloud_sk","bot_usernames"]}
+                })
+            embed = _j.dumps(items, ensure_ascii=False)
+            html = html.replace("/*__ACCOUNTS__*/", embed)
+            html = html.replace("/*__TOKEN__*/", token)
+        else:
+            html = html.replace("/*__ACCOUNTS__*/", "null")
+            html = html.replace("/*__TOKEN__*/", "")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
         self.end_headers()
-        self.wfile.write(_PAGE_HTML.encode("utf-8"))
+        self.wfile.write(html.encode("utf-8"))
 
     def do_GET(self):
         try:
             path = self._path()
-            if path == "/admin" or path == "/admin/panel":
+            if path == "/admin":
                 self._serve_admin_page()
+                return
+            if path == "/admin/panel":
+                token = ""
+                qs = self.path.split("?", 1)
+                if len(qs) > 1:
+                    import urllib.parse as _up
+                    q = _up.parse_qs(qs[1])
+                    token = q.get("token", [""])[0]
+                self._serve_admin_page(token)
                 return
 
             if self.path.startswith("/api/admin/accounts"):
@@ -131,14 +160,20 @@ class AdminHandler(BaseHTTPRequestHandler):
                     token = hashlib.sha256(f"{ADMIN_USER}:{time.time()}:{os.urandom(8).hex()}".encode()).hexdigest()
                     _admin_tokens[token] = time.time() + 86400
                     log.info(f"Admin login success: {username}")
-                    self.send_response(302)
-                    self.send_header("Location", f"/admin/panel?token={token}")
-                    self.end_headers()
+                    if "application/json" in ctype:
+                        self._json(200, {"token": token})
+                    else:
+                        self.send_response(302)
+                        self.send_header("Location", f"/admin/panel?token={token}")
+                        self.end_headers()
                 else:
                     log.info(f"Admin login failed: {username}")
-                    self.send_response(302)
-                    self.send_header("Location", "/admin/?error=1")
-                    self.end_headers()
+                    if "application/json" in ctype:
+                        self._json(401, {"error": "invalid credentials"})
+                    else:
+                        self.send_response(302)
+                        self.send_header("Location", "/admin/?error=1")
+                        self.end_headers()
                 return
 
             if self.path.startswith("/api/admin/accounts/") and self.path.endswith("/test"):
