@@ -52,8 +52,6 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 读取 `references/code-review-and-quality.md`，按文件中 5 轴标准逐项审查（正确性、可读性、架构、安全、性能）。记录发现的问题并按严重度标注（Critical / Required / Nit）。
 
-### 阶段 3：安全扫描
-
 ### 阶段 3：IaC 安全扫描
 
 在阶段 2 代码审查的安全轴覆盖的应用层安全之外，额外扫描 IaC（基础设施即代码）文件：
