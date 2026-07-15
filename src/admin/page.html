@@ -57,10 +57,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </head><body>
 <div class="login-page" id="loginPage">
 <div class="login-card"><h1>DevOps Bot</h1><p>管理台登录</p>
+<form id="loginForm" onsubmit="return doLogin(event)">
 <input type="text" id="userInput" placeholder="用户名" value="developer">
 <input type="password" id="passInput" placeholder="密码" value="YOUR_SSH_PASSWORD">
-<button onclick="login()">登录</button>
-<div class="login-error" id="loginError"></div></div></div>
+<button type="submit">登录</button>
+<div class="login-error" id="loginError"></div></form></div></div>
 <div class="admin-page" id="adminPage">
 <div class="header"><h2>DevOps Bot &#x7ba1;&#x7406;&#x53f0;</h2>
 <div><span class="user-info" id="userDisplay">developer</span><a class="logout" onclick="logout()">&#x9000;&#x51fa;</a></div></div>
@@ -104,9 +105,12 @@ function api(method,path,body,callback){
   if(body)x.send(JSON.stringify(body));
   else x.send();
 }
-function login(){
+function doLogin(event){
+  event.preventDefault();
   var u=document.getElementById('userInput').value;
   var p=document.getElementById('passInput').value;
+  var errEl=document.getElementById('loginError');
+  errEl.style.display='none';
   var x=new XMLHttpRequest();
   x.open('POST','/api/admin/login',true);
   x.setRequestHeader('Content-Type','application/json');
@@ -116,17 +120,19 @@ function login(){
       TOKEN=d.token;
       document.getElementById('loginPage').style.display='none';
       document.getElementById('adminPage').style.display='block';
+      document.getElementById('userDisplay').textContent='developer';
       loadAccounts();
     }else{
-      document.getElementById('loginError').textContent='\u767b\u5f55\u5931\u8d25';
-      document.getElementById('loginError').style.display='block';
+      errEl.textContent='\u767b\u5f55\u5931\u8d25';
+      errEl.style.display='block';
     }
   };
   x.onerror=function(){
-    document.getElementById('loginError').textContent='\u7f51\u7edc\u9519\u8bef';
-    document.getElementById('loginError').style.display='block';
+    errEl.textContent='\u7f51\u7edc\u9519\u8bef\uff0c\u8bf7\u68c0\u67e5\u8fde\u63a5';
+    errEl.style.display='block';
   };
   x.send(JSON.stringify({username:u,password:p}));
+  return false;
 }
 function logout(){TOKEN='';document.getElementById('adminPage').style.display='none';document.getElementById('loginPage').style.display='flex'}
 function mask(v){if(v&&v.length>8)return v.slice(0,4)+'****'+v.slice(-4);return v?'****':'\u7a7a'}
