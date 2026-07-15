@@ -13,19 +13,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .login-card button{width:100%;padding:12px;background:#667eea;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer}
 .header{background:#fff;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 1px 4px rgba(0,0,0,.06)}
 .header h2{font-size:16px;font-weight:600}
-.header a{font-size:13px;color:#e74c3c;cursor:pointer;text-decoration:none;margin-left:16px}
+.header a{font-size:13px;color:#e74c3c;cursor:pointer;margin-left:16px}
 .main{display:flex;max-width:1200px;margin:24px auto;padding:0 24px;gap:24px}
 .sidebar{width:260px;flex-shrink:0}
-.sidebar h3{font-size:13px;color:#888;margin-bottom:8px;padding:0 12px}
+.sidebar h3{font-size:13px;color:#888;padding:0 12px}
 .account-list{background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-.account-item{padding:12px 16px;cursor:pointer;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between}
-.account-item:last-child{border-bottom:none}
+.account-item{padding:12px 16px;cursor:pointer;border-bottom:1px solid #f0f0f0}
 .account-item:hover{background:#f8f9ff}
 .account-item.active{background:#eef0ff;font-weight:600}
-.add-btn{display:block;width:100%;padding:12px;text-align:center;color:#667eea;cursor:pointer;font-size:14px;border-top:1px solid #f0f0f0}
+.add-btn{display:block;padding:12px;text-align:center;color:#667eea;cursor:pointer;border-top:1px solid #f0f0f0}
 .panel{flex:1;background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.06);padding:24px;display:none}
 .panel.active{display:block}
-.panel h3{font-size:16px;margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid #f0f0f0}
+.panel h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0}
 .form-row{margin-bottom:16px}
 .form-row label{display:block;font-size:13px;color:#666;margin-bottom:4px}
 .form-row input{width:100%;padding:10px 14px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px;outline:0}
@@ -40,147 +39,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .toast.err{background:#e74c3c}
 .admin-page{display:none}
 @media(max-width:767px){.main{flex-direction:column;padding:0 12px}.sidebar{width:100%}}
-</style>
-</head><body>
-<script>
-var TOKEN = '';
-var CURRENT = '';
-var ORIG = {};
-var FIELDS = ['Name','GitToken','GitWebhook','FeishuId','FeishuSecret','HwAk','HwSk','Bots'];
-var API_FIELDS = ['name','gitcode_api_token','gitcode_webhook_token','feishu_app_id','feishu_app_secret','huawei_cloud_ak','huawei_cloud_sk','bot_usernames'];
-
-// Extract token from URL
-var params = new URLSearchParams(window.location.search);
-if(params.get('token')){
-  TOKEN = params.get('token');
-  document.getElementById('loginPage').style.display = 'none';
-  document.getElementById('adminPage').style.display = 'block';
-  loadAccounts();
-}
-
-function showToast(msg,type){
-  var t=document.getElementById('toast');
-  t.textContent=msg;t.className='toast '+type;
-  t.classList.add('show');
-  setTimeout(function(){t.classList.remove('show')},3000);
-}
-
-function api(method,path,body,cb){
-  var x=new XMLHttpRequest();
-  x.open(method,'/api/admin/accounts'+path,true);
-  x.setRequestHeader('Authorization','Bearer '+TOKEN);
-  x.setRequestHeader('Content-Type','application/json');
-  x.onload=function(){
-    var ok=x.status>=200&&x.status<300;
-    try{cb(ok,JSON.parse(x.responseText),x.status);}
-    catch(e){cb(false,{error:'parse'},x.status);}
-  };
-  x.onerror=function(){cb(false,{error:'network'},0);};
-  x.send(body?JSON.stringify(body):null);
-}
-
-function loadAccounts(){
-  api('GET','',null,function(ok,data){
-    if(!ok){showToast('加载失败','err');return;}
-    var list=document.getElementById('accountList');
-    list.innerHTML='';
-    for(var i=0;i<data.length;i++){
-      var a=data[i];
-      var d=document.createElement('div');
-      d.className='account-item'+(a.name===CURRENT?' active':'');
-      d.innerHTML='<span>'+a.name+'</span><span>'+(a.gitcode_api_token==='YES'?'\u2705':'\u274c')+'</span>';
-      d.onclick=(function(n){return function(){selectAccount(n);}})(a.name);
-      list.appendChild(d);
-    }
-    var add=document.createElement('div');
-    add.className='add-btn';
-    add.textContent='+ \u65b0\u589e';
-    add.onclick=function(){
-      CURRENT='';
-      document.getElementById('panelTitle').textContent='\u65b0\u589e\u8d26\u6237';
-      for(var i=0;i<FIELDS.length;i++)document.getElementById('f'+FIELDS[i]).value='';
-      document.getElementById('deleteBtn').style.display='none';
-      document.getElementById('panel').classList.add('active');
-    };
-    list.appendChild(add);
-    if(!CURRENT&&data.length>0)CURRENT=data[0].name;
-    if(CURRENT)selectAccount(CURRENT);
-  });
-}
-
-function selectAccount(n){
-  CURRENT=n;
-  var items=document.getElementById('accountList').getElementsByClassName('account-item');
-  for(var i=0;i<items.length;i++){
-    items[i].className='account-item';
-    if(items[i].textContent.indexOf(n)===0)items[i].className+=' active';
-  }
-  api('GET','/'+encodeURIComponent(n),null,function(ok,data){
-    if(!ok){showToast('加载失败','err');return;}
-    ORIG=data;
-    document.getElementById('panelTitle').textContent='\u7f16\u8f91 '+data.name;
-    for(var i=0;i<FIELDS.length;i++)document.getElementById('f'+FIELDS[i]).value=data[API_FIELDS[i]]||'';
-    document.getElementById('fName').value=data.name;
-    document.getElementById('deleteBtn').style.display=(data.name==='default'?'none':'inline-block');
-    document.getElementById('panel').classList.add('active');
-  });
-}
-
-function collectForm(){
-  var o={};
-  for(var i=0;i<FIELDS.length;i++){
-    var el=document.getElementById('f'+FIELDS[i]);
-    var val=el.value;
-    var key=API_FIELDS[i];
-    if(el.className.indexOf('secret')>=0&&val===mask(ORIG[key]))continue;
-    o[key]=val;
-  }
-  if(!o.name)o.name=document.getElementById('fName').value;
-  return Object.keys(o).length===0?null:o;
-}
-
-function mask(v){
-  return v&&v.length>8?v.slice(0,4)+'****'+v.slice(-4):v?'****':'';
-}
-
-function saveAccount(){
-  var data=collectForm();
-  if(!data){showToast('无修改','err');return;}
-  var isNew=(CURRENT==='');
-  var path=isNew?'/'+encodeURIComponent(data.name||'new'):'/'+encodeURIComponent(CURRENT);
-  api('PUT',path,data,function(ok,res){
-    if(ok){
-      showToast('保存成功','ok');
-      if(isNew)CURRENT=res.name;
-      selectAccount(CURRENT);
-    }else{
-      showToast('保存失败: '+(res.error||''),'err');
-    }
-  });
-}
-
-function deleteAccount(){
-  if(!confirm('确定删除 '+CURRENT+' ?'))return;
-  api('DELETE','/'+encodeURIComponent(CURRENT),null,function(ok){
-    if(ok){
-      showToast('已删除','ok');
-      CURRENT='';
-      loadAccounts();
-    }else showToast('删除失败','err');
-  });
-}
-
-function testAccount(){
-  api('POST','/'+encodeURIComponent(CURRENT)+'/test',null,function(ok,data){
-    showToast(data.status||data.error||'测试完成',ok?'ok':'err');
-  });
-}
-
-function logout(){
-  window.location.href='/admin/';
-}
-</script>
-</head><body>
+</style></head><body>
 <div id="loginPage" class="login-page">
 <div class="login-card">
 <h1>DevOps Bot</h1><p>管理台登录</p>
@@ -208,4 +67,82 @@ function logout(){
 <button class="btn-danger" id="deleteBtn" onclick="deleteAccount()">删除</button>
 </div></div></div></div>
 <div class="toast" id="toast"></div>
+<script>
+var TOKEN='',CURRENT='',ORIG={};
+var FIELDS=['Name','GitToken','GitWebhook','FeishuId','FeishuSecret','HwAk','HwSk','Bots'];
+var API_FIELDS=['name','gitcode_api_token','gitcode_webhook_token','feishu_app_id','feishu_app_secret','huawei_cloud_ak','huawei_cloud_sk','bot_usernames'];
+var params=new URLSearchParams(window.location.search);
+if(params.get('token')){
+  TOKEN=params.get('token');
+  document.getElementById('loginPage').style.display='none';
+  document.getElementById('adminPage').style.display='block';
+  loadAccounts();
+}
+function showToast(msg,t){var e=document.getElementById('toast');e.textContent=msg;e.className='toast '+t;e.classList.add('show');setTimeout(function(){e.classList.remove('show')},3000);}
+function api(m,p,b,cb){var x=new XMLHttpRequest();x.open(m,'/api/admin/accounts'+p,true);x.setRequestHeader('Authorization','Bearer '+TOKEN);x.setRequestHeader('Content-Type','application/json');x.onload=function(){try{cb(x.status>=200&&x.status<300,JSON.parse(x.responseText),x.status);}catch(e){cb(false,{error:'parse'},x.status);}};x.onerror=function(){cb(false,{error:'network'},0);};x.send(b?JSON.stringify(b):null);}
+function loadAccounts(){
+  api('GET','',null,function(ok,data){
+    if(!ok){showToast('加载失败','err');return;}
+    var list=document.getElementById('accountList');list.innerHTML='';
+    for(var i=0;i<data.length;i++){
+      var a=data[i],d=document.createElement('div');
+      d.className='account-item'+(a.name===CURRENT?' active':'');
+      d.innerHTML='<span>'+a.name+'</span><span>'+(a.gitcode_api_token==='YES'?'\u2713':'\u2717')+'</span>';
+      d.onclick=function(n){return function(){selectAccount(n);}}(a.name);
+      list.appendChild(d);
+    }
+    var ad=document.createElement('div');ad.className='add-btn';ad.textContent='+ \u65b0\u589e';
+    ad.onclick=function(){
+      CURRENT='';document.getElementById('panelTitle').textContent='\u65b0\u589e\u8d26\u6237';
+      for(var i=0;i<FIELDS.length;i++)document.getElementById('f'+FIELDS[i]).value='';
+      document.getElementById('deleteBtn').style.display='none';document.getElementById('panel').classList.add('active');
+    };
+    list.appendChild(ad);
+    if(!CURRENT&&data.length>0)CURRENT=data[0].name;
+    if(CURRENT)selectAccount(CURRENT);
+  });
+}
+function selectAccount(n){
+  CURRENT=n;
+  var items=document.getElementById('accountList').children;
+  for(var i=0;i<items.length;i++){items[i].className='account-item';if(items[i].textContent.indexOf(n)===0)items[i].className+=' active';}
+  api('GET','/'+encodeURIComponent(n),null,function(ok,data){
+    if(!ok){showToast('加载失败','err');return;}
+    ORIG=data;
+    document.getElementById('panelTitle').textContent='\u7f16\u8f91 '+data.name;
+    for(var i=0;i<FIELDS.length;i++)document.getElementById('f'+FIELDS[i]).value=data[API_FIELDS[i]]||'';
+    document.getElementById('fName').value=data.name;
+    document.getElementById('deleteBtn').style.display=(data.name==='default'?'none':'inline-block');
+    document.getElementById('panel').classList.add('active');
+  });
+}
+function mask(v){return v&&v.length>8?v.slice(0,4)+'****'+v.slice(-4):v?'****':'';}
+function collectForm(){
+  var o={};
+  for(var i=0;i<FIELDS.length;i++){
+    var el=document.getElementById('f'+FIELDS[i]);
+    var v=el.value,k=API_FIELDS[i];
+    if(el.className.indexOf('secret')>=0&&v===mask(ORIG[k]))continue;
+    o[k]=v;
+  }
+  if(!o.name)o.name=document.getElementById('fName').value;
+  return Object.keys(o).length?o:null;
+}
+function saveAccount(){
+  var d=collectForm();if(!d){showToast('无修改','err');return;}
+  var n=CURRENT==='',p=n?'/'+encodeURIComponent(d.name||'new'):'/'+encodeURIComponent(CURRENT);
+  api('PUT',p,d,function(ok,res){
+    if(ok){showToast('保存成功','ok');if(n)CURRENT=res.name;selectAccount(CURRENT);}
+    else showToast('保存失败: '+(res.error||''),'err');
+  });
+}
+function deleteAccount(){
+  if(!confirm('\u786e\u5b9a\u5220\u9664 '+CURRENT+' ?'))return;
+  api('DELETE','/'+encodeURIComponent(CURRENT),null,function(ok){if(ok){showToast('已删除','ok');CURRENT='';loadAccounts();}else showToast('删除失败','err');});
+}
+function testAccount(){
+  api('POST','/'+encodeURIComponent(CURRENT)+'/test',null,function(ok,d){showToast(d.status||d.error||'\u6d4b\u8bd5\u5b8c\u6210',ok?'ok':'err');});
+}
+function logout(){window.location.href='/admin/';}
+</script>
 </body></html>
