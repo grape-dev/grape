@@ -4,40 +4,208 @@
 <title>DevOps Bot 管理台</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#333;min-height:100vh}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#333}
 .login-page{display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#667eea 0,#764ba2 100%)}
 .login-card{background:#fff;border-radius:12px;padding:40px;width:360px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,.15)}
 .login-card h1{text-align:center;margin-bottom:8px;font-size:22px}
 .login-card p{text-align:center;color:#888;font-size:13px;margin-bottom:24px}
 .login-card input{width:100%;padding:12px 16px;border:1px solid #d9d9d9;border-radius:8px;font-size:14px;margin-bottom:12px;outline:0}
 .login-card button{width:100%;padding:12px;background:#667eea;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer}
-.login-error{color:#e74c3c;font-size:13px;text-align:center;margin-top:8px;display:none}
-.panel{padding:24px;max-width:800px;margin:0 auto}
-.panel h2{margin-bottom:20px}
+.header{background:#fff;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.header h2{font-size:16px;font-weight:600}
+.header a{font-size:13px;color:#e74c3c;cursor:pointer;text-decoration:none;margin-left:16px}
+.main{display:flex;max-width:1200px;margin:24px auto;padding:0 24px;gap:24px}
+.sidebar{width:260px;flex-shrink:0}
+.sidebar h3{font-size:13px;color:#888;margin-bottom:8px;padding:0 12px}
+.account-list{background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.account-item{padding:12px 16px;cursor:pointer;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between}
+.account-item:last-child{border-bottom:none}
+.account-item:hover{background:#f8f9ff}
+.account-item.active{background:#eef0ff;font-weight:600}
+.add-btn{display:block;width:100%;padding:12px;text-align:center;color:#667eea;cursor:pointer;font-size:14px;border-top:1px solid #f0f0f0}
+.panel{flex:1;background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.06);padding:24px;display:none}
+.panel.active{display:block}
+.panel h3{font-size:16px;margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid #f0f0f0}
+.form-row{margin-bottom:16px}
+.form-row label{display:block;font-size:13px;color:#666;margin-bottom:4px}
+.form-row input{width:100%;padding:10px 14px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px;outline:0}
+.actions{display:flex;gap:8px;margin-top:20px;padding-top:16px;border-top:1px solid #f0f0f0}
+.actions button{padding:10px 20px;border:none;border-radius:6px;font-size:13px;cursor:pointer}
+.btn-primary{background:#667eea;color:#fff}
+.btn-secondary{background:#e8e8e8;color:#333}
+.btn-danger{background:#e74c3c;color:#fff}
+.toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:8px;color:#fff;font-size:13px;z-index:999;opacity:0;transition:opacity .3s}
+.toast.show{opacity:1}
+.toast.ok{background:#27ae60}
+.toast.err{background:#e74c3c}
+.admin-page{display:none}
+@media(max-width:767px){.main{flex-direction:column;padding:0 12px}.sidebar{width:100%}}
 </style>
+</head><body>
+<script>
+var TOKEN = '';
+var CURRENT = '';
+var ORIG = {};
+var FIELDS = ['Name','GitToken','GitWebhook','FeishuId','FeishuSecret','HwAk','HwSk','Bots'];
+var API_FIELDS = ['name','gitcode_api_token','gitcode_webhook_token','feishu_app_id','feishu_app_secret','huawei_cloud_ak','huawei_cloud_sk','bot_usernames'];
+
+// Extract token from URL
+var params = new URLSearchParams(window.location.search);
+if(params.get('token')){
+  TOKEN = params.get('token');
+  document.getElementById('loginPage').style.display = 'none';
+  document.getElementById('adminPage').style.display = 'block';
+  loadAccounts();
+}
+
+function showToast(msg,type){
+  var t=document.getElementById('toast');
+  t.textContent=msg;t.className='toast '+type;
+  t.classList.add('show');
+  setTimeout(function(){t.classList.remove('show')},3000);
+}
+
+function api(method,path,body,cb){
+  var x=new XMLHttpRequest();
+  x.open(method,'/api/admin/accounts'+path,true);
+  x.setRequestHeader('Authorization','Bearer '+TOKEN);
+  x.setRequestHeader('Content-Type','application/json');
+  x.onload=function(){
+    var ok=x.status>=200&&x.status<300;
+    try{cb(ok,JSON.parse(x.responseText),x.status);}
+    catch(e){cb(false,{error:'parse'},x.status);}
+  };
+  x.onerror=function(){cb(false,{error:'network'},0);};
+  x.send(body?JSON.stringify(body):null);
+}
+
+function loadAccounts(){
+  api('GET','',null,function(ok,data){
+    if(!ok){showToast('加载失败','err');return;}
+    var list=document.getElementById('accountList');
+    list.innerHTML='';
+    for(var i=0;i<data.length;i++){
+      var a=data[i];
+      var d=document.createElement('div');
+      d.className='account-item'+(a.name===CURRENT?' active':'');
+      d.innerHTML='<span>'+a.name+'</span><span>'+(a.gitcode_api_token==='YES'?'\u2705':'\u274c')+'</span>';
+      d.onclick=(function(n){return function(){selectAccount(n);}})(a.name);
+      list.appendChild(d);
+    }
+    var add=document.createElement('div');
+    add.className='add-btn';
+    add.textContent='+ \u65b0\u589e';
+    add.onclick=function(){
+      CURRENT='';
+      document.getElementById('panelTitle').textContent='\u65b0\u589e\u8d26\u6237';
+      for(var i=0;i<FIELDS.length;i++)document.getElementById('f'+FIELDS[i]).value='';
+      document.getElementById('deleteBtn').style.display='none';
+      document.getElementById('panel').classList.add('active');
+    };
+    list.appendChild(add);
+    if(!CURRENT&&data.length>0)CURRENT=data[0].name;
+    if(CURRENT)selectAccount(CURRENT);
+  });
+}
+
+function selectAccount(n){
+  CURRENT=n;
+  var items=document.getElementById('accountList').getElementsByClassName('account-item');
+  for(var i=0;i<items.length;i++){
+    items[i].className='account-item';
+    if(items[i].textContent.indexOf(n)===0)items[i].className+=' active';
+  }
+  api('GET','/'+encodeURIComponent(n),null,function(ok,data){
+    if(!ok){showToast('加载失败','err');return;}
+    ORIG=data;
+    document.getElementById('panelTitle').textContent='\u7f16\u8f91 '+data.name;
+    for(var i=0;i<FIELDS.length;i++)document.getElementById('f'+FIELDS[i]).value=data[API_FIELDS[i]]||'';
+    document.getElementById('fName').value=data.name;
+    document.getElementById('deleteBtn').style.display=(data.name==='default'?'none':'inline-block');
+    document.getElementById('panel').classList.add('active');
+  });
+}
+
+function collectForm(){
+  var o={};
+  for(var i=0;i<FIELDS.length;i++){
+    var el=document.getElementById('f'+FIELDS[i]);
+    var val=el.value;
+    var key=API_FIELDS[i];
+    if(el.className.indexOf('secret')>=0&&val===mask(ORIG[key]))continue;
+    o[key]=val;
+  }
+  if(!o.name)o.name=document.getElementById('fName').value;
+  return Object.keys(o).length===0?null:o;
+}
+
+function mask(v){
+  return v&&v.length>8?v.slice(0,4)+'****'+v.slice(-4):v?'****':'';
+}
+
+function saveAccount(){
+  var data=collectForm();
+  if(!data){showToast('无修改','err');return;}
+  var isNew=(CURRENT==='');
+  var path=isNew?'/'+encodeURIComponent(data.name||'new'):'/'+encodeURIComponent(CURRENT);
+  api('PUT',path,data,function(ok,res){
+    if(ok){
+      showToast('保存成功','ok');
+      if(isNew)CURRENT=res.name;
+      selectAccount(CURRENT);
+    }else{
+      showToast('保存失败: '+(res.error||''),'err');
+    }
+  });
+}
+
+function deleteAccount(){
+  if(!confirm('确定删除 '+CURRENT+' ?'))return;
+  api('DELETE','/'+encodeURIComponent(CURRENT),null,function(ok){
+    if(ok){
+      showToast('已删除','ok');
+      CURRENT='';
+      loadAccounts();
+    }else showToast('删除失败','err');
+  });
+}
+
+function testAccount(){
+  api('POST','/'+encodeURIComponent(CURRENT)+'/test',null,function(ok,data){
+    showToast(data.status||data.error||'测试完成',ok?'ok':'err');
+  });
+}
+
+function logout(){
+  window.location.href='/admin/';
+}
+</script>
 </head><body>
 <div id="loginPage" class="login-page">
 <div class="login-card">
-<h1>DevOps Bot</h1>
-<p>管理台登录</p>
+<h1>DevOps Bot</h1><p>管理台登录</p>
 <form action="/api/admin/login" method="POST">
 <input type="text" name="username" value="developer" placeholder="用户名">
 <input type="password" name="password" value="YOUR_SSH_PASSWORD" placeholder="密码">
 <button type="submit">登录</button>
-</form>
-</div></div>
-<div id="panelPage" class="panel" style="display:none">
-<h2>DevOps Bot 管理台</h2>
-<p>加载中...</p>
-</div>
-<script>
-// Extract token from URL after redirect
-var params=new URLSearchParams(window.location.search);
-var token=params.get('token');
-if(token && token.length>0){
-  document.getElementById('loginPage').style.display='none';
-  document.getElementById('panelPage').style.display='block';
-  document.getElementById('panelPage').innerHTML='<h2>DevOps Bot 管理台</h2><p>登录成功，Token: '+token.slice(0,8)+'...</p>';
-}
-</script>
+</form></div></div>
+<div id="adminPage" class="admin-page">
+<div class="header"><h2>DevOps Bot 管理台</h2><a onclick="logout()">退出</a></div>
+<div class="main">
+<div class="sidebar"><h3>账户列表</h3><div class="account-list" id="accountList"></div></div>
+<div class="panel" id="panel"><h3 id="panelTitle">编辑账户</h3>
+<div class="form-row"><label>名称</label><input id="fName"></div>
+<div class="form-row"><label>GitCode API Token</label><input id="fGitToken" class="secret"></div>
+<div class="form-row"><label>GitCode Webhook Token</label><input id="fGitWebhook" class="secret"></div>
+<div class="form-row"><label>飞书 App ID</label><input id="fFeishuId" class="secret"></div>
+<div class="form-row"><label>飞书 App Secret</label><input id="fFeishuSecret" class="secret"></div>
+<div class="form-row"><label>华为云 Access Key</label><input id="fHwAk" class="secret"></div>
+<div class="form-row"><label>华为云 Secret Key</label><input id="fHwSk" class="secret"></div>
+<div class="form-row"><label>Bot 用户名（逗号分隔）</label><input id="fBots" class="secret"></div>
+<div class="actions">
+<button class="btn-primary" onclick="saveAccount()">保存</button>
+<button class="btn-secondary" onclick="testAccount()">测试连接</button>
+<button class="btn-danger" id="deleteBtn" onclick="deleteAccount()">删除</button>
+</div></div></div></div>
+<div class="toast" id="toast"></div>
 </body></html>
