@@ -82,5 +82,52 @@ def _load_agent_routing_config():
         log.warning(f"Failed to load agent routing config: {_e}")
 
 
+# ====== 多账户配置 ======
+ACCOUNTS = {}
+_DEFAULT_ACCOUNT = "default"
+
+
+def _load_accounts():
+    global ACCOUNTS, _DEFAULT_ACCOUNT
+    path = os.path.join(CONFIG_DIR, "accounts.json")
+    if not os.path.exists(path):
+        ACCOUNTS["default"] = {
+            "gitcode_api_token": GITCODE_API_TOKEN,
+            "gitcode_webhook_token": GITCODE_WEBHOOK_TOKEN,
+            "feishu_app_id": os.environ.get("FEISHU_APP_ID", ""),
+            "feishu_app_secret": os.environ.get("FEISHU_APP_SECRET", ""),
+            "bot_usernames": BOT_USERNAMES,
+        }
+        log.info(f"Loaded single default account from .env (GITCODE_API_TOKEN={'YES' if GITCODE_API_TOKEN else 'NO'})")
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        for a in data.get("accounts", []):
+            a.setdefault("gitcode_api_token", os.environ.get("GITCODE_API_TOKEN", ""))
+            a.setdefault("gitcode_webhook_token", os.environ.get("GITCODE_WEBHOOK_TOKEN", ""))
+            a.setdefault("feishu_app_id", os.environ.get("FEISHU_APP_ID", ""))
+            a.setdefault("feishu_app_secret", os.environ.get("FEISHU_APP_SECRET", ""))
+            a.setdefault("bot_usernames", BOT_USERNAMES)
+            ACCOUNTS[a["name"]] = a
+        _DEFAULT_ACCOUNT = data.get("default", "default")
+        log.info(f"Loaded {len(ACCOUNTS)} accounts from config, default={_DEFAULT_ACCOUNT}")
+    except Exception as e:
+        log.warning(f"Failed to load accounts config: {e}, falling back to .env")
+        _load_accounts()  # retry as single-account
+
+
+def get_account(name=None) -> dict:
+    return ACCOUNTS.get(name or _DEFAULT_ACCOUNT, ACCOUNTS.get("default", {}))
+
+
+def resolve_account_by_webhook_token(token: str) -> str | None:
+    for name, a in ACCOUNTS.items():
+        if a.get("gitcode_webhook_token") == token:
+            return name
+    return None
+
+
 _load_routing_config()
 _load_agent_routing_config()
+_load_accounts()

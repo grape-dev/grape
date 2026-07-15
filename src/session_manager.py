@@ -48,6 +48,14 @@ try:
     db.execute("ALTER TABLE feishu_bindings ADD COLUMN notify_enabled INTEGER DEFAULT 0")
 except:
     pass
+try:
+    db.execute("ALTER TABLE sessions ADD COLUMN account TEXT DEFAULT 'default'")
+except:
+    pass
+try:
+    db.execute("ALTER TABLE feishu_bindings ADD COLUMN account TEXT DEFAULT 'default'")
+except:
+    pass
 db.execute("UPDATE feishu_bindings SET notify_enabled=0 WHERE notify_enabled IS NULL")
 db.commit()
 

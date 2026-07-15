@@ -1,0 +1,13 @@
+{
+  "default": "default",
+  "accounts": [
+    {
+      "name": "default",
+      "gitcode_api_token": "",
+      "gitcode_webhook_token": "",
+      "feishu_app_id": "",
+      "feishu_app_secret": "",
+      "bot_usernames": []
+    }
+  ]
+}
