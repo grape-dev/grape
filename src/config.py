@@ -96,6 +96,8 @@ def _load_accounts():
             "gitcode_webhook_token": GITCODE_WEBHOOK_TOKEN,
             "feishu_app_id": os.environ.get("FEISHU_APP_ID", ""),
             "feishu_app_secret": os.environ.get("FEISHU_APP_SECRET", ""),
+            "huawei_cloud_ak": os.environ.get("HUAWEICLOUD_SDK_AK", ""),
+            "huawei_cloud_sk": os.environ.get("HUAWEICLOUD_SDK_SK", ""),
             "bot_usernames": BOT_USERNAMES,
         }
         log.info(f"Loaded single default account from .env (GITCODE_API_TOKEN={'YES' if GITCODE_API_TOKEN else 'NO'})")
@@ -109,6 +111,8 @@ def _load_accounts():
             a.setdefault("feishu_app_id", os.environ.get("FEISHU_APP_ID", ""))
             a.setdefault("feishu_app_secret", os.environ.get("FEISHU_APP_SECRET", ""))
             a.setdefault("bot_usernames", BOT_USERNAMES)
+            a.setdefault("huawei_cloud_ak", os.environ.get("HUAWEICLOUD_SDK_AK", ""))
+            a.setdefault("huawei_cloud_sk", os.environ.get("HUAWEICLOUD_SDK_SK", ""))
             ACCOUNTS[a["name"]] = a
         _DEFAULT_ACCOUNT = data.get("default", "default")
         log.info(f"Loaded {len(ACCOUNTS)} accounts from config, default={_DEFAULT_ACCOUNT}")

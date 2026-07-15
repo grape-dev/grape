@@ -13,10 +13,15 @@ class GitCodeBackend(VcsBackend):
         event_type_map = {
             "push": "push", "issues": "issue_opened", "issue": "issue_opened",
             "Issue Hook": "issue_opened", "Note Hook": "issue_comment",
-            "Merge Request Hook": "pull_request_opened", "pull_request": "pull_request_opened",
+            "Merge Request Hook": "pull_request_merged", "pull_request": "pull_request_merged",
             "tag_push": "tag_created", "release": "release_created", "pipeline": "build_start",
         }
         evt_type = event_type_map.get(event_header, event_header)
+        # 区分 merge 与非 merge 的 PR 事件
+        if evt_type == "pull_request_merged":
+            obj = payload.get("object_attributes", {})
+            if isinstance(obj, dict) and obj.get("action", "") != "merge":
+                evt_type = "pull_request_opened"
         repo = ""
         if "project" in payload:
             p = payload["project"]

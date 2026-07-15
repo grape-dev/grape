@@ -165,6 +165,15 @@ def _process_event_inner(evt, repo_key, account="default"):
         log.info(f"Prompt built ({len(prompt)} chars)")
 
         log.info(f"═══ Spawning agent (backend={backend}) with --format json ═══")
+
+        # 注入华为云凭据到环境变量
+        from src.config import get_account
+        acc = get_account(evt.get("account", "default"))
+        if acc.get("huawei_cloud_ak"):
+            os.environ["HUAWEICLOUD_SDK_AK"] = acc["huawei_cloud_ak"]
+            os.environ["HUAWEICLOUD_SDK_SK"] = acc.get("huawei_cloud_sk", "")
+            log.info("Injected Huawei Cloud AK/SK into env")
+
         event_count = 0
         final_text = ""
         new_oc_session_id = oc_session_id

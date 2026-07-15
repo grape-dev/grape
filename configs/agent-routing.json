@@ -8,6 +8,7 @@
     "build-debug": "opencode",
     "deploy-guard": "opencode",
     "incident-triage": "opencode",
-    "changelog-gen": "opencode"
+    "changelog-gen": "opencode",
+    "cloud-deploy": "codearts"
   }
 }
