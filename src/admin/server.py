@@ -90,6 +90,22 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
+            # —— Serve static files ——
+            if self.path == "/admin/vue.min.js":
+                js_path = os.path.join(_ADMIN_DIR, "vue.min.js")
+                if os.path.exists(js_path):
+                    with open(js_path, "rb") as f:
+                        js = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                    self.send_header("Cache-Control", "max-age=86400")
+                    self.end_headers()
+                    self.wfile.write(js)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                return
+
             path = self._path()
             if path == "/admin":
                 self._serve_admin_page()
