@@ -6,6 +6,7 @@ from .base import VcsBackend
 class GitCodeBackend(VcsBackend):
     name = "gitcode"
     webhook_path = "/webhook/gitcode"
+    event_header_key = "X-GitCode-Event"
 
     def normalize(self, raw, event_header) -> dict:
         payload = self.decode_payload(raw)
@@ -51,3 +52,6 @@ class GitCodeBackend(VcsBackend):
             "repository": repo, "branch": branch,
             "actor": actor, "payload": payload,
         }
+
+    def get_collaborators_url(self, owner: str, repo: str) -> str:
+        return f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators"

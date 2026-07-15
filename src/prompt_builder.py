@@ -42,7 +42,7 @@ def build_role_definition(skills=None) -> str:
         "You are a DevOps operations assistant. Your domain:",
         "- Code review, build diagnosis, deployment guard, incident triage",
         "- Issue/PR analysis, changelog generation, repository management",
-        "- GitCode API operations",
+        "- Repository (GitCode/GitHub) API operations",
         "",
         "You have no abilities outside DevOps (no weather, email, documents, "
         "PDF, Excel, writing, meetings, voice, etc.).",
@@ -68,7 +68,7 @@ def _build_feishu_context_section(repo_key: str, ctx: dict) -> str:
     # Collaborators list
     collabs = ctx.get("collaborators", [])
     if collabs:
-        lines.append("\n### Repository Collaborators (GitCode)")
+        lines.append("\n### Repository Collaborators")
         for m in collabs:
             lines.append(f"  {m.get('username','?')}  nick={m.get('nick_name','?')}  role={m.get('role_name_cn','?')}  id={m.get('id','?')}")
 
@@ -82,7 +82,7 @@ def _build_feishu_context_section(repo_key: str, ctx: dict) -> str:
     # Known mappings
     mappings = ctx.get("mappings", {})
     if mappings:
-        lines.append("\n### Known GitCode -> Feishu Mappings (cached in feishu_users table)")
+        lines.append("\n### Known VCS -> Feishu Mappings (cached in feishu_users table)")
         for gitcode_user, info in mappings.items():
             lines.append(f"  {gitcode_user}  ->  {info['open_id']}")
 
@@ -119,7 +119,7 @@ def _build_feishu_context_section(repo_key: str, ctx: dict) -> str:
     else:
         lines.append("  - Notifications are enabled. Send Feishu notification cards as instructed.")
 
-    lines.append("\n### Card Content Rule\n  When mentioning a GitCode user in Feishu notification cards, ALWAYS use `nick_name` from Collaborators (Chinese real name), NEVER use `username`/`login` (English ID).\n  Example: \u5ed6\u5829\u54f2 NOT Jason7602\u3001\u5434\u626c NOT younger_eric")
+    lines.append("\n### Card Content Rule\n  When mentioning a repository user in Feishu notification cards, ALWAYS use `nick_name` from Collaborators (Chinese real name), NEVER use `username`/`login` (English ID).\n  Example: \u5ed6\u5829\u54f2 NOT Jason7602\u3001\u5434\u626c NOT younger_eric")
 
     # API instructions
     lines.append(f"""
@@ -137,7 +137,7 @@ Use Python to save discovered mappings in /root/devops-bot/data/sessions.db:
   db.commit(); db.close()
 
 ### Name Resolution Workflow
-1. Determine target user (gitcode_login, e.g. "Jason7602")
+1. Determine target user (vcs_login, e.g. "Jason7602")
 2. If in Known Mappings -> use open_id directly, send notification
 3. Else: find user's nick_name from Collaborators list above
 4. Match nick_name against Group Members name -> get open_id
@@ -154,7 +154,7 @@ def build_chat_role_definition() -> str:
         "You are a DevOps operations assistant. Your domain:\n"
         "- Code review, build diagnosis, deployment guard, incident triage\n"
         "- Issue/PR analysis, changelog generation, repository management\n"
-        "- GitCode API operations\n"
+        "- Repository (GitCode/GitHub) API operations\n"
         "\n"
         "You have no abilities outside DevOps (no weather, email, documents, "
         "PDF, Excel, writing, meetings, voice, etc.).\n"

@@ -49,13 +49,13 @@ def _acquire_repo_lock(repo_key: str) -> threading.Lock:
 
 
 # ====== 事件归一化 ======
-from src.vcs.adapter import normalize_event
+from src.vcs.adapter import normalize_event, get_event_header
 
 # ====== 事件处理入口 ======
 def process_event(raw_body, headers):
     try:
-        event_header = headers.get("X-GitCode-Event", "unknown")
-        evt = normalize_event(raw_body, event_header)
+        event_header, source = get_event_header(headers)
+        evt = normalize_event(raw_body, event_header, source)
         repo_key = f"{evt['source']}:{evt['repository']}"
         log.info(f"═══ Event: {evt['type']} on {evt['repository']} by {evt['actor']} ═══")
 
@@ -111,11 +111,12 @@ def _get_feishu_context(repo_key, repository):
         from src.session_manager import get_auto_impl_enabled, get_notify_enabled
         ctx["auto_impl_enabled"] = get_auto_impl_enabled(repo_key)
         ctx["notify_enabled"] = get_notify_enabled(repo_key)
-        # Fetch GitCode collaborators
+        # Fetch collaborators using VCS backend
+        from src.vcs.gitcode import GitCodeBackend
+        backend = GitCodeBackend()
         parts = repository.split("/", 1)
         if len(parts) == 2:
-            owner, repo = parts
-            url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators"
+            url = backend.get_collaborators_url(parts[0], parts[1])
         else:
             url = f"https://api.gitcode.com/api/v5/repos/{repository}/collaborators"
         try:
