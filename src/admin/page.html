@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DevOps Bot 管理台</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#333;min-height:100vh}
+.login-page{display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#667eea 0,#764ba2 100%)}
+.login-card{background:#fff;border-radius:12px;padding:40px;width:360px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,.15)}
+.login-card h1{text-align:center;margin-bottom:8px;font-size:22px;color:#333}
+.login-card p{text-align:center;color:#888;font-size:13px;margin-bottom:24px}
+.login-card input{width:100%;padding:12px 16px;border:1px solid #d9d9d9;border-radius:8px;font-size:14px;margin-bottom:12px;outline:0;transition:border-color .2s}
+.login-card input:focus{border-color:#667eea}
+.login-card button{width:100%;padding:12px;background:#667eea;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;transition:background .2s}
+.login-card button:hover{background:#5a6fd6}
+.login-error{color:#e74c3c;font-size:13px;text-align:center;margin-top:8px;display:none}
+.admin-page{display:none}
+.header{background:#fff;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.header h2{font-size:16px;font-weight:600}
+.header .user-info{font-size:13px;color:#888}
+.header .logout{font-size:13px;color:#e74c3c;cursor:pointer;margin-left:16px;text-decoration:none}
+.main{display:flex;max-width:1200px;margin:24px auto;padding:0 24px;gap:24px}
+.sidebar{width:260px;flex-shrink:0}
+.sidebar h3{font-size:13px;color:#888;margin-bottom:8px;padding:0 12px}
+.account-list{background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.account-item{padding:12px 16px;cursor:pointer;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between}
+.account-item:last-child{border-bottom:none}
+.account-item:hover{background:#f8f9ff}
+.account-item.active{background:#eef0ff;font-weight:600}
+.account-item .name{font-size:14px}
+.account-item .badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#e8e8e8}
+.account-item .badge.ok{background:#d4edda;color:#155724}
+.add-btn{display:block;width:100%;padding:12px;text-align:center;color:#667eea;cursor:pointer;font-size:14px;border-top:1px solid #f0f0f0;transition:background .2s}
+.add-btn:hover{background:#f8f9ff}
+.panel{flex:1;background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.06);padding:24px;display:none}
+.panel.active{display:block}
+.panel h3{font-size:16px;margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid #f0f0f0}
+.form-row{margin-bottom:16px}
+.form-row label{display:block;font-size:13px;color:#666;margin-bottom:4px}
+.form-row input{width:100%;padding:10px 14px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px;outline:0;transition:border-color .2s}
+.form-row input:focus{border-color:#667eea}
+.form-row .hint{font-size:11px;color:#aaa;margin-top:2px}
+.actions{display:flex;gap:8px;margin-top:20px;padding-top:16px;border-top:1px solid #f0f0f0}
+.actions button{padding:10px 20px;border:none;border-radius:6px;font-size:13px;cursor:pointer;transition:opacity .2s}
+.btn-primary{background:#667eea;color:#fff}
+.btn-primary:hover{opacity:.9}
+.btn-secondary{background:#e8e8e8;color:#333}
+.btn-secondary:hover{opacity:.8}
+.btn-danger{background:#e74c3c;color:#fff}
+.btn-danger:hover{opacity:.9}
+.toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:8px;color:#fff;font-size:13px;z-index:999;opacity:0;transition:opacity .3s}
+.toast.show{opacity:1}
+.toast.ok{background:#27ae60}
+.toast.err{background:#e74c3c}
+@media(max-width:767px){.main{flex-direction:column;padding:0 12px}.sidebar{width:100%}.header{padding:12px 16px}}
+</style>
+</head><body>
+<div class="login-page" id="loginPage">
+<div class="login-card"><h1>DevOps Bot</h1><p>管理台登录</p>
+<input type="text" id="userInput" placeholder="用户名" value="developer">
+<input type="password" id="passInput" placeholder="密码" value="YOUR_SSH_PASSWORD">
+<button onclick="login()">登录</button>
+<div class="login-error" id="loginError"></div></div></div>
+<div class="admin-page" id="adminPage">
+<div class="header"><h2>DevOps Bot &#x7ba1;&#x7406;&#x53f0;</h2>
+<div><span class="user-info" id="userDisplay">developer</span><a class="logout" onclick="logout()">&#x9000;&#x51fa;</a></div></div>
+<div class="main"><div class="sidebar"><h3>&#x8d26;&#x6237;&#x5217;&#x8868;</h3>
+<div class="account-list" id="accountList"></div></div>
+<div class="panel" id="panel"><h3 id="panelTitle">&#x7f16;&#x8f91;&#x8d26;&#x6237;</h3>
+<div class="form-row"><label>&#x8d26;&#x6237;&#x540d;&#x79f0;</label><input id="fName" placeholder="&#x8bf7;&#x8f93;&#x5165;&#x8d26;&#x6237;&#x540d;" onchange="checkNameChange()"></div>
+<div class="form-row"><label>GitCode API Token</label><input id="fGitToken" placeholder="&#x5fc5;&#x586b;" class="secret"><div class="hint">&#x7528;&#x4e8e;&#x8c03;&#x7528; GitCode API</div></div>
+<div class="form-row"><label>GitCode Webhook Token</label><input id="fGitWebhook" placeholder="&#x5fc5;&#x586b;" class="secret">
+<div class="hint">&#x7528;&#x4e8e;&#x9a8c;&#x8bc1; Webhook &#x7b7e;&#x540d;</div></div>
+<div class="form-row"><label>&#x98de;&#x4e66; App ID</label><input id="fFeishuId" placeholder="&#x53ef;&#x9009;" class="secret"></div>
+<div class="form-row"><label>&#x98de;&#x4e66; App Secret</label><input id="fFeishuSecret" placeholder="&#x53ef;&#x9009;" class="secret"></div>
+<div class="form-row"><label>&#x534e;&#x4e3a;&#x4e91; Access Key</label><input id="fHwAk" placeholder="&#x53ef;&#x9009;" class="secret"></div>
+<div class="form-row"><label>&#x534e;&#x4e3a;&#x4e91; Secret Key</label><input id="fHwSk" placeholder="&#x53ef;&#x9009;" class="secret"></div>
+<div class="form-row"><label>Bot &#x7528;&#x6237;&#x540d;&#xff08;&#x9017;&#x53f7;&#x5206;&#x9694;&#xff09;</label><input id="fBots" placeholder="&#x9ed8;&#x8ba4;&#x4e3a; hwc-dev-bot" class="secret"></div>
+<div class="actions">
+<button class="btn-primary" onclick="saveAccount()">&#x4fdd;&#x5b58;</button>
+<button class="btn-secondary" onclick="testAccount()">&#x6d4b;&#x8bd5;&#x8fde;&#x63a5;</button>
+<button class="btn-danger" id="deleteBtn" onclick="deleteAccount()">&#x5220;&#x9664;</button></div></div></div></div>
+<div class="toast" id="toast"></div>
+<script>
+let TOKEN='',CURRENT='',ORIG={};const FIELDS=['Name','GitToken','GitWebhook','FeishuId','FeishuSecret','HwAk','HwSk','Bots'],API_FIELDS=['name','gitcode_api_token','gitcode_webhook_token','feishu_app_id','feishu_app_secret','huawei_cloud_ak','huawei_cloud_sk','bot_usernames'];
+function showToast(msg,type){const t=document.getElementById('toast');t.textContent=msg;t.className='toast '+type;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000)}
+function login(){var u=document.getElementById('userInput').value,p=document.getElementById('passInput').value,x=new XMLHttpRequest();x.open('POST','/api/admin/login',true);x.setRequestHeader('Content-Type','application/json');x.onload=function(){if(x.status===200){var d=JSON.parse(x.responseText);TOKEN=d.token;document.getElementById('loginPage').style.display='none';document.getElementById('adminPage').style.display='block';loadAccounts()}else{document.getElementById('loginError').textContent='\u767b\u5f55\u5931\u8d25';document.getElementById('loginError').style.display='block'}};x.onerror=function(){document.getElementById('loginError').textContent='\u7f51\u7edc\u9519\u8bef';document.getElementById('loginError').style.display='block'};x.send(JSON.stringify({username:u,password:p}))}
+function logout(){TOKEN='';document.getElementById('adminPage').style.display='none';document.getElementById('loginPage').style.display='flex'}
+function api(m,p,b){const h={Authorization:'Bearer '+TOKEN,'Content-Type':'application/json'};const o={method:m,headers:h};if(b)o.body=JSON.stringify(b);return fetch('/api/admin/accounts'+p,o).then(r=>r.json().then(d=>({ok:r.status>=200&&r.status<300,data:d,status:r.status})))}
+function mask(v){return v&&v.length>8?v.slice(0,4)+'****'+v.slice(-4):v?'****':'&#x7a7a;&#xff1b;'}
+function loadAccounts(){api('GET','').then(r=>{if(!r.ok)return;const list=document.getElementById('accountList');list.innerHTML='';r.data.forEach(a=>{const d=document.createElement('div');d.className='account-item'+(a.name===CURRENT?' active':'');d.innerHTML='<span class="name">'+a.name+'</span><span class="badge">'+(a.gitcode_api_token?'\u2705':'&#x274c;')+'</span>';d.onclick=()=>selectAccount(a.name);list.appendChild(d)});const add=document.createElement('div');add.className='add-btn';add.textContent='+ &#x65b0;&#x589e;&#x8d26;&#x6237;';add.onclick=()=>{CURRENT='';document.getElementById('panelTitle').textContent='\u65b0;&#x589e;&#x8d26;&#x6237';FIELDS.forEach((_,i)=>document.getElementById('f'+FIELDS[i]).value='');document.getElementById('deleteBtn').style.display='none';document.getElementById('panel').classList.add('active')};list.appendChild(add);if(!CURRENT&&r.data.length)CURRENT=r.data[0].name;if(CURRENT)selectAccount(CURRENT)})}
+function selectAccount(n){CURRENT=n;api('GET','/'+encodeURIComponent(n)).then(r=>{if(!r.ok)return;const a=r.data;ORIG=a;document.getElementById('panelTitle').textContent='\u7f16\u8f91 '+a.name;FIELDS.forEach((_,i)=>document.getElementById('f'+FIELDS[i]).value=a[API_FIELDS[i]]||'');document.getElementById('fName').value=a.name;document.getElementById('deleteBtn').style.display=a.name==='default'?'none':'inline-block';document.getElementById('panel').classList.add('active');loadAccounts()})}
+function collectForm(){const o={};FIELDS.forEach((_,i)=>{const el=document.getElementById('f'+FIELDS[i]);const val=el.value;const key=API_FIELDS[i];if(el.classList.contains('secret')&&val===mask(ORIG[key]))return;o[key]=val});if(Object.keys(o).length===0)return null;return o}
+function saveAccount(){const data=collectForm();if(!data){showToast('\u6ca1\u6709\u4fee\u6539\uff0c\u65e0\u9700\u4fdd\u5b58','err');return}const isNew=CURRENT==='';const path=isNew?'/'+encodeURIComponent(data.name||'new'):'/'+encodeURIComponent(CURRENT);api('PUT',path,data).then(r=>{if(r.ok){showToast('\u4fdd\u5b58\u6210\u529f','ok');if(isNew)CURRENT=r.data.name;selectAccount(CURRENT)}else{showToast('\u4fdd\u5b58\u5931\u8d25: '+r.data.error,'err')}})}
+function deleteAccount(){if(!confirm('\u786e\u5b9a\u5220\u9664\u8d26\u6237 '+CURRENT+' ?'))return;api('DELETE','/'+encodeURIComponent(CURRENT)).then(r=>{if(r.ok){showToast('\u5df2\u5220\u9664','ok');CURRENT='';loadAccounts()}else showToast('\u5220\u9664\u5931\u8d25: '+r.data.error,'err')})}
+function testAccount(){api('POST','/'+encodeURIComponent(CURRENT)+'/test').then(r=>{showToast(r.data.status||r.data.error||'\u6d4b\u8bd5\u5b8c\u6210',r.ok?'ok':'err')})}
+function checkNameChange(){}
+if(window.location.pathname==='/admin/'){document.getElementById('loginPage').style.display='flex'}
+</script></body></html>
