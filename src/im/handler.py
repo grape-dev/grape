@@ -90,7 +90,7 @@ def process_chat(parsed: dict):
                 repository = repo_key
                 repo_key = f"gitcode:{repo_key}"
 
-        sess, history, oc_sid, is_new = get_or_create_session(repo_key, source, repository)
+        sess, history, oc_sid, stored_backend, is_new = get_or_create_session(repo_key, source, repository)
 
         lock = _acquire_repo_lock(repo_key)
         lock.acquire()
@@ -155,8 +155,9 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         add_reaction(msg_id, "OK")
 
         final_text = ""
-        new_oc_session_id = oc_sid
         backend = get_agent_backend(skills[0]) if skills else "opencode"
+        # 后端切换时清空旧 session ID
+        new_oc_session_id = oc_sid if stored_backend == backend else ""
         for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account):
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")
@@ -172,6 +173,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
                 d = data
                 final_text = d["text"]
                 new_oc_session_id = d["oc_session_id"] or new_oc_session_id
+                log.info(f"  ✅ Done: exit={d.get('exit_code')}, text_len={len(final_text)}, stderr={d.get('stderr','')[:200]}, errors={d.get('errors',[])}")
 
         record = {
             "type": "chat", "time": datetime.now().isoformat(),
@@ -180,7 +182,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
             "oc_session_id": new_oc_session_id
         }
         history.append(record)
-        update_session(sess, history, "idle", new_oc_session_id)
+        update_session(sess, history, "idle", new_oc_session_id, backend)
 
         output = final_text.strip()
         if output == "SKIP":

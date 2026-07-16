@@ -149,7 +149,7 @@ def _process_event_inner(evt, repo_key, account="default"):
         ws = os.path.join(WORKSPACE_DIR, evt['repository'])
         os.makedirs(ws, exist_ok=True)
 
-        sid, history, oc_session_id, is_new = get_or_create_session(repo_key, evt['source'], evt['repository'])
+        sid, history, oc_session_id, stored_backend, is_new = get_or_create_session(repo_key, evt['source'], evt['repository'])
         log.info(f"Session: {sid} (new={is_new}, history={len(history)} events, oc_session={oc_session_id[:30] if oc_session_id else 'none'})")
 
         skills = [get_domain_skill(evt['type'])]
@@ -170,7 +170,8 @@ def _process_event_inner(evt, repo_key, account="default"):
 
         event_count = 0
         final_text = ""
-        new_oc_session_id = oc_session_id
+        # 后端切换时清空旧 session ID
+        new_oc_session_id = oc_session_id if stored_backend == backend else ""
 
         for event_type, data in stream_agent(prompt, ws, oc_session_id, evt['type'], backend_name=backend, account=account):
             event_count += 1
@@ -201,7 +202,7 @@ def _process_event_inner(evt, repo_key, account="default"):
             "oc_session_id": new_oc_session_id
         }
         history.append(record)
-        update_session(sid, history, "idle" if exit_code == 0 else "failed", new_oc_session_id)
+        update_session(sid, history, "idle" if exit_code == 0 else "failed", new_oc_session_id, backend)
 
         if exit_code != 0:
             log.warning(f"Agent failed (exit={exit_code})")

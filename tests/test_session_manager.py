@@ -33,6 +33,7 @@ def _import_session_manager(tmp_path):
             source TEXT, repository TEXT, status TEXT,
             event_history TEXT DEFAULT '[]',
             oc_session_id TEXT DEFAULT '',
+            backend TEXT DEFAULT '',
             created_at TEXT, last_active_at TEXT
         )
     """)
@@ -53,7 +54,7 @@ def _import_session_manager(tmp_path):
 class TestGetOrCreateSession:
     def test_create_new(self, tmp_path):
         sm = _import_session_manager(tmp_path)
-        sid, history, oc_sid, is_new = sm.get_or_create_session(
+        sid, history, oc_sid, _, is_new = sm.get_or_create_session(
             "gitcode:owner/repo", "gitcode", "owner/repo"
         )
         assert sid.startswith("sess-")
@@ -63,10 +64,10 @@ class TestGetOrCreateSession:
 
     def test_return_existing(self, tmp_path):
         sm = _import_session_manager(tmp_path)
-        sid1, _, _, _ = sm.get_or_create_session(
+        sid1, _, _, _, _ = sm.get_or_create_session(
             "gitcode:owner/repo", "gitcode", "owner/repo"
         )
-        sid2, hist2, oc2, is_new2 = sm.get_or_create_session(
+        sid2, hist2, oc2, _, is_new2 = sm.get_or_create_session(
             "gitcode:owner/repo", "gitcode", "owner/repo"
         )
         assert sid1 == sid2
@@ -74,10 +75,10 @@ class TestGetOrCreateSession:
 
     def test_multiple_repos_independent(self, tmp_path):
         sm = _import_session_manager(tmp_path)
-        sid1, _, _, _ = sm.get_or_create_session(
+        sid1, _, _, _, _ = sm.get_or_create_session(
             "gitcode:repo1", "gitcode", "repo1"
         )
-        sid2, _, _, _ = sm.get_or_create_session(
+        sid2, _, _, _, _ = sm.get_or_create_session(
             "gitcode:repo2", "gitcode", "repo2"
         )
         assert sid1 != sid2
@@ -86,13 +87,13 @@ class TestGetOrCreateSession:
 class TestUpdateSession:
     def test_update_history_and_status(self, tmp_path):
         sm = _import_session_manager(tmp_path)
-        sid, history, _, _ = sm.get_or_create_session(
+        sid, history, _, _, _ = sm.get_or_create_session(
             "gitcode:owner/repo", "gitcode", "owner/repo"
         )
         history.append({"type": "test", "success": True, "time": "2026-01-01"})
         sm.update_session(sid, history, "idle")
         # Re-fetch to verify
-        _, hist2, _, _ = sm.get_or_create_session(
+        _, hist2, _, _, _ = sm.get_or_create_session(
             "gitcode:owner/repo", "gitcode", "owner/repo"
         )
         assert len(hist2) == 1
@@ -100,23 +101,23 @@ class TestUpdateSession:
 
     def test_update_oc_session_id(self, tmp_path):
         sm = _import_session_manager(tmp_path)
-        sid, _, _, _ = sm.get_or_create_session(
+        sid, _, _, _, _ = sm.get_or_create_session(
             "gitcode:owner/repo", "gitcode", "owner/repo"
         )
         sm.update_session(sid, [], "running", "session_abc123")
-        _, _, oc_sid, _ = sm.get_or_create_session(
+        _, _, oc_sid, _, _ = sm.get_or_create_session(
             "gitcode:owner/repo", "gitcode", "owner/repo"
         )
         assert oc_sid == "session_abc123"
 
     def test_status_failed_then_idle(self, tmp_path):
         sm = _import_session_manager(tmp_path)
-        sid, _, _, _ = sm.get_or_create_session(
+        sid, _, _, _, _ = sm.get_or_create_session(
             "gitcode:owner/repo", "gitcode", "owner/repo"
         )
         sm.update_session(sid, [], "failed")
         # Next get should reset status to idle
-        _, _, _, is_new = sm.get_or_create_session(
+        _, _, _, _, is_new = sm.get_or_create_session(
             "gitcode:owner/repo", "gitcode", "owner/repo"
         )
         assert is_new is False
@@ -225,7 +226,7 @@ class TestConcurrency:
         import threading
         results = []
         def create_session(repo):
-            sid, _, _, _ = sm.get_or_create_session(
+            sid, _, _, _, _ = sm.get_or_create_session(
                 f"gitcode:{repo}", "gitcode", repo
             )
             results.append(sid)
