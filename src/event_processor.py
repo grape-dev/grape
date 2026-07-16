@@ -170,8 +170,7 @@ def _process_event_inner(evt, repo_key, account="default"):
 
         event_count = 0
         final_text = ""
-        if stored_backend and stored_backend != backend:
-            # 后端切换，清空 DB 中旧的 session ID
+        if stored_backend != backend:
             update_session(sid, history, "idle", "", backend)
             oc_session_id = ""
         new_oc_session_id = oc_session_id

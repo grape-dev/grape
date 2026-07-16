@@ -157,7 +157,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         final_text = ""
         backend = get_agent_backend(skills[0]) if skills else "opencode"
         # 后端切换时清空旧 session ID
-        if stored_backend and stored_backend != backend:
+        if stored_backend != backend:
             update_session(sess, history, "idle", "", backend)
             oc_sid = ""
         for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account):
