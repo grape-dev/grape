@@ -149,8 +149,8 @@ def _process_event_inner(evt, repo_key, account="default"):
         ws = os.path.join(WORKSPACE_DIR, evt['repository'])
         os.makedirs(ws, exist_ok=True)
 
-        sid, history, oc_session_id, stored_backend, is_new = get_or_create_session(repo_key, evt['source'], evt['repository'])
-        log.info(f"Session: {sid} (new={is_new}, history={len(history)} events, oc_session={oc_session_id[:30] if oc_session_id else 'none'})")
+        sid, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, evt['source'], evt['repository'])
+        log.info(f"Session: {sid} (new={is_new}, history={len(history)} events, oc_session={oc_sid[:30] if oc_sid else 'none'})")
 
         skills = [get_domain_skill(evt['type'])]
         log.info(f"Skills: {skills}")
@@ -159,6 +159,7 @@ def _process_event_inner(evt, repo_key, account="default"):
             return
         backend = get_agent_backend(skills[0])
         log.info(f"Backend: {backend}")
+        oc_session_id = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
 
         feishu_ctx = _get_feishu_context(repo_key, evt['repository'])
         prompt = build_prompt(evt, history, oc_session_id, skills, feishu_ctx)
@@ -170,9 +171,6 @@ def _process_event_inner(evt, repo_key, account="default"):
 
         event_count = 0
         final_text = ""
-        if stored_backend != backend:
-            update_session(sid, history, "idle", "", backend)
-            oc_session_id = ""
         new_oc_session_id = oc_session_id
 
         for event_type, data in stream_agent(prompt, ws, new_oc_session_id, evt['type'], backend_name=backend, account=account):
@@ -197,11 +195,19 @@ def _process_event_inner(evt, repo_key, account="default"):
                     new_oc_session_id = d["oc_session_id"]
                 log.info(f"═══ opencode done (exit={exit_code}, text_len={len(final_text)}, events={event_count}) ═══")
 
+        summary = ""
+        for line in final_text.split("\n"):
+            if line.startswith("OUTCOME:"):
+                summary = line[len("OUTCOME:"):].strip()
+                break
+        if not summary:
+            summary = final_text.strip().split("\n")[0][:100]
+
         record = {
             "type": evt["type"], "time": datetime.now().isoformat(),
             "success": exit_code == 0, "exit_code": exit_code,
             "actor": evt["actor"], "account": account,
-            "stdout": final_text[:2000],
+            "summary": summary,
             "oc_session_id": new_oc_session_id
         }
         history.append(record)

@@ -33,6 +33,8 @@ def _import_session_manager(tmp_path):
             source TEXT, repository TEXT, status TEXT,
             event_history TEXT DEFAULT '[]',
             oc_session_id TEXT DEFAULT '',
+            opencode_session_id TEXT DEFAULT '',
+            codearts_session_id TEXT DEFAULT '',
             backend TEXT DEFAULT '',
             created_at TEXT, last_active_at TEXT
         )

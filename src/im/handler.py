@@ -90,12 +90,12 @@ def process_chat(parsed: dict):
                 repository = repo_key
                 repo_key = f"gitcode:{repo_key}"
 
-        sess, history, oc_sid, stored_backend, is_new = get_or_create_session(repo_key, source, repository)
+        sess, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
         lock = _acquire_repo_lock(repo_key)
         lock.acquire()
         try:
-            _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new, account, stored_backend)
+            _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, cc_sid, is_new, account)
         finally:
             lock.release()
 
@@ -111,7 +111,7 @@ def process_chat(parsed: dict):
             pass
 
 
-def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new, account="default", stored_backend=""):
+def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, cc_sid, is_new, account="default"):
     try:
         sender_id = parsed.get('sender_id', '')
         sender_name = get_user_name(sender_id) if sender_id else ""
@@ -156,10 +156,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
 
         final_text = ""
         backend = get_agent_backend(skills[0]) if skills else "opencode"
-        # 清空旧 session ID（对话连续性靠 prompt history 维持，session ID 只是优化）
-        if stored_backend != backend:
-            update_session(sess, history, "idle", "", backend)
-        oc_sid = ""
+        oc_sid = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
         new_oc_session_id = oc_sid
         for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account):
             if event_type == "step_start":
@@ -179,10 +176,18 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
                     new_oc_session_id = d["oc_session_id"]
                 log.info(f"  ✅ Done: exit={d.get('exit_code')}, text_len={len(final_text)}, stderr={d.get('stderr','')[:200]}, errors={d.get('errors',[])}")
 
+        summary = ""
+        for line in final_text.split("\n"):
+            if line.startswith("OUTCOME:"):
+                summary = line[len("OUTCOME:"):].strip()
+                break
+        if not summary:
+            summary = final_text.strip().split("\n")[0][:100]
+
         record = {
             "type": "chat", "time": datetime.now().isoformat(),
             "success": True, "actor": parsed.get("sender_id", ""),
-            "stdout": final_text[:2000],
+            "summary": summary,
             "oc_session_id": new_oc_session_id
         }
         history.append(record)

@@ -60,22 +60,39 @@ try:
     db.execute("ALTER TABLE sessions ADD COLUMN backend TEXT DEFAULT ''")
 except:
     pass
+try:
+    db.execute("ALTER TABLE sessions ADD COLUMN opencode_session_id TEXT DEFAULT ''")
+except:
+    pass
+try:
+    db.execute("ALTER TABLE sessions ADD COLUMN codearts_session_id TEXT DEFAULT ''")
+except:
+    pass
 db.execute("UPDATE feishu_bindings SET notify_enabled=0 WHERE notify_enabled IS NULL")
 db.commit()
 
+MAX_HISTORY = 30
 
-def get_or_create_session(repo_key, source, repository):
+_SESSION_COLS = {"opencode": "opencode_session_id", "codearts": "codearts_session_id"}
+
+
+def _session_col(backend: str) -> str:
+    return _SESSION_COLS.get(backend, "opencode_session_id")
+
+
+def get_or_create_session(repo_key, source, repository, backend="opencode"):
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, event_history, oc_session_id, status, backend FROM sessions WHERE repo_key=?", (repo_key,))
+        c.execute("SELECT id, event_history, opencode_session_id, codearts_session_id, status FROM sessions WHERE repo_key=?", (repo_key,))
         row = c.fetchone()
         if row:
-            sid, hist_json, oc_sid, status, stored_backend = row
+            sid, hist_json, oc_sid, cc_sid, status = row
             history = json.loads(hist_json) if hist_json else []
             if status == "failed":
                 c.execute("UPDATE sessions SET status=? WHERE id=?", ("idle", sid))
                 db.commit()
-            return sid, history, oc_sid, stored_backend or "", False
+            sid_val = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
+            return sid, history, sid_val or "", "", False
         sid = f"sess-{repo_key}-{int(time.time()*1000000)}"
         now = datetime.now().isoformat()
         c.execute(
@@ -86,18 +103,21 @@ def get_or_create_session(repo_key, source, repository):
         return sid, [], "", "", True
 
 
-def update_session(sid, history, status, oc_session_id=None, backend=""):
+def update_session(sid, history, status, oc_session_id=None, backend="opencode"):
     with db_lock:
         c = db.cursor()
+        col = _session_col(backend)
+        if len(history) > MAX_HISTORY:
+            history = history[-MAX_HISTORY:]
         if oc_session_id:
             c.execute(
-                "UPDATE sessions SET event_history=?, status=?, oc_session_id=?, backend=?, last_active_at=? WHERE id=?",
-                (json.dumps(history), status, oc_session_id, backend, datetime.now().isoformat(), sid)
+                f"UPDATE sessions SET event_history=?, status=?, {col}=?, last_active_at=? WHERE id=?",
+                (json.dumps(history), status, oc_session_id, datetime.now().isoformat(), sid)
             )
         else:
             c.execute(
-                "UPDATE sessions SET event_history=?, status=?, backend=?, last_active_at=? WHERE id=?",
-                (json.dumps(history), status, backend, datetime.now().isoformat(), sid)
+                "UPDATE sessions SET event_history=?, status=?, last_active_at=? WHERE id=?",
+                (json.dumps(history), status, datetime.now().isoformat(), sid)
             )
         db.commit()
 
