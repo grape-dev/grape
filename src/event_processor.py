@@ -173,7 +173,7 @@ def _process_event_inner(evt, repo_key, account="default"):
         # 后端切换时清空旧 session ID
         new_oc_session_id = oc_session_id if stored_backend == backend else ""
 
-        for event_type, data in stream_agent(prompt, ws, oc_session_id, evt['type'], backend_name=backend, account=account):
+        for event_type, data in stream_agent(prompt, ws, new_oc_session_id, evt['type'], backend_name=backend, account=account):
             event_count += 1
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")

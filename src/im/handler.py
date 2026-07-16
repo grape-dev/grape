@@ -158,7 +158,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         backend = get_agent_backend(skills[0]) if skills else "opencode"
         # 后端切换时清空旧 session ID
         new_oc_session_id = oc_sid if stored_backend == backend else ""
-        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account):
+        for event_type, data in stream_agent(prompt, wsd, new_oc_session_id, "chat", backend_name=backend, account=account):
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")
             elif event_type == "text":
