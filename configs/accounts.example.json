@@ -1,0 +1,15 @@
+{
+  "default": "default",
+  "accounts": [
+    {
+      "name": "default",
+      "gitcode_api_token": "",
+      "gitcode_webhook_token": "",
+      "feishu_app_id": "",
+      "feishu_app_secret": "",
+      "huawei_cloud_ak": "",
+      "huawei_cloud_sk": "",
+      "bot_usernames": []
+    }
+  ]
+}

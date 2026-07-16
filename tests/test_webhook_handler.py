@@ -9,14 +9,13 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-# Must set env BEFORE importing Handler
-os.environ["GITCODE_API_TOKEN"] = "test_token"
-os.environ["GITCODE_WEBHOOK_TOKEN"] = "test_webhook_secret"
-
-# Force config to reload
+# Force config to reload after setting module vars
 if "src.config" in sys.modules:
     import importlib
     importlib.reload(sys.modules["src.config"])
+import src.config as cfg
+cfg.GITCODE_API_TOKEN = "test_token"
+cfg.GITCODE_WEBHOOK_TOKEN = "test_webhook_secret"
 
 from src.webhook_handler import Handler
 

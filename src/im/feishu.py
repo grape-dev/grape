@@ -1,5 +1,4 @@
-"""
-Feishu (飞书) IM integration for DevOps Bot.
+"""Feishu (飞书) IM integration for DevOps Bot.
 Uses official lark-oapi SDK for WebSocket connection.
 Uses direct HTTP for message sending (SDK Client is async-only).
 """
@@ -16,11 +15,7 @@ import threading
 _feishu_slot = threading.BoundedSemaphore(5)
 _feishu_executor = concurrent.futures.ThreadPoolExecutor(max_workers=5, thread_name_prefix="fs")
 
-from src.config import log
-
-FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
-FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
-FEISHU_BOT_NAME = os.environ.get("FEISHU_BOT_NAME", "DevOps Bot")
+from src.config import log, FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_BOT_NAME
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 _TOKEN = None
