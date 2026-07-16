@@ -9,8 +9,8 @@
       "feishu_app_secret": "",
       "huawei_cloud_ak": "",
       "huawei_cloud_sk": "",
-      "codearts_cli_ak": "",
-      "codearts_cli_sk": "",
+      "CODEARTS_CLI_AK": "",
+      "CODEARTS_CLI_SK": "",
       "bot_usernames": []
     }
   ]

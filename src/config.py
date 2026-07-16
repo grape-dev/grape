@@ -89,8 +89,8 @@ def _load_accounts():
         FEISHU_BOT_NAME = default.get("feishu_bot_name", "DevOps Bot")
         HUAWEICLOUD_SDK_AK = default.get("huawei_cloud_ak", "")
         HUAWEICLOUD_SDK_SK = default.get("huawei_cloud_sk", "")
-        CODEARTS_CLI_AK = default.get("codearts_cli_ak", "")
-        CODEARTS_CLI_SK = default.get("codearts_cli_sk", "")
+        CODEARTS_CLI_AK = default.get("CODEARTS_CLI_AK", "")
+        CODEARTS_CLI_SK = default.get("CODEARTS_CLI_SK", "")
         log.info(f"Loaded {len(ACCOUNTS)} accounts from config, default={_DEFAULT_ACCOUNT}, FEISHU_APP_ID={'YES' if FEISHU_APP_ID else 'NO'}")
     except Exception as e:
         log.warning(f"Failed to load accounts config: {e}")
