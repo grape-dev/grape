@@ -94,6 +94,11 @@ class TestBuildChatPrompt:
         prompt = pb.build_chat_prompt("query", "owner/repo", [], ["chat"])
         assert "chat" in prompt
 
+    def test_with_account(self, pb):
+        prompt = pb.build_chat_prompt("hello", "owner/repo", [], account="customer-a")
+        assert "customer-a" in prompt
+        assert "session_history.json" in prompt
+
 
 class TestBuildPrompt:
     @pytest.fixture

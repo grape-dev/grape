@@ -241,3 +241,66 @@ class TestConcurrency:
         for t in threads:
             t.join()
         assert len(set(results)) == 5
+
+
+class TestDumpHistoryToFile:
+    def _setup(self, tmp_path):
+        import src.config
+        src.config.WORKSPACE_DIR = str(tmp_path)
+        return _import_session_manager(tmp_path)
+
+    def test_basic_dump_default_account(self, tmp_path):
+        sm = self._setup(tmp_path)
+        history = [{"type": "chat", "text": "hello"}]
+        sm.dump_history_to_file("gitcode:owner/repo", history)
+        fp = tmp_path / "owner_repo" / "history" / "default" / "session_history.json"
+        assert fp.exists()
+        data = json.loads(fp.read_text("utf-8"))
+        assert len(data) == 1
+        assert data[0]["type"] == "chat"
+
+    def test_account_specific_dir(self, tmp_path):
+        sm = self._setup(tmp_path)
+        sm.dump_history_to_file("gitcode:owner/repo", [{"type": "chat"}], account="customer-a")
+        fp = tmp_path / "owner_repo" / "history" / "customer-a" / "session_history.json"
+        assert fp.exists()
+
+    def test_oc_session_id_removed(self, tmp_path):
+        sm = self._setup(tmp_path)
+        sm.dump_history_to_file("gitcode:owner/repo", [{"type": "chat", "oc_session_id": "ses_secret"}])
+        fp = tmp_path / "owner_repo" / "history" / "default" / "session_history.json"
+        data = json.loads(fp.read_text("utf-8"))
+        assert "oc_session_id" not in data[0]
+
+    def test_rotation_exceeds_10(self, tmp_path):
+        sm = self._setup(tmp_path)
+        history = [{"type": "chat", "n": i} for i in range(25)]
+        sm.dump_history_to_file("gitcode:owner/repo", history)
+        base = tmp_path / "owner_repo" / "history" / "default"
+        assert (base / "session_history.json").exists()
+        assert (base / "session_history_1.json").exists()
+        assert (base / "session_history_2.json").exists()
+        data0 = json.loads((base / "session_history.json").read_text("utf-8"))
+        assert len(data0) == 10
+        # session_history.json contains the most recent 10 (indices 15-24)
+        assert data0[0]["n"] == 15
+
+    def test_rotation_cleanup_stale_files(self, tmp_path):
+        sm = self._setup(tmp_path)
+        base = tmp_path / "owner_repo" / "history" / "default"
+        os.makedirs(base, exist_ok=True)
+        (base / "session_history_5.json").write_text("[]", encoding="utf-8")
+        sm.dump_history_to_file("gitcode:owner/repo", [{"type": "chat"}] * 3)
+        assert not (base / "session_history_5.json").exists()
+
+    def test_get_history_file_list(self, tmp_path):
+        sm = self._setup(tmp_path)
+        sm.dump_history_to_file("gitcode:owner/repo", [{"type": "chat"}] * 15)
+        files = sm.get_history_file_list("gitcode:owner/repo")
+        assert len(files) == 2
+        assert all(f.endswith(".json") for f in files)
+
+    def test_get_history_file_list_no_files(self, tmp_path):
+        sm = self._setup(tmp_path)
+        files = sm.get_history_file_list("gitcode:nonexistent")
+        assert files == []
