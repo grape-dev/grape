@@ -130,7 +130,7 @@ def dump_history_to_file(repo_key: str, history: list, account: str = "default")
         entry = {k: v for k, v in r.items() if k != "oc_session_id"}
         clean.append(entry)
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
-    hist_dir = os.path.join(WORKSPACE_DIR, repo_name, "history", account)
+    hist_dir = os.path.join(WORKSPACE_DIR, "history", account, repo_name)
     try:
         os.makedirs(hist_dir, exist_ok=True)
         # Write most recent 10 to base file, older chunks to numbered files
@@ -157,7 +157,7 @@ def get_history_file_list(repo_key: str, account: str = "default") -> list[str]:
     """返回可用的历史文件路径列表（最新在前）"""
     from src.config import WORKSPACE_DIR
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
-    hist_dir = os.path.join(WORKSPACE_DIR, repo_name, "history", account)
+    hist_dir = os.path.join(WORKSPACE_DIR, "history", account, repo_name)
     files = []
     try:
         if os.path.isdir(hist_dir):

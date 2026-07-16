@@ -40,7 +40,7 @@ def get_skill_capabilities() -> str:
 def _build_history_file_guide(repo_key: str, account: str = "default") -> str:
     """Build prompt section listing available history files."""
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
-    base = f"/root/devops-bot/data/workspaces/{repo_name}/history/{account}/"
+    base = f"/root/devops-bot/data/workspaces/history/{account}/{repo_name}/"
     from src.session_manager import get_history_file_list
     files = get_history_file_list(repo_key, account)
     if files:
