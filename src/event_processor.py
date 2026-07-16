@@ -170,8 +170,11 @@ def _process_event_inner(evt, repo_key, account="default"):
 
         event_count = 0
         final_text = ""
-        # 后端切换时清空旧 session ID
-        new_oc_session_id = oc_session_id if stored_backend == backend else ""
+        if stored_backend and stored_backend != backend:
+            # 后端切换，清空 DB 中旧的 session ID
+            update_session(sid, history, "idle", "", backend)
+            oc_session_id = ""
+        new_oc_session_id = oc_session_id
 
         for event_type, data in stream_agent(prompt, ws, new_oc_session_id, evt['type'], backend_name=backend, account=account):
             event_count += 1
