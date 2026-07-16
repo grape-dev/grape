@@ -195,14 +195,6 @@ def _process_event_inner(evt, repo_key, account="default"):
                     new_oc_session_id = d["oc_session_id"]
                 log.info(f"═══ opencode done (exit={exit_code}, text_len={len(final_text)}, events={event_count}) ═══")
 
-        summary = ""
-        for line in final_text.split("\n"):
-            if line.startswith("OUTCOME:"):
-                summary = line[len("OUTCOME:"):].strip()
-                break
-        if not summary:
-            summary = final_text.strip().split("\n")[0][:100]
-
         record = {
             "type": evt["type"], "time": datetime.now().isoformat(),
             "success": exit_code == 0, "exit_code": exit_code,
