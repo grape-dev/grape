@@ -3,12 +3,12 @@
   "skill_backends": {
     "issue": "opencode",
     "pr": "opencode",
-    "implementation": "opencode",
+    "implementation": "codearts",
     "chat": "opencode",
-    "build-debug": "opencode",
-    "deploy-guard": "opencode",
+    "build-debug": "codearts",
+    "deploy-guard": "codearts",
     "incident-triage": "opencode",
-    "changelog-gen": "opencode",
+    "changelog-gen": "codearts",
     "cloud-deploy": "codearts"
   }
 }
