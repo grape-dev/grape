@@ -29,6 +29,8 @@ FEISHU_APP_SECRET = ""
 FEISHU_BOT_NAME = "DevOps Bot"
 HUAWEICLOUD_SDK_AK = ""
 HUAWEICLOUD_SDK_SK = ""
+CODEARTS_CLI_AK = ""
+CODEARTS_CLI_SK = ""
 
 # ====== 多账户配置 ======
 ACCOUNTS: dict[str, dict] = {}
@@ -61,6 +63,7 @@ def _load_accounts():
     global GITCODE_API_TOKEN, GITCODE_WEBHOOK_TOKEN, BOT_USERNAMES
     global FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_BOT_NAME
     global HUAWEICLOUD_SDK_AK, HUAWEICLOUD_SDK_SK
+    global CODEARTS_CLI_AK, CODEARTS_CLI_SK
 
     path = os.path.join(CONFIG_DIR, "accounts.json")
     if not os.path.exists(path):
@@ -86,6 +89,8 @@ def _load_accounts():
         FEISHU_BOT_NAME = default.get("feishu_bot_name", "DevOps Bot")
         HUAWEICLOUD_SDK_AK = default.get("huawei_cloud_ak", "")
         HUAWEICLOUD_SDK_SK = default.get("huawei_cloud_sk", "")
+        CODEARTS_CLI_AK = default.get("codearts_cli_ak", "")
+        CODEARTS_CLI_SK = default.get("codearts_cli_sk", "")
         log.info(f"Loaded {len(ACCOUNTS)} accounts from config, default={_DEFAULT_ACCOUNT}, FEISHU_APP_ID={'YES' if FEISHU_APP_ID else 'NO'}")
     except Exception as e:
         log.warning(f"Failed to load accounts config: {e}")
