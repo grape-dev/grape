@@ -6,7 +6,7 @@ from .base import AgentBackend
 
 class CodeArtsBackend(AgentBackend):
     name = "codearts"
-    binary = "/root/.codeartsdoer/installers/codearts"
+    binary = "codearts"
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         args = ["run", "--format", "json"]
