@@ -56,9 +56,8 @@ class TestCodeArtsBackend:
 
     def test_build_args_with_session(self):
         args = self.backend.build_args("test prompt", "sess_abc")
-        assert "--sessionID" in args
-        idx = args.index("--sessionID")
-        assert args[idx + 1] == "sess_abc"
+        assert "--sessionID" not in args  # codearts CLI doesn't support this flag
+        assert len(args) == 3  # run --format json
 
     def test_build_args_no_dangerous_flag(self):
         """CodeArts should NOT have --dangerously-skip-permissions."""

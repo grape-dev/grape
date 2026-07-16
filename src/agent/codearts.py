@@ -10,10 +10,8 @@ class CodeArtsBackend(AgentBackend):
     prompt_via_stdin = True
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
-        args = ["run", "--format", "json"]
-        if session_id:
-            args.extend(["--sessionID", session_id])
-        return args
+        # codearts CLI does NOT support --sessionID flag
+        return ["run", "--format", "json"]
 
     def get_env(self) -> dict:
         env = os.environ.copy()
