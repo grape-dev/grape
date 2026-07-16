@@ -4,7 +4,7 @@
     "issue": "opencode",
     "pr": "opencode",
     "implementation": "opencode",
-    "chat": "codearts",
+    "chat": "opencode",
     "build-debug": "opencode",
     "deploy-guard": "opencode",
     "incident-triage": "opencode",
