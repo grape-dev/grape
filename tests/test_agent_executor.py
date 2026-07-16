@@ -153,6 +153,6 @@ class TestConfigIntegration:
         from src.config import get_agent_backend, _load_agent_routing_config
         _load_agent_routing_config()
         assert get_agent_backend("issue") == "opencode"
-        assert get_agent_backend("implementation") == "codearts"
-        assert get_agent_backend("build-debug") == "codearts"
+        assert get_agent_backend("implementation") == "opencode"
+        assert get_agent_backend("build-debug") == "opencode"
         assert get_agent_backend("unknown_skill") == "opencode"
