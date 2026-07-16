@@ -156,10 +156,11 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
 
         final_text = ""
         backend = get_agent_backend(skills[0]) if skills else "opencode"
-        # 后端切换时清空旧 session ID
+        # 清空旧 session ID（对话连续性靠 prompt history 维持，session ID 只是优化）
         if stored_backend != backend:
             update_session(sess, history, "idle", "", backend)
-            oc_sid = ""
+        oc_sid = ""
+        new_oc_session_id = oc_sid
         for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account):
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")
@@ -174,7 +175,8 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
             elif event_type == "done":
                 d = data
                 final_text = d["text"]
-                new_oc_session_id = d["oc_session_id"] or new_oc_session_id
+                if d.get("exit_code") == 0 and d.get("oc_session_id"):
+                    new_oc_session_id = d["oc_session_id"]
                 log.info(f"  ✅ Done: exit={d.get('exit_code')}, text_len={len(final_text)}, stderr={d.get('stderr','')[:200]}, errors={d.get('errors',[])}")
 
         record = {

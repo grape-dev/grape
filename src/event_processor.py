@@ -193,7 +193,8 @@ def _process_event_inner(evt, repo_key, account="default"):
                 d = data
                 final_text = d["text"]
                 exit_code = d["exit_code"]
-                new_oc_session_id = d["oc_session_id"] or new_oc_session_id
+                if exit_code == 0 and d.get("oc_session_id"):
+                    new_oc_session_id = d["oc_session_id"]
                 log.info(f"═══ opencode done (exit={exit_code}, text_len={len(final_text)}, events={event_count}) ═══")
 
         record = {
