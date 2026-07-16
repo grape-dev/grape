@@ -214,7 +214,7 @@ def _process_event_inner(evt, repo_key, account="default"):
         }
         history.append(record)
         from src.session_manager import dump_history_to_file
-        dump_history_to_file(f"{evt['source']}:{evt['repository']}", history)
+        dump_history_to_file(f"{evt['source']}:{evt['repository']}", history, account)
         update_session(sid, history, "idle" if exit_code == 0 else "failed", new_oc_session_id, backend)
 
         if exit_code != 0:

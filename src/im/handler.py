@@ -146,7 +146,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
             except Exception as e:
                 log.warning(f"Failed to resolve GitCode login for {sender_name}: {e}")
         skills = ["chat"]
-        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills)
+        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, account)
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
         wsd = os.path.join(WORKSPACE_DIR, repository)
@@ -190,7 +190,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         }
         history.append(record)
         from src.session_manager import dump_history_to_file
-        dump_history_to_file(repo_key, history)
+        dump_history_to_file(repo_key, history, account)
         update_session(sess, history, "idle", new_oc_session_id, backend)
 
         output = final_text.strip()

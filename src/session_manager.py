@@ -122,19 +122,51 @@ def update_session(sid, history, status, oc_session_id=None, backend="opencode")
         db.commit()
 
 
-def dump_history_to_file(repo_key: str, history: list):
-    """将 event_history 写入 workspace 目录供 Agent 读取"""
+def dump_history_to_file(repo_key: str, history: list, account: str = "default"):
+    """将 event_history 写入 workspace 目录（按 account 分目录，每文件最多 10 条）"""
     from src.config import WORKSPACE_DIR
+    clean = []
     for r in history:
-        r.pop("oc_session_id", None)  # 不暴露内部 session ID
+        entry = {k: v for k, v in r.items() if k != "oc_session_id"}
+        clean.append(entry)
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
-    path = os.path.join(WORKSPACE_DIR, repo_name, "session_history.json")
+    hist_dir = os.path.join(WORKSPACE_DIR, repo_name, "history", account)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2, ensure_ascii=False)
+        os.makedirs(hist_dir, exist_ok=True)
+        # Write most recent 10 to base file, older chunks to numbered files
+        remaining = clean[:]
+        chunk_idx = 0
+        while remaining:
+            chunk = remaining[-10:]
+            remaining = remaining[:-10]
+            fname = "session_history.json" if chunk_idx == 0 else f"session_history_{chunk_idx}.json"
+            with open(os.path.join(hist_dir, fname), "w", encoding="utf-8") as f:
+                json.dump(chunk, f, indent=2, ensure_ascii=False)
+            chunk_idx += 1
+        # Clean up stale numbered files beyond what we just wrote
+        for fname in os.listdir(hist_dir):
+            if fname.startswith("session_history_") and fname.endswith(".json"):
+                idx = fname.replace("session_history_", "").replace(".json", "")
+                if idx.isdigit() and int(idx) >= chunk_idx:
+                    os.remove(os.path.join(hist_dir, fname))
     except Exception as e:
         log.warning(f"Failed to dump history: {e}")
+
+
+def get_history_file_list(repo_key: str, account: str = "default") -> list[str]:
+    """返回可用的历史文件路径列表（最新在前）"""
+    from src.config import WORKSPACE_DIR
+    repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
+    hist_dir = os.path.join(WORKSPACE_DIR, repo_name, "history", account)
+    files = []
+    try:
+        if os.path.isdir(hist_dir):
+            for f in sorted(os.listdir(hist_dir), reverse=True):
+                if f.endswith(".json"):
+                    files.append(os.path.join(hist_dir, f))
+    except:
+        pass
+    return files or []
 
 
 def get_feishu_open_id(repo_key, gitcode_user):

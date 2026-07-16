@@ -37,6 +37,21 @@ def get_skill_capabilities() -> str:
         return "我是 DevOps Bot，专注于 DevOps 相关领域。"
 
 
+def _build_history_file_guide(repo_key: str, account: str = "default") -> str:
+    """Build prompt section listing available history files."""
+    repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
+    base = f"/root/devops-bot/data/workspaces/{repo_name}/history/{account}/"
+    from src.session_manager import get_history_file_list
+    files = get_history_file_list(repo_key, account)
+    if files:
+        lines = ["Session history files (newest first):"]
+        for f in files:
+            lines.append(f"  {f}")
+        lines.append("Use the read tool to access any of these files when you need context about past events.")
+        return "\n".join(lines)
+    return f"Session history file: {base}session_history.json (none yet)"
+
+
 def build_role_definition(skills=None) -> str:
     rules = [
         "You are a DevOps operations assistant. Your domain:",
@@ -226,8 +241,8 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
         parts.append(f"This repository has {len(history)} past events recorded.")
 
     repo_key = f"{evt['source']}:{evt['repository']}"
-    repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
-    parts.append(f"Session history (up to 100 events) is available at:\n/root/devops-bot/data/workspaces/{repo_name}/session_history.json\nUse the read tool to access it when you need context about past events.")
+    account = evt.get("account", "default")
+    parts.append(_build_history_file_guide(repo_key, account))
 
     if skills:
         skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
@@ -246,12 +261,11 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
     return "\n".join(parts)
 
 
-def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None) -> str:
+def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "default") -> str:
     parts = [f"User asks about {repo_key}: {user_text}"]
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
-    repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
-    parts.append(f"Session history (up to 100 events) is available at:\n/root/devops-bot/data/workspaces/{repo_name}/session_history.json\nUse the read tool to access it when you need context about past events.")
+    parts.append(_build_history_file_guide(repo_key, account))
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
         skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
