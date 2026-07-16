@@ -71,7 +71,7 @@ except:
 db.execute("UPDATE feishu_bindings SET notify_enabled=0 WHERE notify_enabled IS NULL")
 db.commit()
 
-MAX_HISTORY = 30
+MAX_HISTORY = 100
 
 _SESSION_COLS = {"opencode": "opencode_session_id", "codearts": "codearts_session_id"}
 
@@ -120,6 +120,21 @@ def update_session(sid, history, status, oc_session_id=None, backend="opencode")
                 (json.dumps(history), status, datetime.now().isoformat(), sid)
             )
         db.commit()
+
+
+def dump_history_to_file(repo_key: str, history: list):
+    """将 event_history 写入 workspace 目录供 Agent 读取"""
+    from src.config import WORKSPACE_DIR
+    for r in history:
+        r.pop("oc_session_id", None)  # 不暴露内部 session ID
+    repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
+    path = os.path.join(WORKSPACE_DIR, repo_name, "session_history.json")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        log.warning(f"Failed to dump history: {e}")
 
 
 def get_feishu_open_id(repo_key, gitcode_user):

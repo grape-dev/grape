@@ -207,10 +207,14 @@ def _process_event_inner(evt, repo_key, account="default"):
             "type": evt["type"], "time": datetime.now().isoformat(),
             "success": exit_code == 0, "exit_code": exit_code,
             "actor": evt["actor"], "account": account,
-            "summary": summary,
+            "backend": backend,
+            "skill": skills[0],
+            "stdout": final_text[:2000],
             "oc_session_id": new_oc_session_id
         }
         history.append(record)
+        from src.session_manager import dump_history_to_file
+        dump_history_to_file(f"{evt['source']}:{evt['repository']}", history)
         update_session(sid, history, "idle" if exit_code == 0 else "failed", new_oc_session_id, backend)
 
         if exit_code != 0:

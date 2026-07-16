@@ -55,7 +55,6 @@ def build_role_definition(skills=None) -> str:
     else:
         rules.append("3. Never write code, modify files, or execute git commands")
     rules.append("4. Always reply in Chinese. Never include internal reasoning, process steps, or English analysis in your reply.")
-    rules.append("5. When you finish, output a single line starting with 'OUTCOME:' summarizing the key result. Do NOT include any other text after the OUTCOME line.")
     return "\n".join(rules)
 
 
@@ -164,8 +163,7 @@ def build_chat_role_definition() -> str:
         "1. DevOps topic: analyze and reply\n"
         "2. NOT DevOps topic: politely explain you only handle DevOps, list your capabilities above\n"
         "3. Never write code, modify files, or execute git commands\n"
-        "4. Always reply in Chinese. Never include internal reasoning or process steps.\n"
-        "5. When you finish, output a single line starting with 'OUTCOME:' summarizing the key result. Do NOT include any other text after the OUTCOME line."
+        "4. Always reply in Chinese. Never include internal reasoning or process steps."
     )
 
 
@@ -225,14 +223,11 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
             parts.append(f"Body: {body}")
 
     if history:
-        parts.append(f"Previous events in this session: {len(history)}")
-        for h in history[-3:]:
-            s = "ok" if h.get("success") else "fail"
-            summary = h.get("summary", "")
-            line = f"  [{s}] {h.get('type','')}"
-            if summary:
-                line += f" \u2192 {summary[:100]}"
-            parts.append(line)
+        parts.append(f"This repository has {len(history)} past events recorded.")
+
+    repo_key = f"{evt['source']}:{evt['repository']}"
+    repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
+    parts.append(f"Session history (up to 100 events) is available at:\n/root/devops-bot/data/workspaces/{repo_name}/session_history.json\nUse the read tool to access it when you need context about past events.")
 
     if skills:
         skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
@@ -254,16 +249,9 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
 def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None) -> str:
     parts = [f"User asks about {repo_key}: {user_text}"]
     if history:
-        parts.append(f"Session history ({len(history)} events):")
-        for h in history[-8:]:
-            status = "ok" if h.get("success") else "fail"
-            summary = h.get("summary", "")
-            line = f"  [{status}] {h.get('type','')}"
-            if summary:
-                line += f" \u2192 {summary[:100]}"
-            parts.append(line)
-    else:
-        parts.append("No events yet for this repository.")
+        parts.append(f"This repository has {len(history)} past events recorded.")
+    repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
+    parts.append(f"Session history (up to 100 events) is available at:\n/root/devops-bot/data/workspaces/{repo_name}/session_history.json\nUse the read tool to access it when you need context about past events.")
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
         skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")

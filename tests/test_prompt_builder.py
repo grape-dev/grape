@@ -79,7 +79,7 @@ class TestBuildChatPrompt:
         prompt = pb.build_chat_prompt("test query", "owner/repo", [])
         assert "test query" in prompt
         assert "owner/repo" in prompt
-        assert "No events yet" in prompt
+        assert "session_history.json" in prompt
 
     def test_with_history(self, pb):
         history = [
@@ -88,8 +88,7 @@ class TestBuildChatPrompt:
         ]
         prompt = pb.build_chat_prompt("hello", "owner/repo", history)
         assert "history" in prompt or "events" in prompt
-        assert "ok" in prompt
-        assert "fail" in prompt
+        assert "session_history.json" in prompt
 
     def test_with_skills(self, pb):
         prompt = pb.build_chat_prompt("query", "owner/repo", [], ["chat"])
@@ -133,7 +132,7 @@ class TestBuildPrompt:
     def test_with_history(self, pb, base_evt):
         history = [{"type": "issue_opened", "success": True}]
         prompt = pb.build_prompt(base_evt, history, "", ["issue"])
-        assert "Previous events" in prompt
+        assert "session_history.json" in prompt
 
     def test_implementation_skill_role(self, pb, base_evt):
         prompt = pb.build_prompt(base_evt, [], "", ["implementation"])

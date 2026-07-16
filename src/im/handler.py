@@ -155,6 +155,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         add_reaction(msg_id, "OK")
 
         final_text = ""
+        exit_code = 0
         backend = get_agent_backend(skills[0]) if skills else "opencode"
         oc_sid = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
         new_oc_session_id = oc_sid
@@ -172,25 +173,24 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
             elif event_type == "done":
                 d = data
                 final_text = d["text"]
-                if d.get("exit_code") == 0 and d.get("oc_session_id"):
+                exit_code = d.get("exit_code", 0)
+                if exit_code == 0 and d.get("oc_session_id"):
                     new_oc_session_id = d["oc_session_id"]
-                log.info(f"  ✅ Done: exit={d.get('exit_code')}, text_len={len(final_text)}, stderr={d.get('stderr','')[:200]}, errors={d.get('errors',[])}")
-
-        summary = ""
-        for line in final_text.split("\n"):
-            if line.startswith("OUTCOME:"):
-                summary = line[len("OUTCOME:"):].strip()
-                break
-        if not summary:
-            summary = final_text.strip().split("\n")[0][:100]
+                log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}, stderr={d.get('stderr','')[:200]}, errors={d.get('errors',[])}")
 
         record = {
             "type": "chat", "time": datetime.now().isoformat(),
-            "success": True, "actor": parsed.get("sender_id", ""),
-            "summary": summary,
+            "success": exit_code == 0, "exit_code": exit_code,
+            "actor": parsed.get("sender_id", ""),
+            "account": account,
+            "backend": backend,
+            "skill": "chat",
+            "stdout": final_text[:2000],
             "oc_session_id": new_oc_session_id
         }
         history.append(record)
+        from src.session_manager import dump_history_to_file
+        dump_history_to_file(repo_key, history)
         update_session(sess, history, "idle", new_oc_session_id, backend)
 
         output = final_text.strip()
