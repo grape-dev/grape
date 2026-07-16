@@ -24,6 +24,8 @@ from src.im.feishu import (
     get_chat_members,
     get_chat_id_for_repo,
     ensure_configured,
+    process_command,
+    detect_clean_intent,
 )
 
 
@@ -182,3 +184,88 @@ class TestGetChatIdForRepo:
 class TestEnsureConfigured:
     def test_returns_true_when_configured(self):
         assert ensure_configured() is True
+
+
+class TestDetectCleanIntent:
+    def test_clean_command(self):
+        assert detect_clean_intent("/clean") is False  # /clean goes through process_command, not detect_clean_intent
+
+    def test_chinese_clean(self):
+        assert detect_clean_intent("清除会话缓存") is True
+        assert detect_clean_intent("清理上下文") is True
+        assert detect_clean_intent("重置Agent") is True
+        assert detect_clean_intent("重来吧") is True
+        assert detect_clean_intent("从头开始") is True
+
+    def test_no_match(self):
+        assert detect_clean_intent("你好") is False
+        assert detect_clean_intent("查询issue") is False
+
+
+class TestProcessCommandClean:
+    def _setup_db(self, tmp_path):
+        import sqlite3
+        db_path = os.path.join(tmp_path, "test.db")
+        db = sqlite3.connect(db_path)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS feishu_bindings (
+                chat_id TEXT PRIMARY KEY, repo_key TEXT,
+                source TEXT DEFAULT 'gitcode', bind_by TEXT DEFAULT '',
+                account TEXT DEFAULT 'default',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                repo_key TEXT UNIQUE,
+                event_history TEXT DEFAULT '[]',
+                opencode_session_id TEXT DEFAULT '',
+                codearts_session_id TEXT DEFAULT '',
+                backend TEXT DEFAULT ''
+            )
+        """)
+        db.execute("INSERT OR REPLACE INTO feishu_bindings (chat_id, repo_key, account) VALUES (?,?,?)",
+                   ("chat_clean_test", "owner/repo", "default"))
+        db.execute("INSERT OR REPLACE INTO sessions (repo_key, event_history, opencode_session_id, codearts_session_id, backend) VALUES (?,?,?,?,?)",
+                   ("owner/repo", json.dumps([{"type": "chat", "text": "hello"}]), "ses_opencode_old", "ses_codearts_old", "opencode"))
+        db.commit()
+        return db, db_path
+
+    def test_clean_clears_session_ids(self, tmp_path):
+        db, _ = self._setup_db(tmp_path)
+        result = process_command("/clean", "chat_clean_test", "tester", db, "default")
+        assert "已清除" in result
+        c = db.cursor()
+        c.execute("SELECT opencode_session_id, codearts_session_id, backend, event_history FROM sessions WHERE repo_key=?", ("owner/repo",))
+        row = c.fetchone()
+        assert row[0] == ""  # opencode_session_id cleared
+        assert row[1] == ""  # codearts_session_id cleared
+        assert row[2] == ""  # backend cleared
+        assert "hello" in row[3]  # event_history preserved
+
+    def test_clean_no_binding(self, tmp_path):
+        import sqlite3
+        db = sqlite3.connect(os.path.join(tmp_path, "empty.db"))
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS feishu_bindings (
+                chat_id TEXT PRIMARY KEY, repo_key TEXT,
+                source TEXT DEFAULT 'gitcode', bind_by TEXT DEFAULT '',
+                account TEXT DEFAULT 'default',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        db.commit()
+        result = process_command("/clean", "chat_nobody", "tester", db, "default")
+        assert "未绑定" in result
+
+    def test_clean_also_matches_full_gitcode_key(self, tmp_path):
+        db, _ = self._setup_db(tmp_path)
+        c = db.cursor()
+        # Add session with gitcode: prefix
+        c.execute("INSERT OR REPLACE INTO sessions (repo_key, opencode_session_id) VALUES (?,?)",
+                  ("gitcode:owner/repo", "ses_another"))
+        db.commit()
+        result = process_command("/clean", "chat_clean_test", "tester", db, "default")
+        assert "已清除" in result
+        c.execute("SELECT opencode_session_id FROM sessions WHERE repo_key=?", ("gitcode:owner/repo",))
+        assert c.fetchone()[0] == ""
