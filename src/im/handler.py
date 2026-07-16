@@ -95,7 +95,7 @@ def process_chat(parsed: dict):
         lock = _acquire_repo_lock(repo_key)
         lock.acquire()
         try:
-            _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new, account)
+            _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new, account, stored_backend)
         finally:
             lock.release()
 
@@ -111,7 +111,7 @@ def process_chat(parsed: dict):
             pass
 
 
-def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new, account="default"):
+def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, is_new, account="default", stored_backend=""):
     try:
         sender_id = parsed.get('sender_id', '')
         sender_name = get_user_name(sender_id) if sender_id else ""
