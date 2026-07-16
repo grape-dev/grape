@@ -52,7 +52,7 @@ class TestCodeArtsBackend:
         assert "--format" in args
         assert "json" in args
         assert "--dangerously-skip-permissions" not in args
-        assert "hello world" in args
+        assert "hello world" not in args  # prompt piped via stdin
 
     def test_build_args_with_session(self):
         args = self.backend.build_args("test prompt", "sess_abc")

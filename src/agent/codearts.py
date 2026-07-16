@@ -13,7 +13,6 @@ class CodeArtsBackend(AgentBackend):
         args = ["run", "--format", "json"]
         if session_id:
             args.extend(["--sessionID", session_id])
-        args.append(prompt)
         return args
 
     def get_env(self) -> dict:
