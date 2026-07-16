@@ -1,6 +1,5 @@
 """CodeArts 后端实现"""
 import os
-from src.config import GITCODE_API_TOKEN, CODEARTS_CLI_AK, CODEARTS_CLI_SK
 from .base import AgentBackend
 
 
@@ -15,11 +14,14 @@ class CodeArtsBackend(AgentBackend):
             args.extend(["--session", session_id])
         return args
 
-    def get_env(self) -> dict:
+    def get_env(self, account: str = "default") -> dict:
+        from src.config import get_account
+        acc = get_account(account)
         env = os.environ.copy()
-        env["GITCODE_API_TOKEN"] = GITCODE_API_TOKEN
-        if CODEARTS_CLI_AK:
-            env["CODEARTS_CLI_AK"] = CODEARTS_CLI_AK
-        if CODEARTS_CLI_SK:
-            env["CODEARTS_CLI_SK"] = CODEARTS_CLI_SK
+        if acc.get("gitcode_api_token"):
+            env["GITCODE_API_TOKEN"] = acc["gitcode_api_token"]
+        if acc.get("CODEARTS_CLI_AK"):
+            env["CODEARTS_CLI_AK"] = acc["CODEARTS_CLI_AK"]
+        if acc.get("CODEARTS_CLI_SK"):
+            env["CODEARTS_CLI_SK"] = acc["CODEARTS_CLI_SK"]
         return env
