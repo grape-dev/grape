@@ -36,11 +36,15 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     log.info(f"{backend.name} args: {' '.join(args)[:200]}...")
     log.info(f"{backend.name} cwd: {cwd}")
 
+    stdin_pipe = subprocess.PIPE if backend.prompt_via_stdin else None
     proc = subprocess.Popen(
         [agent_cmd] + args,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         cwd=cwd, env=env, bufsize=0
     )
+    if backend.prompt_via_stdin:
+        proc.stdin.write(prompt.encode("utf-8"))
+        proc.stdin.close()
 
     collected_text = []
     new_session_id = session_id

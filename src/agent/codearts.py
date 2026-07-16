@@ -7,6 +7,7 @@ from .base import AgentBackend
 class CodeArtsBackend(AgentBackend):
     name = "codearts"
     binary = "codearts"
+    prompt_via_stdin = True
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         args = ["run", "--format", "json"]

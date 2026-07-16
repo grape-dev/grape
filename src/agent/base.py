@@ -6,6 +6,7 @@ class AgentBackend:
     """Agent 后端基类，所有后端实现需继承此类。"""
     name = ""
     binary = ""
+    prompt_via_stdin = False
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         raise NotImplementedError
