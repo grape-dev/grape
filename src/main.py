@@ -15,6 +15,7 @@ from src.im.feishu import (
 from src.session_manager import db, db_lock
 from src.im.handler import process_chat
 from src.webhook_handler import Handler
+from src.admin.server import start_admin_server
 
 
 def _sync_feishu_users():
