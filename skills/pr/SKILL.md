@@ -31,15 +31,6 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 不要执行 `ls`、`grep`、`cat` 等命令查看 workspace 目录、Bot 代码、日志文件或数据库。
 **所有信息通过 GitCode API 获取**，不读取本地文件。
 
-## 事件处理
-
-| 事件类型 | 处理方式 |
-|---------|---------|
-| pull_request_opened | 关联 Issue → 代码审查 → 安全扫描 → 合并检查 → 评论 |
-| pull_request_updated | 重新审查 + 扫描（增量） |
-| push | 简要审查变更（非 PR 场景时） |
-| note_hook_pr | 分析评论 → 回复 |
-
 ## 处理流程
 
 ### 阶段 0：PR 配置检查
