@@ -66,7 +66,7 @@ def process_event(raw_body, headers, account="default"):
             return
 
         # 前置通知：非 IM 自身事件都送给 im-notify 技能（不受防循环限制）
-        if evt.get("type") not in ("im_notify", "chat"):
+        if evt.get("type") not in ("im_notify",):
             notify_evt = dict(evt)
             notify_evt["type"] = "im_notify"
             notify_evt["original_type"] = evt.get("type", "")
