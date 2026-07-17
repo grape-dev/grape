@@ -65,13 +65,15 @@ def process_event(raw_body, headers, account="default"):
             log.info(f"Skipped malformed event: type={evt['type']}, repo={evt['repository']}")
             return
 
-        # 前置通知：非 IM 自身事件都送给 im-notify 技能（不受防循环限制）
+        # 前置通知：/notify on 时才提交 im-notify 技能（不受防循环限制）
         if evt.get("type") not in ("im_notify",):
-            notify_evt = dict(evt)
-            notify_evt["type"] = "im_notify"
-            notify_evt["original_type"] = evt.get("type", "")
-            log.info(f"Submit to im-notify: original={evt['type']}")
-            _submit_event(_process_event_inner, notify_evt, repo_key, account)
+            from src.session_manager import get_notify_enabled
+            if get_notify_enabled(repo_key):
+                notify_evt = dict(evt)
+                notify_evt["type"] = "im_notify"
+                notify_evt["original_type"] = evt.get("type", "")
+                log.info(f"Submit to im-notify: original={evt['type']}")
+                _submit_event(_process_event_inner, notify_evt, repo_key, account)
 
         # 自循环跳过（仅评论会导致无限循环）
         user = evt['payload'].get('user', {})
