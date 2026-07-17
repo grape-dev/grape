@@ -86,7 +86,7 @@ git push origin feat/issue-{number}
 - 按严重度标注发现（Critical / Required / Nit）
 - 修复发现的问题后提交修正
 
-### 3.5 创建 PR 并发飞书通知
+### 3.5 创建 PR
 
 > **重要**：不要依赖 `git push` 自动创建 PR（自动创建的 PR 没有描述、标签、关联 Issue）。必须使用以下 curl 手动创建并补充字段。
 
@@ -125,21 +125,7 @@ curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 > - `labels` 使用逗号分隔的字符串
 > - 创建后可用 `GET /api/v5/repos/{owner}/{repo}/pulls/{number}` 确认状态
 
-**2. 飞书通知 PR 检视人 + Issue 责任人：**
-
-PR 创建成功后，根据 Prompt 中的 Feishu Notification Capability，向以下人员发送通知：
-- PR 的 assignees
-- 关联 Issue 的责任人（assignee）
-
-通知中引用用户时必须使用 Collaborators 列表中的 `nick_name`（中文真名），禁止使用 `username`/`login`。
-
-Card 内容：
-```
-{nick_name}，您好！PR [#{N}]({PR链接}): {PR标题} 已创建，请检视合入。
-```
-如有多人，用顿号连接：`请廖堉哲、吴扬检视合入`
-
-**3. 评论回复：**
+**2. 评论回复：**
 
 在 Issue 中评论：
 ```
