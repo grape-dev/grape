@@ -160,7 +160,7 @@ class TestBuildPrompt:
             "auto_impl_enabled": True,
             "notify_enabled": True,
         }
-        prompt = pb.build_prompt(base_evt, [], "", ["issue"], ctx)
+        prompt = pb.build_prompt(base_evt, [], "", ["im-notify"], ctx)
         assert "Feishu tenant token: test_token_12345" in prompt
         assert "张三" in prompt
         assert "李四" in prompt

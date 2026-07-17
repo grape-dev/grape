@@ -9,6 +9,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from src.vcs.adapter import normalize_event
+from src.vcs.gitcode import GitCodeBackend
 
 
 class TestNormalizeEventGitCode:
@@ -149,3 +150,61 @@ class TestNormalizeEventCornerCases:
         }
         evt = normalize_event(json.dumps(raw), "issues")
         assert evt["actor"] == "fallback_user"
+
+
+class TestNormalizeEventIssueHookActions:
+    """Issue Hook actions (open/update/close) should produce different event types."""
+
+    def test_issue_hook_open(self):
+        raw = {
+            "event_type": "Issue Hook",
+            "project": {"path_with_namespace": "owner/repo"},
+            "user_name": "tester",
+            "object_attributes": {"action": "open", "iid": 1, "title": "Bug"},
+            "issue": {"number": 1}
+        }
+        evt = normalize_event(json.dumps(raw), "Issue Hook")
+        assert evt["type"] == "issue_opened"
+
+    def test_issue_hook_update(self):
+        raw = {
+            "event_type": "Issue Hook",
+            "project": {"path_with_namespace": "owner/repo"},
+            "user_name": "tester",
+            "object_attributes": {"action": "update", "iid": 1},
+            "issue": {"number": 1}
+        }
+        evt = normalize_event(json.dumps(raw), "Issue Hook")
+        assert evt["type"] == "issue_updated"
+
+    def test_issue_hook_close(self):
+        raw = {
+            "event_type": "Issue Hook",
+            "project": {"path_with_namespace": "owner/repo"},
+            "user_name": "tester",
+            "object_attributes": {"action": "close", "iid": 1},
+            "issue": {"number": 1}
+        }
+        evt = normalize_event(json.dumps(raw), "Issue Hook")
+        assert evt["type"] == "issue_updated"
+
+    def test_issue_hook_reopen(self):
+        raw = {
+            "event_type": "Issue Hook",
+            "project": {"path_with_namespace": "owner/repo"},
+            "user_name": "tester",
+            "object_attributes": {"action": "reopen", "iid": 1},
+            "issue": {"number": 1}
+        }
+        evt = normalize_event(json.dumps(raw), "Issue Hook")
+        assert evt["type"] == "issue_updated"
+
+    def test_issue_hook_missing_attributes(self):
+        """No object_attributes should fall through to issue_updated."""
+        raw = {
+            "event_type": "Issue Hook",
+            "project": {"path_with_namespace": "owner/repo"},
+            "user_name": "tester",
+        }
+        evt = normalize_event(json.dumps(raw), "Issue Hook")
+        assert evt["type"] == "issue_updated"

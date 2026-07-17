@@ -253,7 +253,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
         else:
             parts.append(f"Read the file at {skill_path} using the read tool. Execute its instructions step by step. Do not analyze or propose — execute.")
 
-    if feishu_ctx:
+    if feishu_ctx and skills and skills[0] == "im-notify":
         repo_key = f"{evt['source']}:{evt['repository']}"
         parts.append(_build_feishu_context_section(repo_key, feishu_ctx))
 

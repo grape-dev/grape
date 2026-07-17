@@ -17,6 +17,14 @@ class GitCodeBackend(VcsBackend):
             "tag_push": "tag_created", "release": "release_created", "pipeline": "build_start",
         }
         evt_type = event_type_map.get(event_header, event_header)
+        # 区分 Issue Hook 的动作
+        if event_header == "Issue Hook":
+            obj = payload.get("object_attributes", {})
+            action = obj.get("action", "") if isinstance(obj, dict) else ""
+            if action == "open":
+                evt_type = "issue_opened"
+            else:
+                evt_type = "issue_updated"
         # 区分 merge 与非 merge 的 PR 事件
         if evt_type == "pull_request_merged":
             obj = payload.get("object_attributes", {})
