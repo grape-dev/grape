@@ -42,6 +42,33 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 ## 处理流程
 
+### 阶段 0：跳过无变更的重复检视
+
+在执行正式审查前，先判断本次是否有新的代码变更：
+
+1. **获取 PR 最新 commit SHA**：
+```bash
+curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
+```
+从返回中提取 `head.sha` 字段。
+
+2. **读取上次检视的 SHA**：
+```bash
+cat /root/devops-bot/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha 2>/dev/null
+```
+如果文件不存在 → 首次检视，直接进入阶段 1。
+
+3. **比较 SHA**：
+   - 相同 → 代码没有新变更 → **跳过整个 skill**，输出 `SKIP_PR_REVIEW: No new changes`，**不要发评论**
+   - 不同 → 有新的变更 → 进入阶段 1 正式审查
+
+4. **审查完成后记录 SHA**：在阶段 4 完成后，执行：
+```bash
+mkdir -p /root/devops-bot/data/workspaces/{repository}/.last_pr_review
+echo -n "{head.sha}" > /root/devops-bot/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha
+```
+
 ### 阶段 1：关联 Issue
 
 1. 检查 PR 正文是否引用 Issue：`Closes #N`、`Fixes #N`、`Resolves #N`、`Related #N`
@@ -128,7 +155,7 @@ Content-Type: application/json
 
 ### 必须执行：发评论
 
-所有事件处理完成后，**必须**用 curl 发送一条评论到 Issue，body 以 `[DevOps Bot]` 开头：
+事件处理完成后（阶段 1-4），**必须**用 curl 发送一条评论到 Issue，body 以 `[DevOps Bot]` 开头：
 
 ```bash
 POST /repos/{owner}/{repo}/pulls/{number}/comments
@@ -138,6 +165,8 @@ Content-Type: application/json
 ```
 
 这是强制步骤，不能省略。
+
+**例外：** 阶段 0 判定 SHA 未变更而跳过时，不发评论。
 
 ## 输出规范
 
