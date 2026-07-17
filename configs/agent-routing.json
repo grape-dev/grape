@@ -9,6 +9,7 @@
     "deploy-guard": "opencode",
     "incident-triage": "opencode",
     "changelog-gen": "opencode",
-    "cloud-deploy": "opencode"
+    "cloud-deploy": "opencode",
+    "im-notify": "opencode"
   }
 }
