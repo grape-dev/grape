@@ -101,8 +101,11 @@ EVENT_ROUTING = {}
 _EVENT_ROUTING_FALLBACK = "devops-event-ops"
 
 
-def get_domain_skill(evt_type: str) -> str:
-    return EVENT_ROUTING.get(evt_type, _EVENT_ROUTING_FALLBACK)
+def get_domain_skill(evt_type: str, repo_key: str = "") -> str:
+    repo_skills = EVENT_ROUTING.get("repo_routing", {}).get(repo_key, {}) if repo_key else {}
+    if repo_key and evt_type in repo_skills:
+        return repo_skills[evt_type]
+    return EVENT_ROUTING.get("routing", {}).get(evt_type, _EVENT_ROUTING_FALLBACK)
 
 
 def _load_routing_config():
@@ -114,9 +117,10 @@ def _load_routing_config():
     try:
         with open(_routing_path, encoding="utf-8") as _f:
             _routing_data = json.load(_f)
-        EVENT_ROUTING = _routing_data.get("routing", {})
+        EVENT_ROUTING = _routing_data
         _EVENT_ROUTING_FALLBACK = _routing_data.get("fallback_skill", "devops-event-ops")
-        log.info(f"Event routing loaded: {len(EVENT_ROUTING)} rules, fallback={_EVENT_ROUTING_FALLBACK}")
+        repo_count = len(_routing_data.get("repo_routing", {}))
+        log.info(f"Event routing loaded: {len(_routing_data.get('routing', {}))} rules, {repo_count} repo overrides, fallback={_EVENT_ROUTING_FALLBACK}")
     except Exception as _e:
         log.warning(f"Failed to load event routing config: {_e}")
 

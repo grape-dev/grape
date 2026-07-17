@@ -162,7 +162,7 @@ def _process_event_inner(evt, repo_key, account="default"):
         sid, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, evt['source'], evt['repository'])
         log.info(f"Session: {sid} (new={is_new}, history={len(history)} events, oc_session={oc_sid[:30] if oc_sid else 'none'})")
 
-        skills = [get_domain_skill(evt['type'])]
+        skills = [get_domain_skill(evt['type'], evt.get("repository", ""))]
         log.info(f"Skills: {skills}")
         if not skills[0]:
             log.info(f"No skill for event type {evt['type']}, skipping")

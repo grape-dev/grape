@@ -10,6 +10,7 @@
     "incident-triage": "opencode",
     "changelog-gen": "opencode",
     "cloud-deploy": "opencode",
-    "im-notify": "opencode"
+    "im-notify": "opencode",
+    "skill-pr": "opencode"
   }
 }

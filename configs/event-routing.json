@@ -13,5 +13,11 @@
     "release_created": "changelog-gen",
     "note_hook_pr": "pr"
   },
+  "repo_routing": {
+    "Jason7602/huaweicloud-skills": {
+      "pull_request_opened": "skill-pr",
+      "pull_request_updated": "skill-pr"
+    }
+  },
   "fallback_skill": ""
 }
