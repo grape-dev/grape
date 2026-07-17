@@ -16,7 +16,8 @@
   "repo_routing": {
     "Jason7602/huaweicloud-skills": {
       "pull_request_opened": "skill-pr",
-      "pull_request_updated": "skill-pr"
+      "pull_request_updated": "skill-pr",
+      "note_hook_pr": "skill-pr"
     }
   },
   "fallback_skill": ""

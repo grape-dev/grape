@@ -25,6 +25,14 @@ class GitCodeBackend(VcsBackend):
                 evt_type = "issue_opened"
             else:
                 evt_type = "issue_updated"
+        # 区分 Note Hook 的类型（Issue 评论 vs PR 评论）
+        if event_header == "Note Hook":
+            obj = payload.get("object_attributes", {})
+            noteable_type = obj.get("noteable_type", "") if isinstance(obj, dict) else ""
+            if noteable_type == "MergeRequest":
+                evt_type = "note_hook_pr"
+            else:
+                evt_type = "issue_comment"
         # 区分 merge 与非 merge 的 PR 事件
         if evt_type == "pull_request_merged":
             obj = payload.get("object_attributes", {})
