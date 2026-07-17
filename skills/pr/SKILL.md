@@ -63,7 +63,7 @@ curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 | **Labels** | 已有 `bug` / `feature` / `enhancement` 等标签 | `🏷️ PR 缺少分类标签，请添加（bug/feature/enhancement）` |
 | **Assignee** | 已设置责任人 | `👤 PR 未设置 Assignee，请指定处理人` |
 
-3. **评论提醒**：对每个不通过的检查项，发一条评论提醒 PR 作者。**不阻塞后续流程**，即使发现问题也继续进入阶段 0b。
+3. **评论提醒**：将所有不通过项合并为一条评论发送。若全部通过则不发评论。**不阻塞后续流程**，即使发现问题也继续进入阶段 0b。
 
 ### 阶段 0b：跳过无变更的重复检视
 
