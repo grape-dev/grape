@@ -1,8 +1,6 @@
 # DevOps Bot
 
-**Agent 驱动的 DevOps 事件编排器**。Bot 监听 GitHub/GitCode Webhook 和飞书 IM 消息，通过 opencode CLI 调用 Agent 实现 Issue 分诊、PR 审查、自动代码实现等 DevOps 全流程自动化。Bot 是壳，Agent 是脑。
-
-事件 → 配置文件路由 → domain skill（自包含原则 + API 参考）→ Agent 按流程执行。
+**Agent 驱动的 DevOps 事件编排器**。Bot 监听 GitCode Webhook 和飞书 IM 消息，通过 opencode / codearts CLI 调用 Agent 实现 Issue 分诊、PR 审查、自动代码实现等 DevOps 全流程自动化。Bot 是壳，Agent 是脑。
 
 ## 支持的入口
 
@@ -11,7 +9,25 @@
 | GitCode | HTTP Webhook | ✅ 运行中 |
 | 飞书 | WebSocket 长连接（lark-oapi SDK） | ✅ 运行中 |
 
-## Skills 库（10 个）
+## 多后端 Agent
+
+| 后端 | CLI | 认证方式 | 适用场景 |
+|------|-----|----------|----------|
+| opencode | `opencode run --format json` | GitCode API Token | 开源场景、开发调试 |
+| codearts | `codearts run --format json` | 华为云 AK/SK | 华为云 CodeArts 集成 |
+
+两个后端通过 `configs/agent-routing.json` 按 Skill 路由，可混合使用。
+
+## 多租户
+
+每个 Account（`configs/accounts.json`）有独立配置：
+- GitCode Token / Webhook Token
+- 飞书 App ID / Secret
+- 华为云 AK/SK / CodeArts CLI AK/SK
+
+每个 Account 启动独立的 Feishu WS 连接，Webhook 请求通过 `X-GitCode-Token` 路由到对应 Account。
+
+## Skills 库
 
 | Skill | 说明 |
 |-------|------|
@@ -36,6 +52,7 @@
 | **飞书通知开关** | `/notify on/off` 控制飞书推送通知 |
 | **CODEOWNERS 兜底** | 名名匹配失败时通知仓库管理员 |
 | **PR 关联 Issue** | `inner_issue_nums` 字符串格式 + `close_related_issue` + PATCH `body/labels/prune_branch` |
+| **Session 历史文件** | 每次操作后写入 `data/workspaces/history/{account}/{repo}/session_history.json`，Agent 可自行 `read` 获取上下文 |
 
 ## 飞书命令
 
@@ -47,7 +64,7 @@
 | `/refresh` | 刷新 GitCode ↔ 飞书用户映射 |
 | `/autodev on/off` | 自动实现开关 |
 | `/notify on/off` | 飞书通知开关 |
-| `/clean` | 清除 Agent 会话缓存 |
+| `/clean` | 清除所有后端 Agent 会话缓存（下次触发全新会话） |
 | `/help` | 帮助 |
 
 ## 快速开始
@@ -55,62 +72,113 @@
 ```bash
 git clone https://gitcode.com/Jason7602/devops-bot.git
 cd devops-bot
-pip install lark-oapi websocket-client pytest
-cp .env.example .env
-# 编辑 .env 填入 Token
+pip install lark-oapi websocket-client pytest paramiko
+cp configs/accounts.example.json configs/accounts.json
+# 编辑 accounts.json 填入 Token
 python -m src.main
 ```
 
 ## 测试
 
 ```bash
-pip install pytest
+pip install pytest pytest-mock
 python -m pytest tests/ -v
 ```
 
-共 **87** 个测试用例，覆盖：
+共 **131** 个测试用例，覆盖：
 
 | 模块 | 用例数 | 说明 |
 |------|--------|------|
-| `test_session_manager` | 17 | Session CRUD、Feishu 映射表、autodev/notify 开关、并发安全 |
+| `test_session_manager` | 25 | Session CRUD、Feishu 映射表、autodev/notify 开关、并发安全、历史文件转储 |
 | `test_config` | 5 | 事件路由、fallback、自定义路由 |
 | `test_prompt_builder` | 20 | Issue/PR/评论 prompt 构建、Feishu context 注入、角色定义 |
 | `test_event_processor` | 14 | normalize_event（GitCode/GitLab/GBK/字节流/边界） |
 | `test_webhook_handler` | 12 | Health/Sessions/UserMapping API、Token 校验 |
-| `test_feishu_handler` | 15 | Card 构建、Token 缓存、消息发送、群成员分页 |
+| `test_feishu_handler` | 21 | Card 构建、Token 缓存、消息发送、群成员分页、清理命令 |
 | `test_chat_handler` | 6 | 命令路由、绑定检测、能力查询 |
+| `test_agent_executor` | 20 | opencode/codearts 参数构建、NDJSON 解析、环境变量 |
+
+## 配置
+
+### 多账户配置 (`configs/accounts.json`)
+
+```json
+{
+  "default": "default",
+  "accounts": [
+    {
+      "name": "default",
+      "gitcode_api_token": "",
+      "gitcode_webhook_token": "",
+      "feishu_app_id": "",
+      "feishu_app_secret": "",
+      "huawei_cloud_ak": "",
+      "huawei_cloud_sk": "",
+      "CODEARTS_CLI_AK": "",
+      "CODEARTS_CLI_SK": "",
+      "bot_usernames": []
+    }
+  ]
+}
+```
+
+### Agent 路由 (`configs/agent-routing.json`)
+
+按 Skill 指定使用 opencode 还是 codearts 后端。
+
+### 事件路由 (`configs/event-routing.json`)
+
+事件类型 → Skill 映射。
 
 ## 项目结构
 
 ```
 devops-bot/
-├── src/                   # Python 源码
-│   ├── main.py            # 启动入口（HTTP server + WS 线程）
-│   ├── config.py          # 环境变量 + 事件路由配置
-│   ├── session_manager.py # SQLite Session + Feishu 用户映射
-│   ├── prompt_builder.py  # Agent Prompt 构建
-│   ├── event_processor.py # 事件归一化 + 路由 + 执行
-│   ├── agent_executor.py  # opencode CLI 子进程调度
-│   ├── chat_handler.py    # 飞书 IM 消息处理
-│   ├── webhook_handler.py # HTTP Webhook 处理器
-│   └── feishu_handler.py  # 飞书 API（WS + REST）
+├── src/
+│   ├── main.py                 # 启动入口（HTTP server + WS 线程）
+│   ├── config.py               # 环境变量 + 事件/Agent 路由 + 多账户配置
+│   ├── session_manager.py      # SQLite Session + Feishu 用户映射 + 历史文件转储
+│   ├── prompt_builder.py       # Agent Prompt 构建（含 history 文件指引）
+│   ├── event_processor.py      # 事件归一化 + 路由 + 执行
+│   ├── webhook_handler.py      # HTTP Webhook 处理器
+│   ├── agent/
+│   │   ├── base.py             # AgentBackend 抽象基类
+│   │   ├── executor.py         # 流式子进程调度（NDJSON 事件循环）
+│   │   ├── opencode.py         # opencode 后端（--session, --dangerously-skip-permissions）
+│   │   └── codearts.py         # codearts 后端（stdin 传 prompt, 华为云 AK/SK）
+│   ├── im/
+│   │   ├── handler.py          # 飞书 IM 消息处理
+│   │   └── feishu.py           # 飞书 API（WS + REST）
+│   ├── vcs/
+│   │   └── gitcode.py          # GitCode VCS 适配器
+│   └── admin/
+│       └── server.py           # 管理控制台（Vue 3 SPA）
 ├── configs/
-│   └── event-routing.json # 事件 → Skill 路由配置
-├── skills/                # 技能库（10 个 domain skills）
-│   ├── issue/             # Issue 运营
-│   ├── pr/                # PR 审查
-│   ├── implementation/    # 自主开发实现
-│   ├── build-debug/       # 构建诊断
-│   ├── deploy-guard/      # 部署守卫
-│   ├── incident-triage/   # 事件分诊
-│   ├── changelog-gen/     # 变更日志
-│   ├── chat/              # 飞书对话
-│   └── agent/             # 5 个 agent-skills 子技能
-├── tests/                 # 87 个测试用例（pytest）
-├── CODEOWNERS             # 模块责任人配置
-├── data/                  # 运行时数据（DB / workspace / logs）
-└── .env                   # 环境变量
+│   ├── accounts.json           # 多账户凭证（gitignored）
+│   ├── accounts.example.json   # 示例配置
+│   ├── event-routing.json      # 事件 → Skill 路由
+│   └── agent-routing.json      # Skill → Agent 后端路由
+├── docs/
+│   └── codearts-cli-guide.md   # CodeArts CLI 使用指南
+├── skills/                     # 技能库
+│   ├── issue/pr/implementation/build-debug/...
+│   └── agent/                  # 5 个 agent-skills 子技能
+├── tests/                      # 131 个测试用例（pytest）
+├── data/
+│   ├── sessions.db             # SQLite 数据库
+│   ├── workspaces/             # 工作区 + Agent session 历史
+│   └── devops-bot.log          # 运行日志（按天轮转）
+└── CODEOWNERS                  # 模块责任人配置
 ```
+
+## Directory Structure
+
+The workspace directory `data/workspaces/` contains:
+
+| 路径 | 说明 |
+|------|------|
+| `workspaces/history/{account}/{repo}/session_history.json` | 最近 10 条事件（有分片时按序号递增） |
+| `workspaces/{repo}/` | Agent 执行工作区（.codeartsdoer 配置等） |
 
 ## License
 
