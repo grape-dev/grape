@@ -43,17 +43,54 @@ curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 ```
 从返回中提取 `title`、`body`、`head.sha`、`labels`、`assignee`、`user.login` 等字段。
 
-2. **逐项检查**：
+2. **检查 PR 标题是否符合规范**：
 
-| 检查项 | 通过条件 | 不通过时评论提醒 |
-|--------|---------|----------------|
-| **Title** | 非空，清晰描述变更 | `⚠️ PR 标题为空或过于简单，请补充变更说明` |
+Skill 仓库 PR 标题必须符合以下格式：
+
+```
+{action} skill: [skills/]{path}/{skill-name} [v{version}]
+```
+
+正则规则：`^(add|update)\s+skill:\s+(skills/)?[a-zA-Z0-9_/-]+(\s+v[0-9]+(\.[0-9]+)*)?$`
+
+| action | 含义 |
+|--------|------|
+| `add` | 新增一个技能（PR 中有文件是 added 状态） |
+| `update` | 更新已有技能（PR 中有文件是 modified 状态） |
+
+如果标题不匹配正则，执行自动修复：
+
+**2a. 获取 PR 变更文件列表**：
+```bash
+curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}/files
+```
+从返回中提取每个文件的 `filename` 和 `status`（added / modified）。
+
+**2b. 推断正确的标题**：
+- 取第一个 `skills/` 开头的文件，提取路径中的 skill name（如 `skills/tokauthai/skillscan/...` → `tokauthai/skillscan`）
+- 判断 action：只要 `有 added 无 modified` → `add`；否则 → `update`
+- 拼出：`{action} skill: {skill-path}`
+
+**2c. 自动修复标题**：
+```bash
+curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "add skill: tokauthai/skillscan"}' \
+  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
+```
+
+3. **逐项检查**：
+
+| 检查项 | 通过条件 | 不通过时操作 |
+|--------|---------|------------|
+| **Title** | 匹配上述正则 | 自动修复（2a-2c），评论说明已修正 |
 | **Description** | 非空，有背景说明 | `⚠️ PR 描述为空，请描述变更背景、改动内容和影响` |
 | **Issue 关联** | body 包含 `Closes #N` / `Fixes #N` / `Related #N` | `📎 未检测到关联 Issue，请确认是否需要关联` |
-| **Labels** | 已有 `bug` / `feature` / `enhancement` 等标签 | `🏷️ PR 缺少分类标签，请添加（bug/feature/enhancement）` |
+| **Labels** | 已有 `bug` / `feature` / `enhancement` 等标签 | `🏷️ PR 缺少分类标签，请添加` |
 | **Assignee** | 已设置责任人 | `👤 PR 未设置 Assignee，请指定处理人` |
 
-3. **评论提醒**：将所有不通过项合并为一条评论发送。若全部通过则不发评论。**不阻塞后续流程**，即使发现问题也继续进入阶段 0b。
+4. **评论提醒**：将所有不通过项（除已自动修复的 Title）合并为一条评论发送。若全部通过则不发评论。**不阻塞后续流程**，即使发现问题也继续进入阶段 0b。
 
 ### 阶段 0b：跳过无变更的重复检视
 
