@@ -42,16 +42,34 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 ## 处理流程
 
-### 阶段 0：跳过无变更的重复检视
+### 阶段 0：PR 配置检查
 
-在执行正式审查前，先判断本次是否有新的代码变更：
+适用于 `pull_request_opened` / `pull_request_updated` 事件。在正式审查前，先检查 PR 的基础配置是否完整：
 
-1. **获取 PR 最新 commit SHA**：
+1. **获取 PR 详情**：
 ```bash
 curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
 ```
-从返回中提取 `head.sha` 字段。
+从返回中提取 `title`、`body`、`head.sha`、`labels`、`assignee`、`user.login` 等字段。
+
+2. **逐项检查**：
+
+| 检查项 | 通过条件 | 不通过时评论提醒 |
+|--------|---------|----------------|
+| **Title** | 非空，清晰描述变更 | `⚠️ PR 标题为空或过于简单，请补充变更说明` |
+| **Description** | 非空，有背景说明 | `⚠️ PR 描述为空，请描述变更背景、改动内容和影响` |
+| **Issue 关联** | body 包含 `Closes #N` / `Fixes #N` / `Related #N` | `📎 未检测到关联 Issue，请确认是否需要关联` |
+| **Labels** | 已有 `bug` / `feature` / `enhancement` 等标签 | `🏷️ PR 缺少分类标签，请添加（bug/feature/enhancement）` |
+| **Assignee** | 已设置责任人 | `👤 PR 未设置 Assignee，请指定处理人` |
+
+3. **评论提醒**：对每个不通过的检查项，发一条评论提醒 PR 作者。**不阻塞后续流程**，即使发现问题也继续进入阶段 0b。
+
+### 阶段 0b：跳过无变更的重复检视
+
+在执行正式审查前，先判断本次是否有新的代码变更：
+
+1. **获取 PR 最新 commit SHA**：（阶段 0 已获取，使用已提取的 `head.sha`）
 
 2. **读取上次检视的 SHA**：
 ```bash
@@ -60,7 +78,7 @@ cat /root/devops-bot/data/workspaces/{repository}/.last_pr_review/{pr_number}.sh
 如果文件不存在 → 首次检视，直接进入阶段 1。
 
 3. **比较 SHA**：
-   - 相同 → 代码没有新变更 → **跳过整个 skill**，输出 `SKIP_PR_REVIEW: No new changes`，**不要发评论**
+   - 相同 → 代码没有新变更 → **跳过阶段 1-4**，输出 `SKIP_PR_REVIEW: No new changes`，**不要发审查评论**（但阶段 0 的配置检查评论已发出）
    - 不同 → 有新的变更 → 进入阶段 1 正式审查
 
 4. **审查完成后记录 SHA**：在阶段 4 完成后，执行：
@@ -166,7 +184,7 @@ Content-Type: application/json
 
 这是强制步骤，不能省略。
 
-**例外：** 阶段 0 判定 SHA 未变更而跳过时，不发评论。
+**例外：** 阶段 0b 判定 SHA 未变更而跳过时，不发审查评论。阶段 0 的配置检查评论不受影响。
 
 ## 输出规范
 
