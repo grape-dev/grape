@@ -1,37 +1,49 @@
 # DevOps Bot Skills 库
 
-本目录是 DevOps Bot 的**项目级 Skills 库**，存放面向 DevOps 领域的专属技能定义。这些 Skills 作为接入 Agent（OpenCode、Claude、OpenClaw 等）的项目级技能目录，Agent 在处理 DevOps 事件时会自行发现和触发所需技能。
+本目录是 DevOps Bot 的**技能库**，每个子目录对应一个 Skill，包含 `SKILL.md`（技能指令）和 `references/`（参考文档）。
 
-## 设计理念
+Bot 通过事件路由（`configs/event-routing.json`）将事件分发到对应 Skill，Bot 读取 `SKILL.md` 拼入 Prompt 后交给 Agent 执行。
+
+## 技能列表
+
+| Skill | 说明 | 触发事件 | 后端 |
+|-------|------|---------|------|
+| `issue` | Issue 分诊、标签、CODEOWNERS 分配 | `issue_opened`、`issue_comment` | opencode |
+| `pr` | PR 审查（代码审查、IaC 扫描、合并检查） | `pull_request_opened`、`pull_request_updated`、`note_hook_pr` | opencode |
+| `skill-pr` | Skill 仓库专用 PR 审查（同 pr 技能，用于 huaweicloud-skills） | `pull_request_opened`、`pull_request_updated` | opencode |
+| `implementation` | 自主开发实现（spec → plan → TDD → 增量代码 → PR） | `issue_labeled` | opencode |
+| `build-debug` | 构建失败诊断与修复建议 | `build_failure` | opencode |
+| `deploy-guard` | 部署安全守卫与合规检查 | `deploy_start`、`deploy_failure` | opencode |
+| `incident-triage` | 事件分诊与定级 | 手动触发 | opencode |
+| `changelog-gen` | 变更日志生成与发布说明 | `release_created` | opencode |
+| `cloud-deploy` | 云部署自动化 | `pull_request_merged` | opencode |
+| `im-notify` | 飞书通知 — 接收 GitCode 事件，按事件类型决策发送通知 | 所有非 IM 事件自动前置路由 | opencode |
+| `chat` | 飞书 IM 对话、意见反馈、实施审批 | 飞书消息 | opencode |
+| `agent` | 5 个 agent-skills 子技能（spec-driven-dev / planning / TDD / incremental-impl / code-review） | 被其他技能引用 | opencode |
+
+## 路由机制
 
 ```
-DevOps Bot = 事件编排器，只负责把 Skills 路径告诉 Agent
-Skills    = Agent 的项目级 DevOps 领域知识库
-Agent     = 收到 Skills 路径后，自行发现、匹配、触发技能
+事件 → event_processor.py
+  → event-routing.json（事件类型 → Skill 映射）
+    → 支持 repo_routing（按仓库名覆盖技能）
+      → 读取 skills/{skill}/SKILL.md → 拼入 Prompt → Agent 执行
 ```
 
-- **Bot 不注入 Skills 内容** — Bot 不读取 SKILL.md，不拼接到 Prompt 中
-- **Bot 只传递路径** — 通过环境变量 `DEVOPS_SKILLS_DIR` 将 Skills 目录的绝对路径传给 Agent
-- **Agent 自主决策** — Agent 根据事件上下文，自行判断需要激活哪些 Skills
-- **Skills 是 Agent 的知识，不是 Bot 的逻辑** — Bot 不理解 Skill 内容，也不干预 Agent 的技能选择
+## 仓库特定路由
 
-## 工作机制
+`configs/event-routing.json` 中的 `repo_routing` 支持按仓库名指定不同技能：
 
+```json
+"repo_routing": {
+  "Jason7602/huaweicloud-skills": {
+    "pull_request_opened": "skill-pr",
+    "pull_request_updated": "skill-pr"
+  }
+}
 ```
-1. GitCode 事件到达
-2. Bot 创建 Session，统一加载 `devops-event-ops` skill
-3. Bot 调用 Agent CLI，传入:
-   - DEVOPS_SKILLS_DIR=/path/to/skills   ← Skills 路径
-   - DEVOPS_SESSION_ID=sess-xxx          ← Session 标识
-   - Prompt 包含事件信息 + devops-event-ops 指令
-4. Agent 启动后:
-   - 读取 `devops-event-ops` skill → 查看场景路由表
-   - 根据事件类型，自行决定加载哪些子技能
-    - 需要调用 API 时，读取相应 Skill 目录下的 `references/gitcode-api-reference.md`
-   - 执行技能中定义的步骤
 
-飞书消息同理，但统一加载 `chat` skill。
-```
+未配置的仓库走全局 `routing` 映射。
 
 ## 目录结构
 
@@ -39,53 +51,34 @@ Agent     = 收到 Skills 路径后，自行发现、匹配、触发技能
 skills/
 ├── README.md                    # 本文件
 ├── SKILL-SPEC.md                # Skill 规范定义
-├── build-debug/                 # 构建失败诊断技能
-│   └── SKILL.md
-├── changelog-gen/               # 变更日志生成技能
-│   └── SKILL.md
-├── chat/                        # 飞书 IM 对话技能
-│   └── SKILL.md
-├── code-review/                 # 代码审查技能
-│   └── SKILL.md
-├── comment/                     # 仓库评论回复技能
-│   └── SKILL.md
-├── deploy-guard/                # 部署安全守卫技能
-│   └── SKILL.md
-├── devops-event-ops/            # 事件运营全链路技能
-│   └── SKILL.md
-├── incident-triage/             # 事件分诊技能
-│   └── SKILL.md
-└── security-scan/               # 安全扫描技能
-    └── SKILL.md
+├── agent/                       # 子技能集
+├── build-debug/                 # 构建诊断
+├── changelog-gen/               # 变更日志
+├── chat/                        # 飞书对话
+├── cloud-deploy/                # 云部署
+├── deploy-guard/                # 部署守卫
+├── im-notify/                   # 飞书通知
+├── implementation/              # 自主开发
+├── incident-triage/             # 事件分诊
+├── issue/                       # Issue 运营
+├── pr/                          # PR 审查
+└── skill-pr/                    # Skill 仓库 PR 审查
 ```
+
+每个技能目录包含：
+- `SKILL.md` — 技能指令
+- `references/` — 参考文档（API 参考、审查规范等）
+
+## 如何创建新 Skill
+
+1. 在 `skills/` 下创建目录，如 `skills/my-skill/`
+2. 创建 `SKILL.md`，按 [SKILL-SPEC.md](./SKILL-SPEC.md) 规范编写
+3. 在 `configs/event-routing.json` 中添加事件类型 → Skill 映射
+4. （可选）如果指定仓库使用，在 `repo_routing` 中添加
 
 ## 环境变量
 
 | 变量 | 说明 | 示例 |
 |------|------|------|
 | `DEVOPS_SKILLS_DIR` | Skills 目录的绝对路径 | `/app/skills` |
-| `DEVOPS_SESSION_ID` | 当前 Session ID | `sess-1704067200000000000` |
-
-Agent 启动时通过这两个环境变量获知上下文，`DEVOPS_SKILLS_DIR` 下每个子目录即是一个 Skill，Agent 读取其中的 `SKILL.md` 获取技能定义。
-
-## 如何创建新 Skill
-
-1. 在 `skills/` 下创建目录，如 `skills/my-skill/`
-2. 在其中创建 `SKILL.md`，按 [SKILL-SPEC.md](./SKILL-SPEC.md) 规范编写
-3. 无需修改 Bot 代码或配置 — Agent 会自动发现新 Skill
-
-## 已有 Skills
-
-| Skill | 说明 | 适用入口 |
-|-------|------|---------|
-| `devops-event-ops` | 事件编排全链路管理，所有 GitCode 事件的统一入口 | GitCode 事件 |
-| `chat` | 飞书等 IM 对话处理 | 飞书消息 |
-| `code-review` | 代码审查最佳实践与检查清单 | 参考 skill |
-| `build-debug` | 构建失败诊断方法论与常见模式 | 参考 skill |
-| `deploy-guard` | 部署前安全与合规检查守卫 | 参考 skill |
-| `incident-triage` | 生产事件分诊与定级方法论 | 参考 skill |
-| `security-scan` | 安全漏洞扫描与修复建议 | 参考 skill |
-| `changelog-gen` | 自动生成变更日志 | 参考 skill |
-| `comment` | 仓库 Issue/PR 评论回复 | 参考 skill |
-
-每个技能目录下都有 `references/gitcode-api-reference.md`，需要调用 GitCode API 时直接读取。
+| `DEVOPS_EVENT_TYPE` | 当前事件类型 | `issue_opened` |
