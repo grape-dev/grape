@@ -220,7 +220,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                         self.end_headers()
                 else:
                     log.info(f"Admin login failed: {username}")
-                    self._json(401, {"error": "invalid credentials"})
+                    if "application/json" in ctype:
+                        self._json(401, {"error": "invalid credentials"})
+                    else:
+                        self.send_response(302)
+                        self.send_header("Location", "/admin/?error=1")
+                        self.end_headers()
                 return
 
             if self.path.startswith("/api/admin/accounts/") and self.path.endswith("/test"):

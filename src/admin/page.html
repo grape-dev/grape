@@ -66,12 +66,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div id="login-page">
   <div class="login-card">
     <h1>DevOps Bot</h1><p class="sub">管理台登录</p>
-    <form method="POST" action="/api/admin/login" onsubmit="doLogin();return false">
-      <input id="login-user" name="username" placeholder="用户名" autocomplete="username" required>
-      <input id="login-pass" name="password" type="password" placeholder="密码" autocomplete="current-password" required>
+    <form method="POST" action="/api/admin/login">
+      <input name="username" placeholder="用户名" autocomplete="username" required>
+      <input name="password" type="password" placeholder="密码" autocomplete="current-password" required>
       <button class="btn primary" type="submit">登录</button>
     </form>
-    <div id="login-err" class="err" style="display:none"></div>
+    <div class="err" id="login-err"></div>
   </div>
 </div>
 
@@ -106,33 +106,12 @@ var SHOW_FIELDS = {};
   var qs = new URLSearchParams(window.location.search);
   if (qs.get('token')) TOKEN = qs.get('token');
   if (TOKEN) { document.getElementById('login-page').style.display='none'; document.getElementById('panel-page').style.display='block'; renderList(); }
+  // Show error if redirected from failed login
+  if (qs.get('error')) { var el=document.getElementById('login-err'); el.textContent='用户名或密码错误'; el.style.display='block'; }
 })();
 
 // ======== Toast ========
 function toast(msg, ok){ var t=document.getElementById('toast'); t.textContent=msg; t.className='toast show '+(ok?'ok':'err'); setTimeout(function(){t.className='toast';},2500); }
-
-// ======== Login ========
-function doLogin(){
-  var u = document.getElementById('login-user').value;
-  var p = document.getElementById('login-pass').value;
-  var e = document.getElementById('login-err');
-  var b = document.querySelector('#login-page button[type=submit]');
-  if(!u||!p){ e.textContent='请输入用户名和密码'; e.style.display='block'; return false; }
-  e.style.display='none'; b.disabled=true; b.textContent='登录中…';
-  var x=new XMLHttpRequest();
-  x.open('POST','/api/admin/login',true);
-  x.setRequestHeader('Content-Type','application/json');
-  x.onload=function(){
-    if(x.status===200){
-      try { var d=JSON.parse(x.responseText); } catch(ex) { e.textContent='服务器响应异常'; e.style.display='block'; b.disabled=false; b.textContent='登录'; return; }
-      if(d.token){ TOKEN=d.token; document.getElementById('login-page').style.display='none'; document.getElementById('panel-page').style.display='block'; fetchAccounts(); }
-      else { e.textContent='登录失败'; e.style.display='block'; b.disabled=false; b.textContent='登录'; }
-    }else{ e.textContent='登录失败 ('+x.status+')'; e.style.display='block'; b.disabled=false; b.textContent='登录'; }
-  };
-  x.onerror=function(){ e.textContent='网络错误，请检查连接'; e.style.display='block'; b.disabled=false; b.textContent='登录'; };
-  x.send(JSON.stringify({username:u,password:p}));
-  return false;
-}
 
 // ======== Logout ========
 function doLogout(){ TOKEN=''; window.location.href='/admin/'; }
