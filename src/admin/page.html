@@ -66,9 +66,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div id="login-page">
   <div class="login-card">
     <h1>DevOps Bot</h1><p class="sub">管理台登录</p>
-    <input id="login-user" placeholder="用户名" autocomplete="username">
-    <input id="login-pass" type="password" placeholder="密码" autocomplete="current-password" onkeyup="if(event.key==='Enter')doLogin()">
-    <button class="btn primary" id="login-btn" onclick="doLogin()">登录</button>
+    <form method="POST" action="/api/admin/login" onsubmit="doLogin();return false">
+      <input id="login-user" name="username" placeholder="用户名" autocomplete="username" required>
+      <input id="login-pass" name="password" type="password" placeholder="密码" autocomplete="current-password" required>
+      <button class="btn primary" type="submit">登录</button>
+    </form>
     <div id="login-err" class="err" style="display:none"></div>
   </div>
 </div>
@@ -98,44 +100,38 @@ var IS_NEW = false;
 var SHOW_FIELDS = {};
 
 // ======== Init ========
-(function init(){
+(function(){
   TOKEN = __TOKEN_PLACEHOLDER__ || '';
-  try {
-    var emb = __ACCOUNTS_PLACEHOLDER__;
-    ACCOUNTS = Array.isArray(emb) ? emb : [];
-  }catch(e){ ACCOUNTS = []; }
-
-  if (TOKEN) {
-    document.getElementById('login-page').style.display = 'none';
-    document.getElementById('panel-page').style.display = 'block';
-    renderList();
-  }
-  // Also check URL param
-  var u = new URLSearchParams(window.location.search);
-  if (u.get('token')) TOKEN = u.get('token');
+  try { var emb = __ACCOUNTS_PLACEHOLDER__; ACCOUNTS = Array.isArray(emb) ? emb : []; }catch(e){ ACCOUNTS = []; }
+  var qs = new URLSearchParams(window.location.search);
+  if (qs.get('token')) TOKEN = qs.get('token');
+  if (TOKEN) { document.getElementById('login-page').style.display='none'; document.getElementById('panel-page').style.display='block'; renderList(); }
 })();
 
 // ======== Toast ========
-function toast(msg, ok){ var t=document.getElementById('toast');t.textContent=msg;t.className='toast show '+(ok?'ok':'err');setTimeout(function(){t.className='toast';},2500); }
+function toast(msg, ok){ var t=document.getElementById('toast'); t.textContent=msg; t.className='toast show '+(ok?'ok':'err'); setTimeout(function(){t.className='toast';},2500); }
 
 // ======== Login ========
 function doLogin(){
   var u = document.getElementById('login-user').value;
   var p = document.getElementById('login-pass').value;
-  var b = document.getElementById('login-btn');
   var e = document.getElementById('login-err');
-  b.disabled = true; b.textContent = '登录中…'; e.style.display = 'none';
-  fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})})
-  .then(function(r){ return r.json(); })
-  .then(function(d){
-    if(d.token){
+  e.style.display = 'none';
+  var btn = document.querySelector('#login-page button[type=submit]');
+  if (btn) { btn.disabled = true; btn.textContent = '登录中…'; }
+  try {
+    fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+    .then(function(d){
+      if(!d.token){ throw new Error('no token'); }
       TOKEN = d.token;
       document.getElementById('login-page').style.display = 'none';
       document.getElementById('panel-page').style.display = 'block';
       fetchAccounts();
-    }else{ e.textContent = '登录失败'; e.style.display = 'block'; b.disabled = false; b.textContent = '登录'; }
-  })
-  .catch(function(){ e.textContent = '网络错误'; e.style.display = 'block'; b.disabled = false; b.textContent = '登录'; });
+    })
+    .catch(function(err){ e.textContent = '登录失败: '+(err.message||'请重试'); e.style.display='block'; if(btn){ btn.disabled=false; btn.textContent='登录'; } });
+  } catch(ex) { e.textContent = '错误: '+ex.message; e.style.display='block'; if(btn){ btn.disabled=false; btn.textContent='登录'; } }
+  return false;
 }
 
 // ======== Logout ========
