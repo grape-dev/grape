@@ -92,19 +92,18 @@ class AdminHandler(BaseHTTPRequestHandler):
                     continue
                 items.append(self._account_summary(a))
             embed = _j.dumps(items, ensure_ascii=False)
-            html = html.replace("/*__ACCOUNTS__*/", embed)
-            html = html.replace("/*__TOKEN__*/", token)
-            # OAuth 状态
+            html = html.replace("__ACCOUNTS_PLACEHOLDER__", embed)
+            html = html.replace("__TOKEN_PLACEHOLDER__", _j.dumps(token))
             _load_oauth_config()
             oauth_info = _j.dumps({
                 "gitcode": bool(_GITCODE_OAUTH_CLIENT_ID),
                 "feishu": bool(_FEISHU_OAUTH_APP_ID)
             })
-            html = html.replace("/*__OAUTH__*/", oauth_info)
+            html = html.replace("__OAUTH_PLACEHOLDER__", oauth_info)
         else:
-            html = html.replace("/*__ACCOUNTS__*/", "null")
-            html = html.replace("/*__TOKEN__*/", "")
-            html = html.replace("/*__OAUTH__*/", "null")
+            html = html.replace("__ACCOUNTS_PLACEHOLDER__", "null")
+            html = html.replace("__TOKEN_PLACEHOLDER__", "\"\"")
+            html = html.replace("__OAUTH_PLACEHOLDER__", "null")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
