@@ -64,17 +64,80 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
 @media(max-width:767px){.wrap{flex-direction:column;padding:0 12px}.side{width:100%}}
 </style>
 </head><body>
-<!-- 静态兜底：默认可见，Vue 成功后隐藏 -->
-<div id="static-fallback" class="login-wrap">
-  <div class="login-card">
-    <h1>DevOps Bot</h1><p>管理台登录</p>
-    <form method="POST" action="/api/admin/login">
-      <input name="username" placeholder="用户名">
-      <input name="password" type="password" placeholder="密码">
-      <button class="btn btn-primary" type="submit">登录</button>
-    </form>
-  </div>
+<!-- 静态兜底：默认可见，Vue 成功后隐藏。脚本会根据登录状态切换 -->
+<div id="static-fallback">
+  <noscript><div style="text-align:center;padding:20px;color:#e74c3c">请启用 JavaScript 以使用管理台</div></noscript>
 </div>
+
+<script>
+// 静态兜底脚本 — 不依赖 Vue
+(function(){
+  var f = document.getElementById('static-fallback');
+
+  // 检查是否已登录（页面级别 __TOKEN__ 变量）
+  var pageToken = __TOKEN_PLACEHOLDER__;
+  var pageAccounts = __ACCOUNTS_PLACEHOLDER__;
+  var qsToken = new URLSearchParams(window.location.search).get('token') || '';
+  var token = pageToken || qsToken;
+
+  if (token) {
+    // 已登录 — 显示静态管理面板
+    var accounts = pageAccounts;
+    var itemHtml = '';
+    if (accounts && Array.isArray(accounts)) {
+      accounts.forEach(function(a){ itemHtml += '<div class=\\'item\\'>' + (a.name || a) + '</div>'; });
+    } else {
+      itemHtml = '<div class=\\'loading\\'>加载账户中…</div>';
+    }
+    f.innerHTML = '<div class=\\'top\\'><h2>DevOps Bot 管理台</h2><a href=\\'/admin/\\'>退出</a></div>'
+      + '<div class=\\'wrap\\'>'
+      + '<div class=\\'side\\'><h3>账户列表</h3><div class=\\'list\\'>' + itemHtml + '</div></div>'
+      + '<div style=\\'flex:1;background:#fff;border-radius:8px;padding:24px;text-align:center;color:#888\\'>'
+      + '<p style=\\'margin:40px\\'>请点击左侧账户查看配置</p>'
+      + '<p style=\\'font-size:12px\\'>配置编辑需启用 JavaScript（Vue.js）</p>'
+      + '<p style=\\'font-size:12px;margin-top:8px\\'>当前 Token 有效，可临时查看账户列表</p>'
+      + '</div></div>';
+  } else {
+    // 未登录 — 显示登录表单
+    f.innerHTML = '<div class=\\'login-wrap\\'>'
+      + '<div class=\\'login-card\\'>'
+      + '<h1>DevOps Bot</h1><p>管理台登录</p>'
+      + '<form id=\\'login-form\' onsubmit=\\'return doLogin()\\'>'
+      + '<input id=\\'login-user\' placeholder=\\'用户名\\' required>'
+      + '<input id=\\'login-pass\' type=\\'password\\' placeholder=\\'密码\\' required>'
+      + '<button class=\\'btn btn-primary\\' type=\\'submit\\'>登录</button>'
+      + '</form>'
+      + '<div id=\\'login-err\\' class=\\'err\\' style=\\'display:none\\'></div>'
+      + '</div></div>';
+  }
+})();
+
+function doLogin(){
+  var u = document.getElementById('login-user').value;
+  var p = document.getElementById('login-pass').value;
+  var btn = document.querySelector('#login-form button');
+  var err = document.getElementById('login-err');
+  btn.disabled = true; btn.textContent = '登录中…';
+  var x = new XMLHttpRequest();
+  x.open('POST','/api/admin/login',true);
+  x.setRequestHeader('Content-Type','application/json');
+  x.onload = function(){
+    if(x.status===200){
+      var d = JSON.parse(x.responseText);
+      window.location.href = '/admin/panel?token=' + d.token;
+    }else{
+      btn.disabled = false; btn.textContent = '登录';
+      err.textContent = '登录失败'; err.style.display = 'block';
+    }
+  };
+  x.onerror = function(){
+    btn.disabled = false; btn.textContent = '登录';
+    err.textContent = '网络错误'; err.style.display = 'block';
+  };
+  x.send(JSON.stringify({username:u,password:p}));
+  return false;
+}
+</script>
 
 <div id="app" style="display:none">
   <!-- Vue 加载后显示 -->
@@ -147,17 +210,18 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
   <div class="toast" :class="{s:toast.show,g:toast.ok,r:!toast.ok}">{{ toast.msg }}</div>
 </div>
 
-<script src="/admin/vue.min.js?v=3"></script>
+<script src="/admin/vue.min.js?v=4"></script>
 <script>
+if(typeof Vue!=='undefined'){
+  document.getElementById('static-fallback').style.display='none';
+  document.getElementById('app').style.display='block';
+}
+
 var __ACCOUNTS__ = __ACCOUNTS_PLACEHOLDER__;
 var __TOKEN__ = __TOKEN_PLACEHOLDER__;
 var __OAUTH__ = __OAUTH_PLACEHOLDER__;
 
-if(typeof Vue!=='undefined'){
-  document.getElementById('static-fallback').style.display='none';
-  document.getElementById('app').style.display='block';
-
-  Vue.createApp({
+Vue.createApp({
   data(){
     var params = new URLSearchParams(window.location.search);
     var tok = __TOKEN__ || params.get('token') || '';
