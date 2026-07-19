@@ -64,8 +64,8 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
 @media(max-width:767px){.wrap{flex-direction:column;padding:0 12px}.side{width:100%}}
 </style>
 </head><body>
-<!-- 静态兜底：Vue 加载失败时显示 -->
-<div id="static-fallback" class="login-wrap" style="display:none">
+<!-- 静态兜底：默认可见，Vue 成功后隐藏 -->
+<div id="static-fallback" class="login-wrap">
   <div class="login-card">
     <h1>DevOps Bot</h1><p>管理台登录</p>
     <form method="POST" action="/api/admin/login">
@@ -73,27 +73,6 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
       <input name="password" type="password" placeholder="密码">
       <button class="btn btn-primary" type="submit">登录</button>
     </form>
-    <p style="text-align:center;color:#888;font-size:12px;margin-top:12px">(Vue 未加载，使用静态表单)</p>
-  </div>
-</div>
-
-<div id="static-panel" style="display:none">
-  <div class="top"><h2>DevOps Bot 管理台</h2><a href="/admin/">退出</a></div>
-  <div class="wrap">
-    <div class="side">
-      <h3>账户列表</h3>
-      <div class="list" id="static-list"></div>
-    </div>
-    <div style="flex:1;background:#fff;border-radius:8px;padding:24px;text-align:center;color:#888">
-      <p style="margin:40px">请点击左侧账户查看配置</p>
-      <p style="font-size:12px">配置编辑功能需启用 JavaScript</p>
-    </div>
-  </div>
-</div>
-      <input name="password" type="password" placeholder="密码">
-      <button class="btn btn-primary" type="submit">登录</button>
-    </form>
-    <p style="text-align:center;color:#888;font-size:12px;margin-top:12px">(Vue 未加载，使用静态表单)</p>
   </div>
 </div>
 
@@ -174,34 +153,11 @@ var __ACCOUNTS__ = __ACCOUNTS_PLACEHOLDER__;
 var __TOKEN__ = __TOKEN_PLACEHOLDER__;
 var __OAUTH__ = __OAUTH_PLACEHOLDER__;
 
-(function(){
-  var token = __TOKEN__ || new URLSearchParams(window.location.search).get('token') || '';
-  if(typeof Vue==='undefined'){
-    if(token){
-      document.getElementById('static-panel').style.display='block';
-      var list = document.getElementById('static-list');
-      var accounts = __ACCOUNTS__;
-      if(accounts && accounts.length>0 && typeof accounts[0]==='object'){
-        accounts.forEach(function(a){
-          var div = document.createElement('div');
-          div.className='item'; div.style.padding='12px 16px';
-          div.textContent = a.name || a;
-          list.appendChild(div);
-        });
-      } else {
-        list.innerHTML = '<div class=\'loading\'>无账户</div>';
-      }
-    }else{
-      document.getElementById('static-fallback').style.display='flex';
-    }
-  }else{
-    document.getElementById('app').style.display='block';
-    document.getElementById('static-fallback').style.display='none';
-    document.getElementById('static-panel').style.display='none';
-  }
-})();
+if(typeof Vue!=='undefined'){
+  document.getElementById('static-fallback').style.display='none';
+  document.getElementById('app').style.display='block';
 
-Vue.createApp({
+  Vue.createApp({
   data(){
     var params = new URLSearchParams(window.location.search);
     var tok = __TOKEN__ || params.get('token') || '';
