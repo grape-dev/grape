@@ -116,21 +116,21 @@ function doLogin(){
   var u = document.getElementById('login-user').value;
   var p = document.getElementById('login-pass').value;
   var e = document.getElementById('login-err');
-  e.style.display = 'none';
-  var btn = document.querySelector('#login-page button[type=submit]');
-  if (btn) { btn.disabled = true; btn.textContent = '登录中…'; }
-  try {
-    fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})})
-    .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
-    .then(function(d){
-      if(!d.token){ throw new Error('no token'); }
-      TOKEN = d.token;
-      document.getElementById('login-page').style.display = 'none';
-      document.getElementById('panel-page').style.display = 'block';
-      fetchAccounts();
-    })
-    .catch(function(err){ e.textContent = '登录失败: '+(err.message||'请重试'); e.style.display='block'; if(btn){ btn.disabled=false; btn.textContent='登录'; } });
-  } catch(ex) { e.textContent = '错误: '+ex.message; e.style.display='block'; if(btn){ btn.disabled=false; btn.textContent='登录'; } }
+  var b = document.querySelector('#login-page button[type=submit]');
+  if(!u||!p){ e.textContent='请输入用户名和密码'; e.style.display='block'; return false; }
+  e.style.display='none'; b.disabled=true; b.textContent='登录中…';
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/admin/login',true);
+  x.setRequestHeader('Content-Type','application/json');
+  x.onload=function(){
+    if(x.status===200){
+      try { var d=JSON.parse(x.responseText); } catch(ex) { e.textContent='服务器响应异常'; e.style.display='block'; b.disabled=false; b.textContent='登录'; return; }
+      if(d.token){ TOKEN=d.token; document.getElementById('login-page').style.display='none'; document.getElementById('panel-page').style.display='block'; fetchAccounts(); }
+      else { e.textContent='登录失败'; e.style.display='block'; b.disabled=false; b.textContent='登录'; }
+    }else{ e.textContent='登录失败 ('+x.status+')'; e.style.display='block'; b.disabled=false; b.textContent='登录'; }
+  };
+  x.onerror=function(){ e.textContent='网络错误，请检查连接'; e.style.display='block'; b.disabled=false; b.textContent='登录'; };
+  x.send(JSON.stringify({username:u,password:p}));
   return false;
 }
 
