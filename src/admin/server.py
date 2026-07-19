@@ -134,7 +134,7 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            if self.path == "/admin/vue.min.js":
+            if self._path() == "/admin/vue.min.js":
                 js_path = os.path.join(_ADMIN_DIR, "vue.min.js")
                 if os.path.exists(js_path):
                     with open(js_path, "rb") as f:
