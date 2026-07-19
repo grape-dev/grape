@@ -65,11 +65,31 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
 </style>
 </head><body>
 <!-- 静态兜底：Vue 加载失败时显示 -->
-<div id="static-fallback" class="login-wrap">
+<div id="static-fallback" class="login-wrap" style="display:none">
   <div class="login-card">
     <h1>DevOps Bot</h1><p>管理台登录</p>
     <form method="POST" action="/api/admin/login">
       <input name="username" placeholder="用户名">
+      <input name="password" type="password" placeholder="密码">
+      <button class="btn btn-primary" type="submit">登录</button>
+    </form>
+    <p style="text-align:center;color:#888;font-size:12px;margin-top:12px">(Vue 未加载，使用静态表单)</p>
+  </div>
+</div>
+
+<div id="static-panel" style="display:none">
+  <div class="top"><h2>DevOps Bot 管理台</h2><a href="/admin/">退出</a></div>
+  <div class="wrap">
+    <div class="side">
+      <h3>账户列表</h3>
+      <div class="list" id="static-list"></div>
+    </div>
+    <div style="flex:1;background:#fff;border-radius:8px;padding:24px;text-align:center;color:#888">
+      <p style="margin:40px">请点击左侧账户查看配置</p>
+      <p style="font-size:12px">配置编辑功能需启用 JavaScript</p>
+    </div>
+  </div>
+</div>
       <input name="password" type="password" placeholder="密码">
       <button class="btn btn-primary" type="submit">登录</button>
     </form>
@@ -148,19 +168,38 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
   <div class="toast" :class="{s:toast.show,g:toast.ok,r:!toast.ok}">{{ toast.msg }}</div>
 </div>
 
-<script src="/admin/vue.min.js?v=2"></script>
+<script src="/admin/vue.min.js?v=3"></script>
 <script>
-if(typeof Vue==='undefined'){
-  document.getElementById('static-fallback').style.display='flex';
-  document.getElementById('app').style.display='none';
-}else{
-  document.getElementById('static-fallback').style.display='none';
-  document.getElementById('app').style.display='block';
-}
-
 var __ACCOUNTS__ = __ACCOUNTS_PLACEHOLDER__;
 var __TOKEN__ = __TOKEN_PLACEHOLDER__;
 var __OAUTH__ = __OAUTH_PLACEHOLDER__;
+
+(function(){
+  var token = __TOKEN__ || new URLSearchParams(window.location.search).get('token') || '';
+  if(typeof Vue==='undefined'){
+    if(token){
+      document.getElementById('static-panel').style.display='block';
+      var list = document.getElementById('static-list');
+      var accounts = __ACCOUNTS__;
+      if(accounts && accounts.length>0 && typeof accounts[0]==='object'){
+        accounts.forEach(function(a){
+          var div = document.createElement('div');
+          div.className='item'; div.style.padding='12px 16px';
+          div.textContent = a.name || a;
+          list.appendChild(div);
+        });
+      } else {
+        list.innerHTML = '<div class=\'loading\'>无账户</div>';
+      }
+    }else{
+      document.getElementById('static-fallback').style.display='flex';
+    }
+  }else{
+    document.getElementById('app').style.display='block';
+    document.getElementById('static-fallback').style.display='none';
+    document.getElementById('static-panel').style.display='none';
+  }
+})();
 
 Vue.createApp({
   data(){
