@@ -4,8 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DevOps Bot 管理台</title>
-<script src="/admin/vue.min.js?v=2"></script>
-<noscript><div style="text-align:center;padding:40px;color:#e74c3c">请启用 JavaScript 以加载管理台</div></noscript>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#333;min-height:100vh}
@@ -66,8 +64,21 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
 @media(max-width:767px){.wrap{flex-direction:column;padding:0 12px}.side{width:100%}}
 </style>
 </head><body>
-<div id="app">
-  <!-- Login -->
+<!-- 静态兜底：Vue 加载失败时显示 -->
+<div id="static-fallback" class="login-wrap">
+  <div class="login-card">
+    <h1>DevOps Bot</h1><p>管理台登录</p>
+    <form method="POST" action="/api/admin/login">
+      <input name="username" placeholder="用户名">
+      <input name="password" type="password" placeholder="密码">
+      <button class="btn btn-primary" type="submit">登录</button>
+    </form>
+    <p style="text-align:center;color:#888;font-size:12px;margin-top:12px">(Vue 未加载，使用静态表单)</p>
+  </div>
+</div>
+
+<div id="app" style="display:none">
+  <!-- Vue 加载后显示 -->
   <div class="login-wrap" v-if="!token">
     <div class="login-card">
       <h1>DevOps Bot</h1><p>管理台登录</p>
@@ -83,7 +94,6 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
     </div>
   </div>
 
-  <!-- Admin -->
   <div v-else>
     <div class="top">
       <h2>DevOps Bot 管理台</h2>
@@ -93,9 +103,7 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
       <div class="side">
         <h3>账户列表</h3>
         <div class="list">
-          <div v-for="a in accounts" :key="a.name"
-               class="item" :class="{cur: curName===a.name}"
-               @click="select(a.name)">
+          <div v-for="a in accounts" :key="a.name" class="item" :class="{cur: curName===a.name}" @click="select(a.name)">
             <span>{{ a.name }}</span>
             <span class="dots">
               <span class="dot" :class="a.gitcode_api_token==='YES'?'green':'gray'" title="GitCode Token"></span>
@@ -109,42 +117,26 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
       </div>
       <form v-if="curName !== null">
         <h3>{{ isNew ? '新增账户' : curName }}</h3>
-
-        <!-- 基础信息 -->
-        <div class="group">
-          <h4>基础信息</h4>
+        <div class="group"><h4>基础信息</h4>
           <div class="row"><label>账户名称</label><input v-model="form.name" :disabled="!isNew"></div>
           <div class="row"><label>Bot 用户名（逗号分隔）</label><input v-model="form.bot_usernames_str"></div>
         </div>
-
-        <!-- GitCode -->
-        <div class="group">
-          <h4>GitCode</h4>
+        <div class="group"><h4>GitCode</h4>
           <div class="row"><label>API Token</label><div class="input-wrap"><input :type="showFields.gitcode_api_token?'text':'password'" v-model="form.gitcode_api_token"><span class="eye" @click="toggleShow('gitcode_api_token')">👁</span></div></div>
           <div class="row"><label>Webhook Token</label><div class="input-wrap"><input :type="showFields.gitcode_webhook_token?'text':'password'" v-model="form.gitcode_webhook_token"><span class="eye" @click="toggleShow('gitcode_webhook_token')">👁</span></div></div>
         </div>
-
-        <!-- 飞书 -->
-        <div class="group">
-          <h4>飞书</h4>
+        <div class="group"><h4>飞书</h4>
           <div class="row"><label>App ID</label><div class="input-wrap"><input :type="showFields.feishu_app_id?'text':'password'" v-model="form.feishu_app_id"><span class="eye" @click="toggleShow('feishu_app_id')">👁</span></div></div>
           <div class="row"><label>App Secret</label><div class="input-wrap"><input :type="showFields.feishu_app_secret?'text':'password'" v-model="form.feishu_app_secret"><span class="eye" @click="toggleShow('feishu_app_secret')">👁</span></div></div>
         </div>
-
-        <!-- 华为云 -->
-        <div class="group">
-          <h4>华为云</h4>
+        <div class="group"><h4>华为云</h4>
           <div class="row"><label>Access Key</label><div class="input-wrap"><input :type="showFields.huawei_cloud_ak?'text':'password'" v-model="form.huawei_cloud_ak"><span class="eye" @click="toggleShow('huawei_cloud_ak')">👁</span></div></div>
           <div class="row"><label>Secret Key</label><div class="input-wrap"><input :type="showFields.huawei_cloud_sk?'text':'password'" v-model="form.huawei_cloud_sk"><span class="eye" @click="toggleShow('huawei_cloud_sk')">👁</span></div></div>
         </div>
-
-        <!-- CodeArts -->
-        <div class="group">
-          <h4>CodeArts</h4>
+        <div class="group"><h4>CodeArts</h4>
           <div class="row"><label>CLI Access Key</label><div class="input-wrap"><input :type="showFields.codearts_ak?'text':'password'" v-model="form.CODEARTS_CLI_AK"><span class="eye" @click="toggleShow('codearts_ak')">👁</span></div></div>
           <div class="row"><label>CLI Secret Key</label><div class="input-wrap"><input :type="showFields.codearts_sk?'text':'password'" v-model="form.CODEARTS_CLI_SK"><span class="eye" @click="toggleShow('codearts_sk')">👁</span></div></div>
         </div>
-
         <div class="acts">
           <button class="prim" @click="save">保存</button>
           <button class="sec" @click="testConn">测试连接</button>
@@ -156,7 +148,16 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
   <div class="toast" :class="{s:toast.show,g:toast.ok,r:!toast.ok}">{{ toast.msg }}</div>
 </div>
 
+<script src="/admin/vue.min.js?v=2"></script>
 <script>
+if(typeof Vue==='undefined'){
+  document.getElementById('static-fallback').style.display='flex';
+  document.getElementById('app').style.display='none';
+}else{
+  document.getElementById('static-fallback').style.display='none';
+  document.getElementById('app').style.display='block';
+}
+
 var __ACCOUNTS__ = __ACCOUNTS_PLACEHOLDER__;
 var __TOKEN__ = __TOKEN_PLACEHOLDER__;
 var __OAUTH__ = __OAUTH_PLACEHOLDER__;
