@@ -9,32 +9,48 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#333;min-height:100vh}
 .login-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#667eea 0,#764ba2 100%)}
-.login-card{background:#fff;border-radius:12px;padding:40px;width:360px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,.15)}
+.login-card{background:#fff;border-radius:12px;padding:40px;width:400px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,.15)}
 .login-card h1{text-align:center;margin-bottom:4px;font-size:22px}
 .login-card p{text-align:center;color:#888;font-size:13px;margin-bottom:20px}
 .login-card input{width:100%;padding:12px 16px;border:1px solid #d9d9d9;border-radius:8px;font-size:14px;margin-bottom:12px;outline:0}
 .login-card input:focus{border-color:#667eea}
-.login-card button{width:100%;padding:12px;background:#667eea;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer}
-.login-card button:disabled{opacity:.6;cursor:not-allowed}
+.login-card .btn{display:block;width:100%;padding:12px;border:none;border-radius:8px;font-size:15px;cursor:pointer;text-align:center;margin-bottom:8px;text-decoration:none}
+.login-card .btn-primary{background:#667eea;color:#fff}
+.login-card .btn-primary:disabled{opacity:.6;cursor:not-allowed}
+.login-card .btn-oauth{background:#fff;color:#333;border:1px solid #d9d9d9;display:flex;align-items:center;justify-content:center;gap:8px}
+.login-card .btn-oauth:hover{background:#f5f5f5}
+.login-card .btn-oauth svg{width:18px;height:18px}
+.login-card .divider{text-align:center;color:#bbb;font-size:12px;margin:12px 0;position:relative}
+.login-card .divider::before,.login-card .divider::after{content:'';position:absolute;top:50%;width:40%;height:1px;background:#eee}
+.login-card .divider::before{left:0}
+.login-card .divider::after{right:0}
 .login-card .err{color:#e74c3c;font-size:13px;text-align:center;margin-top:8px}
 .top{background:#fff;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 1px 4px rgba(0,0,0,.06)}
 .top h2{font-size:16px;font-weight:600}
 .top a{font-size:13px;color:#e74c3c;cursor:pointer;margin-left:16px}
 .wrap{display:flex;max-width:1200px;margin:24px auto;padding:0 24px;gap:24px}
-.side{width:260px;flex-shrink:0}
+.side{width:280px;flex-shrink:0}
 .side h3{font-size:13px;color:#888;padding:0 12px;margin-bottom:8px}
 .list{background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
 .item{padding:12px 16px;cursor:pointer;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between}
 .item:last-child{border-bottom:none}
 .item:hover{background:#f8f9ff}
 .item.cur{background:#eef0ff;font-weight:600}
+.item .dots{display:flex;gap:3px}
+.item .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+.dot.green{background:#27ae60}
+.dot.gray{background:#ccc}
 .add{display:block;padding:12px;text-align:center;color:#667eea;cursor:pointer;font-size:14px;border-top:1px solid #f0f0f0}
 form{flex:1;background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.06);padding:24px}
 form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margin-bottom:16px}
-.row{margin-bottom:14px}
-.row label{display:block;font-size:13px;color:#666;margin-bottom:4px}
-.row input{width:100%;padding:10px 14px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px;outline:0}
+.group{margin-bottom:20px}
+.group h4{font-size:13px;color:#888;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #f5f5f5}
+.row{margin-bottom:12px}
+.row label{display:block;font-size:12px;color:#666;margin-bottom:3px}
+.row .input-wrap{display:flex;gap:6px}
+.row input{flex:1;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px;outline:0;transition:border-color .2s}
 .row input:focus{border-color:#667eea}
+.row .eye{background:#f5f5f5;border:1px solid #d9d9d9;border-radius:6px;padding:0 10px;cursor:pointer;font-size:14px;color:#888;display:flex;align-items:center}
 .acts{display:flex;gap:8px;margin-top:16px;padding-top:16px;border-top:1px solid #f0f0f0}
 .acts button{padding:10px 20px;border:none;border-radius:6px;font-size:13px;cursor:pointer}
 .prim{background:#667eea;color:#fff}
@@ -56,7 +72,12 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
       <h1>DevOps Bot</h1><p>管理台登录</p>
       <input type="text" v-model="user" placeholder="用户名">
       <input type="password" v-model="pass" placeholder="密码" @keyup.enter="login">
-      <button @click="login" :disabled="logging">{{ logging ? '登录中…' : '登录' }}</button>
+      <button class="btn btn-primary" @click="login" :disabled="logging">{{ logging ? '登录中…' : '登录' }}</button>
+      <div class="divider" v-if="oauth.gitcode || oauth.feishu">或</div>
+      <a v-if="oauth.gitcode" class="btn btn-oauth" :href="'/api/admin/oauth/gitcode'">
+        <svg viewBox="0 0 24 24" fill="#333"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15l-4-4 1.41-1.41L11 14.17l6.59-6.59L19 9l-8 8z"/></svg>
+        GitCode 登录
+      </a>
       <div class="err" v-if="loginErr">{{ loginErr }}</div>
     </div>
   </div>
@@ -75,22 +96,54 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
                class="item" :class="{cur: curName===a.name}"
                @click="select(a.name)">
             <span>{{ a.name }}</span>
-            <span>{{ a.gitcode_api_token==='YES' ? '\u2713' : '\u2717' }}</span>
+            <span class="dots">
+              <span class="dot" :class="a.gitcode_api_token==='YES'?'green':'gray'" title="GitCode Token"></span>
+              <span class="dot" :class="a.feishu_app_id==='YES'?'green':'gray'" title="飞书"></span>
+              <span class="dot" :class="a.huawei_cloud_ak==='YES'?'green':'gray'" title="华为云"></span>
+            </span>
           </div>
           <div class="add" @click="addNew">+ 新增</div>
           <div class="loading" v-if="loading">加载中…</div>
         </div>
       </div>
       <form v-if="curName !== null">
-        <h3>{{ isNew ? '新增账户' : '编辑 ' + curName }}</h3>
-        <div class="row"><label>名称</label><input v-model="form.name"></div>
-        <div class="row"><label>GitCode API Token</label><input v-model="form.gitcode_api_token" type="password"></div>
-        <div class="row"><label>GitCode Webhook Token</label><input v-model="form.gitcode_webhook_token" type="password"></div>
-        <div class="row"><label>飞书 App ID</label><input v-model="form.feishu_app_id" type="password"></div>
-        <div class="row"><label>飞书 App Secret</label><input v-model="form.feishu_app_secret" type="password"></div>
-        <div class="row"><label>华为云 Access Key</label><input v-model="form.huawei_cloud_ak" type="password"></div>
-        <div class="row"><label>华为云 Secret Key</label><input v-model="form.huawei_cloud_sk" type="password"></div>
-        <div class="row"><label>Bot 用户名（逗号分隔）</label><input v-model="form.bot_usernames"></div>
+        <h3>{{ isNew ? '新增账户' : curName }}</h3>
+
+        <!-- 基础信息 -->
+        <div class="group">
+          <h4>基础信息</h4>
+          <div class="row"><label>账户名称</label><input v-model="form.name" :disabled="!isNew"></div>
+          <div class="row"><label>Bot 用户名（逗号分隔）</label><input v-model="form.bot_usernames_str"></div>
+        </div>
+
+        <!-- GitCode -->
+        <div class="group">
+          <h4>GitCode</h4>
+          <div class="row"><label>API Token</label><div class="input-wrap"><input :type="showFields.gitcode_api_token?'text':'password'" v-model="form.gitcode_api_token"><span class="eye" @click="toggleShow('gitcode_api_token')">👁</span></div></div>
+          <div class="row"><label>Webhook Token</label><div class="input-wrap"><input :type="showFields.gitcode_webhook_token?'text':'password'" v-model="form.gitcode_webhook_token"><span class="eye" @click="toggleShow('gitcode_webhook_token')">👁</span></div></div>
+        </div>
+
+        <!-- 飞书 -->
+        <div class="group">
+          <h4>飞书</h4>
+          <div class="row"><label>App ID</label><div class="input-wrap"><input :type="showFields.feishu_app_id?'text':'password'" v-model="form.feishu_app_id"><span class="eye" @click="toggleShow('feishu_app_id')">👁</span></div></div>
+          <div class="row"><label>App Secret</label><div class="input-wrap"><input :type="showFields.feishu_app_secret?'text':'password'" v-model="form.feishu_app_secret"><span class="eye" @click="toggleShow('feishu_app_secret')">👁</span></div></div>
+        </div>
+
+        <!-- 华为云 -->
+        <div class="group">
+          <h4>华为云</h4>
+          <div class="row"><label>Access Key</label><div class="input-wrap"><input :type="showFields.huawei_cloud_ak?'text':'password'" v-model="form.huawei_cloud_ak"><span class="eye" @click="toggleShow('huawei_cloud_ak')">👁</span></div></div>
+          <div class="row"><label>Secret Key</label><div class="input-wrap"><input :type="showFields.huawei_cloud_sk?'text':'password'" v-model="form.huawei_cloud_sk"><span class="eye" @click="toggleShow('huawei_cloud_sk')">👁</span></div></div>
+        </div>
+
+        <!-- CodeArts -->
+        <div class="group">
+          <h4>CodeArts</h4>
+          <div class="row"><label>CLI Access Key</label><div class="input-wrap"><input :type="showFields.codearts_ak?'text':'password'" v-model="form.CODEARTS_CLI_AK"><span class="eye" @click="toggleShow('codearts_ak')">👁</span></div></div>
+          <div class="row"><label>CLI Secret Key</label><div class="input-wrap"><input :type="showFields.codearts_sk?'text':'password'" v-model="form.CODEARTS_CLI_SK"><span class="eye" @click="toggleShow('codearts_sk')">👁</span></div></div>
+        </div>
+
         <div class="acts">
           <button class="prim" @click="save">保存</button>
           <button class="sec" @click="testConn">测试连接</button>
@@ -103,9 +156,9 @@ form h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margi
 </div>
 
 <script>
-/* Embedding from server */
 var __ACCOUNTS__ = /*__ACCOUNTS__*/ null;
 var __TOKEN__ = /*__TOKEN__*/ '';
+var __OAUTH__ = /*__OAUTH__*/ null;
 
 Vue.createApp({
   data(){
@@ -114,7 +167,7 @@ Vue.createApp({
     return {
       token: tok,
       user: 'developer',
-      pass: 'YOUR_SSH_PASSWORD',
+      pass: '',
       logging: false,
       loginErr: '',
       accounts: __ACCOUNTS__ || [],
@@ -122,6 +175,8 @@ Vue.createApp({
       form: {},
       isNew: false,
       loading: false,
+      oauth: __OAUTH__ || {gitcode:false,feishu:false},
+      showFields: {},
       toast: {show:false, msg:'', ok:true}
     };
   },
@@ -131,6 +186,7 @@ Vue.createApp({
   },
   methods: {
     show(m,o){var t=this;t.toast={show:true,msg:m,ok:o};setTimeout(function(){t.toast.show=false;},2500);},
+    toggleShow(field){Vue.set(this.showFields, field, !this.showFields[field]);},
     login(){
       var t=this;t.logging=true;t.loginErr='';
       var x=new XMLHttpRequest();
@@ -170,19 +226,23 @@ Vue.createApp({
       var t=this;t.curName=n;t.isNew=false;
       t.api('GET','/'+encodeURIComponent(n),null,function(ok,data){
         if(!ok){t.show('加载失败',false);return;}
-        t.form=JSON.parse(JSON.stringify(data));
+        t.form=data;
+        t.form.bot_usernames_str = Array.isArray(t.form.bot_usernames) ? t.form.bot_usernames.join(',') : (t.form.bot_usernames||'');
         t.$forceUpdate();
       });
     },
     addNew(){
       this.curName='__new__';this.isNew=true;
-      this.form={name:'',gitcode_api_token:'',gitcode_webhook_token:'',feishu_app_id:'',feishu_app_secret:'',huawei_cloud_ak:'',huawei_cloud_sk:'',bot_usernames:''};
+      this.form={name:'',gitcode_api_token:'',gitcode_webhook_token:'',feishu_app_id:'',feishu_app_secret:'',huawei_cloud_ak:'',huawei_cloud_sk:'',CODEARTS_CLI_AK:'',CODEARTS_CLI_SK:'',bot_usernames:[],bot_usernames_str:''};
     },
     save(){
       var t=this;var n=t.curName;
       if(t.isNew)n=t.form.name;
       if(!n||!n.trim()){t.show('请输入账户名称',false);return;}
-      t.api('PUT','/'+encodeURIComponent(n),t.form,function(ok,data){
+      var payload = JSON.parse(JSON.stringify(t.form));
+      payload.bot_usernames = payload.bot_usernames_str ? payload.bot_usernames_str.split(',').map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
+      delete payload.bot_usernames_str;
+      t.api('PUT','/'+encodeURIComponent(n),payload,function(ok,data){
         if(ok){t.show('保存成功',true);t.fetchAccounts();}else{t.show('保存失败: '+(data.error||''),false);}
       });
     },
