@@ -141,7 +141,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         js = f.read()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/javascript; charset=utf-8")
-                    self.send_header("Cache-Control", "max-age=86400")
+                    self.send_header("Cache-Control", "max-age=3600")
                     self.end_headers()
                     self.wfile.write(js)
                 else:
