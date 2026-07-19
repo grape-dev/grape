@@ -8,7 +8,6 @@ ADMIN_USER = "developer"
 ADMIN_PASS = "YOUR_SSH_PASSWORD"
 _admin_tokens: dict[str, float] = {}
 
-# OAuth 配置（从 accounts.json 加载）
 _GITCODE_OAUTH_CLIENT_ID = ""
 _GITCODE_OAUTH_CLIENT_SECRET = ""
 _FEISHU_OAUTH_APP_ID = ""
@@ -81,88 +80,38 @@ class AdminHandler(BaseHTTPRequestHandler):
     def _path(self):
         return self.path.split('?')[0].rstrip('/') or '/'
 
-    def _serve_admin_page(self, token=""):
+    def _serve(self, token=""):
         html = _PAGE_HTML
+        from src.config import ACCOUNTS
+        items = []
+        for n, a in ACCOUNTS.items():
+            if n == "default":
+                continue
+            items.append(_account_summary(a))
+        embed = json.dumps(items, ensure_ascii=False)
+        html = html.replace("__ACCOUNTS_PLACEHOLDER__", embed or "[]")
         if token and token in _admin_tokens and time.time() < _admin_tokens[token]:
-            from src.config import ACCOUNTS
-            import json as _j
-            items = []
-            for n, a in ACCOUNTS.items():
-                if n == "default":
-                    continue
-                items.append(self._account_summary(a))
-            embed = _j.dumps(items, ensure_ascii=False)
-            html = html.replace("__ACCOUNTS_PLACEHOLDER__", embed)
-            html = html.replace("__TOKEN_PLACEHOLDER__", _j.dumps(token))
-            _load_oauth_config()
-            oauth_info = _j.dumps({
-                "gitcode": bool(_GITCODE_OAUTH_CLIENT_ID),
-                "feishu": bool(_FEISHU_OAUTH_APP_ID)
-            })
-            html = html.replace("__OAUTH_PLACEHOLDER__", oauth_info)
+            html = html.replace("__TOKEN_PLACEHOLDER__", json.dumps(token))
         else:
-            html = html.replace("__ACCOUNTS_PLACEHOLDER__", "null")
             html = html.replace("__TOKEN_PLACEHOLDER__", "\"\"")
-            html = html.replace("__OAUTH_PLACEHOLDER__", "null")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
         self.end_headers()
         self.wfile.write(html.encode("utf-8"))
 
-    def _account_summary(self, a: dict) -> dict:
-        return {
-            "name": a.get("name", ""),
-            "gitcode_api_token": "YES" if a.get("gitcode_api_token") else "NO",
-            "feishu_app_id": "YES" if a.get("feishu_app_id") else "NO",
-            "huawei_cloud_ak": "YES" if a.get("huawei_cloud_ak") else "NO",
-            "detail": {
-                "name": a.get("name", ""),
-                "gitcode_api_token": a.get("gitcode_api_token", ""),
-                "gitcode_webhook_token": a.get("gitcode_webhook_token", ""),
-                "feishu_app_id": a.get("feishu_app_id", ""),
-                "feishu_app_secret": a.get("feishu_app_secret", ""),
-                "huawei_cloud_ak": a.get("huawei_cloud_ak", ""),
-                "huawei_cloud_sk": a.get("huawei_cloud_sk", ""),
-                "CODEARTS_CLI_AK": a.get("CODEARTS_CLI_AK", ""),
-                "CODEARTS_CLI_SK": a.get("CODEARTS_CLI_SK", ""),
-                "bot_usernames": a.get("bot_usernames", []),
-            }
-        }
-
     def do_GET(self):
         try:
-            if self._path() == "/admin/vue.min.js":
-                js_path = os.path.join(_ADMIN_DIR, "vue.min.js")
-                if os.path.exists(js_path):
-                    with open(js_path, "rb") as f:
-                        js = f.read()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/javascript; charset=utf-8")
-                    self.send_header("Cache-Control", "max-age=3600")
-                    self.end_headers()
-                    self.wfile.write(js)
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-                return
-
             path = self._path()
-            if path == "/admin":
-                self._serve_admin_page()
-                return
-            if path == "/admin/panel":
+            if path in ("/admin", "/admin/panel"):
                 token = ""
-                qs = self.path.split("?", 1)
-                if len(qs) > 1:
-                    q = urllib.parse.parse_qs(qs[1])
+                if "?" in self.path:
+                    q = urllib.parse.parse_qs(self.path.split("?", 1)[1])
                     token = q.get("token", [""])[0]
-                self._serve_admin_page(token)
+                self._serve(token)
                 return
 
-            # —— OAuth 回调 ——
+            # OAuth
             if path == "/api/admin/oauth/gitcode":
                 _load_oauth_config()
                 if not _GITCODE_OAUTH_CLIENT_ID:
@@ -185,24 +134,20 @@ class AdminHandler(BaseHTTPRequestHandler):
                     self._json(400, {"error": "missing code"})
                     return
                 _load_oauth_config()
-                # Exchange code for token
                 token_url = "https://gitcode.com/login/oauth/access_token"
                 data = urllib.parse.urlencode({
                     "client_id": _GITCODE_OAUTH_CLIENT_ID,
                     "client_secret": _GITCODE_OAUTH_CLIENT_SECRET,
-                    "code": code,
-                    "grant_type": "authorization_code",
+                    "code": code, "grant_type": "authorization_code",
                 }).encode()
                 try:
-                    req = urllib.request.Request(token_url, data=data,
-                        headers={"Accept": "application/json"})
+                    req = urllib.request.Request(token_url, data=data, headers={"Accept": "application/json"})
                     resp = urllib.request.urlopen(req, timeout=10)
                     result = json.loads(resp.read())
                     access_token = result.get("access_token", "")
                     if not access_token:
-                        self._json(502, {"error": "OAuth token exchange failed", "detail": result})
+                        self._json(502, {"error": "OAuth token exchange failed"})
                         return
-                    # Use access_token to verify user
                     user_req = urllib.request.Request(
                         "https://api.gitcode.com/api/v5/user",
                         headers={"Authorization": f"Bearer {access_token}"})
@@ -211,7 +156,6 @@ class AdminHandler(BaseHTTPRequestHandler):
                     login = user_info.get("login", "")
                     from src.config import log
                     log.info(f"Admin OAuth login: {login}")
-                    # Create admin session
                     token = hashlib.sha256(f"oauth:{login}:{time.time()}:{os.urandom(8).hex()}".encode()).hexdigest()
                     _admin_tokens[token] = time.time() + 86400
                     self.send_response(302)
@@ -221,23 +165,20 @@ class AdminHandler(BaseHTTPRequestHandler):
                     self._json(502, {"error": f"OAuth failed: {e}"})
                 return
 
-            if self.path.startswith("/api/admin/accounts"):
+            # Account APIs
+            if path.startswith("/api/admin/accounts"):
                 if not self._auth():
                     return
                 from src.config import ACCOUNTS, get_account
-                name = self.path.replace("/api/admin/accounts", "").strip("/")
+                name = path.replace("/api/admin/accounts", "").strip("/")
                 if name:
                     acc = get_account(name)
                     if not acc:
                         self._json(404, {"error": "not found"})
                         return
-                    self._json(200, self._account_summary(acc)["detail"])
+                    self._json(200, _account_detail(acc))
                 else:
-                    items = []
-                    for n, a in ACCOUNTS.items():
-                        if n == "default":
-                            continue
-                        items.append(self._account_summary(a))
+                    items = [_account_summary(a) for n, a in ACCOUNTS.items() if n != "default"]
                     self._json(200, items)
                 return
         except Exception as e:
@@ -257,11 +198,9 @@ class AdminHandler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length) if length > 0 else b""
                 ctype = self.headers.get("Content-Type", "")
-                username = ""
-                password = ""
+                username = password = ""
                 if "application/json" in ctype:
-                    import json as _j
-                    data = _j.loads(body.decode("utf-8", errors="replace"))
+                    data = json.loads(body.decode("utf-8", errors="replace"))
                     username = data.get("username", "")
                     password = data.get("password", "")
                 else:
@@ -281,12 +220,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         self.end_headers()
                 else:
                     log.info(f"Admin login failed: {username}")
-                    if "application/json" in ctype:
-                        self._json(401, {"error": "invalid credentials"})
-                    else:
-                        self.send_response(302)
-                        self.send_header("Location", "/admin/?error=1")
-                        self.end_headers()
+                    self._json(401, {"error": "invalid credentials"})
                 return
 
             if self.path.startswith("/api/admin/accounts/") and self.path.endswith("/test"):
@@ -304,7 +238,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     req = urllib.request.Request("https://api.gitcode.com/api/v5/user",
-                                                 headers={"Authorization": f"Bearer {gtoken}"})
+                                                  headers={"Authorization": f"Bearer {gtoken}"})
                     resp = urllib.request.urlopen(req, timeout=10)
                     user = json.loads(resp.read())
                     self._json(200, {"status": "ok", "login": user.get("login", "?")})
@@ -374,9 +308,31 @@ class AdminHandler(BaseHTTPRequestHandler):
         pass
 
 
+def _account_summary(a: dict) -> dict:
+    return {
+        "name": a.get("name", ""),
+        "gitcode_api_token": "YES" if a.get("gitcode_api_token") else "NO",
+        "feishu_app_id": "YES" if a.get("feishu_app_id") else "NO",
+        "huawei_cloud_ak": "YES" if a.get("huawei_cloud_ak") else "NO",
+    }
+
+def _account_detail(a: dict) -> dict:
+    return {
+        "name": a.get("name", ""),
+        "gitcode_api_token": a.get("gitcode_api_token", ""),
+        "gitcode_webhook_token": a.get("gitcode_webhook_token", ""),
+        "feishu_app_id": a.get("feishu_app_id", ""),
+        "feishu_app_secret": a.get("feishu_app_secret", ""),
+        "huawei_cloud_ak": a.get("huawei_cloud_ak", ""),
+        "huawei_cloud_sk": a.get("huawei_cloud_sk", ""),
+        "CODEARTS_CLI_AK": a.get("CODEARTS_CLI_AK", ""),
+        "CODEARTS_CLI_SK": a.get("CODEARTS_CLI_SK", ""),
+        "bot_usernames": a.get("bot_usernames", []),
+    }
+
+
 def start_admin_server():
     from src.config import log
-    import time
     while True:
         try:
             server = HTTPServer(("", 80), AdminHandler)
