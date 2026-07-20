@@ -117,7 +117,8 @@ function doLogout(){ TOKEN=''; window.location.href='/admin/'; }
 
 // ======== API ========
 function api(method, path, body, cb){
-  fetch(path,{method:method,headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:body?JSON.stringify(body):null})
+  var t = TOKEN || ((window.location.search.match(/[?&]token=([^&]*)/)||[])[1]||'');
+  fetch(path,{method:method,headers:{'Authorization':'Bearer '+t,'Content-Type':'application/json'},body:body?JSON.stringify(body):null})
   .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,data:d,status:r.status}; }); })
   .then(function(r){ cb(r.ok, r.data, r.status); })
   .catch(function(){ toast('网络错误',false); });
