@@ -74,6 +74,13 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_login(self._get_param("error", "")))
             return
 
+        # Logout — invalidate token
+        if path == "/admin/logout":
+            if token:
+                type(self)._tokens.pop(token, None)
+            self._send_html(_render_login(""))
+            return
+
         # Delete account
         if path == "/admin/delete":
             if self._valid_token(token):
@@ -314,7 +321,7 @@ def _render_panel(token, select_name="", message=""):
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>DevOps Bot 管理台</title>
 <style>{_CSS}</style></head><body>
-<div class="header"><h2>DevOps Bot 管理台</h2><a href="/admin/">退出</a></div>
+<div class="header"><h2>DevOps Bot 管理台</h2><a href="/admin/logout?token={token}">退出</a></div>
 <div class="wrap">
   <div class="sidebar"><h3>账户列表</h3><div class="list">
     {items_html}
