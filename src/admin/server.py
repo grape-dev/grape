@@ -7,6 +7,25 @@ _PAGE_PATH = os.path.join(_ADMIN_DIR, "page.html")
 ADMIN_USER = "developer"
 ADMIN_PASS = "YOUR_SSH_PASSWORD"
 _admin_tokens: dict[str, float] = {}
+_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../data/admin_tokens.json")
+
+def _load_tokens():
+    global _admin_tokens
+    try:
+        if os.path.exists(_TOKEN_FILE):
+            with open(_TOKEN_FILE, encoding="utf-8") as f:
+                _admin_tokens = json.load(f)
+    except:
+        pass
+
+def _save_tokens():
+    try:
+        with open(_TOKEN_FILE, "w", encoding="utf-8") as f:
+            json.dump({k:v for k,v in _admin_tokens.items() if v > time.time()}, f)
+    except:
+        pass
+
+_load_tokens()
 
 _GITCODE_OAUTH_CLIENT_ID = ""
 _GITCODE_OAUTH_CLIENT_SECRET = ""
@@ -44,6 +63,7 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _auth(self) -> bool:
         token = self.headers.get("Authorization", "").replace("Bearer ", "").strip()
+        _load_tokens()
         if token in _admin_tokens and time.time() < _admin_tokens[token]:
             return True
         self._json(401, {"error": "unauthorized"})
@@ -156,6 +176,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                     log.info(f"Admin OAuth login: {login}")
                     token = hashlib.sha256(f"oauth:{login}:{time.time()}:{os.urandom(8).hex()}".encode()).hexdigest()
                     _admin_tokens[token] = time.time() + 86400
+                    _save_tokens()
                     self.send_response(302)
                     self.send_header("Location", f"/admin/panel?token={token}")
                     self.end_headers()
@@ -209,6 +230,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if username == ADMIN_USER and password == ADMIN_PASS:
                     token = hashlib.sha256(f"{ADMIN_USER}:{time.time()}:{os.urandom(8).hex()}".encode()).hexdigest()
                     _admin_tokens[token] = time.time() + 86400
+                    _save_tokens()
                     log.info(f"Admin login success: {username}")
                     if "application/json" in ctype:
                         self._json(200, {"token": token})
