@@ -217,7 +217,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                         self.send_response(200)
                         self.send_header("Content-Type", "text/html; charset=utf-8")
                         self.end_headers()
-                        self.wfile.write(f'<meta http-equiv="refresh" content="0;url=/admin/panel?token={token}">'.encode())
+                        body = f'<!DOCTYPE html>\n<html><head><meta charset="utf-8">\n<meta http-equiv="refresh" content="0;url=/admin/panel?token={token}">\n</head><body>\n<p>登录成功，正在跳转...</p>\n<p>如果未跳转，<a href="/admin/panel?token={token}">点此进入</a></p>\n</body></html>'
+                        self.wfile.write(body.encode())
                 else:
                     log.info(f"Admin login failed: {username}")
                     if "application/json" in ctype:
