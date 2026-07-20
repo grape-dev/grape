@@ -103,10 +103,12 @@ var SHOW_FIELDS = {};
 (function(){
   TOKEN = __TOKEN_PLACEHOLDER__ || '';
   try { var emb = __ACCOUNTS_PLACEHOLDER__; ACCOUNTS = Array.isArray(emb) ? emb : []; }catch(e){ ACCOUNTS = []; }
-  var qs = new URLSearchParams(window.location.search);
-  if (qs.get('token')) TOKEN = qs.get('token');
+  // Parse token from URL (belt and suspenders)
+  var s = window.location.search.substring(1).split('&');
+  for(var i=0;i<s.length;i++){ var p=s[i].split('='); if(p[0]==='token') TOKEN=decodeURIComponent(p[1]||''); }
   if (TOKEN) { document.getElementById('login-page').style.display='none'; document.getElementById('panel-page').style.display='block'; renderList(); }
   // Show error if redirected from failed login
+  var qs = new URLSearchParams(window.location.search);
   if (qs.get('error')) { var el=document.getElementById('login-err'); el.textContent='用户名或密码错误'; el.style.display='block'; }
 })();
 

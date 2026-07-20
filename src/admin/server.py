@@ -88,10 +88,10 @@ class AdminHandler(BaseHTTPRequestHandler):
             items.append(_account_summary(a))
         embed = json.dumps(items, ensure_ascii=False)
         html = html.replace("__ACCOUNTS_PLACEHOLDER__", embed or "[]")
-        if token and token in _admin_tokens and time.time() < _admin_tokens[token]:
-            html = html.replace("__TOKEN_PLACEHOLDER__", json.dumps(token))
-        else:
-            html = html.replace("__TOKEN_PLACEHOLDER__", "\"\"")
+    if token:
+        html = html.replace("__TOKEN_PLACEHOLDER__", json.dumps(token))
+    else:
+        html = html.replace("__TOKEN_PLACEHOLDER__", "\"\"")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
