@@ -165,7 +165,6 @@ function doAdd(){
 function toggleShow(key){ SHOW_FIELDS[key] = !SHOW_FIELDS[key]; renderForm(); }
 
 function renderForm(){
-  try {
   var a = CUR_ACCOUNT;
   if (!a) { document.getElementById('form-panel').style.display='none'; document.getElementById('empty-panel').style.display='block'; return; }
   document.getElementById('form-panel').style.display='block'; document.getElementById('empty-panel').style.display='none';
@@ -221,11 +220,11 @@ function renderForm(){
   h += '</div>';
 
   document.getElementById('form-panel').innerHTML = h;
-  if (isNew) {
-    document.querySelector('#form-panel input').removeAttribute('disabled');
-    document.querySelector('#form-panel input').focus();
+    if (isNew) {
+      document.querySelector('#form-panel input').removeAttribute('disabled');
+      document.querySelector('#form-panel input').focus();
+    }
   }
-  } catch(e) { toast('渲染错误: '+e.message, false); }
 }
 
 var RENDER_TIMER = null;
