@@ -85,8 +85,6 @@ class AdminHandler(BaseHTTPRequestHandler):
         from src.config import ACCOUNTS
         items = []
         for n, a in ACCOUNTS.items():
-            if n == "default":
-                continue
             items.append(_account_summary(a))
         embed = json.dumps(items, ensure_ascii=False)
         html = html.replace("__ACCOUNTS_PLACEHOLDER__", embed or "[]")
@@ -178,7 +176,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         return
                     self._json(200, _account_detail(acc))
                 else:
-                    items = [_account_summary(a) for n, a in ACCOUNTS.items() if n != "default"]
+                    items = [_account_summary(a) for n, a in ACCOUNTS.items()]
                     self._json(200, items)
                 return
         except Exception as e:
