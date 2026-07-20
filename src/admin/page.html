@@ -66,9 +66,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div id="login-page">
   <div class="login-card">
     <h1>DevOps Bot</h1><p class="sub">管理台登录</p>
-    <form method="POST" action="/api/admin/login" onsubmit="return loginSubmit(event)">
-      <input name="username" id="login-user" placeholder="用户名" autocomplete="username" required>
-      <input name="password" id="login-pass" type="password" placeholder="密码" autocomplete="current-password" required>
+    <form method="POST" action="/api/admin/login">
+      <input name="username" placeholder="用户名" autocomplete="username" required>
+      <input name="password" type="password" placeholder="密码" autocomplete="current-password" required>
       <button class="btn primary" type="submit">登录</button>
     </form>
     <div class="err" id="login-err"></div>
@@ -92,23 +92,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div id="toast" class="toast"></div>
 
 <script>
-// ======== Login Submit ========
-function loginSubmit(e){
-  e.preventDefault();
-  var u = document.getElementById('login-user').value;
-  var p = document.getElementById('login-pass').value;
-  var x = new XMLHttpRequest();
-  x.open('POST', '/api/admin/login', true);
-  x.setRequestHeader('Content-Type', 'application/json');
-  x.onload = function(){
-    if(x.status === 200){
-      try { var d = JSON.parse(x.responseText); window.location.href = '/admin/panel?token='+d.token; } catch(ex){}
-    }
-  };
-  x.send(JSON.stringify({username:u, password:p}));
-  return false;
-}
-
 // ======== State ========
 var TOKEN = "";
 var ACCOUNTS = [];

@@ -214,9 +214,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                     if "application/json" in ctype:
                         self._json(200, {"token": token})
                     else:
-                        self.send_response(302)
-                        self.send_header("Location", f"/admin/panel?token={token}")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
                         self.end_headers()
+                        self.wfile.write(f'<meta http-equiv="refresh" content="0;url=/admin/panel?token={token}">'.encode())
                 else:
                     log.info(f"Admin login failed: {username}")
                     if "application/json" in ctype:
