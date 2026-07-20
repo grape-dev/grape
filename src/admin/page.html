@@ -150,7 +150,6 @@ function selectAccount(name){
   api('GET','/api/admin/accounts/'+name,'',function(ok,data){
     if(!ok){ toast('加载失败',false); return; }
     CUR_ACCOUNT = data; IS_NEW = false; SHOW_FIELDS = {};
-    toast('已加载: '+data.name, true);
     renderList(); renderForm();
   });
 }
