@@ -175,16 +175,17 @@ function renderForm(){
   var title = isNew ? '新增账户' : a.name;
   var show = SHOW_FIELDS;
 
+  function sv(key){ var v = a[key]; return Array.isArray(v) ? v.join(',') : String(v||''); }
   function field(label, key, placeholder){
     placeholder = placeholder || '';
     var type = show[key] ? 'text' : 'password';
-    var val = (a[key] !== undefined && a[key] !== null) ? a[key] : '';
+    var val = sv(key);
     return '<div class="row"><label>'+label+'</label>'
       + '<div class="input-wrap"><input type="'+type+'" value="'+esc(val)+'" onchange="CUR_ACCOUNT[\''+key+'\']=this.value" placeholder="'+placeholder+'">'
       + '<span class="eye" onclick="toggleShow(\''+key+'\')">'+(show[key]?'&#128065;':'&#128064;')+'</span></div></div>';
   }
   function text(label, key){
-    var val = (a[key] !== undefined && a[key] !== null) ? a[key] : '';
+    var val = sv(key);
     return '<div class="row"><label>'+label+'</label><input type="text" value="'+esc(val)+'" onchange="CUR_ACCOUNT[\''+key+'\']=this.value"></div>';
   }
 
@@ -230,7 +231,7 @@ function renderForm(){
 var RENDER_TIMER = null;
 function scheduleRender(){ clearTimeout(RENDER_TIMER); RENDER_TIMER = setTimeout(renderForm, 200); }
 
-function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // ======== Actions ========
 function doSave(){
