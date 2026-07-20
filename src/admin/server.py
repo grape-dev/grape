@@ -9,28 +9,6 @@ ADMIN_PASS = "YOUR_SSH_PASSWORD"
 _TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../data/admin_tokens.json")
 
 
-class AdminHandler(BaseHTTPRequestHandler):
-    _tokens: dict[str, float] = {}
-
-    @classmethod
-    def _load_tokens(cls):
-        try:
-            if os.path.exists(_TOKEN_FILE):
-                with open(_TOKEN_FILE, encoding="utf-8") as f:
-                    cls._tokens = json.load(f)
-        except:
-            pass
-
-    @classmethod
-    def _save_tokens(cls):
-        try:
-            with open(_TOKEN_FILE, "w", encoding="utf-8") as f:
-                json.dump({k:v for k,v in cls._tokens.items() if v > time.time()}, f)
-        except:
-            pass
-
-AdminHandler._load_tokens()
-
 _GITCODE_OAUTH_CLIENT_ID = ""
 _GITCODE_OAUTH_CLIENT_SECRET = ""
 _FEISHU_OAUTH_APP_ID = ""
@@ -58,6 +36,25 @@ def _load_oauth_config():
 
 
 class AdminHandler(BaseHTTPRequestHandler):
+    _tokens = {}
+
+    @classmethod
+    def _load_tokens(cls):
+        try:
+            if os.path.exists(_TOKEN_FILE):
+                with open(_TOKEN_FILE, encoding="utf-8") as f:
+                    cls._tokens = json.load(f)
+        except:
+            pass
+
+    @classmethod
+    def _save_tokens(cls):
+        try:
+            with open(_TOKEN_FILE, "w", encoding="utf-8") as f:
+                json.dump({k:v for k,v in cls._tokens.items() if v > time.time()}, f)
+        except:
+            pass
+
     def _json(self, code, data):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
