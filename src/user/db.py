@@ -590,9 +590,9 @@ def migrate_accounts_from_json():
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         for a in data.get("accounts", []):
-            save_bot_account(a.get("name", "default"), a)
+            name = a.get("name", "default")
+            save_bot_account(name, a)
             # 同步密码到 users 表
-            name = a.get("name", "")
             pwd = a.get("password", "")
             if pwd and name:
                 user = get_user_by_username(name)
@@ -600,6 +600,20 @@ def migrate_accounts_from_json():
                     update_password(user["id"], pwd)
                 else:
                     create_user(name, pwd, 0)
+            # 同步凭据到 user_credentials 表
+            if name:
+                user = get_user_by_username(name)
+                if user:
+                    uid = user["id"]
+                    creds_map = {
+                        "gitcode": {"token": a.get("gitcode_api_token", "")},
+                        "feishu": {"app_id": a.get("feishu_app_id", ""), "app_secret": a.get("feishu_app_secret", "")},
+                        "huawei_cloud": {"ak": a.get("huawei_cloud_ak", ""), "sk": a.get("huawei_cloud_sk", "")},
+                        "codearts": {"ak": a.get("CODEARTS_CLI_AK", ""), "sk": a.get("CODEARTS_CLI_SK", "")},
+                    }
+                    for provider, config in creds_map.items():
+                        if any(v for v in config.values()):
+                            set_credential(uid, provider, config)
         log.info(f"Migrated {len(data.get('accounts',[]))} accounts from accounts.json to DB")
     except Exception as e:
         log.warning(f"Migration from accounts.json failed: {e}")

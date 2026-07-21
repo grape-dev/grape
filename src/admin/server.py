@@ -307,6 +307,22 @@ class AdminHandler(BaseHTTPRequestHandler):
                 else:
                     user_db.create_user(name, pwd, 0)
             save_accounts(items)
+            # 同步 bot 凭据到 user_credentials 表
+            user = user_db.get_user_by_username(name)
+            if user:
+                uid = user["id"]
+                for a in items:
+                    if a.get("name") == name:
+                        creds_map = {
+                            "gitcode": {"token": a.get("gitcode_api_token", "")},
+                            "feishu": {"app_id": a.get("feishu_app_id", ""), "app_secret": a.get("feishu_app_secret", "")},
+                            "huawei_cloud": {"ak": a.get("huawei_cloud_ak", ""), "sk": a.get("huawei_cloud_sk", "")},
+                            "codearts": {"ak": a.get("CODEARTS_CLI_AK", ""), "sk": a.get("CODEARTS_CLI_SK", "")},
+                        }
+                        for provider, config in creds_map.items():
+                            if any(v for v in config.values()):
+                                user_db.set_credential(uid, provider, config)
+                        break
             self._send_html(_render_admin_panel(token, name, "保存成功"))
             return
 
