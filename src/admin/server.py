@@ -115,9 +115,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             admin_path = None
 
         if admin_path in ("", "/"):
-            uid_param = self._get_param("uid")
             if self._valid_token(token):
-                self._send_html(_render_admin_panel(token, self._get_param("select", ""), "", uid_param))
+                self._send_html(_render_admin_panel(token, self._get_param("select", "")))
             else:
                 self._send_html(_render_admin_login(self._get_param("error", "")))
             return
@@ -243,29 +242,6 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_admin_login("用户名或密码错误"))
             return
 
-        # Admin: create user
-        if path == "/admin/create-user":
-            token = self._get_param("token")
-            if not self._valid_token(token):
-                self._send_html(_render_admin_login("会话过期"))
-                return
-            uid = user_db.create_user(form.get("username", ""), form.get("password", ""), 0)
-            msg = f"用户 {form.get('username')} 创建成功" if uid else "创建失败（用户名可能已存在）"
-            self._send_html(_render_admin_panel(token, "", msg))
-            return
-
-        # Admin: reset password
-        if path == "/admin/reset-pwd":
-            token = self._get_param("token")
-            if not self._valid_token(token):
-                self._send_html(_render_admin_login("会话过期"))
-                return
-            uid = form.get("user_id", "")
-            ok = user_db.update_password(int(uid), form.get("password", "")) if uid.isdigit() else False
-            msg = "密码已修改" if ok else "修改失败"
-            self._send_html(_render_admin_panel(token, "", msg))
-            return
-
         # Save account
         if path == "/admin/save":
             token = self._get_param("token")
@@ -385,11 +361,11 @@ def _render_admin_login(error=""):
 </body></html>"""
 
 
-def _render_admin_panel(token, select_name="", message="", uid_param=""):
+def _render_admin_panel(token, select_name="", message=""):
     from src.config import ACCOUNTS, get_account
 
     # 侧边栏：账户列表 + 用户管理链接
-    items_html = f'<a class="item{" active" if not select_name and not uid_param else ""}" href="/admin?token={token}">📋 用户管理</a>\n'
+    items_html = ""
     for n, a in ACCOUNTS.items():
         active = " active" if n == select_name else ""
         gc = " ok" if a.get("gitcode_api_token") else ""
@@ -434,46 +410,8 @@ def _render_admin_panel(token, select_name="", message="", uid_param=""):
             form_html += f'<a class="btn-d" href="/admin/delete?token={token}&name={select_name}" onclick="return confirm(\'确定删除？\')">删除</a>'
         form_html += '</div></form>'
 
-    elif uid_param and uid_param.isdigit():
-        # 用户详情 + 密码修改
-        user = user_db.get_user(int(uid_param))
-        if user:
-            form_html = f'<h3>用户 {user["username"]}</h3>'
-            form_html += f'<div class="row"><label>用户名</label><input value="{user["username"]}" disabled></div>'
-            form_html += f'<div class="row"><label>用户 ID</label><input value="{user["id"]}" disabled></div>'
-            form_html += '<div class="group"><h4>修改密码</h4>'
-            form_html += f'<form method="POST" action="/admin/reset-pwd?token={token}">'
-            form_html += f'<input type="hidden" name="user_id" value="{user["id"]}">'
-            form_html += '<div class="row"><label>新密码</label><input name="password" type="password" required></div>'
-            form_html += '<button class="btn-p" type="submit">修改密码</button></form></div>'
-            # 显示凭据状态
-            creds = user_db.get_credentials(user["id"])
-            form_html += '<div class="group"><h4>已配置凭据</h4>'
-            if creds:
-                for c in creds:
-                    form_html += f'<div class="row"><label>{c["provider"]}</label><input value="✅ 已配置" disabled style="color:#27ae60"></div>'
-            else:
-                form_html += '<p style="color:#888;font-size:13px">暂无凭据</p>'
-            form_html += '</div>'
-        else:
-            form_html = '<h3>用户不存在</h3>'
     else:
-        # 用户管理视图（含密码修改）
-        users = user_db.list_users()
-        users_rows = ""
-        for u in users:
-            users_rows += f'<div class="item" style="flex-wrap:wrap"><span>{u["username"]} (ID:{u["id"]})</span>'
-            users_rows += f'<form method="POST" action="/admin/reset-pwd?token={token}" style="display:flex;gap:6px;margin-top:4px;width:100%">'
-            users_rows += f'<input type="hidden" name="user_id" value="{u["id"]}">'
-            users_rows += f'<input name="password" type="password" placeholder="新密码" required style="flex:1">'
-            users_rows += f'<button class="btn-p" type="submit" style="padding:6px 12px;font-size:12px">修改密码</button></form></div>'
-        form_html = '<h3>用户管理</h3>'
-        form_html += '<div class="group"><h4>用户列表（每行可直接修改密码）</h4><div class="list">' + users_rows + '</div></div>'
-        form_html += '<div class="group"><h4>创建用户</h4>'
-        form_html += f'<form method="POST" action="/admin/create-user?token={token}">'
-        form_html += '<div class="row"><label>用户名</label><input name="username" required></div>'
-        form_html += '<div class="row"><label>密码</label><input name="password" type="password" required></div>'
-        form_html += '<button class="btn-p" type="submit">创建</button></form></div>'
+        form_html = '<h3>请选择左侧账户</h3>'
 
     toast_html = f'<div class="toast show ok">{message}</div>' if message else ""
     return f"""<!DOCTYPE html>
