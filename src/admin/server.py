@@ -1,8 +1,9 @@
-"""管理台 HTTP 服务（端口 80）：纯服务端渲染 + 内联 JS"""
+"""管理台 HTTP 服务（端口 80）：多用户管理台"""
 import json, os, time, hashlib, urllib.request, urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from concurrent.futures import ThreadPoolExecutor
+from src.user import db as user_db
 
 
 class PooledHTTPServer(ThreadingMixIn, HTTPServer):
@@ -78,15 +79,47 @@ class AdminHandler(BaseHTTPRequestHandler):
         path = self._path()
         token = self._get_param("token")
 
-        # Login page
-        if path in ("/admin", "/admin/", "/"):
-            if self._valid_token(token):
-                self._send_html(_render_panel(token, self._get_param("select", "")))
-            else:
-                self._send_html(_render_login(self._get_param("error", "")))
+        # 普通用户 → 登录页 / 面板
+        if path in ("", "/"):
+            uid = user_db.validate_token(token or "")
+            if uid:
+                user = user_db.get_user(uid)
+                if user:
+                    self._send_html(_render_user_panel(token))
+                    return
+            self._send_html(_render_user_login(self._get_param("error", "")))
             return
 
-        # Logout — invalidate token
+        # 普通用户 → 面板（通过 token 直接访问）
+        if path == "/panel":
+            uid = user_db.validate_token(token or "")
+            if uid and user_db.get_user(uid):
+                self._send_html(_render_user_panel(token))
+                return
+            self._send_html(_render_user_login("会话过期"))
+            return
+
+        # 普通用户 → 退出
+        if path == "/logout":
+            if token:
+                user_db.clear_token(token)
+            self._send_html(_render_user_login(""))
+            return
+
+        # 管理员路由（保持不变）
+        if path.startswith("/admin/"):
+            admin_path = path[len("/admin"):] or "/"
+        else:
+            admin_path = None
+
+        if admin_path in ("", "/", "/"):
+            if self._valid_token(token):
+                self._send_html(_render_admin_panel(token, self._get_param("select", "")))
+            else:
+                self._send_html(_render_admin_login(self._get_param("error", "")))
+            return
+
+        # Admin Logout
         if path == "/admin/logout":
             if token:
                 type(self)._tokens.pop(token, None)
@@ -155,10 +188,20 @@ class AdminHandler(BaseHTTPRequestHandler):
     # ====== POST ======
     def do_POST(self):
         path = self._path()
+        form = self._read_form()
 
-        # Login
+        # 普通用户登录
+        if path in ("", "/", "/login"):
+            user = user_db.verify_user(form.get("username", ""), form.get("password", ""))
+            if user:
+                token = user_db.create_session_token(user["id"])
+                self._send_html(_render_user_panel(token))
+            else:
+                self._send_html(_render_user_login("用户名或密码错误"))
+            return
+
+        # 管理员登录
         if path == "/admin/login":
-            form = self._read_form()
             if form.get("username") == ADMIN_USER and form.get("password") == ADMIN_PASS:
                 token = hashlib.sha256(f"{ADMIN_USER}:{time.time()}:{os.urandom(8).hex()}".encode()).hexdigest()
                 type(self)._tokens[token] = time.time() + 86400
@@ -166,6 +209,17 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_panel(token, ""))
             else:
                 self._send_html(_render_login("用户名或密码错误"))
+            return
+
+        # Admin: create user
+        if path == "/admin/create-user":
+            token = self._get_param("token")
+            if not self._valid_token(token):
+                self._send_html(_render_admin_login("会话过期"))
+                return
+            uid = user_db.create_user(form.get("username", ""), form.get("password", ""), 0)
+            msg = f"用户 {form.get('username')} 创建成功" if uid else "创建失败（用户名可能已存在）"
+            self._send_html(_render_admin_panel(token, "", msg))
             return
 
         # Save account
@@ -204,7 +258,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         pass
 
 
-# ====== HTML Rendering ======
+# ====== Admin HTML Rendering ======
 
 _CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
@@ -217,9 +271,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .login-card input:focus{border-color:#667eea}
 .login-card button{width:100%;padding:12px;background:#667eea;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer}
 .login-card .err{color:#e74c3c;font-size:13px;text-align:center;margin-top:8px}
+.login-card .link{text-align:center;margin-top:12px;font-size:12px;color:#888}
+.login-card .link a{color:#667eea;text-decoration:none}
 .header{background:#fff;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 1px 4px rgba(0,0,0,.06);margin-bottom:24px}
 .header h2{font-size:16px;font-weight:600}
 .header a{font-size:13px;color:#e74c3c;cursor:pointer;text-decoration:none}
+.header .right{font-size:13px;color:#666}
 .wrap{display:flex;max-width:1200px;margin:0 auto;padding:0 24px 24px;gap:24px}
 .sidebar{width:260px;flex-shrink:0}
 .sidebar h3{font-size:13px;color:#888;padding:0 12px;margin-bottom:8px}
@@ -230,7 +287,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .dots{display:flex;gap:3px}
 .dot{width:7px;height:7px;border-radius:50%;background:#ccc}
 .dot.ok{background:#27ae60}
-.add-link{padding:12px;text-align:center;color:#667eea;cursor:pointer;font-size:14px;border-top:1px solid #f0f0f0;display:block;text-decoration:none}
+.add-link{padding:12px;text-align:center;color:#667eea;font-size:14px;border-top:1px solid #f0f0f0;display:block;text-decoration:none}
 .main{flex:1;background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.06);padding:24px}
 .main h3{font-size:16px;padding-bottom:12px;border-bottom:1px solid #f0f0f0;margin-bottom:16px}
 .group{margin-bottom:18px}
@@ -254,7 +311,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 """
 
 
-def _render_login(error=""):
+def _render_admin_login(error=""):
     err_html = f'<p class="err">{error}</p>' if error else ""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
@@ -262,21 +319,21 @@ def _render_login(error=""):
 <title>DevOps Bot 管理台</title>
 <style>{_CSS}</style></head><body>
 <div class="login-wrap"><div class="login-card">
-<h1>DevOps Bot</h1><p class="sub">管理台登录</p>
+<h1>DevOps Bot</h1><p class="sub">管理员登录</p>
 <form method="POST" action="/admin/login">
 <input name="username" placeholder="用户名" required>
 <input name="password" type="password" placeholder="密码" required>
 <button type="submit">登录</button>
 </form>
+<p class="link"><a href="/">返回用户登录</a></p>
 {err_html}
 </div></div>
 </body></html>"""
 
 
-def _render_panel(token, select_name="", message=""):
+def _render_admin_panel(token, select_name="", message=""):
     from src.config import ACCOUNTS, get_account
 
-    # Account list
     items_html = ""
     for n, a in ACCOUNTS.items():
         active = " active" if n == select_name else ""
@@ -285,18 +342,15 @@ def _render_panel(token, select_name="", message=""):
         hw = " ok" if a.get("huawei_cloud_ak") else ""
         items_html += f'<a class="item{active}" href="/admin?token={token}&select={n}"><span>{n}</span><span class="dots"><span class="dot{gc}"></span><span class="dot{fs}"></span><span class="dot{hw}"></span></span></a>\n'
 
-    # Account detail form
     if select_name:
         acc = get_account(select_name) or {}
         bu = ",".join(acc.get("bot_usernames", [])) if isinstance(acc.get("bot_usernames"), list) else str(acc.get("bot_usernames", ""))
         form_html = f'<h3>{select_name}</h3>'
         form_html += '<form method="POST" action="/admin/save?token=' + token + '">'
         form_html += f'<input type="hidden" name="name" value="{select_name}">'
-
         form_html += '<div class="group"><h4>基础信息</h4>'
         form_html += f'<div class="row"><label>账户名称</label><input value="{select_name}" disabled></div>'
-        form_html += f'<div class="row"><label>Bot 用户名（逗号分隔）</label><input name="bot_usernames" value="{bu}"></div></div>'
-
+        form_html += f'<div class="row"><label>Bot 用户名</label><input name="bot_usernames" value="{bu}"></div></div>'
         groups = [
             ("GitCode", [("gitcode_api_token", "API Token"), ("gitcode_webhook_token", "Webhook Token")]),
             ("飞书", [("feishu_app_id", "App ID"), ("feishu_app_secret", "App Secret")]),
@@ -310,24 +364,27 @@ def _render_panel(token, select_name="", message=""):
                 fid = key + "_" + str(hash(key) % 10000)
                 form_html += f'<div class="row"><label>{label}</label><div class="iw">'
                 form_html += f'<input id="{fid}" type="password" name="{key}" value="{val}">'
-                form_html += f'<span class="eye" onclick="var e=document.getElementById(\'{fid}\');e.type=e.type==\'password\'?\'text\':\'password\'">👁</span>'
-                form_html += '</div></div>'
+                form_html += f'<span class="eye" onclick="var e=document.getElementById(\'{fid}\');e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div></div>'
             form_html += '</div>'
-
-        form_html += '<div class="acts">'
-        form_html += '<button class="btn-p" type="submit">保存</button>'
+        form_html += '<div class="acts"><button class="btn-p" type="submit">保存</button>'
         form_html += f'<a class="btn-s" href="/admin/test?token={token}&name={select_name}">测试连接</a>'
         if select_name != "default":
             form_html += f'<a class="btn-d" href="/admin/delete?token={token}&name={select_name}" onclick="return confirm(\'确定删除？\')">删除</a>'
         form_html += '</div></form>'
     else:
-        form_html = '<h3>请选择左侧账户</h3>'
+        users = user_db.list_users()
+        users_rows = ""
+        for u in users:
+            users_rows += f'<div class="item"><span>{u["username"]}</span><span style="font-size:12px;color:#888">ID:{u["id"]}</span></div>'
+        form_html = '<h3>用户管理</h3>'
+        form_html += '<div class="group"><h4>用户列表</h4><div class="list">' + users_rows + '</div></div>'
+        form_html += '<div class="group"><h4>创建用户</h4>'
+        form_html += f'<form method="POST" action="/admin/create-user?token={token}">'
+        form_html += '<div class="row"><label>用户名</label><input name="username" required></div>'
+        form_html += '<div class="row"><label>密码</label><input name="password" type="password" required></div>'
+        form_html += '<button class="btn-p" type="submit">创建</button></form></div>'
 
-    # Toast
-    toast_html = ""
-    if message:
-        toast_html = f'<div class="toast show ok">{message}</div>'
-
+    toast_html = f'<div class="toast show ok">{message}</div>' if message else ""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -335,13 +392,55 @@ def _render_panel(token, select_name="", message=""):
 <style>{_CSS}</style></head><body>
 <div class="header"><h2>DevOps Bot 管理台</h2><a href="/admin/logout?token={token}">退出</a></div>
 <div class="wrap">
-  <div class="sidebar"><h3>账户列表</h3><div class="list">
-    {items_html}
-    <a class="add-link" href="/admin?token={token}&select=__new__">+ 新增</a>
-  </div></div>
+  <div class="sidebar"><h3>账户列表</h3><div class="list">{items_html}<a class="add-link" href="/admin?token={token}&select=__new__">+ 新增账户</a></div></div>
   <div class="main">{form_html}</div>
 </div>
 {toast_html}
+</body></html>"""
+
+
+# ====== User HTML Rendering ======
+
+def _render_user_login(error=""):
+    err_html = f'<p class="err">{error}</p>' if error else ""
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>DevOps Bot 用户中心</title>
+<style>{_CSS}</style></head><body>
+<div class="login-wrap"><div class="login-card">
+<h1>DevOps Bot</h1><p class="sub">用户登录</p>
+<form method="POST" action="/login">
+<input name="username" placeholder="用户名" required>
+<input name="password" type="password" placeholder="密码" required>
+<button type="submit">登录</button>
+</form>
+<p class="link"><a href="/admin/">管理员登录</a></p>
+{err_html}
+</div></div>
+</body></html>"""
+
+
+def _render_user_panel(token):
+    uid = user_db.validate_token(token)
+    user = user_db.get_user(uid) if uid else None
+    if not user:
+        return _render_user_login("会话过期")
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>DevOps Bot 用户中心</title>
+<style>{_CSS}</style></head><body>
+<div class="header"><h2>DevOps Bot 用户中心</h2><span class="right">{user['username']} <a href="/logout?token={token}" style="color:#e74c3c;margin-left:8px">退出</a></span></div>
+<div class="wrap">
+  <div class="main">
+    <h3>用户信息</h3>
+    <div class="row"><label>用户名</label><input value="{user['username']}" disabled></div>
+    <div class="row"><label>用户 ID</label><input value="{user['id']}" disabled></div>
+    <div class="group"><h4>功能（即将开放）</h4><p style="color:#888;font-size:13px;padding:12px">凭据管理 · 自定义技能 · 云主机配置 · 仓库映射</p></div>
+  </div>
+</div>
 </body></html>"""
 
 
