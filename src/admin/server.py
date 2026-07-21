@@ -386,8 +386,8 @@ def _render_admin_panel(token, select_name="", message=""):
         # 密码字段——始终显示，不存在用户时自动创建
         pw_id = f"pwd_{hash('password') % 10000}"
         form_html += f'<div class="row"><label>密码</label><div class="iw">'
-        form_html += f'<input id="{pw_id}" type="password" name="_password" value="********" onfocus="this.value=\'\'">'
-        form_html += f'<span class="eye" onclick="var e=document.getElementById(\'{pw_id}\');e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div></div>'
+        form_html += f'<input id="{pw_id}" type="password" name="_password" value="********">'
+        form_html += f'<span class="eye" onclick="var e=document.getElementById(\'{pw_id}\');if(e.value===\'********\')e.value=\'\';e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div></div>'
         form_html += '</div>'
         groups = [
             ("GitCode", [("gitcode_api_token", "API Token"), ("gitcode_webhook_token", "Webhook Token")]),
