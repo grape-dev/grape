@@ -42,7 +42,6 @@ def fetch_admin_repos(api_token: str) -> list[dict]:
             break
         items = data if isinstance(data, list) else []
         if not items and isinstance(data, dict):
-            # maybe wrapped in a data/page key
             for key in ("data", "list", "items", "content"):
                 if key in data and isinstance(data[key], list):
                     items = data[key]
@@ -51,8 +50,11 @@ def fetch_admin_repos(api_token: str) -> list[dict]:
             full_name = r.get("full_name", "")
             if not full_name or "/" not in full_name:
                 continue
+            # log first item keys for debugging
+            if not repos and items.index(r) == 0:
+                log.info(f"First repo keys: {list(r.keys())}, permissions={r.get('permissions')}, role={r.get('role')}")
             permissions = r.get("permissions")
-            if permissions is None or (isinstance(permissions, dict) and permissions.get("admin")):
+            if isinstance(permissions, dict) and permissions.get("admin"):
                 owner, name = full_name.split("/", 1)
                 repos.append({"full_name": full_name, "owner": owner, "name": name})
         if len(items) < 100:
