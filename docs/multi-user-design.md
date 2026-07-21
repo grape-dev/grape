@@ -128,6 +128,165 @@ GitCode Webhook 事件到达
       → 无 → 检查 event-routing.json routing（全局默认）
 ```
 
+## 自定义技能校验规则
+
+用户上传自定义技能时，服务端需校验以下内容，不合规的返回错误提示。
+
+### 1. 目录结构校验
+
+```
+my-skill-name/
+├── SKILL.md              # 必填，唯一入口文件
+└── references/           # 可选，参考文档（会被 Agent 自动发现）
+    ├── api-reference.md  # 可选
+    └── best-practice.md  # 可选
+```
+
+通过条件：
+- 必须包含 `SKILL.md` 文件
+- 不允许包含 Java/Python/Shell 等可执行脚本或编译产物
+- 文件总大小不超过 1MB
+- `references/` 目录下只允许 `.md` / `.txt` / `.json` / `.yaml` / `.yml` 文件
+
+### 2. YAML Front Matter 校验
+
+```yaml
+---
+name: my-skill-name           # 必填，必须与目录名一致
+version: 1.0.0               # 必填，语义化版本
+description: 一句话描述      # 必填，不超过 200 字
+triggers:                    # 可选
+  - event_type: pull_request_opened
+tools:                       # 可选
+  - git
+---
+```
+
+必填字段检查：
+| 字段 | 校验规则 |
+|------|---------|
+| `name` | 非空，仅允许小写字母、数字、连字符（`[a-z0-9-]+`），与目录名一致 |
+| `version` | 匹配 `\d+\.\d+\.\d+` |
+| `description` | 非空，不超过 200 字 |
+
+### 3. Markdown Body 校验
+
+```markdown
+# Skill 标题
+
+## 场景
+描述适用场景...
+
+## 知识
+领域知识和最佳实践...
+
+## 步骤
+处理流程...
+```
+
+必填章节检查：
+| 章节 | 校验规则 |
+|------|---------|
+| `## 场景` | 必须存在且非空 |
+| `## 知识` | 必须存在且非空 |
+| `## 步骤` | 必须存在且非空，至少包含一个有序或无序列表项（步骤） |
+
+### 4. 命名要求
+
+- 目录名（也是 `name` 字段）必须为 kebab-case：`[a-z0-9-]+`
+- 不能与现有项目级技能同名（`pr`、`issue`、`implementation`、`build-debug`、`deploy-guard`、`incident-triage`、`changelog-gen`、`chat`、`cloud-deploy`、`im-notify`、`agent`）
+- 不能与同一用户的其他自定义技能同名
+
+### 5. 校验失败处理
+
+返回 400 错误，JSON 体包含具体失败原因：
+
+```json
+{
+  "error": "技能校验未通过",
+  "details": [
+    "缺少 SKILL.md 文件",
+    "name 字段与目录名不一致",
+    "「知识」章节不能为空"
+  ]
+}
+```
+
+### 6. 服务端校验实现
+
+```python
+import re, os, yaml
+
+def validate_custom_skill(upload_dir: str, skill_name: str) -> list[str]:
+    errors = []
+
+    # 1. 检查 SKILL.md 是否存在
+    skill_path = os.path.join(upload_dir, "SKILL.md")
+    if not os.path.exists(skill_path):
+        return [f"缺少 SKILL.md 文件"]
+
+    with open(skill_path, encoding="utf-8") as f:
+        content = f.read()
+
+    # 2. 解析 Front Matter
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        errors.append("缺少 YAML Front Matter（--- 分隔）")
+        return errors
+    try:
+        fm = yaml.safe_load(parts[1])
+    except Exception as e:
+        errors.append(f"Front Matter 解析失败: {e}")
+        return errors
+
+    if not isinstance(fm, dict):
+        errors.append("Front Matter 必须是一个对象")
+        return errors
+
+    # name 校验
+    name = fm.get("name", "")
+    if not re.match(r"^[a-z0-9-]+$", name):
+        errors.append("name 字段仅允许小写字母、数字、连字符")
+    if name != skill_name:
+        errors.append(f"name（{name}）与目录名（{skill_name}）不一致")
+
+    # version 校验
+    version = str(fm.get("version", ""))
+    if not re.match(r"^\d+\.\d+\.\d+$", version):
+        errors.append("version 字段必须符合语义化版本号格式（x.y.z）")
+
+    # description 校验
+    desc = fm.get("description", "")
+    if not desc:
+        errors.append("description 字段不能为空")
+    elif len(desc) > 200:
+        errors.append("description 字段不超过 200 字")
+
+    # 3. 解析 Body
+    body = parts[2] if len(parts) > 2 else ""
+    required_sections = ["## 场景", "## 知识", "## 步骤"]
+    for sec in required_sections:
+        if sec not in body:
+            errors.append(f"缺少「{sec.replace('## ', '')}」章节")
+
+    # 4. 步骤章节至少包含一个列表项
+    if "## 步骤" in body:
+        steps_section = body.split("## 步骤", 1)[1].split("##", 1)[0]
+        if not re.search(r"^\s*[-*\d.]", steps_section, re.MULTILINE):
+            errors.append("「步骤」章节必须包含至少一个列表项")
+
+    # 5. 检查禁止内容
+    forbidden_extensions = [".py", ".sh", ".bat", ".exe", ".jar", ".class"]
+    for root, dirs, files in os.walk(upload_dir):
+        for f in files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in forbidden_extensions:
+                errors.append(f"不允许上传可执行文件: {f}")
+                break
+
+    return errors
+```
+
 ## 自定义技能存储
 
 ```
