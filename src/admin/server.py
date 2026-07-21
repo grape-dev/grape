@@ -277,6 +277,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not self._valid_token(token):
                 self._send_html(_render_admin_login("会话过期"))
                 return
+            pwd = form.pop("_password", "")
             name = form.pop("name", "")
             if not name:
                 self._send_html(_render_admin_panel(token, "", "名称不能为空"))
@@ -299,7 +300,6 @@ class AdminHandler(BaseHTTPRequestHandler):
                     if a.get("name") == name:
                         a["bot_usernames"] = [s.strip() for s in form["bot_usernames"].split(",") if s.strip()]
             # 更新密码（自动创建用户）
-            pwd = form.pop("_password", "")
             if pwd:
                 user = user_db.get_user_by_username(name)
                 if user:
