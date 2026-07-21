@@ -18,11 +18,21 @@ def get_backend(name: str) -> AgentBackend:
 
 def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  event_type: str = "", backend_name: str = "opencode",
-                 account: str = "default"):
+                 account: str = "default", user_id: int = 0):
     """流式执行 Agent，yield 事件。"""
     backend = get_backend(backend_name)
-    env = backend.get_env(account=account)
+    env = backend.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
+
+    # 注入用户凭据
+    if user_id > 0:
+        try:
+            from src.user.db import get_credentials
+            for c in get_credentials(user_id):
+                for k, v in c.get("config", {}).items():
+                    env[k.upper()] = str(v)
+        except Exception as e:
+            log.warning(f"Failed to inject user credentials: {e}")
 
     args = backend.build_args(prompt, session_id)
     agent_cmd = shutil.which(backend.binary) or shutil.which(backend.binary + ".cmd")

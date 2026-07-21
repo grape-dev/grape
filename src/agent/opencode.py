@@ -15,7 +15,7 @@ class OpencodeBackend(AgentBackend):
         args.append(prompt)
         return args
 
-    def get_env(self, account: str = "default") -> dict:
+    def get_env(self, account: str = "default", user_id: int = 0) -> dict:
         from src.config import get_account
         acc = get_account(account)
         env = os.environ.copy()

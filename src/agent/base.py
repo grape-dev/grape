@@ -48,5 +48,5 @@ class AgentBackend:
             return {"type": "error", "message": err}
         return {"type": "other", "raw": et}
 
-    def get_env(self, account: str = "default") -> dict:
+    def get_env(self, account: str = "default", user_id: int = 0) -> dict:
         return {}
