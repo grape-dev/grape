@@ -8,10 +8,15 @@
 
 | URL | 用途 | 鉴权 |
 |-----|------|------|
-| `/` | 普通用户登录页 | 无 |
-| `/panel?token=xxx` | 用户面板（凭据管理、技能配置） | Bearer token |
-| `/admin/` | 管理员登录页 | 无 |
-| `/admin/panel?token=xxx` | 管理员面板（用户管理） | Bearer token |
+| `/` | 普通用户登录页 + 用户面板（凭据管理、技能配置） | Token+Session |
+| `/admin/` | 管理员登录页 + 管理员面板 | Token+Session |
+| `/login` | 普通用户登录 POST | 无 |
+| `/admin/login` | 管理员登录 POST | 无 |
+| `/admin/save` | 管理员保存用户账户配置 POST | Token |
+| `/user/cred` | 用户更新自己的凭据 POST | Token |
+| `/user/vm` | 用户管理云主机 POST | Token |
+| `/user/skill` | 用户上传自定义技能 POST | Token |
+| `/user/mapping` | 用户配置仓库技能映射 POST | Token |
 
 ## 登录认证
 
@@ -19,54 +24,66 @@
 
 - 固定账号：`developer` / `YOUR_SSH_PASSWORD`
 - POST `/admin/login` → 返回管理员面板
-- 管理员可创建、编辑、删除普通用户，管理用户的所有配置（凭据、云主机、自定义技能等）
+- 管理员可创建、编辑、删除普通用户（即 `bot_accounts` 中的账户），管理凭据、云主机、自定义技能等
 
 ### 普通用户登录
 
 - POST `/login` → 返回用户面板
-- 用户由管理员预先创建（用户名 + 初始密码）
-- 用户登录后可自行修改密码
+- 用户由管理员在 admin 页面创建（设置密码后自动同步到 `users` 表）
+- 用户登录后可自行修改凭据、管理云主机、上传自定义技能
 
 ## 用户身份
 
 | 身份 | 认证方式 | 入口 |
 |------|---------|------|
 | 管理员（admin） | 固定账号 `developer` / `YOUR_SSH_PASSWORD`（硬编码） | `/admin/` |
-| 普通用户（user） | 由管理员创建，存入 `users` 表 | `/` |
+| 普通用户（user） | 由管理员通过 admin 页面创建，凭据同步存入 `bot_accounts` + `users` 表 | `/` |
 
-## 数据库设计（`sessions.db` 新增表）
+## 核心设计原则
 
-### users 表
+**`bot_accounts` 即用户账户表**。Admin 页面管理的 Bot 账户（gitcode_token、feishu_app_id 等）就是用户的凭据配置，同一份数据同时在 admin 面板和用户面板展示。不再通过 `user_credentials` 冗余存储。
+
+## 数据库设计（`sessions.db`）
+
+### bot_accounts 表（核心用户账户表）
+
+```sql
+CREATE TABLE bot_accounts (
+    name TEXT PRIMARY KEY,
+    gitcode_api_token TEXT DEFAULT '',
+    gitcode_webhook_token TEXT DEFAULT '',
+    gitcode_oauth_client_id TEXT DEFAULT '',
+    gitcode_oauth_client_secret TEXT DEFAULT '',
+    feishu_app_id TEXT DEFAULT '',
+    feishu_app_secret TEXT DEFAULT '',
+    huawei_cloud_ak TEXT DEFAULT '',
+    huawei_cloud_sk TEXT DEFAULT '',
+    CODEARTS_CLI_AK TEXT DEFAULT '',
+    CODEARTS_CLI_SK TEXT DEFAULT '',
+    password TEXT DEFAULT '',
+    bot_usernames TEXT DEFAULT '[]'   -- JSON 数组
+);
+```
+
+每个 `name` 代表一个用户/ Bot 实例。Admin 页面直接管理这些字段，用户面板也读取同一份数据。
+
+### users 表（仅登录认证）
 
 ```sql
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    created_by INTEGER,           -- 创建者的 user_id（admin 在代码中硬编码）
+    username TEXT UNIQUE NOT NULL,     -- 对应 bot_accounts.name
+    password_hash TEXT NOT NULL,       -- SHA256
+    created_by INTEGER,
     created_at TEXT DEFAULT (datetime('now'))
 );
 ```
 
-### user_credentials 表
+只存登录认证所需信息，`username` 与 `bot_accounts.name` 一一对应。
 
-```sql
-CREATE TABLE user_credentials (
-    user_id INTEGER NOT NULL,
-    provider TEXT NOT NULL,       -- 'gitcode','feishu','huawei','codearts'
-    config_json TEXT NOT NULL,    -- 如 {"api_token":"xxx", "app_id":"xxx"}
-    updated_at TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (user_id, provider)
-);
-```
+### user_credentials 表（已废弃）
 
-| provider | config_json 示例 |
-|----------|-----------------|
-| `gitcode` | `{"api_token":"xxx","webhook_token":"xxx"}` |
-| `feishu` | `{"app_id":"xxx","app_secret":"xxx"}` |
-| `huawei` | `{"ak":"xxx","sk":"xxx"}` |
-| `codearts` | `{"ak":"xxx","sk":"xxx"}` |
-| `vm` | `{"host":"203.0.113.2","port":22,"user":"root","password":"xxx","deploy_dir":"/root/repo","service_name":"devops-bot"}` |
+不再使用。凭据直接存储在 `bot_accounts` 的各字段中。
 
 ### user_vms 表
 
@@ -128,21 +145,31 @@ CREATE TABLE repo_skill_mapping (
 ## 页面流
 
 ```
-浏览器 → / → 用户登录页
-  ├─ POST /login → 验证 → /panel?token=xxx → 用户面板
-   │    ├─ 凭据管理（GitCode / 飞书 / 华为云 / CodeArts）
+浏览器 → / → 用户登录页 / 用户面板
+  ├─ POST /login → 验证密码 → 返回用户面板
+   │    ├─ 凭据管理（GitCode Token / 飞书 / 华为云 / CodeArts，同 admin 样式带当前值）
    │    ├─ 云主机管理（关联仓库的部署 VM）
    │    ├─ 自定义技能（上传 SKILL.md）
    │    └─ 仓库技能映射（指定仓库用哪个技能）
    └─ 链接到 /admin/
 
 
-浏览器 → /admin/ → 管理员登录页
-  ├─ POST /admin/login → 验证 → /admin/panel?token=xxx → 管理员面板
-   │    ├─ 创建用户
-   │    ├─ 用户列表（查看/编辑/删除）
-   │    └─ 编辑用户配置（用户名、密码、凭据、云主机、自定义技能）
-  └─ 链接到 /
+浏览器 → /admin/ → 管理员登录页 / 管理员面板
+  ├─ POST /admin/login → 验证固定账号 → 返回管理员面板
+   │    ├─ Bot 账户列表（即用户列表，带状态指示灯）
+   │    ├─ 编辑账户配置（凭据、Bot 用户名、密码）
+   │    ├─ 点击保存后同步密码到 users 表
+   └─ 链接到 /
+```
+
+凭据数据流：
+
+```
+Admin 保存 bot_accounts  →  bot_accounts 表（gitcode_api_token 等字段）
+                                ↓
+                           ACCOUNTS 缓存（config.py）
+                                ↙          ↘
+                    用户面板读取显示      Executor 注入环境变量
 ```
 
 ## 事件路由优先级
@@ -338,69 +365,64 @@ skills/
 ## 管理员创建用户流程
 
 ```
-管理员登录 /admin/panel
-  → 点击"创建用户"
-  → 填写：用户名、初始密码
-  → 存入 users 表（password_hash = hashlib.sha256(password)）
+管理员登录 /admin/
+  → 在 admin 面板左侧账户列表底部，填写新名称 + 密码
+  → 点"保存" → 写入 bot_accounts 表
+  → 密码同步到 users 表（hash）
   → 用户收到账号信息
-  → 用户登录 / → 修改密码 → 配置凭据和技能
+  → 用户登录 / → 查看/编辑凭据和管理技能
 ```
+
+## 用户凭据自管理
+
+用户登录 `/` 面板后，凭据管理页面展示 `bot_accounts` 中该用户的所有凭据字段（GitCode Token、飞书 App ID/Secret、华为云 AK/SK、CodeArts AK/SK），带当前值和 👁 密码切换，修改后点「保存」直接写入 `bot_accounts` 表。无需 admin 干预。
 
 ## 凭据注入
 
-当 `Agent` 子进程启动时，从 `user_credentials` 表中读取对应用户的凭据注入环境变量：
+当 `Agent` 子进程启动时，从 `bot_accounts` 表（通过 `ACCOUNTS` 缓存）读取对应用户的凭据注入环境变量：
 
 ```python
+# src/user/db.py
+def get_credentials(user_id: int) -> list[dict]:
+    """获取用户凭据（从 bot_accounts 表读取）"""
+    user = get_user(user_id)
+    ...
+    # 返回格式：[{"provider":"gitcode", "config":{"token":"xxx"}}, ...]
+
 # src/agent/executor.py
-def stream_agent(prompt, cwd, session_id="", event_type="", backend_name="opencode", account="default", user_id=0):
-    ...
-    if user_id:
-        from src.session_manager import get_user_credentials
-        creds = get_user_credentials(user_id)
-        for c in creds:
-            for k, v in json.loads(c["config_json"]).items():
-                env[k.upper()] = v
-    ...
+for c in get_credentials(user_id):
+    for k, v in c.get("config", {}).items():
+        env[k.upper()] = str(v)
 ```
 
-## 实施阶段
+注入的环境变量：
 
-### 阶段 1：用户系统
-| 文件 | 改动 |
-|------|------|
-| `src/session_manager.py` | 新增 users 表 + `create_user()` / `get_user()` / `list_users()` / `delete_user()` / `verify_user()` |
-| `src/admin/server.py` | 区分 `/` 和 `/admin/` 两套路由、管理员面板添加用户管理页面 |
+| 凭据 | 字段 | 环境变量 |
+|------|------|---------|
+| GitCode | token | `TOKEN` |
+| 飞书 | app_id, app_secret | `APP_ID`, `APP_SECRET` |
+| 华为云 | ak, sk | `AK`, `SK` |
+| CodeArts | ak, sk | `AK`, `SK` |
 
-### 阶段 2：用户凭据管理
-| 文件 | 改动 |
-|------|------|
-| `src/session_manager.py` | 新增 user_credentials / user_vms 表 + CRUD |
-| `src/admin/server.py` | 普通用户面板添加凭据编辑表单 + 云主机管理表单 |
+## 当前实现状态（已完工）
 
-### 阶段 3：自定义技能 + 仓库映射
-| 文件 | 改动 |
-|------|------|
-| `src/session_manager.py` | 新增 user_skills / repo_skill_mapping 表 + CRUD |
-| `src/admin/server.py` | 技能上传表单、仓库映射配置 |
-| `src/config.py` | `get_domain_skill()` 增加 `user_id` 和 `repo_key` 参数 |
-| `src/event_processor.py` | 路由时检查 repo_skill_mapping |
-| 文件系统 | 创建 `skills/custom/` 目录 |
-
-### 阶段 4：凭据注入 Agent
-| 文件 | 改动 |
-|------|------|
-| `src/agent/base.py` | `get_env()` 支持 user_id 参数 |
-| `src/agent/executor.py` | `stream_agent()` 传递 user_id 给 `get_env()` |
+| 组件 | 核心文件 | 说明 |
+|------|---------|------|
+| 用户系统 | `src/user/db.py` | `users` + `bot_accounts` + `user_vms` + `user_skills` + `repo_skill_mapping` 表 CRUD |
+| Admin 面板 | `src/admin/server.py` | 纯服务端 HTML 渲染，登录页 / 账户管理 / 用户管理 |
+| 用户面板 | `src/admin/server.py: _render_user_panel()` | 凭据管理（读/写 bot_accounts）、云主机、自定义技能、仓库映射 |
+| 凭据注入 | `src/user/db.py: get_credentials()` + `src/agent/executor.py` | Agent 运行时从 bot_accounts 读凭据注入环境变量 |
+| 路由扩展 | `src/event_processor.py` + `src/config.py` | 事件路由支持 repo_skill_mapping 优先 |
+| 自定义技能校验 | `src/user/validator.py` | YAML Front Matter、目录结构、安全限制 |
 
 ## 不改动的模块
 
 | 模块 | 说明 |
 |------|------|
-| `accounts.json` | bot 的监听账户体系保留，不受用户系统影响 |
 | `configs/event-routing.json` | 全局路由保留，作为最低优先级 fallback |
 | `feishu WS / Webhook handlers` | 事件监听和处理逻辑不变 |
 | `session / history` | 现有 session 管理不变 |
-| `agent/codearts.py` / `agent/opencode.py` | 后端实现不变，仅凭据来源改为 user_credentials |
+| `agent/codearts.py` / `agent/opencode.py` | 后端实现不变，仅凭据来源改为 bot_accounts |
 | `prompt_builder.py` | 路由逻辑扩展，但构建方式不变 |
 
 ## 安全措施
