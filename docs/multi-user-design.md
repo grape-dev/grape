@@ -70,23 +70,29 @@ CREATE TABLE user_credentials (
 
 ### user_vms 表
 
-每个用户可配置多台云主机，用于 Bot 的 cloud-deploy 技能 SSH 登录部署。
+每个用户可配置多台云主机，每台云主机可关联多个仓库。用于 Bot 的 cloud-deploy 技能 SSH 登录部署。
 
 ```sql
 CREATE TABLE user_vms (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     name TEXT NOT NULL,              -- 主机别名，如 '生产环境'
-    repo_key TEXT NOT NULL,          -- 关联的仓库，如 'owner/repo'
     host TEXT NOT NULL,              -- IP 或域名
     port INTEGER DEFAULT 22,
     user TEXT NOT NULL,              -- SSH 用户名
-    password TEXT NOT NULL,          -- SSH 密码（或 key 路径）
-    deploy_dir TEXT,                 -- 部署目录，如 /opt/app
-    service_name TEXT,               -- systemd 服务名，如 devops-bot
-    branch TEXT DEFAULT 'master',    -- 部署分支
+    password TEXT NOT NULL,          -- SSH 密码
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE (user_id, name)
+);
+
+CREATE TABLE user_vm_repos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vm_id INTEGER NOT NULL,          -- 关联 user_vms.id
+    repo_key TEXT NOT NULL,          -- 仓库，如 'owner/repo'
+    deploy_dir TEXT,                 -- 部署目录，如 /opt/app/{repo}
+    service_name TEXT,               -- systemd 服务名，如 devops-bot
+    branch TEXT DEFAULT 'master',    -- 部署分支
+    UNIQUE (vm_id, repo_key)
 );
 ```
 
