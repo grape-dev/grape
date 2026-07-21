@@ -66,6 +66,29 @@ CREATE TABLE user_credentials (
 | `feishu` | `{"app_id":"xxx","app_secret":"xxx"}` |
 | `huawei` | `{"ak":"xxx","sk":"xxx"}` |
 | `codearts` | `{"ak":"xxx","sk":"xxx"}` |
+| `vm` | `{"host":"203.0.113.2","port":22,"user":"root","password":"xxx","deploy_dir":"/root/repo","service_name":"devops-bot"}` |
+
+### user_vms 表
+
+每个用户可配置多台云主机，用于 Bot 的 cloud-deploy 技能 SSH 登录部署。
+
+```sql
+CREATE TABLE user_vms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,              -- 主机别名，如 '生产环境'
+    repo_key TEXT NOT NULL,          -- 关联的仓库，如 'owner/repo'
+    host TEXT NOT NULL,              -- IP 或域名
+    port INTEGER DEFAULT 22,
+    user TEXT NOT NULL,              -- SSH 用户名
+    password TEXT NOT NULL,          -- SSH 密码（或 key 路径）
+    deploy_dir TEXT,                 -- 部署目录，如 /opt/app
+    service_name TEXT,               -- systemd 服务名，如 devops-bot
+    branch TEXT DEFAULT 'master',    -- 部署分支
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (user_id, name)
+);
+```
 
 ### user_skills 表
 
@@ -101,10 +124,11 @@ CREATE TABLE repo_skill_mapping (
 ```
 浏览器 → / → 用户登录页
   ├─ POST /login → 验证 → /panel?token=xxx → 用户面板
-  │    ├─ 凭据管理（GitCode / 飞书 / 华为云 / CodeArts）
-  │    ├─ 自定义技能（上传 SKILL.md）
-  │    └─ 仓库技能映射（指定仓库用哪个技能）
-  └─ 链接到 /admin/
+   │    ├─ 凭据管理（GitCode / 飞书 / 华为云 / CodeArts）
+   │    ├─ 云主机管理（关联仓库的部署 VM）
+   │    ├─ 自定义技能（上传 SKILL.md）
+   │    └─ 仓库技能映射（指定仓库用哪个技能）
+   └─ 链接到 /admin/
 
 
 浏览器 → /admin/ → 管理员登录页
@@ -344,8 +368,8 @@ def stream_agent(prompt, cwd, session_id="", event_type="", backend_name="openco
 ### 阶段 2：用户凭据管理
 | 文件 | 改动 |
 |------|------|
-| `src/session_manager.py` | 新增 user_credentials 表 + `set_credential()` / `get_credentials()` / `delete_credential()` |
-| `src/admin/server.py` | 普通用户面板添加凭据编辑表单 |
+| `src/session_manager.py` | 新增 user_credentials / user_vms 表 + CRUD |
+| `src/admin/server.py` | 普通用户面板添加凭据编辑表单 + 云主机管理表单 |
 
 ### 阶段 3：自定义技能 + 仓库映射
 | 文件 | 改动 |
