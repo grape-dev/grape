@@ -454,6 +454,7 @@ def _render_admin_panel(token, select_name="", message=""):
   <div class="main">{form_html}</div>
 </div>
 {toast_html}
+<script>var t=document.querySelector('.toast.show');if(t){setTimeout(function(){t.style.opacity='0';},3000);}</script>
 </body></html>"""
 
 
