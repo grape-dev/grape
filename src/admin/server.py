@@ -410,10 +410,17 @@ def _render_admin_panel(token, select_name="", message=""):
         form_html += f'<input type="hidden" name="name" value="{select_name}">'
         form_html += '<div class="group"><h4>基础信息</h4>'
         form_html += f'<div class="row"><label>账户名称</label><input value="{select_name}" disabled></div>'
-        form_html += f'<div class="row"><label>Bot 用户名</label><input name="bot_usernames" value="{bu}"></div></div>'
+        form_html += f'<div class="row"><label>Bot 用户名</label><input name="bot_usernames" value="{bu}"></div>'
+        # 密码：如果 accounts.json 已存明文密码则直接显示，否则查 users 表
+        pw_val = acc.get("password", "")
+        if not pw_val and user_db.get_user_by_username(select_name):
+            pw_val = "********"
+        pw_id = f"pwd_{hash('password') % 10000}"
+        form_html += f'<div class="row"><label>密码</label><div class="iw">'
+        form_html += f'<input id="{pw_id}" type="password" name="password" value="{pw_val}">'
+        form_html += f'<span class="eye" onclick="var e=document.getElementById(\'{pw_id}\');e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div></div>'
         form_html += '</div>'
         groups = [
-            ("基础信息", [("password", "密码"), ("bot_usernames", "Bot 用户名")]),
             ("GitCode", [("gitcode_api_token", "API Token"), ("gitcode_webhook_token", "Webhook Token")]),
             ("飞书", [("feishu_app_id", "App ID"), ("feishu_app_secret", "App Secret")]),
             ("华为云", [("huawei_cloud_ak", "Access Key"), ("huawei_cloud_sk", "Secret Key")]),
