@@ -202,6 +202,35 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_user_login("用户名或密码错误"))
             return
 
+        # 普通用户 → 保存凭据
+        if path == "/user/cred":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            provider = form.get("provider", "")
+            try:
+                config = json.loads(form.get("config_json", "{}"))
+            except json.JSONDecodeError:
+                config = {}
+            user_db.set_credential(uid, provider, config)
+            self._send_html(_render_user_panel(token))
+            return
+
+        # 普通用户 → 添加云主机
+        if path == "/user/vm":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            vm_id = user_db.add_vm(uid, form.get("name", ""), form.get("host", ""),
+                                    form.get("ssh_user", "root"), form.get("ssh_password", ""),
+                                    int(form.get("port", 22)))
+            self._send_html(_render_user_panel(token))
+            return
+
         # 管理员登录
         if path == "/admin/login":
             if form.get("username") == ADMIN_USER and form.get("password") == ADMIN_PASS:
@@ -299,7 +328,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .row .iw{display:flex;gap:6px}
 .row input{flex:1;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px;outline:none}
 .row input:focus{border-color:#667eea}
-.row .eye{background:#f5f5f5;border:1px solid #d9d9d9;border-radius:6px;padding:0 10px;cursor:pointer;font-size:14px;color:#888;display:flex;align-items:center;user-select:none}
+select{width:100%;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px;outline:none;background:#fff}
+textarea{width:100%;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px;outline:none;resize:vertical}
 .acts{display:flex;gap:8px;margin-top:16px;padding-top:16px;border-top:1px solid #f0f0f0}
 .acts button,.acts a{padding:10px 20px;border:none;border-radius:6px;font-size:13px;cursor:pointer;text-decoration:none}
 .btn-p{background:#667eea;color:#fff}
@@ -429,6 +459,17 @@ def _render_user_panel(token):
     if not user:
         return _render_user_login("会话过期")
 
+    creds = user_db.get_credentials(uid)
+    cred_html = ""
+    for c in creds:
+        keys = ", ".join(c.get("config", {}).keys())
+        cred_html += f'<div class="item"><span>{c["provider"]}</span><span style="font-size:12px;color:#888">{keys}</span></div>'
+
+    vms = user_db.get_vms(uid)
+    vm_html = ""
+    for v in vms:
+        vm_html += f'<div class="item"><span>{v["name"]}</span><span style="font-size:12px;color:#888">{v["host"]}:{v["port"]}</span></div>'
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -436,13 +477,56 @@ def _render_user_panel(token):
 <style>{_CSS}</style></head><body>
 <div class="header"><h2>DevOps Bot 用户中心</h2><span class="right">{user['username']} <a href="/logout?token={token}" style="color:#e74c3c;margin-left:8px">退出</a></span></div>
 <div class="wrap">
+  <div class="sidebar" style="width:180px">
+    <div class="list">
+      <a class="item" onclick="showSection('info')">基本信息</a>
+      <a class="item" onclick="showSection('creds')">凭据管理</a>
+      <a class="item" onclick="showSection('vms')">云主机</a>
+    </div>
+  </div>
   <div class="main">
-    <h3>用户信息</h3>
-    <div class="row"><label>用户名</label><input value="{user['username']}" disabled></div>
-    <div class="row"><label>用户 ID</label><input value="{user['id']}" disabled></div>
-    <div class="group"><h4>功能（即将开放）</h4><p style="color:#888;font-size:13px;padding:12px">凭据管理 · 自定义技能 · 云主机配置 · 仓库映射</p></div>
+    <div id="section-info">
+      <h3>基本信息</h3>
+      <div class="row"><label>用户名</label><input value="{user['username']}" disabled></div>
+      <div class="row"><label>用户 ID</label><input value="{user['id']}" disabled></div>
+    </div>
+
+    <div id="section-creds" style="display:none">
+      <h3>凭据管理</h3>
+      <div class="list">{cred_html or '<div class="item" style="color:#888">暂无凭据</div>'}</div>
+      <div class="group" style="margin-top:12px"><h4>添加/更新凭据</h4>
+        <form method="POST" action="/user/cred?token={token}">
+          <div class="row"><label>类型</label><select name="provider" required>
+            <option value="gitcode">GitCode</option>
+            <option value="feishu">飞书</option>
+            <option value="huawei">华为云</option>
+            <option value="codearts">CodeArts</option>
+          </select></div>
+          <div class="row"><label>配置 (JSON)</label><textarea name="config_json" rows="3" style="width:100%;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px" required></textarea></div>
+          <button class="btn-p" type="submit">保存</button>
+        </form>
+      </div>
+    </div>
+
+    <div id="section-vms" style="display:none">
+      <h3>云主机</h3>
+      <div class="list">{vm_html or '<div class="item" style="color:#888">暂无云主机</div>'}</div>
+      <div class="group" style="margin-top:12px"><h4>新增云主机</h4>
+        <form method="POST" action="/user/vm?token={token}">
+          <div class="row"><label>名称</label><input name="name" required></div>
+          <div class="row"><label>主机地址</label><input name="host" placeholder="IP 或域名" required></div>
+          <div class="row"><label>端口</label><input name="port" value="22"></div>
+          <div class="row"><label>SSH 用户</label><input name="ssh_user" value="root" required></div>
+          <div class="row"><label>SSH 密码</label><input name="ssh_password" type="password" required></div>
+          <button class="btn-p" type="submit">添加</button>
+        </form>
+      </div>
+    </div>
   </div>
 </div>
+<script>
+function showSection(name){['info','creds','vms'].forEach(function(s){document.getElementById('section-'+s).style.display=s===name?'block':'none';});}
+</script>
 </body></html>"""
 
 
