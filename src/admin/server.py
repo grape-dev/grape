@@ -115,8 +115,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             admin_path = None
 
         if admin_path in ("", "/"):
+            uid_param = self._get_param("uid")
             if self._valid_token(token):
-                self._send_html(_render_admin_panel(token, self._get_param("select", "")))
+                self._send_html(_render_admin_panel(token, self._get_param("select", ""), "", uid_param))
             else:
                 self._send_html(_render_admin_login(self._get_param("error", "")))
             return
@@ -375,10 +376,11 @@ def _render_admin_login(error=""):
 </body></html>"""
 
 
-def _render_admin_panel(token, select_name="", message=""):
+def _render_admin_panel(token, select_name="", message="", uid_param=""):
     from src.config import ACCOUNTS, get_account
 
-    items_html = ""
+    # 侧边栏：账户列表 + 用户管理链接
+    items_html = f'<a class="item{" active" if not select_name and not uid_param else ""}" href="/admin?token={token}">📋 用户管理</a>\n'
     for n, a in ACCOUNTS.items():
         active = " active" if n == select_name else ""
         gc = " ok" if a.get("gitcode_api_token") else ""
@@ -387,6 +389,7 @@ def _render_admin_panel(token, select_name="", message=""):
         items_html += f'<a class="item{active}" href="/admin?token={token}&select={n}"><span>{n}</span><span class="dots"><span class="dot{gc}"></span><span class="dot{fs}"></span><span class="dot{hw}"></span></span></a>\n'
 
     if select_name:
+        # 账户编辑视图（已有的逻辑）
         acc = get_account(select_name) or {}
         bu = ",".join(acc.get("bot_usernames", [])) if isinstance(acc.get("bot_usernames"), list) else str(acc.get("bot_usernames", ""))
         form_html = f'<h3>{select_name}</h3>'
@@ -415,26 +418,43 @@ def _render_admin_panel(token, select_name="", message=""):
         if select_name != "default":
             form_html += f'<a class="btn-d" href="/admin/delete?token={token}&name={select_name}" onclick="return confirm(\'确定删除？\')">删除</a>'
         form_html += '</div></form>'
+
+    elif uid_param and uid_param.isdigit():
+        # 用户详情 + 密码修改
+        user = user_db.get_user(int(uid_param))
+        if user:
+            form_html = f'<h3>用户 {user["username"]}</h3>'
+            form_html += f'<div class="row"><label>用户名</label><input value="{user["username"]}" disabled></div>'
+            form_html += f'<div class="row"><label>用户 ID</label><input value="{user["id"]}" disabled></div>'
+            form_html += '<div class="group"><h4>修改密码</h4>'
+            form_html += f'<form method="POST" action="/admin/reset-pwd?token={token}">'
+            form_html += f'<input type="hidden" name="user_id" value="{user["id"]}">'
+            form_html += '<div class="row"><label>新密码</label><input name="password" type="password" required></div>'
+            form_html += '<button class="btn-p" type="submit">修改密码</button></form></div>'
+            # 显示凭据状态
+            creds = user_db.get_credentials(user["id"])
+            form_html += '<div class="group"><h4>已配置凭据</h4>'
+            if creds:
+                for c in creds:
+                    form_html += f'<div class="row"><label>{c["provider"]}</label><input value="✅ 已配置" disabled style="color:#27ae60"></div>'
+            else:
+                form_html += '<p style="color:#888;font-size:13px">暂无凭据</p>'
+            form_html += '</div>'
+        else:
+            form_html = '<h3>用户不存在</h3>'
     else:
+        # 用户管理视图
         users = user_db.list_users()
         users_rows = ""
         for u in users:
-            users_rows += f'<div class="item"><span>{u["username"]}</span><span style="font-size:12px;color:#888">ID:{u["id"]}</span></div>'
+            users_rows += f'<a class="item" href="/admin?token={token}&uid={u["id"]}"><span>{u["username"]}</span><span style="font-size:12px;color:#888">ID:{u["id"]}</span></a>'
         form_html = '<h3>用户管理</h3>'
-        form_html += '<div class="group"><h4>用户列表</h4><div class="list">' + users_rows + '</div></div>'
+        form_html += '<div class="group"><h4>用户列表（点击进入修改密码）</h4><div class="list">' + users_rows + '</div></div>'
         form_html += '<div class="group"><h4>创建用户</h4>'
         form_html += f'<form method="POST" action="/admin/create-user?token={token}">'
         form_html += '<div class="row"><label>用户名</label><input name="username" required></div>'
         form_html += '<div class="row"><label>密码</label><input name="password" type="password" required></div>'
         form_html += '<button class="btn-p" type="submit">创建</button></form></div>'
-        form_html += '<div class="group"><h4>修改密码</h4>'
-        form_html += f'<form method="POST" action="/admin/reset-pwd?token={token}">'
-        form_html += '<div class="row"><label>选择用户</label><select name="user_id" required>'
-        for u in users:
-            form_html += f'<option value="{u["id"]}">{u["username"]}</option>'
-        form_html += '</select></div>'
-        form_html += '<div class="row"><label>新密码</label><input name="password" type="password" required></div>'
-        form_html += '<button class="btn-p" type="submit">修改</button></form></div>'
 
     toast_html = f'<div class="toast show ok">{message}</div>' if message else ""
     return f"""<!DOCTYPE html>
