@@ -275,28 +275,27 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             user = user_db.get_user(uid)
             if not user:
-                self._send_html(_render_user_panel(token))
+                self._send_html(_render_user_panel(token, section="repos"))
                 return
             from src.config import ACCOUNTS
             from src.user.repo_manager import fetch_admin_repos
             acc = ACCOUNTS.get(user["username"], {})
             api_token = acc.get("gitcode_api_token", "")
             if not api_token:
-                self._send_html(_render_user_panel(token, loaded_repos=None, repo_msg="GitCode API Token 未配置，请先在凭据管理中设置"))
+                self._send_html(_render_user_panel(token, section="repos", repo_msg="GitCode API Token 未配置，请先在凭据管理中设置"))
                 return
             try:
                 all_repos = fetch_admin_repos(api_token)
             except RuntimeError as e:
-                self._send_html(_render_user_panel(token, loaded_repos=None, repo_msg=str(e)))
+                self._send_html(_render_user_panel(token, section="repos", repo_msg=str(e)))
                 return
-            # 排除已托管
             managed = user_db.get_managed_repos(uid)
             managed_set = set(r["full_name"] for r in managed)
             available = [r for r in all_repos if r["full_name"] not in managed_set]
             if not available:
-                self._send_html(_render_user_panel(token, loaded_repos=None, repo_msg="没有可添加的仓库（所有管理员仓库已托管）"))
+                self._send_html(_render_user_panel(token, section="repos", repo_msg="没有可添加的仓库（所有管理员仓库已托管）"))
                 return
-            self._send_html(_render_user_panel(token, loaded_repos=available, repo_msg=f"已加载 {len(available)} 个可选仓库"))
+            self._send_html(_render_user_panel(token, section="repos", loaded_repos=available, repo_msg=f"已加载 {len(available)} 个可选仓库"))
             return
 
         # 普通用户 → 添加托管仓库
@@ -308,11 +307,11 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             user = user_db.get_user(uid)
             if not user:
-                self._send_html(_render_user_panel(token))
+                self._send_html(_render_user_panel(token, section="repos"))
                 return
             full_name = form.get("full_name", "")
             if "/" not in full_name:
-                self._send_html(_render_user_panel(token, repo_msg="无效的仓库标识"))
+                self._send_html(_render_user_panel(token, section="repos", repo_msg="无效的仓库标识"))
                 return
             owner, name = full_name.split("/", 1)
             from src.config import ACCOUNTS
@@ -320,15 +319,15 @@ class AdminHandler(BaseHTTPRequestHandler):
             acc = ACCOUNTS.get(user["username"], {})
             api_token = acc.get("gitcode_api_token", "")
             if not api_token:
-                self._send_html(_render_user_panel(token, repo_msg="GitCode API Token 未配置"))
+                self._send_html(_render_user_panel(token, section="repos", repo_msg="GitCode API Token 未配置"))
                 return
             try:
                 wh_id = setup_webhook(api_token, owner, name)
             except RuntimeError as e:
-                self._send_html(_render_user_panel(token, repo_msg=f"创建 webhook 失败: {e}"))
+                self._send_html(_render_user_panel(token, section="repos", repo_msg=f"创建 webhook 失败: {e}"))
                 return
             user_db.add_managed_repo(uid, owner, name, full_name, wh_id)
-            self._send_html(_render_user_panel(token, repo_msg=f"已托管 {full_name}"))
+            self._send_html(_render_user_panel(token, section="repos", repo_msg=f"已托管 {full_name}"))
             return
 
         # 普通用户 → 移除托管仓库
@@ -340,7 +339,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             user = user_db.get_user(uid)
             if not user:
-                self._send_html(_render_user_panel(token))
+                self._send_html(_render_user_panel(token, section="repos"))
                 return
             owner = form.get("repo_owner", "")
             name = form.get("repo_name", "")
@@ -354,8 +353,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                     if api_token:
                         remove_webhook(api_token, owner, name, removed["webhook_id"])
                 except RuntimeError:
-                    pass  # 删除 webhook 失败不影响本地删除
-            self._send_html(_render_user_panel(token, repo_msg=f"已移除 {removed['full_name']}" if removed else "移除失败"))
+                    pass
+            self._send_html(_render_user_panel(token, section="repos", repo_msg=f"已移除 {removed['full_name']}" if removed else "移除失败"))
             return
 
         # 管理员登录
@@ -716,7 +715,7 @@ def _render_user_login(error=""):
 </body></html>"""
 
 
-def _render_user_panel(token, loaded_repos=None, repo_msg=""):
+def _render_user_panel(token, loaded_repos=None, repo_msg="", section=""):
     uid = user_db.validate_token(token)
     user = user_db.get_user(uid) if uid else None
     if not user:
@@ -773,6 +772,12 @@ def _render_user_panel(token, loaded_repos=None, repo_msg=""):
         repo_add_opts = "".join(f'<option value="{r["full_name"]}">{r["full_name"]}</option>' for r in loaded_repos)
     repo_msg_html = f'<p style="color:#888;font-size:12px;margin-top:4px">{repo_msg}</p>' if repo_msg else ""
 
+    h_info = "" if section in ("", "info") else ' style="display:none"'
+    h_creds = "" if section == "creds" else ' style="display:none"'
+    h_vms = "" if section == "vms" else ' style="display:none"'
+    h_skills = "" if section == "skills" else ' style="display:none"'
+    h_repos = "" if section == "repos" else ' style="display:none"'
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -791,13 +796,13 @@ def _render_user_panel(token, loaded_repos=None, repo_msg=""):
   </div>
   <div class="main">
 
-    <div id="section-info">
+    <div id="section-info"{h_info}>
       <h3>基本信息</h3>
       <div class="row"><label>用户名</label><input value="{user['username']}" disabled></div>
       <div class="row"><label>用户 ID</label><input value="{user['id']}" disabled></div>
     </div>
 
-    <div id="section-creds" style="display:none">
+    <div id="section-creds"{h_creds}>
       <h3>凭据管理</h3>
       <form method="POST" action="/user/cred?token={token}">
         {cred_fields_html or '<div class="item" style="color:#888">暂无凭据配置</div>'}
@@ -805,7 +810,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg=""):
       </form>
     </div>
 
-    <div id="section-vms" style="display:none">
+    <div id="section-vms"{h_vms}>
       <h3>云主机</h3>
       <div class="list">{vm_html or '<div class="item" style="color:#888">暂无云主机</div>'}</div>
       <div class="group" style="margin-top:12px"><h4>新增云主机</h4>
@@ -820,7 +825,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg=""):
       </div>
     </div>
 
-    <div id="section-skills" style="display:none">
+    <div id="section-skills"{h_skills}>
       <h3>自定义技能</h3>
       <div class="list">{skills_html or '<div class="item" style="color:#888">暂无技能</div>'}</div>
       <div class="group" style="margin-top:12px"><h4>上传新技能</h4>
@@ -847,7 +852,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg=""):
       </div>
     </div>
 
-    <div id="section-repos" style="display:none">
+    <div id="section-repos"{h_repos}>
       <h3>仓库托管</h3>
       <div class="group"><h4>已托管仓库</h4>
         <div class="list">{managed_html or '<div class="item" style="color:#888">暂无托管仓库</div>'}</div>

@@ -37,18 +37,28 @@ def fetch_admin_repos(api_token: str) -> list[dict]:
     while True:
         url = f"{API_BASE}/user/repos?type=all&per_page=100&page={page}&sort=full_name"
         data = _req("GET", url, api_token)
+        log.info(f"fetch_admin_repos page {page}: type={type(data).__name__}, len={len(data) if isinstance(data, (list, dict)) else '?'}")
         if not data:
             break
-        for r in data:
-            permissions = r.get("permissions", {})
-            if isinstance(permissions, dict) and permissions.get("admin"):
-                full_name = r.get("full_name", "")
-                if "/" in full_name:
-                    owner, name = full_name.split("/", 1)
-                    repos.append({"full_name": full_name, "owner": owner, "name": name})
-        if len(data) < 100:
+        items = data if isinstance(data, list) else []
+        if not items and isinstance(data, dict):
+            # maybe wrapped in a data/page key
+            for key in ("data", "list", "items", "content"):
+                if key in data and isinstance(data[key], list):
+                    items = data[key]
+                    break
+        for r in items:
+            full_name = r.get("full_name", "")
+            if not full_name or "/" not in full_name:
+                continue
+            permissions = r.get("permissions")
+            if permissions is None or (isinstance(permissions, dict) and permissions.get("admin")):
+                owner, name = full_name.split("/", 1)
+                repos.append({"full_name": full_name, "owner": owner, "name": name})
+        if len(items) < 100:
             break
         page += 1
+    log.info(f"fetch_admin_repos total: {len(repos)} repos")
     return repos
 
 
