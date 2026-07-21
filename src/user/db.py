@@ -1,5 +1,5 @@
 """用户系统数据库：users/credentials/vms/skills 表管理"""
-import json, hashlib, time
+import json, hashlib, time, os
 from src.session_manager import db, db_lock
 from src.config import log
 
