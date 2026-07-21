@@ -277,7 +277,6 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not self._valid_token(token):
                 self._send_html(_render_admin_login("会话过期"))
                 return
-            pwd = form.pop("_password", "")
             name = form.pop("name", "")
             if not name:
                 self._send_html(_render_admin_panel(token, "", "名称不能为空"))
@@ -299,8 +298,9 @@ class AdminHandler(BaseHTTPRequestHandler):
                 for a in items:
                     if a.get("name") == name:
                         a["bot_usernames"] = [s.strip() for s in form["bot_usernames"].split(",") if s.strip()]
-            # 更新密码（自动创建用户）
-            if pwd and pwd != "********":
+            # 同步密码到 users 表（auth 用 hash，accounts.json 存明文供显示）
+            pwd = form.get("password", "")
+            if pwd:
                 user = user_db.get_user_by_username(name)
                 if user:
                     user_db.update_password(user["id"], pwd)
@@ -410,18 +410,10 @@ def _render_admin_panel(token, select_name="", message=""):
         form_html += f'<input type="hidden" name="name" value="{select_name}">'
         form_html += '<div class="group"><h4>基础信息</h4>'
         form_html += f'<div class="row"><label>账户名称</label><input value="{select_name}" disabled></div>'
-        form_html += f'<div class="row"><label>Bot 用户名</label><input name="bot_usernames" value="{bu}"></div>'
-        # 密码字段（和其他密钥字段一致）
-        pw_val = "********" if user_db.get_user_by_username(select_name) else ""
-        pw_id = f"pwd_{hash('password') % 10000}"
-        form_html += f'<div class="row"><label>密码</label><div class="iw">'
-        form_html += f'<input id="{pw_id}" type="password" name="_password" value="{pw_val}">'
-        form_html += f'<span class="eye" onclick="var e=document.getElementById(\'{pw_id}\');if(e.value===\'********\')e.value=\'\';e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div>'
-        if pw_val:
-            form_html += '<span style="font-size:11px;color:#888;margin-left:4px">密码已设，点👁修改</span>'
-        form_html += '</div>'
+        form_html += f'<div class="row"><label>Bot 用户名</label><input name="bot_usernames" value="{bu}"></div></div>'
         form_html += '</div>'
         groups = [
+            ("基础信息", [("password", "密码"), ("bot_usernames", "Bot 用户名")]),
             ("GitCode", [("gitcode_api_token", "API Token"), ("gitcode_webhook_token", "Webhook Token")]),
             ("飞书", [("feishu_app_id", "App ID"), ("feishu_app_secret", "App Secret")]),
             ("华为云", [("huawei_cloud_ak", "Access Key"), ("huawei_cloud_sk", "Secret Key")]),
