@@ -213,24 +213,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not user:
                 self._send_html(_render_user_login("用户不存在"))
                 return
-            provider = form.get("provider", "")
-            key1 = form.get("key1", "")
-            key2 = form.get("key2", "")
-            from src.user.db import save_bot_account
             from src.config import ACCOUNTS
+            from src.user.db import save_bot_account
             acc = dict(ACCOUNTS.get(user["username"], {"name": user["username"]}))
-            provider_map = {
-                "gitcode": ("gitcode_api_token", None),
-                "feishu": ("feishu_app_id", "feishu_app_secret"),
-                "huawei": ("huawei_cloud_ak", "huawei_cloud_sk"),
-                "codearts": ("CODEARTS_CLI_AK", "CODEARTS_CLI_SK"),
-            }
-            if provider in provider_map:
-                f1, f2 = provider_map[provider]
-                if key1:
-                    acc[f1] = key1
-                if key2 and f2:
-                    acc[f2] = key2
+            for k, v in form.items():
+                acc[k] = v
             save_bot_account(user["username"], acc)
             from src.config import _load_accounts
             _load_accounts()
@@ -506,19 +493,20 @@ def _render_user_panel(token):
 
     from src.config import ACCOUNTS
     bot_acc = ACCOUNTS.get(user["username"])
-    cred_html = ""
+    cred_fields_html = ""
     if bot_acc:
-        provider_configs = [
-            ("GitCode", {"token": bot_acc.get("gitcode_api_token", "")}),
-            ("飞书", {"app_id": bot_acc.get("feishu_app_id", ""), "app_secret": bot_acc.get("feishu_app_secret", "")}),
-            ("华为云", {"ak": bot_acc.get("huawei_cloud_ak", ""), "sk": bot_acc.get("huawei_cloud_sk", "")}),
-            ("CodeArts", {"ak": bot_acc.get("CODEARTS_CLI_AK", ""), "sk": bot_acc.get("CODEARTS_CLI_SK", "")}),
+        field_defs = [
+            ("gitcode_api_token", "GitCode API Token"),
+            ("feishu_app_id", "飞书 App ID"),
+            ("feishu_app_secret", "飞书 App Secret"),
+            ("huawei_cloud_ak", "华为云 AK"),
+            ("huawei_cloud_sk", "华为云 SK"),
+            ("CODEARTS_CLI_AK", "CodeArts CLI AK"),
+            ("CODEARTS_CLI_SK", "CodeArts CLI SK"),
         ]
-        for pname, config in provider_configs:
-            filled = {k: v for k, v in config.items() if v}
-            if filled:
-                keys = ", ".join(filled.keys())
-                cred_html += f'<div class="item"><span>{pname}</span><span style="font-size:12px;color:#888">{keys}</span></div>'
+        for key, label in field_defs:
+            val = bot_acc.get(key, "")
+            cred_fields_html += f'<div class="row"><label>{label}</label><input type="password" name="{key}" value="{val}"></div>'
 
     vms = user_db.get_vms(uid)
     vm_html = ""
@@ -562,20 +550,10 @@ def _render_user_panel(token):
 
     <div id="section-creds" style="display:none">
       <h3>凭据管理</h3>
-      <div class="list">{cred_html or '<div class="item" style="color:#888">暂无凭据</div>'}</div>
-      <div class="group" style="margin-top:12px"><h4>更新凭据（留空则不修改）</h4>
-        <form method="POST" action="/user/cred?token={token}">
-          <div class="row"><label>类型</label><select name="provider" required>
-            <option value="gitcode">GitCode</option>
-            <option value="feishu">飞书</option>
-            <option value="huawei">华为云</option>
-            <option value="codearts">CodeArts</option>
-          </select></div>
-          <div class="row"><label>Token / AK</label><input name="key1" placeholder="token 或 ak"></div>
-          <div class="row"><label>Secret / SK</label><input name="key2" placeholder="secret 或 sk（选填）"></div>
-          <button class="btn-p" type="submit">保存</button>
-        </form>
-      </div>
+      <form method="POST" action="/user/cred?token={token}">
+        {cred_fields_html or '<div class="item" style="color:#888">暂无凭据配置</div>'}
+        <button class="btn-p" type="submit" style="margin-top:12px">保存</button>
+      </form>
     </div>
 
     <div id="section-vms" style="display:none">
