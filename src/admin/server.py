@@ -525,7 +525,7 @@ def _render_user_panel(token):
   </div>
 </div>
 <script>
-function showSection(name){['info','creds','vms'].forEach(function(s){document.getElementById('section-'+s).style.display=s===name?'block':'none';});}
+function showSection(name){{['info','creds','vms'].forEach(function(s){{document.getElementById('section-'+s).style.display=s===name?'block':'none';}});}}
 </script>
 </body></html>"""
 
