@@ -508,7 +508,16 @@ def get_all_bot_accounts() -> list[dict]:
         c = db.cursor()
         c.execute(f"SELECT {','.join(BOT_ACCOUNT_FIELDS)} FROM bot_accounts ORDER BY name")
         rows = c.fetchall()
-    return [dict(zip(BOT_ACCOUNT_FIELDS, r)) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(zip(BOT_ACCOUNT_FIELDS, r))
+        # 解析 JSON 数组字段
+        try:
+            d["bot_usernames"] = json.loads(d.get("bot_usernames", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            d["bot_usernames"] = [s.strip() for s in d.get("bot_usernames", "").split(",") if s.strip()]
+        result.append(d)
+    return result
 
 
 def get_bot_account(name: str) -> dict | None:
