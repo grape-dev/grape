@@ -209,12 +209,31 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not uid:
                 self._send_html(_render_user_login("会话过期"))
                 return
+            user = user_db.get_user(uid)
+            if not user:
+                self._send_html(_render_user_login("用户不存在"))
+                return
             provider = form.get("provider", "")
-            try:
-                config = json.loads(form.get("config_json", "{}"))
-            except json.JSONDecodeError:
-                config = {}
-            user_db.set_credential(uid, provider, config)
+            key1 = form.get("key1", "")
+            key2 = form.get("key2", "")
+            from src.user.db import save_bot_account
+            from src.config import ACCOUNTS
+            acc = dict(ACCOUNTS.get(user["username"], {"name": user["username"]}))
+            provider_map = {
+                "gitcode": ("gitcode_api_token", None),
+                "feishu": ("feishu_app_id", "feishu_app_secret"),
+                "huawei": ("huawei_cloud_ak", "huawei_cloud_sk"),
+                "codearts": ("CODEARTS_CLI_AK", "CODEARTS_CLI_SK"),
+            }
+            if provider in provider_map:
+                f1, f2 = provider_map[provider]
+                if key1:
+                    acc[f1] = key1
+                if key2 and f2:
+                    acc[f2] = key2
+            save_bot_account(user["username"], acc)
+            from src.config import _load_accounts
+            _load_accounts()
             self._send_html(_render_user_panel(token))
             return
 
@@ -307,22 +326,6 @@ class AdminHandler(BaseHTTPRequestHandler):
                 else:
                     user_db.create_user(name, pwd, 0)
             save_accounts(items)
-            # 同步 bot 凭据到 user_credentials 表
-            user = user_db.get_user_by_username(name)
-            if user:
-                uid = user["id"]
-                for a in items:
-                    if a.get("name") == name:
-                        creds_map = {
-                            "gitcode": {"token": a.get("gitcode_api_token", "")},
-                            "feishu": {"app_id": a.get("feishu_app_id", ""), "app_secret": a.get("feishu_app_secret", "")},
-                            "huawei_cloud": {"ak": a.get("huawei_cloud_ak", ""), "sk": a.get("huawei_cloud_sk", "")},
-                            "codearts": {"ak": a.get("CODEARTS_CLI_AK", ""), "sk": a.get("CODEARTS_CLI_SK", "")},
-                        }
-                        for provider, config in creds_map.items():
-                            if any(v for v in config.values()):
-                                user_db.set_credential(uid, provider, config)
-                        break
             self._send_html(_render_admin_panel(token, name, "保存成功"))
             return
 
@@ -501,11 +504,21 @@ def _render_user_panel(token):
     if not user:
         return _render_user_login("会话过期")
 
-    creds = user_db.get_credentials(uid)
+    from src.config import ACCOUNTS
+    bot_acc = ACCOUNTS.get(user["username"])
     cred_html = ""
-    for c in creds:
-        keys = ", ".join(c.get("config", {}).keys())
-        cred_html += f'<div class="item"><span>{c["provider"]}</span><span style="font-size:12px;color:#888">{keys}</span></div>'
+    if bot_acc:
+        provider_configs = [
+            ("GitCode", {"token": bot_acc.get("gitcode_api_token", "")}),
+            ("飞书", {"app_id": bot_acc.get("feishu_app_id", ""), "app_secret": bot_acc.get("feishu_app_secret", "")}),
+            ("华为云", {"ak": bot_acc.get("huawei_cloud_ak", ""), "sk": bot_acc.get("huawei_cloud_sk", "")}),
+            ("CodeArts", {"ak": bot_acc.get("CODEARTS_CLI_AK", ""), "sk": bot_acc.get("CODEARTS_CLI_SK", "")}),
+        ]
+        for pname, config in provider_configs:
+            filled = {k: v for k, v in config.items() if v}
+            if filled:
+                keys = ", ".join(filled.keys())
+                cred_html += f'<div class="item"><span>{pname}</span><span style="font-size:12px;color:#888">{keys}</span></div>'
 
     vms = user_db.get_vms(uid)
     vm_html = ""
@@ -550,7 +563,7 @@ def _render_user_panel(token):
     <div id="section-creds" style="display:none">
       <h3>凭据管理</h3>
       <div class="list">{cred_html or '<div class="item" style="color:#888">暂无凭据</div>'}</div>
-      <div class="group" style="margin-top:12px"><h4>添加/更新凭据</h4>
+      <div class="group" style="margin-top:12px"><h4>更新凭据（留空则不修改）</h4>
         <form method="POST" action="/user/cred?token={token}">
           <div class="row"><label>类型</label><select name="provider" required>
             <option value="gitcode">GitCode</option>
@@ -558,7 +571,8 @@ def _render_user_panel(token):
             <option value="huawei">华为云</option>
             <option value="codearts">CodeArts</option>
           </select></div>
-          <div class="row"><label>配置 (JSON)</label><textarea name="config_json" rows="3" style="width:100%;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px" required></textarea></div>
+          <div class="row"><label>Token / AK</label><input name="key1" placeholder="token 或 ak"></div>
+          <div class="row"><label>Secret / SK</label><input name="key2" placeholder="secret 或 sk（选填）"></div>
           <button class="btn-p" type="submit">保存</button>
         </form>
       </div>

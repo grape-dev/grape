@@ -225,18 +225,35 @@ def set_credential(user_id: int, provider: str, config: dict) -> bool:
 
 
 def get_credentials(user_id: int) -> list[dict]:
-    """获取用户所有凭据"""
+    """获取用户凭据（从 bot_accounts 表读取）"""
+    user = get_user(user_id)
+    if not user:
+        return []
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT provider, config_json, updated_at FROM user_credentials WHERE user_id=?", (user_id,))
-        rows = c.fetchall()
+        c.execute("SELECT * FROM bot_accounts WHERE name=?", (user["username"],))
+        row = c.fetchone()
+    if not row:
+        return []
+    d = dict(zip(BOT_ACCOUNT_FIELDS, row))
     result = []
-    for r in rows:
-        try:
-            cfg = json.loads(r[1])
-        except Exception:
-            cfg = {}
-        result.append({"provider": r[0], "config": cfg, "updated_at": r[2]})
+    if d.get("gitcode_api_token"):
+        result.append({"provider": "gitcode", "config": {"token": d["gitcode_api_token"]}})
+    if d.get("feishu_app_id") or d.get("feishu_app_secret"):
+        cfg = {}
+        if d.get("feishu_app_id"): cfg["app_id"] = d["feishu_app_id"]
+        if d.get("feishu_app_secret"): cfg["app_secret"] = d["feishu_app_secret"]
+        result.append({"provider": "feishu", "config": cfg})
+    if d.get("huawei_cloud_ak") or d.get("huawei_cloud_sk"):
+        cfg = {}
+        if d.get("huawei_cloud_ak"): cfg["ak"] = d["huawei_cloud_ak"]
+        if d.get("huawei_cloud_sk"): cfg["sk"] = d["huawei_cloud_sk"]
+        result.append({"provider": "huawei_cloud", "config": cfg})
+    if d.get("CODEARTS_CLI_AK") or d.get("CODEARTS_CLI_SK"):
+        cfg = {}
+        if d.get("CODEARTS_CLI_AK"): cfg["ak"] = d["CODEARTS_CLI_AK"]
+        if d.get("CODEARTS_CLI_SK"): cfg["sk"] = d["CODEARTS_CLI_SK"]
+        result.append({"provider": "codearts", "config": cfg})
     return result
 
 
@@ -600,20 +617,6 @@ def migrate_accounts_from_json():
                     update_password(user["id"], pwd)
                 else:
                     create_user(name, pwd, 0)
-            # 同步凭据到 user_credentials 表
-            if name:
-                user = get_user_by_username(name)
-                if user:
-                    uid = user["id"]
-                    creds_map = {
-                        "gitcode": {"token": a.get("gitcode_api_token", "")},
-                        "feishu": {"app_id": a.get("feishu_app_id", ""), "app_secret": a.get("feishu_app_secret", "")},
-                        "huawei_cloud": {"ak": a.get("huawei_cloud_ak", ""), "sk": a.get("huawei_cloud_sk", "")},
-                        "codearts": {"ak": a.get("CODEARTS_CLI_AK", ""), "sk": a.get("CODEARTS_CLI_SK", "")},
-                    }
-                    for provider, config in creds_map.items():
-                        if any(v for v in config.values()):
-                            set_credential(uid, provider, config)
         log.info(f"Migrated {len(data.get('accounts',[]))} accounts from accounts.json to DB")
     except Exception as e:
         log.warning(f"Migration from accounts.json failed: {e}")
