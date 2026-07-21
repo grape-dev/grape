@@ -52,9 +52,9 @@ def fetch_admin_repos(api_token: str) -> list[dict]:
                 continue
             # log first item keys for debugging
             if not repos and items.index(r) == 0:
-                log.info(f"First repo keys: {list(r.keys())}, permissions={r.get('permissions')}, role={r.get('role')}")
-            permissions = r.get("permissions")
-            if isinstance(permissions, dict) and permissions.get("admin"):
+                log.info(f"First repo keys: {list(r.keys())}, permission={r.get('permission')}, permissions={r.get('permissions')}, role={r.get('role')}")
+            perm = r.get("permission") or r.get("permissions")
+            if isinstance(perm, dict) and perm.get("admin"):
                 owner, name = full_name.split("/", 1)
                 repos.append({"full_name": full_name, "owner": owner, "name": name})
         if len(items) < 100:
