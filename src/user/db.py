@@ -576,9 +576,15 @@ def resolve_bot_account_by_webhook_token(token: str) -> str | None:
 
 
 def migrate_accounts_from_json():
-    """从 accounts.json 迁移数据到 bot_accounts 表（幂等）"""
+    """从 accounts.json 迁移数据到 bot_accounts 表（仅首次）"""
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "accounts.json")
     if not os.path.exists(path):
+        return
+    # 检查是否已有数据（避免重复导入覆盖）
+    with db_lock:
+        c = db.cursor()
+        cnt = c.execute("SELECT COUNT(*) FROM bot_accounts").fetchone()[0]
+    if cnt > 0:
         return
     try:
         with open(path, encoding="utf-8") as f:
