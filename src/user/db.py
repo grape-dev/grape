@@ -568,7 +568,7 @@ def resolve_bot_account_by_webhook_token(token: str) -> str | None:
 
 def migrate_accounts_from_json():
     """从 accounts.json 迁移数据到 bot_accounts 表（幂等）"""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "accounts.json")
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "accounts.json")
     if not os.path.exists(path):
         return
     try:
