@@ -107,12 +107,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             return
 
         # 管理员路由（保持不变）
-        if path.startswith("/admin/"):
+        if path.startswith("/admin") or path == "/admin":
             admin_path = path[len("/admin"):] or "/"
+            if not admin_path.startswith("/"):
+                admin_path = "/" + admin_path
         else:
             admin_path = None
 
-        if admin_path in ("", "/", "/"):
+        if admin_path in ("", "/"):
             if self._valid_token(token):
                 self._send_html(_render_admin_panel(token, self._get_param("select", "")))
             else:
@@ -120,25 +122,25 @@ class AdminHandler(BaseHTTPRequestHandler):
             return
 
         # Admin Logout
-        if path == "/admin/logout":
+        if admin_path == "/logout":
             if token:
                 type(self)._tokens.pop(token, None)
-            self._send_html(_render_login(""))
+            self._send_html(_render_admin_login(""))
             return
 
-        # Delete account
-        if path == "/admin/delete":
+        # Admin: delete account
+        if admin_path == "/delete":
             if self._valid_token(token):
                 name = self._get_param("name", "")
                 if name and name != "default":
                     from src.config import ACCOUNTS, save_accounts
                     items = [a for a in ACCOUNTS.values() if a.get("name") != name]
                     save_accounts(items)
-            self._send_html(_render_panel(token, "", "已删除 " + self._get_param("name", "")))
+            self._send_html(_render_admin_panel(token, "", "已删除 " + self._get_param("name", "")))
             return
 
-        # Test connection
-        if path == "/admin/test":
+        # Admin: test connection
+        if admin_path == "/test":
             msg = ""
             if self._valid_token(token):
                 name = self._get_param("name", "")
@@ -155,7 +157,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         msg = f"连接失败: {e}"
                 else:
                     msg = "未配置 GitCode Token"
-            self._send_html(_render_panel(token, self._get_param("name", ""), msg))
+            self._send_html(_render_admin_panel(token, self._get_param("name", ""), msg))
             return
 
         # API: get account detail (for fetch)
@@ -206,9 +208,9 @@ class AdminHandler(BaseHTTPRequestHandler):
                 token = hashlib.sha256(f"{ADMIN_USER}:{time.time()}:{os.urandom(8).hex()}".encode()).hexdigest()
                 type(self)._tokens[token] = time.time() + 86400
                 # Return panel page directly — NO redirect
-                self._send_html(_render_panel(token, ""))
+                self._send_html(_render_admin_panel(token, ""))
             else:
-                self._send_html(_render_login("用户名或密码错误"))
+                self._send_html(_render_admin_login("用户名或密码错误"))
             return
 
         # Admin: create user
@@ -226,12 +228,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         if path == "/admin/save":
             token = self._get_param("token")
             if not self._valid_token(token):
-                self._send_html(_render_login("会话过期"))
+                self._send_html(_render_admin_login("会话过期"))
                 return
             form = self._read_form()
             name = form.pop("name", "")
             if not name:
-                self._send_html(_render_panel(token, "", "名称不能为空"))
+                self._send_html(_render_admin_panel(token, "", "名称不能为空"))
                 return
             from src.config import ACCOUNTS, save_accounts
             items = list(ACCOUNTS.values())
@@ -251,7 +253,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                     if a.get("name") == name:
                         a["bot_usernames"] = [s.strip() for s in form["bot_usernames"].split(",") if s.strip()]
             save_accounts(items)
-            self._send_html(_render_panel(token, name, "保存成功"))
+            self._send_html(_render_admin_panel(token, name, "保存成功"))
             return
 
     def log_message(self, fmt, *args):
