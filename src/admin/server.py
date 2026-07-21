@@ -300,15 +300,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                     if a.get("name") == name:
                         a["bot_usernames"] = [s.strip() for s in form["bot_usernames"].split(",") if s.strip()]
             # 更新密码（自动创建用户）
-            if pwd:
+            if pwd and pwd != "********":
                 user = user_db.get_user_by_username(name)
                 if user:
                     user_db.update_password(user["id"], pwd)
                 else:
                     user_db.create_user(name, pwd, 0)
-            has_user = bool(user_db.get_user_by_username(name))
             save_accounts(items)
-            self._send_html(_render_admin_panel(token, name, "保存成功", has_user))
+            self._send_html(_render_admin_panel(token, name, "保存成功"))
             return
 
     def log_message(self, fmt, *args):
@@ -390,7 +389,7 @@ def _render_admin_login(error=""):
 </body></html>"""
 
 
-def _render_admin_panel(token, select_name="", message="", has_user=None):
+def _render_admin_panel(token, select_name="", message=""):
     from src.config import ACCOUNTS, get_account
 
     # 侧边栏：账户列表 + 用户管理链接
@@ -412,12 +411,11 @@ def _render_admin_panel(token, select_name="", message="", has_user=None):
         form_html += '<div class="group"><h4>基础信息</h4>'
         form_html += f'<div class="row"><label>账户名称</label><input value="{select_name}" disabled></div>'
         form_html += f'<div class="row"><label>Bot 用户名</label><input name="bot_usernames" value="{bu}"></div>'
-        # 密码字段
+        # 密码字段（和其他密钥字段一致）
+        pw_val = "********" if user_db.get_user_by_username(select_name) else ""
         pw_id = f"pwd_{hash('password') % 10000}"
-        has_user = bool(user_db.get_user_by_username(select_name)) if has_user is None else has_user
-        pw_label = "✅ 已设密码（输入新值修改）" if has_user else "密码（留空不设）"
-        form_html += f'<div class="row"><label>{pw_label}</label><div class="iw">'
-        form_html += f'<input id="{pw_id}" type="password" name="_password" value="" placeholder="输入新密码">'
+        form_html += f'<div class="row"><label>密码</label><div class="iw">'
+        form_html += f'<input id="{pw_id}" type="password" name="_password" value="{pw_val}">'
         form_html += f'<span class="eye" onclick="var e=document.getElementById(\'{pw_id}\');e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div></div>'
         form_html += '</div>'
         groups = [
