@@ -328,6 +328,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .item{padding:12px 16px;cursor:pointer;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between;text-decoration:none;color:#333}
 .item:hover{background:#f8f9ff}
 .item.active{background:#eef0ff;font-weight:600}
+.item form input,.item form button{font-size:12px}
 .dots{display:flex;gap:3px}
 .dot{width:7px;height:7px;border-radius:50%;background:#ccc}
 .dot.ok{background:#27ae60}
@@ -443,13 +444,17 @@ def _render_admin_panel(token, select_name="", message="", uid_param=""):
         else:
             form_html = '<h3>用户不存在</h3>'
     else:
-        # 用户管理视图
+        # 用户管理视图（含密码修改）
         users = user_db.list_users()
         users_rows = ""
         for u in users:
-            users_rows += f'<a class="item" href="/admin?token={token}&uid={u["id"]}"><span>{u["username"]}</span><span style="font-size:12px;color:#888">ID:{u["id"]}</span></a>'
+            users_rows += f'<div class="item" style="flex-wrap:wrap"><span>{u["username"]} (ID:{u["id"]})</span>'
+            users_rows += f'<form method="POST" action="/admin/reset-pwd?token={token}" style="display:flex;gap:6px;margin-top:4px;width:100%">'
+            users_rows += f'<input type="hidden" name="user_id" value="{u["id"]}">'
+            users_rows += f'<input name="password" type="password" placeholder="新密码" required style="flex:1">'
+            users_rows += f'<button class="btn-p" type="submit" style="padding:6px 12px;font-size:12px">修改密码</button></form></div>'
         form_html = '<h3>用户管理</h3>'
-        form_html += '<div class="group"><h4>用户列表（点击进入修改密码）</h4><div class="list">' + users_rows + '</div></div>'
+        form_html += '<div class="group"><h4>用户列表（每行可直接修改密码）</h4><div class="list">' + users_rows + '</div></div>'
         form_html += '<div class="group"><h4>创建用户</h4>'
         form_html += f'<form method="POST" action="/admin/create-user?token={token}">'
         form_html += '<div class="row"><label>用户名</label><input name="username" required></div>'
