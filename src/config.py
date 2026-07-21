@@ -101,10 +101,18 @@ EVENT_ROUTING = {}
 _EVENT_ROUTING_FALLBACK = "devops-event-ops"
 
 
-def get_domain_skill(evt_type: str, repo_key: str = "") -> str:
+def get_domain_skill(evt_type: str, repo_key: str = "", user_id: int = 0) -> str:
+    # 1. 用户自定义映射（最高优先级）
+    if user_id and repo_key:
+        from src.user.db import get_skill_for_event
+        skill = get_skill_for_event(user_id, repo_key, evt_type)
+        if skill:
+            return skill
+    # 2. 全局 repo_routing
     repo_skills = EVENT_ROUTING.get("repo_routing", {}).get(repo_key, {}) if repo_key else {}
     if repo_key and evt_type in repo_skills:
         return repo_skills[evt_type]
+    # 3. 全局 routing（最低优先级）
     return EVENT_ROUTING.get("routing", {}).get(evt_type, _EVENT_ROUTING_FALLBACK)
 
 

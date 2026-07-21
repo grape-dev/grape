@@ -231,6 +231,35 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_html(_render_user_panel(token))
             return
 
+        # 普通用户 → 上传自定义技能
+        if path == "/user/skill":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            from src.user import validator
+            skill_name = form.get("skill_name", "")
+            content = form.get("content", "")
+            if not re.match(r"^[a-z0-9-]+$", skill_name):
+                self._send_html(_render_user_panel(token))
+                return
+            user_db.create_skill(uid, skill_name)
+            user_db.save_skill_md(uid, skill_name, content)
+            self._send_html(_render_user_panel(token))
+            return
+
+        # 普通用户 → 仓库技能映射
+        if path == "/user/mapping":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            user_db.set_repo_mapping(uid, form.get("repo_key", ""), form.get("event_type", ""), form.get("skill_name", ""))
+            self._send_html(_render_user_panel(token))
+            return
+
         # 管理员登录
         if path == "/admin/login":
             if form.get("username") == ADMIN_USER and form.get("password") == ADMIN_PASS:
@@ -467,6 +496,18 @@ def _render_user_panel(token):
     for v in vms:
         vm_html += f'<div class="item"><span>{v["name"]}</span><span style="font-size:12px;color:#888">{v["host"]}:{v["port"]}</span></div>'
 
+    skills = user_db.list_skills(uid)
+    skills_html = ""
+    for s in skills:
+        skills_html += f'<div class="item"><span>{s["skill_name"]}</span></div>'
+
+    mappings = user_db.get_repo_mappings(uid)
+    mapping_html = ""
+    for m in mappings:
+        mapping_html += f'<div class="item"><span>{m["repo_key"]} / {m["event_type"]} → {m["skill_name"]}</span></div>'
+
+    skill_opts = "".join(f'<option value="{s["skill_name"]}">{s["skill_name"]}</option>' for s in skills)
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -479,9 +520,11 @@ def _render_user_panel(token):
       <a class="item" onclick="showSection('info')">基本信息</a>
       <a class="item" onclick="showSection('creds')">凭据管理</a>
       <a class="item" onclick="showSection('vms')">云主机</a>
+      <a class="item" onclick="showSection('skills')">自定义技能</a>
     </div>
   </div>
   <div class="main">
+
     <div id="section-info">
       <h3>基本信息</h3>
       <div class="row"><label>用户名</label><input value="{user['username']}" disabled></div>
@@ -519,10 +562,38 @@ def _render_user_panel(token):
         </form>
       </div>
     </div>
+
+    <div id="section-skills" style="display:none">
+      <h3>自定义技能</h3>
+      <div class="list">{skills_html or '<div class="item" style="color:#888">暂无技能</div>'}</div>
+      <div class="group" style="margin-top:12px"><h4>上传新技能</h4>
+        <form method="POST" action="/user/skill?token={token}">
+          <div class="row"><label>技能名称</label><input name="skill_name" pattern="[a-z0-9-]+" placeholder="kebab-case" required></div>
+          <div class="row"><label>SKILL.md 内容</label><textarea name="content" rows="8" style="width:100%;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px" required></textarea></div>
+          <button class="btn-p" type="submit">上传</button>
+        </form>
+      </div>
+      <div class="group"><h4>仓库技能映射</h4>
+        <div class="list">{mapping_html or '<div class="item" style="color:#888">暂无映射</div>'}</div>
+        <form method="POST" action="/user/mapping?token={token}" style="margin-top:8px">
+          <div class="row"><label>仓库</label><input name="repo_key" placeholder="owner/repo" required></div>
+          <div class="row"><label>事件类型</label><select name="event_type">
+            <option value="pull_request_opened">pull_request_opened</option>
+            <option value="pull_request_updated">pull_request_updated</option>
+            <option value="issue_opened">issue_opened</option>
+            <option value="issue_comment">issue_comment</option>
+            <option value="note_hook_pr">note_hook_pr</option>
+          </select></div>
+          <div class="row"><label>技能</label><select name="skill_name">{skill_opts}</select></div>
+          <button class="btn-p" type="submit">添加映射</button>
+        </form>
+      </div>
+    </div>
+
   </div>
 </div>
 <script>
-function showSection(name){{['info','creds','vms'].forEach(function(s){{document.getElementById('section-'+s).style.display=s===name?'block':'none';}});}}
+function showSection(name){{['info','creds','vms','skills'].forEach(function(s){{document.getElementById('section-'+s).style.display=s===name?'block':'none';}});}}
 </script>
 </body></html>"""
 

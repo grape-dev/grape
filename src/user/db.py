@@ -314,5 +314,161 @@ def delete_vm_repo(vm_id: int, repo_key: str) -> bool:
         return False
 
 
+# ====== 自定义技能表 ======
+_SKILLS_DDL = """
+CREATE TABLE IF NOT EXISTS user_skills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    skill_name TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (user_id, skill_name)
+)
+"""
+
+# ====== 仓库技能映射表 ======
+_REPO_SKILL_DDL = """
+CREATE TABLE IF NOT EXISTS repo_skill_mapping (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    repo_key TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    skill_name TEXT NOT NULL,
+    UNIQUE (user_id, repo_key, event_type)
+)
+"""
+
+
+def init_db():
+    """初始化用户相关表（幂等）"""
+    with db_lock:
+        db.execute(_USERS_DDL)
+        db.execute(_CREDENTIALS_DDL)
+        db.execute(_VMS_DDL)
+        db.execute(_VM_REPOS_DDL)
+        db.execute(_SKILLS_DDL)
+        db.execute(_REPO_SKILL_DDL)
+        for col in ["created_by"]:
+            try:
+                db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+            except Exception:
+                pass
+        db.commit()
+
+
+# ====== 自定义技能 CRUD ======
+
+SKILL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "custom")
+
+def ensure_skill_dir(user_id: int, skill_name: str) -> str:
+    """确保技能目录存在，返回路径"""
+    path = os.path.join(SKILL_DIR, str(user_id), skill_name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def create_skill(user_id: int, skill_name: str) -> bool:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR IGNORE INTO user_skills (user_id, skill_name) VALUES (?,?)",
+                      (user_id, skill_name))
+            db.commit()
+            ensure_skill_dir(user_id, skill_name)
+            return True
+    except Exception as e:
+        log.warning(f"Create skill failed: {e}")
+        return False
+
+
+def delete_skill(user_id: int, skill_name: str) -> bool:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM user_skills WHERE user_id=? AND skill_name=?", (user_id, skill_name))
+            c.execute("DELETE FROM repo_skill_mapping WHERE user_id=? AND skill_name=?", (user_id, skill_name))
+            db.commit()
+            # 删除技能目录
+            import shutil
+            path = os.path.join(SKILL_DIR, str(user_id), skill_name)
+            if os.path.exists(path):
+                shutil.rmtree(path)
+            return True
+    except Exception as e:
+        log.warning(f"Delete skill failed: {e}")
+        return False
+
+
+def list_skills(user_id: int) -> list[dict]:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, skill_name, created_at FROM user_skills WHERE user_id=? ORDER BY id", (user_id,))
+        return [{"id": r[0], "skill_name": r[1], "created_at": r[2]} for r in c.fetchall()]
+
+
+def save_skill_md(user_id: int, skill_name: str, content: str) -> bool:
+    """保存 SKILL.md 内容"""
+    try:
+        path = os.path.join(ensure_skill_dir(user_id, skill_name), "SKILL.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        log.warning(f"Save SKILL.md failed: {e}")
+        return False
+
+
+def get_skill_md(user_id: int, skill_name: str) -> str | None:
+    """读取 SKILL.md 内容"""
+    path = os.path.join(SKILL_DIR, str(user_id), skill_name, "SKILL.md")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+# ====== 仓库技能映射 CRUD ======
+
+def set_repo_mapping(user_id: int, repo_key: str, event_type: str, skill_name: str) -> bool:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO repo_skill_mapping (user_id, repo_key, event_type, skill_name) VALUES (?,?,?,?)",
+                      (user_id, repo_key, event_type, skill_name))
+            db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"Set repo mapping failed: {e}")
+        return False
+
+
+def delete_repo_mapping(user_id: int, repo_key: str, event_type: str) -> bool:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM repo_skill_mapping WHERE user_id=? AND repo_key=? AND event_type=?", (user_id, repo_key, event_type))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"Delete repo mapping failed: {e}")
+        return False
+
+
+def get_repo_mappings(user_id: int) -> list[dict]:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, event_type, skill_name FROM repo_skill_mapping WHERE user_id=? ORDER BY repo_key", (user_id,))
+        return [{"repo_key": r[0], "event_type": r[1], "skill_name": r[2]} for r in c.fetchall()]
+
+
+def get_skill_for_event(user_id: int, repo_key: str, event_type: str) -> str | None:
+    """路由用：根据 user_id + repo + event 查找自定义技能名称"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT skill_name FROM repo_skill_mapping WHERE user_id=? AND repo_key=? AND event_type=?",
+                  (user_id, repo_key, event_type))
+        row = c.fetchone()
+    return row[0] if row else None
+
+
 # 启动时初始化
 init_db()
