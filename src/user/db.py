@@ -373,6 +373,19 @@ CREATE TABLE IF NOT EXISTS repo_skill_mapping (
 )
 """
 
+# ====== 托管仓库表 ======
+_MANAGED_REPOS_DDL = """
+CREATE TABLE IF NOT EXISTS managed_repos (
+    user_id INTEGER NOT NULL,
+    repo_owner TEXT NOT NULL,
+    repo_name TEXT NOT NULL,
+    full_name TEXT NOT NULL,
+    webhook_id INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (user_id, repo_owner, repo_name)
+)
+"""
+
 
 def init_db():
     """初始化用户相关表（幂等）"""
@@ -384,6 +397,7 @@ def init_db():
         db.execute(_VM_REPOS_DDL)
         db.execute(_SKILLS_DDL)
         db.execute(_REPO_SKILL_DDL)
+        db.execute(_MANAGED_REPOS_DDL)
         for col in ["created_by"]:
             try:
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -505,6 +519,53 @@ def get_skill_for_event(user_id: int, repo_key: str, event_type: str) -> str | N
                   (user_id, repo_key, event_type))
         row = c.fetchone()
     return row[0] if row else None
+
+
+# ====== 托管仓库 CRUD ======
+
+def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: str, webhook_id: int = 0) -> bool:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, webhook_id) VALUES (?,?,?,?,?)",
+                      (user_id, repo_owner, repo_name, full_name, webhook_id))
+            db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"Add managed repo failed: {e}")
+        return False
+
+
+def get_managed_repos(user_id: int) -> list[dict]:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_owner, repo_name, full_name, webhook_id, created_at FROM managed_repos WHERE user_id=? ORDER BY full_name", (user_id,))
+        return [{"repo_owner": r[0], "repo_name": r[1], "full_name": r[2], "webhook_id": r[3], "created_at": r[4]} for r in c.fetchall()]
+
+
+def remove_managed_repo(user_id: int, repo_owner: str, repo_name: str) -> dict | None:
+    """删除托管仓库记录，返回被删除的记录（含 webhook_id）或 None"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT full_name, webhook_id FROM managed_repos WHERE user_id=? AND repo_owner=? AND repo_name=?", (user_id, repo_owner, repo_name))
+            row = c.fetchone()
+            if not row:
+                return None
+            c.execute("DELETE FROM managed_repos WHERE user_id=? AND repo_owner=? AND repo_name=?", (user_id, repo_owner, repo_name))
+            db.commit()
+            return {"full_name": row[0], "webhook_id": row[1]}
+    except Exception as e:
+        log.warning(f"Remove managed repo failed: {e}")
+        return None
+
+
+def get_all_managed_repos() -> list[dict]:
+    """Admin 用：获取所有托管记录"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT user_id, repo_owner, repo_name, full_name, webhook_id, created_at FROM managed_repos ORDER BY full_name")
+        return [{"user_id": r[0], "repo_owner": r[1], "repo_name": r[2], "full_name": r[3], "webhook_id": r[4], "created_at": r[5]} for r in c.fetchall()]
 
 
 # ====== Bot 账户 CRUD（替代 accounts.json） ======

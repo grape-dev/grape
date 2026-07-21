@@ -266,6 +266,98 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_html(_render_user_panel(token))
             return
 
+        # 普通用户 → 加载可托管仓库列表
+        if path == "/user/repo-sync":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            user = user_db.get_user(uid)
+            if not user:
+                self._send_html(_render_user_panel(token))
+                return
+            from src.config import ACCOUNTS
+            from src.user.repo_manager import fetch_admin_repos
+            acc = ACCOUNTS.get(user["username"], {})
+            api_token = acc.get("gitcode_api_token", "")
+            if not api_token:
+                self._send_html(_render_user_panel(token, loaded_repos=None, repo_msg="GitCode API Token 未配置，请先在凭据管理中设置"))
+                return
+            try:
+                all_repos = fetch_admin_repos(api_token)
+            except RuntimeError as e:
+                self._send_html(_render_user_panel(token, loaded_repos=None, repo_msg=str(e)))
+                return
+            # 排除已托管
+            managed = user_db.get_managed_repos(uid)
+            managed_set = set(r["full_name"] for r in managed)
+            available = [r for r in all_repos if r["full_name"] not in managed_set]
+            if not available:
+                self._send_html(_render_user_panel(token, loaded_repos=None, repo_msg="没有可添加的仓库（所有管理员仓库已托管）"))
+                return
+            self._send_html(_render_user_panel(token, loaded_repos=available, repo_msg=f"已加载 {len(available)} 个可选仓库"))
+            return
+
+        # 普通用户 → 添加托管仓库
+        if path == "/user/repo-add":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            user = user_db.get_user(uid)
+            if not user:
+                self._send_html(_render_user_panel(token))
+                return
+            full_name = form.get("full_name", "")
+            if "/" not in full_name:
+                self._send_html(_render_user_panel(token, repo_msg="无效的仓库标识"))
+                return
+            owner, name = full_name.split("/", 1)
+            from src.config import ACCOUNTS
+            from src.user.repo_manager import setup_webhook
+            acc = ACCOUNTS.get(user["username"], {})
+            api_token = acc.get("gitcode_api_token", "")
+            if not api_token:
+                self._send_html(_render_user_panel(token, repo_msg="GitCode API Token 未配置"))
+                return
+            try:
+                wh_id = setup_webhook(api_token, owner, name)
+            except RuntimeError as e:
+                self._send_html(_render_user_panel(token, repo_msg=f"创建 webhook 失败: {e}"))
+                return
+            user_db.add_managed_repo(uid, owner, name, full_name, wh_id)
+            self._send_html(_render_user_panel(token, repo_msg=f"已托管 {full_name}"))
+            return
+
+        # 普通用户 → 移除托管仓库
+        if path == "/user/repo-remove":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            user = user_db.get_user(uid)
+            if not user:
+                self._send_html(_render_user_panel(token))
+                return
+            owner = form.get("repo_owner", "")
+            name = form.get("repo_name", "")
+            removed = user_db.remove_managed_repo(uid, owner, name)
+            if removed and removed.get("webhook_id"):
+                from src.config import ACCOUNTS
+                from src.user.repo_manager import remove_webhook
+                try:
+                    acc = ACCOUNTS.get(user["username"], {})
+                    api_token = acc.get("gitcode_api_token", "")
+                    if api_token:
+                        remove_webhook(api_token, owner, name, removed["webhook_id"])
+                except RuntimeError:
+                    pass  # 删除 webhook 失败不影响本地删除
+            self._send_html(_render_user_panel(token, repo_msg=f"已移除 {removed['full_name']}" if removed else "移除失败"))
+            return
+
         # 管理员登录
         if path == "/admin/login":
             if form.get("username") == ADMIN_USER and form.get("password") == ADMIN_PASS:
@@ -314,6 +406,104 @@ class AdminHandler(BaseHTTPRequestHandler):
                     user_db.create_user(name, pwd, 0)
             save_accounts(items)
             self._send_html(_render_admin_panel(token, name, "保存成功"))
+            return
+
+        # 管理员 → 加载可托管仓库列表
+        if path == "/admin/repo-sync":
+            token = self._get_param("token")
+            if not self._valid_token(token):
+                self._send_html(_render_admin_login("会话过期"))
+                return
+            account_name = form.get("account_name", "")
+            if not account_name:
+                self._send_html(_render_admin_panel(token, account_name, "", repo_msg="缺少账户名"))
+                return
+            from src.config import ACCOUNTS
+            from src.user.repo_manager import fetch_admin_repos
+            acc = ACCOUNTS.get(account_name, {})
+            api_token = acc.get("gitcode_api_token", "")
+            if not api_token:
+                self._send_html(_render_admin_panel(token, account_name, "", repo_msg="GitCode API Token 未配置"))
+                return
+            try:
+                all_repos = fetch_admin_repos(api_token)
+            except RuntimeError as e:
+                self._send_html(_render_admin_panel(token, account_name, "", repo_msg=str(e)))
+                return
+            admin_user = user_db.get_user_by_username(account_name)
+            managed_set = set()
+            if admin_user:
+                managed_set = set(r["full_name"] for r in user_db.get_managed_repos(admin_user["id"]))
+            available = [r for r in all_repos if r["full_name"] not in managed_set]
+            if not available:
+                self._send_html(_render_admin_panel(token, account_name, "", repo_msg="没有可添加的仓库"))
+                return
+            self._send_html(_render_admin_panel(token, account_name, "", loaded_repos=available, repo_msg=f"已加载 {len(available)} 个可选仓库"))
+            return
+
+        # 管理员 → 添加托管仓库
+        if path == "/admin/repo-add":
+            token = self._get_param("token")
+            if not self._valid_token(token):
+                self._send_html(_render_admin_login("会话过期"))
+                return
+            account_name = form.get("account_name", "")
+            full_name = form.get("full_name", "")
+            if "/" not in full_name:
+                self._send_html(_render_admin_panel(token, account_name, "", repo_msg="无效的仓库标识"))
+                return
+            owner, name = full_name.split("/", 1)
+            from src.config import ACCOUNTS
+            from src.user.repo_manager import setup_webhook
+            acc = ACCOUNTS.get(account_name, {})
+            api_token = acc.get("gitcode_api_token", "")
+            if not api_token:
+                self._send_html(_render_admin_panel(token, account_name, "", repo_msg="GitCode API Token 未配置"))
+                return
+            admin_user = user_db.get_user_by_username(account_name)
+            if not admin_user:
+                self._send_html(_render_admin_panel(token, account_name, "", repo_msg="用户不存在"))
+                return
+            try:
+                wh_id = setup_webhook(api_token, owner, name)
+            except RuntimeError as e:
+                self._send_html(_render_admin_panel(token, account_name, "", repo_msg=f"创建 webhook 失败: {e}"))
+                return
+            user_db.add_managed_repo(admin_user["id"], owner, name, full_name, wh_id)
+            self._send_html(_render_admin_panel(token, account_name, "", repo_msg=f"已托管 {full_name}"))
+            return
+
+        # 管理员 → 移除托管仓库
+        if path == "/admin/repo-remove":
+            token = self._get_param("token")
+            if not self._valid_token(token):
+                self._send_html(_render_admin_login("会话过期"))
+                return
+            account_name = form.get("account_name") or ""
+            # 尝试从 form 取，fallback 到 query
+            if not account_name:
+                account_name = self._get_param("account_name") or ""
+            owner = form.get("repo_owner", "")
+            name = form.get("repo_name", "")
+            if not account_name:
+                self._send_html(_render_admin_panel(token, "", "", repo_msg="缺少账户名"))
+                return
+            admin_user = user_db.get_user_by_username(account_name)
+            if not admin_user:
+                self._send_html(_render_admin_panel(token, account_name, "", repo_msg="用户不存在"))
+                return
+            removed = user_db.remove_managed_repo(admin_user["id"], owner, name)
+            if removed and removed.get("webhook_id"):
+                from src.config import ACCOUNTS
+                from src.user.repo_manager import remove_webhook
+                try:
+                    acc = ACCOUNTS.get(account_name, {})
+                    api_token = acc.get("gitcode_api_token", "")
+                    if api_token:
+                        remove_webhook(api_token, owner, name, removed["webhook_id"])
+                except RuntimeError:
+                    pass
+            self._send_html(_render_admin_panel(token, account_name, "", repo_msg=f"已移除 {removed['full_name']}" if removed else "移除失败"))
             return
 
     def log_message(self, fmt, *args):
@@ -396,7 +586,7 @@ def _render_admin_login(error=""):
 </body></html>"""
 
 
-def _render_admin_panel(token, select_name="", message=""):
+def _render_admin_panel(token, select_name="", message="", loaded_repos=None, repo_msg=""):
     from src.config import ACCOUNTS, get_account
 
     # 侧边栏：账户列表 + 用户管理链接
@@ -445,6 +635,38 @@ def _render_admin_panel(token, select_name="", message=""):
             form_html += f'<a class="btn-d" href="/admin/delete?token={token}&name={select_name}" onclick="return confirm(\'确定删除？\')">删除</a>'
         form_html += '</div></form>'
 
+        # Admin 仓库管理
+        if select_name:
+            admin_user = user_db.get_user_by_username(select_name)
+            if admin_user:
+                admin_uid = admin_user["id"]
+                managed_adm = user_db.get_managed_repos(admin_uid)
+                managed_adm_html = ""
+                for r in managed_adm:
+                    managed_adm_html += f'''<div class="item"><span>{r["full_name"]}</span>
+<form method="POST" action="/admin/repo-remove?token={token}" style="display:inline">
+<input type="hidden" name="account_name" value="{select_name}">
+<input type="hidden" name="repo_owner" value="{r["repo_owner"]}">
+<input type="hidden" name="repo_name" value="{r["repo_name"]}">
+<button class="btn-d" type="submit" style="padding:2px 8px;font-size:12px">移除</button>
+</form></div>'''
+                adm_repo_opts = ""
+                if loaded_repos:
+                    adm_repo_opts = "".join(f'<option value="{r["full_name"]}">{r["full_name"]}</option>' for r in loaded_repos)
+                adm_repo_msg = f'<p style="color:#888;font-size:12px;margin-top:4px">{repo_msg}</p>' if repo_msg else ""
+                form_html += '<div class="group" style="margin-top:24px;padding-top:16px;border-top:2px solid #eee"><h4>仓库托管</h4>'
+                form_html += '<div class="list">' + (managed_adm_html or '<div class="item" style="color:#888">暂无托管仓库</div>') + '</div>'
+                form_html += f'<form method="POST" action="/admin/repo-sync?token={token}" style="margin-top:8px">'
+                form_html += '<input type="hidden" name="account_name" value="' + select_name + '">'
+                form_html += '<button class="btn-p" type="submit">从 GitCode 加载仓库列表</button></form>'
+                form_html += adm_repo_msg
+                if adm_repo_opts:
+                    form_html += f'<form method="POST" action="/admin/repo-add?token={token}" style="margin-top:8px">'
+                    form_html += '<input type="hidden" name="account_name" value="' + select_name + '">'
+                    form_html += '<select name="full_name" style="width:100%;padding:9px 12px;margin-bottom:8px">' + adm_repo_opts + '</select>'
+                    form_html += '<button class="btn-p" type="submit">添加托管</button></form>'
+                form_html += '</div>'
+
     else:
         form_html = '<h3>请选择左侧账户</h3>'
 
@@ -466,6 +688,14 @@ def _render_admin_panel(token, select_name="", message=""):
 
 # ====== User HTML Rendering ======
 
+def _repo_add_form(token, opts):
+    return (f'<form method="POST" action="/user/repo-add?token={token}">'
+            '<select name="full_name" style="width:100%;padding:9px 12px;margin-bottom:8px">'
+            f'{opts}'
+            '</select>'
+            '<button class="btn-p" type="submit">添加托管</button></form>')
+
+
 def _render_user_login(error=""):
     err_html = f'<p class="err">{error}</p>' if error else ""
     return f"""<!DOCTYPE html>
@@ -486,7 +716,7 @@ def _render_user_login(error=""):
 </body></html>"""
 
 
-def _render_user_panel(token):
+def _render_user_panel(token, loaded_repos=None, repo_msg=""):
     uid = user_db.validate_token(token)
     user = user_db.get_user(uid) if uid else None
     if not user:
@@ -527,6 +757,22 @@ def _render_user_panel(token):
 
     skill_opts = "".join(f'<option value="{s["skill_name"]}">{s["skill_name"]}</option>' for s in skills)
 
+    # 仓库托管
+    managed = user_db.get_managed_repos(uid)
+    managed_html = ""
+    for r in managed:
+        managed_html += f'''<div class="item"><span>{r["full_name"]}</span>
+<form method="POST" action="/user/repo-remove?token={token}" style="display:inline">
+<input type="hidden" name="repo_owner" value="{r["repo_owner"]}">
+<input type="hidden" name="repo_name" value="{r["repo_name"]}">
+<button class="btn-d" type="submit" style="padding:2px 8px;font-size:12px">移除</button>
+</form></div>'''
+
+    repo_add_opts = ""
+    if loaded_repos:
+        repo_add_opts = "".join(f'<option value="{r["full_name"]}">{r["full_name"]}</option>' for r in loaded_repos)
+    repo_msg_html = f'<p style="color:#888;font-size:12px;margin-top:4px">{repo_msg}</p>' if repo_msg else ""
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -540,6 +786,7 @@ def _render_user_panel(token):
       <a class="item" onclick="showSection('creds')">凭据管理</a>
       <a class="item" onclick="showSection('vms')">云主机</a>
       <a class="item" onclick="showSection('skills')">自定义技能</a>
+      <a class="item" onclick="showSection('repos')">仓库托管</a>
     </div>
   </div>
   <div class="main">
@@ -600,10 +847,23 @@ def _render_user_panel(token):
       </div>
     </div>
 
+    <div id="section-repos" style="display:none">
+      <h3>仓库托管</h3>
+      <div class="group"><h4>已托管仓库</h4>
+        <div class="list">{managed_html or '<div class="item" style="color:#888">暂无托管仓库</div>'}</div>
+      </div>
+      <div class="group"><h4>添加托管仓库</h4>
+        <form method="POST" action="/user/repo-sync?token={token}" style="margin-bottom:8px">
+          <button class="btn-p" type="submit">从 GitCode 加载仓库列表</button>
+        </form>
+        {repo_msg_html}
+        {_repo_add_form(token, repo_add_opts) if repo_add_opts else ''}
+    </div>
+
   </div>
 </div>
 <script>
-function showSection(name){{['info','creds','vms','skills'].forEach(function(s){{document.getElementById('section-'+s).style.display=s===name?'block':'none';}});}}
+function showSection(name){{['info','creds','vms','skills','repos'].forEach(function(s){{document.getElementById('section-'+s).style.display=s===name?'block':'none';}});}}
 </script>
 </body></html>"""
 
