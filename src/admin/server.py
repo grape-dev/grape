@@ -1,5 +1,5 @@
 """管理台 HTTP 服务（端口 80）：多用户管理台"""
-import json, os, time, hashlib, urllib.request, urllib.parse
+import json, os, time, hashlib, urllib.request, urllib.parse, re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from concurrent.futures import ThreadPoolExecutor
@@ -454,7 +454,7 @@ def _render_admin_panel(token, select_name="", message=""):
   <div class="main">{form_html}</div>
 </div>
 {toast_html}
-<script>var t=document.querySelector('.toast.show');if(t){setTimeout(function(){t.style.opacity='0';},3000);}</script>
+<script>var t=document.querySelector('.toast.show');if(t){{setTimeout(function(){{t.style.opacity='0';}},3000);}}</script>
 </body></html>"""
 
 
