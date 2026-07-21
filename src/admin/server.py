@@ -272,7 +272,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         a["bot_usernames"] = [s.strip() for s in form["bot_usernames"].split(",") if s.strip()]
             # 更新密码（自动创建用户）
             pwd = form.pop("_password", "")
-            if pwd:
+            if pwd and pwd != "********":
                 user = user_db.get_user_by_username(name)
                 if user:
                     user_db.update_password(user["id"], pwd)
@@ -386,7 +386,7 @@ def _render_admin_panel(token, select_name="", message=""):
         # 密码字段——始终显示，不存在用户时自动创建
         pw_id = f"pwd_{hash('password') % 10000}"
         form_html += f'<div class="row"><label>密码</label><div class="iw">'
-        form_html += f'<input id="{pw_id}" type="password" name="_password" placeholder="留空不修改" value="">'
+        form_html += f'<input id="{pw_id}" type="password" name="_password" value="********" onfocus="this.value=\'\'">'
         form_html += f'<span class="eye" onclick="var e=document.getElementById(\'{pw_id}\');e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div></div>'
         form_html += '</div>'
         groups = [
