@@ -277,7 +277,6 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not self._valid_token(token):
                 self._send_html(_render_admin_login("会话过期"))
                 return
-            form = self._read_form()
             name = form.pop("name", "")
             if not name:
                 self._send_html(_render_admin_panel(token, "", "名称不能为空"))
