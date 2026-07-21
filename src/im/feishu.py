@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS feishu_bindings (
 
 
 def ensure_configured():
-    return bool(FEISHU_APP_ID and FEISHU_APP_SECRET)
+    app_id = FEISHU_APP_ID or os.environ.get("FEISHU_APP_ID", "")
+    secret = FEISHU_APP_SECRET or os.environ.get("FEISHU_APP_SECRET", "")
+    return bool(app_id and secret)
 
 
 def get_tenant_token() -> str:

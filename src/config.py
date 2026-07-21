@@ -20,7 +20,7 @@ LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/lo
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# ====== 模块变量（从 accounts.json 加载后覆盖） ======
+# ====== 模块变量（从 bot_accounts 表加载） ======
 GITCODE_API_TOKEN = ""
 GITCODE_WEBHOOK_TOKEN = ""
 BOT_USERNAMES: list[str] = []
@@ -32,9 +32,42 @@ HUAWEICLOUD_SDK_SK = ""
 CODEARTS_CLI_AK = ""
 CODEARTS_CLI_SK = ""
 
-# ====== 多账户配置 ======
+# ====== 多账户配置（从 DB 加载） ======
 ACCOUNTS: dict[str, dict] = {}
 _DEFAULT_ACCOUNT = "default"
+
+
+def _load_accounts():
+    """从 bot_accounts 表加载账户配置，并设置模块级变量"""
+    global ACCOUNTS, _DEFAULT_ACCOUNT
+    global GITCODE_API_TOKEN, GITCODE_WEBHOOK_TOKEN, BOT_USERNAMES
+    global FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_BOT_NAME
+    global HUAWEICLOUD_SDK_AK, HUAWEICLOUD_SDK_SK
+    global CODEARTS_CLI_AK, CODEARTS_CLI_SK
+
+    ACCOUNTS = {}
+    try:
+        from src.user.db import get_all_bot_accounts
+        for a in get_all_bot_accounts():
+            ACCOUNTS[a["name"]] = a
+    except Exception as e:
+        log.warning(f"Failed to load accounts from DB: {e}")
+        return
+
+    default = get_account()
+    GITCODE_API_TOKEN = default.get("gitcode_api_token", "")
+    GITCODE_WEBHOOK_TOKEN = default.get("gitcode_webhook_token", "")
+    BOT_USERNAMES = default.get("bot_usernames", [])
+    if isinstance(BOT_USERNAMES, str):
+        BOT_USERNAMES = [u.strip() for u in BOT_USERNAMES.split(",") if u.strip()]
+    FEISHU_APP_ID = default.get("feishu_app_id", "")
+    FEISHU_APP_SECRET = default.get("feishu_app_secret", "")
+    FEISHU_BOT_NAME = default.get("feishu_bot_name", "DevOps Bot")
+    HUAWEICLOUD_SDK_AK = default.get("huawei_cloud_ak", "")
+    HUAWEICLOUD_SDK_SK = default.get("huawei_cloud_sk", "")
+    CODEARTS_CLI_AK = default.get("CODEARTS_CLI_AK", "")
+    CODEARTS_CLI_SK = default.get("CODEARTS_CLI_SK", "")
+    log.info(f"Loaded {len(ACCOUNTS)} accounts from DB, default={_DEFAULT_ACCOUNT}")
 
 
 def get_account(name=None) -> dict:
@@ -42,58 +75,25 @@ def get_account(name=None) -> dict:
 
 
 def save_accounts(new_accounts: list):
-    """将 accounts 列表写回 accounts.json 并重载"""
-    global ACCOUNTS
-    path = os.path.join(CONFIG_DIR, "accounts.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"default": _DEFAULT_ACCOUNT, "accounts": new_accounts}, f, indent=2, ensure_ascii=False)
+    """将账户列表写入 DB 并重载"""
+    from src.user.db import save_bot_account, delete_bot_account
+    existing = set(ACCOUNTS.keys())
+    new_names = set()
+    for a in new_accounts:
+        name = a.get("name", "")
+        if not name:
+            continue
+        save_bot_account(name, a)
+        new_names.add(name)
+    # 删除不存在的
+    for n in existing - new_names:
+        delete_bot_account(n)
     _load_accounts()
 
 
 def resolve_account_by_webhook_token(token: str) -> str | None:
-    for name, a in ACCOUNTS.items():
-        if a.get("gitcode_webhook_token") == token:
-            return name
-    return None
-
-
-def _load_accounts():
-    """从 accounts.json 加载账户配置，并设置模块级变量"""
-    global ACCOUNTS, _DEFAULT_ACCOUNT
-    global GITCODE_API_TOKEN, GITCODE_WEBHOOK_TOKEN, BOT_USERNAMES
-    global FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_BOT_NAME
-    global HUAWEICLOUD_SDK_AK, HUAWEICLOUD_SDK_SK
-    global CODEARTS_CLI_AK, CODEARTS_CLI_SK
-
-    path = os.path.join(CONFIG_DIR, "accounts.json")
-    if not os.path.exists(path):
-        log.warning(f"Accounts config not found at {path}, using empty defaults")
-        return
-
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        for a in data.get("accounts", []):
-            ACCOUNTS[a["name"]] = a
-        _DEFAULT_ACCOUNT = data.get("default", "default")
-
-        # 从 default 账户设置模块级变量
-        default = get_account()
-        GITCODE_API_TOKEN = default.get("gitcode_api_token", "")
-        GITCODE_WEBHOOK_TOKEN = default.get("gitcode_webhook_token", "")
-        BOT_USERNAMES = default.get("bot_usernames", [])
-        if isinstance(BOT_USERNAMES, str):
-            BOT_USERNAMES = [u.strip() for u in BOT_USERNAMES.split(",") if u.strip()]
-        FEISHU_APP_ID = default.get("feishu_app_id", "")
-        FEISHU_APP_SECRET = default.get("feishu_app_secret", "")
-        FEISHU_BOT_NAME = default.get("feishu_bot_name", "DevOps Bot")
-        HUAWEICLOUD_SDK_AK = default.get("huawei_cloud_ak", "")
-        HUAWEICLOUD_SDK_SK = default.get("huawei_cloud_sk", "")
-        CODEARTS_CLI_AK = default.get("CODEARTS_CLI_AK", "")
-        CODEARTS_CLI_SK = default.get("CODEARTS_CLI_SK", "")
-        log.info(f"Loaded {len(ACCOUNTS)} accounts from config, default={_DEFAULT_ACCOUNT}, FEISHU_APP_ID={'YES' if FEISHU_APP_ID else 'NO'}")
-    except Exception as e:
-        log.warning(f"Failed to load accounts config: {e}")
+    from src.user.db import resolve_bot_account_by_webhook_token
+    return resolve_bot_account_by_webhook_token(token)
 
 
 # ====== 事件路由 ======
@@ -159,3 +159,13 @@ def _load_agent_routing_config():
 _load_routing_config()
 _load_agent_routing_config()
 _load_accounts()
+
+# 环境变量兜底——无论 _load_accounts 何时运行，模块加载时总会执行一次
+import os as _os
+for _var in ["GITCODE_API_TOKEN", "GITCODE_WEBHOOK_TOKEN", "FEISHU_APP_ID",
+             "FEISHU_APP_SECRET", "HUAWEICLOUD_SDK_AK", "HUAWEICLOUD_SDK_SK",
+             "CODEARTS_CLI_AK", "CODEARTS_CLI_SK"]:
+    if not globals().get(_var):
+        val = _os.environ.get(_var, "")
+        if val:
+            globals()[_var] = val

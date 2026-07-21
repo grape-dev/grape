@@ -15,6 +15,25 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """
 
+_BOT_ACCOUNTS_DDL = """
+CREATE TABLE IF NOT EXISTS bot_accounts (
+    name TEXT PRIMARY KEY,
+    gitcode_api_token TEXT DEFAULT '',
+    gitcode_webhook_token TEXT DEFAULT '',
+    gitcode_oauth_client_id TEXT DEFAULT '',
+    gitcode_oauth_client_secret TEXT DEFAULT '',
+    feishu_app_id TEXT DEFAULT '',
+    feishu_app_secret TEXT DEFAULT '',
+    huawei_cloud_ak TEXT DEFAULT '',
+    huawei_cloud_sk TEXT DEFAULT '',
+    CODEARTS_CLI_AK TEXT DEFAULT '',
+    CODEARTS_CLI_SK TEXT DEFAULT '',
+    password TEXT DEFAULT '',
+    bot_usernames TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
 
 def init_db():
     """初始化用户相关表（幂等）"""
@@ -342,6 +361,7 @@ def init_db():
     """初始化用户相关表（幂等）"""
     with db_lock:
         db.execute(_USERS_DDL)
+        db.execute(_BOT_ACCOUNTS_DDL)
         db.execute(_CREDENTIALS_DDL)
         db.execute(_VMS_DDL)
         db.execute(_VM_REPOS_DDL)
@@ -470,5 +490,106 @@ def get_skill_for_event(user_id: int, repo_key: str, event_type: str) -> str | N
     return row[0] if row else None
 
 
-# 启动时初始化
+# ====== Bot 账户 CRUD（替代 accounts.json） ======
+
+BOT_ACCOUNT_FIELDS = [
+    "name", "gitcode_api_token", "gitcode_webhook_token",
+    "gitcode_oauth_client_id", "gitcode_oauth_client_secret",
+    "feishu_app_id", "feishu_app_secret",
+    "huawei_cloud_ak", "huawei_cloud_sk",
+    "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",
+    "password", "bot_usernames",
+]
+
+
+def get_all_bot_accounts() -> list[dict]:
+    """获取所有 Bot 账户"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"SELECT {','.join(BOT_ACCOUNT_FIELDS)} FROM bot_accounts ORDER BY name")
+        rows = c.fetchall()
+    return [dict(zip(BOT_ACCOUNT_FIELDS, r)) for r in rows]
+
+
+def get_bot_account(name: str) -> dict | None:
+    """获取单个 Bot 账户"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"SELECT {','.join(BOT_ACCOUNT_FIELDS)} FROM bot_accounts WHERE name=?", (name,))
+        row = c.fetchone()
+    if not row:
+        return None
+    # 解析 bot_usernames JSON 数组
+    d = dict(zip(BOT_ACCOUNT_FIELDS, row))
+    try:
+        d["bot_usernames"] = json.loads(d.get("bot_usernames", "[]"))
+    except (json.JSONDecodeError, TypeError):
+        d["bot_usernames"] = [s.strip() for s in d.get("bot_usernames", "").split(",") if s.strip()]
+    return d
+
+
+def save_bot_account(name: str, data: dict):
+    """创建或更新 Bot 账户"""
+    bu = data.get("bot_usernames", [])
+    if isinstance(bu, list):
+        bu = json.dumps(bu, ensure_ascii=False)
+    elif isinstance(bu, str):
+        bu = json.dumps([s.strip() for s in bu.split(",") if s.strip()], ensure_ascii=False)
+    else:
+        bu = "[]"
+    fields = {k: data.get(k, "") for k in BOT_ACCOUNT_FIELDS if k != "name"}
+    fields["bot_usernames"] = bu
+    set_clause = ",".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [name]
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"INSERT OR REPLACE INTO bot_accounts ({','.join(fields.keys())},name) VALUES ({','.join('?' for _ in fields)},?)", vals)
+        db.commit()
+
+
+def delete_bot_account(name: str) -> bool:
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM bot_accounts WHERE name=?", (name,))
+        db.commit()
+        return c.rowcount > 0
+
+
+def resolve_bot_account_by_webhook_token(token: str) -> str | None:
+    """通过 webhook token 查找账户名"""
+    if not token:
+        return None
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT name FROM bot_accounts WHERE gitcode_webhook_token=?", (token,))
+        row = c.fetchone()
+    return row[0] if row else None
+
+
+def migrate_accounts_from_json():
+    """从 accounts.json 迁移数据到 bot_accounts 表（幂等）"""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "accounts.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        for a in data.get("accounts", []):
+            save_bot_account(a.get("name", "default"), a)
+            # 同步密码到 users 表
+            name = a.get("name", "")
+            pwd = a.get("password", "")
+            if pwd and name:
+                user = get_user_by_username(name)
+                if user:
+                    update_password(user["id"], pwd)
+                else:
+                    create_user(name, pwd, 0)
+        log.info(f"Migrated {len(data.get('accounts',[]))} accounts from accounts.json to DB")
+    except Exception as e:
+        log.warning(f"Migration from accounts.json failed: {e}")
+
+
+# 启动时初始化 + 迁移
 init_db()
+migrate_accounts_from_json()
