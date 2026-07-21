@@ -253,6 +253,18 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_html(_render_admin_panel(token, "", msg))
             return
 
+        # Admin: reset password
+        if path == "/admin/reset-pwd":
+            token = self._get_param("token")
+            if not self._valid_token(token):
+                self._send_html(_render_admin_login("会话过期"))
+                return
+            uid = form.get("user_id", "")
+            ok = user_db.update_password(int(uid), form.get("password", "")) if uid.isdigit() else False
+            msg = "密码已修改" if ok else "修改失败"
+            self._send_html(_render_admin_panel(token, "", msg))
+            return
+
         # Save account
         if path == "/admin/save":
             token = self._get_param("token")
@@ -415,6 +427,14 @@ def _render_admin_panel(token, select_name="", message=""):
         form_html += '<div class="row"><label>用户名</label><input name="username" required></div>'
         form_html += '<div class="row"><label>密码</label><input name="password" type="password" required></div>'
         form_html += '<button class="btn-p" type="submit">创建</button></form></div>'
+        form_html += '<div class="group"><h4>修改密码</h4>'
+        form_html += f'<form method="POST" action="/admin/reset-pwd?token={token}">'
+        form_html += '<div class="row"><label>选择用户</label><select name="user_id" required>'
+        for u in users:
+            form_html += f'<option value="{u["id"]}">{u["username"]}</option>'
+        form_html += '</select></div>'
+        form_html += '<div class="row"><label>新密码</label><input name="password" type="password" required></div>'
+        form_html += '<button class="btn-p" type="submit">修改</button></form></div>'
 
     toast_html = f'<div class="toast show ok">{message}</div>' if message else ""
     return f"""<!DOCTYPE html>
