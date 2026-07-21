@@ -358,6 +358,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .row{margin-bottom:10px}
 .row label{display:block;font-size:12px;color:#666;margin-bottom:2px}
 .row .iw{display:flex;gap:6px}
+.eye{cursor:pointer;user-select:none}
 .row input{flex:1;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px;outline:none}
 .row input:focus{border-color:#667eea}
 select{width:100%;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px;outline:none;background:#fff}
@@ -506,7 +507,8 @@ def _render_user_panel(token):
         ]
         for key, label in field_defs:
             val = bot_acc.get(key, "")
-            cred_fields_html += f'<div class="row"><label>{label}</label><input type="password" name="{key}" value="{val}"></div>'
+            fid = key + "_" + str(hash(key) % 10000)
+            cred_fields_html += f'<div class="row"><label>{label}</label><div class="iw"><input id="{fid}" type="password" name="{key}" value="{val}"><span class="eye" onclick="var e=document.getElementById(\'{fid}\');e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div></div>'
 
     vms = user_db.get_vms(uid)
     vm_html = ""
