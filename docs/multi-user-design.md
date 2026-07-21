@@ -27,12 +27,12 @@
 - 用户由管理员预先创建（用户名 + 初始密码）
 - 用户登录后可自行修改密码
 
-## 用户角色
+## 用户身份
 
-| 角色 | 权限 | 入口 |
-|------|------|------|
-| `admin` | 创建/删除用户、重置密码 | `/admin/` |
-| `user` | 管理自己的凭据、自定义技能 | `/` |
+| 身份 | 认证方式 | 入口 |
+|------|---------|------|
+| 管理员（admin） | 固定账号 `developer` / `YOUR_SSH_PASSWORD`（硬编码） | `/admin/` |
+| 普通用户（user） | 由管理员创建，存入 `users` 表 | `/` |
 
 ## 数据库设计（`sessions.db` 新增表）
 
@@ -43,8 +43,7 @@ CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    role TEXT DEFAULT 'user',     -- 'admin' | 'user'
-    created_by INTEGER,           -- 创建者的 user_id
+    created_by INTEGER,           -- 创建者的 user_id（admin 在代码中硬编码）
     created_at TEXT DEFAULT (datetime('now'))
 );
 ```
