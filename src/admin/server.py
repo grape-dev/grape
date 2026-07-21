@@ -1,6 +1,18 @@
 """管理台 HTTP 服务（端口 80）：纯服务端渲染 + 内联 JS"""
 import json, os, time, hashlib, urllib.request, urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+from concurrent.futures import ThreadPoolExecutor
+
+
+class PooledHTTPServer(ThreadingMixIn, HTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+    pool = ThreadPoolExecutor(max_workers=4)
+
+    def process_request(self, request, client_address):
+        self.pool.submit(self.process_request_thread, request, client_address)
+
 
 ADMIN_USER = "developer"
 ADMIN_PASS = "YOUR_SSH_PASSWORD"
@@ -358,11 +370,12 @@ def _account_detail(a):
 
 def start_admin_server():
     from src.config import log
+    AdminHandler.timeout = 30
     while True:
         try:
-            server = HTTPServer(("", 80), AdminHandler)
+            server = PooledHTTPServer(("", 80), AdminHandler)
             server.socket.setsockopt(1, 2, 1)
-            log.info("Admin server started on :80")
+            log.info("Admin server started on :80 (pooled, 4 workers, 30s timeout)")
             server.serve_forever()
         except OSError as e:
             log.warning(f"Admin server failed on :80: {e}, retrying in 5s")
