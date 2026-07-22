@@ -351,6 +351,19 @@ def delete_vm_repo(vm_id: int, repo_key: str) -> bool:
         return False
 
 
+def clear_vm_repos(vm_id: int) -> bool:
+    """清除指定云主机的所有仓库映射"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM user_vm_repos WHERE vm_id=?", (vm_id,))
+            db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"Clear VM repos failed: {e}")
+        return False
+
+
 # ====== 自定义技能表 ======
 _SKILLS_DDL = """
 CREATE TABLE IF NOT EXISTS user_skills (

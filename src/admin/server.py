@@ -182,7 +182,32 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             from src.config import ACCOUNTS
             items = [_account_summary(a) for a in ACCOUNTS.values()]
-            self._send_json(200, items)
+        self._send_json(200, items)
+        return
+
+        # API: VM connectivity test
+        if path == "/api/vm-test":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_json(401, {"status": "error", "error": "unauthorized"})
+                return
+            vm_id = int(self._get_param("vm_id", "0"))
+            vms = user_db.get_vms(uid)
+            vm = next((v for v in vms if v["id"] == vm_id), None)
+            if not vm:
+                self._send_json(404, {"status": "error", "error": "not found"})
+                return
+            import paramiko
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(vm["host"], port=vm["port"], username=vm["ssh_user"],
+                              password=vm.get("ssh_password", ""), timeout=10)
+                client.close()
+                self._send_json(200, {"status": "ok"})
+            except Exception as e:
+                self._send_json(200, {"status": "fail", "error": str(e)[:200]})
             return
 
         self.send_response(404)
@@ -249,29 +274,21 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_html(_render_user_panel(token, section="vms"))
             return
 
-        # 普通用户 → 测试云主机连通性
-        if path == "/user/vm-test":
+        # 普通用户 → 配置云主机应用仓库
+        if path == "/user/vm-config":
             token = self._get_param("token")
             uid = user_db.validate_token(token)
             if not uid:
                 self._send_html(_render_user_login("会话过期"))
                 return
-            vms = user_db.get_vms(uid)
-            vm = next((v for v in vms if str(v["id"]) == form.get("vm_id", "")), None)
-            if not vm:
-                self._send_html(_render_user_panel(token, section="vms", skill_msg="云主机不存在"))
-                return
-            import paramiko
-            try:
-                client = paramiko.SSHClient()
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                client.connect(vm["host"], port=vm["port"], username=vm["ssh_user"],
-                              password=vm.get("ssh_password", ""), timeout=10)
-                client.close()
-                msg = f"{vm['name']} 连接成功"
-            except Exception as e:
-                msg = f"{vm['name']} 连接失败: {e}"
-            self._send_html(_render_user_panel(token, section="vms", vm_msg=msg))
+            vm_id = int(form.get("vm_id", 0))
+            repos = form.get("repos", [])
+            if isinstance(repos, str):
+                repos = [repos]
+            user_db.clear_vm_repos(vm_id)
+            for r in repos:
+                user_db.add_vm_repo(vm_id, r)
+            self._send_html(_render_user_panel(token, section="vms"))
             return
 
         # 普通用户 → 上传自定义技能（zip 包）
@@ -888,7 +905,7 @@ def _render_user_login(error=""):
 </body></html>"""
 
 
-def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_msg="", vm_msg=""):
+def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_msg=""):
     uid = user_db.validate_token(token)
     user = user_db.get_user(uid) if uid else None
     if not user:
@@ -917,17 +934,31 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
     vms = user_db.get_vms(uid)
     vm_html = ""
     for v in vms:
-        vm_html += f'''<div class="item" style="display:flex;align-items:center;justify-content:space-between">
-<span><strong>{v["name"]}</strong><span style="color:#888;font-size:12px;margin-left:8px">{v["host"]}:{v["port"]}</span></span>
+        vm_repos = user_db.get_vm_repos(v["id"])
+        vm_mapped = set(r["repo_key"] for r in vm_repos)
+        repo_cb_vm = ""
+        for r in managed:
+            chk = " checked" if r["full_name"] in vm_mapped else ""
+            repo_cb_vm += f'<label style="font-size:12px;margin-right:8px;white-space:nowrap"><input type="checkbox" name="repos" value="{r["full_name"]}"{chk}> {r["full_name"]}</label>'
+        vm_html += f'''<div style="padding:16px;border-bottom:1px solid #f0f0f0">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+<span>
+  <span id="vm_status_{v["id"]}" style="font-size:14px;margin-right:4px"></span>
+  <strong>{v["name"]}</strong>
+  <span style="color:#888;font-size:12px;margin-left:8px">{v["host"]}:{v["port"]}</span>
+</span>
 <div style="display:flex;gap:4px">
-<form method="POST" action="/user/vm-test?token={token}" style="margin:0">
-<input type="hidden" name="vm_id" value="{v["id"]}">
-<button class="btn-s" type="submit" style="padding:2px 8px;font-size:12px">测试</button>
-</form>
+<button class="btn-s" style="padding:2px 8px;font-size:12px" onclick="testVm({v["id"]})" id="vm_btn_{v["id"]}">测试</button>
 <form method="POST" action="/user/vm-delete?token={token}" style="margin:0" onsubmit="return confirm('确定删除云主机 {v["name"]}？')">
 <input type="hidden" name="vm_id" value="{v["id"]}">
 <button class="btn-d" type="submit" style="padding:2px 8px;font-size:12px">删除</button>
-</form></div></div>'''
+</form></div>
+</div>
+<form method="POST" action="/user/vm-config?token={token}">
+<input type="hidden" name="vm_id" value="{v["id"]}">
+<div style="display:flex;flex-wrap:wrap;gap:4px">{repo_cb_vm or '<span style="color:#999;font-size:12px">暂无托管仓库</span>'}</div>
+<button class="btn-p" type="submit" style="font-size:12px;padding:6px 16px;margin-top:8px">保存</button>
+</form></div>'''
 
     skills = user_db.list_skills(uid)
     managed = user_db.get_managed_repos(uid)
@@ -1040,7 +1071,6 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
         <h3 style="margin:0;border:none;padding:0">云主机</h3>
         <button class="btn-p" type="button" onclick="toggleNewVm()">新增云主机</button>
       </div>
-      {('<p style="color:#e74c3c;font-size:12px;margin-bottom:8px">' + vm_msg + '</p>') if vm_msg else ''}
       <div class="list">{vm_html or '<div class="item" style="color:#888">暂无云主机</div>'}</div>
       <div id="new_vm_form" style="display:none;margin-top:12px;padding:16px;background:#f5f5f5;border-radius:8px">
         <h4 style="margin:0 0 12px 0;font-size:14px">新增云主机</h4>
@@ -1089,6 +1119,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
 <script>
 function showSection(name){{['info','creds','vms','skills','repos'].forEach(function(s){{document.getElementById('section-'+s).style.display=s===name?'block':'none';}});}}
 function handleSkillFile(){{var f=document.getElementById('skill_file').files[0];if(!f)return;var r=new FileReader();r.onload=function(e){{document.getElementById('skill_zip').value=e.target.result.split(',')[1];document.getElementById('skill_form').submit();}};r.readAsDataURL(f);}}
+function testVm(id){{var btn=document.getElementById('vm_btn_'+id);btn.disabled=true;btn.innerText='...';var s=document.getElementById('vm_status_'+id);fetch('/api/vm-test?token={token}&vm_id='+id).then(function(r){{return r.json()}}).then(function(d){{if(d.status==='ok'){{s.innerText='✅'}}else{{s.innerText='❌'}};btn.disabled=false;btn.innerText='测试'}}).catch(function(){{s.innerText='❌';btn.disabled=false;btn.innerText='测试'}});}}
 </script>
 </body></html>"""
 
