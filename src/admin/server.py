@@ -198,15 +198,20 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not vm:
                 self._send_json(404, {"status": "error", "error": "not found"})
                 return
-            import paramiko
+            import paramiko, socket
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             try:
-                client = paramiko.SSHClient()
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 client.connect(vm["host"], port=vm["port"], username=vm["ssh_user"],
-                              password=vm.get("ssh_password", ""), timeout=10)
+                              password=vm.get("ssh_password", ""), timeout=8, banner_timeout=5, auth_timeout=8)
+                client.get_transport().sock.settimeout(5)
                 client.close()
                 self._send_json(200, {"status": "ok"})
             except Exception as e:
+                try:
+                    client.close()
+                except:
+                    pass
                 self._send_json(200, {"status": "fail", "error": str(e)[:200]})
             return
 
