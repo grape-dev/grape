@@ -24,9 +24,9 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
 
 
-def fetch_admin_repos(api_token: str) -> list[dict]:
-    """获取用户有管理员权限的仓库列表。
-    返回：[{"full_name": "owner/repo", "owner": "owner", "name": "repo"}, ...]
+def fetch_repos_with_role(api_token: str) -> list[dict]:
+    """获取用户的项目成员仓库，标注 is_admin。
+    返回：[{"full_name": "owner/repo", "owner": "owner", "name": "repo", "is_admin": bool}, ...]
     """
     if not api_token:
         raise RuntimeError("GitCode API Token 未配置")
@@ -35,7 +35,7 @@ def fetch_admin_repos(api_token: str) -> list[dict]:
     while True:
         url = f"{API_BASE}/user/repos?type=all&per_page=100&page={page}&sort=full_name"
         data = _req("GET", url, api_token)
-        log.info(f"fetch_admin_repos page {page}: type={type(data).__name__}, len={len(data) if isinstance(data, (list, dict)) else '?'}")
+        log.info(f"fetch_repos page {page}: type={type(data).__name__}, len={len(data) if isinstance(data, (list, dict)) else '?'}")
         if not data:
             break
         items = data if isinstance(data, list) else []
@@ -51,13 +51,13 @@ def fetch_admin_repos(api_token: str) -> list[dict]:
             if not repos and items.index(r) == 0:
                 log.info(f"First repo keys: {list(r.keys())}, permission={r.get('permission')}, permissions={r.get('permissions')}")
             perm = r.get("permission") or r.get("permissions")
-            if isinstance(perm, dict) and perm.get("admin"):
-                owner, name = full_name.split("/", 1)
-                repos.append({"full_name": full_name, "owner": owner, "name": name})
+            is_admin = isinstance(perm, dict) and perm.get("admin")
+            owner, name = full_name.split("/", 1)
+            repos.append({"full_name": full_name, "owner": owner, "name": name, "is_admin": bool(is_admin)})
         if len(items) < 100:
             break
         page += 1
-    log.info(f"fetch_admin_repos total: {len(repos)} repos")
+    log.info(f"fetch_repos total: {len(repos)} repos")
     return repos
 
 

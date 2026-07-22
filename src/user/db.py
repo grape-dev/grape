@@ -382,6 +382,7 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     repo_name TEXT NOT NULL,
     full_name TEXT NOT NULL,
     webhook_id INTEGER DEFAULT 0,
+    is_admin INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE (user_id, repo_owner, repo_name)
 )
@@ -404,6 +405,10 @@ def init_db():
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
             except Exception:
                 pass
+        try:
+            db.execute("ALTER TABLE managed_repos ADD COLUMN is_admin INTEGER DEFAULT 0")
+        except Exception:
+            pass
         try:
             db.execute("ALTER TABLE bot_accounts ADD COLUMN webhook_url TEXT DEFAULT ''")
         except Exception:
@@ -528,12 +533,12 @@ def get_skill_for_event(user_id: int, repo_key: str, event_type: str) -> str | N
 
 # ====== 托管仓库 CRUD ======
 
-def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: str, webhook_id: int = 0) -> bool:
+def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: str, webhook_id: int = 0, is_admin: bool = True) -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, webhook_id) VALUES (?,?,?,?,?)",
-                      (user_id, repo_owner, repo_name, full_name, webhook_id))
+            c.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, webhook_id, is_admin) VALUES (?,?,?,?,?,?)",
+                      (user_id, repo_owner, repo_name, full_name, webhook_id, int(is_admin)))
             db.commit()
             return True
     except Exception as e:
@@ -544,8 +549,8 @@ def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: s
 def get_managed_repos(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_owner, repo_name, full_name, webhook_id, created_at FROM managed_repos WHERE user_id=? ORDER BY full_name", (user_id,))
-        return [{"repo_owner": r[0], "repo_name": r[1], "full_name": r[2], "webhook_id": r[3], "created_at": r[4]} for r in c.fetchall()]
+        c.execute("SELECT repo_owner, repo_name, full_name, webhook_id, is_admin, created_at FROM managed_repos WHERE user_id=? ORDER BY full_name", (user_id,))
+        return [{"repo_owner": r[0], "repo_name": r[1], "full_name": r[2], "webhook_id": r[3], "is_admin": bool(r[4]), "created_at": r[5]} for r in c.fetchall()]
 
 
 def remove_managed_repo(user_id: int, repo_owner: str, repo_name: str) -> dict | None:
@@ -569,8 +574,8 @@ def get_all_managed_repos() -> list[dict]:
     """Admin 用：获取所有托管记录"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT user_id, repo_owner, repo_name, full_name, webhook_id, created_at FROM managed_repos ORDER BY full_name")
-        return [{"user_id": r[0], "repo_owner": r[1], "repo_name": r[2], "full_name": r[3], "webhook_id": r[4], "created_at": r[5]} for r in c.fetchall()]
+        c.execute("SELECT user_id, repo_owner, repo_name, full_name, webhook_id, is_admin, created_at FROM managed_repos ORDER BY full_name")
+        return [{"user_id": r[0], "repo_owner": r[1], "repo_name": r[2], "full_name": r[3], "webhook_id": r[4], "is_admin": bool(r[5]), "created_at": r[6]} for r in c.fetchall()]
 
 
 # ====== Bot 账户 CRUD（替代 accounts.json） ======

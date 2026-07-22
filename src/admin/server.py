@@ -278,7 +278,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_user_panel(token, section="repos"))
                 return
             from src.config import ACCOUNTS
-            from src.user.repo_manager import fetch_admin_repos, find_existing_webhook
+            from src.user.repo_manager import fetch_repos_with_role, find_existing_webhook
             acc = ACCOUNTS.get(user["username"], {})
             api_token = acc.get("gitcode_api_token", "")
             webhook_url = acc.get("webhook_url", "")
@@ -286,13 +286,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_user_panel(token, section="repos", repo_msg="GitCode API Token 未配置，请先在凭据管理中设置"))
                 return
             try:
-                all_repos = fetch_admin_repos(api_token)
+                all_repos = fetch_repos_with_role(api_token)
             except RuntimeError as e:
                 self._send_html(_render_user_panel(token, section="repos", repo_msg=str(e)))
                 return
             managed = user_db.get_managed_repos(uid)
             managed_set = set(r["full_name"] for r in managed)
             auto_imported = 0
+            non_admin_imported = 0
             available = []
             for r in all_repos:
                 if r["full_name"] in managed_set:
@@ -300,15 +301,21 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if webhook_url:
                     wh_id = find_existing_webhook(api_token, r["owner"], r["name"], webhook_url)
                     if wh_id:
-                        user_db.add_managed_repo(uid, r["owner"], r["name"], r["full_name"], wh_id)
+                        user_db.add_managed_repo(uid, r["owner"], r["name"], r["full_name"], wh_id, is_admin=r.get("is_admin", False))
                         auto_imported += 1
+                        if not r.get("is_admin"):
+                            non_admin_imported += 1
                         continue
-                available.append(r)
+                if r.get("is_admin"):
+                    available.append(r)
             msg = f"已加载 {len(all_repos)} 个仓库"
             if auto_imported:
-                msg += f"，自动导入 {auto_imported} 个已有 webhook 的仓库"
+                parts = [f"自动导入 {auto_imported} 个"]
+                if non_admin_imported:
+                    parts.append(f"（含 {non_admin_imported} 个非管理员）")
+                msg += "，" + "".join(parts)
             if available:
-                msg += f"，剩余 {len(available)} 个可添加"
+                msg += f"，{len(available)} 个可添加"
             else:
                 msg += "，无可添加的仓库"
             self._send_html(_render_user_panel(token, section="repos", loaded_repos=available or None, repo_msg=msg))
@@ -343,7 +350,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             except RuntimeError as e:
                 self._send_html(_render_user_panel(token, section="repos", repo_msg=f"创建 webhook 失败: {e}"))
                 return
-            user_db.add_managed_repo(uid, owner, name, full_name, wh_id)
+            user_db.add_managed_repo(uid, owner, name, full_name, wh_id, is_admin=True)
             self._send_html(_render_user_panel(token, section="repos", repo_msg=f"已托管 {full_name}"))
             return
 
@@ -435,7 +442,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_admin_panel(token, account_name, "", repo_msg="缺少账户名"))
                 return
             from src.config import ACCOUNTS
-            from src.user.repo_manager import fetch_admin_repos, find_existing_webhook
+            from src.user.repo_manager import fetch_repos_with_role, find_existing_webhook
             acc = ACCOUNTS.get(account_name, {})
             api_token = acc.get("gitcode_api_token", "")
             webhook_url = acc.get("webhook_url", "")
@@ -443,7 +450,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_admin_panel(token, account_name, "", repo_msg="GitCode API Token 未配置"))
                 return
             try:
-                all_repos = fetch_admin_repos(api_token)
+                all_repos = fetch_repos_with_role(api_token)
             except RuntimeError as e:
                 self._send_html(_render_admin_panel(token, account_name, "", repo_msg=str(e)))
                 return
@@ -452,6 +459,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             if admin_user:
                 managed_set = set(r["full_name"] for r in user_db.get_managed_repos(admin_user["id"]))
             auto_imported = 0
+            non_admin_imported = 0
             available = []
             for r in all_repos:
                 if r["full_name"] in managed_set:
@@ -459,15 +467,21 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if webhook_url and admin_user:
                     wh_id = find_existing_webhook(api_token, r["owner"], r["name"], webhook_url)
                     if wh_id:
-                        user_db.add_managed_repo(admin_user["id"], r["owner"], r["name"], r["full_name"], wh_id)
+                        user_db.add_managed_repo(admin_user["id"], r["owner"], r["name"], r["full_name"], wh_id, is_admin=r.get("is_admin", False))
                         auto_imported += 1
+                        if not r.get("is_admin"):
+                            non_admin_imported += 1
                         continue
-                available.append(r)
+                if r.get("is_admin"):
+                    available.append(r)
             msg = f"已加载 {len(all_repos)} 个仓库"
             if auto_imported:
-                msg += f"，自动导入 {auto_imported} 个已有 webhook 的仓库"
+                parts = [f"自动导入 {auto_imported} 个"]
+                if non_admin_imported:
+                    parts.append(f"（含 {non_admin_imported} 个非管理员）")
+                msg += "，" + "".join(parts)
             if available:
-                msg += f"，剩余 {len(available)} 个可添加"
+                msg += f"，{len(available)} 个可添加"
             else:
                 msg += "，无可添加的仓库"
             self._send_html(_render_admin_panel(token, account_name, "", loaded_repos=available or None, repo_msg=msg))
@@ -502,7 +516,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             except RuntimeError as e:
                 self._send_html(_render_admin_panel(token, account_name, "", repo_msg=f"创建 webhook 失败: {e}"))
                 return
-            user_db.add_managed_repo(admin_user["id"], owner, name, full_name, wh_id)
+            user_db.add_managed_repo(admin_user["id"], owner, name, full_name, wh_id, is_admin=True)
             self._send_html(_render_admin_panel(token, account_name, "", repo_msg=f"已托管 {full_name}"))
             return
 
@@ -676,8 +690,11 @@ def _render_admin_panel(token, select_name="", message="", loaded_repos=None, re
                 managed_adm = user_db.get_managed_repos(admin_uid)
                 managed_adm_html = ""
                 for r in managed_adm:
-                    managed_adm_html += f'''<div class="item"><span>{r["full_name"]}</span>
-<form method="POST" action="/admin/repo-remove?token={token}" style="display:inline">
+                    badge_adm = "" if r.get("is_admin") else '<span style="color:#999;font-size:11px;margin-left:6px">非管理员</span>'
+                    confirm_adm = "" if r.get("is_admin") else " onsubmit=\"return confirm('非管理员仓库，删除后需手动重新配置 webhook，确定移除？')\""
+                    managed_adm_html += f'''<div class="item" style="display:flex;align-items:center;justify-content:space-between">
+<span>{r["full_name"]}{badge_adm}</span>
+<form method="POST" action="/admin/repo-remove?token={token}" style="margin:0"{confirm_adm}>
 <input type="hidden" name="account_name" value="{select_name}">
 <input type="hidden" name="repo_owner" value="{r["repo_owner"]}">
 <input type="hidden" name="repo_name" value="{r["repo_name"]}">
@@ -796,8 +813,11 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section=""):
     managed = user_db.get_managed_repos(uid)
     managed_html = ""
     for r in managed:
-        managed_html += f'''<div class="item"><span>{r["full_name"]}</span>
-<form method="POST" action="/user/repo-remove?token={token}" style="display:inline">
+        badge = "" if r.get("is_admin") else '<span style="color:#999;font-size:11px;margin-left:6px">非管理员</span>'
+        confirm_msg = "" if r.get("is_admin") else " onsubmit=\"return confirm('非管理员仓库，删除后需手动重新配置 webhook，确定移除？')\""
+        managed_html += f'''<div class="item" style="display:flex;align-items:center;justify-content:space-between">
+<span>{r["full_name"]}{badge}</span>
+<form method="POST" action="/user/repo-remove?token={token}" style="margin:0"{confirm_msg}>
 <input type="hidden" name="repo_owner" value="{r["repo_owner"]}">
 <input type="hidden" name="repo_name" value="{r["repo_name"]}">
 <button class="btn-d" type="submit" style="padding:2px 8px;font-size:12px">移除</button>
