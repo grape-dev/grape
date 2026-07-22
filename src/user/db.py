@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS bot_accounts (
     CODEARTS_CLI_SK TEXT DEFAULT '',
     password TEXT DEFAULT '',
     bot_usernames TEXT DEFAULT '',
+    webhook_url TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -403,6 +404,10 @@ def init_db():
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
             except Exception:
                 pass
+        try:
+            db.execute("ALTER TABLE bot_accounts ADD COLUMN webhook_url TEXT DEFAULT ''")
+        except Exception:
+            pass
         db.commit()
 
 
@@ -576,7 +581,7 @@ BOT_ACCOUNT_FIELDS = [
     "feishu_app_id", "feishu_app_secret",
     "huawei_cloud_ak", "huawei_cloud_sk",
     "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",
-    "password", "bot_usernames",
+    "password", "bot_usernames", "webhook_url",
 ]
 
 

@@ -47,9 +47,26 @@ def _load_accounts():
 
     ACCOUNTS = {}
     try:
-        from src.user.db import get_all_bot_accounts
-        for a in get_all_bot_accounts():
-            ACCOUNTS[a["name"]] = a
+    from src.user.db import get_all_bot_accounts, save_bot_account
+    for a in get_all_bot_accounts():
+        ACCOUNTS[a["name"]] = a
+    # 自动检测并填入 webhook_url
+    from src.user.repo_manager import detect_public_url
+    detected = False
+    for n, a in ACCOUNTS.items():
+        if not a.get("webhook_url"):
+            if not detected:
+                url = detect_public_url()
+                if url:
+                    a["webhook_url"] = url
+                    save_bot_account(n, a)
+                    detected = True
+                    log.info(f"Auto-detected webhook URL: {url}")
+                else:
+                    break
+            else:
+                a["webhook_url"] = list(ACCOUNTS.values())[0].get("webhook_url", "")
+                save_bot_account(n, a)
     except Exception as e:
         log.warning(f"Failed to load accounts from DB: {e}")
         return

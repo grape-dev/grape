@@ -278,9 +278,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_user_panel(token, section="repos"))
                 return
             from src.config import ACCOUNTS
-            from src.user.repo_manager import fetch_admin_repos
+            from src.user.repo_manager import fetch_admin_repos, find_existing_webhook
             acc = ACCOUNTS.get(user["username"], {})
             api_token = acc.get("gitcode_api_token", "")
+            webhook_url = acc.get("webhook_url", "")
             if not api_token:
                 self._send_html(_render_user_panel(token, section="repos", repo_msg="GitCode API Token 未配置，请先在凭据管理中设置"))
                 return
@@ -291,11 +292,26 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             managed = user_db.get_managed_repos(uid)
             managed_set = set(r["full_name"] for r in managed)
-            available = [r for r in all_repos if r["full_name"] not in managed_set]
-            if not available:
-                self._send_html(_render_user_panel(token, section="repos", repo_msg="没有可添加的仓库（所有管理员仓库已托管）"))
-                return
-            self._send_html(_render_user_panel(token, section="repos", loaded_repos=available, repo_msg=f"已加载 {len(available)} 个可选仓库"))
+            auto_imported = 0
+            available = []
+            for r in all_repos:
+                if r["full_name"] in managed_set:
+                    continue
+                if webhook_url:
+                    wh_id = find_existing_webhook(api_token, r["owner"], r["name"], webhook_url)
+                    if wh_id:
+                        user_db.add_managed_repo(uid, r["owner"], r["name"], r["full_name"], wh_id)
+                        auto_imported += 1
+                        continue
+                available.append(r)
+            msg = f"已加载 {len(all_repos)} 个仓库"
+            if auto_imported:
+                msg += f"，自动导入 {auto_imported} 个已有 webhook 的仓库"
+            if available:
+                msg += f"，剩余 {len(available)} 个可添加"
+            else:
+                msg += "，无可添加的仓库"
+            self._send_html(_render_user_panel(token, section="repos", loaded_repos=available or None, repo_msg=msg))
             return
 
         # 普通用户 → 添加托管仓库
@@ -318,11 +334,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             from src.user.repo_manager import setup_webhook
             acc = ACCOUNTS.get(user["username"], {})
             api_token = acc.get("gitcode_api_token", "")
+            webhook_url = acc.get("webhook_url", "")
             if not api_token:
                 self._send_html(_render_user_panel(token, section="repos", repo_msg="GitCode API Token 未配置"))
                 return
             try:
-                wh_id = setup_webhook(api_token, owner, name)
+                wh_id = setup_webhook(api_token, owner, name, webhook_url)
             except RuntimeError as e:
                 self._send_html(_render_user_panel(token, section="repos", repo_msg=f"创建 webhook 失败: {e}"))
                 return
@@ -418,9 +435,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_admin_panel(token, account_name, "", repo_msg="缺少账户名"))
                 return
             from src.config import ACCOUNTS
-            from src.user.repo_manager import fetch_admin_repos
+            from src.user.repo_manager import fetch_admin_repos, find_existing_webhook
             acc = ACCOUNTS.get(account_name, {})
             api_token = acc.get("gitcode_api_token", "")
+            webhook_url = acc.get("webhook_url", "")
             if not api_token:
                 self._send_html(_render_admin_panel(token, account_name, "", repo_msg="GitCode API Token 未配置"))
                 return
@@ -433,11 +451,26 @@ class AdminHandler(BaseHTTPRequestHandler):
             managed_set = set()
             if admin_user:
                 managed_set = set(r["full_name"] for r in user_db.get_managed_repos(admin_user["id"]))
-            available = [r for r in all_repos if r["full_name"] not in managed_set]
-            if not available:
-                self._send_html(_render_admin_panel(token, account_name, "", repo_msg="没有可添加的仓库"))
-                return
-            self._send_html(_render_admin_panel(token, account_name, "", loaded_repos=available, repo_msg=f"已加载 {len(available)} 个可选仓库"))
+            auto_imported = 0
+            available = []
+            for r in all_repos:
+                if r["full_name"] in managed_set:
+                    continue
+                if webhook_url and admin_user:
+                    wh_id = find_existing_webhook(api_token, r["owner"], r["name"], webhook_url)
+                    if wh_id:
+                        user_db.add_managed_repo(admin_user["id"], r["owner"], r["name"], r["full_name"], wh_id)
+                        auto_imported += 1
+                        continue
+                available.append(r)
+            msg = f"已加载 {len(all_repos)} 个仓库"
+            if auto_imported:
+                msg += f"，自动导入 {auto_imported} 个已有 webhook 的仓库"
+            if available:
+                msg += f"，剩余 {len(available)} 个可添加"
+            else:
+                msg += "，无可添加的仓库"
+            self._send_html(_render_admin_panel(token, account_name, "", loaded_repos=available or None, repo_msg=msg))
             return
 
         # 管理员 → 添加托管仓库
@@ -456,6 +489,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             from src.user.repo_manager import setup_webhook
             acc = ACCOUNTS.get(account_name, {})
             api_token = acc.get("gitcode_api_token", "")
+            webhook_url = acc.get("webhook_url", "")
             if not api_token:
                 self._send_html(_render_admin_panel(token, account_name, "", repo_msg="GitCode API Token 未配置"))
                 return
@@ -464,7 +498,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_admin_panel(token, account_name, "", repo_msg="用户不存在"))
                 return
             try:
-                wh_id = setup_webhook(api_token, owner, name)
+                wh_id = setup_webhook(api_token, owner, name, webhook_url)
             except RuntimeError as e:
                 self._send_html(_render_admin_panel(token, account_name, "", repo_msg=f"创建 webhook 失败: {e}"))
                 return
@@ -614,7 +648,7 @@ def _render_admin_panel(token, select_name="", message="", loaded_repos=None, re
         form_html += f'<span class="eye" onclick="var e=document.getElementById(\'{fid}\');e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div></div>'
         form_html += '</div>'
         groups = [
-            ("GitCode", [("gitcode_api_token", "API Token"), ("gitcode_webhook_token", "Webhook Token")]),
+            ("GitCode", [("gitcode_api_token", "API Token"), ("gitcode_webhook_token", "Webhook Token"), ("webhook_url", "Webhook URL")]),
             ("飞书", [("feishu_app_id", "App ID"), ("feishu_app_secret", "App Secret")]),
             ("华为云", [("huawei_cloud_ak", "Access Key"), ("huawei_cloud_sk", "Secret Key")]),
             ("CodeArts", [("CODEARTS_CLI_AK", "CLI Access Key"), ("CODEARTS_CLI_SK", "CLI Secret Key")]),
@@ -727,6 +761,8 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section=""):
     if bot_acc:
         field_defs = [
             ("gitcode_api_token", "GitCode API Token"),
+            ("gitcode_webhook_token", "GitCode Webhook Token"),
+            ("webhook_url", "GitCode Webhook URL"),
             ("feishu_app_id", "飞书 App ID"),
             ("feishu_app_secret", "飞书 App Secret"),
             ("huawei_cloud_ak", "华为云 AK"),
@@ -892,6 +928,7 @@ def _account_detail(a):
         "huawei_cloud_sk": a.get("huawei_cloud_sk", ""),
         "CODEARTS_CLI_AK": a.get("CODEARTS_CLI_AK", ""),
         "CODEARTS_CLI_SK": a.get("CODEARTS_CLI_SK", ""),
+        "webhook_url": a.get("webhook_url", ""),
         "bot_usernames": a.get("bot_usernames", []),
     }
 

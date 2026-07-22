@@ -1,13 +1,13 @@
 """GitCode 仓库托管管理：获取管理员仓库、创建/删除 webhook"""
-import json, urllib.request, urllib.error
+import json, socket, urllib.request, urllib.error
 from src.config import log, GITCODE_WEBHOOK_TOKEN
 
 API_BASE = "https://api.gitcode.com/api/v5"
-WEBHOOK_URL = "http://203.0.113.2:8080/webhook/gitcode"
+WEBHOOK_PORT = 8080
+WEBHOOK_PATH = "/webhook/gitcode"
 
 
 def _req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
-    """调用 GitCode API，返回 JSON 响应或抛出异常"""
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -24,6 +24,24 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
         raise RuntimeError(f"GitCode API {method} {url} failed ({e.code}): {body}")
     except urllib.error.URLError as e:
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
+
+
+def detect_public_url() -> str:
+    """自动检测本机公网 IP，拼接完整 webhook URL"""
+    try:
+        resp = urllib.request.urlopen("https://api.ipify.org?format=json", timeout=5)
+        ip = json.loads(resp.read())["ip"]
+        return f"http://{ip}:{WEBHOOK_PORT}{WEBHOOK_PATH}"
+    except:
+        pass
+    try:
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        if ip and not ip.startswith("127."):
+            return f"http://{ip}:{WEBHOOK_PORT}{WEBHOOK_PATH}"
+    except:
+        pass
+    return ""
 
 
 def fetch_admin_repos(api_token: str) -> list[dict]:
@@ -50,9 +68,8 @@ def fetch_admin_repos(api_token: str) -> list[dict]:
             full_name = r.get("full_name", "")
             if not full_name or "/" not in full_name:
                 continue
-            # log first item keys for debugging
             if not repos and items.index(r) == 0:
-                log.info(f"First repo keys: {list(r.keys())}, permission={r.get('permission')}, permissions={r.get('permissions')}, role={r.get('role')}")
+                log.info(f"First repo keys: {list(r.keys())}, permission={r.get('permission')}, permissions={r.get('permissions')}")
             perm = r.get("permission") or r.get("permissions")
             if isinstance(perm, dict) and perm.get("admin"):
                 owner, name = full_name.split("/", 1)
@@ -64,11 +81,27 @@ def fetch_admin_repos(api_token: str) -> list[dict]:
     return repos
 
 
-def setup_webhook(api_token: str, owner: str, repo: str) -> int:
+def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int | None:
+    """检查仓库是否已有指向 webhook_url 的 webhook，有则返回 webhook_id"""
+    if not webhook_url:
+        return None
+    url = f"{API_BASE}/repos/{owner}/{repo}/hooks"
+    try:
+        hooks = _req("GET", url, api_token)
+        if isinstance(hooks, list):
+            for h in hooks:
+                if h.get("url") == webhook_url:
+                    return h.get("id")
+    except RuntimeError:
+        pass
+    return None
+
+
+def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int:
     """在指定仓库上创建 DevOps Bot webhook，返回 webhook_id。"""
     url = f"{API_BASE}/repos/{owner}/{repo}/hooks"
     body = {
-        "url": WEBHOOK_URL,
+        "url": webhook_url,
         "password": GITCODE_WEBHOOK_TOKEN,
         "push_events": True,
         "issues_events": True,
