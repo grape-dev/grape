@@ -70,7 +70,7 @@ def _load_accounts():
         for n, a in ACCOUNTS.items():
             if not a.get("webhook_url"):
                 if not detected:
-                    url = detect_public_url()
+                    url = _detect_webhook_url()
                     if url:
                         a["webhook_url"] = url
                         save_bot_account(n, a)
