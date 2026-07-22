@@ -502,6 +502,27 @@ def set_repo_mapping(user_id: int, repo_key: str, event_type: str, skill_name: s
         return False
 
 
+def get_skill_mappings(user_id: int, skill_name: str) -> list[dict]:
+    """获取指定技能的所有映射"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, event_type FROM repo_skill_mapping WHERE user_id=? AND skill_name=? ORDER BY repo_key, event_type", (user_id, skill_name))
+        return [{"repo_key": r[0], "event_type": r[1]} for r in c.fetchall()]
+
+
+def clear_skill_mappings(user_id: int, skill_name: str) -> bool:
+    """清除指定技能的所有映射"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM repo_skill_mapping WHERE user_id=? AND skill_name=?", (user_id, skill_name))
+            db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"Clear skill mappings failed: {e}")
+        return False
+
+
 def delete_repo_mapping(user_id: int, repo_key: str, event_type: str) -> bool:
     try:
         with db_lock:

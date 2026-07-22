@@ -237,33 +237,89 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_html(_render_user_panel(token))
             return
 
-        # 普通用户 → 上传自定义技能
+        # 普通用户 → 上传自定义技能（zip 包）
         if path == "/user/skill":
             token = self._get_param("token")
             uid = user_db.validate_token(token)
             if not uid:
                 self._send_html(_render_user_login("会话过期"))
                 return
-            from src.user import validator
-            skill_name = form.get("skill_name", "")
-            content = form.get("content", "")
-            if not re.match(r"^[a-z0-9-]+$", skill_name):
-                self._send_html(_render_user_panel(token))
+            import zipfile, io, yaml
+            zip_b64 = form.get("zip_b64", "")
+            if not zip_b64:
+                self._send_html(_render_user_panel(token, section="skills"))
                 return
-            user_db.create_skill(uid, skill_name)
-            user_db.save_skill_md(uid, skill_name, content)
-            self._send_html(_render_user_panel(token))
+            try:
+                raw = __import__("base64").b64decode(zip_b64)
+            except Exception as e:
+                self._send_html(_render_user_panel(token, section="skills"))
+                return
+            skill_name = ""
+            skill_content = ""
+            ref_dir = ""
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                    names = zf.namelist()
+                    # 自动剥离公共顶层目录
+                    prefix = ""
+                    if names:
+                        first = names[0]
+                        if "/" in first and all(n.startswith(first.split("/")[0] + "/") for n in names if "/" in n):
+                            prefix = first.split("/")[0] + "/"
+                    # 找 SKILL.md
+                    skill_path = prefix + "SKILL.md"
+                    if skill_path not in names:
+                        skill_path = "SKILL.md" if "SKILL.md" in names else ""
+                    if not skill_path:
+                        self._send_html(_render_user_panel(token, section="skills"))
+                        return
+                    skill_content = zf.read(skill_path).decode("utf-8")
+                    # 解析 name
+                    parts = skill_content.split("---", 2)
+                    if len(parts) < 3:
+                        self._send_html(_render_user_panel(token, section="skills"))
+                        return
+                    fm = yaml.safe_load(parts[1])
+                    if not isinstance(fm, dict) or not re.match(r"^[a-z0-9-]+$", str(fm.get("name", ""))):
+                        self._send_html(_render_user_panel(token, section="skills"))
+                        return
+                    skill_name = fm["name"]
+                    # 解压全部文件到技能目录
+                    for n in names:
+                        if n.startswith(prefix) and not zf.getinfo(n).is_dir():
+                            rel = n[len(prefix):]
+                            target = os.path.join(user_db.ensure_skill_dir(uid, skill_name), rel)
+                            os.makedirs(os.path.dirname(target), exist_ok=True)
+                            with open(target, "wb") as f:
+                                f.write(zf.read(n))
+            except Exception as e:
+                self._send_html(_render_user_panel(token, section="skills"))
+                return
+            if skill_name:
+                user_db.create_skill(uid, skill_name)
+            self._send_html(_render_user_panel(token, section="skills"))
             return
 
-        # 普通用户 → 仓库技能映射
-        if path == "/user/mapping":
+        # 普通用户 → 保存技能配置（仓库+事件映射）
+        if path == "/user/skill-config":
             token = self._get_param("token")
             uid = user_db.validate_token(token)
             if not uid:
                 self._send_html(_render_user_login("会话过期"))
                 return
-            user_db.set_repo_mapping(uid, form.get("repo_key", ""), form.get("event_type", ""), form.get("skill_name", ""))
-            self._send_html(_render_user_panel(token))
+            user = user_db.get_user(uid)
+            skill_name = form.get("skill_name", "")
+            repos = form.get("repos", [])
+            events = form.get("events", [])
+            if isinstance(repos, str):
+                repos = [repos]
+            if isinstance(events, str):
+                events = [events]
+            user_db.clear_skill_mappings(uid, skill_name)
+            for r in repos:
+                for e in events:
+                    user_db.set_repo_mapping(uid, r, e, skill_name)
+            self._send_html(_render_user_panel(token, section="skills"))
             return
 
         # 普通用户 → 加载可托管仓库列表
@@ -806,16 +862,45 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section=""):
         vm_html += f'<div class="item"><span>{v["name"]}</span><span style="font-size:12px;color:#888">{v["host"]}:{v["port"]}</span></div>'
 
     skills = user_db.list_skills(uid)
-    skills_html = ""
+    event_types = ["issue_opened","im_notify","issue_labeled","issue_comment",
+        "pull_request_opened","pull_request_updated","pull_request_merged",
+        "build_failure","deploy_start","deploy_failure","release_created","note_hook_pr"]
+    skill_cards_html = ""
+    import yaml
     for s in skills:
-        skills_html += f'<div class="item"><span>{s["skill_name"]}</span></div>'
+        sn = s["skill_name"]
+        md = user_db.get_skill_md(uid, sn)
+        desc = ""
+        if md:
+            parts = md.split("---", 2)
+            if len(parts) >= 3:
+                try:
+                    fm = yaml.safe_load(parts[1])
+                    desc = fm.get("description", "") if isinstance(fm, dict) else ""
+                except:
+                    pass
+        mappings = user_db.get_skill_mappings(uid, sn)
+        mapped_repos = set(m["repo_key"] for m in mappings)
+        mapped_events = set(m["event_type"] for m in mappings)
+        repo_cb = ""
+        for r in managed:
+            chk = " checked" if r["full_name"] in mapped_repos else ""
+            repo_cb += f'<label style="font-size:12px;margin-right:8px;white-space:nowrap"><input type="checkbox" name="repos" value="{r["full_name"]}"{chk}> {r["full_name"]}</label>'
+        evt_cb = ""
+        for e in event_types:
+            chk = " checked" if e in mapped_events else ""
+            evt_cb += f'<label style="font-size:12px;margin-right:8px;white-space:nowrap"><input type="checkbox" name="events" value="{e}"{chk}> {e}</label>'
+        skill_cards_html += f'''<div style="padding:16px;border-bottom:1px solid #f0f0f0">
+<div style="font-weight:600;margin-bottom:2px">{sn}</div>
+<div style="font-size:12px;color:#888;margin-bottom:12px">{desc or "暂无描述"}</div>
+<form method="POST" action="/user/skill-config?token={token}">
+<input type="hidden" name="skill_name" value="{sn}">
+<div class="row"><label style="font-size:12px">应用仓库</label><div style="display:flex;flex-wrap:wrap;gap:4px">{repo_cb}</div></div>
+<div class="row"><label style="font-size:12px">应用事件</label><div style="display:flex;flex-wrap:wrap;gap:4px">{evt_cb}</div></div>
+<button class="btn-p" type="submit" style="font-size:12px;padding:6px 16px;margin-top:8px">保存</button>
+</form></div>'''
 
-    mappings = user_db.get_repo_mappings(uid)
-    mapping_html = ""
-    for m in mappings:
-        mapping_html += f'<div class="item"><span>{m["repo_key"]} / {m["event_type"]} → {m["skill_name"]}</span></div>'
-
-    skill_opts = "".join(f'<option value="{s["skill_name"]}">{s["skill_name"]}</option>' for s in skills)
+    missing_skills_html = '<div class="item" style="color:#888">暂无自定义技能，点击右上角「上传技能」导入</div>'
 
     # 仓库托管
     managed = user_db.get_managed_repos(uid)
@@ -890,30 +975,15 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section=""):
     </div>
 
     <div id="section-skills"{h_skills}>
-      <h3>自定义技能</h3>
-      <div class="list">{skills_html or '<div class="item" style="color:#888">暂无技能</div>'}</div>
-      <div class="group" style="margin-top:12px"><h4>上传新技能</h4>
-        <form method="POST" action="/user/skill?token={token}">
-          <div class="row"><label>技能名称</label><input name="skill_name" pattern="[a-z0-9-]+" placeholder="kebab-case" required></div>
-          <div class="row"><label>SKILL.md 内容</label><textarea name="content" rows="8" style="width:100%;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px" required></textarea></div>
-          <button class="btn-p" type="submit">上传</button>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h3 style="margin:0;border:none;padding:0">自定义技能</h3>
+        <form method="POST" action="/user/skill?token={token}" id="skill_form" style="display:inline">
+          <input type="file" accept=".zip" style="display:none" id="skill_file" onchange="handleSkillFile()">
+          <input type="hidden" name="zip_b64" id="skill_zip" value="">
+          <button class="btn-p" type="button" onclick="document.getElementById('skill_file').click()">上传技能</button>
         </form>
       </div>
-      <div class="group"><h4>仓库技能映射</h4>
-        <div class="list">{mapping_html or '<div class="item" style="color:#888">暂无映射</div>'}</div>
-        <form method="POST" action="/user/mapping?token={token}" style="margin-top:8px">
-          <div class="row"><label>仓库</label><input name="repo_key" placeholder="owner/repo" required></div>
-          <div class="row"><label>事件类型</label><select name="event_type">
-            <option value="pull_request_opened">pull_request_opened</option>
-            <option value="pull_request_updated">pull_request_updated</option>
-            <option value="issue_opened">issue_opened</option>
-            <option value="issue_comment">issue_comment</option>
-            <option value="note_hook_pr">note_hook_pr</option>
-          </select></div>
-          <div class="row"><label>技能</label><select name="skill_name">{skill_opts}</select></div>
-          <button class="btn-p" type="submit">添加映射</button>
-        </form>
-      </div>
+      <div class="list">{skill_cards_html or missing_skills_html}</div>
     </div>
 
     <div id="section-repos"{h_repos}>
@@ -933,6 +1003,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section=""):
 </div>
 <script>
 function showSection(name){{['info','creds','vms','skills','repos'].forEach(function(s){{document.getElementById('section-'+s).style.display=s===name?'block':'none';}});}}
+function handleSkillFile(){{var f=document.getElementById('skill_file').files[0];if(!f)return;var r=new FileReader();r.onload=function(e){{document.getElementById('skill_zip').value=e.target.result.split(',')[1];document.getElementById('skill_form').submit();}};r.readAsDataURL(f);}}
 </script>
 </body></html>"""
 
