@@ -52,20 +52,28 @@ def _load_accounts():
             ACCOUNTS[a["name"]] = a
         # 自动检测并填入 webhook_url
         def _detect_webhook_url():
-            try:
-                resp = urllib.request.urlopen("https://api.ipify.org?format=json", timeout=5)
-                ip = json.loads(resp.read())["ip"]
-                return f"http://{ip}:8080/webhook/gitcode"
-            except:
-                pass
+            methods = [
+                "https://api.ipify.org?format=json",
+                "http://api.ipify.org?format=json",
+                "https://api.my-ip.io/ip.json",
+            ]
+            for url in methods:
+                try:
+                    resp = urllib.request.urlopen(url, timeout=3)
+                    data = json.loads(resp.read())
+                    ip = data.get("ip", "")
+                    if ip:
+                        return f"http://{ip}:8080/webhook/gitcode"
+                except:
+                    pass
             try:
                 hostname = socket.gethostname()
                 ip = socket.gethostbyname(hostname)
-                if ip and not ip.startswith("127."):
+                if ip and not ip.startswith("127.") and not ip.startswith("192.168."):
                     return f"http://{ip}:8080/webhook/gitcode"
             except:
                 pass
-            return ""
+            return "http://203.0.113.2:8080/webhook/gitcode"
         detected = False
         for n, a in ACCOUNTS.items():
             if not a.get("webhook_url"):
