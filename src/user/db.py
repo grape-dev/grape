@@ -553,6 +553,19 @@ def get_managed_repos(user_id: int) -> list[dict]:
         return [{"repo_owner": r[0], "repo_name": r[1], "full_name": r[2], "webhook_id": r[3], "is_admin": bool(r[4]), "created_at": r[5]} for r in c.fetchall()]
 
 
+def update_managed_repo_admin(user_id: int, repo_owner: str, repo_name: str, is_admin: bool) -> bool:
+    """更新托管仓库的 is_admin 标志"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE managed_repos SET is_admin=? WHERE user_id=? AND repo_owner=? AND repo_name=?", (int(is_admin), user_id, repo_owner, repo_name))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"Update managed repo admin failed: {e}")
+        return False
+
+
 def remove_managed_repo(user_id: int, repo_owner: str, repo_name: str) -> dict | None:
     """删除托管仓库记录，返回被删除的记录（含 webhook_id）或 None"""
     try:

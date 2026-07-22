@@ -291,12 +291,16 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_user_panel(token, section="repos", repo_msg=str(e)))
                 return
             managed = user_db.get_managed_repos(uid)
-            managed_set = set(r["full_name"] for r in managed)
+            managed_set = {r["full_name"]: r for r in managed}
             auto_imported = 0
             non_admin_imported = 0
             available = []
             for r in all_repos:
                 if r["full_name"] in managed_set:
+                    # 刷新已托管仓库的 is_admin 状态
+                    existing = managed_set[r["full_name"]]
+                    if existing.get("is_admin") != r.get("is_admin"):
+                        user_db.update_managed_repo_admin(uid, r["owner"], r["name"], r.get("is_admin", False))
                     continue
                 if webhook_url:
                     wh_id = find_existing_webhook(api_token, r["owner"], r["name"], webhook_url)
@@ -455,14 +459,18 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_admin_panel(token, account_name, "", repo_msg=str(e)))
                 return
             admin_user = user_db.get_user_by_username(account_name)
-            managed_set = set()
+            managed_set = {}
             if admin_user:
-                managed_set = set(r["full_name"] for r in user_db.get_managed_repos(admin_user["id"]))
+                for mr in user_db.get_managed_repos(admin_user["id"]):
+                    managed_set[mr["full_name"]] = mr
             auto_imported = 0
             non_admin_imported = 0
             available = []
             for r in all_repos:
                 if r["full_name"] in managed_set:
+                    existing = managed_set[r["full_name"]]
+                    if admin_user and existing.get("is_admin") != r.get("is_admin"):
+                        user_db.update_managed_repo_admin(admin_user["id"], r["owner"], r["name"], r.get("is_admin", False))
                     continue
                 if webhook_url and admin_user:
                     wh_id = find_existing_webhook(api_token, r["owner"], r["name"], webhook_url)
