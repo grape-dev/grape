@@ -290,11 +290,11 @@ class AdminHandler(BaseHTTPRequestHandler):
                     skill_content = zf.read(skill_path).decode("utf-8")
                     parts = skill_content.split("---", 2)
                     if len(parts) < 3:
-                        self._send_html(_render_user_panel(token, section="skills", skill_msg="SKILL.md 缺少 YAML Front Matter（--- 分隔）"))
+                        self._send_html(_render_user_panel(token, section="skills", skill_msg="SKILL.md 缺少 YAML Front Matter 的结束分隔符 ---"))
                         return
                     fm = yaml.safe_load(parts[1])
                     if not isinstance(fm, dict):
-                        self._send_html(_render_user_panel(token, section="skills", skill_msg="Front Matter 格式错误"))
+                        self._send_html(_render_user_panel(token, section="skills", skill_msg=f"Front Matter 格式错误，请检查 YAML 语法: {parts[1][:200]}"))
                         return
                     if not re.match(r"^[a-z0-9-]+$", str(fm.get("name", ""))):
                         self._send_html(_render_user_panel(token, section="skills", skill_msg="name 字段仅允许小写字母、数字、连字符"))
