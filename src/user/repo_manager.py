@@ -49,7 +49,9 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
             if not full_name or "/" not in full_name:
                 continue
             if not repos and items.index(r) == 0:
-                log.info(f"First repo keys: {list(r.keys())}, permission={r.get('permission')}, permissions={r.get('permissions')}")
+                log.info(f"First repo keys: {list(r.keys())}, permission={r.get('permission')} (type={type(r.get('permission')).__name__})")
+            if len(repos) < 5:
+                log.info(f"Repo {r.get('full_name')}: permission={r.get('permission')} (type={type(r.get('permission')).__name__})")
             perm = r.get("permission") or r.get("permissions")
             is_admin = isinstance(perm, dict) and perm.get("admin")
             owner, name = full_name.split("/", 1)
