@@ -25,11 +25,18 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
 
 
 def fetch_repos_with_role(api_token: str) -> list[dict]:
-    """获取用户的项目成员仓库，标注 is_admin。
+    """获取用户的项目成员仓库，标注 is_admin（仅仓库所有者算管理员）。
     返回：[{"full_name": "owner/repo", "owner": "owner", "name": "repo", "is_admin": bool}, ...]
     """
     if not api_token:
         raise RuntimeError("GitCode API Token 未配置")
+    # 获取当前用户身份
+    current_user = ""
+    try:
+        user_data = _req("GET", f"{API_BASE}/user", api_token)
+        current_user = user_data.get("login", "")
+    except RuntimeError:
+        pass
     repos = []
     page = 1
     while True:
@@ -49,15 +56,17 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
             if not full_name or "/" not in full_name:
                 continue
             if not repos and items.index(r) == 0:
-                log.info(f"First repo: {r.get('full_name')}, permission={r.get('permission')}")
-            perm = r.get("permission") or r.get("permissions")
-            is_admin = isinstance(perm, dict) and perm.get("admin")
+                log.info(f"First repo: {r.get('full_name')}, owner={r.get('owner')}")
+            # 仓库所有者才是真正管理员，维护者不算
+            owner_obj = r.get("owner", {})
+            owner_login = owner_obj.get("login", "") if isinstance(owner_obj, dict) else ""
+            is_admin = bool(current_user and owner_login and current_user == owner_login)
             owner, name = full_name.split("/", 1)
-            repos.append({"full_name": full_name, "owner": owner, "name": name, "is_admin": bool(is_admin)})
+            repos.append({"full_name": full_name, "owner": owner, "name": name, "is_admin": is_admin})
         if len(items) < 100:
             break
         page += 1
-    log.info(f"fetch_repos total: {len(repos)} repos")
+    log.info(f"fetch_repos total: {len(repos)} repos (current_user={current_user})")
     return repos
 
 
