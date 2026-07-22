@@ -291,13 +291,22 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not vm:
                 self._send_html(_render_user_panel(token, section="vms", vm_msg="云主机不存在"))
                 return
-            import socket
+            import paramiko, socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(8)
             try:
                 sock.connect((vm["host"], vm["port"]))
+                transport = paramiko.Transport(sock)
+                transport.connect(username=vm["ssh_user"], password=vm.get("ssh_password", ""))
+                transport.close()
                 sock.close()
-                msg = f"{vm['name']} 连接成功"
+                msg = f"{vm['name']} 连接成功（密码正确）"
+            except paramiko.AuthenticationException:
+                msg = f"{vm['name']} 连接失败：密码错误"
+                try:
+                    sock.close()
+                except:
+                    pass
             except Exception as e:
                 try:
                     sock.close()
