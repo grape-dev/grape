@@ -24,24 +24,17 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
 
 
-def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: str, perm_from_list: dict | None = None) -> bool:
-    """检查指定用户在仓库上的实际是否管理员"""
+def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: str) -> bool:
+    """调 /collaborators/{username}/permission 接口精确判断管理员权限"""
     if not username:
-        return bool(isinstance(perm_from_list, dict) and perm_from_list.get("admin"))
-    url = f"{API_BASE}/repos/{owner}/{repo}/collaborators/{username}"
+        return False
+    url = f"{API_BASE}/repos/{owner}/{repo}/collaborators/{username}/permission"
     try:
         data = _req("GET", url, api_token)
-        p = data.get("permission", {})
-        if isinstance(p, dict):
-            return bool(p.get("admin"))
-    except RuntimeError as e:
-        # 404 说明不是直接协作者，可能是组织成员
-        if "404" in str(e):
-            pass
-        else:
-            raise
-    # fallback: 用 list API 的 permission 字段
-    return bool(isinstance(perm_from_list, dict) and perm_from_list.get("admin"))
+        perm = data.get("permissions", {})
+        return bool(perm.get("admin")) if isinstance(perm, dict) else False
+    except RuntimeError:
+        return False
 
 
 def fetch_repos_with_role(api_token: str) -> list[dict]:
@@ -79,15 +72,13 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
                 continue
             if not repos and items.index(r) == 0:
                 log.info(f"First repo: {r.get('full_name')}, owner={r.get('owner')}")
-            perm = r.get("permission") or r.get("permissions")
             owner_obj = r.get("owner", {})
             owner_login = owner_obj.get("login", "") if isinstance(owner_obj, dict) else ""
             release_owner = full_name.split("/", 1)[0]
-            # 仓库所有者本人 → 肯定是管理员
             if current_user and owner_login and current_user == owner_login:
                 is_admin = True
             else:
-                is_admin = _check_collaborator_admin(api_token, release_owner, r.get("name", ""), current_user, perm)
+                is_admin = _check_collaborator_admin(api_token, release_owner, r.get("name", ""), current_user)
             repos.append({"full_name": full_name, "owner": release_owner, "name": r.get("name", ""), "is_admin": is_admin})
         if len(items) < 100:
             break
