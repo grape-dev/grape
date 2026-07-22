@@ -63,7 +63,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         except Exception as e:
             try:
                 from src.config import log
-                log.warning(f"Admin error: {e}")
+                import traceback
+                log.warning(f"Admin error: {e}\n{traceback.format_exc()}")
             except:
                 pass
 
@@ -244,44 +245,42 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not uid:
                 self._send_html(_render_user_login("会话过期"))
                 return
-            import zipfile, io, yaml
+            import zipfile, io, yaml, base64
             zip_b64 = form.get("zip_b64", "")
             if not zip_b64:
-                self._send_html(_render_user_panel(token, section="skills"))
+                self._send_html(_render_user_panel(token, section="skills", skill_msg="未读取到文件内容"))
                 return
             try:
-                raw = __import__("base64").b64decode(zip_b64)
+                raw = base64.b64decode(zip_b64)
             except Exception as e:
-                self._send_html(_render_user_panel(token, section="skills"))
+                self._send_html(_render_user_panel(token, section="skills", skill_msg=f"base64 解码失败: {e}"))
                 return
             skill_name = ""
-            skill_content = ""
-            ref_dir = ""
             try:
                 with zipfile.ZipFile(io.BytesIO(raw)) as zf:
                     names = zf.namelist()
-                    # 自动剥离公共顶层目录
                     prefix = ""
                     if names:
                         first = names[0]
                         if "/" in first and all(n.startswith(first.split("/")[0] + "/") for n in names if "/" in n):
                             prefix = first.split("/")[0] + "/"
-                    # 找 SKILL.md
                     skill_path = prefix + "SKILL.md"
                     if skill_path not in names:
                         skill_path = "SKILL.md" if "SKILL.md" in names else ""
                     if not skill_path:
-                        self._send_html(_render_user_panel(token, section="skills"))
+                        self._send_html(_render_user_panel(token, section="skills", skill_msg="zip 包中未找到 SKILL.md"))
                         return
                     skill_content = zf.read(skill_path).decode("utf-8")
-                    # 解析 name
                     parts = skill_content.split("---", 2)
                     if len(parts) < 3:
-                        self._send_html(_render_user_panel(token, section="skills"))
+                        self._send_html(_render_user_panel(token, section="skills", skill_msg="SKILL.md 缺少 YAML Front Matter（--- 分隔）"))
                         return
                     fm = yaml.safe_load(parts[1])
-                    if not isinstance(fm, dict) or not re.match(r"^[a-z0-9-]+$", str(fm.get("name", ""))):
-                        self._send_html(_render_user_panel(token, section="skills"))
+                    if not isinstance(fm, dict):
+                        self._send_html(_render_user_panel(token, section="skills", skill_msg="Front Matter 格式错误"))
+                        return
+                    if not re.match(r"^[a-z0-9-]+$", str(fm.get("name", ""))):
+                        self._send_html(_render_user_panel(token, section="skills", skill_msg="name 字段仅允许小写字母、数字、连字符"))
                         return
                     skill_name = fm["name"]
                     # 解压全部文件到技能目录
@@ -293,11 +292,11 @@ class AdminHandler(BaseHTTPRequestHandler):
                             with open(target, "wb") as f:
                                 f.write(zf.read(n))
             except Exception as e:
-                self._send_html(_render_user_panel(token, section="skills"))
+                self._send_html(_render_user_panel(token, section="skills", skill_msg=f"处理 zip 包失败: {e}"))
                 return
             if skill_name:
                 user_db.create_skill(uid, skill_name)
-            self._send_html(_render_user_panel(token, section="skills"))
+            self._send_html(_render_user_panel(token, section="skills", skill_msg=f"技能 {skill_name} 已上传"))
             return
 
         # 普通用户 → 保存技能配置（仓库+事件映射）
@@ -830,7 +829,7 @@ def _render_user_login(error=""):
 </body></html>"""
 
 
-def _render_user_panel(token, loaded_repos=None, repo_msg="", section=""):
+def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_msg=""):
     uid = user_db.validate_token(token)
     user = user_db.get_user(uid) if uid else None
     if not user:
@@ -983,6 +982,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section=""):
           <button class="btn-p" type="button" onclick="document.getElementById('skill_file').click()">上传技能</button>
         </form>
       </div>
+      {('<p style="color:#e74c3c;font-size:12px;margin-bottom:8px">' + skill_msg + '</p>') if skill_msg else ''}
       <div class="list">{skill_cards_html or missing_skills_html}</div>
     </div>
 
