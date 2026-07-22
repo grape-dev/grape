@@ -182,8 +182,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             from src.config import ACCOUNTS
             items = [_account_summary(a) for a in ACCOUNTS.values()]
-        self._send_json(200, items)
-        return
+            self._send_json(200, items)
+            return
 
         # API: VM connectivity test
         if path == "/api/vm-test":
