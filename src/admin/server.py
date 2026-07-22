@@ -259,51 +259,44 @@ class AdminHandler(BaseHTTPRequestHandler):
             try:
                 with zipfile.ZipFile(io.BytesIO(raw)) as zf:
                     names = zf.namelist()
-                    from src.config import log
-                    log.info(f"Skill upload: names={names}")
                     prefix = ""
                     if names:
                         first = names[0]
-                        # 检测公共顶层目录（处理 my-skill/SKILL.md 等）
                         parts = first.split("/")
                         if len(parts) > 1 and parts[0]:
                             candidate = parts[0] + "/"
                             if all(n.startswith(candidate) or n == parts[0] for n in names):
                                 prefix = candidate
+                                # 用顶层目录名作为技能名称的 fallback
+                                skill_name = parts[0].replace("_", "-").lower()
                     skill_path = prefix + "SKILL.md"
                     if skill_path not in names:
-                        skill_path = "SKILL.md" if "SKILL.md" in names else ""
-                    # 大小写容错
-                    if not skill_path:
-                        for v in ["skill.md", "Skill.md", "SKILL.MD"]:
-                            if prefix + v in names:
-                                skill_path = prefix + v
-                                break
-                        if not skill_path:
-                            for v in ["skill.md", "Skill.md", "SKILL.MD"]:
-                                if v in names:
-                                    skill_path = v
-                                    break
-                    if not skill_path:
+                        skill_path = prefix + "skill.md"
+                    if skill_path not in names:
+                        skill_path = prefix + "Skill.md"
+                    if skill_path not in names:
+                        skill_path = "SKILL.md" if "SKILL.md" in names else "skill.md" if "skill.md" in names else ""
+                    if not skill_path or skill_path not in names:
                         self._send_html(_render_user_panel(token, section="skills", skill_msg="zip 包中未找到 SKILL.md"))
                         return
                     skill_content = zf.read(skill_path).decode("utf-8")
+                    # 尝试从 Front Matter 提取 name
                     parts = skill_content.split("---", 2)
-                    if len(parts) < 3:
-                        self._send_html(_render_user_panel(token, section="skills", skill_msg="SKILL.md 缺少 YAML Front Matter 的结束分隔符 ---"))
-                        return
-                    fm = yaml.safe_load(parts[1])
-                    if not isinstance(fm, dict):
-                        self._send_html(_render_user_panel(token, section="skills", skill_msg=f"Front Matter 格式错误，请检查 YAML 语法: {parts[1][:200]}"))
-                        return
-                    if not re.match(r"^[a-z0-9-]+$", str(fm.get("name", ""))):
-                        self._send_html(_render_user_panel(token, section="skills", skill_msg="name 字段仅允许小写字母、数字、连字符"))
-                        return
-                    skill_name = fm["name"]
+                    if len(parts) >= 3:
+                        try:
+                            fm = yaml.safe_load(parts[1])
+                            if isinstance(fm, dict) and fm.get("name"):
+                                n = str(fm["name"]).strip()
+                                if re.match(r"^[a-z0-9-]+$", n):
+                                    skill_name = n
+                        except:
+                            pass
+                    if not skill_name:
+                        skill_name = "custom-skill"
                     # 解压全部文件到技能目录
                     for n in names:
                         if n.startswith(prefix) and not zf.getinfo(n).is_dir():
-                            rel = n[len(prefix):]
+                            rel = n[len(prefix):] if prefix else n
                             target = os.path.join(user_db.ensure_skill_dir(uid, skill_name), rel)
                             os.makedirs(os.path.dirname(target), exist_ok=True)
                             with open(target, "wb") as f:
