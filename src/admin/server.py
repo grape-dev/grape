@@ -331,6 +331,19 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_html(_render_user_panel(token, section="skills"))
             return
 
+        # 普通用户 → 删除技能
+        if path == "/user/skill-delete":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            skill_name = form.get("skill_name", "")
+            if skill_name:
+                user_db.delete_skill(uid, skill_name)
+            self._send_html(_render_user_panel(token, section="skills", skill_msg=f"技能 {skill_name} 已删除"))
+            return
+
         # 普通用户 → 加载可托管仓库列表
         if path == "/user/repo-sync":
             token = self._get_param("token")
@@ -901,8 +914,16 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
             chk = " checked" if e in mapped_events else ""
             evt_cb += f'<label style="font-size:12px;margin-right:8px;white-space:nowrap"><input type="checkbox" name="events" value="{e}"{chk}> {e}</label>'
         skill_cards_html += f'''<div style="padding:16px;border-bottom:1px solid #f0f0f0">
+<div style="display:flex;justify-content:space-between;align-items:start">
+<div>
 <div style="font-weight:600;margin-bottom:2px">{sn}</div>
 <div style="font-size:12px;color:#888;margin-bottom:12px">{desc or "暂无描述"}</div>
+</div>
+<form method="POST" action="/user/skill-delete?token={token}" style="margin:0" onsubmit="return confirm('确定删除技能 {sn}？将同时清除所有仓库映射')">
+<input type="hidden" name="skill_name" value="{sn}">
+<button class="btn-d" type="submit" style="padding:2px 8px;font-size:12px">删除</button>
+</form>
+</div>
 <form method="POST" action="/user/skill-config?token={token}">
 <input type="hidden" name="skill_name" value="{sn}">
 <div class="row"><label style="font-size:12px">应用仓库</label><div style="display:flex;flex-wrap:wrap;gap:4px">{repo_cb}</div></div>
