@@ -24,8 +24,30 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
 
 
+def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: str, perm_from_list: dict | None = None) -> bool:
+    """检查指定用户在仓库上的实际是否管理员"""
+    if not username:
+        return bool(isinstance(perm_from_list, dict) and perm_from_list.get("admin"))
+    url = f"{API_BASE}/repos/{owner}/{repo}/collaborators/{username}"
+    try:
+        data = _req("GET", url, api_token)
+        p = data.get("permission", {})
+        if isinstance(p, dict):
+            return bool(p.get("admin"))
+    except RuntimeError as e:
+        # 404 说明不是直接协作者，可能是组织成员
+        if "404" in str(e):
+            pass
+        else:
+            raise
+    # fallback: 用 list API 的 permission 字段
+    return bool(isinstance(perm_from_list, dict) and perm_from_list.get("admin"))
+
+
 def fetch_repos_with_role(api_token: str) -> list[dict]:
-    """获取用户的项目成员仓库，标注 is_admin（仅仓库所有者算管理员）。
+    """获取用户的项目成员仓库，标注 is_admin。
+    仓库所有者 | 组织管理员 → is_admin=True
+    维护者 → is_admin=False
     返回：[{"full_name": "owner/repo", "owner": "owner", "name": "repo", "is_admin": bool}, ...]
     """
     if not api_token:
@@ -57,12 +79,16 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
                 continue
             if not repos and items.index(r) == 0:
                 log.info(f"First repo: {r.get('full_name')}, owner={r.get('owner')}")
-            # 仓库所有者才是真正管理员，维护者不算
+            perm = r.get("permission") or r.get("permissions")
             owner_obj = r.get("owner", {})
             owner_login = owner_obj.get("login", "") if isinstance(owner_obj, dict) else ""
-            is_admin = bool(current_user and owner_login and current_user == owner_login)
-            owner, name = full_name.split("/", 1)
-            repos.append({"full_name": full_name, "owner": owner, "name": name, "is_admin": is_admin})
+            release_owner = full_name.split("/", 1)[0]
+            # 仓库所有者本人 → 肯定是管理员
+            if current_user and owner_login and current_user == owner_login:
+                is_admin = True
+            else:
+                is_admin = _check_collaborator_admin(api_token, release_owner, r.get("name", ""), current_user, perm)
+            repos.append({"full_name": full_name, "owner": release_owner, "name": r.get("name", ""), "is_admin": is_admin})
         if len(items) < 100:
             break
         page += 1
