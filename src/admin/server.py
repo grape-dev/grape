@@ -273,6 +273,17 @@ class AdminHandler(BaseHTTPRequestHandler):
                     skill_path = prefix + "SKILL.md"
                     if skill_path not in names:
                         skill_path = "SKILL.md" if "SKILL.md" in names else ""
+                    # 大小写容错
+                    if not skill_path:
+                        for v in ["skill.md", "Skill.md", "SKILL.MD"]:
+                            if prefix + v in names:
+                                skill_path = prefix + v
+                                break
+                        if not skill_path:
+                            for v in ["skill.md", "Skill.md", "SKILL.MD"]:
+                                if v in names:
+                                    skill_path = v
+                                    break
                     if not skill_path:
                         self._send_html(_render_user_panel(token, section="skills", skill_msg="zip 包中未找到 SKILL.md"))
                         return
