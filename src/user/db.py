@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS user_vms (
     port INTEGER DEFAULT 22,
     ssh_user TEXT NOT NULL,
     ssh_password TEXT NOT NULL,
+    status TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE (user_id, name)
 )
@@ -302,8 +303,20 @@ def add_vm(user_id: int, name: str, host: str, ssh_user: str, ssh_password: str,
 def get_vms(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, host, port, ssh_user, ssh_password FROM user_vms WHERE user_id=? ORDER BY id", (user_id,))
-        return [{"id": r[0], "name": r[1], "host": r[2], "port": r[3], "ssh_user": r[4], "ssh_password": r[5]} for r in c.fetchall()]
+        c.execute("SELECT id, name, host, port, ssh_user, ssh_password, status FROM user_vms WHERE user_id=? ORDER BY id", (user_id,))
+        return [{"id": r[0], "name": r[1], "host": r[2], "port": r[3], "ssh_user": r[4], "ssh_password": r[5], "status": r[6]} for r in c.fetchall()]
+
+
+def update_vm_status(vm_id: int, status: str) -> bool:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE user_vms SET status=? WHERE id=?", (status, vm_id))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"Update VM status failed: {e}")
+        return False
 
 
 def delete_vm(vm_id: int) -> bool:
@@ -424,6 +437,10 @@ def init_db():
             pass
         try:
             db.execute("ALTER TABLE bot_accounts ADD COLUMN webhook_url TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE user_vms ADD COLUMN status TEXT DEFAULT ''")
         except Exception:
             pass
         db.commit()

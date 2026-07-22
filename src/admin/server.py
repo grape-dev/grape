@@ -300,6 +300,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 transport.connect(username=vm["ssh_user"], password=vm.get("ssh_password", ""))
                 transport.close()
                 sock.close()
+                user_db.update_vm_status(vm["id"], "connected")
                 msg = f"{vm['name']} 连接成功（密码正确）"
             except paramiko.AuthenticationException:
                 msg = f"{vm['name']} 连接失败：密码错误"
@@ -987,6 +988,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
 <span>
   <strong>{v["name"]}</strong>
+  {('<span style="color:#27ae60;font-size:11px;margin-left:4px">已连通</span>' if v.get("status") == "connected" else '<span style="color:#999;font-size:11px;margin-left:4px">未连通</span>')}
   <span style="color:#888;font-size:12px;margin-left:8px">{v["host"]}:{v["port"]}</span>
 </span>
 <div style="display:flex;gap:4px">
