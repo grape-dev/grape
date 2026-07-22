@@ -418,7 +418,7 @@ def init_db():
 
 # ====== 自定义技能 CRUD ======
 
-SKILL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "custom")
+SKILL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "skills", "custom")
 
 def ensure_skill_dir(user_id: int, skill_name: str) -> str:
     """确保技能目录存在，返回路径"""
@@ -479,12 +479,14 @@ def save_skill_md(user_id: int, skill_name: str, content: str) -> bool:
 
 
 def get_skill_md(user_id: int, skill_name: str) -> str | None:
-    """读取 SKILL.md 内容"""
-    path = os.path.join(SKILL_DIR, str(user_id), skill_name, "SKILL.md")
-    if not os.path.exists(path):
-        return None
-    with open(path, encoding="utf-8") as f:
-        return f.read()
+    """读取 SKILL.md 内容（大小写容错）"""
+    base = os.path.join(SKILL_DIR, str(user_id), skill_name)
+    for name in ("SKILL.md", "skill.md", "Skill.md"):
+        path = os.path.join(base, name)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+    return None
 
 
 # ====== 仓库技能映射 CRUD ======
@@ -730,3 +732,21 @@ def migrate_accounts_from_json():
 # 启动时初始化 + 迁移
 init_db()
 migrate_accounts_from_json()
+
+# 迁移旧路径 skills 到新路径
+_OLD_SKILL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "custom")
+if os.path.isdir(_OLD_SKILL_DIR) and _OLD_SKILL_DIR != SKILL_DIR:
+    try:
+        import shutil
+        for uid_dir in os.listdir(_OLD_SKILL_DIR):
+            src = os.path.join(_OLD_SKILL_DIR, uid_dir)
+            if os.path.isdir(src):
+                dst = os.path.join(SKILL_DIR, uid_dir)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if not os.path.exists(dst):
+                    shutil.move(src, dst)
+                    log.info(f"Moved skill dir: {src} -> {dst}")
+        if os.path.isdir(_OLD_SKILL_DIR) and not os.listdir(_OLD_SKILL_DIR):
+            os.rmdir(_OLD_SKILL_DIR)
+    except Exception as e:
+        log.warning(f"Skill dir migration failed: {e}")
