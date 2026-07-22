@@ -871,6 +871,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
         vm_html += f'<div class="item"><span>{v["name"]}</span><span style="font-size:12px;color:#888">{v["host"]}:{v["port"]}</span></div>'
 
     skills = user_db.list_skills(uid)
+    managed = user_db.get_managed_repos(uid)
     event_types = ["issue_opened","im_notify","issue_labeled","issue_comment",
         "pull_request_opened","pull_request_updated","pull_request_merged",
         "build_failure","deploy_start","deploy_failure","release_created","note_hook_pr"]
@@ -912,7 +913,6 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
     missing_skills_html = '<div class="item" style="color:#888">暂无自定义技能，点击右上角「上传技能」导入</div>'
 
     # 仓库托管
-    managed = user_db.get_managed_repos(uid)
     managed_html = ""
     for r in managed:
         badge = "" if r.get("is_admin") else '<span style="color:#999;font-size:11px;margin-left:6px">非管理员</span>'
