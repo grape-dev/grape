@@ -198,21 +198,19 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not vm:
                 self._send_json(404, {"status": "error", "error": "not found"})
                 return
-            from concurrent.futures import ThreadPoolExecutor
-            def _test_ssh():
-                import paramiko
-                c = paramiko.SSHClient()
-                c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                c.connect(vm["host"], port=vm["port"], username=vm["ssh_user"],
-                          password=vm.get("ssh_password", ""), timeout=8, banner_timeout=5, auth_timeout=8)
-                c.close()
-                return True
+            import socket
+            # 先用 socket 快速检测端口
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
             try:
-                pool = ThreadPoolExecutor(max_workers=1)
-                f = pool.submit(_test_ssh)
-                f.result(timeout=15)
+                sock.connect((vm["host"], vm["port"]))
+                sock.close()
                 self._send_json(200, {"status": "ok"})
             except Exception as e:
+                try:
+                    sock.close()
+                except:
+                    pass
                 self._send_json(200, {"status": "fail", "error": str(e)[:200]})
             return
 
@@ -278,6 +276,35 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             user_db.delete_vm(int(form.get("vm_id", 0)))
             self._send_html(_render_user_panel(token, section="vms"))
+            return
+
+        # 普通用户 → 测试云主机连通性
+        if path == "/user/vm-test":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            user = user_db.get_user(uid)
+            vms = user_db.get_vms(uid)
+            vm = next((v for v in vms if str(v["id"]) == form.get("vm_id", "")), None)
+            if not vm:
+                self._send_html(_render_user_panel(token, section="vms", vm_msg="云主机不存在"))
+                return
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(8)
+            try:
+                sock.connect((vm["host"], vm["port"]))
+                sock.close()
+                msg = f"{vm['name']} 连接成功"
+            except Exception as e:
+                try:
+                    sock.close()
+                except:
+                    pass
+                msg = f"{vm['name']} 连接失败: {e}"
+            self._send_html(_render_user_panel(token, section="vms", vm_msg=msg))
             return
 
         # 普通用户 → 配置云主机应用仓库
@@ -911,7 +938,7 @@ def _render_user_login(error=""):
 </body></html>"""
 
 
-def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_msg=""):
+def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_msg="", vm_msg=""):
     uid = user_db.validate_token(token)
     user = user_db.get_user(uid) if uid else None
     if not user:
@@ -950,12 +977,14 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
         vm_html += f'''<div style="padding:16px;border-bottom:1px solid #f0f0f0">
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
 <span>
-  <span id="vm_status_{v["id"]}" style="font-size:14px;margin-right:4px"></span>
   <strong>{v["name"]}</strong>
   <span style="color:#888;font-size:12px;margin-left:8px">{v["host"]}:{v["port"]}</span>
 </span>
 <div style="display:flex;gap:4px">
-<button class="btn-s" style="padding:2px 8px;font-size:12px" onclick="testVm({v["id"]})" id="vm_btn_{v["id"]}">测试</button>
+<form method="POST" action="/user/vm-test?token={token}" style="margin:0">
+<input type="hidden" name="vm_id" value="{v["id"]}">
+<button class="btn-s" type="submit" style="padding:2px 8px;font-size:12px">测试</button>
+</form>
 <form method="POST" action="/user/vm-delete?token={token}" style="margin:0" onsubmit="return confirm('确定删除云主机 {v["name"]}？')">
 <input type="hidden" name="vm_id" value="{v["id"]}">
 <button class="btn-d" type="submit" style="padding:2px 8px;font-size:12px">删除</button>
@@ -1077,6 +1106,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
         <h3 style="margin:0;border:none;padding:0">云主机</h3>
         <button class="btn-p" type="button" onclick="toggleNewVm()">新增云主机</button>
       </div>
+      {('<p style="font-size:12px;margin-bottom:8px;color:' + ('#27ae60' if '成功' in vm_msg else '#e74c3c') + '">' + vm_msg + '</p>') if vm_msg else ''}
       <div class="list">{vm_html or '<div class="item" style="color:#888">暂无云主机</div>'}</div>
       <div id="new_vm_form" style="display:none;margin-top:12px;padding:16px;background:#f5f5f5;border-radius:8px">
         <h4 style="margin:0 0 12px 0;font-size:14px">新增云主机</h4>
@@ -1091,6 +1121,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
           <button class="btn-p" type="submit" style="margin-top:12px">添加</button>
         </form>
       </div>
+      <script>function toggleNewVm(){{var f=document.getElementById('new_vm_form');f.style.display=f.style.display==='none'?'block':'none';}}</script>
       <script>function toggleNewVm(){{var f=document.getElementById('new_vm_form');f.style.display=f.style.display==='none'?'block':'none';}}</script>
     </div>
 
@@ -1125,7 +1156,6 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
 <script>
 function showSection(name){{['info','creds','vms','skills','repos'].forEach(function(s){{document.getElementById('section-'+s).style.display=s===name?'block':'none';}});}}
 function handleSkillFile(){{var f=document.getElementById('skill_file').files[0];if(!f)return;var r=new FileReader();r.onload=function(e){{document.getElementById('skill_zip').value=e.target.result.split(',')[1];document.getElementById('skill_form').submit();}};r.readAsDataURL(f);}}
-function testVm(id){{var btn=document.getElementById('vm_btn_'+id);btn.disabled=true;btn.innerText='...';var s=document.getElementById('vm_status_'+id);fetch('/api/vm-test?token={token}&vm_id='+id).then(function(r){{return r.json()}}).then(function(d){{if(d.status==='ok'){{s.innerText='✅'}}else{{s.innerText='❌'}};btn.disabled=false;btn.innerText='测试'}}).catch(function(){{s.innerText='❌';btn.disabled=false;btn.innerText='测试'}});}}
 </script>
 </body></html>"""
 
