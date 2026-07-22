@@ -932,6 +932,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
             cred_fields_html += f'<div class="row"><label>{label}</label><div class="iw"><input id="{fid}" type="password" name="{key}" value="{val}"><span class="eye" onclick="var e=document.getElementById(\'{fid}\');e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div></div>'
 
     vms = user_db.get_vms(uid)
+    managed = user_db.get_managed_repos(uid)
     vm_html = ""
     for v in vms:
         vm_repos = user_db.get_vm_repos(v["id"])
@@ -961,7 +962,6 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
 </form></div>'''
 
     skills = user_db.list_skills(uid)
-    managed = user_db.get_managed_repos(uid)
     event_types = ["issue_opened","im_notify","issue_labeled","issue_comment",
         "pull_request_opened","pull_request_updated","pull_request_merged",
         "build_failure","deploy_start","deploy_failure","release_created","note_hook_pr"]
