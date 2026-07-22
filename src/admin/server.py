@@ -1055,7 +1055,7 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
           <button class="btn-p" type="submit" style="margin-top:12px">添加</button>
         </form>
       </div>
-      <script>function toggleNewVm(){var f=document.getElementById('new_vm_form');f.style.display=f.style.display==='none'?'block':'none';}</script>
+      <script>function toggleNewVm(){{var f=document.getElementById('new_vm_form');f.style.display=f.style.display==='none'?'block':'none';}}</script>
     </div>
 
     <div id="section-skills"{h_skills}>
