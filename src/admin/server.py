@@ -199,17 +199,15 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"status": "error", "error": "not found"})
                 return
             import paramiko, socket
-            client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(8)
             try:
-                client.connect(vm["host"], port=vm["port"], username=vm["ssh_user"],
-                              password=vm.get("ssh_password", ""), timeout=8, banner_timeout=5, auth_timeout=8)
-                client.get_transport().sock.settimeout(5)
-                client.close()
+                sock.connect((vm["host"], vm["port"]))
+                sock.close()
                 self._send_json(200, {"status": "ok"})
             except Exception as e:
                 try:
-                    client.close()
+                    sock.close()
                 except:
                     pass
                 self._send_json(200, {"status": "fail", "error": str(e)[:200]})
