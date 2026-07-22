@@ -1,5 +1,5 @@
 """Bot 配置：全局常量、事件路由、多账户配置（从 accounts.json 读取）"""
-import os, json, logging, logging.handlers
+import os, json, logging, logging.handlers, urllib.request, socket
 
 # ====== 日志 ======
 logging.basicConfig(
@@ -51,7 +51,21 @@ def _load_accounts():
         for a in get_all_bot_accounts():
             ACCOUNTS[a["name"]] = a
         # 自动检测并填入 webhook_url
-        from src.user.db import detect_public_url
+        def _detect_webhook_url():
+            try:
+                resp = urllib.request.urlopen("https://api.ipify.org?format=json", timeout=5)
+                ip = json.loads(resp.read())["ip"]
+                return f"http://{ip}:8080/webhook/gitcode"
+            except:
+                pass
+            try:
+                hostname = socket.gethostname()
+                ip = socket.gethostbyname(hostname)
+                if ip and not ip.startswith("127."):
+                    return f"http://{ip}:8080/webhook/gitcode"
+            except:
+                pass
+            return ""
         detected = False
         for n, a in ACCOUNTS.items():
             if not a.get("webhook_url"):
