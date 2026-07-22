@@ -235,7 +235,43 @@ class AdminHandler(BaseHTTPRequestHandler):
             vm_id = user_db.add_vm(uid, form.get("name", ""), form.get("host", ""),
                                     form.get("ssh_user", "root"), form.get("ssh_password", ""),
                                     int(form.get("port", 22)))
-            self._send_html(_render_user_panel(token))
+            self._send_html(_render_user_panel(token, section="vms"))
+            return
+
+        # 普通用户 → 删除云主机
+        if path == "/user/vm-delete":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            user_db.delete_vm(int(form.get("vm_id", 0)))
+            self._send_html(_render_user_panel(token, section="vms"))
+            return
+
+        # 普通用户 → 测试云主机连通性
+        if path == "/user/vm-test":
+            token = self._get_param("token")
+            uid = user_db.validate_token(token)
+            if not uid:
+                self._send_html(_render_user_login("会话过期"))
+                return
+            vms = user_db.get_vms(uid)
+            vm = next((v for v in vms if str(v["id"]) == form.get("vm_id", "")), None)
+            if not vm:
+                self._send_html(_render_user_panel(token, section="vms", skill_msg="云主机不存在"))
+                return
+            import paramiko
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(vm["host"], port=vm["port"], username=vm["ssh_user"],
+                              password=vm.get("ssh_password", ""), timeout=10)
+                client.close()
+                msg = f"{vm['name']} 连接成功"
+            except Exception as e:
+                msg = f"{vm['name']} 连接失败: {e}"
+            self._send_html(_render_user_panel(token, section="vms", vm_msg=msg))
             return
 
         # 普通用户 → 上传自定义技能（zip 包）
@@ -852,7 +888,7 @@ def _render_user_login(error=""):
 </body></html>"""
 
 
-def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_msg=""):
+def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_msg="", vm_msg=""):
     uid = user_db.validate_token(token)
     user = user_db.get_user(uid) if uid else None
     if not user:
@@ -881,7 +917,17 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
     vms = user_db.get_vms(uid)
     vm_html = ""
     for v in vms:
-        vm_html += f'<div class="item"><span>{v["name"]}</span><span style="font-size:12px;color:#888">{v["host"]}:{v["port"]}</span></div>'
+        vm_html += f'''<div class="item" style="display:flex;align-items:center;justify-content:space-between">
+<span><strong>{v["name"]}</strong><span style="color:#888;font-size:12px;margin-left:8px">{v["host"]}:{v["port"]}</span></span>
+<div style="display:flex;gap:4px">
+<form method="POST" action="/user/vm-test?token={token}" style="margin:0">
+<input type="hidden" name="vm_id" value="{v["id"]}">
+<button class="btn-s" type="submit" style="padding:2px 8px;font-size:12px">测试</button>
+</form>
+<form method="POST" action="/user/vm-delete?token={token}" style="margin:0" onsubmit="return confirm('确定删除云主机 {v["name"]}？')">
+<input type="hidden" name="vm_id" value="{v["id"]}">
+<button class="btn-d" type="submit" style="padding:2px 8px;font-size:12px">删除</button>
+</form></div></div>'''
 
     skills = user_db.list_skills(uid)
     managed = user_db.get_managed_repos(uid)
@@ -990,18 +1036,26 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
     </div>
 
     <div id="section-vms"{h_vms}>
-      <h3>云主机</h3>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h3 style="margin:0;border:none;padding:0">云主机</h3>
+        <button class="btn-p" type="button" onclick="toggleNewVm()">新增云主机</button>
+      </div>
+      {('<p style="color:#e74c3c;font-size:12px;margin-bottom:8px">' + vm_msg + '</p>') if vm_msg else ''}
       <div class="list">{vm_html or '<div class="item" style="color:#888">暂无云主机</div>'}</div>
-      <div class="group" style="margin-top:12px"><h4>新增云主机</h4>
+      <div id="new_vm_form" style="display:none;margin-top:12px;padding:16px;background:#f5f5f5;border-radius:8px">
+        <h4 style="margin:0 0 12px 0;font-size:14px">新增云主机</h4>
         <form method="POST" action="/user/vm?token={token}">
-          <div class="row"><label>名称</label><input name="name" required></div>
-          <div class="row"><label>主机地址</label><input name="host" placeholder="IP 或域名" required></div>
-          <div class="row"><label>端口</label><input name="port" value="22"></div>
-          <div class="row"><label>SSH 用户</label><input name="ssh_user" value="root" required></div>
-          <div class="row"><label>SSH 密码</label><input name="ssh_password" type="password" required></div>
-          <button class="btn-p" type="submit">添加</button>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div><label style="font-size:12px;display:block;margin-bottom:2px;color:#666">名称</label><input name="name" style="width:100%;padding:8px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px" required></div>
+            <div><label style="font-size:12px;display:block;margin-bottom:2px;color:#666">主机地址</label><input name="host" style="width:100%;padding:8px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px" placeholder="IP 或域名" required></div>
+            <div><label style="font-size:12px;display:block;margin-bottom:2px;color:#666">端口</label><input name="port" value="22" style="width:100%;padding:8px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px"></div>
+            <div><label style="font-size:12px;display:block;margin-bottom:2px;color:#666">SSH 用户</label><input name="ssh_user" value="root" style="width:100%;padding:8px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px" required></div>
+            <div style="grid-column:1/-1"><label style="font-size:12px;display:block;margin-bottom:2px;color:#666">SSH 密码</label><input name="ssh_password" type="password" style="width:100%;padding:8px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px" required></div>
+          </div>
+          <button class="btn-p" type="submit" style="margin-top:12px">添加</button>
         </form>
       </div>
+      <script>function toggleNewVm(){var f=document.getElementById('new_vm_form');f.style.display=f.style.display==='none'?'block':'none';}</script>
     </div>
 
     <div id="section-skills"{h_skills}>

@@ -302,8 +302,8 @@ def add_vm(user_id: int, name: str, host: str, ssh_user: str, ssh_password: str,
 def get_vms(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, host, port, ssh_user FROM user_vms WHERE user_id=? ORDER BY id", (user_id,))
-        return [{"id": r[0], "name": r[1], "host": r[2], "port": r[3], "ssh_user": r[4]} for r in c.fetchall()]
+        c.execute("SELECT id, name, host, port, ssh_user, ssh_password FROM user_vms WHERE user_id=? ORDER BY id", (user_id,))
+        return [{"id": r[0], "name": r[1], "host": r[2], "port": r[3], "ssh_user": r[4], "ssh_password": r[5]} for r in c.fetchall()]
 
 
 def delete_vm(vm_id: int) -> bool:
