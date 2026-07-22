@@ -259,11 +259,17 @@ class AdminHandler(BaseHTTPRequestHandler):
             try:
                 with zipfile.ZipFile(io.BytesIO(raw)) as zf:
                     names = zf.namelist()
+                    from src.config import log
+                    log.info(f"Skill upload: names={names}")
                     prefix = ""
                     if names:
                         first = names[0]
-                        if "/" in first and all(n.startswith(first.split("/")[0] + "/") for n in names if "/" in n):
-                            prefix = first.split("/")[0] + "/"
+                        # 检测公共顶层目录（处理 my-skill/SKILL.md 等）
+                        parts = first.split("/")
+                        if len(parts) > 1 and parts[0]:
+                            candidate = parts[0] + "/"
+                            if all(n.startswith(candidate) or n == parts[0] for n in names):
+                                prefix = candidate
                     skill_path = prefix + "SKILL.md"
                     if skill_path not in names:
                         skill_path = "SKILL.md" if "SKILL.md" in names else ""
