@@ -51,7 +51,7 @@ def _load_accounts():
         for a in get_all_bot_accounts():
             ACCOUNTS[a["name"]] = a
         # 自动检测并填入 webhook_url
-        from src.user.repo_manager import detect_public_url
+        from src.user.db import detect_public_url
         detected = False
         for n, a in ACCOUNTS.items():
             if not a.get("webhook_url"):

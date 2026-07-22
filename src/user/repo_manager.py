@@ -1,10 +1,8 @@
 """GitCode 仓库托管管理：获取管理员仓库、创建/删除 webhook"""
-import json, socket, urllib.request, urllib.error
+import json, urllib.request, urllib.error
 from src.config import log, GITCODE_WEBHOOK_TOKEN
 
 API_BASE = "https://api.gitcode.com/api/v5"
-WEBHOOK_PORT = 8080
-WEBHOOK_PATH = "/webhook/gitcode"
 
 
 def _req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
@@ -24,24 +22,6 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
         raise RuntimeError(f"GitCode API {method} {url} failed ({e.code}): {body}")
     except urllib.error.URLError as e:
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
-
-
-def detect_public_url() -> str:
-    """自动检测本机公网 IP，拼接完整 webhook URL"""
-    try:
-        resp = urllib.request.urlopen("https://api.ipify.org?format=json", timeout=5)
-        ip = json.loads(resp.read())["ip"]
-        return f"http://{ip}:{WEBHOOK_PORT}{WEBHOOK_PATH}"
-    except:
-        pass
-    try:
-        hostname = socket.gethostname()
-        ip = socket.gethostbyname(hostname)
-        if ip and not ip.startswith("127."):
-            return f"http://{ip}:{WEBHOOK_PORT}{WEBHOOK_PATH}"
-    except:
-        pass
-    return ""
 
 
 def fetch_admin_repos(api_token: str) -> list[dict]:

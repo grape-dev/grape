@@ -1,5 +1,5 @@
 """用户系统数据库：users/credentials/vms/skills 表管理"""
-import json, hashlib, time, os
+import json, hashlib, time, os, socket, urllib.request
 from src.session_manager import db, db_lock
 from src.config import log
 
@@ -691,3 +691,25 @@ def migrate_accounts_from_json():
 # 启动时初始化 + 迁移
 init_db()
 migrate_accounts_from_json()
+
+
+WEBHOOK_PORT = 8080
+WEBHOOK_PATH = "/webhook/gitcode"
+
+
+def detect_public_url() -> str:
+    """自动检测本机公网 IP，拼接完整 webhook URL"""
+    try:
+        resp = urllib.request.urlopen("https://api.ipify.org?format=json", timeout=5)
+        ip = json.loads(resp.read())["ip"]
+        return f"http://{ip}:{WEBHOOK_PORT}{WEBHOOK_PATH}"
+    except:
+        pass
+    try:
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        if ip and not ip.startswith("127."):
+            return f"http://{ip}:{WEBHOOK_PORT}{WEBHOOK_PATH}"
+    except:
+        pass
+    return ""
