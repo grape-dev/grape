@@ -28,32 +28,65 @@ issue_comment（用户回复"同意开发"）
 
 ### 目标
 
-引入 **A2A（Agent-to-Agent）协议**，使 Agent 在执行完毕后，能够通过调用 DevOps Bot API 主动触发另一个 Agent，实现多 Agent 协作流水线。
+引入 **A2A（Agent-to-Agent）协议**，使 Agent 在执行完毕后，能够通过调用 DevOps Bot API 主动调用另一个 Agent，实现多 Agent 协作流水线。
 
 ## 架构设计
 
+### Agent 注册表（Agent Registry）
+
+当前 Agent 需要知道有哪些 Agent 可用、各自能干什么，才能决定将任务交给谁。每个 Agent 对应一个技能目录（`skills/{agent_name}/`），在注册表中注册其名称和能力描述。
+
+```python
+# src/config.py 或独立文件
+AGENT_REGISTRY = {
+    "issue": {
+        "description": "处理 Issue 分类、打标签、回复用户、审批确认",
+    },
+    "implementation": {
+        "description": "代码实现：创建分支、编码、提交、创建 PR",
+    },
+    "pr": {
+        "description": "Pull Request 审核：检查代码质量、添加评论",
+    },
+    "cloud-deploy": {
+        "description": "云部署：SSH 登录服务器、拉取代码、重启服务",
+    },
+    "build-debug": {
+        "description": "构建调试：分析构建失败日志、修复编译错误",
+    },
+    "deploy-guard": {
+        "description": "部署守护：监控部署状态、回滚异常发布",
+    },
+    "changelog-gen": {
+        "description": "生成变更日志：基于 commit 历史生成 CHANGELOG",
+    },
+    "skill-pr": {
+        "description": "技能仓库 PR 审核：校验自定义技能格式",
+    },
+}
+```
+
 ### A2A 协议定义
 
-Agent 在需要调用其他技能时，通过 **HTTP POST** 向 DevOps Bot 提交 A2A 事件：
+Agent 在需要调用其他 Agent 时，通过 **HTTP POST** 向 DevOps Bot 提交 A2A 事件：
 
-```
+```json
 POST /api/a2a
 Content-Type: application/json
 
 {
-  "event_type": "issue_comment",     // 事件类型（可选，默认沿用当前事件类型）
-  "skill": "implementation",          // 下一个要执行的技能（必填）
-  "payload": {                        // 上下文信息
+  "agent": "implementation",
+  "payload": {
     "repository": "owner/repo",
     "account": "default",
-    "context": "当前 DevOps Bot 生成的 prompt 摘要 + 当前 Agent 的处理结论"
+    "context": "前序 Agent 的处理摘要 + 当前 Agent 的分析结论"
   }
 }
 ```
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `skill` | 是 | 下一个要执行的技能名称（对应 skill 目录名） |
+| `agent` | 是 | 下一个要调用的 Agent 名称（对应 AGENT_REGISTRY 中的 key） |
 | `payload` | 是 | 透传上下文 |
 | `payload.repository` | 是 | 仓库标识 |
 | `payload.account` | 是 | 账户名 |
@@ -68,25 +101,43 @@ Webhook → event_processor → agent.run() → 结束
 
 新架构（Agent 主动触发 A2A）：
 ```
-Webhook → event_processor → agent.run(skill_prompt)
-  → Agent 完成任务后，如果判断需要其他技能：
-    → curl POST http://devops-bot:8080/api/a2a
+Webhook → event_processor → agent.run(prompt + AGENT_REGISTRY)
+  → Agent 完成任务后，查阅注册表决定下一步：
+    → curl POST http://devops-bot:8080/api/a2a {"agent": "implementation", ...}
   → Webhook 处理器收到 A2A 请求
-  → event_processor 切换 skill 重新执行
+  → event_processor 路由到指定 Agent
 ```
 
 ### 改动范围
 
 | 文件 | 改动 |
 |------|------|
+| `src/config.py` | 新增 `AGENT_REGISTRY` 常量 |
 | `src/webhook_handler.py` | 新增 `POST /api/a2a` 路由 |
-| `src/event_processor.py` | 新增 `process_a2a_event()`，支持 `_override_skill` |
-| `src/prompt_builder.py` | 在 prompt 末尾追加 A2A API 调用说明 |
-| `skills/*/SKILL.md` | 可选：增加 A2A 使用指引 |
+| `src/event_processor.py` | 新增 `process_a2a_event()`，支持 `_override_agent` |
+| `src/prompt_builder.py` | 在 prompt 中注入 `AGENT_REGISTRY` + A2A 调用说明 |
+| `src/agent/executor.py` | 追加注入 `REPO_FULL_NAME`、`ACCOUNT`、`CURRENT_EVENT_TYPE` |
 
 ## 详细设计
 
-### 1. A2A API 端点
+### 1. Agent 注册表
+
+在 `src/config.py` 中定义 `AGENT_REGISTRY`：
+
+```python
+AGENT_REGISTRY = {
+    "issue":          {"description": "Issue 分类、打标签、回复、审批确认"},
+    "implementation": {"description": "代码实现：创建分支、编码、提交 PR"},
+    "pr":             {"description": "PR 审核：代码质量检查、评论"},
+    "cloud-deploy":   {"description": "云部署：SSH 部署、重启服务"},
+    "build-debug":    {"description": "构建调试：分析失败日志、修复"},
+    "deploy-guard":   {"description": "部署守护：状态监控、异常回滚"},
+    "changelog-gen":  {"description": "变更日志：基于 commit 生成 CHANGELOG"},
+    "skill-pr":       {"description": "技能仓库 PR 审核"},
+}
+```
+
+### 2. A2A API 端点
 
 在 `webhook_handler.py` 中新增路由（Webhook 服务器端口 8080）：
 
@@ -102,39 +153,48 @@ if self.path == "/api/a2a" and self.command == "POST":
     self.wfile.write(b'{"status":"ok"}')
 ```
 
-### 2. event_processor A2A 处理
-
-新增 `process_a2a_event()`：
+### 3. event_processor A2A 处理
 
 ```python
-VALID_SKILLS = {"issue", "implementation", "pr", "cloud-deploy",
-                "build-debug", "deploy-guard", "changelog-gen",
-                "im-notify", "skill-pr", "agent"}
+from src.config import AGENT_REGISTRY
 
 def process_a2a_event(body: dict):
-    """处理 Agent 提交的 A2A 事件，路由到指定 skill"""
-    skill = body.get("skill", "")
-    if skill not in VALID_SKILLS:
-        log.warning(f"Invalid A2A skill: {skill}")
+    agent_name = body.get("agent", "")
+    if agent_name not in AGENT_REGISTRY:
+        log.warning(f"Invalid A2A agent: {agent_name}")
         return
     payload = body.get("payload", {})
     repository = payload.get("repository", "")
-    event_type = body.get("event_type", "")
     account = payload.get("account", "default")
     repo_key = f"gitcode:{repository}"
     a2a_evt = {
-        "type": event_type,
+        "type": "a2a_event",
         "repository": repository,
         "source": "gitcode",
         "actor": "bot",
         "payload": payload,
-        "_override_skill": skill,
-        "_a2a_context": payload.get("context", ""),  # ← 前序上下文
+        "_override_agent": agent_name,
+        "_a2a_context": payload.get("context", ""),
     }
     _process_event_inner(a2a_evt, repo_key, account)
 ```
 
-`build_prompt` 收到 `_a2a_context` 后，将其注入到 prompt 顶部：
+修改 `_process_event_inner` 支持 `_override_agent`：
+
+```python
+def _process_event_inner(evt, repo_key, account):
+    override_agent = evt.pop("_override_agent", "")
+    if override_agent:
+        log.info(f"A2A: routing to agent={override_agent}")
+        skills = [override_agent]
+    else:
+        skills = get_domain_skill(evt['type'], repo_key)
+    for skill in skills:
+        # 构建 prompt（含 AGENT_REGISTRY + A2A 说明）+ 执行 Agent
+        ...
+```
+
+`build_prompt` 收到 `_a2a_context` 后，注入到 prompt 顶部：
 
 ```python
 def build_prompt(evt, ...):
@@ -147,50 +207,36 @@ def build_prompt(evt, ...):
     # 后续拼接原始 prompt ...
 ```
 
-修改 `_process_event_inner` 支持 `_override_skill`：
+### 4. Prompt 注入 Agent 注册表 + A2A 调用说明
 
-```python
-def _process_event_inner(evt, repo_key, account):
-    override_skill = evt.pop("_override_skill", "")
-    if override_skill:
-        log.info(f"A2A override: routing to skill={override_skill}")
-        skills = [override_skill]
-    else:
-        skills = get_domain_skill(evt['type'], repo_key)
-    for skill in skills:
-        # 构建 prompt + 执行 Agent
-        ...
-```
-
-### 3. Prompt 追加 A2A 调用说明 + context 传递
-
-在 `build_prompt` 末尾追加，告知 Agent 如何构建 context 并发起 A2A：
+在 `build_prompt` 末尾追加。注意：`AGENT_REGISTRY` 在 prompt 中动态渲染为 JSON，Agent 可直接读取。
 
 ```
-## Agent-to-Agent 协议
+## 可用 Agent 列表
 
-如果你认为当前任务需要其他技能继续处理（例如 issue 审批通过后需要开发），
-请先完成当前任务（发布必要的评论/通知），然后调用 A2A API。
+以下是你可以调用的其他 Agent。当你完成任务后，如果判断需要其他 Agent 继续处理，
+查表选择最合适的 Agent，然后调用 A2A API。
+
+{{AGENT_REGISTRY_JSON}}
 
 ### 调用方式
 
   curl -X POST http://localhost:8080/api/a2a \
     -H "Content-Type: application/json" \
     -d '{
-      "event_type": "'"$CURRENT_EVENT_TYPE"'",
-      "skill": "implementation",
+      "agent": "implementation",
       "payload": {
         "repository": "'"$REPO_FULL_NAME"'",
         "account": "'"$ACCOUNT"'",
-        "context": "当前处理摘要：你完成该任务的分析结论和关键信息"
+        "context": "当前处理摘要（见下方构造规则）"
       }
     }'
 
 ### context 构造规则
 
 `context` 是传给下一个 Agent 的"接力说明"，应包含：
-1. **原始需求**：DevOps Bot 给你的 prompt 的核心内容
-2. **你的分析结论**：你通过分析得出的关键信息（issue 类型、严重程度、涉及文件等）
+1. **原始需求**：DevOps Bot 给你 prompt 的核心内容摘要
+2. **你的分析结论**：你通过分析得出的关键信息
 3. **建议下一步**：需要下一个 Agent 做什么
 
 示例：
@@ -203,22 +249,21 @@ def _process_event_inner(evt, repo_key, account):
 ⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
 ```
 
-### 4. context 的传递链路
+### 5. context 的传递链路
 
 ```
-DevOps Bot 生成原始 prompt
+DevOps Bot 生成原始 prompt（含 AGENT_REGISTRY + A2A 说明）
   → 当前 Agent 收到 prompt + 执行
-    → Agent 理解上下文、分析问题、生成结论
-    → Agent 将原始 prompt 摘要 + 自己的结论拼成 context
-    → Agent 发 curl POST /api/a2a 携带 context
+    → Agent 查阅注册表，判断应调用哪个 Agent
+    → Agent 生成 context（原始需求摘要 + 自己的结论）
+    → Agent 发 curl POST /api/a2a 携带 agent + context
   → event_processor 收到 A2A 请求
-    → _process_event_inner 将 context 注入到下一个 Agent 的 prompt 中
-    → 下一个 Agent 收到含前序上下文的 prompt
+    → 校验 agent 是否在注册表中
+    → 将 context 注入到下一个 Agent 的 prompt 顶部
+    → 下一个 Agent 收到含前序上下文的 prompt + 完整注册表
 ```
 
-### 5. Agent 调用 curl 的变量来源
-
-`$GITCODE_WEBHOOK_TOKEN`、`$ISSUE_NUMBER`、`$REPO_FULL_NAME` 等变量通过 `executor.py` 注入到 Agent 的环境变量中，Agent 可直接在 curl 命令中引用。
+### 6. 环境变量
 
 当前已注入的环境变量（`src/agent/executor.py`）：
 - `GITCODE_API_TOKEN`
@@ -229,12 +274,12 @@ DevOps Bot 生成原始 prompt
 - `ACCOUNT`（账户名）
 - `CURRENT_EVENT_TYPE`（当前事件类型，如 `issue_comment`）
 
-### 5. 安全限制
+### 7. 安全限制
 
 | 限制 | 说明 |
 |------|------|
 | 本地访问 | A2A API 仅限 `localhost:8080` 访问，不对外暴露 |
-| Skill 白名单 | 只允许 `VALID_SKILLS` 中已注册的技能 |
+| Agent 白名单 | 只允许 `AGENT_REGISTRY` 中已注册的 Agent |
 | 最大调用深度 | `max_a2a_depth = 5`，防止无限循环 |
 | 日志记录 | 每次 A2A 跳转记录完整链路 |
 
@@ -244,25 +289,27 @@ DevOps Bot 生成原始 prompt
 
 ```
 用户创建 Issue（feature 类型）
-  → issue_opened → issue skill
+  → issue_opened → issue agent
     → Agent 打标签、指派、回复等待批准
     → 用户回复"同意开发"
-    → issue_comment → issue skill
+    → issue_comment → issue agent（再次触发）
     → Agent 检测到批准意图
-    → curl POST /api/a2a {"skill": "implementation"}
-  → event_processor 切换 implementation skill
-    → Agent 创建分支、编码、提交 PR
+    → 查注册表 → 选择 implementation agent
+    → curl POST /api/a2a {"agent": "implementation", "context": "..."}
+  → process_a2a_event → 切换 implementation agent
+    → Agent 收到前序 context + "创建分支、编码、提交 PR"
 ```
 
 ### 场景二：Bug 自动修复
 
 ```
 用户创建 Issue（bug 类型）
-  → issue_opened → issue skill（auto_impl_enabled=ON）
+  → issue_opened → issue agent（auto_impl_enabled=ON）
     → Agent 分类、加 PATCH 标签
-    → curl POST /api/a2a {"skill": "implementation"}
-  → 切换 implementation skill
-    → Agent 分析代码、修复、提交 PR
+    → 查注册表 → 选择 implementation agent
+    → curl POST /api/a2a {"agent": "implementation", "context": "..."}
+  → 切换 implementation agent
+    → Agent 修复代码、提交 PR
 ```
 
 ## 实施阶段
@@ -271,17 +318,17 @@ DevOps Bot 生成原始 prompt
 
 | 文件 | 改动 |
 |------|------|
-| `src/webhook_handler.py` | 新增 `POST /api/a2a` 路由 + `process_a2a_event` 调用 |
-| `src/event_processor.py` | 新增 `process_a2a_event()`，`_process_event_inner` 支持 `_override_skill` |
-| `src/agent/executor.py` | 追加注入 `GITCODE_WEBHOOK_TOKEN`、`ISSUE_NUMBER`、`REPO_FULL_NAME` 等变量 |
-| `src/prompt_builder.py` | 追加 A2A API 调用说明到 prompt |
+| `src/config.py` | 新增 `AGENT_REGISTRY` 常量 |
+| `src/webhook_handler.py` | 新增 `POST /api/a2a` 路由 |
+| `src/event_processor.py` | 新增 `process_a2a_event()`，`_process_event_inner` 支持 `_override_agent` |
+| `src/prompt_builder.py` | 注入 `AGENT_REGISTRY` JSON + A2A 调用说明到 prompt；注入 `_a2a_context` |
+| `src/agent/executor.py` | 追加注入 `REPO_FULL_NAME`、`ACCOUNT`、`CURRENT_EVENT_TYPE` |
 
-### 阶段 2：Skill 适配
+### 阶段 2：Agent 适配
 
 | 文件 | 改动 |
 |------|------|
-| `skills/issue/SKILL.md` | 增加在批准场景下调用 A2A 的指引 |
-| `skills/bug/SKILL.md` | 可选：增加 A2A 指引 |
+| `skills/issue/SKILL.md` | 增加在审批/分类场景下调用 A2A 的指引 |
 
 ### 阶段 3：监控与安全
 
