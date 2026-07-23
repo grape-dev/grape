@@ -34,36 +34,56 @@ issue_comment（用户回复"同意开发"）
 
 ### Agent 注册表（Agent Registry）
 
-当前 Agent 需要知道有哪些 Agent 可用、各自能干什么，才能决定将任务交给谁。每个 Agent 对应一个技能目录（`skills/{agent_name}/`），在注册表中注册其名称和能力描述。
+当前 Agent 需要知道有哪些 Agent 可用、各自能干什么，才能决定将任务交给谁。注册表**动态构建**，不硬编码。
+
+#### 构建方式
+
+启动时扫描 `skills/` 目录下所有子目录，读取每个技能目录中 `SKILL.md` 的 YAML Front Matter 提取 `name` 和 `description`：
 
 ```python
-# src/config.py 或独立文件
-AGENT_REGISTRY = {
-    "issue": {
-        "description": "处理 Issue 分类、打标签、回复用户、审批确认",
-    },
-    "implementation": {
-        "description": "代码实现：创建分支、编码、提交、创建 PR",
-    },
-    "pr": {
-        "description": "Pull Request 审核：检查代码质量、添加评论",
-    },
-    "cloud-deploy": {
-        "description": "云部署：SSH 登录服务器、拉取代码、重启服务",
-    },
-    "build-debug": {
-        "description": "构建调试：分析构建失败日志、修复编译错误",
-    },
-    "deploy-guard": {
-        "description": "部署守护：监控部署状态、回滚异常发布",
-    },
-    "changelog-gen": {
-        "description": "生成变更日志：基于 commit 历史生成 CHANGELOG",
-    },
-    "skill-pr": {
-        "description": "技能仓库 PR 审核：校验自定义技能格式",
-    },
-}
+def build_agent_registry() -> dict:
+    registry = {}
+    skills_dir = "/root/devops-bot/skills"
+    for entry in os.listdir(skills_dir):
+        skill_path = os.path.join(skills_dir, entry, "SKILL.md")
+        if not os.path.isfile(skill_path):
+            continue
+        try:
+            content = open(skill_path, encoding="utf-8").read()
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                fm = yaml.safe_load(parts[1])
+                if isinstance(fm, dict) and fm.get("name"):
+                    registry[fm["name"]] = {
+                        "description": fm.get("description", ""),
+                    }
+        except:
+            pass
+    return registry
+```
+
+自动发现以下目录中的技能：
+- `skills/issue/` → `{name: issue, description: "Issue 分类、打标签、回复、审批确认"}`
+- `skills/implementation/` → `{name: implementation, description: "代码实现：创建分支..."}`
+- `skills/custom/{user_id}/{skill_name}/` → 用户自定义技能
+- 其他所有 `skills/` 下的技能目录
+
+#### 缓存策略
+
+注册表在启动时构建一次，缓存在内存中。当新增/删除自定义技能时，调用 `rebuild_agent_registry()` 刷新。
+
+```python
+_agent_registry_cache = None
+
+def get_agent_registry() -> dict:
+    global _agent_registry_cache
+    if _agent_registry_cache is None:
+        _agent_registry_cache = build_agent_registry()
+    return _agent_registry_cache
+
+def rebuild_agent_registry():
+    global _agent_registry_cache
+    _agent_registry_cache = build_agent_registry()
 ```
 
 ### A2A 协议定义
@@ -156,11 +176,12 @@ if self.path == "/api/a2a" and self.command == "POST":
 ### 3. event_processor A2A 处理
 
 ```python
-from src.config import AGENT_REGISTRY
+from src.config import get_agent_registry
 
 def process_a2a_event(body: dict):
     agent_name = body.get("agent", "")
-    if agent_name not in AGENT_REGISTRY:
+    registry = get_agent_registry()
+    if agent_name not in registry:
         log.warning(f"Invalid A2A agent: {agent_name}")
         return
     payload = body.get("payload", {})
@@ -209,7 +230,7 @@ def build_prompt(evt, ...):
 
 ### 4. Prompt 注入 Agent 注册表 + A2A 调用说明
 
-在 `build_prompt` 末尾追加。注意：`AGENT_REGISTRY` 在 prompt 中动态渲染为 JSON，Agent 可直接读取。
+在 `build_prompt` 末尾追加。`AGENT_REGISTRY_JSON` 由 `get_agent_registry()` 动态渲染：
 
 ```
 ## 可用 Agent 列表
@@ -279,7 +300,7 @@ DevOps Bot 生成原始 prompt（含 AGENT_REGISTRY + A2A 说明）
 | 限制 | 说明 |
 |------|------|
 | 本地访问 | A2A API 仅限 `localhost:8080` 访问，不对外暴露 |
-| Agent 白名单 | 只允许 `AGENT_REGISTRY` 中已注册的 Agent |
+| Agent 白名单 | 只允许 `get_agent_registry()` 中已注册的 Agent |
 | 最大调用深度 | `max_a2a_depth = 5`，防止无限循环 |
 | 日志记录 | 每次 A2A 跳转记录完整链路 |
 
@@ -318,10 +339,10 @@ DevOps Bot 生成原始 prompt（含 AGENT_REGISTRY + A2A 说明）
 
 | 文件 | 改动 |
 |------|------|
-| `src/config.py` | 新增 `AGENT_REGISTRY` 常量 |
+| `src/config.py` | 新增 `build_agent_registry()`、`get_agent_registry()`、`rebuild_agent_registry()` |
 | `src/webhook_handler.py` | 新增 `POST /api/a2a` 路由 |
 | `src/event_processor.py` | 新增 `process_a2a_event()`，`_process_event_inner` 支持 `_override_agent` |
-| `src/prompt_builder.py` | 注入 `AGENT_REGISTRY` JSON + A2A 调用说明到 prompt；注入 `_a2a_context` |
+| `src/prompt_builder.py` | 注入 `get_agent_registry()` JSON + A2A 调用说明到 prompt；注入 `_a2a_context` |
 | `src/agent/executor.py` | 追加注入 `REPO_FULL_NAME`、`ACCOUNT`、`CURRENT_EVENT_TYPE` |
 
 ### 阶段 2：Agent 适配
