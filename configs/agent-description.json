@@ -1,0 +1,29 @@
+{
+  "issue": {
+    "description": "Issue 全生命周期管理：分类、打标签、指派人、创建里程碑、关联 PR、回复评论"
+  },
+  "implementation": {
+    "description": "代码实现：分析问题、制定修改方案、编码实现、提交 PR"
+  },
+  "pr": {
+    "description": "Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并操作、添加评论"
+  },
+  "cloud-deploy": {
+    "description": "云部署：SSH 登录服务器、拉取代码、重启服务、健康检查"
+  },
+  "build-debug": {
+    "description": "构建调试：分析构建失败日志、识别常见错误模式、修复编译问题"
+  },
+  "deploy-guard": {
+    "description": "部署前安全合规检查：审核代码变更、检查配置、验证部署条件"
+  },
+  "changelog-gen": {
+    "description": "变更日志生成：基于 commit 历史自动生成 CHANGELOG"
+  },
+  "skill-pr": {
+    "description": "技能仓库 PR 审核：校验自定义技能格式、质量检查"
+  },
+  "im-notify": {
+    "description": "IM 通知：监控仓库事件并发送飞书通知"
+  }
+}

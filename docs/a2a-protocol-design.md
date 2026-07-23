@@ -70,7 +70,27 @@ Webhook → event_processor → agent.run()
 
 ## 详细设计
 
-### 1. A2A API 端点
+### 1. Agent 注册表
+
+Agent 名称和能力的对应关系通过 `configs/agent-description.json` 维护，代码不硬编码。
+
+```json
+{
+  "issue":            {"description": "Issue 全生命周期管理：分类、打标签、指派人、创建里程碑、关联 PR、回复评论"},
+  "implementation":   {"description": "代码实现：分析问题、制定修改方案、编码实现、提交 PR"},
+  "pr":               {"description": "PR 全流程管理：关联 Issue、代码审查、安全扫描、合并操作、添加评论"},
+  "cloud-deploy":     {"description": "云部署：SSH 登录服务器、拉取代码、重启服务、健康检查"},
+  "build-debug":      {"description": "构建调试：分析失败日志、修复编译问题"},
+  "deploy-guard":     {"description": "部署前安全合规检查"},
+  "changelog-gen":    {"description": "变更日志生成"},
+  "skill-pr":         {"description": "技能仓库 PR 审核"},
+  "im-notify":        {"description": "IM 通知"}
+}
+```
+
+`process_a2a_event` 读取此文件校验 agent 合法性，同时用于注入 prompt 告知 Agent 可用选项。
+
+### 2. A2A API 端点
 
 `src/webhook_handler.py` 新增路由：
 
@@ -89,12 +109,24 @@ if self.path == "/api/a2a" and self.command == "POST":
 ### 2. event_processor A2A 处理
 
 ```python
+import os, json
+
+AGENTS_FILE = os.path.join(os.path.dirname(__file__), "..", "configs", "agent-description.json")
+
+def _load_agent_registry() -> dict:
+    try:
+        with open(AGENTS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
 def process_a2a_event(body: dict):
     agent_name = body.get("agent", "")
-    agent_dir = os.path.join(SKILLS_DIR, agent_name)
-    if not os.path.isdir(agent_dir):
+    registry = _load_agent_registry()
+    if agent_name not in registry:
         log.warning(f"A2A agent not found: {agent_name}")
         return
+    ...
     payload = body.get("payload", {})
     repository = payload.get("repository", "")
     account = payload.get("account", "default")
@@ -205,7 +237,7 @@ DevOps Bot 生成原始 prompt（含 A2A 说明）
 | 限制 | 说明 |
 |------|------|
 | 本地访问 | A2A API 仅限 `localhost:8080` |
-| Agent 校验 | 校验 `skills/{agent_name}/` 目录是否存在 |
+| Agent 校验 | 校验 `configs/agent-description.json` 中是否存在对应 agent |
 | 最大深度 | `max_a2a_depth = 5` |
 
 ## 场景验证
@@ -232,9 +264,10 @@ issue_opened（bug 类型，auto_impl_enabled=ON）
 
 | 文件 | 改动 |
 |------|------|
+| `configs/agent-description.json` | 新增 Agent 能力描述配置 |
 | `src/webhook_handler.py` | 新增 `POST /api/a2a` 路由 |
-| `src/event_processor.py` | 新增 `process_a2a_event()`，`_process_event_inner` 支持 `_override_agent` |
-| `src/prompt_builder.py` | 注入 `_a2a_context` 到 prompt 顶部；追加 A2A 调用说明 |
+| `src/event_processor.py` | 新增 `process_a2a_event()`，读取 `configs/agent-description.json` 校验；`_process_event_inner` 支持 `_override_agent` |
+| `src/prompt_builder.py` | 注入 `_a2a_context` 到 prompt 顶部；将 `configs/agent-description.json` 内容注入 prompt 供 Agent 参考 |
 | `src/agent/executor.py` | 追加注入 `REPO_FULL_NAME`、`ACCOUNT`、`CURRENT_EVENT_TYPE` |
 | `skills/issue/SKILL.md` | 增加在批准场景下调用 A2A 的指引 |
 
@@ -247,4 +280,3 @@ issue_opened（bug 类型，auto_impl_enabled=ON）
 | `user/db.py` | 用户管理不变 |
 | `event-routing.json` | 路由规则不变 |
 | `im/*.py` | 飞书处理不变 |
-| `configs/` | 无需新增配置文件 |
