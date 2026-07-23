@@ -104,6 +104,48 @@ def process_event(raw_body, headers, account="default"):
 
 
 # ====== 事件处理主体 ======
+MAX_A2A_DEPTH = 5
+_a2a_depth = {}  # repo_key -> depth counter
+
+
+def process_a2a_event(body: dict):
+    """处理 A2A API 请求，路由到指定 Agent"""
+    import json, os
+    agent_name = body.get("agent", "")
+    agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
+    try:
+        with open(agents_file, encoding="utf-8") as f:
+            registry = json.load(f)
+    except Exception:
+        registry = {}
+    if agent_name not in registry:
+        log.warning(f"A2A agent not found in registry: {agent_name}")
+        log.warning(f"Available agents: {list(registry.keys())}")
+        return
+    payload = body.get("payload", {})
+    repository = payload.get("repository", "")
+    account = payload.get("account", "default")
+    repo_key = f"gitcode:{repository}"
+    # 深度检查
+    current_depth = _a2a_depth.get(repo_key, 0)
+    if current_depth >= MAX_A2A_DEPTH:
+        log.warning(f"A2A max depth ({MAX_A2A_DEPTH}) reached for {repo_key}")
+        return
+    _a2a_depth[repo_key] = current_depth + 1
+    a2a_evt = {
+        "type": "a2a_event",
+        "repository": repository,
+        "source": "gitcode",
+        "actor": "bot",
+        "payload": payload,
+        "_override_agent": agent_name,
+        "_a2a_context": payload.get("context", ""),
+        "account": account,
+    }
+    _process_event_inner(a2a_evt, repo_key, account)
+    _a2a_depth[repo_key] = _a2a_depth.get(repo_key, 1) - 1
+
+
 def _get_feishu_context(repo_key, repository):
     """Pre-fetch Feishu notification context for prompt injection.
     Returns dict with collaborators, group_members, mappings, token, chat_id."""
@@ -162,7 +204,13 @@ def _process_event_inner(evt, repo_key, account="default"):
         sid, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, evt['source'], evt['repository'])
         log.info(f"Session: {sid} (new={is_new}, history={len(history)} events, oc_session={oc_sid[:30] if oc_sid else 'none'})")
 
-        skills = [get_domain_skill(evt['type'], evt.get("repository", ""), 0)]
+        # A2A override: 使用指定的 agent 而非按事件类型路由
+        override_agent = evt.pop("_override_agent", "")
+        if override_agent:
+            skills = [override_agent]
+            log.info(f"A2A override: routing to agent={override_agent}")
+        else:
+            skills = [get_domain_skill(evt['type'], evt.get("repository", ""), 0)]
         log.info(f"Skills: {skills}")
         if not skills[0]:
             log.info(f"No skill for event type {evt['type']}, skipping")
@@ -181,9 +229,15 @@ def _process_event_inner(evt, repo_key, account="default"):
 
         event_count = 0
         final_text = ""
-        new_oc_session_id = oc_session_id
+        new_oc_session_id = oc_sid
 
-        for event_type, data in stream_agent(prompt, ws, new_oc_session_id, evt['type'], backend_name=backend, account=account):
+        env_extra = {
+            "REPO_FULL_NAME": evt['repository'],
+            "ACCOUNT": account,
+            "CURRENT_EVENT_TYPE": evt['type'],
+        }
+
+        for event_type, data in stream_agent(prompt, ws, new_oc_session_id, evt['type'], backend_name=backend, account=account, env_extra=env_extra):
             event_count += 1
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")

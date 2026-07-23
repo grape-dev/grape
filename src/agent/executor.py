@@ -18,11 +18,14 @@ def get_backend(name: str) -> AgentBackend:
 
 def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  event_type: str = "", backend_name: str = "opencode",
-                 account: str = "default", user_id: int = 0):
+                 account: str = "default", user_id: int = 0,
+                 env_extra: dict | None = None):
     """流式执行 Agent，yield 事件。"""
     backend = get_backend(backend_name)
     env = backend.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
+    if env_extra:
+        env.update(env_extra)
 
     # 注入用户凭据
     if user_id > 0:

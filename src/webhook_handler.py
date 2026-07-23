@@ -18,6 +18,20 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length > 0 else b""
 
+        # A2A Agent-to-Agent 协议
+        if self.path == "/api/a2a":
+            try:
+                data = json.loads(body)
+                from src.event_processor import process_a2a_event
+                process_a2a_event(data)
+            except Exception as e:
+                log.warning(f"A2A error: {e}")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+            return
+
         if self.path == "/webhook/gitcode" and GITCODE_WEBHOOK_TOKEN:
             token = self.headers.get("X-GitCode-Token", "")
             if token != GITCODE_WEBHOOK_TOKEN:

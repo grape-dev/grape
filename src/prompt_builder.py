@@ -217,6 +217,13 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
     parts = []
     evt_type = evt.get("type", "event")
 
+    # A2A context injection
+    a2a_ctx = evt.get("_a2a_context", "")
+    if a2a_ctx:
+        parts.append("## 前序 Agent 处理摘要\n")
+        parts.append(a2a_ctx)
+        parts.append("请基于以上上下文继续处理。\n")
+
     if evt_type == "issue_comment":
         note = ""
         if isinstance(payload.get("object_attributes"), dict):
@@ -258,11 +265,53 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
         parts.append(_build_feishu_context_section(repo_key, feishu_ctx))
 
     parts.append(build_role_definition(skills))
+
+    # A2A protocol instructions + available agents
+    try:
+        agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
+        if os.path.isfile(agents_file):
+            with open(agents_file, encoding="utf-8") as f:
+                agent_registry = json.load(f)
+    except Exception:
+        agent_registry = {}
+    if agent_registry:
+        parts.append("\n## Agent-to-Agent 协议\n")
+        parts.append("当你需要调用其他 Agent 时，从下表中选择最合适的：\n")
+        for ag, info in agent_registry.items():
+            desc = info.get("description", "")
+            parts.append(f"- {ag}：{desc}")
+        parts.append("""
+### 调用方式
+
+如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
+然后调用 A2A API：
+
+  curl -X POST http://localhost:8080/api/a2a \\
+    -H "Content-Type: application/json" \\
+    -d '{
+      "agent": "implementation",
+      "payload": {
+        "repository": "'"$REPO_FULL_NAME"'",
+        "account": "'"$ACCOUNT"'",
+        "context": "当前处理摘要"
+      }
+    }'
+
+### context 构造规则
+
+context 是传给下一个 Agent 的接力说明，应包含：
+1. 原始需求：本 prompt 的核心内容摘要
+2. 你的分析结论：关键分析结果
+3. 建议下一步：需要下一个 Agent 做什么
+
+⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
+""")
     return "\n".join(parts)
 
 
 def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "default") -> str:
     parts = [f"User asks about {repo_key}: {user_text}"]
+    # Chat messages don't have `evt`, so A2A context is not injected here
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
     parts.append(_build_history_file_guide(repo_key, account))
