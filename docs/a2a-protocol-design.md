@@ -38,7 +38,7 @@ issue_comment（用户回复"同意开发"）
 
 #### 构建方式
 
-在 `configs/agents/agent-description.json` 中定义所有 Agent 的能力描述，`key` 为 Agent 名称（对应技能目录名）：
+在 `configs/agent-description.json` 中定义所有 Agent 的能力描述，`key` 为 Agent 名称（对应技能目录名）：
 
 ```json
 {
@@ -59,7 +59,7 @@ issue_comment（用户回复"同意开发"）
 ```python
 import os, json
 
-AGENTS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agents", "agent-description.json")
+AGENTS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
 
 def build_agent_registry() -> dict:
     if not os.path.isfile(AGENTS_FILE):
@@ -75,7 +75,7 @@ def build_agent_registry() -> dict:
 #### 新增 Agent 步骤
 
 1. 创建技能目录 `skills/new-agent/SKILL.md`
-2. 在 `configs/agents/agent-description.json` 中追加一条描述
+2. 在 `configs/agent-description.json` 中追加一条描述
 3. 重启或调 `rebuild_agent_registry()` 刷新
 
 #### 缓存策略
@@ -349,7 +349,7 @@ DevOps Bot 生成原始 prompt（含 AGENT_REGISTRY + A2A 说明）
 
 | 文件 | 改动 |
 |------|------|
-| `configs/agents/agent-description.json` | 新增 Agent 能力描述文件（所有 Agent 合并在一个 JSON 中） |
+| `configs/agent-description.json` | 新增 Agent 能力描述文件（所有 Agent 合并在一个 JSON 中） |
 | `src/config.py` | 新增 `build_agent_registry()`、`get_agent_registry()`、`rebuild_agent_registry()` |
 | `src/webhook_handler.py` | 新增 `POST /api/a2a` 路由 |
 | `src/event_processor.py` | 新增 `process_a2a_event()`，`_process_event_inner` 支持 `_override_agent` |
