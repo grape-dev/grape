@@ -1,4 +1,0 @@
-{
-  "name": "deploy-guard",
-  "description": "部署前安全合规检查：审核代码变更、检查配置、验证部署条件"
-}

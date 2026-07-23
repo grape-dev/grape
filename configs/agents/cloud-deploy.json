@@ -1,4 +1,0 @@
-{
-  "name": "cloud-deploy",
-  "description": "云部署：SSH 登录服务器、拉取代码、重启服务、健康检查"
-}

@@ -38,52 +38,44 @@ issue_comment（用户回复"同意开发"）
 
 #### 构建方式
 
-在 `configs/agents/` 目录下为每个 Agent 新建一个 JSON 文件，`name` 对应技能目录名：
+在 `configs/agents/agent-description.json` 中定义所有 Agent 的能力描述，`key` 为 Agent 名称（对应技能目录名）：
 
 ```json
-// configs/agents/issue.json
 {
-  "name": "issue",
-  "description": "Issue 全生命周期管理：分类、打标签、指派人、创建里程碑、关联 PR、回复评论"
-}
-
-// configs/agents/implementation.json
-{
-  "name": "implementation",
-  "description": "代码实现：分析问题、制定修改方案、编码实现、提交 PR"
+  "issue": {
+    "description": "Issue 全生命周期管理：分类、打标签、指派人、创建里程碑、关联 PR、回复评论"
+  },
+  "implementation": {
+    "description": "代码实现：分析问题、制定修改方案、编码实现、提交 PR"
+  },
+  "pr": {
+    "description": "Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并操作、添加评论"
+  }
 }
 ```
 
-启动时扫描 `configs/agents/` 目录读取所有 `.json` 文件构建注册表：
+启动时读取该文件构建注册表：
 
 ```python
 import os, json
 
-AGENTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agents")
+AGENTS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agents", "agent-description.json")
 
 def build_agent_registry() -> dict:
-    registry = {}
-    if not os.path.isdir(AGENTS_DIR):
-        return registry
-    for fname in os.listdir(AGENTS_DIR):
-        if not fname.endswith(".json"):
-            continue
-        path = os.path.join(AGENTS_DIR, fname)
-        try:
-            data = json.load(open(path, encoding="utf-8"))
-            name = data.get("name", "")
-            desc = data.get("description", "")
-            if name:
-                registry[name] = {"description": desc, "file": fname}
-        except Exception:
-            pass
-    return registry
+    if not os.path.isfile(AGENTS_FILE):
+        return {}
+    try:
+        with open(AGENTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: {"description": v.get("description", "")} for k, v in data.items() if isinstance(v, dict)}
+    except Exception:
+        return {}
 ```
 
 #### 新增 Agent 步骤
 
 1. 创建技能目录 `skills/new-agent/SKILL.md`
-2. 创建能力描述文件 `configs/agents/new-agent.json`
+2. 在 `configs/agents/agent-description.json` 中追加一条描述
 3. 重启或调 `rebuild_agent_registry()` 刷新
 
 #### 缓存策略
@@ -357,7 +349,7 @@ DevOps Bot 生成原始 prompt（含 AGENT_REGISTRY + A2A 说明）
 
 | 文件 | 改动 |
 |------|------|
-| `configs/agents/*.json` | 新增 Agent 能力描述文件（每个 Agent 一个） |
+| `configs/agents/agent-description.json` | 新增 Agent 能力描述文件（所有 Agent 合并在一个 JSON 中） |
 | `src/config.py` | 新增 `build_agent_registry()`、`get_agent_registry()`、`rebuild_agent_registry()` |
 | `src/webhook_handler.py` | 新增 `POST /api/a2a` 路由 |
 | `src/event_processor.py` | 新增 `process_a2a_event()`，`_process_event_inner` 支持 `_override_agent` |
