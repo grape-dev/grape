@@ -188,8 +188,12 @@ text = base64.b64decode(data['content']).decode('utf-8')
 | 评论请求关闭 Issue | 验证后回复说明，**最后 curl POST 评论到 Issue** |
 | 评论讨论方案设计 | 可以参与讨论给出建议，**最后 curl POST 评论到 Issue** |
 | **用户质疑分配结果** | 重新核对 CODEOWNERS 描述，**基于自己的分析维持或调整**，不盲从评论，**最后 curl POST 评论到 Issue** |
-| **用户回复启动确认（"启动"/"同意"）且是分配的责任人** | 添加 PATCH 标签 `{"labels": "feature,triaged,PATCH"}` 以触发 `implementation` skill 自动开发，**最后 curl POST 评论到 Issue** |
+| **用户回复启动确认（"启动"/"同意"/"开始"）且是分配的责任人** | 调用 A2A API 触发 `implementation` Agent 自动开发 |
 | **用户回复启动确认但不是责任人** | 回复 "请 @责任人 本人确认是否启动开发"，**最后 curl POST 评论到 Issue** |
+
+> **A2A 调用**：确认开发后，先发评论通知用户即将开始开发，然后调用 A2A API。命令模板见本 prompt 末尾的 Agent-to-Agent 协议章节。
+
+### 评论输出规范
 | 其他 DevOps 相关评论 | 分析并回复，**最后 curl POST 评论到 Issue** |
 
 ### 评论输出规范
