@@ -177,45 +177,56 @@ next_skill: implementation
 - issue：Issue 处理
 ```
 
-> **注意**：`[A2A]` 指令块是内部协议，Agent 在调用 API 发布评论/通知前应由系统自动剥离该块，不会出现在任何外部消息中。详见下节。
+> **注意**：`[A2A]` 指令块是内部协议，不会出现在任何外部消息中。详见下节。
 
 ### 4. A2A 指令剥离机制
 
-Agent 输出的完整内容包含两部分：
-- **业务消息**：需要发布到 Issue / PR / 飞书的正文
-- **A2A 指令块**：`[A2A]...[/A2A]`，内部协议，不应暴露
+当前 Agent 发布业务消息到 Issue / PR 是**直接调用 GitCode API**（通过 prompt 中的 curl 指令），不经 DevOps Bot 转发。因此剥离流程如下：
 
-处理流程：
+#### 实际调用链路
 
-```python
-def strip_a2a_and_post(output: str, ..., evt, ...) -> None:
-    """剥离 A2A 指令块，发布纯文本消息"""
-    # 1. 移除 A2A 块
-    clean = re.sub(r'\[A2A\].*?\[/A2A\]', '', output, flags=re.DOTALL).strip()
-    # 2. 发布清理后的文本（如果有）
-    if clean:
-        post_comment(clean, evt)
-    # 3. 解析 A2A 指令
-    a2a = parse_a2a_instruction(output)
-    return a2a
+```
+Agent Final Response 包含 [A2A]
+  ├→ curl 发评论到 GitCode（Agent 自行排除 A2A）
+  └→ DevOps Bot 读取 Final Response，解析 [A2A] → 切换 skill
 ```
 
-此时 `event_processor` 的循环逻辑变为：
+#### Agent 层剥离（关键）
+
+Skill 指令需明确告知 Agent 区分两种内容：
+
+```
+## Agent-to-Agent 协议
+
+当你完成任务后，请在最终回复中附加以下指令块：
+
+[A2A]
+next_skill: implementation
+[/A2A]
+
+⚡ 重要规则：
+- [A2A] 块必须放在 Final Response 中，DevOps Bot 会读取
+- 调用 curl 发评论时，必须从 body 中移除 [A2A] 块
+- 即：发到 GitCode 的评论不含 [A2A]，只含业务消息
+```
+
+#### DevOps Bot 层解析
+
+DevOps Bot 从 Agent 的 Final Response 中解析 `[A2A]` 指令，不负责剥离或转发消息：
 
 ```python
-output, exit_code = run_agent(prompt, ...)
-# 剥离 A2A、发布评论、返回指令
-a2a = strip_a2a_and_post(output, evt)
+output = agent.get_final_response()
+a2a = parse_a2a_instruction(output)
 if a2a:
-    # 切换 skill 继续循环
-    ...
+    evt['type'] = a2a.get('next_event', evt['type'])
+    continue  # 切换 skill 重新执行
 ```
 
 #### 补充说明
 
-- **Agent 无需关心剥离逻辑**：Agent 只需在回复末尾附加 `[A2A]`，系统自动处理
-- **业务消息和 A2A 相互独立**：A2A 块可以放在回复末尾，不影响正文
-- **纯 A2A 不发布**：如果 Agent 输出只有 A2A 块而没有业务消息，则不产生任何外部评论
+- **Agent 自行负责剥离**：发 curl 时从 body 中去掉 `[A2A]`，这是 prompt 指令约束的事
+- **业务消息和 A2A 相互独立**：`[A2A]` 块仅出现在 Final Response 末尾，不混入业务文本
+- **纯 A2A 不发布**：如果 Agent 最终回复只有 `[A2A]` 没有业务文本，则不产生评论
 
 ### 5. 安全限制
 
