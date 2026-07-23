@@ -1,0 +1,4 @@
+{
+  "name": "changelog-gen",
+  "description": "变更日志生成：基于 commit 历史自动生成 CHANGELOG"
+}

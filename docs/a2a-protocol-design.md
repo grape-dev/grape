@@ -38,35 +38,53 @@ issue_comment（用户回复"同意开发"）
 
 #### 构建方式
 
-启动时扫描 `skills/` 目录下所有子目录，读取每个技能目录中 `SKILL.md` 的 YAML Front Matter 提取 `name` 和 `description`：
+在 `configs/agents/` 目录下为每个 Agent 新建一个 JSON 文件，`name` 对应技能目录名：
+
+```json
+// configs/agents/issue.json
+{
+  "name": "issue",
+  "description": "Issue 全生命周期管理：分类、打标签、指派人、创建里程碑、关联 PR、回复评论"
+}
+
+// configs/agents/implementation.json
+{
+  "name": "implementation",
+  "description": "代码实现：分析问题、制定修改方案、编码实现、提交 PR"
+}
+```
+
+启动时扫描 `configs/agents/` 目录读取所有 `.json` 文件构建注册表：
 
 ```python
+import os, json
+
+AGENTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agents")
+
 def build_agent_registry() -> dict:
     registry = {}
-    skills_dir = "/root/devops-bot/skills"
-    for entry in os.listdir(skills_dir):
-        skill_path = os.path.join(skills_dir, entry, "SKILL.md")
-        if not os.path.isfile(skill_path):
+    if not os.path.isdir(AGENTS_DIR):
+        return registry
+    for fname in os.listdir(AGENTS_DIR):
+        if not fname.endswith(".json"):
             continue
+        path = os.path.join(AGENTS_DIR, fname)
         try:
-            content = open(skill_path, encoding="utf-8").read()
-            parts = content.split("---", 2)
-            if len(parts) >= 3:
-                fm = yaml.safe_load(parts[1])
-                if isinstance(fm, dict) and fm.get("name"):
-                    registry[fm["name"]] = {
-                        "description": fm.get("description", ""),
-                    }
-        except:
+            data = json.load(open(path, encoding="utf-8"))
+            name = data.get("name", "")
+            desc = data.get("description", "")
+            if name:
+                registry[name] = {"description": desc, "file": fname}
+        except Exception:
             pass
     return registry
 ```
 
-自动发现以下目录中的技能：
-- `skills/issue/` → `{name: issue, description: "Issue 分类、打标签、回复、审批确认"}`
-- `skills/implementation/` → `{name: implementation, description: "代码实现：创建分支..."}`
-- `skills/custom/{user_id}/{skill_name}/` → 用户自定义技能
-- 其他所有 `skills/` 下的技能目录
+#### 新增 Agent 步骤
+
+1. 创建技能目录 `skills/new-agent/SKILL.md`
+2. 创建能力描述文件 `configs/agents/new-agent.json`
+3. 重启或调 `rebuild_agent_registry()` 刷新
 
 #### 缓存策略
 
@@ -230,7 +248,7 @@ def build_prompt(evt, ...):
 
 ### 4. Prompt 注入 Agent 注册表 + A2A 调用说明
 
-在 `build_prompt` 末尾追加。`AGENT_REGISTRY_JSON` 由 `get_agent_registry()` 动态渲染：
+在 `build_prompt` 末尾追加。`AGENT_REGISTRY_JSON` 由 `get_agent_registry()` 动态渲染为格式化的 JSON 文本：
 
 ```
 ## 可用 Agent 列表
@@ -339,6 +357,7 @@ DevOps Bot 生成原始 prompt（含 AGENT_REGISTRY + A2A 说明）
 
 | 文件 | 改动 |
 |------|------|
+| `configs/agents/*.json` | 新增 Agent 能力描述文件（每个 Agent 一个） |
 | `src/config.py` | 新增 `build_agent_registry()`、`get_agent_registry()`、`rebuild_agent_registry()` |
 | `src/webhook_handler.py` | 新增 `POST /api/a2a` 路由 |
 | `src/event_processor.py` | 新增 `process_a2a_event()`，`_process_event_inner` 支持 `_override_agent` |
