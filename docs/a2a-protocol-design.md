@@ -106,7 +106,7 @@ if self.path == "/api/a2a" and self.command == "POST":
     self.wfile.write(b'{"status":"ok"}')
 ```
 
-### 2. event_processor A2A 处理
+### 3. event_processor A2A 处理
 
 ```python
 import os, json
@@ -126,7 +126,6 @@ def process_a2a_event(body: dict):
     if agent_name not in registry:
         log.warning(f"A2A agent not found: {agent_name}")
         return
-    ...
     payload = body.get("payload", {})
     repository = payload.get("repository", "")
     account = payload.get("account", "default")
@@ -155,7 +154,7 @@ def _process_event_inner(evt, repo_key, account):
     ...
 ```
 
-### 3. context 注入
+### 4. context 注入
 
 `build_prompt` 收到 `_a2a_context` 后注入到 prompt 顶部：
 
@@ -170,12 +169,20 @@ def build_prompt(evt, ...):
     ...
 ```
 
-### 4. Prompt 追加 A2A 调用说明
+### 5. Prompt 追加 A2A 调用说明 + Agent 列表
 
 在 `build_prompt` 末尾追加，由 skill 自身的 SKILL.md 决定是否以及何时调用 A2A：
 
 ```
 ## Agent-to-Agent 协议
+
+### 可用 Agent 列表
+
+当你需要调用其他 Agent 时，从下表中选择最合适的：
+
+{{AGENT_DESCRIPTION_JSON}}
+
+### 调用方式
 
 如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
 然后调用 A2A API：
@@ -206,7 +213,9 @@ context 是传给下一个 Agent 的接力说明，应包含：
 ⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
 ```
 
-### 5. context 传递链路
+其中 `{{AGENT_DESCRIPTION_JSON}}` 由 `prompt_builder` 从 `configs/agent-description.json` 动态渲染为格式化文本。
+
+### 6. context 传递链路
 
 ```
 DevOps Bot 生成原始 prompt（含 A2A 说明）
@@ -217,11 +226,11 @@ DevOps Bot 生成原始 prompt（含 A2A 说明）
   → 下一个 Agent 收到含前序上下文的 prompt
 ```
 
-### 6. agent 合法性校验
+### 7. agent 合法性校验
 
-通过检查 `skills/{agent_name}/` 目录是否存在来确认 agent 是否有效，无需注册表文件。
+通过读取 `configs/agent-description.json` 校验 agent 名称是否存在。
 
-### 7. 环境变量
+### 8. 环境变量
 
 当前已注入：
 - `GITCODE_API_TOKEN`
@@ -232,7 +241,7 @@ DevOps Bot 生成原始 prompt（含 A2A 说明）
 - `ACCOUNT`
 - `CURRENT_EVENT_TYPE`
 
-### 8. 安全限制
+### 9. 安全限制
 
 | 限制 | 说明 |
 |------|------|
