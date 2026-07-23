@@ -43,11 +43,8 @@ Content-Type: application/json
 {
   "event_type": "issue_comment",     // 事件类型（可选，默认沿用当前事件类型）
   "skill": "implementation",          // 下一个要执行的技能（必填）
-  "payload": {                        // 原始事件摘要，透传给下一个 Agent（可选）
+  "payload": {                        // 必传上下文（可选）
     "repository": "owner/repo",
-    "issue_number": "33",
-    "issue_title": "[Feature] 新增VOD声音查询",
-    "actor": "mm6667",
     "account": "default"
   }
 }
@@ -57,7 +54,7 @@ Content-Type: application/json
 |------|------|------|
 | `skill` | 是 | 下一个要执行的技能名称（对应 skill 目录名） |
 | `event_type` | 否 | 覆盖的事件类型，不传则沿用当前事件类型 |
-| `payload` | 否 | 原始事件摘要（仓库、编号、标题、操作人等），透传给下一个 Agent 作为上下文 |
+| `payload` | 否 | 透传最小上下文，`repository` 和 `account` 必含 |
 
 ### 处理流程变化
 
@@ -165,9 +162,6 @@ def _process_event_inner(evt, repo_key, account):
       "skill": "implementation",
       "payload": {
         "repository": "'"$REPO_FULL_NAME"'",
-        "issue_number": "'"$ISSUE_NUMBER"'",
-        "issue_title": "'"$ISSUE_TITLE"'",
-        "actor": "'"$ACTOR"'",
         "account": "'"$ACCOUNT"'"
       }
     }'
@@ -192,9 +186,6 @@ def _process_event_inner(evt, repo_key, account):
 
 需要追加注入：
 - `REPO_FULL_NAME`（如 `owner/repo`）
-- `ISSUE_NUMBER` / `PR_NUMBER`（当前事件编号）
-- `ISSUE_TITLE` / `PR_TITLE`（当前事件标题）
-- `ACTOR`（事件触发人）
 - `ACCOUNT`（账户名）
 - `CURRENT_EVENT_TYPE`（当前事件类型，如 `issue_comment`）
 
