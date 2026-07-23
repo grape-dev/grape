@@ -56,9 +56,9 @@ Content-Type: application/json
 | `skill` | 是 | 下一个要执行的技能名称（对应 skill 目录名） |
 | `event_type` | 否 | 覆盖的事件类型，不传则沿用当前事件类型 |
 | `payload` | 否 | 透传上下文 |
-| `payload.repository` | 推荐 | 仓库标识，Agent 无法自行推断时传递 |
-| `payload.account` | 推荐 | 账户名 |
-| `payload.context` | 推荐 | 原始 prompt 摘要 + 当前 Agent 处理结论，供下一个 Agent 理解前因后果 |
+| `payload.repository` | 是 | 仓库标识 |
+| `payload.account` | 是 | 账户名 |
+| `payload.context` | 是 | 原始 prompt 摘要 + 当前 Agent 处理结论，供下一个 Agent 理解前因后果 |
 
 ### 处理流程变化
 
