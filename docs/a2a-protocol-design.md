@@ -41,7 +41,6 @@ POST /api/a2a
 Content-Type: application/json
 
 {
-  "token": "webhook_token",       // 鉴权
   "event_type": "issue_comment",  // 事件类型
   "skill": "implementation",       // 下一个要执行的技能（必填）
   "params": {                      // 透传参数（选填）
@@ -54,7 +53,6 @@ Content-Type: application/json
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `token` | 是 | GitCode webhook token 鉴权 |
 | `skill` | 是 | 下一个要执行的技能名称（对应 skill 目录名） |
 | `event_type` | 否 | 覆盖的事件类型（默认沿用当前事件类型） |
 | `params` | 否 | 透传给下一个 Agent 的额外参数 |
@@ -94,10 +92,6 @@ Webhook → event_processor → agent.run(skill_prompt)
 if self.path == "/api/a2a" and self.command == "POST":
     length = int(self.headers.get("Content-Length", 0))
     body = json.loads(self.rfile.read(length))
-    if body.get("token") != GITCODE_WEBHOOK_TOKEN:
-        self.send_response(401)
-        self.end_headers()
-        return
     from src.event_processor import process_a2a_event
     process_a2a_event(body)
     self.send_response(200)
@@ -165,7 +159,6 @@ def _process_event_inner(evt, repo_key, account):
   curl -X POST http://localhost:8080/api/a2a \
     -H "Content-Type: application/json" \
     -d '{
-      "token": "'"$GITCODE_WEBHOOK_TOKEN"'",
       "event_type": "issue_comment",
       "skill": "implementation",
       "params": {
@@ -200,7 +193,7 @@ def _process_event_inner(evt, repo_key, account):
 
 | 限制 | 说明 |
 |------|------|
-| Token 鉴权 | A2A API 必须携带有效的 `GITCODE_WEBHOOK_TOKEN` |
+| 本地访问 | A2A API 仅限 `localhost:8080` 访问，不对外暴露 |
 | Skill 白名单 | 只允许 `VALID_SKILLS` 中已注册的技能 |
 | 最大调用深度 | `max_a2a_depth = 5`，防止无限循环 |
 | 日志记录 | 每次 A2A 跳转记录完整链路 |
