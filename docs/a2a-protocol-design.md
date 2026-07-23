@@ -43,9 +43,10 @@ Content-Type: application/json
 {
   "event_type": "issue_comment",     // 事件类型（可选，默认沿用当前事件类型）
   "skill": "implementation",          // 下一个要执行的技能（必填）
-  "payload": {                        // 必传上下文（可选）
+  "payload": {                        // 上下文信息
     "repository": "owner/repo",
-    "account": "default"
+    "account": "default",
+    "context": "当前 DevOps Bot 生成的 prompt 摘要 + 当前 Agent 的处理结论"
   }
 }
 ```
@@ -54,7 +55,10 @@ Content-Type: application/json
 |------|------|------|
 | `skill` | 是 | 下一个要执行的技能名称（对应 skill 目录名） |
 | `event_type` | 否 | 覆盖的事件类型，不传则沿用当前事件类型 |
-| `payload` | 否 | 透传最小上下文，`repository` 和 `account` 必含 |
+| `payload` | 否 | 透传上下文 |
+| `payload.repository` | 推荐 | 仓库标识，Agent 无法自行推断时传递 |
+| `payload.account` | 推荐 | 账户名 |
+| `payload.context` | 推荐 | 原始 prompt 摘要 + 当前 Agent 处理结论，供下一个 Agent 理解前因后果 |
 
 ### 处理流程变化
 
@@ -123,11 +127,25 @@ def process_a2a_event(body: dict):
         "type": event_type,
         "repository": repository,
         "source": "gitcode",
-        "actor": payload.get("actor", "bot"),
+        "actor": "bot",
         "payload": payload,
         "_override_skill": skill,
+        "_a2a_context": payload.get("context", ""),  # ← 前序上下文
     }
     _process_event_inner(a2a_evt, repo_key, account)
+```
+
+`build_prompt` 收到 `_a2a_context` 后，将其注入到 prompt 顶部：
+
+```python
+def build_prompt(evt, ...):
+    parts = []
+    a2a_ctx = evt.get("_a2a_context", "")
+    if a2a_ctx:
+        parts.append("## 前序 Agent 处理摘要\n")
+        parts.append(a2a_ctx)
+        parts.append("请基于以上上下文继续处理。\n")
+    # 后续拼接原始 prompt ...
 ```
 
 修改 `_process_event_inner` 支持 `_override_skill`：
@@ -145,15 +163,17 @@ def _process_event_inner(evt, repo_key, account):
         ...
 ```
 
-### 3. Prompt 追加 A2A 调用说明
+### 3. Prompt 追加 A2A 调用说明 + context 传递
 
-在 `build_prompt` 末尾追加，告知 Agent 如何发起 A2A：
+在 `build_prompt` 末尾追加，告知 Agent 如何构建 context 并发起 A2A：
 
 ```
 ## Agent-to-Agent 协议
 
 如果你认为当前任务需要其他技能继续处理（例如 issue 审批通过后需要开发），
-请先完成当前任务（发布必要的评论/通知），然后调用 A2A API：
+请先完成当前任务（发布必要的评论/通知），然后调用 A2A API。
+
+### 调用方式
 
   curl -X POST http://localhost:8080/api/a2a \
     -H "Content-Type: application/json" \
@@ -162,21 +182,42 @@ def _process_event_inner(evt, repo_key, account):
       "skill": "implementation",
       "payload": {
         "repository": "'"$REPO_FULL_NAME"'",
-        "account": "'"$ACCOUNT"'"
+        "account": "'"$ACCOUNT"'",
+        "context": "当前处理摘要：你完成该任务的分析结论和关键信息"
       }
     }'
 
-可用技能：
-- implementation：代码实现与提交
-- pr：Pull Request 审核
-- cloud-deploy：云部署
-- issue：Issue 处理
-- build-debug：构建调试
+### context 构造规则
 
-⚡ 注意：A2A API 调用是独立操作，不影响你已发布的评论/通知。
+`context` 是传给下一个 Agent 的"接力说明"，应包含：
+1. **原始需求**：DevOps Bot 给你的 prompt 的核心内容
+2. **你的分析结论**：你通过分析得出的关键信息（issue 类型、严重程度、涉及文件等）
+3. **建议下一步**：需要下一个 Agent 做什么
+
+示例：
+```
+原始需求：处理 issue #33 "新增VOD声音查询"（feature 请求）
+分析结论：用户请求新增 VOD 声音查询功能，需要修改 vod-service 模块
+建议下一步：创建分支 feat/vod-query，实现查询接口
 ```
 
-### 4. Agent 调用 curl 的变量来源
+⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
+```
+
+### 4. context 的传递链路
+
+```
+DevOps Bot 生成原始 prompt
+  → 当前 Agent 收到 prompt + 执行
+    → Agent 理解上下文、分析问题、生成结论
+    → Agent 将原始 prompt 摘要 + 自己的结论拼成 context
+    → Agent 发 curl POST /api/a2a 携带 context
+  → event_processor 收到 A2A 请求
+    → _process_event_inner 将 context 注入到下一个 Agent 的 prompt 中
+    → 下一个 Agent 收到含前序上下文的 prompt
+```
+
+### 5. Agent 调用 curl 的变量来源
 
 `$GITCODE_WEBHOOK_TOKEN`、`$ISSUE_NUMBER`、`$REPO_FULL_NAME` 等变量通过 `executor.py` 注入到 Agent 的环境变量中，Agent 可直接在 curl 命令中引用。
 
