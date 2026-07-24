@@ -34,21 +34,17 @@ tools:
 
 ### 分析内容
 
-1. **触发来源**
-   - A2A context 中有「前序 Agent 处理摘要」→ 优先按 context 执行
-   - 无 A2A context → 读取 Issue 标签判断
-
-2. **任务类型**
+1. **任务类型**
 
    | 判断条件 | 任务类型 |
    |---------|---------|
    | context 包含 `CODEOWNERS`、`模块责任人`、`codeowner 分支` | 生成 CODEOWNERS |
    | context 包含 `启动开发`、`实现` | feature 开发 |
    | context 包含 `修复`、`bug` | bug 修复 |
-   | Issue 标签含 `bug`/`feature` 且含 `PATCH` | bug fix / feature dev（传统入口） |
+   | Issue 标签含 `bug`/`feature` 且含 `PATCH` | bug fix / feature dev |
    | 非以上情况 | 不做处理，结束 |
 
-3. **复杂度评估**
+2. **复杂度评估**
    - 简单修复（单文件改动、< 50 行）→ 跳过文档和方案设计
    - 中等 feature（多文件、有明确需求）→ 执行方案设计
    - 大型 feature（跨模块、架构调整）→ 执行文档 + 方案设计
