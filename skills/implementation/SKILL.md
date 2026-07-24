@@ -154,6 +154,72 @@ Content-Type: application/json
 | 责任人 | 附带建议 | 纳入方案设计后进入开发 |
 | 非责任人 | 任意内容 | 回复 "请 @责任人 本人确认是否启动开发" |
 
+## 5. CODEOWNERS 文件生成（通过 A2A 触发）
+
+当收到来自 issue skill 的 A2A 事件，且 context 中包含 CODEOWNERS 模块责任人信息时，执行此流程。
+
+### 触发条件
+
+从 prompt 顶部的"前序 Agent 处理摘要"中判断是否包含以下内容：
+- 关键词：`CODEOWNERS`、`模块责任人`、`codeowner 分支`
+- 包含了用户填写的模块定义信息
+
+### 执行步骤
+
+1. **解析 context 中的模块信息**：从 A2A context 中提取用户填写的模块定义，格式如：
+
+   ```
+   模块：用户管理
+   责任人：@username
+   触发词：登录、注册、权限、角色
+   描述：用户认证与权限管理
+   ```
+
+2. **生成 CODEOWNERS 文件**：将以上信息转换为 CODEOWNERS 格式：
+
+   ```
+   # 项目：xxx
+   # 描述：xxx
+   
+   # 模块：用户管理
+   # 责任人：@username
+   # 触发词：登录、注册、权限、角色
+   # 描述：用户认证与权限管理
+   * @username
+   ```
+
+3. **推送到 `codeowner` 分支**：
+
+   ```bash
+   # 创建 codeowner 分支（基于仓库的默认分支）
+   git checkout -b codeowner
+   
+   # 写入 CODEOWNERS 文件到仓库根目录
+   cat > CODEOWNERS << 'EOF'
+   # 项目：xxx
+   # 描述：xxx
+   
+   # 模块：用户管理
+   # 责任人：@username
+   # 触发词：登录、注册、权限、角色
+   # 描述：用户认证与权限管理
+   * @username
+   EOF
+   
+   git add CODEOWNERS
+   git commit -m "docs: add CODEOWNERS for module ownership"
+   git push origin codeowner
+   ```
+
+4. **在触发 Issue 中评论告知完成**：
+
+   ```bash
+   POST /repos/{owner}/{repo}/issues/{number}/comments
+   Authorization: Bearer $GITCODE_API_TOKEN
+   Content-Type: application/json
+   {"body": "[DevOps Bot] CODEOWNERS 已生成并推送到 `codeowner` 分支。后续机器人将优先从此分支读取模块责任人信息。"}
+   ```
+
 ## 硬规则
 
 - ❌ 禁止合并 PR（仅创建，等待人工审批）

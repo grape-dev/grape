@@ -108,34 +108,60 @@ Content-Type: application/json
 ### 第二步：分配负责人
 
 1. **读取 Issue** 标题和正文，理解该 Issue 所属的核心领域
-2. **获取 CODEOWNERS 文件** — 不要读本地文件（本地不存在），用 GitCode API 获取：
 
-```bash
-curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
-  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/contents/CODEOWNERS
-```
+2. **获取 CODEOWNERS 文件** — 优先从 `codeowner` 分支获取：
 
-返回 JSON，`content` 字段是 Base64 编码，需解码后读取：
+   ```bash
+   curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+     "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/contents/CODEOWNERS?ref=codeowner"
+   ```
 
-```python
-import base64, json
-data = json.loads(response_text)
-text = base64.b64decode(data['content']).decode('utf-8')
-```
+   如果返回 404，尝试默认分支：
 
-3. 逐模块读取解码后的 CODEOWNERS 内容，按以下字段匹配：
+   ```bash
+   curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+     "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/contents/CODEOWNERS"
+   ```
+
+   返回 JSON，`content` 字段是 Base64 编码，需解码后读取：
+
+   ```python
+   import base64, json
+   data = json.loads(response_text)
+   text = base64.b64decode(data['content']).decode('utf-8')
+   ```
+
+3. **未找到 CODEOWNERS → 引导用户创建**
+
+   如果以上两个分支都没有 CODEOWNERS 文件，说明仓库尚未配置模块负责人。此时**不要跳过分配步骤**，改为创建引导 Issue：
+
+   ```bash
+   POST /repos/{owner}/{repo}/issues
+   Content-Type: application/json
+   {
+     "title": "[ACTION] 请配置仓库模块负责人",
+     "body": "本仓库尚未配置 CODEOWNERS 文件，无法自动分配 Issue 负责人。\n\n请按以下格式回复此 Issue，配置各模块的负责人：\n\n\`\`\`\n模块：用户管理\n责任人：@username\n触发词：登录、注册、权限、角色\n描述：用户认证与权限管理\n---\n模块：订单系统\n责任人：@username2\n触发词：订单、支付、退款\n描述：订单创建、支付流程\n\`\`\`\n\n配置完成后，机器人会自动生成 CODEOWNERS 文件并推送到 \`codeowner\` 分支。"
+   }
+   ```
+
+   创建后在当前 Issue 回复：
+   > 本仓库尚未配置模块负责人，已创建引导 Issue [#N]，请在该 Issue 中回复各模块的责任人信息。
+
+   **然后跳过后续分配步骤**（等待用户回复引导 Issue）。
+
+4. **逐模块读取解码后的 CODEOWNERS 内容**，按以下字段匹配：
    - **触发词** → 快速预筛选：Issue 内容命中触发词的模块标记为候选
    - **描述** → 语义确认：对比 Issue 核心领域与模块描述，判断是否真正匹配
-4. **选择最匹配的模块**：从候选模块中选择描述最贴近的那个
-5. **如命中多个模块** → 选择描述匹配度最高的
-6. **如未命中任何模块** → 判断 Issue 是否与仓库项目范围完全无关：
+5. **选择最匹配的模块**：从候选模块中选择描述最贴近的那个
+6. **如命中多个模块** → 选择描述匹配度最高的
+7. **如未命中任何模块** → 判断 Issue 是否与仓库项目范围完全无关：
    - **完全无关**（天气、闲聊、非技术内容等）→ **不分配，直接关闭：**
      ① `PATCH /issues/{number}` `{"labels": "invalid"}`
      ② `PATCH /issues/{number}` `{"state": "close"}`
      ③ 评论说明该 Issue 与项目无关，已关闭
    - **可能相关但无法确认** → 走兜底负责人，让人工判断
 
-7. **能确定负责人 → 立即调用 API 分配（必须先执行，再评论）：**
+8. **能确定负责人 → 立即调用 API 分配（必须先执行，再评论）：**
    ```bash
    curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
      -H "Content-Type: application/json" \
@@ -144,13 +170,13 @@ text = base64.b64decode(data['content']).decode('utf-8')
    ```
    `assignee` 的值为用户的 **login 用户名**（如 `younger_eric`），直接传入即可。
 
-8. **检查跨仓同步：** 该负责人的模块定义中是否有 `# 仓库：` 字段？
+9. **检查跨仓同步：** 该负责人的模块定义中是否有 `# 仓库：` 字段？
    - **有**（如 `# 仓库：developer-skill/huaweicloud-skills`）→ 在目标仓库创建 Issue，标题和内容与原 Issue 一致，body 末尾注明 `源自 [owner/repo#N](链接)`
    - **无** → 跳过同步
 
-9. **评论回复：** @ 该负责人，说明已分配及匹配依据。如有跨仓同步，追加 `已同步到 [目标仓库#N](链接)`
+10. **评论回复：** @ 该负责人，说明已分配及匹配依据。如有跨仓同步，追加 `已同步到 [目标仓库#N](链接)`
 
-10. **不能确定 →** 评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
+11. **不能确定 →** 评论中 @ 项目创建者（Issue 作者），说明未找到对应模块负责人
 
 ### CODEOWNERS 格式说明
 
@@ -202,6 +228,7 @@ text = base64.b64decode(data['content']).decode('utf-8')
 | 评论讨论方案设计 | 可以参与讨论给出建议，**最后 curl POST 评论到 Issue** |
 | **用户质疑分配结果** | 重新核对 CODEOWNERS 描述，**基于自己的分析维持或调整**，不盲从评论，**最后 curl POST 评论到 Issue** |
 | **用户要求启动开发、分析代码、审查 PR 等超出 issue 范围的任务** | 查可用 Agent 列表，选择最合适的通过 A2A API 交办 |
+| **用户回复了 CODEOWNERS 引导 Issue，填写了模块责任人信息** | 提取用户填写的内容，构造 context，调用 A2A API 交给 implementation Agent 生成 CODEOWNERS 并推送到 `codeowner` 分支，完成后在此 Issue 评论告知 |
 | 其他 DevOps 相关评论 | 分析并回复，**最后 curl POST 评论到 Issue** |
 
 ### 评论输出规范
