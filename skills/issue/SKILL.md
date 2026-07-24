@@ -133,21 +133,13 @@ Content-Type: application/json
 
 3. **未找到 CODEOWNERS → 引导用户创建**
 
-   如果以上两个分支都没有 CODEOWNERS 文件，说明仓库尚未配置模块负责人。此时**不要跳过分配步骤**，改为创建引导 Issue：
+   如果以上两个分支都没有 CODEOWNERS 文件，说明仓库尚未配置模块负责人。此时**不要跳过分配步骤**，改为：
 
-   ```bash
-   POST /repos/{owner}/{repo}/issues
-   Content-Type: application/json
-   {
-     "title": "[ACTION] 请配置仓库模块负责人",
-     "body": "本仓库尚未配置 CODEOWNERS 文件，无法自动分配 Issue 负责人。\n\n请按以下格式回复此 Issue，配置各模块的负责人：\n\n\`\`\`\n模块：用户管理\n责任人：@username\n触发词：登录、注册、权限、角色\n描述：用户认证与权限管理\n---\n模块：订单系统\n责任人：@username2\n触发词：订单、支付、退款\n描述：订单创建、支付流程\n\`\`\`\n\n配置完成后，机器人会自动生成 CODEOWNERS 文件并推送到 \`codeowner\` 分支。"
-   }
-   ```
-
-   创建后在当前 Issue 回复：
-   > 本仓库尚未配置模块负责人，已创建引导 Issue [#N]，请在该 Issue 中回复各模块的责任人信息。
-
-   **然后跳过后续分配步骤**（等待用户回复引导 Issue）。
+   a. 读取 `references/codeowners-guide.md` 中的引导 Issue 模板
+   b. 用该模板创建一个新的引导 Issue
+   c. 在当前 Issue 回复：
+      > 本仓库尚未配置模块负责人，已创建引导 Issue [#N]，请在该 Issue 中回复各模块的责任人信息。
+   d. **跳过后续分配步骤**（等待用户回复引导 Issue）
 
 4. **逐模块读取解码后的 CODEOWNERS 内容**，按以下字段匹配：
    - **触发词** → 快速预筛选：Issue 内容命中触发词的模块标记为候选
