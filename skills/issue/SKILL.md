@@ -47,33 +47,11 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 > 所有步骤完成后，**必须**用 curl 将结果 POST 到 Issue 评论，body 以 `[DevOps Bot]` 开头。这是最终强制步骤。
 
-### 第零步：有效性检查
+### 第零步：有效性检查（仅新 Issue 需要）
 
-在分类之前，先判断 Issue 是否有效：
+如果 Issue 已有标签或已有负责人（说明已被机器人处理过），**跳过**此步骤，直接进入「第一步：分类与打标签」重新确认标签是否需要更新。
 
-| 检查项 | 方法 | 无效则 |
-|--------|------|--------|
-| 是否已实现 | 搜索 master 分支 commit message 是否包含 Issue 标题关键词 | 回复并建议关闭 |
-| 是否重复 | 搜索 open 状态 Issue 中标题/正文相似度高的 | 回复并在重复 Issue 中关联 |
-| 描述是否清晰 | 正文 < 30 字或无复现步骤/日志/截图 | 标记 `need-info` 并等待补充 |
-
-**检查流程：**
-
-1. **是否已实现：** 用 API 获取最近 commit，搜索 commit message 是否匹配 Issue 标题
-   ```bash
-   GET /repos/{owner}/{repo}/commits?per_page=20
-   ```
-   匹配到相关 commit → 回复 "该功能已在 [`{sha}`](链接) 中实现，建议关闭。" → **跳过后续步骤**
-
-2. **是否重复：** 用 API 搜索 open 状态的 Issue，检查标题/正文相似度
-   ```bash
-   GET /repos/{owner}/{repo}/issues?state=open&per_page=20
-   ```
-   找到重复 → 在原 Issue 评论 "与 [#N](链接) 重复，已在 #N 中跟进，关闭此 Issue。" → **关闭并跳过后续步骤**
-
-3. **描述是否清晰：** 正文 < 30 字、无复现步骤、无日志/截图 → 标记 `need-info` 并评论要求补充 → 跳过分配
-
-通过有效性检查后，进入正常分诊流程。
+如果是全新的 Issue（无标签、无负责人），读取 `references/issue-validity-check.md` 执行完整性检查。
 
 ### 第一步：分类与打标签
 
