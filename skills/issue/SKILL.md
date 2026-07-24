@@ -49,7 +49,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 3. **负责人状态** — 当前是否有负责人？是否需要分配？
 
-4. **Issue 内容质量分析** — 按标签类型对内容质量做深度评估，见 `references/quality-analysis-guide.md`
+4. **Issue 内容质量分析** — 按标签类型评估 Issue 内容质量
 
 5. **是否需要回复** — 用户 @提及/提问/质疑分配结果 → 需要回复
 
