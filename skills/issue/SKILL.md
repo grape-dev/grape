@@ -117,8 +117,6 @@ Content-Type: application/json
 
 当分析结论为「负责人缺失，且 Issue 在仓库主题范围内」时执行。
 
-**如果 Issue 已有负责人**，跳过此能力项。
-
 1. **读取 Issue** 标题和正文，理解该 Issue 所属的核心领域
 
 2. **获取 CODEOWNERS 文件** — 优先从 `codeowner` 分支获取：
