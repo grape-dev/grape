@@ -85,6 +85,8 @@ Content-Type: application/json
 
 ### 第二步：分配负责人
 
+**如果 Issue 已有负责人（assignee 不为空）**，跳过此步骤——负责人已存在，无需重新分配。
+
 1. **读取 Issue** 标题和正文，理解该 Issue 所属的核心领域
 
 2. **获取 CODEOWNERS 文件** — 优先从 `codeowner` 分支获取：
