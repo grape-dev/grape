@@ -49,26 +49,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 3. **负责人状态** — 当前是否有负责人？是否需要分配？
 
-4. **Issue 内容质量分析**
-
-   根据 Issue 类型对内容质量进行评估：
-
-   **Bug 类型：**
-   - 是否提供了完整的复现步骤？
-   - 是否有日志/截图/堆栈信息？
-   - 缺少关键信息 → 标记 `need-info` 并追问
-   - 信息完整 → 确认是真实 bug
-
-   **Feature 类型：**
-   - 需求描述是否清晰明确？
-   - 是否有边界条件或模糊表述？
-   - 需求清晰 → 可进入方案设计
-   - 需求模糊 → 标记 `need-info` 并追问具体场景和边界
-
-   **分析结果输出到结论中：**
-   - 内容质量：信息完整，确认是真实 bug
-   - 内容质量：需求清晰，边界明确
-   - 内容质量：缺少复现步骤，需追问
+4. **Issue 内容质量分析** — 按标签类型对内容质量做深度评估，见 `references/quality-analysis-guide.md`
 
 5. **是否需要回复** — 用户 @提及/提问/质疑分配结果 → 需要回复
 
@@ -89,6 +70,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 | 能力 | 执行条件 | 参考 |
 |------|---------|------|
+| 内容质量分析 | 分析结论为需要评估 Issue 内容质量 | `references/quality-analysis-guide.md` |
 | 打标签 | 分析结论为标签缺失或需更新 | `references/labeling-guide.md` |
 | 分配负责人 | 分析结论为负责人缺失且 Issue 在仓库范围内 | `references/assignee-guide.md` |
 | 评论回复 | 分析结论为需要回复 | `references/comment-guide.md` |
