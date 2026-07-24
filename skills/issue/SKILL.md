@@ -163,7 +163,7 @@ text = base64.b64decode(data['content']).decode('utf-8')
 | 仓库 | `# 仓库：owner/repo` | 跨仓同步目标（可选） |
 | 兜底 | `* @用户名` | 未匹配任何模块时使用 |
 
-### 第四步：评论回复
+### 第三步：评论回复
 
 在 Issue 中发表评论，说明已完成的操作：
 
@@ -202,9 +202,6 @@ text = base64.b64decode(data['content']).decode('utf-8')
 | 评论讨论方案设计 | 可以参与讨论给出建议，**最后 curl POST 评论到 Issue** |
 | **用户质疑分配结果** | 重新核对 CODEOWNERS 描述，**基于自己的分析维持或调整**，不盲从评论，**最后 curl POST 评论到 Issue** |
 | **用户要求启动开发、分析代码、审查 PR 等超出 issue 范围的任务** | 查可用 Agent 列表，选择最合适的通过 A2A API 交办 |
-| **用户质疑分配结果** | 重新核对 CODEOWNERS 描述，**基于自己的分析维持或调整**，不盲从评论，**最后 curl POST 评论到 Issue** |
-
-### 评论输出规范
 | 其他 DevOps 相关评论 | 分析并回复，**最后 curl POST 评论到 Issue** |
 
 ### 评论输出规范
@@ -284,13 +281,6 @@ GET /repos/{owner}/{repo}/milestones?state=all
 PATCH /repos/{owner}/{repo}/issues/{number}
 {"milestone_id": 里程碑ID}
 ```
-
-## PR 关联
-
-由 `pr` skill 收到 PR 事件时触发：
-
-- PR body 引用 `Closes #N` / `Fixes #N` → 在 Issue #N 评论 `📌 关联 PR #{pr_number}`
-- 原 Issue 是 bug → PATCH labels="bug,triaged"
 
 ## 硬约束
 
