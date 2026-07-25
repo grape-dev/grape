@@ -9,10 +9,25 @@
 
 ### 0. 是否与仓库主题相关
 
-读取 Issue 标题和正文，判断内容是否属于该仓库的主题范围：
+读取 Issue 标题和正文，判断内容是否属于该仓库的主题范围。按以下优先级判断：
 
-- 获取仓库信息：`GET /repos/{owner}/{repo}` 返回中的 `description` 和 `topics` 字段
-- 对比 Issue 内容与仓库描述/topics 是否匹配
+1. **Session 历史**（优先，零额外消耗）
+   - 你的 prompt 中已包含该仓库的历史事件记录
+   - 回顾历史事件中的仓库和 Issue 类型，快速判断当前 Issue 是否属于同类话题
+   - Session 历史信息足够 → 直接判断，跳过后续步骤
+
+2. **README 内容**（信息不足时）
+   - 如果 Session 历史信息不足或无历史记录，获取仓库 README：
+     ```bash
+     GET /repos/{owner}/{repo}/readme
+     ```
+   - 返回 JSON，`content` 字段是 Base64 编码，解码后读取前 500 字判断项目主题
+
+3. **仓库信息**（最后兜底）
+   - 如 README 也不可用，获取仓库 `description` 和 `topics`：
+     ```bash
+     GET /repos/{owner}/{repo}
+     ```
 
 **完全不相关**（如 DevOps 工具仓库收到天气、闲聊、非技术内容）：
 → 标记 `invalid` 标签
