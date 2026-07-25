@@ -222,6 +222,8 @@ Content-Type: application/json
 
 **所有开发任务都执行此能力。**
 
+⚠️ **创建 PR 后必须先发 Issue 评论告知用户，否则视为未完成。这是最终强制步骤，不可跳过。**
+
 > **重要**：不要依赖 `git push` 自动创建 PR。必须使用以下 curl 手动创建并补充字段。
 
 ```bash
@@ -253,14 +255,18 @@ curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 - `close_related_issue: true` 表示 PR 合入时自动关闭关联 Issue
 - `body`（不是 `description`）用于设置 PR 描述
 
-**在 Issue 中评论告知：**
+**⚠️ 必须执行：发 Issue 评论告知**
+
+创建 PR 后，立即在 Issue 中发评论告知用户，body 以 `[DevOps Bot]` 开头：
 
 ```bash
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $GITCODE_API_TOKEN
 Content-Type: application/json
-{"body": "✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pull/{pr_number})。"}
+{"body": "[DevOps Bot] ✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pull/{pr_number})。"}
 ```
+
+**跳过此步 = 事件未完成处理。**
 
 ## 硬规则
 
@@ -269,7 +275,7 @@ Content-Type: application/json
 | 按分析结论执行实现 | ✅ **必须做** |
 | 所有 feature 开发**必须先输出需求文档和方案设计**再编码 | ✅ **必须做** |
 | 所有开发任务**必须包含测试用例** | ✅ **必须做** |
-| 创建 PR 后在 Issue 评论链接 | ✅ **必须做** |
+| ⚠️ **创建 PR 后必须在 Issue 发评论告知** | ✅ **必须做，不可跳过** |
 | 每个提交一个原子变更 | ✅ **必须做** |
 | 只通过 GitCode API 获取信息 | ✅ **必须做** |
 | 仅实现当前 Issue 描述的内容 | ✅ **保持范围** |
