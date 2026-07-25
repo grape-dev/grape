@@ -79,8 +79,8 @@ def process_event(raw_body, headers, account="default"):
         user = evt['payload'].get('user', {})
         username = user.get('username', '') if isinstance(user, dict) else ''
         if username in BOT_USERNAMES:
-            if evt['type'] == 'issue_comment':
-                log.info(f"Skip: self-comment from {username}")
+            if evt['type'] in ('issue_comment', 'note_hook_pr'):
+                log.info(f"Skip: self-comment from {username} ({evt['type']})")
                 return
             log.info(f"Self-triggered event from {username}: {evt['type']}")
 
