@@ -97,7 +97,7 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 扫描结果存入 `review_comments`。
 
-### 能力四：A2A 请求支援
+### 能力四：A2A 通知
 
 **当审查发现问题需要修改时，调用 A2A 通知 implementation Agent 处理。**
 
