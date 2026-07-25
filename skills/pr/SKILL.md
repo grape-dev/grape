@@ -38,41 +38,9 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
    如果是 `pull_request_updated`、`push` 或 `note_hook_pr` 事件，**跳过此步**（配置已在 PR 创建时检查过）。
 
-   获取 PR 详情：
-   ```bash
-   curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
-     https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
-   ```
-   从返回中提取 `title`、`body`、`head.sha`、`labels`、`assignee`、`user.login` 等字段。
+   读取 `references/pr-config-check.md` 执行检查，将不通过项记录到 `review_comments` 中（暂不评论，统一到最后处理）。
 
-   逐项检查并将不通过项记录下来（暂不评论，统一到最后的评论回复能力项中处理）：
-
-   | 检查项 | 通过条件 | 不通过记录 |
-   |--------|---------|-----------|
-   | **Title** | 非空，清晰描述变更 | PR 标题为空或过于简单 |
-   | **Description** | 非空，有背景说明 | PR 描述为空 |
-   | **Labels** | 已有分类标签 | PR 缺少分类标签 |
-   | **Assignee** | 已设置责任人 | PR 未设置 Assignee |
-   | **Issue 关联** | body 包含 `Closes #N` / `Fixes #N` / `Related #N` | 未检测到关联 Issue |
-
-   如果有关联 Issue：
-   - 在对应 Issue 中评论 `📌 关联 PR #{pr_number}`
-   - 对应 Issue 是 bug → 在 Issue 上更新标签 `labels="bug,triaged"`
-   ```bash
-   curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
-     https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
-   ```
-   从返回中提取 `title`、`body`、`head.sha`、`labels`、`assignee`、`user.login` 等字段。
-
-   逐项检查并将不通过项记录下来（暂不评论，统一到最后的评论回复能力项中处理）：
-
-   | 检查项 | 通过条件 | 不通过记录 |
-   |--------|---------|-----------|
-   | **Title** | 非空，清晰描述变更 | PR 标题为空或过于简单 |
-   | **Description** | 非空，有背景说明 | PR 描述为空 |
-   | **Issue 关联** | body 包含 `Closes #N` / `Fixes #N` / `Related #N` | 未检测到关联 Issue |
-   | **Labels** | 已有分类标签 | PR 缺少分类标签 |
-   | **Assignee** | 已设置责任人 | PR 未设置 Assignee |
+   如果有关联 Issue，在对应 Issue 中评论 `📌 关联 PR #{pr_number}`，对应 Issue 是 bug 则更新标签 `labels="bug,triaged"`。
 
 2. **变更检视**
 
@@ -89,9 +57,9 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
    | 判断条件 | 任务类型 |
    |---------|---------|
-   | PR 修改了 `skills/` 目录下的文件 | 常规审查 + **Skill 审查** |
-   | PR 包含 IaC 文件（K8s/Terraform/Dockerfile） | 常规审查 + **安全扫描** |
-   | 普通代码变更 | 常规审查 |
+   | PR 修改了 `skills/` 目录下的文件 | 常规审查 + Skill 审查 + 回复评论 + A2A 通知 |
+   | PR 包含 IaC 文件（K8s/Terraform/Dockerfile） | 常规审查 + 安全扫描 + 回复评论 + A2A 通知 |
+   | 普通代码变更 | 常规审查 + 回复评论 + A2A 通知 |
    | 无新变更 | 不做处理，结束 |
 
 ### 分析结论示例
@@ -101,7 +69,7 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 - 配置检查：Title 和 Description 通过，缺少 Labels 和 Assignee
 - 变更检视：有新变更（首次审查）
 - 任务类型：常规审查 + 安全扫描（IaC 文件变更）
-- 需要执行：源码审查 → IaC 安全扫描 → 合并检查 → A2A 请求支援（如需修改）→ 评论回复
+- 需要执行：源码审查 → IaC 安全扫描 → 合并检查 → A2A 通知（如需修改）→ 评论回复
 ```
 
 ## 能力项
