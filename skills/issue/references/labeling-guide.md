@@ -29,4 +29,4 @@ Content-Type: application/json
 {"labels": "feature,triaged"}
 ```
 
-多个标签用逗号分隔。如果标签已存在则跳过创建步骤，直接 PATCH issue。
+多个标签用逗号分隔。如果标签定义已在仓库中存在，跳过创建步骤，直接 PATCH issue。
