@@ -58,7 +58,7 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
    | 判断条件 | 任务类型 |
    |---------|---------|
    | PR 修改了 `skills/` 目录下的文件 | 常规审查 + Skill 审查 + 回复评论 + A2A 通知 |
-   | PR 包含 IaC 文件（K8s/Terraform/Dockerfile） | 常规审查 + 安全扫描 + 回复评论 + A2A 通知 |
+   | PR 包含 IaC 文件（K8s/Terraform/Dockerfile） | 常规审查 + IaC 审查 + 回复评论 + A2A 通知 |
    | 普通代码变更 | 常规审查 + 回复评论 + A2A 通知 |
    | 无新变更 | 不做处理，结束 |
 
@@ -69,22 +69,22 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 - 配置检查：Title 和 Description 通过，缺少 Labels 和 Assignee
 - 变更检视：有新变更（首次审查）
 - 任务类型：常规审查 + 安全扫描（IaC 文件变更）
-- 需要执行：源码审查 → IaC 安全扫描 → A2A 通知（如需修改）→ 评论回复
+- 需要执行：常规审查 → IaC 审查 → A2A 通知（如需修改）→ 评论回复
 ```
 
 ## 能力项
 
 执行过程中不单独发评论，所有评论内容记录到 `review_comments` 列表中，最后统一在「评论回复」能力项中发送。
 
-### 能力一：源码审查
+### 能力一：常规审查
 
 读取 `references/code-review-and-quality.md`，按 5 轴标准逐项审查（正确性、可读性、架构、安全、性能）。记录发现的问题并按严重度标注（Critical / Required / Nit），存入 `review_comments`。
 
-### 能力二：Skill 审查（仅当 PR 修改了 `skills/` 目录）
+### 能力二：Skill 审查
 
 读取 `references/skill-review-and-quality.md`，审查技能文件的格式规范、完整性、引用路径、向后兼容性。发现的问题存入 `review_comments`。
 
-### 能力三：IaC 安全扫描（仅当 PR 包含 IaC 文件）
+### 能力三：IaC 审查（仅当 PR 包含 IaC 文件）
 
 额外扫描 IaC（基础设施即代码）文件：
 
