@@ -19,10 +19,10 @@ tools:
 负责编码、提交、创建 PR。不负责 Issue 分类、打标签、分配负责人（这是 issue skill 的职责）。
 
 ### 依赖前序分析
-通过 A2A 被调用时，prompt 顶部包含「前序 Agent 处理摘要」，其中已包含了 issue skill 的分析结论。优先依据此上下文执行。
+通过 A2A 被调用时，prompt 顶部包含「前序 Agent 处理摘要」，其中已包含了 issue skill 的分析结论。此摘要可作为需求背景的快速参考，但**不保证完整性**，必须通过 API 获取 Issue 完整内容后再开始编码。
 
 ### 理解需求后再实现
-在编码前，先基于 A2A context 或 Issue 内容完整理解需求，判断需求是否清晰、边界是否明确。
+在编码前，必须通过 GitCode API 获取 Issue 完整内容（标题、正文、标签、评论），基于完整信息判断需求是否清晰、范围是否明确。
 如果发现需求理解有疑问或信息不足，先通过评论向用户确认，确认后再开始编码。
 
 ### 确认技术可行性
@@ -48,7 +48,7 @@ tools:
      curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
        "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}"
      ```
-    - 如有不明确之处，先通过评论向用户确认，确认后再继续
+   - 如有不明确之处，先通过评论向用户确认，确认后再继续
 
 2. **技术可行性**
    - 实现该需求是否需要调用外部 API 或第三方服务？（如 VOD、OBS、IAM 等）
@@ -168,9 +168,9 @@ git push origin feat/issue-{number}
 - 将需求文档保存到仓库 `docs/spec.md`
 - 在 Issue 中评论 `📋 需求文档已归档到 [docs/spec.md]({仓库链接})`
 
-### 能力五：方案设计（中等及以上 feature）
+### 能力五：方案设计
 
-**仅当分析结论需要方案设计时执行。**
+**所有 feature 开发都必须执行此能力。**
 
 开始设计前，先确认技术可行性：
 1. 涉及的外部服务/API 是否有可获取的文档？
