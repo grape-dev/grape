@@ -77,7 +77,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 用户请求关闭 Issue 时：
 1. `git log --oneline -20 --all` 检查 master 是否已实现
-2. 已实现 → 回复建议关闭；未实现 → 回复当前进展
+2. 已实现 → 回复说明已实现并**关闭 Issue**；未实现 → 回复当前进展
 
 ## 里程碑设置（可选）
 
