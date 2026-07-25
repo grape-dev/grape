@@ -38,7 +38,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 ### 禁止探索 Bot 内部
 **所有信息通过 GitCode API 获取**，不读取本地文件。
 
-## Issue 分析（每次处理前先执行）
+## Issue 分析（每次处理前先执行，⚠️ 必须按 1→2→3→4→5 顺序依次执行，上一步未完成不得进入下一步）
 
 1. **Issue 是否有效**（⚠️ 新 Issue 必须执行此检查，不可跳过）
     - 已有标签或负责人 → 已被处理过，跳过有效性检查
@@ -50,7 +50,11 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 4. **是否需要回复** — 用户 @提及/提问/质疑分配结果 → 需要回复
 
-5. **是否需要 A2A** — 是否超出 issue 能力范围？
+5. **是否需要 A2A**（⚠️ 仅清晰且有效的 Issue 才能调用，不可随意调用）
+    - 前提条件（**全部满足**）：
+      a. Issue 通过了全部有效性检查（内容质量分析确认清晰、信息完整、具备实施条件）
+      b. Issue 未被标记为 need-info、invalid，未被判断为已实现或重复
+    - **不符合以上条件 → 不调用 A2A**，通过评论回复继续讨论或追问
 
 ```
 分析结论示例：
@@ -58,7 +62,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 - 负责人：缺失，需分配
 - 内容质量：需求清晰，边界明确
 - 回复：需要
-- A2A：不需要
+- A2A：通过（清晰且有效 → 可调用 A2A）
 ```
 
 分析完成后，按需执行以下能力项，无固定顺序。
@@ -70,7 +74,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 | 打标签 | 分析结论为标签缺失或需更新（全新 Issue 必须先通过有效性检查） | `references/labeling-guide.md` |
 | 分配负责人 | 分析结论为负责人缺失且 Issue 在仓库范围内 | `references/assignee-guide.md` |
 | 评论回复 | 分析结论为需要回复 | `references/comment-guide.md` |
-| A2A 请求支援 | 分析结论为超出 issue 范围 | 本 prompt 底部的 Agent-to-Agent 协议章节 |
+| A2A 请求支援 | 分析结论为清晰且有效的 Issue（见 Issue 分析第 5 步） | 本 prompt 底部的 Agent-to-Agent 协议章节 |
 
 ## 关闭建议
 
