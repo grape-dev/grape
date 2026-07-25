@@ -248,7 +248,7 @@ curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $GITCODE_API_TOKEN
 Content-Type: application/json
-{"body": "✅ 已完成实现，请审查 PR [#{pr_number}]。"}
+{"body": "✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pulls/{pr_number})。"}
 ```
 
 ## 硬规则
