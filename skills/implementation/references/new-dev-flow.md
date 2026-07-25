@@ -134,7 +134,7 @@ curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{pr_number}
 ```
 
-发 Issue 评论告知：
+### ⚠️ 必须执行：发 Issue 评论告知
 
 ```bash
 POST /repos/{owner}/{repo}/issues/{number}/comments
