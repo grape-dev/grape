@@ -4,9 +4,6 @@ version: 2.0.0
 description: |
   代码实现与 PR 创建/优化。通过 A2A 协议被 issue skill 调用时执行新开发；
   或被 PR skill 调用时根据审查意见优化 PR 代码实现。
-  也响应 issue_labeled 事件（带 PATCH 标签时进入修复/开发流程）。
-triggers:
-  - event_type: issue_labeled
 tools:
   - git
   - curl

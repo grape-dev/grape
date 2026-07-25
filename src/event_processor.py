@@ -82,13 +82,7 @@ def process_event(raw_body, headers, account="default"):
             if evt['type'] == 'issue_comment':
                 log.info(f"Skip: self-comment from {username}")
                 return
-            if evt['type'] == 'issue_opened':
-                changes = evt['payload'].get('changes', {})
-                if isinstance(changes, dict) and "labels" in changes:
-                    evt['type'] = 'issue_labeled'
-                    log.info(f"Bot label change, routing to implementation")
-                else:
-                    log.info(f"Self-triggered issue_opened from {username}")
+            log.info(f"Self-triggered event from {username}: {evt['type']}")
 
         lock = _acquire_repo_lock(repo_key)
         lock.acquire(timeout=180)

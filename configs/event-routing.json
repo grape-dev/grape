@@ -2,7 +2,6 @@
   "routing": {
     "issue_opened": "issue",
     "im_notify": "im-notify",
-    "issue_labeled": "implementation",
     "issue_comment": "issue",
     "pull_request_opened": "pr",
     "pull_request_updated": "pr",
