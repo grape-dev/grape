@@ -40,10 +40,10 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 ## Issue 分析（每次处理前先执行）
 
-1. **Issue 是否有效**
+1. **Issue 是否有效**（⚠️ 新 Issue 必须执行此检查，不可跳过）
     - 已有标签或负责人 → 已被处理过，跳过有效性检查
-    - 全新 Issue → 读取 `references/issue-validity-check.md`
-    - 无效 → **结束处理**
+    - 全新 Issue（无标签、无负责人）→ **必须先读取 `references/issue-validity-check.md` 执行完整性检查，检查通过后才能执行以下能力项**
+    - 无效 → **结束处理，不执行以下任何能力项**
 
 2. **标签状态** — 当前是否有标签？是否需要更新？
 
@@ -68,7 +68,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 | 能力 | 执行条件 | 参考 |
 |------|---------|------|
-| 打标签 | 分析结论为标签缺失或需更新 | `references/labeling-guide.md` |
+| 打标签 | 分析结论为标签缺失或需更新（全新 Issue 必须先通过有效性检查） | `references/labeling-guide.md` |
 | 分配负责人 | 分析结论为负责人缺失且 Issue 在仓库范围内 | `references/assignee-guide.md` |
 | 评论回复 | 分析结论为需要回复 | `references/comment-guide.md` |
 | A2A 请求支援 | 分析结论为超出 issue 范围 | 本 prompt 底部的 Agent-to-Agent 协议章节 |
