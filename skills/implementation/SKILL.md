@@ -193,9 +193,13 @@ git add -A && git commit -m "feat: #{number} 描述"
 git push origin feat/issue-{number}
 ```
 
-完成后在 Issue 中评论：
-```
-📋 实现代码已提交到分支 feat/issue-{number}
+**完成后必须在 Issue 中发评论告知（参照能力八「创建 PR」中的评论格式），否则视为未完成：**
+
+```bash
+POST /repos/{owner}/{repo}/issues/{number}/comments
+Authorization: Bearer $GITCODE_API_TOKEN
+Content-Type: application/json
+{"body": "📋 实现代码已提交到分支 feat/issue-{number}。"}
 ```
 
 ### 能力七：自审查
@@ -248,7 +252,7 @@ curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $GITCODE_API_TOKEN
 Content-Type: application/json
-{"body": "✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pulls/{pr_number})。"}
+{"body": "✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pull/{pr_number})。"}
 ```
 
 ## 硬规则
