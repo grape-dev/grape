@@ -241,6 +241,14 @@ def _process_event_inner(evt, repo_key, account="default"):
         evt_number = extract_event_number(evt.get("payload", {}))
         if evt_number is not None:
             env_extra["ISSUE_NUMBER"] = str(evt_number)
+        # 提取 PR head SHA
+        payload = evt.get("payload", {})
+        if isinstance(payload, dict):
+            pr_data = payload.get("pull_request") or payload.get("merge_request") or {}
+            if isinstance(pr_data, dict):
+                head = pr_data.get("head", {})
+                if isinstance(head, dict) and head.get("sha"):
+                    env_extra["HEAD_SHA"] = head["sha"]
         if "a2a_event" in evt.get("type", "") or evt.get("_a2a_context"):
             env_extra["IS_A2A"] = "1"
 

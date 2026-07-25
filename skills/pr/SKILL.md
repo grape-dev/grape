@@ -74,15 +74,45 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 ## 能力项
 
-执行过程中不单独发评论，所有评论内容记录到 `review_comments` 列表中，最后统一在「评论回复」能力项中发送。
+审查过程中对每个发现的问题直接在对应代码位置发布行内评论，最后在「评论回复」中发一条总结性评论。
 
 ### 能力一：常规审查
 
-读取 `references/code-review-and-quality.md`，按 5 轴标准逐项审查（正确性、可读性、架构、安全、性能）。记录发现的问题并按严重度标注（Critical / Required / Nit），存入 `review_comments`。
+读取 `references/code-review-and-quality.md`，按 5 轴标准逐项审查（正确性、可读性、架构、安全、性能）。
+
+对发现的每个问题，在对应代码位置发布行内评论：
+
+```bash
+# 先获取 PR 变更文件列表和 diff 信息
+GET /repos/{owner}/{repo}/pulls/{number}/files
+```
+
+从返回中获取每个文件在 diff 中的行号映射。然后在对应位置发布评论：
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "body": "[DevOps Bot] 🔴 Critical: 硬编码密钥，建议使用环境变量",
+    "commit_id": "'"$HEAD_SHA"'",
+    "path": "src/config.py",
+    "position": 42
+  }' \
+  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}/comments
+```
+
+- `commit_id` 为 PR 最新的 head.sha（阶段 0 已获取）
+- `path` 为问题所在的文件路径
+- `position` 为问题在 diff 中的行号（从 PR files API 返回的 diff 中获取）
+- 发现 Critical 或 Required 级别问题时，记录问题摘要用于后续 A2A 通知
 
 ### 能力二：Skill 审查
 
-读取 `references/skill-review-and-quality.md`，审查技能文件的格式规范、完整性、引用路径、向后兼容性。发现的问题存入 `review_comments`。
+**仅当 PR 修改了 `skills/` 目录时执行。**
+
+读取 `references/skill-review-and-quality.md`，审查技能文件的格式规范、完整性、引用路径、向后兼容性。
+
+对发现的每个问题，参照能力一的格式在对应代码位置发布行内评论。
 
 ### 能力三：IaC 审查（仅当 PR 包含 IaC 文件）
 
@@ -95,7 +125,7 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 | Dockerfile | `FROM latest`、`ADD` 替代 `COPY`、root 用户运行、多余端口暴露 |
 | Helm Chart | values 中的敏感默认值、RBAC 权限过度、镜像拉取策略不当 |
 
-扫描结果存入 `review_comments`。
+对发现的每个问题，参照能力一的格式在对应代码位置发布行内评论。
 
 ### 能力四：A2A 通知
 
@@ -116,7 +146,7 @@ curl -X POST http://localhost:8080/api/a2a \
   }'
 ```
 
-其中 `$REVIEW_SUMMARY` 为 review_comments 中 Critical 和 Required 级别问题的汇总。
+其中 `$REVIEW_SUMMARY` 为上述审查中发现的 Critical 和 Required 级别问题的汇总。
 
 ### 能力五：评论回复
 
