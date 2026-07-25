@@ -34,9 +34,30 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 ### 分析内容
 
-1. **PR 配置检查**
+1. **PR 配置检查（仅首次 `pull_request_opened` 事件时执行）**
+
+   如果是 `pull_request_updated`、`push` 或 `note_hook_pr` 事件，**跳过此步**（配置已在 PR 创建时检查过）。
 
    获取 PR 详情：
+   ```bash
+   curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+     https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
+   ```
+   从返回中提取 `title`、`body`、`head.sha`、`labels`、`assignee`、`user.login` 等字段。
+
+   逐项检查并将不通过项记录下来（暂不评论，统一到最后的评论回复能力项中处理）：
+
+   | 检查项 | 通过条件 | 不通过记录 |
+   |--------|---------|-----------|
+   | **Title** | 非空，清晰描述变更 | PR 标题为空或过于简单 |
+   | **Description** | 非空，有背景说明 | PR 描述为空 |
+   | **Labels** | 已有分类标签 | PR 缺少分类标签 |
+   | **Assignee** | 已设置责任人 | PR 未设置 Assignee |
+   | **Issue 关联** | body 包含 `Closes #N` / `Fixes #N` / `Related #N` | 未检测到关联 Issue |
+
+   如果有关联 Issue：
+   - 在对应 Issue 中评论 `📌 关联 PR #{pr_number}`
+   - 对应 Issue 是 bug → 在 Issue 上更新标签 `labels="bug,triaged"`
    ```bash
    curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
      https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
@@ -80,30 +101,22 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 - 配置检查：Title 和 Description 通过，缺少 Labels 和 Assignee
 - 变更检视：有新变更（首次审查）
 - 任务类型：常规审查 + 安全扫描（IaC 文件变更）
-- 需要执行：源码审查 → IaC 安全扫描 → 合并检查 → 评论回复
+- 需要执行：源码审查 → IaC 安全扫描 → 合并检查 → A2A 请求支援（如需修改）→ 评论回复
 ```
 
 ## 能力项
 
 执行过程中不单独发评论，所有评论内容记录到 `review_comments` 列表中，最后统一在「评论回复」能力项中发送。
 
-### 能力一：关联 Issue
-
-检查 PR 正文是否引用 Issue：`Closes #N`、`Fixes #N`、`Resolves #N`、`Related #N`
-
-如果有关联 Issue：
-- 在对应 Issue 中评论 `📌 关联 PR #{pr_number}`
-- 对应 Issue 是 bug → 在 Issue 上更新标签 `labels="bug,triaged"`
-
-### 能力二：源码审查
+### 能力一：源码审查
 
 读取 `references/code-review-and-quality.md`，按 5 轴标准逐项审查（正确性、可读性、架构、安全、性能）。记录发现的问题并按严重度标注（Critical / Required / Nit），存入 `review_comments`。
 
-### 能力三：Skill 审查（仅当 PR 修改了 `skills/` 目录）
+### 能力二：Skill 审查（仅当 PR 修改了 `skills/` 目录）
 
 读取 `references/skill-review-and-quality.md`，审查技能文件的格式规范、完整性、引用路径、向后兼容性。发现的问题存入 `review_comments`。
 
-### 能力四：IaC 安全扫描（仅当 PR 包含 IaC 文件）
+### 能力三：IaC 安全扫描（仅当 PR 包含 IaC 文件）
 
 额外扫描 IaC（基础设施即代码）文件：
 
@@ -116,7 +129,7 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 扫描结果存入 `review_comments`。
 
-### 能力五：合并检查
+### 能力四：合并检查
 
 - [ ] 代码审查通过，无严重问题
 - [ ] IaC 安全扫描无隐患
@@ -125,6 +138,27 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 - [ ] 关联 Issue 已 accepted 或 triaged
 
 检查结果存入 `review_comments`。
+
+### 能力五：A2A 请求支援
+
+**当审查发现问题需要修改时，调用 A2A 通知 implementation Agent 处理。**
+
+如果 review_comments 中存在 Critical 或 Required 级别的问题，说明需要修改代码。此时调用 A2A API 将审查意见传递给 implementation Agent：
+
+```bash
+curl -X POST http://localhost:8080/api/a2a \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent": "implementation",
+    "payload": {
+      "repository": "'"$REPO_FULL_NAME"'",
+      "account": "'"$ACCOUNT"'",
+      "context": "PR #'$PR_NUMBER' 审查发现问题需要修改：'$REVIEW_SUMMARY'"
+    }
+  }'
+```
+
+其中 `$REVIEW_SUMMARY` 为 review_comments 中 Critical 和 Required 级别问题的汇总。
 
 ### 能力六：评论回复
 
@@ -179,6 +213,7 @@ Content-Type: application/json
 | 行为 | 态度 |
 |------|------|
 | 按分析结论执行 PR 审查 | ✅ **必须做** |
+| 审查发现问题需要修改时调用 A2A 通知 implementation | ✅ **必须做** |
 | 所有评论统一在最后发送 | ✅ **必须做，不得在中间步骤发评论** |
 | ⚠️ **发送评论是最终强制步骤** | ✅ **必须做**（除非 SHA 未变更跳过） |
 | 只通过 GitCode API 获取信息 | ✅ **必须做** |
