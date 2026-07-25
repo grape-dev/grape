@@ -297,10 +297,12 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
       }
     }'
 
+📌 重要：payload 中必须传递 `repository` 和 `account`，如能获取到 `issue_number` 也一并传递。
+
 ### context 构造规则
 
 context 是传给下一个 Agent 的接力说明，应包含：
-1. 原始需求：本 prompt 的核心内容摘要
+1. 原始需求：本 prompt 的核心内容摘要（如果来源于 Issue，包含 Issue 标题和关键信息）
 2. 你的分析结论：关键分析结果
 3. 建议下一步：需要下一个 Agent 做什么
 

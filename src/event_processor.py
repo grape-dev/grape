@@ -236,6 +236,13 @@ def _process_event_inner(evt, repo_key, account="default"):
             "ACCOUNT": account,
             "CURRENT_EVENT_TYPE": evt['type'],
         }
+        # 从事件 payload 提取 Issue/PR 编号
+        from src.prompt_builder import extract_event_number
+        evt_number = extract_event_number(evt.get("payload", {}))
+        if evt_number is not None:
+            env_extra["ISSUE_NUMBER"] = str(evt_number)
+        if "a2a_event" in evt.get("type", "") or evt.get("_a2a_context"):
+            env_extra["IS_A2A"] = "1"
 
         for event_type, data in stream_agent(prompt, ws, new_oc_session_id, evt['type'], backend_name=backend, account=account, env_extra=env_extra):
             event_count += 1
