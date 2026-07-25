@@ -80,7 +80,27 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 读取 `references/code-review-and-quality.md`，按 5 轴标准逐项审查（正确性、可读性、架构、安全、性能）。
 
-对发现的每个问题，在对应代码位置发布行内评论：
+**审查前先获取 PR 上已有行内评论，检查上次发现的问题是否已修复：**
+
+```bash
+# 获取 PR 所有行内评论
+GET /repos/{owner}/{repo}/pulls/{number}/comments
+```
+
+对每条已有评论：
+- 检查对应代码位置的代码是否已无问题（问题已修复）
+- 如果已修复 → 调用 API 标记为已解决：
+
+```bash
+curl -s -X PUT -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"resolved": true}' \
+  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}/comments/{discussion_id}
+```
+
+其中 `discussion_id` 为评论对象的 `discussion_id` 字段（不是 `id` 字段）。
+
+**然后审查新变更，对发现的每个问题发布行内评论：**
 
 ```bash
 # 先获取 PR 变更文件列表和 diff 信息

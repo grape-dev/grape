@@ -241,6 +241,7 @@ def _process_event_inner(evt, repo_key, account="default"):
         evt_number = extract_event_number(evt.get("payload", {}))
         if evt_number is not None:
             env_extra["ISSUE_NUMBER"] = str(evt_number)
+            env_extra["PR_NUMBER"] = str(evt_number)
         # 提取 PR head SHA
         payload = evt.get("payload", {})
         if isinstance(payload, dict):
