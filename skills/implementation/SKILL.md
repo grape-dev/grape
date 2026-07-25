@@ -42,15 +42,13 @@ tools:
 ### 分析内容
 
 1. **需求理解**
-   - 基于 A2A context 中的「前序 Agent 处理摘要」或 Issue 内容，完整理解需求
-   - 判断需求的目标、范围、关键功能点
-   - 如有不明确之处，先通过评论向用户确认，确认后再继续
+   - 获取 Issue 的标题、正文、标签、评论等完整信息，判断需求的目标、范围、关键功能点
    - ⚠️ **收到 A2A 调用时，前序 context 可能只包含摘要，不足以支撑完整实现。必须通过 GitCode API 获取 Issue 完整内容：**
      ```bash
      curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
        "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}"
      ```
-     获取 Issue 的标题、正文、标签、评论等完整信息，基于完整信息而非仅 context 摘要进行开发
+    - 如有不明确之处，先通过评论向用户确认，确认后再继续
 
 2. **技术可行性**
    - 实现该需求是否需要调用外部 API 或第三方服务？（如 VOD、OBS、IAM 等）
