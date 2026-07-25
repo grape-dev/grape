@@ -1,10 +1,9 @@
 ---
 name: pr
-version: 1.0.0
+version: 2.0.0
 description: |
   Pull Request 全生命周期管理：接收 → 关联 Issue → 代码审查 → 安全扫描 → 合并检查 → 评论回复。
-  当收到 pull_request_opened、pull_request_updated、push 或 PR 上的评论事件时使用此技能。
-  不适用于：Issue 相关事件（用 issue skill）。
+   当收到 pull_request_opened、pull_request_updated、push 或 PR 上的评论事件时使用此技能。
 triggers:
   - event_type: pull_request_opened
   - event_type: pull_request_updated
@@ -21,86 +20,92 @@ tools:
 ### 验证外部 claim
 PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 claim，不是事实。**先打开原对象核对**。
 
-### 已有 PR 修此 issue → 默认 review
-如果关联 PR 已存在，下一步默认是 review 现有 PR，不是从零实现。只有 PR 方向不对、质量不达标、或作者明确放弃时，才考虑其他方案。
-
 ### Consult freely, decide carefully
-可以自主拉取上下文做评估/review，但 merge/close/roadmap 等硬决策需要人工确认。
+可以自主拉取上下文做评估/review，但 merge/close/roadmap 等硬决策需人工确认。
+
+### 所有评论统一在能力项执行完毕后发送
+各能力项的分析结果先记录，最后统一合并为一条评论发送，不得在中间步骤单独发评论。
 
 ### 禁止探索 Bot 内部
 不要执行 `ls`、`grep`、`cat` 等命令查看 workspace 目录、Bot 代码、日志文件或数据库。
 **所有信息通过 GitCode API 获取**，不读取本地文件。
 
-## 处理流程
+## PR 分析（每次执行前先分析，⚠️ 必须按 1→2→3 顺序依次执行，上一步未完成不得进入下一步）
 
-### 阶段 0：PR 配置检查
+### 分析内容
 
-适用于 `pull_request_opened` / `pull_request_updated` 事件。在正式审查前，先检查 PR 的基础配置是否完整：
+1. **PR 配置检查**
 
-1. **获取 PR 详情**：
-```bash
-curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
-  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
+   获取 PR 详情：
+   ```bash
+   curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+     https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
+   ```
+   从返回中提取 `title`、`body`、`head.sha`、`labels`、`assignee`、`user.login` 等字段。
+
+   逐项检查并将不通过项记录下来（暂不评论，统一到最后的评论回复能力项中处理）：
+
+   | 检查项 | 通过条件 | 不通过记录 |
+   |--------|---------|-----------|
+   | **Title** | 非空，清晰描述变更 | PR 标题为空或过于简单 |
+   | **Description** | 非空，有背景说明 | PR 描述为空 |
+   | **Issue 关联** | body 包含 `Closes #N` / `Fixes #N` / `Related #N` | 未检测到关联 Issue |
+   | **Labels** | 已有分类标签 | PR 缺少分类标签 |
+   | **Assignee** | 已设置责任人 | PR 未设置 Assignee |
+
+2. **变更检视**
+
+   判断是否有新的代码变更：
+
+   ```bash
+   cat /root/devops-bot/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha 2>/dev/null
+   ```
+
+   - 文件不存在或 SHA 不同 → 有新的变更，继续
+   - SHA 相同 → 无新变更，**跳过以下所有能力项**（配置检查的评论仍会发送）
+
+3. **任务类型判断**
+
+   | 判断条件 | 任务类型 |
+   |---------|---------|
+   | PR 修改了 `skills/` 目录下的文件 | 常规审查 + **Skill 审查** |
+   | PR 包含 IaC 文件（K8s/Terraform/Dockerfile） | 常规审查 + **安全扫描** |
+   | 普通代码变更 | 常规审查 |
+   | 无新变更 | 不做处理，结束 |
+
+### 分析结论示例
+
 ```
-从返回中提取 `title`、`body`、`head.sha`、`labels`、`assignee`、`user.login` 等字段。
-
-2. **逐项检查**：
-
-| 检查项 | 通过条件 | 不通过时评论提醒 |
-|--------|---------|----------------|
-| **Title** | 非空，清晰描述变更 | `⚠️ PR 标题为空或过于简单，请补充变更说明` |
-| **Description** | 非空，有背景说明 | `⚠️ PR 描述为空，请描述变更背景、改动内容和影响` |
-| **Issue 关联** | body 包含 `Closes #N` / `Fixes #N` / `Related #N` | `📎 未检测到关联 Issue，请确认是否需要关联` |
-| **Labels** | 已有 `bug` / `feature` / `enhancement` 等标签 | `🏷️ PR 缺少分类标签，请添加（bug/feature/enhancement）` |
-| **Assignee** | 已设置责任人 | `👤 PR 未设置 Assignee，请指定处理人` |
-
-3. **评论提醒**：将所有不通过项合并为一条评论发送。若全部通过则不发评论。**不阻塞后续流程**，即使发现问题也继续进入阶段 0b。
-
-### 阶段 0b：跳过无变更的重复检视
-
-在执行正式审查前，先判断本次是否有新的代码变更：
-
-1. **获取 PR 最新 commit SHA**：（阶段 0 已获取，使用已提取的 `head.sha`）
-
-2. **读取上次检视的 SHA**：
-```bash
-cat /root/devops-bot/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha 2>/dev/null
-```
-如果文件不存在 → 首次检视，直接进入阶段 1。
-
-3. **比较 SHA**：
-   - 相同 → 代码没有新变更 → **跳过阶段 1-4**，输出 `SKIP_PR_REVIEW: No new changes`，**不要发审查评论**（但阶段 0 的配置检查评论已发出）
-   - 不同 → 有新的变更 → 进入阶段 1 正式审查
-
-4. **审查完成后记录 SHA**：在阶段 4 完成后，执行：
-```bash
-mkdir -p /root/devops-bot/data/workspaces/{repository}/.last_pr_review
-echo -n "{head.sha}" > /root/devops-bot/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha
+分析结论：
+- 配置检查：Title 和 Description 通过，缺少 Labels 和 Assignee
+- 变更检视：有新变更（首次审查）
+- 任务类型：常规审查 + 安全扫描（IaC 文件变更）
+- 需要执行：源码审查 → IaC 安全扫描 → 合并检查 → 评论回复
 ```
 
-### 阶段 1：关联 Issue
+## 能力项
 
-1. 检查 PR 正文是否引用 Issue：`Closes #N`、`Fixes #N`、`Resolves #N`、`Related #N`
-2. 在对应 Issue 中评论 `📌 关联 PR #{pr_number}`
-3. 对应 Issue 是 bug → 在 Issue 上更新标签 `labels="bug,triaged"`
+执行过程中不单独发评论，所有评论内容记录到 `review_comments` 列表中，最后统一在「评论回复」能力项中发送。
 
-### 阶段 2：审查
+### 能力一：关联 Issue
 
-#### 2.1 源码审查
+检查 PR 正文是否引用 Issue：`Closes #N`、`Fixes #N`、`Resolves #N`、`Related #N`
 
-**源码**指编程语言代码（如 Go、Python、Java、C/C++、TypeScript 等）以及配置文件（`.json`、`.yaml`、`.toml` 等）。根据当前 PR 提交的具体变更来判定源码范围，不绑定特定目录。
+如果有关联 Issue：
+- 在对应 Issue 中评论 `📌 关联 PR #{pr_number}`
+- 对应 Issue 是 bug → 在 Issue 上更新标签 `labels="bug,triaged"`
 
-读取 `references/code-review-and-quality.md`，按 5 轴标准逐项审查（正确性、可读性、架构、安全、性能）。记录发现的问题并按严重度标注（Critical / Required / Nit）。
+### 能力二：源码审查
 
-#### 2.2 Skill 审查
+读取 `references/code-review-and-quality.md`，按 5 轴标准逐项审查（正确性、可读性、架构、安全、性能）。记录发现的问题并按严重度标注（Critical / Required / Nit），存入 `review_comments`。
 
-**Skill（技能）**指 `skills/` 目录下的 `SKILL.md` 文件和 `references/` 参考文档。Skill 是 Agent 执行任务所依赖的指令集，定义了特定事件下 Agent 的行为、原则、流程和约束。
+### 能力三：Skill 审查（仅当 PR 修改了 `skills/` 目录）
 
-仅当 PR 修改了 `skills/` 目录下的文件时执行。读取 `references/skill-review-and-quality.md`，按其中标准审查技能文件的格式规范、完整性、引用路径、向后兼容性。
+读取 `references/skill-review-and-quality.md`，审查技能文件的格式规范、完整性、引用路径、向后兼容性。发现的问题存入 `review_comments`。
 
-### 阶段 3：IaC 安全扫描
+### 能力四：IaC 安全扫描（仅当 PR 包含 IaC 文件）
 
-在阶段 2 代码审查的安全轴覆盖的应用层安全之外，额外扫描 IaC（基础设施即代码）文件：
+额外扫描 IaC（基础设施即代码）文件：
 
 | 文件类型 | 关注点 |
 |---------|--------|
@@ -109,73 +114,38 @@ echo -n "{head.sha}" > /root/devops-bot/data/workspaces/{repository}/.last_pr_re
 | Dockerfile | `FROM latest`、`ADD` 替代 `COPY`、root 用户运行、多余端口暴露 |
 | Helm Chart | values 中的敏感默认值、RBAC 权限过度、镜像拉取策略不当 |
 
-### 阶段 4：合并检查
+扫描结果存入 `review_comments`。
 
-- [ ] 代码审查通过（阶段 2）无严重问题
-- [ ] IaC 安全扫描（阶段 3）无隐患
+### 能力五：合并检查
+
+- [ ] 代码审查通过，无严重问题
+- [ ] IaC 安全扫描无隐患
 - [ ] 测试通过（PR 描述中声明）
 - [ ] 无合并冲突
 - [ ] 关联 Issue 已 accepted 或 triaged
 
-## 评论回复
+检查结果存入 `review_comments`。
 
-| 场景 | 行为 |
-|------|------|
-| 用户 @提及机器人 | 分析评论并回复 |
-| 评论包含代码片段 | 分析代码并提供建议 |
-| 评论询问 PR 状态 | 检查合并条件并回复 |
-| 其他 DevOps 相关评论 | 分析并回复 |
+### 能力六：评论回复
 
-### 评论输出规范
+**⚠️ 所有能力项执行完毕后，最后统一执行此步。不得在中间步骤单独发评论。**
 
-你的评论是**对用户说的**，不是执行报告。禁止输出内部处理细节：
-
-| 行为 | 示例 |
-|------|------|
-| ✅ 直接回答问题 | "合并条件满足，可以合并" |
-| ✅ 给出审查结论 | "代码审查通过，有一个警告" |
-| ✅ 追问用户 | "请补充测试用例" |
-| ❌ 输出处理步骤 | "第一阶段：关联 Issue → 第二阶段：代码审查" |
-| ❌ 输出内部术语 | "加载 skill"、"事件类型"、"路由到" |
-| ❌ 输出流程报告 | "已完成 PR 处理流程"、"任务完成" |
-
-### 语言要求
-始终使用中文回复。不得包含英文推理过程、内部处理步骤或术语。
-
-### 链接格式规范
-
-评论中引用 commit、Issue、PR 时，必须使用 Markdown 链接格式，方便用户点击跳转：
-
-| 引用类型 | 示例 |
-|---------|------|
-| commit | `` [`fd7e659`](https://gitcode.com/{owner}/{repo}/commit/fd7e659) `` |
-| Issue | `[#14](https://gitcode.com/{owner}/{repo}/issues/14)` |
-| PR | `[#2](https://gitcode.com/{owner}/{repo}/pulls/2)` |
-
-### 评论格式要求
-通过 curl 发送评论时，body 必须以 `[DevOps Bot]` 开头，回复 PR 评论时应引用原文：
+将所有 `review_comments` 中的内容合并为一条评论发送：
 
 ```bash
 POST /repos/{owner}/{repo}/pulls/{number}/comments
 Authorization: Bearer $GITCODE_API_TOKEN
 Content-Type: application/json
-{"body": "> 用户的问题原文\n\n[DevOps Bot] 这是机器人的回复内容。"}
+{"body": "[DevOps Bot] 审查报告\n\n## 配置检查\n- ✅ Title：通过\n- ⚠️ Labels：缺少分类标签\n\n## 代码审查\n✅ 通过\n\n## 安全扫描\n✅ 安全\n\n## 合并检查\n⚠️ 测试未确认"}
 ```
 
-### 必须执行：发评论
+- body **必须**以 `[DevOps Bot]` 开头
+- 汇总所有能力项的发现，按章节组织
+- 如果全部通过，评论：`[DevOps Bot] 审查通过，所有检查项均正常。`
 
-事件处理完成后（阶段 1-4），**必须**用 curl 发送一条评论到 Issue，body 以 `[DevOps Bot]` 开头：
+**跳过此步 = 事件未完成处理。**
 
-```bash
-POST /repos/{owner}/{repo}/pulls/{number}/comments
-Authorization: Bearer $GITCODE_API_TOKEN
-Content-Type: application/json
-{"body": "[DevOps Bot] 代码审查完成，结论：通过。"}
-```
-
-这是强制步骤，不能省略。
-
-**例外：** 阶段 0b 判定 SHA 未变更而跳过时，不发审查评论。阶段 0 的配置检查评论不受影响。
+**例外：** 变更检视判定 SHA 未变更而跳过时，不发评论。
 
 ## 输出规范
 
@@ -206,16 +176,17 @@ Content-Type: application/json
 
 ## 硬规则
 
-- ❌ 禁止直接合并 PR（仅输出检查结论）
-- ❌ 禁止修改 PR 代码
-- ❌ 禁止删除 PR
-- ❌ 禁止回复用户 Token、密码、AK/SK 等敏感信息
-- ❌ 禁止探索 workspace 目录和 Bot 系统文件
-- ❌ 禁止读取 devops-bot.log、sessions.db 等 Bot 内部文件
-- ❌ 禁止执行 `ls /root/devops-bot`、`grep *.log` 等无关命令
-- ❌ 禁止直接写代码修复问题
-- ✅ 可以审查、扫描、评论、关联 Issue
-- ✅ 只通过 GitCode API 获取 Issue/PR 信息
+| 行为 | 态度 |
+|------|------|
+| 按分析结论执行 PR 审查 | ✅ **必须做** |
+| 所有评论统一在最后发送 | ✅ **必须做，不得在中间步骤发评论** |
+| ⚠️ **发送评论是最终强制步骤** | ✅ **必须做**（除非 SHA 未变更跳过） |
+| 只通过 GitCode API 获取信息 | ✅ **必须做** |
+| 直接合并 PR | ❌ **禁止**（仅输出检查结论） |
+| 修改 PR 代码或文件 | ❌ **禁止** |
+| 删除 PR | ❌ **禁止** |
+| 回复 Token、密码等敏感信息 | ❌ **禁止** |
+| 探索 workspace、Bot 系统文件 | ❌ **禁止** |
 
 ## 参考
 
