@@ -43,7 +43,6 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 1. **Issue 是否有效**（⚠️ 新 Issue 必须执行此检查，不可跳过）
     - 已有标签或负责人 → 已被处理过，跳过有效性检查
     - 全新 Issue（无标签、无负责人）→ **必须先读取 `references/issue-validity-check.md` 执行完整性检查，检查通过后才能执行以下能力项**
-    - 无效 → **结束处理，不执行以下任何能力项**
 
 2. **标签状态** — 当前是否有标签？是否需要更新？
 
