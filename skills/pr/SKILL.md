@@ -69,7 +69,7 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 - 配置检查：Title 和 Description 通过，缺少 Labels 和 Assignee
 - 变更检视：有新变更（首次审查）
 - 任务类型：常规审查 + 安全扫描（IaC 文件变更）
-- 需要执行：源码审查 → IaC 安全扫描 → 合并检查 → A2A 通知（如需修改）→ 评论回复
+- 需要执行：源码审查 → IaC 安全扫描 → A2A 通知（如需修改）→ 评论回复
 ```
 
 ## 能力项
@@ -97,17 +97,7 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 扫描结果存入 `review_comments`。
 
-### 能力四：合并检查
-
-- [ ] 代码审查通过，无严重问题
-- [ ] IaC 安全扫描无隐患
-- [ ] 测试通过（PR 描述中声明）
-- [ ] 无合并冲突
-- [ ] 关联 Issue 已 accepted 或 triaged
-
-检查结果存入 `review_comments`。
-
-### 能力五：A2A 请求支援
+### 能力四：A2A 请求支援
 
 **当审查发现问题需要修改时，调用 A2A 通知 implementation Agent 处理。**
 
@@ -128,7 +118,7 @@ curl -X POST http://localhost:8080/api/a2a \
 
 其中 `$REVIEW_SUMMARY` 为 review_comments 中 Critical 和 Required 级别问题的汇总。
 
-### 能力六：评论回复
+### 能力五：评论回复
 
 **⚠️ 所有能力项执行完毕后，最后统一执行此步。不得在中间步骤单独发评论。**
 
@@ -173,7 +163,6 @@ Content-Type: application/json
 ### 合并检查
 - ✅ 安全通过
 - ✅ 审查通过
-- ⚠️ 测试未确认
 ```
 
 ## 硬规则
