@@ -49,11 +49,9 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 3. **负责人状态** — 当前是否有负责人？是否需要分配？
 
-4. **Issue 内容质量分析** — 按标签类型评估 Issue 内容质量
+4. **是否需要回复** — 用户 @提及/提问/质疑分配结果 → 需要回复
 
-5. **是否需要回复** — 用户 @提及/提问/质疑分配结果 → 需要回复
-
-6. **是否需要 A2A** — 是否超出 issue 能力范围？
+5. **是否需要 A2A** — 是否超出 issue 能力范围？
 
 ```
 分析结论示例：
@@ -70,7 +68,6 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 | 能力 | 执行条件 | 参考 |
 |------|---------|------|
-| 内容质量分析 | 分析结论为需要评估 Issue 内容质量 | `references/quality-analysis-guide.md` |
 | 打标签 | 分析结论为标签缺失或需更新 | `references/labeling-guide.md` |
 | 分配负责人 | 分析结论为负责人缺失且 Issue 在仓库范围内 | `references/assignee-guide.md` |
 | 评论回复 | 分析结论为需要回复 | `references/comment-guide.md` |
