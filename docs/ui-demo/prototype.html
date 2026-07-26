@@ -197,11 +197,11 @@ td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bot
 <div class="logo">A</div>
 <h1>Agentic DevOps</h1>
 <p class="sub">致力于实现 Loop Engineer</p>
-<button class="obtn" onclick="login()">
+<button class="obtn" id="gitBtn" onclick="login()">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
   使用 GitCode 登录
 </button>
-<div class="links">
+<div class="links" id="loginLinks">
   <a onclick="togglePwd()">← 用户名密码登录</a>
   <a onclick="event.stopPropagation();alert('[Demo] 跳转到 /admin/ 管理员登录页');return false">← 管理员登录</a>
 </div>
@@ -209,6 +209,7 @@ td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bot
   <input type="text" placeholder="用户名">
   <input type="password" placeholder="密码">
   <button class="obtn" onclick="login()">登录</button>
+  <p style="margin-top:12px;font-size:12px;text-align:center"><a onclick="togglePwd()" style="color:var(--t3);text-decoration:underline;cursor:pointer">← 返回 GitCode 登录</a></p>
 </div>
 </div>
 </div>
@@ -675,7 +676,7 @@ function renderProfile(){
 
 // Login
 function login(){document.getElementById('ln').classList.add('hid');nav('rsel')}
-function togglePwd(){let f=document.getElementById('pwdForm');f.style.display=f.style.display==='none'||!f.style.display?'block':'none'}
+function togglePwd(){let f=document.getElementById('pwdForm');let show=f.style.display==='none'||!f.style.display;f.style.display=show?'block':'none';document.getElementById('gitBtn').style.display=show?'none':'';document.getElementById('loginLinks').style.display=show?'none':''}
 // Init
 renderRsel();
 </script>
