@@ -71,20 +71,36 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 ┌─ Sidebar ──────────────────────────────────────────┐
 │  DevOps Bot                                         │
 │                                                     │
-│  [team/backend-service ▼]  ← 下拉切换仓库           │
+│  [team/backend-service ▼]                           │
+│       ┌─────────────────────┐                       │
+│       │ team/backend-service│                       │
+│       │ team/web-frontend   │                       │
+│       │ team/mobile-app     │                       │
+│       ├─────────────────────┤                       │
+│       │ + 新增仓库托管       │                       │
+│       └─────────────────────┘                       │
 │                                                     │
 │  Workspace                                          │
 │    ■ Dashboard                                      │
 │    ▶ Pipeline                                       │
-│    ☎ Chat Agent                                     │
 │                                                     │
-│  Repositories                                       │
-│    ≡ All Repos                                      │
+│  DevOps Agents                                      │
+│    ♫ VOD Agent                                      │
+│    ⚠ Issue Agent                                    │
+│    ⚙ Coding Agent                                   │
+│    ✔ QA Agent                                        │
+│    ♡ SRE Agent                                      │
 │                                                     │
 │  Account                                            │
+│    ☎ Chat Agent（个人）                              │
 │    ⚙ Settings                                       │
 └─────────────────────────────────────────────────────┘
 ```
+
+说明：
+- **Repo 下拉**：显示已托管的仓库列表，底部有「+ 新增仓库托管」选项
+- **DevOps Agents**：核心工作流的 5 个 Agent，点击进入对应 Agent 详情
+- **Chat Agent**：归属 Account 区域，每个用户个人专属，非核心工作流环节
 
 切换仓库后，Dashboard、Pipeline 等页面内容跟随切换为该仓库的数据。
 

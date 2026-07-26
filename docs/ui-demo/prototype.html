@@ -292,10 +292,11 @@
 
   <!-- Repo selector -->
   <div class="repo-selector">
-    <select onchange="switchRepo(this.value)">
+    <select onchange="onRepoSelect(this)">
       <option value="backend">team/backend-service</option>
       <option value="frontend">team/web-frontend</option>
       <option value="mobile">team/mobile-app</option>
+      <option value="__add__" style="border-top:1px solid rgba(255,255,255,0.2);color:var(--accent)">+ 新增仓库托管</option>
     </select>
   </div>
 
@@ -303,12 +304,16 @@
     <div class="label">Workspace</div>
     <a class="active" onclick="showView('dashboard')"><span class="icon">\u25a0</span> Dashboard <span class="badge">7</span></a>
     <a onclick="showView('pipeline')"><span class="icon">\u25b6</span> Pipeline</a>
-    <a onclick="showView('chat')"><span class="icon">\u260e</span> Chat Agent</a>
 
-    <div class="label">Repositories</div>
-    <a onclick="showView('repos')"><span class="icon">\u2261</span> All Repos</a>
+    <div class="label">DevOps Agents</div>
+    <a onclick="showView('agent-detail','vod')"><span class="icon">\u266b</span> VOD Agent</a>
+    <a onclick="showView('agent-detail','issue')"><span class="icon">\u26a0</span> Issue Agent</a>
+    <a onclick="showView('agent-detail','coding')"><span class="icon">\u2699</span> Coding Agent</a>
+    <a onclick="showView('agent-detail','qa')"><span class="icon">\u2714</span> QA Agent</a>
+    <a onclick="showView('agent-detail','sre')"><span class="icon">\u2661</span> SRE Agent</a>
 
     <div class="label">Account</div>
+    <a onclick="showView('chat')"><span class="icon">\u260e</span> Chat Agent <span class="badge">\u2139\ufe0f</span></a>
     <a onclick="showView('settings')"><span class="icon">\u2699</span> Settings</a>
   </div>
 
@@ -882,6 +887,10 @@
     const titles = { dashboard:'Dashboard', pipeline:'Pipeline', chat:'Chat Agent',
       repos:'Repositories', settings:'Settings', 'agent-detail':'Agent' };
     document.getElementById('pageTitle').textContent = titles[name] || 'Dashboard';
+    if (name === 'agent-detail' && param) {
+      const n = { vod:'VOD Agent', issue:'Issue Agent', coding:'Coding Agent', qa:'QA Agent', sre:'SRE Agent', chat:'Chat Agent' };
+      document.getElementById('pageTitle').textContent = n[param] || 'Agent';
+    }
 
     if (name === 'agent-detail' && param) {
       document.getElementById('view-agent-detail').classList.add('active');
@@ -900,16 +909,27 @@
 
     // Highlight sidebar
     document.querySelectorAll('.sidebar-nav a').forEach(a => {
+      a.classList.remove('active');
       const onclick = a.getAttribute('onclick') || '';
-      if (onclick.includes("'" + name + "'") || (name === 'agent-detail' && onclick.includes('showView'))) {
-        // Don't highlight agent-detail since it's param-based
+      if (name === 'agent-detail' && param && onclick.includes("'" + param + "'")) {
+        a.classList.add('active');
+      } else if (onclick.includes("showView('" + name + "'")) {
+        a.classList.add('active');
       }
-      if (onclick.includes("showView('" + name + "')")) a.classList.add('active');
     });
   }
 
   function showAgent(agent) {
     showView('agent-detail', agent);
+  }
+
+  function onRepoSelect(sel) {
+    if (sel.value === '__add__') {
+      showView('repos');
+      sel.value = currentRepo;
+      return;
+    }
+    switchRepo(sel.value);
   }
 
   function switchRepo(repo) {
