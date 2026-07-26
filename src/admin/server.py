@@ -209,7 +209,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         f"?client_id={urllib.parse.quote(client_id)}"
                         f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
                         f"&response_type=code"
-                        f"&scope=read_user"
+                        f"&scope=all"
                         f"&state={urllib.parse.quote(state)}")
             self.send_response(302)
             self.send_header("Location", auth_url)
@@ -287,6 +287,13 @@ class AdminHandler(BaseHTTPRequestHandler):
                         local_user = user_db.get_user(result["id"])
                 # 每次登录都刷新 token 和绑定
                 user_db.link_gitcode_user(local_user["id"], gitcode_id, access_token, refresh_token)
+                # 自动填充 gitcode_api_token（从 DB 读现有数据合并，防止覆盖其他字段）
+                user_acc = user_db.get_user_account(local_user["username"]) or {}
+                user_acc["gitcode_api_token"] = access_token
+                user_db.save_user_account(local_user["username"], user_acc)
+                from src.config import _load_accounts, log
+                _load_accounts()
+                log.info(f"GitCode OAuth login OK: user={local_user['username']} id={local_user['id']} gitcode_id={gitcode_id}")
                 token = user_db.create_session_token(local_user["id"])
                 self._send_html(_render_user_panel(token))
             except Exception as e:
