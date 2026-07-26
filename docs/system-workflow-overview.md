@@ -104,9 +104,147 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 
 切换仓库后，Dashboard、Pipeline 等页面内容跟随切换为该仓库的数据。
 
----
+### 2.3 Pipeline 页面
 
-### 2.3 日常使用
+```
+┌─ Top Bar ────────────────────────────────────────────┐
+│  Pipeline · team/backend-service                      │
+│  Active pipeline: 1  |  Completed today: 3            │
+├───────────────────────────────────────────────────────┤
+│                                                        │
+│  Active: Issue #342 - Login timeout                    │
+│                                                        │
+│  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌───────┐ │
+│  │ ● VOD  │→│ ● Issue│→│ ● Code │→│ ● QA  │→│ ● SRE │ │
+│  │ Done   │  │ Done   │  │ PR sub │  │Review │  │Pending│ │
+│  └────────┘  └────────┘  └────────┘  └────────┘  └───────┘ │
+│                                                        │
+│  ──────────────────────────────────────────────────   │
+│                                                        │
+│  Pipeline History                                      │
+│  ┌─────────┬──────────┬──────────────┬───────┬────────┐│
+│  │Pipeline │ Duration │ Agents       │Result │Release ││
+│  ├─────────┼──────────┼──────────────┼───────┼────────┤│
+│  │Issue#338│ 28m 12s  │ V I C Q S   │Released│v2.3.1 ││
+│  │Issue#335│ 1h 05m   │ V I C Q S   │Released│v2.3.0 ││
+│  │Issue#331│ 42m 18s  │ I C Q       │Rollback│v2.2.9 ││
+│  └─────────┴──────────┴──────────────┴───────┴────────┘│
+└─────────────────────────────────────────────────────────┘
+```
+
+### 2.4 DevOps Agent 详情页面（以 VOD Agent 为例）
+
+```
+┌─ Top Bar ────────────────────────────────────────────┐
+│  VOD Agent · team/backend-service                     │
+├───────────────────────────────────────────────────────┤
+│                                                        │
+│  ┌─ Agent Header ─────────────────────────────────┐  │
+│  │  ♫ VOD Agent                    [Config] [Logs] │  │
+│  │  Voice of Developer                            │  │
+│  │  ● Active | Today: 5 | Signals: 47/Week        │  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐               │
+│  │  47  │ │   8  │ │  92% │ │  2m  │               │
+│  │Signals│ │Issues│ │Quality│ │  Avg │               │
+│  └──────┘ └──────┘ └──────┘ └──────┘               │
+│                                                        │
+│  Event History (Last 24h)                             │
+│  ├─ 12:05 Signal: CI too slow → Issue #345            │
+│  ├─ 10:30 Analysis: 3 signals cluster                 │
+│  ├─ 08:00 Weekly report: 8 key signals                │
+│  └─ Yest. Collected 12 feedback entries               │
+│                                                        │
+│  ──────────────────────────────────────────────────   │
+│                                                        │
+│  Skill Configuration                                   │
+│  ★ Default: skills/vod/SKILL.md                       │
+│  ✎ Custom: team/backend-service (uploaded)             │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 2.5 Chat Agent 页面
+
+```
+┌─ Top Bar ────────────────────────────────────────────┐
+│  Chat Agent · Personal Assistant                      │
+├───────────────────────────────────────────────────────┤
+│                                                        │
+│  ┌────────── Main Chat ──────────┐  ┌── Agents ──┐  │
+│  │                                │  │ ♫ VOD  47  │  │
+│  │  Hello! I'm your personal     │  │ ⚠ Issue 3  │  │
+│  │  DevOps assistant.            │  │ ⚙ Coding 1 │  │
+│  │                                │  │ ✔ QA    2  │  │
+│  │  ┌───────────────────────────┐│  │ ♡ SRE v2.3 │  │
+│  │  │Check status of issue #342 ││  └────────────┘  │
+│  │  └───────────────────────────┘│                   │
+│  │                                │  ┌─ Personal ─┐  │
+│  │  ✅ Issue #342 is with QA     │  │ Your Agent  │  │
+│  │  Agent (PR #1278 under review)│  │ Backend:    │  │
+│  │  ETA: ~15 min.                │  │ Default     │  │
+│  │                                │  └────────────┘  │
+│  │  ┌─[Type your message...]───────┐                 │
+│  │  │                       [Send]│                 │
+│  └──────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 2.6 Repositories 页面
+
+```
+┌─ Top Bar ────────────────────────────────────────────┐
+│  Repositories                    [↻ Sync from GitCode]│
+├───────────────────────────────────────────────────────┤
+│                                                        │
+│  Hosted (3)                                           │
+│  ┌────────────────────────────────────────────────┐  │
+│  │ ■ team/backend-service        Webhook OK  Active│  │
+│  │ ■ team/web-frontend           Webhook OK  Active│  │
+│  │ ■ team/mobile-app             Webhook OK  Joined│  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
+│  Available to Join (5)                                 │
+│  ┌────────────────────────────────────────────────┐  │
+│  │ Repository        Role     Description     [+]  │  │
+│  │ org/docs-site     Member   Documentation   Join │  │
+│  │ org/devops-toolkit Member   DevOps Tools    Join │  │
+│  │ org/data-pipeline  Admin   ETL pipeline    Join │  │
+│  │ team/analytics    Maintain Analytics       Join │  │
+│  └────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 2.7 Settings 页面
+
+```
+┌─ Top Bar ────────────────────────────────────────────┐
+│  Settings · Account                                   │
+├───────────────────────────────────────────────────────┤
+│                                                        │
+│  [Channel] [Credentials] [Preferences]                 │
+│                                                        │
+│  ┌─ Chat Agent Backend ────────────────────────────┐  │
+│  │ Backend Type  [Default (Built-in) ▼]            │  │
+│  │ Backend URL  http://localhost:8080/api/chat      │  │
+│  │ API Key      ********************                │  │
+│  │ ✓ Your personal Chat Agent is active.            │  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ IM Integration ────────────────────────────────┐  │
+│  │ Feishu   ✓ Connected                  [Reconnect]│  │
+│  │ WeCom    — Not configured            [Configure]│  │
+│  │ DingTalk — Not configured            [Configure]│  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
+│  [Credentials Tab]: GitCode Token, Huawei Cloud AK/SK  │
+│  [Preferences Tab]: Notifications, Custom Skills       │
+└─────────────────────────────────────────────────────────┘
+```
+
+
+
+### 2.8 日常使用
 
 ```
 日常开发流程：
