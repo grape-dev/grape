@@ -171,14 +171,17 @@ def _cleanup_expired_oauth_states():
 
 def save_oauth_state(state: str, provider: str, data: dict | None = None):
     """保存 OAuth state（防 CSRF，10 分钟过期）"""
+    from src.config import log
     try:
         with db_lock:
             c = db.cursor()
             c.execute("INSERT OR REPLACE INTO oauth_states (state, provider, data_json, expires) VALUES (?,?,?,?)",
                       (state, provider, json.dumps(data or {}), time.time() + 600))
             db.commit()
-    except Exception:
-        pass
+        log("info", f"save_oauth_state: state={state[:20]}... saved OK")
+    except Exception as e:
+        log("warning", f"save_oauth_state FAILED: {e}")
+        raise  # 暴露异常，让 handle_one_request 记录完整 traceback
 
 
 def validate_oauth_state(state: str, provider: str) -> dict | None:

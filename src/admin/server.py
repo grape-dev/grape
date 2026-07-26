@@ -200,7 +200,11 @@ class AdminHandler(BaseHTTPRequestHandler):
                 port = self.server.server_port
                 redirect_uri = f"{scheme}://{host}:{port}/auth/gitcode/callback"
             state = hashlib.sha256(os.urandom(32)).hexdigest()
-            user_db.save_oauth_state(state, "gitcode", {})
+            try:
+                user_db.save_oauth_state(state, "gitcode", {})
+            except Exception as e:
+                self._send_html(_render_user_login(f"保存 OAuth state 失败: {e}"))
+                return
             auth_url = (f"https://gitcode.com/oauth/authorize"
                         f"?client_id={urllib.parse.quote(client_id)}"
                         f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
