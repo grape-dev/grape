@@ -120,6 +120,16 @@
   }
   .agent-flow .node .n-header h4 { font-size: 14px; font-weight: 600; }
   .agent-flow .node .n-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 8px; }
+  .agent-flow .node .n-meta {
+    display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px;
+    padding: 6px 8px; background: var(--bg); border-radius: 6px;
+  }
+  .agent-flow .node .n-meta-item {
+    font-size: 10px; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 4px;
+  }
+  .agent-flow .node .n-meta-item .meta-label {
+    color: var(--text-light); font-weight: 500;
+  }
   .agent-flow .node .n-status { font-size: 11px; color: var(--text-light); }
   .agent-flow .node .n-status .dot { width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:4px; }
   .agent-flow .node .n-tag {
@@ -424,37 +434,57 @@
           <!-- VOD -->
           <div class="node" style="border-top:3px solid #ec4899" onclick="showAgent('vod')">
             <div class="n-header"><span class="ndot" style="background:#ec4899"></span><h4>VOD Agent</h4></div>
-            <div class="n-desc">Voice of Developer: collect feedback &rarr; analyze &rarr; create issue</div>
+            <div class="n-desc">Voice of Developer: collect feedback → analyze → create issue</div>
+            <div class="n-meta">
+              <span class="n-meta-item"><span class="meta-label">Backend</span> OpenCode</span>
+              <span class="n-meta-item"><span class="meta-label">Skill</span> default</span>
+            </div>
             <div class="n-status"><span class="dot" style="background:var(--green)"></span> 47 signals this week</div>
-            <div class="n-tag tag-vod">\u266b feedback &rarr; issue</div>
+            <div class="n-tag tag-vod">♫ feedback → issue</div>
           </div>
           <!-- Issue -->
           <div class="node" style="border-top:3px solid #ef4444" onclick="showAgent('issue')">
             <div class="n-header"><span class="ndot" style="background:#ef4444"></span><h4>Issue Agent</h4></div>
-            <div class="n-desc">Classify &rarr; refine requirements &rarr; trigger development</div>
+            <div class="n-desc">Classify → refine requirements → trigger development</div>
+            <div class="n-meta">
+              <span class="n-meta-item"><span class="meta-label">Backend</span> OpenCode</span>
+              <span class="n-meta-item"><span class="meta-label">Skill</span> skills/issue/</span>
+            </div>
             <div class="n-status"><span class="dot" style="background:var(--yellow)"></span> 3 active issues</div>
-            <div class="n-tag tag-issue">\u26a0 2 bugs \u00b7 1 feature</div>
+            <div class="n-tag tag-issue">⚠ 2 bugs · 1 feature</div>
           </div>
           <!-- Coding -->
           <div class="node" style="border-top:3px solid #3b82f6" onclick="showAgent('coding')">
             <div class="n-header"><span class="ndot" style="background:#3b82f6"></span><h4>Coding Agent</h4></div>
-            <div class="n-desc">Design solution &rarr; implement &rarr; self-review &rarr; submit PR</div>
+            <div class="n-desc">Design solution → implement → self-review → submit PR</div>
+            <div class="n-meta">
+              <span class="n-meta-item"><span class="meta-label">Backend</span> CodeArts</span>
+              <span class="n-meta-item"><span class="meta-label">Skill</span> implementation</span>
+            </div>
             <div class="n-status"><span class="dot" style="background:var(--green)"></span> PR #1278 in progress</div>
-            <div class="n-tag tag-coding">\u2699 implementing...</div>
+            <div class="n-tag tag-coding">⚙ implementing...</div>
           </div>
           <!-- QA -->
           <div class="node" style="border-top:3px solid #8b5cf6" onclick="showAgent('qa')">
             <div class="n-header"><span class="ndot" style="background:#8b5cf6"></span><h4>QA Agent</h4></div>
-            <div class="n-desc">Code review &rarr; auto tests &rarr; functional validation</div>
+            <div class="n-desc">Code review → auto tests → functional validation</div>
+            <div class="n-meta">
+              <span class="n-meta-item"><span class="meta-label">Backend</span> OpenCode</span>
+              <span class="n-meta-item"><span class="meta-label">Skill</span> skills/pr/</span>
+            </div>
             <div class="n-status"><span class="dot" style="background:var(--green)"></span> 2 PRs awaiting review</div>
-            <div class="n-tag tag-qa">\u2714 pass: 92%</div>
+            <div class="n-tag tag-qa">✔ pass: 92%</div>
           </div>
           <!-- SRE -->
           <div class="node" style="border-top:3px solid #f97316" onclick="showAgent('sre')">
             <div class="n-header"><span class="ndot" style="background:#f97316"></span><h4>SRE Agent</h4></div>
-            <div class="n-desc">Build &rarr; deploy &rarr; monitor &rarr; incident response</div>
+            <div class="n-desc">Build → deploy → monitor → incident response</div>
+            <div class="n-meta">
+              <span class="n-meta-item"><span class="meta-label">Backend</span> OpenCode</span>
+              <span class="n-meta-item"><span class="meta-label">Skill</span> deploy-guard</span>
+            </div>
             <div class="n-status"><span class="dot" style="background:var(--green)"></span> v2.3.1 running</div>
-            <div class="n-tag tag-sre">\u2661 uptime 99.9%</div>
+            <div class="n-tag tag-sre">♡ uptime 99.9%</div>
           </div>
         </div>
 
