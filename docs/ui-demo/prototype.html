@@ -1,0 +1,1084 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DevOps Bot - 高保真原型</title>
+<style>
+  :root {
+    --sidebar: #0f172a;
+    --sidebar-hover: #1e293b;
+    --sidebar-active: #334155;
+    --bg: #f1f5f9;
+    --card: #ffffff;
+    --border: #e2e8f0;
+    --text: #0f172a;
+    --text-secondary: #64748b;
+    --text-light: #94a3b8;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --purple: #8b5cf6;
+    --orange: #f97316;
+    --teal: #14b8a6;
+    --pink: #ec4899;
+    --indigo: #6366f1;
+    --sky: #0ea5e9;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+    background: var(--bg); color: var(--text); display: flex; min-height: 100vh;
+  }
+
+  /* Sidebar */
+  .sidebar {
+    width: 240px; background: var(--sidebar); color: #fff;
+    display: flex; flex-direction: column; flex-shrink: 0;
+    position: sticky; top: 0; height: 100vh;
+  }
+  .sidebar-header {
+    padding: 20px 20px 16px; border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .sidebar-header h1 {
+    font-size: 18px; font-weight: 700; letter-spacing: -0.5px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .sidebar-header h1 .logo {
+    width: 28px; height: 28px; background: var(--accent); border-radius: 6px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 800;
+  }
+  .sidebar-header .sub {
+    font-size: 11px; color: var(--text-light); margin-top: 2px; font-weight: 400;
+  }
+  .sidebar-nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
+  .sidebar-nav .label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--text-light); padding: 12px 10px 6px; font-weight: 600;
+  }
+  .sidebar-nav a {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-radius: 6px; color: #cbd5e1;
+    text-decoration: none; font-size: 13px; cursor: pointer;
+    transition: all 0.15s; margin-bottom: 1px;
+  }
+  .sidebar-nav a:hover { background: var(--sidebar-hover); color: #fff; }
+  .sidebar-nav a.active { background: var(--accent); color: #fff; font-weight: 500; }
+  .sidebar-nav a .icon { width: 18px; text-align: center; font-size: 14px; }
+  .sidebar-nav a .badge {
+    margin-left: auto; background: var(--accent); color: #fff;
+    font-size: 10px; padding: 1px 7px; border-radius: 10px; font-weight: 600;
+  }
+  .sidebar-nav a.active .badge { background: rgba(255,255,255,0.25); }
+  .sidebar-footer {
+    padding: 12px 16px; border-top: 1px solid rgba(255,255,255,0.08);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .sidebar-footer .avatar {
+    width: 32px; height: 32px; border-radius: 8px; background: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; color: #fff; flex-shrink: 0;
+  }
+  .sidebar-footer .info { flex: 1; min-width: 0; }
+  .sidebar-footer .info .name { font-size: 12px; font-weight: 600; }
+  .sidebar-footer .info .status { font-size: 10px; color: var(--green); }
+  .sidebar-footer .info .status::before { content: ''; display: inline-block; width: 6px; height: 6px; background: var(--green); border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+
+  /* Main content */
+  .main { flex: 1; min-width: 0; }
+  .topbar {
+    background: var(--card); border-bottom: 1px solid var(--border);
+    padding: 0 32px; height: 56px; display: flex; align-items: center; gap: 16px;
+    position: sticky; top: 0; z-index: 10;
+  }
+  .topbar .breadcrumb { font-size: 13px; color: var(--text-secondary); }
+  .topbar .breadcrumb strong { color: var(--text); font-weight: 600; }
+  .topbar .spacer { flex: 1; }
+  .topbar .search {
+    display: flex; align-items: center; gap: 6px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px;
+    font-size: 12px; color: var(--text-secondary); width: 200px;
+  }
+  .topbar .search input {
+    border: none; background: transparent; outline: none;
+    font-size: 12px; width: 100%; color: var(--text);
+  }
+  .content { padding: 24px 32px; }
+
+  /* Cards */
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px; margin-bottom: 16px;
+  }
+  .card-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .card-header h2 {
+    font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px;
+  }
+  .card-header h2 .count {
+    font-size: 11px; font-weight: 400; color: var(--text-secondary);
+    background: var(--bg); padding: 1px 8px; border-radius: 10px;
+  }
+
+  /* Grid */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+
+  /* Agent cards */
+  .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .agent-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px; cursor: pointer; transition: all 0.15s;
+  }
+  .agent-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06); border-color: var(--accent); }
+  .agent-card .top {
+    display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px;
+  }
+  .agent-card .icon-box {
+    width: 36px; height: 36px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; flex-shrink: 0;
+  }
+  .agent-card .info { flex: 1; min-width: 0; }
+  .agent-card .info h3 { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+  .agent-card .info p { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
+  .agent-card .info .status-row {
+    display: flex; align-items: center; gap: 12px; margin-top: 8px; font-size: 11px;
+  }
+  .agent-card .info .status-row .dot {
+    width: 6px; height: 6px; border-radius: 50%; display: inline-block;
+  }
+  .agent-card .info .status-row .dot.green { background: var(--green); }
+  .agent-card .info .status-row .dot.yellow { background: var(--yellow); }
+  .agent-card .info .status-row .dot.red { background: var(--red); }
+  .agent-card .info .status-row .dot.gray { background: var(--text-light); }
+
+  /* Colors */
+  .bg-issue { background: #fef2f2; color: var(--red); }
+  .bg-coding { background: #eff6ff; color: var(--accent); }
+  .bg-qa { background: #faf5ff; color: var(--purple); }
+  .bg-release { background: #f0fdf4; color: var(--green); }
+  .bg-sre { background: #fff7ed; color: var(--orange); }
+  .bg-chat { background: #f0f9ff; color: var(--sky); }
+  .bg-vod { background: #fdf2f8; color: var(--pink); }
+
+  .border-issue { border-left: 3px solid var(--red); }
+  .border-coding { border-left: 3px solid var(--accent); }
+  .border-qa { border-left: 3px solid var(--purple); }
+  .border-release { border-left: 3px solid var(--green); }
+  .border-sre { border-left: 3px solid var(--orange); }
+  .border-chat { border-left: 3px solid var(--sky); }
+  .border-vod { border-left: 3px solid var(--pink); }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px;
+    border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer;
+    border: none; transition: all 0.15s; text-decoration: none;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-outline {
+    background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
+  }
+  .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-success { background: var(--green); color: #fff; }
+  .btn-success:hover { opacity: 0.9; }
+  .btn-sm { padding: 4px 10px; font-size: 11px; }
+  .btn-lg { padding: 10px 20px; font-size: 14px; }
+
+  /* Table */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; padding: 10px 12px; font-weight: 500; color: var(--text-secondary);
+    border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f8fafc; }
+
+  /* Pipeline */
+  .pipeline {
+    display: flex; align-items: flex-start; gap: 0;
+    padding: 20px 0; overflow-x: auto;
+  }
+  .pipeline .stage {
+    flex-shrink: 0; width: 180px; padding: 16px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    margin: 0 4px; position: relative;
+  }
+  .pipeline .stage::after {
+    content: '\2192'; position: absolute; right: -14px; top: 50%;
+    transform: translateY(-50%); color: var(--text-light); font-size: 16px;
+  }
+  .pipeline .stage:last-child::after { display: none; }
+  .pipeline .stage .stage-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  }
+  .pipeline .stage .stage-header .sdot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+  }
+  .pipeline .stage .stage-header h4 { font-size: 12px; font-weight: 600; }
+  .pipeline .stage .stage-status {
+    font-size: 11px; color: var(--text-secondary); line-height: 1.5;
+  }
+  .pipeline .stage .stage-status .item {
+    display: flex; align-items: center; gap: 6px; padding: 3px 0;
+  }
+
+  /* Tabs */
+  .tabs {
+    display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 20px;
+  }
+  .tabs a {
+    padding: 10px 18px; font-size: 13px; font-weight: 500; color: var(--text-secondary);
+    text-decoration: none; border-bottom: 2px solid transparent; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .tabs a:hover { color: var(--text); }
+  .tabs a.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  /* Repo item */
+  .repo-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 0; border-bottom: 1px solid var(--border);
+  }
+  .repo-item:last-child { border-bottom: none; }
+  .repo-item .repo-icon {
+    width: 36px; height: 36px; border-radius: 6px; background: var(--bg);
+    display: flex; align-items: center; justify-content: center; font-size: 16px;
+  }
+  .repo-item .repo-info { flex: 1; min-width: 0; }
+  .repo-item .repo-info .name { font-size: 13px; font-weight: 600; }
+  .repo-item .repo-info .desc { font-size: 11px; color: var(--text-secondary); }
+  .repo-item .repo-info .meta { font-size: 10px; color: var(--text-light); margin-top: 2px; }
+
+  /* Onboarding */
+  .onboarding {
+    max-width: 640px; margin: 40px auto;
+  }
+  .onboarding .steps {
+    display: flex; align-items: center; justify-content: center; gap: 0;
+    margin-bottom: 40px;
+  }
+  .onboarding .steps .step {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .onboarding .steps .step .num {
+    width: 28px; height: 28px; border-radius: 50%; display: flex;
+    align-items: center; justify-content: center; font-size: 12px; font-weight: 600;
+    background: var(--border); color: var(--text-secondary);
+  }
+  .onboarding .steps .step.active .num { background: var(--accent); color: #fff; }
+  .onboarding .steps .step.done .num { background: var(--green); color: #fff; }
+  .onboarding .steps .step .label { font-size: 12px; color: var(--text-secondary); }
+  .onboarding .steps .step.active .label { color: var(--text); font-weight: 500; }
+  .onboarding .steps .connector {
+    width: 40px; height: 1px; background: var(--border); margin: 0 8px;
+  }
+
+  /* Settings */
+  .settings-section { margin-bottom: 24px; }
+  .settings-section h3 {
+    font-size: 13px; font-weight: 600; margin-bottom: 12px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .form-row {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 10px;
+  }
+  .form-row label { font-size: 12px; color: var(--text-secondary); width: 140px; flex-shrink: 0; }
+  .form-row input[type="text"],
+  .form-row input[type="password"],
+  .form-row select {
+    flex: 1; padding: 7px 12px; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 12px; background: var(--bg); outline: none; color: var(--text);
+  }
+  .form-row input:focus { border-color: var(--accent); }
+
+  /* Utility */
+  .flex { display: flex; }
+  .flex-1 { flex: 1; }
+  .gap-8 { gap: 8px; }
+  .gap-12 { gap: 12px; }
+  .items-center { align-items: center; }
+  .justify-between { justify-content: space-between; }
+  .mt-8 { margin-top: 8px; }
+  .mt-16 { margin-top: 16px; }
+  .mb-8 { margin-bottom: 8px; }
+  .mb-16 { margin-bottom: 16px; }
+  .text-center { text-align: center; }
+  .text-sm { font-size: 12px; }
+  .text-xs { font-size: 11px; }
+  .text-secondary { color: var(--text-secondary); }
+  .text-light { color: var(--text-light); }
+  .text-success { color: var(--green); }
+  .text-warning { color: var(--yellow); }
+  .text-danger { color: var(--red); }
+
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* Tags */
+  .tag {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 500;
+  }
+  .tag-issue { background: #fef2f2; color: #dc2626; }
+  .tag-coding { background: #eff6ff; color: #2563eb; }
+  .tag-qa { background: #faf5ff; color: #9333ea; }
+  .tag-release { background: #f0fdf4; color: #16a34a; }
+  .tag-sre { background: #fff7ed; color: #ea580c; }
+  .tag-chat { background: #f0f9ff; color: #0284c7; }
+  .tag-default { background: var(--bg); color: var(--text-secondary); }
+
+  /* Stat cards */
+  .stat-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; text-align: center;
+  }
+  .stat-card .num { font-size: 24px; font-weight: 700; line-height: 1; }
+  .stat-card .label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+
+  /* Activity */
+  .activity-item {
+    display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border);
+  }
+  .activity-item:last-child { border-bottom: none; }
+  .activity-item .atime { font-size: 11px; color: var(--text-light); white-space: nowrap; width: 50px; }
+  .activity-item .acontent { flex: 1; font-size: 12px; line-height: 1.5; }
+  .activity-item .acontent strong { font-weight: 600; }
+
+  /* Hidden utility */
+  .hidden { display: none; }
+
+  /* Login page overlay */
+  .login-overlay {
+    position: fixed; inset: 0; background: var(--sidebar); z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.3s;
+  }
+  .login-overlay.hidden { opacity: 0; pointer-events: none; }
+  .login-box {
+    background: #1e293b; border-radius: 12px; padding: 40px;
+    width: 380px; text-align: center;
+  }
+  .login-box h1 {
+    color: #fff; font-size: 24px; font-weight: 700; margin-bottom: 4px;
+  }
+  .login-box p { color: var(--text-light); font-size: 13px; margin-bottom: 28px; }
+  .login-box .oauth-btn {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    width: 100%; padding: 12px; border-radius: 8px; border: none;
+    background: var(--accent); color: #fff; font-size: 14px; font-weight: 500;
+    cursor: pointer; text-decoration: none; transition: all 0.15s;
+  }
+  .login-box .oauth-btn:hover { background: var(--accent-hover); }
+  .login-box .divider {
+    display: flex; align-items: center; gap: 12px; margin: 20px 0; font-size: 12px;
+    color: var(--text-light);
+  }
+  .login-box .divider::before,
+  .login-box .divider::after { content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.1); }
+  .login-box .demo-hint { font-size: 11px; color: var(--text-light); margin-top: 20px; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .content { padding: 16px; }
+    .topbar { padding: 0 16px; }
+    .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+    .agent-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Login Overlay -->
+<div class="login-overlay" id="loginOverlay">
+  <div class="login-box">
+    <h1>DevOps Bot</h1>
+    <p>基于 GitCode 的多 Agent 协作 DevOps 平台</p>
+    <button class="oauth-btn" onclick="doLogin()">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+      使用 GitCode 登录
+    </button>
+    <div class="divider">或</div>
+    <div style="display:flex;gap:8px">
+      <input type="text" placeholder="demo" style="flex:1;padding:10px 14px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#fff;font-size:13px;outline:none">
+      <input type="password" placeholder="\u2022\u2022\u2022\u2022\u2022\u2022" style="flex:1;padding:10px 14px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#fff;font-size:13px;outline:none">
+      <button class="oauth-btn" style="flex:0;padding:10px 20px;font-size:13px" onclick="doLogin()">登录</button>
+    </div>
+    <p class="demo-hint">Demo: 点击「使用 GitCode 登录」进入系统</p>
+  </div>
+</div>
+
+<!-- Sidebar -->
+<div class="sidebar">
+  <div class="sidebar-header">
+    <h1><span class="logo">D</span> DevOps Bot</h1>
+    <div class="sub">v2.0 \u00b7 7 Agents</div>
+  </div>
+  <div class="sidebar-nav">
+    <div class="label">Overview</div>
+    <a class="active" onclick="showView('dashboard')"><span class="icon">\u25a0</span> Dashboard <span class="badge">12</span></a>
+    <a onclick="showView('pipeline')"><span class="icon">\u25b6</span> Pipeline</a>
+    <a onclick="showView('repos')"><span class="icon">\u2261</span> Repositories</a>
+
+    <div class="label">Agents</div>
+    <a onclick="showView('agent-detail', 'issue')"><span class="icon">\u26a0</span> Issue Agent</a>
+    <a onclick="showView('agent-detail', 'coding')"><span class="icon">\u2699</span> Coding Agent</a>
+    <a onclick="showView('agent-detail', 'qa')"><span class="icon">\u2714</span> QA Agent</a>
+    <a onclick="showView('agent-detail', 'release')"><span class="icon">\u2191</span> Release Agent</a>
+    <a onclick="showView('agent-detail', 'sre')"><span class="icon">\u2661</span> SRE Agent</a>
+    <a onclick="showView('agent-detail', 'chat')"><span class="icon">\u260e</span> Chat Agent</a>
+    <a onclick="showView('agent-detail', 'vod')"><span class="icon">\u266b</span> VOD Agent</a>
+
+    <div class="label">System</div>
+    <a onclick="showView('settings')"><span class="icon">\u2699</span> Settings</a>
+  </div>
+  <div class="sidebar-footer">
+    <div class="avatar">Z</div>
+    <div class="info">
+      <div class="name">Zhang Wei</div>
+      <div class="status">Online</div>
+    </div>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="main">
+  <div class="topbar">
+    <div class="breadcrumb"><strong>Dashboard</strong></div>
+    <div class="spacer"></div>
+    <div class="search">
+      <span>\u2315</span>
+      <input type="text" placeholder="Search events, repos, agents..." onfocus="this.style.width='280px'" onblur="this.style.width='100%'">
+    </div>
+  </div>
+  <div class="content">
+
+    <!-- ==================== DASHBOARD ==================== -->
+    <div class="view active" id="view-dashboard">
+      <!-- Onboarding notice -->
+      <div class="card" style="background:linear-gradient(135deg,#eff6ff,#f0fdf4);border-color:#bfdbfe;margin-bottom:20px;display:flex;align-items:center;gap:16px">
+        <div style="font-size:28px">\u2728</div>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:600;margin-bottom:2px">Welcome to DevOps Bot!</div>
+          <div style="font-size:12px;color:var(--text-secondary)">Your workflow is ready. 3 repos active \u00b7 12 events today</div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="showView('repos')">Manage Repos</button>
+      </div>
+
+      <!-- Stats -->
+      <div class="grid-4 mb-16">
+        <div class="stat-card"><div class="num" style="color:var(--accent)">3</div><div class="label">Active Repos</div></div>
+        <div class="stat-card"><div class="num" style="color:var(--green)">12</div><div class="label">Today's Events</div></div>
+        <div class="stat-card"><div class="num" style="color:var(--purple)">7</div><div class="label">Agents</div></div>
+        <div class="stat-card"><div class="num" style="color:var(--orange)">98.5%</div><div class="label">Auto-Resolution</div></div>
+      </div>
+
+      <!-- Agent Grid -->
+      <div style="font-size:13px;font-weight:600;margin-bottom:12px">Agent Status</div>
+      <div class="agent-grid">
+        <div class="agent-card border-issue" onclick="showView('agent-detail','issue')">
+          <div class="top">
+            <div class="icon-box bg-issue">\u26a0</div>
+            <div class="info">
+              <h3>Issue Agent</h3>
+              <p>Issue lifecycle: classify, label, assign, A2A trigger</p>
+              <div class="status-row">
+                <span><span class="dot green"></span> Active</span>
+                <span>Today: 5</span>
+                <span>Avg: 12s</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <span class="tag tag-issue">bug</span>
+            <span class="tag tag-issue">feature</span>
+            <span class="tag tag-issue">enhancement</span>
+          </div>
+        </div>
+
+        <div class="agent-card border-coding" onclick="showView('agent-detail','coding')">
+          <div class="top">
+            <div class="icon-box bg-coding">\u2699</div>
+            <div class="info">
+              <h3>Coding Agent</h3>
+              <p>Analyze, design, code, self-review, submit PR</p>
+              <div class="status-row">
+                <span><span class="dot green"></span> Active</span>
+                <span>Today: 3</span>
+                <span>Avg: 45s</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <span class="tag tag-coding">implement</span>
+            <span class="tag tag-coding">refactor</span>
+            <span class="tag tag-coding">fix</span>
+          </div>
+        </div>
+
+        <div class="agent-card border-qa" onclick="showView('agent-detail','qa')">
+          <div class="top">
+            <div class="icon-box bg-qa">\u2714</div>
+            <div class="info">
+              <h3>QA Agent</h3>
+              <p>Code review, auto tests, functional validation</p>
+              <div class="status-row">
+                <span><span class="dot green"></span> Active</span>
+                <span>Today: 4</span>
+                <span>Pass: 92%</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <span class="tag tag-qa">review</span>
+            <span class="tag tag-qa">test</span>
+            <span class="tag tag-qa">security</span>
+          </div>
+        </div>
+
+        <div class="agent-card border-release" onclick="showView('agent-detail','release')">
+          <div class="top">
+            <div class="icon-box bg-release">\u2191</div>
+            <div class="info">
+              <h3>Release Agent</h3>
+              <p>CHANGELOG, build, package, deploy</p>
+              <div class="status-row">
+                <span><span class="dot green"></span> Active</span>
+                <span>Today: 1</span>
+                <span>Avg: 28s</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <span class="tag tag-release">build</span>
+            <span class="tag tag-release">deploy</span>
+          </div>
+        </div>
+
+        <div class="agent-card border-sre" onclick="showView('agent-detail','sre')">
+          <div class="top">
+            <div class="icon-box bg-sre">\u2661</div>
+            <div class="info">
+              <h3>SRE Agent</h3>
+              <p>Monitor, diagnose, compliance, health check</p>
+              <div class="status-row">
+                <span><span class="dot green"></span> Active</span>
+                <span>Today: 2</span>
+                <span>Uptime: 99.9%</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <span class="tag tag-sre">alerts</span>
+            <span class="tag tag-sre">compliance</span>
+          </div>
+        </div>
+
+        <div class="agent-card border-chat" onclick="showView('agent-detail','chat')">
+          <div class="top">
+            <div class="icon-box bg-chat">\u260e</div>
+            <div class="info">
+              <h3>Chat Agent</h3>
+              <p>User dialogue, command routing, approval</p>
+              <div class="status-row">
+                <span><span class="dot green"></span> Active</span>
+                <span>Today: 18</span>
+                <span>Backend: Default</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <span class="tag tag-chat">dialog</span>
+            <span class="tag tag-chat">notify</span>
+          </div>
+        </div>
+
+        <div class="agent-card border-vod" onclick="showView('agent-detail','vod')">
+          <div class="top">
+            <div class="icon-box bg-vod">\u266b</div>
+            <div class="info">
+              <h3>VOD Agent</h3>
+              <p>Voice of developer: collect, analyze, refine</p>
+              <div class="status-row">
+                <span><span class="dot yellow"></span> Idle</span>
+                <span>Total: 47</span>
+                <span>Signals: 8</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <span class="tag tag-default">feedback</span>
+            <span class="tag tag-default">analytics</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent Activity -->
+      <div class="card mt-16" style="padding:16px 20px">
+        <div class="card-header"><h2>Recent Activity</h2><span style="font-size:11px;color:var(--text-light)">Last 24h</span></div>
+        <div class="activity-item">
+          <div class="atime">14:32</div>
+          <div class="acontent"><strong>QA Agent</strong> approved PR #1278 \u00b7 <span class="text-secondary">feat: add pipeline visualization</span></div>
+        </div>
+        <div class="activity-item">
+          <div class="atime">14:15</div>
+          <div class="acontent"><strong>Coding Agent</strong> submitted PR #1278 \u00b7 <span class="text-secondary">feat: add pipeline visualization</span></div>
+        </div>
+        <div class="activity-item">
+          <div class="atime">13:50</div>
+          <div class="acontent"><strong>Issue Agent</strong> assigned issue #342 to @alice \u00b7 <span class="text-secondary">bug: login timeout</span></div>
+        </div>
+        <div class="activity-item">
+          <div class="atime">13:22</div>
+          <div class="acontent"><strong>Release Agent</strong> deployed v2.3.1 to production \u00b7 <span class="text-success">success</span></div>
+        </div>
+        <div class="activity-item">
+          <div class="atime">12:05</div>
+          <div class="acontent"><strong>SRE Agent</strong> resolved incident INC-023 \u00b7 <span class="text-secondary">auto-recovery after scaling</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== PIPELINE ==================== -->
+    <div class="view" id="view-pipeline">
+      <div class="card" style="padding:16px 20px">
+        <div class="card-header">
+          <h2>End-to-End Pipeline</h2>
+          <div style="display:flex;gap:8px">
+            <span class="text-xs text-secondary">Repo: <strong>team/backend-service</strong></span>
+            <span class="text-xs text-secondary">Branch: <strong>main</strong></span>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px">
+          Issue #342: Login timeout when session expires \u00b7 Updated 14:32
+        </div>
+        <div class="pipeline">
+          <div class="stage" style="border-top:3px solid var(--red)">
+            <div class="stage-header">
+              <span class="sdot" style="background:var(--red)"></span><h4>Issue</h4>
+            </div>
+            <div class="stage-status">
+              <span class="item"><span class="dot green"></span> Classified: bug</span>
+              <span class="item"><span class="dot green"></span> Labeled: auth</span>
+              <span class="item"><span class="dot green"></span> Assigned: @alice</span>
+              <span class="item"><span class="dot green"></span> A2A triggered</span>
+            </div>
+          </div>
+          <div class="stage" style="border-top:3px solid var(--accent)">
+            <div class="stage-header">
+              <span class="sdot" style="background:var(--accent)"></span><h4>Coding</h4>
+            </div>
+            <div class="stage-status">
+              <span class="item"><span class="dot green"></span> Design approved</span>
+              <span class="item"><span class="dot green"></span> Implemented</span>
+              <span class="item"><span class="dot green"></span> Self-review done</span>
+              <span class="item"><span class="dot green"></span> PR #1278 submitted</span>
+            </div>
+          </div>
+          <div class="stage" style="border-top:3px solid var(--purple)">
+            <div class="stage-header">
+              <span class="sdot" style="background:var(--purple)"></span><h4>QA</h4>
+            </div>
+            <div class="stage-status">
+              <span class="item"><span class="dot yellow"></span> Code review...</span>
+              <span class="item"><span class="dot gray"></span> Auto tests</span>
+              <span class="item"><span class="dot gray"></span> E2E validation</span>
+            </div>
+          </div>
+          <div class="stage" style="border-top:3px solid var(--green)">
+            <div class="stage-header">
+              <span class="sdot" style="background:var(--green)"></span><h4>Release</h4>
+            </div>
+            <div class="stage-status">
+              <span class="item"><span class="dot gray"></span> CHANGELOG</span>
+              <span class="item"><span class="dot gray"></span> Build</span>
+              <span class="item"><span class="dot gray"></span> Deploy</span>
+            </div>
+          </div>
+          <div class="stage" style="border-top:3px solid var(--orange)">
+            <div class="stage-header">
+              <span class="sdot" style="background:var(--orange)"></span><h4>SRE</h4>
+            </div>
+            <div class="stage-status">
+              <span class="item"><span class="dot gray"></span> Monitoring</span>
+              <span class="item"><span class="dot gray"></span> Health check</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pipeline history -->
+      <div class="card mt-16">
+        <div class="card-header"><h2>Pipeline History</h2></div>
+        <div class="table-wrap">
+          <table>
+            <tr><th>Issue</th><th>PR</th><th>Agents</th><th>Duration</th><th>Status</th></tr>
+            <tr><td>#342 Login timeout</td><td>#1278</td><td><span class="tag tag-issue">I</span> <span class="tag tag-coding">C</span> <span class="tag tag-qa">Q</span></td><td>12m 34s</td><td><span class="text-warning">In Review</span></td></tr>
+            <tr><td>#338 Add webhook retry</td><td>#1275</td><td><span class="tag tag-issue">I</span> <span class="tag tag-coding">C</span> <span class="tag tag-qa">Q</span> <span class="tag tag-release">R</span></td><td>28m 12s</td><td><span class="text-success">Released v2.3.1</span></td></tr>
+            <tr><td>#335 Refactor auth module</td><td>#1272</td><td><span class="tag tag-issue">I</span> <span class="tag tag-coding">C</span> <span class="tag tag-qa">Q</span> <span class="tag tag-release">R</span> <span class="tag tag-sre">S</span></td><td>1h 05m</td><td><span class="text-success">Released v2.3.0</span></td></tr>
+            <tr><td>#331 API rate limit</td><td>#1268</td><td><span class="tag tag-issue">I</span> <span class="tag tag-coding">C</span> <span class="tag tag-qa">Q</span></td><td>42m 18s</td><td><span class="text-danger">Rolled back</span></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== REPOSITORIES ==================== -->
+    <div class="view" id="view-repos">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <h2 style="font-size:16px;font-weight:600">Repositories</h2>
+        <button class="btn btn-primary btn-sm" onclick="alert('[Demo] Sync repos from GitCode')">\u21bb Sync from GitCode</button>
+      </div>
+
+      <!-- Joined repos -->
+      <div class="card" style="padding:16px 20px">
+        <div class="card-header"><h2>Joined <span class="count">3</span></h2></div>
+        <div class="repo-item">
+          <div class="repo-icon">\u25a0</div>
+          <div class="repo-info">
+            <div class="name">team/backend-service</div>
+            <div class="desc">Core backend API service</div>
+            <div class="meta">Member \u00b7 Updated 14:32 \u00b7 \u2605 main</div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span class="tag tag-release" style="background:#dcfce7;color:#16a34a">Hosted</span>
+            <span class="text-xs text-secondary">Webhook OK</span>
+          </div>
+        </div>
+        <div class="repo-item">
+          <div class="repo-icon">\u25a0</div>
+          <div class="repo-info">
+            <div class="name">team/web-frontend</div>
+            <div class="desc">React-based admin dashboard</div>
+            <div class="meta">Maintainer \u00b7 Updated 12:10 \u00b7 \u2605 develop</div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span class="tag tag-release" style="background:#dcfce7;color:#16a34a">Hosted</span>
+            <span class="text-xs text-secondary">Webhook OK</span>
+          </div>
+        </div>
+        <div class="repo-item">
+          <div class="repo-icon">\u25a0</div>
+          <div class="repo-info">
+            <div class="name">team/mobile-app</div>
+            <div class="desc">React Native mobile application</div>
+            <div class="meta">Member \u00b7 Updated 09:45 \u00b7 \u2605 main</div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <button class="btn btn-outline btn-sm" onclick="alert('[Demo] Host this repo')">+ Host</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Available repos to join -->
+      <div class="card mt-16" style="padding:16px 20px">
+        <div class="card-header"><h2>Available to Join <span class="count">5</span></h2></div>
+        <div class="table-wrap">
+          <table>
+            <tr><th>Repository</th><th>Role</th><th>Description</th><th></th></tr>
+            <tr><td><strong>org/docs-site</strong></td><td>Member</td><td>Documentation site</td><td><button class="btn btn-outline btn-sm" onclick="alert('[Demo] Join repo')">+ Join</button></td></tr>
+            <tr><td><strong>org/devops-toolkit</strong></td><td>Member</td><td>Internal DevOps tools</td><td><button class="btn btn-outline btn-sm" onclick="alert('[Demo] Join repo')">+ Join</button></td></tr>
+            <tr><td><strong>org/data-pipeline</strong></td><td>Admin</td><td>ETL data pipeline</td><td><button class="btn btn-outline btn-sm" onclick="alert('[Demo] Join repo')">+ Join</button></td></tr>
+            <tr><td><strong>team/analytics</strong></td><td>Maintainer</td><td>Analytics service</td><td><button class="btn btn-outline btn-sm" onclick="alert('[Demo] Join repo')">+ Join</button></td></tr>
+            <tr><td><strong>team/notification</strong></td><td>Member</td><td>Notification service</td><td><button class="btn btn-outline btn-sm" onclick="alert('[Demo] Join repo')">+ Join</button></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== AGENT DETAIL ==================== -->
+    <div class="view" id="view-agent-detail">
+      <div id="agentDetailContent"></div>
+    </div>
+
+    <!-- ==================== SETTINGS ==================== -->
+    <div class="view" id="view-settings">
+      <div class="tabs">
+        <a class="active" onclick="settingsTab(this,'channel')">Channel</a>
+        <a onclick="settingsTab(this,'credentials')">Credentials</a>
+        <a onclick="settingsTab(this,'preferences')">Preferences</a>
+      </div>
+
+      <div id="settings-channel" class="settings-section">
+        <div class="card" style="padding:16px 20px">
+          <h3>Chat Agent Backend</h3>
+          <div class="form-row"><label>Backend Type</label>
+            <select><option>Default (Built-in)</option><option>Custom (Bring Your Own)</option></select>
+          </div>
+          <div class="form-row"><label>Backend URL</label><input type="text" value="http://localhost:8080/api/chat" placeholder="http://your-agent:port/api/chat"></div>
+          <div class="form-row"><label>API Key</label><input type="password" value="sk-demo-key-xxxxxxxx"></div>
+          <div style="margin-top:12px;padding:12px;background:#f0fdf4;border-radius:6px;font-size:12px;color:#16a34a">
+            \u2713 Using default Chat Agent. Custom backends (OpenClaw, Hermes) supported.
+          </div>
+        </div>
+
+        <div class="card mt-16" style="padding:16px 20px">
+          <h3>IM Integration</h3>
+          <div class="form-row"><label>Feishu Bot</label>
+            <span style="font-size:12px;color:var(--green)">\u2713 Connected</span>
+            <button class="btn btn-outline btn-sm">\u21bb Reconnect</button>
+          </div>
+          <div class="form-row"><label>WeCom Bot</label>
+            <span style="font-size:12px;color:var(--text-light)">\u2014 Not configured</span>
+            <button class="btn btn-outline btn-sm">Configure</button>
+          </div>
+          <div class="form-row"><label>DingTalk Bot</label>
+            <span style="font-size:12px;color:var(--text-light)">\u2014 Not configured</span>
+            <button class="btn btn-outline btn-sm">Configure</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="settings-credentials" class="settings-section" style="display:none">
+        <div class="card" style="padding:16px 20px">
+          <h3>GitCode</h3>
+          <div class="form-row"><label>API Token</label><input type="password" value="ghp_demo_token_xxxxxxxxxxxxxxxxxxxx"></div>
+          <div class="form-row"><label>Account</label><input type="text" value="zhangwei" disabled style="background:#f1f5f9"></div>
+        </div>
+        <div class="card mt-16" style="padding:16px 20px">
+          <h3>Huawei Cloud</h3>
+          <div class="form-row"><label>Access Key</label><input type="password" value="AK-demo-access-key-xxxx"></div>
+          <div class="form-row"><label>Secret Key</label><input type="password" value="SK-demo-secret-key-xxxx"></div>
+          <div class="form-row"><label>Region</label><select><option>cn-north-4</option><option>cn-east-3</option></select></div>
+          <div style="margin-top:12px;font-size:11px;color:var(--text-secondary)">Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.</div>
+        </div>
+      </div>
+
+      <div id="settings-preferences" class="settings-section" style="display:none">
+        <div class="card" style="padding:16px 20px">
+          <h3>Notification Preferences</h3>
+          <div style="margin-bottom:8px;font-size:12px">
+            <label style="display:flex;align-items:center;gap:8px;padding:6px 0">
+              <input type="checkbox" checked> Issue events
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px 0">
+              <input type="checkbox" checked> PR events
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px 0">
+              <input type="checkbox"> Build failures
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px 0">
+              <input type="checkbox" checked> Release events
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:6px 0">
+              <input type="checkbox"> SRE alerts
+            </label>
+          </div>
+        </div>
+        <div class="card mt-16" style="padding:16px 20px">
+          <h3>Custom Skills</h3>
+          <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">
+            Project maintainers can upload custom SKILL.md to override default agent behaviors.
+          </div>
+          <button class="btn btn-outline btn-sm">Upload Skill</button>
+          <div style="margin-top:12px">
+            <div class="repo-item" style="padding:8px 0">
+              <span class="tag tag-coding">team/backend-service</span>
+              <span class="text-xs text-secondary">pull_request_opened</span>
+              <span class="text-xs" style="color:var(--accent);flex:1">custom-pr-review</span>
+              <button class="btn btn-outline btn-sm">Edit</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script>
+  // Navigation
+  function showView(name, param) {
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
+
+    if (name === 'agent-detail' && param) {
+      const view = document.getElementById('view-agent-detail');
+      view.classList.add('active');
+      renderAgentDetail(param);
+      // Highlight sidebar link
+      document.querySelectorAll('.sidebar-nav a').forEach(a => {
+        if (a.textContent.includes(agentName(param))) a.classList.add('active');
+      });
+    } else {
+      const view = document.getElementById('view-' + name);
+      if (view) view.classList.add('active');
+      // Highlight sidebar link
+      document.querySelectorAll('.sidebar-nav a').forEach(a => {
+        if (a.getAttribute('onclick') && a.getAttribute('onclick').includes("'" + name + "'")) {
+          a.classList.add('active');
+        }
+      });
+    }
+
+    // Update breadcrumb
+    const names = { 'dashboard':'Dashboard', 'pipeline':'Pipeline', 'repos':'Repositories',
+      'agent-detail':'Agent', 'settings':'Settings' };
+    document.querySelector('.breadcrumb strong').textContent = names[name] || name;
+  }
+
+  function agentName(key) {
+    const names = { issue:'Issue Agent', coding:'Coding Agent', qa:'QA Agent',
+      release:'Release Agent', sre:'SRE Agent', chat:'Chat Agent', vod:'VOD Agent' };
+    return names[key] || key;
+  }
+
+  const agentData = {
+    issue: {
+      icon: '\u26a0', color: 'var(--red)', bg: 'bg-issue', border: 'border-issue',
+      desc: 'Issue lifecycle management: classify, label, assign, milestones, link PRs',
+      status: 'Active', today: 5, avg: '12s',
+      events: [
+        {time:'14:15', text:'Classified issue #342 as <strong>bug</strong>', tag:'bug'},
+        {time:'13:50', text:'Assigned issue #342 to <strong>@alice</strong>', tag:'assign'},
+        {time:'13:22', text:'Triggered A2A to Coding Agent for issue #338', tag:'a2a'},
+        {time:'11:05', text:'Labeled issue #335 as <strong>enhancement</strong>', tag:'label'},
+        {time:'09:30', text:'Auto-closed issue #329 (fixed in PR #1270)', tag:'resolve'},
+      ]
+    },
+    coding: {
+      icon: '\u2699', color: 'var(--accent)', bg: 'bg-coding', border: 'border-coding',
+      desc: 'Analyze requirements, design solution, implement code, self-review, submit PR',
+      status: 'Active', today: 3, avg: '45s',
+      events: [
+        {time:'14:15', text:'Submitted PR <strong>#1278</strong> for issue #342', tag:'pr'},
+        {time:'12:30', text:'Designed solution for issue #342: add session refresh', tag:'design'},
+        {time:'11:00', text:'Implemented feature: webhook retry logic (PR #1275)', tag:'impl'},
+        {time:'09:45', text:'Code self-review completed for PR #1275', tag:'review'},
+      ]
+    },
+    qa: {
+      icon: '\u2714', color: 'var(--purple)', bg: 'bg-qa', border: 'border-qa',
+      desc: 'Code review, automated tests, functional validation, security scanning',
+      status: 'Active', today: 4, pass: '92%',
+      events: [
+        {time:'14:30', text:'Approved PR <strong>#1278</strong> (1 minor suggestion)', tag:'approved'},
+        {time:'13:15', text:'Code review completed for PR #1275: <strong>2 issues found</strong>', tag:'review'},
+        {time:'12:00', text:'Auto-test suite passed for PR #1275 (156 tests)', tag:'test'},
+        {time:'10:30', text:'Security scan OK for PR #1272', tag:'security'},
+      ]
+    },
+    release: {
+      icon: '\u2191', color: 'var(--green)', bg: 'bg-release', border: 'border-release',
+      desc: 'CHANGELOG generation, build, package, deploy to target environment',
+      status: 'Active', today: 1, avg: '28s',
+      events: [
+        {time:'13:22', text:'Deployed <strong>v2.3.1</strong> to production', tag:'deploy'},
+        {time:'13:20', text:'Generated CHANGELOG for v2.3.1', tag:'changelog'},
+        {time:'13:18', text:'Build #482 completed successfully', tag:'build'},
+        {time:'10:00', text:'PR #1272 merged into main', tag:'merge'},
+      ]
+    },
+    sre: {
+      icon: '\u2661', color: 'var(--orange)', bg: 'bg-sre', border: 'border-sre',
+      desc: 'Deploy monitoring, fault diagnosis, compliance checks, health inspection',
+      status: 'Active', today: 2, uptime: '99.9%',
+      events: [
+        {time:'14:00', text:'Health check passed for all services', tag:'health'},
+        {time:'12:05', text:'Auto-resolved incident <strong>INC-023</strong>', tag:'incident'},
+        {time:'10:15', text:'Compliance scan OK for backend-service', tag:'compliance'},
+        {time:'08:00', text:'Deploy guard verified PR #1272: <strong>3 checks passed</strong>', tag:'guard'},
+      ]
+    },
+    chat: {
+      icon: '\u260e', color: 'var(--sky)', bg: 'bg-chat', border: 'border-chat',
+      desc: 'User dialogue, command routing, approval, feedback collection',
+      status: 'Active', today: 18, backend: 'Default',
+      events: [
+        {time:'14:28', text:'Replied to @bob: "Build failed due to test timeout"', tag:'dialog'},
+        {time:'14:00', text:'Forwarded approval request for PR #1278', tag:'approval'},
+        {time:'13:45', text:'User @alice: "check build status" \u2192 queried SRE Agent', tag:'a2a'},
+        {time:'11:30', text:'Sent release notification to \u2605 team-channel', tag:'notify'},
+      ]
+    },
+    vod: {
+      icon: '\u266b', color: 'var(--pink)', bg: 'bg-vod', border: 'border-vod',
+      desc: 'Developer voice collection, analysis, value extraction, trend reporting',
+      status: 'Idle', total: 47, signals: 8,
+      events: [
+        {time:'08:00', text:'Weekly report generated: <strong>8 key signals</strong>', tag:'report'},
+        {time:'Yesterday', text:'Analyzed 12 feedback entries from PR comments', tag:'analyze'},
+        {time:'Yesterday', text:'Trend: CI flakiness increased 15% this week', tag:'trend'},
+        {time:'2d ago', text:'Collected 5 feedback from Issue discussions', tag:'collect'},
+      ]
+    }
+  };
+
+  function renderAgentDetail(key) {
+    const d = agentData[key];
+    if (!d) return;
+    const container = document.getElementById('agentDetailContent');
+    container.innerHTML = `
+      <div class="card" style="padding:16px 20px">
+        <div style="display:flex;align-items:flex-start;gap:16px">
+          <div class="icon-box ${d.bg}" style="width:48px;height:48px;font-size:22px">${d.icon}</div>
+          <div style="flex:1">
+            <h2 style="font-size:18px;font-weight:600;margin-bottom:4px">${agentName(key)}</h2>
+            <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">${d.desc}</p>
+            <div style="display:flex;gap:16px;font-size:12px">
+              <span><span class="dot green"></span> ${d.status}</span>
+              <span class="text-secondary">Today: ${d.today} events</span>
+              ${d.avg ? '<span class="text-secondary">Avg: ' + d.avg + '</span>' : ''}
+              ${d.pass ? '<span class="text-secondary">Pass: ' + d.pass + '</span>' : ''}
+              ${d.uptime ? '<span class="text-secondary">Uptime: ' + d.uptime + '</span>' : ''}
+              ${d.backend ? '<span class="text-secondary">Backend: ' + d.backend + '</span>' : ''}
+              ${d.signals ? '<span class="text-secondary">Signals: ' + d.signals + '</span>' : ''}
+            </div>
+          </div>
+          <div style="display:flex;gap:4px">
+            <button class="btn btn-outline btn-sm">\u2699 Configure</button>
+            <button class="btn btn-primary btn-sm">View Logs</button>
+          </div>
+        </div>
+      </div>
+      <div class="card mt-16" style="padding:16px 20px">
+        <div class="card-header"><h2>Event History</h2><span style="font-size:11px;color:var(--text-light)">Last 24h</span></div>
+        ${d.events.map(e => `
+          <div class="activity-item">
+            <div class="atime">${e.time}</div>
+            <div class="acontent">${e.text} <span class="tag tag-default" style="float:right">${e.tag}</span></div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="card mt-16" style="padding:16px 20px">
+        <div class="card-header"><h2>Skills</h2></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <span class="tag tag-default" style="padding:4px 12px;font-size:12px">\u2605 Default Skill</span>
+          <span class="tag tag-default" style="padding:4px 12px;font-size:12px;background:#eff6ff;color:var(--accent)">\u270f Custom: team/backend-service</span>
+        </div>
+        <div style="margin-top:12px;font-size:12px;color:var(--text-secondary)">
+          <span>Default skill path: <code style="background:var(--bg);padding:1px 6px;border-radius:3px">skills/${key}/SKILL.md</code></span>
+        </div>
+      </div>
+    `;
+  }
+
+  function settingsTab(el, tab) {
+    document.querySelectorAll('#settings-channel, #settings-credentials, #settings-preferences').forEach(v => v.style.display = 'none');
+    document.getElementById('settings-' + tab).style.display = 'block';
+    document.querySelectorAll('.tabs a').forEach(a => a.classList.remove('active'));
+    el.classList.add('active');
+  }
+
+  function doLogin() {
+    document.getElementById('loginOverlay').classList.add('hidden');
+  }
+</script>
+</body>
+</html>
