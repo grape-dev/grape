@@ -405,11 +405,7 @@ function renderDash(){
     </div>`;
   });
   html+=`</div>
-  <div style="display:flex;gap:0;padding:4px 0 0">
-    ${['vod','issue','coding','qa','sre'].map(()=>'<div style="flex-shrink:0;width:200px;margin:0 6px;display:flex;flex-direction:column;align-items:center"><div style="width:1.5px;height:16px;background:linear-gradient(to bottom,var(--t3),var(--t3) 8px,transparent 8px);opacity:.5"></div><div style="font-size:8px;color:var(--t3)">|</div></div>').join('')}
-  </div>
-  <div style="max-width:${200*5+12*5}px;margin:0 auto">
-  <div class="cl" onclick="nav('chat')" style="margin-top:0;border-radius:var(--r2)">
+  <div class="cl" onclick="nav('chat')">
     <div class="ci">☎</div>
     <div class="cx"><h4>Chat Agent · Personal Assistant</h4><p>Your personal agent connected to the workflow · Submit issues · Query status · Approve</p></div>
     <div class="flex gap6"><span class="tg tg-ch">↔ VOD</span><span class="tg tg-ch">↔ Issue</span><span class="tg tg-ch">↔ Coding</span><span class="tg tg-ch">↔ QA</span><span class="tg tg-ch">↔ SRE</span></div>
