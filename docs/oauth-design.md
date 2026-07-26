@@ -14,7 +14,8 @@
 | `gitcode_oauth_client_secret` | 同上 | GitCode OAuth App 的 client_secret |
 | `gitcode_oauth_redirect_uri` | 同上 | 回调 URL，如 `http://203.0.113.2:80/auth/gitcode/callback` |
 
-以上三个字段在 master 分支中已存在（`BOT_ACCOUNT_FIELDS` 包含，admin 面板已渲染）。
+> `gitcode_oauth_redirect_uri` 必须存在于 `BOT_ACCOUNT_FIELDS` 中，否则保存时会被忽略。  
+> GitCode OAuth App 注册的回调 URL 必须与此值**完全一致**（包括端口号）。
 
 ## OAuth 流程
 
@@ -22,8 +23,9 @@
 ┌─ 浏览器 ─┐      ┌─ DevOps Bot ─┐      ┌─ GitCode ─┐
 │          │      │              │      │           │
 │ 点击登录  │ ──→ │ 生成 state   │      │           │
-│          │      │ 存 oauth_states     │           │
+│          │      │ 存内存 store │      │           │
 │          │ ←── │ 302 跳转     │      │           │
+│          │      │ (no-cache)   │      │           │
 │          │ ──→ │              │ ──→ │ 授权页面   │
 │          │      │              │      │ 用户确认   │
 │          │ ←── │              │ ←── │ code+state│
@@ -46,27 +48,25 @@ ALTER TABLE users ADD COLUMN gitcode_id TEXT DEFAULT '';
 
 `gitcode_id` 存储 GitCode 的用户数字 ID（对象 ID，如 `"11652785"`），用于去重绑定。
 
-### 新增 oauth_states 表
+### oauth_states 表（保留但不再用于 OAuth state）
 
-```sql
-CREATE TABLE IF NOT EXISTS oauth_states (
-    state TEXT PRIMARY KEY,
-    provider TEXT NOT NULL,
-    data_json TEXT DEFAULT '{}',
-    expires REAL NOT NULL
-)
+`oauth_states` SQLite 表作为兼容性保留，OAuth state 实际使用**进程内内存存储**（`_oauth_store` dict），原因是 SQLite 在多线程场景下存在跨线程事务隔离问题，state 写入后可能在另一线程不可见。
+
+```python
+# src/user/db.py
+_oauth_store = {}               # 内存 dict
+_oauth_lock = threading.Lock()  # 专用锁
 ```
 
-- `state`：随机字符串，CSRF 防伪
-- `provider`：固定 `"gitcode"`
-- `data_json`：回调后需要恢复的数据（如登录前所在页面）
-- `expires`：过期时间戳（10 分钟后）
+- 写入（`save_oauth_state`）：加锁 → dict 赋值 → 解锁
+- 读取并消耗（`validate_oauth_state`）：加锁 → `pop(state, None)` → 解锁
+- 10 分钟过期（调用方控制，未单独清理线程）
 
 ## API 端点
 
 ### GET /auth/gitcode/login
 
-生成随机 state → 存入 `oauth_states` 表 → 302 跳转到 GitCode 授权页：
+生成随机 state → 存入 `_oauth_store` → 302 跳转到 GitCode 授权页（**带 no-cache 头，防浏览器缓存 302**）：
 
 ```
 https://gitcode.com/oauth/authorize
@@ -78,14 +78,17 @@ https://gitcode.com/oauth/authorize
 ```
 
 - `client_id` 从 `bot_accounts.gitcode_oauth_client_id` 读取
-- `redirect_uri` 优先用配置的 `gitcode_oauth_redirect_uri`，未配置则自动从请求头拼接
+- `redirect_uri` 优先用配置的 `gitcode_oauth_redirect_uri`，未配置则自动从请求头拼接（含端口号）
 
 ### GET /auth/gitcode/callback
 
 接收 GitCode 回调：
 
 ```
-1. 验证 state → 从 oauth_states 表查找并删除（一次性使用，防 replay）
+1. 验证 state → 从 _oauth_store 查找并删除（一次性使用，防 replay）
+   → 返回 dict {}（空字典），不是 None
+   → 回调中判断：if state_data is None:  # 而不是 if not state_data:
+                                  ↑ 空字典 {} 在 Python 中是 falsy
 2. POST https://gitcode.com/oauth/token → 获取 access_token
    grant_type=authorization_code&code={code}&client_id={client_id}
    &client_secret={client_secret}&redirect_uri={redirect_uri}
@@ -102,10 +105,11 @@ https://gitcode.com/oauth/authorize
 
 ```python
 def save_oauth_state(state, provider, data=None):
-    """保存 OAuth state（防 CSRF，10 分钟过期）"""
+    """保存 OAuth state（防 CSRF，10 分钟过期，内存存储）"""
 
 def validate_oauth_state(state, provider) -> dict | None:
-    """验证并消耗 OAuth state（查 + 删），返回 data 或 None"""
+    """验证并消耗 OAuth state（pop + 校验），返回 data 或 None。
+    注意：返回空 dict {} 表示成功，回调必须用 is None 判断。"""
 
 def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
     """通过 GitCode ID 查找本地用户"""
@@ -115,6 +119,17 @@ def link_gitcode_user(user_id, gitcode_id, access_token, refresh_token=""):
 ```
 
 所有 DDL 统一在 `init_db()` 中处理，不在模块级别执行额外 SQL。
+
+## 陷坑记录
+
+| 问题 | 症状 | 根因 | 修复 |
+|------|------|------|------|
+| state 存不入 DB | state 从未找到 | SQLite 跨线程事务隔离：线程 A 写入后线程 B 读取不到 | 改为内存 dict 存储 |
+| state 验证返回空字典导致失败 | 日志显示 FOUND 但仍报错 | `validate_oauth_state` 返回 `{}`，`if not state_data:` 认为 `{}` 为 falsy | 改为 `if state_data is None:` |
+| state 始终返回 None | 每次验证都失败 | `return entry["data"]` 缩进错误，位于 `if` 块内成为死代码 | 修正缩进 |
+| redirect_uri 不保存 | admin 填入后刷新就没了 | `gitcode_oauth_redirect_uri` 未加入 `BOT_ACCOUNT_FIELDS` | 加入字段列表 |
+| 浏览器缓存 302 | 再次点击登录时直接跳到 GitCode，state 未更新 | 302 响应无 cache-control 头 | 添加 no-cache 头 |
+| `log("warning", ...)` 调用错误 | Logger 对象不可调用 | 误用 `log("warning", msg)` 而非 `log.warning(msg)` | 修正调用方式 |
 
 ## UI 变更
 
@@ -147,23 +162,15 @@ GitCode 绑定: ✅ 已绑定 / ❌ 未绑定
 
 | 文件 | 改动 |
 |------|------|
-| `src/user/db.py` | `init_db()` 增加 `oauth_states` 表 DDL + ALTER TABLE + `_cleanup_expired_oauth_states()`；新增 `save_oauth_state()`、`validate_oauth_state()`、`get_user_by_gitcode_id()`、`link_gitcode_user()` |
-| `src/admin/server.py` | `do_GET` 新增 `/auth/gitcode/login` 和 `/auth/gitcode/callback` 路由；`_render_user_login()` 增加 OAuth 登录按钮；`_render_user_panel()` 增加 GitCode 绑定状态 |
-
-## 与之前 Agent 实现的关键区别
-
-| 问题 | Agent 实现的问题 | 本方案 |
-|------|----------------|--------|
-| DDL 执行时机 | `_ensure_gitcode_column()` 在模块级定义两次，第二次覆盖第一次，导致死锁 | 所有 DDL 统一在 `init_db()` 中处理，不在模块级执行额外 SQL |
-| `db.commit()` 位置 | 在 `init_db()` 的 `with db_lock` 内外各调一次 | 统一在 `with db_lock` 内调一次 |
-| `list_users()` 中的列 | 每次调用都 `_ensure_gitcode_column()`，增加锁竞争 | DDL 在 `init_db()` 时已处理，查询直接取字段 |
-| 模块级代码 | `_ensure_gitcode_column()` 在模块级调用 | 无模块级多余代码（仅调用 `init_db()`） |
+| `src/user/db.py` | `init_db()` 增加 `oauth_states` 表 DDL + ALTER TABLE + `_cleanup_expired_oauth_states()`；新增 `save_oauth_state()`、`validate_oauth_state()`、`get_user_by_gitcode_id()`、`link_gitcode_user()`；`BOT_ACCOUNT_FIELDS` 增加 `gitcode_oauth_redirect_uri` |
+| `src/admin/server.py` | `do_GET` 新增 `/auth/gitcode/login` 和 `/auth/gitcode/callback` 路由；`_render_user_login()` 增加 OAuth 登录按钮；`_render_user_panel()` 增加 GitCode 绑定状态；302 跳转添加 no-cache 头 |
 
 ## 安全措施
 
 | 措施 | 说明 |
 |------|------|
-| state 防 CSRF | 随机 state 存 DB，一次性使用，10 分钟过期 |
+| state 防 CSRF | 随机 state 存内存 dict，一次性使用（pop），10 分钟过期 |
 | access_token 存储 | 存于 `user_credentials` 表（已有凭据存储机制） |
 | HTTPS 回调 | redirect_uri 自动检测请求协议 |
+| 302 防缓存 | Cache-Control: no-cache, no-store, must-revalidate + Pragma: no-cache + Expires: 0 |
 | 错误处理 | 每一步错误返回具体提示给用户，不泄漏敏感信息 |
