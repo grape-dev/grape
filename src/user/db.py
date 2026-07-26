@@ -161,7 +161,6 @@ def clear_token(token: str):
 
 
 # ====== GitCode OAuth 联邦登录 ======
-log.info(f"_oauth_store initialized at id={id(_oauth_store)}, thread={threading.current_thread().name}")
 
 
 def _cleanup_expired_oauth_states():
@@ -178,38 +177,24 @@ def save_oauth_state(state: str, provider: str, data: dict | None = None):
     """保存 OAuth state（防 CSRF，10 分钟过期，内存存储）"""
     expires = time.time() + 600
     with _oauth_lock:
-        before = len(_oauth_store)
         _oauth_store[state] = {"provider": provider, "data": data or {}, "expires": expires}
-        after = len(_oauth_store)
-        keys = list(_oauth_store.keys())
-    log.info(f"save_oauth_state: thread={threading.current_thread().name} store_id={id(_oauth_store)} state={state[:20]}... before={before} after={after} keys={[k[:16] for k in keys]}")
+    log.info(f"save_oauth_state: state={state[:20]}... saved OK, total={len(_oauth_store)}")
 
 
 def validate_oauth_state(state: str, provider: str) -> dict | None:
     """验证并消耗 OAuth state（查 + 删），返回 data 或 None"""
     with _oauth_lock:
         entry = _oauth_store.pop(state, None)
-        remaining = len(_oauth_store)
-        keys = list(_oauth_store.keys())
-    if not entry:
-        log.warning(f"validate_oauth_state: thread={threading.current_thread().name} store_id={id(_oauth_store)} state={state[:20]}... NOT FOUND. remaining={remaining} keys={[k[:16] for k in keys]}")
+    if entry is None:
+        log.warning(f"validate_oauth_state: state={state[:20]}... NOT FOUND")
         return None
-    log.info(f"validate_oauth_state: thread={threading.current_thread().name} state={state[:20]}... FOUND, consumed OK, remaining={remaining}")
     if entry["provider"] != provider:
-        log.warning(f"validate_oauth_state: provider mismatch expected={provider} got={entry['provider']}")
+        log.warning(f"validate_oauth_state: provider mismatch")
         return None
     if time.time() > entry["expires"]:
         log.warning(f"validate_oauth_state: state expired")
         return None
     return entry["data"]
-
-
-def debug_list_oauth_states():
-    """调试：打印所有未过期 oauth_states"""
-    now = time.time()
-    with _oauth_lock:
-        valid = {k: v for k, v in _oauth_store.items() if v["expires"] > now}
-        log.warning(f"oauth_states in memory ({len(valid)}):")
         for sid, entry in list(valid.items())[:10]:
             log.warning(f"  state={sid[:40]}... provider={entry['provider']} expires={entry['expires']}")
 
