@@ -6,7 +6,7 @@
 
 ## 前提条件
 
-管理员需在 GitCode 创建一个 OAuth App，然后在 admin 面板配置：
+管理员需在 GitCode 创建一个 OAuth App（[设置页面](https://gitcode.com/setting/oauth)），然后在 admin 面板配置：
 
 | 字段 | 位置 | 说明 |
 |------|------|------|
