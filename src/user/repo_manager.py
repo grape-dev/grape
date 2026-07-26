@@ -1,5 +1,5 @@
 """GitCode 仓库托管管理：获取管理员仓库、创建/删除 webhook"""
-import json, urllib.request, urllib.error
+import json, urllib.request, urllib.error, urllib.parse
 from src.config import log, GITCODE_WEBHOOK_TOKEN
 
 API_BASE = "https://api.gitcode.com/api/v5"
@@ -28,7 +28,7 @@ def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: s
     """调 /collaborators/{username}/permission 接口精确判断管理员权限"""
     if not username:
         return False
-    url = f"{API_BASE}/repos/{owner}/{repo}/collaborators/{username}/permission"
+    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{username}/permission"
     try:
         data = _req("GET", url, api_token)
         perm = data.get("permissions", {})
@@ -91,7 +91,7 @@ def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: st
     """检查仓库是否已有指向 webhook_url 的 webhook，有则返回 webhook_id"""
     if not webhook_url:
         return None
-    url = f"{API_BASE}/repos/{owner}/{repo}/hooks"
+    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     try:
         hooks = _req("GET", url, api_token)
         if isinstance(hooks, list):
@@ -105,7 +105,7 @@ def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: st
 
 def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int:
     """在指定仓库上创建 DevOps Bot webhook，返回 webhook_id。"""
-    url = f"{API_BASE}/repos/{owner}/{repo}/hooks"
+    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     body = {
         "url": webhook_url,
         "password": GITCODE_WEBHOOK_TOKEN,
@@ -128,6 +128,6 @@ def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> in
 
 def remove_webhook(api_token: str, owner: str, repo: str, webhook_id: int) -> bool:
     """删除指定仓库上的 webhook。"""
-    url = f"{API_BASE}/repos/{owner}/{repo}/hooks/{webhook_id}"
+    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"
     _req("DELETE", url, api_token)
     return True
