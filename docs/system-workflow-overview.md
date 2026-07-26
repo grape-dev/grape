@@ -65,7 +65,9 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 
 ### 2.1.1 选择仓库页面（登录后首屏）
 
-用户首次登录后，进入仓库选择页面。每个仓库以卡片形式展示，支持搜索和角色过滤：
+> 此页面仅在用户首次登录且尚未加入任何仓库时展示。如果用户已有已加入的仓库，登录后直接进入该仓库的 Dashboard。
+
+用户首次登录后，进入仓库选择页面。每个仓库以卡片形式展示，支持搜索和角色过滤，所有卡片均为「未加入」状态，提供 `+ Join` 或 `Host Now` 入口：
 
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
@@ -77,15 +79,17 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 │  │ ■ team/      │  │ ■ team/      │  │ ■ org/       │ │
 │  │ backend-srv  │  │ web-frontend │  │ docs-site    │ │
 │  │ Maintainer   │  │ Maintainer   │  │ Member       │ │
-│  │ 🌐 Active    │  │ 🌐 Active    │  │ 🌐 Joined    │ │
-│  │ [  Joined ✔ ]│  │ [  Joined ✔ ]│  │ [+ Join]     │ │
+│  │ Owner: team  │  │ Owner: team  │  │ Owner: org   │ │
+│  │ 🚧 Not added │  │ 🚧 Not added │  │ 🚧 Not added │ │
+│  │ [+ Join]     │  │ [+ Join]     │  │ [+ Join]     │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘ │
 │                                                        │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
 │  │ ■ org/       │  │ ■ team/      │  │ ■ team/      │ │
 │  │ devops-tklt  │  │ mobile-app   │  │ notification │ │
 │  │ Admin        │  │ Member       │  │ Member       │ │
-│  │ 🚧 Not added │  │ 🌐 Joined    │  │ 🌐 Joined    │ │
+│  │ Owner: org   │  │ Owner: team  │  │ Owner: team  │ │
+│  │ 🚧 Not added │  │ 🚧 Not added │  │ 🚧 Not added │ │
 │  │ [Host Now]   │  │ [+ Join]     │  │ [+ Join]     │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘ │
 │                                                        │
@@ -93,6 +97,7 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 │  │ ■ org/       │                                      │
 │  │ data-pipeline│                                      │
 │  │ Admin        │                                      │
+│  │ Owner: org   │                                      │
 │  │ 🚧 Not added │                                      │
 │  │ [Host Now]   │                                      │
 │  └──────────────┘                                      │
@@ -104,9 +109,10 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 | 卡片元素 | 说明 |
 |---------|------|
 | **仓库名称** | `owner/repo` 格式，左侧显示仓库图标 |
-| **角色标签** | Member / Maintainer / Admin |
-| **状态指示** | 🌐 已加入 / 🚧 未加入 / 🚀 已托管 |
-| **操作按钮** | 已加入 → `Joined ✔`（禁用）；未加入且是成员 → `+ Join`；未加入且有管理权限 → `Host Now`（一键托管并加入） |
+| **角色标签** | Member / Maintainer / Admin（用户在 GitCode 中的角色） |
+| **Owner 信息** | 仓库所属组织/用户 |
+| **状态指示** | 🚧 未加入（所有卡片统一状态） |
+| **操作按钮** | 成员角色 → `+ Join`；管理角色 → `Host Now`（一键托管并加入） |
 | **搜索过滤** | 顶部搜索框可按名称搜索；下拉过滤按角色：全部 / 成员 / 管理 |
 
 ### 2.2 Dashboard（按仓库维度）
@@ -149,6 +155,52 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 - **Chat Agent**：归属 Account 区域，每个用户个人专属，非核心工作流环节
 
 切换仓库后，Dashboard、Pipeline 等页面内容跟随切换为该仓库的数据。
+
+Dashboard 主内容区域展示所选仓库的完整工作流看板：
+
+```
+┌─ Top Bar ────────────────────────────────────────────┐
+│  Dashboard · team/backend-service                     │
+│  [🔍 Search events, repos, agents...]                 │
+├───────────────────────────────────────────────────────┤
+│                                                        │
+│  ┌─ Repo Header ──────────────────────────────────┐  │
+│  │  ■ team/backend-service   🌐 Webhook OK        │  │
+│  │  Core backend API service · ★ main             │  │
+│  │   98.5% Auto-Reso. │ 47 Events/Week │ 12s Avg  │  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
+│  Agent Workflow (Logical flow: VOD→Issue→Coding→QA→SRE)│
+│                                                        │
+│  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐   │
+│  │♫ VOD │→│⚠ Issue│→│⚙Coding│→│✔ QA  │→│♡ SRE │   │
+│  │47 sig│  │3 open │  │PR1278│  │92%pas│  │v2.3.1│   │
+│  │Backend│  │Backend│  │Backend│  │Backend│  │Backend│   │
+│  │Opencode│  │Opencode│  │CodeArts│  │Opencode│  │Opencode│   │
+│  └──────┘  └──────┘  └──────┘  └──────┘  └──────┘   │
+│                                                        │
+│  ┌─ Chat Agent (Personal Assistant) ──────────────┐  │
+│  │ ☎ Your personal agent connected to workflow    │  │
+│  │ [↔ VOD] [↔ Issue] [↔ Coding] [↔ QA] [↔ SRE]   │  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
+│  Recent Activity (Last 24h · team/backend-service)     │
+│  ├─ 14:32 QA Approved PR #1278 · feat: webhook retry  │
+│  ├─ 14:15 Coding Submitted PR #1278                    │
+│  ├─ 13:50 Issue Assigned #342 to @alice               │
+│  ├─ 13:22 SRE Deployed v2.3.1 to production ✓         │
+│  └─ 12:05 VOD Signal #47 → created issue #345         │
+└─────────────────────────────────────────────────────────┘
+```
+
+Dashboard 主要区域说明：
+
+| 区域 | 内容 |
+|------|------|
+| **Repo Header** | 当前仓库名称、状态（Webhook OK）、指标（自动解决率、事件量、平均响应时间） |
+| **Agent Flow** | 5 个 Agent 横向流水线卡片，每个显示状态、Backend、关键指标 |
+| **Chat Lane** | 个人 Chat Agent 横贯连接条，点击进入 Chat 页面 |
+| **Recent Activity** | 最近 24 小时事件流，按时间降序 |
 
 ### 2.3 Pipeline 页面
 
