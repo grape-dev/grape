@@ -213,6 +213,9 @@ class AdminHandler(BaseHTTPRequestHandler):
                         f"&state={urllib.parse.quote(state)}")
             self.send_response(302)
             self.send_header("Location", auth_url)
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
             self.end_headers()
             return
 
