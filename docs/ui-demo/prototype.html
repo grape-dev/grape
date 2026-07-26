@@ -244,6 +244,7 @@ td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bot
 
   <div class="grp">Settings</div>
   <a onclick="nav('settings')"><span class="ic">⚙</span>General Settings</a>
+  <a onclick="nav('settings','gitcode')"><span class="ic">⎘</span>GitCode Repo</a>
 </div>
 <div class="sb-ft">
   <div class="av">Z</div>
@@ -342,7 +343,7 @@ function nav(v,param){
   else if(v==='chat'){t='Chat Agent';renderChat()}
   else if(v==='rsel'){t='选择仓库';document.querySelector('.sb').style.display='none';document.querySelector('.tb').style.display='none';document.querySelector('.mn').style.position='fixed';document.querySelector('.mn').style.inset='0';renderRsel()}
   else if(v==='repos'){t='Repositories';renderRepos()}
-  else if(v==='settings'){t='Settings';renderSettings()}
+  else if(v==='settings'){t='Settings';renderSettings();if(param==='gitcode')stab('gitcode')}
   else if(v==='profile'){t='Profile';renderProfile()}
   else if(v==='agt'&&param){t=A[param].n;renderAgent(param)}
   // Show sidebar/topbar if going to non-rsel page
@@ -352,8 +353,8 @@ function nav(v,param){
   // Highlight sidebar
   document.querySelectorAll('.sb-nav a').forEach(a=>{
     let o=a.getAttribute('onclick')||'';
-    if(v==='agt'&&param&&o.includes("'"+param+"'"))a.classList.add('act');
-    else if(o.includes("'"+v+"'"))a.classList.add('act');
+    if(param&&o.includes("'"+param+"'"))a.classList.add('act');
+    else if(!param&&o==="nav('"+v+"')")a.classList.add('act');
   });
   if(v==='dash')document.querySelector('.sb-nav a')?.classList.add('act');
 }
