@@ -544,6 +544,29 @@ def init_db():
             db.commit()
         except Exception:
             pass
+        # 清理重复用户（同一 username 只保留最小 id）
+        try:
+            db.execute("""
+                DELETE FROM user_accounts WHERE id NOT IN (
+                    SELECT MIN(id) FROM user_accounts GROUP BY username
+                )
+            """)
+            # 清理 user_credentials 中指向已删除用户的记录
+            db.execute("""
+                DELETE FROM user_credentials WHERE user_id NOT IN (SELECT id FROM user_accounts)
+            """)
+            # 修复 managed_repos 中的旧 user_id（通过旧 users 表映射）
+            try:
+                db.execute("""
+                    UPDATE managed_repos SET user_id = (
+                        SELECT ua.id FROM user_accounts ua, users u WHERE ua.username = u.username AND u.id = managed_repos.user_id
+                    ) WHERE EXISTS (SELECT 1 FROM users u WHERE u.id = managed_repos.user_id)
+                """)
+            except Exception:
+                pass
+            db.commit()
+        except Exception:
+            pass
         try:
             db.execute("ALTER TABLE managed_repos ADD COLUMN is_admin INTEGER DEFAULT 0")
         except Exception:
@@ -805,7 +828,7 @@ def get_user_account(username: str) -> dict | None:
 
 
 def save_user_account(username: str, data: dict):
-    """创建或更新用户账户"""
+    """创建或更新用户账户（保留 id，不会因 INSERT OR REPLACE 产生新 id）"""
     bu = data.get("bot_usernames", [])
     if isinstance(bu, list):
         bu = json.dumps(bu, ensure_ascii=False)
@@ -816,10 +839,14 @@ def save_user_account(username: str, data: dict):
     fields = {k: data.get(k, "") for k in USER_ACCOUNT_FIELDS if k not in ("id", "username", "created_at")}
     fields["bot_usernames"] = bu
     set_clause = ",".join(f"{k}=?" for k in fields)
-    vals = list(fields.values()) + [username]
+    vals = list(fields.values())
     with db_lock:
         c = db.cursor()
-        c.execute(f"INSERT OR REPLACE INTO user_accounts ({','.join(fields.keys())},username) VALUES ({','.join('?' for _ in fields)},?)", vals)
+        existing = c.execute("SELECT id FROM user_accounts WHERE username=?", (username,)).fetchone()
+        if existing:
+            c.execute(f"UPDATE user_accounts SET {set_clause} WHERE username=?", vals + [username])
+        else:
+            c.execute(f"INSERT INTO user_accounts ({','.join(fields.keys())},username) VALUES ({','.join('?' for _ in fields)},?)", vals + [username])
         db.commit()
 
 
