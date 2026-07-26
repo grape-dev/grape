@@ -28,5 +28,5 @@ curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 ## Issue 关联处理
 
 如果有关联 Issue：
-- 在对应 Issue 中评论 `📌 关联 PR #{pr_number}`
-- 对应 Issue 是 bug → 在 Issue 上更新标签 `labels="bug,triaged"`
+- **记录到 `review_comments` 列表**，统一到最后的评论回复能力项中处理：`📌 关联 PR #{pr_number}`
+- 对应 Issue 是 bug → 在 Issue 上更新标签 `labels="bug,triaged"`（此操作不受 SHA 跳过影响）
