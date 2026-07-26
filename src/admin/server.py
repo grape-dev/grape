@@ -949,7 +949,9 @@ def _render_admin_panel(token, select_name="", message="", loaded_repos=None, re
         form_html += f'<span class="eye" onclick="var e=document.getElementById(\'{fid}\');e.type=e.type==\'password\'?\'text\':\'password\'">👁</span></div></div>'
         form_html += '</div>'
         groups = [
-            ("GitCode", [("gitcode_api_token", "API Token"), ("gitcode_webhook_token", "Webhook Token"), ("webhook_url", "Webhook URL")]),
+            ("GitCode", [("gitcode_api_token", "API Token"), ("gitcode_webhook_token", "Webhook Token"),
+                         ("gitcode_oauth_client_id", "OAuth Client ID"), ("gitcode_oauth_client_secret", "OAuth Client Secret"),
+                         ("gitcode_oauth_redirect_uri", "OAuth Redirect URI"), ("webhook_url", "Webhook URL")]),
             ("飞书", [("feishu_app_id", "App ID"), ("feishu_app_secret", "App Secret")]),
             ("华为云", [("huawei_cloud_ak", "Access Key"), ("huawei_cloud_sk", "Secret Key")]),
             ("CodeArts", [("CODEARTS_CLI_AK", "CLI Access Key"), ("CODEARTS_CLI_SK", "CLI Secret Key")]),
