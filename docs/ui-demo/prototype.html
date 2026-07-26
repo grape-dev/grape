@@ -340,11 +340,13 @@ function nav(v,param){
   if(v==='dash'){t='Dashboard';renderDash()}
   else if(v==='pipe'){t='Pipeline';renderPipe()}
   else if(v==='chat'){t='Chat Agent';renderChat()}
-  else if(v==='rsel'){t='选择仓库';renderRsel()}
+  else if(v==='rsel'){t='选择仓库';document.querySelector('.sb').style.display='none';document.querySelector('.tb').style.display='none';document.querySelector('.mn').style.position='fixed';document.querySelector('.mn').style.inset='0';renderRsel()}
   else if(v==='repos'){t='Repositories';renderRepos()}
   else if(v==='settings'){t='Settings';renderSettings()}
   else if(v==='profile'){t='Profile';renderProfile()}
   else if(v==='agt'&&param){t=A[param].n;renderAgent(param)}
+  // Show sidebar/topbar if going to non-rsel page
+  if(v!=='rsel'){document.querySelector('.sb').style.display='';document.querySelector('.tb').style.display='';document.querySelector('.mn').style.position='';document.querySelector('.mn').style.inset=''}
   document.getElementById('pg').textContent=t;
   document.getElementById('v-'+v)?.classList.add('ac');
   // Highlight sidebar
