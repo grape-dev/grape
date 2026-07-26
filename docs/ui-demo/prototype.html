@@ -363,6 +363,11 @@
       <div id="chatContent"></div>
     </div>
 
+    <!-- ==================== REPO SELECTION (first login) ==================== -->
+    <div class="view" id="view-repo-select">
+      <div id="repoSelectContent"></div>
+    </div>
+
     <!-- ==================== REPOS ==================== -->
     <div class="view" id="view-repos">
       <div id="reposContent"></div>
@@ -915,7 +920,7 @@
     document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
 
     const titles = { dashboard:'Dashboard', pipeline:'Pipeline', chat:'Chat Agent',
-      repos:'Repositories', settings:'Settings', 'agent-detail':'Agent' };
+      repos:'Repositories', settings:'Settings', 'agent-detail':'Agent', 'repo-select':'选择仓库' };
     document.getElementById('pageTitle').textContent = titles[name] || 'Dashboard';
     if (name === 'agent-detail' && param) {
       const n = { vod:'VOD Agent', issue:'Issue Agent', coding:'Coding Agent', qa:'QA Agent', sre:'SRE Agent', chat:'Chat Agent' };
@@ -988,7 +993,71 @@
 
   function doLogin() {
     document.getElementById('loginOverlay').classList.add('hidden');
-    renderDashboard(currentRepo);
+    renderRepoSelect();
+  }
+
+  function renderRepoSelect() {
+    showView('repo-select');
+    const el = document.getElementById('repoSelectContent');
+    document.getElementById('pageTitle').textContent = '选择仓库';
+    document.getElementById('repoTag').textContent = '';
+    el.innerHTML = `
+      <div style="max-width:900px;margin:0 auto">
+        <div style="margin-bottom:24px">
+          <h2 style="font-size:18px;font-weight:600;margin-bottom:4px">Welcome, Zhang Wei</h2>
+          <p style="font-size:13px;color:var(--text-secondary)">请选择你要加入的 GitCode 仓库</p>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:20px">
+          <input type="text" placeholder="🔍 搜索仓库名称..." style="flex:1;padding:8px 14px;border:1px solid var(--border);border-radius:8px;font-size:13px;outline:none;background:var(--card)">
+          <select style="padding:8px 14px;border:1px solid var(--border);border-radius:8px;font-size:12px;background:var(--card);outline:none">
+            <option>全部</option><option>成员</option><option>管理员</option>
+          </select>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px">
+          ${[
+            {name:'team/backend-service', desc:'Core backend API service', owner:'team', role:'Maintainer', status:'hosted', btn:'已托管'},
+            {name:'team/web-frontend', desc:'React admin dashboard', owner:'team', role:'Maintainer', status:'joined', btn:'已加入'},
+            {name:'org/docs-site', desc:'Documentation site', owner:'org', role:'Member', status:'joined', btn:'已加入'},
+            {name:'org/devops-toolkit', desc:'Internal DevOps tools', owner:'org', role:'Member', status:'none', btn:'+ Join'},
+            {name:'team/mobile-app', desc:'React Native mobile app', owner:'team', role:'Member', status:'none', btn:'+ Join'},
+            {name:'org/data-pipeline', desc:'ETL data pipeline', owner:'org', role:'Admin', status:'none', btn:'Host Now'},
+            {name:'team/notification', desc:'Notification service', owner:'team', role:'Member', status:'none', btn:'+ Join'},
+            {name:'team/analytics', desc:'Analytics service', owner:'team', role:'Maintainer', status:'none', btn:'Host Now'},
+          ].map(r => {
+            const statusColors = {hosted:'#dcfce7;color:#16a34a', joined:'#eff6ff;color:#2563eb', none:'#f1f5f9;color:#64748b'};
+            const statusDots = {hosted:'🚀', joined:'🌐', none:'🚧'};
+            return \`<div class="card" style="padding:16px;cursor:pointer;display:flex;flex-direction:column;justify-content:space-between" onclick="selectRepo('\${r.name}')">
+              <div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                  <span style="font-size:13px;font-weight:600">\${r.name}</span>
+                  <span class="tag tag-default" style="font-size:10px">\${r.role}</span>
+                </div>
+                <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">\${r.desc}</div>
+                <div style="font-size:10px;color:var(--text-light)">Owner: \${r.owner}</div>
+              </div>
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
+                <span style="font-size:11px">\${statusDots[r.status]} \${r.status === 'hosted' ? '已托管' : r.status === 'joined' ? '已加入' : '未加入'}</span>
+                <button class="btn \${r.status === 'none' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="event.stopPropagation();handleJoin('\${r.name}')">\${r.btn}</button>
+              </div>
+            </div>\`;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  function selectRepo(name) {
+    const map = {'team/backend-service':'backend','team/web-frontend':'frontend','team/mobile-app':'mobile'};
+    const key = map[name] || 'backend';
+    switchRepo(key);
+    showView('dashboard');
+  }
+
+  function handleJoin(name) {
+    alert('[Demo] 加入仓库: ' + name);
+    renderRepoSelect();
   }
 
   // Init
