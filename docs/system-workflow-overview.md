@@ -360,25 +360,16 @@ Chat Agent 页面说明：
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 2.7 Settings 页面
+### 2.7 General Settings 页面
+
+仓库级别的通用配置，包含凭据、通知、自定义技能管理：
 
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
-│  Settings · Account                                   │
+│  General Settings · team/backend-service              │
 ├───────────────────────────────────────────────────────┤
 │                                                        │
-│  [GitCode Repo] [Credentials] [Notifications] [Skills] │
-│                                                        │
-│  ┌─ GitCode Repo ───────────────────────────────────┐  │
-│  │ Webhook Token  [xxxxxxxxxxxxxxxxxxxxxxxxxxxx]    │  │
-│  │ Webhook URL    http://203.0.113.2:8080/...     │  │
-│  │ Bot Username   [devops-bot]                      │  │
-│  └────────────────────────────────────────────────┘  │
-│                                                        │
-│  ┌─ GitCode API ────────────────────────────────────┐  │
-│  │ API Token  [ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxx]     │  │
-│  │ Account    zhangwei (read-only)                   │  │
-│  └────────────────────────────────────────────────┘  │
+│  [Credentials] [Notifications] [Skills]                │
 │                                                        │
 │  ┌─ Huawei Cloud ──────────────────────────────────┐  │
 │  │ Access Key [AK-demo-access-key-xxxx]             │  │
@@ -394,13 +385,32 @@ Chat Agent 页面说明：
 │  │ team/backend-service · pull_request_opened       │  │
 │  │ → custom-pr-review                       [Edit]  │  │
 │  └────────────────────────────────────────────────┘  │
-│                                                        │
-│  > Chat Agent 相关设置（Backend、IM 集成）请在          │
-│  > Chat Agent 页面内进行配置                            │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 2.8 日常使用
+### 2.8 GitCode Repo 页面
+
+仓库的 GitCode 专属配置，包含 API Token、Webhook 和机器人设置：
+
+```
+┌─ Top Bar ────────────────────────────────────────────┐
+│  GitCode Repo · team/backend-service                  │
+├───────────────────────────────────────────────────────┤
+│                                                        │
+│  ┌─ GitCode Token ─────────────────────────────────┐  │
+│  │ API Token  [ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxx]     │  │
+│  │ Account    zhangwei (read-only)                   │  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ Webhook Bot ───────────────────────────────────┐  │
+│  │ Webhook Token  [xxxxxxxxxxxxxxxxxxxxxxxxxxxx]    │  │
+│  │ Webhook URL    http://203.0.113.2:8080/...     │  │
+│  │ Bot Username   [devops-bot]                      │  │
+│  └────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 2.9 日常使用
 
 ```
 日常开发流程：

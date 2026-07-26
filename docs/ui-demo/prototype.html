@@ -244,7 +244,7 @@ td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bot
 
   <div class="grp">Settings</div>
   <a onclick="nav('settings')"><span class="ic">⚙</span>General Settings</a>
-  <a onclick="nav('settings','gitcode')"><span class="ic">⎘</span>GitCode Repo</a>
+  <a onclick="nav('gitcode')"><span class="ic">⎘</span>GitCode Repo</a>
 </div>
 <div class="sb-ft">
   <div class="av">Z</div>
@@ -278,6 +278,9 @@ td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bot
 
 <!-- SETTINGS -->
 <div class="vw" id="v-settings"><div id="sC"></div></div>
+
+<!-- GITCODE REPO -->
+<div class="vw" id="v-gitcode"><div id="gC"></div></div>
 
 <!-- AGENT DETAIL -->
 <div class="vw" id="v-agt"><div id="aC"></div></div>
@@ -343,7 +346,8 @@ function nav(v,param){
   else if(v==='chat'){t='Chat Agent';renderChat()}
   else if(v==='rsel'){t='选择仓库';document.querySelector('.sb').style.display='none';document.querySelector('.tb').style.display='none';document.querySelector('.mn').style.position='fixed';document.querySelector('.mn').style.inset='0';renderRsel()}
   else if(v==='repos'){t='Repositories';renderRepos()}
-  else if(v==='settings'){t='Settings';renderSettings();if(param==='gitcode')stab('gitcode')}
+  else if(v==='settings'){t='General Settings';renderSettings()}
+  else if(v==='gitcode'){t='GitCode Repo';renderGitcode()}
   else if(v==='profile'){t='Profile';renderProfile()}
   else if(v==='agt'&&param){t=A[param].n;renderAgent(param)}
   // Show sidebar/topbar if going to non-rsel page
@@ -581,25 +585,13 @@ function renderSettings(){
   document.getElementById('rt').textContent=R[repo].n;
   let html=`
 <div class="stabs">
-  <a class="ac" onclick="stab('gitcode')">GitCode Repo</a>
-  <a onclick="stab('credentials')">Credentials</a>
+  <a class="ac" onclick="stab('credentials')">Credentials</a>
   <a onclick="stab('notify')">Notifications</a>
   <a onclick="stab('skills')">Skills</a>
 </div>
 <p class="tx t3 mt8" style="margin-bottom:12px">> Chat Agent 相关设置（Backend、IM 集成）请在 Chat Agent 页面内配置</p>
-<div id="s-gitcode">
-  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode Repo Bot</h3>
-    <div class="srow"><label>Webhook Token</label><input type="password" value="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"></div>
-    <div class="srow"><label>Webhook URL</label><input type="text" value="http://203.0.113.2:8080/webhook/gitcode" disabled style="background:#f1f5f9"></div>
-    <div class="srow"><label>Bot Username</label><input type="text" value="devops-bot"></div>
-  </div>
-</div>
-<div id="s-credentials" class="hidden">
-  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode API</h3>
-    <div class="srow"><label>API Token</label><input type="password" value="ghp_demo_token_xxxxxxxxxxxxxxxxxxxx"></div>
-    <div class="srow"><label>Account</label><input type="text" value="zhangwei" disabled style="background:#f1f5f9"></div>
-  </div>
-  <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Huawei Cloud</h3>
+<div id="s-credentials">
+  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Huawei Cloud</h3>
     <div class="srow"><label>Access Key</label><input type="password" value="AK-demo-access-key-xxxx"></div>
     <div class="srow"><label>Secret Key</label><input type="password" value="SK-demo-secret-key-xxxx"></div>
     <p class="tx t2 mt8">Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.</p>
@@ -627,8 +619,23 @@ function renderSettings(){
   document.getElementById('sC').innerHTML=html;
 }
 
+// GitCode Repo
+function renderGitcode(){
+  document.getElementById('rt').textContent=R[repo].n;
+  let html=`
+<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode Token</h3>
+  <div class="srow"><label>API Token</label><input type="password" value="ghp_demo_token_xxxxxxxxxxxxxxxxxxxx"></div>
+  <div class="srow"><label>Account</label><input type="text" value="zhangwei" disabled style="background:#f1f5f9"></div>
+</div>
+<div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Webhook Bot</h3>
+  <div class="srow"><label>Webhook Token</label><input type="password" value="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"></div>
+  <div class="srow"><label>Webhook URL</label><input type="text" value="http://203.0.113.2:8080/webhook/gitcode" disabled style="background:#f1f5f9"></div>
+  <div class="srow"><label>Bot Username</label><input type="text" value="devops-bot"></div>
+</div>`;
+  document.getElementById('gC').innerHTML=html;
+}
+
 function stab(tab){
-  document.getElementById('s-gitcode').classList.add('hidden');
   document.getElementById('s-credentials').classList.add('hidden');
   document.getElementById('s-notify').classList.add('hidden');
   document.getElementById('s-skills').classList.add('hidden');
