@@ -2,1076 +2,639 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agentic DevOps - 高保真原型 v2</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Agentic DevOps — Loop Engineer</title>
 <style>
-  :root {
-    --sidebar: #0f172a; --sidebar-hover: #1e293b; --sidebar-active: #334155;
-    --bg: #f1f5f9; --card: #ffffff; --border: #e2e8f0;
-    --text: #0f172a; --text-secondary: #64748b; --text-light: #94a3b8;
-    --accent: #3b82f6; --accent-hover: #2563eb;
-    --green: #22c55e; --yellow: #eab308; --red: #ef4444;
-    --purple: #8b5cf6; --orange: #f97316; --teal: #14b8a6;
-    --pink: #ec4899; --indigo: #6366f1; --sky: #0ea5e9;
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
-    background: var(--bg); color: var(--text); display: flex; min-height: 100vh;
-  }
-  .sidebar {
-    width: 240px; background: var(--sidebar); color: #fff;
-    display: flex; flex-direction: column; flex-shrink: 0;
-    position: sticky; top: 0; height: 100vh;
-  }
-  .sidebar-header {
-    padding: 20px 20px 16px; border-bottom: 1px solid rgba(255,255,255,0.08);
-  }
-  .sidebar-header h1 {
-    font-size: 18px; font-weight: 700; letter-spacing: -0.5px;
-    display: flex; align-items: center; gap: 10px;
-  }
-  .sidebar-header h1 .logo { width:28px;height:28px;background:var(--accent);border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:14px;font-weight:800; }
-  .sidebar-header .sub { font-size:11px;color:var(--text-light);margin-top:2px;font-weight:400; }
-  .sidebar-nav { flex:1; padding: 12px 10px; overflow-y: auto; }
-  .sidebar-nav .label {
-    font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
-    color: var(--text-light); padding: 12px 10px 6px; font-weight: 600;
-  }
-  .sidebar-nav a {
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 12px; border-radius: 6px; color: #cbd5e1;
-    text-decoration: none; font-size: 13px; cursor: pointer;
-    transition: all 0.15s; margin-bottom: 1px;
-  }
-  .sidebar-nav a:hover { background: var(--sidebar-hover); color: #fff; }
-  .sidebar-nav a.active { background: var(--accent); color: #fff; font-weight: 500; }
-  .sidebar-nav a .icon { width: 18px; text-align: center; font-size: 14px; }
-  .sidebar-nav a .badge { margin-left:auto;background:var(--accent);color:#fff;font-size:10px;padding:1px 7px;border-radius:10px;font-weight:600; }
-  .sidebar-nav a.active .badge { background:rgba(255,255,255,0.25); }
+:root {
+  --s: #0c1222; --s2: #161e30; --s3: #1e2940;
+  --bg: #f5f6f8; --c: #fff; --b: #e3e6ee;
+  --t: #101724; --t2: #5b667b; --t3: #8d97a8;
+  --a: #3168e0; --ah: #2556c2;
+  --g: #1ca44c; --y: #d49c0f; --r: #dc2828;
+  --pu: #7b3cf2; --or: #ea5a0c; --pk: #d83076; --sk: #0c92d4;
+  --rd: 8px; --r2: 12px; --sh: 0 1px 3px rgba(0,0,0,.04);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:var(--bg);color:var(--t);display:flex;min-height:100vh;overflow:hidden}
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-thumb{background:#ccd2db;border-radius:3px}
 
-  /* Repo selector */
-  .repo-selector {
-    margin: 8px 10px; position: relative;
-  }
-  .repo-selector select {
-    width: 100%; padding: 8px 10px; border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.1); background: var(--sidebar-hover);
-    color: #fff; font-size: 12px; outline: none; cursor: pointer;
-    appearance: none; -webkit-appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-    background-repeat: no-repeat; background-position: right 8px center;
-  }
-  .repo-selector select option { background: var(--sidebar); color: #fff; }
+/* Login */
+.ln{position:fixed;inset:0;z-index:200;background:radial-gradient(ellipse at 20% 50%,#162240 0%,#0c1222 60%);display:flex;align-items:center;justify-content:center;transition:all .4s}
+.ln.hid{opacity:0;pointer-events:none}
+.lbox{width:400px;text-align:center}
+.lbox .logo{display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;border-radius:14px;background:linear-gradient(135deg,#3168e0,#7b3cf2);color:#fff;font-size:22px;font-weight:800;margin-bottom:20px}
+.lbox h1{color:#fff;font-size:26px;font-weight:700;letter-spacing:-1px;margin-bottom:6px}
+.lbox .sub{color:#8d97a8;font-size:14px;margin-bottom:32px}
+.lbox .obtn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:14px;border-radius:10px;border:none;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:all .2s;margin-bottom:20px}
+.lbox .obtn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,.3)}
+.lbox .links{display:flex;justify-content:center;gap:24px;font-size:13px}
+.lbox .links a{color:#8d97a8;text-decoration:none;cursor:pointer;transition:color .15s}
+.lbox .links a:hover{color:#fff}
+.lbox .inp{display:none;margin-bottom:16px;text-align:left}
+.lbox .inp input{width:100%;padding:11px 14px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px;outline:none;margin-bottom:8px}
+.lbox .inp input:focus{border-color:var(--a)}
+.lbox .inp .obtn{margin-top:4px}
 
-  .sidebar-footer {
-    padding: 12px 16px; border-top: 1px solid rgba(255,255,255,0.08);
-    display: flex; align-items: center; gap: 10px;
-  }
-  .sidebar-footer .avatar { width:32px;height:32px;border-radius:8px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;flex-shrink:0; }
-  .sidebar-footer .info { flex:1; min-width:0; }
-  .sidebar-footer .info .name { font-size:12px; font-weight:600; }
-  .sidebar-footer .info .status { font-size:10px; color:var(--green); }
-  .sidebar-footer .info .status::before { content:'';display:inline-block;width:6px;height:6px;background:var(--green);border-radius:50%;margin-right:4px;vertical-align:middle; }
+/* Sidebar */
+.sb{width:232px;background:var(--s);color:#fff;display:flex;flex-direction:column;flex-shrink:0;height:100vh;overflow:hidden}
+.sb-h{padding:18px 18px 14px;border-bottom:1px solid rgba(255,255,255,.06)}
+.sb-h .logo-s{display:flex;align-items:center;gap:9px;margin-bottom:3px}
+.sb-h .logo-s .sq{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,var(--a),var(--pu));display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:800}
+.sb-h h1{font-size:15px;font-weight:700;letter-spacing:-.5px}
+.sb-h .tagline{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.8px}
+.sb-sel{margin:10px 12px}
+.sb-sel select{width:100%;padding:7px 10px;border-radius:7px;border:1px solid rgba(255,255,255,.08);background:var(--s2);color:#fff;font-size:11px;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%238d97a8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center}
+.sb-sel select option{background:var(--s);color:#fff}
+.sb-nav{flex:1;padding:6px 10px;overflow-y:auto}
+.sb-nav .grp{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--t3);padding:14px 8px 5px;font-weight:600}
+.sb-nav a{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:7px;color:#c2cad6;text-decoration:none;font-size:12px;cursor:pointer;transition:all .12s;margin-bottom:1px}
+.sb-nav a:hover{background:var(--s2);color:#fff}
+.sb-nav a.act{background:var(--a);color:#fff;font-weight:500}
+.sb-nav a .ic{width:16px;text-align:center;font-size:13px;opacity:.8}
+.sb-nav a.act .ic{opacity:1}
+.sb-nav a .b{font-size:10px;background:rgba(255,255,255,.15);padding:1px 7px;border-radius:8px;margin-left:auto}
+.sb-ft{padding:10px 16px;border-top:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:10px}
+.sb-ft .av{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--a),var(--pu));display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+.sb-ft .by{font-size:11px;font-weight:500}.sb-ft .by span{font-size:10px;color:var(--g);display:block}.sb-ft .by span::before{content:'';display:inline-block;width:5px;height:5px;background:var(--g);border-radius:50%;margin-right:4px;vertical-align:middle}
 
-  .main { flex:1; min-width:0; }
-  .topbar {
-    background: var(--card); border-bottom: 1px solid var(--border);
-    padding: 0 32px; height: 56px; display: flex; align-items: center; gap: 16px;
-    position: sticky; top: 0; z-index: 10;
-  }
-  .topbar .breadcrumb { font-size:13px;color:var(--text-secondary); }
-  .topbar .breadcrumb strong { color:var(--text);font-weight:600; }
-  .topbar .spacer { flex:1; }
-  .topbar .search { display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:4px 12px;font-size:12px;color:var(--text-secondary);width:200px; }
-  .topbar .search input { border:none;background:transparent;outline:none;font-size:12px;width:100%;color:var(--text); }
-  .content { padding: 24px 32px; }
+/* Main */
+.mn{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.tb{background:var(--c);border-bottom:1px solid var(--b);padding:0 28px;height:52px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.tb .bc{font-size:13px;color:var(--t2)}.tb .bc b{color:var(--t);font-weight:600}
+.tb .sp{flex:1}
+.tb .srch{display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--b);border-radius:7px;padding:5px 12px;font-size:12px;color:var(--t2);width:200px}
+.tb .srch input{border:none;background:none;outline:none;font-size:12px;width:100%;color:var(--t)}
+.ct{padding:22px 28px;overflow-y:auto;flex:1}
 
-  .card { background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:16px; }
-  .card-header { display:flex;align-items:center;justify-content:space-between;margin-bottom:16px; }
-  .card-header h2 { font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px; }
-  .card-header h2 .count { font-size:11px;font-weight:400;color:var(--text-secondary);background:var(--bg);padding:1px 8px;border-radius:10px; }
+/* Cards */
+.cd{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:18px 20px;margin-bottom:14px;box-shadow:var(--sh)}
+.cd-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.cd-h h2{font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px}
+.cd-h h2 .c{font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px}
 
-  .grid-4 { display:grid;grid-template-columns:repeat(4,1fr);gap:16px; }
+/* Stats */
+.stats{display:flex;gap:8px;flex-wrap:wrap}
+.st{display:flex;flex-direction:column;align-items:center;padding:10px 16px;background:var(--bg);border-radius:8px;min-width:70px}
+.st .v{font-size:16px;font-weight:700;line-height:1.2}.st .l{font-size:10px;color:var(--t2);margin-top:2px}
 
-  /* Agent flow (workflow visualization) */
-  .agent-flow {
-    display: flex; align-items: flex-start; gap: 0;
-    padding: 20px 0; overflow-x: auto; min-height: 340px;
-  }
-  .agent-flow .node {
-    flex-shrink: 0; width: 210px; padding: 18px;
-    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-    margin: 0 12px; position: relative; transition: all 0.15s;
-    cursor: pointer;
-  }
-  .agent-flow .node:hover { box-shadow: 0 4px 20px rgba(0,0,0,0.1); transform: translateY(-2px); }
-  .agent-flow .node::after {
-    content: '\2192'; position: absolute; right: -22px; top: 50%;
-    transform: translateY(-50%); color: var(--text-light); font-size: 22px;
-    font-weight: 300;
-  }
-  .agent-flow .node:last-child::after { display: none; }
-  .agent-flow .node .n-header {
-    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
-  }
-  .agent-flow .node .n-header .ndot {
-    width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex-shrink: 0;
-  }
-  .agent-flow .node .n-header h4 { font-size: 14px; font-weight: 600; }
-  .agent-flow .node .n-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 8px; }
-  .agent-flow .node .n-meta {
-    display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px;
-    padding: 6px 8px; background: var(--bg); border-radius: 6px;
-  }
-  .agent-flow .node .n-meta-item {
-    font-size: 10px; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 4px;
-  }
-  .agent-flow .node .n-meta-item .meta-label {
-    color: var(--text-light); font-weight: 500;
-  }
-  .agent-flow .node .n-status { font-size: 11px; color: var(--text-light); }
-  .agent-flow .node .n-status .dot { width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:4px; }
-  .agent-flow .node .n-tag {
-    display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 4px;
-    margin-top: 6px;
-  }
+/* Agent flow */
+.af{display:flex;align-items:flex-start;gap:0;padding:16px 0 10px;overflow-x:auto;min-height:280px}
+.af .nd{flex-shrink:0;width:215px;padding:16px;background:var(--c);border:1px solid var(--b);border-radius:var(--r2);margin:0 14px;position:relative;cursor:pointer;transition:all .15s;box-shadow:var(--sh)}
+.af .nd:hover{box-shadow:0 8px 24px rgba(0,0,0,.07);transform:translateY(-2px)}
+.af .nd::after{content:'\2192';position:absolute;right:-24px;top:50%;transform:translateY(-50%);color:var(--t3);font-size:20px}
+.af .nd:last-child::after{display:none}
+.af .nd .nh{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.af .nd .nh .n{width:11px;height:11px;border-radius:50%;flex-shrink:0}
+.af .nd .nh h4{font-size:13px;font-weight:600}
+.af .nd .nds{font-size:10px;color:var(--t2);line-height:1.5;margin-bottom:6px}
+.af .nd .nm{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:6px;padding:5px 7px;background:var(--bg);border-radius:6px;font-size:10px;color:var(--t2)}
+.af .nd .nm .ml{color:var(--t3);font-weight:500}
+.af .nd .ns{font-size:10px;color:var(--t3);margin-bottom:4px}
+.af .nd .ns .d{width:5px;height:5px;border-radius:50%;display:inline-block;margin-right:3px}
+.af .nd .nt{display:inline-block;font-size:9px;padding:2px 7px;border-radius:4px;font-weight:500}
 
-  .agent-flow .node.chat-node {
-    border-style: dashed; border-color: var(--sky);
-    background: linear-gradient(135deg, #f0f9ff, #ffffff);
-  }
-  .agent-flow .node.chat-node::after { display: none; }
+/* Chat lane */
+.cl{margin-top:8px;padding:10px 16px;background:linear-gradient(135deg,#eef5ff,#e8f4fd);border:1px dashed #8ecbfa;border-radius:var(--r2);display:flex;align-items:center;gap:14px;cursor:pointer;font-size:12px;color:var(--t2);transition:all .15s}
+.cl:hover{border-color:var(--a)}
+.cl .ci{width:30px;height:30px;border-radius:8px;background:var(--sk);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;flex-shrink:0}
+.cl .cx{flex:1}
+.cl .cx h4{font-size:12px;font-weight:600;color:var(--t);margin-bottom:1px}
+.cl .cx p{font-size:10px;color:var(--t2)}
 
-  /* Chat lane (horizontal bar showing chat connects to all) */
-  .chat-lane {
-    margin-top: 12px; padding: 12px 16px;
-    background: linear-gradient(135deg, #f0f9ff, #e0f2fe);
-    border: 1px dashed var(--sky); border-radius: 10px;
-    display: flex; align-items: center; gap: 16px;
-    font-size: 12px; color: var(--text-secondary);
-    cursor: pointer; transition: all 0.15s;
-  }
-  .chat-lane:hover { border-color: var(--accent); }
-  .chat-lane .chat-icon {
-    width: 32px; height: 32px; border-radius: 8px; background: var(--sky);
-    display: flex; align-items: center; justify-content: center; color: #fff; font-size: 14px;
-  }
-  .chat-lane .chat-info { flex: 1; }
-  .chat-lane .chat-info h4 { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
-  .chat-lane .chat-tags { display: flex; gap: 4px; }
+/* Tags */
+.tg{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:500}
+.tg-v{background:#fde8f0;color:#b91b5e}
+.tg-i{background:#fce5e5;color:#c12929}
+.tg-c{background:#e3edfd;color:#235ec7}
+.tg-q{background:#f3e9fe;color:#7728d4}
+.tg-s{background:#fef0e4;color:#d15408}
+.tg-ch{background:#e2f4fd;color:#0c7aaa}
+.tg-d{background:var(--bg);color:var(--t2)}
 
-  .btn {
-    display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px;
-    border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer;
-    border: none; transition: all 0.15s; text-decoration: none;
-  }
-  .btn-primary { background: var(--accent); color: #fff; }
-  .btn-primary:hover { background: var(--accent-hover); }
-  .btn-outline { background:transparent;border:1px solid var(--border);color:var(--text-secondary); }
-  .btn-outline:hover { border-color:var(--accent);color:var(--accent); }
-  .btn-sm { padding:4px 10px;font-size:11px; }
-  .btn-success { background:var(--green);color:#fff; }
-  .btn-warning { background:var(--orange);color:#fff; }
+/* Activity */
+.ai{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--b);font-size:12px}
+.ai:last-child{border-bottom:none}
+.ai .t{font-size:10px;color:var(--t3);white-space:nowrap;width:44px;flex-shrink:0}
+.ai .ac{flex:1;line-height:1.5}.ai .ac b{font-weight:600}
+.ai .ac .tg{margin-right:4px}
 
-  .table-wrap { overflow-x: auto; }
-  table { width:100%;border-collapse:collapse;font-size:13px; }
-  th { text-align:left;padding:10px 12px;font-weight:500;color:var(--text-secondary);border-bottom:1px solid var(--border);font-size:11px;text-transform:uppercase;letter-spacing:0.5px; }
-  td { padding:10px 12px;border-bottom:1px solid var(--border); }
-  tr:last-child td { border-bottom:none; }
-  tr:hover td { background:#f8fafc; }
+/* Table */
+.tw{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:8px 10px;font-weight:500;color:var(--t2);border-bottom:1px solid var(--b);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bottom:none}tr:hover td{background:#f8f9fb}
 
-  .repo-item { display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border); }
-  .repo-item:last-child { border-bottom:none; }
-  .repo-item .repo-icon { width:36px;height:36px;border-radius:6px;background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:16px; }
-  .repo-item .repo-info { flex:1;min-width:0; }
-  .repo-item .repo-info .name { font-size:13px;font-weight:600; }
-  .repo-item .repo-info .desc { font-size:11px;color:var(--text-secondary); }
-  .repo-item .repo-info .meta { font-size:10px;color:var(--text-light);margin-top:2px; }
+/* Buttons */
+.bt{display:inline-flex;align-items:center;gap:5px;padding:6px 13px;border-radius:7px;font-size:11px;font-weight:500;cursor:pointer;border:none;transition:all .15s;text-decoration:none}
+.bt-p{background:var(--a);color:#fff}.bt-p:hover{background:var(--ah)}
+.bt-o{background:transparent;border:1px solid var(--b);color:var(--t2)}.bt-o:hover{border-color:var(--a);color:var(--a)}
+.bt-s{padding:4px 10px;font-size:10px}
+.bt-g{background:var(--g);color:#fff}
 
-  .tag { display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:500; }
-  .tag-vod { background:#fdf2f8;color:#be185d; }
-  .tag-issue { background:#fef2f2;color:#dc2626; }
-  .tag-coding { background:#eff6ff;color:#2563eb; }
-  .tag-qa { background:#faf5ff;color:#9333ea; }
-  .tag-sre { background:#fff7ed;color:#ea580c; }
-  .tag-chat { background:#f0f9ff;color:#0284c7; }
-  .tag-default { background:var(--bg);color:var(--text-secondary); }
+/* View */
+.vw{display:none}.vw.ac{display:block}
 
-  .stat-card { background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center; }
-  .stat-card .num { font-size:24px;font-weight:700;line-height:1; }
-  .stat-card .label { font-size:11px;color:var(--text-secondary);margin-top:4px; }
+/* Repo cards */
+.rgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
+.rc{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:16px;cursor:pointer;transition:all .15s;box-shadow:var(--sh);display:flex;flex-direction:column;justify-content:space-between}
+.rc:hover{border-color:var(--a);box-shadow:0 4px 16px rgba(0,0,0,.06)}
+.rc .rh{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.rc .rh .rn{font-size:13px;font-weight:600}.rc .rd{font-size:11px;color:var(--t2);margin-bottom:4px}
+.rc .ro{font-size:10px;color:var(--t3);margin-bottom:8px}
+.rc .rf{display:flex;align-items:center;justify-content:space-between;padding-top:10px;border-top:1px solid var(--b);margin-top:auto}
+.rc .rf .s{font-size:11px;color:var(--t3)}
 
-  .activity-item { display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--border); }
-  .activity-item:last-child { border-bottom:none; }
-  .activity-item .atime { font-size:11px;color:var(--text-light);white-space:nowrap;width:50px; }
-  .activity-item .acontent { flex:1;font-size:12px;line-height:1.5; }
-  .activity-item .acontent strong { font-weight:600; }
+/* Chat layout */
+.chat-wrap{display:flex;gap:14px;min-height:500px}
+.chat-main{flex:1;display:flex;flex-direction:column;background:var(--c);border:1px solid var(--b);border-radius:var(--r2);box-shadow:var(--sh)}
+.chat-hdr{padding:12px 18px;border-bottom:1px solid var(--b)}
+.chat-hdr h2{font-size:14px;font-weight:600;margin-bottom:2px}
+.chat-body{flex:1;padding:14px 18px;overflow-y:auto;font-size:13px}
+.chat-body .msg{max-width:75%;padding:10px 14px;border-radius:10px;margin-bottom:10px;line-height:1.5;font-size:12px}
+.chat-body .msg.l{background:var(--a);color:#fff;border-radius:10px 10px 10px 2px}
+.chat-body .msg.r{background:var(--bg);border-radius:10px 10px 2px 10px;margin-left:auto}
+.chat-in{padding:10px 18px;border-top:1px solid var(--b);display:flex;gap:8px}
+.chat-in input{flex:1;padding:8px 12px;border:1px solid var(--b);border-radius:7px;font-size:12px;outline:none}
+.chat-in input:focus{border-color:var(--a)}
+.chat-side{width:200px;flex-shrink:0;display:flex;flex-direction:column;gap:4px;font-size:11px}
+.chat-side .agc{display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:7px;font-size:11px}
+.chat-side .agc .ad{width:7px;height:7px;border-radius:50%;display:inline-block}
+.chat-side .agc .ctc{margin-left:auto;font-size:10px;color:var(--t2);background:var(--bg);padding:0 5px;border-radius:4px}
 
-  .view { display:none; }
-  .view.active { display:block; }
+/* Settings */
+.stabs{display:flex;gap:0;border-bottom:1px solid var(--b);margin-bottom:16px}
+.stabs a{padding:9px 16px;font-size:12px;font-weight:500;color:var(--t2);cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}
+.stabs a:hover{color:var(--t)}
+.stabs a.ac{color:var(--a);border-bottom-color:var(--a)}
+.srow{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.srow label{font-size:11px;color:var(--t2);width:110px;flex-shrink:0}
+.srow input,.srow select{flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none;color:var(--t)}
+.srow input:focus,.srow select:focus{border-color:var(--a)}
 
-  .onboarding { max-width:640px;margin:40px auto; }
+/* Text */
+.ts{font-size:11px}.tx{font-size:10px}.t2{color:var(--t2)}.t3{color:var(--t3)}.tgx{color:var(--g)}.ty{color:var(--y)}.tr{color:var(--r)}
+.flex{display:flex}.fc{align-items:center}.f1{flex:1}.gap6{gap:6px}.gap8{gap:8px}.gap12{gap:12px}.gap16{gap:16px}.jbtw{justify-content:space-between}.mt8{margin-top:8px}.mt12{margin-top:12px}.mt16{margin-top:16px}.mb8{margin-bottom:8px}
 
-  .text-xs { font-size:11px; }
-  .text-sm { font-size:12px; }
-  .text-secondary { color:var(--text-secondary); }
-  .text-light { color:var(--text-light); }
-  .text-success { color:var(--green); }
-  .text-warning { color:var(--yellow); }
-  .text-danger { color:var(--red); }
-  .mt-4 { margin-top:4px; }
-  .mt-8 { margin-top:8px; }
-  .mt-16 { margin-top:16px; }
-  .mb-8 { margin-bottom:8px; }
-  .mb-16 { margin-bottom:16px; }
-  .flex { display:flex; }
-  .flex-1 { flex:1; }
-  .items-center { align-items:center; }
-  .justify-between { justify-content:space-between; }
-  .gap-8 { gap:8px; }
-  .gap-12 { gap:12px; }
-  .hidden { display:none; }
+/* Pipeline click */
+.pipe-row{cursor:pointer;transition:all .1s}
+.pipe-row:hover td{background:#eef2ff}
+.pipe-row.sel td{background:#eef2ff;font-weight:600}
 
-  .login-overlay {
-    position: fixed; inset: 0; background: var(--sidebar); z-index: 100;
-    display: flex; align-items: center; justify-content: center;
-    transition: all 0.3s;
-  }
-  .login-overlay.hidden { opacity: 0; pointer-events: none; }
-  .login-box { background:#1e293b;border-radius:12px;padding:40px;width:380px;text-align:center; }
-  .login-box h1 { color:#fff;font-size:24px;font-weight:700;margin-bottom:4px; }
-  .login-box p { color:var(--text-light);font-size:13px;margin-bottom:28px; }
-  .login-box .oauth-btn { display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:12px;border-radius:8px;border:none;background:var(--accent);color:#fff;font-size:14px;font-weight:500;cursor:pointer;transition:all 0.15s; }
-  .login-box .oauth-btn:hover { background:var(--accent-hover); }
-  .login-box .divider { display:flex;align-items:center;gap:12px;margin:20px 0;font-size:12px;color:var(--text-light); }
-  .login-box .divider::before,.login-box .divider::after { content:'';flex:1;height:1px;background:rgba(255,255,255,0.1); }
-  .login-box .demo-hint { font-size:11px;color:var(--text-light);margin-top:20px; }
+.hidden{display:none}
 
-  /* Agent detail modal-like */
-  .agent-panel { display:flex;gap:16px; }
-  .agent-panel .ap-main { flex:1; }
-  .agent-panel .ap-sidebar { width: 260px; flex-shrink: 0; }
-  .ap-metric { display:flex;flex-direction:column;align-items:center;padding:12px;background:var(--bg);border-radius:8px; }
-  .ap-metric .val { font-size:18px;font-weight:700; }
-  .ap-metric .lbl { font-size:10px;color:var(--text-secondary);margin-top:2px; }
-
-  ::-webkit-scrollbar { width:6px;height:6px; }
-  ::-webkit-scrollbar-thumb { background:#cbd5e1;border-radius:3px; }
-
-  @media (max-width:768px) {
-    .sidebar { display:none; }
-    .content { padding:16px; }
-    .topbar { padding:0 16px; }
-    .grid-4 { grid-template-columns:1fr 1fr; }
-    .agent-flow { flex-direction:column;align-items:stretch; }
-    .agent-flow .node { width:auto;margin-bottom:12px; }
-    .agent-flow .node::after { content:'\2193';right:auto;bottom:-24px;top:auto;left:50%;transform:translateX(-50%); }
-    .agent-panel { flex-direction:column; }
-    .agent-panel .ap-sidebar { width:auto; }
-  }
+@media(max-width:768px){
+  .sb{display:none}.ct{padding:14px}.tb{padding:0 14px}
+  .af{flex-direction:column}.af .nd{width:auto;margin:0 0 10px}.af .nd::after{content:'\2193';right:auto;bottom:-18px;top:auto;left:50%;transform:translateX(-50%)}
+  .chat-wrap{flex-direction:column}.chat-side{width:auto;flex-direction:row;flex-wrap:wrap}
+}
 </style>
 </head>
 <body>
 
-<!-- Login Overlay -->
-<div class="login-overlay" id="loginOverlay">
-  <div class="login-box">
-    <h1>Agentic DevOps</h1>
-    <p>致力于实现 Loop Engineer</p>
-    <button class="oauth-btn" onclick="doLogin()">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
-      使用 GitCode 登录
-    </button>
-    <p style="margin-top:16px;font-size:12px;color:var(--text-light)">
-      <a href="#" onclick="event.stopPropagation();togglePasswordLogin();return false" style="color:var(--text-light);text-decoration:underline;cursor:pointer">← 用户名密码登录</a>
-    </p>
-    <div id="passwordLoginForm" style="display:none;margin-top:12px">
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <input type="text" id="pwdUser" placeholder="用户名" style="padding:10px 14px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#fff;font-size:13px;outline:none">
-        <input type="password" id="pwdPass" placeholder="密码" style="padding:10px 14px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#fff;font-size:13px;outline:none">
-        <button class="oauth-btn" style="font-size:13px" onclick="doLogin()">登录</button>
-      </div>
-    </div>
-    <p style="margin-top:12px;font-size:12px;color:var(--text-light)">
-      <a href="/admin/" onclick="event.stopPropagation();alert('[Demo] 跳转到 /admin/ 管理员登录页');return false" style="color:var(--text-light);text-decoration:underline;cursor:pointer">← 管理员登录</a>
-    </p>
-  </div>
+<!-- ====== LOGIN ====== -->
+<div class="ln" id="ln">
+<div class="lbox">
+<div class="logo">A</div>
+<h1>Agentic DevOps</h1>
+<p class="sub">致力于实现 Loop Engineer</p>
+<button class="obtn" onclick="login()">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+  使用 GitCode 登录
+</button>
+<div class="links">
+  <a onclick="togglePwd()">← 用户名密码登录</a>
+  <a onclick="event.stopPropagation();alert('[Demo] 跳转到 /admin/ 管理员登录页');return false">← 管理员登录</a>
+</div>
+<div class="inp" id="pwdForm">
+  <input type="text" placeholder="用户名">
+  <input type="password" placeholder="密码">
+  <button class="obtn" onclick="login()">登录</button>
+</div>
+</div>
 </div>
 
-<!-- Sidebar -->
-<div class="sidebar">
-  <div class="sidebar-header">
-    <h1><span class="logo">A</span> Agentic DevOps</h1>
-    <div class="sub">Multi-Agent Pipeline · Loop Engineer</div>
-  </div>
+<!-- ====== SIDEBAR ====== -->
+<div class="sb">
+<div class="sb-h">
+  <div class="logo-s"><span class="sq">A</span><h1>Agentic DevOps</h1></div>
+  <div class="tagline">Loop Engineer</div>
+</div>
+<div class="sb-sel">
+  <select onchange="onRepo(this)">
+    <option value="be">team/backend-service</option>
+    <option value="fe">team/web-frontend</option>
+    <option value="mo">team/mobile-app</option>
+    <option value="__add__">+ 新增仓库托管</option>
+  </select>
+</div>
+<div class="sb-nav">
+  <div class="grp">Workspace</div>
+  <a class="act" onclick="nav('dash')"><span class="ic">■</span>Dashboard<span class="b">7</span></a>
+  <a onclick="nav('pipe')"><span class="ic">▶</span>Pipeline</a>
 
-  <!-- Repo selector -->
-  <div class="repo-selector">
-    <select onchange="onRepoSelect(this)">
-      <option value="backend">team/backend-service</option>
-      <option value="frontend">team/web-frontend</option>
-      <option value="mobile">team/mobile-app</option>
-      <option value="__add__" style="border-top:1px solid rgba(255,255,255,0.2);color:var(--accent)">+ 新增仓库托管</option>
-    </select>
-  </div>
+  <div class="grp">DevOps Agents</div>
+  <a onclick="nav('agt','vod')"><span class="ic" style="color:var(--pk)">●</span>VOD Agent</a>
+  <a onclick="nav('agt','issue')"><span class="ic" style="color:var(--r)">●</span>Issue Agent</a>
+  <a onclick="nav('agt','coding')"><span class="ic" style="color:var(--a)">●</span>Coding Agent</a>
+  <a onclick="nav('agt','qa')"><span class="ic" style="color:var(--pu)">●</span>QA Agent</a>
+  <a onclick="nav('agt','sre')"><span class="ic" style="color:var(--or)">●</span>SRE Agent</a>
 
-  <div class="sidebar-nav">
-    <div class="label">Workspace</div>
-    <a class="active" onclick="showView('dashboard')"><span class="icon">\u25a0</span> Dashboard <span class="badge">7</span></a>
-    <a onclick="showView('pipeline')"><span class="icon">\u25b6</span> Pipeline</a>
+  <div class="grp">Account</div>
+  <a onclick="nav('profile')"><span class="ic">☺</span>Zhang Wei · Online</a>
 
-    <div class="label">DevOps Agents</div>
-    <a onclick="showView('agent-detail','vod')"><span class="icon">\u266b</span> VOD Agent</a>
-    <a onclick="showView('agent-detail','issue')"><span class="icon">\u26a0</span> Issue Agent</a>
-    <a onclick="showView('agent-detail','coding')"><span class="icon">\u2699</span> Coding Agent</a>
-    <a onclick="showView('agent-detail','qa')"><span class="icon">\u2714</span> QA Agent</a>
-    <a onclick="showView('agent-detail','sre')"><span class="icon">\u2661</span> SRE Agent</a>
-
-    <div class="label">Account</div>
-    <a onclick="showView('profile')"><span class="icon">\u263a</span> Zhang Wei · Online</a>
-
-    <div class="label">Settings</div>
-    <a onclick="showView('settings')"><span class="icon">\u2699</span> Repo Settings</a>
-  </div>
-
-  <div class="sidebar-footer">
-    <div class="avatar">Z</div>
-    <div class="info">
-      <div class="name">Zhang Wei</div>
-      <div class="status">Online</div>
-    </div>
-  </div>
+  <div class="grp">Settings</div>
+  <a onclick="nav('settings')"><span class="ic">⚙</span>Repo Settings</a>
+</div>
+<div class="sb-ft">
+  <div class="av">Z</div>
+  <div class="by">Zhang Wei<span>online</span></div>
+</div>
 </div>
 
-<!-- Main -->
-<div class="main">
-  <div class="topbar">
-    <div class="breadcrumb"><strong id="pageTitle">Dashboard</strong> <span id="repoTag" style="color:var(--accent);font-weight:500">team/backend-service</span></div>
-    <div class="spacer"></div>
-    <div class="search">
-      <span>\u2315</span>
-      <input type="text" placeholder="Search events, repos, agents..." onfocus="this.style.width='280px'" onblur="this.style.width='100%'">
-    </div>
-  </div>
-  <div class="content">
-
-    <!-- ==================== DASHBOARD (per-repo) ==================== -->
-    <div class="view active" id="view-dashboard">
-      <div id="dashboardContent"></div>
-    </div>
-
-    <!-- ==================== PIPELINE ==================== -->
-    <div class="view" id="view-pipeline">
-      <div id="pipelineContent"></div>
-    </div>
-
-    <!-- ==================== CHAT ==================== -->
-    <div class="view" id="view-chat">
-      <div id="chatContent"></div>
-    </div>
-
-    <!-- ==================== REPO SELECTION (first login) ==================== -->
-    <div class="view" id="view-repo-select">
-      <div id="repoSelectContent"></div>
-    </div>
-
-    <!-- ==================== REPOS ==================== -->
-    <div class="view" id="view-repos">
-      <div id="reposContent"></div>
-    </div>
-
-    <!-- ==================== SETTINGS ==================== -->
-    <div class="view" id="view-settings">
-      <div id="settingsContent"></div>
-    </div>
-
-    <!-- ==================== AGENT DETAIL ==================== -->
-    <div class="view" id="view-agent-detail">
-      <div id="agentDetailContent"></div>
-    </div>
-
-  </div>
+<!-- ====== MAIN ====== -->
+<div class="mn">
+<div class="tb">
+  <div class="bc"><b id="pg">Dashboard</b> <span id="rt" style="color:var(--a);font-weight:500">team/backend-service</span></div>
+  <div class="sp"></div>
+  <div class="srch"><span>⌕</span><input placeholder="Search..." onfocus="this.style.width='260px'" onblur="this.style.width='100%'"></div>
 </div>
+<div class="ct">
+
+<!-- DASHBOARD -->
+<div class="vw ac" id="v-dash"><div id="dC"></div></div>
+
+<!-- PIPELINE -->
+<div class="vw" id="v-pipe"><div id="pC"></div></div>
+
+<!-- CHAT -->
+<div class="vw" id="v-chat"><div id="chC"></div></div>
+
+<!-- REPO SELECT -->
+<div class="vw" id="v-rsel"><div id="rC"></div></div>
+
+<!-- REPOS -->
+<div class="vw" id="v-repos"><div id="rpC"></div></div>
+
+<!-- SETTINGS -->
+<div class="vw" id="v-settings"><div id="sC"></div></div>
+
+<!-- AGENT DETAIL -->
+<div class="vw" id="v-agt"><div id="aC"></div></div>
+
+<!-- PROFILE -->
+<div class="vw" id="v-profile"><div id="pfC"></div></div>
+
+</div></div>
 
 <script>
-  // ====== Data ======
-  const repos = {
-    backend: { name:'team/backend-service', desc:'Core backend API service', branch:'main' },
-    frontend: { name:'team/web-frontend', desc:'React admin dashboard', branch:'develop' },
-    mobile: { name:'team/mobile-app', desc:'React Native app', branch:'main' },
-  };
+// Data
+const R={be:{n:'team/backend-service',d:'Core backend API service',br:'main',role:'Maintainer'},
+fe:{n:'team/web-frontend',d:'React admin dashboard',br:'develop',role:'Maintainer'},
+mo:{n:'team/mobile-app',d:'React Native app',br:'main',role:'Member'}};
+let repo='be';
 
-  let currentRepo = 'backend';
+// Agents info
+const A={
+vod:{ico:'♫',c:'var(--pk)',bg:'#fde8f0',bc:'var(--pk)',n:'VOD Agent',s:'Voice of Developer',
+  sd:'从开发者声音中收集反馈, 聚类分析共性, 提炼价值, 自动创建 Issue',
+  sk:'default',ev:[
+  ['12:05','Signal: "CI pipeline too slow" → created <b>Issue #345</b>'],
+  ['10:30','Analysis: 3 signals cluster around "test flakiness"'],
+  ['08:00','Weekly report: <b>8 key signals</b>, 2 trending up'],
+  ['Yest.','Collected 12 feedback from PR comments']]},
+issue:{ico:'⚠',c:'var(--r)',bg:'#fce5e5',bc:'var(--r)',n:'Issue Agent',s:'Issue Manager',
+  sd:'处理 Issue, 分类打标签, 提炼为可开发需求, 指派负责人, 触发 Coding Agent',
+  sk:'skills/issue/',ev:[
+  ['13:50','Assigned <b>Issue #342</b> (bug: login timeout) to @alice'],
+  ['13:22','A2A triggered Coding Agent for Issue #338'],
+  ['11:05','Labelled Issue #335 as <b>enhancement</b>'],
+  ['09:30','Auto-closed Issue #329 (fixed in PR #1270)']]},
+coding:{ico:'⚙',c:'var(--a)',bg:'#e3edfd',bc:'var(--a)',n:'Coding Agent',s:'Developer',
+  sd:'分析需求 → 设计方案 → 编码实现 → 自我审查 → 提交 Pull Request',
+  sk:'implementation',ev:[
+  ['14:15','Submitted <b>PR #1278</b> for Issue #342'],
+  ['12:30','Designed solution for Issue #342: add session refresh'],
+  ['11:00','Implemented webhook retry logic (PR #1275)'],
+  ['09:45','Self-review completed for PR #1275']]},
+qa:{ico:'✔',c:'var(--pu)',bg:'#f3e9fe',bc:'var(--pu)',n:'QA Agent',s:'Quality Assurance',
+  sd:'Code Review, 自动化测试, 功能验证, 安全检查, 确保代码质量',
+  sk:'skills/pr/',ev:[
+  ['14:30','Approved <b>PR #1278</b> (1 minor suggestion)'],
+  ['13:15','Review for PR #1275: <b>2 issues found</b>'],
+  ['12:00','Auto-test suite passed: 156 tests OK'],
+  ['10:30','Security scan OK for PR #1272']]},
+sre:{ico:'♡',c:'var(--or)',bg:'#fef0e4',bc:'var(--or)',n:'SRE Agent',s:'DevOps',
+  sd:'构建部署, 发布管理, 监控运维, 故障排查, 合规检查',
+  sk:'deploy-guard',ev:[
+  ['13:22','Deployed <b>v2.3.1</b> to production · <span class="tgx">success</span>'],
+  ['13:18','Build #482 completed'],
+  ['12:05','Auto-resolved incident <b>INC-023</b>'],
+  ['10:15','Compliance scan OK for backend-service']]}
+};
 
-  const agentColors = {
-    vod: { dot: '#ec4899', bg:'bg-vod', tag:'tag-vod', label:'VOD Agent', title:'Voice of Developer' },
-    issue: { dot: '#ef4444', bg:'bg-issue', tag:'tag-issue', label:'Issue Agent', title:'Issue Manager' },
-    coding: { dot: '#3b82f6', bg:'bg-coding', tag:'tag-coding', label:'Coding Agent', title:'Developer' },
-    qa: { dot: '#8b5cf6', bg:'bg-qa', tag:'tag-qa', label:'QA Agent', title:'Quality Assurance' },
-    sre: { dot: '#f97316', bg:'bg-sre', tag:'tag-sre', label:'SRE Agent', title:'DevOps' },
-  };
+// Navigation
+function nav(v,param){
+  document.querySelectorAll('.vw').forEach(x=>x.classList.remove('ac'));
+  document.querySelectorAll('.sb-nav a').forEach(x=>x.classList.remove('act'));
+  let t='Dashboard';
+  if(v==='dash'){t='Dashboard';renderDash()}
+  else if(v==='pipe'){t='Pipeline';renderPipe()}
+  else if(v==='chat'){t='Chat Agent';renderChat()}
+  else if(v==='rsel'){t='选择仓库';renderRsel()}
+  else if(v==='repos'){t='Repositories';renderRepos()}
+  else if(v==='settings'){t='Settings';renderSettings()}
+  else if(v==='profile'){t='Profile';renderProfile()}
+  else if(v==='agt'&&param){t=A[param].n;renderAgent(param)}
+  document.getElementById('pg').textContent=t;
+  document.getElementById('v-'+v)?.classList.add('ac');
+  // Highlight sidebar
+  document.querySelectorAll('.sb-nav a').forEach(a=>{
+    let o=a.getAttribute('onclick')||'';
+    if(v==='agt'&&param&&o.includes("'"+param+"'"))a.classList.add('act');
+    else if(o.includes("'"+v+"'"))a.classList.add('act');
+  });
+  if(v==='dash')document.querySelector('.sb-nav a')?.classList.add('act');
+}
 
-  // ====== Render Functions ======
-  function renderDashboard(repo) {
-    const repoData = repos[repo];
-    const el = document.getElementById('dashboardContent');
-    document.getElementById('repoTag').textContent = repoData.name;
+function onRepo(s){
+  if(s.value==='__add__'){nav('repos');s.value=repo;return}
+  repo=s.value;nav('dash');
+}
 
-    el.innerHTML = `
-      <!-- Repo header -->
-      <div class="card" style="padding:16px 20px;background:linear-gradient(135deg,#eff6ff,#f0fdf4);border-color:#bfdbfe">
-        <div style="display:flex;align-items:center;gap:12px">
-          <div style="font-size:28px">\u25a0</div>
-          <div style="flex:1">
-            <div style="font-size:15px;font-weight:600">${repoData.name} <span class="tag tag-coding" style="font-size:10px;vertical-align:middle">Maintainer</span></div>
-            <div style="font-size:12px;color:var(--text-secondary)">${repoData.desc} \u00b7 \u2605 ${repoData.branch} \u00b7 Webhook OK</div>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center">
-            <span class="stat-card" style="padding:8px 16px"><div class="num" style="font-size:16px;color:var(--green)">98.5%</div><div class="label">Auto-Resolution</div></span>
-            <span class="stat-card" style="padding:8px 16px"><div class="num" style="font-size:16px;color:var(--accent)">47</div><div class="label">Events/Week</div></span>
-            <span class="stat-card" style="padding:8px 16px"><div class="num" style="font-size:16px;color:var(--purple)">12s</div><div class="label">Avg Response</div></span>
-          </div>
-        </div>
+// Dashboard
+function renderDash(){
+  let d=R[repo];
+  document.getElementById('rt').textContent=d.n;
+  let html=`
+<div class="cd" style="background:linear-gradient(135deg,#eef3ff,#eefdf2);border-color:#c6d9f7">
+  <div class="flex fc gap12">
+    <div style="font-size:26px">■</div>
+    <div class="f1">
+      <div style="font-size:14px;font-weight:600">${d.n} <span class="tg tg-c" style="font-size:9px;vertical-align:middle">${d.role}</span></div>
+      <div class="ts t2">${d.d} · ★ ${d.br} · Webhook OK</div>
+    </div>
+    <div class="stats">
+      <div class="st"><div class="v" style="color:var(--g)">98.5%</div><div class="l">Auto-Resolution</div></div>
+      <div class="st"><div class="v" style="color:var(--a)">47</div><div class="l">Events/Week</div></div>
+      <div class="st"><div class="v" style="color:var(--pu)">12s</div><div class="l">Avg Response</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="cd">
+  <div class="cd-h"><h2>Agent Workflow</h2><span class="ts t3">VOD → Issue → Coding → QA → SRE</span></div>
+  <div class="af">`;
+  ['vod','issue','coding','qa','sre'].forEach(k=>{
+    let a=A[k];
+    html+=`
+    <div class="nd" style="border-top:3px solid ${a.c}" onclick="nav('agt','${k}')">
+      <div class="nh"><span class="n" style="background:${a.c}"></span><h4>${a.n}</h4></div>
+      <div class="nds">${a.sd}</div>
+      <div class="nm"><span class="ml">Skill</span> ${a.sk}</div>
+      <div class="ns"><span class="d" style="background:var(--g)"></span>${k==='vod'?'47 signals/week':k==='issue'?'3 active issues':k==='coding'?'PR #1278 in progress':k==='qa'?'92% pass rate':'v2.3.1 running'}</div>
+      <div class="nt tg-${k==='vod'?'v':k==='issue'?'i':k==='coding'?'c':k==='qa'?'q':'s'}">${k==='vod'?'♫ feedback→issue':k==='issue'?'⚠ 2 bugs · 1 feature':k==='coding'?'⚙ implementing...':k==='qa'?'✔ pass: 92%':'♡ uptime 99.9%'}</div>
+    </div>`;
+  });
+  html+=`</div>
+  <div class="cl" onclick="nav('chat')">
+    <div class="ci">☎</div>
+    <div class="cx"><h4>Chat Agent · Personal Assistant</h4><p>Your personal agent connected to the workflow · Submit issues · Query status · Approve</p></div>
+    <div class="flex gap6"><span class="tg tg-ch">↔ VOD</span><span class="tg tg-ch">↔ Issue</span><span class="tg tg-ch">↔ Coding</span><span class="tg tg-ch">↔ QA</span><span class="tg tg-ch">↔ SRE</span></div>
+  </div>
+</div>
+
+<div class="cd">
+  <div class="cd-h"><h2>Recent Activity</h2><span class="ts t3">${d.n} · Last 24h</span></div>
+  <div class="ai"><div class="t">14:32</div><div class="ac"><span class="tg tg-q">QA</span>Approved PR #1278 · <span class="t2">feat: add webhook retry</span></div></div>
+  <div class="ai"><div class="t">14:15</div><div class="ac"><span class="tg tg-c">Coding</span>Submitted PR #1278</div></div>
+  <div class="ai"><div class="t">13:50</div><div class="ac"><span class="tg tg-i">Issue</span>Assigned #342 to @alice · <span class="t2">bug: login timeout</span></div></div>
+  <div class="ai"><div class="t">13:22</div><div class="ac"><span class="tg tg-s">SRE</span>Deployed v2.3.1 to production · <span class="tgx">success</span></div></div>
+  <div class="ai"><div class="t">12:05</div><div class="ac"><span class="tg tg-v">VOD</span>Signal #47 → created issue #345</div></div>
+</div>`;
+  document.getElementById('dC').innerHTML=html;
+}
+
+// Pipeline
+function renderPipe(){
+  let d=R[repo];
+  let pipedata=[
+    {iss:'#342 - Login timeout',stages:['Done','Done','PR #1278','Reviewing','Pending'],s:[2,2,2,1,0],act:true},
+    {iss:'#338 - Webhook retry',stages:['Done','Done','Done','Done','Released'],s:[2,2,2,2,2],result:'Released v2.3.1'},
+    {iss:'#335 - Refactor auth',stages:['Done','Done','Done','Done','Released'],s:[2,2,2,2,2],result:'Released v2.3.0'},
+    {iss:'#331 - API rate limit',stages:['Done','Done','Done','Done','Rollback'],s:[2,2,2,2,3],result:'Rolled back'}
+  ];
+  let active=pipedata[0];
+  document.getElementById('rt').textContent=d.n;
+  let html=`
+<div class="cd">
+  <div class="cd-h"><h2>Pipeline · ${d.n}</h2><div class="flex gap12"><span class="ts t2">Active: <b>1</b></span><span class="ts t2">Today: <b>3</b></span></div></div>
+  <div style="margin-bottom:16px">
+    <div class="ts" style="font-weight:600;margin-bottom:8px">Active: Issue ${active.iss}</div>
+    <div class="af" style="min-height:auto;padding:6px 0">`;
+  ['VOD','Issue','Coding','QA','SRE'].forEach((n,i)=>{
+    let s=active.stages[i],sc=active.s[i];
+    let colors=['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
+    let colors_bg=['#fde8f0','#fce5e5','#e3edfd','#f3e9fe','#fef0e4'];
+    let dotc=sc===2?'var(--g)':sc===1?'var(--y)':sc===3?'var(--r)':sc===0?'var(--t3)':'#ddd';
+    html+=`<div class="nd" style="padding:10px;width:150px;border-top:3px solid ${colors[i]};cursor:default${sc===0?';opacity:.5':''}">
+      <div class="nh"><span class="n" style="background:${colors[i]}"></span><h4 style="font-size:11px">${n}</h4></div>
+      <div class="nds" style="margin-bottom:2px">${s}</div>
+      <div class="ns tx"><span class="d" style="background:${dotc}"></span>${sc===2?'Done':sc===1?'In Progress':sc===3?'Failed':sc===0?'Pending':'—'}</div>
+    </div>`;
+  });
+  html+=`</div></div>
+  <div class="tw">
+    <table>
+      <tr><th>Pipeline</th><th>Duration</th><th>Agents</th><th>Result</th><th>Release</th></tr>`;
+  pipedata.forEach((p,i)=>{
+    let s=i===0?' sel':'';
+    html+=`<tr class="pipe-row${s}" onclick="selPipe(${i})">
+      <td><span class="ts"><b>Issue ${p.iss}</b></span></td>
+      <td>${i===0?'—':i===1?'28m 12s':i===2?'1h 05m':'42m 18s'}</td>
+      <td><span class="tg tg-v">V</span><span class="tg tg-i">I</span><span class="tg tg-c">C</span><span class="tg tg-q">Q</span><span class="tg tg-s">S</span></td>
+      <td><span class="${(i===0?'ty':i===3?'tr':'tgx')}">${i===0?'Processing':p.result}</span></td>
+      <td>${i===1?'v2.3.1':i===2?'v2.3.0':i===3?'v2.2.9':'—'}</td></tr>`;
+  });
+  html+=`</table></div></div>
+<div class="tx t2 mt8">点击历史表中的 Issue 会切换上方工作流状态展示</div>`;
+  document.getElementById('pC').innerHTML=html;
+}
+
+// Chat Agent
+function renderChat(){
+  document.getElementById('rt').textContent='';
+  document.getElementById('pC')||0;
+  let html=`
+<div class="chat-wrap">
+  <div class="chat-main">
+    <div class="chat-hdr"><h2>Chat Agent · Personal Assistant</h2><div class="tx t2">Your personal agent · Backend: <b>Default</b></div></div>
+    <div class="chat-body">
+      <div class="msg l">Hello! I'm your personal DevOps assistant. How can I help you today?</div>
+      <div class="msg r">Check the status of issue #342</div>
+      <div class="msg l">✅ Issue #342 "Login timeout" is with <b>QA Agent</b> (PR #1278 under review). ETA: ~15 min.</div>
+      <div class="msg l">ℹ️ VOD Agent found 2 new signals. One may interest you: "API response time degraded after deploy". Want me to create an issue?</div>
+    </div>
+    <div class="chat-in"><input placeholder="Ask me anything..." style="flex:1"><button class="bt bt-p">Send</button></div>
+  </div>
+  <div class="chat-side">
+    <div class="tgx ts" style="margin-bottom:8px;font-weight:600">Connected Agents</div>
+    <div class="agc" style="background:#fde8f0"><span class="ad" style="background:var(--pk)"></span>VOD Agent<span class="ctc">47</span></div>
+    <div class="agc" style="background:#fce5e5"><span class="ad" style="background:var(--r)"></span>Issue Agent<span class="ctc">3</span></div>
+    <div class="agc" style="background:#e3edfd"><span class="ad" style="background:var(--a)"></span>Coding Agent<span class="ctc">1</span></div>
+    <div class="agc" style="background:#f3e9fe"><span class="ad" style="background:var(--pu)"></span>QA Agent<span class="ctc">2</span></div>
+    <div class="agc" style="background:#fef0e4"><span class="ad" style="background:var(--or)"></span>SRE Agent<span class="ctc">v2.3.1</span></div>
+    <div class="cd" style="margin-top:12px;padding:10px;font-size:10px;color:var(--t2)">
+      <b style="color:var(--sk)">☎ Chat Settings</b><br><br>
+      <div class="ts t3">Backend</div><div class="ts" style="margin-bottom:6px">Default (Built-in)</div>
+      <div class="ts t3">IM</div><div class="ts" style="margin-bottom:6px"><span class="tgx">✓</span> Feishu Connected</div>
+      <div class="ts"><a href="#" onclick="return false" style="color:var(--a);font-size:10px">Custom Backend →</a></div>
+    </div>
+  </div>
+</div>`;
+  document.getElementById('chC').innerHTML=html;
+}
+
+// Repo Selection (first login)
+function renderRsel(){
+  document.getElementById('rt').textContent='';
+  let repos=[
+    {n:'team/backend-service',d:'Core backend API service',o:'team',role:'Maintainer',btn:'Host Now',cls:'bt-p'},
+    {n:'team/web-frontend',d:'React admin dashboard',o:'team',role:'Maintainer',btn:'Host Now',cls:'bt-p'},
+    {n:'org/docs-site',d:'Documentation site',o:'org',role:'Member',btn:'+ Join',cls:'bt-o'},
+    {n:'org/devops-toolkit',d:'Internal DevOps tools',o:'org',role:'Member',btn:'+ Join',cls:'bt-o'},
+    {n:'team/mobile-app',d:'React Native mobile app',o:'team',role:'Member',btn:'+ Join',cls:'bt-o'},
+    {n:'org/data-pipeline',d:'ETL data pipeline',o:'org',role:'Admin',btn:'Host Now',cls:'bt-p'},
+    {n:'team/notification',d:'Notification service',o:'team',role:'Member',btn:'+ Join',cls:'bt-o'},
+    {n:'team/analytics',d:'Analytics service',o:'team',role:'Maintainer',btn:'Host Now',cls:'bt-p'},
+  ];
+  let html=`
+<div style="max-width:900px;margin:0 auto">
+  <div style="margin-bottom:20px"><h2 style="font-size:17px;font-weight:600;margin-bottom:3px">Welcome, Zhang Wei</h2><p class="ts t2">选择你要加入的 GitCode 仓库 · 仅首次登录展示</p></div>
+  <div class="flex gap8 mb16"><input placeholder="搜索仓库..." style="flex:1;padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c)"><select style="padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:11px;background:var(--c);outline:none"><option>全部</option><option>成员</option><option>管理员</option></select></div>
+  <div class="rgrid">`;
+  repos.forEach(r=>{
+    html+=`
+    <div class="rc" onclick="repo='${r.n==='team/backend-service'?'be':r.n==='team/web-frontend'?'fe':'mo'}';nav('dash')">
+      <div>
+        <div class="rh"><span class="rn">${r.n}</span><span class="tg tg-d" style="font-size:9px">${r.role}</span></div>
+        <div class="rd">${r.d}</div>
+        <div class="ro">Owner: ${r.o}</div>
       </div>
+      <div class="rf"><span class="s">🚧 Not added</span><button class="bt ${r.cls} bt-s" onclick="event.stopPropagation();alert('[Demo] ${r.btn} ${r.n}')">${r.btn}</button></div>
+    </div>`;
+  });
+  html+=`</div></div>`;
+  document.getElementById('rC').innerHTML=html;
+}
 
-      <!-- Agent Workflow Flow -->
-      <div class="card mt-16" style="padding:16px 20px">
-        <div class="card-header">
-          <h2>Agent Workflow</h2>
-          <span style="font-size:11px;color:var(--text-light)">Logical flow: VOD \u2192 Issue \u2192 Coding \u2192 QA \u2192 SRE</span>
-        </div>
+// Agent Detail
+function renderAgent(k){
+  let a=A[k];
+  document.getElementById('rt').textContent=R[repo].n;
+  let html=`
+<div class="cd" style="background:${a.bg};border-color:${a.bc}33">
+  <div class="flex fc gap12">
+    <div style="width:44px;height:44px;border-radius:10px;background:${a.bc}22;display:flex;align-items:center;justify-content:center;font-size:20px">${a.ico}</div>
+    <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${a.n}</h2><div class="ts t2">${a.s} · ${a.sd}</div></div>
+    <div class="flex gap6"><button class="bt bt-o bt-s">Configure</button><button class="bt bt-p bt-s">View Logs</button><button class="bt bt-o bt-s" onclick="nav('dash')">← Back</button></div>
+  </div>
+</div>
+<div class="stats mt16 mb16">
+  <div class="st"><div class="v" style="color:${a.c}">${k==='vod'?'47':k==='issue'?'3':k==='coding'?'3':k==='qa'?'4':'3'}</div><div class="l">${k==='vod'?'Signals/Week':k==='issue'?'Active':k==='coding'?'Today':k==='qa'?'Today':'Deploys/Week'}</div></div>
+  <div class="st"><div class="v" style="color:${a.c}">${k==='vod'?'8':k==='issue'?'12':k==='coding'?'45s':k==='qa'?'92%':'99.9%'}</div><div class="l">${k==='vod'?'Issues Created':k==='issue'?'Resolved/Week':k==='coding'?'Avg Time':k==='qa'?'Pass Rate':'Uptime'}</div></div>
+  <div class="st"><div class="v" style="color:${a.c}">${k==='vod'?'92%':k==='issue'?'2m':k==='coding'?'98%':k==='qa'?'3':'12s'}</div><div class="l">${k==='vod'?'Signal Quality':k==='issue'?'Avg Triage':k==='coding'?'First-Pass':'Issues Caught':'MTTR'}</div></div>
+</div>
+<div class="cd"><div class="cd-h"><h2>Event History</h2><span class="ts t3">Last 24h</span></div>`;
+  a.ev.forEach(e=>{html+=`<div class="ai"><div class="t">${e[0]}</div><div class="ac">${e[1]}</div></div>`;});
+  html+=`</div>
+<div class="cd"><div class="cd-h"><h2>Skill</h2></div><span class="tg tg-d" style="padding:4px 10px;font-size:11px">★ Default: skills/${k}/SKILL.md</span></div>`;
+  document.getElementById('aC').innerHTML=html;
+}
 
-        <!-- Main flow -->
-        <div class="agent-flow" id="agentFlow">
-          <!-- VOD -->
-          <div class="node" style="border-top:3px solid #ec4899" onclick="showAgent('vod')">
-            <div class="n-header"><span class="ndot" style="background:#ec4899"></span><h4>VOD Agent</h4></div>
-            <div class="n-desc">Voice of Developer: collect feedback → analyze → create issue</div>
-            <div class="n-meta">
-              <span class="n-meta-item"><span class="meta-label">Skill</span> default</span>
-            </div>
-            <div class="n-status"><span class="dot" style="background:var(--green)"></span> 47 signals this week</div>
-            <div class="n-tag tag-vod">♫ feedback → issue</div>
-          </div>
-          <!-- Issue -->
-          <div class="node" style="border-top:3px solid #ef4444" onclick="showAgent('issue')">
-            <div class="n-header"><span class="ndot" style="background:#ef4444"></span><h4>Issue Agent</h4></div>
-            <div class="n-desc">Classify → refine requirements → trigger development</div>
-            <div class="n-meta">
-              <span class="n-meta-item"><span class="meta-label">Skill</span> skills/issue/</span>
-            </div>
-            <div class="n-status"><span class="dot" style="background:var(--yellow)"></span> 3 active issues</div>
-            <div class="n-tag tag-issue">⚠ 2 bugs · 1 feature</div>
-          </div>
-          <!-- Coding -->
-          <div class="node" style="border-top:3px solid #3b82f6" onclick="showAgent('coding')">
-            <div class="n-header"><span class="ndot" style="background:#3b82f6"></span><h4>Coding Agent</h4></div>
-            <div class="n-desc">Design solution → implement → self-review → submit PR</div>
-            <div class="n-meta">
-              <span class="n-meta-item"><span class="meta-label">Skill</span> implementation</span>
-            </div>
-            <div class="n-status"><span class="dot" style="background:var(--green)"></span> PR #1278 in progress</div>
-            <div class="n-tag tag-coding">⚙ implementing...</div>
-          </div>
-          <!-- QA -->
-          <div class="node" style="border-top:3px solid #8b5cf6" onclick="showAgent('qa')">
-            <div class="n-header"><span class="ndot" style="background:#8b5cf6"></span><h4>QA Agent</h4></div>
-            <div class="n-desc">Code review → auto tests → functional validation</div>
-            <div class="n-meta">
-              <span class="n-meta-item"><span class="meta-label">Skill</span> skills/pr/</span>
-            </div>
-            <div class="n-status"><span class="dot" style="background:var(--green)"></span> 2 PRs awaiting review</div>
-            <div class="n-tag tag-qa">✔ pass: 92%</div>
-          </div>
-          <!-- SRE -->
-          <div class="node" style="border-top:3px solid #f97316" onclick="showAgent('sre')">
-            <div class="n-header"><span class="ndot" style="background:#f97316"></span><h4>SRE Agent</h4></div>
-            <div class="n-desc">Build → deploy → monitor → incident response</div>
-            <div class="n-meta">
-              <span class="n-meta-item"><span class="meta-label">Skill</span> deploy-guard</span>
-            </div>
-            <div class="n-status"><span class="dot" style="background:var(--green)"></span> v2.3.1 running</div>
-            <div class="n-tag tag-sre">♡ uptime 99.9%</div>
-          </div>
-        </div>
+// Repos
+function renderRepos(){
+  document.getElementById('rt').textContent='';
+  let html=`
+<div class="flex fc jbtw mb16"><h2 style="font-size:15px;font-weight:600">Repositories</h2><button class="bt bt-p bt-s">↻ Sync from GitCode</button></div>
+<div class="cd"><div class="cd-h"><h2>Hosted <span class="c">3</span></h2></div>
+  <div class="repo-item" onclick="repo='be';nav('dash')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--b)"><span class="tg tg-c" style="font-size:11px;padding:3px 8px">team/backend-service</span><span class="ts t2">Maintainer</span><span class="ts t3">Webhook OK · ★ main</span><span class="tg tg-s" style="background:#dcfce7;color:#16a34a;margin-left:auto">Active</span></div>
+  <div class="repo-item" onclick="repo='fe';nav('dash')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--b)"><span class="tg tg-c" style="font-size:11px;padding:3px 8px">team/web-frontend</span><span class="ts t2">Maintainer</span><span class="ts t3">Webhook OK · ★ develop</span><span class="tg tg-s" style="background:#dcfce7;color:#16a34a;margin-left:auto">Active</span></div>
+  <div class="repo-item" style="display:flex;align-items:center;gap:10px;padding:10px 0"><span class="tg tg-c" style="font-size:11px;padding:3px 8px">team/mobile-app</span><span class="ts t2">Member</span><span class="ts t3">Webhook OK · ★ main</span><span class="tg tg-d" style="margin-left:auto">Joined</span></div>
+</div>
+<div class="cd"><div class="cd-h"><h2>Available to Join <span class="c">5</span></h2></div>
+<div class="tw"><table>
+  <tr><th>Repository</th><th>Role</th><th>Description</th><th></th></tr>
+  <tr><td><b>org/docs-site</b></td><td>Member</td><td>Documentation site</td><td><button class="bt bt-o bt-s">+ Join</button></td></tr>
+  <tr><td><b>org/devops-toolkit</b></td><td>Member</td><td>Internal DevOps tools</td><td><button class="bt bt-o bt-s">+ Join</button></td></tr>
+  <tr><td><b>org/data-pipeline</b></td><td><span class="tg tg-s">Admin</span></td><td>ETL data pipeline</td><td><button class="bt bt-p bt-s">Host Now</button></td></tr>
+  <tr><td><b>team/analytics</b></td><td><span class="tg tg-i">Maintainer</span></td><td>Analytics service</td><td><button class="bt bt-p bt-s">Host Now</button></td></tr>
+  <tr><td><b>team/notification</b></td><td>Member</td><td>Notification service</td><td><button class="bt bt-o bt-s">+ Join</button></td></tr>
+</table></div></div>`;
+  document.getElementById('rpC').innerHTML=html;
+}
 
-        <!-- Chat lane (connects to all) -->
-        <div class="chat-lane" onclick="showView('chat')">
-          <div class="chat-icon">\u260e</div>
-          <div class="chat-info">
-            <h4>Chat Agent \u00b7 Personal Assistant</h4>
-            <div style="font-size:11px">Your personal agent connected to the entire workflow \u00b7 Submit issues \u00b7 Approve flows \u00b7 Query status</div>
-          </div>
-          <div class="chat-tags">
-            <span class="tag tag-chat">\u2194 VOD</span>
-            <span class="tag tag-chat">\u2194 Issue</span>
-            <span class="tag tag-chat">\u2194 Coding</span>
-            <span class="tag tag-chat">\u2194 QA</span>
-            <span class="tag tag-chat">\u2194 SRE</span>
-          </div>
-          <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();showView('chat')">Open Chat</button>
-        </div>
-      </div>
+// Settings
+function renderSettings(){
+  document.getElementById('rt').textContent=R[repo].n;
+  let html=`
+<div class="stabs">
+  <a class="ac" onclick="stab('credentials')">Credentials</a>
+  <a onclick="stab('notify')">Notifications</a>
+  <a onclick="stab('skills')">Skills</a>
+</div>
+<div id="s-credentials">
+  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode</h3>
+    <div class="srow"><label>API Token</label><input type="password" value="ghp_demo_token_xxxxxxxxxxxxxxxxxxxx"></div>
+    <div class="srow"><label>Account</label><input type="text" value="zhangwei" disabled style="background:#f1f5f9"></div>
+  </div>
+  <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Huawei Cloud</h3>
+    <div class="srow"><label>Access Key</label><input type="password" value="AK-demo-access-key-xxxx"></div>
+    <div class="srow"><label>Secret Key</label><input type="password" value="SK-demo-secret-key-xxxx"></div>
+    <p class="tx t2 mt8">Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.</p>
+  </div>
+</div>
+<div id="s-notify" class="hidden">
+  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Notification Preferences</h3>
+    <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked>Issue events</label>
+    <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked>PR events</label>
+    <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox">Build failures</label>
+    <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked>Release events</label>
+    <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox">VOD signals</label>
+  </div>
+</div>
+<div id="s-skills" class="hidden">
+  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Custom Skills</h3>
+    <button class="bt bt-o bt-s">Upload Skill</button>
+    <div class="flex fc gap8 mt12" style="padding:8px 0;border-top:1px solid var(--b)">
+      <span class="tg tg-c">team/backend-service</span><span class="tx t2">pull_request_opened</span>
+      <span class="tx f1" style="color:var(--a);text-align:right">custom-pr-review</span>
+      <button class="bt bt-o bt-s">Edit</button>
+    </div>
+  </div>
+</div>`;
+  document.getElementById('sC').innerHTML=html;
+}
 
-      <!-- Recent Activity -->
-      <div class="card mt-16" style="padding:16px 20px">
-        <div class="card-header"><h2>Recent Activity</h2><span style="font-size:11px;color:var(--text-light)">${repoData.name} \u00b7 Last 24h</span></div>
-        <div class="activity-item">
-          <div class="atime">14:32</div>
-          <div class="acontent"><span class="tag tag-qa">QA</span> Approved PR #1278 \u00b7 <span class="text-secondary">feat: add webhook retry</span></div>
-        </div>
-        <div class="activity-item">
-          <div class="atime">14:15</div>
-          <div class="acontent"><span class="tag tag-coding">Coding</span> Submitted PR #1278 \u00b7 <span class="text-secondary">feat: add webhook retry</span></div>
-        </div>
-        <div class="activity-item">
-          <div class="atime">13:50</div>
-          <div class="acontent"><span class="tag tag-issue">Issue</span> Assigned #342 to @alice \u00b7 <span class="text-secondary">bug: login timeout</span></div>
-        </div>
-        <div class="activity-item">
-          <div class="atime">13:22</div>
-          <div class="acontent"><span class="tag tag-sre">SRE</span> Deployed v2.3.1 to production \u00b7 <span class="text-success">success</span></div>
-        </div>
-        <div class="activity-item">
-          <div class="atime">12:05</div>
-          <div class="acontent"><span class="tag tag-vod">VOD</span> Signal #47: "CI pipeline too slow" \u2192 created issue #345</div>
-        </div>
-      </div>
-    `;
-  }
+function stab(tab){
+  document.getElementById('s-credentials').classList.add('hidden');
+  document.getElementById('s-notify').classList.add('hidden');
+  document.getElementById('s-skills').classList.add('hidden');
+  document.getElementById('s-'+tab).classList.remove('hidden');
+  document.querySelectorAll('.stabs a').forEach(a=>a.classList.remove('ac'));
+  document.querySelector('.stabs a[onclick*="'+tab+'"]')?.classList.add('ac');
+}
 
-  function renderPipeline(repo) {
-    const repoData = repos[repo];
-    document.getElementById('pipelineContent').innerHTML = `
-      <div class="card" style="padding:16px 20px">
-        <div class="card-header">
-          <h2>Pipeline \u00b7 ${repoData.name}</h2>
-          <div style="display:flex;gap:8px;align-items:center">
-            <span class="text-xs text-secondary">Active pipeline: <strong>1</strong></span>
-            <span class="text-xs text-secondary">Completed today: <strong>3</strong></span>
-          </div>
-        </div>
+// Profile placeholder
+function renderProfile(){
+  document.getElementById('rt').textContent='';
+  document.getElementById('pfC').innerHTML='<div class="cd" style="text-align:center;padding:40px"><div style="font-size:48px;margin-bottom:12px">☺</div><h2 style="margin-bottom:4px">Zhang Wei</h2><p class="ts t2">Maintainer · Online</p><p class="tx t3 mt12">User profile page — coming soon</p></div>';
+}
 
-        <!-- Active pipeline -->
-        <div style="margin-bottom:20px">
-          <div style="font-size:12px;font-weight:600;margin-bottom:8px">Active: Issue #342 - Login timeout</div>
-          <div class="agent-flow" style="min-height:auto;padding:8px 0">
-            <div class="node" style="padding:10px;width:150px;border-top:3px solid #ec4899;cursor:default">
-              <div class="n-header"><span class="ndot" style="background:#ec4899"></span><h4>VOD</h4></div>
-              <div class="n-desc">Signal collected</div>
-              <div class="n-status"><span class="dot" style="background:var(--green)"></span> Done</div>
-            </div>
-            <div class="node" style="padding:10px;width:150px;border-top:3px solid #ef4444;cursor:default">
-              <div class="n-header"><span class="ndot" style="background:#ef4444"></span><h4>Issue</h4></div>
-              <div class="n-desc">Classified \u00b7 Assigned</div>
-              <div class="n-status"><span class="dot" style="background:var(--green)"></span> Done</div>
-            </div>
-            <div class="node" style="padding:10px;width:150px;border-top:3px solid #3b82f6;cursor:default">
-              <div class="n-header"><span class="ndot" style="background:#3b82f6"></span><h4>Coding</h4></div>
-              <div class="n-desc">PR #1278 submitted</div>
-              <div class="n-status"><span class="dot" style="background:var(--green)"></span> Done</div>
-            </div>
-            <div class="node" style="padding:10px;width:150px;border-top:3px solid #8b5cf6;cursor:default">
-              <div class="n-header"><span class="ndot" style="background:#8b5cf6"></span><h4>QA</h4></div>
-              <div class="n-desc">Review in progress</div>
-              <div class="n-status"><span class="dot" style="background:var(--yellow)"></span> Reviewing</div>
-            </div>
-            <div class="node" style="padding:10px;width:150px;border-top:3px solid #f97316;cursor:default;opacity:0.5">
-              <div class="n-header"><span class="ndot" style="background:#f97316"></span><h4>SRE</h4></div>
-              <div class="n-desc">Awaiting QA approval</div>
-              <div class="n-status"><span class="dot" style="background:#ddd"></span> Pending</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- History table -->
-        <div class="table-wrap">
-          <table>
-            <tr><th>Pipeline</th><th>Duration</th><th>Agents</th><th>Result</th><th>Release</th></tr>
-            <tr>
-              <td><span class="text-sm">Issue #338 - Webhook retry</span></td>
-              <td>28m 12s</td>
-              <td><span class="tag tag-vod">V</span> <span class="tag tag-issue">I</span> <span class="tag tag-coding">C</span> <span class="tag tag-qa">Q</span> <span class="tag tag-sre">S</span></td>
-              <td><span class="text-success">Released</span></td>
-              <td>v2.3.1</td>
-            </tr>
-            <tr>
-              <td><span class="text-sm">Issue #335 - Refactor auth</span></td>
-              <td>1h 05m</td>
-              <td><span class="tag tag-vod">V</span> <span class="tag tag-issue">I</span> <span class="tag tag-coding">C</span> <span class="tag tag-qa">Q</span> <span class="tag tag-sre">S</span></td>
-              <td><span class="text-success">Released</span></td>
-              <td>v2.3.0</td>
-            </tr>
-            <tr>
-              <td><span class="text-sm">Issue #331 - API rate limit</span></td>
-              <td>42m 18s</td>
-              <td><span class="tag tag-issue">I</span> <span class="tag tag-coding">C</span> <span class="tag tag-qa">Q</span></td>
-              <td><span class="text-danger">Rolled back</span></td>
-              <td>v2.2.9</td>
-            </tr>
-            <tr>
-              <td><span class="text-sm">Issue #329 - Add logging</span></td>
-              <td>18m 05s</td>
-              <td><span class="tag tag-vod">V</span> <span class="tag tag-issue">I</span> <span class="tag tag-coding">C</span> <span class="tag tag-qa">Q</span> <span class="tag tag-sre">S</span></td>
-              <td><span class="text-success">Released</span></td>
-              <td>v2.2.8</td>
-            </tr>
-          </table>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderChat() {
-    document.getElementById('chatContent').innerHTML = `
-      <div style="display:flex;gap:16px;min-height:500px">
-        <!-- Chat conversation -->
-        <div class="card" style="flex:1;display:flex;flex-direction:column;padding:0">
-          <div style="padding:14px 20px;border-bottom:1px solid var(--border)">
-            <h2 style="font-size:14px;font-weight:600">Chat Agent \u00b7 Personal Assistant</h2>
-            <div style="font-size:11px;color:var(--text-secondary)">Your personal agent connected to the workflow \u00b7 Backend: <strong>Default</strong></div>
-          </div>
-          <div style="flex:1;padding:16px 20px;overflow-y:auto;font-size:13px">
-            <div class="activity-item"><div style="background:var(--accent);color:#fff;border-radius:8px 8px 8px 2px;padding:10px 14px;max-width:80%">Hello! I'm your personal DevOps assistant. How can I help you today?</div></div>
-            <div class="activity-item" style="justify-content:flex-end"><div style="background:var(--bg);border-radius:8px 8px 2px 8px;padding:10px 14px;max-width:80%">Check the status of issue #342</div></div>
-            <div class="activity-item"><div style="background:var(--accent);color:#fff;border-radius:8px 8px 8px 2px;padding:10px 14px;max-width:80%">\u2705 Issue #342 "Login timeout" is currently with <strong>QA Agent</strong> (PR #1278 under review). Estimated completion: ~15 min.</div></div>
-            <div class="activity-item"><div style="background:var(--accent);color:#fff;border-radius:8px 8px 8px 2px;padding:10px 14px;max-width:80%">\u2139\ufe0f VOD Agent identified 2 new signals today. One may be relevant to you: "API response time degraded after last deploy". Want me to create an issue?</div></div>
-          </div>
-          <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px">
-            <input type="text" placeholder="Ask me anything..." style="flex:1;padding:8px 14px;border:1px solid var(--border);border-radius:6px;font-size:13px;outline:none">
-            <button class="btn btn-primary">Send</button>
-          </div>
-        </div>
-
-        <!-- Agent context sidebar -->
-        <div class="card" style="width:220px;flex-shrink:0;padding:16px">
-          <h3 style="font-size:12px;font-weight:600;margin-bottom:12px">Connected Agents</h3>
-          <div style="display:flex;flex-direction:column;gap:6px;font-size:12px">
-            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:#fdf2f8"><span class="ndot" style="width:8px;height:8px;border-radius:50%;background:#ec4899;display:inline-block"></span>VOD Agent <span class="badge" style="margin-left:auto;background:var(--bg);color:var(--text-secondary);font-size:10px;padding:0 6px;border-radius:4px">47</span></div>
-            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:#fef2f2"><span class="ndot" style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>Issue Agent <span class="badge" style="margin-left:auto;background:var(--bg);color:var(--text-secondary);font-size:10px;padding:0 6px;border-radius:4px">3</span></div>
-            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:#eff6ff"><span class="ndot" style="width:8px;height:8px;border-radius:50%;background:#3b82f6;display:inline-block"></span>Coding Agent <span class="badge" style="margin-left:auto;background:var(--bg);color:var(--text-secondary);font-size:10px;padding:0 6px;border-radius:4px">1 PR</span></div>
-            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:#faf5ff"><span class="ndot" style="width:8px;height:8px;border-radius:50%;background:#8b5cf6;display:inline-block"></span>QA Agent <span class="badge" style="margin-left:auto;background:var(--bg);color:var(--text-secondary);font-size:10px;padding:0 6px;border-radius:4px">2</span></div>
-            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:#fff7ed"><span class="ndot" style="width:8px;height:8px;border-radius:50%;background:#f97316;display:inline-block"></span>SRE Agent <span class="badge" style="margin-left:auto;background:var(--bg);color:var(--text-secondary);font-size:10px;padding:0 6px;border-radius:4px">v2.3.1</span></div>
-          </div>
-          <div style="margin-top:16px;padding:10px;background:#f0f9ff;border-radius:6px;font-size:11px;color:var(--text-secondary)">
-            <strong style="color:var(--sky)">\u260e Your Agent</strong><br>
-            Each user has their own personal Chat Agent that can interact with the entire workflow.
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderRepos() {
-    document.getElementById('reposContent').innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-        <h2 style="font-size:16px;font-weight:600">Repositories</h2>
-        <button class="btn btn-primary btn-sm">\u21bb Sync from GitCode</button>
-      </div>
-      <!-- Hosted repos -->
-      <div class="card" style="padding:16px 20px">
-        <div class="card-header"><h2>Hosted <span class="count">3</span></h2></div>
-        <div class="repo-item" onclick="switchRepo('backend');showView('dashboard')" style="cursor:pointer">
-          <div class="repo-icon" style="background:#eff6ff;color:var(--accent)">\u25a0</div>
-          <div class="repo-info">
-            <div class="name">team/backend-service</div>
-            <div class="desc">Core backend API service</div>
-            <div class="meta">Maintainer \u00b7 Webhook OK \u00b7 \u2605 main</div>
-          </div>
-          <span class="tag tag-sre" style="background:#dcfce7;color:#16a34a">Active</span>
-        </div>
-        <div class="repo-item" onclick="switchRepo('frontend');showView('dashboard')" style="cursor:pointer">
-          <div class="repo-icon" style="background:#f0fdf4;color:var(--green)">\u25a0</div>
-          <div class="repo-info">
-            <div class="name">team/web-frontend</div>
-            <div class="desc">React-based admin dashboard</div>
-            <div class="meta">Maintainer \u00b7 Webhook OK \u00b7 \u2605 develop</div>
-          </div>
-          <span class="tag tag-sre" style="background:#dcfce7;color:#16a34a">Active</span>
-        </div>
-        <div class="repo-item">
-          <div class="repo-icon" style="background:#fff7ed;color:var(--orange)">\u25a0</div>
-          <div class="repo-info">
-            <div class="name">team/mobile-app</div>
-            <div class="desc">React Native mobile application</div>
-            <div class="meta">Member \u00b7 Webhook OK \u00b7 \u2605 main</div>
-          </div>
-          <span class="tag tag-default">Joined</span>
-        </div>
-      </div>
-      <!-- Available -->
-      <div class="card mt-16" style="padding:16px 20px">
-        <div class="card-header"><h2>Available to Join <span class="count">5</span></h2></div>
-        <div class="table-wrap">
-          <table>
-            <tr><th>Repository</th><th>Role</th><th>Description</th><th></th></tr>
-            <tr><td><strong>org/docs-site</strong></td><td>Member</td><td>Documentation site</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
-            <tr><td><strong>org/devops-toolkit</strong></td><td>Member</td><td>Internal DevOps tools</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
-            <tr><td><strong>org/data-pipeline</strong></td><td><span class="tag tag-sre">Admin</span></td><td>ETL data pipeline</td><td><button class="btn btn-primary btn-sm" onclick="alert('[Demo] 托管仓库 org/data-pipeline')">Host Now</button></td></tr>
-            <tr><td><strong>team/analytics</strong></td><td><span class="tag tag-issue">Maintainer</span></td><td>Analytics service</td><td><button class="btn btn-primary btn-sm" onclick="alert('[Demo] 托管仓库 team/analytics')">Host Now</button></td></tr>
-            <tr><td><strong>org/docs-site</strong></td><td>Member</td><td>Documentation site</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
-            <tr><td><strong>team/analytics</strong></td><td>Maintainer</td><td>Analytics service</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
-            <tr><td><strong>team/notification</strong></td><td>Member</td><td>Notification service</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
-          </table>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderSettings() {
-    document.getElementById('settingsContent').innerHTML = `
-      <div style="display:flex;gap:8px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0">
-        <a class="btn btn-outline btn-sm active-tab" onclick="settingsTab(this,'channel')" style="border:none;border-radius:0;border-bottom:2px solid var(--accent);color:var(--accent);font-weight:500">Channel</a>
-        <a class="btn btn-outline btn-sm" onclick="settingsTab(this,'credentials')" style="border:none;border-radius:0;color:var(--text-secondary)">Credentials</a>
-        <a class="btn btn-outline btn-sm" onclick="settingsTab(this,'preferences')" style="border:none;border-radius:0;color:var(--text-secondary)">Preferences</a>
-      </div>
-
-      <div id="settings-channel" class="settings-section">
-        <div class="card" style="padding:16px 20px">
-          <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Chat Agent Backend</h3>
-          <div class="flex items-center gap-8" style="margin-bottom:10px">
-            <label style="font-size:12px;color:var(--text-secondary);width:120px">Backend Type</label>
-            <select style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:6px;font-size:12px;background:var(--bg)">
-              <option>Default (Built-in)</option>
-              <option>Custom (OpenClaw, Hermes...)</option>
-            </select>
-          </div>
-          <div class="flex items-center gap-8" style="margin-bottom:10px">
-            <label style="font-size:12px;color:var(--text-secondary);width:120px">Backend URL</label>
-            <input type="text" value="http://localhost:8080/api/chat" style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:6px;font-size:12px;background:var(--bg)">
-          </div>
-          <div class="flex items-center gap-8" style="margin-bottom:10px">
-            <label style="font-size:12px;color:var(--text-secondary);width:120px">API Key</label>
-            <input type="password" value="sk-demo-key-xxxxxxxx" style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:6px;font-size:12px;background:var(--bg)">
-          </div>
-          <div style="padding:10px;background:#f0fdf4;border-radius:6px;font-size:12px;color:#16a34a">
-            \u2713 Your personal Chat Agent is active. Each user has their own agent connected to the workflow.
-          </div>
-        </div>
-        <div class="card mt-16" style="padding:16px 20px">
-          <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">IM Integration (via Chat Agent)</h3>
-          <div class="flex items-center gap-8" style="margin-bottom:10px">
-            <label style="font-size:12px;color:var(--text-secondary);width:120px">Feishu</label>
-            <span style="font-size:12px;color:var(--green)">\u2713 Connected</span>
-            <button class="btn btn-outline btn-sm">\u21bb Reconnect</button>
-          </div>
-          <div class="flex items-center gap-8" style="margin-bottom:10px">
-            <label style="font-size:12px;color:var(--text-secondary);width:120px">WeCom</label>
-            <span style="font-size:12px;color:var(--text-light)">\u2014 Not configured</span>
-            <button class="btn btn-outline btn-sm">Configure</button>
-          </div>
-          <div class="flex items-center gap-8" style="margin-bottom:10px">
-            <label style="font-size:12px;color:var(--text-secondary);width:120px">DingTalk</label>
-            <span style="font-size:12px;color:var(--text-light)">\u2014 Not configured</span>
-            <button class="btn btn-outline btn-sm">Configure</button>
-          </div>
-        </div>
-      </div>
-
-      <div id="settings-credentials" class="settings-section" style="display:none">
-        <div class="card" style="padding:16px 20px">
-          <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode</h3>
-          <div class="flex items-center gap-8" style="margin-bottom:10px">
-            <label style="font-size:12px;color:var(--text-secondary);width:120px">API Token</label>
-            <input type="password" value="ghp_demo_token_xxxxxxxxxxxxxxxxxxxx" style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:6px;font-size:12px;background:var(--bg)">
-          </div>
-        </div>
-        <div class="card mt-16" style="padding:16px 20px">
-          <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Huawei Cloud</h3>
-          <div class="flex items-center gap-8" style="margin-bottom:10px">
-            <label style="font-size:12px;color:var(--text-secondary);width:120px">Access Key</label>
-            <input type="password" value="AK-demo-access-key-xxxx" style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:6px;font-size:12px;background:var(--bg)">
-          </div>
-          <div class="flex items-center gap-8" style="margin-bottom:10px">
-            <label style="font-size:12px;color:var(--text-secondary);width:120px">Secret Key</label>
-            <input type="password" value="SK-demo-secret-key-xxxx" style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:6px;font-size:12px;background:var(--bg)">
-          </div>
-          <div style="font-size:11px;color:var(--text-secondary)">Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.</div>
-        </div>
-      </div>
-
-      <div id="settings-preferences" class="settings-section" style="display:none">
-        <div class="card" style="padding:16px 20px">
-          <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Notifications</h3>
-          <label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px"><input type="checkbox" checked> Issue events</label>
-          <label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px"><input type="checkbox" checked> PR events</label>
-          <label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px"><input type="checkbox"> Build failures</label>
-          <label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px"><input type="checkbox" checked> Release events</label>
-          <label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px"><input type="checkbox"> VOD signals</label>
-        </div>
-        <div class="card mt-16" style="padding:16px 20px">
-          <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Custom Skills</h3>
-          <button class="btn btn-outline btn-sm">Upload Skill</button>
-          <div style="margin-top:12px">
-            <div class="repo-item" style="padding:8px 0">
-              <span class="tag tag-coding">team/backend-service</span>
-              <span class="text-xs text-secondary" style="margin-left:8px">pull_request_opened</span>
-              <span class="text-xs" style="color:var(--accent);flex:1;text-align:right">custom-pr-review</span>
-              <button class="btn btn-outline btn-sm">Edit</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  // ====== Agent Detail ======
-  function renderAgentDetail(agent) {
-    const data = {
-      vod: {
-        icon:'\u266b', color:'#ec4899', bg:['#fdf2f8','#fce7f3'], name:'VOD Agent', sub:'Voice of Developer',
-        desc:'从各种来源收集开发者声音，分析共性问题，提炼价值信息，自动创建 Issue',
-        metrics:[{val:'47',lbl:'Signals/Week'},{val:'8',lbl:'Issues Created'},{val:'92%',lbl:'Signal Quality'}],
-        events:[
-          {time:'12:05',text:'Signal: "CI pipeline too slow" \u2192 created <strong>Issue #345</strong>'},
-          {time:'10:30',text:'Analysis complete: 3 signals cluster around "test flakiness"'},
-          {time:'08:00',text:'Weekly report: <strong>8 key signals</strong>, 2 trending up'},
-          {time:'Yesterday',text:'Collected 12 feedback entries from PR comments'},
-        ]
-      },
-      issue: {
-        icon:'\u26a0', color:'#ef4444', bg:['#fef2f2','#fee2e2'], name:'Issue Agent', sub:'Issue Manager',
-        desc:'处理 Issue，分类打标签，提炼为可开发的需求，指派处理人，触发 Coding Agent',
-        metrics:[{val:'3',lbl:'Active'},{val:'12',lbl:'Resolved/Week'},{val:'2m',lbl:'Avg Triage'}],
-        events:[
-          {time:'13:50',text:'Assigned <strong>Issue #342</strong> (bug: login timeout) to @alice'},
-          {time:'13:22',text:'A2A triggered Coding Agent for Issue #338'},
-          {time:'11:05',text:'Labelled Issue #335 as <strong>enhancement</strong>'},
-          {time:'09:30',text:'Auto-closed Issue #329 (fixed in PR #1270)'},
-        ]
-      },
-      coding: {
-        icon:'\u2699', color:'#3b82f6', bg:['#eff6ff','#dbeafe'], name:'Coding Agent', sub:'Developer',
-        desc:'接收需求，设计方案，编写代码实现，自我审查，提交 Pull Request',
-        metrics:[{val:'3',lbl:'Today'},{val:'45s',lbl:'Avg Time'},{val:'98%',lbl:'First-Pass OK'}],
-        events:[
-          {time:'14:15',text:'Submitted <strong>PR #1278</strong> for Issue #342'},
-          {time:'12:30',text:'Designed solution for Issue #342: add session refresh token'},
-          {time:'11:00',text:'Implemented feature: webhook retry logic (PR #1275)'},
-          {time:'09:45',text:'Self-review completed for PR #1275'},
-        ]
-      },
-      qa: {
-        icon:'\u2714', color:'#8b5cf6', bg:['#faf5ff','#f3e8ff'], name:'QA Agent', sub:'Quality Assurance',
-        desc:'代码审查、自动化测试、功能验证、安全检查，确保代码质量',
-        metrics:[{val:'4',lbl:'Today'},{val:'92%',lbl:'Pass Rate'},{val:'3',lbl:'Issues Caught'}],
-        events:[
-          {time:'14:30',text:'Approved <strong>PR #1278</strong> (1 minor suggestion)'},
-          {time:'13:15',text:'Code review completed for PR #1275: <strong>2 issues found</strong>'},
-          {time:'12:00',text:'Auto-test suite passed for PR #1275 (156 tests)'},
-          {time:'10:30',text:'Security scan OK for PR #1272'},
-        ]
-      },
-      sre: {
-        icon:'\u2661', color:'#f97316', bg:['#fff7ed','#ffedd5'], name:'SRE Agent', sub:'DevOps',
-        desc:'构建、部署、监控、故障排查、合规检查、发布管理（含 Release 能力）',
-        metrics:[{val:'99.9%',lbl:'Uptime'},{val:'3',lbl:'Deploys/Week'},{val:'12s',lbl:'MTTR'}],
-        events:[
-          {time:'13:22',text:'Deployed <strong>v2.3.1</strong> to production \u00b7 <span class="text-success">success</span>'},
-          {time:'13:18',text:'Build #482 completed'},
-          {time:'12:05',text:'Auto-resolved incident <strong>INC-023</strong>'},
-          {time:'10:15',text:'Compliance scan OK for backend-service'},
-        ]
-      }
-    };
-
-    const d = data[agent];
-    if (!d) return;
-
-    document.getElementById('agentDetailContent').innerHTML = `
-      <div class="card" style="padding:16px 20px;background:linear-gradient(135deg,${d.bg[0]},${d.bg[1]});border-color:${d.color}44">
-        <div class="flex items-center gap-12">
-          <div style="width:48px;height:48px;border-radius:10px;background:${d.color}22;display:flex;align-items:center;justify-content:center;font-size:22px">${d.icon}</div>
-          <div style="flex:1">
-            <h2 style="font-size:18px;font-weight:600;margin-bottom:2px">${d.name}</h2>
-            <div style="font-size:13px;color:var(--text-secondary)">${d.sub} \u00b7 ${d.desc}</div>
-          </div>
-          <div style="display:flex;gap:8px">
-            <button class="btn btn-outline btn-sm">\u2699 Configure</button>
-            <button class="btn btn-primary btn-sm">View Logs</button>
-            <button class="btn btn-outline btn-sm" onclick="showView('dashboard')">\u2190 Back</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="grid-4 mt-16">
-        ${d.metrics.map(m => `<div class="stat-card"><div class="num" style="color:${d.color}">${m.val}</div><div class="label">${m.lbl}</div></div>`).join('')}
-      </div>
-
-      <div class="card mt-16" style="padding:16px 20px">
-        <div class="card-header"><h2>Event History</h2><span style="font-size:11px;color:var(--text-light)">Last 24h</span></div>
-        ${d.events.map(e => `
-          <div class="activity-item">
-            <div class="atime">${e.time}</div>
-            <div class="acontent">${e.text}</div>
-          </div>
-        `).join('')}
-      </div>
-
-      <div class="card mt-16" style="padding:16px 20px">
-        <div class="card-header"><h2>Skill</h2></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <span class="tag tag-default" style="padding:4px 12px;font-size:12px">\u2605 Default: skills/${agent}/SKILL.md</span>
-          <span class="tag tag-default" style="padding:4px 12px;font-size:12px;background:#eff6ff;color:var(--accent)">\u270f Custom: team/backend-service</span>
-        </div>
-      </div>
-    `;
-  }
-
-  // ====== Navigation ======
-  function showView(name, param) {
-    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-    document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
-
-    const titles = { dashboard:'Dashboard', pipeline:'Pipeline', chat:'Chat Agent',
-      repos:'Repositories', settings:'Settings', 'agent-detail':'Agent', 'repo-select':'选择仓库' };
-    document.getElementById('pageTitle').textContent = titles[name] || 'Dashboard';
-    if (name === 'agent-detail' && param) {
-      const n = { vod:'VOD Agent', issue:'Issue Agent', coding:'Coding Agent', qa:'QA Agent', sre:'SRE Agent', chat:'Chat Agent' };
-      document.getElementById('pageTitle').textContent = n[param] || 'Agent';
-    }
-
-    if (name === 'agent-detail' && param) {
-      document.getElementById('view-agent-detail').classList.add('active');
-      renderAgentDetail(param);
-    } else {
-      const view = document.getElementById('view-' + name);
-      if (view) {
-        view.classList.add('active');
-        if (name === 'dashboard') renderDashboard(currentRepo);
-        if (name === 'pipeline') renderPipeline(currentRepo);
-        if (name === 'chat') renderChat();
-        if (name === 'repos') renderRepos();
-        if (name === 'settings') renderSettings();
-      }
-    }
-
-    // Highlight sidebar
-    document.querySelectorAll('.sidebar-nav a').forEach(a => {
-      a.classList.remove('active');
-      const onclick = a.getAttribute('onclick') || '';
-      if (name === 'agent-detail' && param && onclick.includes("'" + param + "'")) {
-        a.classList.add('active');
-      } else if (onclick.includes("showView('" + name + "'")) {
-        a.classList.add('active');
-      }
-    });
-  }
-
-  function showAgent(agent) {
-    showView('agent-detail', agent);
-  }
-
-  function onRepoSelect(sel) {
-    if (sel.value === '__add__') {
-      showView('repos');
-      sel.value = currentRepo;
-      return;
-    }
-    switchRepo(sel.value);
-  }
-
-  function switchRepo(repo) {
-    currentRepo = repo;
-    document.querySelector('.repo-selector select').value = repo;
-    if (document.getElementById('view-dashboard').classList.contains('active')) {
-      renderDashboard(repo);
-    }
-  }
-
-  function togglePasswordLogin() {
-    const form = document.getElementById('passwordLoginForm');
-    form.style.display = form.style.display === 'none' ? 'block' : 'none';
-  }
-
-  function settingsTab(el, tab) {
-    document.getElementById('settings-channel').style.display = tab === 'channel' ? 'block' : 'none';
-    document.getElementById('settings-credentials').style.display = tab === 'credentials' ? 'block' : 'none';
-    document.getElementById('settings-preferences').style.display = tab === 'preferences' ? 'block' : 'none';
-    document.querySelectorAll('.active-tab').forEach(a => {
-      a.classList.remove('active-tab');
-      a.style.color = 'var(--text-secondary)';
-      a.style.borderBottomColor = 'transparent';
-      a.style.fontWeight = '400';
-    });
-    el.classList.add('active-tab');
-    el.style.color = 'var(--accent)';
-    el.style.borderBottomColor = 'var(--accent)';
-    el.style.fontWeight = '500';
-  }
-
-  function doLogin() {
-    document.getElementById('loginOverlay').classList.add('hidden');
-    renderRepoSelect();
-  }
-
-  function renderRepoSelect() {
-    showView('repo-select');
-    const el = document.getElementById('repoSelectContent');
-    document.getElementById('pageTitle').textContent = '选择仓库';
-    document.getElementById('repoTag').textContent = '';
-    el.innerHTML = `
-      <div style="max-width:900px;margin:0 auto">
-        <div style="margin-bottom:24px">
-          <h2 style="font-size:18px;font-weight:600;margin-bottom:4px">Welcome, Zhang Wei</h2>
-          <p style="font-size:13px;color:var(--text-secondary)">请选择你要加入的 GitCode 仓库</p>
-        </div>
-
-        <div style="display:flex;gap:8px;margin-bottom:20px">
-          <input type="text" placeholder="🔍 搜索仓库名称..." style="flex:1;padding:8px 14px;border:1px solid var(--border);border-radius:8px;font-size:13px;outline:none;background:var(--card)">
-          <select style="padding:8px 14px;border:1px solid var(--border);border-radius:8px;font-size:12px;background:var(--card);outline:none">
-            <option>全部</option><option>成员</option><option>管理员</option>
-          </select>
-        </div>
-
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px">
-          ${[
-            {name:'team/backend-service', desc:'Core backend API service', owner:'team', role:'Maintainer', status:'hosted', btn:'已托管'},
-            {name:'team/web-frontend', desc:'React admin dashboard', owner:'team', role:'Maintainer', status:'joined', btn:'已加入'},
-            {name:'org/docs-site', desc:'Documentation site', owner:'org', role:'Member', status:'joined', btn:'已加入'},
-            {name:'org/devops-toolkit', desc:'Internal DevOps tools', owner:'org', role:'Member', status:'none', btn:'+ Join'},
-            {name:'team/mobile-app', desc:'React Native mobile app', owner:'team', role:'Member', status:'none', btn:'+ Join'},
-            {name:'org/data-pipeline', desc:'ETL data pipeline', owner:'org', role:'Admin', status:'none', btn:'Host Now'},
-            {name:'team/notification', desc:'Notification service', owner:'team', role:'Member', status:'none', btn:'+ Join'},
-            {name:'team/analytics', desc:'Analytics service', owner:'team', role:'Maintainer', status:'none', btn:'Host Now'},
-          ].map(r => {
-            const statusColors = {hosted:'#dcfce7;color:#16a34a', joined:'#eff6ff;color:#2563eb', none:'#f1f5f9;color:#64748b'};
-            const statusDots = {hosted:'🚀', joined:'🌐', none:'🚧'};
-            return \`<div class="card" style="padding:16px;cursor:pointer;display:flex;flex-direction:column;justify-content:space-between" onclick="selectRepo('\${r.name}')">
-              <div>
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                  <span style="font-size:13px;font-weight:600">\${r.name}</span>
-                  <span class="tag tag-default" style="font-size:10px">\${r.role}</span>
-                </div>
-                <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">\${r.desc}</div>
-                <div style="font-size:10px;color:var(--text-light)">Owner: \${r.owner}</div>
-              </div>
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
-                <span style="font-size:11px">\${statusDots[r.status]} \${r.status === 'hosted' ? '已托管' : r.status === 'joined' ? '已加入' : '未加入'}</span>
-                <button class="btn \${r.status === 'none' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="event.stopPropagation();handleJoin('\${r.name}')">\${r.btn}</button>
-              </div>
-            </div>\`;
-          }).join('')}
-        </div>
-      </div>
-    `;
-  }
-
-  function selectRepo(name) {
-    const map = {'team/backend-service':'backend','team/web-frontend':'frontend','team/mobile-app':'mobile'};
-    const key = map[name] || 'backend';
-    switchRepo(key);
-    showView('dashboard');
-  }
-
-  function handleJoin(name) {
-    alert('[Demo] 加入仓库: ' + name);
-    renderRepoSelect();
-  }
-
-  // Init
-  renderDashboard(currentRepo);
+// Login
+function login(){document.getElementById('ln').classList.add('hid');renderDash()}
+function togglePwd(){let f=document.getElementById('pwdForm');f.style.display=f.style.display==='none'||!f.style.display?'block':'none'}
+// Init
+renderDash();
 </script>
 </body>
 </html>
