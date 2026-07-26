@@ -144,15 +144,19 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 │    ♡ SRE Agent                                      │
 │                                                     │
 │  Account                                            │
-│    ☎ Chat Agent（个人）                              │
-│    ⚙ Settings                                       │
+│    ☺ Zhang Wei · Online                             │
+│                                                     │
+│  Settings                                           │
+│    ⚙ Repo Settings                                  │
 └─────────────────────────────────────────────────────┘
 ```
 
 说明：
 - **Repo 下拉**：显示已托管的仓库列表，底部有「+ 新增仓库托管」选项
 - **DevOps Agents**：核心工作流的 5 个 Agent，点击进入对应 Agent 详情
-- **Chat Agent**：归属 Account 区域，每个用户个人专属，非核心工作流环节
+- **Account**：用户个人信息、在线状态
+- **Settings**：仓库级别的通用设置（凭据、通知、自定义 Skill 等），与 Account 并列
+- **Chat Agent 设置**：集成在 Chat Agent 页面内部，不在侧边栏展示
 
 切换仓库后，Dashboard、Pipeline 等页面内容跟随切换为该仓库的数据。
 
