@@ -1,8 +1,8 @@
-# DevOps Bot 系统使用场景与工作流设计
+# Agentic DevOps 系统使用场景与工作流设计
 
 ## 一、系统概述
 
-DevOps Bot 是一个基于 GitCode 事件驱动的多 Agent 协作 DevOps 平台。
+Agentic DevOps 是一个多 Agent 协作的 DevOps 平台，致力于实现 Loop Engineer。
 
 **核心理念：**
 - **Bot** — 事件编排器，负责监听事件、路由分发、会话管理
@@ -30,7 +30,7 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 ### 2.1 首次登录
 
 ```
-开发者通过 GitCode OAuth 登录 DevOps Bot
+开发者通过 GitCode OAuth 登录 Agentic DevOps
   │
   ├── 1. 选择要加入的仓库（Repo）
   │     用自己的 GitCode token 拉取所有成员仓库列表
@@ -40,7 +40,7 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
   ├── 2. 托管仓库（仅限项目维护者/管理员）
   │     对于自己管理的仓库，点击「托管」
   │     系统自动创建 GitCode Webhook
-  │     → DevOps Bot 开始监听该仓库的所有事件
+  │     → Agentic DevOps 开始监听该仓库的所有事件
   │     → 事件将按照路由规则自动分发给对应的 Agent
   │
   ├── 3. 配置消息通道（Channel）
@@ -69,7 +69,7 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 
 ```
 ┌─ Sidebar ──────────────────────────────────────────┐
-│  DevOps Bot                                         │
+│  Agentic DevOps                                         │
 │                                                     │
 │  [team/backend-service ▼]                           │
 │       ┌─────────────────────┐                       │
@@ -306,7 +306,7 @@ Chat Agent（个人专属，每个用户一个）
         └── "部署一下 v2.3.1" → 触发部署
 
 每个用户有独立的 Chat Agent 实例
-Chat Agent 是用户与整个 DevOps Bot 工作流的统一入口
+Chat Agent 是用户与整个 Agentic DevOps 工作流的统一入口
 ```
 
 ### 4.3 构建失败自动处理
@@ -340,7 +340,7 @@ SRE Agent
 | 配置项 | 说明 | 配置入口 |
 |--------|------|---------|
 | **已加入 Repo 列表** | 用户参与的所有仓库，展示角色（成员/维护者/管理员） | Repositories 页面 |
-| **已托管 Repo 列表** | 被 DevOps Bot 监听的项目，显示 Webhook 状态 | Repositories 页面 |
+| **已托管 Repo 列表** | 被 Agentic DevOps 监听的项目，显示 Webhook 状态 | Repositories 页面 |
 | **Dashboard 仓库切换** | 侧边栏下拉选择已托管仓库，Dashboard 跟随切换 | 侧边栏 Repo Selector |
 | **Channel 配置** | Chat Agent 选择（默认/自有），IM 绑定 | Settings → Channel |
 | **云平台凭据** | 华为云 AK/SK，为 Coding Agent 提供云端开发环境 | Settings → Credentials |
