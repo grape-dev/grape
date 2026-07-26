@@ -182,6 +182,7 @@ def save_oauth_state(state: str, provider: str, data: dict | None = None):
 
 def validate_oauth_state(state: str, provider: str) -> dict | None:
     """验证并消耗 OAuth state（查 + 删），返回 data 或 None"""
+    from src.config import log
     try:
         with db_lock:
             c = db.cursor()
@@ -191,14 +192,21 @@ def validate_oauth_state(state: str, provider: str) -> dict | None:
                 c.execute("DELETE FROM oauth_states WHERE state=?", (state,))
                 db.commit()
             else:
+                log("warning", f"validate_oauth_state: state={state[:20]}... not found in DB")
                 return None
-        if row[0] != provider or time.time() > row[2]:
+        if row[0] != provider:
+            log("warning", f"validate_oauth_state: provider mismatch expected={provider} got={row[0]}")
+            return None
+        if time.time() > row[2]:
+            log("warning", f"validate_oauth_state: state expired expires={row[2]} now={time.time()}")
             return None
         try:
             return json.loads(row[1])
-        except Exception:
+        except Exception as e:
+            log("warning", f"validate_oauth_state: json parse error: {e}")
             return None
-    except Exception:
+    except Exception as e:
+        log("warning", f"validate_oauth_state: exception: {e}")
         return None
 
 

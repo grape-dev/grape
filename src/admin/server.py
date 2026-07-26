@@ -206,7 +206,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
                         f"&response_type=code"
                         f"&scope=read_user"
-                        f"&state={state}")
+                        f"&state={urllib.parse.quote(state)}")
             self.send_response(302)
             self.send_header("Location", auth_url)
             self.end_headers()
@@ -222,6 +222,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             state_data = user_db.validate_oauth_state(state, "gitcode")
             if not state_data:
                 self._send_html(_render_user_login("GitCode 登录失败：state 无效或已过期"))
+                from src.config import log
+                log("warning", f"OAuth state validation failed. state={state[:16]}..., callback_query={self.path.split('?',1)[1] if '?' in self.path else 'no_qs'}")
                 return
             from src.config import get_account
             acc = get_account()
