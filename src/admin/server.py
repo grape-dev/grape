@@ -227,7 +227,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not state_data:
                 self._send_html(_render_user_login("GitCode 登录失败：state 无效或已过期"))
                 from src.config import log
-                log("warning", f"OAuth state validation failed. state={state[:16]}..., callback_query={self.path.split('?',1)[1] if '?' in self.path else 'no_qs'}")
+                log.warning(f"OAuth state validation failed. state={state[:16]}..., callback_query={self.path.split('?',1)[1] if '?' in self.path else 'no_qs'}")
                 return
             from src.config import get_account
             acc = get_account()

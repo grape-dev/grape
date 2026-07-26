@@ -178,9 +178,9 @@ def save_oauth_state(state: str, provider: str, data: dict | None = None):
             c.execute("INSERT OR REPLACE INTO oauth_states (state, provider, data_json, expires) VALUES (?,?,?,?)",
                       (state, provider, json.dumps(data or {}), time.time() + 600))
             db.commit()
-        log("info", f"save_oauth_state: state={state[:20]}... saved OK")
+        log.info(f"save_oauth_state: state={state[:20]}... saved OK")
     except Exception as e:
-        log("warning", f"save_oauth_state FAILED: {e}")
+        log.warning(f"save_oauth_state FAILED: {e}")
         raise  # 暴露异常，让 handle_one_request 记录完整 traceback
 
 
@@ -196,21 +196,21 @@ def validate_oauth_state(state: str, provider: str) -> dict | None:
                 c.execute("DELETE FROM oauth_states WHERE state=?", (state,))
                 db.commit()
             else:
-                log("warning", f"validate_oauth_state: state={state[:20]}... not found in DB")
+                log.warning(f"validate_oauth_state: state={state[:20]}... not found in DB")
                 return None
         if row[0] != provider:
-            log("warning", f"validate_oauth_state: provider mismatch expected={provider} got={row[0]}")
+            log.warning(f"validate_oauth_state: provider mismatch expected={provider} got={row[0]}")
             return None
         if time.time() > row[2]:
-            log("warning", f"validate_oauth_state: state expired expires={row[2]} now={time.time()}")
+            log.warning(f"validate_oauth_state: state expired expires={row[2]} now={time.time()}")
             return None
         try:
             return json.loads(row[1])
         except Exception as e:
-            log("warning", f"validate_oauth_state: json parse error: {e}")
+            log.warning(f"validate_oauth_state: json parse error: {e}")
             return None
     except Exception as e:
-        log("warning", f"validate_oauth_state: exception: {e}")
+        log.warning(f"validate_oauth_state: exception: {e}")
         return None
 
 
