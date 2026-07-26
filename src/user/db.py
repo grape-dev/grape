@@ -214,6 +214,20 @@ def validate_oauth_state(state: str, provider: str) -> dict | None:
         return None
 
 
+def debug_list_oauth_states():
+    """调试：打印所有未过期 oauth_states"""
+    from src.config import log
+    try:
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute("SELECT state, provider, expires FROM oauth_states WHERE expires > ? ORDER BY expires", (time.time(),)).fetchall()
+        log.warning(f"oauth_states in DB ({len(rows)}):")
+        for r in rows[:10]:
+            log.warning(f"  state={r[0][:40]}... provider={r[1]} expires={r[2]}")
+    except Exception as e:
+        log.warning(f"debug_list_oauth_states: {e}")
+
+
 def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
     """通过 GitCode 用户 ID 查找本地用户"""
     with db_lock:

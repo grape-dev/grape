@@ -225,9 +225,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             state_data = user_db.validate_oauth_state(state, "gitcode")
             if not state_data:
-                self._send_html(_render_user_login("GitCode 登录失败：state 无效或已过期"))
                 from src.config import log
-                log.warning(f"OAuth state validation failed. state={state[:16]}..., callback_query={self.path.split('?',1)[1] if '?' in self.path else 'no_qs'}")
+                log.warning(f"OAuth validate failed. state=|{state}| qs={self.path.split('?',1)[1] if '?' in self.path else 'no_qs'}")
+                # 检查 DB 中所有 state
+                from src.user.db import debug_list_oauth_states
+                debug_list_oauth_states()
+                self._send_html(_render_user_login("GitCode 登录失败：state 无效或已过期"))
                 return
             from src.config import get_account
             acc = get_account()
