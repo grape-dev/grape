@@ -196,8 +196,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             redirect_uri = acc.get("gitcode_oauth_redirect_uri", "")
             if not redirect_uri:
                 scheme = "https" if self.headers.get("X-Forwarded-Proto", "") == "https" else "http"
-                host = self.headers.get("Host", "localhost:80")
-                redirect_uri = f"{scheme}://{host}/auth/gitcode/callback"
+                host = self.headers.get("Host", "").split(":")[0] or "localhost"
+                port = self.server.server_port
+                redirect_uri = f"{scheme}://{host}:{port}/auth/gitcode/callback"
             state = hashlib.sha256(os.urandom(32)).hexdigest()
             user_db.save_oauth_state(state, "gitcode", {})
             auth_url = (f"https://gitcode.com/oauth/authorize"
@@ -229,8 +230,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             redirect_uri = acc.get("gitcode_oauth_redirect_uri", "")
             if not redirect_uri:
                 scheme = "https" if self.headers.get("X-Forwarded-Proto", "") == "https" else "http"
-                host = self.headers.get("Host", "localhost:80")
-                redirect_uri = f"{scheme}://{host}/auth/gitcode/callback"
+                host = self.headers.get("Host", "").split(":")[0] or "localhost"
+                port = self.server.server_port
+                redirect_uri = f"{scheme}://{host}:{port}/auth/gitcode/callback"
             try:
                 # code 换 access_token
                 token_req = urllib.request.Request(
