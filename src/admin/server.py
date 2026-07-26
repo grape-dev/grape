@@ -1,5 +1,5 @@
 """管理台 HTTP 服务（端口 80）：多用户管理台"""
-import json, os, time, hashlib, urllib.request, urllib.parse, re
+import json, os, time, hashlib, urllib.request, urllib.parse, re, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from concurrent.futures import ThreadPoolExecutor
@@ -226,9 +226,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             state_data = user_db.validate_oauth_state(state, "gitcode")
             if not state_data:
                 from src.config import log
-                log.warning(f"OAuth validate failed. state=|{state}| qs={self.path.split('?',1)[1] if '?' in self.path else 'no_qs'}")
-                # 检查 DB 中所有 state
-                from src.user.db import debug_list_oauth_states
+                log.warning(f"OAuth validate failed. thread={threading.current_thread().name} store_id={id(user_db._oauth_store) if hasattr(user_db,'_oauth_store') else 'N/A'} state=|{state}|")
+                from src.user.db import debug_list_oauth_states, _oauth_store
+                log.warning(f"callback store_id={id(_oauth_store)}")
                 debug_list_oauth_states()
                 self._send_html(_render_user_login("GitCode 登录失败：state 无效或已过期"))
                 return
