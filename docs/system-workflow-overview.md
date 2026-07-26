@@ -272,7 +272,7 @@ Dashboard 主要区域说明：
 ├───────────────────────────────────────────────────────┤
 │                                                        │
 │  ┌─ Agent Header ─────────────────────────────────┐  │
-│  │  ♫ VOD Agent                    [Config] [Logs] │  │
+│  │  ♫ VOD Agent                    [Config] [Events]  │  │
 │  │  Voice of Developer                            │  │
 │  │  ● Active | Today: 5 | Signals: 47/Week        │  │
 │  └────────────────────────────────────────────────┘  │
