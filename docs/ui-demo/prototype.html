@@ -156,7 +156,7 @@ td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bot
 .chat-in{padding:10px 18px;border-top:1px solid var(--b);display:flex;gap:8px}
 .chat-in input{flex:1;padding:8px 12px;border:1px solid var(--b);border-radius:7px;font-size:12px;outline:none}
 .chat-in input:focus{border-color:var(--a)}
-.chat-side{width:200px;flex-shrink:0;display:flex;flex-direction:column;gap:4px;font-size:11px}
+.chat-side{width:240px;flex-shrink:0;display:flex;flex-direction:column;gap:10px;font-size:11px;overflow-y:auto}
 .chat-side .agc{display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:7px;font-size:11px}
 .chat-side .agc .ad{width:7px;height:7px;border-radius:50%;display:inline-block}
 .chat-side .agc .ctc{margin-left:auto;font-size:10px;color:var(--t2);background:var(--bg);padding:0 5px;border-radius:4px}
@@ -484,17 +484,30 @@ function renderChat(){
     <div class="chat-in"><input placeholder="Ask me anything..." style="flex:1"><button class="bt bt-p">Send</button></div>
   </div>
   <div class="chat-side">
-    <div class="tgx ts" style="margin-bottom:8px;font-weight:600">Connected Agents</div>
+    <div class="ts" style="font-weight:600;color:var(--t);margin-bottom:2px">★ Agents</div>
     <div class="agc" style="background:#fde8f0"><span class="ad" style="background:var(--pk)"></span>VOD Agent<span class="ctc">47</span></div>
     <div class="agc" style="background:#fce5e5"><span class="ad" style="background:var(--r)"></span>Issue Agent<span class="ctc">3</span></div>
     <div class="agc" style="background:#e3edfd"><span class="ad" style="background:var(--a)"></span>Coding Agent<span class="ctc">1</span></div>
     <div class="agc" style="background:#f3e9fe"><span class="ad" style="background:var(--pu)"></span>QA Agent<span class="ctc">2</span></div>
     <div class="agc" style="background:#fef0e4"><span class="ad" style="background:var(--or)"></span>SRE Agent<span class="ctc">v2.3.1</span></div>
-    <div class="cd" style="margin-top:12px;padding:10px;font-size:10px;color:var(--t2)">
-      <b style="color:var(--sk)">☎ Chat Settings</b><br><br>
-      <div class="ts t3">Backend</div><div class="ts" style="margin-bottom:6px">Default (Built-in)</div>
-      <div class="ts t3">IM</div><div class="ts" style="margin-bottom:6px"><span class="tgx">✓</span> Feishu Connected</div>
-      <div class="ts"><a href="#" onclick="return false" style="color:var(--a);font-size:10px">Custom Backend →</a></div>
+
+    <div class="cd" style="padding:10px;font-size:10px">
+      <div class="ts" style="font-weight:600;color:var(--t);margin-bottom:8px">★ Backend</div>
+      <div class="tx t3" style="margin-bottom:2px">Type</div>
+      <select style="width:100%;padding:4px 6px;margin-bottom:6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg)">
+        <option>Default (Built-in)</option><option>Custom (OpenClaw)</option><option>Custom (Hermes)</option>
+      </select>
+      <div class="tx t3" style="margin-bottom:2px">URL</div>
+      <input type="text" value="localhost:8080/chat" disabled style="width:100%;padding:4px 6px;margin-bottom:6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg)">
+      <div class="tx t3" style="margin-bottom:2px">API Key</div>
+      <input type="password" value="********" style="width:100%;padding:4px 6px;margin-bottom:4px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg)">
+    </div>
+
+    <div class="cd" style="padding:10px;font-size:10px">
+      <div class="ts" style="font-weight:600;color:var(--t);margin-bottom:8px">★ IM</div>
+      <div class="flex fc jbtw" style="margin-bottom:4px"><span><span class="tgx">✓</span> Feishu</span><button class="bt bt-o bt-s" style="font-size:9px;padding:2px 6px">↻</button></div>
+      <div class="flex fc jbtw" style="margin-bottom:4px"><span><span class="t3">○</span> WeCom</span><button class="bt bt-o bt-s" style="font-size:9px;padding:2px 6px">+</button></div>
+      <div class="flex fc jbtw" style="margin-bottom:4px"><span><span class="t3">○</span> DingTalk</span><button class="bt bt-o bt-s" style="font-size:9px;padding:2px 6px">+</button></div>
     </div>
   </div>
 </div>`;

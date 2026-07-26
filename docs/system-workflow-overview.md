@@ -302,24 +302,26 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 │  Chat Agent · Personal Assistant                      │
 ├───────────────────────────────────────────────────────┤
 │                                                        │
-│  ┌────────── Main Chat ──────────┐  ┌── Agents ──┐  │
-│  │                                │  │ ♫ VOD  47  │  │
-│  │  Hello! I'm your personal     │  │ ⚠ Issue 3  │  │
-│  │  DevOps assistant.            │  │ ⚙ Coding 1 │  │
-│  │                                │  │ ✔ QA    2  │  │
-│  │  ┌───────────────────────────┐│  │ ♡ SRE v2.3 │  │
-│  │  │Check status of issue #342 ││  └────────────┘  │
-│  │  └───────────────────────────┘│                   │
-│  │                                │  ┌─ Config ───┐  │
-│  │  ✅ Issue #342 is with QA     │  │ Backend:   │  │
-│  │  Agent (PR #1278 under review)│  │ [Default ▼]│  │
-│  │  ETA: ~15 min.                │  │            │  │
-│  │                                │  │ IM:        │  │
-│  │  ┌─[Type your message...]───┐ │  │ ✓ Feishu   │  │
-│  │  │                    [Send]│ │  │ ○ WeCom    │  │
-│  │  └──────────────────────────┘ │  │ ○ DingTalk │  │
-│  └────────────────────────────────┘  └────────────┘  │
-│                                                        │
+│  ┌────────── Main Chat ──────────┐  ┌── Config ─────┐ │
+│  │                                │  │ ★ Agents      │ │
+│  │  Hello! I'm your personal     │  │ ♫ VOD  47     │ │
+│  │  DevOps assistant.            │  │ ⚠ Issue 3     │ │
+│  │                                │  │ ⚙ Coding 1    │ │
+│  │  ┌───────────────────────────┐│  │ ✔ QA    2     │ │
+│  │  │Check status of issue #342 ││  │ ♡ SRE v2.3    │ │
+│  │  └───────────────────────────┘│  │               │ │
+│  │                                │  │ ★ Backend     │ │
+│  │  ✅ Issue #342 is with QA     │  │ [Default ▼]   │ │
+│  │  Agent (PR #1278 under review)│  │ URL: localhost │ │
+│  │  ETA: ~15 min.                │  │ Key: ********  │ │
+│  │                                │  │               │ │
+│  │  ┌─[Type your message...]───┐ │  │ ★ IM          │ │
+│  │  │                    [Send]│ │  │ ✓ Feishu      │ │
+│  │  └──────────────────────────┘ │  │   [Reconnect] │ │
+│  └────────────────────────────────┘  │ ○ WeCom       │ │
+│                                       │ ○ DingTalk    │ │
+│                                       │ [Custom IM +] │ │
+│                                       └──────────────┘ │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -328,8 +330,7 @@ Chat Agent 页面说明：
 | 区域 | 内容 |
 |------|------|
 | **主聊天区** | 对话窗口，Agent 回复 + 用户输入 |
-| **Agents 连接状态** | 展示与 5 个 DevOps Agent 的连接和当前状态 |
-| **Config 面板** | Chat Agent 自身配置：Backend 选择（默认/自有）、IM 集成（飞书/企微/钉钉） |
+| **Config 面板** | 三块配置：Agents 状态、Backend 设置（类型/URL/Key）、IM 集成（飞书/企微/钉钉） |
 
 ### 2.6 Repositories 页面
 
