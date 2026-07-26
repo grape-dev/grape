@@ -580,13 +580,21 @@ function renderSettings(){
   document.getElementById('rt').textContent=R[repo].n;
   let html=`
 <div class="stabs">
-  <a class="ac" onclick="stab('credentials')">Credentials</a>
+  <a class="ac" onclick="stab('gitcode')">GitCode Repo</a>
+  <a onclick="stab('credentials')">Credentials</a>
   <a onclick="stab('notify')">Notifications</a>
   <a onclick="stab('skills')">Skills</a>
 </div>
 <p class="tx t3 mt8" style="margin-bottom:12px">> Chat Agent 相关设置（Backend、IM 集成）请在 Chat Agent 页面内配置</p>
-<div id="s-credentials">
-  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode</h3>
+<div id="s-gitcode">
+  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode Repo Bot</h3>
+    <div class="srow"><label>Webhook Token</label><input type="password" value="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"></div>
+    <div class="srow"><label>Webhook URL</label><input type="text" value="http://203.0.113.2:8080/webhook/gitcode" disabled style="background:#f1f5f9"></div>
+    <div class="srow"><label>Bot Username</label><input type="text" value="devops-bot"></div>
+  </div>
+</div>
+<div id="s-credentials" class="hidden">
+  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode API</h3>
     <div class="srow"><label>API Token</label><input type="password" value="ghp_demo_token_xxxxxxxxxxxxxxxxxxxx"></div>
     <div class="srow"><label>Account</label><input type="text" value="zhangwei" disabled style="background:#f1f5f9"></div>
   </div>
@@ -619,6 +627,7 @@ function renderSettings(){
 }
 
 function stab(tab){
+  document.getElementById('s-gitcode').classList.add('hidden');
   document.getElementById('s-credentials').classList.add('hidden');
   document.getElementById('s-notify').classList.add('hidden');
   document.getElementById('s-skills').classList.add('hidden');

@@ -366,9 +366,15 @@ Chat Agent 页面说明：
 │  Settings · Account                                   │
 ├───────────────────────────────────────────────────────┤
 │                                                        │
-│  [Channel] [Credentials] [Preferences]                 │
+│  [GitCode Repo] [Credentials] [Notifications] [Skills] │
 │                                                        │
-│  ┌─ GitCode ────────────────────────────────────────┐  │
+│  ┌─ GitCode Repo ───────────────────────────────────┐  │
+│  │ Webhook Token  [xxxxxxxxxxxxxxxxxxxxxxxxxxxx]    │  │
+│  │ Webhook URL    http://203.0.113.2:8080/...     │  │
+│  │ Bot Username   [devops-bot]                      │  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ GitCode API ────────────────────────────────────┐  │
 │  │ API Token  [ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxx]     │  │
 │  │ Account    zhangwei (read-only)                   │  │
 │  └────────────────────────────────────────────────┘  │
