@@ -194,9 +194,12 @@ def validate_oauth_state(state: str, provider: str) -> dict | None:
     if time.time() > entry["expires"]:
         log.warning(f"validate_oauth_state: state expired")
         return None
-    return entry["data"]
-        for sid, entry in list(valid.items())[:10]:
-            log.warning(f"  state={sid[:40]}... provider={entry['provider']} expires={entry['expires']}")
+        return entry["data"]
+
+
+
+
+
 
 
 def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
