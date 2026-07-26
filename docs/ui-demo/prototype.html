@@ -542,7 +542,7 @@ function renderAgent(k){
 <div class="stats mt16 mb16">
   <div class="st"><div class="v" style="color:${a.c}">${k==='vod'?'47':k==='issue'?'3':k==='coding'?'3':k==='qa'?'4':'3'}</div><div class="l">${k==='vod'?'Signals/Week':k==='issue'?'Active':k==='coding'?'Today':k==='qa'?'Today':'Deploys/Week'}</div></div>
   <div class="st"><div class="v" style="color:${a.c}">${k==='vod'?'8':k==='issue'?'12':k==='coding'?'45s':k==='qa'?'92%':'99.9%'}</div><div class="l">${k==='vod'?'Issues Created':k==='issue'?'Resolved/Week':k==='coding'?'Avg Time':k==='qa'?'Pass Rate':'Uptime'}</div></div>
-  <div class="st"><div class="v" style="color:${a.c}">${k==='vod'?'92%':k==='issue'?'2m':k==='coding'?'98%':k==='qa'?'3':'12s'}</div><div class="l">${k==='vod'?'Signal Quality':k==='issue'?'Avg Triage':k==='coding'?'First-Pass':'Issues Caught':'MTTR'}</div></div>
+  <div class="st"><div class="v" style="color:${a.c}">${k==='vod'?'92%':k==='issue'?'2m':k==='coding'?'98%':k==='qa'?'3':'12s'}</div><div class="l">${k==='vod'?'Signal Quality':k==='issue'?'Avg Triage':k==='coding'?'First-Pass':k==='qa'?'Issues Caught':'MTTR'}</div></div>
 </div>
 <div class="cd"><div class="cd-h"><h2>Event History</h2><span class="ts t3">Last 24h</span></div>`;
   a.ev.forEach(e=>{html+=`<div class="ai"><div class="t">${e[0]}</div><div class="ac">${e[1]}</div></div>`;});
