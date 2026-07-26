@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS bot_accounts (
     gitcode_webhook_token TEXT DEFAULT '',
     gitcode_oauth_client_id TEXT DEFAULT '',
     gitcode_oauth_client_secret TEXT DEFAULT '',
+    gitcode_oauth_redirect_uri TEXT DEFAULT '',
     feishu_app_id TEXT DEFAULT '',
     feishu_app_secret TEXT DEFAULT '',
     huawei_cloud_ak TEXT DEFAULT '',
@@ -753,6 +754,7 @@ def get_all_managed_repos() -> list[dict]:
 BOT_ACCOUNT_FIELDS = [
     "name", "gitcode_api_token", "gitcode_webhook_token",
     "gitcode_oauth_client_id", "gitcode_oauth_client_secret",
+    "gitcode_oauth_redirect_uri",
     "feishu_app_id", "feishu_app_secret",
     "huawei_cloud_ak", "huawei_cloud_sk",
     "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",
