@@ -162,10 +162,10 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 │    ♡ SRE Agent                                      │
 │                                                     │
 │  Account                                            │
-│    ☺ Zhang Wei · Online                             │
+│    ☎ Chat Agent                                     │
 │                                                     │
 │  Settings                                           │
-│    ⚙ Repo Settings                                  │
+│    ⚙ General Settings                                │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -294,6 +294,8 @@ Dashboard 主要区域说明：
 
 ### 2.5 Chat Agent 页面
 
+Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 连接状态、以及自身的配置面板（Backend 选择、IM 集成）。
+
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
 │  Chat Agent · Personal Assistant                      │
@@ -307,16 +309,26 @@ Dashboard 主要区域说明：
 │  │  ┌───────────────────────────┐│  │ ♡ SRE v2.3 │  │
 │  │  │Check status of issue #342 ││  └────────────┘  │
 │  │  └───────────────────────────┘│                   │
-│  │                                │  ┌─ Personal ─┐  │
-│  │  ✅ Issue #342 is with QA     │  │ Your Agent  │  │
-│  │  Agent (PR #1278 under review)│  │ Backend:    │  │
-│  │  ETA: ~15 min.                │  │ Default     │  │
-│  │                                │  └────────────┘  │
-│  │  ┌─[Type your message...]───────┐                 │
-│  │  │                       [Send]│                 │
-│  └──────────────────────────────────────────────────┘  │
+│  │                                │  ┌─ Config ───┐  │
+│  │  ✅ Issue #342 is with QA     │  │ Backend:   │  │
+│  │  Agent (PR #1278 under review)│  │ [Default ▼]│  │
+│  │  ETA: ~15 min.                │  │            │  │
+│  │                                │  │ IM:        │  │
+│  │  ┌─[Type your message...]───┐ │  │ ✓ Feishu   │  │
+│  │  │                    [Send]│ │  │ ○ WeCom    │  │
+│  │  └──────────────────────────┘ │  │ ○ DingTalk │  │
+│  └────────────────────────────────┘  └────────────┘  │
+│                                                        │
 └─────────────────────────────────────────────────────────┘
 ```
+
+Chat Agent 页面说明：
+
+| 区域 | 内容 |
+|------|------|
+| **主聊天区** | 对话窗口，Agent 回复 + 用户输入 |
+| **Agents 连接状态** | 展示与 5 个 DevOps Agent 的连接和当前状态 |
+| **Config 面板** | Chat Agent 自身配置：Backend 选择（默认/自有）、IM 集成（飞书/企微/钉钉） |
 
 ### 2.6 Repositories 页面
 
@@ -356,25 +368,30 @@ Dashboard 主要区域说明：
 │                                                        │
 │  [Channel] [Credentials] [Preferences]                 │
 │                                                        │
-│  ┌─ Chat Agent Backend ────────────────────────────┐  │
-│  │ Backend Type  [Default (Built-in) ▼]            │  │
-│  │ Backend URL  http://localhost:8080/api/chat      │  │
-│  │ API Key      ********************                │  │
-│  │ ✓ Your personal Chat Agent is active.            │  │
+│  ┌─ GitCode ────────────────────────────────────────┐  │
+│  │ API Token  [ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxx]     │  │
+│  │ Account    zhangwei (read-only)                   │  │
 │  └────────────────────────────────────────────────┘  │
 │                                                        │
-│  ┌─ IM Integration ────────────────────────────────┐  │
-│  │ Feishu   ✓ Connected                  [Reconnect]│  │
-│  │ WeCom    — Not configured            [Configure]│  │
-│  │ DingTalk — Not configured            [Configure]│  │
+│  ┌─ Huawei Cloud ──────────────────────────────────┐  │
+│  │ Access Key [AK-demo-access-key-xxxx]             │  │
+│  │ Secret Key [SK-demo-secret-key-xxxx]             │  │
 │  └────────────────────────────────────────────────┘  │
 │                                                        │
-│  [Credentials Tab]: GitCode Token, Huawei Cloud AK/SK  │
-│  [Preferences Tab]: Notifications, Custom Skills       │
+│  ┌─ Notifications ─────────────────────────────────┐  │
+│  │ ☑ Issue events  ☑ PR events  ☐ Build failures   │  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ Custom Skills ─────────────────────────────────┐  │
+│  │ [Upload Skill]                                   │  │
+│  │ team/backend-service · pull_request_opened       │  │
+│  │ → custom-pr-review                       [Edit]  │  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
+│  > Chat Agent 相关设置（Backend、IM 集成）请在          │
+│  > Chat Agent 页面内进行配置                            │
 └─────────────────────────────────────────────────────────┘
 ```
-
-
 
 ### 2.8 日常使用
 
