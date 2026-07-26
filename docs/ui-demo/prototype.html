@@ -80,9 +80,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 
 /* Agent flow */
 .af{display:flex;align-items:flex-start;gap:0;padding:16px 0 10px;overflow-x:auto;min-height:280px}
-.af .nd{flex-shrink:0;width:215px;padding:16px;background:var(--c);border:1px solid var(--b);border-radius:var(--r2);margin:0 14px;position:relative;cursor:pointer;transition:all .15s;box-shadow:var(--sh)}
+.af .nd{flex-shrink:0;width:180px;padding:16px;background:var(--c);border:1px solid var(--b);border-radius:var(--r2);margin:0 6px;position:relative;cursor:pointer;transition:all .15s;box-shadow:var(--sh)}
 .af .nd:hover{box-shadow:0 8px 24px rgba(0,0,0,.07);transform:translateY(-2px)}
-.af .nd::after{content:'\2192';position:absolute;right:-24px;top:50%;transform:translateY(-50%);color:var(--t3);font-size:20px}
+.af .nd::after{content:'\2192';position:absolute;right:-18px;top:50%;transform:translateY(-50%);color:var(--a);font-size:22px;font-weight:700}
 .af .nd:last-child::after{display:none}
 .af .nd .nh{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .af .nd .nh .n{width:11px;height:11px;border-radius:50%;flex-shrink:0}
@@ -95,8 +95,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 .af .nd .nt{display:inline-block;font-size:9px;padding:2px 7px;border-radius:4px;font-weight:500}
 
 /* Chat lane */
-.cl{margin-top:8px;padding:10px 16px;background:linear-gradient(135deg,#eef5ff,#e8f4fd);border:1px dashed #8ecbfa;border-radius:var(--r2);display:flex;align-items:center;gap:14px;cursor:pointer;font-size:12px;color:var(--t2);transition:all .15s}
-.cl:hover{border-color:var(--a)}
+.cl{margin-top:8px;padding:14px 18px;background:var(--c);border:1px solid var(--b);border-radius:var(--r2);display:flex;align-items:center;gap:14px;cursor:pointer;font-size:12px;color:var(--t2);transition:all .15s;box-shadow:var(--sh)}
+.cl:hover{border-color:var(--sk);box-shadow:0 4px 12px rgba(0,0,0,.06)}
 .cl .ci{width:30px;height:30px;border-radius:8px;background:var(--sk);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;flex-shrink:0}
 .cl .cx{flex:1}
 .cl .cx h4{font-size:12px;font-weight:600;color:var(--t);margin-bottom:1px}
@@ -398,7 +398,7 @@ function renderDash(){
     <div class="nd" style="border-top:3px solid ${a.c}" onclick="nav('agt','${k}')">
       <div class="nh"><span class="n" style="background:${a.c}"></span><h4>${a.n}</h4></div>
       <div class="nds">${a.sd}</div>
-      <div class="nm"><span class="ml">Skill</span> ${a.sk}</div>
+       <div class="nm"><span class="ml">Backend</span> ${k==='vod'?'Hermes':k==='coding'?'CodeArts':'OpenCode'}</div>
       <div class="ns"><span class="d" style="background:var(--g)"></span>${k==='vod'?'47 signals/week':k==='issue'?'3 active issues':k==='coding'?'PR #1278 in progress':k==='qa'?'92% pass rate':'v2.3.1 running'}</div>
       <div class="nt tg-${k==='vod'?'v':k==='issue'?'i':k==='coding'?'c':k==='qa'?'q':'s'}">${k==='vod'?'♫ feedback→issue':k==='issue'?'⚠ 2 bugs · 1 feature':k==='coding'?'⚙ implementing...':k==='qa'?'✔ pass: 92%':'♡ uptime 99.9%'}</div>
     </div>`;
