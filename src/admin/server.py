@@ -185,6 +185,106 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json(200, items)
             return
 
+        # GitCode OAuth 登录
+        if path == "/auth/gitcode/login":
+            from src.config import get_account
+            acc = get_account()
+            client_id = acc.get("gitcode_oauth_client_id", "")
+            if not client_id:
+                self._send_html(_render_user_login("GitCode OAuth 未配置（缺少 client_id）"))
+                return
+            redirect_uri = acc.get("gitcode_oauth_redirect_uri", "")
+            if not redirect_uri:
+                scheme = "https" if self.headers.get("X-Forwarded-Proto", "") == "https" else "http"
+                host = self.headers.get("Host", "localhost:80")
+                redirect_uri = f"{scheme}://{host}/auth/gitcode/callback"
+            state = hashlib.sha256(os.urandom(32)).hexdigest()
+            user_db.save_oauth_state(state, "gitcode", {})
+            auth_url = (f"https://gitcode.com/oauth/authorize"
+                        f"?client_id={urllib.parse.quote(client_id)}"
+                        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+                        f"&response_type=code"
+                        f"&scope=read_user"
+                        f"&state={state}")
+            self.send_response(302)
+            self.send_header("Location", auth_url)
+            self.end_headers()
+            return
+
+        if path == "/auth/gitcode/callback":
+            code = self._get_param("code", "")
+            state = self._get_param("state", "")
+            error = self._get_param("error", "")
+            if error:
+                self._send_html(_render_user_login(f"GitCode 授权失败: {error}"))
+                return
+            state_data = user_db.validate_oauth_state(state, "gitcode")
+            if not state_data:
+                self._send_html(_render_user_login("GitCode 登录失败：state 无效或已过期"))
+                return
+            from src.config import get_account
+            acc = get_account()
+            client_id = acc.get("gitcode_oauth_client_id", "")
+            client_secret = acc.get("gitcode_oauth_client_secret", "")
+            redirect_uri = acc.get("gitcode_oauth_redirect_uri", "")
+            if not redirect_uri:
+                scheme = "https" if self.headers.get("X-Forwarded-Proto", "") == "https" else "http"
+                host = self.headers.get("Host", "localhost:80")
+                redirect_uri = f"{scheme}://{host}/auth/gitcode/callback"
+            try:
+                # code 换 access_token
+                token_req = urllib.request.Request(
+                    "https://gitcode.com/oauth/token",
+                    data=urllib.parse.urlencode({
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "redirect_uri": redirect_uri
+                    }).encode(),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST"
+                )
+                token_resp = urllib.request.urlopen(token_req, timeout=10)
+                token_data = json.loads(token_resp.read())
+                access_token = token_data.get("access_token", "")
+                refresh_token = token_data.get("refresh_token", "")
+                if not access_token:
+                    self._send_html(_render_user_login("GitCode 登录失败：获取 access_token 失败"))
+                    return
+                # 获取 GitCode 用户信息
+                user_req = urllib.request.Request(
+                    "https://api.gitcode.com/api/v5/user",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+                user_resp = urllib.request.urlopen(user_req, timeout=10)
+                gitcode_user = json.loads(user_resp.read())
+                gitcode_id = str(gitcode_user.get("id", ""))
+                gitcode_login = gitcode_user.get("login", "")
+                if not gitcode_id:
+                    self._send_html(_render_user_login("GitCode 登录失败：无法获取用户信息"))
+                    return
+                # 查找或创建本地用户
+                local_user = user_db.get_user_by_gitcode_id(gitcode_id)
+                if not local_user:
+                    local_user = user_db.get_user_by_username(gitcode_login)
+                    if local_user:
+                        user_db.link_gitcode_user(local_user["id"], gitcode_id, access_token, refresh_token)
+                    else:
+                        result = user_db.create_user(gitcode_login, hashlib.sha256(os.urandom(16)).hexdigest(), 0)
+                        if not result:
+                            self._send_html(_render_user_login("GitCode 登录失败：创建用户失败"))
+                            return
+                        local_user = user_db.get_user(result["id"])
+                        user_db.link_gitcode_user(local_user["id"], gitcode_id, access_token, refresh_token)
+                token = user_db.create_session_token(local_user["id"])
+                self._send_html(_render_user_panel(token))
+            except Exception as e:
+                from src.config import log
+                log.warning(f"GitCode OAuth callback error: {e}")
+                self._send_html(_render_user_login(f"GitCode 登录失败: {e}"))
+            return
+
         # API: VM connectivity test
         if path == "/api/vm-test":
             token = self._get_param("token")
@@ -754,6 +854,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .login-card .err{color:#e74c3c;font-size:13px;text-align:center;margin-top:8px}
 .login-card .link{text-align:center;margin-top:12px;font-size:12px;color:#888}
 .login-card .link a{color:#667eea;text-decoration:none}
+.login-card .divider{display:flex;align-items:center;margin:16px 0;color:#bbb;font-size:12px}
+.login-card .divider::before,.login-card .divider::after{content:'';flex:1;height:1px;background:#e0e0e0}
+.login-card .divider span{padding:0 12px}
+.login-card .oauth-btn{display:block;width:100%;padding:12px;background:#fff;color:#333;border:1px solid #d9d9d9;border-radius:8px;font-size:14px;cursor:pointer;text-align:center;text-decoration:none;box-sizing:border-box}
+.login-card .oauth-btn:hover{border-color:#667eea;color:#667eea}
 .header{background:#fff;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 1px 4px rgba(0,0,0,.06);margin-bottom:24px}
 .header h2{font-size:16px;font-weight:600}
 .header a{font-size:13px;color:#e74c3c;cursor:pointer;text-decoration:none}
@@ -930,6 +1035,15 @@ def _repo_add_form(token, opts):
 
 def _render_user_login(error=""):
     err_html = f'<p class="err">{error}</p>' if error else ""
+    from src.config import get_account
+    acc = get_account()
+    has_oauth = bool(acc.get("gitcode_oauth_client_id"))
+    oauth_html = ""
+    if has_oauth:
+        oauth_html = (
+            '<div class="divider"><span>或</span></div>'
+            '<a class="oauth-btn" href="/auth/gitcode/login">使用 GitCode 登录</a>'
+        )
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -942,6 +1056,7 @@ def _render_user_login(error=""):
 <input name="password" type="password" placeholder="密码" required>
 <button type="submit">登录</button>
 </form>
+{oauth_html}
 <p class="link"><a href="/admin/">管理员登录</a></p>
 {err_html}
 </div></div>
@@ -1102,6 +1217,10 @@ def _render_user_panel(token, loaded_repos=None, repo_msg="", section="", skill_
       <h3>基本信息</h3>
       <div class="row"><label>用户名</label><input value="{user['username']}" disabled></div>
       <div class="row"><label>用户 ID</label><input value="{user['id']}" disabled></div>
+      <div class="row"><label>GitCode 绑定</label>
+        <input value="{'✅ 已绑定' if user_db.get_credential(uid, 'gitcode_oauth') else '❌ 未绑定'}" disabled
+               style="color:{'#27ae60' if user_db.get_credential(uid, 'gitcode_oauth') else '#999'};width:100%;padding:9px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px">
+      </div>
     </div>
 
     <div id="section-creds"{h_creds}>

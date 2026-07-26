@@ -155,6 +155,83 @@ def clear_token(token: str):
     _user_token_map.pop(token, None)
 
 
+# ====== GitCode OAuth 联邦登录 ======
+
+
+def _cleanup_expired_oauth_states():
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM oauth_states WHERE expires < ?", (time.time(),))
+            db.commit()
+    except Exception:
+        pass
+
+
+def save_oauth_state(state: str, provider: str, data: dict | None = None):
+    """保存 OAuth state（防 CSRF，10 分钟过期）"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO oauth_states (state, provider, data_json, expires) VALUES (?,?,?,?)",
+                      (state, provider, json.dumps(data or {}), time.time() + 600))
+            db.commit()
+    except Exception:
+        pass
+
+
+def validate_oauth_state(state: str, provider: str) -> dict | None:
+    """验证并消耗 OAuth state（查 + 删），返回 data 或 None"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT provider, data_json, expires FROM oauth_states WHERE state=?", (state,))
+            row = c.fetchone()
+            if row:
+                c.execute("DELETE FROM oauth_states WHERE state=?", (state,))
+                db.commit()
+            else:
+                return None
+        if row[0] != provider or time.time() > row[2]:
+            return None
+        try:
+            return json.loads(row[1])
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
+    """通过 GitCode 用户 ID 查找本地用户"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, username, created_by, created_at FROM users WHERE gitcode_id=?", (gitcode_id,))
+        row = c.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
+
+
+def link_gitcode_user(user_id: int, gitcode_id: str, access_token: str, refresh_token: str = "") -> bool:
+    """绑定本地用户与 GitCode 用户，存储 access_token 到 user_credentials"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE users SET gitcode_id=? WHERE id=?", (gitcode_id, user_id))
+            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
+                      (user_id, "gitcode_oauth", json.dumps({
+                          "gitcode_id": gitcode_id,
+                          "access_token": access_token,
+                          "refresh_token": refresh_token
+                      })))
+            db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"Link GitCode user failed: {e}")
+        return False
+
+
 # ====== 凭据表 ======
 _CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS user_credentials (
@@ -414,6 +491,15 @@ CREATE TABLE IF NOT EXISTS managed_repos (
 )
 """
 
+_OAUTH_STATES_DDL = """
+CREATE TABLE IF NOT EXISTS oauth_states (
+    state TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    data_json TEXT DEFAULT '{}',
+    expires REAL NOT NULL
+)
+"""
+
 
 def init_db():
     """初始化用户相关表（幂等）"""
@@ -426,6 +512,7 @@ def init_db():
         db.execute(_SKILLS_DDL)
         db.execute(_REPO_SKILL_DDL)
         db.execute(_MANAGED_REPOS_DDL)
+        db.execute(_OAUTH_STATES_DDL)
         for col in ["created_by"]:
             try:
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -443,7 +530,16 @@ def init_db():
             db.execute("ALTER TABLE user_vms ADD COLUMN status TEXT DEFAULT ''")
         except Exception:
             pass
+        try:
+            db.execute("ALTER TABLE users ADD COLUMN gitcode_id TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE bot_accounts ADD COLUMN gitcode_oauth_redirect_uri TEXT DEFAULT ''")
+        except Exception:
+            pass
         db.commit()
+    _cleanup_expired_oauth_states()
 
 
 # ====== 自定义技能 CRUD ======
