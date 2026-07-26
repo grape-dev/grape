@@ -1,7 +1,11 @@
 """用户系统数据库：users/credentials/vms/skills 表管理"""
-import json, hashlib, time, os
+import json, hashlib, time, os, threading
 from src.session_manager import db, db_lock
 from src.config import log
+
+# OAuth state 存储（内存，不依赖 SQLite 跨线程事务）
+_oauth_store = {}
+_oauth_lock = threading.Lock()
 
 
 # ====== 用户表 ======
@@ -170,62 +174,37 @@ def _cleanup_expired_oauth_states():
 
 
 def save_oauth_state(state: str, provider: str, data: dict | None = None):
-    """保存 OAuth state（防 CSRF，10 分钟过期）"""
-    from src.config import log
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO oauth_states (state, provider, data_json, expires) VALUES (?,?,?,?)",
-                      (state, provider, json.dumps(data or {}), time.time() + 600))
-            db.commit()
-        log.info(f"save_oauth_state: state={state[:20]}... saved OK")
-    except Exception as e:
-        log.warning(f"save_oauth_state FAILED: {e}")
-        raise  # 暴露异常，让 handle_one_request 记录完整 traceback
+    """保存 OAuth state（防 CSRF，10 分钟过期，内存存储）"""
+    expires = time.time() + 600
+    with _oauth_lock:
+        _oauth_store[state] = {"provider": provider, "data": data or {}, "expires": expires}
+    log.info(f"save_oauth_state: state={state[:20]}... saved OK, total={len(_oauth_store)}")
 
 
 def validate_oauth_state(state: str, provider: str) -> dict | None:
     """验证并消耗 OAuth state（查 + 删），返回 data 或 None"""
-    from src.config import log
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT provider, data_json, expires FROM oauth_states WHERE state=?", (state,))
-            row = c.fetchone()
-            if row:
-                c.execute("DELETE FROM oauth_states WHERE state=?", (state,))
-                db.commit()
-            else:
-                log.warning(f"validate_oauth_state: state={state[:20]}... not found in DB")
-                return None
-        if row[0] != provider:
-            log.warning(f"validate_oauth_state: provider mismatch expected={provider} got={row[0]}")
-            return None
-        if time.time() > row[2]:
-            log.warning(f"validate_oauth_state: state expired expires={row[2]} now={time.time()}")
-            return None
-        try:
-            return json.loads(row[1])
-        except Exception as e:
-            log.warning(f"validate_oauth_state: json parse error: {e}")
-            return None
-    except Exception as e:
-        log.warning(f"validate_oauth_state: exception: {e}")
+    with _oauth_lock:
+        entry = _oauth_store.pop(state, None)
+    if not entry:
+        log.warning(f"validate_oauth_state: state={state[:20]}... not found in memory store")
         return None
+    if entry["provider"] != provider:
+        log.warning(f"validate_oauth_state: provider mismatch expected={provider} got={entry['provider']}")
+        return None
+    if time.time() > entry["expires"]:
+        log.warning(f"validate_oauth_state: state expired")
+        return None
+    return entry["data"]
 
 
 def debug_list_oauth_states():
     """调试：打印所有未过期 oauth_states"""
-    from src.config import log
-    try:
-        with db_lock:
-            c = db.cursor()
-            rows = c.execute("SELECT state, provider, expires FROM oauth_states WHERE expires > ? ORDER BY expires", (time.time(),)).fetchall()
-        log.warning(f"oauth_states in DB ({len(rows)}):")
-        for r in rows[:10]:
-            log.warning(f"  state={r[0][:40]}... provider={r[1]} expires={r[2]}")
-    except Exception as e:
-        log.warning(f"debug_list_oauth_states: {e}")
+    now = time.time()
+    with _oauth_lock:
+        valid = {k: v for k, v in _oauth_store.items() if v["expires"] > now}
+        log.warning(f"oauth_states in memory ({len(valid)}):")
+        for sid, entry in list(valid.items())[:10]:
+            log.warning(f"  state={sid[:40]}... provider={entry['provider']} expires={entry['expires']}")
 
 
 def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
