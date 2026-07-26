@@ -20,7 +20,7 @@ LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/lo
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# ====== 模块变量（从 bot_accounts 表加载） ======
+# ====== 模块变量（从 user_accounts 表加载） ======
 GITCODE_API_TOKEN = ""
 GITCODE_WEBHOOK_TOKEN = ""
 BOT_USERNAMES: list[str] = []
@@ -38,7 +38,7 @@ _DEFAULT_ACCOUNT = "default"
 
 
 def _load_accounts():
-    """从 bot_accounts 表加载账户配置，并设置模块级变量"""
+    """从 user_accounts 表加载账户配置，并设置模块级变量"""
     global ACCOUNTS, _DEFAULT_ACCOUNT
     global GITCODE_API_TOKEN, GITCODE_WEBHOOK_TOKEN, BOT_USERNAMES
     global FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_BOT_NAME
@@ -47,8 +47,8 @@ def _load_accounts():
 
     ACCOUNTS = {}
     try:
-        from src.user.db import get_all_bot_accounts, save_bot_account
-        for a in get_all_bot_accounts():
+        from src.user.db import get_all_user_accounts, save_user_account
+        for a in get_all_user_accounts():
             ACCOUNTS[a["name"]] = a
         # 自动检测并填入 webhook_url
         def _detect_webhook_url():
@@ -81,14 +81,14 @@ def _load_accounts():
                     url = _detect_webhook_url()
                     if url:
                         a["webhook_url"] = url
-                        save_bot_account(n, a)
+                        save_user_account(n, a)
                         detected = True
                         log.info(f"Auto-detected webhook URL: {url}")
                     else:
                         break
                 else:
                     a["webhook_url"] = list(ACCOUNTS.values())[0].get("webhook_url", "")
-                    save_bot_account(n, a)
+                    save_user_account(n, a)
     except Exception as e:
         log.warning(f"Failed to load accounts from DB: {e}")
         return
@@ -115,24 +115,24 @@ def get_account(name=None) -> dict:
 
 def save_accounts(new_accounts: list):
     """将账户列表写入 DB 并重载"""
-    from src.user.db import save_bot_account, delete_bot_account
+    from src.user.db import save_user_account, delete_user_account
     existing = set(ACCOUNTS.keys())
     new_names = set()
     for a in new_accounts:
         name = a.get("name", "")
         if not name:
             continue
-        save_bot_account(name, a)
+        save_user_account(name, a)
         new_names.add(name)
     # 删除不存在的
     for n in existing - new_names:
-        delete_bot_account(n)
+        delete_user_account(n)
     _load_accounts()
 
 
 def resolve_account_by_webhook_token(token: str) -> str | None:
-    from src.user.db import resolve_bot_account_by_webhook_token
-    return resolve_bot_account_by_webhook_token(token)
+    from src.user.db import resolve_user_account_by_webhook_token
+    return resolve_user_account_by_webhook_token(token)
 
 
 # ====== 事件路由 ======

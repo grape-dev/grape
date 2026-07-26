@@ -353,11 +353,11 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_html(_render_user_login("用户不存在"))
                 return
             from src.config import ACCOUNTS
-            from src.user.db import save_bot_account
+            from src.user.db import save_user_account
             acc = dict(ACCOUNTS.get(user["username"], {"name": user["username"]}))
             for k, v in form.items():
                 acc[k] = v
-            save_bot_account(user["username"], acc)
+            save_user_account(user["username"], acc)
             from src.config import _load_accounts
             _load_accounts()
             self._send_html(_render_user_panel(token))

@@ -8,20 +8,13 @@ _oauth_store = {}
 _oauth_lock = threading.Lock()
 
 
-# ====== 用户表 ======
-_USERS_DDL = """
-CREATE TABLE IF NOT EXISTS users (
+# ====== 用户账户表（合并 users + bot_accounts） ======
+_USER_ACCOUNTS_DDL = """
+CREATE TABLE IF NOT EXISTS user_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    created_by INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_BOT_ACCOUNTS_DDL = """
-CREATE TABLE IF NOT EXISTS bot_accounts (
-    name TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL DEFAULT '',
+    gitcode_id TEXT DEFAULT '',
     gitcode_api_token TEXT DEFAULT '',
     gitcode_webhook_token TEXT DEFAULT '',
     gitcode_oauth_client_id TEXT DEFAULT '',
@@ -36,20 +29,10 @@ CREATE TABLE IF NOT EXISTS bot_accounts (
     password TEXT DEFAULT '',
     bot_usernames TEXT DEFAULT '',
     webhook_url TEXT DEFAULT '',
+    created_by INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
-
-
-def init_db():
-    """初始化用户相关表（幂等）"""
-    with db_lock:
-        db.execute(_USERS_DDL)
-        try:
-            db.execute("ALTER TABLE users ADD COLUMN created_by INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        db.commit()
 
 
 def _hash_password(password: str) -> str:
@@ -62,8 +45,8 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO users (username, password_hash, created_by) VALUES (?,?,?)",
-                      (username, pw_hash, created_by))
+            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by) VALUES (?,?,?,?)",
+                      (username, pw_hash, password, created_by))
             db.commit()
             uid = c.lastrowid
             log.info(f"User created: {username} (id={uid}, by={created_by})")
@@ -76,7 +59,7 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
 def get_user(user_id: int) -> dict | None:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM users WHERE id=?", (user_id,))
+        c.execute("SELECT id, username, created_by, created_at FROM user_accounts WHERE id=?", (user_id,))
         row = c.fetchone()
     if not row:
         return None
@@ -86,7 +69,7 @@ def get_user(user_id: int) -> dict | None:
 def get_user_by_username(username: str) -> dict | None:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, username, password_hash, created_by, created_at FROM users WHERE username=?", (username,))
+        c.execute("SELECT id, username, password_hash, created_by, created_at FROM user_accounts WHERE username=?", (username,))
         row = c.fetchone()
     if not row:
         return None
@@ -96,7 +79,7 @@ def get_user_by_username(username: str) -> dict | None:
 def list_users() -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM users ORDER BY id")
+        c.execute("SELECT id, username, created_by, created_at FROM user_accounts ORDER BY id")
         return [{"id": r[0], "username": r[1], "created_by": r[2], "created_at": r[3]} for r in c.fetchall()]
 
 
@@ -104,7 +87,7 @@ def delete_user(user_id: int) -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM users WHERE id=?", (user_id,))
+            c.execute("DELETE FROM user_accounts WHERE id=?", (user_id,))
             db.commit()
             return c.rowcount > 0
     except Exception as e:
@@ -117,7 +100,7 @@ def update_password(user_id: int, new_password: str) -> bool:
         pw_hash = _hash_password(new_password)
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE users SET password_hash=? WHERE id=?", (pw_hash, user_id))
+            c.execute("UPDATE user_accounts SET password_hash=?, password=? WHERE id=?", (pw_hash, new_password, user_id))
             db.commit()
             return c.rowcount > 0
     except Exception as e:
@@ -206,7 +189,7 @@ def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
     """通过 GitCode 用户 ID 查找本地用户"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM users WHERE gitcode_id=?", (gitcode_id,))
+        c.execute("SELECT id, username, created_by, created_at FROM user_accounts WHERE gitcode_id=?", (gitcode_id,))
         row = c.fetchone()
     if not row:
         return None
@@ -218,7 +201,7 @@ def link_gitcode_user(user_id: int, gitcode_id: str, access_token: str, refresh_
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE users SET gitcode_id=? WHERE id=?", (gitcode_id, user_id))
+            c.execute("UPDATE user_accounts SET gitcode_id=? WHERE id=?", (gitcode_id, user_id))
             c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
                       (user_id, "gitcode_oauth", json.dumps({
                           "gitcode_id": gitcode_id,
@@ -304,17 +287,14 @@ def set_credential(user_id: int, provider: str, config: dict) -> bool:
 
 
 def get_credentials(user_id: int) -> list[dict]:
-    """获取用户凭据（从 bot_accounts 表读取）"""
-    user = get_user(user_id)
-    if not user:
-        return []
+    """获取用户凭据（从 user_accounts 表读取）"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT * FROM bot_accounts WHERE name=?", (user["username"],))
+        c.execute("SELECT * FROM user_accounts WHERE id=?", (user_id,))
         row = c.fetchone()
     if not row:
         return []
-    d = dict(zip(BOT_ACCOUNT_FIELDS, row))
+    d = dict(zip(USER_ACCOUNT_FIELDS, row))
     result = []
     if d.get("gitcode_api_token"):
         result.append({"provider": "gitcode", "config": {"token": d["gitcode_api_token"]}})
@@ -504,8 +484,7 @@ CREATE TABLE IF NOT EXISTS oauth_states (
 def init_db():
     """初始化用户相关表（幂等）"""
     with db_lock:
-        db.execute(_USERS_DDL)
-        db.execute(_BOT_ACCOUNTS_DDL)
+        db.execute(_USER_ACCOUNTS_DDL)
         db.execute(_CREDENTIALS_DDL)
         db.execute(_VMS_DDL)
         db.execute(_VM_REPOS_DDL)
@@ -513,9 +492,45 @@ def init_db():
         db.execute(_REPO_SKILL_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
-        for col in ["created_by"]:
+        # 从旧表迁移数据（幂等）
+        try:
+            cnt = db.execute("SELECT COUNT(*) FROM user_accounts").fetchone()[0]
+        except Exception:
+            cnt = 0
+        if cnt == 0:
             try:
-                db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+                db.execute("""
+                    INSERT OR IGNORE INTO user_accounts
+                        (id, username, password_hash, gitcode_id,
+                         gitcode_api_token, gitcode_webhook_token,
+                         gitcode_oauth_client_id, gitcode_oauth_client_secret,
+                         gitcode_oauth_redirect_uri,
+                         feishu_app_id, feishu_app_secret,
+                         huawei_cloud_ak, huawei_cloud_sk,
+                         CODEARTS_CLI_AK, CODEARTS_CLI_SK,
+                         password, bot_usernames, webhook_url,
+                         created_by, created_at)
+                    SELECT
+                        u.id, u.username, u.password_hash, u.gitcode_id,
+                        COALESCE(b.gitcode_api_token, ''),
+                        COALESCE(b.gitcode_webhook_token, ''),
+                        COALESCE(b.gitcode_oauth_client_id, ''),
+                        COALESCE(b.gitcode_oauth_client_secret, ''),
+                        COALESCE(b.gitcode_oauth_redirect_uri, ''),
+                        COALESCE(b.feishu_app_id, ''),
+                        COALESCE(b.feishu_app_secret, ''),
+                        COALESCE(b.huawei_cloud_ak, ''),
+                        COALESCE(b.huawei_cloud_sk, ''),
+                        COALESCE(b.CODEARTS_CLI_AK, ''),
+                        COALESCE(b.CODEARTS_CLI_SK, ''),
+                        COALESCE(b.password, ''),
+                        COALESCE(b.bot_usernames, ''),
+                        COALESCE(b.webhook_url, ''),
+                        u.created_by, u.created_at
+                    FROM users u
+                    LEFT JOIN bot_accounts b ON u.username = b.name
+                """)
+                db.commit()
             except Exception:
                 pass
         try:
@@ -523,19 +538,7 @@ def init_db():
         except Exception:
             pass
         try:
-            db.execute("ALTER TABLE bot_accounts ADD COLUMN webhook_url TEXT DEFAULT ''")
-        except Exception:
-            pass
-        try:
             db.execute("ALTER TABLE user_vms ADD COLUMN status TEXT DEFAULT ''")
-        except Exception:
-            pass
-        try:
-            db.execute("ALTER TABLE users ADD COLUMN gitcode_id TEXT DEFAULT ''")
-        except Exception:
-            pass
-        try:
-            db.execute("ALTER TABLE bot_accounts ADD COLUMN gitcode_oauth_redirect_uri TEXT DEFAULT ''")
         except Exception:
             pass
         db.commit()
@@ -740,29 +743,31 @@ def get_all_managed_repos() -> list[dict]:
         return [{"user_id": r[0], "repo_owner": r[1], "repo_name": r[2], "full_name": r[3], "webhook_id": r[4], "is_admin": bool(r[5]), "created_at": r[6]} for r in c.fetchall()]
 
 
-# ====== Bot 账户 CRUD（替代 accounts.json） ======
+# ====== 用户账户 CRUD ======
 
-BOT_ACCOUNT_FIELDS = [
-    "name", "gitcode_api_token", "gitcode_webhook_token",
+USER_ACCOUNT_FIELDS = [
+    "id", "username", "password_hash", "gitcode_id",
+    "gitcode_api_token", "gitcode_webhook_token",
     "gitcode_oauth_client_id", "gitcode_oauth_client_secret",
     "gitcode_oauth_redirect_uri",
     "feishu_app_id", "feishu_app_secret",
     "huawei_cloud_ak", "huawei_cloud_sk",
     "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",
     "password", "bot_usernames", "webhook_url",
+    "created_by", "created_at",
 ]
 
 
-def get_all_bot_accounts() -> list[dict]:
-    """获取所有 Bot 账户"""
+def get_all_user_accounts() -> list[dict]:
+    """获取所有用户账户"""
     with db_lock:
         c = db.cursor()
-        c.execute(f"SELECT {','.join(BOT_ACCOUNT_FIELDS)} FROM bot_accounts ORDER BY name")
+        c.execute(f"SELECT {','.join(USER_ACCOUNT_FIELDS)} FROM user_accounts ORDER BY username")
         rows = c.fetchall()
     result = []
     for r in rows:
-        d = dict(zip(BOT_ACCOUNT_FIELDS, r))
-        # 解析 JSON 数组字段
+        d = dict(zip(USER_ACCOUNT_FIELDS, r))
+        d["name"] = d["username"]  # 向后兼容
         try:
             d["bot_usernames"] = json.loads(d.get("bot_usernames", "[]"))
         except (json.JSONDecodeError, TypeError):
@@ -771,16 +776,16 @@ def get_all_bot_accounts() -> list[dict]:
     return result
 
 
-def get_bot_account(name: str) -> dict | None:
-    """获取单个 Bot 账户"""
+def get_user_account(username: str) -> dict | None:
+    """获取单个用户账户"""
     with db_lock:
         c = db.cursor()
-        c.execute(f"SELECT {','.join(BOT_ACCOUNT_FIELDS)} FROM bot_accounts WHERE name=?", (name,))
+        c.execute(f"SELECT {','.join(USER_ACCOUNT_FIELDS)} FROM user_accounts WHERE username=?", (username,))
         row = c.fetchone()
     if not row:
         return None
-    # 解析 bot_usernames JSON 数组
-    d = dict(zip(BOT_ACCOUNT_FIELDS, row))
+    d = dict(zip(USER_ACCOUNT_FIELDS, row))
+    d["name"] = d["username"]  # 向后兼容
     try:
         d["bot_usernames"] = json.loads(d.get("bot_usernames", "[]"))
     except (json.JSONDecodeError, TypeError):
@@ -788,8 +793,8 @@ def get_bot_account(name: str) -> dict | None:
     return d
 
 
-def save_bot_account(name: str, data: dict):
-    """创建或更新 Bot 账户"""
+def save_user_account(username: str, data: dict):
+    """创建或更新用户账户"""
     bu = data.get("bot_usernames", [])
     if isinstance(bu, list):
         bu = json.dumps(bu, ensure_ascii=False)
@@ -797,44 +802,43 @@ def save_bot_account(name: str, data: dict):
         bu = json.dumps([s.strip() for s in bu.split(",") if s.strip()], ensure_ascii=False)
     else:
         bu = "[]"
-    fields = {k: data.get(k, "") for k in BOT_ACCOUNT_FIELDS if k != "name"}
+    fields = {k: data.get(k, "") for k in USER_ACCOUNT_FIELDS if k not in ("id", "username", "created_at")}
     fields["bot_usernames"] = bu
     set_clause = ",".join(f"{k}=?" for k in fields)
-    vals = list(fields.values()) + [name]
+    vals = list(fields.values()) + [username]
     with db_lock:
         c = db.cursor()
-        c.execute(f"INSERT OR REPLACE INTO bot_accounts ({','.join(fields.keys())},name) VALUES ({','.join('?' for _ in fields)},?)", vals)
+        c.execute(f"INSERT OR REPLACE INTO user_accounts ({','.join(fields.keys())},username) VALUES ({','.join('?' for _ in fields)},?)", vals)
         db.commit()
 
 
-def delete_bot_account(name: str) -> bool:
+def delete_user_account(username: str) -> bool:
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM bot_accounts WHERE name=?", (name,))
+        c.execute("DELETE FROM user_accounts WHERE username=?", (username,))
         db.commit()
         return c.rowcount > 0
 
 
-def resolve_bot_account_by_webhook_token(token: str) -> str | None:
-    """通过 webhook token 查找账户名"""
+def resolve_user_account_by_webhook_token(token: str) -> str | None:
+    """通过 webhook token 查找用户名"""
     if not token:
         return None
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT name FROM bot_accounts WHERE gitcode_webhook_token=?", (token,))
+        c.execute("SELECT username FROM user_accounts WHERE gitcode_webhook_token=?", (token,))
         row = c.fetchone()
     return row[0] if row else None
 
 
 def migrate_accounts_from_json():
-    """从 accounts.json 迁移数据到 bot_accounts 表（仅首次）"""
+    """从 accounts.json 迁移数据到 user_accounts 表（仅首次）"""
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "accounts.json")
     if not os.path.exists(path):
         return
-    # 检查是否已有数据（避免重复导入覆盖）
     with db_lock:
         c = db.cursor()
-        cnt = c.execute("SELECT COUNT(*) FROM bot_accounts").fetchone()[0]
+        cnt = c.execute("SELECT COUNT(*) FROM user_accounts").fetchone()[0]
     if cnt > 0:
         return
     try:
@@ -842,8 +846,7 @@ def migrate_accounts_from_json():
             data = json.load(f)
         for a in data.get("accounts", []):
             name = a.get("name", "default")
-            save_bot_account(name, a)
-            # 同步密码到 users 表
+            save_user_account(name, a)
             pwd = a.get("password", "")
             if pwd and name:
                 user = get_user_by_username(name)
