@@ -194,7 +194,7 @@ def validate_oauth_state(state: str, provider: str) -> dict | None:
     if time.time() > entry["expires"]:
         log.warning(f"validate_oauth_state: state expired")
         return None
-        return entry["data"]
+    return entry["data"]
 
 
 
