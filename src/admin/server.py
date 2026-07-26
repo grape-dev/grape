@@ -278,14 +278,15 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if not local_user:
                     local_user = user_db.get_user_by_username(gitcode_login)
                     if local_user:
-                        user_db.link_gitcode_user(local_user["id"], gitcode_id, access_token, refresh_token)
+                        pass  # link 在下面统一执行
                     else:
                         result = user_db.create_user(gitcode_login, hashlib.sha256(os.urandom(16)).hexdigest(), 0)
                         if not result:
                             self._send_html(_render_user_login("GitCode 登录失败：创建用户失败"))
                             return
                         local_user = user_db.get_user(result["id"])
-                        user_db.link_gitcode_user(local_user["id"], gitcode_id, access_token, refresh_token)
+                # 每次登录都刷新 token 和绑定
+                user_db.link_gitcode_user(local_user["id"], gitcode_id, access_token, refresh_token)
                 token = user_db.create_session_token(local_user["id"])
                 self._send_html(_render_user_panel(token))
             except Exception as e:

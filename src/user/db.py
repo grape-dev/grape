@@ -533,6 +533,17 @@ def init_db():
                 db.commit()
             except Exception:
                 pass
+        # 修复 user_credentials.user_id 与 user_accounts.id 不匹配（合并后 id 可能变化）
+        try:
+            db.execute("""
+                UPDATE user_credentials
+                SET user_id = (SELECT ua.id FROM user_accounts ua, users u WHERE ua.username = u.username AND u.id = user_credentials.user_id)
+                WHERE EXISTS (SELECT 1 FROM users u WHERE u.id = user_credentials.user_id)
+                  AND EXISTS (SELECT 1 FROM user_accounts ua, users u WHERE ua.username = u.username AND u.id = user_credentials.user_id)
+            """)
+            db.commit()
+        except Exception:
+            pass
         try:
             db.execute("ALTER TABLE managed_repos ADD COLUMN is_admin INTEGER DEFAULT 0")
         except Exception:
