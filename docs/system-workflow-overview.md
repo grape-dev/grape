@@ -147,17 +147,19 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 | **工作流位置** | 工作流最上游，触发后续所有 Agent 的起点 |
 | **预制 Skill** | 待开发 |
 
-> VOD Agent 的数据来源非常广泛（Issue 讨论、IM 消息、代码 Review 评论、用户反馈等），当前阶段先作为后端数据清理和提炼的 Agent，后续逐步扩展声音收集技能。
+> VOD Agent 的数据来源非常广泛（Issue 讨论、IM 消息、代码 Review 评论、用户反馈等），未来将成为 Issue 的主要提交来源，形成"声音收集 → 自动创建 Issue → 开发解决"的闭环。
 
 ### 3.2 Issue Agent
 
 | 属性 | 说明 |
 |------|------|
 | **职责** | Issue 全生命周期管理 |
-| **触发方式** | `issue_opened` / `issue_comment` / VOD Agent 提交 / 用户主动 |
+| **触发方式** | VOD Agent 提交（主要来源）/ `issue_opened` / `issue_comment` / 用户主动 |
 | **关键能力** | Issue 分类与打标签、责任人指派、需求提炼、A2A 触发 Coding Agent |
 | **工作流** | Issue 到达 → 分析内容 → 分类打标签 → 提炼为可开发需求 → A2A 通知 Coding Agent |
 | **预制 Skill** | `skills/issue/` |
+
+> 未来绝大部分 Issue 将由 VOD Agent 自动提交，VOD Agent 从开发者声音中提炼共性问题，直接生成 Issue 提交 Issue Agent 处理，形成 "声音收集 → 自动创建 Issue → 开发解决" 的闭环。
 
 ### 3.3 Coding Agent
 
@@ -191,7 +193,17 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 | **工作流** | PR 合并 → CHANGELOG → 构建部署 → 健康检查 → 持续监控 → 故障响应 |
 | **预制 Skill** | `skills/changelog-gen/`、`skills/cloud-deploy/`、`skills/deploy-guard/`、`skills/build-debug/`、`skills/incident-triage/` |
 
-### 3.6 Chat Agent（个人专属）
+### 3.6 Agent 对比总览
+
+| Agent | 工作流位置 | 输入 | 输出 | 触发下游 |
+|-------|-----------|------|------|---------|
+| **VOD Agent** | 最上游 | 开发者声音（Issue/PR/IM） | 分析报告、Issue | Issue Agent |
+| **Issue Agent** | 上游 | Issue 事件、VOD 提交 | 分类标签、开发需求 | Coding Agent |
+| **Coding Agent** | 中游 | 开发需求、修复 PR | 代码实现、PR | QA Agent |
+| **QA Agent** | 中下游 | PR 提交/更新 | 审查结论、测试报告 | Coding(回退) / SRE(通过) |
+| **SRE Agent** | 下游 | PR 合并、部署事件 | 版本发布、运维报告 | — |
+
+### 3.7 Chat Agent（个人专属）
 
 | 属性 | 说明 |
 |------|------|
@@ -206,16 +218,7 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 |  | 自有 Chat Agent 可对接飞书、企微等 IM，作为个人专用对话引擎 |
 | **预制 Skill** | `skills/chat/`、`skills/im-notify/` |
 
-### 3.7 Agent 对比总览
-
-| Agent | 工作流位置 | 输入 | 输出 | 触发下游 |
-|-------|-----------|------|------|---------|
-| **VOD Agent** | 最上游 | 开发者声音（Issue/PR/IM） | 分析报告、Issue | Issue Agent |
-| **Issue Agent** | 上游 | Issue 事件、VOD 提交 | 分类标签、开发需求 | Coding Agent |
-| **Coding Agent** | 中游 | 开发需求、修复 PR | 代码实现、PR | QA Agent |
-| **QA Agent** | 中下游 | PR 提交/更新 | 审查结论、测试报告 | Coding(回退) / SRE(通过) |
-| **SRE Agent** | 下游 | PR 合并、部署事件 | 版本发布、运维报告 | — |
-| **Chat Agent** | 横向（个人） | 用户消息 | 查询/操作结果 | 任意 Agent |
+> Chat Agent 不完全属于 DevOps 工程循环（Engineer Loop）的关键一环，它是每个用户接入工作流的个人对话入口。核心工作流仍为 VOD → Issue → Coding → QA → SRE。
 
 ---
 
@@ -224,7 +227,7 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 ### 4.1 完整端到端工作流
 
 ```
-VOD Agent（声音收集）
+VOD Agent（声音收集 — 未来主要的 Issue 来源）
   │
   ├── 收集开发者反馈（来源：Issue、PR 评论、IM 对话、用户反馈等）
   ├── 聚类分析，识别共性问题
@@ -232,7 +235,7 @@ VOD Agent（声音收集）
         │
         ▼
       Issue Agent
-        ├── 分析 Issue 内容
+        ├── 分析 Issue 内容（来自 VOD 或用户提交）
         ├── 分类、打标签、提炼需求
         ├── 指派责任人
         └── A2A 触发 Coding Agent
