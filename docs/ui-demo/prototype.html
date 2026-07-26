@@ -97,34 +97,34 @@
   /* Agent flow (workflow visualization) */
   .agent-flow {
     display: flex; align-items: flex-start; gap: 0;
-    padding: 20px 0; overflow-x: auto; min-height: 300px;
+    padding: 20px 0; overflow-x: auto; min-height: 340px;
   }
   .agent-flow .node {
-    flex-shrink: 0; width: 170px; padding: 14px;
-    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-    margin: 0 4px; position: relative; transition: all 0.15s;
+    flex-shrink: 0; width: 210px; padding: 18px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    margin: 0 12px; position: relative; transition: all 0.15s;
     cursor: pointer;
   }
-  .agent-flow .node:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.08); transform: translateY(-2px); }
+  .agent-flow .node:hover { box-shadow: 0 4px 20px rgba(0,0,0,0.1); transform: translateY(-2px); }
   .agent-flow .node::after {
-    content: '\2192'; position: absolute; right: -14px; top: 50%;
-    transform: translateY(-50%); color: var(--text-light); font-size: 18px;
+    content: '\2192'; position: absolute; right: -22px; top: 50%;
+    transform: translateY(-50%); color: var(--text-light); font-size: 22px;
     font-weight: 300;
   }
   .agent-flow .node:last-child::after { display: none; }
   .agent-flow .node .n-header {
-    display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
   }
   .agent-flow .node .n-header .ndot {
-    width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+    width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex-shrink: 0;
   }
-  .agent-flow .node .n-header h4 { font-size: 12px; font-weight: 600; }
-  .agent-flow .node .n-desc { font-size: 10px; color: var(--text-secondary); line-height: 1.4; margin-bottom: 6px; }
-  .agent-flow .node .n-status { font-size: 10px; color: var(--text-light); }
-  .agent-flow .node .n-status .dot { width:5px;height:5px;border-radius:50%;display:inline-block;margin-right:3px; }
+  .agent-flow .node .n-header h4 { font-size: 14px; font-weight: 600; }
+  .agent-flow .node .n-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 8px; }
+  .agent-flow .node .n-status { font-size: 11px; color: var(--text-light); }
+  .agent-flow .node .n-status .dot { width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:4px; }
   .agent-flow .node .n-tag {
-    display: inline-block; font-size: 9px; padding: 1px 6px; border-radius: 3px;
-    margin-top: 4px;
+    display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 4px;
+    margin-top: 6px;
   }
 
   .agent-flow .node.chat-node {
@@ -255,8 +255,8 @@
     .topbar { padding:0 16px; }
     .grid-4 { grid-template-columns:1fr 1fr; }
     .agent-flow { flex-direction:column;align-items:stretch; }
-    .agent-flow .node { width:auto;margin-bottom:8px; }
-    .agent-flow .node::after { content:'\2193';right:auto;bottom:-18px;top:auto;left:50%;transform:translateX(-50%); }
+    .agent-flow .node { width:auto;margin-bottom:12px; }
+    .agent-flow .node::after { content:'\2193';right:auto;bottom:-24px;top:auto;left:50%;transform:translateX(-50%); }
     .agent-panel { flex-direction:column; }
     .agent-panel .ap-sidebar { width:auto; }
   }
