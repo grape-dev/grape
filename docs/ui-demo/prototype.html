@@ -416,7 +416,7 @@
         <div style="display:flex;align-items:center;gap:12px">
           <div style="font-size:28px">\u25a0</div>
           <div style="flex:1">
-            <div style="font-size:15px;font-weight:600">${repoData.name}</div>
+            <div style="font-size:15px;font-weight:600">${repoData.name} <span class="tag tag-coding" style="font-size:10px;vertical-align:middle">Maintainer</span></div>
             <div style="font-size:12px;color:var(--text-secondary)">${repoData.desc} \u00b7 \u2605 ${repoData.branch} \u00b7 Webhook OK</div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
@@ -441,7 +441,6 @@
             <div class="n-header"><span class="ndot" style="background:#ec4899"></span><h4>VOD Agent</h4></div>
             <div class="n-desc">Voice of Developer: collect feedback → analyze → create issue</div>
             <div class="n-meta">
-              <span class="n-meta-item"><span class="meta-label">Backend</span> OpenCode</span>
               <span class="n-meta-item"><span class="meta-label">Skill</span> default</span>
             </div>
             <div class="n-status"><span class="dot" style="background:var(--green)"></span> 47 signals this week</div>
@@ -452,7 +451,6 @@
             <div class="n-header"><span class="ndot" style="background:#ef4444"></span><h4>Issue Agent</h4></div>
             <div class="n-desc">Classify → refine requirements → trigger development</div>
             <div class="n-meta">
-              <span class="n-meta-item"><span class="meta-label">Backend</span> OpenCode</span>
               <span class="n-meta-item"><span class="meta-label">Skill</span> skills/issue/</span>
             </div>
             <div class="n-status"><span class="dot" style="background:var(--yellow)"></span> 3 active issues</div>
@@ -463,7 +461,6 @@
             <div class="n-header"><span class="ndot" style="background:#3b82f6"></span><h4>Coding Agent</h4></div>
             <div class="n-desc">Design solution → implement → self-review → submit PR</div>
             <div class="n-meta">
-              <span class="n-meta-item"><span class="meta-label">Backend</span> CodeArts</span>
               <span class="n-meta-item"><span class="meta-label">Skill</span> implementation</span>
             </div>
             <div class="n-status"><span class="dot" style="background:var(--green)"></span> PR #1278 in progress</div>
@@ -474,7 +471,6 @@
             <div class="n-header"><span class="ndot" style="background:#8b5cf6"></span><h4>QA Agent</h4></div>
             <div class="n-desc">Code review → auto tests → functional validation</div>
             <div class="n-meta">
-              <span class="n-meta-item"><span class="meta-label">Backend</span> OpenCode</span>
               <span class="n-meta-item"><span class="meta-label">Skill</span> skills/pr/</span>
             </div>
             <div class="n-status"><span class="dot" style="background:var(--green)"></span> 2 PRs awaiting review</div>
@@ -485,7 +481,6 @@
             <div class="n-header"><span class="ndot" style="background:#f97316"></span><h4>SRE Agent</h4></div>
             <div class="n-desc">Build → deploy → monitor → incident response</div>
             <div class="n-meta">
-              <span class="n-meta-item"><span class="meta-label">Backend</span> OpenCode</span>
               <span class="n-meta-item"><span class="meta-label">Skill</span> deploy-guard</span>
             </div>
             <div class="n-status"><span class="dot" style="background:var(--green)"></span> v2.3.1 running</div>
@@ -705,7 +700,9 @@
             <tr><th>Repository</th><th>Role</th><th>Description</th><th></th></tr>
             <tr><td><strong>org/docs-site</strong></td><td>Member</td><td>Documentation site</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
             <tr><td><strong>org/devops-toolkit</strong></td><td>Member</td><td>Internal DevOps tools</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
-            <tr><td><strong>org/data-pipeline</strong></td><td>Admin</td><td>ETL data pipeline</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
+            <tr><td><strong>org/data-pipeline</strong></td><td><span class="tag tag-sre">Admin</span></td><td>ETL data pipeline</td><td><button class="btn btn-primary btn-sm" onclick="alert('[Demo] 托管仓库 org/data-pipeline')">Host Now</button></td></tr>
+            <tr><td><strong>team/analytics</strong></td><td><span class="tag tag-issue">Maintainer</span></td><td>Analytics service</td><td><button class="btn btn-primary btn-sm" onclick="alert('[Demo] 托管仓库 team/analytics')">Host Now</button></td></tr>
+            <tr><td><strong>org/docs-site</strong></td><td>Member</td><td>Documentation site</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
             <tr><td><strong>team/analytics</strong></td><td>Maintainer</td><td>Analytics service</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
             <tr><td><strong>team/notification</strong></td><td>Member</td><td>Notification service</td><td><button class="btn btn-outline btn-sm">+ Join</button></td></tr>
           </table>

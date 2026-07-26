@@ -123,7 +123,7 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 ┌─ Sidebar ──────────────────────────────────────────┐
 │  Agentic DevOps                                         │
 │                                                     │
-│  [team/backend-service ▼]                           │
+│  [team/backend-service ▼]        [Maintainer ▼]       │
 │       ┌─────────────────────┐                       │
 │       │ team/backend-service│                       │
 │       │ team/web-frontend   │                       │
@@ -165,19 +165,18 @@ Dashboard 主内容区域展示所选仓库的完整工作流看板：
 ├───────────────────────────────────────────────────────┤
 │                                                        │
 │  ┌─ Repo Header ──────────────────────────────────┐  │
-│  │  ■ team/backend-service   🌐 Webhook OK        │  │
+│  │  ■ team/backend-service   🌐 Webhook OK     [Maintainer] │  │
 │  │  Core backend API service · ★ main             │  │
 │  │   98.5% Auto-Reso. │ 47 Events/Week │ 12s Avg  │  │
 │  └────────────────────────────────────────────────┘  │
 │                                                        │
 │  Agent Workflow (Logical flow: VOD→Issue→Coding→QA→SRE)│
 │                                                        │
-│  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐   │
-│  │♫ VOD │→│⚠ Issue│→│⚙Coding│→│✔ QA  │→│♡ SRE │   │
-│  │47 sig│  │3 open │  │PR1278│  │92%pas│  │v2.3.1│   │
-│  │Backend│  │Backend│  │Backend│  │Backend│  │Backend│   │
-│  │Opencode│  │Opencode│  │CodeArts│  │Opencode│  │Opencode│   │
-│  └──────┘  └──────┘  └──────┘  └──────┘  └──────┘   │
+ │  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐   │
+ │  │♫ VOD │→│⚠ Issue│→│⚙Coding│→│✔ QA  │→│♡ SRE │   │
+ │  │47 sig│  │3 open │  │PR1278│  │92%pas│  │v2.3.1│   │
+ │  │OpenCode│  │OpenCode│  │OpenCode│  │OpenCode│  │OpenCode│   │
+ │  └──────┘  └──────┘  └──────┘  └──────┘  └──────┘   │
 │                                                        │
 │  ┌─ Chat Agent (Personal Assistant) ──────────────┐  │
 │  │ ☎ Your personal agent connected to workflow    │  │
@@ -198,7 +197,7 @@ Dashboard 主要区域说明：
 | 区域 | 内容 |
 |------|------|
 | **Repo Header** | 当前仓库名称、状态（Webhook OK）、指标（自动解决率、事件量、平均响应时间） |
-| **Agent Flow** | 5 个 Agent 横向流水线卡片，每个显示状态、Backend、关键指标 |
+| **Agent Flow** | 5 个 Agent 横向流水线卡片，每个显示状态、关键指标，统一基于 OpenCode |
 | **Chat Lane** | 个人 Chat Agent 横贯连接条，点击进入 Chat 页面 |
 | **Recent Activity** | 最近 24 小时事件流，按时间降序 |
 
@@ -229,6 +228,15 @@ Dashboard 主要区域说明：
 │  └─────────┴──────────┴──────────────┴───────┴────────┘│
 └─────────────────────────────────────────────────────────┘
 ```
+
+点击历史表中的不同 Issue，上方的活跃流水线状态会对应变化：
+
+| 选中 Issue | VOD | Issue | Coding | QA | SRE |
+|-----------|-----|-------|--------|-----|-----|
+| #342 Login timeout | ✅ Done | ✅ Done | ✅ PR #1278 | 🔄 Review | ⏳ Pending |
+| #338 Webhook retry | ✅ Done | ✅ Done | ✅ Done | ✅ Done | ✅ Released v2.3.1 |
+| #335 Refactor auth | ✅ Done | ✅ Done | ✅ Done | ✅ Done | ✅ Released v2.3.0 |
+| #331 API rate limit | ❌ Skip | ✅ Done | ✅ Done | ✅ Done | 🔄 Rolled back |
 
 ### 2.4 DevOps Agent 详情页面（以 VOD Agent 为例）
 
@@ -304,9 +312,13 @@ Dashboard 主要区域说明：
 │                                                        │
 │  Available to Join (5)                                 │
 │  ┌────────────────────────────────────────────────┐  │
-│  │ Repository        Role     Description     [+]  │  │
-│  │ org/docs-site     Member   Documentation   Join │  │
-│  │ org/devops-toolkit Member   DevOps Tools    Join │  │
+│  │ Repository        Role     Description       Action│  │
+│  │ org/docs-site     Member   Documentation     Join │  │
+│  │ org/devops-toolkit Member   DevOps Tools      Join │  │
+│  │ team/notification Member   Notification      Join │  │
+│  │ org/data-pipeline  Admin   ETL pipeline    Host Now│  │
+│  │ team/analytics    Maintainer Analytics    Host Now│  │
+│  └────────────────────────────────────────────────┘  │
 │  │ org/data-pipeline  Admin   ETL pipeline    Join │  │
 │  │ team/analytics    Maintain Analytics       Join │  │
 │  └────────────────────────────────────────────────┘  │
