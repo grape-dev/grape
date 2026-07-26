@@ -371,6 +371,11 @@ Chat Agent 页面说明：
 │                                                        │
 │  [Credentials] [Notifications] [Skills]                │
 │                                                        │
+│  ┌─ GitCode API（OAuth 登录自动获取）──────────────┐  │
+│  │ API Token  [ghp_zhangwei_token_xxxxxxxxxxxx]     │  │
+│  │ Account    zhangwei · 登录时自动填充               │  │
+│  └────────────────────────────────────────────────┘  │
+│                                                        │
 │  ┌─ Huawei Cloud ──────────────────────────────────┐  │
 │  │ Access Key [AK-demo-access-key-xxxx]             │  │
 │  │ Secret Key [SK-demo-secret-key-xxxx]             │  │
@@ -397,9 +402,9 @@ Chat Agent 页面说明：
 │  GitCode Repo · team/backend-service                  │
 ├───────────────────────────────────────────────────────┤
 │                                                        │
-│  ┌─ GitCode Token ─────────────────────────────────┐  │
-│  │ API Token  [ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxx]     │  │
-│  │ Account    zhangwei (read-only)                   │  │
+│  ┌─ DevOps Bot Token ───────────────────────────────┐  │
+│  │ Bot Token  [ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx]    │  │
+│  │ Scope      read_repo, write_repo, manage_webhook    │  │
 │  └────────────────────────────────────────────────┘  │
 │                                                        │
 │  ┌─ Webhook Bot ───────────────────────────────────┐  │

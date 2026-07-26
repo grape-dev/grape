@@ -591,7 +591,11 @@ function renderSettings(){
 </div>
 <p class="tx t3 mt8" style="margin-bottom:12px">> Chat Agent 相关设置（Backend、IM 集成）请在 Chat Agent 页面内配置</p>
 <div id="s-credentials">
-  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Huawei Cloud</h3>
+  <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode API（OAuth 登录自动填充）</h3>
+    <div class="srow"><label>API Token</label><input type="password" value="ghp_zhangwei_token_xxxxxxxxxxxx" disabled style="background:#f1f5f9"></div>
+    <div class="srow"><label>Account</label><input type="text" value="zhangwei · 登录时自动填充" disabled style="background:#f1f5f9;font-size:10px"></div>
+  </div>
+  <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Huawei Cloud</h3>
     <div class="srow"><label>Access Key</label><input type="password" value="AK-demo-access-key-xxxx"></div>
     <div class="srow"><label>Secret Key</label><input type="password" value="SK-demo-secret-key-xxxx"></div>
     <p class="tx t2 mt8">Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.</p>
@@ -623,9 +627,9 @@ function renderSettings(){
 function renderGitcode(){
   document.getElementById('rt').textContent=R[repo].n;
   let html=`
-<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode Token</h3>
-  <div class="srow"><label>API Token</label><input type="password" value="ghp_demo_token_xxxxxxxxxxxxxxxxxxxx"></div>
-  <div class="srow"><label>Account</label><input type="text" value="zhangwei" disabled style="background:#f1f5f9"></div>
+<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">DevOps Bot Token</h3>
+  <div class="srow"><label>Bot Token</label><input type="password" value="ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx"></div>
+  <div class="srow"><label>Scope</label><input type="text" value="read_repo, write_repo, manage_webhook" disabled style="background:#f1f5f9;font-size:10px"></div>
 </div>
 <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Webhook Bot</h3>
   <div class="srow"><label>Webhook Token</label><input type="password" value="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"></div>
