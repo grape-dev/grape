@@ -34,7 +34,12 @@ async def gitcode_webhook(request: Request):
 
 @router.post("/api/a2a")
 async def a2a_endpoint(request: Request):
-    """Agent-to-Agent 协议端点：接收 A2A 请求并触发目标 Agent"""
+    """Agent-to-Agent 协议端点：仅限内网调用"""
+    client_host = request.client.host if request.client else "unknown"
+    if client_host not in ("127.0.0.1", "::1", "localhost", "0.0.0.0"):
+        log.warning(f"A2A rejected from external IP: {client_host}")
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "A2A endpoint is internal only"})
+
     body = await request.json()
     agent_name = body.get("agent", "")
     payload = body.get("payload", {})
