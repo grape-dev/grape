@@ -43,6 +43,10 @@ if os.path.isdir(STATIC_DIR):
 from src.api.db_setup import init_database
 init_database()
 
+# Re-load accounts after DB init (fix circular import issue)
+from src.config import _load_accounts
+_load_accounts()
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

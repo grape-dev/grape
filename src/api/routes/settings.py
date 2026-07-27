@@ -148,8 +148,41 @@ async def update_default_bot_token(body: GitCodeRepoConfig, user: dict = Depends
         acc["gitcode_api_token"] = body.bot_token
     if body.webhook_token:
         acc["gitcode_webhook_token"] = body.webhook_token
-    user_db.save_user_account("default", acc)
+        user_db.save_user_account("default", acc)
     return {"message": "系统默认 Bot Token 已更新"}
+
+
+# ====== OAuth 凭据（管理员配置）======
+
+@router.get("/oauth")
+async def get_oauth_config(user: dict = Depends(get_current_user)):
+    acc = user_db.get_user_account("default") or {}
+    return {
+        "gitcode_oauth_client_id": bool(acc.get("gitcode_oauth_client_id", "")),
+        "gitcode_oauth_redirect_uri": acc.get("gitcode_oauth_redirect_uri", ""),
+    }
+
+
+class OAuthConfig(BaseModel):
+    gitcode_oauth_client_id: str = ""
+    gitcode_oauth_client_secret: str = ""
+    gitcode_oauth_redirect_uri: str = ""
+
+
+@router.put("/oauth")
+async def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_current_user)):
+    acc = user_db.get_user_account("default") or {}
+    if body.gitcode_oauth_client_id:
+        acc["gitcode_oauth_client_id"] = body.gitcode_oauth_client_id
+    if body.gitcode_oauth_client_secret:
+        acc["gitcode_oauth_client_secret"] = body.gitcode_oauth_client_secret
+    if body.gitcode_oauth_redirect_uri:
+        acc["gitcode_oauth_redirect_uri"] = body.gitcode_oauth_redirect_uri
+    user_db.save_user_account("default", acc)
+    # Re-initialize config accounts
+    from src.config import _load_accounts
+    _load_accounts()
+    return {"message": "OAuth 配置已更新"}
 
 
 # ====== Backend Agents ======
