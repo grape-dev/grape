@@ -311,14 +311,14 @@ let repo='be';
 
 // Agents info
 const A={
-vod:{ico:'♫',c:'var(--pk)',bg:'#fde8f0',bc:'var(--pk)',n:'VOD Agent',s:'Voice of Developer',
+vod:{ico:'🎤',c:'var(--pk)',bg:'#fde8f0',bc:'var(--pk)',n:'VOD Agent',s:'Voice of Developer',
   sd:'从开发者声音中收集反馈, 聚类分析共性, 提炼价值, 自动创建 Issue',
   sk:'default',ev:[
   ['12:05','Signal: "CI pipeline too slow" → created <b>Issue #345</b>'],
   ['10:30','Analysis: 3 signals cluster around "test flakiness"'],
   ['08:00','Weekly report: <b>8 key signals</b>, 2 trending up'],
   ['Yest.','Collected 12 feedback from PR comments']]},
-issue:{ico:'⚠',c:'var(--r)',bg:'#fce5e5',bc:'var(--r)',n:'Issue Agent',s:'Issue Manager',
+issue:{ico:'🎫',c:'var(--r)',bg:'#fce5e5',bc:'var(--r)',n:'Issue Agent',s:'Issue Manager',
   sd:'处理 Issue, 分类打标签, 提炼为可开发需求, 指派负责人, 触发 Coding Agent',
   sk:'skills/issue/',ev:[
   ['13:50','Assigned <b>Issue #342</b> (bug: login timeout) to @alice'],
@@ -339,7 +339,7 @@ qa:{ico:'✔',c:'var(--pu)',bg:'#f3e9fe',bc:'var(--pu)',n:'QA Agent',s:'Quality 
   ['13:15','Review for PR #1275: <b>2 issues found</b>'],
   ['12:00','Auto-test suite passed: 156 tests OK'],
   ['10:30','Security scan OK for PR #1272']]},
-sre:{ico:'♡',c:'var(--or)',bg:'#fef0e4',bc:'var(--or)',n:'SRE Agent',s:'DevOps',
+sre:{ico:'🚀',c:'var(--or)',bg:'#fef0e4',bc:'var(--or)',n:'SRE Agent',s:'DevOps',
   sd:'构建部署, 发布管理, 监控运维, 故障排查, 合规检查',
   sk:'deploy-guard',ev:[
   ['13:22','Deployed <b>v2.3.1</b> to production · <span class="tgx">success</span>'],
@@ -413,7 +413,7 @@ function renderDash(){
       <div class="nds">${a.sd}</div>
        <div class="nm"><span class="ml">Backend</span><span class="mv">${k==='vod'?'Hermes':k==='coding'?'CodeArts':'OpenCode'}</span></div>
       <div class="ns"><span class="d" style="background:var(--g)"></span>${k==='vod'?'47 signals/week':k==='issue'?'3 active issues':k==='coding'?'PR #1278 in progress':k==='qa'?'92% pass rate':'v2.3.1 running'}</div>
-      <div class="nt tg-${k==='vod'?'v':k==='issue'?'i':k==='coding'?'c':k==='qa'?'q':'s'}">${k==='vod'?'♫ feedback→issue':k==='issue'?'⚠ 2 bugs · 1 feature':k==='coding'?'⚙ implementing...':k==='qa'?'✔ pass: 92%':'♡ uptime 99.9%'}</div>
+       <div class="nt tg-${k==='vod'?'v':k==='issue'?'i':k==='coding'?'c':k==='qa'?'q':'s'}">${k==='vod'?'🎤 feedback→issue':k==='issue'?'🎫 2 bugs · 1 feature':k==='coding'?'⚙ implementing...':k==='qa'?'✔ pass: 92%':'🚀 uptime 99.9%'}</div>
     </div>`;
   });
   html+=`</div>
@@ -693,11 +693,11 @@ function renderGitcode(){
 function renderSkills(){
   document.getElementById('rt').textContent='';
   const categories=[
-    {name:'VOD Agent',ico:'♫',c:'#ec4899',tag:'tg-v',skills:[
+    {name:'VOD Agent',ico:'🎤',c:'#ec4899',tag:'tg-v',skills:[
       {n:'声音分析',desc:'收集、聚类、提炼开发者声音中的共性问题',type:'官方技能'},
       {n:'反馈收集',desc:'从 IM 和 PR 评论中收集反馈信息',type:'用户上传'},
     ]},
-    {name:'Issue Agent',ico:'⚠',c:'#ef4444',tag:'tg-i',skills:[
+    {name:'Issue Agent',ico:'🎫',c:'#ef4444',tag:'tg-i',skills:[
       {n:'Issue 管理',desc:'分类、标签、指派、A2A 触发 Coding Agent',type:'官方技能'},
       {n:'自定义 Issue 处理',desc:'包含特定项目的 Issue 处理规则',type:'用户上传'},
     ]},
@@ -708,7 +708,7 @@ function renderSkills(){
       {n:'PR Review',desc:'Code Review、自动化测试、功能验证',type:'官方技能'},
       {n:'自定义审查规则',desc:'特定项目代码审查规则',type:'用户上传'},
     ]},
-    {name:'SRE Agent',ico:'♡',c:'#f97316',tag:'tg-s',skills:[
+    {name:'SRE Agent',ico:'🚀',c:'#f97316',tag:'tg-s',skills:[
       {n:'部署发布',desc:'CHANGELOG生成→构建→部署→监控',type:'官方技能'},
       {n:'合规检查',desc:'部署前安全与合规门禁',type:'官方技能'},
     ]},
