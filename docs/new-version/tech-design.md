@@ -1324,35 +1324,4 @@ VALUES ('security-check', 'Security vulnerability scanning and reporting',
 
 
 
-## 二十一、实施路线
 
-### Phase 1：API 基础
-
-- [x] FastAPI 框架搭建 + 路由注册
-- [x] 认证路由 (OAuth + 密码)
-- [x] 仓库路由 (列表/加入/托管)
-- [x] Dashboard/Agent/Chat/Settings 路由
-- [x] 统一响应格式
-
-### Phase 2：前端 SPA
-
-- [ ] 原型 HTML → 独立 SPA 模块
-- [ ] 假数据 → API fetch()
-- [ ] 状态管理 (token, repo)
-- [ ] 路由守卫
-- [ ] 加载态 + 错误态
-
-### Phase 3：后端补全
-
-- [ ] Dashboard 指标 ↔ 真实统计
-- [ ] Pipeline ↔ Session 历史
-- [ ] Agent 详情 ↔ 事件日志
-- [ ] Chat ↔ opencode CLI
-- [ ] Backend Agents ↔ 引擎检测
-
-### Phase 4：体验优化
-
-- [ ] Chat SSE 流式回复
-- [ ] Dashboard 自动刷新
-- [ ] 移动端响应式
-- [ ] 性能优化
