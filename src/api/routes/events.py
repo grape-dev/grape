@@ -5,44 +5,6 @@ from src.api.deps import get_current_user
 router = APIRouter(prefix="/api/events", tags=["events"])
 
 
-@router.get("/{owner}/{repo}")
-async def list_events(owner: str, repo: str,
-                      page: int = Query(1, ge=1),
-                      page_size: int = Query(20, ge=1, le=100),
-                      status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
-                      user: dict = Depends(get_current_user)):
-    repo_key = f"{owner}/{repo}"
-    from src.session_manager import db, db_lock
-
-    where_clauses = ["repo_key=?"]
-    params = [repo_key]
-    if status:
-        where_clauses.append("status=?")
-        params.append(status)
-
-    where_sql = " AND ".join(where_clauses)
-
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(f"SELECT COUNT(*) FROM events WHERE {where_sql}", params)
-            total = c.fetchone()[0]
-
-            offset = (page - 1) * page_size
-            c.execute(
-                f"SELECT seq, event_type, agent_type, title, status, created_at FROM events WHERE {where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
-                params + [page_size, offset]
-            )
-            events = [
-                {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1], "status": r[4], "created_at": r[5]}
-                for r in c.fetchall()
-            ]
-        except Exception:
-            return {"events": [], "total": 0, "page": page, "page_size": page_size}
-
-    return {"events": events, "total": total, "page": page, "page_size": page_size}
-
-
 @router.get("/detail/{seq}")
 async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
     from src.session_manager import db, db_lock
@@ -80,3 +42,41 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         "status": row[9],
         "created_at": row[10],
     }
+
+
+@router.get("/{owner}/{repo}")
+async def list_events(owner: str, repo: str,
+                      page: int = Query(1, ge=1),
+                      page_size: int = Query(20, ge=1, le=100),
+                      status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
+                      user: dict = Depends(get_current_user)):
+    repo_key = f"{owner}/{repo}"
+    from src.session_manager import db, db_lock
+
+    where_clauses = ["repo_key=?"]
+    params = [repo_key]
+    if status:
+        where_clauses.append("status=?")
+        params.append(status)
+
+    where_sql = " AND ".join(where_clauses)
+
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(f"SELECT COUNT(*) FROM events WHERE {where_sql}", params)
+            total = c.fetchone()[0]
+
+            offset = (page - 1) * page_size
+            c.execute(
+                f"SELECT seq, event_type, agent_type, title, status, created_at FROM events WHERE {where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                params + [page_size, offset]
+            )
+            events = [
+                {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1], "status": r[4], "created_at": r[5]}
+                for r in c.fetchall()
+            ]
+        except Exception:
+            return {"events": [], "total": 0, "page": page, "page_size": page_size}
+
+    return {"events": events, "total": total, "page": page, "page_size": page_size}

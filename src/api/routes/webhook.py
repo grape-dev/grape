@@ -35,24 +35,23 @@ async def gitcode_webhook(request: Request):
 @router.post("/api/a2a")
 async def a2a_endpoint(request: Request):
     """Agent-to-Agent 协议端点：仅限内网调用"""
-    client_host = request.client.host if request.client else "unknown"
-    if client_host not in ("127.0.0.1", "::1", "localhost", "0.0.0.0"):
-        log.warning(f"A2A rejected from external IP: {client_host}")
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "A2A endpoint is internal only"})
-
     body = await request.json()
     agent_name = body.get("agent", "")
     payload = body.get("payload", {})
 
     if not agent_name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing agent field"})
+    if not payload.get("repository"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
+
+    client_host = request.client.host if request.client else "unknown"
+    if client_host not in ("127.0.0.1", "::1", "localhost", "0.0.0.0"):
+        log.warning(f"A2A rejected from external IP: {client_host}")
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "A2A endpoint is internal only"})
 
     repository = payload.get("repository", "")
     account = payload.get("account", "default")
     context = payload.get("context", "")
-
-    if not repository:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
 
     # 构造伪事件触发目标 Agent
     a2a_payload = {

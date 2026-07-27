@@ -65,7 +65,7 @@ print("P9.3 VCS adapter github: OK")
 
 from src.vcs.base import VcsBackend
 class GitLabBackend(VcsBackend):
-    name = "gitlab"; webhook_path = "/webhook/gitlab"
+    name = "gitlab"; webhook_path = "/webhook/gitlab"; event_header_key = "X-GitLab-Event"
     def normalize(self, raw, event_header):
         return {"source": "gitlab", "type": event_header, "repository": "org/repo", "branch": "", "actor": "", "payload": {}}
 register_vcs_backend("gitlab", GitLabBackend())

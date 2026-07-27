@@ -6,6 +6,7 @@ class VcsBackend:
     """VCS 后端基类，所有版本控制平台实现需继承此类。"""
     name = ""
     webhook_path = ""
+    event_header_key = ""
 
     def normalize(self, raw, event_header) -> dict:
         """将平台专有 webhook → 统一事件格式。

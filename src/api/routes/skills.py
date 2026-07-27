@@ -92,7 +92,9 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
 
 @router.delete("/{skill_name}")
 async def delete_skill(skill_name: str, user: dict = Depends(get_current_user)):
-    success = user_db.delete_skill(user["id"], skill_name)
-    if success:
-        return {"message": f"技能 {skill_name} 已删除"}
-    raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+    skills = user_db.list_skills(user["id"])
+    exists = any(s.get("skill_name") == skill_name for s in skills)
+    if not exists:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+    user_db.delete_skill(user["id"], skill_name)
+    return {"message": f"技能 {skill_name} 已删除"}
