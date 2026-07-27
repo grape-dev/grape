@@ -1,6 +1,7 @@
 {
   "routing": {
     "issue_opened": "issue",
+    "issue_labeled": "issue",
     "im_notify": "im-notify",
     "issue_comment": "issue",
     "pull_request_opened": "pr",

@@ -45,7 +45,7 @@ class TestEventRouting:
         cfg = _import_config()
         assert cfg.get_domain_skill("issue_opened") == "issue"
         assert cfg.get_domain_skill("issue_comment") == "issue"
-        assert cfg.get_domain_skill("issue_labeled") == "implementation"
+        assert cfg.get_domain_skill("issue_labeled") == "issue"
         assert cfg.get_domain_skill("pull_request_opened") == "pr"
         assert cfg.get_domain_skill("pull_request_updated") == "pr"
         assert cfg.get_domain_skill("build_failure") == "build-debug"
