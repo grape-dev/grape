@@ -247,6 +247,15 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
 
+    try:
+        from src.api.event_store import get_issue_summary
+        repo_key = f"{evt['source']}:{evt['repository']}"
+        issue_summary = get_issue_summary(repo_key)
+        if issue_summary:
+            parts.append(issue_summary)
+    except Exception:
+        pass
+
     repo_key = f"{evt['source']}:{evt['repository']}"
     account = evt.get("account", "default")
     parts.append(_build_history_file_guide(repo_key, account))
@@ -316,6 +325,15 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
     # Chat messages don't have `evt`, so A2A context is not injected here
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
+
+    try:
+        from src.api.event_store import get_issue_summary
+        issue_summary = get_issue_summary(repo_key)
+        if issue_summary:
+            parts.append(issue_summary)
+    except Exception:
+        pass
+
     parts.append(_build_history_file_guide(repo_key, account))
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
