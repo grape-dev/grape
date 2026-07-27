@@ -579,12 +579,13 @@ function renderAgent(k){
       <option selected>OpenCode</option><option>CodeArts</option><option>Hermes</option><option>Cursor</option>
     </select>
   </div>
-  <div class="srow mt8"><label>URL</label><input type="text" value="(default)" disabled style="background:#f1f5f9;flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px"></div>
-  <h3 style="font-size:13px;font-weight:600;margin:16px 0 12px">Skill Configuration</h3>
-  <div style="display:flex;flex-direction:column;gap:6px;font-size:12px">
-    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" checked> Default · <span class="tg tg-d">skills/${k}/SKILL.md</span></label>
-    ${k==='issue'?`<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" checked> Custom · <span class="tg tg-i">custom-issue-skill</span></label>`:`<label style="display:flex;align-items:center;gap:8px"><input type="checkbox"> Custom · <span class="tg tg-d">(no custom skill)</span></label>`}
-    <button class="bt bt-o bt-s" style="align-self:flex-start;margin-top:4px">Upload New Skill</button>
+  <h3 style="font-size:13px;font-weight:600;margin:16px 0 12px">Skill（最多选一个，默认官方自带）</h3>
+  <div class="srow"><label>Skill</label>
+    <select style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+      <option selected>Default · skills/${k}/SKILL.md</option>
+      ${k==='issue'?`<option>Custom · custom-issue-skill</option>`:''}
+      <option>Custom · team/backend-service (uploaded)</option>
+    </select>
   </div>
   <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="toggleAgentCfg()">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg()">Cancel</button></div>
 </div>

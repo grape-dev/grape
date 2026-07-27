@@ -305,16 +305,15 @@ Dashboard 主要区域说明：
 │                                                        │
 │  Backend Engine                                        │
 │  [OpenCode ▼]  ← 选择该 Agent 使用的后端引擎            │
-│  URL (默认，使用自定义 Backend 时显示)                  │
-│  API Key (使用自定义 Backend 时显示)                    │
 │                                                        │
-│  Skill Configuration                                    │
+│  Skill（最多选一个，默认官方自带）                       │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │ ☑ Default · skills/vod/SKILL.md                 │  │
-│  │ ☑ Custom · custom-vod-analysis                   │  │
-│  │ ☐ Custom · team/backend-service (inactive)       │  │
+│  │ [Default · skills/vod/SKILL.md ▼]                │  │
+│  │ Options:                                         │  │
+│  │   Default · skills/vod/SKILL.md                  │  │
+│  │   Custom · custom-vod-analysis                   │  │
+│  │   Custom · team/backend-service uploaded skill    │  │
 │  └──────────────────────────────────────────────────┘  │
-│  [Upload New Skill]                                    │
 │                                                        │
 │  [Save] [Cancel]                                       │
 └────────────────────────────────────────────────────────┘
