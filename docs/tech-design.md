@@ -934,36 +934,137 @@ CREATE TABLE user_accounts (
 
 ## 十七、配置体系
 
-### 16.1 路由配置
+### 17.1 现状与问题
 
-| 文件 | 格式 | 用途 |
-|------|------|------|
-| `configs/event-routing.json` | JSON | 事件类型 → Skill 映射 |
-| `configs/agent-routing.json` | JSON | Skill → Backend 映射 |
-| `configs/agent-description.json` | JSON | Agent 注册表 (A2A 用) |
+当前路由和 Agent 配置分散在 JSON 文件 + DB 表中，存在管理分裂：
 
-### 16.2 事件路由示例 (`event-routing.json`)
+| 数据 | 当前位置 | 问题 |
+|------|---------|------|
+| 全局事件→Skill | `configs/event-routing.json` | 文件更新需重启服务 |
+| Skill→Backend | `configs/agent-routing.json` | 同上，无前端管理界面 |
+| Agent 注册表 | `configs/agent-description.json` | A2A 依赖，需手动编辑 |
+| 用户自定义映射 | `repo_skill_mapping` 表 | ✅ 已入 DB，前端可管理 |
 
-```json
-{
-  "routing": {
-    "issue_opened": "issue",
-    "issue_comment": "issue",
-    "pull_request_opened": "pr",
-    "pull_request_updated": "pr",
-    "pull_request_merged": "cloud-deploy",
-    "build_failure": "build-debug",
-    "deploy_start": "deploy-guard",
-    "release_created": "changelog-gen",
-    "im_notify": "im-notify"
-  },
-  "repo_routing": {
-    "owner/skill-repo": {
-      "pull_request_opened": "skill-pr"
-    }
-  },
-  "fallback_skill": ""
-}
+### 17.2 推荐方案：全部统一入 DB
+
+| JSON 文件 | 新 DB 表 | 用途 |
+|----------|---------|------|
+| `event-routing.json` → | `event_route_config` | 全局事件类型→技能映射 |
+| `agent-routing.json` → | 合并到 `agent_type_config` | 每种 Agent 类型的默认 Backend |
+| `agent-description.json` → | `agent_registry` | Agent 注册（名称、描述、触发词、工具） |
+
+**新表 DDL：**
+
+```sql
+CREATE TABLE event_route_config (
+    event_type TEXT NOT NULL,        -- "issue_opened", "pull_request_opened" 等
+    skill_name TEXT NOT NULL,         -- "issue", "pr", "coding" 等
+    repo_key TEXT DEFAULT '',         -- 空 = 全局, 非空 = 仓库级覆盖
+    priority INTEGER DEFAULT 0,       -- 优先级 (数字越大越高)
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (event_type, repo_key)
+);
+
+CREATE TABLE agent_type_config (
+    agent_type TEXT PRIMARY KEY,      -- "vod", "issue", "coding", "qa", "sre"
+    default_backend TEXT NOT NULL,    -- "opencode" | "codearts" | "hermes"
+    description TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE agent_registry (
+    name TEXT PRIMARY KEY,            -- "issue", "implementation", "pr"...
+    description TEXT NOT NULL,
+    triggers TEXT DEFAULT '',         -- JSON 数组: ["issue_opened","issue_comment"]
+    tools TEXT DEFAULT '',            -- JSON 数组: 可用工具列表
+    created_at TEXT DEFAULT (datetime('now'))
+);
+```
+
+**迁移策略（bootstrap）：**
+
+```python
+def bootstrap_routing_config():
+    """首次启动/首次迁移: 将 JSON 种子数据导入 DB"""
+    with db_lock:
+        cnt = SELECT COUNT(*) FROM event_route_config
+    if cnt > 0: return  # 已迁移
+
+    # 加载 event-routing.json → event_route_config
+    data = json.load(open("configs/event-routing.json"))
+    for event_type, skill in data["routing"].items():
+        INSERT INTO event_route_config (event_type, skill_name, priority)
+        VALUES (?, ?, 0)
+
+    for repo_key, routes in data.get("repo_routing", {}).items():
+        for event_type, skill in routes.items():
+            INSERT ... VALUES (event_type, skill, repo_key, 10)
+
+    # 加载 agent-routing.json → agent_type_config
+    data = json.load(open("configs/agent-routing.json"))
+    default = data["default_backend"]
+    for skill, backend in data.get("skill_backends", {}).items():
+        INSERT INTO agent_type_config (agent_type, default_backend)
+        VALUES (?, ?) ON CONFLICT IGNORE
+
+    # 加载 agent-description.json → agent_registry
+    for agent in json.load(open("configs/agent-description.json")).get("agents", []):
+        INSERT INTO agent_registry (name, description, triggers, tools)
+        VALUES (?, ?, ?, ?)
+```
+
+### 17.3 调整后的路由查询
+
+```python
+# config.py — 从 DB 查询，替换 JSON 文件读取
+
+def get_domain_skill(evt_type: str, repo_key: str = "", user_id: int = 0) -> str:
+    # 1. 用户自定义 (最高优先级) — DB 已支持
+    if user_id and repo_key:
+        skill = get_skill_for_event(user_id, repo_key, evt_type)
+        if skill: return skill
+
+    # 2. 全局仓库覆盖 — 从 event_route_config 查
+    row = SELECT skill_name FROM event_route_config
+          WHERE event_type = ? AND repo_key = ? AND priority > 0
+    if row: return row.skill_name
+
+    # 3. 全局默认
+    row = SELECT skill_name FROM event_route_config
+          WHERE event_type = ? AND repo_key = ''
+    return row.skill_name if row else ""
+
+def get_agent_backend(skill_name: str) -> str:
+    row = SELECT default_backend FROM agent_type_config
+          WHERE agent_type = ?
+    return row.default_backend if row else "opencode"
+```
+
+### 17.4 管理 API
+
+```
+GET    /api/settings/event-routes        → 所有路由规则(全局+仓库覆盖)
+PUT    /api/settings/event-routes        → 批量更新路由 {event_type, skill, repo_key?}
+
+GET    /api/settings/agent-backends      → 所有 Agent 类型的 Backend 绑定
+PUT    /api/settings/agent-backends/{type} → 更新单类型绑定
+
+GET    /api/settings/agent-registry      → Agent 注册表
+```
+
+### 17.5 JSON 文件的角色变化
+
+```
+旧: JSON 文件 = 运行时 Truth (每次读取)
+新: JSON 文件 = Bootstrap 种子 (仅首次迁移使用)
+
+启动流程:
+  1. 检查 DB 是否有数据 → 有则跳过
+  2. DB 无数据 → 读取 JSON → INSERT INTO DB
+  3. 运行时: config.get_domain_skill() → SELECT FROM DB
+
+前端修改路由后:
+  PUT /api/settings/event-routes → UPDATE DB → 即时生效 (无需重启)
 ```
 
 ---
@@ -1029,7 +1130,7 @@ WantedBy=multi-user.target
 │   └── user/db.py             # 用户数据库
 ├── docs/                      # 设计文档
 ├── skills/                    # Agent 技能
-├── configs/                   # 路由配置
+├── configs/                   # 种子数据 (首次启动导入 DB，非运行时 truth)
 └── data/                      # DB + workspaces
 ```
 
