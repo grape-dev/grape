@@ -122,6 +122,8 @@
 | A7 | GET | `/callback/gitcode` | 有效 state + code | 200 `{token, user}` |
 | A8 | GET | `/profile` | 带有效 token | 200 `{username, managed_repos}` |
 | A9 | GET | `/profile` | 无 token | 401 |
+| A10 | POST | `/logout` | 有效 token | 200，token 失效 |
+| A11 | POST | `/logout` | 无效 token | 200（幂等） |
 
 ### 3.2 仓库 `/api/repos/`
 
@@ -252,7 +254,8 @@
 | F2 | 登录后首次（无仓库） | 显示 Repo Selection 全屏页 |
 | F3 | 登录后已有仓库 | 直接进入 Dashboard |
 | F4 | 侧边栏点击 Dashboard | 加载 Dashboard |
-| F5 | 侧边栏点击 Pipeline | 加载 Pipeline |
+| F5 | 侧边栏底部 ↩ 退出登录 | 返回登录页 overlay |
+| F6 | 侧边栏点击 Pipeline | 加载 Pipeline |
 | F6 | 侧边栏点击任意 Agent | 加载 Agent Detail |
 | F7 | 侧边栏点击 Chat Agent | 加载 Chat 页面 |
 | F8 | 侧边栏点击 Skills Library | 加载 DevOps Skills |

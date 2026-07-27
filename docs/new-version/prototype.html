@@ -254,6 +254,7 @@ td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bot
 <div class="sb-ft">
   <div class="av">Z</div>
   <div class="by">Zhang Wei<span>Maintainer</span></div>
+  <div style="margin-left:auto"><a onclick="logout()" style="color:var(--t3);font-size:10px;cursor:pointer;text-decoration:none">↩</a></div>
 </div>
 </div>
 
@@ -887,6 +888,7 @@ function renderProfile(){
 
 // Login
 function login(){document.getElementById('ln').classList.add('hid');nav('rsel')}
+function logout(){document.getElementById('ln').classList.remove('hid');document.getElementById('rt').textContent=''}
 function togglePwd(){let f=document.getElementById('pwdForm');let show=f.style.display==='none'||!f.style.display;f.style.display=show?'block':'none';document.getElementById('gitBtn').style.display=show?'none':'';document.getElementById('loginLinks').style.display=show?'none':''}
 function toggleAgentCfg(){document.getElementById('agentCfgPanel').classList.toggle('hidden')}
 // Init

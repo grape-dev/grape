@@ -161,6 +161,7 @@ Content:    application/json
 | GET | `/login/gitcode` | OAuth 跳转 URL |
 | GET | `/callback/gitcode` | OAuth 回调 → `{token, user}` |
 | GET | `/profile` | 当前用户信息 + 托管仓库列表 |
+| POST | `/logout` | 清除 session token |
 
 ### 4.3 仓库 `/api/repos/`
 
