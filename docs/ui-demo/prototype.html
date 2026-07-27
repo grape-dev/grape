@@ -431,11 +431,11 @@ function renderDash(){
 
 <div class="cd">
   <div class="cd-h"><h2>Recent Activity</h2><span class="ts t3">${d.n} · Last 24h</span></div>
-  <div class="ai"><div class="t">14:32</div><div class="ac"><span class="tg tg-q">QA</span>Approved PR #1278 · <span class="t2">feat: add webhook retry</span></div></div>
-  <div class="ai"><div class="t">14:15</div><div class="ac"><span class="tg tg-c">Coding</span>Submitted PR #1278</div></div>
-  <div class="ai"><div class="t">13:50</div><div class="ac"><span class="tg tg-i">Issue</span>Assigned #342 to @alice · <span class="t2">bug: login timeout</span></div></div>
-  <div class="ai"><div class="t">13:22</div><div class="ac"><span class="tg tg-s">SRE</span>Deployed v2.3.1 to production · <span class="tgx">success</span></div></div>
-  <div class="ai"><div class="t">12:05</div><div class="ac"><span class="tg tg-v">VOD</span>Signal #47 → created issue #345</div></div>
+  <div class="ai" style="cursor:pointer" onclick="nav('event','qa','0')"><div class="t">14:32</div><div class="ac"><span class="tg tg-q">QA</span>Approved PR #1278 · <span class="t2">feat: add webhook retry</span></div></div>
+  <div class="ai" style="cursor:pointer" onclick="nav('event','coding','0')"><div class="t">14:15</div><div class="ac"><span class="tg tg-c">Coding</span>Submitted PR #1278</div></div>
+  <div class="ai" style="cursor:pointer" onclick="nav('event','issue','0')"><div class="t">13:50</div><div class="ac"><span class="tg tg-i">Issue</span>Assigned #342 to @alice · <span class="t2">bug: login timeout</span></div></div>
+  <div class="ai" style="cursor:pointer" onclick="nav('event','sre','0')"><div class="t">13:22</div><div class="ac"><span class="tg tg-s">SRE</span>Deployed v2.3.1 to production · <span class="tgx">success</span></div></div>
+  <div class="ai" style="cursor:pointer" onclick="nav('event','vod','0')"><div class="t">12:05</div><div class="ac"><span class="tg tg-v">VOD</span>Signal #47 → created issue #345</div></div>
 </div>`;
   document.getElementById('dC').innerHTML=html;
 }

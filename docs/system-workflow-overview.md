@@ -230,7 +230,7 @@ Dashboard 主要区域说明：
 | **Repo Header** | 当前仓库名称、状态（Webhook OK）、指标（自动解决率、事件量、平均响应时间） |
 | **Agent Flow** | 5 个 Agent 横向流水线卡片，每个显示状态、关键指标，统一基于 OpenCode |
 | **Chat Lane** | 个人 Chat Agent 横贯连接条，点击进入 Chat 页面 |
-| **Recent Activity** | 最近 24 小时事件流，按时间降序 |
+| **Recent Activity** | 最近 24 小时事件流，点击事件可跳转到 Event Detail 详情页 |
 
 ### 2.3 Pipeline 页面
 
