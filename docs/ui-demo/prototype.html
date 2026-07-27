@@ -300,6 +300,9 @@ td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bot
 <!-- PROFILE -->
 <div class="vw" id="v-profile"><div id="pfC"></div></div>
 
+<!-- EVENT DETAIL -->
+<div class="vw" id="v-event"><div id="evC"></div></div>
+
 </div></div>
 
 <script>
@@ -364,6 +367,7 @@ function nav(v,param){
   else if(v==='backend'){t='Backend Agents';renderBackend()}
   else if(v==='profile'){t='Profile';renderProfile()}
   else if(v==='agt'&&param){t=A[param].n;renderAgent(param)}
+  else if(v==='event'&&param){t='Event Detail';renderEventDetail(param[0],param[1])}
   // Show sidebar/topbar if going to non-rsel page
   if(v!=='rsel'){document.querySelector('.sb').style.display='';document.querySelector('.tb').style.display='';document.querySelector('.mn').style.position='';document.querySelector('.mn').style.inset=''}
   document.getElementById('pg').textContent=t;
@@ -627,10 +631,68 @@ function renderAgent(k){
   <div class="st"><div class="v" style="color:${a.c}">${k==='vod'?'92%':k==='issue'?'2m':k==='coding'?'98%':k==='qa'?'3':'12s'}</div><div class="l">${k==='vod'?'Signal Quality':k==='issue'?'Avg Triage':k==='coding'?'First-Pass':k==='qa'?'Issues Caught':'MTTR'}</div></div>
 </div>
 <div class="cd"><div class="cd-h"><h2>Event History</h2><span class="ts t3">Last 24h</span></div>`;
-  a.ev.forEach(e=>{html+=`<div class="ai"><div class="t">${e[0]}</div><div class="ac">${e[1]}</div></div>`;});
+  a.ev.forEach((e,i)=>{html+=`<div class="ai" style="cursor:pointer" onclick="nav('event',${JSON.stringify([k,i])})"><div class="t">${e[0]}</div><div class="ac">${e[1]}</div></div>`;});
   html+=`</div>
 <div class="cd"><div class="cd-h"><h2>Skill</h2></div><span class="tg tg-d" style="padding:4px 10px;font-size:11px">★ Default: skills/${k}/SKILL.md</span></div>`;
   document.getElementById('aC').innerHTML=html;
+}
+
+// Event Detail
+function renderEventDetail(agent,idx){
+  let a=A[agent];
+  let ev=a.ev[idx];
+  document.getElementById('rt').textContent=R[repo].n;
+  let html=`
+<div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
+  <!-- Left: Context & Logs -->
+  <div class="cd" style="padding:16px 20px;overflow-y:auto">
+    <h3 style="font-size:13px;font-weight:600;margin-bottom:8px">Event Context</h3>
+    <div class="tx t2" style="margin-bottom:12px;line-height:1.6">
+      <div>Trigger: pull_request_opened</div>
+      <div>Repository: team/backend-service</div>
+      <div>Branch: main</div>
+      <div>Time: 2026-07-26 12:05</div>
+    </div>
+    <h3 style="font-size:13px;font-weight:600;margin-bottom:8px">Agent Execution Log</h3>
+    <div style="background:var(--s);color:#c2cad6;border-radius:8px;padding:12px;font-size:11px;font-family:monospace;line-height:1.7">
+      <div style="color:var(--g)">[12:05:01] Agent started · backend=OpenCode</div>
+      <div>[12:05:03] Loading skill: skills/${agent}/SKILL.md</div>
+      <div>[12:05:05] Analyzing repository events...</div>
+      <div>[12:05:08] Found 3 signals with similar patterns</div>
+      <div style="color:var(--y)">[12:05:10] WARNING: Low confidence on signal #47</div>
+      <div>[12:05:11] Creating issue from signal analysis...</div>
+      <div style="color:var(--g)">[12:05:13] ✅ Issue #345 created successfully</div>
+      <div>[12:05:13] Agent completed · duration: 12s</div>
+    </div>
+    <div class="cd mt12" style="padding:10px;background:#eef2ff;font-size:11px">
+      <div style="color:var(--a);font-weight:600;margin-bottom:6px">💡 Have a question about these logs?</div>
+      <div style="color:var(--t2);margin-bottom:6px">Submit your feedback or question as an issue to the DevOps Bot project.</div>
+      <button class="bt bt-outline bt-s" onclick="alert('[Demo] Submit issue to DevOps Bot project')">Submit Issue to DevOps Bot</button>
+    </div>
+  </div>
+  <!-- Right: Event Info -->
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <div class="cd" style="padding:16px">
+      <h3 style="font-size:12px;font-weight:600;margin-bottom:10px">Event Info</h3>
+      <div style="font-size:11px;color:var(--t2);line-height:1.8">
+        <div><span style="color:var(--t3)">Backend:</span> <b>OpenCode</b></div>
+        <div><span style="color:var(--t3)">Skill:</span> skills/${agent}/SKILL.md</div>
+        <div><span style="color:var(--t3)">Issue:</span> #345</div>
+        <div><span style="color:var(--t3)">Agent:</span> ${a.n}</div>
+        <div><span style="color:var(--t3)">Duration:</span> 12s</div>
+        <div><span style="color:var(--t3)">Status:</span> <span class="tgx">✅ Success</span></div>
+      </div>
+    </div>
+    <div class="cd" style="padding:16px">
+      <h3 style="font-size:12px;font-weight:600;margin-bottom:10px">💬 Feedback</h3>
+      <div class="tx t2" style="margin-bottom:6px">Noticed an issue with this event?</div>
+      <input type="text" placeholder="Issue title..." style="width:100%;padding:6px 8px;margin-bottom:6px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--bg)">
+      <textarea placeholder="Describe the problem or suggestion..." style="width:100%;height:60px;padding:6px 8px;margin-bottom:8px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--bg);resize:vertical"></textarea>
+      <button class="bt bt-p bt-s" style="width:100%" onclick="alert('[Demo] Issue submitted to DevOps Bot repo')">Submit Issue to DevOps Bot</button>
+    </div>
+  </div>
+</div>`;
+  document.getElementById('evC').innerHTML=html;
 }
 
 // Repos

@@ -332,7 +332,45 @@ Agent Detail 页面说明：
 | **Event History** | 最近 24h 的操作记录 |
 | **Config 面板** | 点击展开：选择 Backend Engine、勾选启用的 Skills |
 
-### 2.5 DevOps Skills 页面
+### 2.5 Event Detail 页面
+
+点击 Agent 详情页中的任意 Event，进入该 Event 的详细视图。左栏展示事件上下文和 Agent 执行日志，右栏展示事件元信息和反馈入口：
+
+```
+┌─ Top Bar ────────────────────────────────────────────┐
+│  Event Detail · VOD Agent · team/backend-service      │
+├───────────────────────────────────────────────────────┤
+│                                                        │
+│  ┌─ Context & Logs ───────────┐  ┌─ Event Info ────┐ │
+│  │                              │                    │ │
+│  │ ## Event Context             │  Backend: OpenCode │ │
+│  │ Trigger: pull_request_opened │  Skill: skills/vod/│ │
+│  │ Repository: team/backend-srv │  Issue: #345       │ │
+│  │ Branch: main                 │  Duration: 12s     │ │
+│  │                              │  Status: ✅ Success │ │
+│  │ ## Agent Execution Log       │                    │ │
+│  │ [12:05:01] Agent started     │  ───────────────── │ │
+│  │ [12:05:03] Analyzing signals │                    │ │
+│  │ [12:05:08] Cluster: 3 similar│  💬 Feedback       │ │
+│  │ [12:05:11] Creating issue... │  Found an issue?   │ │
+│  │ [12:05:13] Issue #345 created│  ┌──────────────┐ │ │
+│  │ [12:05:13] Agent completed   │  │Title:        │ │ │
+│  │                              │  │Description:  │ │ │
+│  │ ──────────────────────────── │  │              │ │ │
+│  │ 💡 Have a question about     │  └──────────────┘ │ │
+│  │ these logs? Submit to →      │  [Submit Issue to  │ │
+│  │ DevOps Bot project issues    │   DevOps Bot]      │ │
+│  └──────────────────────────────┘  └────────────────┘ │
+└─────────────────────────────────────────────────────────┘
+```
+
+Event Detail 页面说明：
+
+| 区域 | 内容 |
+|------|------|
+| **Context & Logs（左栏）** | 事件触发上下文（仓库、分支、触发类型）+ Agent 执行过程日志 |
+| **Event Info（右栏上）** | 事件元信息：Backend 引擎、Skill、所属 Issue、执行耗时、状态 |
+| **Feedback（右栏下）** | 对日志/执行结果有疑问时，提交 Issue 到 DevOps Bot 项目 |
 
 按 DevOps Agent 分类的技能库页面，展示官方自带技能和用户上传的自定义技能：
 
@@ -436,7 +474,7 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 2.6 Chat Agent 页面
+### 2.7 Chat Agent 页面
 
 Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 连接状态、以及自身的配置面板（Backend 选择、IM 集成）。
 
@@ -468,7 +506,7 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 | **主聊天区** | 对话窗口，Agent 回复 + 用户输入 |
 | **Config 面板** | 三块配置：Agents 状态、Backend 设置（类型/URL/Key）、IM 集成（飞书/企微/钉钉） |
 
-### 2.7 Repositories 页面
+### 2.8 Repositories 页面
 
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
@@ -497,7 +535,7 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 2.8 General Settings 页面
+### 2.9 General Settings 页面
 
 仓库级别的通用配置，包含凭据、通知、自定义技能管理：
 
@@ -530,7 +568,7 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 2.9 GitCode Repo 页面
+### 2.10 GitCode Repo 页面
 
 仓库的 GitCode 专属配置，包含 API Token、Webhook 和机器人设置：
 
@@ -552,7 +590,7 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 2.10 Backend Agents 页面
+### 2.11 Backend Agents 页面
 
 管理和检测本地已安装的 Agent 引擎（OpenCode、CodeArts、Hermes 等），检查运行状态和配置连接凭据。此页面不与具体的 DevOps Agent 绑定，属于系统级 Agent 引擎管理：
 
@@ -601,7 +639,7 @@ Backend Agents 页面说明：
 | **CodeArts 特殊配置** | CodeArts 需要 AK/SK 连接华为云，提供独立配置区 |
 | **刷新** | Refresh All 重新检测所有引擎状态 |
 
-### 2.11 日常使用
+### 2.12 日常使用
 
 ```
 日常开发流程：
