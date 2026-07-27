@@ -199,7 +199,7 @@ Content:    application/json
 | GET | `/{name}/{owner}/{repo}` | Agent 详情 (指标/事件/Skill) |
 | PUT | `/{name}/{owner}/{repo}` | 配置 Agent (Engine + Skill) |
 
-> 所有 DevOps Agents (VOD/Issue/Coding/QA/SRE) 使用 **DevOps Bot Token** 执行 GitCode 操作。Chat Agent 使用用户的 **User Token** 代表用户操作。
+> 所有 DevOps Agents (VOD/Issue/Coding/QA/SRE) 使用 **DevOps Bot Token** 执行 GitCode 操作。当用户未配置自定义 Bot Token 时，自动回退使用系统默认 Bot Token（由管理员在 default 账户中配置）。Chat Agent 使用用户的 **User Token** 代表用户操作。
 
 ### 4.8 Chat `/api/chat/`
 
@@ -248,6 +248,8 @@ DevOps Bot 使用三种不同的 GitCode Token，按用途严格隔离：
 | **User Token** | Chat Agent 代表用户操作的个人凭证 | `read_user`（OAuth 自动获取） | `user_accounts.gitcode_api_token`（普通用户） | General Settings → Credentials（OAuth 自动填充）|
 | **Webhook Token** | GitCode 推送事件时的验签凭证 | 仅用于验签，无 API 调用能力 | `user_accounts.gitcode_webhook_token` | GitCode Repo 页面 |
 
+**回退机制：** 当管理员未为仓库配置 Bot Token 时，DevOps Agents 自动使用系统默认 Token（管理员在 GitCode Repo 页面的 `default` 条目下预配）。若默认 Token 也未配置，则 Agents 报错提示「请管理员配置 DevOps Bot Token」，不执行 GitCode 操作。
+
 **调用关系：**
 
 ```
@@ -257,6 +259,7 @@ DevOps Bot Token（系统全局）
   ├── Coding Agent  → 创建/提交 PR、代码实现
   ├── QA Agent      → PR 评论、代码审查标记
   └── SRE Agent     → 变更日志、部署状态更新
+  └── 回退规则: 若 repo 级未配置 → 使用 default 账户的 Token
 
 User Token（用户个人）
   └── Chat Agent    → 代表用户发起操作：提交 Issue、审批流程、查询状态
@@ -267,6 +270,7 @@ Webhook Token
 
 **安全原则：**
 - Bot Token 是系统级凭证，管理员配置，**不随用户变化**。所有 DevOps Agents 自动享有仓库的读写权限
+- 若未配置自定义 Bot Token，自动回退使用**系统默认 Bot Token**（管理员在 default 账户下预配），确保零配置即可运行
 - User Token 是用户级凭证，OAuth 登录自动获取，**代表用户身份**。Chat Agent 用此 Token 在 GitCode 上以用户名义操作
 - Webhook Token 仅用于验证 Webhook 来源，无 API 调用权限
 
@@ -458,7 +462,7 @@ stream_agent(prompt, cwd, session_id, backend, account, user_id, env):
 | VOD / Issue / Coding / QA / SRE | **DevOps Bot Token** | `user_accounts.gitcode_api_token`（Bot 账户） |
 | Chat Agent | **User Token**（OAuth 个人凭证） | `user_accounts.gitcode_api_token`（当前用户） |
 
-`stream_agent` 根据 `account` 参数决定注入哪个 Token：DevOps Agents 由 `event_processor` 调用时传入系统账户；Chat Agent 由 `handler` 调用时传入用户账户。
+`stream_agent` 根据 `account` 参数决定注入哪个 Token：DevOps Agents 由 `event_processor` 调用时传入系统账户；若系统账户未配置 Token，自动回退使用 `default` 账户的 Token；Chat Agent 由 `handler` 调用时传入用户账户。
 
 ### 8.6 Backend 发现与健康检测
 

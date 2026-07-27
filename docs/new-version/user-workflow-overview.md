@@ -602,7 +602,8 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 └─────────────────────────────────────────────────────────┘
 ```
 
-> **DevOps Bot Token 说明：** 此 Token 是 DevOps 系统的**全局凭证**，所有 DevOps Agents（VOD/Issue/Coding/QA/SRE）在执行 GitCode 操作时自动使用此 Token。Bot Token 需要有仓库的读写权限（`read_repo, write_repo, manage_webhook`），建议使用单独的 Bot 账号创建，与用户个人 Token 隔离。
+> **DevOps Bot Token 说明：** 此 Token 是 DevOps 系统的**全局凭证**，所有 DevOps Agents（VOD/Issue/Coding/QA/SRE）在执行 GitCode 操作时自动使用此 Token。Bot Token 需要有仓库的读写权限（`read_repo, write_repo, manage_webhook`），建议使用单独的 Bot 账号创建，与用户个人 Token 隔离。  
+> **回退规则：** 若当前仓库未配置 Bot Token，系统自动使用 `default` 账户下的默认 Token。管理员可在 GitCode Repo 页中编辑 `default` 条目来配置系统默认 Token，确保新仓库零配置即可运行。
 
 ### 2.11 Backend Agents 页面
 

@@ -123,9 +123,18 @@
 | 项目 | 内容 |
 |------|------|
 | **目标** | 实现 DevOps Bot Token、User Token、Webhook Token 三层隔离 |
-| **要点** | `stream_agent` 根据 Agent 类型注入不同 Token：DevOps Agents 使用 Bot Token（系统全局），Chat Agent 使用 User Token（个人 OAuth）；`user_accounts` 字段复用但语义区分；Bot Token 配置入口在 GitCode Repo 页，User Token 在 General Settings → Credentials |
-| **产出** | DevOps Agents 自动使用 Bot Token；Chat Agent 使用用户个人 Token；Webhook 验签使用独立的 Webhook Token |
-| **验收** | 验证 DevOps Agent 提交的 PR/Issue 显示为 Bot 用户身份；Chat Agent 提交的操作显示为当前用户身份；Webhook Token 错误时不处理事件 |
+| **要点** | `stream_agent` 根据 Agent 类型注入不同 Token：DevOps Agents 使用 Bot Token（系统全局），Chat Agent 使用 User Token（个人 OAuth）；Bot Token 支持回退：repo 级未配置 → 使用 `default` 账户的默认 Token；`user_accounts` 字段复用但语义区分；Bot Token 配置入口在 GitCode Repo 页（含 `default` 默认条目），User Token 在 General Settings → Credentials |
+| **产出** | DevOps Agents 自动使用 Bot Token（或回退到默认 Token）；Chat Agent 使用用户个人 Token；Webhook 验签使用独立的 Webhook Token |
+| **验收** | 验证 DevOps Agent 提交的 PR/Issue 显示为 Bot 用户身份；未配置 Bot Token 时回退到默认 Token；Chat Agent 提交的操作显示为当前用户身份；Webhook Token 错误时不处理事件 |
+
+### Task 2.11 默认 Bot Token 管理员配置入口
+
+| 项目 | 内容 |
+|------|------|
+| **目标** | 在 GitCode Repo 页面增加 `default` 条目，允许管理员配置/更新系统默认 Bot Token |
+| **要点** | GET/PUT `/api/settings/gitcode-repo/default` 对 default 账户的 Token 进行读写；SPA 中 GitCode Repo 页面增加 `default` 条目卡片（与普通仓库条目同级），表单字段为 `gitcode_api_token` 和 `gitcode_webhook_token` |
+| **产出** | 管理员可在 GitCode Repo 页面配置默认 Bot Token，新仓库无需单独配置 |
+| **验收** | 配置 default Token 后，未配 Token 的仓库自动继承；修改 default Token 后后续事件使用新 Token |
 
 ---
 
