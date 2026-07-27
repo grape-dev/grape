@@ -440,10 +440,34 @@ function renderDash(){
 function renderPipe(){
   let d=R[repo];
   let pipedata=[
-    {iss:'#342 - Login timeout',stages:['Done','Done','PR #1278','Reviewing','Pending'],s:[2,2,2,1,0],act:true},
-    {iss:'#338 - Webhook retry',stages:['Done','Done','Done','Done','Released'],s:[2,2,2,2,2],result:'Released v2.3.1'},
-    {iss:'#335 - Refactor auth',stages:['Done','Done','Done','Done','Released'],s:[2,2,2,2,2],result:'Released v2.3.0'},
-    {iss:'#331 - API rate limit',stages:['Done','Done','Done','Done','Rollback'],s:[2,2,2,2,3],result:'Rolled back'}
+    {iss:'#342 - Login timeout',
+     stages:[['Signal #47→#345','Feedback collected'],
+             ['Classified bug','Assigned @alice'],
+             ['PR #1278 submitted','Solution designed'],
+             ['Review in progress','92% pass rate'],
+             ['Awaiting QA','—']],
+     s:[2,2,2,1,0],act:true},
+    {iss:'#338 - Webhook retry',
+     stages:[['Signal #12→#338','Analysis done'],
+             ['Enhancement','Assigned @bob'],
+             ['PR #1275','Self-reviewed'],
+             ['156 tests OK','Approved'],
+             ['Deployed v2.3.1','CHANGELOG done']],
+     s:[2,2,2,2,2],result:'Released v2.3.1'},
+    {iss:'#335 - Refactor auth',
+     stages:[['Signal #8→#335','Clustered'],
+             ['Refactor task','@alice'],
+             ['PR #1272','Tested'],
+             ['Approved','Security OK'],
+             ['Deployed v2.3.0','Health OK']],
+     s:[2,2,2,2,2],result:'Released v2.3.0'},
+    {iss:'#331 - API rate limit',
+     stages:[['Skipped','No signal'],
+             ['Bug confirmed','Critical'],
+             ['PR #1268','Fixed'],
+             ['2 issues found','Sent back'],
+              ['Rolled back','']],
+     s:[0,2,2,2,3],result:'Rolled back'}
   ];
   let active=pipedata[0];
   document.getElementById('rt').textContent=d.n;
@@ -454,13 +478,14 @@ function renderPipe(){
     <div class="ts" style="font-weight:600;margin-bottom:8px">Active: Issue ${active.iss}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
   ['VOD','Issue','Coding','QA','SRE'].forEach((n,i)=>{
-    let s=active.stages[i],sc=active.s[i];
+    let stage=active.stages[i],sc=active.s[i];
     let colors=['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
     let colors_bg=['#fde8f0','#fce5e5','#e3edfd','#f3e9fe','#fef0e4'];
     let dotc=sc===2?'var(--g)':sc===1?'var(--y)':sc===3?'var(--r)':sc===0?'var(--t3)':'#ddd';
     html+=`<div class="nd" style="padding:10px;width:150px;border-top:3px solid ${colors[i]};cursor:default${sc===0?';opacity:.5':''}">
       <div class="nh"><span class="n" style="background:${colors[i]}"></span><h4 style="font-size:11px">${n}</h4></div>
-      <div class="nds" style="margin-bottom:2px">${s}</div>
+      <div class="nds" style="margin-bottom:1px">${stage[0]}</div>
+      <div class="nds" style="margin-bottom:1px;font-size:9px">${stage[1]}</div>
       <div class="ns tx"><span class="d" style="background:${dotc}"></span>${sc===2?'Done':sc===1?'In Progress':sc===3?'Failed':sc===0?'Pending':'—'}</div>
     </div>`;
   });

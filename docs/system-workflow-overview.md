@@ -244,7 +244,8 @@ Dashboard 主要区域说明：
 │                                                        │
 │  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌───────┐ │
 │  │ ● VOD  │→│ ● Issue│→│ ● Code │→│ ● QA  │→│ ● SRE │ │
-│  │ Done   │  │ Done   │  │ PR sub │  │Review │  │Pending│ │
+│  │Signal #│  │Classify│  │ PR #   │  │Review  │  │Await  │ │
+│  │47>#345 │  │bug @ali│  │1278 sub│  │ing...  │  │QA OK  │ │
 │  └────────┘  └────────┘  └────────┘  └────────┘  └───────┘ │
 │                                                        │
 │  ──────────────────────────────────────────────────   │
@@ -264,10 +265,10 @@ Dashboard 主要区域说明：
 
 | 选中 Issue | VOD | Issue | Coding | QA | SRE |
 |-----------|-----|-------|--------|-----|-----|
-| #342 Login timeout | ✅ Done | ✅ Done | ✅ PR #1278 | 🔄 Review | ⏳ Pending |
-| #338 Webhook retry | ✅ Done | ✅ Done | ✅ Done | ✅ Done | ✅ Released v2.3.1 |
-| #335 Refactor auth | ✅ Done | ✅ Done | ✅ Done | ✅ Done | ✅ Released v2.3.0 |
-| #331 API rate limit | ❌ Skip | ✅ Done | ✅ Done | ✅ Done | 🔄 Rolled back |
+| #342 Login timeout | ✅ Signal #47→#345 | ✅ Classified bug, @alice | ✅ PR #1278 | 🔄 Reviewing... | ⏳ Await QA |
+| #338 Webhook retry | ✅ Signal #12→#338 | ✅ Enhancement, @bob | ✅ PR #1275 | ✅ 156 tests OK | ✅ Deployed v2.3.1 |
+| #335 Refactor auth | ✅ Signal #8→#335 | ✅ Refactor task | ✅ PR #1272 | ✅ Approved | ✅ Deployed v2.3.0 |
+| #331 API rate limit | ❌ Skipped | ✅ Bug confirmed | ✅ PR #1268 | ✅ 2 issues found | ✅ Rolled back |
 
 ### 2.4 DevOps Agent 详情页面（以 VOD Agent 为例）
 
