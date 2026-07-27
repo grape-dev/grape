@@ -246,6 +246,7 @@ td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bot
   <div class="grp">Settings</div>
   <a onclick="nav('settings')"><span class="ic">⚙</span>General Settings</a>
   <a onclick="nav('gitcode')"><span class="ic">⎘</span>GitCode Repo</a>
+  <a onclick="nav('backend')"><span class="ic">⎘</span>Backend Agents</a>
 </div>
 <div class="sb-ft">
   <div class="av">Z</div>
@@ -283,6 +284,9 @@ td{padding:8px 10px;border-bottom:1px solid var(--b)}tr:last-child td{border-bot
 
 <!-- GITCODE REPO -->
 <div class="vw" id="v-gitcode"><div id="gC"></div></div>
+
+<!-- BACKEND AGENTS -->
+<div class="vw" id="v-backend"><div id="bC"></div></div>
 
 <!-- AGENT DETAIL -->
 <div class="vw" id="v-agt"><div id="aC"></div></div>
@@ -350,6 +354,7 @@ function nav(v,param){
   else if(v==='repos'){t='Repositories';renderRepos()}
   else if(v==='settings'){t='General Settings';renderSettings()}
   else if(v==='gitcode'){t='GitCode Repo';renderGitcode()}
+  else if(v==='backend'){t='Backend Agents';renderBackend()}
   else if(v==='profile'){t='Profile';renderProfile()}
   else if(v==='agt'&&param){t=A[param].n;renderAgent(param)}
   // Show sidebar/topbar if going to non-rsel page
@@ -658,6 +663,36 @@ function renderGitcode(){
   <div class="srow"><label>Bot Username</label><input type="text" value="devops-bot"></div>
 </div>`;
   document.getElementById('gC').innerHTML=html;
+}
+
+// Backend Agents
+function renderBackend(){
+  document.getElementById('rt').textContent=R[repo].n;
+  const agents=[
+    {k:'vod',n:'VOD Agent',ico:'♫',c:'#ec4899',bk:'Hermes',url:'http://hermes:8080/agent',hasKey:true},
+    {k:'issue',n:'Issue Agent',ico:'⚠',c:'#ef4444',bk:'OpenCode',url:'(default)',hasKey:false},
+    {k:'coding',n:'Coding Agent',ico:'⚙',c:'#3b82f6',bk:'CodeArts',url:'(default)',hasKey:false},
+    {k:'qa',n:'QA Agent',ico:'✔',c:'#8b5cf6',bk:'OpenCode',url:'(default)',hasKey:false},
+    {k:'sre',n:'SRE Agent',ico:'♡',c:'#f97316',bk:'OpenCode',url:'(default)',hasKey:false},
+  ];
+  let html='';
+  agents.forEach(a=>{
+    html+=`
+<div class="cd" style="padding:16px 20px">
+  <h3 style="font-size:13px;font-weight:600;margin-bottom:12px;color:${a.c}">${a.ico} ${a.n}</h3>
+  <div class="srow"><label>Backend</label>
+    <select style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+      <option ${a.bk==='OpenCode'?'selected':''}>OpenCode</option>
+      <option ${a.bk==='CodeArts'?'selected':''}>CodeArts</option>
+      <option ${a.bk==='Hermes'?'selected':''}>Hermes</option>
+      <option>Cursor</option>
+    </select>
+  </div>
+  <div class="srow"><label>URL</label><input type="text" value="${a.url}" ${a.url==='(default)'?'disabled style="background:#f1f5f9"':''} style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
+  ${a.hasKey?`<div class="srow"><label>API Key</label><input type="password" value="********************" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>`:''}
+</div>`;
+  });
+  document.getElementById('bC').innerHTML=html;
 }
 
 function stab(tab){

@@ -235,6 +235,8 @@ GET  /api/user/profile?token=xxx
 | N15 | GET | `/api/repo/{owner}/{repo}/gitcode` | 获取仓库级 GitCode 配置 | P1 |
 | N16 | PUT | `/api/repo/{owner}/{repo}/gitcode` | 更新仓库级 GitCode 配置 | P1 |
 | N17 | GET | `/api/user/profile` | 用户基本信息和仓库列表 | P0 |
+| N18 | GET | `/api/settings/backend-agents` | 获取 5 个 Agent 的 Backend 配置 | P1 |
+| N19 | PUT | `/api/settings/backend-agents` | 更新 Agent 的 Backend 引擎（OpenCode/CodeArts/Hermes/Cursor） | P1 |
 
 ---
 
