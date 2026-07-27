@@ -578,6 +578,8 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 └─────────────────────────────────────────────────────────┘
 ```
 
+> **用户个人 Token 说明：** 此处的 GitCode API Token 是**用户的个人凭证**，通过 OAuth 登录自动获取并填充。该 Token 由 **Chat Agent** 代表你在 GitCode 上执行操作（提交 Issue、查询状态、审批流程等）。DevOps Agents 使用独立的 **Bot Token**，不受此页影响。
+
 ### 2.10 GitCode Repo 页面
 
 仓库的 GitCode 专属配置，包含 API Token、Webhook 和机器人设置：
@@ -599,6 +601,8 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 │  └────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
+
+> **DevOps Bot Token 说明：** 此 Token 是 DevOps 系统的**全局凭证**，所有 DevOps Agents（VOD/Issue/Coding/QA/SRE）在执行 GitCode 操作时自动使用此 Token。Bot Token 需要有仓库的读写权限（`read_repo, write_repo, manage_webhook`），建议使用单独的 Bot 账号创建，与用户个人 Token 隔离。
 
 ### 2.11 Backend Agents 页面
 

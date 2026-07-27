@@ -118,6 +118,15 @@
 | **产出** | Topbar 搜索框可用 |
 | **验收** | H1-H3 通过 |
 
+### Task 2.10 Token 三层体系实现
+
+| 项目 | 内容 |
+|------|------|
+| **目标** | 实现 DevOps Bot Token、User Token、Webhook Token 三层隔离 |
+| **要点** | `stream_agent` 根据 Agent 类型注入不同 Token：DevOps Agents 使用 Bot Token（系统全局），Chat Agent 使用 User Token（个人 OAuth）；`user_accounts` 字段复用但语义区分；Bot Token 配置入口在 GitCode Repo 页，User Token 在 General Settings → Credentials |
+| **产出** | DevOps Agents 自动使用 Bot Token；Chat Agent 使用用户个人 Token；Webhook 验签使用独立的 Webhook Token |
+| **验收** | 验证 DevOps Agent 提交的 PR/Issue 显示为 Bot 用户身份；Chat Agent 提交的操作显示为当前用户身份；Webhook Token 错误时不处理事件 |
+
 ---
 
 ## Phase 3：事件处理管道

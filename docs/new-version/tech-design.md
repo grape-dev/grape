@@ -199,6 +199,8 @@ Content:    application/json
 | GET | `/{name}/{owner}/{repo}` | Agent 详情 (指标/事件/Skill) |
 | PUT | `/{name}/{owner}/{repo}` | 配置 Agent (Engine + Skill) |
 
+> 所有 DevOps Agents (VOD/Issue/Coding/QA/SRE) 使用 **DevOps Bot Token** 执行 GitCode 操作。Chat Agent 使用用户的 **User Token** 代表用户操作。
+
 ### 4.8 Chat `/api/chat/`
 
 | 方法 | 路径 | 说明 |
@@ -235,6 +237,38 @@ Content:    application/json
 
 > 注：仓库选择页的「＋ 新增仓库」卡片点击跳转到 `https://gitcode.com/create`（前端行为，无需 API）。  
 > 注：Topbar 的「☁ 云开发环境」按钮链接到华为云 CodeArts（前端行为，无需 API）。
+
+### 4.13 Token 三层体系
+
+DevOps Bot 使用三种不同的 GitCode Token，按用途严格隔离：
+
+| Token 类型 | 用途 | 权限范围 | 存储字段 | 配置入口 |
+|-----------|------|---------|---------|---------|
+| **DevOps Bot Token** | DevOps Agents 执行 GitCode 操作的全局凭证 | `read_repo, write_repo, manage_webhook` | `user_accounts.gitcode_api_token`（Bot 账户） | GitCode Repo 页面 |
+| **User Token** | Chat Agent 代表用户操作的个人凭证 | `read_user`（OAuth 自动获取） | `user_accounts.gitcode_api_token`（普通用户） | General Settings → Credentials（OAuth 自动填充）|
+| **Webhook Token** | GitCode 推送事件时的验签凭证 | 仅用于验签，无 API 调用能力 | `user_accounts.gitcode_webhook_token` | GitCode Repo 页面 |
+
+**调用关系：**
+
+```
+DevOps Bot Token（系统全局）
+  ├── VOD Agent    → 创建 Issue、读取事件、分析信号
+  ├── Issue Agent   → 打标签、指派、A2A 触发 Coding
+  ├── Coding Agent  → 创建/提交 PR、代码实现
+  ├── QA Agent      → PR 评论、代码审查标记
+  └── SRE Agent     → 变更日志、部署状态更新
+
+User Token（用户个人）
+  └── Chat Agent    → 代表用户发起操作：提交 Issue、审批流程、查询状态
+
+Webhook Token
+  └── GitCode Webhook 验签（端口 8080）
+```
+
+**安全原则：**
+- Bot Token 是系统级凭证，管理员配置，**不随用户变化**。所有 DevOps Agents 自动享有仓库的读写权限
+- User Token 是用户级凭证，OAuth 登录自动获取，**代表用户身份**。Chat Agent 用此 Token 在 GitCode 上以用户名义操作
+- Webhook Token 仅用于验证 Webhook 来源，无 API 调用权限
 
 ### 4.10 依赖注入 (`deps.py`)
 
@@ -416,6 +450,15 @@ stream_agent(prompt, cwd, session_id, backend, account, user_id, env):
   ├── 6. 等待退出或超时 120s kill
   └── 7. yield done → {exit_code, text, oc_session_id, errors, stderr}
 ```
+
+**Token 注入规则：**
+
+| Agent 类型 | 使用的 Token | 来源 |
+|-----------|-------------|------|
+| VOD / Issue / Coding / QA / SRE | **DevOps Bot Token** | `user_accounts.gitcode_api_token`（Bot 账户） |
+| Chat Agent | **User Token**（OAuth 个人凭证） | `user_accounts.gitcode_api_token`（当前用户） |
+
+`stream_agent` 根据 `account` 参数决定注入哪个 Token：DevOps Agents 由 `event_processor` 调用时传入系统账户；Chat Agent 由 `handler` 调用时传入用户账户。
 
 ### 8.6 Backend 发现与健康检测
 
