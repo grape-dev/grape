@@ -1170,7 +1170,161 @@ WantedBy=multi-user.target
 
 ---
 
-## 十九、实施路线
+## 二十、开放兼容设计
+
+### 20.1 Backend Agent 插件模型
+
+当前支持 OpenCode 和 CodeArts，架构设计为可插拔的后端 Agent 引擎模型，新增引擎只需实现 `AgentBackend` 接口：
+
+```python
+class AgentBackend:
+    name: str              # 引擎标识: "opencode" | "codearts" | "openclaw" | "hermes" | "cursor"
+    binary: str            # CLI 可执行文件名
+    prompt_via_stdin: bool # prompt 传递方式
+    build_args(prompt, session_id) → list[str]  # 参数构建
+    parse_output(line) → dict | None            # 输出解析
+    get_env(account, user_id) → dict            # 环境变量
+```
+
+**新增引擎步骤：**
+
+```
+1. 创建 src/agent/hermes.py → class HermesBackend(AgentBackend)
+2. 在 _BACKENDS 字典注册: {"hermes": HermesBackend()}
+3. 在 discover_backends() 的 REGISTERED_BACKENDS 添加路径
+4. 重启服务 → Backend Agents 页面自动检测新引擎
+```
+
+**支持的引擎及扩展计划：**
+
+| 引擎 | 状态 | 新增成本 |
+|------|------|---------|
+| OpenCode | ✅ 已支持 | — |
+| CodeArts | ✅ 已支持 | — |
+| OpenClaw | 可扩展 | 实现 AgentBackend 子类 (~20 行) |
+| Hermes | 可扩展 | 同上 |
+| Cursor | 可扩展 | 同上 |
+| 其他 CLI Agent | 可扩展 | 同上 |
+| HTTP API Agent | 可扩展 | 需新增 HTTPBackend 基类 (~50 行) |
+
+### 20.2 IM 通道插件模型
+
+当前 IM 层只实现了飞书（lark-oapi），架构预留了多通道扩展点：
+
+```python
+class IMChannel:
+    channel: str          # "feishu" | "wecom" | "dingtalk"
+    start_connection()    # 建立长连接
+    handle_message(event) # 消息处理
+    send_reply(msg, text) # 回复消息
+```
+
+**当前 CHAT AGENT 配置页已预留：**
+
+| 通道 | 配置字段 | 状态 |
+|------|---------|------|
+| Feishu | App ID + App Secret | ✅ 已实现 |
+| WeCom (企业微信) | Webhook URL + Token | 待扩展 |
+| DingTalk (钉钉) | App Key + App Secret | 待扩展 |
+| Custom IM | Webhook URL | 待扩展 |
+
+**扩展步骤（以 WeCom 为例）：**
+
+```
+1. 创建 src/im/wecom.py → class WecomChannel(IMChannel)
+2. 注册到 IM_CHANNELS: {"wecom": WecomChannel()}
+3. 在 user_accounts 表新增 wecom_webhook_url 字段
+4. Chat Agent Config 页新增 WeCom 配置表单
+```
+
+### 20.3 VCS 平台插件模型
+
+当前 VCS 层通过适配器模式实现 GitCode 支持，通过统一事件格式屏蔽平台差异：
+
+```python
+class VcsBackend:
+    name: str
+    normalize(raw, event_header) → dict  # 归一化
+    detect_event_header(headers) → str   # 事件头识别
+```
+
+**统一事件格式（平台无关）：**
+
+```json
+{"source": "github|gitcode|gitee|gitlab",
+ "type": "issue_opened",
+ "repository": "owner/repo",
+ "actor": "username", "payload": {...}}
+```
+
+**扩展平台步骤（以 GitHub 为例）：**
+
+```
+1. 创建 src/vcs/github.py → class GitHubBackend(VcsBackend)
+2. 实现 normalize() + detect_event_header()
+3. 注册到 _BACKENDS: {"github": GitHubBackend()}
+4. 新增 Webhook 路由: POST /webhook/github
+5. 在 managed_repos 表通过 source 字段区分平台
+```
+
+### 20.4 OAuth 联邦登录扩展
+
+当前 OAuth 基于 GitCode，认证路由设计为可扩展模式：
+
+```
+/api/auth/login/gitcode   → GitCode OAuth
+/api/auth/login/github    → GitHub OAuth (可扩展)
+/api/auth/login/gitee     → Gitee OAuth (可扩展)
+```
+
+**扩展步骤：**
+
+```
+1. 在 user_accounts 表新增 {platform}_oauth_client_id/secret 字段
+2. 新增路由: GET /api/auth/login/{platform}
+3. 新增回调: GET /api/auth/callback/{platform}
+4. 前端登录页新增平台按钮
+```
+
+### 20.5 数据库可扩展性
+
+`user_accounts` 表采用宽表设计，新增凭据字段只需 ALTER TABLE：
+
+```sql
+-- 扩展示例: 新增 GitHub OAuth 支持
+ALTER TABLE user_accounts ADD COLUMN github_oauth_client_id TEXT DEFAULT '';
+ALTER TABLE user_accounts ADD COLUMN github_oauth_client_secret TEXT DEFAULT '';
+
+-- 扩展微信 IM 支持
+ALTER TABLE user_accounts ADD COLUMN wecom_webhook_url TEXT DEFAULT '';
+ALTER TABLE user_accounts ADD COLUMN wecom_webhook_token TEXT DEFAULT '';
+```
+
+### 20.6 Agent 类型扩展
+
+5 种 DevOps Agent（VOD/Issue/Coding/QA/SRE）通过 `agent_type_config` 表和 Prompt Builder 的 Agent 注册表驱动，新增 Agent 类型无需修改事件管道代码：
+
+```sql
+INSERT INTO agent_type_config (agent_type, default_backend, description)
+VALUES ('security', 'opencode', 'Security scanning agent');
+
+INSERT INTO agent_registry (name, description, triggers, tools)
+VALUES ('security-check', 'Security vulnerability scanning and reporting',
+        '["deploy_start","pull_request_opened"]', '["sast","dependency_check"]');
+```
+
+**扩展步骤：**
+
+```
+1. INSERT INTO agent_type_config + agent_registry
+2. 创建 skills/security-check/SKILL.md
+3. 在 event_route_config 添加触发路由
+4. 前端侧边栏 + Agent 详情页自动扩展
+```
+
+
+
+## 二十一、实施路线
 
 ### Phase 1：API 基础
 
