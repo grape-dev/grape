@@ -340,6 +340,7 @@ Agent Detail 页面说明：
 ┌─ Top Bar ────────────────────────────────────────────┐
 │  Event Detail · VOD Agent · team/backend-service      │
 ├───────────────────────────────────────────────────────┤
+│  [← 返回 VOD Agent]                                   │
 │                                                        │
 │  ┌─ Context & Logs ───────────┐  ┌─ Event Info ────┐ │
 │  │                              │                    │ │

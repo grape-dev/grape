@@ -643,6 +643,7 @@ function renderEventDetail(agent,idx){
   let ev=a.ev[idx];
   document.getElementById('rt').textContent=R[repo].n;
   let html=`
+<button class="bt bt-o bt-s" onclick="nav('agt','${agent}')" style="margin-bottom:12px">← 返回 ${a.n}</button>
 <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
   <!-- Left: Context & Logs -->
   <div class="cd" style="padding:16px 20px;overflow-y:auto">
