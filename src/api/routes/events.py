@@ -1,0 +1,82 @@
+"""Events 路由：事件列表、详情"""
+from fastapi import APIRouter, HTTPException, Depends, Query
+from src.api.deps import get_current_user
+
+router = APIRouter(prefix="/api/events", tags=["events"])
+
+
+@router.get("/{owner}/{repo}")
+async def list_events(owner: str, repo: str,
+                      page: int = Query(1, ge=1),
+                      page_size: int = Query(20, ge=1, le=100),
+                      status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
+                      user: dict = Depends(get_current_user)):
+    repo_key = f"{owner}/{repo}"
+    from src.session_manager import db, db_lock
+
+    where_clauses = ["repo_key=?"]
+    params = [repo_key]
+    if status:
+        where_clauses.append("status=?")
+        params.append(status)
+
+    where_sql = " AND ".join(where_clauses)
+
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(f"SELECT COUNT(*) FROM events WHERE {where_sql}", params)
+            total = c.fetchone()[0]
+
+            offset = (page - 1) * page_size
+            c.execute(
+                f"SELECT seq, event_type, agent_type, title, status, created_at FROM events WHERE {where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                params + [page_size, offset]
+            )
+            events = [
+                {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1], "status": r[4], "created_at": r[5]}
+                for r in c.fetchall()
+            ]
+        except Exception:
+            return {"events": [], "total": 0, "page": page, "page_size": page_size}
+
+    return {"events": events, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/detail/{seq}")
+async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, body, payload, status, created_at FROM events WHERE seq=?",
+                (seq,)
+            )
+            row = c.fetchone()
+        except Exception:
+            row = None
+
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
+
+    import json
+    payload = {}
+    try:
+        payload = json.loads(row[8]) if row[8] else {}
+    except Exception:
+        pass
+
+    return {
+        "seq": row[0],
+        "repo_key": row[1],
+        "issue_id": row[2],
+        "event_type": row[3],
+        "source": row[4],
+        "agent_type": row[5] or "",
+        "title": row[6] or row[3],
+        "body": row[7] or "",
+        "payload": payload,
+        "status": row[9],
+        "created_at": row[10],
+    }
