@@ -383,9 +383,72 @@ stream_agent(prompt, cwd, session_id, backend, account, user_id, env):
   └── 7. yield done → {exit_code, text, oc_session_id, errors, stderr}
 ```
 
+### 8.6 Backend 发现与健康检测
+
+**前端 Backend Agents 页面** 需要展示引擎的安装状态和运行状态。后端通过系统级检测实现：
+
+**发现机制：**
+
+```python
+def discover_backends() -> list[dict]:
+    for be in REGISTERED_BACKENDS:
+        for p in be["paths"]:
+            found = shutil.which(p)
+            if found:
+                result["installed"], result["path"] = True, found
+                break
+```
+
+| 引擎 | 查找方式 | 示例路径 |
+|------|---------|---------|
+| OpenCode | `which opencode` | `/usr/local/bin/opencode` |
+| CodeArts | `which codearts` | `/usr/local/bin/codearts` |
+| Hermes | `which hermes` | `/usr/local/bin/hermes` |
+| Cursor | `which cursor-agent` | `/usr/local/bin/cursor-agent` |
+
+**健康检测：**
+
+```python
+def check_health(binary: str) -> dict:
+    # 1. --version 获取版本
+    p = subprocess.run([binary, "--version"], ...)
+    if p.rc == 0: result["version"] = p.stdout.strip()
+
+    # 2. 最小功能验证
+    p = subprocess.run([binary, "run", "--format", "json",
+                        "Respond with exactly 'OK'"], timeout=10)
+    result["running"] = (p.rc == 0 and "OK" in p.stdout)
+```
+
+**CodeArts AK/SK 验证：**
+
+```python
+def validate_codearts_auth(ak: str, sk: str) -> bool:
+    env = {"CODEARTS_CLI_AK": ak, "CODEARTS_CLI_SK": sk}
+    p = subprocess.run(["codearts", "run", "--format", "json",
+                        "Respond with exactly 'AUTH_OK'"],
+                       env=env, ..., timeout=15)
+    return p.rc == 0 and "AUTH_OK" in p.stdout
+```
+
+**API 端点：**
+
+```
+GET  /api/settings/backend-agents
+  → [{name, label, installed, path, version, running, requires_auth}]
+
+POST /api/settings/backend-agents/refresh
+  → 强制重新 discover + check_health
+
+PUT  /api/settings/backend-agents/codearts
+  → {ak, sk} → 实时验证 AK/SK 有效性
+```
+
+**缓存：** 检测结果缓存 5 分钟，手动刷新 (Refresh All / Test Connection) 强制更新。
+
 ---
 
-## 九、VCS 适配器 (`src/vcs/`)
+## 十、VCS 适配器 (`src/vcs/`)
 
 ### 9.1 统一事件格式
 
@@ -418,7 +481,7 @@ stream_agent(prompt, cwd, session_id, backend, account, user_id, env):
 
 ---
 
-## 十、飞书 IM 集成 (`src/im/`)
+## 十一、飞书 IM 集成 (`src/im/`)
 
 ### 10.1 WebSocket 连接
 
@@ -459,7 +522,7 @@ process_chat(parsed):
 
 ---
 
-## 十一、事件与 Agent 会话管理 (`session_manager.py`)
+## 十二、事件与 Agent 会话管理 (`session_manager.py`)
 
 ### 11.1 核心概念
 
@@ -734,7 +797,7 @@ Event Detail 页面提供反馈表单，用户可对任意事件的执行日志�
   VOD 需要同时分析: 原始事件是否有问题 + 用户反馈是否合理
 ```
 
-## 十二、技能系统（Skills）
+## 十三、技能系统（Skills）
 
 ### 12.1 存储结构
 
@@ -782,7 +845,7 @@ skills/
 
 ---
 
-## 十三、数据库设计
+## 十四、数据库设计
 
 ### 13.1 核心表 `user_accounts`
 
@@ -841,7 +904,7 @@ CREATE TABLE user_accounts (
 
 ---
 
-## 十四、并发模型
+## 十五、并发模型
 
 | 组件 | 并发控制 | 说明 |
 |------|---------|------|
@@ -854,7 +917,7 @@ CREATE TABLE user_accounts (
 
 ---
 
-## 十五、安全模型
+## 十六、安全模型
 
 | 措施 | 实现 |
 |------|------|
@@ -869,7 +932,7 @@ CREATE TABLE user_accounts (
 
 ---
 
-## 十六、配置体系
+## 十七、配置体系
 
 ### 16.1 路由配置
 
@@ -905,7 +968,7 @@ CREATE TABLE user_accounts (
 
 ---
 
-## 十七、部署架构
+## 十八、部署架构
 
 ### 17.1 服务器
 
@@ -972,7 +1035,7 @@ WantedBy=multi-user.target
 
 ---
 
-## 十八、实施路线
+## 十九、实施路线
 
 ### Phase 1：API 基础
 
