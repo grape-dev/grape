@@ -12,8 +12,34 @@ _BACKENDS = {
 }
 
 
+def register_backend(name: str, backend: AgentBackend):
+    """注册第三方 Agent 后端（插件接口，~20 行代码即可接入新引擎）"""
+    _BACKENDS[name] = backend
+    log.info(f"Backend registered: {name} -> {backend.__class__.__name__}")
+
+
 def get_backend(name: str) -> AgentBackend:
     return _BACKENDS.get(name, _BACKENDS["opencode"])
+
+
+def discover_backends() -> list[dict]:
+    """动态发现本地已安装的 Agent 引擎"""
+    known = {
+        "opencode": {"cli": "opencode", "pip": "opencode"},
+        "codearts": {"cli": "codearts", "pip": "codearts-cli"},
+        "hermes": {"cli": "hermes", "pip": "hermes"},
+        "cursor": {"cli": "cursor", "pip": "cursor"},
+    }
+    results = []
+    for name, info in known.items():
+        cli_path = shutil.which(info["cli"])
+        results.append({
+            "name": name,
+            "installed": cli_path is not None,
+            "cli_path": cli_path or "",
+            "pip_package": info["pip"],
+        })
+    return results
 
 
 def stream_agent(prompt: str, cwd: str, session_id: str = "",
