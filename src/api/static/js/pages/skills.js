@@ -1,30 +1,45 @@
+const SKILL_CATEGORIES = [
+  {name:'VOD Agent',ico:'🎤',c:'#ec4899',tag:'tg-v',skills:[
+    {n:'声音分析',desc:'收集、聚类、提炼开发者声音中的共性问题',type:'官方技能'},
+    {n:'反馈收集',desc:'从 IM 和 PR 评论中收集反馈信息',type:'用户上传'},
+  ]},
+  {name:'Issue Agent',ico:'🎫',c:'#ef4444',tag:'tg-i',skills:[
+    {n:'Issue 管理',desc:'分类、标签、指派、A2A 触发 Coding Agent',type:'官方技能'},
+    {n:'自定义 Issue 处理',desc:'包含特定项目的 Issue 处理规则',type:'用户上传'},
+  ]},
+  {name:'Coding Agent',ico:'⚙',c:'#3b82f6',tag:'tg-c',skills:[
+    {n:'代码实现',desc:'需求分析→方案设计→编码实现→PR提交',type:'官方技能'},
+  ]},
+  {name:'QA Agent',ico:'✔',c:'#8b5cf6',tag:'tg-q',skills:[
+    {n:'PR Review',desc:'Code Review、自动化测试、功能验证',type:'官方技能'},
+    {n:'自定义审查规则',desc:'特定项目代码审查规则',type:'用户上传'},
+  ]},
+  {name:'SRE Agent',ico:'🚀',c:'#f97316',tag:'tg-s',skills:[
+    {n:'部署发布',desc:'CHANGELOG生成→构建→部署→监控',type:'官方技能'},
+    {n:'合规检查',desc:'部署前安全与合规门禁',type:'官方技能'},
+  ]},
+];
+
 function renderSkills() {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  el.innerHTML = `<div class="cd"><div class="cd-h"><h2>DevOps Skills Library</h2></div>
-  <div id="skillsList"><div class="loading">加载中...</div></div></div>`;
-
-  API.get('/skills/').then(d => {
-    const skills = d.skills || [];
-    let html = '';
-    const groups = {};
-    skills.forEach(s => {
-      const g = s.agent_type || 'other';
-      if (!groups[g]) groups[g] = [];
-      groups[g].push(s);
+  let html = '<div style="margin-bottom:12px"><input placeholder="搜索技能..." style="padding:8px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);width:260px"></div>';
+  SKILL_CATEGORIES.forEach(cat => {
+    html += `<div style="margin-bottom:18px">
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${cat.c}">${cat.ico} ${cat.name} Skills</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">`;
+    cat.skills.forEach(s => {
+      html += `<div class="cd" style="padding:14px;cursor:pointer">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <span style="color:${cat.c}">${cat.ico}</span>
+          <span style="font-size:12px;font-weight:600">${s.n}</span>
+          <span class="tg ${cat.tag}" style="margin-left:auto;font-size:9px">${s.type}</span>
+        </div>
+        <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:8px">${s.desc}</div>
+        <div style="display:flex;gap:6px"><button class="bt bt-o bt-s">View</button><button class="bt bt-o bt-s">Edit</button></div>
+      </div>`;
     });
-    Object.entries(groups).forEach(([g, items]) => {
-      html += `<div class="cd-h" style="margin-top:12px"><h2 class="t2">${g.toUpperCase()}</h2></div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px">`;
-      items.forEach(s => {
-        html += `<div style="border:1px solid var(--b);border-radius:8px;padding:8px 12px;width:calc(33% - 8px);min-width:180px">
-          <div style="font-size:12px;font-weight:600;margin-bottom:2px">${s.name}</div>
-          <div style="font-size:10px;color:var(--t2)">${s.description || ''}</div>
-          <div style="font-size:9px;color:var(--t3);margin-top:4px"><span class="tg tg-d">${s.type || 'official'}</span></div>
-        </div>`;
-      });
-      html += `</div>`;
-    });
-    document.getElementById('skillsList').innerHTML = html || '<div class="ts t2">暂无技能</div>';
-  }).catch(e => document.getElementById('skillsList').innerHTML = `<div class="error">加载失败: ${e.message}</div>`);
+    html += `</div></div>`;
+  });
+  el.innerHTML = html;
 }

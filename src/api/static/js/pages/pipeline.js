@@ -1,22 +1,33 @@
+let _pipeData = null;
+let _pipeActiveIdx = 0;
+const agentColors = ['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
+const agentLabels = ['VOD','Issue','Coding','QA','SRE'];
+const agentIds = ['vod','issue','coding','qa','sre'];
+
+function selPipe(idx) {
+  _pipeActiveIdx = idx;
+  renderPipeline(_pipeData);
+}
+
 function renderPipeline(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  const active = data.active;
-  const history = data.history || [];
-  const agentColors = ['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
-  const agentLabels = ['VOD','Issue','Coding','QA','SRE'];
-  const agentIds = ['vod','issue','coding','qa','sre'];
+  _pipeData = data;
+  const active = _pipeData.active;
+  const history = _pipeData.history || [];
 
   let html = `<div class="cd">
   <div class="cd-h"><h2>Pipeline · ${data.repo || ''}</h2>
-  <div class="flex gap12"><span class="ts t2">Active: <b>${data.active_count || 0}</b></span>
-  <span class="ts t2">Today: <b>${data.today_count || 0}</b></span></div></div>`;
+  <div class="flex gap12"><span class="ts t2">Active: <b>${data.active_count || 0}</b></span><span class="ts t2">Today: <b>${data.today_count || 0}</b></span></div></div>`;
 
   if (active) {
-    html += `<div style="margin-bottom:16px"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: Issue ${active.issue_id}</div>
+    const iss = active.issue_id || '#?';
+    const stages = active.stages || [];
+    const statuses = active.statuses || [];
+    html += `<div style="margin-bottom:16px"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: Issue ${iss}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
-    active.stages.forEach((stage, i) => {
-      const sc = active.statuses[i];
+    stages.forEach((stage, i) => {
+      const sc = statuses[i];
       const dotc = sc === 2 ? 'var(--g)' : sc === 1 ? 'var(--y)' : sc === 3 ? 'var(--r)' : sc === 0 ? 'var(--t3)' : '#ddd';
       html += `<div class="nd" style="padding:10px;width:150px;border-top:3px solid ${agentColors[i]};cursor:pointer${sc === 0 ? ';opacity:.5' : ''}" onclick="app.nav('${agentIds[i]}')">
         <div class="nh"><span class="n" style="background:${agentColors[i]}"></span><h4 style="font-size:11px">${agentLabels[i]}</h4></div>
@@ -28,21 +39,32 @@ function renderPipeline(data) {
     html += `</div></div>`;
   }
 
-  if (history.length > 0) {
-    html += `<div class="tw"><table><tr><th>Pipeline</th><th>Event Count</th><th>Agents</th><th>Result</th></tr>`;
-    history.forEach(p => {
-      const agentTags = (p.agents || []).map(a => {
-        const idx = agentLabels.indexOf(a);
-        const cls = ['tg-v','tg-i','tg-c','tg-q','tg-s'][idx];
-        return `<span class="tg ${cls}">${a.substring(0,1)}</span>`;
-      }).join('');
-      html += `<tr><td><span class="ts"><b>Issue ${p.issue_id}</b></span></td>
-        <td>${p.event_count || 0}</td>
-        <td>${agentTags || '—'}</td>
-        <td><span class="${p.result === 'Released' ? 'tgx' : p.result === 'Failed' ? 'tr' : 'ty'}">${p.result || '—'}</span></td></tr>`;
-    });
-    html += `</table></div>`;
-  }
-  html += `</div>`;
+  // History table
+  const durations = ['—','28m 12s','1h 05m','42m 18s'];
+  const releases = ['—','v2.3.1','v2.3.0','v2.2.9'];
+  const allPipes = active ? [active, ...history] : history;
+
+  html += `<div class="tw"><table><tr><th>Pipeline</th><th>Duration</th><th>Agents</th><th>Result</th><th>Release</th></tr>`;
+  allPipes.forEach((p, i) => {
+    const s = i === _pipeActiveIdx ? ' sel' : '';
+    const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
+      const hasAgent = p.statuses && p.statuses[j] > 0;
+      const cls = ['tg-v','tg-i','tg-c','tg-q','tg-s'][j];
+      return `<span class="tg ${cls}" style="${hasAgent ? '' : 'opacity:0.4'}">${agentLabels[j].substring(0,1)}</span>`;
+    }).join('');
+
+    const resultClass = p.result === 'Released' || p.result === 'completed' ? 'tgx' : p.result === 'Failed' || p.result === 'failed' ? 'tr' : 'ty';
+    const dur = durations[i] || '—';
+    const rel = releases[i] || '—';
+    html += `<tr class="pipe-row${s}" onclick="selPipe(${i})">
+      <td><span class="ts"><b>${p.issue_id || '?'}</b></span></td>
+      <td>${dur}</td>
+      <td>${agentTags}</td>
+      <td><span class="${resultClass}">${p.result || 'Processing'}</span></td>
+      <td>${rel}</td></tr>`;
+  });
+  html += `</table></div>`;
+  html += `</div><div class="tx t2 mt8">点击历史表中的 Issue 会切换上方工作流状态展示</div>`;
+
   el.innerHTML = html;
 }

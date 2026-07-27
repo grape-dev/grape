@@ -10,7 +10,6 @@ const app = (() => {
     $('loginView').classList.remove('hid');
     $('sidebar').style.display = 'none';
     $('mainView').style.display = 'none';
-    $('repoView').classList.remove('ac');
   }
 
   function showApp() {
@@ -25,6 +24,7 @@ const app = (() => {
     API.get('/auth/profile').then(d => {
       $('userName').textContent = d.username || 'User';
       $('userAvatar').textContent = (d.username || 'U')[0].toUpperCase();
+      $('userRole').textContent = (d.managed_repos && d.managed_repos.length > 0) ? 'Admin' : 'Member';
     }).catch(() => {});
   }
 
@@ -36,22 +36,17 @@ const app = (() => {
       sel.innerHTML = '<option value="">选择仓库...</option>' + repos.map(r =>
         `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
       ).join('');
-
       if (!current && repos.length > 0) {
         const r = repos[0];
         localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
       }
-
-      if (repos.length === 0) {
-        showRepoSelection(repos);
-      }
+      if (repos.length === 0) showRepoSelection(repos);
     }).catch(() => {});
   }
 
   function showRepoSelection(repos) {
     $('sidebar').style.display = 'none';
     $('mainView').style.display = 'none';
-    $('repoView').classList.add('ac');
     renderRepos(repos);
   }
 
@@ -62,125 +57,101 @@ const app = (() => {
     nav('dash');
   }
 
+  let _refreshTimer = null;
   function nav(view, param) {
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings') {
-      loadRepos();
-      return;
-    }
+    if (!repo && view !== 'repos' && view !== 'settings') { loadRepos(); return; }
 
-    VIEWS.forEach(v => {
-      const el = $('nav-' + v);
-      if (el) el.classList.remove('act');
-    });
+    VIEWS.forEach(v => { const el = $('nav-' + v); if (el) el.classList.remove('act'); });
     const navEl = $('nav-' + view);
     if (navEl) navEl.classList.add('act');
+    document.querySelectorAll('.sb-nav a').forEach(a => {
+      const o = a.getAttribute('onclick') || '';
+      if (param && o.includes("'" + param + "'")) a.classList.add('act');
+      else if (!param && o === "nav('" + view + "')") a.classList.add('act');
+    });
 
-    const bc = $('breadcrumb');
+    const title = $('pageTitle');
+    const repoTitle = $('repoTitle');
     const pc = $('pageContent');
     pc.innerHTML = '<div class="loading">加载中...</div>';
 
-    if (window._refreshTimer) { clearInterval(window._refreshTimer); window._refreshTimer = null; }
+    if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+
+    repoTitle.textContent = repo ? repo.fullName : '';
 
     if (view === 'dash') {
-      bc.innerHTML = repo ? `<b>${repo.fullName}</b> · Dashboard` : 'Dashboard';
-
+      title.textContent = 'Dashboard';
       const loadDash = () => API.get('/dashboard/' + repo.owner + '/' + repo.name).then(renderDashboard).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
       loadDash();
-      window._refreshTimer = setInterval(loadDash, 30000);
+      _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
-      bc.innerHTML = repo ? `<b>${repo.fullName}</b> · Pipeline` : 'Pipeline';
+      title.textContent = 'Pipeline';
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
-      bc.innerHTML = repo ? `<b>${repo.fullName}</b> · ${AGENT_META[view].display}` : view;
+      title.textContent = AGENT_META[view].display;
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (view === 'event') {
-      bc.innerHTML = 'Event #' + param;
+      title.textContent = 'Event Detail';
       API.get('/events/detail/' + param).then(renderEventDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (view === 'chat') {
-      bc.innerHTML = 'Chat Agent';
+      title.textContent = 'Chat Agent';
       renderChat();
     } else if (view === 'settings') {
-      bc.innerHTML = 'Settings';
+      title.textContent = 'General Settings';
       renderSettings(param || 'credentials');
     } else if (view === 'skills') {
-      bc.innerHTML = 'DevOps Skills';
+      title.textContent = 'DevOps Skills';
       renderSkills();
     } else if (view === 'backends') {
-      bc.innerHTML = 'Backend Agents';
-      API.get('/settings/backend-agents').then(d => {
-        const backends = d.backends || [];
-        let html = '<div class="cd"><div class="cd-h"><h2>Backend Agents</h2></div>';
-        backends.forEach(b => {
-          html += `<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--b)">
-            <span style="font-weight:600;width:80px">${b.name}</span>
-            <span class="${b.installed ? 'tgx' : 'tr'}">${b.installed ? '✓ Installed' : '✗ Not found'}</span>
-            <span class="ts t3">${b.cli_path || ''}</span>
-          </div>`;
-        });
-        html += '</div>';
-        pc.innerHTML = html;
-      }).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+      title.textContent = 'Backend Agents';
+      API.get('/settings/backend-agents').then(renderBackends).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (view === 'repos') {
-      bc.innerHTML = '选择仓库';
+      title.textContent = '选择仓库';
       loadRepos();
     }
   }
 
   function search(q) {
     if (!q.trim()) return;
+    const pc = $('pageContent');
     API.get('/search/?q=' + encodeURIComponent(q) + '&type=all').then(d => {
-      const pc = $('pageContent');
-      let html = `<div class="cd"><div class="cd-h"><h2>Search: "${q}"</h2></div>`;
-      html += `<div class="ts t2">Events: ${(d.events || []).length} · Repos: ${(d.repos || []).length} · Agents: ${(d.agents || []).length}</div>`;
-      if (d.events && d.events.length > 0) {
-        html += '<div class="cd-h" style="margin-top:12px"><h2>Events</h2></div>';
-        d.events.forEach(ev => {
-          html += `<div class="ai" onclick="app.nav('event',${ev.seq})" style="cursor:pointer"><div class="ac"><b>${ev.title}</b><span class="ts t3"> ${ev.repo_key}</span></div></div>`;
-        });
-      }
-      if (d.agents && d.agents.length > 0) {
-        html += '<div class="cd-h" style="margin-top:12px"><h2>Agents</h2></div>';
-        d.agents.forEach(a => {
-          html += `<div class="cl" onclick="app.nav('${a.name}')"><div class="cx"><h4>${a.display_name}</h4></div></div>`;
-        });
-      }
+      let html = '<div class="cd"><div class="cd-h"><h2>Search: "' + q + '"</h2></div>';
+      html += '<div class="ts t2">Events: ' + (d.events || []).length + ' / Repos: ' + (d.repos || []).length + ' / Agents: ' + (d.agents || []).length + '</div>';
+      (d.events || []).forEach(ev => { html += '<div class="ai" onclick="app.nav(\'event\',' + ev.seq + ')" style="cursor:pointer"><div class="ac"><b>' + (ev.title || '') + '</b><span class="ts t3"> ' + (ev.repo_key || '') + '</span></div></div>'; });
+      (d.agents || []).forEach(a => { html += '<div class="cl" onclick="app.nav(\'' + a.name + '\')"><div class="cx"><h4>' + a.display_name + '</h4></div></div>'; });
       html += '</div>';
       pc.innerHTML = html;
-    }).catch(e => {});
+    }).catch(() => {});
   }
 
   function oauthLogin() {
-    API.get('/auth/login/gitcode').then(d => {
-      if (d.redirect_url) window.location.href = d.redirect_url;
-    }).catch(e => app.showToast('OAuth 未配置'));
+    API.get('/auth/login/gitcode').then(d => { if (d.redirect_url) window.location.href = d.redirect_url; }).catch(e => showToast('OAuth 未配置'));
   }
 
   let pwdVisible = false;
   function togglePwdLogin() {
     pwdVisible = !pwdVisible;
+    $('loginLinks').style.display = pwdVisible ? 'none' : '';
     $('pwdLogin').style.display = pwdVisible ? 'block' : 'none';
+    $('gitBtn').style.display = pwdVisible ? 'none' : '';
   }
 
   function pwdLogin() {
-    const username = $('loginUser').value.trim();
-    const password = $('loginPass').value.trim();
-    if (!username || !password) return app.showToast('请输入用户名和密码');
-    API.post('/auth/login', {username, password}).then(d => {
+    const u = $('loginUser').value.trim();
+    const p = $('loginPass').value.trim();
+    if (!u || !p) return showToast('请输入用户名和密码');
+    API.post('/auth/login', {username: u, password: p}).then(d => {
       localStorage.setItem('token', d.token);
       localStorage.setItem('user', JSON.stringify(d.user));
       showApp();
-    }).catch(e => app.showToast('登录失败: ' + e.message));
+    }).catch(e => showToast('登录失败: ' + e.message));
   }
 
   function logout() {
-    const token = localStorage.getItem('token');
-    if (token) {
-      API.post('/auth/logout', {}).catch(() => {});
-    }
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    localStorage.removeItem('currentRepo');
+    const t = localStorage.getItem('token');
+    if (t) API.post('/auth/logout', {}).catch(() => {});
+    localStorage.removeItem('token'); localStorage.removeItem('user'); localStorage.removeItem('currentRepo');
     showLogin();
   }
 
@@ -194,22 +165,15 @@ const app = (() => {
 
   function init() {
     const token = localStorage.getItem('token');
-    if (token) {
-      showApp();
-    } else {
-      const urlParams = new URLSearchParams(window.location.search);
-      const urlToken = urlParams.get('token');
-      if (urlToken) {
-        localStorage.setItem('token', urlToken);
-        history.replaceState(null, '', '/');
-        showApp();
-      } else {
-        showLogin();
-      }
+    if (token) { showApp(); }
+    else {
+      const p = new URLSearchParams(window.location.search);
+      const t = p.get('token');
+      if (t) { localStorage.setItem('token', t); history.replaceState(null, '', '/'); showApp(); }
+      else { showLogin(); }
     }
   }
 
   return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, currentRepo, showLogin, init};
 })();
-
 document.addEventListener('DOMContentLoaded', () => app.init());
