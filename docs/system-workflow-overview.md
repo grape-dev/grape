@@ -178,7 +178,7 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 - **DevOps Agents**：核心工作流的 5 个 Agent，点击进入对应 Agent 详情
 - **Account**：用户个人信息、在线状态
 - **Settings**：仓库级别的通用设置（凭据、通知、自定义 Skill 等），与 Account 并列
-- **Backend Agents**：配置 5 个 DevOps Agents 各自使用的 Backend 引擎
+- **Backend Agents**：检测本地 Agent 引擎安装状态（OpenCode/CodeArts/Hermes），配置连接凭据
 - **Chat Agent 设置**：集成在 Chat Agent 页面内部，不在侧边栏展示
 
 切换仓库后，Dashboard、Pipeline 等页面内容跟随切换为该仓库的数据。
@@ -427,38 +427,39 @@ Chat Agent 页面说明：
 
 ### 2.9 Backend Agents 页面
 
-管理 DevOps Agents 所用后端的配置页面，支持每个 Agent 单独选择不同的 Backend 引擎：
+管理和检测本地已安装的 Agent 引擎（OpenCode、CodeArts、Hermes 等），检查运行状态和配置连接凭据。此页面不与具体的 DevOps Agent 绑定，属于系统级 Agent 引擎管理：
 
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
-│  Backend Agents · team/backend-service                │
+│  Backend Agents                                      │
 ├───────────────────────────────────────────────────────┤
 │                                                        │
-│  ┌─ VOD Agent ────────────────────────────────────┐  │
-│  │  ♫ VOD Agent        [Hermes ▼]                 │  │
-│  │  URL      http://hermes:8080/agent              │  │
-│  │  API Key  ********************                  │  │
-│  └───────────────────────────────────────────────┘  │
+│  ┌─ OpenCode ──────────────────────────────────────┐  │
+│  │  ● Running         Version: 1.5.2               │  │
+│  │  Installed ✓       Path: /usr/local/bin/opencode│  │
+│  │  [Test Connection] [View Logs]                  │  │
+│  └────────────────────────────────────────────────┘  │
 │                                                        │
-│  ┌─ Issue Agent ──────────────────────────────────┐  │
-│  │  ⚠ Issue Agent      [OpenCode ▼]               │  │
-│  │  URL      (default)                             │  │
-│  └───────────────────────────────────────────────┘  │
+│  ┌─ CodeArts ──────────────────────────────────────┐  │
+│  │  ● Running         Version: 2.1.0               │  │
+│  │  Installed ✓       Path: /usr/local/bin/codearts │  │
+│  │  AK  [AK-demo-access-key-xxxx]                  │  │
+│  │  SK  [SK-demo-secret-key-xxxx]                  │  │
+│  │  [Test Connection] [Save AK/SK]                  │  │
+│  └────────────────────────────────────────────────┘  │
 │                                                        │
-│  ┌─ Coding Agent ─────────────────────────────────┐  │
-│  │  ⚙ Coding Agent     [CodeArts ▼]               │  │
-│  │  URL      (default)                             │  │
-│  └───────────────────────────────────────────────┘  │
+│  ┌─ Hermes ────────────────────────────────────────┐  │
+│  │  ● Running         Version: 0.9.1               │  │
+│  │  Installed ✓       Path: /usr/local/bin/hermes  │  │
+│  │  [Test Connection] [View Logs]                  │  │
+│  └────────────────────────────────────────────────┘  │
 │                                                        │
-│  ┌─ QA Agent ─────────────────────────────────────┐  │
-│  │  ✔ QA Agent         [OpenCode ▼]               │  │
-│  │  URL      (default)                             │  │
-│  └───────────────────────────────────────────────┘  │
+│  ┌─ Cursor ────────────────────────────────────────┐  │
+│  │  ○ Not Installed                                │  │
+│  │  [Install Guide]                                │  │
+│  └────────────────────────────────────────────────┘  │
 │                                                        │
-│  ┌─ SRE Agent ────────────────────────────────────┐  │
-│  │  ♡ SRE Agent        [OpenCode ▼]               │  │
-│  │  URL      (default)                             │  │
-│  └───────────────────────────────────────────────┘  │
+│  [⟳ Refresh All]                                      │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -466,10 +467,12 @@ Backend Agents 页面说明：
 
 | 元素 | 说明 |
 |------|------|
-| **Agent 列表** | 每个 DevOps Agent 一行，包含图标、名称、Backend 下拉选择 |
-| **Backend 下拉** | 可选：OpenCode、CodeArts、Hermes、Cursor 等 |
-| **自定义 URL** | 使用自定义 Backend 时显示 URL 和 API Key 配置 |
-| **保存** | 修改后全局生效，影响所有仓库的该 Agent 执行 |
+| **引擎列表** | 每个 Agent 引擎一行，展示安装状态、版本、运行状态 |
+| **安装检测** | 自动检测本地是否安装该引擎，显示路径和版本 |
+| **运行状态** | ● Running / ○ Stopped / ● Error |
+| **连接测试** | 点击 Test Connection 验证引擎是否可正常工作 |
+| **CodeArts 特殊配置** | CodeArts 需要 AK/SK 连接华为云，提供独立配置区 |
+| **刷新** | Refresh All 重新检测所有引擎状态 |
 
 ### 2.10 日常使用
 

@@ -665,33 +665,41 @@ function renderGitcode(){
   document.getElementById('gC').innerHTML=html;
 }
 
-// Backend Agents
+// Backend Agents - engine health detection
 function renderBackend(){
-  document.getElementById('rt').textContent=R[repo].n;
-  const agents=[
-    {k:'vod',n:'VOD Agent',ico:'♫',c:'#ec4899',bk:'Hermes',url:'http://hermes:8080/agent',hasKey:true},
-    {k:'issue',n:'Issue Agent',ico:'⚠',c:'#ef4444',bk:'OpenCode',url:'(default)',hasKey:false},
-    {k:'coding',n:'Coding Agent',ico:'⚙',c:'#3b82f6',bk:'CodeArts',url:'(default)',hasKey:false},
-    {k:'qa',n:'QA Agent',ico:'✔',c:'#8b5cf6',bk:'OpenCode',url:'(default)',hasKey:false},
-    {k:'sre',n:'SRE Agent',ico:'♡',c:'#f97316',bk:'OpenCode',url:'(default)',hasKey:false},
+  document.getElementById('rt').textContent='';
+  const engines=[
+    {n:'OpenCode',v:'1.5.2',path:'/usr/local/bin/opencode',running:true,hasAK:false},
+    {n:'CodeArts',v:'2.1.0',path:'/usr/local/bin/codearts',running:true,hasAK:true,ak:'AK-demo-access-key-xxxx',sk:'SK-demo-secret-key-xxxx'},
+    {n:'Hermes',v:'0.9.1',path:'/usr/local/bin/hermes',running:true,hasAK:false},
+    {n:'Cursor',v:'',path:'',running:false,installed:false,hasAK:false},
   ];
   let html='';
-  agents.forEach(a=>{
+  engines.forEach(e=>{
     html+=`
 <div class="cd" style="padding:16px 20px">
-  <h3 style="font-size:13px;font-weight:600;margin-bottom:12px;color:${a.c}">${a.ico} ${a.n}</h3>
-  <div class="srow"><label>Backend</label>
-    <select style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
-      <option ${a.bk==='OpenCode'?'selected':''}>OpenCode</option>
-      <option ${a.bk==='CodeArts'?'selected':''}>CodeArts</option>
-      <option ${a.bk==='Hermes'?'selected':''}>Hermes</option>
-      <option>Cursor</option>
-    </select>
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+    <span style="width:10px;height:10px;border-radius:50%;background:${e.running?'var(--g)':'var(--t3)'};display:inline-block"></span>
+    <h3 style="font-size:14px;font-weight:600">${e.n}</h3>
+    <span class="ts t2" style="margin-left:8px">${e.installed===false?'Not Installed':'Version: '+e.v}</span>
   </div>
-  <div class="srow"><label>URL</label><input type="text" value="${a.url}" ${a.url==='(default)'?'disabled style="background:#f1f5f9"':''} style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
-  ${a.hasKey?`<div class="srow"><label>API Key</label><input type="password" value="********************" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>`:''}
+  ${e.installed===false?`
+    <div class="srow"><label></label><button class="bt bt-o bt-s">Install Guide</button></div>
+  `:`
+    <div class="srow"><label>Installed</label><span class="tgx">✓</span> Path: ${e.path}</div>
+    ${e.hasAK?`
+      <div class="srow"><label>AK</label><input type="password" value="${e.ak}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
+      <div class="srow"><label>SK</label><input type="password" value="${e.sk}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
+    `:''}
+    <div class="flex gap6" style="margin-left:120px">
+      <button class="bt bt-o bt-s">Test Connection</button>
+      <button class="bt bt-o bt-s">View Logs</button>
+      ${e.hasAK?`<button class="bt bt-p bt-s">Save AK/SK</button>`:''}
+    </div>
+  `}
 </div>`;
   });
+  html+=`<button class="bt bt-o" style="margin-top:8px">⟳ Refresh All</button>`;
   document.getElementById('bC').innerHTML=html;
 }
 
