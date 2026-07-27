@@ -1,4 +1,5 @@
 """Skills 路由：列表、上传、删除"""
+import os, tempfile, zipfile, json
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from src.user import db as user_db
 from src.user.validator import validate_skill as validate_custom_skill
@@ -28,12 +29,12 @@ async def list_skills(user: dict = Depends(get_current_user)):
             })
 
     custom = []
-    user_skills_raw = user_db.get_user_skills(user["id"])
+    user_skills_raw = user_db.list_skills(user["id"])
     for s in user_skills_raw:
         custom.append({
-            "name": s.get("name", "unknown"),
-            "agent_type": s.get("agent_type", ""),
-            "description": s.get("description", "")[:100],
+            "name": s.get("skill_name", "unknown"),
+            "agent_type": "",
+            "description": f"User-uploaded skill: {s.get('skill_name', '')}",
             "type": "user-uploaded",
         })
 
@@ -46,21 +47,52 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "Skill 文件不能超过 10MB"})
 
-    import base64, yaml, tempfile, os, zipfile
+    tmp_dir = tempfile.mkdtemp()
     try:
-        b64_content = base64.b64encode(content).decode()
-        result = validate_custom_skill(b64_content)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"Skill 校验失败: {e}"})
+        zip_path = os.path.join(tmp_dir, file.filename or "skill.zip")
+        with open(zip_path, "wb") as f:
+            f.write(content)
 
-    return {"message": "技能上传成功", "skill": result}
+        extract_dir = os.path.join(tmp_dir, "extracted")
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
+
+        entries = os.listdir(extract_dir)
+        if not entries:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "ZIP 文件为空"})
+
+        skill_dir = os.path.join(extract_dir, entries[0])
+        if not os.path.isdir(skill_dir):
+            skill_dir = extract_dir
+
+        skill_name = os.path.basename(skill_dir) if os.path.isdir(skill_dir) else entries[0]
+        errors = validate_custom_skill(skill_dir, skill_name)
+        if errors:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"Skill 校验失败: {'; '.join(errors)}"})
+
+        import shutil
+        user_skill_dir = os.path.join(user_db.SKILL_DIR, str(user["id"]), skill_name)
+        os.makedirs(os.path.dirname(user_skill_dir), exist_ok=True)
+        if os.path.exists(user_skill_dir):
+            shutil.rmtree(user_skill_dir)
+        shutil.copytree(skill_dir, user_skill_dir)
+
+        user_db.create_skill(user["id"], skill_name, "")
+        user_db.save_skill_md(user["id"], skill_name)
+
+        return {"message": f"技能 {skill_name} 上传成功"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"上传失败: {e}"})
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @router.delete("/{skill_name}")
 async def delete_skill(skill_name: str, user: dict = Depends(get_current_user)):
-    skills = user_db.get_user_skills(user["id"])
-    for s in skills:
-        if s.get("name") == skill_name:
-            user_db.delete_user_skill(s["id"])
-            return {"message": f"技能 {skill_name} 已删除"}
+    success = user_db.delete_skill(user["id"], skill_name)
+    if success:
+        return {"message": f"技能 {skill_name} 已删除"}
     raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})

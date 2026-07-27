@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search
+from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline
 
 app = FastAPI(title="Agentic DevOps API", version="2.0.0")
 
@@ -27,6 +27,7 @@ app.include_router(chat.router)
 app.include_router(settings.router)
 app.include_router(skills.router)
 app.include_router(search.router)
+app.include_router(pipeline.router)
 
 from src.api.db_setup import init_database
 init_database()

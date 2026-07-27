@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_bot_token
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -63,21 +63,18 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         except Exception:
             pass
 
-    from src.api.db_setup import _SEED_FILES
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT agent_type, display_name, description FROM agent_type_config ORDER BY order_num, agent_type")
+            all_types = c.fetchall()
+            skills_list = [{"name": r[0], "display_name": r[1], "description": (r[2] or "")[:100]} for r in all_types]
+        except Exception:
+            skills_list = []
     from src.api.deps import get_bot_token
-
     bot_token = get_bot_token("default")
-
-    skills_list = []
-    from src.config import get_skill_capabilities
-    all_skills = get_skill_capabilities()
-    for skill_name, skill_info in all_skills.items():
-        skills_list.append({
-            "name": skill_name,
-            "description": skill_info.get("description", "")[:100],
-        })
-
-    config = {}
+    config = {"backend": "opencode"}
     from src.api.db_setup import _CONFIG_DIR
     try:
         import json, os
