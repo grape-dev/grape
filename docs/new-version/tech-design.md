@@ -178,22 +178,38 @@ Content:    application/json
 |------|------|------|
 | GET | `/{owner}/{repo}` | 全量数据 `{repo, metrics, agents, activity}` |
 
-### 4.5 Agent `/api/agents/`
+### 4.5 Pipeline `/api/pipeline/`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/{owner}/{repo}` | 流水线数据 `{active, history}`，active 含每个 Agent 阶段的事件详情 |
+
+### 4.6 Events `/api/events/`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/{event_seq}` | 单条事件详情 `{context, execution_log, metadata}` |
+| GET | `/{owner}/{repo}` | 仓库事件列表 `{events}` |
+
+### 4.7 Agent `/api/agents/`
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/{name}/{owner}/{repo}` | Agent 详情 (指标/事件/Skill) |
 | PUT | `/{name}/{owner}/{repo}` | 配置 Agent (Engine + Skill) |
 
-### 4.6 Chat `/api/chat/`
+### 4.8 Chat `/api/chat/`
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/send` | 发送消息 → Agent 回复 |
 | GET | `/config` | Chat Agent 配置 |
 | PUT | `/config` | 更新 Backend/IM 配置 |
+| POST | `/feedback` | 提交事件反馈（→ A2A 推给 VOD Agent） |
 
-### 4.7 Settings `/api/settings/`
+> 飞书 App ID/Secret 支持「Scan QR to auto-configure」快捷接入（见 `docs/feishu-agent-auto-config.md`）。
+
+### 4.9 Settings `/api/settings/`
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -202,7 +218,24 @@ Content:    application/json
 | GET/PUT | `/gitcode-repo/{owner}/{repo}` | 仓库级 GitCode 配置 |
 | GET/PUT | `/backend-agents` | 引擎健康状态/配置 |
 
-### 4.8 依赖注入 (`deps.py`)
+### 4.11 Skills `/api/skills/`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/` | 按 Agent 分类的技能列表 `?agent=vod&search=关键字` |
+| POST | `/upload` | 上传自定义 Skill (zip/base64) |
+| DELETE | `/{skill_name}` | 删除自定义 Skill |
+
+### 4.12 Search `/api/search/`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/` | 全局搜索 `?q=keyword&type=event|repo|agent` |
+
+> 注：仓库选择页的「＋ 新增仓库」卡片点击跳转到 `https://gitcode.com/create`（前端行为，无需 API）。  
+> 注：Topbar 的「☁ 云开发环境」按钮链接到华为云 CodeArts（前端行为，无需 API）。
+
+### 4.10 依赖注入 (`deps.py`)
 
 ```python
 def get_current_user(authorization: str = Header(None)) -> dict:
