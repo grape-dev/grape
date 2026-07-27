@@ -1,5 +1,7 @@
 """Chat Agent 路由：对话、配置、反馈"""
+import json, asyncio
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from src.api.deps import get_current_user
 from src.user import db as user_db
@@ -22,6 +24,37 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
              f"当前使用您的个人 Token 进行操作。"
              f"需要我帮您做什么？")
     return {"reply": reply, "conversation_id": f"conv-{user['id']}-{int(__import__('time').time())}"}
+
+
+@router.post("/send/stream")
+async def send_message_stream(body: ChatMessage, user: dict = Depends(get_current_user)):
+    """SSE 流式回复：逐步推送 Agent 的思考过程"""
+
+    async def event_stream():
+        yield f"data: {json.dumps({'type': 'status', 'text': '思考中...'})}\n\n"
+        await asyncio.sleep(0.3)
+
+        acc = user_db.get_user_account(user["username"]) or {}
+        user_token = acc.get("gitcode_api_token", "")
+
+        steps = [
+            ("分析中", "正在分析您的请求..."),
+            ("处理", f"理解问题: {body.message[:50]}..."),
+            ("生成", "正在生成回复..."),
+            ("完成", f"收到您的消息：「{body.message}」\n\n当前使用您的个人 Token 进行操作。需要我帮您做什么？"),
+        ]
+
+        for s_type, s_text in steps:
+            await asyncio.sleep(0.2)
+            yield f"data: {json.dumps({'type': s_type, 'text': s_text})}\n\n"
+
+        yield f"data: {json.dumps({'type': 'done', 'text': steps[-1][1]})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 class FeedbackBody(BaseModel):

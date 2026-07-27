@@ -80,9 +80,14 @@ const app = (() => {
     const pc = $('pageContent');
     pc.innerHTML = '<div class="loading">加载中...</div>';
 
+    if (window._refreshTimer) { clearInterval(window._refreshTimer); window._refreshTimer = null; }
+
     if (view === 'dash') {
       bc.innerHTML = repo ? `<b>${repo.fullName}</b> · Dashboard` : 'Dashboard';
-      API.get('/dashboard/' + repo.owner + '/' + repo.name).then(renderDashboard).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+
+      const loadDash = () => API.get('/dashboard/' + repo.owner + '/' + repo.name).then(renderDashboard).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+      loadDash();
+      window._refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       bc.innerHTML = repo ? `<b>${repo.fullName}</b> · Pipeline` : 'Pipeline';
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
