@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Agentic DevOps — Loop Engineer</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+
+<div class="ln" id="loginView">
+<div class="lbox">
+<div class="logo">A</div>
+<h1>Agentic DevOps</h1>
+<p class="sub">致力于实现 Loop Engineer</p>
+<button class="obtn" onclick="app.oauthLogin()">GitCode OAuth 登录</button>
+<div class="links">
+<a onclick="app.togglePwdLogin()">密码登录</a>
+</div>
+<div class="inp" id="pwdLogin">
+<input type="text" placeholder="用户名" id="loginUser">
+<input type="password" placeholder="密码" id="loginPass">
+<button class="obtn" onclick="app.pwdLogin()">登录</button>
+</div>
+</div>
+</div>
+
+<div class="sb" id="sidebar" style="display:none">
+<div class="sb-h">
+<div class="logo-s"><span class="sq">A</span><h1>Agentic DevOps</h1></div>
+<div class="tagline">Loop Engineer</div>
+</div>
+<div class="sb-sel"><select id="repoSelect" onchange="app.switchRepo(this.value)"><option value="">选择仓库...</option></select></div>
+<div class="sb-nav">
+<div class="grp">Workspace</div>
+<a id="nav-dash" onclick="app.nav('dash')"><span class="ic">□</span>Dashboard</a>
+<a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">▶</span>Pipeline</a>
+<div class="grp">DevOps Agents</div>
+<a id="nav-vod" onclick="app.nav('vod')"><span class="ic">🔍</span>VOD Agent</a>
+<a id="nav-issue" onclick="app.nav('issue')"><span class="ic">📋</span>Issue Agent</a>
+<a id="nav-coding" onclick="app.nav('coding')"><span class="ic">💻</span>Coding Agent</a>
+<a id="nav-qa" onclick="app.nav('qa')"><span class="ic">🧪</span>QA Agent</a>
+<a id="nav-sre" onclick="app.nav('sre')"><span class="ic">⚙️</span>SRE Agent</a>
+<div class="grp">Account</div>
+<a id="nav-chat" onclick="app.nav('chat')"><span class="ic">💬</span>Chat Agent</a>
+<div class="grp">Settings</div>
+<a id="nav-settings-credentials" onclick="app.nav('settings','credentials')"><span class="ic">⚙</span>General Settings</a>
+<a id="nav-settings-gitcode" onclick="app.nav('settings','gitcode')"><span class="ic">🔑</span>GitCode Repo</a>
+<a id="nav-skills" onclick="app.nav('skills')"><span class="ic">🎯</span>DevOps Skills</a>
+<a id="nav-backends" onclick="app.nav('backends')"><span class="ic">⚡</span>Backend Agents</a>
+</div>
+<div class="sb-ft">
+<div class="av" id="userAvatar">U</div>
+<div class="by"><span id="userName">User</span></div>
+<a style="margin-left:auto;color:var(--t3);cursor:pointer;font-size:16px" onclick="app.logout()" title="登出">↩</a>
+</div>
+</div>
+
+<div class="mn" id="mainView" style="display:none">
+<div class="tb">
+<div class="bc" id="breadcrumb">Agentic DevOps</div>
+<div class="sp"></div>
+<div class="srch"><input type="text" placeholder="搜索事件/仓库/Agent..." id="searchInput" onkeydown="if(event.key==='Enter')app.search(this.value)"></div>
+</div>
+<div class="ct" id="pageContent">
+<div class="loading">加载中...</div>
+</div>
+</div>
+
+<div class="vw ac" id="repoView">
+<div id="repoContent"></div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/pages/dashboard.js"></script>
+<script src="/static/js/pages/pipeline.js"></script>
+<script src="/static/js/pages/agents.js"></script>
+<script src="/static/js/pages/events.js"></script>
+<script src="/static/js/pages/chat.js"></script>
+<script src="/static/js/pages/repos.js"></script>
+<script src="/static/js/pages/settings.js"></script>
+<script src="/static/js/pages/skills.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

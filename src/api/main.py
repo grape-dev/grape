@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline
 
@@ -28,6 +29,15 @@ app.include_router(settings.router)
 app.include_router(skills.router)
 app.include_router(search.router)
 app.include_router(pipeline.router)
+
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.isdir(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    from fastapi.responses import FileResponse
+    @app.get("/")
+    async def serve_spa():
+        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 from src.api.db_setup import init_database
 init_database()
