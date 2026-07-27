@@ -487,7 +487,7 @@ function renderPipe(){
     let colors=['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
     let colors_bg=['#fde8f0','#fce5e5','#e3edfd','#f3e9fe','#fef0e4'];
     let dotc=sc===2?'var(--g)':sc===1?'var(--y)':sc===3?'var(--r)':sc===0?'var(--t3)':'#ddd';
-    html+=`<div class="nd" style="padding:10px;width:150px;border-top:3px solid ${colors[i]};cursor:pointer${sc===0?';opacity:.5':''}" onclick="nav('agt','${agents[i]}')">
+    html+=`<div class="nd" style="padding:10px;width:150px;border-top:3px solid ${colors[i]};cursor:pointer${sc===0?';opacity:.5':''}" onclick="nav('event','${agents[i]}','0')">
       <div class="nh"><span class="n" style="background:${colors[i]}"></span><h4 style="font-size:11px">${n}</h4></div>
       <div class="nds" style="margin-bottom:1px">${stage[0]}</div>
       <div class="nds" style="margin-bottom:1px;font-size:9px">${stage[1]}</div>
