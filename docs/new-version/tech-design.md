@@ -199,7 +199,7 @@ Content:    application/json
 | GET | `/{name}/{owner}/{repo}` | Agent 详情 (指标/事件/Skill) |
 | PUT | `/{name}/{owner}/{repo}` | 配置 Agent (Engine + Skill) |
 
-> 所有 DevOps Agents (VOD/Issue/Coding/QA/SRE) 使用 **DevOps Bot Token** 执行 GitCode 操作。当用户未配置自定义 Bot Token 时，自动回退使用系统默认 Bot Token（由管理员在 default 账户中配置）。Chat Agent 使用用户的 **User Token** 代表用户操作。
+> 所有 DevOps Agents (VOD/Issue/Coding/QA/SRE) 使用 **DevOps Bot Token** 执行 GitCode 操作。当用户未配置自定义 Bot Token 时，自动回退使用系统默认 Bot Token（由管理员在管理员系统中配置）。Chat Agent 使用用户的 **User Token** 代表用户操作。
 
 ### 4.8 Chat `/api/chat/`
 
@@ -259,7 +259,7 @@ DevOps Bot Token（系统全局）
   ├── Coding Agent  → 创建/提交 PR、代码实现
   ├── QA Agent      → PR 评论、代码审查标记
   └── SRE Agent     → 变更日志、部署状态更新
-  └── 回退规则: 若 repo 级未配置 → 使用 default 账户的 Token
+  └── 回退规则: 若 repo 级未配置 → 使用管理员系统配置的默认 Token
 
 User Token（用户个人）
   └── Chat Agent    → 代表用户发起操作：提交 Issue、审批流程、查询状态
@@ -270,7 +270,7 @@ Webhook Token
 
 **安全原则：**
 - Bot Token 是系统级凭证，管理员配置，**不随用户变化**。所有 DevOps Agents 自动享有仓库的读写权限
-- 若未配置自定义 Bot Token，自动回退使用**系统默认 Bot Token**（管理员在 default 账户下预配），确保零配置即可运行
+- 若未配置自定义 Bot Token，自动回退使用**系统默认 Bot Token**（由管理员在管理员系统中配置），确保零配置即可运行
 - User Token 是用户级凭证，OAuth 登录自动获取，**代表用户身份**。Chat Agent 用此 Token 在 GitCode 上以用户名义操作
 - Webhook Token 仅用于验证 Webhook 来源，无 API 调用权限
 

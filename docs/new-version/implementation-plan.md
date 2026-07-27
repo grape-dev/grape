@@ -132,8 +132,8 @@
 | 项目 | 内容 |
 |------|------|
 | **目标** | 在 GitCode Repo 页面增加 `default` 条目，允许管理员配置/更新系统默认 Bot Token |
-| **要点** | GET/PUT `/api/settings/gitcode-repo/default` 对 default 账户的 Token 进行读写；SPA 中 GitCode Repo 页面增加 `default` 条目卡片（与普通仓库条目同级），表单字段为 `gitcode_api_token` 和 `gitcode_webhook_token` |
-| **产出** | 管理员可在 GitCode Repo 页面配置默认 Bot Token，新仓库无需单独配置 |
+| **要点** | GET/PUT `/api/settings/gitcode-repo/default` 对系统默认 Token 进行读写；SPA 中 GitCode Repo 页面增加 `default` 条目卡片（与普通仓库条目同级，标注"系统默认"），表单字段为 `gitcode_api_token` 和 `gitcode_webhook_token` |
+| **产出** | 管理员可在管理员系统中配置默认 Bot Token，新仓库无需单独配置 |
 | **验收** | 配置 default Token 后，未配 Token 的仓库自动继承；修改 default Token 后后续事件使用新 Token |
 
 ---
