@@ -306,6 +306,37 @@
 
 ---
 
+## Phase 9：开放兼容
+
+基于 `tech-design.md §20` 的插件模型设计，为后续扩展预留接口。
+
+### Task 9.1 Backend Agent 插件接口
+
+| 项目 | 内容 |
+|------|------|
+| **目标** | 确保 `AgentBackend` 抽象类可支持第三方 Agent 引擎接入 |
+| **要点** | `_BACKENDS` 字典注册机制验证，`discover_backends()` 动态发现逻辑 |
+| **产出** | OpenClaw/Hermes/Cursor 任一引擎可用 20 行代码接入 |
+| **验收** | 新建 HermesBackend 子类 → 注册 → Backend Agents 页面可检测并测试 |
+
+### Task 9.2 IM 通道扩展接口
+
+| 项目 | 内容 |
+|------|------|
+| **目标** | 预留 WeCom/DingTalk 通道接入点 |
+| **要点** | `IMChannel` 抽象类，`user_accounts` 预留 IM 字段 |
+| **产出** | Chat Agent Config 页面的 IM 配置可扩展新通道 |
+| **验收** | 通过界面配置新通道后，可正常接收/回复消息 |
+
+### Task 9.3 VCS 平台扩展验证
+
+| 项目 | 内容 |
+|------|------|
+| **目标** | 验证 `VcsBackend` 适配器可支持 GitHub/GitLab |
+| **要点** | 用 GitHub Webhook 模拟数据进行 `normalize()` 测试 |
+| **产出** | GitHub 事件可成功归一化为统一格式 |
+| **验收** | GitHub PR/Issue/Push 事件归一化单元测试通过 |
+
 ## 总览
 
 | Phase | 任务数 | 说明 |
@@ -318,7 +349,8 @@
 | P6 IM/Backend | 2 | 飞书 + 引擎发现 |
 | P7 体验优化 | 4 | SSE + Auto-refresh + Mobile + Perf |
 | P8 安全 | 1 | 全面审计 |
-| **合计** | **30** | |
+| P9 开放兼容 | 3 | Agent 插件 + IM 扩展 + VCS 验证 |
+| **合计** | **33** | |
 
 ### 依赖关系
 
@@ -332,6 +364,6 @@ P1 基础设施 ──→ P2 核心 API ──→ P3 事件管道
                               │
                     P7 体验优化
                     P8 安全加固
-```
+                    P9 开放兼容
 
 P1→P2→P3 串行，P4 可与 P2/P3 并行开发（前期用 mock 数据），P5/P6 独立可并行，P7/P8 最后进行。
