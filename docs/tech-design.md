@@ -651,6 +651,89 @@ VOD Agent 定时读取共享事件历史，聚类分析共性问题：
   └─ 生成 VOD Signal → 创建 Issue → Issue Agent 处理
 ```
 
+### 11.8 用户反馈处理流程 (Event Feedback → VOD Agent)
+
+Event Detail 页面提供反馈表单，用户可对任意事件的执行日志提出建议或问题。反馈通过 A2A 协议发给 VOD Agent 分析处理。
+
+**数据流：**
+
+```
+┌─ Event Detail 页面 ──────────────────────────────────┐
+│  左侧: 事件上下文 + Agent 执行日志                      │
+│  右侧: 反馈表单 (Title + Description + Submit)        │
+└────────────────────┬────────────────────────────────┘
+                     │ POST /api/chat/feedback
+                     │ {event_seq: 47, title:"...", description:"..."}
+                     ▼
+┌─ API Server ─────────────────────────────────────────┐
+│  1. 查询 events 表获取事件完整数据                      │
+│     {seq, agent_type, issue_id, event, response,      │
+│      execution_log, context}                          │
+│  2. 构造 A2A 载荷:                                    │
+│     {agent: "vod",                                    │
+│      payload: {                                       │
+│        type: "event_feedback",                        │
+│        event_context: {                               │
+│          agent: "coding",                             │
+│          issue_id: 342,                               │
+│          event: "PR #1278 submitted",                 │
+│          execution_log: "[12:05:01] Agent started...",│
+│        },                                            │
+│        feedback: {                                    │
+│          title: "PR review 太慢",                     │
+│          description: "QA Agent 审查 PR #1278 用了30m",│
+│          submitted_by: "zhangwei"                     │
+│        }                                             │
+│      }}                                              │
+│  3. POST /api/a2a → 触发 VOD Agent                   │
+└────────────────────┬────────────────────────────────┘
+                     │ A2A 事件: agent="vod"
+                     ▼
+┌─ VOD Agent ──────────────────────────────────────────┐
+│  Prompt 注入:                                         │
+│    "## 用户反馈事件                                    │
+│     原始事件: Coding Agent 提交 PR #1278               │
+│     执行日志: [12:05:01] Agent started...              │
+│     用户反馈: PR review 太慢 - QA 审查 PR #1278 用了 30m│
+│                                                       │
+│     请分析这个反馈，判断:                                │
+│     1. 是否需要创建 Issue 跟踪？                        │
+│     2. 是否属于已知的共性问题？                          │
+│     3. 给出处理建议"                                   │
+│                                                       │
+│  VOD Agent 决策:                                       │
+│  ├─ 需要处理 → 创建 Issue #346 "QA 审查时效过长"        │
+│  │               → A2A 触发 Issue Agent               │
+│  ├─ 已知问题 → 聚类到 "test flakiness" signal          │
+│  │               → 更新 signal count                  │
+│  └─ 无需处理 → 标记为 resolved，记录到 events          │
+└───────────────────────────────────────────────────────┘
+```
+
+**关键设计点：**
+
+| 环节 | 实现 |
+|------|------|
+| **前端提交** | Event Detail 右侧反馈表单 → `POST /api/chat/feedback` |
+| **事件关联** | 通过 `event_seq` 从 `events` 表获取完整上下文 + 执行日志 |
+| **A2A 路由** | 固定路由到 `vod` Agent（所有反馈归口 VOD 分析） |
+| **载荷结构** | `event_context` (原事件数据) + `feedback` (用户输入) |
+| **VOD 处理** | 自主决策：创建 Issue / 聚合分析 / 忽略 |
+| **结果记录** | `append_event_history(agent_type="vod", event_type="feedback")` |
+
+**与普通 A2A 的区别：**
+
+```
+普通 A2A (Issue→Coding):
+  Issue Agent 处理完 → 触发 Coding Agent
+  context = "Issue #342 需要实现..."
+
+反馈 A2A (Event→VOD):
+  用户审阅事件日志 → 提交反馈 → 触发 VOD Agent
+  context = "事件 #47 的完整上下文 + 用户反馈内容"
+  VOD 需要同时分析: 原始事件是否有问题 + 用户反馈是否合理
+```
+
 ## 十二、技能系统（Skills）
 
 ### 12.1 存储结构
