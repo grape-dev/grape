@@ -156,20 +156,41 @@ async def update_default_bot_token(body: GitCodeRepoConfig, user: dict = Depends
 
 @router.get("/backend-agents")
 async def get_backend_agents(user: dict = Depends(get_current_user)):
-    from src.api.db_setup import _CONFIG_DIR
-    import json, os, shutil
+    import shutil, subprocess, json
 
-    engines = ["opencode", "codearts", "hermes", "cursor"]
+    engines = [
+        {"name": "opencode", "cli": "opencode"},
+        {"name": "codearts", "cli": "codearts"},
+        {"name": "hermes", "cli": "hermes"},
+        {"name": "cursor", "cli": "cursor"},
+    ]
     results = []
 
-    for name in engines:
-        cli_path = shutil.which(name)
+    for eng in engines:
+        cli_path = shutil.which(eng["cli"])
+        version = None
+        healthy = None
+
+        if cli_path:
+            try:
+                r = subprocess.run([cli_path, "--version"], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    version = r.stdout.strip().split("\n")[0][:60]
+                    healthy = True
+                else:
+                    healthy = False
+            except Exception as e:
+                version = str(e)[:40]
+                healthy = False
+        else:
+            healthy = False
+
         results.append({
-            "name": name,
+            "name": eng["name"],
             "installed": cli_path is not None,
             "cli_path": cli_path or "",
-            "healthy": None,
-            "version": None,
+            "healthy": healthy,
+            "version": version or "",
         })
 
     return {"backends": results}

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline
+from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook
 
 app = FastAPI(title="Agentic DevOps API", version="2.0.0")
 
@@ -29,6 +29,7 @@ app.include_router(settings.router)
 app.include_router(skills.router)
 app.include_router(search.router)
 app.include_router(pipeline.router)
+app.include_router(webhook.router)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
