@@ -581,7 +581,15 @@ function renderRsel(){
 <div style="max-width:900px;margin:0 auto">
   <div style="margin-bottom:20px"><h2 style="font-size:17px;font-weight:600;margin-bottom:3px">Welcome, Zhang Wei</h2><p class="ts t2">选择你要加入的 GitCode 仓库</p></div>
   <div class="flex gap8" style="margin-bottom:24px"><input placeholder="搜索仓库..." style="flex:1;padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c)"><select style="padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:11px;background:var(--c);outline:none"><option>全部</option><option>成员</option><option>管理员</option></select></div>
-  <div class="rgrid">`;
+  <div class="rgrid">
+    <div class="rc" style="background:linear-gradient(135deg,#eef3ff,#f0fdf4);border-color:var(--a);border-style:dashed" onclick="window.open('https://gitcode.com/create','_blank')">
+      <div>
+        <div class="rh"><span class="rn" style="color:var(--a)">＋ 新增仓库</span><span class="tg tg-c" style="font-size:9px">新项目</span></div>
+        <div class="rd">创建一个新的 GitCode 项目</div>
+        <div class="ro">不想基于已有项目？从零开始创建</div>
+      </div>
+      <div class="rf"><span class="s">🆕 New Project</span><button class="bt bt-p bt-s" onclick="event.stopPropagation();window.open('https://gitcode.com/create','_blank')">Create Now</button></div>
+    </div>`;
   repos.forEach(r=>{
     html+=`
     <div class="rc" onclick="repo='${r.n==='team/backend-service'?'be':r.n==='team/web-frontend'?'fe':'mo'}';nav('dash')">

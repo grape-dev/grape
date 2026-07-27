@@ -96,7 +96,13 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 ├───────────────────────────────────────────────────────┤
 │                                                        │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │ ■ team/      │  │ ■ team/      │  │ ■ org/       │ │
+│  │ ■ ＋ 新增仓库  │  │ ■ team/      │  │ ■ team/      │ │
+│  │ 创建一个新的   │  │ backend-srv  │  │ web-frontend │ │
+│  │ GitCode 项目   │  │ Maintainer   │  │ Maintainer   │ │
+│  │ 🆕 New Project │  │ Owner: team  │  │ Owner: team  │ │
+│  │ [Create Now]  │  │ [+ Join]     │  │ [+ Join]     │ │
+│  └──────────────┘  └──────────────┘  └──────────────┘ │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
 │  │ backend-srv  │  │ web-frontend │  │ docs-site    │ │
 │  │ Maintainer   │  │ Maintainer   │  │ Member       │ │
 │  │ Owner: team  │  │ Owner: team  │  │ Owner: org   │ │
@@ -128,6 +134,7 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 
 | 卡片元素 | 说明 |
 |---------|------|
+| **新增仓库卡片（首个）** | 始终展示在首位，点击跳转到 `https://gitcode.com/create` 创建新项目 |
 | **仓库名称** | `owner/repo` 格式，左侧显示仓库图标 |
 | **角色标签** | Member / Maintainer / Admin（用户在 GitCode 中的角色） |
 | **Owner 信息** | 仓库所属组织/用户 |
