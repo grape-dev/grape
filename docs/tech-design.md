@@ -63,8 +63,8 @@ Agentic DevOps 是一个基于事件驱动的多 Agent 协作 DevOps 平台。�
 │                       数据层                                  │
 │  data/sessions.db (SQLite)                                    │
 │  ┌─────────────────┬─────────────────┬──────────────────────┐ │
-│  │ user_accounts   │ sessions        │ feishu_bindings      │ │
-│  │ managed_repos   │ user_skills     │ repo_skill_mapping   │ │
+│  │ user_accounts   │ agent_sessions   │ feishu_bindings      │ │
+│  │ managed_repos   │ events           │ repo_skill_mapping   │ │
 │  │ user_vms        │ user_credentials│ oauth_states         │ │
 │  └─────────────────┴─────────────────┴──────────────────────┘ │
 │  skills/ (文件系统)   data/workspaces/   configs/ (JSON)      │
@@ -459,38 +459,197 @@ process_chat(parsed):
 
 ---
 
-## 十一、会话管理 (`session_manager.py`)
+## 十一、事件与 Agent 会话管理 (`session_manager.py`)
 
-### 11.1 持久化模型
+### 11.1 核心概念
 
-```
-按 repo_key 维度: 一个仓库一个 Session
+旧模型中，"Session" 表示"一个仓库一个会话"。但实际使用中，**同一个仓库下的不同 Agent（VOD、Coding、SRE）即使都使用 opencode，也应该拥有各自独立的 Agent 上下文**，而事件历史是它们的**共享资源**。
 
-Session 字段:
-  repo_key, source, repository, status, account
-  event_history (JSON array, max 100)
-  opencode_session_id (Agent CLI 持久会话 ID)
-  codearts_session_id
-  created_at, last_active_at
-```
+因此从「会话管理」更名为「**事件管理与 Agent 会话绑定**」：
 
-### 11.2 核心操作
+| 概念 | 范围 | 存储 |
+|------|------|------|
+| **Event History** | 按仓库共享 | 所有 Agent 可见，按 issue 关联 |
+| **Agent Session** | 按 (repo_key, agent_type) 独立 | 每种 Agent 独享自己的 Backend 上下文 |
+
+### 11.2 为什么不能共享 Session
 
 ```
-get_or_create_session(repo_key, source, repository, backend):
-  → 已存在? 返回 {id, history, agent_session_id}
-  → 不存在? 创建 + 创建 workspace 目录
-  → 失败状态? 自动重置为 idle
-
-update_session(sid, history, status, oc_session_id):
-  → 更新 event_history (cap 100) + backend session_id
-
-dump_history_to_file(repo_key, history, account):
-  → data/workspaces/history/{account}/{repo}/session_history.json
-  → 旧条目归档到编号文件 (session_history_N.json, max 10 per file)
+仓库: owner/repo
+  ├─ VOD Agent (opencode)   → Session: sess_vod_001
+  │   上下文: 正在分析 47 个 signals，已创建 Issue #345
+  │
+  ├─ Coding Agent (codearts) → Session: sess_code_001
+  │   上下文: 正在实现 Issue #342，已提交 PR #1278
+  │
+  └─ SRE Agent (opencode)    → Session: sess_sre_001
+      上下文: 正在监控 v2.3.1 部署，Incident INC-023 已恢复
 ```
 
----
+如果三者共享同一个 opencode session：VOD 的分析上下文会污染 Coding 的代码生成上下文，SRE 的监控信息会干扰 Issue 管理。**每个 Agent 需要的上下文完全不同，必须隔离。**
+
+但它们共享**同一份事件历史**：当 Coding Agent 需要了解"Issue #342 是怎么产生的"，它可以查阅 VOD Agent 创建 Issue 的那条事件记录。
+
+### 11.3 数据模型
+
+```
+┌─ event_history (仓库级共享) ──────────────────────────────┐
+│                                                            │
+│  SELECT * FROM events WHERE repo_key = 'owner/repo'        │
+│  ORDER BY seq DESC LIMIT 100                                │
+│                                                            │
+│  ┌────┬──────────┬──────────┬────────────────┬──────────┐ │
+│  │seq │ agent    │ event    │ response       │ issue    │ │
+│  ├────┼──────────┼──────────┼────────────────┼──────────┤ │
+│  │ 47 │ vod      │ Signal 47│ → created #345 │ #345     │ │
+│  │ 46 │ issue    │ #345 bug │ → assigned     │ #345     │ │
+│  │ 45 │ coding   │ PR #1278 │ → QA triggered │ #342     │ │
+│  │ 44 │ sre      │ Deploy   │ → monitoring   │ #338     │ │
+│  └────┴──────────┴──────────┴────────────────┴──────────┘ │
+│                                                            │
+│  Prompt 注入: "该仓库有 47 条事件，最近: VOD→#345,          │
+│              Coding→#342, SRE→#338"                        │
+└────────────────────────────────────────────────────────────┘
+
+┌─ agent_sessions (按 Agent 类型独立) ────────────────────────┐
+│                                                             │
+│  INSERT/UPDATE agent_sessions                               │
+│    SET backend_session_id = ?, backend = ?, status = ?       │
+│    WHERE repo_key = ? AND agent_type = ?                     │
+│                                                             │
+│  ┌──────────┬──────────┬──────────────┬───────────────────┐ │
+│  │repo_key  │agent_type│backend       │backend_session_id │ │
+│  ├──────────┼──────────┼──────────────┼───────────────────┤ │
+│  │owner/rp  │ vod      │ opencode     │ sess_vod_abc      │ │
+│  │owner/rp  │ issue    │ opencode     │ sess_issue_abc    │ │
+│  │owner/rp  │ coding   │ codearts     │ sess_code_xyz     │ │
+│  │owner/rp  │ qa       │ opencode     │ sess_qa_abc       │ │
+│  │owner/rp  │ sre      │ opencode     │ sess_sre_abc      │ │
+│  └──────────┴──────────┴──────────────┴───────────────────┘ │
+│                                                             │
+│  每个 (repo_key, agent_type) 一行                             │
+│  VOD 的 opencode session ≠ SRE 的 opencode session           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 11.4 核心操作
+
+```python
+def get_or_create_agent_session(repo_key: str, agent_type: str,
+                                 backend: str, account: str) -> dict:
+    """获取 Agent Session。不存在则创建，返回 backend_session_id"""
+    row = SELECT * FROM agent_sessions
+          WHERE repo_key = ? AND agent_type = ?
+    if row:
+        # 该 Agent 已存在会话 → 返回现有 session_id
+        return {"agent_session_id": row.backend_session_id, "status": row.status}
+    else:
+        # 首次执行该 Agent → 创建空会话
+        INSERT INTO agent_sessions (repo_key, agent_type, backend, account, status)
+        VALUES (?, ?, ?, ?, 'idle')
+        return {"agent_session_id": None, "status": "idle"}
+
+
+def update_agent_session(repo_key: str, agent_type: str, backend: str,
+                          backend_session_id: str, status: str):
+    """Agent 执行完毕后，更新 Agent 的 backend session_id"""
+    UPDATE agent_sessions
+    SET backend_session_id = ?, backend = ?, status = ?,
+        updated_at = datetime('now')
+    WHERE repo_key = ? AND agent_type = ?
+
+
+def append_event_history(repo_key: str, event: dict):
+    """追加事件到共享历史（所有 Agent 可见）"""
+    INSERT INTO events (repo_key, agent_type, issue_id,
+                        event_type, event, response,
+                        duration_sec, exit_code)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    # 保持总容量 ≤ 100，超出自动裁剪
+
+
+def get_event_history(repo_key: str, limit: int = 100) -> list[dict]:
+    """获取仓库共享事件历史"""
+    return SELECT * FROM events WHERE repo_key = ?
+           ORDER BY seq DESC LIMIT ?
+```
+
+### 11.5 事件与 Issue 关联
+
+每条事件记录绑定到具体的 Issue ID，Prompt 构建时据此生成结构化上下文：
+
+```json
+{
+  "seq": 47,
+  "repo_key": "owner/repo",
+  "agent_type": "vod",
+  "issue_id": 345,
+  "event_type": "issue_opened",
+  "event": "Signal #47: CI pipeline too slow",
+  "response": "Created Issue #345: Optimize CI pipeline",
+  "duration_sec": 12.5,
+  "exit_code": 0,
+  "created_at": "2026-07-26T12:05:00"
+}
+```
+
+Prompt 构建时按 Issue 聚合并注入：
+
+```
+"该仓库 47 条事件:
+  Issue #345: VOD→创建, Issue→分类bug, Coding→PR #1278, QA→审查中
+  Issue #342: VOD→跳过, Issue→enhancement, Coding→已完成
+  ..."
+```
+
+### 11.6 端到端数据流
+
+```
+Webhook 事件到达 → _process_event_inner()
+  │
+  ├─ 1. 路由解析: get_domain_skill() → agent_type = "vod" (或 issue/coding/..)
+  ├─ 2. Backend 选择: get_agent_backend() → backend = "opencode"
+  │
+  ├─ 3. 获取 Agent Session:
+  │     get_or_create_agent_session(repo_key, "vod", "opencode")
+  │     → {agent_session_id: "sess_vod_abc", status: "idle"}
+  │     注意: 返回的是 VOD Agent 专属的 session，与仓库内其他 Agent 隔离
+  │
+  ├─ 4. 获取共享历史:
+  │     get_event_history(repo_key)
+  │     → [...]  所有 Agent 的事件记录，按 issue 关联
+  │
+  ├─ 5. build_prompt(history, agent_session_id)
+  │     注入: "该仓库 47 条事件，涉及 Issue #345 #342 #338"
+  │
+  ├─ 6. stream_agent(prompt, session_id="sess_vod_abc")
+  │     启动: opencode run --session sess_vod_abc
+  │     Agent 只加载 VOD 的历史上下文，不影响 Coding/SRE
+  │
+  ├─ 7. append_event_history(repo_key, {
+  │       agent_type: "vod", issue_id: 345,
+  │       event: "Signal #47...", response: "Created #345",
+  │       duration: 12.5, exit_code: 0
+  │    })
+  │
+  └─ 8. update_agent_session(repo_key, "vod", "opencode",
+         "sess_vod_abc", "idle")
+       → UPDATE agent_sessions SET backend_session_id='sess_vod_abc'
+```
+
+### 11.7 每日事件汇总（VOD Agent 消费）
+
+VOD Agent 定时读取共享事件历史，聚类分析共性问题：
+
+```
+每天 08:00:
+  ├─ get_event_history(repo_key, limit=200)
+  ├─ VOD Agent 分析最近事件:
+  │   "本周共 47 条事件，其中: 
+  │    CI flakiness 相关 12 条，API timeout 相关 8 条，
+  │    code quality 相关 5 条"
+  └─ 生成 VOD Signal → 创建 Issue → Issue Agent 处理
+```
 
 ## 十二、技能系统（Skills）
 
@@ -578,7 +737,8 @@ CREATE TABLE user_accounts (
 
 | 表 | 用途 | 关键字段 |
 |----|------|---------|
-| `sessions` | Agent 会话 | `repo_key`, `event_history`, `opencode_session_id` |
+| `events` | 仓库级共享事件历史 | `repo_key`, `agent_type`, `issue_id`, `event`, `response`, `seq` |
+| `agent_sessions` | Agent 独立会话 | `repo_key`, `agent_type`, `backend`, `backend_session_id`, `status` |
 | `managed_repos` | 托管仓库 | `user_id`, `full_name`, `webhook_id`, `is_admin` |
 | `user_skills` | 自定义技能索引 | `user_id`, `skill_name` |
 | `repo_skill_mapping` | 仓库×事件×技能 | `user_id`, `repo_key`, `event_type`, `skill_name` |
