@@ -367,7 +367,7 @@ function nav(v,param){
   else if(v==='backend'){t='Backend Agents';renderBackend()}
   else if(v==='profile'){t='Profile';renderProfile()}
   else if(v==='agt'&&param){t=A[param].n;renderAgent(param)}
-  else if(v==='event'&&param){t='Event Detail';renderEventDetail(param[0],param[1])}
+  else if(v==='event'&&param){t='Event Detail';renderEventDetail(param,arguments[2])}
   // Show sidebar/topbar if going to non-rsel page
   if(v!=='rsel'){document.querySelector('.sb').style.display='';document.querySelector('.tb').style.display='';document.querySelector('.mn').style.position='';document.querySelector('.mn').style.inset=''}
   document.getElementById('pg').textContent=t;
@@ -631,7 +631,7 @@ function renderAgent(k){
   <div class="st"><div class="v" style="color:${a.c}">${k==='vod'?'92%':k==='issue'?'2m':k==='coding'?'98%':k==='qa'?'3':'12s'}</div><div class="l">${k==='vod'?'Signal Quality':k==='issue'?'Avg Triage':k==='coding'?'First-Pass':k==='qa'?'Issues Caught':'MTTR'}</div></div>
 </div>
 <div class="cd"><div class="cd-h"><h2>Event History</h2><span class="ts t3">Last 24h</span></div>`;
-  a.ev.forEach((e,i)=>{html+=`<div class="ai" style="cursor:pointer" onclick="nav('event',${JSON.stringify([k,i])})"><div class="t">${e[0]}</div><div class="ac">${e[1]}</div></div>`;});
+  a.ev.forEach((e,i)=>{html+=`<div class="ai" style="cursor:pointer" onclick="nav('event','${k}','${i}')"><div class="t">${e[0]}</div><div class="ac">${e[1]}</div></div>`;});
   html+=`</div>
 <div class="cd"><div class="cd-h"><h2>Skill</h2></div><span class="tg tg-d" style="padding:4px 10px;font-size:11px">★ Default: skills/${k}/SKILL.md</span></div>`;
   document.getElementById('aC').innerHTML=html;
