@@ -12,7 +12,7 @@ from src.im.feishu import (
     get_user_name, start_ws, stop_ws, get_chat_members, sync_repo_feishu_mapping
 )
 from src.session_manager import db
-from src.event_processor import _acquire_repo_lock
+from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
 
 
 def process_chat(parsed: dict):

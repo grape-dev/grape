@@ -1,8 +1,19 @@
 """Event Store — 事件记录与查询（shared events table）"""
-import json
+import json, threading
 from datetime import datetime
 from src.session_manager import db, db_lock
 from src.config import log
+
+# ====== Per-repo 锁（从旧 event_processor 迁移）======
+_repo_locks = {}
+_repo_locks_lock = threading.Lock()
+
+
+def acquire_repo_lock(repo_key: str) -> threading.Lock:
+    with _repo_locks_lock:
+        if repo_key not in _repo_locks:
+            _repo_locks[repo_key] = threading.Lock()
+        return _repo_locks[repo_key]
 
 
 def append_event(repo_key: str, event_type: str, title: str = "", body: str = "",
