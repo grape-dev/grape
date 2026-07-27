@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+    environment:
+      - OAUTH_REDIRECT_URI=https://your-domain.com/api/auth/callback/gitcode
+    restart: unless-stopped

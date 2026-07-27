@@ -34,7 +34,7 @@ async def gitcode_oauth_login(request: Request):
     if not client_id:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode OAuth 未配置"})
 
-    redirect_uri = acc.get("gitcode_oauth_redirect_uri", "")
+    redirect_uri = os.environ.get("OAUTH_REDIRECT_URI") or acc.get("gitcode_oauth_redirect_uri", "")
     if not redirect_uri:
         scheme = "https" if request.headers.get("X-Forwarded-Proto") == "https" else "http"
         host = request.headers.get("Host", "localhost:80").split(":")[0]
