@@ -298,6 +298,37 @@ Dashboard 主要区域说明：
 └─────────────────────────────────────────────────────────┘
 ```
 
+点击 [Config] 按钮后，展开该 Agent 的配置面板：
+
+```
+┌─ Agent Config (下拉面板或在页内展开) ──────────────────┐
+│                                                        │
+│  Backend Engine                                        │
+│  [OpenCode ▼]  ← 选择该 Agent 使用的后端引擎            │
+│  URL (默认，使用自定义 Backend 时显示)                  │
+│  API Key (使用自定义 Backend 时显示)                    │
+│                                                        │
+│  Skill Configuration                                    │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ ☑ Default · skills/vod/SKILL.md                 │  │
+│  │ ☑ Custom · custom-vod-analysis                   │  │
+│  │ ☐ Custom · team/backend-service (inactive)       │  │
+│  └──────────────────────────────────────────────────┘  │
+│  [Upload New Skill]                                    │
+│                                                        │
+│  [Save] [Cancel]                                       │
+└────────────────────────────────────────────────────────┘
+```
+
+Agent Detail 页面说明：
+
+| 区域 | 内容 |
+|------|------|
+| **Agent Header** | Agent 名称、状态、[Config] 和 [Events] 按钮 |
+| **指标卡** | 该 Agent 的关键统计数据 |
+| **Event History** | 最近 24h 的操作记录 |
+| **Config 面板** | 点击展开：选择 Backend Engine、勾选启用的 Skills |
+
 ### 2.5 Chat Agent 页面
 
 Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 连接状态、以及自身的配置面板（Backend 选择、IM 集成）。
