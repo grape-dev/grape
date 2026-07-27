@@ -708,7 +708,7 @@ function renderEventDetail(agent,idx){
 function renderRepos(){
   document.getElementById('rt').textContent='';
   let html=`
-<div class="flex fc jbtw mb16"><h2 style="font-size:15px;font-weight:600">Repositories</h2><button class="bt bt-p bt-s">↻ Sync from GitCode</button></div>
+<div class="flex fc jbtw" style="margin-bottom:24px"><h2 style="font-size:15px;font-weight:600">Repositories</h2><button class="bt bt-p bt-s">↻ Sync from GitCode</button></div>
 <div class="cd"><div class="cd-h"><h2>Hosted <span class="c">3</span></h2></div>
   <div class="repo-item" onclick="repo='be';nav('dash')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--b)"><span class="tg tg-c" style="font-size:11px;padding:3px 8px">team/backend-service</span><span class="ts t2">Maintainer</span><span class="ts t3">Webhook OK · ★ main</span><span class="tg tg-s" style="background:#dcfce7;color:#16a34a;margin-left:auto">Active</span></div>
   <div class="repo-item" onclick="repo='fe';nav('dash')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--b)"><span class="tg tg-c" style="font-size:11px;padding:3px 8px">team/web-frontend</span><span class="ts t2">Maintainer</span><span class="ts t3">Webhook OK · ★ develop</span><span class="tg tg-s" style="background:#dcfce7;color:#16a34a;margin-left:auto">Active</span></div>
