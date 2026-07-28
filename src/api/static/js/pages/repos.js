@@ -138,22 +138,33 @@ function unhostRepo(fullName) {
   API.post('/repos/remove', {full_name: fullName}).then(r => {
     app.showToast('已解除托管');
     const cur = app.currentRepo();
-    if (cur && cur.fullName === fullName) {
+    const wasCurrent = cur && cur.fullName === fullName;
+    if (wasCurrent) {
       localStorage.removeItem('currentRepo');
     }
     app.initSidebarRepos();
-    // 跳转到仓库选择页
-    API.get('/repos/member').then(d => {
-      const repos = d.repos || [];
-      document.getElementById('sidebar').style.display = 'none';
-      document.getElementById('tb').style.display = 'none';
-      const mv = document.getElementById('mainView');
-      mv.style.display = 'flex';
-      mv.style.position = 'fixed';
-      mv.style.inset = '0';
-      mv.style.zIndex = '100';
-      document.getElementById('pageTitle').textContent = '选择仓库';
-      renderRepoSelection(repos);
+    // 检查是否还有剩余托管仓库
+    API.get('/repos/managed').then(md => {
+      const remaining = md.repos || [];
+      if (wasCurrent || remaining.length === 0) {
+        // 解除的是当前仓库或是最后一个 → 跳转到仓库选择页
+        API.get('/repos/member').then(d => {
+          const repos = d.repos || [];
+          document.getElementById('sidebar').style.display = 'none';
+          document.getElementById('tb').style.display = 'none';
+          const mv = document.getElementById('mainView');
+          mv.style.display = 'flex';
+          mv.style.position = 'fixed';
+          mv.style.inset = '0';
+          mv.style.zIndex = '100';
+          document.getElementById('pageTitle').textContent = '选择仓库';
+          renderRepoSelection(repos);
+        });
+      } else {
+        // 只是普通解除 → 刷新管理页
+        document.getElementById('pageTitle').textContent = '选择仓库';
+        renderRepos();
+      }
     });
   }).catch(e => app.showToast('解除托管失败: ' + e.message));
 }

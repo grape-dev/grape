@@ -95,22 +95,29 @@ function unhostFromSettings(fullName) {
   API.post('/repos/remove', {full_name: fullName}).then(r => {
     app.showToast('已解除托管');
     const cur = app.currentRepo();
-    if (cur && cur.fullName === fullName) {
+    const wasCurrent = cur && cur.fullName === fullName;
+    if (wasCurrent) {
       localStorage.removeItem('currentRepo');
     }
     app.initSidebarRepos();
-    // 跳转到仓库选择页
-    API.get('/repos/member').then(d => {
-      const repos = d.repos || [];
-      document.getElementById('sidebar').style.display = 'none';
-      document.getElementById('tb').style.display = 'none';
-      const mv = document.getElementById('mainView');
-      mv.style.display = 'flex';
-      mv.style.position = 'fixed';
-      mv.style.inset = '0';
-      mv.style.zIndex = '100';
-      document.getElementById('pageTitle').textContent = '选择仓库';
-      renderRepoSelection(repos);
+    API.get('/repos/managed').then(md => {
+      const remaining = md.repos || [];
+      if (wasCurrent || remaining.length === 0) {
+        API.get('/repos/member').then(d => {
+          const repos = d.repos || [];
+          document.getElementById('sidebar').style.display = 'none';
+          document.getElementById('tb').style.display = 'none';
+          const mv = document.getElementById('mainView');
+          mv.style.display = 'flex';
+          mv.style.position = 'fixed';
+          mv.style.inset = '0';
+          mv.style.zIndex = '100';
+          document.getElementById('pageTitle').textContent = '选择仓库';
+          renderRepoSelection(repos);
+        });
+      } else {
+        app.nav('dash');
+      }
     });
   }).catch(e => app.showToast('解除托管失败: ' + e.message));
 }
