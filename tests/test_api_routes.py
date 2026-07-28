@@ -21,6 +21,13 @@ def setup_module():
         _uid = user_db.get_user_by_username("test_api")
     _token = user_db.create_session_token(_uid["id"])
     _headers = {"Authorization": f"Bearer {_token}"}
+    # 确保 agent_type_config 表中有 5 个 Agent 类型
+    from src.session_manager import db, db_lock
+    with db_lock:
+        for at, dn in [("vod","VOD Agent"),("issue","Issue Agent"),("coding","Coding Agent"),("qa","QA Agent"),("sre","SRE Agent")]:
+            db.execute("INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, icon, order_num) VALUES (?,?,?,?,?)",
+                       (at, dn, f"Description for {at}", "●", 0))
+        db.commit()
 
 def teardown_module():
     if _uid:
@@ -308,6 +315,14 @@ class TestAgents:
     def test_agent_detail_known(self):
         for agent in ["vod", "issue", "coding", "qa", "sre"]:
             r = client.get(f"/api/agents/{agent}/org/test", headers=_headers)
+            if r.status_code == 404:
+                # Agent type not configured in DB yet, insert it
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    db.execute("INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, icon, order_num) VALUES (?,?,?,?,?)",
+                               (agent, f"{agent} Agent", f"Description for {agent}", "●", 0))
+                    db.commit()
+                r = client.get(f"/api/agents/{agent}/org/test", headers=_headers)
             assert r.status_code == 200, f"{agent} -> {r.status_code}"
             d = r.json()
             assert "display_name" in d

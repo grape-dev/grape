@@ -1,4 +1,4 @@
-"""Agent 路由：详情、配置"""
+"""Agent 路由：详情、配置、类型元数据"""
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
@@ -6,22 +6,64 @@ from src.api.deps import get_current_user, get_bot_token
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
-AGENT_META = {
-    "vod": {"display_name": "VOD Agent", "icon": "🔍", "description": "Value-Operational-Data Agent — 事件信号监控与 Issue 触发"},
-    "issue": {"display_name": "Issue Agent", "icon": "📋", "description": "Issue 分类、标签、指派、A2A 触发"},
-    "coding": {"display_name": "Coding Agent", "icon": "💻", "description": "代码实现、PR 创建"},
-    "qa": {"display_name": "QA Agent", "icon": "🧪", "description": "代码审查、质量检测"},
-    "sre": {"display_name": "SRE Agent", "icon": "⚙️", "description": "变更日志、部署状态"},
-}
+AGENT_TYPES = ["vod", "issue", "coding", "qa", "sre"]
+
+
+def _get_agent_type_meta(agent_type: str) -> dict | None:
+    """从 agent_type_config 表读取 Agent 元数据"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT agent_type, display_name, description, default_backend, icon, order_num FROM agent_type_config WHERE agent_type=?",
+                (agent_type,)
+            )
+            row = c.fetchone()
+            if row:
+                return {"agent_type": row[0], "display_name": row[1], "description": row[2],
+                        "default_backend": row[3] or "opencode", "icon": row[4] or "", "order_num": row[5] or 0}
+        except Exception:
+            pass
+    return None
+
+
+@router.get("/types")
+async def list_agent_types():
+    """返回所有 Agent 类型的元数据（显示名、图标、描述、颜色等）"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT agent_type, display_name, description, default_backend, icon, order_num FROM agent_type_config ORDER BY order_num, agent_type"
+            )
+            rows = c.fetchall()
+        except Exception:
+            rows = []
+
+    COLORS = {"vod": "var(--pk)", "issue": "var(--r)", "coding": "var(--a)", "qa": "var(--pu)", "sre": "var(--or)"}
+    BGS = {"vod": "#fde8f0", "issue": "#fce5e5", "coding": "#e3edfd", "qa": "#f3e9fe", "sre": "#fef0e4"}
+
+    return {"types": [{
+        "agent_type": r[0], "display_name": r[1], "description": r[2] or "",
+        "default_backend": r[3] or "opencode", "icon": r[4] or "",
+        "order_num": r[5] or 0,
+        "color": COLORS.get(r[0], "var(--t2)"),
+        "bg": BGS.get(r[0], "var(--bg)"),
+    } for r in rows]}
 
 
 @router.get("/{name}/{owner}/{repo}")
 async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depends(get_current_user)):
-    if name not in AGENT_META:
+    if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
+    meta = _get_agent_type_meta(name)
+    if not meta:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"Agent 类型未配置: {name}"})
+
     repo_key = f"{owner}/{repo}"
-    meta = AGENT_META[name]
 
     from src.session_manager import db, db_lock
     session_data = {}
@@ -63,46 +105,24 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         except Exception:
             pass
 
-    from src.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("SELECT agent_type, display_name, description FROM agent_type_config ORDER BY order_num, agent_type")
-            all_types = c.fetchall()
-            skills_list = [{"name": r[0], "display_name": r[1], "description": (r[2] or "")[:100]} for r in all_types]
-        except Exception:
-            skills_list = []
-    from src.api.deps import get_bot_token
-    bot_token = get_bot_token("default")
-    config = {"backend": "opencode"}
-    from src.api.db_setup import _CONFIG_DIR
-    try:
-        import json, os
-        cfg_path = os.path.join(_CONFIG_DIR, "agent-routing.json")
-        if os.path.exists(cfg_path):
-            with open(cfg_path, "r") as f:
-                routing = json.load(f)
-            backends = routing.get("skill_backends", {})
-            config = {"backend": backends.get(name, routing.get("default_backend", "opencode"))}
-    except Exception:
-        config = {"backend": "opencode"}
+    COLORS = {"vod": "var(--pk)", "issue": "var(--r)", "coding": "var(--a)", "qa": "var(--pu)", "sre": "var(--or)"}
+    BGS = {"vod": "#fde8f0", "issue": "#fce5e5", "coding": "#e3edfd", "qa": "#f3e9fe", "sre": "#fef0e4"}
 
     return {
-        "name": name,
+        "agent_type": name,
         "display_name": meta["display_name"],
         "icon": meta["icon"],
         "description": meta["description"],
-        "backend": session_data.get("backend", config.get("backend", "opencode")),
+        "color": COLORS.get(name, "var(--t2)"),
+        "bg": BGS.get(name, "var(--bg)"),
+        "backend": session_data.get("backend", meta.get("default_backend", "opencode")),
         "status": session_data.get("status", "idle"),
-        "oc_session_id": session_data.get("oc_session_id", ""),
         "last_active": session_data.get("last_active_at", ""),
-        "bot_token_configured": bool(bot_token),
         "metrics": {
             "total_events": sum(event_stats.values()),
             "event_stats": event_stats,
         },
         "recent_events": recent_events,
-        "skills": skills_list,
     }
 
 
@@ -113,7 +133,7 @@ class AgentConfig(BaseModel):
 @router.put("/{name}/{owner}/{repo}")
 async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfig,
                               user: dict = Depends(get_current_user)):
-    if name not in AGENT_META:
+    if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
     repo_key = f"{owner}/{repo}"

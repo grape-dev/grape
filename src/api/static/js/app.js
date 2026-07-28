@@ -12,9 +12,17 @@ const app = (() => {
     $('mainView').style.display = 'none';
   }
 
+const _AGENT_TYPES = {};
+
+function loadAgentTypes() {
+  fetch('/api/agents/types').then(r => r.json()).then(d => {
+    (d.types || []).forEach(t => { _AGENT_TYPES[t.agent_type] = t; });
+  }).catch(() => {});
+}
+
   function showApp() {
     $('loginView').classList.add('hid');
-    // Sidebar and mainView visibility is managed by loadRepos
+    loadAgentTypes();
     loadProfile();
     loadRepos();
   }
@@ -144,7 +152,7 @@ const app = (() => {
       title.textContent = 'Pipeline';
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
-      title.textContent = AGENT_META[view].display;
+      title.textContent = (_AGENT_TYPES[view] && _AGENT_TYPES[view].display_name) || view;
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (view === 'event') {
       title.textContent = 'Event Detail';

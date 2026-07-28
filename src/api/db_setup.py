@@ -158,14 +158,16 @@ def _insert_seed_data(table: str, data: dict):
                     )
 
         elif table == "agent_type_config":
-            # agent-description.json: {"name": {...}, ...}
+            # agent-description.json: {"agent_type": {"name": "...", ...}}
             for agent_type, info in data.items():
                 display_name = info.get("name", agent_type)
                 description = info.get("description", "")
                 default_backend = info.get("backend", "opencode")
+                icon = info.get("icon", "")
+                order_num = info.get("order_num", 0)
                 c.execute(
-                    "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, default_backend) VALUES (?,?,?,?)",
-                    (agent_type, display_name, description, default_backend)
+                    "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, default_backend, icon, order_num) VALUES (?,?,?,?,?,?)",
+                    (agent_type, display_name, description, default_backend, icon, order_num)
                 )
 
         elif table == "agent_registry":

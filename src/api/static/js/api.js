@@ -1,3 +1,5 @@
+var _AGENT_TYPES = {};  // 全局 Agent 类型缓存（由 app.js 填充）
+
 const API = (() => {
   const BASE = '/api';
 
