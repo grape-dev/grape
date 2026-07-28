@@ -22,12 +22,18 @@ async def get_credentials(user: dict = Depends(get_current_user)):
             "ak_exists": bool(acc.get("huawei_cloud_ak")),
             "sk_exists": bool(acc.get("huawei_cloud_sk")),
         },
+        "codearts": {
+            "ak_exists": bool(acc.get("CODEARTS_CLI_AK")),
+            "sk_exists": bool(acc.get("CODEARTS_CLI_SK")),
+        },
     }
 
 
 class UpdateCredentials(BaseModel):
     huawei_cloud_ak: str = ""
     huawei_cloud_sk: str = ""
+    codearts_ak: str = ""
+    codearts_sk: str = ""
 
 
 @router.put("/credentials")
@@ -37,6 +43,10 @@ async def update_credentials(body: UpdateCredentials, user: dict = Depends(get_c
         acc["huawei_cloud_ak"] = body.huawei_cloud_ak
     if body.huawei_cloud_sk:
         acc["huawei_cloud_sk"] = body.huawei_cloud_sk
+    if body.codearts_ak:
+        acc["CODEARTS_CLI_AK"] = body.codearts_ak
+    if body.codearts_sk:
+        acc["CODEARTS_CLI_SK"] = body.codearts_sk
     user_db.save_user_account(user["username"], acc)
     return {"message": "凭据已更新"}
 
@@ -189,12 +199,36 @@ async def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_curren
 
 @router.get("/backend-agents")
 async def get_backend_agents(user: dict = Depends(get_current_user)):
+    """读取缓存的后端引擎列表（<5min 自动刷新）"""
+    from src.agent.executor import discover_backends
+    from src.user import db as user_db
+    import subprocess, datetime
+
+    age = user_db.get_backend_agents_age()
+    if age is not None and age < 300:
+        cached = user_db.get_backend_agents()
+        if cached:
+            return {"backends": cached, "_cached": True}
+
+    results = _refresh_backend_agents()
+    return {"backends": results, "_cached": False}
+
+
+@router.post("/backend-agents/refresh")
+async def refresh_backend_agents(user: dict = Depends(get_current_user)):
+    """强制刷新后端引擎检测"""
+    results = _refresh_backend_agents()
+    return {"backends": results}
+
+
+def _refresh_backend_agents():
+    """执行发现+检测，写入 DB，返回结果"""
+    from src.agent.executor import discover_backends
+    from src.user import db as user_db
     import subprocess
 
-    from src.agent.executor import discover_backends
     discovered = discover_backends()
     results = []
-
     for eng in discovered:
         version = None
         healthy = None
@@ -216,10 +250,13 @@ async def get_backend_agents(user: dict = Depends(get_current_user)):
 
         results.append({
             "name": eng["name"],
+            "display_name": eng["name"].capitalize(),
             "installed": eng["installed"],
             "cli_path": cli_path or "",
             "healthy": healthy,
             "version": version or "",
+            "pip_package": eng.get("pip_package", ""),
         })
 
-    return {"backends": results}
+    user_db.save_backend_agents(results)
+    return results

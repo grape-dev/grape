@@ -987,3 +987,47 @@ def has_user_repos(user_id: int) -> bool:
 
 
 init_user_repos_table()
+
+
+# ====== Backend Agents 缓存表 ======
+
+def save_backend_agents(agents: list[dict]):
+    """批量写入 backend agents 缓存"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM backend_agents")
+        for a in agents:
+            c.execute(
+                "INSERT OR REPLACE INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package) VALUES (?,?,?,?,?,?,?)",
+                (a.get("name", ""), a.get("display_name", a.get("name", "")),
+                 1 if a.get("installed") else 0, a.get("cli_path", ""),
+                 a.get("version", ""), 1 if a.get("healthy") else 0,
+                 a.get("pip_package", ""))
+            )
+        db.commit()
+
+
+def get_backend_agents() -> list[dict]:
+    """读取 backend agents 缓存"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT name, display_name, installed, cli_path, version, healthy, pip_package, updated_at FROM backend_agents ORDER BY name")
+        return [
+            {"name": r[0], "display_name": r[1], "installed": bool(r[2]),
+             "cli_path": r[3], "version": r[4], "healthy": bool(r[5]),
+             "pip_package": r[6], "updated_at": r[7]}
+            for r in c.fetchall()
+        ]
+
+
+def get_backend_agents_age() -> float | None:
+    """返回缓存数据的 age（秒），无缓存返回 None"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT MIN(updated_at) FROM backend_agents")
+        row = c.fetchone()
+        if not row or not row[0]:
+            return None
+    import datetime
+    updated = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+    return (datetime.datetime.now() - updated).total_seconds()

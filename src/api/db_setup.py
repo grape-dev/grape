@@ -78,8 +78,22 @@ CREATE TABLE IF NOT EXISTS meta (
 )
 """
 
+_BACKEND_AGENTS_DDL = """
+CREATE TABLE IF NOT EXISTS backend_agents (
+    name TEXT PRIMARY KEY,
+    display_name TEXT DEFAULT '',
+    installed INTEGER DEFAULT 0,
+    cli_path TEXT DEFAULT '',
+    version TEXT DEFAULT '',
+    healthy INTEGER DEFAULT 0,
+    pip_package TEXT DEFAULT '',
+    updated_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
+    ("backend_agents", _BACKEND_AGENTS_DDL),
     ("agent_sessions", _AGENT_SESSIONS_TABLE_DDL),
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type_config", _AGENT_TYPE_CONFIG_DDL),
