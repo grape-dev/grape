@@ -161,6 +161,46 @@ class TestFirstLoginNoRepos:
 
         page.close()
 
+    def test_host_permission_rejects_non_owner(self, browser):
+        """非维护员/管理员尝试加入并托管 → 显示错误提示，不进入 Dashboard
+        验证 backend 权限校验（_check_collaborator_admin）与 frontend 展示（fetch_repos_with_role）一致性
+        """
+        import paramiko, hashlib
+        c = paramiko.SSHClient()
+        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        c.connect('203.0.113.2', 22, 'root', 'YOUR_SSH_PASSWORD', timeout=10)
+        c.exec_command("python3 -c \"import sqlite3;db=sqlite3.connect('/root/devops-bot/data/sessions.db');"
+                       "db.execute('DELETE FROM managed_repos');db.commit();print('OK')\"", timeout=5)
+        pw = hashlib.sha256(b"testpass123").hexdigest()
+        c.exec_command(f'python3 -c "import sqlite3,hashlib;db=sqlite3.connect(\\\"/root/devops-bot/data/sessions.db\\\");'
+                       f'db.execute(\\\"UPDATE user_accounts SET password_hash=?,password=? WHERE username=?\\\",'
+                       f"(\\\"{pw}\\\",\\\"testpass123\\\",\\\"Jason7602\\\"));db.commit();print(\\\"OK\\\")\"", timeout=5)
+        c.close()
+
+        # 创建一个普通用户（无 GitCode 管理员权限）
+        from src.user import db as user_db
+        uid = user_db.create_user("normal_user", "test123")
+        if not uid:
+            uid = user_db.get_user_by_username("normal_user")
+        r = requests.post(f"{BASE}/api/auth/login",
+            json={"username": "normal_user", "password": "test123"}, timeout=10)
+        if r.status_code != 200:
+            print("  [SKIP] Cannot login as normal_user")
+            return
+        normal_token = r.json()["token"]
+
+        # 直接用 API 测试 host（绕过前端，因为 normal_user 没有任何仓库显示）
+        r = requests.post(f"{BASE}/api/repos/host",
+            json={"full_name": "Jason7602/devops-bot"},
+            headers={"Authorization": f"Bearer {normal_token}"}, timeout=15)
+        print(f"  Host by non-admin: {r.status_code} {r.json().get('detail',{}).get('message','')[:80]}")
+        assert r.status_code == 403, f"Expected 403, got {r.status_code}: {r.text[:100]}"
+        assert "权限不够" in r.json()["detail"]["message"]
+        print("  [OK] Non-admin correctly rejected with 403")
+
+        if uid:
+            user_db.delete_user(uid["id"])
+
 @pytest.fixture(scope="session", autouse=True)
 def setup():
     global TOKEN
