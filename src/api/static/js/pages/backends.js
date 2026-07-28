@@ -3,6 +3,16 @@ function renderBackends(data) {
   if (!el) return;
   const engines = data.backends || [];
 
+  if (engines.length === 0) {
+    el.innerHTML = `<div style="max-width:600px;margin:40px auto;text-align:center">
+      <div style="font-size:40px;margin-bottom:16px">⚡</div>
+      <h3 style="font-size:15px;font-weight:600;margin-bottom:8px">暂无后端引擎数据</h3>
+      <p class="ts t2" style="margin-bottom:20px">点击下方按钮扫描本地已安装的 Agent 引擎</p>
+      <button class="bt bt-p" onclick="refreshBackends()">⟳ 扫描并刷新</button>
+    </div>`;
+    return;
+  }
+
   API.get('/settings/credentials').then(credData => {
     const creds = credData || {};
     buildHtml(engines, creds);

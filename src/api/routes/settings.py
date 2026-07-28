@@ -199,30 +199,14 @@ async def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_curren
 
 @router.get("/backend-agents")
 async def get_backend_agents(user: dict = Depends(get_current_user)):
-    """读取缓存的后端引擎列表（<5min 自动刷新）"""
-    from src.agent.executor import discover_backends
+    """从 DB 读取后端引擎列表，空列表则需手动刷新"""
     from src.user import db as user_db
-    import subprocess, datetime
-
-    age = user_db.get_backend_agents_age()
-    if age is not None and age < 300:
-        cached = user_db.get_backend_agents()
-        if cached:
-            return {"backends": cached, "_cached": True}
-
-    results = _refresh_backend_agents()
-    return {"backends": results, "_cached": False}
-
+    cached = user_db.get_backend_agents()
+    return {"backends": cached}
 
 @router.post("/backend-agents/refresh")
 async def refresh_backend_agents(user: dict = Depends(get_current_user)):
-    """强制刷新后端引擎检测"""
-    results = _refresh_backend_agents()
-    return {"backends": results}
-
-
-def _refresh_backend_agents():
-    """执行发现+检测，写入 DB，返回结果"""
+    """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB"""
     from src.agent.executor import discover_backends
     from src.user import db as user_db
     import subprocess
@@ -259,4 +243,4 @@ def _refresh_backend_agents():
         })
 
     user_db.save_backend_agents(results)
-    return results
+    return {"backends": results}
