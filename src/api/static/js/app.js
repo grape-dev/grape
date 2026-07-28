@@ -33,8 +33,8 @@ const app = (() => {
       const repos = d.repos || [];
       const managedRepos = repos.filter(r => r.is_joined || r.is_hosted);
       console.log("[loadRepos] repos", JSON.stringify({total: repos.length, managed: managedRepos.length}));
-      // 侧边栏只展示已加入/已托管的仓库
-      _updateSidebarRepos(managedRepos);
+      // 侧边栏使用后端接口 GET /api/repos/managed（仅已托管的仓库）
+      initSidebarRepos();
       const current = currentRepo();
 
       if (managedRepos.length === 0) {
