@@ -52,7 +52,10 @@ const app = (() => {
         localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
         nav('dash');
       }
-    }).catch(() => {});
+    }).catch(() => {
+      localStorage.removeItem('token');
+      showLogin();
+    });
   }
 
   function switchRepo(val) {
