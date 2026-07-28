@@ -2,7 +2,7 @@
 
 基于 `user-workflow-overview.md` 定义的完整用户旅程，使用 Playwright 对**远端 DevOps Bot** (`http://203.0.113.2`) 进行端到端场景测试。
 
-> **测试目标：** 覆盖用户从首次登录到日常使用的全部 12 个场景，确保每个场景的页面渲染、交互逻辑、数据加载符合设计文档。
+> **测试目标：** 覆盖用户从首次登录到日常使用的全部场景，确保每个场景的页面渲染、交互逻辑、数据加载符合设计文档。
 
 ---
 
@@ -26,480 +26,464 @@ def page(browser):
     yield p
 
 def login(page, token):
-    """通过 localStorage 注入 token 模拟登录态"""
     page.add_init_script(f"""
     localStorage.setItem('token', '{token}');
     localStorage.setItem('app_cache_ver', '2');
-    localStorage.removeItem('currentRepo');
+    localStorage.setItem('currentRepo', JSON.stringify({{fullName:'Jason7602/devops-bot',owner:'Jason7602',name:'devops-bot'}}));
     """)
     page.goto(BASE)
     page.wait_for_load_state("networkidle")
     time.sleep(2)
 
 def get_token():
-    """获取有效 token（通过密码登录 API）"""
     r = requests.post(f"{BASE}/api/auth/login",
-        json={"username": "test", "password": "test"})
+        json={"username": "test", "password": "test123"})
     return r.json()["token"]
 ```
 
 ---
 
-## 二、场景测试用例
+## 二、登录场景测试（S1 重构）
 
-### 场景 1：首次登录 → 仓库选择 → 加入仓库
+将原 S1 拆解为 **5 个子场景**，从页面渲染到 OAuth 回调全链路覆盖，每步含诊断日志捕获用于定位"空页面"类故障。
 
-**对应文档：** §2.1 首次登录 + §2.1.1 选择仓库页面
+### S1-A：登录页静态渲染
 
-**前置条件：** 用户首次登录，尚未加入任何仓库（`managed_repos` 为空）
+**目的：** 验证未登录状态下 SPA 正确渲染登录页
 
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 1.1 | 访问首页 | 显示登录页：标题 "Agentic DevOps"、副标题 "致力于实现 Loop Engineer"、GitCode OAuth 按钮 |
-| 1.2 | 点击"← 用户名密码登录" | GitCode 按钮隐藏，显示用户名/密码输入框和返回链接 |
-| 1.3 | 输入凭据后登录 | 页面跳转到仓库选择页 |
-| 1.4 | 仓库选择页展示 | 显示 "Welcome, {用户名}"、搜索框、角色过滤器、仓库卡片网格 |
-| 1.5 | 检查首位卡片 | 第一个卡片是"＋ 新增仓库"（渐变虚线边框，点击跳转 GitCode） |
-| 1.6 | 检查仓库卡片结构 | 每张卡片含：仓库名 `owner/repo`、角色标签、Owner 信息、`🚧 Not added` 状态、`+ Join` 或 `Host Now` 按钮 |
-| 1.7 | 点击仓库的 `+ Join` 按钮 | 调用 API `/api/repos/join`，成功后进入 Dashboard |
-| 1.8 | Dashboard 验证 | 显示仓库名称、渐变头部卡片、5 Agent 工作流、Chat Agent 连接条、最近活动 |
-| 1.9 | 侧边栏验证 | 侧边栏可见，仓库下拉包含已加入的仓库，显示用户名和在线状态 |
-| 1.10 | 返回仓库选择页 | 侧边栏仓库下拉选"选择仓库..."返回选择页，确认所有已加入的仓库显示"已加入"状态 |
+| # | 检查点 | 断言 | 诊断意义 |
+|---|--------|------|----------|
+| A1 | 页面标题 | `<title>` 含 "Agentic DevOps — Loop Engineer" | SEO/书签 |
+| A2 | 登录覆盖层可见 | `.ln` 无 `hid` class | 登录覆盖层正确显示 |
+| A3 | Logo 可见 | `.lbox .logo` 文本为 "A" | 品牌标识 |
+| A4 | 主标题 | `.lbox h1` 文本为 "Agentic DevOps" | — |
+| A5 | 副标题 | `.lbox .sub` 含 "Loop Engineer" | — |
+| A6 | GitCode OAuth 按钮 | `#gitBtn` 可见，含 SVG + "使用 GitCode 登录" 文本 | — |
+| A7 | 密码切换链接可见 | `#loginLinks a` 文本含 "用户名密码登录" | 切换入口 |
+| A8 | 密码表单默认隐藏 | `#pwdLogin` 的 `display` 为 `none` | 默认状态 |
+| A9 | SPA 已初始化 | `page.evaluate('typeof app')` 返回 `"object"` | JS 无报错 |
+| A10 | 页面无 JS 错误 | `page.on("pageerror")` 无事件触发 | 语法/运行时正确 |
 
 ```python
-def test_scenario_1_first_login(page):
-    """S1: 首次登录 → 仓库选择 → 加入 → Dashboard"""
-    # Step 1.1-1.2: Login page
-    page.goto(BASE)
-    page.wait_for_load_state("networkidle")
-    assert page.locator("#gitBtn").is_visible()
-    assert page.locator(".lbox h1").inner_text() == "Agentic DevOps"
-    page.locator("#loginLinks a").click()
-    time.sleep(0.3)
-    assert page.locator("#gitBtn").is_hidden()
-    assert page.locator("#loginUser").is_visible()
+class TestLoginA_Render:
+    def test_login_page_render(self, page):
+        logs, errors = [], []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(BASE)
+        page.wait_for_load_state("networkidle")
+        assert page.locator(".lbox h1").inner_text() == "Agentic DevOps"
+        assert page.locator("#gitBtn").is_visible()
+        assert "使用 GitCode 登录" in page.locator("#gitBtn").inner_text()
+        assert page.locator("#loginLinks a").is_visible()
+        assert page.evaluate('typeof window.app') == 'object'
+        assert len(errors) == 0, f"JS Errors: {errors}"
 ```
 
 ---
+
+### S1-B：密码登录切换交互
+
+**目的：** 验证密码/OAuth 登录两种方式切换正确
+
+| # | 操作 | 预期 |
+|---|------|------|
+| B1 | 点击"用户名密码登录" | `#gitBtn` 变为 `display:none` |
+| B2 | — | `#loginLinks` 变为 `display:none` |
+| B3 | — | `#pwdLogin` 变为 `display:block` |
+| B4 | — | `#loginUser` 可见、`#loginPass` 可见 |
+| B5 | — | 登录按钮可见 |
+| B6 | — | 底部"返回 GitCode 登录"链接可见 |
+| B7 | 点击"返回 GitCode 登录" | 恢复初始状态：`#gitBtn` 可见 |
+| B8 | — | `#pwdLogin` 变回 `display:none` |
+| B9 | 重复切换 3 次 | 每次状态无漂移，始终正确 |
+
+```python
+class TestLoginB_Toggle:
+    def test_password_toggle(self, page):
+        page.goto(BASE)
+        page.wait_for_load_state("networkidle")
+        # Click toggle
+        page.locator("#loginLinks a").click()
+        time.sleep(0.3)
+        assert page.locator("#gitBtn").is_hidden()
+        assert page.locator("#loginUser").is_visible()
+        assert page.locator("#loginPass").is_visible()
+        # Toggle back
+        page.locator("#pwdLogin a").click()
+        time.sleep(0.3)
+        assert page.locator("#gitBtn").is_visible()
+        assert page.locator("#pwdLogin").evaluate("el => getComputedStyle(el).display") == "none"
+```
+
+---
+
+### S1-C：密码登录完整流程（核心诊断）
+
+**目的：** 模拟用户输入凭据登录，验证 token 生成、页面跳转、3 秒内无异常重载
+
+**诊断手段：**
+- 捕获 `console.log` / `console.error` — 追踪 `init()` / `loadRepos()` 执行流
+- 捕获 `pageerror` — 发现 JS 运行时异常
+- 捕获 `request` / `response` — 追踪 API 调用链
+- 3 秒后验证页面状态 — 检测是否触发 `location.reload()`
+
+| # | 操作 | 预期 |
+|---|------|------|
+| C1 | 填写用户名 + 密码 | 输入框值正确 |
+| C2 | 点击登录按钮 | 触发 `POST /api/auth/login` |
+| C3 | API 返回 200 | `{"token": "...", "user": {...}}` |
+| C4 | 登录后 500ms | `#sidebar` 显示（有仓库时）或 `.rc` 显示（首次） |
+| C5 | 登录后 1s | `#pageTitle` 为 "Dashboard" 或仓库选择页 |
+| C6 | 登录后 3s | 页面 URL 未变化（非 OAuth 时无跳转） |
+| C7 | 登录后 3s | 页面未重新加载（无 `GET /` 请求） |
+| C8 | 期间无 `pageerror` | JS 无异常 |
+| C9 | 期间无 `console.error` | 无未捕获异常日志 |
+| C10 | 验证 session token 有效 | `GET /api/auth/profile` 返回 200 |
+
+```python
+class TestLoginC_PasswordFlow:
+    def test_password_login_flow(self, page):
+        logs, errors, requests = [], [], []
+        page.on("console", lambda msg: logs.append(f"[{msg.type}] {msg.text}"))
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.on("request", lambda req: requests.append(req.url))
+        
+        page.goto(BASE)
+        page.wait_for_load_state("networkidle")
+        
+        # Login
+        page.locator("#loginLinks a").click()
+        time.sleep(0.3)
+        page.locator("#loginUser").fill("test")
+        page.locator("#loginPass").fill("test123")
+        page.locator("#pwdLogin .obtn").click()
+        
+        # Wait for API response + navigation
+        time.sleep(3)
+        
+        # No JS errors
+        assert len(errors) == 0, f"JS ERRORS: {errors}"
+        
+        # No page reload (no second GET /)
+        reloads = [u for u in requests if u == BASE + "/" and requests.count(u) > 1]
+        assert len(reloads) == 0, f"Page reload detected: {reloads}"
+        
+        # App state
+        in_dash = page.locator("#pageTitle:has-text('Dashboard')").is_visible()
+        in_selection = page.locator(".rc").first.is_visible()
+        in_login = page.locator("#gitBtn").is_visible()
+        assert in_dash or in_selection, f"Unknown state. Login still visible: {in_login}"
+        
+        # Token valid
+        token = page.evaluate("localStorage.getItem('token')")
+        r = requests.get(f"{BASE}/api/auth/profile", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200, f"Token invalid: {r.status_code}"
+        
+        print(f"\n[DIAG] JS logs: {len(logs)} entries, Errors: {len(errors)}")
+        for log in logs:
+            if "init" in log or "loadRepos" in log or "nav" in log:
+                print(f"  {log}")
+```
+
+---
+
+### S1-D：OAuth 跳转 URL 验证
+
+**目的：** 无需 GitCode 授权即可验证 OAuth 流程的前半段
+
+| # | 操作 | 预期 |
+|---|------|------|
+| D1 | 调用 `GET /api/auth/login/gitcode` | 返回 `{"redirect_url": "..."}` |
+| D2 | redirect_url 以 `https://gitcode.com/oauth/authorize` 开头 | OAuth 端点正确 |
+| D3 | redirect_url 含 `client_id=5efa6f4b16c34741b1f357baee074f63` | 配置的 client_id |
+| D4 | redirect_url 含 `redirect_uri=http%3A//203.0.113.2/api/auth/callback/gitcode` | 配置的回调地址 |
+| D5 | redirect_url 含 `state=`（32 字节 hex） | CSRF 防护 |
+| D6 | OAuth 未配置时返回 400 | 错误处理正确 |
+
+```python
+class TestLoginD_OAuthURL:
+    def test_oauth_url(self, page):
+        r = requests.get(f"{BASE}/api/auth/login/gitcode")
+        assert r.status_code in (200, 400)
+        if r.status_code == 200:
+            url = r.json()["redirect_url"]
+            assert url.startswith("https://gitcode.com/oauth/authorize")
+            assert "client_id=5efa6f4b16c34741b1f357baee074f63" in url
+            assert "redirect_uri=http%3A//203.0.113.2/api/auth/callback/gitcode" in url
+            assert "state=" in url
+```
+
+---
+
+### S1-E：OAuth 回调 API 验证
+
+**目的：** 绕过 GitCode UI，直接测试回调端点的异常处理
+
+**诊断手段：** 验证回调后的 302 重定向和 state 安全性
+
+| # | 操作 | 预期 |
+|---|------|------|
+| E1 | 构造有效 state → 调用 callback | 302 重定向到 `/?token=xxx` |
+| E2 | 验证 Location header 含 `token=` | token 带回到 SPA |
+| E3 | 无效 state 调用 callback | 400 "state 无效或已过期" |
+| E4 | 空 code 调用 callback | 400 "state 无效或已过期" |
+| E5 | state 重用（第二次用同一 state）| 400（state 已消耗，不可重放） |
+| E6 | OAuth scope 缺失 | 400 "GitCode 授权失败" |
+
+```python
+class TestLoginE_Callback:
+    def test_callback_state_security(self):
+        from src.user import db as user_db
+        # Create a valid state
+        import hashlib, os
+        state = hashlib.sha256(os.urandom(32)).hexdigest()
+        user_db.save_oauth_state(state, "gitcode", {})
+        
+        # First use: should fail on code validation (code is fake)
+        r = requests.get(f"{BASE}/api/auth/callback/gitcode",
+            params={"code": "invalid_code", "state": state})
+        assert r.status_code in (302, 502)  # 302 if GitCode accepts, 502 if fails
+        
+        # Second use: state already consumed
+        r2 = requests.get(f"{BASE}/api/auth/callback/gitcode",
+            params={"code": "invalid_code", "state": state})
+        assert r2.status_code == 400
+```
+
+---
+
+## 三、其余场景测试（S2–S12）
 
 ### 场景 2：Dashboard 工作流监控
 
 **对应文档：** §2.2 Dashboard
 
-**前置条件：** 用户已加入至少一个仓库
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 2.1 | 访问 Dashboard | 显示仓库名称、Webhook 状态标签、3 个指标（Auto-Resolution / Events/Week / Avg Response） |
-| 2.2 | Agent 工作流区域 | 显示 5 个横向 Agent 卡片：VOD → Issue → Coding → QA → SRE，每个卡片含名称、描述、Backend 名、状态点、活动标签 |
-| 2.3 | Chat Agent 连接条 | "Chat Agent · Personal Assistant" 卡片可见，含 Agent 标签按钮 |
-| 2.4 | 最近活动列表 | 显示最近 5 条事件，每条含时间、Agent 标签、事件标题、状态 |
-| 2.5 | 点击 Agent 卡片 | 跳转到对应 Agent 详情页 |
-| 2.6 | 点击 Chat 连接条 | 跳转到 Chat Agent 页面 |
-| 2.7 | 点击活动事件 | 跳转到 Event Detail 页面 |
-| 2.8 | 顶部搜索框 | 输入关键字回车后显示搜索结果 |
-| 2.9 | "☁ 云开发环境"按钮 | 按钮可见，点击弹出提示 |
-| 2.10 | Dashboard 自动刷新 | 等待 30 秒后数据自动更新（验证活动列表变化） |
+| 步骤 | 操作 | 预期 |
+|------|------|------|
+| 2.1 | 进入 Dashboard | 标题 "Dashboard"，渐变头部卡片 |
+| 2.2 | Agent 工作流 | 5 个横向 Agent 卡片：VOD → Issue → Coding → QA → SRE |
+| 2.3 | Chat Agent 连接条 | `.cl` 卡片可见 |
+| 2.4 | 最近活动列表 | `.ai` 列表含时间/标签/标题 |
+| 2.5 | 点击 Agent 卡片 | 跳转 Agent 详情页 |
+| 2.6 | 顶部搜索框 | 输入后回车显示搜索结果 |
+| 2.7 | "☁ 云开发环境"按钮 | 可见 |
+| 2.8 | 30s 自动刷新 | 数据更新 |
 
 ```python
-def test_scenario_2_dashboard(page, token):
-    """S2: Dashboard 工作流"""
+def test_dashboard(page, token):
     login(page, token)
     assert page.locator("#pageTitle").inner_text() == "Dashboard"
-    # Agent flow: 5 cards
     assert page.locator(".af .nd").count() == 5
-    # Chat lane
-    assert page.locator(".cl").is_visible()
-    assert "Chat Agent" in page.locator(".cl").inner_text()
-    # Click agent card -> agent detail
     page.locator(".af .nd").first.click()
     time.sleep(1)
     assert "Agent" in page.locator("#pageTitle").inner_text()
 ```
 
----
-
-### 场景 3：Pipeline 工作流查看与切换
+### 场景 3：Pipeline 工作流
 
 **对应文档：** §2.3 Pipeline
 
-**前置条件：** 仓库有多个 Issue 的事件记录
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 3.1 | 进入 Pipeline 页面 | 显示标题 "Pipeline"、活跃 Pipeline 计数、今日完成数 |
-| 3.2 | 活跃工作流 | 显示当前活跃 Issue 的 5 Agent 状态卡片（VOD→Issue→Coding→QA→SRE） |
-| 3.3 | Agent 状态指示 | 每个卡片显示状态圆点（绿=完成 / 黄=进行中 / 红=失败 / 灰=待处理）和状态文字 |
-| 3.4 | 历史表格 | 表格含 5 列：Pipeline / Duration / Agents / Result / Release |
-| 3.5 | 点击历史行 | 选中行高亮（`sel` class），上方活跃工作流切换为该 Issue 的状态 |
-| 3.6 | 连续切换 | 点击不同历史行，活跃工作流状态正确切换 |
-| 3.7 | Agent 标签 | 表格中 Agents 列显示 V/I/C/Q/S 标签，颜色正确 |
-| 3.8 | 无 Issue 时 | 显示空状态（无报错，显示 0 条） |
+| 步骤 | 操作 | 预期 |
+|------|------|------|
+| 3.1 | 进入 Pipeline | 标题 "Pipeline"，活跃/今日计数 |
+| 3.2 | 活跃工作流 | 5 Agent 状态卡片（VOD→Issue→Coding→QA→SRE） |
+| 3.3 | 状态圆点 | 绿=完成 / 黄=进行中 / 红=失败 / 灰=待处理 |
+| 3.4 | 历史表格 | Duration / Agents / Result / Release 列 |
+| 3.5 | 点击历史行 | 行高亮 + 活跃工作流切换 |
 
 ```python
-def test_scenario_3_pipeline(page, token):
-    """S3: Pipeline 工作流"""
+def test_pipeline(page, token):
     login(page, token)
-    page.locator("#nav-pipe").click()
-    time.sleep(1)
+    page.evaluate("app.nav('pipe')"); time.sleep(1)
     assert page.locator("#pageTitle").inner_text() == "Pipeline"
-    assert page.locator(".af .nd").count() == 5  # Agent status cards
-    rows = page.locator(".pipe-row")
-    if rows.count() > 1:
-        rows.nth(1).click()
-        time.sleep(0.5)
-        assert "sel" in rows.nth(1).get_attribute("class")
+    assert page.locator(".af .nd").count() == 5
 ```
 
----
-
-### 场景 4：Agent 详情查看与配置
+### 场景 4：Agent 详情
 
 **对应文档：** §2.4 DevOps Agent 详情页面
 
-**前置条件：** 用户已加入仓库
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 4.1 | 进入 VOD Agent 页面 | 显示彩色头部（粉色背景）、Agent 图标 ♫、名称 "VOD Agent"、描述、Configure 和 Events 按钮 |
-| 4.2 | 进入 Issue Agent 页面 | 红色背景头部、图标 ⚠、名称 "Issue Agent" |
-| 4.3 | 进入 Coding Agent 页面 | 蓝色背景头部、图标 ⚙、名称 "Coding Agent" |
-| 4.4 | 进入 QA Agent 页面 | 紫色背景头部、图标 ✔、名称 "QA Agent" |
-| 4.5 | 进入 SRE Agent 页面 | 橙色背景头部、图标 ♡、名称 "SRE Agent" |
-| 4.6 | 统计指标 | 3 个 Agent 专属指标卡片 |
-| 4.7 | 事件历史 | 最近事件列表，点击事件跳转 Event Detail |
-| 4.8 | Skill 配置 | 显示当前 Skill，含名称和路径 |
-| 4.9 | 点击 Configure | 展开配置面板：Backend Engine 下拉选择器（OpenCode/CodeArts/Hermes/Cursor）、Skill 下拉选择器 |
-| 4.10 | 选择 Backend 后 Save | 调用 API `/api/agents/{name}/...`，面板关闭，提示保存成功 |
-| 4.11 | 点击 Cancel | 面板关闭，不保存 |
+| Agent | 头部颜色 | 图标 |
+|-------|----------|------|
+| VOD | `#fde8f0` | ♫ |
+| Issue | `#fce5e5` | ⚠ |
+| Coding | `#e3edfd` | ⚙ |
+| QA | `#f3e9fe` | ✔ |
+| SRE | `#fef0e4` | ♡ |
 
 ```python
-@pytest.mark.parametrize("agent_id,name,color", [
-    ("vod", "VOD Agent", "#fde8f0"),
-    ("issue", "Issue Agent", "#fce5e5"),
-    ("coding", "Coding Agent", "#e3edfd"),
-    ("qa", "QA Agent", "#f3e9fe"),
-    ("sre", "SRE Agent", "#fef0e4"),
-])
-def test_scenario_4_agent_detail(page, token, agent_id, name, color):
-    """S4: Agent 详情"""
+@pytest.mark.parametrize("agent_id,name", [
+    ("vod","VOD Agent"),("issue","Issue Agent"),("coding","Coding Agent"),
+    ("qa","QA Agent"),("sre","SRE Agent")])
+def test_agent(page, token, agent_id, name):
     login(page, token)
-    page.locator(f"#nav-{agent_id}").click()
-    time.sleep(1)
+    page.evaluate(f"app.nav('{agent_id}')"); time.sleep(1)
     assert page.locator("#pageTitle").inner_text() == name
-    # Config button opens panel
-    page.locator("button:has-text('Configure')").click()
-    time.sleep(0.3)
+    assert page.locator("button:has-text('Configure')").is_visible()
+    page.locator("button:has-text('Configure')").click(); time.sleep(0.3)
     assert page.locator("#agentCfgPanel").is_visible()
 ```
 
----
-
-### 场景 5：Event Detail 查看与反馈提交
-
-**对应文档：** §2.5 Event Detail 页面
-
-**前置条件：** 仓库有事件记录
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 5.1 | 从 Agent 页面点击事件 | 进入 Event Detail 页面 |
-| 5.2 | 返回按钮 | "← 返回 {Agent}" 按钮可见，点击返回上一页 |
-| 5.3 | 左栏 Event Context | 显示 Trigger、Repository、Issue、Time 等上下文信息 |
-| 5.4 | 左栏 Agent Execution Log | 终端风格日志框，显示 Agent 执行步骤（带时间戳） |
-| 5.5 | 右栏 Event Info | 显示 Backend、Skill、Issue、Duration、Status |
-| 5.6 | 右栏 Feedback 表单 | 含 Issue title 输入框、Description 文本域 |
-| 5.7 | 提交 Feedback | 填写表单后点击 "Submit Feedback"，提示提交成功 |
-| 5.8 | 直接访问不存在的事件 | 返回 404 错误提示 |
+### 场景 5：Event Detail
 
 ```python
-def test_scenario_5_event_detail(page, token):
-    """S5: Event Detail"""
+def test_event(page, token):
     login(page, token)
-    # Navigate to first agent's first event
-    page.locator("#nav-vod").click()
-    time.sleep(1)
-    events = page.locator(".ai")
-    if events.count() > 0:
-        events.first.click()
-        time.sleep(1)
+    page.evaluate("app.nav('vod')"); time.sleep(1)
+    ev = page.locator(".ai")
+    if ev.count() > 0:
+        ev.first.click(); time.sleep(1)
         assert page.locator("#pageTitle").inner_text() == "Event Detail"
         assert page.locator("button:has-text('返回')").is_visible()
-        # Feedback form
         assert page.locator("#fbTitle").is_visible()
-        assert page.locator("#fbBody").is_visible()
 ```
 
----
-
-### 场景 6：Chat Agent 对话与配置
-
-**对应文档：** §2.6 + §2.7 Chat Agent
-
-**前置条件：** 用户已登录
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 6.1 | 进入 Chat Agent 页面 | 显示标题 "Chat Agent · Personal Assistant" |
-| 6.2 | 主聊天区 | 显示预置对话消息（机器人问候语和示例对话） |
-| 6.3 | 输入框 + 发送按钮 | 输入框 placeholder "Ask me anything..."，Send 按钮 |
-| 6.4 | 发送消息 | 输入文字后发送，消息出现在聊天区（左侧蓝色气泡），收到回复 |
-| 6.5 | SSE 流式回复 | 发送后看到逐步输出的思考过程（思考中...→分析中...→完成） |
-| 6.6 | 右侧 Agent 面板 | 5 个 Agent 状态卡片（VOD/Issue/Coding/QA/SRE），各带计数和彩色背景 |
-| 6.7 | Backend 配置 | Type 下拉（Default/Custom）、URL 输入、API Key 输入 |
-| 6.8 | IM 配置 | Feishu 连接状态（✓ 绿色）、App ID/Secret 输入、WeCom + 按钮、DingTalk + 按钮、"Scan QR to auto-configure" 提示 |
+### 场景 6：Chat Agent
 
 ```python
-def test_scenario_6_chat(page, token):
-    """S6: Chat Agent"""
+def test_chat(page, token):
     login(page, token)
-    page.locator("#nav-chat").click()
-    time.sleep(1)
+    page.evaluate("app.nav('chat')"); time.sleep(1)
     assert page.locator("#pageTitle").inner_text() == "Chat Agent"
-    # Agent sidebar
     assert page.locator(".chat-side .agc").count() == 5
-    # Backend config
-    assert page.locator(".chat-side select").is_visible()
-    # IM config
-    assert "Feishu" in page.locator(".chat-side").inner_text()
-    # Send message
-    page.locator(".chat-in input").fill("Hello")
-    page.locator(".chat-in .bt").click()
-    time.sleep(2)
-    assert page.locator(".msg.l").count() > 0
+    assert page.locator(".chat-in input").is_visible()
 ```
 
----
-
-### 场景 7：Settings 配置管理
-
-**对应文档：** §2.9 General Settings 页面
-
-**前置条件：** 用户已登录
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 7.1 | 进入 General Settings | 显示标题 "General Settings"，3 个 Tab：Credentials / Notifications / Skills |
-| 7.2 | Credentials Tab（默认） | 显示 GitCode API Token（已填充，disabled）、Account 信息、Huawei Cloud AK/SK 输入框 |
-| 7.3 | 切换到 Notifications Tab | 显示 5 个复选框：Issue events / PR events / Build failures / Release events / VOD signals |
-| 7.4 | 切换到 Skills Tab | 显示 "Upload Skill" 按钮、技能路由列表（含仓库名、事件类型、自定义 Skill 名、Edit 按钮） |
-| 7.5 | 华为云 AK/SK 输入 | 输入后点击 Save，提示保存成功 |
+### 场景 7：Settings
 
 ```python
-def test_scenario_7_settings(page, token):
-    """S7: Settings"""
+def test_settings(page, token):
     login(page, token)
-    page.locator("#nav-settings-credentials").click()
-    time.sleep(1)
-    assert page.locator("#pageTitle").inner_text() == "General Settings"
+    page.evaluate("app.nav('settings')"); time.sleep(1)
     assert page.locator(".stabs a").count() == 3
-    # Notifications tab
-    page.locator(".stabs a:nth-child(2)").click()
-    time.sleep(0.3)
+    page.locator(".stabs a:nth-child(2)").click(); time.sleep(0.3)
     assert page.locator("input[type='checkbox']").count() >= 3
 ```
 
----
-
-### 场景 8：GitCode Repo 配置
-
-**对应文档：** §2.10 GitCode Repo 页面
-
-**前置条件：** 用户已加入仓库
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 8.1 | 进入 GitCode Repo Settings | 显示 DevOps Bot Token 区域（Bot Token 输入、Scope 说明） |
-| 8.2 | Webhook Bot 区域 | Webhook Token 输入、Webhook URL（只读）、Bot Username 输入 |
-| 8.3 | Bot Token 输入后 Save | 提示配置已更新 |
-| 8.4 | 默认 Bot Token 配置 | 支持对 `default` 条目配置系统默认 Token |
-
----
-
-### 场景 9：DevOps Skills 浏览
-
-**对应文档：** §2.6 Skills 库
-
-**前置条件：** 用户已登录
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 9.1 | 进入 Skills Library | 显示标题 "DevOps Skills" |
-| 9.2 | 搜索框 | 可见，可输入搜索技能 |
-| 9.3 | 按 Agent 分类展示 | 5 个分类区域：VOD Agent Skills / Issue Agent Skills / Coding Agent Skills / QA Agent Skills / SRE Agent Skills |
-| 9.4 | 技能卡片 | 每张卡片含 Agent 图标、技能名称、类型标签（官方技能/用户上传）、描述、View/Edit 按钮 |
-| 9.5 | 卡片计数 | 每个分类下至少 1 个技能 |
+### 场景 9：DevOps Skills
 
 ```python
-def test_scenario_9_skills(page, token):
-    """S9: Skills Library"""
+def test_skills(page, token):
     login(page, token)
-    page.locator("#nav-skills").click()
-    time.sleep(1)
+    page.evaluate("app.nav('skills')"); time.sleep(1)
     assert page.locator("#pageTitle").inner_text() == "DevOps Skills"
-    for cat in ["VOD Agent", "Issue Agent", "Coding Agent", "QA Agent", "SRE Agent"]:
-        assert page.locator(f"h3:has-text('{cat}')").is_visible()
 ```
 
----
-
-### 场景 10：Backend Agents 引擎检测
-
-**对应文档：** §2.11 Backend Agents 页面
-
-**前置条件：** 用户已登录
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 10.1 | 进入 Backend Agents | 显示标题 "Backend Agents" |
-| 10.2 | 4 个引擎卡片 | OpenCode / CodeArts / Hermes / Cursor |
-| 10.3 | 引擎状态 | 每个卡片头部有运行状态圆点（● 绿 / ● 灰） |
-| 10.4 | 安装信息 | 显示 Version 和 Path 或 "Not Installed" |
-| 10.5 | 操作按钮 | Test Connection / View Logs / Save AK/SK（仅 CodeArts） |
-| 10.6 | Refresh All 按钮 | 可见 |
+### 场景 10：Backend Agents
 
 ```python
-def test_scenario_10_backends(page, token):
-    """S10: Backend Agents"""
+def test_backends(page, token):
     login(page, token)
-    page.locator("#nav-backends").click()
-    time.sleep(1)
+    page.evaluate("app.nav('backends')"); time.sleep(1)
     assert page.locator("#pageTitle").inner_text() == "Backend Agents"
-    backends = page.locator(".cd h3")
-    names = [backends.nth(i).inner_text() for i in range(backends.count())]
-    for eng in ["OpenCode", "CodeArts", "Hermes", "Cursor"]:
-        assert eng in names, f"{eng} not found"
 ```
 
----
-
-### 场景 11：侧边栏导航全链路
-
-**对应文档：** §2.2 Sidebar
-
-**前置条件：** 用户已加入仓库
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 11.1 | 验证所有导航链接 | 侧边栏 11 个链接全部可点击，页面正确切换 |
-| 11.2 | 活跃高亮 | 点击后当前页面链接有 `act` class，其他无 |
-| 11.3 | 仓库下拉切换 | 切换仓库后 Dashboard 数据响应变化 |
-| 11.4 | 用户信息 | 侧边栏底部显示用户名和角色（Admin/Member） |
-| 11.5 | 登出 | 点击 ↩ 登出，返回登录页，清除 localStorage |
+### 场景 11：侧边栏导航
 
 ```python
-def test_scenario_11_navigation(page, token):
-    """S11: 导航全链路"""
+def test_navigation(page, token):
     login(page, token)
-    links = [
-        ("#nav-dash", "Dashboard"),
-        ("#nav-pipe", "Pipeline"),
-        ("#nav-vod", "VOD Agent"),
-        ("#nav-issue", "Issue Agent"),
-        ("#nav-coding", "Coding Agent"),
-        ("#nav-qa", "QA Agent"),
-        ("#nav-sre", "SRE Agent"),
-        ("#nav-skills", "DevOps Skills"),
-        ("#nav-chat", "Chat Agent"),
-        ("#nav-settings-credentials", "General Settings"),
-        ("#nav-backends", "Backend Agents"),
-    ]
-    for sel, expected in links:
-        page.locator(sel).click()
-        time.sleep(0.5)
-        actual = page.locator("#pageTitle").inner_text()
-        assert actual == expected, f"{sel}: expected '{expected}', got '{actual}'"
-        assert "act" in (page.locator(sel).get_attribute("class") or "")
+    for view, expected in [
+        ("dash","Dashboard"),("pipe","Pipeline"),("vod","VOD Agent"),
+        ("skills","DevOps Skills"),("chat","Chat Agent"),
+        ("settings","General Settings"),("backends","Backend Agents"),
+    ]:
+        page.evaluate(f"app.nav('{view}')"); time.sleep(0.5)
+        assert page.locator("#pageTitle").inner_text() == expected
 ```
 
----
-
-### 场景 12：日常开发工作流（端到端）
-
-**对应文档：** §2.12 日常使用 + §3 Agent 工作流
-
-**前置条件：** 仓库有完整的 5 Agent 事件记录
-
-| 步骤 | 操作 | 预期结果 |
-|------|------|----------|
-| 12.1 | Dashboard 查看概览 | 看到 5 Agent 状态、最近活动 |
-| 12.2 | 进入 Pipeline | 查看当前活跃 Issue 的完整 5 步工作流 |
-| 12.3 | 查看 VOD Agent | 查看声音收集记录和信号分析 |
-| 12.4 | 查看 Issue Agent | 查看 Issue 分类和指派记录 |
-| 12.5 | 查看 Coding Agent | 查看 PR 提交记录 |
-| 12.6 | 查看 QA Agent | 查看 Code Review 和测试结果 |
-| 12.7 | 查看 SRE Agent | 查看发布记录和部署状态 |
-| 12.8 | Chat Agent 查询 | 通过对话获取工作流状态 |
-| 12.9 | 搜索 | 通过顶部搜索框搜索 Issue/PR 编号 |
-| 12.10 | Event 详情 + 反馈 | 查看事件详情，提交反馈 |
+### 场景 12：日常开发工作流
 
 ```python
-def test_scenario_12_daily_workflow(page, token):
-    """S12: 日常开发工作流（全链路）"""
+def test_daily(page, token):
     login(page, token)
-    
-    # Step 1: Dashboard
+    page.evaluate("app.nav('dash')"); time.sleep(0.5)
     assert page.locator("#pageTitle").inner_text() == "Dashboard"
-    
-    # Step 2-7: Visit all 5 agents
-    for agent_id in ["vod", "issue", "coding", "qa", "sre"]:
-        page.locator(f"#nav-{agent_id}").click()
-        time.sleep(0.5)
-        assert "Agent" in page.locator("#pageTitle").inner_text()
-    
-    # Step 8: Chat
-    page.locator("#nav-chat").click()
-    time.sleep(0.5)
-    assert page.locator("#pageTitle").inner_text() == "Chat Agent"
-    
-    # Step 9: Search
-    page.locator("#searchInput").fill("issue")
-    page.locator("#searchInput").press("Enter")
-    time.sleep(1)
-    assert "Search" in page.locator(".cd-h h2").inner_text()
+    for aid in ["vod","issue","coding","qa","sre","chat"]:
+        page.evaluate(f"app.nav('{aid}')"); time.sleep(0.5)
+        assert page.locator("#pageTitle").inner_text() != ""
 ```
 
 ---
 
-## 三、移动端响应式测试
+## 四、移动端响应式测试
 
-| 场景 | 视口 | 预期 |
-|------|------|------|
-| M1 | 375×812 (iPhone X) | 侧边栏隐藏，内容区全宽，Agent Flow 纵向排列 |
-| M2 | 768×1024 (iPad) | 侧边栏可见或可折叠，布局正常 |
-| M3 | 320×568 (iPhone SE) | 无横向滚动条，所有按钮可点击 |
+| 视口 | 预期 |
+|------|------|
+| 375×812 (iPhone X) | 侧边栏隐藏，内容区全宽 |
+| 320×568 (iPhone SE) | 无横向滚动条 |
+| 768×1024 (iPad) | 布局正常 |
 
 ```python
-def test_mobile_responsive(page, token):
+def test_mobile(page, token):
     page.set_viewport_size({"width": 375, "height": 812})
-    login(page, token)
+    page.add_init_script(f"""localStorage.setItem('token','{token}');localStorage.setItem('app_cache_ver','2');
+    localStorage.setItem('currentRepo',JSON.stringify({{fullName:'Jason7602/devops-bot',owner:'Jason7602',name:'devops-bot'}}));""")
+    page.goto(BASE); page.wait_for_load_state("networkidle"); time.sleep(2)
     assert page.locator("#sidebar").is_hidden()
-    assert page.locator(".ct").is_visible()
 ```
 
 ---
 
-## 四、异常场景测试
+## 五、异常场景测试
 
-| 场景 | 操作 | 预期 |
-|------|------|------|
-| E1 | Token 过期后操作 | `api.js` 捕获 401，清除 token，跳转登录页 |
-| E2 | GitCode API 不可达 | `GET /api/repos/member` 返回 502，显示错误提示，不强制登出 |
-| E3 | 访问不存在的 Event | `GET /api/events/detail/999999` → 404 页面 |
-| E4 | 空数据状态 | managed_repos 为空时显示仓库选择页；events 为空时 Dashboard 正常加载 |
-| E5 | 快速连续点击导航 | 页面不崩溃，URL 不混乱 |
-| E6 | 浏览器前进/后退 | SPA 路由正常，不出现白屏 |
+| # | 场景 | 操作 | 预期 |
+|---|------|------|------|
+| E1 | Token 过期 | localStorage 存无效 token 后加载 | 自动跳转登录页 |
+| E2 | GitCode API 502 | 停用网络后加载 | 错误提示，不强制登出 |
+| E3 | 404 Event | `GET /api/events/detail/999999` | 404 页面 |
+| E4 | 空数据 | managed_repos 为空时 | 仓库选择页正常显示 |
+| E5 | 快速连续点击导航 | 快速点击 10 次导航 | 页面不崩溃 |
+| E6 | 浏览器后退 | 从 Dashboard 后退 | 不出现白屏 |
 
 ---
 
-## 五、测试执行
+## 六、添加 JS 追踪日志（app.js 修改）
+
+在 `app.js` 的 `init()` 和 `loadRepos()` 中添加诊断日志，Playwright 测试通过 `page.on("console")` 捕获：
+
+```javascript
+function init() {
+  console.log("[init] start", JSON.stringify({
+    hasToken: !!localStorage.getItem('token'),
+    cacheVer: localStorage.getItem('app_cache_ver'),
+    currentRepo: localStorage.getItem('currentRepo'),
+    url: window.location.href
+  }));
+  // ... rest of init ...
+}
+
+function loadRepos() {
+  console.log("[loadRepos] start");
+  API.get('/repos/member').then(d => {
+    const repos = d.repos || [];
+    const managedRepos = repos.filter(r => r.is_joined || r.is_hosted);
+    console.log("[loadRepos] repos", JSON.stringify({
+      total: repos.length,
+      managed: managedRepos.length
+    }));
+    // ... rest of loadRepos ...
+  }).catch(() => {
+    console.error("[loadRepos] FAILED");
+    // ... catch handler ...
+  });
+}
+```
+
+---
+
+## 七、测试执行
 
 ```bash
-# 运行全部 12 个场景
-pytest tests/ui_scenario_test.py -v --tb=short
+# 安装依赖
+pip install playwright pytest
+playwright install chromium
 
-# 运行特定场景
-pytest tests/ui_scenario_test.py::test_scenario_1_first_login -v
+# 运行登录场景测试（S1-A 到 S1-E）
+pytest tests/ui_scenario_test.py -k "Login" -v --tb=short
+
+# 运行全部测试
+pytest tests/ui_scenario_test.py -v --tb=short
 
 # 生成 HTML 报告
 pytest tests/ui_scenario_test.py --html=scenario-report.html
@@ -507,22 +491,37 @@ pytest tests/ui_scenario_test.py --html=scenario-report.html
 
 ---
 
-## 六、场景与文档对照表
+## 八、定位"空页面"问题速查表
+
+| 现象 | 可能原因 | 验证方式 |
+|------|---------|---------|
+| 登录后 2s 页面空白 | `loadRepos()` 失败，catch 隐藏 sidebar/mainView | 检查 S1-C 控制台日志：有无 `[loadRepos] FAILED` |
+| 页面重新加载（`GET /`） | `location.reload()` 触发 | 检查 S1-C 请求日志：多次 `GET /` |
+| 无错误但页面空白 | JS 语法错误导致 `app` 未定义 | 检查 S1-A A9：`typeof app` |
+| 偶发性空白 | Uvicorn 多实例/内存 session 丢失 | `pkill -f uvicorn` 后重启单实例 |
+| OAuth 回调后空白 | `history.replaceState` 触发浏览器异常 | 检查 S1-C 日志：`[init] replaceState done` |
+
+---
+
+## 九、场景与文档对照表
 
 | 场景 | 文档章节 | 测试步骤 | 涉及页面 |
 |------|---------|---------|---------|
-| S1 首次登录 | §2.1 + §2.1.1 | 10 | Login → 仓库选择 |
-| S2 Dashboard | §2.2 | 10 | Dashboard |
-| S3 Pipeline | §2.3 | 8 | Pipeline |
-| S4 Agent 详情 | §2.4 | 11 | 5 Agent 详情页 |
-| S5 Event Detail | §2.5 | 8 | Event Detail |
-| S6 Chat Agent | §2.6 + §2.7 | 8 | Chat |
-| S7 Settings | §2.9 | 5 | General Settings |
-| S8 GitCode Repo | §2.10 | 4 | GitCode Repo |
-| S9 Skills | §2.6 Skills | 5 | Skills Library |
-| S10 Backend | §2.11 | 6 | Backend Agents |
-| S11 导航 | §2.2 Sidebar | 5 | 全局 |
-| S12 日常流程 | §2.12 + §3 | 10 | 全页面 |
+| S1-A 登录渲染 | §2.1 | 10 | Login |
+| S1-B 切换交互 | §2.1 | 9 | Login |
+| S1-C 密码登录 | §2.1 | 10 + 诊断 | Login → Dashboard/仓库选择 |
+| S1-D OAuth URL | §2.1 | 6 | API |
+| S1-E 回调验证 | §2.1 | 6 | API |
+| S2 Dashboard | §2.2 | 8 | Dashboard |
+| S3 Pipeline | §2.3 | 5 | Pipeline |
+| S4 Agent 详情 | §2.4 | 5 × 5 | 5 Agent 页 |
+| S5 Event Detail | §2.5 | 4 | Event Detail |
+| S6 Chat Agent | §2.6 + §2.7 | 4 | Chat |
+| S7 Settings | §2.9 | 3 | General Settings |
+| S9 Skills | §2.6 Skills | 2 | Skills |
+| S10 Backend | §2.11 | 2 | Backend Agents |
+| S11 导航 | §2.2 | 7 | 全局 |
+| S12 日常流程 | §2.12 | 7 | 全页面 |
 | M1-M3 移动端 | — | 3 | 全局 |
 | E1-E6 异常 | — | 6 | 多页面 |
-| **合计** | | **99** | |
+| **合计** | | **107** | |

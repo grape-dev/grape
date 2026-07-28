@@ -28,8 +28,10 @@ const app = (() => {
   }
 
   function loadRepos() {
+    console.log("[loadRepos] start");
     API.get('/repos/member').then(d => {
       const repos = d.repos || [];
+      console.log("[loadRepos] repos", JSON.stringify({total: repos.length, managed: repos.filter(r => r.is_joined || r.is_hosted).length}));
       _updateSidebarRepos(repos);
       const current = currentRepo();
 
@@ -52,6 +54,7 @@ const app = (() => {
         nav('dash');
       }
     }).catch(() => {
+      console.error("[loadRepos] FAILED");
       // On 401, redirect to login. On other errors (502 etc.), show empty state
       $('sidebar').style.display = 'none';
       $('mainView').style.display = 'none';
@@ -195,6 +198,12 @@ const app = (() => {
   }
 
   function init() {
+    console.log("[init] start", JSON.stringify({
+      hasToken: !!localStorage.getItem('token'),
+      cacheVer: localStorage.getItem('app_cache_ver'),
+      currentRepo: localStorage.getItem('currentRepo'),
+      url: window.location.href
+    }));
     // Check for OAuth token in URL first
     const p = new URLSearchParams(window.location.search);
     const urlToken = p.get('token');
