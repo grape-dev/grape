@@ -32,14 +32,24 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
     result = []
     for r in repos:
         full_name = r.get("full_name", "")
+        is_admin = r.get("is_admin", False)
+        in_managed = full_name in managed
+
+        # 仅返回两类仓库：
+        # 1) 自己是维护员/管理员的仓库（可托管）
+        # 2) 自己是成员且已托管的仓库（可加入）
+        # 过滤掉：自己是成员且未托管的仓库（无操作权限）
+        if not is_admin and not in_managed:
+            continue
+
         result.append({
             "full_name": full_name,
             "owner": r.get("owner", ""),
             "name": r.get("name", ""),
             "description": r.get("description", ""),
-            "role": "Admin" if r.get("is_admin") else "Maintainer" if full_name in managed else "Member",
-            "is_joined": full_name in managed,
-            "is_hosted": full_name in managed and managed.get(full_name, False),
+            "role": "Admin" if is_admin else "Maintainer" if in_managed else "Member",
+            "is_joined": in_managed,
+            "is_hosted": in_managed and managed.get(full_name, False),
         })
     return {"repos": result}
 
