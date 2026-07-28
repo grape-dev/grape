@@ -70,6 +70,22 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
 
+    # 权限检查：必须是仓库的维护员或管理员才能托管
+    from src.user.repo_manager import _check_collaborator_admin, _req
+    try:
+        user_data = _req("GET", f"https://api.gitcode.com/api/v5/user", api_token)
+        current_user = user_data.get("login", "")
+        if not current_user:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
+
+        is_admin = _check_collaborator_admin(api_token, owner, repo_name, current_user)
+        if not is_admin:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "托管权限不够：仅仓库的维护员或管理员可以托管"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"权限验证失败: {e}"})
+
     try:
         existing_id = find_existing_webhook(api_token, owner, repo_name, webhook_url)
         if existing_id:
