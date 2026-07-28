@@ -98,6 +98,10 @@ const app = (() => {
   function switchRepo(val) {
     if (!val) return;
     if (val === '__add__') {
+      // Reset dropdown to current repo
+      const cur = currentRepo();
+      const sel = $('repoSelect');
+      if (cur) sel.value = cur.fullName;
       // 显示完整仓库选择页（类似首次登录）
       API.get('/repos/member').then(d => {
         const repos = d.repos || [];
@@ -109,7 +113,7 @@ const app = (() => {
         $('mainView').style.zIndex = '100';
         $('pageTitle').textContent = '选择仓库';
         renderRepos(repos);
-      }).catch(() => {});
+      }).catch(e => console.error("[switchRepo] member fetch failed:", e));
       return;
     }
     const parts = val.split('/');
