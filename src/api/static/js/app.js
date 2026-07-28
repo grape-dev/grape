@@ -50,7 +50,7 @@ const app = (() => {
 
       $('sidebar').style.display = 'flex';
       $('mainView').style.display = 'flex';
-      $('repoView').classList.remove('ac');
+      $('pageTitle').textContent = 'Dashboard';
 
       if (!current) {
         const r = managedRepos[0];
