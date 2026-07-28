@@ -36,16 +36,18 @@ function renderRepos(repos) {
   d.innerHTML = html;
 }
 
-function joinAndSelect(fullName, owner, name) {
-  API.post('/repos/join', {full_name: fullName}).then(r => {
-    selectRepo(fullName, owner, name);
-  }).catch(e => app.showToast('加入失败: ' + e.message));
-}
-
 function hostAndSelect(fullName, owner, name) {
   API.post('/repos/host', {full_name: fullName}).then(r => {
+    app.showToast('加入并托管成功');
     selectRepo(fullName, owner, name);
   }).catch(e => app.showToast('托管失败: ' + e.message));
+}
+
+function joinAndSelect(fullName, owner, name) {
+  API.post('/repos/join', {full_name: fullName}).then(r => {
+    app.showToast('已成功加入仓库');
+    selectRepo(fullName, owner, name);
+  }).catch(e => app.showToast('加入失败: ' + e.message));
 }
 
 function selectRepo(fullName, owner, name) {
@@ -53,6 +55,7 @@ function selectRepo(fullName, owner, name) {
   const sidebar = document.getElementById('sidebar');
   const mainView = document.getElementById('mainView');
   const tb = document.getElementById('tb');
+  const title = document.getElementById('pageTitle');
   // Restore normal layout
   if (mainView) {
     mainView.style.position = '';
@@ -62,6 +65,7 @@ function selectRepo(fullName, owner, name) {
   }
   if (sidebar) sidebar.style.display = 'flex';
   if (tb) tb.style.display = 'flex';
+  if (title) title.textContent = 'Dashboard';
   // Reload sidebar repo list
   app.initSidebarRepos();
   app.nav('dash');
