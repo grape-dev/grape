@@ -83,7 +83,7 @@ const app = (() => {
       const current = currentRepo();
       sel.innerHTML = '<option value="">选择仓库...</option>' + repos.map(r =>
         `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
-      ).join('') + '<option value="__add__">＋ 新增仓库托管</option>';
+      ).join('');
     }).catch(() => {});
   }
 
@@ -97,11 +97,6 @@ const app = (() => {
 
   function switchRepo(val) {
     if (!val) return;
-    if (val === '__add__') {
-      localStorage.removeItem('currentRepo');
-      nav('dash');
-      return;
-    }
     const parts = val.split('/');
     localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1]}));
     nav('dash');

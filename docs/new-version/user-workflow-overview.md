@@ -142,8 +142,6 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 │       │ team/backend-service│                       │
 │       │ team/web-frontend   │                       │
 │       │ team/mobile-app     │                       │
-│       ├─────────────────────┤                       │
-│       │ + 新增仓库托管       │                       │
 │       └─────────────────────┘                       │
 │                                                     │
 │  Workspace                                          │
