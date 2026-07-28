@@ -37,8 +37,9 @@ async def list_skills(user: dict = Depends(get_current_user)):
         custom.append({
             "name": s.get("skill_name", "unknown"),
             "display_name": s.get("skill_name", "unknown"),
-            "description": f"User-uploaded skill: {s.get('skill_name', '')}",
-            "agent_type": "",
+            "description": s.get("description", ""),
+            "agent_type": s.get("agent_type", ""),
+            "parent_agent_type": s.get("parent_agent_type", ""),
             "type": "user-uploaded",
         })
 
@@ -81,7 +82,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             shutil.rmtree(user_skill_dir)
         shutil.copytree(skill_dir, user_skill_dir)
 
-        user_db.create_skill(user["id"], skill_name, "")
+        user_db.create_skill(user["id"], skill_name, "", "", "")
         user_db.save_skill_md(user["id"], skill_name)
 
         return {"message": f"技能 {skill_name} 上传成功"}

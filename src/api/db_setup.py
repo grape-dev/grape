@@ -247,6 +247,9 @@ def _migrate_tables():
     """已有数据库的 schema 迁移"""
     migrations = [
         "ALTER TABLE agent_type_config ADD COLUMN parent_agent_type TEXT DEFAULT ''",
+        "ALTER TABLE user_skills ADD COLUMN agent_type TEXT DEFAULT ''",
+        "ALTER TABLE user_skills ADD COLUMN description TEXT DEFAULT ''",
+        "ALTER TABLE user_skills ADD COLUMN parent_agent_type TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:

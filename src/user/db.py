@@ -440,6 +440,9 @@ CREATE TABLE IF NOT EXISTS user_skills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     skill_name TEXT NOT NULL,
+    agent_type TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    parent_agent_type TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE (user_id, skill_name)
 )
@@ -590,12 +593,12 @@ def ensure_skill_dir(user_id: int, skill_name: str) -> str:
     return path
 
 
-def create_skill(user_id: int, skill_name: str) -> bool:
+def create_skill(user_id: int, skill_name: str, agent_type: str = "", description: str = "", parent_agent_type: str = "") -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR IGNORE INTO user_skills (user_id, skill_name) VALUES (?,?)",
-                      (user_id, skill_name))
+            c.execute("INSERT OR IGNORE INTO user_skills (user_id, skill_name, agent_type, description, parent_agent_type) VALUES (?,?,?,?,?)",
+                      (user_id, skill_name, agent_type, description, parent_agent_type))
             db.commit()
             ensure_skill_dir(user_id, skill_name)
             return True
@@ -625,8 +628,8 @@ def delete_skill(user_id: int, skill_name: str) -> bool:
 def list_skills(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, skill_name, created_at FROM user_skills WHERE user_id=? ORDER BY id", (user_id,))
-        return [{"id": r[0], "skill_name": r[1], "created_at": r[2]} for r in c.fetchall()]
+        c.execute("SELECT id, skill_name, agent_type, description, parent_agent_type, created_at FROM user_skills WHERE user_id=? ORDER BY id", (user_id,))
+        return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "parent_agent_type": r[4] or "", "created_at": r[5]} for r in c.fetchall()]
 
 
 def save_skill_md(user_id: int, skill_name: str, content: str) -> bool:
