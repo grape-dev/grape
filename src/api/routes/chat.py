@@ -164,7 +164,6 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
     return {
         "backend": {
             "type": acc.get("chat_backend_type", "Default"),
-            "url": acc.get("chat_backend_url", "localhost:8080/chat"),
             "api_key_exists": bool(acc.get("gitcode_api_token")),
         },
         "_backends": backends,

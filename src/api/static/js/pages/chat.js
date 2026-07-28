@@ -167,14 +167,12 @@ function toggleChatConfig() {
     p.classList.remove('hidden');
     API.get('/chat/config').then(d => {
       const feishu = d.im?.feishu || {};
-      const backend = d.backend || {};
       const backendsOpts = (d._backends || []).map(b =>
         `<option value="${b.name}" ${b.name === backend.type?.toLowerCase() ? 'selected' : ''}>${b.display_name || b.name}</option>`
       ).join('') || '<option>Default (Built-in)</option>';
       p.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
         <span style="font-weight:600">Backend</span>
         <select id="cfgBackend" style="width:160px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${backendsOpts}</select>
-        <input id="cfgBackendUrl" placeholder="URL" value="${backend.url || 'localhost:8080/chat'}" style="width:200px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px">
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px">
         <span style="font-weight:600">IM</span>
