@@ -137,9 +137,12 @@ function unhostRepo(fullName) {
   if (!confirm('确定要解除托管 ' + fullName + ' 吗？相关的 Webhook 将被删除。')) return;
   API.post('/repos/remove', {full_name: fullName}).then(r => {
     app.showToast('已解除托管');
-    // 跳转到首次登录仓库选择页
-    localStorage.removeItem('currentRepo');
     app.initSidebarRepos();
-    app.nav('dash');
+    // 刷新仓库管理页
+    if (document.getElementById('pageTitle').innerText === '选择仓库') {
+      renderRepos();
+    } else {
+      app.nav('dash');
+    }
   }).catch(e => app.showToast('解除托管失败: ' + e.message));
 }
