@@ -38,7 +38,12 @@ if os.path.isdir(STATIC_DIR):
     from fastapi.responses import FileResponse
     @app.get("/")
     async def serve_spa():
-        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+        from fastapi.responses import FileResponse
+        resp = FileResponse(os.path.join(STATIC_DIR, "index.html"))
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
 
 from src.api.db_setup import init_database
 init_database()
