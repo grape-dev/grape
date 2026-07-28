@@ -211,6 +211,10 @@ const app = (() => {
     if (urlToken) {
       localStorage.setItem('token', urlToken);
       localStorage.setItem('app_cache_ver', '2');
+      // Clear old repo selection on fresh OAuth login
+      if (p.get('first_login')) {
+        localStorage.removeItem('currentRepo');
+      }
       showApp();
       // Remove token from URL without reload
       if (window.history.replaceState) {
