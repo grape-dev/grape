@@ -120,7 +120,8 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
     user_db.save_user_account(local_user["username"], user_acc)
 
     token = user_db.create_session_token(local_user["id"])
-    return {"token": token, "user": {"id": local_user["id"], "username": local_user["username"]}}
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/?token={token}", status_code=302)
 
 
 @router.get("/profile")
