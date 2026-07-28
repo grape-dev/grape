@@ -156,7 +156,7 @@ function doSend(input, body) {
   }).catch(e => { const el = document.getElementById(tid); if (el) el.innerHTML = 'Request failed: ' + e.message; });
 }
 
-// ====== IM Config Panel ======
+// ====== Config Panel ======
 let _chatConfigVisible = false;
 
 function toggleChatConfig() {
@@ -167,8 +167,17 @@ function toggleChatConfig() {
     p.classList.remove('hidden');
     API.get('/chat/config').then(d => {
       const feishu = d.im?.feishu || {};
+      const backend = d.backend || {};
+      const backendsOpts = (d._backends || []).map(b =>
+        `<option value="${b.name}" ${b.name === backend.type?.toLowerCase() ? 'selected' : ''}>${b.display_name || b.name}</option>`
+      ).join('') || '<option>Default (Built-in)</option>';
       p.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-        <span style="font-weight:600">IM Configuration</span>
+        <span style="font-weight:600">Backend</span>
+        <select id="cfgBackend" style="width:160px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${backendsOpts}</select>
+        <input id="cfgBackendUrl" placeholder="URL" value="${backend.url || 'localhost:8080/chat'}" style="width:200px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px">
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px">
+        <span style="font-weight:600">IM</span>
         <label style="display:flex;align-items:center;gap:4px"><span class="${feishu.connected ? 'tgx' : 't3'}">●</span> Feishu ${feishu.connected ? '(Connected)' : '(Disconnected)'}</label>
         <input id="cfgFeishuAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:180px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px">
         <input id="cfgFeishuSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:180px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px">

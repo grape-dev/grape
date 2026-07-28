@@ -159,12 +159,15 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
 @router.get("/config")
 async def get_chat_config(user: dict = Depends(get_current_user)):
     acc = user_db.get_user_account(user["username"]) or {}
+    from src.user.db import get_backend_agents as _get_cached_backends
+    backends = _get_cached_backends()
     return {
         "backend": {
-            "type": "Default",
-            "url": "localhost:8080/chat",
+            "type": acc.get("chat_backend_type", "Default"),
+            "url": acc.get("chat_backend_url", "localhost:8080/chat"),
             "api_key_exists": bool(acc.get("gitcode_api_token")),
         },
+        "_backends": backends,
         "im": {
             "feishu": {
                 "connected": bool(acc.get("feishu_app_id")),
