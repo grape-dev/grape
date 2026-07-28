@@ -1,7 +1,7 @@
 {
   "vod": {
     "name": "VOD Agent",
-    "icon": "🔍",
+    "icon": "\U0001f50d",
     "color": "var(--pk)",
     "bg": "#fde8f0",
     "description": "从开发者声音中收集反馈、聚类分析共性、提炼价值、自动创建 Issue",
@@ -10,7 +10,7 @@
   },
   "issue": {
     "name": "Issue Agent",
-    "icon": "📋",
+    "icon": "\U0001f4cb",
     "color": "var(--r)",
     "bg": "#fce5e5",
     "description": "Issue 分类、标签、指派、A2A 触发 Coding Agent",
@@ -19,7 +19,7 @@
   },
   "coding": {
     "name": "Coding Agent",
-    "icon": "💻",
+    "icon": "\U0001f4bb",
     "color": "var(--a)",
     "bg": "#e3edfd",
     "description": "代码实现、PR 创建、自我审查",
@@ -28,7 +28,7 @@
   },
   "qa": {
     "name": "QA Agent",
-    "icon": "🧪",
+    "icon": "\U0001f9ea",
     "color": "var(--pu)",
     "bg": "#f3e9fe",
     "description": "代码审查、自动化测试、功能验证、安全检查",
@@ -37,20 +37,24 @@
   },
   "sre": {
     "name": "SRE Agent",
-    "icon": "⚙️",
+    "icon": "\u2699\ufe0f",
     "color": "var(--or)",
     "bg": "#fef0e4",
     "description": "构建部署、发布管理、监控运维、故障排查",
     "backend": "opencode",
     "order_num": 5
   },
+  "issue-skill": {
+    "name": "Issue Management",
+    "description": "Issue 全生命周期管理：分类、打标签、指派人、创建里程碑、关联 PR、回复评论"
+  },
   "impl": {
     "name": "Implementation",
     "description": "代码实现：分析问题、制定修改方案、编码实现、提交 PR"
   },
-  "pr-review": {
+  "pr": {
     "name": "PR Review",
-    "description": "Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并操作"
+    "description": "Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并操作、添加评论"
   },
   "cloud-deploy": {
     "name": "Cloud Deploy",
