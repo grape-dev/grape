@@ -136,7 +136,24 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
-    removed = user_db.remove_managed_repo(user["id"], parts[0], parts[1])
+    owner, repo_name = parts
+
+    # 如果存在 webhook，先从 GitCode 删除
+    acc = user_db.get_user_account(user["username"]) or {}
+    api_token = acc.get("gitcode_api_token", "")
+    if not api_token:
+        api_token = get_bot_token(user["username"])
+
+    if api_token:
+        try:
+            from src.user.repo_manager import _get_managed_webhook, remove_webhook
+            wh_id = _get_managed_webhook(user["id"], owner, repo_name)
+            if wh_id:
+                remove_webhook(api_token, owner, repo_name, wh_id)
+        except Exception as e:
+            pass  # Webhook 删除失败不影响解除托管
+
+    removed = user_db.remove_managed_repo(user["id"], owner, repo_name)
     if not removed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
     return {"message": "已移除仓库"}

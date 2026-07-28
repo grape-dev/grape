@@ -129,6 +129,22 @@ def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> in
     return hook_id
 
 
+def _get_managed_webhook(user_id: int, owner: str, repo: str) -> int | None:
+    """从 managed_repos 表获取 webhook_id"""
+    import sqlite3
+    db_path = None
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT webhook_id FROM managed_repos WHERE user_id=? AND repo_owner=? AND repo_name=?",
+                      (user_id, owner, repo))
+            row = c.fetchone()
+            return row[0] if row and row[0] else None
+    except:
+        return None
+
+
 def remove_webhook(api_token: str, owner: str, repo: str, webhook_id: int) -> bool:
     """删除指定仓库上的 webhook。"""
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"

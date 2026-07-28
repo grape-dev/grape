@@ -61,11 +61,12 @@ function renderRepos() {
       managedRepos.forEach(r => {
         const statusClass = r.is_hosted ? 'tg-s' : 'tg-d';
         const statusText = r.is_hosted ? 'Active' : 'Joined';
-        html += `<div class="repo-item" onclick="selectRepo('${r.full_name}','${r.owner}','${r.name}')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--b)">
-          <span class="tg tg-c" style="font-size:11px;padding:3px 8px">${r.full_name}</span>
+        html += `<div class="repo-item" style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--b)">
+          <span class="tg tg-c" style="font-size:11px;padding:3px 8px;cursor:pointer" onclick="selectRepo('${r.full_name}','${r.owner}','${r.name}')">${r.full_name}</span>
           <span class="ts t2">${r.role}</span>
           <span class="ts t3">${r.is_hosted ? 'Webhook OK' : ''} · ★ ${r.name}</span>
           <span class="tg ${statusClass}" style="margin-left:auto">${statusText}</span>
+          <button class="bt bt-o bt-s" onclick="event.stopPropagation();unhostRepo('${r.full_name}')" style="color:var(--r);border-color:var(--r)">解除托管</button>
         </div>`;
       });
     }
@@ -130,4 +131,15 @@ function selectRepo(fullName, owner, name) {
   if (title) title.textContent = 'Dashboard';
   app.initSidebarRepos();
   app.nav('dash');
+}
+
+function unhostRepo(fullName) {
+  if (!confirm('确定要解除托管 ' + fullName + ' 吗？相关的 Webhook 将被删除。')) return;
+  API.post('/repos/remove', {full_name: fullName}).then(r => {
+    app.showToast('已解除托管');
+    // 跳转到首次登录仓库选择页
+    localStorage.removeItem('currentRepo');
+    app.initSidebarRepos();
+    app.nav('dash');
+  }).catch(e => app.showToast('解除托管失败: ' + e.message));
 }
