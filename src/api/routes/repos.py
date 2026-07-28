@@ -88,7 +88,12 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         if not current_user:
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
 
-        is_admin = _check_collaborator_admin(api_token, owner, repo_name, current_user)
+        # 项目所有者有完全权限，直接通过
+        if current_user == owner:
+            is_admin = True
+        else:
+            is_admin = _check_collaborator_admin(api_token, owner, repo_name, current_user)
+
         if not is_admin:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "托管权限不够：仅仓库的维护员或管理员可以托管"})
     except HTTPException:

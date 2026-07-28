@@ -28,6 +28,9 @@ def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: s
     """调 /collaborators/{username}/permission 接口精确判断管理员权限"""
     if not username:
         return False
+    # 项目所有者直接有完全权限
+    if username == owner:
+        return True
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{username}/permission"
     try:
         data = _req("GET", url, api_token)
