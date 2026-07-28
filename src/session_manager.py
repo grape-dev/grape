@@ -250,3 +250,192 @@ def set_notify_enabled(repo_key, enabled):
             full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
             c.execute("UPDATE feishu_bindings SET notify_enabled=? WHERE repo_key=?", (int(enabled), full_key))
         db.commit()
+
+
+# ====== im_channels CRUD ======
+
+def create_im_channel(provider: str, channel_id: str, repo_key: str,
+                      channel_name: str = "", bind_by: str = "",
+                      account: str = "default") -> str | None:
+    import uuid
+    cid = str(uuid.uuid4())
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR IGNORE INTO im_channels (id, provider, channel_id, channel_name, repo_key, bind_by, account) VALUES (?,?,?,?,?,?,?)",
+                (cid, provider, channel_id, channel_name, repo_key, bind_by, account)
+            )
+            db.commit()
+            return cid
+    except Exception as e:
+        log.warning(f"Create im_channel failed: {e}")
+        return None
+
+
+def get_channel_by_repo(repo_key: str, provider: str = "feishu") -> dict | None:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, provider, channel_id, channel_name, repo_key, auto_impl_enabled, notify_enabled, account, created_at FROM im_channels WHERE repo_key=? AND provider=?", (repo_key, provider))
+        row = c.fetchone()
+        if not row:
+            c.execute("SELECT id, provider, channel_id, channel_name, repo_key, auto_impl_enabled, notify_enabled, account, created_at FROM im_channels WHERE repo_key=? AND provider=?", ("gitcode:" + repo_key, provider))
+            row = c.fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "provider": row[1], "channel_id": row[2], "channel_name": row[3],
+                "repo_key": row[4], "auto_impl_enabled": bool(row[5]), "notify_enabled": bool(row[6]),
+                "account": row[7], "created_at": row[8]}
+
+
+def get_channel_by_channel_id(provider: str, channel_id: str) -> dict | None:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, provider, channel_id, channel_name, repo_key, auto_impl_enabled, notify_enabled, account, created_at FROM im_channels WHERE provider=? AND channel_id=?", (provider, channel_id))
+        row = c.fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "provider": row[1], "channel_id": row[2], "channel_name": row[3],
+                "repo_key": row[4], "auto_impl_enabled": bool(row[5]), "notify_enabled": bool(row[6]),
+                "account": row[7], "created_at": row[8]}
+
+
+def update_im_channel(repo_key: str, provider: str, **kwargs):
+    allowed = {"auto_impl_enabled", "notify_enabled", "channel_name"}
+    sets = []
+    vals = []
+    for k, v in kwargs.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            vals.append(int(v) if isinstance(v, bool) else v)
+    if not sets:
+        return
+    vals += [repo_key, provider]
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"UPDATE im_channels SET {', '.join(sets)} WHERE repo_key=? AND provider=?", vals)
+        if c.rowcount == 0:
+            full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
+            vals[-2] = full_key
+            c.execute(f"UPDATE im_channels SET {', '.join(sets)} WHERE repo_key=? AND provider=?", vals)
+        db.commit()
+
+
+def delete_im_channel(provider: str, channel_id: str):
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM im_channels WHERE provider=? AND channel_id=?", (provider, channel_id))
+        db.commit()
+
+
+# ====== user_im_bindings CRUD ======
+
+def bind_user_im(user_id: int, provider: str, channel_id: str, channel_type: str = "direct_message") -> bool:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO user_im_bindings (user_id, provider, channel_type, channel_id) VALUES (?,?,?,?)",
+                      (user_id, provider, channel_type, channel_id))
+            db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"Bind user IM failed: {e}")
+        return False
+
+
+def get_user_im_channel(user_id: int, provider: str = "feishu", channel_type: str = "direct_message") -> dict | None:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, user_id, provider, channel_type, channel_id, enabled, created_at FROM user_im_bindings WHERE user_id=? AND provider=? AND channel_type=?", (user_id, provider, channel_type))
+        row = c.fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "user_id": row[1], "provider": row[2], "channel_type": row[3],
+                "channel_id": row[4], "enabled": bool(row[5]), "created_at": row[6]}
+
+
+def unbind_user_im(user_id: int, provider: str = "feishu"):
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM user_im_bindings WHERE user_id=? AND provider=?", (user_id, provider))
+        db.commit()
+
+
+# ====== chat_conversations CRUD ======
+
+def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "", title: str = "") -> str:
+    import uuid
+    cid = str(uuid.uuid4())
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT INTO chat_conversations (id, user_id, repo_key, im_channel_id, title) VALUES (?,?,?,?,?)",
+                  (cid, user_id, repo_key, im_channel_id, title))
+        db.commit()
+    return cid
+
+
+def get_user_conversations(user_id: int, limit: int = 20) -> list[dict]:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, user_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
+        return [{"id": r[0], "user_id": r[1], "repo_key": r[2], "im_channel_id": r[3], "title": r[4], "status": r[5], "created_at": r[6], "updated_at": r[7]} for r in c.fetchall()]
+
+
+def get_conversation(conv_id: str) -> dict | None:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, user_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE id=?", (conv_id,))
+        row = c.fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "user_id": row[1], "repo_key": row[2], "im_channel_id": row[3],
+                "title": row[4], "status": row[5], "created_at": row[6], "updated_at": row[7]}
+
+
+def update_conversation(conv_id: str, **kwargs):
+    allowed = {"title", "status"}
+    sets = []
+    vals = []
+    for k, v in kwargs.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            vals.append(v)
+    if not sets:
+        return
+    vals.append(conv_id)
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"UPDATE chat_conversations SET {', '.join(sets)}, updated_at=datetime('now') WHERE id=?", vals)
+        db.commit()
+
+
+def touch_conversation(conv_id: str):
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE chat_conversations SET updated_at=datetime('now') WHERE id=?", (conv_id,))
+        db.commit()
+
+
+# ====== chat_messages CRUD ======
+
+def add_message(conversation_id: str, role: str, content: str) -> int:
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT INTO chat_messages (conversation_id, role, content) VALUES (?,?,?)",
+                  (conversation_id, role, content))
+        db.commit()
+        return c.lastrowid
+
+
+def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> list[dict]:
+    with db_lock:
+        c = db.cursor()
+        if before_id > 0:
+            c.execute("SELECT id, conversation_id, role, content, created_at FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
+                      (conversation_id, before_id, limit))
+        else:
+            c.execute("SELECT id, conversation_id, role, content, created_at FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
+                      (conversation_id, limit))
+        rows = c.fetchall()
+        rows.reverse()
+        return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": r[4]} for r in rows]

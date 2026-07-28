@@ -91,9 +91,67 @@ CREATE TABLE IF NOT EXISTS backend_agents (
 )
 """
 
+_IM_CHANNELS_DDL = """
+CREATE TABLE IF NOT EXISTS im_channels (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    channel_name TEXT DEFAULT '',
+    repo_key TEXT NOT NULL,
+    source TEXT DEFAULT 'gitcode',
+    bind_by TEXT DEFAULT '',
+    auto_impl_enabled INTEGER DEFAULT 0,
+    notify_enabled INTEGER DEFAULT 0,
+    account TEXT DEFAULT 'default',
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (provider, channel_id)
+)
+"""
+
+_USER_IM_BINDINGS_DDL = """
+CREATE TABLE IF NOT EXISTS user_im_bindings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    channel_type TEXT NOT NULL DEFAULT 'direct_message',
+    channel_id TEXT NOT NULL,
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (user_id, provider, channel_type)
+)
+"""
+
+_CHAT_CONVERSATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS chat_conversations (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    repo_key TEXT DEFAULT '',
+    im_channel_id TEXT DEFAULT '',
+    title TEXT DEFAULT '',
+    status TEXT DEFAULT 'active',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_CHAT_MESSAGES_DDL = """
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("backend_agents", _BACKEND_AGENTS_DDL),
+    ("events", _EVENTS_TABLE_DDL),
+    ("im_channels", _IM_CHANNELS_DDL),
+    ("user_im_bindings", _USER_IM_BINDINGS_DDL),
+    ("chat_conversations", _CHAT_CONVERSATIONS_DDL),
+    ("chat_messages", _CHAT_MESSAGES_DDL),
     ("agent_sessions", _AGENT_SESSIONS_TABLE_DDL),
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type_config", _AGENT_TYPE_CONFIG_DDL),

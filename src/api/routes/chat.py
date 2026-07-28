@@ -1,10 +1,14 @@
-"""Chat Agent 路由：对话、配置、反馈"""
-import json, asyncio
-from fastapi import APIRouter, HTTPException, Depends
+"""Chat Agent 路由：对话、消息、配置、反馈"""
+import json, asyncio, uuid
+from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from src.api.deps import get_current_user
 from src.user import db as user_db
+from src.session_manager import (
+    create_conversation, get_user_conversations, get_conversation,
+    add_message, get_messages, touch_conversation, update_conversation,
+)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -12,30 +16,81 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 class ChatMessage(BaseModel):
     message: str
     repo_key: str = ""
+    conversation_id: str = ""
 
+
+class FeedbackBody(BaseModel):
+    seq: int
+    feedback_type: str = "create_issue"
+    comment: str = ""
+
+
+# ====== Conversations ======
+
+@router.get("/conversations")
+async def list_conversations(user: dict = Depends(get_current_user)):
+    convs = get_user_conversations(user["id"])
+    return {"conversations": convs}
+
+
+@router.post("/conversations")
+async def new_conversation(user: dict = Depends(get_current_user)):
+    cid = create_conversation(user["id"])
+    return {"conversation_id": cid}
+
+
+# ====== Messages ======
+
+@router.get("/messages/{conv_id}")
+async def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(get_current_user)):
+    conv = get_conversation(conv_id)
+    if not conv or conv["user_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
+    msgs = get_messages(conv_id, before_id=before)
+    return {"messages": msgs, "conversation": conv}
+
+
+# ====== Send ======
 
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
-    """发送消息给 Chat Agent — 使用 User Token 代表用户操作"""
-    acc = user_db.get_user_account(user["username"]) or {}
-    user_token = acc.get("gitcode_api_token", "")
+    # 自动创建或复用对话
+    conv_id = body.conversation_id
+    if conv_id:
+        conv = get_conversation(conv_id)
+        if not conv or conv["user_id"] != user["id"]:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
+    else:
+        conv_id = create_conversation(user["id"], body.repo_key)
 
+    # 保存用户消息
+    add_message(conv_id, "user", body.message)
+
+    # mock 回复
     reply = (f"收到您的消息：「{body.message}」\n\n"
              f"当前使用您的个人 Token 进行操作。"
              f"需要我帮您做什么？")
-    return {"reply": reply, "conversation_id": f"conv-{user['id']}-{int(__import__('time').time())}"}
+    add_message(conv_id, "agent", reply)
+    touch_conversation(conv_id)
+
+    return {"reply": reply, "conversation_id": conv_id}
 
 
 @router.post("/send/stream")
 async def send_message_stream(body: ChatMessage, user: dict = Depends(get_current_user)):
-    """SSE 流式回复：逐步推送 Agent 的思考过程"""
+    conv_id = body.conversation_id
+    if conv_id:
+        conv = get_conversation(conv_id)
+        if not conv or conv["user_id"] != user["id"]:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
+    else:
+        conv_id = create_conversation(user["id"], body.repo_key)
+
+    add_message(conv_id, "user", body.message)
 
     async def event_stream():
-        yield f"data: {json.dumps({'type': 'status', 'text': '思考中...'})}\n\n"
+        yield f"data: {json.dumps({'type': 'status', 'text': '思考中...', 'conversation_id': conv_id})}\n\n"
         await asyncio.sleep(0.3)
-
-        acc = user_db.get_user_account(user["username"]) or {}
-        user_token = acc.get("gitcode_api_token", "")
 
         steps = [
             ("分析中", "正在分析您的请求..."),
@@ -46,9 +101,11 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
         for s_type, s_text in steps:
             await asyncio.sleep(0.2)
-            yield f"data: {json.dumps({'type': s_type, 'text': s_text})}\n\n"
+            yield f"data: {json.dumps({'type': s_type, 'text': s_text, 'conversation_id': conv_id})}\n\n"
 
-        yield f"data: {json.dumps({'type': 'done', 'text': steps[-1][1]})}\n\n"
+        add_message(conv_id, "agent", steps[-1][1])
+        touch_conversation(conv_id)
+        yield f"data: {json.dumps({'type': 'done', 'text': steps[-1][1], 'conversation_id': conv_id})}\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -57,15 +114,10 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     )
 
 
-class FeedbackBody(BaseModel):
-    seq: int
-    feedback_type: str = "create_issue"
-    comment: str = ""
-
+# ====== Feedback ======
 
 @router.post("/feedback")
 async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
-    """用户反馈 → A2A 发送给 VOD Agent"""
     from src.session_manager import db, db_lock
 
     with db_lock:
@@ -92,7 +144,6 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
         }
     }
 
-    import json
     from src.api.deps import get_bot_token
     bot_token = get_bot_token("default")
 
@@ -103,9 +154,10 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
     }
 
 
+# ====== Config ======
+
 @router.get("/config")
 async def get_chat_config(user: dict = Depends(get_current_user)):
-    """获取 Chat Agent 配置（Backend + IM）"""
     acc = user_db.get_user_account(user["username"]) or {}
     return {
         "backend": {
