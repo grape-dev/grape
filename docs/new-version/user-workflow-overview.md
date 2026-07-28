@@ -593,7 +593,67 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 > **DevOps Bot Token 说明：** 此 Token 是 DevOps 系统的**全局凭证**，所有 DevOps Agents（VOD/Issue/Coding/QA/SRE）在执行 GitCode 操作时自动使用此 Token。Bot Token 需要有仓库的读写权限（`read_repo, write_repo, manage_webhook`），建议使用单独的 Bot 账号创建，与用户个人 Token 隔离。  
 > **回退规则：** 若当前仓库未配置 Bot Token，系统自动使用 `default` 账户下的默认 Token。管理员可在 GitCode Repo 页中编辑 `default` 条目来配置系统默认 Token，确保新仓库零配置即可运行。
 
-### 2.11 Backend Agents 页面
+### 2.11 仓库列表缓存与同步
+
+**目的：** 避免每次访问仓库选择页或管理页时都调用 GitCode API，减少加载时间。
+
+**设计方案：**
+
+```
+用户 GitCode Token 首次拉取仓库列表
+        │
+        ▼
+┌──────────────────────────────────────────────┐
+│              user_repos 表                    │
+│──────────────────────────────────────────────│
+│ user_id │ full_name │ owner │ name           │
+│ role    │ description │ is_admin            │
+│ created_at (缓存时间戳)                      │
+└──────────────────────────────────────────────┘
+        │
+        ├── GET /api/repos/member → 从 user_repos 表读取
+        │    如果表为空 → 自动调 GitCode API 拉取并写入
+        │
+        └── POST /api/repos/sync → 手动强制从 GitCode 刷新
+              清空该用户的 user_repos → 重新拉取 GitCode API → 写入
+```
+
+**页面交互：**
+
+仓库管理页（侧边栏「＋ 新增仓库托管」）顶部增加 **[↻ Sync from GitCode]** 按钮：
+
+```
+┌─ Repositories ───────────────────────────────────┐
+│  Repositories                   [↻ Sync from GitCode]  │
+├────────────────────────────────────────────────────┤
+│  Hosted (n)  ← 从 managed_repos 读取               │
+│  ...                                               │
+│  Available to Join (n)  ← 从 user_repos 表读取      │
+│  ...                                               │
+└────────────────────────────────────────────────────┘
+```
+
+**缓存刷新时机：**
+
+| 操作 | 缓存行为 |
+|------|---------|
+| 首次登录/访问选择页 | user_repos 为空 → 自动从 GitCode 拉取并缓存 |
+| 点击「Sync from GitCode」 | 强制重新拉取，更新缓存 |
+| 加入仓库 | 仅更新 managed_repos，不影响 user_repos |
+| 解除托管 | 仅更新 managed_repos，不影响 user_repos |
+| 自动过期 | 无过期时间，由用户手动刷新 |
+
+**API 接口：**
+
+```python
+# 获取可加入仓库列表（从 user_repos 表读取，自动按 is_admin + managed_repos 过滤）
+GET /api/repos/member → {"repos": [...]}
+
+# 手动从 GitCode 同步
+POST /api/repos/sync → 调 GitCode API 拉取 → 写入 user_repos → 返回 {"repos": [...]}
+```
+
+### 2.12 Backend Agents 页面
 
 管理和检测本地已安装的 Agent 引擎（OpenCode、CodeArts、Hermes 等），检查运行状态和配置连接凭据。此页面不与具体的 DevOps Agent 绑定，属于系统级 Agent 引擎管理：
 
