@@ -39,7 +39,8 @@ const app = (() => {
       if (managedRepos.length === 0) {
         $('sidebar').style.display = 'none';
         $('mainView').style.display = 'none';
-        $('repoView').classList.add('ac');
+        const rv = $('repoView');
+        if (rv) rv.classList.add('ac');
         renderRepos(repos);
         return;
       }
@@ -55,10 +56,10 @@ const app = (() => {
       }
     }).catch(() => {
       console.error("[loadRepos] FAILED");
-      // On 401, redirect to login. On other errors (502 etc.), show empty state
+      const rv = $('repoView');
+      if (rv) rv.classList.add('ac');
       $('sidebar').style.display = 'none';
       $('mainView').style.display = 'none';
-      $('repoView').classList.add('ac');
       const el = $('repoContent');
       if (el) el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">无法加载仓库列表，请确认 GitCode Token 是否有效</div></div>';
     });
