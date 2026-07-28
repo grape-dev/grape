@@ -128,7 +128,7 @@ function loadAgentTypes() {
     const repo = currentRepo();
     if (!repo && view !== 'repos' && view !== 'settings') { loadRepos(); return; }
 
-    VIEWS.forEach(v => { const el = $('nav-' + v); if (el) el.classList.remove('act'); });
+    document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));
     const navEl = $('nav-' + view);
     if (navEl) navEl.classList.add('act');
     document.querySelectorAll('.sb-nav a').forEach(a => {
