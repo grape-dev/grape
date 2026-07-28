@@ -31,11 +31,13 @@ const app = (() => {
     console.log("[loadRepos] start");
     API.get('/repos/member').then(d => {
       const repos = d.repos || [];
-      console.log("[loadRepos] repos", JSON.stringify({total: repos.length, managed: repos.filter(r => r.is_joined || r.is_hosted).length}));
-      _updateSidebarRepos(repos);
+      const managedRepos = repos.filter(r => r.is_joined || r.is_hosted);
+      console.log("[loadRepos] repos", JSON.stringify({total: repos.length, managed: managedRepos.length}));
+      // 侧边栏只展示已加入/已托管的仓库
+      _updateSidebarRepos(managedRepos);
       const current = currentRepo();
 
-      const managedRepos = repos.filter(r => r.is_joined || r.is_hosted);
+      if (managedRepos.length === 0) {
       if (managedRepos.length === 0) {
         $('sidebar').style.display = 'none';
         $('tb').style.display = 'none';
