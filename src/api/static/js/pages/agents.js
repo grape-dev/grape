@@ -4,6 +4,27 @@ function toggleAgentCfg() {
   _agentCfgVisible = !_agentCfgVisible;
   const p = document.getElementById('agentCfgPanel');
   if (p) p.classList.toggle('hidden');
+  if (_agentCfgVisible) loadCfgOptions();
+}
+
+function loadCfgOptions() {
+  const backendSelect = document.querySelector('.cfg-backend');
+  const skillSelect = document.querySelector('.cfg-skill');
+  if (!backendSelect || backendSelect.options.length > 1) return; // already loaded
+  API.get('/settings/backend-agents').then(d => {
+    const backends = d.backends || [];
+    const current = backendSelect.dataset.current || 'opencode';
+    backendSelect.innerHTML = backends.map(b =>
+      `<option value="${b.name}" ${b.name === current ? 'selected' : ''}>${b.name}${b.healthy ? ' ✓' : ' ✗'}</option>`
+    ).join('');
+  }).catch(() => {});
+  API.get('/skills').then(d => {
+    const allSkills = d.skills || [];
+    const agentType = skillSelect.dataset.agent || '';
+    const filtered = allSkills.filter(s => s.agent_type === agentType || s.parent_agent_type === agentType);
+    skillSelect.innerHTML = '<option value="">默认官方技能（自动）</option>' +
+      filtered.map(s => `<option value="${s.name}">${s.display_name || s.name}</option>`).join('');
+  }).catch(() => {});
 }
 
 function renderAgent(name, data) {
@@ -22,30 +43,11 @@ function renderAgent(name, data) {
 
   const ef = es.completed || 0;
   const er = es.running || 0;
-  const ep = es.pending || 0;
   const et = m.total_events || 0;
 
-  // Fetch backends and skills for the config panel
-  Promise.all([
-    API.get('/settings/backend-agents').catch(() => ({backends: []})),
-    API.get('/skills').catch(() => ({skills: []})),
-  ]).then(([backendData, skillData]) => {
-    const backends = backendData.backends || [];
-    const allSkills = skillData.skills || [];
-    const agentSkills = allSkills.filter(s => s.agent_type === name || s.parent_agent_type === name);
+  const currentBackend = data.backend || meta.default_backend || 'opencode';
 
-    const currentBackend = data.backend || meta.default_backend || 'opencode';
-    const currentSkill = data.skill || '';
-
-    const backendOpts = backends.length > 0
-      ? backends.map(b => `<option value="${b.name}" ${b.name === currentBackend ? 'selected' : ''}>${b.name}${b.healthy ? ' ✓' : ' ✗'}</option>`).join('')
-      : `<option value="${currentBackend}" selected>${currentBackend}</option>`;
-
-    const skillOpts = agentSkills.length > 0
-      ? `<option value="">默认官方技能（自动）</option>${agentSkills.map(s => `<option value="${s.name}" ${s.name === currentSkill ? 'selected' : ''}>${s.display_name || s.name}</option>`).join('')}`
-      : '<option value="">默认官方技能（自动）</option>';
-
-    let html = `
+  let html = `
 <div class="cd" style="background:${meta.bg || 'var(--bg)'};border-color:${meta.color || 'var(--b)'}33">
   <div class="flex fc gap12">
     <div style="width:44px;height:44px;border-radius:10px;background:${meta.color || 'var(--b)'}22;display:flex;align-items:center;justify-content:center;font-size:20px">${meta.icon || '?'}</div>
@@ -56,12 +58,15 @@ function renderAgent(name, data) {
 <div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">
   <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Agent Configuration</h3>
   <div class="srow"><label>Backend Engine</label>
-    <select class="cfg-backend" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">${backendOpts}</select>
+    <select class="cfg-backend" data-current="${currentBackend}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+      <option value="${currentBackend}" selected>${currentBackend} ...</option>
+    </select>
   </div>
   <div class="srow"><label>Skill</label>
-    <select class="cfg-skill" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">${skillOpts}</select>
+    <select class="cfg-skill" data-agent="${name}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+      <option value="">加载中...</option>
+    </select>
   </div>
-  <div style="font-size:11px;color:var(--t3);margin-top:4px">${agentSkills.length > 0 ? `可选 ${agentSkills.length} 个 ${meta.display_name || name} 技能` : '无专用技能，使用默认官方技能'}</div>
   <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg()">Cancel</button></div>
 </div>
 <div class="stats mt16 mb16">
@@ -71,8 +76,7 @@ function renderAgent(name, data) {
 </div>
 <div class="cd"><div class="cd-h"><h2>Event History</h2><span class="ts t3">最近 ${events.length} 条</span></div>${evtHtml}</div>`;
 
-    el.innerHTML = html;
-  });
+  el.innerHTML = html;
 }
 
 function saveAgentConfig(name) {
