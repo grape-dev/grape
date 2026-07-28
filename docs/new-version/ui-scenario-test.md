@@ -252,6 +252,112 @@ class TestLoginE_Callback:
 
 ---
 
+### S1-F：完整 OAuth 登录流程（Playwright 自动化）
+
+**目的：** 使用真实 GitCode 凭据，自动化完整 OAuth 流程：SPA → OAuth 按钮 → GitCode 登录 → 授权 → 回调 → 验证首次登录行为。
+
+**前置条件：**
+- Playwright 已安装 (`pip install playwright && playwright install chromium`)
+- 环境变量 `GITCODE_USER` 和 `GITCODE_PASS` 已设置（或直接填入凭据）
+
+| # | 操作 | 预期 |
+|---|------|------|
+| F1 | 访问 SPA，验证 GitCode OAuth 按钮可见 | `#gitBtn` 含 "使用 GitCode 登录" |
+| F2 | 获取 OAuth URL | `GET /api/auth/login/gitcode` 返回 redirect_url |
+| F3 | Playwright 跳转到 GitCode 授权页 | URL 含 `gitcode.com/oauth/authorize` |
+| F4 | GitCode 要求登录时，填写用户名密码 | 使用 `GITCODE_USER` / `GITCODE_PASS` |
+| F5 | 提交登录 | 跳转到授权页 |
+| F6 | 点击"授权"按钮 | 允许 DevOps Bot 访问 |
+| F7 | GitCode 回调到 `http://203.0.113.2/api/auth/callback/gitcode` | 302 重定向到 `/?token=xxx` |
+| F8 | SPA 加载，`init()` 捕获 URL token | `[init] start` 日志含 `hasToken:true` |
+| F9 | `loadRepos()` 获取仓库列表 | `[loadRepos] repos` 日志显示仓库数 |
+| F10 | 首次登录（managed_repos 为空）| 显示仓库选择页，`.rc` 卡片 > 0 |
+| F11 | 已有托管仓库时 | 直接进入 Dashboard |
+| F12 | 全程无 `pageerror` | 0 JS 错误 |
+| F13 | 全程无 `[loadRepos] FAILED` 日志 | catch handler 未触发 |
+
+```python
+import os, time, requests
+from playwright.sync_api import sync_playwright
+
+BASE = "http://203.0.113.2"
+GITCODE_USER = os.environ.get("GITCODE_USER", "18617109891")
+GITCODE_PASS = os.environ.get("GITCODE_PASS", "")
+
+class TestLoginF_OAuthFlow:
+    def test_full_oauth_flow(self):
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            logs, errors = [], []
+            page.on("console", lambda msg: logs.append(f"[{msg.type}] {msg.text[:200]}"))
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            
+            # F1: SPA
+            page.goto(BASE)
+            page.wait_for_load_state("networkidle")
+            assert page.locator("#gitBtn").is_visible(), "GitCode login button"
+            
+            # F2-F3: Get OAuth URL and navigate
+            r = requests.get(f"{BASE}/api/auth/login/gitcode")
+            assert r.status_code == 200, "OAuth URL generation"
+            auth_url = r.json()["redirect_url"]
+            page.goto(auth_url)
+            page.wait_for_load_state("networkidle")
+            
+            # F4: If GitCode login page appears
+            if "login" in page.url.lower():
+                for sel in ['input[name="user[login]"]', 'input[type="text"]', 'input[name="login"]']:
+                    el = page.locator(sel).first
+                    if el.is_visible():
+                        el.fill(GITCODE_USER); break
+                for sel in ['input[type="password"]']:
+                    el = page.locator(sel).first
+                    if el.is_visible():
+                        el.fill(GITCODE_PASS); break
+                for sel in ['button[type="submit"]', 'input[type="submit"]']:
+                    el = page.locator(sel).first
+                    if el.is_visible():
+                        with page.expect_navigation(wait_until="networkidle", timeout=30000):
+                            el.click()
+                        break
+            
+            # F5-F6: Authorize
+            time.sleep(2)
+            for sel in ['button:has-text("授权")', 'input[value*="授权"]', 'button[type="submit"]']:
+                el = page.locator(sel).first
+                if el.is_visible():
+                    with page.expect_navigation(wait_until="networkidle", timeout=30000) as nav:
+                        el.click()
+                    break
+            
+            # F7-F8: Wait for callback -> SPA
+            time.sleep(5)
+            if BASE not in page.url:
+                page.goto(BASE)
+                page.wait_for_load_state("networkidle")
+            time.sleep(3)
+            
+            # F9-F11: Check page state
+            on_selection = page.locator("text=选择你要加入的").is_visible()
+            on_dashboard = page.locator("#pageTitle:has-text('Dashboard')").is_visible()
+            on_login = page.locator("#gitBtn").is_visible()
+            
+            # F12: Validate
+            assert len(errors) == 0, f"JS errors: {errors}"
+            assert not any("[loadRepos] FAILED" in l for l in logs)
+            assert on_selection or on_dashboard, f"Unexpected state: selection={on_selection} dash={on_dashboard} login={on_login}"
+            
+            # Diagnostics
+            print(f"Selection: {on_selection}, Dashboard: {on_dashboard}, Login: {on_login}")
+            print(f"JS errors: {len(errors)}")
+            for l in logs:
+                if any(k in l for k in ["init","loadRepos","error"]):
+                    print(f"  {l}")
+            
+            browser.close()
+```
+
 ## 三、其余场景测试（S2–S12）
 
 ### 场景 2：Dashboard 工作流监控
@@ -496,6 +602,7 @@ pytest tests/ui_scenario_test.py --html=scenario-report.html
 | 现象 | 可能原因 | 验证方式 |
 |------|---------|---------|
 | 登录后 2s 页面空白 | `loadRepos()` 失败，catch 隐藏 sidebar/mainView | 检查 S1-C 控制台日志：有无 `[loadRepos] FAILED` |
+| 页面空白 + JS 报错 classList null | HTML 缺少 `#repoView` 元素 | 检查 `$('repoView').classList` |
 | 页面重新加载（`GET /`） | `location.reload()` 触发 | 检查 S1-C 请求日志：多次 `GET /` |
 | 无错误但页面空白 | JS 语法错误导致 `app` 未定义 | 检查 S1-A A9：`typeof app` |
 | 偶发性空白 | Uvicorn 多实例/内存 session 丢失 | `pkill -f uvicorn` 后重启单实例 |
@@ -512,6 +619,7 @@ pytest tests/ui_scenario_test.py --html=scenario-report.html
 | S1-C 密码登录 | §2.1 | 10 + 诊断 | Login → Dashboard/仓库选择 |
 | S1-D OAuth URL | §2.1 | 6 | API |
 | S1-E 回调验证 | §2.1 | 6 | API |
+| S1-F OAuth 全流程 | §2.1 | 13 | Login → GitCode → SPA |
 | S2 Dashboard | §2.2 | 8 | Dashboard |
 | S3 Pipeline | §2.3 | 5 | Pipeline |
 | S4 Agent 详情 | §2.4 | 5 × 5 | 5 Agent 页 |
@@ -524,4 +632,4 @@ pytest tests/ui_scenario_test.py --html=scenario-report.html
 | S12 日常流程 | §2.12 | 7 | 全页面 |
 | M1-M3 移动端 | — | 3 | 全局 |
 | E1-E6 异常 | — | 6 | 多页面 |
-| **合计** | | **107** | |
+| **合计** | | **120** | |
