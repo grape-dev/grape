@@ -215,6 +215,69 @@ class TestRepos:
         assert result == False, "Non-owner should fail permission check"
         print("  [OK] Non-owner permission check correctly rejected")
 
+    def test_sync_endpoint(self):
+        """POST /api/repos/sync 应返回仓库列表且标记同步成功"""
+        # test 用户没有 gitcode token，用 default 的 bot token 设置
+        r = client.post("/api/repos/sync", headers=_headers)
+        # 可能 502（GitCode 不可达）或 200（成功）
+        assert r.status_code in (200, 502), f"Unexpected status: {r.status_code}"
+        if r.status_code == 200:
+            data = r.json()
+            assert "repos" in data
+            assert data["message"] == "同步成功"
+            print(f"  [OK] sync returned {len(data['repos'])} repos")
+
+    def test_sync_then_member_uses_cache(self):
+        """同步后 GET /api/repos/member 应返回 _cached=True（表示命中缓存）"""
+        # 先同步
+        r = client.post("/api/repos/sync", headers=_headers)
+        if r.status_code != 200:
+            print("  [SKIP] sync failed, cannot test cache")
+            return
+
+        # 再调 member，应走缓存
+        r = client.get("/api/repos/member", headers=_headers)
+        assert r.status_code == 200
+        data = r.json()
+        # 检查是否标记为缓存（_cached 字段）
+        assert data.get("_cached") == True, f"Expected cached response, got _cached={data.get('_cached')}"
+        assert "repos" in data
+        print(f"  [OK] member from cache: {len(data['repos'])} repos")
+
+    def test_user_repos_table_operations(self):
+        """验证 user_repos 表的读写函数"""
+        from src.user.db import save_user_repos, get_user_repos, has_user_repos, clear_user_repos
+
+        test_repos = [
+            {"full_name": "org/test-a", "owner": "org", "name": "test-a",
+             "description": "Test A", "role": "Admin", "is_admin": True},
+            {"full_name": "org/test-b", "owner": "org", "name": "test-b",
+             "description": "Test B", "role": "Member", "is_admin": False},
+        ]
+
+        uid = 9999
+        clear_user_repos(uid)
+        assert not has_user_repos(uid), "Should be empty after clear"
+
+        save_user_repos(uid, test_repos)
+        assert has_user_repos(uid), "Should have data after save"
+
+        repos = get_user_repos(uid)
+        assert len(repos) == 2, f"Expected 2, got {len(repos)}"
+        assert repos[0]["full_name"] == "org/test-a"
+        assert repos[1]["is_admin"] == False
+
+        # 覆盖写入
+        save_user_repos(uid, [{"full_name": "org/test-c", "owner": "org", "name": "test-c",
+                                "description": "Test C", "role": "Admin", "is_admin": True}])
+        repos = get_user_repos(uid)
+        assert len(repos) == 1, f"Expected 1 after rewrite, got {len(repos)}"
+        assert repos[0]["full_name"] == "org/test-c"
+
+        clear_user_repos(uid)
+        assert not has_user_repos(uid), "Should be empty after final clear"
+        print("  [OK] user_repos table operations verified")
+
 
 # ===================== 4. Dashboard =====================
 class TestDashboard:
