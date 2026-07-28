@@ -534,14 +534,14 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 
 ### 2.9 General Settings 页面
 
-仓库级别的通用配置，包含凭据、通知、自定义技能管理：
+仓库级别的通用配置，包含凭据、通知偏好：
 
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
 │  General Settings · team/backend-service              │
 ├───────────────────────────────────────────────────────┤
 │                                                        │
-│  [Credentials] [Notifications] [Skills]                │
+│  [Credentials] [Notifications]                        │
 │                                                        │
 │  ┌─ GitCode API（OAuth 登录自动获取）──────────────┐  │
 │  │ API Token  [ghp_zhangwei_token_xxxxxxxxxxxx]     │  │
@@ -555,12 +555,6 @@ Chat Agent 是每个用户专属的个人对话助手，包含聊天区、Agent 
 │                                                        │
 │  ┌─ Notifications ─────────────────────────────────┐  │
 │  │ ☑ Issue events  ☑ PR events  ☐ Build failures   │  │
-│  └────────────────────────────────────────────────┘  │
-│                                                        │
-│  ┌─ Custom Skills ─────────────────────────────────┐  │
-│  │ [Upload Skill]                                   │  │
-│  │ team/backend-service · pull_request_opened       │  │
-│  │ → custom-pr-review                       [Edit]  │  │
 │  └────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```

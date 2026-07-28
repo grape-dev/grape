@@ -5,7 +5,6 @@ function renderSettings(tab) {
   const tabs = [
     {id:'credentials', label:'Credentials'},
     {id:'notifications', label:'Notifications'},
-    {id:'skills', label:'Skills'},
   ];
 
   let html = `<div class="cd"><div class="cd-h"><h2>Settings</h2></div>
@@ -35,16 +34,6 @@ function renderSettings(tab) {
       <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox"> Build failures</label>
       <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> Release events</label>
       <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox"> VOD signals</label>
-    </div></div>`;
-    el.innerHTML = html;
-  } else if (current === 'skills') {
-    html += `<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Custom Skills</h3>
-      <button class="bt bt-o bt-s">Upload Skill</button>
-      <div class="flex fc gap8 mt12" style="padding:8px 0;border-top:1px solid var(--b)">
-        <span class="tg tg-c">team/backend-service</span><span class="tx t2">pull_request_opened</span>
-        <span class="tx f1" style="color:var(--a);text-align:right">custom-pr-review</span>
-        <button class="bt bt-o bt-s">Edit</button>
-      </div>
     </div></div>`;
     el.innerHTML = html;
   } else {
