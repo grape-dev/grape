@@ -38,7 +38,6 @@ const app = (() => {
       const current = currentRepo();
 
       if (managedRepos.length === 0) {
-      if (managedRepos.length === 0) {
         $('sidebar').style.display = 'none';
         $('tb').style.display = 'none';
         $('mainView').style.display = 'flex';
