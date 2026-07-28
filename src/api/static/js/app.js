@@ -30,11 +30,8 @@ const app = (() => {
   function loadRepos() {
     API.get('/repos/member').then(d => {
       const repos = d.repos || [];
-      const sel = $('repoSelect');
+      _updateSidebarRepos(repos);
       const current = currentRepo();
-      sel.innerHTML = '<option value="">选择仓库...</option>' + repos.map(r =>
-        `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
-      ).join('');
 
       const managedRepos = repos.filter(r => r.is_joined || r.is_hosted);
       if (managedRepos.length === 0) {
@@ -56,6 +53,29 @@ const app = (() => {
       }
     }).catch(() => {
       localStorage.removeItem('token');
+      showLogin();
+    });
+  }
+
+  function initSidebarRepos() {
+    // Lightweight version for after repo selection - just populate sidebar dropdown
+    API.get('/repos/managed').then(d => {
+      const repos = d.repos || [];
+      const sel = $('repoSelect');
+      const current = currentRepo();
+      sel.innerHTML = '<option value="">选择仓库...</option>' + repos.map(r =>
+        `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
+      ).join('');
+    }).catch(() => {});
+  }
+
+  function _updateSidebarRepos(repos) {
+    const sel = $('repoSelect');
+    const current = currentRepo();
+    sel.innerHTML = '<option value="">选择仓库...</option>' + repos.map(r =>
+      `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
+    ).join('');
+  }
       showLogin();
     });
   }
@@ -174,25 +194,30 @@ const app = (() => {
   }
 
   function init() {
-    // Force reload if cache version changed
-    const CACHE_VER = '2';
-    if (localStorage.getItem('app_cache_ver') !== CACHE_VER) {
-      localStorage.clear();
-      localStorage.setItem('app_cache_ver', CACHE_VER);
-      location.reload();
+    // Check for OAuth token in URL first
+    const p = new URLSearchParams(window.location.search);
+    const urlToken = p.get('token');
+    if (urlToken) {
+      localStorage.setItem('token', urlToken);
+      localStorage.setItem('app_cache_ver', '2');
+      history.replaceState(null, '', '/');
+      showApp();
       return;
+    }
+
+    // Cache version check - only clear if version mismatch AND not in OAuth flow
+    if (localStorage.getItem('app_cache_ver') !== '2') {
+      const oldRepo = localStorage.getItem('currentRepo');
+      localStorage.clear();
+      if (oldRepo) localStorage.setItem('currentRepo', oldRepo); // restore repo selection
+      localStorage.setItem('app_cache_ver', '2');
     }
 
     const token = localStorage.getItem('token');
     if (token) { showApp(); }
-    else {
-      const p = new URLSearchParams(window.location.search);
-      const t = p.get('token');
-      if (t) { localStorage.setItem('token', t); history.replaceState(null, '', '/'); showApp(); }
-      else { showLogin(); }
-    }
+    else { showLogin(); }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, currentRepo, showLogin, init, loadRepos};
+  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, currentRepo, showLogin, init, loadRepos, initSidebarRepos};
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());

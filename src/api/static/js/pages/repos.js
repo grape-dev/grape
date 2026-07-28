@@ -50,15 +50,13 @@ function hostAndSelect(fullName, owner, name) {
 
 function selectRepo(fullName, owner, name) {
   localStorage.setItem('currentRepo', JSON.stringify({fullName, owner, name}));
-  const loginView = document.getElementById('loginView');
   const sidebar = document.getElementById('sidebar');
   const mainView = document.getElementById('mainView');
   const repoView = document.getElementById('repoView');
-  if (loginView) loginView.classList.add('hid');
   if (sidebar) sidebar.style.display = 'flex';
   if (mainView) mainView.style.display = 'flex';
   if (repoView) repoView.classList.remove('ac');
-  // Re-load sidebar with updated repos
-  app.loadRepos();
+  // Reload sidebar repo list
+  app.initSidebarRepos();
   app.nav('dash');
 }
