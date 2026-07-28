@@ -50,7 +50,11 @@ const app = (() => {
       }
 
       $('sidebar').style.display = 'flex';
+      $('tb').style.display = 'flex';
       $('mainView').style.display = 'flex';
+      $('mainView').style.position = '';
+      $('mainView').style.inset = '';
+      $('mainView').style.zIndex = '';
       $('pageTitle').textContent = 'Dashboard';
 
       if (!current) {
