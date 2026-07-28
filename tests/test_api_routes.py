@@ -104,7 +104,50 @@ class TestRepos:
     def test_managed_list(self):
         r = client.get("/api/repos/managed", headers=_headers)
         assert r.status_code == 200
-        assert "repos" in r.json()
+        data = r.json()
+        assert "repos" in data
+        # 已托管的仓库不应包含未加入的仓库
+        for repo in data["repos"]:
+            assert repo["status"] in ("Active", "Joined"), f"Unexpected status: {repo['status']}"
+
+    def test_managed_list_only_shows_joined(self):
+        """验证 GET /api/repos/managed 只返回已加入的仓库，
+        不会返回 GitCode 上所有有权限的仓库"""
+        # 先清理已加入的记录
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM managed_repos")
+            db.commit()
+
+        # 清理后应为空
+        r = client.get("/api/repos/managed", headers=_headers)
+        assert r.status_code == 200
+        assert r.json()["repos"] == [], f"Expected empty, got {len(r.json()['repos'])} repos"
+        print("  [OK] managed repos empty after cleanup")
+
+        # 加入一个仓库
+        r = client.post("/api/repos/join", json={"full_name": "org/test-managed"}, headers=_headers)
+        assert r.status_code == 200
+
+        # 加入后应出现
+        r = client.get("/api/repos/managed", headers=_headers)
+        assert r.status_code == 200
+        repos = r.json()["repos"]
+        assert len(repos) >= 1, f"Expected at least 1 repo, got {len(repos)}"
+        found = any(rp["full_name"] == "org/test-managed" for rp in repos)
+        assert found, "org/test-managed not in managed list"
+        print("  [OK] joined repo appears in managed list")
+
+        # 移除后应消失
+        r = client.post("/api/repos/remove", json={"full_name": "org/test-managed"}, headers=_headers)
+        assert r.status_code == 200
+
+        r = client.get("/api/repos/managed", headers=_headers)
+        all_repos = r.json()["repos"]
+        found = any(rp["full_name"] == "org/test-managed" for rp in all_repos)
+        assert not found, "org/test-managed still in managed list after remove"
+        print("  [OK] removed repo disappears from managed list")
 
     def test_join_invalid(self):
         r = client.post("/api/repos/join", json={"full_name": "bad"}, headers=_headers)
