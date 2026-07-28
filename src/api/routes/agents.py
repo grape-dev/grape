@@ -74,12 +74,12 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         c = db.cursor()
         try:
             c.execute(
-                "SELECT backend, oc_session_id, status, last_active_at FROM agent_sessions WHERE repo_key=? AND agent_type=?",
+                "SELECT backend, skill, oc_session_id, status, last_active_at FROM agent_sessions WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
             if row:
-                session_data = {"backend": row[0], "oc_session_id": row[1], "status": row[2], "last_active_at": row[3]}
+                session_data = {"backend": row[0], "skill": row[1] or "", "oc_session_id": row[2], "status": row[3], "last_active_at": row[4]}
         except Exception:
             pass
 
@@ -116,6 +116,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         "color": COLORS.get(name, "var(--t2)"),
         "bg": BGS.get(name, "var(--bg)"),
         "backend": session_data.get("backend", meta.get("default_backend", "opencode")),
+        "skill": session_data.get("skill", ""),
         "status": session_data.get("status", "idle"),
         "last_active": session_data.get("last_active_at", ""),
         "metrics": {
@@ -128,6 +129,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
 
 class AgentConfig(BaseModel):
     backend: str = "opencode"
+    skill: str = ""
 
 
 @router.put("/{name}/{owner}/{repo}")
@@ -145,8 +147,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         c = db.cursor()
         try:
             c.execute(
-                "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, status, last_active_at) VALUES (?,?,?,?,?,datetime('now'))",
-                (session_id, repo_key, name, body.backend, "idle")
+                "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, status, last_active_at) VALUES (?,?,?,?,?,?,datetime('now'))",
+                (session_id, repo_key, name, body.backend, body.skill, "idle")
             )
             db.commit()
         except Exception as e:

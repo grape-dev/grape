@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     repo_key TEXT NOT NULL,
     agent_type TEXT NOT NULL,
     backend TEXT DEFAULT 'opencode',
+    skill TEXT DEFAULT '',
     oc_session_id TEXT DEFAULT '',
     status TEXT DEFAULT 'idle',
     created_at TEXT DEFAULT (datetime('now')),
@@ -250,6 +251,7 @@ def _migrate_tables():
         "ALTER TABLE user_skills ADD COLUMN agent_type TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN description TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN parent_agent_type TEXT DEFAULT ''",
+        "ALTER TABLE agent_sessions ADD COLUMN skill TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
