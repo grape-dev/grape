@@ -1,4 +1,5 @@
 """仓库路由：列表、加入、托管、移除"""
+import time
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
@@ -8,6 +9,25 @@ from src.config import GITCODE_WEBHOOK_TOKEN
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
 
+# 仓库列表缓存（userId → {data, timestamp}），TTL 30s
+_repo_cache: dict[int, dict] = {}
+_REPO_CACHE_TTL = 30
+
+
+def _get_cached_repos(user_id: int):
+    entry = _repo_cache.get(user_id)
+    if entry and time.time() - entry["time"] < _REPO_CACHE_TTL:
+        return entry["data"]
+    return None
+
+
+def _set_cached_repos(user_id: int, data: list):
+    _repo_cache[user_id] = {"data": data, "time": time.time()}
+
+
+def _clear_repo_cache(user_id: int):
+    _repo_cache.pop(user_id, None)
+
 
 class RepoAction(BaseModel):
     full_name: str
@@ -15,6 +35,11 @@ class RepoAction(BaseModel):
 
 @router.get("/member")
 async def list_member_repos(user: dict = Depends(get_current_user)):
+    # 检查缓存
+    cached = _get_cached_repos(user["id"])
+    if cached is not None:
+        return {"repos": cached}
+
     acc = user_db.get_user_account(user["username"]) or {}
     api_token = acc.get("gitcode_api_token", "")
     if not api_token:
@@ -35,10 +60,6 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
         is_admin = r.get("is_admin", False)
         in_managed = full_name in managed
 
-        # 仅返回两类仓库：
-        # 1) 自己是维护员/管理员的仓库（可托管）
-        # 2) 自己是成员且已托管的仓库（可加入）
-        # 过滤掉：自己是成员且未托管的仓库（无操作权限）
         if not is_admin and not in_managed:
             continue
 
@@ -51,6 +72,8 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
             "is_joined": in_managed,
             "is_hosted": in_managed and managed.get(full_name, False),
         })
+
+    _set_cached_repos(user["id"], result)
     return {"repos": result}
 
 
@@ -61,6 +84,7 @@ async def join_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
     user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=0, is_admin=False)
+    _clear_repo_cache(user["id"])
     return {"message": "已加入仓库"}
 
 
@@ -110,10 +134,12 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         existing_id = find_existing_webhook(bot_token, owner, repo_name, webhook_url)
         if existing_id:
             user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=existing_id, is_admin=True)
+            _clear_repo_cache(user["id"])
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
 
         hook_id = setup_webhook(bot_token, owner, repo_name, webhook_url)
         user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=hook_id, is_admin=True)
+        _clear_repo_cache(user["id"])
         return {"message": "仓库托管成功", "webhook_id": hook_id}
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
@@ -156,4 +182,5 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
     removed = user_db.remove_managed_repo(user["id"], owner, repo_name)
     if not removed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
+    _clear_repo_cache(user["id"])
     return {"message": "已移除仓库"}
