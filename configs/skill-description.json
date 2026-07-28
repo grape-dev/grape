@@ -1,52 +1,57 @@
 {
-  "event-monitor": {
-    "name": "事件监控",
-    "agent_type": "vod",
-    "description": "监控仓库事件、提取信号、分析趋势"
-  },
-  "signal-analysis": {
-    "name": "信号分析",
-    "agent_type": "vod",
-    "description": "聚类分析共性问题、提炼价值信息"
-  },
-  "issue-triage": {
-    "name": "Issue 分诊",
+  "issue": {
+    "name": "Issue 管理",
     "agent_type": "issue",
-    "description": "Issue 分类、打标签、指派负责人"
+    "description": "Issue 全生命周期管理：分类、打标签、指派人、设置里程碑、关联 PR、回复评论"
   },
-  "label-manager": {
-    "name": "标签管理",
-    "agent_type": "issue",
-    "description": "自动化标签、里程碑管理、A2A 触发"
-  },
-  "code-gen": {
-    "name": "代码生成",
+  "implementation": {
+    "name": "代码实现",
     "agent_type": "coding",
-    "description": "需求分析、方案设计、编码实现"
+    "description": "代码实现与 PR 创建：分析问题、制定方案、编码实现、提交 PR"
   },
-  "pr-creator": {
-    "name": "PR 创建",
+  "pr": {
+    "name": "PR 管理",
     "agent_type": "coding",
-    "description": "自我审查、提交 Pull Request"
+    "description": "Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并操作"
   },
-  "code-review": {
-    "name": "代码审查",
+  "skill-pr": {
+    "name": "技能仓库 PR 审查",
     "agent_type": "qa",
-    "description": "Code Review、安全扫描、架构检查"
+    "description": "技能仓库专有 PR 审查：校验自定义技能格式、质量检查"
   },
-  "test-gen": {
-    "name": "测试生成",
-    "agent_type": "qa",
-    "description": "自动化测试用例生成与执行"
-  },
-  "change-log": {
-    "name": "变更日志",
+  "build-debug": {
+    "name": "构建调试",
     "agent_type": "sre",
-    "description": "CHANGELOG 生成、构建打包、发布部署"
+    "description": "构建失败诊断：分析构建日志、识别常见错误模式、修复编译问题"
   },
-  "deploy-monitor": {
-    "name": "部署监控",
+  "cloud-deploy": {
+    "name": "云部署",
     "agent_type": "sre",
-    "description": "部署监控、健康检查、故障排查"
+    "description": "云部署：SSH 登录服务器、拉取代码、重启服务、健康检查"
+  },
+  "deploy-guard": {
+    "name": "部署安全审查",
+    "agent_type": "sre",
+    "description": "部署前安全合规检查：审核代码变更、检查配置、验证部署条件"
+  },
+  "changelog-gen": {
+    "name": "变更日志生成",
+    "agent_type": "sre",
+    "description": "基于 commit 历史自动生成 CHANGELOG"
+  },
+  "incident-triage": {
+    "name": "事件分诊",
+    "agent_type": "sre",
+    "description": "生产事件分诊与定级：判断影响范围、确定优先级、触发应急响应"
+  },
+  "im-notify": {
+    "name": "IM 通知",
+    "agent_type": "sre",
+    "description": "仓库事件监控与飞书通知：Issue 指派、PR 审查、部署结果等"
+  },
+  "chat": {
+    "name": "对话助手",
+    "agent_type": "chat",
+    "description": "IM 对话处理：判断话题相关性、决定是否回复、能力边界管理"
   }
 }
