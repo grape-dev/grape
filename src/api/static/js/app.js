@@ -215,7 +215,7 @@ const app = (() => {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '2');
+      localStorage.setItem('app_cache_ver', '3');
       if (p.get('first_login')) {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
@@ -236,11 +236,11 @@ const app = (() => {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '2') {
+    if (localStorage.getItem('app_cache_ver') !== '3') {
       const oldRepo = localStorage.getItem('currentRepo');
       localStorage.clear();
       if (oldRepo) localStorage.setItem('currentRepo', oldRepo); // restore repo selection
-      localStorage.setItem('app_cache_ver', '2');
+      localStorage.setItem('app_cache_ver', '3');
     }
 
     const token = localStorage.getItem('token');
