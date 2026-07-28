@@ -94,8 +94,11 @@ function unhostFromSettings(fullName) {
   if (!confirm('确定要解除托管 ' + fullName + ' 吗？相关的 Webhook 将被删除，事件将不再被监听。')) return;
   API.post('/repos/remove', {full_name: fullName}).then(r => {
     app.showToast('已解除托管');
+    const cur = app.currentRepo();
+    if (cur && cur.fullName === fullName) {
+      localStorage.removeItem('currentRepo');
+    }
     app.initSidebarRepos();
-    // 如果还有托管仓库，跳转到仓库管理页；否则跳转到选择页
     app.nav('dash');
   }).catch(e => app.showToast('解除托管失败: ' + e.message));
 }
