@@ -14,8 +14,7 @@ const app = (() => {
 
   function showApp() {
     $('loginView').classList.add('hid');
-    $('sidebar').style.display = 'flex';
-    $('mainView').style.display = 'flex';
+    // Sidebar and mainView visibility is managed by loadRepos
     loadProfile();
     loadRepos();
   }
@@ -36,18 +35,24 @@ const app = (() => {
       sel.innerHTML = '<option value="">选择仓库...</option>' + repos.map(r =>
         `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
       ).join('');
-      if (!current && repos.length > 0) {
-        const r = repos[0];
-        localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
-      }
-      if (repos.length === 0) showRepoSelection(repos);
-    }).catch(() => {});
-  }
 
-  function showRepoSelection(repos) {
-    $('sidebar').style.display = 'none';
-    $('mainView').style.display = 'none';
-    renderRepos(repos);
+      const managedRepos = repos.filter(r => r.is_joined || r.is_hosted);
+      if (managedRepos.length === 0) {
+        $('sidebar').style.display = 'none';
+        $('mainView').style.display = 'none';
+        renderRepos(repos);
+        return;
+      }
+
+      $('sidebar').style.display = 'flex';
+      $('mainView').style.display = 'flex';
+
+      if (!current) {
+        const r = managedRepos[0];
+        localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
+        nav('dash');
+      }
+    }).catch(() => {});
   }
 
   function switchRepo(val) {
@@ -174,6 +179,6 @@ const app = (() => {
     }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, currentRepo, showLogin, init};
+  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, currentRepo, showLogin, init, loadRepos};
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
