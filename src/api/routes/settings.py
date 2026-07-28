@@ -242,5 +242,7 @@ async def refresh_backend_agents(user: dict = Depends(get_current_user)):
             "pip_package": eng.get("pip_package", ""),
         })
 
+    # Only persist backends that are actually installed
+    results = [r for r in results if r["installed"]]
     user_db.save_backend_agents(results)
     return {"backends": results}
