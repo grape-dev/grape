@@ -46,7 +46,7 @@
   },
   "im-notify": {
     "name": "IM 通知",
-    "agent_type": "sre",
+    "agent_type": "chat",
     "description": "仓库事件监控与飞书通知：Issue 指派、PR 审查、部署结果等"
   },
   "chat": {
