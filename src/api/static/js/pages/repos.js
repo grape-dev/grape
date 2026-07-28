@@ -52,10 +52,16 @@ function selectRepo(fullName, owner, name) {
   localStorage.setItem('currentRepo', JSON.stringify({fullName, owner, name}));
   const sidebar = document.getElementById('sidebar');
   const mainView = document.getElementById('mainView');
-  const repoView = document.getElementById('repoView');
+  const tb = document.getElementById('tb');
+  // Restore normal layout
+  if (mainView) {
+    mainView.style.position = '';
+    mainView.style.inset = '';
+    mainView.style.zIndex = '';
+    mainView.style.display = 'flex';
+  }
   if (sidebar) sidebar.style.display = 'flex';
-  if (mainView) mainView.style.display = 'flex';
-  if (repoView) repoView.classList.remove('ac');
+  if (tb) tb.style.display = 'flex';
   // Reload sidebar repo list
   app.initSidebarRepos();
   app.nav('dash');

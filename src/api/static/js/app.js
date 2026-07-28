@@ -38,9 +38,12 @@ const app = (() => {
       const managedRepos = repos.filter(r => r.is_joined || r.is_hosted);
       if (managedRepos.length === 0) {
         $('sidebar').style.display = 'none';
-        $('mainView').style.display = 'none';
-        const rv = $('repoView');
-        if (rv) rv.classList.add('ac');
+        $('tb').style.display = 'none';
+        $('mainView').style.display = 'flex';
+        $('mainView').style.position = 'fixed';
+        $('mainView').style.inset = '0';
+        $('mainView').style.zIndex = '100';
+        $('pageTitle').textContent = '选择仓库';
         renderRepos(repos);
         return;
       }
@@ -56,10 +59,14 @@ const app = (() => {
       }
     }).catch(() => {
       console.error("[loadRepos] FAILED");
-      const rv = $('repoView');
-      if (rv) rv.classList.add('ac');
       $('sidebar').style.display = 'none';
-      $('mainView').style.display = 'none';
+      $('tb').style.display = 'none';
+      $('mainView').style.display = 'flex';
+      $('mainView').style.position = 'fixed';
+      $('mainView').style.inset = '0';
+      $('mainView').style.zIndex = '100';
+      const el = $('pageContent');
+      if (el) el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">无法加载仓库列表，请确认 GitCode Token 是否有效</div></div>';
       const el = $('repoContent');
       if (el) el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">无法加载仓库列表，请确认 GitCode Token 是否有效</div></div>';
     });
