@@ -22,8 +22,8 @@ function renderRepos(repos) {
     const isAdmin = r.role === 'Admin' || r.role === 'Maintainer';
     const btnHtml = r.is_hosted ? '<span class="ts t2">已托管</span>' :
                     r.is_joined ? '<span class="ts t2">已加入</span>' :
-                    isAdmin ? '<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">Host Now</button>' :
-                    '<button class="bt bt-o bt-s" onclick="event.stopPropagation();joinAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">+ Join</button>';
+                    isAdmin ? '<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">加入并托管</button>' :
+                    '<button class="bt bt-o bt-s" onclick="event.stopPropagation();joinAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">加入</button>';
     const statusIcon = r.is_hosted ? '✅ Hosted' : r.is_joined ? '👋 Joined' : '🚧 Not added';
     html += `<div class="rc" onclick="${r.is_joined || r.is_hosted ? 'selectRepo(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')' : 'event.stopPropagation();' + (isAdmin ? 'hostAndSelect' : 'joinAndSelect') + '(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')'}">
       <div><div class="rh"><span class="rn">${r.full_name}</span><span class="tg tg-d" style="font-size:9px">${r.role}</span></div>

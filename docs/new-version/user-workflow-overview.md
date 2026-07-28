@@ -53,17 +53,16 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 开发者通过 GitCode OAuth 登录 Agentic DevOps
   │
   ├── 1. 选择要加入的仓库（Repo）
-  │     用自己的 GitCode token 拉取所有成员仓库列表
-  │     选择仓库 → 「加入」（成为该项目的 Bot 参与者）
-  │     加入后可查看该仓库的事件流和 Agent 处理记录
+  │     用自己的 GitCode token 拉取仓库列表，仓库分为两种类型：
+  │       ├── 类型 A：自己是维护员或管理员的**未托管仓库**
+  │       │     点击「加入并托管」→ 系统自动创建 Webhook + 加入仓库
+  │       │     → Agentic DevOps 开始监听该仓库的所有事件
+  │       │
+  │       └── 类型 B：自己是成员，同时**已托管的仓库**
+  │             点击「加入」→ 成为该项目的 Bot 参与者
+  │             加入后可查看该仓库的事件流和 Agent 处理记录
   │
-  ├── 2. 托管仓库（仅限项目维护者/管理员）
-  │     对于自己管理的仓库，点击「托管」
-  │     系统自动创建 GitCode Webhook
-  │     → Agentic DevOps 开始监听该仓库的所有事件
-  │     → 事件将按照路由规则自动分发给对应的 Agent
-  │
-  ├── 3. 配置消息通道（Channel）
+  ├── 2. 配置消息通道（Channel）
   │     选择 Chat Agent 接入方式：
   │       ├── 方式 A：使用平台默认的 Chat Agent
   │       │     直接在 Web 面板或通过默认 IM 交互
@@ -87,7 +86,12 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 
 > 此页面仅在用户首次登录且尚未加入任何仓库时展示。如果用户已有已加入的仓库，登录后直接进入该仓库的 Dashboard。
 
-用户首次登录后，进入仓库选择页面。每个仓库以卡片形式展示，支持搜索和角色过滤，所有卡片均为「未加入」状态，提供 `+ Join` 或 `Host Now` 入口：
+用户首次登录后，进入仓库选择页面。每个仓库以卡片形式展示，支持搜索和角色过滤：
+
+| 类型 | 用户角色 | 按钮 | 操作 |
+|------|---------|------|------|
+| **类型 A：未托管仓库** | Admin / Maintainer | `加入并托管` | 创建 Webhook + 加入仓库，开始监听事件 |
+| **类型 B：已托管仓库** | Member（有人已托管）| `加入` | 仅加入仓库，可查看事件流和 Agent 记录 |
 
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
@@ -100,33 +104,16 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 │  │ 创建一个新的   │  │ backend-srv  │  │ web-frontend │ │
 │  │ GitCode 项目   │  │ Maintainer   │  │ Maintainer   │ │
 │  │ 🆕 New Project │  │ Owner: team  │  │ Owner: team  │ │
-│  │ [Create Now]  │  │ [+ Join]     │  │ [+ Join]     │ │
+│  │ [Create Now]  │  │ [加入并托管] │  │ [加入并托管] │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘ │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │ backend-srv  │  │ web-frontend │  │ docs-site    │ │
-│  │ Maintainer   │  │ Maintainer   │  │ Member       │ │
-│  │ Owner: team  │  │ Owner: team  │  │ Owner: org   │ │
-│  │ 🚧 Not added │  │ 🚧 Not added │  │ 🚧 Not added │ │
-│  │ [+ Join]     │  │ [+ Join]     │  │ [+ Join]     │ │
-│  └──────────────┘  └──────────────┘  └──────────────┘ │
-│                                                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │ ■ org/       │  │ ■ team/      │  │ ■ team/      │ │
-│  │ devops-tklt  │  │ mobile-app   │  │ notification │ │
+│  │ ■ org/       │  │ ■ team/      │  │ ■ org/       │ │
+│  │ devops-tklt  │  │ notification │  │ data-pipeline│ │
 │  │ Admin        │  │ Member       │  │ Member       │ │
-│  │ Owner: org   │  │ Owner: team  │  │ Owner: team  │ │
+│  │ Owner: org   │  │ Owner: team  │  │ Owner: org   │ │
 │  │ 🚧 Not added │  │ 🚧 Not added │  │ 🚧 Not added │ │
-│  │ [Host Now]   │  │ [+ Join]     │  │ [+ Join]     │ │
+│  │ [加入并托管] │  │ [加入]       │  │ [加入]       │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘ │
-│                                                        │
-│  ┌──────────────┐                                      │
-│  │ ■ org/       │                                      │
-│  │ data-pipeline│                                      │
-│  │ Admin        │                                      │
-│  │ Owner: org   │                                      │
-│  │ 🚧 Not added │                                      │
-│  │ [Host Now]   │                                      │
-│  └──────────────┘                                      │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -139,7 +126,7 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 | **角色标签** | Member / Maintainer / Admin（用户在 GitCode 中的角色） |
 | **Owner 信息** | 仓库所属组织/用户 |
 | **状态指示** | 🚧 未加入（所有卡片统一状态） |
-| **操作按钮** | 成员角色 → `+ Join`；管理角色 → `Host Now`（一键托管并加入） |
+| **操作按钮** | 管理员/维护员 → `加入并托管`（创建 Webhook + 加入仓库）；成员 → `加入`（仅加入） |
 | **搜索过滤** | 顶部搜索框可按名称搜索；下拉过滤按角色：全部 / 成员 / 管理 |
 
 ### 2.2 Dashboard（按仓库维度）
