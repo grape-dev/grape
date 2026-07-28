@@ -45,15 +45,15 @@ class TestFirstLoginNoRepos:
     def test_first_login_shows_repo_selection(self, browser):
         """首次登录 → 仓库选择页（而非 Dashboard）"""
         token = self._setup()
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
-        # add_init_script must be on the context, not page, to persist across goto
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = context.new_page()
         logs, errors = [], []
         page.on("console", lambda msg: logs.append(f"[{msg.type}] {msg.text[:200]}"))
         page.on("pageerror", lambda e: errors.append(str(e)))
         
-        browser.contexts[0].add_init_script(f"""
+        context.add_init_script(f"""
         localStorage.setItem('token', '{token}');
-        localStorage.setItem('app_cache_ver', '2');
+        localStorage.setItem('app_cache_ver', '3');
         localStorage.removeItem('currentRepo');
         """)
         page.goto(BASE)
@@ -88,10 +88,11 @@ class TestFirstLoginNoRepos:
     def test_selection_page_only_shows_joinable_repos(self, browser):
         """仓库选择页仅显示可托管（Admin/Maintainer）或已托管的仓库"""
         token = self._setup()
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
-        browser.contexts[0].add_init_script(f"""
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = context.new_page()
+        context.add_init_script(f"""
         localStorage.setItem('token', '{token}');
-        localStorage.setItem('app_cache_ver', '2');
+        localStorage.setItem('app_cache_ver', '3');
         localStorage.removeItem('currentRepo');
         """)
         page.goto(BASE)
@@ -124,12 +125,13 @@ class TestFirstLoginNoRepos:
     def test_join_host_and_dashboard(self, browser):
         """点击加入并托管 → 成功toast → Dashboard标题正确"""
         token = self._setup()
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = context.new_page()
         logs, errors = [], []
         page.on("pageerror", lambda e: errors.append(str(e)))
-        browser.contexts[0].add_init_script(f"""
+        context.add_init_script(f"""
         localStorage.setItem('token', '{token}');
-        localStorage.setItem('app_cache_ver', '2');
+        localStorage.setItem('app_cache_ver', '3');
         localStorage.removeItem('currentRepo');
         """)
         page.goto(BASE)
