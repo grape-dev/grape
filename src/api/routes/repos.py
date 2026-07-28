@@ -80,6 +80,11 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
 
+    # Webhook 操作使用 DevOps Bot Token（有 manage_webhook 权限），而非用户个人 token
+    bot_token = get_bot_token("default")
+    if not bot_token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "DevOps Bot Token 未配置，请在 GitCode Repo 设置中配置系统默认 Token"})
+
     # 权限检查：必须是仓库的维护员或管理员才能托管
     from src.user.repo_manager import _check_collaborator_admin, _req
     try:
@@ -102,12 +107,12 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"权限验证失败: {e}"})
 
     try:
-        existing_id = find_existing_webhook(api_token, owner, repo_name, webhook_url)
+        existing_id = find_existing_webhook(bot_token, owner, repo_name, webhook_url)
         if existing_id:
             user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=existing_id, is_admin=True)
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
 
-        hook_id = setup_webhook(api_token, owner, repo_name, webhook_url)
+        hook_id = setup_webhook(bot_token, owner, repo_name, webhook_url)
         user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=hook_id, is_admin=True)
         return {"message": "仓库托管成功", "webhook_id": hook_id}
     except Exception as e:

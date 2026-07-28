@@ -9,11 +9,13 @@ const API = (() => {
   }
 
   function handleResp(r) {
-    if (r.status === 401) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
-      throw new Error('未登录');
+    if (!r.ok) {
+      if (r.status === 401) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+      }
+      return r.json().then(err => { throw new Error(err?.detail?.message || `请求失败 (${r.status})`); });
     }
     return r.json();
   }
