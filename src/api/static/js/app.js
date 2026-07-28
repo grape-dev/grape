@@ -201,8 +201,11 @@ const app = (() => {
     if (urlToken) {
       localStorage.setItem('token', urlToken);
       localStorage.setItem('app_cache_ver', '2');
-      history.replaceState(null, '', '/');
       showApp();
+      // Remove token from URL without reload
+      if (window.history.replaceState) {
+        window.history.replaceState(null, '', '/');
+      }
       return;
     }
 
