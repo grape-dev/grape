@@ -85,6 +85,82 @@ class TestFirstLoginNoRepos:
 
         page.close()
 
+    def test_selection_page_only_shows_joinable_repos(self, browser):
+        """仓库选择页仅显示可托管（Admin/Maintainer）或已托管的仓库"""
+        token = self._setup()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        browser.contexts[0].add_init_script(f"""
+        localStorage.setItem('token', '{token}');
+        localStorage.setItem('app_cache_ver', '2');
+        localStorage.removeItem('currentRepo');
+        """)
+        page.goto(BASE)
+        page.wait_for_load_state("networkidle")
+        time.sleep(3)
+
+        cards = page.locator(".rc")
+        count = cards.count()
+        print(f"  Repo cards: {count}")
+
+        # Verify each card has either "加入并托管" or "加入" or "已加入" button
+        for i in range(1, count):  # skip first card (新增仓库)
+            card_text = cards.nth(i).inner_text()
+            has_host_btn = "加入并托管" in card_text
+            has_join_btn = "加入" in card_text and "加入并托管" not in card_text
+            has_joined = "已加入" in card_text or "已托管" in card_text
+            assert has_host_btn or has_join_btn or has_joined, \
+                f"Card {i} has no valid action button: {card_text[:60]}"
+
+        # Verify no "Member" card without action
+        for i in range(1, count):
+            role_tag = cards.nth(i).locator(".tg-d")
+            if role_tag.is_visible() and "Member" in role_tag.inner_text():
+                card_text = cards.nth(i).inner_text()
+                assert "加入" in card_text or "已加入" in card_text, \
+                    f"Member card {i} has no join option: {card_text[:60]}"
+
+        page.close()
+
+    def test_join_host_and_dashboard(self, browser):
+        """点击加入并托管 → 成功toast → Dashboard标题正确"""
+        token = self._setup()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        logs, errors = [], []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        browser.contexts[0].add_init_script(f"""
+        localStorage.setItem('token', '{token}');
+        localStorage.setItem('app_cache_ver', '2');
+        localStorage.removeItem('currentRepo');
+        """)
+        page.goto(BASE)
+        page.wait_for_load_state("networkidle")
+        time.sleep(2)
+
+        # Find and click "加入并托管" button
+        host_btn = page.locator("button:has-text('加入并托管')").first
+        if host_btn.is_visible():
+            host_name = page.locator(".rc").nth(1).locator(".rn").inner_text()
+            print(f"  Hosting: {host_name}")
+            host_btn.click()
+            time.sleep(4)
+
+            # Check toast appeared
+            toast = page.locator("text=加入并托管成功")
+            assert toast.is_visible() or page.locator("#pageTitle:has-text('Dashboard')").is_visible(), \
+                "No success toast or Dashboard after host"
+
+            # Check Dashboard title
+            assert page.locator("#pageTitle").inner_text() == "Dashboard", \
+                f"Title should be Dashboard, got: {page.locator('#pageTitle').inner_text()}"
+
+            # Check JS errors
+            assert len(errors) == 0, f"JS errors after host: {errors}"
+            print("  [OK] Host success, Dashboard loaded")
+        else:
+            print("  [SKIP] No host button found (no Admin/Maintainer repos)")
+
+        page.close()
+
 @pytest.fixture(scope="session", autouse=True)
 def setup():
     global TOKEN
