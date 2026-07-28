@@ -67,8 +67,6 @@ const app = (() => {
       $('mainView').style.zIndex = '100';
       const el = $('pageContent');
       if (el) el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">无法加载仓库列表，请确认 GitCode Token 是否有效</div></div>';
-      const el = $('repoContent');
-      if (el) el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">无法加载仓库列表，请确认 GitCode Token 是否有效</div></div>';
     });
   }
 

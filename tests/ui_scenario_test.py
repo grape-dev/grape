@@ -46,11 +46,12 @@ class TestFirstLoginNoRepos:
         """首次登录 → 仓库选择页（而非 Dashboard）"""
         token = self._setup()
         page = browser.new_page(viewport={"width": 1440, "height": 900})
+        # add_init_script must be on the context, not page, to persist across goto
         logs, errors = [], []
         page.on("console", lambda msg: logs.append(f"[{msg.type}] {msg.text[:200]}"))
         page.on("pageerror", lambda e: errors.append(str(e)))
-
-        page.add_init_script(f"""
+        
+        browser.contexts[0].add_init_script(f"""
         localStorage.setItem('token', '{token}');
         localStorage.setItem('app_cache_ver', '2');
         localStorage.removeItem('currentRepo');
