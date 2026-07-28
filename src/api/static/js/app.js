@@ -52,8 +52,12 @@ const app = (() => {
         nav('dash');
       }
     }).catch(() => {
-      localStorage.removeItem('token');
-      showLogin();
+      // On 401, redirect to login. On other errors (502 etc.), show empty state
+      $('sidebar').style.display = 'none';
+      $('mainView').style.display = 'none';
+      $('repoView').classList.add('ac');
+      const el = $('repoContent');
+      if (el) el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">无法加载仓库列表，请确认 GitCode Token 是否有效</div></div>';
     });
   }
 
