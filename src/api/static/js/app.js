@@ -83,7 +83,7 @@ const app = (() => {
       const current = currentRepo();
       sel.innerHTML = repos.map(r =>
         `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
-      ).join('');
+      ).join('') + '<option value="__add__">＋ 新增仓库托管</option>';
     }).catch(() => {});
   }
 
@@ -97,6 +97,21 @@ const app = (() => {
 
   function switchRepo(val) {
     if (!val) return;
+    if (val === '__add__') {
+      // 显示完整仓库选择页（类似首次登录）
+      API.get('/repos/member').then(d => {
+        const repos = d.repos || [];
+        $('sidebar').style.display = 'none';
+        $('tb').style.display = 'none';
+        $('mainView').style.display = 'flex';
+        $('mainView').style.position = 'fixed';
+        $('mainView').style.inset = '0';
+        $('mainView').style.zIndex = '100';
+        $('pageTitle').textContent = '选择仓库';
+        renderRepos(repos);
+      }).catch(() => {});
+      return;
+    }
     const parts = val.split('/');
     localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1]}));
     nav('dash');
