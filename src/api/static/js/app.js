@@ -80,9 +80,6 @@ const app = (() => {
       `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
     ).join('');
   }
-      showLogin();
-    });
-  }
 
   function switchRepo(val) {
     if (!val) return;
