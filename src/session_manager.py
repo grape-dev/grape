@@ -439,3 +439,30 @@ def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> l
         rows = c.fetchall()
         rows.reverse()
         return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": r[4]} for r in rows]
+
+
+# ====== chat_config CRUD ======
+
+def get_chat_config(user_id: int) -> dict:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT backend, feishu_app_id, feishu_app_secret, updated_at FROM chat_config WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+        if not row:
+            return {"backend": "opencode", "feishu_app_id": "", "feishu_app_secret": "", "updated_at": ""}
+        return {"backend": row[0] or "opencode", "feishu_app_id": row[1] or "", "feishu_app_secret": row[2] or "", "updated_at": row[3] or ""}
+
+
+def set_chat_config(user_id: int, **kwargs):
+    allowed = {"backend", "feishu_app_id", "feishu_app_secret"}
+    data = get_chat_config(user_id)
+    for k, v in kwargs.items():
+        if k in allowed and v is not None:
+            data[k] = v
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO chat_config (user_id, backend, feishu_app_id, feishu_app_secret, updated_at) VALUES (?,?,?,?,datetime('now'))",
+            (user_id, data["backend"], data["feishu_app_id"], data["feishu_app_secret"])
+        )
+        db.commit()

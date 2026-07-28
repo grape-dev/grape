@@ -8,6 +8,8 @@ from src.user import db as user_db
 from src.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
     add_message, get_messages, touch_conversation, update_conversation,
+    get_chat_config as _get_chat_config,
+    set_chat_config as _set_chat_config,
 )
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -158,20 +160,19 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
 
 @router.get("/config")
 async def get_chat_config(user: dict = Depends(get_current_user)):
-    acc = user_db.get_user_account(user["username"]) or {}
+    cfg = _get_chat_config(user["id"])
     from src.user.db import get_backend_agents as _get_cached_backends
     backends = _get_cached_backends()
     return {
         "backend": {
-            "type": acc.get("chat_backend_type", "Default"),
-            "api_key_exists": bool(acc.get("gitcode_api_token")),
+            "type": cfg.get("backend", "opencode"),
         },
         "_backends": backends,
         "im": {
             "feishu": {
-                "connected": bool(acc.get("feishu_app_id")),
-                "app_id": acc.get("feishu_app_id", ""),
-                "app_secret_exists": bool(acc.get("feishu_app_secret")),
+                "connected": bool(cfg.get("feishu_app_id")),
+                "app_id": cfg.get("feishu_app_id", ""),
+                "app_secret_exists": bool(cfg.get("feishu_app_secret")),
             },
             "wecom": {"connected": False, "app_id": ""},
             "dingtalk": {"connected": False, "app_id": ""},
@@ -181,12 +182,14 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
 
 @router.put("/config")
 async def update_chat_config(body: dict, user: dict = Depends(get_current_user)):
-    acc = user_db.get_user_account(user["username"]) or {}
     im = body.get("im", {})
     feishu = im.get("feishu", {})
+    kwargs = {}
     if feishu.get("app_id"):
-        acc["feishu_app_id"] = feishu["app_id"]
+        kwargs["feishu_app_id"] = feishu["app_id"]
     if feishu.get("app_secret"):
-        acc["feishu_app_secret"] = feishu["app_secret"]
-    user_db.save_user_account(user["username"], acc)
+        kwargs["feishu_app_secret"] = feishu["app_secret"]
+    if body.get("backend"):
+        kwargs["backend"] = body["backend"]
+    _set_chat_config(user["id"], **kwargs)
     return {"message": "配置已更新"}

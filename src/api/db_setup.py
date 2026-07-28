@@ -144,6 +144,16 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 )
 """
 
+_CHAT_CONFIG_DDL = """
+CREATE TABLE IF NOT EXISTS chat_config (
+    user_id INTEGER PRIMARY KEY,
+    backend TEXT DEFAULT 'opencode',
+    feishu_app_id TEXT DEFAULT '',
+    feishu_app_secret TEXT DEFAULT '',
+    updated_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("backend_agents", _BACKEND_AGENTS_DDL),
@@ -152,6 +162,7 @@ _NEW_TABLES = [
     ("user_im_bindings", _USER_IM_BINDINGS_DDL),
     ("chat_conversations", _CHAT_CONVERSATIONS_DDL),
     ("chat_messages", _CHAT_MESSAGES_DDL),
+    ("chat_config", _CHAT_CONFIG_DDL),
     ("agent_sessions", _AGENT_SESSIONS_TABLE_DDL),
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type_config", _AGENT_TYPE_CONFIG_DDL),

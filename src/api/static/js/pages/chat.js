@@ -188,9 +188,10 @@ function toggleChatConfig() {
 }
 
 function saveChatConfig() {
+  const backend = document.getElementById('cfgBackend')?.value || '';
   const appId = document.getElementById('cfgFeishuAppId')?.value || '';
   const secret = document.getElementById('cfgFeishuSecret')?.value || '';
-  API.put('/chat/config', {im: {feishu: {app_id: appId, app_secret: secret}}}).then(() => {
-    app.showToast('IM 配置已保存');
+  API.put('/chat/config', {backend, im: {feishu: {app_id: appId, app_secret: secret}}}).then(() => {
+    app.showToast('配置已保存');
   }).catch(e => app.showToast('保存失败: ' + e.message));
 }
