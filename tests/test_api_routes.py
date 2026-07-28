@@ -21,12 +21,15 @@ def setup_module():
         _uid = user_db.get_user_by_username("test_api")
     _token = user_db.create_session_token(_uid["id"])
     _headers = {"Authorization": f"Bearer {_token}"}
-    # 确保 agent_type_config 表中有 5 个 Agent 类型
+    # 确保 agent_type_config 表中有 5 个 Agent 类型和技能
     from src.session_manager import db, db_lock
     with db_lock:
         for at, dn in [("vod","VOD Agent"),("issue","Issue Agent"),("coding","Coding Agent"),("qa","QA Agent"),("sre","SRE Agent")]:
             db.execute("INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, icon, order_num) VALUES (?,?,?,?,?)",
                        (at, dn, f"Description for {at}", "●", 0))
+        for skill, dn, parent in [("issue","Issue 管理","issue"),("implementation","代码实现","coding"),("pr","PR 管理","coding")]:
+            db.execute("INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, parent_agent_type) VALUES (?,?,?,?)",
+                       (skill, dn, f"{dn} description", parent))
         db.commit()
 
 def teardown_module():

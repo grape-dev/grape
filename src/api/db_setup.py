@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS agent_type_config (
     default_backend TEXT DEFAULT 'opencode',
     icon TEXT DEFAULT '',
     order_num INTEGER DEFAULT 0,
+    parent_agent_type TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -145,7 +146,11 @@ def _seed_from_json():
 
         with db_lock:
             c = db.cursor()
-            c.execute(f"SELECT COUNT(*) FROM {db_table}")
+            if seed_key == "agent_type_config_skills":
+                # Skills share the same table as agent types, check for skill rows specifically
+                c.execute("SELECT COUNT(*) FROM agent_type_config WHERE parent_agent_type!=''")
+            else:
+                c.execute(f"SELECT COUNT(*) FROM {db_table}")
             count = c.fetchone()[0]
             if count > 0:
                 log.info(f"Table '{db_table}' already has {count} rows, skip seed from {json_file}")
@@ -202,10 +207,17 @@ def _insert_seed_data(table: str, data: dict):
                 display_name = info.get("name", skill_name)
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
+                # Try UPDATE first (row may already exist from agent-description.json)
                 c.execute(
-                    "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description) VALUES (?,?,?)",
-                    (skill_name, display_name, description)
+                    "UPDATE agent_type_config SET parent_agent_type=?, description=? WHERE agent_type=? AND parent_agent_type=''",
+                    (agent_type, description, skill_name)
                 )
+                if c.rowcount == 0:
+                    # Skill-only key (not in agent-description.json), INSERT
+                    c.execute(
+                        "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, parent_agent_type) VALUES (?,?,?,?)",
+                        (skill_name, display_name, description, agent_type)
+                    )
 
         elif table == "agent_registry":
             # agent-routing.json: {"default_backend": "...", "skill_backends": {...}}
@@ -226,5 +238,20 @@ def _insert_seed_data(table: str, data: dict):
 def init_database():
     """初始化所有新表（幂等），启动时调用"""
     _create_tables()
+    _migrate_tables()
     _create_indexes()
     _seed_from_json()
+
+
+def _migrate_tables():
+    """已有数据库的 schema 迁移"""
+    migrations = [
+        "ALTER TABLE agent_type_config ADD COLUMN parent_agent_type TEXT DEFAULT ''",
+    ]
+    for sql in migrations:
+        try:
+            with db_lock:
+                db.execute(sql)
+                db.commit()
+        except Exception:
+            pass  # column already exists

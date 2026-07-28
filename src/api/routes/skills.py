@@ -7,34 +7,38 @@ from src.api.deps import get_current_user
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
-AGENT_CATEGORIES = {
-    "vod": ["event-monitor", "signal-analysis", "anomaly-detection"],
-    "issue": ["issue-triage", "label-manager", "auto-assign"],
-    "coding": ["code-gen", "pr-creator", "branch-manager"],
-    "qa": ["code-review", "test-gen", "quality-check"],
-    "sre": ["change-log", "deploy-monitor", "incident-response"],
-}
-
 
 @router.get("/")
 async def list_skills(user: dict = Depends(get_current_user)):
+    """返回技能列表：official 从 agent_type_config 读取，custom 从用户上传"""
+    from src.session_manager import db, db_lock
+
     official = []
-    for agent_type, skill_names in AGENT_CATEGORIES.items():
-        for sname in skill_names:
-            official.append({
-                "name": sname,
-                "agent_type": agent_type,
-                "description": f"DevOps {agent_type.upper()} skill: {sname}",
-                "type": "official",
-            })
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT agent_type, display_name, description, parent_agent_type FROM agent_type_config WHERE parent_agent_type!='' ORDER BY parent_agent_type, agent_type"
+            )
+            for r in c.fetchall():
+                official.append({
+                    "name": r[0],
+                    "display_name": r[1],
+                    "description": r[2] or "",
+                    "agent_type": r[3],
+                    "type": "official",
+                })
+        except Exception:
+            pass
 
     custom = []
     user_skills_raw = user_db.list_skills(user["id"])
     for s in user_skills_raw:
         custom.append({
             "name": s.get("skill_name", "unknown"),
-            "agent_type": "",
+            "display_name": s.get("skill_name", "unknown"),
             "description": f"User-uploaded skill: {s.get('skill_name', '')}",
+            "agent_type": "",
             "type": "user-uploaded",
         })
 
