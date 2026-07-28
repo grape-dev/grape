@@ -23,15 +23,18 @@ function loadAgentTypes() {
   function showApp() {
     $('loginView').classList.add('hid');
     loadAgentTypes();
-    loadProfile();
-    loadRepos();
+    loadProfile().then(() => loadRepos()).catch(() => loadRepos());
   }
 
   function loadProfile() {
-    API.get('/auth/profile').then(d => {
+    return API.get('/auth/profile').then(d => {
       $('userName').textContent = d.username || 'User';
       $('userAvatar').textContent = (d.username || 'U')[0].toUpperCase();
       $('userRole').textContent = (d.managed_repos && d.managed_repos.length > 0) ? 'Admin' : 'Member';
+      localStorage.setItem('user', JSON.stringify(d));
+      // 如果当前在仓库选择页，更新 Welcome 消息
+      const welcomeEl = document.getElementById('welcomeUser');
+      if (welcomeEl) welcomeEl.textContent = d.username || 'User';
     }).catch(() => {});
   }
 

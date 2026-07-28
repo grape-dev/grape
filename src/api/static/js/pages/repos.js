@@ -8,7 +8,10 @@ function renderRepoSelection(repos) {
   }
   const user = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).username : 'User';
   let html = `<div style="max-width:900px;margin:0 auto">
-    <div style="margin-bottom:20px"><h2 style="font-size:17px;font-weight:600;margin-bottom:3px">Welcome, ${user}</h2><p class="ts t2">选择你要加入的 GitCode 仓库</p></div>
+    <div style="margin-bottom:20px;display:flex;justify-content:space-between;align-items:center">
+      <div><h2 style="font-size:17px;font-weight:600;margin-bottom:3px">Welcome, <span id="welcomeUser">${user}</span></h2><p class="ts t2">选择你要加入的 GitCode 仓库</p></div>
+      <button class="bt bt-o bt-s" onclick="app.logout()" style="color:var(--r);border-color:var(--r)">退出登录</button>
+    </div>
     <div class="flex gap8" style="margin-bottom:24px"><input placeholder="搜索仓库..." style="flex:1;padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c)"><select style="padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:11px;background:var(--c);outline:none"><option>全部</option><option>成员</option><option>管理员</option></select></div>
     <div class="rgrid">
       <div class="rc" style="background:linear-gradient(135deg,#eef3ff,#f0fdf4);border-color:var(--a);border-style:dashed" onclick="window.open('https://gitcode.com/create','_blank')">
