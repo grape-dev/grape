@@ -81,7 +81,7 @@ const app = (() => {
       const repos = d.repos || [];
       const sel = $('repoSelect');
       const current = currentRepo();
-      sel.innerHTML = '<option value="">选择仓库...</option>' + repos.map(r =>
+      sel.innerHTML = repos.map(r =>
         `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
       ).join('');
     }).catch(() => {});
@@ -90,7 +90,7 @@ const app = (() => {
   function _updateSidebarRepos(repos) {
     const sel = $('repoSelect');
     const current = currentRepo();
-    sel.innerHTML = '<option value="">选择仓库...</option>' + repos.map(r =>
+    sel.innerHTML = repos.map(r =>
       `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
     ).join('');
   }
