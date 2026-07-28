@@ -918,3 +918,69 @@ if os.path.isdir(_OLD_SKILL_DIR) and _OLD_SKILL_DIR != SKILL_DIR:
             os.rmdir(_OLD_SKILL_DIR)
     except Exception as e:
         log.warning(f"Skill dir migration failed: {e}")
+
+
+# ====== 用户仓库缓存表（user_repos）======
+
+_USER_REPOS_DDL = """
+CREATE TABLE IF NOT EXISTS user_repos (
+    user_id INTEGER NOT NULL,
+    full_name TEXT NOT NULL,
+    owner TEXT DEFAULT '',
+    name TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    role TEXT DEFAULT '',
+    is_admin INTEGER DEFAULT 0,
+    synced_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, full_name)
+)
+"""
+
+
+def init_user_repos_table():
+    with db_lock:
+        db.execute(_USER_REPOS_DDL)
+        db.commit()
+
+
+def save_user_repos(user_id: int, repos: list[dict]):
+    """批量写入用户仓库缓存"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
+        for r in repos:
+            c.execute(
+                "INSERT OR REPLACE INTO user_repos (user_id, full_name, owner, name, description, role, is_admin) VALUES (?,?,?,?,?,?,?)",
+                (user_id, r.get("full_name", ""), r.get("owner", ""), r.get("name", ""),
+                 r.get("description", ""), r.get("role", ""), 1 if r.get("is_admin") else 0)
+            )
+        db.commit()
+
+
+def get_user_repos(user_id: int) -> list[dict]:
+    """读取用户仓库缓存"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT full_name, owner, name, description, role, is_admin FROM user_repos WHERE user_id=? ORDER BY full_name", (user_id,))
+        return [
+            {"full_name": r[0], "owner": r[1], "name": r[2], "description": r[3], "role": r[4], "is_admin": bool(r[5])}
+            for r in c.fetchall()
+        ]
+
+
+def clear_user_repos(user_id: int):
+    """清除用户仓库缓存"""
+    with db_lock:
+        db.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
+        db.commit()
+
+
+def has_user_repos(user_id: int) -> bool:
+    """检查是否有缓存"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM user_repos WHERE user_id=?", (user_id,))
+        return c.fetchone()[0] > 0
+
+
+init_user_repos_table()

@@ -50,7 +50,7 @@ function renderRepos() {
 
     let html = `<div class="flex fc jbtw" style="margin-bottom:20px">
       <h2 style="font-size:15px;font-weight:600">Repositories</h2>
-      <button class="bt bt-p bt-s" onclick="renderRepos()">↻ Sync from GitCode</button>
+      <button class="bt bt-p bt-s" onclick="syncRepos()">↻ Sync from GitCode</button>
     </div>`;
 
     // Hosted repos
@@ -100,6 +100,13 @@ function renderRepos() {
 
 
 // ====== 操作函数 ======
+function syncRepos() {
+  API.post('/repos/sync').then(d => {
+    app.showToast('同步成功');
+    renderRepos();
+  }).catch(e => app.showToast('同步失败: ' + e.message));
+}
+
 function hostAndSelect(fullName, owner, name) {
   API.post('/repos/host', {full_name: fullName}).then(r => {
     app.showToast('加入并托管成功');
