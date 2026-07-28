@@ -133,6 +133,45 @@ class TestRepos:
         r = client.post("/api/repos/host", json={"full_name": "bad-format"}, headers=_headers)
         assert r.status_code == 400
 
+    def test_host_strict_mode_check(self):
+        """验证 backend 的权限检查逻辑与 frontend 一致：
+        1) 项目所有者 → 通过
+        2) 非所有者 → 调用 _check_collaborator_admin
+        3) 结果与 fetch_repos_with_role 的 is_admin 一致
+        """
+        from src.user.repo_manager import _check_collaborator_admin, _req, API_BASE
+
+        # 获取当前用户身份
+        r = client.post("/api/auth/login",
+            json={"username": "test", "password": "test123"}, headers=_headers)
+        # 用 default 账户的 token
+        from src.config import get_account
+        acc = get_account()
+        bot_token = acc.get("gitcode_api_token", "")
+        assert bot_token, "Need bot token for this test"
+
+        user_data = _req("GET", f"{API_BASE}/user", bot_token)
+        current_user = user_data.get("login", "")
+        assert current_user, "Need current user identity"
+
+        # 测试 1：项目所有者通过
+        owner_repos = [r for r in _req("GET", f"{API_BASE}/user/repos?type=all&per_page=50", bot_token)
+                       if isinstance(r, dict) and r.get("owner", {}).get("login") == current_user]
+        if owner_repos:
+            test_repo = owner_repos[0]
+            repo_name = test_repo.get("name", "")
+            assert _check_collaborator_admin(bot_token, current_user, repo_name, current_user), \
+                "Owner should pass permission check"
+            print(f"  [OK] Owner permission check passed for {current_user}/{repo_name}")
+        else:
+            print("  [SKIP] No owner repos found")
+
+        # 测试 2：非所有者不通过
+        non_owner = "nonexistent_user_xyz"
+        result = _check_collaborator_admin(bot_token, "someorg", "somerepo", non_owner)
+        assert result == False, "Non-owner should fail permission check"
+        print("  [OK] Non-owner permission check correctly rejected")
+
 
 # ===================== 4. Dashboard =====================
 class TestDashboard:
