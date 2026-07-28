@@ -216,9 +216,16 @@ const app = (() => {
     if (urlToken) {
       localStorage.setItem('token', urlToken);
       localStorage.setItem('app_cache_ver', '2');
-      // Clear old repo selection on fresh OAuth login
       if (p.get('first_login')) {
         localStorage.removeItem('currentRepo');
+        // Immediately show repo selection layout, skip Dashboard flash
+        $('sidebar').style.display = 'none';
+        $('tb').style.display = 'none';
+        $('mainView').style.display = 'flex';
+        $('mainView').style.position = 'fixed';
+        $('mainView').style.inset = '0';
+        $('mainView').style.zIndex = '100';
+        $('pageTitle').textContent = '选择仓库';
       }
       showApp();
       // Remove token from URL without reload
