@@ -5,7 +5,84 @@ import pytest, requests
 
 BASE = "http://203.0.113.2"
 TOKEN = None
-TEST_REPO = "Jason7602/devops-bot"  # Must be a real GitCode repo
+TEST_REPO = "Jason7602/devops-bot"
+
+
+# ==================== S0: 首次登录（无托管 → 仓库选择页）========================
+class TestFirstLoginNoRepos:
+    """首次登录场景：无托管项目时应进入仓库选择页而非 Dashboard
+    
+    前置条件：
+    - managed_repos 表为空
+    - 使用 Jason7602 账户（含 GitCode API Token）
+    - 不设置 currentRepo
+    """
+
+    @pytest.fixture(scope="module")
+    def browser(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            b = p.chromium.launch(headless=True)
+            yield b
+
+    def _setup(self):
+        import paramiko, hashlib
+        c = paramiko.SSHClient()
+        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        c.connect('203.0.113.2', 22, 'root', 'YOUR_SSH_PASSWORD', timeout=10)
+        c.exec_command("python3 -c \"import sqlite3;db=sqlite3.connect('/root/devops-bot/data/sessions.db');"
+                       "db.execute('DELETE FROM managed_repos');db.commit();print('OK')\"", timeout=5)
+        pw = hashlib.sha256(b"testpass123").hexdigest()
+        c.exec_command(f'python3 -c "import sqlite3,hashlib;db=sqlite3.connect(\\\"/root/devops-bot/data/sessions.db\\\");'
+                       f'db.execute(\\\"UPDATE user_accounts SET password_hash=?,password=? WHERE username=?\\\",'
+                       f"(\\\"{pw}\\\",\\\"testpass123\\\",\\\"Jason7602\\\"));db.commit();print(\\\"OK\\\")\"", timeout=5)
+        c.close()
+        r = requests.post(f"{BASE}/api/auth/login",
+            json={"username": "Jason7602", "password": "testpass123"}, timeout=10)
+        assert r.status_code == 200, f"Jason7602 login failed: {r.text[:100]}"
+        return r.json()["token"]
+
+    def test_first_login_shows_repo_selection(self, browser):
+        """首次登录 → 仓库选择页（而非 Dashboard）"""
+        token = self._setup()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        logs, errors = [], []
+        page.on("console", lambda msg: logs.append(f"[{msg.type}] {msg.text[:200]}"))
+        page.on("pageerror", lambda e: errors.append(str(e)))
+
+        page.add_init_script(f"""
+        localStorage.setItem('token', '{token}');
+        localStorage.setItem('app_cache_ver', '2');
+        localStorage.removeItem('currentRepo');
+        """)
+        page.goto(BASE)
+        page.wait_for_load_state("networkidle")
+        time.sleep(3)
+
+        on_selection = page.locator("text=选择你要加入的").is_visible()
+        on_dashboard = page.locator("#pageTitle:has-text('Dashboard')").is_visible()
+        repo_cards = page.locator(".rc").count()
+
+        for l in logs:
+            if any(k in l for k in ["init", "loadRepos", "error"]):
+                print(f"  LOG: {l}")
+        for e in errors:
+            print(f"  ERR: {e}")
+
+        assert on_selection, f"Expected selection page, got dash={on_dashboard} repo_cards={repo_cards}"
+        assert not on_dashboard, "Should NOT be on Dashboard"
+        assert repo_cards > 0, f"No repo cards rendered"
+        assert len(errors) == 0, f"JS errors: {errors}"
+
+        # 加入仓库 → Dashboard
+        btn = page.locator(".bt:has-text('+ Join')").first
+        if btn.is_visible():
+            btn.click()
+            time.sleep(3)
+            assert page.locator("#pageTitle:has-text('Dashboard')").is_visible(), "Dashboard after join"
+            print("  -> Dashboard after join: OK")
+
+        page.close()
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
