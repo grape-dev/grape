@@ -274,6 +274,6 @@ function loadAgentTypes() {
     else { showLogin(); }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, currentRepo, showLogin, init, loadRepos, initSidebarRepos};
+  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile};
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
