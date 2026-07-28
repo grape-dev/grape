@@ -99,6 +99,18 @@ function unhostFromSettings(fullName) {
       localStorage.removeItem('currentRepo');
     }
     app.initSidebarRepos();
-    app.nav('dash');
+    // 跳转到仓库选择页
+    API.get('/repos/member').then(d => {
+      const repos = d.repos || [];
+      document.getElementById('sidebar').style.display = 'none';
+      document.getElementById('tb').style.display = 'none';
+      const mv = document.getElementById('mainView');
+      mv.style.display = 'flex';
+      mv.style.position = 'fixed';
+      mv.style.inset = '0';
+      mv.style.zIndex = '100';
+      document.getElementById('pageTitle').textContent = '选择仓库';
+      renderRepoSelection(repos);
+    });
   }).catch(e => app.showToast('解除托管失败: ' + e.message));
 }
