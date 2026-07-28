@@ -1,0 +1,52 @@
+{
+  "event-monitor": {
+    "name": "事件监控",
+    "agent_type": "vod",
+    "description": "监控仓库事件、提取信号、分析趋势"
+  },
+  "signal-analysis": {
+    "name": "信号分析",
+    "agent_type": "vod",
+    "description": "聚类分析共性问题、提炼价值信息"
+  },
+  "issue-triage": {
+    "name": "Issue 分诊",
+    "agent_type": "issue",
+    "description": "Issue 分类、打标签、指派负责人"
+  },
+  "label-manager": {
+    "name": "标签管理",
+    "agent_type": "issue",
+    "description": "自动化标签、里程碑管理、A2A 触发"
+  },
+  "code-gen": {
+    "name": "代码生成",
+    "agent_type": "coding",
+    "description": "需求分析、方案设计、编码实现"
+  },
+  "pr-creator": {
+    "name": "PR 创建",
+    "agent_type": "coding",
+    "description": "自我审查、提交 Pull Request"
+  },
+  "code-review": {
+    "name": "代码审查",
+    "agent_type": "qa",
+    "description": "Code Review、安全扫描、架构检查"
+  },
+  "test-gen": {
+    "name": "测试生成",
+    "agent_type": "qa",
+    "description": "自动化测试用例生成与执行"
+  },
+  "change-log": {
+    "name": "变更日志",
+    "agent_type": "sre",
+    "description": "CHANGELOG 生成、构建打包、发布部署"
+  },
+  "deploy-monitor": {
+    "name": "部署监控",
+    "agent_type": "sre",
+    "description": "部署监控、健康检查、故障排查"
+  }
+}

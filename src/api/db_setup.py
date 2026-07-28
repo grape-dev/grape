@@ -69,8 +69,15 @@ CREATE TABLE IF NOT EXISTS agent_registry (
 )
 """
 
+_META_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+)
+"""
+
 _NEW_TABLES = [
-    ("events", _EVENTS_TABLE_DDL),
+    ("meta", _META_TABLE_DDL),
     ("agent_sessions", _AGENT_SESSIONS_TABLE_DDL),
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type_config", _AGENT_TYPE_CONFIG_DDL),
@@ -79,11 +86,13 @@ _NEW_TABLES = [
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 
-_SEED_FILES = {
-    "event_route_config": "event-routing.json",
-    "agent_type_config": "agent-description.json",
-    "agent_registry": "agent-routing.json",
-}
+# (seed_key, json_filename, actual_table_name)
+_SEED_FILES = [
+    ("event_route_config", "event-routing.json", "event_route_config"),
+    ("agent_type_config", "agent-description.json", "agent_type_config"),
+    ("agent_type_config_skills", "skill-description.json", "agent_type_config"),
+    ("agent_registry", "agent-routing.json", "agent_registry"),
+]
 
 
 def _create_tables():
@@ -118,7 +127,17 @@ def _create_indexes():
 
 def _seed_from_json():
     """首次运行时从 JSON 种子文件导入数据"""
-    for table, json_file in _SEED_FILES.items():
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT value FROM meta WHERE key='seeded_keys'")
+        row = c.fetchone()
+        seeded_keys = set(row[0].split(",")) if row and row[0] else set()
+
+    for seed_key, json_file, db_table in _SEED_FILES:
+        if seed_key in seeded_keys:
+            log.info(f"Seed key '{seed_key}' already run, skip")
+            continue
+
         filepath = os.path.join(_CONFIG_DIR, json_file)
         if not os.path.exists(filepath):
             log.warning(f"Seed file not found: {filepath}")
@@ -126,17 +145,24 @@ def _seed_from_json():
 
         with db_lock:
             c = db.cursor()
-            c.execute(f"SELECT COUNT(*) FROM {table}")
+            c.execute(f"SELECT COUNT(*) FROM {db_table}")
             count = c.fetchone()[0]
             if count > 0:
-                log.info(f"Table '{table}' already has {count} rows, skip seed")
+                log.info(f"Table '{db_table}' already has {count} rows, skip seed from {json_file}")
                 continue
 
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        _insert_seed_data(table, data)
-        log.info(f"Seeded {table} from {json_file}")
+        _insert_seed_data(seed_key, data)
+
+        with db_lock:
+            c = db.cursor()
+            seeded_keys.add(seed_key)
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded_keys', ?)",
+                      (",".join(sorted(seeded_keys)),))
+            db.commit()
+        log.info(f"Seeded {db_table} from {json_file}")
 
 
 def _insert_seed_data(table: str, data: dict):
@@ -168,6 +194,17 @@ def _insert_seed_data(table: str, data: dict):
                 c.execute(
                     "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, default_backend, icon, order_num) VALUES (?,?,?,?,?,?)",
                     (agent_type, display_name, description, default_backend, icon, order_num)
+                )
+
+        elif table == "agent_type_config_skills":
+            # skill-description.json: {"skill_name": {"name": "...", "agent_type": "...", ...}}
+            for skill_name, info in data.items():
+                display_name = info.get("name", skill_name)
+                description = info.get("description", "")
+                agent_type = info.get("agent_type", "")
+                c.execute(
+                    "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description) VALUES (?,?,?)",
+                    (skill_name, display_name, description)
                 )
 
         elif table == "agent_registry":
