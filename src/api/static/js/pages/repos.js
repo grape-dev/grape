@@ -1,5 +1,5 @@
 function renderRepos(repos) {
-  const d = document.getElementById('repoContent');
+  const d = document.getElementById('pageContent');
   if (!d) return;
   if (!repos || repos.length === 0) {
     d.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="loading">没有找到仓库</div></div>';
