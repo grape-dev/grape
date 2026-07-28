@@ -40,12 +40,14 @@ const app = (() => {
       if (managedRepos.length === 0) {
         $('sidebar').style.display = 'none';
         $('mainView').style.display = 'none';
+        $('repoView').classList.add('ac');
         renderRepos(repos);
         return;
       }
 
       $('sidebar').style.display = 'flex';
       $('mainView').style.display = 'flex';
+      $('repoView').classList.remove('ac');
 
       if (!current) {
         const r = managedRepos[0];
@@ -172,6 +174,15 @@ const app = (() => {
   }
 
   function init() {
+    // Force reload if cache version changed
+    const CACHE_VER = '2';
+    if (localStorage.getItem('app_cache_ver') !== CACHE_VER) {
+      localStorage.clear();
+      localStorage.setItem('app_cache_ver', CACHE_VER);
+      location.reload();
+      return;
+    }
+
     const token = localStorage.getItem('token');
     if (token) { showApp(); }
     else {
