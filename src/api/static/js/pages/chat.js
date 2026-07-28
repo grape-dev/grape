@@ -8,7 +8,12 @@ function renderChat() {
   el.innerHTML = `<div class="chat-wrap">
     <div class="chat-convlist" id="convList"></div>
     <div class="chat-main">
-      <div class="chat-hdr"><h2>Chat Agent · Personal Assistant</h2></div>
+      <div class="chat-hdr">
+        <h2>Chat Agent · Personal Assistant</h2>
+        <div class="sp"></div>
+        <button class="bt bt-o bt-s" onclick="toggleChatConfig()">⚙ IM Config</button>
+      </div>
+      <div id="chatConfigPanel" class="cd hidden" style="margin:0;border-radius:0;border-bottom:1px solid var(--b);padding:12px 18px;font-size:11px"></div>
       <div class="chat-body" id="chatBody">
         <div style="text-align:center;color:var(--t3);padding:60px 20px">选择一个对话或创建新对话</div>
       </div>
@@ -149,4 +154,36 @@ function doSend(input, body) {
     }
     read();
   }).catch(e => { const el = document.getElementById(tid); if (el) el.innerHTML = 'Request failed: ' + e.message; });
+}
+
+// ====== IM Config Panel ======
+let _chatConfigVisible = false;
+
+function toggleChatConfig() {
+  _chatConfigVisible = !_chatConfigVisible;
+  const p = document.getElementById('chatConfigPanel');
+  if (!p) return;
+  if (_chatConfigVisible) {
+    p.classList.remove('hidden');
+    API.get('/chat/config').then(d => {
+      const feishu = d.im?.feishu || {};
+      p.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+        <span style="font-weight:600">IM Configuration</span>
+        <label style="display:flex;align-items:center;gap:4px"><span class="${feishu.connected ? 'tgx' : 't3'}">●</span> Feishu ${feishu.connected ? '(Connected)' : '(Disconnected)'}</label>
+        <input id="cfgFeishuAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:180px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px">
+        <input id="cfgFeishuSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:180px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px">
+        <button class="bt bt-p bt-s" onclick="saveChatConfig()">Save</button>
+      </div>`;
+    }).catch(() => {});
+  } else {
+    p.classList.add('hidden');
+  }
+}
+
+function saveChatConfig() {
+  const appId = document.getElementById('cfgFeishuAppId')?.value || '';
+  const secret = document.getElementById('cfgFeishuSecret')?.value || '';
+  API.put('/chat/config', {im: {feishu: {app_id: appId, app_secret: secret}}}).then(() => {
+    app.showToast('IM 配置已保存');
+  }).catch(e => app.showToast('保存失败: ' + e.message));
 }
