@@ -1,4 +1,5 @@
-function renderRepos(repos) {
+// ====== 首次登录/新增仓库：卡片式仓库选择页 ======
+function renderRepoSelection(repos) {
   const d = document.getElementById('pageContent');
   if (!d) return;
   if (!repos || repos.length === 0) {
@@ -36,6 +37,68 @@ function renderRepos(repos) {
   d.innerHTML = html;
 }
 
+// ====== 仓库管理页（侧边栏"＋ 新增仓库托管"）=======
+function renderRepos() {
+  const el = document.getElementById('pageContent');
+  if (!el) return;
+  el.innerHTML = '<div class="loading">加载中...</div>';
+
+  API.get('/repos/member').then(d => {
+    const allRepos = d.repos || [];
+    const managedRepos = allRepos.filter(r => r.is_joined || r.is_hosted);
+    const availableRepos = allRepos.filter(r => !r.is_joined && !r.is_hosted);
+
+    let html = `<div class="flex fc jbtw" style="margin-bottom:20px">
+      <h2 style="font-size:15px;font-weight:600">Repositories</h2>
+      <button class="bt bt-p bt-s" onclick="renderRepos()">↻ Sync from GitCode</button>
+    </div>`;
+
+    // Hosted repos
+    html += `<div class="cd"><div class="cd-h"><h2>Hosted <span class="c">${managedRepos.length}</span></h2></div>`;
+    if (managedRepos.length === 0) {
+      html += '<div class="ts t2" style="padding:12px 0">暂无已托管的仓库</div>';
+    } else {
+      managedRepos.forEach(r => {
+        const statusClass = r.is_hosted ? 'tg-s' : 'tg-d';
+        const statusText = r.is_hosted ? 'Active' : 'Joined';
+        html += `<div class="repo-item" onclick="selectRepo('${r.full_name}','${r.owner}','${r.name}')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--b)">
+          <span class="tg tg-c" style="font-size:11px;padding:3px 8px">${r.full_name}</span>
+          <span class="ts t2">${r.role}</span>
+          <span class="ts t3">${r.is_hosted ? 'Webhook OK' : ''} · ★ ${r.name}</span>
+          <span class="tg ${statusClass}" style="margin-left:auto">${statusText}</span>
+        </div>`;
+      });
+    }
+    html += `</div>`;
+
+    // Available to join
+    html += `<div class="cd"><div class="cd-h"><h2>Available to Join <span class="c">${availableRepos.length}</span></h2></div>`;
+    if (availableRepos.length === 0) {
+      html += '<div class="ts t2" style="padding:12px 0">没有可加入的仓库</div>';
+    } else {
+      html += `<div class="tw"><table>
+        <tr><th>Repository</th><th>Role</th><th>Description</th><th></th></tr>`;
+      availableRepos.forEach(r => {
+        const isAdmin = r.role === 'Admin' || r.role === 'Maintainer';
+        const roleTag = r.role === 'Admin' ? `<span class="tg tg-s">${r.role}</span>` :
+                        r.role === 'Maintainer' ? `<span class="tg tg-i">${r.role}</span>` : r.role;
+        const btnHtml = isAdmin
+          ? `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}')">${r.is_hosted ? '已托管' : '加入并托管'}</button>`
+          : `<button class="bt bt-o bt-s" onclick="event.stopPropagation();joinAndSelect('${r.full_name}','${r.owner}','${r.name}')">加入</button>`;
+        html += `<tr><td><b>${r.full_name}</b></td><td>${roleTag}</td><td>${r.description || ''}</td><td>${btnHtml}</td></tr>`;
+      });
+      html += `</table></div>`;
+    }
+    html += `</div>`;
+
+    el.innerHTML = html;
+  }).catch(() => {
+    el.innerHTML = '<div class="error">加载失败</div>';
+  });
+}
+
+
+// ====== 操作函数 ======
 function hostAndSelect(fullName, owner, name) {
   API.post('/repos/host', {full_name: fullName}).then(r => {
     app.showToast('加入并托管成功');
@@ -56,7 +119,6 @@ function selectRepo(fullName, owner, name) {
   const mainView = document.getElementById('mainView');
   const tb = document.getElementById('tb');
   const title = document.getElementById('pageTitle');
-  // Restore normal layout
   if (mainView) {
     mainView.style.position = '';
     mainView.style.inset = '';
@@ -66,7 +128,6 @@ function selectRepo(fullName, owner, name) {
   if (sidebar) sidebar.style.display = 'flex';
   if (tb) tb.style.display = 'flex';
   if (title) title.textContent = 'Dashboard';
-  // Reload sidebar repo list
   app.initSidebarRepos();
   app.nav('dash');
 }

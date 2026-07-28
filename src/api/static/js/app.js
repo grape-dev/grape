@@ -45,7 +45,7 @@ const app = (() => {
         $('mainView').style.inset = '0';
         $('mainView').style.zIndex = '100';
         $('pageTitle').textContent = '选择仓库';
-        renderRepos(repos);
+        renderRepoSelection(repos);
         return;
       }
 
@@ -102,18 +102,9 @@ const app = (() => {
       const cur = currentRepo();
       const sel = $('repoSelect');
       if (cur) sel.value = cur.fullName;
-      // 显示完整仓库选择页（类似首次登录）
-      API.get('/repos/member').then(d => {
-        const repos = d.repos || [];
-        $('sidebar').style.display = 'none';
-        $('tb').style.display = 'none';
-        $('mainView').style.display = 'flex';
-        $('mainView').style.position = 'fixed';
-        $('mainView').style.inset = '0';
-        $('mainView').style.zIndex = '100';
-        $('pageTitle').textContent = '选择仓库';
-        renderRepos(repos);
-      }).catch(e => console.error("[switchRepo] member fetch failed:", e));
+      // 显示仓库管理页（已托管 + 可加入列表）
+      $('pageTitle').textContent = '选择仓库';
+      renderRepos();
       return;
     }
     const parts = val.split('/');
