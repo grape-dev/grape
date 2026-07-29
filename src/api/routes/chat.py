@@ -1,7 +1,9 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
-import json, asyncio, tempfile, os
+import json, asyncio, tempfile, os, threading
 
 _CHAT_CWD = tempfile.gettempdir()
+# 限制同时运行的 opencode 子进程数（防止大量用户并发导致服务器崩溃）
+_CHAT_AGENT_SEMAPHORE = threading.Semaphore(5)
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -121,26 +123,27 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 
     def run_agent():
         nonlocal new_session_id
-        for evt_type, data in stream_agent(
-            prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
-            backend_name=backend_name, user_id=user["id"],
-            account=user["username"], env_extra=env_extra,
-        ):
-            if evt_type == "text":
-                text = data.get("text", "") if isinstance(data, dict) else str(data)
-                if text:
-                    collected.append(text)
-            elif evt_type == "done":
-                if isinstance(data, dict):
-                    nsid = data.get("oc_session_id", "")
-                    if nsid:
-                        new_session_id = nsid
-                    if not collected:
-                        done_text = data.get("text", "")
-                        if done_text:
-                            collected.append(done_text)
-            elif evt_type in ("error"):
-                break
+        with _CHAT_AGENT_SEMAPHORE:
+            for evt_type, data in stream_agent(
+                prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
+                backend_name=backend_name, user_id=user["id"],
+                account=user["username"], env_extra=env_extra,
+            ):
+                if evt_type == "text":
+                    text = data.get("text", "") if isinstance(data, dict) else str(data)
+                    if text:
+                        collected.append(text)
+                elif evt_type == "done":
+                    if isinstance(data, dict):
+                        nsid = data.get("oc_session_id", "")
+                        if nsid:
+                            new_session_id = nsid
+                        if not collected:
+                            done_text = data.get("text", "")
+                            if done_text:
+                                collected.append(done_text)
+                elif evt_type in ("error"):
+                    break
         return "".join(collected)
 
     reply = await loop.run_in_executor(None, run_agent)
@@ -199,6 +202,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
         def agent_worker():
             nonlocal captured_session
+            if not _CHAT_AGENT_SEMAPHORE.acquire(blocking=True):
+                return
             try:
                 for evt_type, data in stream_agent(
                     prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
@@ -214,6 +219,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 q.put_nowait(("error", str(e)))
             finally:
                 q.put_nowait(None)
+                _CHAT_AGENT_SEMAPHORE.release()
 
         loop.run_in_executor(None, agent_worker)
 
@@ -291,6 +297,20 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
             with open(skill_path, encoding="utf-8") as f:
                 skill_content = f.read()
             parts.append(f"\n## Current Skill: {skill_name}\n{skill_content}\n\nFollow the instructions above for this skill.")
+    # GitCode API 访问说明（无论是否配置 skill 都注入）
+    parts.append("""
+## GitCode API Access
+
+You have access to the GitCode API for this repository. Your personal API token is available as the GITCODE_API_TOKEN environment variable in shell commands.
+
+Use curl with the token like:
+  curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \\
+    https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues
+
+Available operations: view and manage issues, pull requests, commits, labels, milestones, comments.
+
+IMPORTANT: Never print, reveal, or echo the token value or environment variable name in your response. Use $GITCODE_API_TOKEN in commands only.
+""")
     chat_history = [m for m in history if m.get("role") in ("user", "agent")][-10:]
     if chat_history:
         parts.append("\nConversation history:")
@@ -303,7 +323,6 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
     from src.config import log
     log.info(f"Chat prompt ({len(prompt)} chars, skill={skill_name or 'none'}, repo={repo_key or 'none'}): {prompt[:2000]}")
     return prompt
-    return "\n".join(parts)
 
 
 # ====== Feedback ======
