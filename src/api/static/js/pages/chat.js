@@ -37,11 +37,15 @@ function loadSideConfig() {
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
         <div style="font-weight:600;margin-bottom:8px">IM</div>
-        <div style="margin-bottom:6px"><span class="${feishu.connected ? 'tgx' : 't3'}">●</span> ${feishu.connected ? 'Feishu Connected' : 'Feishu'}</div>
+        <select id="cfgImProvider" onchange="switchImProvider()" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
+          <option value="feishu" ${d.im?.feishu?.app_id ? 'selected' : ''}>Feishu</option>
+          <option value="wecom" ${d.im?.wecom?.app_id ? 'selected' : ''}>WeCom</option>
+          <option value="dingtalk" ${d.im?.dingtalk?.app_id ? 'selected' : ''}>DingTalk</option>
+        </select>
         <div style="margin-bottom:4px"><span class="t3">App ID</span></div>
-        <input id="cfgFeishuAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:4px">
+        <input id="cfgImAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:4px">
         <div style="margin-bottom:4px"><span class="t3">App Secret</span></div>
-        <input id="cfgFeishuSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
+        <input id="cfgImSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
         <button class="bt bt-p bt-s" onclick="saveChatConfig()" style="width:100%">Save</button>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
@@ -197,9 +201,20 @@ function doSend(input, body) {
 
 function saveChatConfig() {
   const backend = document.getElementById('cfgBackend')?.value || '';
-  const appId = document.getElementById('cfgFeishuAppId')?.value || '';
-  const secret = document.getElementById('cfgFeishuSecret')?.value || '';
-  API.put('/chat/config', {backend, im: {feishu: {app_id: appId, app_secret: secret}}}).then(() => {
+  const provider = document.getElementById('cfgImProvider')?.value || 'feishu';
+  const appId = document.getElementById('cfgImAppId')?.value || '';
+  const secret = document.getElementById('cfgImSecret')?.value || '';
+  const im = {};
+  im[provider] = {app_id: appId, app_secret: secret};
+  API.put('/chat/config', {backend, im}).then(() => {
     app.showToast('配置已保存');
   }).catch(e => app.showToast('保存失败: ' + e.message));
+}
+
+function switchImProvider() {
+  const sel = document.getElementById('cfgImProvider');
+  if (!sel) return;
+  const provider = sel.value;
+  // Try to load provider-specific config from the DOM or API
+  // For now just update the section header
 }
