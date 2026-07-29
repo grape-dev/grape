@@ -17,10 +17,6 @@ from src.session_manager import (
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-CHAT_SYSTEM_PROMPT = """You are a helpful DevOps assistant integrated with GitCode.
-Answer questions about repositories, issues, pull requests, and DevOps workflows.
-Keep responses concise and actionable."""
-
 
 class ChatMessage(BaseModel):
     message: str
@@ -263,9 +259,19 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
 
 def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: str = "") -> str:
-    parts = [CHAT_SYSTEM_PROMPT]
+    from src.prompt_builder import build_chat_role_definition
+    parts = [build_chat_role_definition()]
     if repo_key:
         parts.append(f"\nIMPORTANT: You are working in repository: {repo_key}")
+    # 添加事件上下文
+    if repo_key:
+        try:
+            from src.api.event_store import get_issue_summary
+            summary = get_issue_summary(repo_key)
+            if summary:
+                parts.append(f"\nRepository event context:\n{summary}")
+        except Exception:
+            pass
     if skill_name:
         from src.config import SKILLS_DIR
         skill_path = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
@@ -282,7 +288,6 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
     repo_note = f" (in {repo_key})" if repo_key else ""
     parts.append(f"\nUser{repo_note}: {message}\nAssistant:")
     prompt = "\n".join(parts)
-    # 日志输出 prompt 前 300 字符用于调试
     from src.config import log
     log.info(f"Chat prompt ({len(prompt)} chars, skill={skill_name or 'none'}, repo={repo_key or 'none'}): {prompt[:300]}")
     return prompt
