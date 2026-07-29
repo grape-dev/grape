@@ -46,6 +46,43 @@ async def list_skills(user: dict = Depends(get_current_user)):
     return {"skills": official + custom}
 
 
+@router.get("/{name}")
+async def get_skill_detail(name: str, user: dict = Depends(get_current_user)):
+    """返回技能详情（含 SKILL.md 内容）"""
+    from src.session_manager import db, db_lock
+    from src.config import SKILLS_DIR
+
+    # 查官方技能
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT agent_type, display_name, description, parent_agent_type, skill_path FROM agent_type_config WHERE agent_type=?", (name,))
+        row = c.fetchone()
+
+    if row:
+        skill_dir = row[4] or name
+        skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
+        content = ""
+        if os.path.exists(skill_path):
+            with open(skill_path, encoding="utf-8") as f:
+                content = f.read()
+        return {
+            "name": row[0], "display_name": row[1], "description": row[2] or "",
+            "agent_type": row[3], "type": "official", "content": content,
+        }
+
+    # 查用户上传技能
+    skills = user_db.list_skills(user["id"])
+    for s in skills:
+        if s.get("skill_name") == name:
+            md = user_db.get_skill_md(user["id"], name)
+            return {
+                "name": name, "display_name": name, "description": s.get("description", ""),
+                "agent_type": s.get("agent_type", ""), "type": "user-uploaded", "content": md or "",
+            }
+
+    raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+
+
 @router.post("/upload")
 async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
     content = await file.read()
