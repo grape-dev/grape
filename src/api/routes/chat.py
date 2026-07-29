@@ -34,14 +34,18 @@ class FeedbackBody(BaseModel):
 # ====== Conversations ======
 
 @router.get("/conversations")
-async def list_conversations(user: dict = Depends(get_current_user)):
-    convs = get_user_conversations(user["id"])
+async def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user)):
+    convs = get_user_conversations(user["id"], repo_key=repo_key)
     return {"conversations": convs}
 
 
+class NewConversationBody(BaseModel):
+    repo_key: str = ""
+
+
 @router.post("/conversations")
-async def new_conversation(user: dict = Depends(get_current_user)):
-    cid = create_conversation(user["id"])
+async def new_conversation(body: NewConversationBody, user: dict = Depends(get_current_user)):
+    cid = create_conversation(user["id"], repo_key=body.repo_key)
     return {"conversation_id": cid}
 
 

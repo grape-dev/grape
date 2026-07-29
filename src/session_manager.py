@@ -375,10 +375,13 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
     return cid
 
 
-def get_user_conversations(user_id: int, limit: int = 20) -> list[dict]:
+def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, user_id, session_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
+        if repo_key:
+            c.execute("SELECT id, user_id, session_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? AND repo_key=? ORDER BY updated_at DESC LIMIT ?", (user_id, repo_key, limit))
+        else:
+            c.execute("SELECT id, user_id, session_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
         return [{"id": r[0], "user_id": r[1], "session_id": r[2] or "", "repo_key": r[3], "im_channel_id": r[4], "title": r[5], "status": r[6], "created_at": r[7], "updated_at": r[8]} for r in c.fetchall()]
 
 

@@ -71,7 +71,9 @@ function loadSideConfig() {
 }
 
 function loadConversations(autoSelect) {
-  API.get('/chat/conversations').then(d => {
+  const repo = app.currentRepo();
+  const repoKey = repo ? repo.fullName : '';
+  API.get('/chat/conversations' + (repoKey ? '?repo_key=' + encodeURIComponent(repoKey) : '')).then(d => {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
     if (!list) return;
@@ -99,7 +101,8 @@ function loadConversations(autoSelect) {
 }
 
 function newConversation() {
-  API.post('/chat/conversations', {}).then(d => {
+  const repo = app.currentRepo();
+  API.post('/chat/conversations', repo ? {repo_key: repo.fullName} : {}).then(d => {
     _currentConvId = d.conversation_id;
     loadConversations();
     document.getElementById('chatBody').innerHTML = '';
@@ -138,7 +141,8 @@ function sendChatStream() {
   const body = document.getElementById('chatBody');
   if (!input || !input.value.trim()) return;
   if (!_currentConvId) {
-    API.post('/chat/conversations', {}).then(d => {
+    const repo = app.currentRepo();
+    API.post('/chat/conversations', repo ? {repo_key: repo.fullName} : {}).then(d => {
       _currentConvId = d.conversation_id;
       loadConversations();
       doSend(input, body);
