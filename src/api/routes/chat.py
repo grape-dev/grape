@@ -87,7 +87,6 @@ def _auto_title(conv: dict, message: str):
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
-    # Get user's gitcode token
     acc = user_db.get_user_account(user["username"]) or {}
     user_token = acc.get("gitcode_api_token", "")
 
@@ -95,10 +94,12 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         conv = get_conversation(conv_id)
         if not conv or conv["user_id"] != user["id"]:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
+        if not conv.get("user_gitcode_token") and user_token:
+            update_conversation(conv_id, user_gitcode_token=user_token)
+            conv = get_conversation(conv_id)
     else:
         conv_id = create_conversation(user["id"], body.repo_key, user_gitcode_token=user_token)
-    conv = get_conversation(conv_id)
-    _auto_title(conv, body.message)
+        conv = get_conversation(conv_id)
 
     add_message(conv_id, "user", body.message)
 
@@ -165,6 +166,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         conv = get_conversation(conv_id)
         if not conv or conv["user_id"] != user["id"]:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
+        if not conv.get("user_gitcode_token") and user_token:
+            update_conversation(conv_id, user_gitcode_token=user_token)
+            conv = get_conversation(conv_id)
     else:
         conv_id = create_conversation(user["id"], body.repo_key, user_gitcode_token=user_token)
     conv = get_conversation(conv_id)

@@ -398,7 +398,7 @@ def get_conversation(conv_id: str) -> dict | None:
 
 
 def update_conversation(conv_id: str, **kwargs):
-    allowed = {"title", "status", "session_id"}
+    allowed = {"title", "status", "session_id", "user_gitcode_token"}
     sets = []
     vals = []
     for k, v in kwargs.items():
