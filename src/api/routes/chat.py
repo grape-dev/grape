@@ -97,7 +97,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 
     def run_agent():
         for evt_type, data in stream_agent(
-            prompt=prompt, cwd=os.getcwd(), session_id=session_id,
+            prompt=prompt, cwd=os.getcwd(),
             backend_name=backend_name, user_id=user["id"],
         ):
             if evt_type == "text":
@@ -140,7 +140,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     backend_name = cfg.get("backend", "opencode")
     history = get_messages(conv_id, limit=20)
     prompt = _build_chat_prompt(body.message, body.repo_key, history)
-    session_id = conv.get("session_id", "") if conv else ""
+    # Don't pass session_id — let opencode auto-create its own
 
     from src.agent.executor import stream_agent
 
@@ -151,7 +151,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         def agent_worker():
             try:
                 for evt_type, data in stream_agent(
-                    prompt=prompt, cwd=os.getcwd(), session_id=session_id,
+                    prompt=prompt, cwd=os.getcwd(),
                     backend_name=backend_name, user_id=user["id"],
                 ):
                     q.put_nowait((evt_type, data))
