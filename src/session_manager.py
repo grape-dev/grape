@@ -363,14 +363,15 @@ def unbind_user_im(user_id: int, provider: str = "feishu"):
 
 # ====== chat_conversations CRUD ======
 
-def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "", title: str = "") -> str:
+def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "", title: str = "",
+                        user_gitcode_token: str = "") -> str:
     import uuid
     cid = str(uuid.uuid4())
-    session_id = ""  # real opencode session_id will be captured on first call
+    session_id = ""
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT INTO chat_conversations (id, user_id, session_id, repo_key, im_channel_id, title) VALUES (?,?,?,?,?,?)",
-                  (cid, user_id, session_id, repo_key, im_channel_id, title))
+        c.execute("INSERT INTO chat_conversations (id, user_id, session_id, repo_key, im_channel_id, title, user_gitcode_token) VALUES (?,?,?,?,?,?,?)",
+                  (cid, user_id, session_id, repo_key, im_channel_id, title, user_gitcode_token))
         db.commit()
     return cid
 
@@ -379,21 +380,21 @@ def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) ->
     with db_lock:
         c = db.cursor()
         if repo_key:
-            c.execute("SELECT id, user_id, session_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? AND repo_key=? ORDER BY updated_at DESC LIMIT ?", (user_id, repo_key, limit))
+            c.execute("SELECT id, user_id, session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? AND repo_key=? ORDER BY updated_at DESC LIMIT ?", (user_id, repo_key, limit))
         else:
-            c.execute("SELECT id, user_id, session_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
-        return [{"id": r[0], "user_id": r[1], "session_id": r[2] or "", "repo_key": r[3], "im_channel_id": r[4], "title": r[5], "status": r[6], "created_at": r[7], "updated_at": r[8]} for r in c.fetchall()]
+            c.execute("SELECT id, user_id, session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
+        return [{"id": r[0], "user_id": r[1], "session_id": r[2] or "", "user_gitcode_token": r[3] or "", "repo_key": r[4], "im_channel_id": r[5], "title": r[6], "status": r[7], "created_at": r[8], "updated_at": r[9]} for r in c.fetchall()]
 
 
 def get_conversation(conv_id: str) -> dict | None:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, user_id, session_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE id=?", (conv_id,))
+        c.execute("SELECT id, user_id, session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE id=?", (conv_id,))
         row = c.fetchone()
         if not row:
             return None
-        return {"id": row[0], "user_id": row[1], "session_id": row[2] or "", "repo_key": row[3], "im_channel_id": row[4],
-                "title": row[5], "status": row[6], "created_at": row[7], "updated_at": row[8]}
+        return {"id": row[0], "user_id": row[1], "session_id": row[2] or "", "user_gitcode_token": row[3] or "", "repo_key": row[4], "im_channel_id": row[5],
+                "title": row[6], "status": row[7], "created_at": row[8], "updated_at": row[9]}
 
 
 def update_conversation(conv_id: str, **kwargs):

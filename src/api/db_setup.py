@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS chat_conversations (
     id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,
     session_id TEXT DEFAULT '',
+    user_gitcode_token TEXT DEFAULT '',
     repo_key TEXT DEFAULT '',
     im_channel_id TEXT DEFAULT '',
     title TEXT DEFAULT '',
@@ -339,6 +340,7 @@ def _migrate_tables():
         "ALTER TABLE agent_sessions ADD COLUMN skill TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN session_id TEXT DEFAULT ''",
         "ALTER TABLE chat_config ADD COLUMN skill TEXT DEFAULT ''",
+        "ALTER TABLE chat_conversations ADD COLUMN user_gitcode_token TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:

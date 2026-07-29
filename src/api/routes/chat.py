@@ -87,12 +87,16 @@ def _auto_title(conv: dict, message: str):
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
+    # Get user's gitcode token
+    acc = user_db.get_user_account(user["username"]) or {}
+    user_token = acc.get("gitcode_api_token", "")
+
     if conv_id:
         conv = get_conversation(conv_id)
         if not conv or conv["user_id"] != user["id"]:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
     else:
-        conv_id = create_conversation(user["id"], body.repo_key)
+        conv_id = create_conversation(user["id"], body.repo_key, user_gitcode_token=user_token)
     conv = get_conversation(conv_id)
     _auto_title(conv, body.message)
 
@@ -107,6 +111,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     session_id = conv.get("session_id", "") if conv else ""
     if session_id and not session_id.startswith("ses_"):
         session_id = ""
+    gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
+    env_extra = {"GITCODE_API_TOKEN": gitcode_token} if gitcode_token else None
 
     from src.agent.executor import stream_agent
     loop = asyncio.get_event_loop()
@@ -118,7 +124,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         for evt_type, data in stream_agent(
             prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
             backend_name=backend_name, user_id=user["id"],
-            account=user["username"],
+            account=user["username"], env_extra=env_extra,
         ):
             if evt_type == "text":
                 text = data.get("text", "") if isinstance(data, dict) else str(data)
@@ -152,12 +158,15 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 @router.post("/send/stream")
 async def send_message_stream(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
+    acc = user_db.get_user_account(user["username"]) or {}
+    user_token = acc.get("gitcode_api_token", "")
+
     if conv_id:
         conv = get_conversation(conv_id)
         if not conv or conv["user_id"] != user["id"]:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
     else:
-        conv_id = create_conversation(user["id"], body.repo_key)
+        conv_id = create_conversation(user["id"], body.repo_key, user_gitcode_token=user_token)
     conv = get_conversation(conv_id)
     _auto_title(conv, body.message)
 
@@ -172,6 +181,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     session_id = conv.get("session_id", "") if conv else ""
     if session_id and not session_id.startswith("ses_"):
         session_id = ""
+    gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
+    env_extra = {"GITCODE_API_TOKEN": gitcode_token} if gitcode_token else None
 
     from src.agent.executor import stream_agent
 
@@ -186,7 +197,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 for evt_type, data in stream_agent(
                     prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
                     backend_name=backend_name, user_id=user["id"],
-                    account=user["username"],
+                    account=user["username"], env_extra=env_extra,
                 ):
                     if evt_type == "done" and isinstance(data, dict):
                         nsid = data.get("oc_session_id", "")
