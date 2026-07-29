@@ -1,11 +1,12 @@
-"""事件路由 — 从 DB 读取路由规则，三级路由策略"""
+"""事件路由 — 三级路由策略（DB驱动）"""
+import json
 from src.session_manager import db, db_lock
 from src.config import log
 
 
 def get_domain_skill(event_type: str, repo_key: str = "",
                      user_id: int = 0) -> str:
-    """三级路由：repo_skill_mapping(user) → event_route_config(repo) → event_route_config(global)"""
+    """三级路由：repo_skill_mapping(user) → event_route_config(repo) → agent_type_config.subscribe_events(global)"""
     # 第一级：用户自定义映射（repo_skill_mapping）
     if user_id:
         try:
@@ -38,18 +39,20 @@ def get_domain_skill(event_type: str, repo_key: str = "",
         except Exception:
             pass
 
-    # 第三级：全局路由（event_route_config.repo_key = ''）
+    # 第三级：全局路由（agent_type_config.subscribe_events）
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT skill FROM event_route_config WHERE repo_key='' AND event_type=? ORDER BY priority DESC LIMIT 1",
-                (event_type,)
-            )
-            row = c.fetchone()
-            if row:
-                log.info(f"Route: global -> {row[0]} (type={event_type})")
-                return row[0]
+            c.execute("SELECT agent_type, subscribe_events FROM agent_type_config WHERE subscribe_events IS NOT NULL AND subscribe_events!='[]'")
+            for r in c.fetchall():
+                agent_type = r[0]
+                try:
+                    events = json.loads(r[1])
+                    if isinstance(events, list) and event_type in events:
+                        log.info(f"Route: subscribe -> {agent_type} (type={event_type})")
+                        return agent_type
+                except (json.JSONDecodeError, TypeError):
+                    pass
     except Exception:
         pass
 
@@ -63,9 +66,16 @@ def get_agent_skill_map() -> dict[str, str]:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT event_type, skill FROM event_route_config WHERE repo_key='' ORDER BY event_type")
+            c.execute("SELECT agent_type, subscribe_events FROM agent_type_config WHERE subscribe_events IS NOT NULL AND subscribe_events!='[]'")
             for r in c.fetchall():
-                result[r[0]] = r[1]
+                agent_type = r[0]
+                try:
+                    events = json.loads(r[1])
+                    if isinstance(events, list):
+                        for evt in events:
+                            result[evt] = agent_type
+                except (json.JSONDecodeError, TypeError):
+                    pass
     except Exception:
         pass
     return result

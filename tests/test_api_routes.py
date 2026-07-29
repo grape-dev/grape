@@ -29,11 +29,11 @@ def setup_module():
     from src.session_manager import db, db_lock
     with db_lock:
         for at, dn in [("vod","VOD Agent"),("issue","Issue Agent"),("coding","Coding Agent"),("qa","QA Agent"),("sre","SRE Agent")]:
-            db.execute("INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, icon, order_num) VALUES (?,?,?,?,?)",
-                       (at, dn, f"Description for {at}", "●", 0))
+            db.execute("INSERT OR REPLACE INTO agent_type_config (agent_type, display_name, description, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?)",
+                       (at, dn, f"Description for {at}", "●", 0, '["issue_opened"]' if at == "issue" else "[]"))
         for skill, dn, parent in [("issue","Issue 管理","issue"),("implementation","代码实现","coding"),("pr","PR 管理","coding")]:
-            db.execute("INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, parent_agent_type) VALUES (?,?,?,?)",
-                       (skill, dn, f"{dn} description", parent))
+            db.execute("INSERT OR REPLACE INTO agent_type_config (agent_type, display_name, description, parent_agent_type, subscribe_events) VALUES (?,?,?,?,?)",
+                       (skill, dn, f"{dn} description", parent, '["issue_opened"]' if skill == "issue" else "[]"))
         db.commit()
 
 def teardown_module():

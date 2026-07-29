@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS agent_type_config (
     order_num INTEGER DEFAULT 0,
     parent_agent_type TEXT DEFAULT '',
     skill_path TEXT DEFAULT '',
+    subscribe_events TEXT DEFAULT '[]',
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -284,9 +285,10 @@ def _insert_seed_data(table: str, data: dict):
                 default_backend = info.get("backend", "opencode")
                 icon = info.get("icon", "")
                 order_num = info.get("order_num", 0)
+                subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
                 c.execute(
-                    "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, default_backend, icon, order_num) VALUES (?,?,?,?,?,?)",
-                    (agent_type, display_name, description, default_backend, icon, order_num)
+                    "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
+                    (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events)
                 )
 
         elif table == "agent_type_config_skills":
@@ -296,16 +298,17 @@ def _insert_seed_data(table: str, data: dict):
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
                 skill_path = info.get("path", skill_name)
+                subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
                 # Try UPDATE first (row may already exist from agent-description.json)
                 c.execute(
-                    "UPDATE agent_type_config SET parent_agent_type=?, description=?, skill_path=? WHERE agent_type=? AND parent_agent_type=''",
-                    (agent_type, description, skill_path, skill_name)
+                    "UPDATE agent_type_config SET parent_agent_type=?, description=?, skill_path=?, subscribe_events=? WHERE agent_type=? AND parent_agent_type=''",
+                    (agent_type, description, skill_path, subscribe_events, skill_name)
                 )
                 if c.rowcount == 0:
                     # Skill-only key (not in agent-description.json), INSERT
                     c.execute(
-                        "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, parent_agent_type, skill_path) VALUES (?,?,?,?,?)",
-                        (skill_name, display_name, description, agent_type, skill_path)
+                        "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, parent_agent_type, skill_path, subscribe_events) VALUES (?,?,?,?,?,?)",
+                        (skill_name, display_name, description, agent_type, skill_path, subscribe_events)
                     )
 
         elif table == "agent_registry":
@@ -346,6 +349,7 @@ def _migrate_tables():
         "ALTER TABLE agent_sessions ADD COLUMN repo_gitcode_token TEXT DEFAULT ''",
         "ALTER TABLE agent_type_config ADD COLUMN skill_path TEXT DEFAULT ''",
         "ALTER TABLE feishu_users ADD COLUMN user_id INTEGER DEFAULT 0",
+        "ALTER TABLE agent_type_config ADD COLUMN subscribe_events TEXT DEFAULT '[]'",
     ]
     for sql in migrations:
         try:
