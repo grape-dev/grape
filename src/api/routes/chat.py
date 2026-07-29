@@ -1,7 +1,13 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
 import json, asyncio, tempfile, os, threading
 
-_CHAT_CWD = tempfile.gettempdir()
+from src.config import WORKSPACE_DIR
+
+def _get_chat_cwd(user_id: int, conv_id: str) -> str:
+    """每个 conversation 独立工作目录，避免相互影响"""
+    path = os.path.join(WORKSPACE_DIR, "chat", str(user_id), conv_id)
+    os.makedirs(path, exist_ok=True)
+    return path
 # 限制同时运行的 opencode 子进程数（防止大量用户并发导致服务器崩溃）
 _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -125,7 +131,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         nonlocal new_session_id
         with _CHAT_AGENT_SEMAPHORE:
             for evt_type, data in stream_agent(
-                prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
+                prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=session_id,
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], env_extra=env_extra,
             ):
@@ -206,7 +212,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 return
             try:
                 for evt_type, data in stream_agent(
-                    prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
+                prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], env_extra=env_extra,
                 ):
