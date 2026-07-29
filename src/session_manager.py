@@ -179,12 +179,20 @@ def get_feishu_open_id(repo_key, gitcode_user):
 
 
 def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name=""):
-    """写入 GitCode → Feishu 用户映射"""
+    """写入 GitCode → Feishu 用户映射（含 user_id）"""
+    user_id = 0
+    try:
+        from src.user import db as user_db
+        acc = user_db.get_user_account(gitcode_user)
+        if acc:
+            user_id = acc.get("id", 0)
+    except Exception:
+        pass
     with db_lock:
         c = db.cursor()
         c.execute(
-            "INSERT OR REPLACE INTO feishu_users (repo_key, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?)",
-            (repo_key, gitcode_user, open_id, feishu_name, datetime.now().isoformat())
+            "INSERT OR REPLACE INTO feishu_users (repo_key, gitcode_user, feishu_open_id, feishu_name, user_id, updated_at) VALUES (?,?,?,?,?,?)",
+            (repo_key, gitcode_user, open_id, feishu_name, user_id, datetime.now().isoformat())
         )
         db.commit()
 

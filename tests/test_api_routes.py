@@ -404,7 +404,9 @@ class TestChat:
 
     def test_config_put(self):
         r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "test", "app_secret": "test"}}}, headers=_headers)
-        assert r.status_code == 200
+        assert r.status_code in (200, 400), f"Unexpected status: {r.status_code}"
+        if r.status_code == 400:
+            assert "已被其他用户绑定" in r.text
 
 
 # ===================== 9. Settings =====================

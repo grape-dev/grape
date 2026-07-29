@@ -203,6 +203,7 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)",
         "CREATE INDEX IF NOT EXISTS idx_agent_sessions_repo ON agent_sessions(repo_key)",
         "CREATE INDEX IF NOT EXISTS idx_event_route_config_repo ON event_route_config(repo_key)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_config_feishu_app_id ON chat_config(feishu_app_id) WHERE feishu_app_id != ''",
     ]
     for idx in indexes:
         try:
@@ -344,6 +345,7 @@ def _migrate_tables():
         "ALTER TABLE chat_conversations ADD COLUMN user_gitcode_token TEXT DEFAULT ''",
         "ALTER TABLE agent_sessions ADD COLUMN repo_gitcode_token TEXT DEFAULT ''",
         "ALTER TABLE agent_type_config ADD COLUMN skill_path TEXT DEFAULT ''",
+        "ALTER TABLE feishu_users ADD COLUMN user_id INTEGER DEFAULT 0",
     ]
     for sql in migrations:
         try:

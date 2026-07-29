@@ -435,6 +435,13 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
     feishu = im.get("feishu", {})
     kwargs = {}
     if feishu.get("app_id"):
+        # 校验 feishu_app_id 唯一性
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT user_id FROM chat_config WHERE feishu_app_id=? AND user_id!=?", (feishu["app_id"], user["id"]))
+            if c.fetchone():
+                raise HTTPException(status_code=400, detail={"code": 400, "message": "该飞书 App ID 已被其他用户绑定"})
         kwargs["feishu_app_id"] = feishu["app_id"]
     if feishu.get("app_secret"):
         kwargs["feishu_app_secret"] = feishu["app_secret"]

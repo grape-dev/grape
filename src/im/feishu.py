@@ -539,10 +539,8 @@ def parse_event_data(event):
 def start_ws(on_message_callback, account_name: str = "default"):
     """启动 WebSocket 长连接。支持多账户，每个 account 一个 WS 连接。"""
     import asyncio
-    # 创建独立的事件循环（在子线程中运行）
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    # 覆盖 lark-oapi 模块级 loop（它在 import 时捕获了主线程的 loop）
     import lark_oapi.ws.client as _lark_ws
     _lark_ws.loop = loop
 
@@ -550,14 +548,33 @@ def start_ws(on_message_callback, account_name: str = "default"):
     if not ensure_configured():
         return
 
-    # 从账户配置获取凭据
-    from src.config import get_account
-    acc = get_account(account_name)
-    app_id = acc.get("feishu_app_id", FEISHU_APP_ID)
-    app_secret = acc.get("feishu_app_secret", FEISHU_APP_SECRET)
+    # 从 chat_config 表获取飞书凭据（不再依赖 .env 或 accounts.json）
+    app_id = FEISHU_APP_ID or os.environ.get("FEISHU_APP_ID", "")
+    app_secret = FEISHU_APP_SECRET or os.environ.get("FEISHU_APP_SECRET", "")
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT feishu_app_id, feishu_app_secret FROM chat_config WHERE feishu_app_id!='' LIMIT 1")
+            row = c.fetchone()
+            if row:
+                app_id = row[0]
+                app_secret = row[1] or app_secret
+        except Exception:
+            pass
+
     if not app_id or not app_secret:
-        log.warning(f"Feishu: account '{account_name}' not configured, skipping WS")
+        log.warning(f"Feishu: no feishu_app_id configured in chat_config, skipping WS")
         return
+
+    # 记录当前 WS 使用的 app_id 到 meta 表（供后续查询 user_id 用）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ws_feishu_app_id', ?)", (app_id,))
+            db.commit()
+    except Exception:
+        pass
 
     # 创建事件处理器（注入 account_name）
     def _handle_with_account(event):
@@ -581,6 +598,21 @@ def start_ws(on_message_callback, account_name: str = "default"):
     _ws_clients[account_name] = client
     log.info(f"Feishu WS client starting (account={account_name})...")
     client.start()
+
+
+def get_user_id_by_app_id(app_id: str) -> int | None:
+    """通过 feishu_app_id 查找关联的 user_id（chat_config）"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT user_id FROM chat_config WHERE feishu_app_id=?", (app_id,))
+            row = c.fetchone()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+    return None
 
 
 def stop_ws(account_name: str | None = None):

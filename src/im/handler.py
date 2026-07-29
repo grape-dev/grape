@@ -55,24 +55,46 @@ def process_chat(parsed: dict):
         if not repo_key:
             reply_parts = ["当前未绑定任何仓库至本群。"]
             try:
+                # 通过 meta 表中记录的 ws_feishu_app_id 查找 user_id
+                user_id = None
+                app_id = ""
                 c = db.cursor()
-                c.execute("SELECT DISTINCT repo_key, repository, source FROM sessions ORDER BY last_active_at DESC LIMIT 10")
-                rows = c.fetchall()
-                if rows:
-                    reply_parts.append("已有处理的仓库：")
-                    for r in rows:
-                        reply_parts.append(f"  📦 {r[1]}")
-                    reply_parts.append("")
-                    reply_parts.append("绑定方式（任选一种）：")
-                    reply_parts.append(f'  "绑定到 {rows[0][1]}"')
-                    reply_parts.append(f'  "使用 {rows[0][1]}"')
-                    reply_parts.append(f"  /bind {rows[0][1]}")
+                c.execute("SELECT value FROM meta WHERE key='ws_feishu_app_id'")
+                row = c.fetchone()
+                if row:
+                    app_id = row[0]
+                    from src.im.feishu import get_user_id_by_app_id
+                    user_id = get_user_id_by_app_id(app_id)
+                if user_id:
+                    # 查询该用户已加入的仓库
+                    from src.user import db as user_db
+                    repos = user_db.get_managed_repos(user_id)
+                    if repos:
+                        reply_parts.append("你已加入以下仓库，请选择绑定的仓库：")
+                        for i, r in enumerate(repos, 1):
+                            reply_parts.append(f"  {i}. {r['full_name']}")
+                        reply_parts.append("")
+                        reply_parts.append("发送 /bind 序号 或 /bind owner/repo 完成绑定")
+                    else:
+                        reply_parts.append("你可能还没有加入任何仓库。")
+                        reply_parts.append("请先在网页端加入仓库，或发送 /bind owner/repo 直接绑定。")
                 else:
-                    reply_parts.append("尚无任何仓库的 Session 记录。")
-                    reply_parts.append("请先在 GitCode 上操作仓库触发事件，")
-                    reply_parts.append('或发送：绑定到 owner/repo_name')
+                    # 兜底：显示最近的 session 记录
+                    c.execute("SELECT DISTINCT repo_key, repository, source FROM sessions ORDER BY last_active_at DESC LIMIT 10")
+                    rows = c.fetchall()
+                    if rows:
+                        reply_parts.append("已有处理的仓库：")
+                        for r in rows:
+                            reply_parts.append(f"  📦 {r[1]}")
+                        reply_parts.append("")
+                        reply_parts.append("绑定方式（任选一种）：")
+                        reply_parts.append(f'  "绑定到 {rows[0][1]}"')
+                        reply_parts.append(f'  "使用 {rows[0][1]}"')
+                        reply_parts.append(f"  /bind {rows[0][1]}")
+                    else:
+                        reply_parts.append("尚无任何仓库记录。请发送 /bind owner/repo 绑定仓库。")
             except Exception as e:
-                log.warning(f"Feishu: query sessions error: {e}")
+                log.warning(f"Feishu: resolve user repos error: {e}")
                 reply_parts.append("请发送：绑定到 owner/repo_name")
             reply_text(msg_id, "\n".join(reply_parts))
             return
