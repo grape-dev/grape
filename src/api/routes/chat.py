@@ -293,10 +293,7 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
             pass
         from src.config import SKILLS_DIR
         skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
-        if os.path.exists(skill_path):
-            with open(skill_path, encoding="utf-8") as f:
-                skill_content = f.read()
-            parts.append(f"\n## Current Skill: {skill_name}\n{skill_content}\n\nFollow the instructions above for this skill.")
+        parts.append(f"\n## Current Skill: {skill_name}\nSkill file: {skill_path}\nRead this file and follow its instructions.")
     # GitCode API 访问说明（无论是否配置 skill 都注入）
     parts.append("""
 ## GitCode API Access
