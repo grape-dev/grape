@@ -91,6 +91,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     prompt = _build_chat_prompt(body.message, repo_key, history)
     session_id = conv.get("session_id", "") if conv else ""
+    if session_id and not session_id.startswith("ses_"):
+        session_id = ""
 
     from src.agent.executor import stream_agent
     loop = asyncio.get_event_loop()
@@ -152,6 +154,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     prompt = _build_chat_prompt(body.message, repo_key, history)
     session_id = conv.get("session_id", "") if conv else ""
+    if session_id and not session_id.startswith("ses_"):
+        session_id = ""
 
     from src.agent.executor import stream_agent
 
