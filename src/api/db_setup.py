@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS agent_type_config (
     icon TEXT DEFAULT '',
     order_num INTEGER DEFAULT 0,
     parent_agent_type TEXT DEFAULT '',
+    skill_path TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -288,21 +289,22 @@ def _insert_seed_data(table: str, data: dict):
                 )
 
         elif table == "agent_type_config_skills":
-            # skill-description.json: {"skill_name": {"name": "...", "agent_type": "...", ...}}
+            # skill-description.json: {"skill_name": {"name": "...", "agent_type": "...", "path": "...", ...}}
             for skill_name, info in data.items():
                 display_name = info.get("name", skill_name)
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
+                skill_path = info.get("path", skill_name)
                 # Try UPDATE first (row may already exist from agent-description.json)
                 c.execute(
-                    "UPDATE agent_type_config SET parent_agent_type=?, description=? WHERE agent_type=? AND parent_agent_type=''",
-                    (agent_type, description, skill_name)
+                    "UPDATE agent_type_config SET parent_agent_type=?, description=?, skill_path=? WHERE agent_type=? AND parent_agent_type=''",
+                    (agent_type, description, skill_path, skill_name)
                 )
                 if c.rowcount == 0:
                     # Skill-only key (not in agent-description.json), INSERT
                     c.execute(
-                        "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, parent_agent_type) VALUES (?,?,?,?)",
-                        (skill_name, display_name, description, agent_type)
+                        "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, parent_agent_type, skill_path) VALUES (?,?,?,?,?)",
+                        (skill_name, display_name, description, agent_type, skill_path)
                     )
 
         elif table == "agent_registry":
@@ -341,6 +343,7 @@ def _migrate_tables():
         "ALTER TABLE chat_config ADD COLUMN skill TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN user_gitcode_token TEXT DEFAULT ''",
         "ALTER TABLE agent_sessions ADD COLUMN repo_gitcode_token TEXT DEFAULT ''",
+        "ALTER TABLE agent_type_config ADD COLUMN skill_path TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:

@@ -273,8 +273,20 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
         except Exception:
             pass
     if skill_name:
+        # 从 DB 查找 skill 的实际目录路径
+        skill_dir = skill_name
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT skill_path FROM agent_type_config WHERE agent_type=? AND skill_path!=''", (skill_name,))
+                row = c.fetchone()
+                if row:
+                    skill_dir = row[0]
+        except Exception:
+            pass
         from src.config import SKILLS_DIR
-        skill_path = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
+        skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
         if os.path.exists(skill_path):
             with open(skill_path, encoding="utf-8") as f:
                 skill_content = f.read()
@@ -347,8 +359,8 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT agent_type, display_name, description FROM agent_type_config WHERE parent_agent_type='chat' ORDER BY agent_type")
-            chat_skills = [{"name": r[0], "display_name": r[1], "description": r[2]} for r in c.fetchall()]
+            c.execute("SELECT agent_type, display_name, description, skill_path FROM agent_type_config WHERE parent_agent_type='chat' ORDER BY agent_type")
+            chat_skills = [{"name": r[0], "display_name": r[1], "description": r[2], "skill_path": r[3] or r[0]} for r in c.fetchall()]
         except Exception:
             pass
     return {

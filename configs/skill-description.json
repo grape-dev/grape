@@ -2,56 +2,67 @@
   "issue": {
     "name": "Issue 管理",
     "agent_type": "issue",
+    "path": "issue",
     "description": "Issue 全生命周期管理：分类、打标签、指派人、设置里程碑、关联 PR、回复评论"
   },
   "implementation": {
     "name": "代码实现",
     "agent_type": "coding",
+    "path": "implementation",
     "description": "代码实现与 PR 创建：分析问题、制定方案、编码实现、提交 PR"
   },
   "pr": {
     "name": "PR 管理",
     "agent_type": "coding",
+    "path": "pr",
     "description": "Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并操作"
   },
   "skill-pr": {
     "name": "技能仓库 PR 审查",
     "agent_type": "qa",
+    "path": "skill-pr",
     "description": "技能仓库专有 PR 审查：校验自定义技能格式、质量检查"
   },
   "build-debug": {
     "name": "构建调试",
     "agent_type": "sre",
+    "path": "build-debug",
     "description": "构建失败诊断：分析构建日志、识别常见错误模式、修复编译问题"
   },
   "cloud-deploy": {
     "name": "云部署",
     "agent_type": "sre",
+    "path": "cloud-deploy",
     "description": "云部署：SSH 登录服务器、拉取代码、重启服务、健康检查"
   },
   "deploy-guard": {
     "name": "部署安全审查",
     "agent_type": "sre",
+    "path": "deploy-guard",
     "description": "部署前安全合规检查：审核代码变更、检查配置、验证部署条件"
   },
   "changelog-gen": {
     "name": "变更日志生成",
     "agent_type": "sre",
+    "path": "changelog-gen",
     "description": "基于 commit 历史自动生成 CHANGELOG"
   },
   "incident-triage": {
     "name": "事件分诊",
     "agent_type": "sre",
+    "path": "incident-triage",
     "description": "生产事件分诊与定级：判断影响范围、确定优先级、触发应急响应"
   },
   "im-notify": {
     "name": "IM 通知",
     "agent_type": "chat",
+    "path": "im-notify",
     "description": "仓库事件监控与飞书通知：Issue 指派、PR 审查、部署结果等"
   },
   "chat": {
     "name": "对话助手",
     "agent_type": "chat",
+    "path": "chat",
     "description": "IM 对话处理：判断话题相关性、决定是否回复、能力边界管理"
   }
 }
