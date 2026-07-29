@@ -18,14 +18,7 @@ async def lifespan(app: FastAPI):
     try:
         from src.im.handler import process_chat
         from src.im.feishu import start_ws
-        import asyncio
-        def _run_feishu_ws():
-            try:
-                asyncio.set_event_loop(asyncio.new_event_loop())
-                start_ws(process_chat)
-            except Exception as e:
-                log.warning(f"Feishu WS error: {e}")
-        t = threading.Thread(target=_run_feishu_ws, daemon=True)
+        t = threading.Thread(target=start_ws, args=(process_chat,), daemon=True)
         t.start()
         log.info("Feishu WS started in background thread")
     except Exception as e:

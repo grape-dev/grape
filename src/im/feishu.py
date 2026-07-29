@@ -538,6 +538,14 @@ def parse_event_data(event):
 
 def start_ws(on_message_callback, account_name: str = "default"):
     """启动 WebSocket 长连接。支持多账户，每个 account 一个 WS 连接。"""
+    import asyncio
+    # 创建独立的事件循环（在子线程中运行）
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    # 覆盖 lark-oapi 模块级 loop（它在 import 时捕获了主线程的 loop）
+    import lark_oapi.ws.client as _lark_ws
+    _lark_ws.loop = loop
+
     global _ws_clients
     if not ensure_configured():
         return
