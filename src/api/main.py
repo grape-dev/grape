@@ -1,15 +1,39 @@
 """Agentic DevOps API — FastAPI REST API Server (port 3000)"""
-import sys, os
+import sys, os, threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from contextlib import asynccontextmanager
 
 from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook
 
-app = FastAPI(title="Agentic DevOps API", version="2.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    from src.config import log
+    try:
+        from src.im.handler import process_chat
+        from src.im.feishu import start_ws
+        t = threading.Thread(target=start_ws, args=(process_chat,), daemon=True)
+        t.start()
+        log.info("Feishu WS started in background thread")
+    except Exception as e:
+        log.warning(f"Feishu WS start skipped: {e}")
+    yield
+    # Shutdown
+    try:
+        from src.im.feishu import stop_ws
+        stop_ws()
+        log.info("Feishu WS stopped")
+    except Exception:
+        pass
+
+
+app = FastAPI(title="Agentic DevOps API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
