@@ -1,5 +1,5 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
-import json, asyncio, uuid
+import json, asyncio, uuid, os
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -13,6 +13,10 @@ from src.session_manager import (
 )
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+CHAT_SYSTEM_PROMPT = """You are a helpful DevOps assistant integrated with GitCode.
+Answer questions about repositories, issues, pull requests, and DevOps workflows.
+Keep responses concise and actionable."""
 
 
 class ChatMessage(BaseModel):
@@ -56,7 +60,6 @@ async def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict =
 
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
-    # 自动创建或复用对话
     conv_id = body.conversation_id
     if conv_id:
         conv = get_conversation(conv_id)
@@ -65,16 +68,34 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     else:
         conv_id = create_conversation(user["id"], body.repo_key)
 
-    # 保存用户消息
     add_message(conv_id, "user", body.message)
 
-    # mock 回复
-    reply = (f"收到您的消息：「{body.message}」\n\n"
-             f"当前使用您的个人 Token 进行操作。"
-             f"需要我帮您做什么？")
+    cfg = _get_chat_config(user["id"])
+    backend_name = cfg.get("backend", "opencode")
+    history = get_messages(conv_id, limit=20) if body.conversation_id else []
+    prompt = _build_chat_prompt(body.message, body.repo_key, history)
+
+    from src.agent.executor import stream_agent
+    loop = asyncio.get_event_loop()
+    collected = []
+
+    def run_agent():
+        for evt_type, data in stream_agent(
+            prompt=prompt, cwd=os.getcwd(),
+            backend_name=backend_name, user_id=user["id"],
+        ):
+            if evt_type == "text":
+                collected.append(data.get("text", ""))
+            elif evt_type in ("done", "error"):
+                break
+        return "".join(collected)
+
+    reply = await loop.run_in_executor(None, run_agent)
+    if not reply:
+        reply = f"收到您的消息：「{body.message}」\n\n当前使用 {backend_name} 后端处理。"
+
     add_message(conv_id, "agent", reply)
     touch_conversation(conv_id)
-
     return {"reply": reply, "conversation_id": conv_id}
 
 
@@ -90,30 +111,81 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
     add_message(conv_id, "user", body.message)
 
+    cfg = _get_chat_config(user["id"])
+    backend_name = cfg.get("backend", "opencode")
+    history = get_messages(conv_id, limit=20)
+    prompt = _build_chat_prompt(body.message, body.repo_key, history)
+
+    from src.agent.executor import stream_agent
+
     async def event_stream():
-        yield f"data: {json.dumps({'type': 'status', 'text': '思考中...', 'conversation_id': conv_id})}\n\n"
-        await asyncio.sleep(0.3)
+        q = asyncio.Queue()
+        loop = asyncio.get_event_loop()
 
-        steps = [
-            ("分析中", "正在分析您的请求..."),
-            ("处理", f"理解问题: {body.message[:50]}..."),
-            ("生成", "正在生成回复..."),
-            ("完成", f"收到您的消息：「{body.message}」\n\n当前使用您的个人 Token 进行操作。需要我帮您做什么？"),
-        ]
+        def agent_worker():
+            try:
+                for evt_type, data in stream_agent(
+                    prompt=prompt, cwd=os.getcwd(),
+                    backend_name=backend_name, user_id=user["id"],
+                ):
+                    q.put_nowait((evt_type, data))
+            except Exception as e:
+                q.put_nowait(("error", str(e)))
+            finally:
+                q.put_nowait(None)
 
-        for s_type, s_text in steps:
-            await asyncio.sleep(0.2)
-            yield f"data: {json.dumps({'type': s_type, 'text': s_text, 'conversation_id': conv_id})}\n\n"
+        loop.run_in_executor(None, agent_worker)
 
-        add_message(conv_id, "agent", steps[-1][1])
+        yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...', 'conversation_id': conv_id})}\n\n"
+
+        final_text = ""
+        while True:
+            item = await q.get()
+            if item is None:
+                break
+            evt_type, data = item
+            if evt_type == "text":
+                text = data.get("text", "")
+                if text:
+                    final_text += text
+                    yield f"data: {json.dumps({'type': '生成中', 'text': final_text, 'conversation_id': conv_id})}\n\n"
+            elif evt_type == "error":
+                err_msg = str(data)
+                yield f"data: {json.dumps({'type': 'error', 'text': f'后端错误: {err_msg}', 'conversation_id': conv_id})}\n\n"
+                return
+            elif evt_type == "done":
+                break
+
+        if not final_text:
+            final_text = f"收到您的消息：「{body.message}」\n\n当前使用 {backend_name} 后端处理。"
+
+        add_message(conv_id, "agent", final_text)
         touch_conversation(conv_id)
-        yield f"data: {json.dumps({'type': 'done', 'text': steps[-1][1], 'conversation_id': conv_id})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+def _build_chat_prompt(message: str, repo_key: str, history: list) -> str:
+    parts = [CHAT_SYSTEM_PROMPT]
+    if repo_key:
+        parts.append(f"\nCurrent repository: {repo_key}")
+    # Include recent chat history for context
+    chat_history = [m for m in history if m.get("role") in ("user", "agent")][-10:]
+    if chat_history:
+        parts.append("\nConversation history:")
+        for m in chat_history:
+            role = "User" if m["role"] == "user" else "Assistant"
+            parts.append(f"{role}: {m['content'][:200]}")
+    parts.append(f"\nUser: {message}\nAssistant:")
+    return "\n".join(parts)
+
+
+# ====== Feedback ======
 
 
 # ====== Feedback ======
