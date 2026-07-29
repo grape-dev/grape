@@ -83,6 +83,7 @@ function loadConversations(autoSelect) {
       html += `<div class="conv-item" data-id="${c.id}"${active}>
         <div class="conv-title">${c.title || '新对话'}</div>
         <div class="conv-meta">${(c.created_at || '').substring(0,16)}</div>
+        <span class="conv-del" onclick="event.stopPropagation();deleteConversation('${c.id}')">✕</span>
       </div>`;
     });
     if (convs.length === 0) {
@@ -109,6 +110,18 @@ function newConversation() {
     document.getElementById('chatInput').disabled = false;
     document.querySelector('.chat-in button').disabled = false;
   }).catch(e => app.showToast('创建失败: ' + e.message));
+}
+
+function deleteConversation(convId) {
+  if (!confirm('确定删除此对话及其所有消息？')) return;
+  API.del('/chat/conversations/' + convId).then(() => {
+    if (_currentConvId === convId) {
+      _currentConvId = null;
+      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">输入消息即可开始新对话</div>';
+    }
+    loadConversations();
+    app.showToast('对话已删除');
+  }).catch(e => app.showToast('删除失败: ' + e.message));
 }
 
 function switchConversation(convId) {

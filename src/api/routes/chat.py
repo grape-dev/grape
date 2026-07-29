@@ -10,6 +10,7 @@ from src.user import db as user_db
 from src.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
     add_message, get_messages, touch_conversation, update_conversation,
+    delete_messages_by_conv, delete_conversation,
     get_chat_config as _get_chat_config,
     set_chat_config as _set_chat_config,
 )
@@ -49,6 +50,16 @@ class NewConversationBody(BaseModel):
 async def new_conversation(body: NewConversationBody, user: dict = Depends(get_current_user)):
     cid = create_conversation(user["id"], repo_key=body.repo_key)
     return {"conversation_id": cid}
+
+
+@router.delete("/conversations/{conv_id}")
+async def remove_conversation(conv_id: str, user: dict = Depends(get_current_user)):
+    conv = get_conversation(conv_id)
+    if not conv or conv["user_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
+    delete_messages_by_conv(conv_id)
+    delete_conversation(conv_id)
+    return {"message": "对话已删除"}
 
 
 # ====== Messages ======

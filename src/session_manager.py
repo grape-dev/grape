@@ -445,6 +445,20 @@ def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> l
         return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": r[4]} for r in rows]
 
 
+def delete_messages_by_conv(conversation_id: str):
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM chat_messages WHERE conversation_id=?", (conversation_id,))
+        db.commit()
+
+
+def delete_conversation(conv_id: str):
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM chat_conversations WHERE id=?", (conv_id,))
+        db.commit()
+
+
 # ====== chat_config CRUD ======
 
 def get_chat_config(user_id: int) -> dict:
