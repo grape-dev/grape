@@ -146,7 +146,7 @@ function sendChatStream() {
 function doSend(input, body) {
   const msg = input.value.trim();
   input.value = '';
-  body.innerHTML += '<div class="msg l">' + msg + '</div>';
+  body.innerHTML += '<div class="msg l">' + msg.replace(/</g,'&lt;') + '</div>';
   const tid = 't' + Date.now();
   body.innerHTML += '<div class="msg r" id="' + tid + '">Thinking...</div>';
   body.scrollTop = body.scrollHeight;
@@ -162,14 +162,35 @@ function doSend(input, body) {
     headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token},
     body: JSON.stringify({message: msg, repo_key: repo ? repo.fullName : '', conversation_id: _currentConvId}),
     signal: ac.signal,
-  }).then(resp => {
+  }).then(async resp => {
+    const el = document.getElementById(tid);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      if (el) el.innerHTML = 'Error: ' + (err.detail?.message || resp.statusText);
+      return;
+    }
+    if (!resp.body) {
+      // Fallback: read as text
+      const text = await resp.text();
+      try {
+        const lines = text.split('\n');
+        lines.forEach(line => {
+          if (line.startsWith('data: ')) {
+            const d = JSON.parse(line.substring(6));
+            if (d.text && el) el.innerHTML = d.text;
+          }
+        });
+      } catch(e) {}
+      if (el) el.innerHTML = text || 'Done';
+      loadConversations();
+      return;
+    }
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '', finalText = '';
     function read() {
       reader.read().then(({done, value}) => {
         if (done) {
-          const el = document.getElementById(tid);
           if (el) el.innerHTML = finalText || 'Done';
           body.scrollTop = body.scrollHeight;
           _chatAbort = null;
@@ -184,16 +205,13 @@ function doSend(input, body) {
             try {
               const d = JSON.parse(line.substring(6));
               if (d.type === 'done') finalText = d.text;
-              else if (d.text) {
-                const el = document.getElementById(tid);
-                if (el) el.innerHTML = d.text;
-              }
+              else if (d.text && el) el.innerHTML = d.text;
             } catch(e) {}
           }
         });
         body.scrollTop = body.scrollHeight;
         read();
-      }).catch(e => { if (e.name !== 'AbortError') { const el = document.getElementById(tid); if (el) el.innerHTML = 'Error: ' + e.message; } });
+      }).catch(e => { if (e.name !== 'AbortError' && el) el.innerHTML = 'Error: ' + e.message; });
     }
     read();
   }).catch(e => { const el = document.getElementById(tid); if (el) el.innerHTML = 'Request failed: ' + e.message; });
