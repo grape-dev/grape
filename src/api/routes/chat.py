@@ -301,7 +301,7 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
     parts.append(f"\nUser{repo_note}: {message}\nAssistant:")
     prompt = "\n".join(parts)
     from src.config import log
-    log.info(f"Chat prompt ({len(prompt)} chars, skill={skill_name or 'none'}, repo={repo_key or 'none'}): {prompt[:300]}")
+    log.info(f"Chat prompt ({len(prompt)} chars, skill={skill_name or 'none'}, repo={repo_key or 'none'}): {prompt[:2000]}")
     return prompt
     return "\n".join(parts)
 
