@@ -58,6 +58,15 @@ async def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict =
 
 # ====== Send ======
 
+def _auto_title(conv: dict, message: str):
+    """首次消息时自动生成对话标题"""
+    if conv and not conv.get("title") and message:
+        title = message.strip()[:30]
+        if len(message) > 30:
+            title += "..."
+        update_conversation(conv["id"], title=title)
+
+
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
@@ -67,7 +76,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
     else:
         conv_id = create_conversation(user["id"], body.repo_key)
-        conv = get_conversation(conv_id)
+    conv = get_conversation(conv_id)
+    _auto_title(conv, body.message)
 
     add_message(conv_id, "user", body.message)
 
@@ -112,7 +122,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
     else:
         conv_id = create_conversation(user["id"], body.repo_key)
-        conv = get_conversation(conv_id)
+    conv = get_conversation(conv_id)
+    _auto_title(conv, body.message)
 
     add_message(conv_id, "user", body.message)
 

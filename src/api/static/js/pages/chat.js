@@ -5,7 +5,7 @@ function renderChat() {
   _currentConvId = null;
   const el = document.getElementById('pageContent');
   if (!el) return;
-  el.innerHTML = `<div class="chat-wrap">
+  el.innerHTML = `<div class="chat-wrap" style="height:calc(100vh - 96px)">
     <div class="chat-convlist" id="convList"></div>
     <div class="chat-main">
       <div class="chat-hdr"><h2>Chat Agent · Personal Assistant</h2></div>
