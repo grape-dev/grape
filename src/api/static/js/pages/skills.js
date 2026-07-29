@@ -60,6 +60,7 @@ function renderSkillDetail(data) {
   const ico = meta.icon || '◈';
   const tagClass = data.type === 'official' ? 'tg-c' : 'tg-d';
 
+  const content = (data.content || '').replace(/`/g, '\\`').replace(/\${/g, '\\${');
   el.innerHTML = `
     <button class="bt bt-o bt-s" onclick="app.nav('skills')" style="margin-bottom:12px">← 返回 Skills Library</button>
     <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
@@ -73,7 +74,7 @@ function renderSkillDetail(data) {
         </div>
         <div style="font-size:12px;color:var(--t2);margin-bottom:14px;line-height:1.5">${data.description}</div>
         <h3 style="font-size:13px;font-weight:600;margin-bottom:6px">SKILL.md</h3>
-        <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${data.content || '(无详细内容)'}</pre>
+        <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${content || '(无详细内容)'}</pre>
       </div>
       <div class="cd" style="padding:16px 20px;font-size:12px">
         <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">Skill Info</h3>
