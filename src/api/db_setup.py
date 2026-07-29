@@ -352,3 +352,10 @@ def _migrate_tables():
                 db.commit()
         except Exception:
             pass  # column already exists
+    # 补填已有技能的 skill_path（空值则用 agent_type 自身作为 path）
+    try:
+        with db_lock:
+            db.execute("UPDATE agent_type_config SET skill_path=agent_type WHERE skill_path='' AND parent_agent_type!=''")
+            db.commit()
+    except Exception:
+        pass
