@@ -104,10 +104,15 @@ async def update_notifications(body: NotificationPrefs, user: dict = Depends(get
 async def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
     repo_key = f"{owner}/{repo}"
     acc = user_db.get_user_account(repo_key) or {}
-    # 读取 repo 绑定的 Bot Token
     from src.user.db import get_bot_token_by_repo
     bot_token = get_bot_token_by_repo(owner, repo)
-    wh_token = acc.get("gitcode_webhook_token", "")
+    # 从 managed_repos 读取 webhook_token
+    wh_token = ""
+    repos = user_db.get_managed_repos(user["id"])
+    for r in repos:
+        if r["repo_owner"] == owner and r["repo_name"] == repo:
+            wh_token = r.get("gitcode_webhook_token", "")
+            break
 
     return {
         "devops_bot_token_exists": bool(bot_token),
@@ -128,20 +133,19 @@ async def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoCon
                                      user: dict = Depends(get_current_user)):
     repo_key = f"{owner}/{repo}"
     acc = user_db.get_user_account(repo_key) or {}
-    if body.webhook_token:
-        acc["gitcode_webhook_token"] = body.webhook_token
     if body.bot_username:
         acc["bot_usernames"] = body.bot_username
     user_db.save_user_account(repo_key, acc)
-    # 将 Bot Token 存储到 managed_repos
-    if body.bot_token:
-        from src.user.db import update_managed_repo_bot_token
-        # 找到该 repo 在 managed_repos 中的记录
-        repos = user_db.get_managed_repos(user["id"])
-        for r in repos:
-            if r["repo_owner"] == owner and r["repo_name"] == repo:
+    # 将 Bot Token 和 Webhook Token 存储到 managed_repos
+    from src.user.db import update_managed_repo_bot_token, update_managed_repo_webhook_token
+    repos = user_db.get_managed_repos(user["id"])
+    for r in repos:
+        if r["repo_owner"] == owner and r["repo_name"] == repo:
+            if body.bot_token:
                 update_managed_repo_bot_token(user["id"], owner, repo, body.bot_token)
-                break
+            if body.webhook_token:
+                update_managed_repo_webhook_token(user["id"], owner, repo, body.webhook_token)
+            break
     return {"message": "GitCode Repo 配置已更新"}
 
 

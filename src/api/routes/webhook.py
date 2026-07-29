@@ -2,7 +2,7 @@
 import json, hashlib, hmac, os
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
-from src.config import log, resolve_account_by_webhook_token
+from src.config import log
 from src.api.event_pipeline import run_pipeline
 
 router = APIRouter(tags=["webhook"])
@@ -14,18 +14,15 @@ async def gitcode_webhook(request: Request):
     body = await request.body()
     token = request.headers.get("X-GitCode-Token", "")
 
-    # Webhook Token 验证：通过 DB 中的 gitcode_webhook_token 校验
-    resolved_account = resolve_account_by_webhook_token(token)
-    if not resolved_account:
+    # Webhook Token 验证：从 managed_repos 查找匹配的 webhook_token
+    from src.user.db import resolve_repo_by_webhook_token
+    repo_full_name = resolve_repo_by_webhook_token(token)
+    if not repo_full_name:
         log.warning(f"Webhook rejected: invalid token")
         return JSONResponse(status_code=403, content={"code": 403, "message": "invalid webhook token"})
-    account = resolved_account
 
-    log.info(f"Webhook: token OK, account={account}")
-
-    # 通过事件管道处理
-    result = run_pipeline(body, dict(request.headers), account=account)
-
+    log.info(f"Webhook: token OK, repo={repo_full_name}")
+    result = run_pipeline(body, dict(request.headers), repo_key_override=f"gitcode:{repo_full_name}")
     return {"status": "ok", "seq": result.get("seq", 0), "event_type": result.get("event_type", "")}
 
 

@@ -106,12 +106,11 @@ def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: st
     return None
 
 
-def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int:
+def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webhook_password: str = "") -> int:
     """在指定仓库上创建 DevOps Bot webhook，返回 webhook_id。"""
-    # 从 DB 获取 webhook 密码
-    from src.user.db import get_user_account
-    acc = get_user_account(f"{owner}/{repo}") or {}
-    webhook_password = acc.get("gitcode_webhook_token", "")
+    if not webhook_password:
+        from src.user.db import get_bot_token_by_repo
+        webhook_password = get_bot_token_by_repo(owner, repo) or api_token
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     body = {
         "url": webhook_url,

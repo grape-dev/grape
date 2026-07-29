@@ -488,11 +488,12 @@ class TestSearch:
 # ===================== 12. Webhook & A2A =====================
 class TestWebhook:
     def test_webhook_push(self):
-        # 设置测试用的 webhook token
-        from src.user import db as u_db
-        acc = u_db.get_user_account("default") or {}
-        acc["gitcode_webhook_token"] = "test_webhook_token_123"
-        u_db.save_user_account("default", acc)
+        # 设置测试用的 webhook token 到 managed_repos
+        from src.session_manager import db, db_lock
+        with db_lock:
+            db.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, gitcode_webhook_token, is_admin) VALUES (?,?,?,?,?,?)",
+                       (1, "org", "repo", "org/repo", "test_webhook_token_123", 1))
+            db.commit()
         r = client.post("/webhook/gitcode", content=b'{}',
                         headers={"X-GitCode-Event": "push", "X-GitCode-Token": "test_webhook_token_123"})
         assert r.status_code == 200

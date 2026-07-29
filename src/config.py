@@ -96,11 +96,6 @@ def save_accounts(new_accounts: list):
     _load_accounts()
 
 
-def resolve_account_by_webhook_token(token: str) -> str | None:
-    from src.user.db import resolve_user_account_by_webhook_token
-    return resolve_user_account_by_webhook_token(token)
-
-
 # ====== 事件路由 ======
 
 

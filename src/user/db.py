@@ -470,6 +470,7 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     webhook_id INTEGER DEFAULT 0,
     is_admin INTEGER DEFAULT 0,
     bot_gitcode_token TEXT DEFAULT '',
+    gitcode_webhook_token TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE (user_id, repo_owner, repo_name)
 )
@@ -577,6 +578,10 @@ def init_db():
             pass
         try:
             db.execute("ALTER TABLE managed_repos ADD COLUMN bot_gitcode_token TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE managed_repos ADD COLUMN gitcode_webhook_token TEXT DEFAULT ''")
         except Exception:
             pass
         try:
@@ -727,12 +732,12 @@ def get_skill_for_event(user_id: int, repo_key: str, event_type: str) -> str | N
 
 # ====== 托管仓库 CRUD ======
 
-def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: str, webhook_id: int = 0, is_admin: bool = True, bot_gitcode_token: str = "") -> bool:
+def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: str, webhook_id: int = 0, is_admin: bool = True, bot_gitcode_token: str = "", gitcode_webhook_token: str = "") -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, webhook_id, is_admin, bot_gitcode_token) VALUES (?,?,?,?,?,?,?)",
-                      (user_id, repo_owner, repo_name, full_name, webhook_id, int(is_admin), bot_gitcode_token))
+            c.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, webhook_id, is_admin, bot_gitcode_token, gitcode_webhook_token) VALUES (?,?,?,?,?,?,?,?)",
+                      (user_id, repo_owner, repo_name, full_name, webhook_id, int(is_admin), bot_gitcode_token, gitcode_webhook_token))
             db.commit()
             return True
     except Exception as e:
@@ -743,8 +748,8 @@ def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: s
 def get_managed_repos(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_owner, repo_name, full_name, webhook_id, is_admin, bot_gitcode_token, created_at FROM managed_repos WHERE user_id=? ORDER BY full_name", (user_id,))
-        return [{"repo_owner": r[0], "repo_name": r[1], "full_name": r[2], "webhook_id": r[3], "is_admin": bool(r[4]), "bot_gitcode_token": r[5] or "", "created_at": r[6]} for r in c.fetchall()]
+        c.execute("SELECT repo_owner, repo_name, full_name, webhook_id, is_admin, bot_gitcode_token, gitcode_webhook_token, created_at FROM managed_repos WHERE user_id=? ORDER BY full_name", (user_id,))
+        return [{"repo_owner": r[0], "repo_name": r[1], "full_name": r[2], "webhook_id": r[3], "is_admin": bool(r[4]), "bot_gitcode_token": r[5] or "", "gitcode_webhook_token": r[6] or "", "created_at": r[7]} for r in c.fetchall()]
 
 
 def update_managed_repo_admin(user_id: int, repo_owner: str, repo_name: str, is_admin: bool) -> bool:
@@ -772,7 +777,6 @@ def update_managed_repo_bot_token(user_id: int, repo_owner: str, repo_name: str,
 
 
 def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
-    """查找仓库绑定的 DevOps Bot Token，没有则返回空"""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT bot_gitcode_token FROM managed_repos WHERE repo_owner=? AND repo_name=? AND bot_gitcode_token!='' LIMIT 1", (repo_owner, repo_name))
@@ -780,6 +784,34 @@ def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
         if row:
             return row[0]
     return ""
+
+
+def update_managed_repo_webhook_token(user_id: int, repo_owner: str, repo_name: str, webhook_token: str) -> bool:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE managed_repos SET gitcode_webhook_token=? WHERE user_id=? AND repo_owner=? AND repo_name=?", (webhook_token, user_id, repo_owner, repo_name))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"Update managed repo webhook token failed: {e}")
+        return False
+
+
+def resolve_repo_by_webhook_token(token: str) -> str | None:
+    """通过 webhook token 查找仓库全名（owner/repo）"""
+    if not token:
+        return None
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT full_name FROM managed_repos WHERE gitcode_webhook_token=? LIMIT 1", (token,))
+            row = c.fetchone()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+    return None
 
 
 def remove_managed_repo(user_id: int, repo_owner: str, repo_name: str) -> dict | None:
@@ -811,7 +843,7 @@ def get_all_managed_repos() -> list[dict]:
 
 USER_ACCOUNT_FIELDS = [
     "id", "username", "password_hash", "gitcode_id",
-    "gitcode_api_token", "gitcode_webhook_token",
+    "gitcode_api_token",
     "gitcode_oauth_client_id", "gitcode_oauth_client_secret",
     "gitcode_oauth_redirect_uri",
     "feishu_app_id", "feishu_app_secret",
