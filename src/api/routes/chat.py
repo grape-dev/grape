@@ -87,7 +87,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
             backend_name=backend_name, user_id=user["id"],
         ):
             if evt_type == "text":
-                collected.append(data.get("text", ""))
+                text = data.get("text", "") if isinstance(data, dict) else str(data)
+                if text:
+                    collected.append(text)
             elif evt_type in ("done", "error"):
                 break
         return "".join(collected)
@@ -149,7 +151,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 break
             evt_type, data = item
             if evt_type == "text":
-                text = data.get("text", "")
+                text = data.get("text", "") if isinstance(data, dict) else str(data)
                 if text:
                     final_text += text
                     yield f"data: {json.dumps({'type': '生成中', 'text': final_text, 'conversation_id': conv_id})}\n\n"
