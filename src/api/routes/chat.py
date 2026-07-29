@@ -317,12 +317,6 @@ Your token is available as the GITCODE_API_TOKEN environment variable.
     https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues
 Never print or reveal the token value.
 """)
-    chat_history = [m for m in history if m.get("role") in ("user", "agent")][-10:]
-    if chat_history:
-        parts.append("\nConversation history:")
-        for m in chat_history:
-            role = "User" if m["role"] == "user" else "Assistant"
-            parts.append(f"{role}: {m['content'][:200]}")
     repo_note = f" (in {repo_key})" if repo_key else ""
     parts.append(f"\nUser{repo_note}: {message}\nAssistant:")
     prompt = "\n".join(parts)
