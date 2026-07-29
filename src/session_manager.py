@@ -366,10 +366,11 @@ def unbind_user_im(user_id: int, provider: str = "feishu"):
 def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "", title: str = "") -> str:
     import uuid
     cid = str(uuid.uuid4())
+    session_id = str(uuid.uuid4())
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT INTO chat_conversations (id, user_id, repo_key, im_channel_id, title) VALUES (?,?,?,?,?)",
-                  (cid, user_id, repo_key, im_channel_id, title))
+        c.execute("INSERT INTO chat_conversations (id, user_id, session_id, repo_key, im_channel_id, title) VALUES (?,?,?,?,?,?)",
+                  (cid, user_id, session_id, repo_key, im_channel_id, title))
         db.commit()
     return cid
 
@@ -377,19 +378,19 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
 def get_user_conversations(user_id: int, limit: int = 20) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, user_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
-        return [{"id": r[0], "user_id": r[1], "repo_key": r[2], "im_channel_id": r[3], "title": r[4], "status": r[5], "created_at": r[6], "updated_at": r[7]} for r in c.fetchall()]
+        c.execute("SELECT id, user_id, session_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
+        return [{"id": r[0], "user_id": r[1], "session_id": r[2] or "", "repo_key": r[3], "im_channel_id": r[4], "title": r[5], "status": r[6], "created_at": r[7], "updated_at": r[8]} for r in c.fetchall()]
 
 
 def get_conversation(conv_id: str) -> dict | None:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, user_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE id=?", (conv_id,))
+        c.execute("SELECT id, user_id, session_id, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE id=?", (conv_id,))
         row = c.fetchone()
         if not row:
             return None
-        return {"id": row[0], "user_id": row[1], "repo_key": row[2], "im_channel_id": row[3],
-                "title": row[4], "status": row[5], "created_at": row[6], "updated_at": row[7]}
+        return {"id": row[0], "user_id": row[1], "session_id": row[2] or "", "repo_key": row[3], "im_channel_id": row[4],
+                "title": row[5], "status": row[6], "created_at": row[7], "updated_at": row[8]}
 
 
 def update_conversation(conv_id: str, **kwargs):

@@ -125,6 +125,7 @@ _CHAT_CONVERSATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS chat_conversations (
     id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,
+    session_id TEXT DEFAULT '',
     repo_key TEXT DEFAULT '',
     im_channel_id TEXT DEFAULT '',
     title TEXT DEFAULT '',
@@ -335,6 +336,7 @@ def _migrate_tables():
         "ALTER TABLE user_skills ADD COLUMN description TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN parent_agent_type TEXT DEFAULT ''",
         "ALTER TABLE agent_sessions ADD COLUMN skill TEXT DEFAULT ''",
+        "ALTER TABLE chat_conversations ADD COLUMN session_id TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
