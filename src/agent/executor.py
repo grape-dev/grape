@@ -45,11 +45,15 @@ def discover_backends() -> list[dict]:
 def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  event_type: str = "", backend_name: str = "opencode",
                  account: str = "default", user_id: int = 0,
-                 env_extra: dict | None = None):
+                 env_extra: dict | None = None,
+                 repo_gitcode_token: str = "") -> Generator:
     """流式执行 Agent，yield 事件。"""
     backend = get_backend(backend_name)
     env = backend.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
+    # 注入 repo 级别的 DevOps Bot Token（优先于 account 的 token）
+    if repo_gitcode_token:
+        env["GITCODE_API_TOKEN"] = repo_gitcode_token
     if env_extra:
         env.update(env_extra)
 
@@ -162,6 +166,6 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     })
 
 
-def stream_opencode(prompt, cwd, oc_session_id, event_type=""):
+def stream_opencode(prompt, cwd, oc_session_id, event_type="", repo_gitcode_token=""):
     """向后兼容包装器，默认使用 opencode 后端。"""
-    yield from stream_agent(prompt, cwd, oc_session_id, event_type, backend_name="opencode")
+    yield from stream_agent(prompt, cwd, oc_session_id, event_type, backend_name="opencode", repo_gitcode_token=repo_gitcode_token)

@@ -159,7 +159,16 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         backend = get_agent_backend(skills[0]) if skills else "opencode"
         oc_sid = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
         new_oc_session_id = oc_sid
-        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account):
+        # 获取 repo 绑定的 DevOps Bot Token
+        repo_token = ""
+        try:
+            parts = repo_key.replace("gitcode:", "").split("/")
+            if len(parts) == 2:
+                from src.user.db import get_bot_token_by_repo
+                repo_token = get_bot_token_by_repo(parts[0], parts[1])
+        except Exception:
+            pass
+        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account, repo_gitcode_token=repo_token):
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")
             elif event_type == "text":

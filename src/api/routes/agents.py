@@ -74,12 +74,12 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         c = db.cursor()
         try:
             c.execute(
-                "SELECT backend, skill, oc_session_id, status, last_active_at FROM agent_sessions WHERE repo_key=? AND agent_type=?",
+                "SELECT backend, skill, repo_gitcode_token, oc_session_id, status, last_active_at FROM agent_sessions WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
             if row:
-                session_data = {"backend": row[0], "skill": row[1] or "", "oc_session_id": row[2], "status": row[3], "last_active_at": row[4]}
+                session_data = {"backend": row[0], "skill": row[1] or "", "repo_gitcode_token": row[2] or "", "oc_session_id": row[3], "status": row[4], "last_active_at": row[5]}
         except Exception:
             pass
 
@@ -117,6 +117,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         "bg": BGS.get(name, "var(--bg)"),
         "backend": session_data.get("backend", meta.get("default_backend", "opencode")),
         "skill": session_data.get("skill", ""),
+        "repo_gitcode_token": session_data.get("repo_gitcode_token", ""),
         "status": session_data.get("status", "idle"),
         "last_active": session_data.get("last_active_at", ""),
         "metrics": {
@@ -142,13 +143,17 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     import uuid
     session_id = str(uuid.uuid4())
 
+    # 获取 repo 绑定的 DevOps Bot Token
+    from src.user.db import get_bot_token_by_repo
+    repo_token = get_bot_token_by_repo(owner, repo)
+
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, status, last_active_at) VALUES (?,?,?,?,?,?,datetime('now'))",
-                (session_id, repo_key, name, body.backend, body.skill, "idle")
+                "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at) VALUES (?,?,?,?,?,?,?,datetime('now'))",
+                (session_id, repo_key, name, body.backend, body.skill, repo_token, "idle")
             )
             db.commit()
         except Exception as e:

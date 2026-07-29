@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     backend TEXT DEFAULT 'opencode',
     skill TEXT DEFAULT '',
     oc_session_id TEXT DEFAULT '',
+    repo_gitcode_token TEXT DEFAULT '',
     status TEXT DEFAULT 'idle',
     created_at TEXT DEFAULT (datetime('now')),
     last_active_at TEXT DEFAULT (datetime('now')),
@@ -341,6 +342,7 @@ def _migrate_tables():
         "ALTER TABLE chat_conversations ADD COLUMN session_id TEXT DEFAULT ''",
         "ALTER TABLE chat_config ADD COLUMN skill TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN user_gitcode_token TEXT DEFAULT ''",
+        "ALTER TABLE agent_sessions ADD COLUMN repo_gitcode_token TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
