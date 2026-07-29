@@ -252,7 +252,9 @@ function saveChatConfig() {
   const skill = document.getElementById('cfgSkill')?.value || '';
   const provider = document.getElementById('cfgImProvider')?.value || 'feishu';
   const appId = document.getElementById('cfgImAppId')?.value || '';
-  const secret = document.getElementById('cfgImSecret')?.value || '';
+  const rawSecret = document.getElementById('cfgImSecret')?.value || '';
+  // 如果密码框内容是占位符（********），说明用户没改过，不发送 secret
+  const secret = rawSecret === '********' ? '' : rawSecret;
   const im = {};
   im[provider] = {app_id: appId, app_secret: secret};
   API.put('/chat/config', {backend, skill, im}).then(() => {

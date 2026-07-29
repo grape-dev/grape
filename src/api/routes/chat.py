@@ -443,7 +443,7 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
             if c.fetchone():
                 raise HTTPException(status_code=400, detail={"code": 400, "message": "该飞书 App ID 已被其他用户绑定"})
         kwargs["feishu_app_id"] = feishu["app_id"]
-    if feishu.get("app_secret"):
+    if feishu.get("app_secret") and feishu["app_secret"] != "********":
         kwargs["feishu_app_secret"] = feishu["app_secret"]
     if body.get("backend"):
         kwargs["backend"] = body["backend"]

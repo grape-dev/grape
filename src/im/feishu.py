@@ -548,7 +548,7 @@ def start_ws(on_message_callback, account_name: str = "default"):
     if not ensure_configured():
         return
 
-    # 从 chat_config 表获取飞书凭据（不再依赖 .env 或 accounts.json）
+    # 从 chat_config 表获取飞书凭据（仅当 secret 不是占位符时覆盖）
     app_id = FEISHU_APP_ID or os.environ.get("FEISHU_APP_ID", "")
     app_secret = FEISHU_APP_SECRET or os.environ.get("FEISHU_APP_SECRET", "")
     from src.session_manager import db, db_lock
@@ -557,9 +557,9 @@ def start_ws(on_message_callback, account_name: str = "default"):
         try:
             c.execute("SELECT feishu_app_id, feishu_app_secret FROM chat_config WHERE feishu_app_id!='' LIMIT 1")
             row = c.fetchone()
-            if row:
+            if row and row[0] and row[1] and row[1] != '********':
                 app_id = row[0]
-                app_secret = row[1] or app_secret
+                app_secret = row[1]
         except Exception:
             pass
 
