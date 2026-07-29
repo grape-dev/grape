@@ -135,6 +135,20 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], env_extra=env_extra,
             ):
+                # 日志输出
+                if evt_type == "step_start":
+                    log.info(f"  ▶ {data}")
+                elif evt_type == "text":
+                    log.info(f"  💬 {data[:120]}")
+                elif evt_type == "reasoning":
+                    log.info(f"  🤔 {data[:120]}")
+                elif evt_type == "tool_use":
+                    log.info(f"  🔧 {data[:150]}")
+                elif evt_type == "step_finish":
+                    log.info(f"  ✅ {data}")
+                elif evt_type == "done":
+                    log.info(f"  ✅ Done: exit={data.get('exit_code')}, text_len={len(data.get('text',''))}")
+
                 if evt_type == "text":
                     text = data.get("text", "") if isinstance(data, dict) else str(data)
                     if text:
@@ -212,10 +226,24 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 return
             try:
                 for evt_type, data in stream_agent(
-                prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=session_id,
+                    prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], env_extra=env_extra,
                 ):
+                    # 日志输出（对齐 master 分支 im/handler.py）
+                    if evt_type == "step_start":
+                        log.info(f"  ▶ {data}")
+                    elif evt_type == "text":
+                        log.info(f"  💬 {data[:120]}")
+                    elif evt_type == "reasoning":
+                        log.info(f"  🤔 {data[:120]}")
+                    elif evt_type == "tool_use":
+                        log.info(f"  🔧 {data[:150]}")
+                    elif evt_type == "step_finish":
+                        log.info(f"  ✅ {data}")
+                    elif evt_type == "done":
+                        log.info(f"  ✅ Done: exit={data.get('exit_code')}, text_len={len(data.get('text',''))}")
+
                     if evt_type == "done" and isinstance(data, dict):
                         nsid = data.get("oc_session_id", "")
                         if nsid:
