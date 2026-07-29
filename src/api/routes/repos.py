@@ -5,6 +5,7 @@ from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook
 from src.api.deps import get_current_user, get_bot_token
 from src.config import GITCODE_WEBHOOK_TOKEN
+from src.user.db import update_managed_repo_bot_token, get_bot_token_by_repo
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
 
@@ -112,9 +113,9 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
 
-    bot_token = get_bot_token("default")
+    bot_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
     if not bot_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "DevOps Bot Token 未配置"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "DevOps Bot Token 未配置，请在 GitCode Repo 设置中配置"})
 
     from src.user.repo_manager import _check_collaborator_admin, _req
     try:
@@ -157,7 +158,33 @@ async def list_managed_repos(user: dict = Depends(get_current_user)):
         "webhook_ok": bool(r["webhook_id"]),
         "branch": "main",
         "status": "Active" if r["is_admin"] else "Joined",
+        "has_bot_token": bool(r.get("bot_gitcode_token", "")),
     } for r in repos]}
+
+
+class BotTokenBody(BaseModel):
+    full_name: str
+    bot_token: str = ""
+
+
+@router.get("/bot-token/{owner}/{repo_name}")
+async def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(get_current_user)):
+    """获取仓库绑定的 DevOps Bot Token 是否存在"""
+    token = get_bot_token_by_repo(owner, repo_name)
+    return {"has_bot_token": bool(token)}
+
+
+@router.put("/bot-token")
+async def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user)):
+    """设置仓库绑定的 DevOps Bot Token"""
+    parts = body.full_name.split("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
+    owner, repo_name = parts
+    ok = update_managed_repo_bot_token(user["id"], owner, repo_name, body.bot_token)
+    if not ok:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
+    return {"message": "Bot Token 已更新"}
 
 
 @router.post("/remove")
@@ -167,8 +194,7 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
 
-    acc = user_db.get_user_account(user["username"]) or {}
-    api_token = acc.get("gitcode_api_token", "")
+    api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
     if not api_token:
         api_token = get_bot_token(user["username"])
 

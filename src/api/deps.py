@@ -21,18 +21,32 @@ def get_current_user(authorization: str = Header(None)) -> dict:
     return {"id": uid, "username": user["username"], "token": token, "token_type": TOKEN_TYPE_USER}
 
 
-def get_bot_token(username: str) -> str:
-    """获取 DevOps Bot Token：优先使用用户配置的 Bot Token，回退到系统默认（default 账户）"""
-    acc = user_db.get_user_account(username) or {}
-    bot_token = acc.get("gitcode_api_token", "")
-    if bot_token:
-        return bot_token
+def get_bot_token(username: str = "", repo_owner: str = "", repo_name: str = "") -> str:
+    """获取 DevOps Bot Token：
+       1. 优先使用 repo 绑定的 bot_gitcode_token
+       2. 其次使用用户的 gitcode_api_token（仅非 DevOps Agent 场景）
+       3. 回退到 default 账户的 gitcode_api_token
+    """
+    # 仓库级别的 Bot Token（DevOps Agents 应该用这个）
+    if repo_owner and repo_name:
+        from src.user.db import get_bot_token_by_repo
+        repo_token = get_bot_token_by_repo(repo_owner, repo_name)
+        if repo_token:
+            return repo_token
+    # 用户个人 Token（仅 Chat Agent 等个人场景）
+    if username:
+        acc = user_db.get_user_account(username) or {}
+        user_token = acc.get("gitcode_api_token", "")
+        if user_token:
+            return user_token
+    # 系统默认
     default_acc = user_db.get_user_account("default") or {}
     return default_acc.get("gitcode_api_token", "")
 
 
 def get_webhook_token(owner: str, repo: str) -> str:
-    """获取仓库的 Webhook Token，回退到 default"""
+    """获取仓库的 Webhook Token"""
+    # 优先取 managed_repos 对应的 webhook_token
     acc = user_db.get_user_account(f"{owner}/{repo}") or {}
     wh_token = acc.get("gitcode_webhook_token", "")
     if wh_token:
