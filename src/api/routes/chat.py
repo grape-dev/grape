@@ -115,6 +115,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
     env_extra = {"GITCODE_API_TOKEN": gitcode_token} if gitcode_token else None
 
+    from src.config import log
+    log.info(f"Chat send (stream={False}): backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, session_id={'set' if session_id else 'new'}")
+
     from src.agent.executor import stream_agent
     loop = asyncio.get_event_loop()
     collected = []
@@ -188,6 +191,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
     env_extra = {"GITCODE_API_TOKEN": gitcode_token} if gitcode_token else None
 
+    from src.config import log
+    log.info(f"Chat send/stream: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, session_id={'set' if session_id else 'new'}")
+
     from src.agent.executor import stream_agent
 
     async def event_stream():
@@ -260,7 +266,6 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
     parts = [CHAT_SYSTEM_PROMPT]
     if repo_key:
         parts.append(f"\nIMPORTANT: You are working in repository: {repo_key}")
-    # Load skill instructions if configured
     if skill_name:
         from src.config import SKILLS_DIR
         skill_path = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
@@ -276,6 +281,11 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
             parts.append(f"{role}: {m['content'][:200]}")
     repo_note = f" (in {repo_key})" if repo_key else ""
     parts.append(f"\nUser{repo_note}: {message}\nAssistant:")
+    prompt = "\n".join(parts)
+    # 日志输出 prompt 前 300 字符用于调试
+    from src.config import log
+    log.info(f"Chat prompt ({len(prompt)} chars, skill={skill_name or 'none'}, repo={repo_key or 'none'}): {prompt[:300]}")
+    return prompt
     return "\n".join(parts)
 
 
