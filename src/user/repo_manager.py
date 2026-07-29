@@ -1,6 +1,6 @@
 """GitCode 仓库托管管理：获取管理员仓库、创建/删除 webhook"""
 import json, urllib.request, urllib.error, urllib.parse
-from src.config import log, GITCODE_WEBHOOK_TOKEN
+from src.config import log
 
 API_BASE = "https://api.gitcode.com/api/v5"
 
@@ -108,10 +108,14 @@ def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: st
 
 def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int:
     """在指定仓库上创建 DevOps Bot webhook，返回 webhook_id。"""
+    # 从 DB 获取 webhook 密码
+    from src.user.db import get_user_account
+    acc = get_user_account(f"{owner}/{repo}") or {}
+    webhook_password = acc.get("gitcode_webhook_token", "")
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     body = {
         "url": webhook_url,
-        "password": GITCODE_WEBHOOK_TOKEN,
+        "password": webhook_password,
         "push_events": True,
         "issues_events": True,
         "merge_requests_events": True,

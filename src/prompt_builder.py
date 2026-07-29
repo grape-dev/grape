@@ -232,7 +232,8 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
         parts.append(prefix)
         if note:
             parts.append(f'Comment: {json.dumps(note, ensure_ascii=True)[:1000]}')
-            if any(f"@{u}" in note for u in __import__("src.config", fromlist=["BOT_USERNAMES"]).BOT_USERNAMES):
+            # 检测是否 @ 了 Bot
+            if any(f"@{u}" in note for u in __import__("src.user.db", fromlist=["get_all_bot_usernames"]).get_all_bot_usernames()):
                 parts.append("(User @mentioned the bot)")
     else:
         if number is not None:

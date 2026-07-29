@@ -4,7 +4,6 @@ from pydantic import BaseModel
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook
 from src.api.deps import get_current_user, get_bot_token, get_user_token
-from src.config import GITCODE_WEBHOOK_TOKEN
 from src.user.db import update_managed_repo_bot_token, get_bot_token_by_repo
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])

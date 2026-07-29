@@ -6,8 +6,6 @@ from src.session_manager import get_or_create_session, update_session
 from src.prompt_builder import build_chat_prompt, get_skill_capabilities, build_role_definition
 from src.agent.executor import stream_agent
 from src.im.feishu import (
-    FEISHU_BINDINGS_TABLE_SQL, FEISHU_APP_ID, FEISHU_APP_SECRET,
-    FEISHU_BOT_NAME, reply_text, reply_card, add_reaction,
     resolve_repo, process_command, detect_bind_intent, detect_clean_intent,
     get_user_name, start_ws, stop_ws, get_chat_members, sync_repo_feishu_mapping
 )

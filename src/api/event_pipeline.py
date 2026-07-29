@@ -1,7 +1,7 @@
 """事件处理管道：归一化 → 路由 → 存储 → Agent 执行"""
 import json, os, time, uuid
 from datetime import datetime
-from src.config import log, BOT_USERNAMES
+from src.config import log
 from src.vcs.adapter import normalize_event, get_event_header
 from src.api.routing import get_domain_skill
 from src.api.event_store import append_event, update_event_status, get_issue_summary
@@ -59,9 +59,12 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
 
     # 2. 自循环检测
     actor = resolve_actor(evt.get("payload", {}), evt)
-    if actor in BOT_USERNAMES and event_type in ("issue_comment", "note_hook_pr"):
-        log.info(f"Pipeline skip: self-comment from {actor}")
-        return result
+    if actor and event_type in ("issue_comment", "note_hook_pr"):
+        # 从 DB 读取所有 bot_usernames
+        from src.user.db import get_all_bot_usernames
+        if actor in get_all_bot_usernames():
+            log.info(f"Pipeline skip: self-comment from {actor}")
+            return result
 
     # 3. 路由判定
     skill = get_domain_skill(event_type, f"{source}:{evt['repository']}")

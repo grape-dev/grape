@@ -15,7 +15,7 @@ import threading
 _feishu_slot = threading.BoundedSemaphore(5)
 _feishu_executor = concurrent.futures.ThreadPoolExecutor(max_workers=5, thread_name_prefix="fs")
 
-from src.config import log, FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_BOT_NAME
+from src.config import log
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 _TOKEN = None
@@ -34,9 +34,17 @@ CREATE TABLE IF NOT EXISTS feishu_bindings (
 
 
 def ensure_configured():
-    app_id = FEISHU_APP_ID or os.environ.get("FEISHU_APP_ID", "")
-    secret = FEISHU_APP_SECRET or os.environ.get("FEISHU_APP_SECRET", "")
-    return bool(app_id and secret)
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT feishu_app_id, feishu_app_secret FROM chat_config WHERE feishu_app_id!='' LIMIT 1")
+            row = c.fetchone()
+            if row and row[0] and row[1] and row[1] != '********':
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def get_tenant_token() -> str:
@@ -48,8 +56,24 @@ def get_tenant_token() -> str:
     with _TOKEN_LOCK:
         if time.time() < _TOKEN_EXPIRE and _TOKEN:
             return _TOKEN
+        # 从 chat_config DB 获取凭据
+        app_id = ""
+        app_secret = ""
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute("SELECT feishu_app_id, feishu_app_secret FROM chat_config WHERE feishu_app_id!='' LIMIT 1")
+                row = c.fetchone()
+                if row and row[1] and row[1] != '********':
+                    app_id = row[0]
+                    app_secret = row[1]
+            except Exception:
+                pass
+        if not app_id or not app_secret:
+            return ""
         url = f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal"
-        payload = json.dumps({"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}).encode()
+        payload = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
         try:
             resp = urlopen(Request(url, data=payload, headers={"Content-Type": "application/json"}), timeout=10)
             data = json.loads(resp.read())
@@ -317,13 +341,19 @@ def sync_repo_feishu_mapping(repo_key: str, chat_id: str) -> int:
     if len(parts) < 2:
         return 0
     owner, repo = parts
+    # 从 managed_repos 获取 repo 绑定的 Bot Token
+    from src.user.db import get_bot_token_by_repo
+    api_token = get_bot_token_by_repo(owner, repo)
+    if not api_token:
+        log.warning(f"Feishu sync: no bot token for {repo_key}, skipping")
+        return 0
     try:
         collabs = []
         page = 1
         while True:
             resp = urlopen(Request(
                 f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators?per_page=100&page={page}",
-                headers={"Authorization": f"Bearer {os.environ.get('GITCODE_API_TOKEN','')}"}
+                headers={"Authorization": f"Bearer {api_token}"}
             ), timeout=10)
             data = json.loads(resp.read())
             if not data:
@@ -548,9 +578,9 @@ def start_ws(on_message_callback, account_name: str = "default"):
     if not ensure_configured():
         return
 
-    # 从 chat_config 表获取飞书凭据（仅当 secret 不是占位符时覆盖）
-    app_id = FEISHU_APP_ID or os.environ.get("FEISHU_APP_ID", "")
-    app_secret = FEISHU_APP_SECRET or os.environ.get("FEISHU_APP_SECRET", "")
+    # 从 chat_config 表获取飞书凭据
+    app_id = ""
+    app_secret = ""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()

@@ -899,6 +899,27 @@ def resolve_user_account_by_webhook_token(token: str) -> str | None:
     return row[0] if row else None
 
 
+def get_all_bot_usernames() -> list[str]:
+    """获取所有账户中配置的 bot_usernames 列表"""
+    result = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT bot_usernames FROM user_accounts WHERE bot_usernames IS NOT NULL AND bot_usernames!=''")
+            for row in c.fetchall():
+                raw = row[0]
+                try:
+                    names = json.loads(raw)
+                    if isinstance(names, list):
+                        result.extend(names)
+                except (json.JSONDecodeError, TypeError):
+                    names = [s.strip() for s in raw.split(",") if s.strip()]
+                    result.extend(names)
+        except Exception:
+            pass
+    return list(set(result))
+
+
 def migrate_accounts_from_json():
     """从 accounts.json 迁移数据到 user_accounts 表（仅首次）"""
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "accounts.json")

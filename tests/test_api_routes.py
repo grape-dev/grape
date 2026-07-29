@@ -488,9 +488,13 @@ class TestSearch:
 # ===================== 12. Webhook & A2A =====================
 class TestWebhook:
     def test_webhook_push(self):
-        from src.config import GITCODE_WEBHOOK_TOKEN
+        # 设置测试用的 webhook token
+        from src.user import db as u_db
+        acc = u_db.get_user_account("default") or {}
+        acc["gitcode_webhook_token"] = "test_webhook_token_123"
+        u_db.save_user_account("default", acc)
         r = client.post("/webhook/gitcode", content=b'{}',
-                        headers={"X-GitCode-Event": "push", "X-GitCode-Token": GITCODE_WEBHOOK_TOKEN})
+                        headers={"X-GitCode-Event": "push", "X-GitCode-Token": "test_webhook_token_123"})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
