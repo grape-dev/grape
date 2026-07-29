@@ -118,6 +118,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         for evt_type, data in stream_agent(
             prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
             backend_name=backend_name, user_id=user["id"],
+            account=user["username"],
         ):
             if evt_type == "text":
                 text = data.get("text", "") if isinstance(data, dict) else str(data)
@@ -183,8 +184,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             nonlocal captured_session
             try:
                 for evt_type, data in stream_agent(
-            prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
+                    prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
                     backend_name=backend_name, user_id=user["id"],
+                    account=user["username"],
                 ):
                     if evt_type == "done" and isinstance(data, dict):
                         nsid = data.get("oc_session_id", "")
