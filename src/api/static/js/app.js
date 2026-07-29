@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','backends','event','repos'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','backends','event','repos','skill'];
 
   function currentRepo() {
     try { return JSON.parse(localStorage.getItem('currentRepo')); } catch { return null; }
@@ -175,6 +175,9 @@ function loadAgentTypes() {
     } else if (view === 'repos') {
       title.textContent = '选择仓库';
       loadRepos();
+    } else if (view === 'skill') {
+      title.textContent = 'Skill Detail';
+      API.get('/skills/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     }
   }
 
