@@ -244,7 +244,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '3');
+      localStorage.setItem('app_cache_ver', '4');
       if (p.get('first_login')) {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
@@ -269,7 +269,7 @@ function loadAgentTypes() {
       const oldRepo = localStorage.getItem('currentRepo');
       localStorage.clear();
       if (oldRepo) localStorage.setItem('currentRepo', oldRepo); // restore repo selection
-      localStorage.setItem('app_cache_ver', '3');
+      localStorage.setItem('app_cache_ver', '4');
     }
 
     const token = localStorage.getItem('token');
