@@ -772,17 +772,14 @@ def update_managed_repo_bot_token(user_id: int, repo_owner: str, repo_name: str,
 
 
 def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
-    """查找仓库绑定的 DevOps Bot Token"""
+    """查找仓库绑定的 DevOps Bot Token，没有则返回空"""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT bot_gitcode_token FROM managed_repos WHERE repo_owner=? AND repo_name=? AND bot_gitcode_token!='' LIMIT 1", (repo_owner, repo_name))
         row = c.fetchone()
         if row:
             return row[0]
-    # 回退到 default 账户的 API Token
-    from src.config import get_account
-    acc = get_account("default")
-    return acc.get("gitcode_api_token", "")
+    return ""
 
 
 def remove_managed_repo(user_id: int, repo_owner: str, repo_name: str) -> dict | None:

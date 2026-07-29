@@ -19,6 +19,10 @@ def setup_module():
     _uid = user_db.create_user("test_api", "test123")
     if not _uid:
         _uid = user_db.get_user_by_username("test_api")
+    # 给测试用户设置 API Token
+    acc = user_db.get_user_account("test_api") or {}
+    acc["gitcode_api_token"] = "test_api_token_12345"
+    user_db.save_user_account("test_api", acc)
     _token = user_db.create_session_token(_uid["id"])
     _headers = {"Authorization": f"Bearer {_token}"}
     # 确保 agent_type_config 表中有 5 个 Agent 类型和技能
@@ -425,10 +429,6 @@ class TestSettings:
     def test_gitcode_repo_update(self):
         r = client.put("/api/settings/gitcode-repo/owner/repo",
                        json={"bot_token": "test", "webhook_token": "test"}, headers=_headers)
-        assert r.status_code == 200
-
-    def test_default_bot_token(self):
-        r = client.get("/api/settings/gitcode-repo/default", headers=_headers)
         assert r.status_code == 200
 
     def test_backend_agents(self):

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user, get_bot_token, get_webhook_token
+from src.api.deps import get_current_user, get_webhook_token, get_user_token
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -104,16 +104,16 @@ async def update_notifications(body: NotificationPrefs, user: dict = Depends(get
 async def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
     repo_key = f"{owner}/{repo}"
     acc = user_db.get_user_account(repo_key) or {}
-    bot_token = acc.get("gitcode_api_token", "")
+    # 读取 repo 绑定的 Bot Token
+    from src.user.db import get_bot_token_by_repo
+    bot_token = get_bot_token_by_repo(owner, repo)
     wh_token = acc.get("gitcode_webhook_token", "")
-    default_bot = get_bot_token("default") if not bot_token else ""
 
     return {
         "devops_bot_token_exists": bool(bot_token),
         "webhook_token_exists": bool(wh_token),
         "webhook_url": acc.get("webhook_url", "http://localhost:8080/webhook/gitcode"),
         "bot_username": acc.get("bot_usernames", "devops-bot"),
-        "fallback_to_default": not bool(bot_token) and bool(default_bot),
     }
 
 
@@ -128,38 +128,21 @@ async def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoCon
                                      user: dict = Depends(get_current_user)):
     repo_key = f"{owner}/{repo}"
     acc = user_db.get_user_account(repo_key) or {}
-    if body.bot_token:
-        acc["gitcode_api_token"] = body.bot_token
     if body.webhook_token:
         acc["gitcode_webhook_token"] = body.webhook_token
     if body.bot_username:
         acc["bot_usernames"] = body.bot_username
     user_db.save_user_account(repo_key, acc)
-    return {"message": "GitCode Repo 配置已更新"}
-
-
-# ====== Default Bot Token (管理员配置) ======
-
-@router.get("/gitcode-repo/default")
-async def get_default_bot_token(user: dict = Depends(get_current_user)):
-    default_token = get_bot_token("default")
-    default_wh = get_webhook_token("default", "")
-    return {
-        "devops_bot_token_exists": bool(default_token),
-        "webhook_token_exists": bool(default_wh),
-        "note": "系统默认 Token，所有未配置自定义 Bot Token 的仓库自动继承",
-    }
-
-
-@router.put("/gitcode-repo/default")
-async def update_default_bot_token(body: GitCodeRepoConfig, user: dict = Depends(get_current_user)):
-    acc = user_db.get_user_account("default") or {}
+    # 将 Bot Token 存储到 managed_repos
     if body.bot_token:
-        acc["gitcode_api_token"] = body.bot_token
-    if body.webhook_token:
-        acc["gitcode_webhook_token"] = body.webhook_token
-        user_db.save_user_account("default", acc)
-    return {"message": "系统默认 Bot Token 已更新"}
+        from src.user.db import update_managed_repo_bot_token
+        # 找到该 repo 在 managed_repos 中的记录
+        repos = user_db.get_managed_repos(user["id"])
+        for r in repos:
+            if r["repo_owner"] == owner and r["repo_name"] == repo:
+                update_managed_repo_bot_token(user["id"], owner, repo, body.bot_token)
+                break
+    return {"message": "GitCode Repo 配置已更新"}
 
 
 # ====== OAuth 凭据（管理员配置）======

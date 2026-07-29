@@ -305,8 +305,8 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
         }
     }
 
-    from src.api.deps import get_bot_token
-    bot_token = get_bot_token("default")
+    from src.user.db import get_bot_token_by_repo
+    bot_token = get_bot_token_by_repo(repo_key.split("/")[0], repo_key.split("/")[1]) if "/" in repo_key else ""
 
     return {
         "message": "反馈已提交给 VOD Agent",

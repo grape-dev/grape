@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook
-from src.api.deps import get_current_user, get_bot_token
+from src.api.deps import get_current_user, get_bot_token, get_user_token
 from src.config import GITCODE_WEBHOOK_TOKEN
 from src.user.db import update_managed_repo_bot_token, get_bot_token_by_repo
 
@@ -48,12 +48,9 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
 @router.get("/member")
 async def list_member_repos(user: dict = Depends(get_current_user)):
     """获取用户可操作仓库列表：优先从 user_repos 缓存读取，缓存为空时自动从 GitCode 拉取"""
-    acc = user_db.get_user_account(user["username"]) or {}
-    api_token = acc.get("gitcode_api_token", "")
+    api_token = get_user_token(user["username"])
     if not api_token:
-        api_token = get_bot_token(user["username"])
-    if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
     # 优先读取 DB 缓存
     cached = user_db.get_user_repos(user["id"])
@@ -72,10 +69,7 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
 @router.post("/sync")
 async def sync_repos(user: dict = Depends(get_current_user)):
     """手动从 GitCode 同步仓库列表，刷新 user_repos 缓存"""
-    acc = user_db.get_user_account(user["username"]) or {}
-    api_token = acc.get("gitcode_api_token", "")
-    if not api_token:
-        api_token = get_bot_token(user["username"])
+    api_token = get_user_token(user["username"])
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
 
@@ -104,10 +98,8 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
 
+    api_token = get_user_token(user["username"])
     acc = user_db.get_user_account(user["username"]) or {}
-    api_token = acc.get("gitcode_api_token", "")
-    if not api_token:
-        api_token = get_bot_token(user["username"])
     webhook_url = acc.get("webhook_url", "")
 
     if not api_token:
@@ -196,7 +188,7 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
 
     api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
     if not api_token:
-        api_token = get_bot_token(user["username"])
+        api_token = get_user_token(user["username"])
 
     if api_token:
         try:
