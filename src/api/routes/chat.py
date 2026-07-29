@@ -109,7 +109,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "opencode")
-    skill_name = cfg.get("skill", "")
+    skill_name = cfg.get("skill", "") or "chat"
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     prompt = _build_chat_prompt(body.message, repo_key, history, skill_name)
@@ -200,7 +200,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "opencode")
-    skill_name = cfg.get("skill", "")
+    skill_name = cfg.get("skill", "") or "chat"
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     prompt = _build_chat_prompt(body.message, repo_key, history, skill_name)
@@ -349,7 +349,7 @@ Never print or reveal the token value.
     parts.append(f"\nUser{repo_note}: {message}\nAssistant:")
     prompt = "\n".join(parts)
     from src.config import log
-    log.info(f"Chat prompt ({len(prompt)} chars, skill={skill_name or 'none'}, repo={repo_key or 'none'}): {prompt[:2000]}")
+    log.info(f"Chat prompt ({len(prompt)} chars, skill={skill_name}, repo={repo_key or 'none'}): {prompt[:2000]}")
     return prompt
 
 
