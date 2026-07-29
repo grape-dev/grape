@@ -1,5 +1,7 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
-import json, asyncio, uuid, os
+import json, asyncio, tempfile
+
+_CHAT_CWD = tempfile.gettempdir()
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -102,7 +104,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     def run_agent():
         nonlocal new_session_id
         for evt_type, data in stream_agent(
-            prompt=prompt, cwd=os.getcwd(), session_id=session_id,
+            prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
             backend_name=backend_name, user_id=user["id"],
         ):
             if evt_type == "text":
@@ -168,7 +170,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             nonlocal captured_session
             try:
                 for evt_type, data in stream_agent(
-                    prompt=prompt, cwd=os.getcwd(), session_id=session_id,
+            prompt=prompt, cwd=_CHAT_CWD, session_id=session_id,
                     backend_name=backend_name, user_id=user["id"],
                 ):
                     if evt_type == "done" and isinstance(data, dict):
