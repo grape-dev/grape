@@ -1,5 +1,6 @@
 """Agent 执行器：流式子进程调度 (NDJSON)，不绑定具体后端。"""
 import os, subprocess, json, shutil
+from typing import Generator
 from src.config import log
 from .base import AgentBackend
 from .opencode import OpencodeBackend
