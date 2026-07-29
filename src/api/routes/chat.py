@@ -3,7 +3,7 @@ import json, asyncio, tempfile, os, threading
 
 _CHAT_CWD = tempfile.gettempdir()
 # 限制同时运行的 opencode 子进程数（防止大量用户并发导致服务器崩溃）
-_CHAT_AGENT_SEMAPHORE = threading.Semaphore(5)
+_CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
