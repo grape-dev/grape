@@ -73,7 +73,6 @@ def _load_accounts():
                     return f"http://{ip}:8080/webhook/gitcode"
             except:
                 pass
-            return "http://203.0.113.2:8080/webhook/gitcode"
         detected = False
         for n, a in ACCOUNTS.items():
             if not a.get("webhook_url"):
