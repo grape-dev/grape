@@ -25,15 +25,23 @@ function loadSideConfig() {
   API.get('/chat/config').then(d => {
     const feishu = d.im?.feishu || {};
     const backend = d.backend || {};
+    const currentSkill = d.skill || '';
     const backendsOpts = (d._backends || []).map(b =>
       `<option value="${b.name}" ${b.name === (backend.type || '').toLowerCase() ? 'selected' : ''}>${b.display_name || b.name}</option>`
     ).join('') || '<option>Default</option>';
+    const skillsOpts = (d._skills || []).map(s =>
+      `<option value="${s.name}" ${s.name === currentSkill ? 'selected' : ''}>${s.display_name || s.name}</option>`
+    ).join('') || '<option value="">无专用技能</option>';
     const side = document.getElementById('chatSide');
     if (!side) return;
     side.innerHTML = `
       <div class="cd" style="padding:12px;font-size:11px">
         <div style="font-weight:600;margin-bottom:8px">Backend</div>
         <select id="cfgBackend" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${backendsOpts}</select>
+      </div>
+      <div class="cd" style="padding:12px;font-size:11px">
+        <div style="font-weight:600;margin-bottom:8px">Skill</div>
+        <select id="cfgSkill" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${skillsOpts}</select>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
         <div style="font-weight:600;margin-bottom:8px">IM</div>
@@ -241,12 +249,13 @@ function doSend(input, body) {
 
 function saveChatConfig() {
   const backend = document.getElementById('cfgBackend')?.value || '';
+  const skill = document.getElementById('cfgSkill')?.value || '';
   const provider = document.getElementById('cfgImProvider')?.value || 'feishu';
   const appId = document.getElementById('cfgImAppId')?.value || '';
   const secret = document.getElementById('cfgImSecret')?.value || '';
   const im = {};
   im[provider] = {app_id: appId, app_secret: secret};
-  API.put('/chat/config', {backend, im}).then(() => {
+  API.put('/chat/config', {backend, skill, im}).then(() => {
     app.showToast('配置已保存');
   }).catch(e => app.showToast('保存失败: ' + e.message));
 }

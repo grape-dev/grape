@@ -149,6 +149,7 @@ _CHAT_CONFIG_DDL = """
 CREATE TABLE IF NOT EXISTS chat_config (
     user_id INTEGER PRIMARY KEY,
     backend TEXT DEFAULT 'opencode',
+    skill TEXT DEFAULT '',
     feishu_app_id TEXT DEFAULT '',
     feishu_app_secret TEXT DEFAULT '',
     updated_at TEXT DEFAULT (datetime('now'))
@@ -337,6 +338,7 @@ def _migrate_tables():
         "ALTER TABLE user_skills ADD COLUMN parent_agent_type TEXT DEFAULT ''",
         "ALTER TABLE agent_sessions ADD COLUMN skill TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN session_id TEXT DEFAULT ''",
+        "ALTER TABLE chat_config ADD COLUMN skill TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:

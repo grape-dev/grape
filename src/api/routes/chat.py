@@ -301,12 +301,24 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
 async def get_chat_config(user: dict = Depends(get_current_user)):
     cfg = _get_chat_config(user["id"])
     from src.user.db import get_backend_agents as _get_cached_backends
+    from src.session_manager import db, db_lock
     backends = _get_cached_backends()
+    # Load chat skills from agent_type_config
+    chat_skills = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT agent_type, display_name, description FROM agent_type_config WHERE parent_agent_type='chat' ORDER BY agent_type")
+            chat_skills = [{"name": r[0], "display_name": r[1], "description": r[2]} for r in c.fetchall()]
+        except Exception:
+            pass
     return {
         "backend": {
             "type": cfg.get("backend", "opencode"),
         },
+        "skill": cfg.get("skill", ""),
         "_backends": backends,
+        "_skills": chat_skills,
         "im": {
             "feishu": {
                 "connected": bool(cfg.get("feishu_app_id")),
@@ -330,5 +342,7 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
         kwargs["feishu_app_secret"] = feishu["app_secret"]
     if body.get("backend"):
         kwargs["backend"] = body["backend"]
+    if body.get("skill") is not None:
+        kwargs["skill"] = body["skill"]
     _set_chat_config(user["id"], **kwargs)
     return {"message": "配置已更新"}
