@@ -8,20 +8,62 @@ function renderChat() {
   el.innerHTML = `<div class="chat-wrap">
     <div class="chat-convlist" id="convList"></div>
     <div class="chat-main">
-      <div class="chat-hdr">
-        <h2>Chat Agent · Personal Assistant</h2>
-        <div class="sp"></div>
-        <button class="bt bt-o bt-s" onclick="toggleChatConfig()">⚙ IM Config</button>
-      </div>
-      <div id="chatConfigPanel" class="cd hidden" style="margin:0;border-radius:0;border-bottom:1px solid var(--b);padding:12px 18px;font-size:11px"></div>
+      <div class="chat-hdr"><h2>Chat Agent · Personal Assistant</h2></div>
       <div class="chat-body" id="chatBody">
         <div style="text-align:center;color:var(--t3);padding:60px 20px">选择一个对话或创建新对话</div>
       </div>
       <div class="chat-in"><input id="chatInput" placeholder="Ask me anything..." style="flex:1" disabled><button class="bt bt-p" onclick="sendChatStream()" disabled>Send</button></div>
     </div>
+    <div class="chat-side" id="chatSide"></div>
   </div>`;
   loadConversations();
+  loadSideConfig();
   setupChatStream();
+}
+
+function loadSideConfig() {
+  API.get('/chat/config').then(d => {
+    const feishu = d.im?.feishu || {};
+    const backend = d.backend || {};
+    const backendsOpts = (d._backends || []).map(b =>
+      `<option value="${b.name}" ${b.name === (backend.type || '').toLowerCase() ? 'selected' : ''}>${b.display_name || b.name}</option>`
+    ).join('') || '<option>Default</option>';
+    const side = document.getElementById('chatSide');
+    if (!side) return;
+    side.innerHTML = `
+      <div class="cd" style="padding:12px;font-size:11px">
+        <div style="font-weight:600;margin-bottom:8px">Backend</div>
+        <select id="cfgBackend" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${backendsOpts}</select>
+      </div>
+      <div class="cd" style="padding:12px;font-size:11px">
+        <div style="font-weight:600;margin-bottom:8px">IM</div>
+        <div style="margin-bottom:6px"><span class="${feishu.connected ? 'tgx' : 't3'}">●</span> ${feishu.connected ? 'Feishu Connected' : 'Feishu'}</div>
+        <div style="margin-bottom:4px"><span class="t3">App ID</span></div>
+        <input id="cfgFeishuAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:4px">
+        <div style="margin-bottom:4px"><span class="t3">App Secret</span></div>
+        <input id="cfgFeishuSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
+        <button class="bt bt-p bt-s" onclick="saveChatConfig()" style="width:100%">Save</button>
+      </div>
+      <div class="cd" style="padding:12px;font-size:11px">
+        <div style="font-weight:600;margin-bottom:6px">Agents</div>
+        <div class="chat-agents" id="chatAgents"></div>
+      </div>`;
+    // Load agent stats
+    const repo = app.currentRepo();
+    if (repo) {
+      ['vod','issue','coding','qa','sre'].forEach((at, i) => {
+        const COLORS = ['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
+        const LABELS = ['VOD','Issue','Coding','QA','SRE'];
+        API.get('/agents/' + at + '/' + repo.owner + '/' + repo.name).then(d => {
+          const m = d.metrics || {};
+          const es = m.event_stats || {};
+          const total = m.total_events || 0;
+          const el2 = document.getElementById('chatAgents');
+          if (el2) el2.innerHTML += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:10px"><span style="width:6px;height:6px;border-radius:50%;background:${COLORS[i]};display:inline-block"></span>${LABELS[i]}<span class="t3" style="margin-left:auto">${total}</span></div>`;
+        }).catch(() => {});
+      });
+    }
+  }).catch(() => {});
 }
 
 function loadConversations() {
@@ -41,7 +83,6 @@ function loadConversations() {
       html += '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">暂无对话</div>';
     }
     list.innerHTML = html;
-    // Bind click
     list.querySelectorAll('.conv-item').forEach(item => {
       item.addEventListener('click', () => switchConversation(item.dataset.id));
     });
@@ -60,7 +101,7 @@ function newConversation() {
 
 function switchConversation(convId) {
   _currentConvId = convId;
-  loadConversations(); // refresh highlight
+  loadConversations();
   const body = document.getElementById('chatBody');
   const input = document.getElementById('chatInput');
   body.innerHTML = '<div class="loading">加载中...</div>';
@@ -88,7 +129,6 @@ function sendChatStream() {
   const body = document.getElementById('chatBody');
   if (!input || !input.value.trim()) return;
   if (!_currentConvId) {
-    // Auto-create conversation
     API.post('/chat/conversations', {}).then(d => {
       _currentConvId = d.conversation_id;
       loadConversations();
@@ -129,7 +169,6 @@ function doSend(input, body) {
           if (el) el.innerHTML = finalText || 'Done';
           body.scrollTop = body.scrollHeight;
           _chatAbort = null;
-          // reload conversations to update title
           loadConversations();
           return;
         }
@@ -154,37 +193,6 @@ function doSend(input, body) {
     }
     read();
   }).catch(e => { const el = document.getElementById(tid); if (el) el.innerHTML = 'Request failed: ' + e.message; });
-}
-
-// ====== Config Panel ======
-let _chatConfigVisible = false;
-
-function toggleChatConfig() {
-  _chatConfigVisible = !_chatConfigVisible;
-  const p = document.getElementById('chatConfigPanel');
-  if (!p) return;
-  if (_chatConfigVisible) {
-    p.classList.remove('hidden');
-    API.get('/chat/config').then(d => {
-      const feishu = d.im?.feishu || {};
-      const backendsOpts = (d._backends || []).map(b =>
-        `<option value="${b.name}" ${b.name === backend.type?.toLowerCase() ? 'selected' : ''}>${b.display_name || b.name}</option>`
-      ).join('') || '<option>Default (Built-in)</option>';
-      p.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-        <span style="font-weight:600">Backend</span>
-        <select id="cfgBackend" style="width:160px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${backendsOpts}</select>
-      </div>
-      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px">
-        <span style="font-weight:600">IM</span>
-        <label style="display:flex;align-items:center;gap:4px"><span class="${feishu.connected ? 'tgx' : 't3'}">●</span> Feishu ${feishu.connected ? '(Connected)' : '(Disconnected)'}</label>
-        <input id="cfgFeishuAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:180px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px">
-        <input id="cfgFeishuSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:180px;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px">
-        <button class="bt bt-p bt-s" onclick="saveChatConfig()">Save</button>
-      </div>`;
-    }).catch(() => {});
-  } else {
-    p.classList.add('hidden');
-  }
 }
 
 function saveChatConfig() {
