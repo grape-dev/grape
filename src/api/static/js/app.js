@@ -265,10 +265,14 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '3') {
+    if (localStorage.getItem('app_cache_ver') !== '4') {
       const oldRepo = localStorage.getItem('currentRepo');
+      const oldToken = localStorage.getItem('token');
+      const oldUser = localStorage.getItem('user');
       localStorage.clear();
-      if (oldRepo) localStorage.setItem('currentRepo', oldRepo); // restore repo selection
+      if (oldToken) localStorage.setItem('token', oldToken);
+      if (oldUser) localStorage.setItem('user', oldUser);
+      if (oldRepo) localStorage.setItem('currentRepo', oldRepo);
       localStorage.setItem('app_cache_ver', '4');
     }
 
