@@ -104,7 +104,12 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
                 text = data.get("text", "") if isinstance(data, dict) else str(data)
                 if text:
                     collected.append(text)
-            elif evt_type in ("done", "error"):
+            elif evt_type == "done":
+                if not collected:
+                    done_text = data.get("text", "") if isinstance(data, dict) else ""
+                    if done_text:
+                        collected.append(done_text)
+            elif evt_type in ("error"):
                 break
         return "".join(collected)
 
@@ -175,6 +180,10 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 yield f"data: {json.dumps({'type': 'error', 'text': f'后端错误: {err_msg}', 'conversation_id': conv_id})}\n\n"
                 return
             elif evt_type == "done":
+                if not final_text:
+                    done_text = data.get("text", "") if isinstance(data, dict) else ""
+                    if done_text:
+                        final_text = done_text
                 break
 
         if not final_text:
