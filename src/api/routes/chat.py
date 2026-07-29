@@ -120,7 +120,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     env_extra = {"GITCODE_API_TOKEN": gitcode_token} if gitcode_token else None
 
     from src.config import log
-    log.info(f"Chat send (stream={False}): backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, session_id={'set' if session_id else 'new'}")
+    log.info(f"Chat send: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
     from src.agent.executor import stream_agent
     loop = asyncio.get_event_loop()
@@ -197,7 +197,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     env_extra = {"GITCODE_API_TOKEN": gitcode_token} if gitcode_token else None
 
     from src.config import log
-    log.info(f"Chat send/stream: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, session_id={'set' if session_id else 'new'}")
+    log.info(f"Chat send/stream: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
     from src.agent.executor import stream_agent
 
