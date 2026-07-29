@@ -366,7 +366,7 @@ def unbind_user_im(user_id: int, provider: str = "feishu"):
 def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "", title: str = "") -> str:
     import uuid
     cid = str(uuid.uuid4())
-    session_id = str(uuid.uuid4())
+    session_id = ""  # real opencode session_id will be captured on first call
     with db_lock:
         c = db.cursor()
         c.execute("INSERT INTO chat_conversations (id, user_id, session_id, repo_key, im_channel_id, title) VALUES (?,?,?,?,?,?)",
