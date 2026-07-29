@@ -1,5 +1,5 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
-import json, asyncio, tempfile
+import json, asyncio, tempfile, os
 
 _CHAT_CWD = tempfile.gettempdir()
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -100,9 +100,10 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "opencode")
+    skill_name = cfg.get("skill", "")
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    prompt = _build_chat_prompt(body.message, repo_key, history)
+    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name)
     session_id = conv.get("session_id", "") if conv else ""
     if session_id and not session_id.startswith("ses_"):
         session_id = ""
@@ -163,9 +164,10 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "opencode")
+    skill_name = cfg.get("skill", "")
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    prompt = _build_chat_prompt(body.message, repo_key, history)
+    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name)
     session_id = conv.get("session_id", "") if conv else ""
     if session_id and not session_id.startswith("ses_"):
         session_id = ""
@@ -237,10 +239,18 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     )
 
 
-def _build_chat_prompt(message: str, repo_key: str, history: list) -> str:
+def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: str = "") -> str:
     parts = [CHAT_SYSTEM_PROMPT]
     if repo_key:
         parts.append(f"\nIMPORTANT: You are working in repository: {repo_key}")
+    # Load skill instructions if configured
+    if skill_name:
+        from src.config import SKILLS_DIR
+        skill_path = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
+        if os.path.exists(skill_path):
+            with open(skill_path, encoding="utf-8") as f:
+                skill_content = f.read()
+            parts.append(f"\n## Current Skill: {skill_name}\n{skill_content}\n\nFollow the instructions above for this skill.")
     chat_history = [m for m in history if m.get("role") in ("user", "agent")][-10:]
     if chat_history:
         parts.append("\nConversation history:")
@@ -250,9 +260,6 @@ def _build_chat_prompt(message: str, repo_key: str, history: list) -> str:
     repo_note = f" (in {repo_key})" if repo_key else ""
     parts.append(f"\nUser{repo_note}: {message}\nAssistant:")
     return "\n".join(parts)
-
-
-# ====== Feedback ======
 
 
 # ====== Feedback ======
