@@ -136,67 +136,23 @@ def resolve_account_by_webhook_token(token: str) -> str | None:
 
 
 # ====== 事件路由 ======
-EVENT_ROUTING = {}
-_EVENT_ROUTING_FALLBACK = "devops-event-ops"
+# ====== 事件路由 ======
 
 
 def get_domain_skill(evt_type: str, repo_key: str = "", user_id: int = 0) -> str:
-    # 1. 用户自定义映射（最高优先级）
-    if user_id and repo_key:
-        from src.user.db import get_skill_for_event
-        skill = get_skill_for_event(user_id, repo_key, evt_type)
-        if skill:
-            return skill
-    # 2. 全局 repo_routing
-    repo_skills = EVENT_ROUTING.get("repo_routing", {}).get(repo_key, {}) if repo_key else {}
-    if repo_key and evt_type in repo_skills:
-        return repo_skills[evt_type]
-    # 3. 全局 routing（最低优先级）
-    return EVENT_ROUTING.get("routing", {}).get(evt_type, _EVENT_ROUTING_FALLBACK)
-
-
-def _load_routing_config():
-    global EVENT_ROUTING, _EVENT_ROUTING_FALLBACK
-    _routing_path = os.path.join(CONFIG_DIR, "event-routing.json")
-    if not os.path.exists(_routing_path):
-        log.info(f"Event routing config not found at {_routing_path}, fallback={_EVENT_ROUTING_FALLBACK}")
-        return
+    """从 DB 读取事件路由（托管给 src.api.routing）"""
     try:
-        with open(_routing_path, encoding="utf-8") as _f:
-            _routing_data = json.load(_f)
-        EVENT_ROUTING = _routing_data
-        _EVENT_ROUTING_FALLBACK = _routing_data.get("fallback_skill", "devops-event-ops")
-        repo_count = len(_routing_data.get("repo_routing", {}))
-        log.info(f"Event routing loaded: {len(_routing_data.get('routing', {}))} rules, {repo_count} repo overrides, fallback={_EVENT_ROUTING_FALLBACK}")
-    except Exception as _e:
-        log.warning(f"Failed to load event routing config: {_e}")
+        from src.api.routing import get_domain_skill as _db_route
+        return _db_route(evt_type, repo_key, user_id)
+    except Exception:
+        return ""
 
 
-# ====== Agent 后端路由 ======
-AGENT_ROUTING = {"default_backend": "opencode", "skill_backends": {}}
+def get_agent_backend(skill_name: str = "") -> str:
+    """返回默认后端引擎"""
+    return "opencode"
 
 
-def get_agent_backend(skill_name: str) -> str:
-    return AGENT_ROUTING.get("skill_backends", {}).get(skill_name, AGENT_ROUTING.get("default_backend", "opencode"))
-
-
-def _load_agent_routing_config():
-    global AGENT_ROUTING
-    _path = os.path.join(CONFIG_DIR, "agent-routing.json")
-    if not os.path.exists(_path):
-        log.info(f"Agent routing config not found at {_path}, using defaults")
-        return
-    try:
-        with open(_path, encoding="utf-8") as _f:
-            AGENT_ROUTING = json.load(_f)
-        log.info(f"Agent routing loaded: default={AGENT_ROUTING.get('default_backend')}, {len(AGENT_ROUTING.get('skill_backends', {}))} skill mappings")
-    except Exception as _e:
-        log.warning(f"Failed to load agent routing config: {_e}")
-
-
-# ====== 启动时加载 ======
-_load_routing_config()
-_load_agent_routing_config()
 _load_accounts()
 
 # 环境变量兜底——无论 _load_accounts 何时运行，模块加载时总会执行一次

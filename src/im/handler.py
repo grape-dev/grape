@@ -1,7 +1,7 @@
 """飞书消息处理"""
 import re, os
 from datetime import datetime
-from src.config import log, WORKSPACE_DIR, SKILLS_DIR, get_domain_skill, get_agent_backend
+from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import get_or_create_session, update_session
 from src.prompt_builder import build_chat_prompt, get_skill_capabilities, build_role_definition
 from src.agent.executor import stream_agent
@@ -156,7 +156,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
 
         final_text = ""
         exit_code = 0
-        backend = get_agent_backend(skills[0]) if skills else "opencode"
+        backend = "opencode"
         oc_sid = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
         new_oc_session_id = oc_sid
         # 获取 repo 绑定的 DevOps Bot Token

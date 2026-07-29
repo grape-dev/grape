@@ -177,10 +177,8 @@ _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 
 # (seed_key, json_filename, actual_table_name)
 _SEED_FILES = [
-    ("event_route_config", "event-routing.json", "event_route_config"),
     ("agent_type_config", "agent-description.json", "agent_type_config"),
     ("agent_type_config_skills", "skill-description.json", "agent_type_config"),
-    ("agent_registry", "agent-routing.json", "agent_registry"),
 ]
 
 
