@@ -71,8 +71,8 @@ function loadAgentTypes() {
       if (!current) {
         const r = managedRepos[0];
         localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
-        nav('dash');
       }
+      nav('dash');
     }).catch(() => {
       console.error("[loadRepos] FAILED");
       $('sidebar').style.display = 'none';
