@@ -10,13 +10,13 @@ function renderChat() {
     <div class="chat-main">
       <div class="chat-hdr"><h2>Chat Agent · Personal Assistant</h2></div>
       <div class="chat-body" id="chatBody">
-        <div style="text-align:center;color:var(--t3);padding:60px 20px">选择一个对话或创建新对话</div>
+        <div style="text-align:center;color:var(--t3);padding:60px 20px">加载中...</div>
       </div>
-      <div class="chat-in"><input id="chatInput" placeholder="Ask me anything..." style="flex:1" disabled><button class="bt bt-p" onclick="sendChatStream()" disabled>Send</button></div>
+      <div class="chat-in"><input id="chatInput" placeholder="Ask me anything..." style="flex:1"><button class="bt bt-p" onclick="sendChatStream()">Send</button></div>
     </div>
     <div class="chat-side" id="chatSide"></div>
   </div>`;
-  loadConversations();
+  loadConversations(true);  // auto-select first
   loadSideConfig();
   setupChatStream();
 }
@@ -70,7 +70,7 @@ function loadSideConfig() {
   }).catch(() => {});
 }
 
-function loadConversations() {
+function loadConversations(autoSelect) {
   API.get('/chat/conversations').then(d => {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
@@ -84,12 +84,17 @@ function loadConversations() {
       </div>`;
     });
     if (convs.length === 0) {
-      html += '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">暂无对话</div>';
+      html += '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">暂无对话，开始输入即可自动创建</div>';
+      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">输入消息即可开始新对话</div>';
     }
     list.innerHTML = html;
     list.querySelectorAll('.conv-item').forEach(item => {
       item.addEventListener('click', () => switchConversation(item.dataset.id));
     });
+    // Auto-select first conversation
+    if (autoSelect && convs.length > 0 && !_currentConvId) {
+      switchConversation(convs[0].id);
+    }
   }).catch(() => {});
 }
 
