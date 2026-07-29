@@ -88,16 +88,19 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "opencode")
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
-    prompt = _build_chat_prompt(body.message, body.repo_key, history)
+    repo_key = conv.get("repo_key", "") if conv else body.repo_key
+    prompt = _build_chat_prompt(body.message, repo_key, history)
     session_id = conv.get("session_id", "") if conv else ""
 
     from src.agent.executor import stream_agent
     loop = asyncio.get_event_loop()
     collected = []
+    new_session_id = ""
 
     def run_agent():
+        nonlocal new_session_id
         for evt_type, data in stream_agent(
-            prompt=prompt, cwd=os.getcwd(),
+            prompt=prompt, cwd=os.getcwd(), session_id=session_id,
             backend_name=backend_name, user_id=user["id"],
         ):
             if evt_type == "text":
@@ -105,10 +108,14 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
                 if text:
                     collected.append(text)
             elif evt_type == "done":
-                if not collected:
-                    done_text = data.get("text", "") if isinstance(data, dict) else ""
-                    if done_text:
-                        collected.append(done_text)
+                if isinstance(data, dict):
+                    nsid = data.get("oc_session_id", "")
+                    if nsid:
+                        new_session_id = nsid
+                    if not collected:
+                        done_text = data.get("text", "")
+                        if done_text:
+                            collected.append(done_text)
             elif evt_type in ("error"):
                 break
         return "".join(collected)
@@ -119,6 +126,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 
     add_message(conv_id, "agent", reply)
     touch_conversation(conv_id)
+    # Save opencode session ID for continuity
+    if new_session_id and not session_id:
+        update_conversation(conv_id, session_id=new_session_id)
     return {"reply": reply, "conversation_id": conv_id}
 
 
@@ -139,21 +149,28 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "opencode")
     history = get_messages(conv_id, limit=20)
-    prompt = _build_chat_prompt(body.message, body.repo_key, history)
-    # Don't pass session_id — let opencode auto-create its own
+    repo_key = conv.get("repo_key", "") if conv else body.repo_key
+    prompt = _build_chat_prompt(body.message, repo_key, history)
+    session_id = conv.get("session_id", "") if conv else ""
 
     from src.agent.executor import stream_agent
 
     async def event_stream():
         q = asyncio.Queue()
         loop = asyncio.get_event_loop()
+        captured_session = ""
 
         def agent_worker():
+            nonlocal captured_session
             try:
                 for evt_type, data in stream_agent(
-                    prompt=prompt, cwd=os.getcwd(),
+                    prompt=prompt, cwd=os.getcwd(), session_id=session_id,
                     backend_name=backend_name, user_id=user["id"],
                 ):
+                    if evt_type == "done" and isinstance(data, dict):
+                        nsid = data.get("oc_session_id", "")
+                        if nsid:
+                            captured_session = nsid
                     q.put_nowait((evt_type, data))
             except Exception as e:
                 q.put_nowait(("error", str(e)))
@@ -191,6 +208,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
         add_message(conv_id, "agent", final_text)
         touch_conversation(conv_id)
+        # Save opencode session ID for continuity
+        if captured_session and not session_id:
+            update_conversation(conv_id, session_id=captured_session)
         yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
 
     return StreamingResponse(
@@ -203,15 +223,15 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 def _build_chat_prompt(message: str, repo_key: str, history: list) -> str:
     parts = [CHAT_SYSTEM_PROMPT]
     if repo_key:
-        parts.append(f"\nCurrent repository: {repo_key}")
-    # Include recent chat history for context
+        parts.append(f"\nIMPORTANT: You are working in repository: {repo_key}")
     chat_history = [m for m in history if m.get("role") in ("user", "agent")][-10:]
     if chat_history:
         parts.append("\nConversation history:")
         for m in chat_history:
             role = "User" if m["role"] == "user" else "Assistant"
             parts.append(f"{role}: {m['content'][:200]}")
-    parts.append(f"\nUser: {message}\nAssistant:")
+    repo_note = f" (in {repo_key})" if repo_key else ""
+    parts.append(f"\nUser{repo_note}: {message}\nAssistant:")
     return "\n".join(parts)
 
 
