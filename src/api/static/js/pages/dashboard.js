@@ -5,20 +5,32 @@ function renderDashboard(data) {
   const act = data.activity || [];
   const m = data.metrics || {};
   const repo = data.repo || '';
+  const role = data.role || 'Member';
+  const agentCounts = data.agent_event_counts || {};
   const scenes = data._scenes || [];
   const owner = data._owner || '';
   const name = data._name || '';
   const sceneOpts = scenes.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
 
   const agentOrder = ['vod','issue','coding','qa','sre'];
+  const agentIcons = ['🎤','🎫','⚙','✔','🚀'];
   const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
+  const emojiLabels = ['🎤 feedback→issue','🎫 2 bugs · 1 feature','⚙ implementing...','✔ pass: 92%','🚀 uptime 99.9%'];
+
+  const agentTaglines = {
+    vod: 'Voice of Developer',
+    issue: 'Issue Manager',
+    coding: 'Developer',
+    qa: 'Quality Assurance',
+    sre: 'DevOps',
+  };
 
   let html = `<div class="cd" style="background:linear-gradient(135deg,#eef3ff,#eefdf2);border-color:#c6d9f7">
     <div class="flex fc gap12">
       <div style="font-size:26px">■</div>
       <div class="f1">
-        <div style="font-size:14px;font-weight:600">${repo} <span class="tg tg-c" style="font-size:9px;vertical-align:middle">${(a[0] && a[0].status) || 'Active'}</span></div>
-        <div class="ts t2">DevOps Bot · ★ main · Webhook OK</div>
+        <div style="font-size:14px;font-weight:600">${repo} <span class="tg tg-c" style="font-size:9px;vertical-align:middle">${role}</span></div>
+        <div class="ts t2">${role === 'Maintainer' ? 'Maintainer' : 'Member'} · ★ main · Webhook OK</div>
       </div>
       <div class="stats">
         <div class="st"><div class="v" style="color:var(--g)">${m.auto_resolution || '98.5'}%</div><div class="l">Auto-Resolution</div></div>
@@ -46,14 +58,16 @@ function renderDashboard(data) {
     const statusDot = st === 'failed' ? 'var(--r)' : st === 'running' ? 'var(--y)' : hasSession ? 'var(--g)' : '#ddd';
     const statusLabel = st === 'completed' ? 'Done' : st === 'running' ? 'Active' : st === 'failed' ? 'Failed' : hasSession ? 'Active' : '—';
     const backend = ag.backend || meta.default_backend || 'OpenCode';
-    const ntText = at === 'vod' ? '分析开发者声音' : at === 'issue' ? 'Issue 处理中' : at === 'coding' ? '编码实现' : at === 'qa' ? '质量审查' : '构建部署';
+    const count = agentCounts[at] || 0;
+    const nsText = count > 0 ? count + ' events today' : hasSession ? (st === 'running' ? 'Processing...' : 'Idle') : '—';
+    const ntCls = at === 'vod' ? 'tg-v' : at === 'issue' ? 'tg-i' : at === 'coding' ? 'tg-c' : at === 'qa' ? 'tg-q' : 'tg-s';
 
     html += `<div class="nd" style="border-top:3px solid ${meta.color || 'var(--t2)'}" onclick="app.nav('${at}')">
       <div class="nh"><span class="n" style="background:${meta.color || 'var(--t2)'}"></span><h4>${meta.display_name || agentLabels[i]}</h4></div>
-      <div class="nds">${meta.description || ''}</div>
+      <div class="nds">${agentTaglines[at] || ''}</div>
       <div class="nm"><span class="ml">Backend</span><span class="mv">${backend}</span></div>
-      <div class="ns"><span class="d" style="background:${statusDot}"></span>${statusLabel}</div>
-      <div class="nt" style="background:${meta.bg || 'var(--bg)'};color:${meta.color || 'var(--t2)'}">${ntText}</div>
+      <div class="ns"><span class="d" style="background:${statusDot}"></span>${nsText}</div>
+      <div class="nt ${ntCls}">${agentIcons[i]} ${emojiLabels[i]}</div>
     </div>`;
   });
 

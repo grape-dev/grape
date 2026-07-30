@@ -47,9 +47,31 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
             agent_sessions.append({
                 "agent_type": atype,
                 "backend": "opencode",
-                "status": "idle",
+                "status": "",
                 "last_active_at": "",
             })
+
+    # 计算每个 Agent 的事件统计
+    agent_event_counts = {}
+    for ev in recent_events:
+        at = ev["agent_type"]
+        if at:
+            agent_event_counts[at] = agent_event_counts.get(at, 0) + 1
+
+    for atype in all_types:
+        if atype not in agent_event_counts:
+            agent_event_counts[atype] = 0
+
+    # 获取用户角色
+    role = "Member"
+    try:
+        repos = user_db.get_managed_repos(user["id"])
+        for r in repos:
+            if r["repo_owner"] == owner and r["repo_name"] == repo:
+                role = "Maintainer" if r.get("is_admin") else "Member"
+                break
+    except Exception:
+        pass
 
     event_counts = {"pending": 0, "running": 0, "completed": 0, "failed": 0}
     for ev in recent_events:
@@ -59,6 +81,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
 
     return {
         "repo": repo_key,
+        "role": role,
         "metrics": {
             "total_events": len(recent_events),
             "active_agents": sum(1 for a in agent_sessions if a["status"] == "running"),
@@ -66,5 +89,6 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
             "failed_events": event_counts["failed"],
         },
         "agents": agent_sessions,
+        "agent_event_counts": agent_event_counts,
         "activity": recent_events,
     }
