@@ -1,7 +1,7 @@
 {
   "scenes": {
     "default": {
-      "name": "Default",
+      "name": "通用开发",
       "mapping": {
         "vod": "",
         "issue": "issue",
