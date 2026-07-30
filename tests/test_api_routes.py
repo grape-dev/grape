@@ -28,9 +28,9 @@ def setup_module():
     # 确保 agent_type_config 表中有 5 个 Agent 类型和技能
     from src.session_manager import db, db_lock
     with db_lock:
-        for at, dn in [("vod","VOD Agent"),("issue","Issue Agent"),("coding","Coding Agent"),("qa","QA Agent"),("sre","SRE Agent")]:
+        for at, dn, ord_num in [("vod","VOD Agent",1),("issue","Issue Agent",2),("coding","Coding Agent",3),("qa","QA Agent",4),("sre","SRE Agent",5)]:
             db.execute("INSERT OR REPLACE INTO agent_type_config (agent_type, display_name, description, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?)",
-                       (at, dn, f"Description for {at}", "●", 0, '["issue_opened"]' if at == "issue" else "[]"))
+                       (at, dn, f"Description for {at}", "●", ord_num, '["issue_opened"]' if at == "issue" else "[]"))
         for skill, dn, parent in [("issue","Issue 管理","issue"),("implementation","代码实现","coding"),("pr","PR 管理","coding")]:
             db.execute("INSERT OR REPLACE INTO agent_type_config (agent_type, display_name, description, parent_agent_type, subscribe_events) VALUES (?,?,?,?,?)",
                        (skill, dn, f"{dn} description", parent, '["issue_opened"]' if skill == "issue" else "[]"))
@@ -488,19 +488,20 @@ class TestSearch:
 # ===================== 12. Webhook & A2A =====================
 class TestWebhook:
     def test_webhook_push(self):
-        # 设置测试用的 webhook token 到 managed_repos
         from src.session_manager import db, db_lock
         with db_lock:
             db.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, gitcode_webhook_token, is_admin) VALUES (?,?,?,?,?,?)",
                        (1, "org", "repo", "org/repo", "test_webhook_token_123", 1))
             db.commit()
-        r = client.post("/webhook/gitcode", content=b'{}',
+        payload = '{"project": {"path_with_namespace": "org/repo"}, "ref": "refs/heads/main"}'
+        r = client.post("/webhook/gitcode", content=payload.encode(),
                         headers={"X-GitCode-Event": "push", "X-GitCode-Token": "test_webhook_token_123"})
-        assert r.status_code == 200
+        assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
         assert r.json()["status"] == "ok"
 
     def test_webhook_invalid_token(self):
-        r = client.post("/webhook/gitcode", content=b'{}',
+        payload = '{"project": {"path_with_namespace": "org/repo"}, "ref": "refs/heads/main"}'
+        r = client.post("/webhook/gitcode", content=payload.encode(),
                         headers={"X-GitCode-Event": "push", "X-GitCode-Token": "wrong_token"})
         assert r.status_code == 403
 
@@ -569,6 +570,11 @@ class TestEventPipeline:
 
     def test_routing_db(self):
         from src.api.routing import get_domain_agent, get_agent_skill_map
+        from src.session_manager import db, db_lock
+        with db_lock:
+            db.execute("INSERT OR REPLACE INTO agent_type_config (agent_type, display_name, description, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?)",
+                       ("issue", "Issue Agent", "Test", "●", 2, '["issue_opened"]'))
+            db.commit()
         skill = get_domain_agent("issue_opened")
         assert skill == "issue" or skill != ""
         sm = get_agent_skill_map()

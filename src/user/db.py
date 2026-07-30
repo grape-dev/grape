@@ -814,6 +814,15 @@ def resolve_repo_by_webhook_token(token: str) -> str | None:
     return None
 
 
+def get_webhook_token_by_repo(full_name: str) -> str:
+    """根据 full_name（owner/repo）查找 repo 的预期 webhook token"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT gitcode_webhook_token FROM managed_repos WHERE full_name=? LIMIT 1", (full_name,))
+        row = c.fetchone()
+        return row[0] if row else ""
+
+
 def remove_managed_repo(user_id: int, repo_owner: str, repo_name: str) -> dict | None:
     """删除托管仓库记录，返回被删除的记录（含 webhook_id）或 None"""
     try:

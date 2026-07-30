@@ -67,29 +67,45 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
             return result
 
     # 3. 路由判定
-    skill = get_domain_agent(event_type, f"{source}:{evt['repository']}")
-    if not skill:
+    agent_type = get_domain_agent(event_type)
+    if not agent_type:
         log.info(f"Pipeline: no route for type={event_type}")
         return result
 
-    # 4. 提取 Issue ID
+    # 4. 查找 Agent 配置（backend + skill）
+    backend = "opencode"
+    skill_name = ""
+    repo_name = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT backend, skill FROM agent_sessions WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
+            row = c.fetchone()
+            if row:
+                backend = row[0] or backend
+                skill_name = row[1] or ""
+    except Exception:
+        pass
+
+    # 5. 提取 Issue ID
     payload = evt.get("payload", {})
     issue_id = resolve_issue_id(payload) or evt.get("issue_id", "")
     title = evt.get("title", "") or event_type
 
-    # 5. 存储事件
+    # 6. 存储事件
     seq = append_event(
         repo_key=repo_key,
         event_type=event_type,
         title=title,
         issue_id=issue_id,
         source=source,
-        agent_type=skill,
+        agent_type=agent_type,
         payload=payload,
         status="running",
     )
 
-    result.update({"seq": seq, "event_type": event_type, "skill": skill,
+    result.update({"seq": seq, "event_type": event_type, "skill": agent_type,
+                   "backend": backend, "skill_name": skill_name,
                    "repo_key": repo_key, "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
     return result

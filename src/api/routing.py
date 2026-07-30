@@ -1,72 +1,32 @@
-"""事件路由 — 三级路由策略（DB驱动）"""
+"""事件路由 — 单级路由：从 agent_type_config.subscribe_events 查找匹配的 Agent"""
 import json
 from src.session_manager import db, db_lock
 from src.config import log
 
 
-def get_domain_agent(event_type: str, repo_key: str = "",
-                     user_id: int = 0) -> str:
-    """三级路由：repo_skill_mapping(user) → event_route_config(repo) → agent_type_config.subscribe_events(global)"""
-    # 第一级：用户自定义映射（repo_skill_mapping）
-    if user_id:
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT skill_name FROM repo_skill_mapping WHERE user_id=? AND repo_key=? AND event_type=? AND is_active=1 LIMIT 1",
-                    (user_id, repo_key, event_type)
-                )
-                row = c.fetchone()
-                if row:
-                    log.info(f"Route: user_mapping -> {row[0]} (user={user_id}, repo={repo_key}, type={event_type})")
-                    return row[0]
-        except Exception:
-            pass
-
-    # 第二级：仓库覆盖配置（event_route_config.repo_key = repo_key）
-    if repo_key:
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT skill FROM event_route_config WHERE repo_key=? AND event_type=? ORDER BY priority DESC LIMIT 1",
-                    (repo_key, event_type)
-                )
-                row = c.fetchone()
-                if row:
-                    log.info(f"Route: repo_override -> {row[0]} (repo={repo_key}, type={event_type})")
-                    return row[0]
-        except Exception:
-            pass
-
-    # 第三级：全局路由（agent_type_config.subscribe_events）
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT agent_type, subscribe_events FROM agent_type_config WHERE subscribe_events IS NOT NULL AND subscribe_events!='[]'")
-            for r in c.fetchall():
-                agent_type = r[0]
-                try:
-                    events = json.loads(r[1])
-                    if isinstance(events, list) and event_type in events:
-                        log.info(f"Route: subscribe -> {agent_type} (type={event_type})")
-                        return agent_type
-                except (json.JSONDecodeError, TypeError):
-                    pass
-    except Exception:
-        pass
-
-    log.info(f"Route: no match for type={event_type}, repo={repo_key}")
+def get_domain_agent(event_type: str) -> str:
+    """单级路由：从 agent_type_config.subscribe_events 查找匹配的 Agent"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT agent_type FROM agent_type_config WHERE order_num>0 AND subscribe_events LIKE ?",
+            (f'%"{event_type}"%',)
+        )
+        row = c.fetchone()
+        if row:
+            log.info(f"Route: {event_type} -> {row[0]}")
+            return row[0]
+    log.info(f"Route: no match for type={event_type}")
     return ""
 
 
 def get_agent_skill_map() -> dict[str, str]:
-    """获取 {event_type: skill} 全局映射，用于前端展示"""
+    """获取 {event_type: agent_type} 映射，用于前端展示"""
     result = {}
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT agent_type, subscribe_events FROM agent_type_config WHERE subscribe_events IS NOT NULL AND subscribe_events!='[]'")
+            c.execute("SELECT agent_type, subscribe_events FROM agent_type_config WHERE order_num>0")
             for r in c.fetchall():
                 agent_type = r[0]
                 try:
