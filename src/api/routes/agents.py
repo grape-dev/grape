@@ -95,11 +95,15 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
 
         try:
             c.execute(
-                "SELECT seq, event_type, title, status, created_at FROM events WHERE repo_key=? AND agent_type=? ORDER BY seq DESC LIMIT 10",
+                "SELECT seq, event_type, title, actor, status, created_at, backend, skill, exit_code, duration, started_at, completed_at FROM events WHERE repo_key=? AND agent_type=? ORDER BY seq DESC LIMIT 10",
                 (repo_key, name)
             )
             recent_events = [
-                {"seq": r[0], "event_type": r[1], "title": r[2] or r[1], "status": r[3], "created_at": r[4]}
+                {"seq": r[0], "event_type": r[1], "title": r[2] or r[1], "actor": r[3] or "",
+                 "status": r[4], "created_at": r[5],
+                 "backend": r[6] or "", "skill": r[7] or "",
+                 "exit_code": r[8], "duration": r[9],
+                 "started_at": r[10] or "", "completed_at": r[11] or ""}
                 for r in c.fetchall()
             ]
         except Exception:
