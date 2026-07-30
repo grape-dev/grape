@@ -1,7 +1,7 @@
 """事件处理管道：归一化 → 路由 → 存储 → Agent 执行"""
-import json, os, time, uuid
+import json, os, time, uuid, threading
 from datetime import datetime
-from src.config import log
+from src.config import log, WORKSPACE_DIR
 from src.vcs.adapter import normalize_event, get_event_header
 from src.api.routing import get_domain_agent
 from src.api.event_store import append_event, update_event_status, get_issue_summary
@@ -139,6 +139,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
                    "repo_key": repo_key, "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
     log.info(f"Pipeline: done, seq={seq}, ok=True, final_agent={agent_type}")
+
+    # 7. 后台异步执行 Agent
+    if seq > 0 and backend and skill_name:
+        threading.Thread(target=_execute_agent, args=(
+            repo_key, seq, agent_type, backend, skill_name, evt,
+        ), daemon=True, name=f"ag-{agent_type}-{seq}").start()
+        log.info(f"Pipeline: started agent execution for seq={seq}")
+
     return result
 
 
@@ -148,3 +156,55 @@ def get_prompt_context(repo_key: str) -> str:
     if not summary:
         return ""
     return f"\n\n[Event History]\n{summary}\n"
+
+
+def _execute_agent(repo_key: str, seq: int, agent_type: str,
+                   backend: str, skill_name: str, evt: dict):
+    """后台执行 Agent：构建 prompt → stream_agent → 更新事件状态"""
+    from src.agent.executor import stream_agent
+    from src.prompt_builder import build_prompt
+
+    repository = evt.get("repository", repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key)
+    ws = os.path.join(WORKSPACE_DIR, repository)
+    os.makedirs(ws, exist_ok=True)
+
+    log.info(f"Exec agent: type={agent_type}, backend={backend}, skill={skill_name}, seq={seq}")
+
+    try:
+        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type])
+    except Exception as e:
+        log.warning(f"Exec agent: prompt build failed: {e}")
+        update_event_status(seq, "failed")
+        return
+
+    parts = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
+    owner_repo = parts.split("/", 1)
+    repo_gitcode_token = ""
+    if len(owner_repo) == 2:
+        from src.user.db import get_bot_token_by_repo
+        repo_gitcode_token = get_bot_token_by_repo(owner_repo[0], owner_repo[1]) or ""
+
+    update_event_status(seq, "running")
+    log.info(f"Exec agent: spawning {backend} for seq={seq}")
+
+    exit_code = -1
+    final_text = ""
+    try:
+        for evt_type, data in stream_agent(
+            prompt, ws, session_id="", event_type=evt.get("type", ""),
+            backend_name=backend, account="default",
+            repo_gitcode_token=repo_gitcode_token,
+        ):
+            if evt_type == "done":
+                d = data
+                exit_code = d.get("exit_code", -1)
+                final_text = d.get("text", "")
+                log.info(f"Agent done: exit={exit_code}, text_len={len(final_text)}")
+            elif evt_type == "error":
+                log.warning(f"Agent error: {data}")
+    except Exception as e:
+        log.warning(f"Exec agent failed: {e}")
+
+    new_status = "completed" if exit_code == 0 else "failed"
+    update_event_status(seq, new_status)
+    log.info(f"Exec agent: seq={seq} -> {new_status}")
