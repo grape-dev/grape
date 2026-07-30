@@ -31,17 +31,15 @@ async def lifespan(app: FastAPI):
         for bot_app_id, bot_app_secret, bot_type in rows:
             try:
                 if bot_type == "chat_bot":
-                    task = asyncio.create_task(
-                        start_ws_async(process_chat, bot_app_id, bot_app_secret),
-                        name=f"chat-ws-{bot_app_id[:20]}"
+                    task = asyncio.ensure_future(
+                        start_ws_async(process_chat, bot_app_id, bot_app_secret)
                     )
                     ws_tasks.append(task)
                     log.info(f"Chat WS task created: {bot_app_id[:40]}")
 
                 elif bot_type == "vod_bot":
-                    task = asyncio.create_task(
-                        start_vod_ws_async(bot_app_id, bot_app_secret),
-                        name=f"vod-ws-{bot_app_id[:20]}"
+                    task = asyncio.ensure_future(
+                        start_vod_ws_async(bot_app_id, bot_app_secret)
                     )
                     ws_tasks.append(task)
                     log.info(f"VOD WS task created: {bot_app_id[:40]}")

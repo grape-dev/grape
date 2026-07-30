@@ -7,6 +7,7 @@ from datetime import datetime
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 import lark_oapi
+import lark_oapi.ws.client  # 预加载 WS 子模块（避免在 async task 中首次加载阻塞事件循环）
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
 # 全局 Feishu 消息并发限制（等待+运行最多 5 个）
