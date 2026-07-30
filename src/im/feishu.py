@@ -587,6 +587,8 @@ def start_ws(on_message_callback, account_name: str = "default"):
     import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    import lark_oapi.ws.client as _lark_ws
+    _lark_ws.loop = loop
 
     global _ws_clients
 
@@ -637,7 +639,6 @@ def start_ws(on_message_callback, account_name: str = "default"):
         event_handler=handler,
         auto_reconnect=True,
     )
-    client.loop = loop
     _ws_clients[account_name] = client
     log.info(f"Feishu WS client starting (account={account_name})...")
     try:
@@ -685,6 +686,8 @@ def start_vod_ws(bot_app_id: str):
     import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    import lark_oapi.ws.client as _lark_ws
+    _lark_ws.loop = loop
 
     global _ws_clients
     app_id = ""
@@ -753,7 +756,6 @@ def start_vod_ws(bot_app_id: str):
         event_handler=handler,
         auto_reconnect=True,
     )
-    client.loop = loop
     _ws_clients[f"vod_{bot_app_id}"] = client
     log.info(f"VOD WS started for bot_app_id={bot_app_id}")
     try:
