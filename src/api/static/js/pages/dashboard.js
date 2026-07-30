@@ -35,6 +35,7 @@ function renderDashboard(data) {
         <select id="sceneSelect" style="padding:4px 8px;border-radius:6px;border:1px solid var(--b);font-size:11px;background:var(--bg);color:var(--t);outline:none">${sceneOpts}</select>
         <button class="bt bt-p bt-s" onclick="applyScene('${owner}', '${name}')">应用</button>
       </div>
+    </div>
     <div class="af">`;
 
   agentOrder.forEach((at, i) => {
