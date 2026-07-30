@@ -25,80 +25,39 @@ async def lifespan(app: FastAPI):
             c.execute("SELECT DISTINCT bot_app_id, bot_app_secret, bot_type FROM im_bot_config")
             rows = c.fetchall()
 
-        from src.im.feishu_bot import FeishuBot
-        from src.im.feishu import _handle_message
+        from src.im.feishu import start_ws_async, start_vod_ws_async
         from src.im.handler import process_chat
-        from src.im.vod_handler import process_vod_message
 
         for bot_app_id, bot_app_secret, bot_type in rows:
             try:
                 if bot_type == "chat_bot":
-                    def _make_chat_handler():
-                        import concurrent.futures
-                        _pool = concurrent.futures.ThreadPoolExecutor(max_workers=5)
-
-                        async def _handler(msg):
-                            event = msg.get("event", {})
-                            message = event.get("message", {})
-                            msg_type = message.get("message_type", "text")
-                            content_str = message.get("content", "{}")
-                            chat_id = message.get("chat_id", "")
-                            sender_open_id = event.get("sender", {}).get("sender_id", {}).get("open_id", "")
-
-                            text = ""
-                            if msg_type == "text":
-                                try:
-                                    text = json.loads(content_str).get("text", "")
-                                except Exception:
-                                    text = content_str
-
-                            if not text or not chat_id:
-                                return
-
-                            parsed = {
-                                "type": "message", "text": text,
-                                "chat_id": chat_id, "sender_id": sender_open_id,
-                                "sender_open_id": sender_open_id,
-                                "message_id": message.get("message_id", ""),
-                                "message_type": msg_type, "account": bot_app_id,
-                            }
-                            loop = asyncio.get_event_loop()
-                            await loop.run_in_executor(_pool, process_chat, parsed)
-
-                        return _handler
-
-                    bot = FeishuBot(bot_app_id, bot_app_secret, f"chat-{bot_app_id[:12]}",
-                                    _make_chat_handler())
-                    chat_bots.append(bot)
-                    task = asyncio.create_task(bot.run(), name=f"chat-{bot_app_id[:20]}")
+                    task = asyncio.create_task(
+                        start_ws_async(process_chat, bot_app_id, bot_app_secret),
+                        name=f"chat-ws-{bot_app_id[:20]}"
+                    )
                     ws_tasks.append(task)
-                    log.info(f"Chat Bot task created: {bot_app_id[:40]}")
+                    log.info(f"Chat WS task created: {bot_app_id[:40]}")
 
                 elif bot_type == "vod_bot":
-                    _vod_bot_id = bot_app_id
-                    async def _vod_handler(msg):
-                        process_vod_message(msg, _vod_bot_id)
-                    bot = FeishuBot(bot_app_id, bot_app_secret, f"vod-{bot_app_id[:12]}",
-                                    _vod_handler)
-                    chat_bots.append(bot)
-                    task = asyncio.create_task(bot.run(), name=f"vod-{bot_app_id[:20]}")
+                    task = asyncio.create_task(
+                        start_vod_ws_async(bot_app_id, bot_app_secret),
+                        name=f"vod-ws-{bot_app_id[:20]}"
+                    )
                     ws_tasks.append(task)
-                    log.info(f"VOD Bot task created: {bot_app_id[:40]}")
+                    log.info(f"VOD WS task created: {bot_app_id[:40]}")
 
             except Exception as e:
-                log.warning(f"Bot init failed for {bot_app_id[:20]}: {e}")
+                log.warning(f"WS task create failed for {bot_app_id[:20]}: {e}")
 
-        log.info(f"IM Bots: {len(ws_tasks)} task(s) created")
+        log.info(f"IM WS: {len(ws_tasks)} task(s) created")
 
     except Exception as e:
-        log.warning(f"IM Bots startup failed: {e}")
+        log.warning(f"IM WS startup failed: {e}")
 
     yield
 
     # Shutdown
-    log.info("Shutting down IM Bots...")
-    for bot in chat_bots:
-        bot.stop()
+    log.info("Shutting down IM WS...")
     for task in ws_tasks:
         task.cancel()
     for task in ws_tasks:
@@ -106,7 +65,9 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
-    log.info("IM Bots stopped")
+    from src.im.feishu import stop_ws
+    stop_ws()
+    log.info("IM WS stopped")
 
 
 app = FastAPI(title="Agentic DevOps API", version="2.0.0", lifespan=lifespan)
