@@ -123,6 +123,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
 
     # 6. 存储事件
     log.info(f"Pipeline: storing event, repo_key={repo_key}, agent={agent_type}")
+    actor = evt.get("actor", "")
     seq = append_event(
         repo_key=repo_key,
         event_type=event_type,
@@ -130,6 +131,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
         issue_id=issue_id,
         source=source,
         agent_type=agent_type,
+        actor=actor,
         payload=payload,
         status="running",
     )
@@ -163,6 +165,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     """后台执行 Agent：构建 prompt → stream_agent → 更新事件状态"""
     from src.agent.executor import stream_agent
     from src.prompt_builder import build_prompt
+    from src.api.event_store import update_event_config, update_event_complete
 
     repository = evt.get("repository", repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key)
     ws = os.path.join(WORKSPACE_DIR, repository, f"{agent_type}-agent")
@@ -197,18 +200,23 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         from src.user.db import get_bot_token_by_repo
         repo_gitcode_token = get_bot_token_by_repo(owner_repo[0], owner_repo[1]) or ""
 
+    # 写入执行配置
+    started_at = datetime.now().isoformat()
+    update_event_config(seq, backend, skill_name, started_at)
     update_event_status(seq, "running")
     log.info(f"Exec agent: spawning {backend} for seq={seq}")
 
     exit_code = -1
     final_text = ""
     new_oc_session_id = ""
+    agent_logs = []
     try:
         for evt_type, data in stream_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
             backend_name=backend, account="default",
             repo_gitcode_token=repo_gitcode_token,
         ):
+            agent_logs.append({"time": datetime.now().isoformat(), "type": evt_type, "msg": str(data)[:200]})
             if evt_type == "done":
                 d = data
                 exit_code = d.get("exit_code", -1)
@@ -231,6 +239,16 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
+    # 写入执行结果
+    completed_at = datetime.now().isoformat()
+    duration = None
+    try:
+        s = datetime.fromisoformat(started_at)
+        e = datetime.fromisoformat(completed_at)
+        duration = round((e - s).total_seconds(), 1)
+    except Exception:
+        pass
     new_status = "completed" if exit_code == 0 else "failed"
-    update_event_status(seq, new_status)
-    log.info(f"Exec agent: seq={seq} -> {new_status}")
+    update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
+                          agent_logs=agent_logs, completed_at=completed_at)
+    log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, log_count={len(agent_logs)}")

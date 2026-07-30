@@ -9,15 +9,22 @@ _EVENTS_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_key TEXT NOT NULL,
-    issue_id TEXT DEFAULT '',
     event_type TEXT NOT NULL,
     source TEXT DEFAULT 'gitcode',
-    agent_type TEXT DEFAULT '',
+    issue_id TEXT DEFAULT '',
     title TEXT DEFAULT '',
-    body TEXT DEFAULT '',
+    actor TEXT DEFAULT '',
     payload TEXT DEFAULT '{}',
+    agent_type TEXT DEFAULT '',
+    backend TEXT DEFAULT '',
+    skill TEXT DEFAULT '',
     status TEXT DEFAULT 'pending',
-    created_at TEXT DEFAULT (datetime('now'))
+    exit_code INTEGER DEFAULT NULL,
+    duration REAL DEFAULT NULL,
+    agent_logs TEXT DEFAULT '[]',
+    created_at TEXT DEFAULT (datetime('now')),
+    started_at TEXT DEFAULT '',
+    completed_at TEXT DEFAULT ''
 )
 """
 
@@ -350,6 +357,14 @@ def _migrate_tables():
         "ALTER TABLE agent_type_config ADD COLUMN skill_path TEXT DEFAULT ''",
         "ALTER TABLE feishu_users ADD COLUMN user_id INTEGER DEFAULT 0",
         "ALTER TABLE agent_type_config ADD COLUMN subscribe_events TEXT DEFAULT '[]'",
+        "ALTER TABLE events ADD COLUMN actor TEXT DEFAULT ''",
+        "ALTER TABLE events ADD COLUMN backend TEXT DEFAULT ''",
+        "ALTER TABLE events ADD COLUMN skill TEXT DEFAULT ''",
+        "ALTER TABLE events ADD COLUMN exit_code INTEGER DEFAULT NULL",
+        "ALTER TABLE events ADD COLUMN duration REAL DEFAULT NULL",
+        "ALTER TABLE events ADD COLUMN agent_logs TEXT DEFAULT '[]'",
+        "ALTER TABLE events ADD COLUMN started_at TEXT DEFAULT ''",
+        "ALTER TABLE events ADD COLUMN completed_at TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:

@@ -16,23 +16,23 @@ def acquire_repo_lock(repo_key: str) -> threading.Lock:
         return _repo_locks[repo_key]
 
 
-def append_event(repo_key: str, event_type: str, title: str = "", body: str = "",
+def append_event(repo_key: str, event_type: str, title: str = "",
                  issue_id: str = "", agent_type: str = "", source: str = "gitcode",
-                 payload: dict = None, status: str = "pending") -> int:
+                 actor: str = "", payload: dict = None, status: str = "pending") -> int:
     """写入事件到 events 表，返回 seq"""
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, body, payload, status) VALUES (?,?,?,?,?,?,?,?,?)",
-                (repo_key, issue_id, event_type, source, agent_type, title, body,
+                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, payload, status) VALUES (?,?,?,?,?,?,?,?,?)",
+                (repo_key, issue_id, event_type, source, agent_type, title, actor,
                  json.dumps(payload or {}), status)
             )
             db.commit()
             seq = c.lastrowid
             payload_keys = list((payload or {}).keys())
             log.info(f"Event stored: seq={seq}, repo={repo_key}, type={event_type}, "
-                     f"agent={agent_type}, issue={issue_id}, source={source}, "
+                     f"agent={agent_type}, issue={issue_id}, actor={actor}, source={source}, "
                      f"status={status}, payload_keys={payload_keys}")
             return seq
         except Exception as e:
@@ -50,6 +50,34 @@ def update_event_status(seq: int, status: str):
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update event {seq}: {e}")
+
+
+def update_event_config(seq: int, backend: str, skill: str, started_at: str):
+    """写入执行配置（backend, skill, started_at）"""
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute("UPDATE events SET backend=?, skill=?, started_at=? WHERE seq=?",
+                      (backend, skill, started_at, seq))
+            db.commit()
+        except Exception as e:
+            log.warning(f"Failed to update event config {seq}: {e}")
+
+
+def update_event_complete(seq: int, status: str, exit_code: int = None,
+                          duration: float = None, agent_logs: list = None,
+                          completed_at: str = ""):
+    """写入执行结果（status, exit_code, duration, agent_logs, completed_at）"""
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute(
+                "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=? WHERE seq=?",
+                (status, exit_code, duration, json.dumps(agent_logs or []), completed_at, seq)
+            )
+            db.commit()
+        except Exception as e:
+            log.warning(f"Failed to update event complete {seq}: {e}")
 
 
 def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
@@ -73,12 +101,15 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
         c = db.cursor()
         try:
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, status, created_at FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, status, created_at, backend, skill, exit_code, duration, started_at, completed_at FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
                 params + [limit, offset]
             )
             return [
                 {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "",
-                 "title": r[4] or r[2], "status": r[5], "created_at": r[6]}
+                 "title": r[4] or r[2], "actor": r[5] or "", "status": r[6], "created_at": r[7],
+                 "backend": r[8] or "", "skill": r[9] or "",
+                 "exit_code": r[10], "duration": r[11],
+                 "started_at": r[12] or "", "completed_at": r[13] or ""}
                 for r in c.fetchall()
             ]
         except Exception:
@@ -107,7 +138,7 @@ def get_events_grouped_by_issue(repo_key: str) -> dict[str, list[dict]]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, status, created_at FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
+                "SELECT seq, issue_id, event_type, agent_type, title, actor, status, created_at FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
                 (repo_key,)
             )
             rows = c.fetchall()
@@ -121,7 +152,7 @@ def get_events_grouped_by_issue(repo_key: str) -> dict[str, list[dict]]:
             grouped[iid] = []
         grouped[iid].append({
             "seq": r[0], "event_type": r[2], "agent_type": r[3] or "",
-            "title": r[4] or r[2], "status": r[5], "created_at": r[6],
+            "title": r[4] or r[2], "actor": r[5] or "", "status": r[6], "created_at": r[7],
         })
     return grouped
 
