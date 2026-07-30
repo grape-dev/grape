@@ -8,7 +8,7 @@ from src.agent.executor import stream_agent
 from src.im.feishu import (
     resolve_repo, process_command, detect_bind_intent, detect_clean_intent,
     get_user_name, start_ws, stop_ws, get_chat_members, sync_repo_feishu_mapping,
-    add_reaction,
+    add_reaction, reply_card,
 )
 from src.session_manager import db
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
