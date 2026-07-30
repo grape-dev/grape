@@ -934,7 +934,7 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
 def _handle_message(event, on_message_callback, account_name: str = "default"):
     """处理收到的飞书消息（在 WS 线程中调用）"""
     try:
-        log.info(f"Feishu WS event received, type={type(event).__name__}")
+        log.info(f"[Chat] WS event received, type={type(event).__name__}")
 
         # event.header.event_type is a string, not a method
         header = getattr(event, 'header', None)

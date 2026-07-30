@@ -196,7 +196,7 @@ def _send_feishu_reply(bot_app_id: str, bot_app_secret: str, chat_id: str, text:
             "Content-Type": "application/json",
         })
         resp = urlopen(req, timeout=10)
-        log.info(f"VOD IM: card reply sent to chat={chat_id}, status={resp.status}")
+        log.info(f"[VOD] card reply sent, chat={chat_id[:20]}, status={resp.status}")
     except Exception as e:
         log.warning(f"VOD IM: send card reply failed: {e}")
 
@@ -241,7 +241,7 @@ def process_vod_message(message: dict, bot_app_id: str):
             return
 
         text = text.strip()
-        log.info(f"VOD IM: msg from chat={chat_id}, sender={sender_id[:20]}, text={text[:100]}")
+        log.info(f"[VOD] msg from {sender_id[:20]}: {text[:100]}")
 
         # 命令处理
         cmd_parts = text.split()

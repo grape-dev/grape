@@ -22,7 +22,7 @@ def process_chat(parsed: dict):
         chat_id = parsed["chat_id"]
         msg_id = parsed["message_id"]
         account = parsed.get("account", "default")
-        log.info(f"Feishu message: {text[:100]} (chat={chat_id[:20]}, account={account})")
+        log.info(f"[Chat] message: {text[:100]} (chat={chat_id[:20]}, bot={account[:20]})")
 
         # 能力询问
         capability_patterns = [
