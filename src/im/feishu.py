@@ -2,7 +2,7 @@
 Uses official lark-oapi SDK for WebSocket connection.
 Uses direct HTTP for message sending (SDK Client is async-only).
 """
-import json, os, logging, re, time
+import json, os, logging, re, time, asyncio
 from datetime import datetime
 from urllib.request import Request, urlopen
 from urllib.error import URLError
