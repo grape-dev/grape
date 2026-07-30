@@ -53,12 +53,14 @@ function renderDashboard(data) {
     const nsText = count > 0 ? count + ' events today' : hasSession ? (st === 'running' ? 'Processing...' : 'Idle') : '—';
     const ntCls = at === 'vod' ? 'tg-v' : at === 'issue' ? 'tg-i' : at === 'coding' ? 'tg-c' : at === 'qa' ? 'tg-q' : 'tg-s';
     const colors = {vod:'var(--pk)',issue:'var(--r)',coding:'var(--a)',qa:'var(--pu)',sre:'var(--or)'};
+    const descs = {vod:'从开发者声音中收集反馈、聚类分析共性、提炼价值、自动创建 Issue',issue:'Issue 分类、标签、指派、A2A 触发 Coding Agent',coding:'代码实现、PR 创建、自我审查',qa:'代码审查、自动化测试、功能验证、安全检查',sre:'构建部署、发布管理、监控运维、故障排查'};
     const borderColor = meta.color || colors[at] || 'var(--t2)';
     const dotColor = meta.color || colors[at] || 'var(--t2)';
+    const desc = meta.description || descs[at] || '';
 
     html += `<div class="nd" style="border-top:3px solid ${borderColor}" onclick="app.nav('${at}')">
       <div class="nh"><span class="n" style="background:${dotColor}"></span><h4>${meta.display_name || agentLabels[i]}</h4></div>
-      <div class="nds">${meta.description || ''}</div>
+      <div class="nds">${desc}</div>
       <div class="nm"><span class="ml">Backend</span><span class="mv">${backend}</span></div>
       <div class="ns"><span class="d" style="background:${statusDot}"></span>${nsText}</div>
       <div class="nt ${ntCls}">${bottomLabels[i]}</div>
