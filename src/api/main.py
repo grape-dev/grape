@@ -28,14 +28,6 @@ async def lifespan(app: FastAPI):
         from src.im.feishu import start_ws_async, start_vod_ws_async
         from src.im.handler import process_chat
 
-        # 测试 async task 是否运行
-        async def _test():
-            log.info("WS_TEST: test task running!")
-            await asyncio.sleep(1)
-            log.info("WS_TEST: test task done, ws tasks should follow")
-        t = asyncio.get_event_loop().create_task(_test())
-        ws_tasks.append(t)
-
         for bot_app_id, bot_app_secret, bot_type in rows:
             try:
                 if bot_type == "chat_bot":
