@@ -38,9 +38,9 @@ def ensure_configured():
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT feishu_app_id, feishu_app_secret FROM chat_config WHERE feishu_app_id!='' LIMIT 1")
+            c.execute("SELECT bot_app_id FROM im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
             row = c.fetchone()
-            if row and row[0] and row[1] and row[1] != '********':
+            if row and row[0]:
                 return True
         except Exception:
             pass
@@ -56,16 +56,16 @@ def get_tenant_token() -> str:
     with _TOKEN_LOCK:
         if time.time() < _TOKEN_EXPIRE and _TOKEN:
             return _TOKEN
-        # 从 chat_config DB 获取凭据
+        # 从 im_bot_config 获取 Chat Agent 凭据
         app_id = ""
         app_secret = ""
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             try:
-                c.execute("SELECT feishu_app_id, feishu_app_secret FROM chat_config WHERE feishu_app_id!='' LIMIT 1")
+                c.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
                 row = c.fetchone()
-                if row and row[1] and row[1] != '********':
+                if row and row[0] and row[1]:
                     app_id = row[0]
                     app_secret = row[1]
             except Exception:
@@ -591,26 +591,24 @@ def start_ws(on_message_callback, account_name: str = "default"):
     _lark_ws.loop = loop
 
     global _ws_clients
-    if not ensure_configured():
-        return
 
-    # 从 chat_config 表获取飞书凭据
+    # 从 im_bot_config 获取 Chat Agent 凭据
     app_id = ""
     app_secret = ""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT feishu_app_id, feishu_app_secret FROM chat_config WHERE feishu_app_id!='' LIMIT 1")
+            c.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
             row = c.fetchone()
-            if row and row[0] and row[1] and row[1] != '********':
+            if row and row[0] and row[1]:
                 app_id = row[0]
                 app_secret = row[1]
         except Exception:
             pass
 
     if not app_id or not app_secret:
-        log.warning(f"Feishu: no feishu_app_id configured in chat_config, skipping WS")
+        log.warning(f"Feishu: no chat_bot configured in im_bot_config, skipping WS")
         return
 
     # 记录当前 WS 使用的 app_id 到 meta 表（供后续查询 user_id 用）
@@ -681,7 +679,7 @@ def stop_ws(account_name: str | None = None):
 
 
 def start_vod_ws(bot_app_id: str):
-    """启动 VOD Agent 的 WebSocket 连接（读取 vod_bot_config 的凭证）"""
+    """启动 VOD Agent 的 WebSocket 连接（读取 im_bot_config 的凭证）"""
     import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -694,7 +692,7 @@ def start_vod_ws(bot_app_id: str):
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT bot_app_id, bot_app_secret FROM vod_bot_config WHERE bot_app_id=?", (bot_app_id,))
+            c.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='vod_bot' AND bot_app_id=?", (bot_app_id,))
             row = c.fetchone()
             if row and row[0] and row[1]:
                 app_id = row[0]

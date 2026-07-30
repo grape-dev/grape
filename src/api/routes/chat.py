@@ -1,7 +1,7 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
 import json, asyncio, tempfile, os, threading
 
-from src.config import WORKSPACE_DIR
+from src.config import WORKSPACE_DIR, log
 
 def _get_chat_cwd(user_id: int, conv_id: str) -> str:
     """每个 conversation 独立工作目录，避免相互影响"""
@@ -410,6 +410,19 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
             chat_skills = [{"name": r[0], "display_name": r[1], "description": r[2], "skill_path": r[3] or r[0]} for r in c.fetchall()]
         except Exception:
             pass
+
+    # 从 im_bot_config 读取 Chat Agent 凭证状态
+    im_app_id = ""
+    im_app_secret = ""
+    try:
+        c.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
+        row = c.fetchone()
+        if row:
+            im_app_id = row[0] or ""
+            im_app_secret = row[1] or ""
+    except Exception:
+        pass
+
     return {
         "backend": {
             "type": cfg.get("backend", "opencode"),
@@ -419,9 +432,9 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
         "_skills": chat_skills,
         "im": {
             "feishu": {
-                "connected": bool(cfg.get("feishu_app_id")),
-                "app_id": cfg.get("feishu_app_id", ""),
-                "app_secret_exists": bool(cfg.get("feishu_app_secret")),
+                "connected": bool(im_app_id),
+                "app_id": im_app_id,
+                "app_secret_exists": bool(im_app_secret),
             },
             "wecom": {"connected": False, "app_id": ""},
             "dingtalk": {"connected": False, "app_id": ""},
@@ -435,14 +448,30 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
     feishu = im.get("feishu", {})
     kwargs = {}
     if feishu.get("app_id"):
-        # 校验 feishu_app_id 唯一性
+        app_id = feishu["app_id"]
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT user_id FROM chat_config WHERE feishu_app_id=? AND user_id!=?", (feishu["app_id"], user["id"]))
-            if c.fetchone():
-                raise HTTPException(status_code=400, detail={"code": 400, "message": "该飞书 App ID 已被其他用户绑定"})
-        kwargs["feishu_app_id"] = feishu["app_id"]
+            # 类型独占校验
+            c.execute("SELECT bot_type FROM im_bot_config WHERE bot_app_id=?", (app_id,))
+            row = c.fetchone()
+            if row and row[0] == "vod_bot":
+                raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent"})
+            # 保存到 im_bot_config
+            app_secret = feishu.get("app_secret", "")
+            if app_secret and app_secret != "********":
+                c.execute(
+                    "INSERT OR REPLACE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) VALUES (?,?,?)",
+                    (app_id, app_secret, "chat_bot")
+                )
+                db.commit()
+                kwargs["feishu_app_id"] = app_id
+                log.info(f"Chat IM: saved im_bot_config for {app_id[:30]}")
+            else:
+                kwargs["feishu_app_id"] = app_id
+    else:
+        kwargs["feishu_app_id"] = ""
+        kwargs["feishu_app_secret"] = ""
     if feishu.get("app_secret") and feishu["app_secret"] != "********":
         kwargs["feishu_app_secret"] = feishu["app_secret"]
     if body.get("backend"):

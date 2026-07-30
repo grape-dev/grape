@@ -103,7 +103,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
                 pass
             if session_data.get("vod_bot_app_id"):
                 try:
-                    c.execute("SELECT COUNT(*) FROM vod_bot_config WHERE bot_app_id=?", (session_data["vod_bot_app_id"],))
+                    c.execute("SELECT COUNT(*) FROM im_bot_config WHERE bot_type='vod_bot' AND bot_app_id=?", (session_data["vod_bot_app_id"],))
                     vod_bot_connected = c.fetchone()[0] > 0
                 except Exception:
                     pass
@@ -186,14 +186,14 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 
     from src.session_manager import db, db_lock
 
-    # VOD IM 配置：保存到 vod_bot_config + 更新 agent_sessions.vod_bot_app_id
+    # VOD IM 配置：保存到 im_bot_config + 类型独占校验 + 更新 agent_sessions.vod_bot_app_id
     if name == "vod" and body.vod_bot_app_id:
         app_secret = body.vod_bot_app_secret
         if app_secret == "********":
             try:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("SELECT bot_app_secret FROM vod_bot_config WHERE bot_app_id=?", (body.vod_bot_app_id,))
+                    c.execute("SELECT bot_app_secret FROM im_bot_config WHERE bot_app_id=?", (body.vod_bot_app_id,))
                     row = c.fetchone()
                     if row:
                         app_secret = row[0]
@@ -202,9 +202,14 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         if app_secret:
             with db_lock:
                 c = db.cursor()
+                # 类型独占校验：检查是否已被 chat_bot 占用
+                c.execute("SELECT bot_type FROM im_bot_config WHERE bot_app_id=?", (body.vod_bot_app_id,))
+                row = c.fetchone()
+                if row and row[0] == "chat_bot":
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent"})
                 c.execute(
-                    "INSERT OR REPLACE INTO vod_bot_config (bot_app_id, bot_app_secret) VALUES (?,?)",
-                    (body.vod_bot_app_id, app_secret)
+                    "INSERT OR REPLACE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) VALUES (?,?,?)",
+                    (body.vod_bot_app_id, app_secret, "vod_bot")
                 )
                 db.commit()
 

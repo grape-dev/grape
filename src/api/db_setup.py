@@ -168,10 +168,11 @@ CREATE TABLE IF NOT EXISTS chat_config (
 )
 """
 
-_VOD_BOT_CONFIG_DDL = """
-CREATE TABLE IF NOT EXISTS vod_bot_config (
+_IM_BOT_CONFIG_DDL = """
+CREATE TABLE IF NOT EXISTS im_bot_config (
     bot_app_id TEXT PRIMARY KEY,
     bot_app_secret TEXT NOT NULL,
+    bot_type TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -203,7 +204,7 @@ _NEW_TABLES = [
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type_config", _AGENT_TYPE_CONFIG_DDL),
     ("agent_registry", _AGENT_REGISTRY_DDL),
-    ("vod_bot_config", _VOD_BOT_CONFIG_DDL),
+    ("im_bot_config", _IM_BOT_CONFIG_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
 ]
 
@@ -432,3 +433,17 @@ def _migrate_tables():
                 log.info(f"Backfilled subscribe_events for {updated} agent(s) from {filepath}")
     except Exception as e:
         log.warning(f"Backfill subscribe_events failed: {e}")
+    # 迁移 im 凭证到 im_bot_config 统一表
+    try:
+        with db_lock:
+            c = db.cursor()
+            # Chat Agent 凭证
+            c.execute("INSERT OR IGNORE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) SELECT feishu_app_id, feishu_app_secret, 'chat_bot' FROM chat_config WHERE feishu_app_id!='' AND feishu_app_secret!='' AND feishu_app_secret!='********'")
+            # VOD Agent 凭证
+            c.execute("INSERT OR IGNORE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) SELECT bot_app_id, bot_app_secret, 'vod_bot' FROM vod_bot_config")
+            db.commit()
+            migrated = c.lastrowid
+            if migrated:
+                log.info(f"Migrated IM configs to im_bot_config")
+    except Exception as e:
+        log.warning(f"Migrate im_bot_config failed: {e}")

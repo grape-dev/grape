@@ -160,7 +160,7 @@ def _get_bot_credential(bot_app_id: str) -> tuple[str, str]:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT bot_app_id, bot_app_secret FROM vod_bot_config WHERE bot_app_id=?", (bot_app_id,))
+            c.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='vod_bot' AND bot_app_id=?", (bot_app_id,))
             row = c.fetchone()
             if row:
                 return row[0], row[1]
