@@ -91,6 +91,7 @@ class FeishuBot:
                             event = data.get("event", {})
                             header = event.get("header", {})
                             event_type = header.get("event_type", "")
+                            log.info(f"[{self.name}] event: {event_type}")
 
                             if event_type == "im.message.receive_v1":
                                 message = event.get("event", {}).get("message", {})
@@ -114,6 +115,7 @@ class FeishuBot:
 
     async def _safe_handle(self, message_dict: dict):
         """安全地处理消息，异常不扩散"""
+        log.info(f"[{self.name}] handling message")
         try:
             if self.on_message:
                 if asyncio.iscoroutinefunction(self.on_message):
