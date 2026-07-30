@@ -30,13 +30,13 @@ async def lifespan(app: FastAPI):
             try:
                 if bot_type == "chat_bot":
                     threading.Thread(
-                        target=lambda: asyncio.run(start_ws_async(process_chat, bot_app_id, bot_app_secret)),
+                        target=lambda a=bot_app_id, s=bot_app_secret: asyncio.run(start_ws_async(process_chat, a, s)),
                         daemon=True, name=f"chat-ws-{bot_app_id[:20]}"
                     ).start()
                     log.info(f"Chat WS thread: {bot_app_id[:40]}")
                 elif bot_type == "vod_bot":
                     threading.Thread(
-                        target=lambda: asyncio.run(start_vod_ws_async(bot_app_id, bot_app_secret)),
+                        target=lambda a=bot_app_id, s=bot_app_secret: asyncio.run(start_vod_ws_async(a, s)),
                         daemon=True, name=f"vod-ws-{bot_app_id[:20]}"
                     ).start()
                     log.info(f"VOD WS thread: {bot_app_id[:40]}")
