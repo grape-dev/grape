@@ -857,7 +857,9 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
             if callable(event_type):
                 event_type = event_type()
             if event_type != "im.message.receive_v1":
+                log.info(f"[VOD] skip event: {event_type}")
                 return
+            log.info(f"[VOD] event: receive_v1")
             ev = getattr(event, 'event', None)
             if ev is None:
                 return
