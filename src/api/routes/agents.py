@@ -186,7 +186,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 
     from src.session_manager import db, db_lock
 
-    # VOD IM 配置：保存到 im_bot_config + 类型独占校验 + 更新 agent_sessions.vod_bot_app_id
+    # VOD IM 配置：保存到 im_bot_config + 类型独占校验 + 清理旧 app_id
     if name == "vod" and body.vod_bot_app_id:
         app_secret = body.vod_bot_app_secret
         if app_secret == "********":
@@ -202,11 +202,27 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         if app_secret:
             with db_lock:
                 c = db.cursor()
-                # 类型独占校验：检查是否已被 chat_bot 占用
+                # 类型独占校验
                 c.execute("SELECT bot_type FROM im_bot_config WHERE bot_app_id=?", (body.vod_bot_app_id,))
                 row = c.fetchone()
                 if row and row[0] == "chat_bot":
                     raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent"})
+
+                # 如果换了新的 app_id，删除旧的 app_id
+                c.execute("SELECT vod_bot_app_id FROM agent_sessions WHERE repo_key=? AND agent_type='vod'", (repo_key,))
+                old_row = c.fetchone()
+                old_app_id = old_row[0] if old_row else ""
+                if old_app_id and old_app_id != body.vod_bot_app_id:
+                    # 检查是否还有其他 agent_session 引用旧 app_id
+                    c.execute("SELECT COUNT(*) FROM agent_sessions WHERE vod_bot_app_id=? AND repo_key!=?", (old_app_id, repo_key))
+                    other_refs = c.fetchone()[0]
+                    if other_refs == 0:
+                        c.execute("DELETE FROM im_bot_config WHERE bot_app_id=?", (old_app_id,))
+                        log.info(f"VOD IM: removed old app_id={old_app_id[:30]}")
+                    # 清理旧 conversations
+                    c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE repo_key=? AND agent_type='vod')", (repo_key,))
+                    log.info(f"VOD IM: cleaned conversations for {repo_key}")
+
                 c.execute(
                     "INSERT OR REPLACE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) VALUES (?,?,?)",
                     (body.vod_bot_app_id, app_secret, "vod_bot")
