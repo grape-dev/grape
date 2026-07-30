@@ -86,6 +86,22 @@ def get_tenant_token() -> str:
             return ""
 
 
+def get_tenant_token_from(app_id: str, app_secret: str) -> str:
+    """根据自定义 app_id/app_secret 获取 tenant_access_token（不从 chat_config 读取）"""
+    import time
+    if not app_id or not app_secret:
+        return ""
+    url = f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal"
+    payload = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
+    try:
+        resp = urlopen(Request(url, data=payload, headers={"Content-Type": "application/json"}), timeout=10)
+        data = json.loads(resp.read())
+        return data.get("tenant_access_token", "")
+    except Exception as e:
+        log.warning(f"Feishu: get_tenant_token_from failed: {e}")
+        return ""
+
+
 def get_user_name(user_id: str) -> str:
     """通过飞书 API 获取用户昵称"""
     if not user_id or not ensure_configured():

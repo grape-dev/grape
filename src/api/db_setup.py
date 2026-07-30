@@ -367,6 +367,9 @@ def _migrate_tables():
         "ALTER TABLE events ADD COLUMN agent_logs TEXT DEFAULT '[]'",
         "ALTER TABLE events ADD COLUMN started_at TEXT DEFAULT ''",
         "ALTER TABLE events ADD COLUMN completed_at TEXT DEFAULT ''",
+        "ALTER TABLE agent_sessions ADD COLUMN im_provider TEXT DEFAULT ''",
+        "ALTER TABLE agent_sessions ADD COLUMN im_app_id TEXT DEFAULT ''",
+        "ALTER TABLE agent_sessions ADD COLUMN im_app_secret TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:

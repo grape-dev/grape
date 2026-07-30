@@ -1,4 +1,10 @@
 {
+  "vod": {
+    "name": "开发者声音分析",
+    "agent_type": "vod",
+    "path": "vod",
+    "description": "收集开发者反馈、聚类分析共性问题、提炼价值、自动创建 Issue"
+  },
   "issue": {
     "name": "Issue 管理",
     "agent_type": "issue",

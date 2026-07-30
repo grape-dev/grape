@@ -72,6 +72,20 @@ function renderAgent(name, data) {
       <option value="">加载中...</option>
     </select>
   </div>
+  <div style="margin:16px 0 12px;border-top:1px solid var(--b);padding-top:12px">
+    <div class="flex fc jbtw" style="margin-bottom:8px">
+      <h3 style="font-size:13px;font-weight:600">IM 通知</h3>
+      <span class="ts t3">${data.im && data.im.connected ? '🟢 已连接' : ''}</span>
+    </div>
+    <div class="srow"><label>Provider</label>
+      <select id="imProvider" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+        <option value="">关闭</option>
+        <option value="feishu" ${(data.im && data.im.provider === 'feishu') ? 'selected' : ''}>Feishu</option>
+      </select>
+    </div>
+    <div class="srow"><label>App ID</label><input id="imAppId" value="${(data.im && data.im.app_id) || ''}" placeholder="cli_xxxxxxxx" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
+    <div class="srow"><label>App Secret</label><input id="imSecret" type="password" value="${data.im && data.im.connected ? '********' : ''}" placeholder="留空不修改" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
+  </div>
   <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg()">Cancel</button></div>
 </div>
 <div class="stats mt16 mb16">
@@ -89,7 +103,16 @@ function saveAgentConfig(name) {
   const skill = document.querySelector('.cfg-skill')?.value || '';
   const repo = app.currentRepo();
   if (!repo) return;
-  API.put('/agents/' + name + '/' + repo.owner + '/' + repo.name, {backend, skill}).then(r => {
+  const provider = document.getElementById('imProvider')?.value || '';
+  const appId = document.getElementById('imAppId')?.value || '';
+  const rawSecret = document.getElementById('imSecret')?.value || '';
+  const secret = rawSecret === '********' ? '' : rawSecret;
+  API.put('/agents/' + name + '/' + repo.owner + '/' + repo.name, {
+    backend, skill,
+    im_provider: provider,
+    im_app_id: appId,
+    im_app_secret: secret,
+  }).then(r => {
     app.showToast('配置已保存');
     toggleAgentCfg();
   }).catch(e => app.showToast('保存失败: ' + e.message));

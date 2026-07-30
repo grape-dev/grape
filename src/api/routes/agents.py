@@ -74,12 +74,13 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         c = db.cursor()
         try:
             c.execute(
-                "SELECT backend, skill, repo_gitcode_token, oc_session_id, status, last_active_at FROM agent_sessions WHERE repo_key=? AND agent_type=?",
+                "SELECT backend, skill, repo_gitcode_token, oc_session_id, status, last_active_at, im_provider, im_app_id FROM agent_sessions WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
             if row:
-                session_data = {"backend": row[0], "skill": row[1] or "", "repo_gitcode_token": row[2] or "", "oc_session_id": row[3], "status": row[4], "last_active_at": row[5]}
+                session_data = {"backend": row[0], "skill": row[1] or "", "repo_gitcode_token": row[2] or "", "oc_session_id": row[3], "status": row[4], "last_active_at": row[5],
+                               "im_provider": row[6] or "", "im_app_id": row[7] or ""}
         except Exception:
             pass
 
@@ -130,12 +131,20 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
             "event_stats": event_stats,
         },
         "recent_events": recent_events,
+        "im": {
+            "provider": session_data.get("im_provider", ""),
+            "app_id": session_data.get("im_app_id", ""),
+            "connected": bool(session_data.get("im_app_id")),
+        },
     }
 
 
 class AgentConfig(BaseModel):
     backend: str = "opencode"
     skill: str = ""
+    im_provider: str = ""
+    im_app_id: str = ""
+    im_app_secret: str = ""
 
 
 @router.put("/{name}/{owner}/{repo}")
@@ -152,13 +161,27 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     from src.user.db import get_bot_token_by_repo
     repo_token = get_bot_token_by_repo(owner, repo)
 
+    # 密码掩码处理：如果传 "********" 表示不修改
     from src.session_manager import db, db_lock
+    im_secret = body.im_app_secret
+    if im_secret == "********":
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT im_app_secret FROM agent_sessions WHERE repo_key=? AND agent_type=?", (repo_key, name))
+                row = c.fetchone()
+                if row:
+                    im_secret = row[0] or ""
+        except Exception:
+            pass
+
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at) VALUES (?,?,?,?,?,?,?,datetime('now'))",
-                (session_id, repo_key, name, body.backend, body.skill, repo_token, "idle")
+                "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, im_provider, im_app_id, im_app_secret) VALUES (?,?,?,?,?,?,?,datetime('now'),?,?,?)",
+                (session_id, repo_key, name, body.backend, body.skill, repo_token, "idle",
+                 body.im_provider, body.im_app_id, im_secret)
             )
             db.commit()
         except Exception as e:

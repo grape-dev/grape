@@ -3,7 +3,7 @@
     "default": {
       "name": "通用开发",
       "mapping": {
-        "vod": "",
+        "vod": "vod",
         "issue": "issue",
         "coding": "implementation",
         "qa": "code-review-and-quality",
@@ -13,17 +13,17 @@
     "cloud-native": {
       "name": "云原生开发",
       "mapping": {
-        "vod": "",
+        "vod": "vod",
         "issue": "issue",
         "coding": "implementation",
-        "qa": "pr",
+        "qa": "code-review-and-quality",
         "sre": "cloud-deploy"
       }
     },
     "iac": {
       "name": "IaC开发",
       "mapping": {
-        "vod": "",
+        "vod": "vod",
         "issue": "issue",
         "coding": "implementation",
         "qa": "code-review-and-quality",
@@ -33,7 +33,7 @@
     "agent-dev": {
       "name": "Agent开发",
       "mapping": {
-        "vod": "",
+        "vod": "vod",
         "issue": "issue",
         "coding": "implementation",
         "qa": "code-review-and-quality",
@@ -43,7 +43,7 @@
     "skill-dev": {
       "name": "Skill开发",
       "mapping": {
-        "vod": "",
+        "vod": "vod",
         "issue": "issue",
         "coding": "implementation",
         "qa": "code-review-and-quality",
