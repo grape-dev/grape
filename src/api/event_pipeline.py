@@ -94,7 +94,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
     if not backend:
         # 从默认映射配置文件加载 skill
         try:
-            _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-defaults.json")
+            _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
             if os.path.exists(_defaults_path):
                 with open(_defaults_path, "r", encoding="utf-8") as _f:
                     _defaults = json.load(_f)
