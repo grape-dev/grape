@@ -34,8 +34,8 @@ class FeishuBot:
         return ""
 
     async def _get_ws_endpoint(self) -> str:
-        """获取飞书 WebSocket 动态端点 URL"""
-        url = f"{FEISHU_BASE}/callback/ws/endpoint"
+        """获取飞书 WebSocket 动态端点 URL（不在 open-apis 下）"""
+        url = f"https://open.feishu.cn/callback/ws/endpoint"
         payload = json.dumps({"AppID": self.app_id, "AppSecret": self.app_secret}).encode()
         try:
             resp = urlopen(Request(url, data=payload, headers={
