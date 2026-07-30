@@ -33,23 +33,38 @@ class FeishuBot:
             log.warning(f"[{self.name}] token error: {e}")
         return ""
 
+    async def _get_ws_endpoint(self) -> str:
+        """获取飞书 WebSocket 动态端点 URL"""
+        url = f"{FEISHU_BASE}/callback/ws/endpoint"
+        payload = json.dumps({"AppID": self.app_id, "AppSecret": self.app_secret}).encode()
+        try:
+            resp = urlopen(Request(url, data=payload, headers={
+                "Content-Type": "application/json",
+                "User-Agent": "devops-bot/1.0",
+            }), timeout=10)
+            data = json.loads(resp.read())
+            if data.get("code") == 0:
+                return data.get("data", {}).get("URL", "")
+            log.warning(f"[{self.name}] endpoint api error: {data}")
+        except Exception as e:
+            log.warning(f"[{self.name}] endpoint error: {e}")
+        return ""
+
     async def run(self):
-        """生命周期主循环：鉴权 → 连接 WS → 接收消息 → 重连"""
+        """生命周期主循环：鉴权 → 获取端点 → 连接 WS → 接收消息 → 重连"""
         self._running = True
         import asyncio
         import websockets
 
         while self._running:
             try:
-                self.token = await self._get_tenant_token()
-                if not self.token:
-                    log.warning(f"[{self.name}] no token, retry in 10s")
+                ws_url = await self._get_ws_endpoint()
+                if not ws_url:
+                    log.warning(f"[{self.name}] no ws endpoint, retry in 10s")
                     await asyncio.sleep(10)
                     continue
 
-                ws_url = f"wss://msg-frontier.feishu.cn/ws/v2?app_id={self.app_id}&token={self.token}"
                 log.info(f"[{self.name}] connecting...")
-
                 async with websockets.connect(ws_url, ping_interval=20) as ws:
                     self.ws = ws
                     log.info(f"[{self.name}] connected")
