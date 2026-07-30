@@ -26,16 +26,17 @@ def normalize_event(raw, event_header, source: str = "gitcode") -> dict:
 
 
 def get_event_header(headers: dict) -> tuple[str, str]:
-    """从 HTTP 头中提取事件类型和平台名称。
+    """从 HTTP 头中提取事件类型和平台名称（大小写不敏感）。
 
     Returns:
         (event_type_header, source_name)
     """
+    headers_lower = {k.lower(): v for k, v in headers.items()}
     for source, backend in _BACKENDS.items():
-        header_value = headers.get(backend.event_header_key)
+        header_value = headers_lower.get(backend.event_header_key.lower())
         if header_value:
             return header_value, source
-    return headers.get("X-GitCode-Event", "unknown"), "gitcode"
+    return headers_lower.get("x-gitcode-event", "unknown"), "gitcode"
 
 
 def resolve_source_by_path(path: str) -> str:

@@ -51,7 +51,7 @@ class TestInfra:
     def test_spa_index(self):
         r = client.get("/")
         assert r.status_code == 200
-        assert "Agentic DevOps" in r.text
+        assert "Grape" in r.text
 
     def test_spa_static_files(self):
         for f in ["/static/js/app.js", "/static/css/app.css", "/static/js/api.js",
