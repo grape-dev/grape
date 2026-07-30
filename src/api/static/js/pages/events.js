@@ -3,8 +3,15 @@ function renderEventDetail(data) {
   if (!el) return;
   const p = data.payload || {};
   const agent = data.agent_type || 'vod';
+  const logs = data.agent_logs || [];
+  const agentName = (_AGENT_TYPES[agent] && _AGENT_TYPES[agent].display_name) || agent;
+  const logHtml = logs.length > 0 ? logs.map(l =>
+    `<div style="${l.type === 'error' ? 'color:var(--r)' : l.type === 'done' ? 'color:var(--g)' : ''}">[${(l.time || '').substring(11,19) || '--:--'}] ${l.type}: ${l.msg}</div>`
+  ).join('') : `<div>[${(data.created_at || '').substring(11,16) || '--:--'}] Agent started</div>
+    <div>[${(data.created_at || '').substring(11,16) || '--:--'}] Processing ${data.event_type} event</div>
+    <div style="color:var(--g)">[${(data.created_at || '').substring(11,16) || '--:--'}] ${data.status === 'completed' ? 'Completed' : data.status === 'failed' ? 'Failed' : data.status}</div>`;
 
-  let html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← 返回 ${AGENT_META[agent] ? AGENT_META[agent].display : agent}</button>
+  let html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← 返回 ${agentName}</button>
   <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
     <div class="cd" style="padding:16px 20px;overflow-y:auto">
       <h3 style="font-size:13px;font-weight:600;margin-bottom:8px">Event Context</h3>
@@ -12,16 +19,12 @@ function renderEventDetail(data) {
         <div>Trigger: ${data.event_type || '—'}</div>
         <div>Repository: ${data.repo_key || ''}</div>
         <div>Issue: ${data.issue_id || '—'}</div>
+        <div>Actor: ${data.actor || '—'}</div>
         <div>Time: ${data.created_at || ''}</div>
       </div>
       <h3 style="font-size:13px;font-weight:600;margin-bottom:8px">Agent Execution Log</h3>
       <div style="background:var(--s);color:#c2cad6;border-radius:8px;padding:12px;font-size:11px;font-family:monospace;line-height:1.7">
-        <div style="color:var(--g)">[${(data.created_at || '').substring(11,16) || '12:05'}] Agent started · backend=OpenCode</div>
-        <div>[${(data.created_at || '').substring(11,16) || '12:05'}] Loading skill: skills/${agent}/SKILL.md</div>
-        <div>[${(data.created_at || '').substring(11,16) || '12:05'}] Analyzing repository events...</div>
-        <div>[${(data.created_at || '').substring(11,16) || '12:05'}] Processing ${data.event_type} event</div>
-        <div style="color:var(--g)">[${(data.created_at || '').substring(11,16) || '12:05'}] ✅ ${data.status === 'completed' ? 'Completed' : data.status === 'failed' ? 'Failed' : 'Running'}</div>
-        <div>[${(data.created_at || '').substring(11,16) || '12:05'}] Agent completed</div>
+        ${logHtml}
       </div>
       <div class="cd mt12" style="padding:10px;background:#eef2ff;font-size:11px">
         <div style="color:var(--a);font-weight:600;margin-bottom:4px">💡 Have a question about these logs?</div>
@@ -32,12 +35,13 @@ function renderEventDetail(data) {
       <div class="cd" style="padding:16px">
         <h3 style="font-size:12px;font-weight:600;margin-bottom:10px">Event Info</h3>
         <div style="font-size:11px;color:var(--t2);line-height:1.8">
-          <div><span style="color:var(--t3)">Backend:</span> <b>OpenCode</b></div>
-          <div><span style="color:var(--t3)">Skill:</span> skills/${agent}/SKILL.md</div>
+          <div><span style="color:var(--t3)">Backend:</span> <b>${data.backend || 'OpenCode'}</b></div>
+          <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
           <div><span style="color:var(--t3)">Issue:</span> ${data.issue_id || '—'}</div>
+          <div><span style="color:var(--t3)">Actor:</span> @${data.actor || '—'}</div>
           <div><span style="color:var(--t3)">Agent:</span> ${agent}</div>
-          <div><span style="color:var(--t3)">Duration:</span> 12s</div>
-          <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ Running'}</span></div>
+          <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
+          <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span></div>
         </div>
       </div>
       <div class="cd" style="padding:16px">

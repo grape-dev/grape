@@ -12,7 +12,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, body, payload, status, created_at FROM events WHERE seq=?",
+                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, payload, status, created_at, backend, skill, exit_code, duration, agent_logs, started_at, completed_at FROM events WHERE seq=?",
                 (seq,)
             )
             row = c.fetchone()
@@ -29,6 +29,12 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
     except Exception:
         pass
 
+    agent_logs = []
+    try:
+        agent_logs = json.loads(row[15]) if row[15] else []
+    except Exception:
+        pass
+
     return {
         "seq": row[0],
         "repo_key": row[1],
@@ -37,10 +43,17 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         "source": row[4],
         "agent_type": row[5] or "",
         "title": row[6] or row[3],
-        "body": row[7] or "",
+        "actor": row[7] or "",
         "payload": payload,
         "status": row[9],
         "created_at": row[10],
+        "backend": row[11] or "",
+        "skill": row[12] or "",
+        "exit_code": row[13],
+        "duration": row[14],
+        "agent_logs": agent_logs,
+        "started_at": row[16] or "",
+        "completed_at": row[17] or "",
     }
 
 
