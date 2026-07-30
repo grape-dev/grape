@@ -13,11 +13,15 @@ async def gitcode_webhook(request: Request):
     """接收 GitCode Webhook 事件"""
     body = await request.body()
     token = request.headers.get("X-GitCode-Token", "")
+    event_header = request.headers.get("X-Gitcode-Event", "unknown")
+
+    log.info(f"Webhook: received event={event_header}, body_size={len(body)}, token={token[:8] if token else 'none'}...")
 
     # 1. 解析事件体获取 repo 名
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
+        log.warning("Webhook: invalid JSON body")
         return JSONResponse(status_code=400, content={"code": 400, "message": "invalid body"})
 
     repo = ""
@@ -30,19 +34,24 @@ async def gitcode_webhook(request: Request):
         log.warning("Webhook: could not extract repo from payload")
         return JSONResponse(status_code=400, content={"code": 400, "message": "missing repository"})
 
+    log.info(f"Webhook: extracted repo={repo}")
+
     # 2. 用 repo 查 managed_repos 的预期 token
     from src.user.db import get_webhook_token_by_repo
     expected = get_webhook_token_by_repo(repo)
+    log.info(f"Webhook: expected_token={'found' if expected else 'none (unmanaged repo)'}")
 
     # 3. 对比验证（仅托管仓库需要验证）
     if expected and token != expected:
-        log.warning(f"Webhook rejected: token mismatch for {repo}")
+        log.warning(f"Webhook rejected: token mismatch for repo={repo}")
         return JSONResponse(status_code=403, content={"code": 403, "message": "invalid webhook token"})
 
-    log.info(f"Webhook: token OK, repo={repo}")
+    log.info(f"Webhook: token OK, repo={repo}, event={event_header}")
 
     # 4. 处理事件
+    log.info(f"Webhook: calling run_pipeline for repo={repo}")
     result = run_pipeline(body, dict(request.headers), repo_key_override=f"gitcode:{repo}")
+    log.info(f"Webhook: pipeline done, seq={result.get('seq')}, event_type={result.get('event_type')}, ok={result.get('ok')}")
     return {"status": "ok", "seq": result.get("seq", 0), "event_type": result.get("event_type", "")}
 
 

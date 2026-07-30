@@ -30,10 +30,14 @@ def append_event(repo_key: str, event_type: str, title: str = "", body: str = ""
             )
             db.commit()
             seq = c.lastrowid
-            log.info(f"Event stored: seq={seq}, repo={repo_key}, type={event_type}, issue={issue_id}")
+            payload_keys = list((payload or {}).keys())
+            log.info(f"Event stored: seq={seq}, repo={repo_key}, type={event_type}, "
+                     f"agent={agent_type}, issue={issue_id}, source={source}, "
+                     f"status={status}, payload_keys={payload_keys}")
             return seq
         except Exception as e:
-            log.warning(f"Failed to store event: {e}")
+            log.warning(f"Event store FAILED: seq=0, repo={repo_key}, type={event_type}, "
+                        f"agent={agent_type}, error={e}")
             return 0
 
 

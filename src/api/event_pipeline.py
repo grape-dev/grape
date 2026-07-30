@@ -51,25 +51,28 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
     repo_key = repo_key_override or f"{source}:{evt['repository']}"
     event_type = evt.get("type", "unknown")
 
-    log.info(f"Pipeline: type={event_type}, repo={evt['repository']}, source={source}")
+    log.info(f"Pipeline: start, raw_type={event_header}, source={source}, repo={evt['repository']}")
 
     if not evt["repository"] or event_type == "unknown":
-        log.info(f"Pipeline skipped: malformed event")
+        log.info(f"Pipeline skipped: repository='{evt['repository']}' or event_type='{event_type}' not recognized")
         return result
 
     # 2. 自循环检测
     actor = resolve_actor(evt.get("payload", {}), evt)
+    log.info(f"Pipeline: actor={actor}, event_type={event_type}")
     if actor and event_type in ("issue_comment", "note_hook_pr"):
-        # 从 DB 读取所有 bot_usernames
         from src.user.db import get_all_bot_usernames
-        if actor in get_all_bot_usernames():
-            log.info(f"Pipeline skip: self-comment from {actor}")
+        bot_usernames = get_all_bot_usernames()
+        if actor in bot_usernames:
+            log.info(f"Pipeline skip: self-comment from bot={actor}")
             return result
+        log.info(f"Pipeline: comment from {actor}, not a bot ({bot_usernames})")
 
     # 3. 路由判定
     agent_type = get_domain_agent(event_type)
+    log.info(f"Pipeline: routing result -> agent_type='{agent_type}'")
     if not agent_type:
-        log.info(f"Pipeline: no route for type={event_type}")
+        log.info(f"Pipeline: no route for type={event_type}, skip")
         return result
 
     # 4. 查找 Agent 配置（backend + skill）
@@ -84,15 +87,20 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
             if row:
                 backend = row[0] or backend
                 skill_name = row[1] or ""
-    except Exception:
-        pass
+                log.info(f"Pipeline: agent session found, backend={backend}, skill={skill_name or '(default)'}")
+            else:
+                log.info(f"Pipeline: no agent session for repo={repo_name}, agent={agent_type}, using defaults")
+    except Exception as e:
+        log.warning(f"Pipeline: agent session lookup failed: {e}")
 
     # 5. 提取 Issue ID
     payload = evt.get("payload", {})
     issue_id = resolve_issue_id(payload) or evt.get("issue_id", "")
     title = evt.get("title", "") or event_type
+    log.info(f"Pipeline: issue_id={issue_id or '(none)'}, title={title}")
 
     # 6. 存储事件
+    log.info(f"Pipeline: storing event, repo_key={repo_key}, agent={agent_type}")
     seq = append_event(
         repo_key=repo_key,
         event_type=event_type,
@@ -108,6 +116,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
                    "backend": backend, "skill_name": skill_name,
                    "repo_key": repo_key, "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
+    log.info(f"Pipeline: done, seq={seq}, ok=True, final_agent={agent_type}")
     return result
 
 
