@@ -75,8 +75,11 @@ async def lifespan(app: FastAPI):
                     log.info(f"Chat Bot task created: {bot_app_id[:40]}")
 
                 elif bot_type == "vod_bot":
+                    _vod_bot_id = bot_app_id
+                    async def _vod_handler(msg):
+                        process_vod_message(msg, _vod_bot_id)
                     bot = FeishuBot(bot_app_id, bot_app_secret, f"vod-{bot_app_id[:12]}",
-                                    process_vod_message)
+                                    _vod_handler)
                     chat_bots.append(bot)
                     task = asyncio.create_task(bot.run(), name=f"vod-{bot_app_id[:20]}")
                     ws_tasks.append(task)
