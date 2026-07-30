@@ -75,8 +75,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
         log.info(f"Pipeline: no route for type={event_type}, skip")
         return result
 
-    # 4. 查找 Agent 配置（backend + skill）
-    backend = "opencode"
+    # 4. 查找 Agent 配置（backend + skill），找不到则不处理
+    backend = None
     skill_name = ""
     repo_name = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
     try:
@@ -85,13 +85,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
             c.execute("SELECT backend, skill FROM agent_sessions WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
             row = c.fetchone()
             if row:
-                backend = row[0] or backend
+                backend = row[0] or "opencode"
                 skill_name = row[1] or ""
                 log.info(f"Pipeline: agent session found, backend={backend}, skill={skill_name or '(default)'}")
-            else:
-                log.info(f"Pipeline: no agent session for repo={repo_name}, agent={agent_type}, using defaults")
     except Exception as e:
         log.warning(f"Pipeline: agent session lookup failed: {e}")
+
+    if not backend:
+        log.info(f"Pipeline: no agent session for repo={repo_name}, agent={agent_type}, skip")
+        return result
 
     # 5. 提取 Issue ID
     payload = evt.get("payload", {})
