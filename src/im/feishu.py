@@ -698,9 +698,15 @@ async def start_ws_async(on_message_callback, bot_app_id: str, bot_app_secret: s
     def _handle_with_account(event):
         return _handle_message(event, on_message_callback, bot_app_id)
 
+    def _noop(event):
+        pass
+
     import lark_oapi
     handler = (lark_oapi.EventDispatcherHandler.builder("", "")
                .register_p2_im_message_receive_v1(_handle_with_account)
+               .register_p2_im_message_reaction_created_v1(_noop)
+               .register_p2_im_message_reaction_deleted_v1(_noop)
+               .register_p2_im_message_recalled_v1(_noop)
                .build())
 
     # 异步获取 WS URL
@@ -824,6 +830,18 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
 
 async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
     """在运行中事件循环上创建并连接 VOD WS Client"""
+    # 跳过没有被任何 agent_session 引用的 VOD Bot
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM agent_sessions WHERE agent_type='vod' AND vod_bot_app_id=?", (bot_app_id,))
+            if c.fetchone()[0] == 0:
+                log.info(f"VOD WS: {bot_app_id[:20]} has no agent_session, skip")
+                return
+    except Exception:
+        pass
+
     global _ws_clients
     import lark_oapi.ws.client as _lark_ws
     _lark_ws.loop = asyncio.get_running_loop()
