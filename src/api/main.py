@@ -1,5 +1,5 @@
 """Agentic DevOps API — FastAPI REST API Server (port 3000)"""
-import sys, os
+import sys, os, asyncio
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import FastAPI, Request
