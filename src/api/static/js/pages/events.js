@@ -12,26 +12,26 @@ function renderEventDetail(data) {
     <div style="color:var(--g)">[${(data.created_at || '').substring(11,16) || '--:--'}] ${data.status === 'completed' ? 'Completed' : data.status === 'failed' ? 'Failed' : data.status}</div>`;
 
   let html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← 返回 ${agentName}</button>
-  <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
-    <div class="cd" style="padding:16px 20px;overflow-y:auto">
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:8px">Event Context</h3>
-      <div class="tx t2" style="margin-bottom:12px;line-height:1.6">
+  <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;height:calc(100vh - 160px);overflow:hidden">
+    <div class="cd" style="padding:16px 20px;display:flex;flex-direction:column;overflow:hidden">
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Event Context</h3>
+      <div class="tx t2" style="margin-bottom:12px;line-height:1.6;flex-shrink:0">
         <div>Trigger: ${data.event_type || '—'}</div>
         <div>Repository: ${data.repo_key || ''}</div>
         <div>Issue: ${data.issue_id || '—'}</div>
         <div>Actor: ${data.actor || '—'}</div>
         <div>Time: ${data.created_at || ''}</div>
       </div>
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:8px">Agent Execution Log</h3>
-      <div style="background:var(--s);color:#c2cad6;border-radius:8px;padding:12px;font-size:11px;font-family:monospace;line-height:1.7">
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Agent Execution Log</h3>
+      <div style="flex:1;overflow-y:auto;background:var(--s);color:#c2cad6;border-radius:8px;padding:12px;font-size:11px;font-family:monospace;line-height:1.7">
         ${logHtml}
       </div>
-      <div class="cd mt12" style="padding:10px;background:#eef2ff;font-size:11px">
+      <div class="cd mt12" style="padding:10px;background:#eef2ff;font-size:11px;flex-shrink:0">
         <div style="color:var(--a);font-weight:600;margin-bottom:4px">💡 Have a question about these logs?</div>
         <div style="color:var(--t2)">Use the Feedback form on the right to submit your feedback.</div>
       </div>
     </div>
-    <div style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;flex-direction:column;gap:12px;overflow-y:auto">
       <div class="cd" style="padding:16px">
         <h3 style="font-size:12px;font-weight:600;margin-bottom:10px">Event Info</h3>
         <div style="font-size:11px;color:var(--t2);line-height:1.8">
