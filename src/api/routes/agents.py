@@ -241,12 +241,13 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"保存配置失败: {e}"})
 
-    # VOD IM：若凭证变更，重启 WS
+    # VOD IM：若凭证变更，在线程中重启 WS
     if name == "vod" and body.vod_bot_app_id:
         try:
-            from src.im.feishu import start_vod_ws
-            import threading
-            threading.Thread(target=start_vod_ws, args=(body.vod_bot_app_id,), daemon=True).start()
+            import threading, asyncio
+            from src.im.feishu import start_vod_ws_async
+            threading.Thread(target=lambda: asyncio.run(start_vod_ws_async(body.vod_bot_app_id, app_secret)),
+                             daemon=True, name=f"vod-ws-{body.vod_bot_app_id[:20]}").start()
         except Exception as e:
             log.warning(f"VOD WS start failed: {e}")
 
