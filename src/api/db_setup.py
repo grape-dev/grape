@@ -365,3 +365,25 @@ def _migrate_tables():
             db.commit()
     except Exception:
         pass
+    # 回填 subscribe_events：当已有行因 seed 跳过而保持 '[]' 时，从 JSON 重新写入
+    try:
+        filepath = os.path.join(_CONFIG_DIR, "agent-description.json")
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            updated = 0
+            with db_lock:
+                c = db.cursor()
+                for agent_type, info in data.items():
+                    events = info.get("subscribe_events", [])
+                    if events:
+                        c.execute(
+                            "UPDATE agent_type_config SET subscribe_events=? WHERE agent_type=? AND subscribe_events='[]'",
+                            (json.dumps(events, ensure_ascii=False), agent_type)
+                        )
+                        updated += c.rowcount
+                db.commit()
+            if updated:
+                log.info(f"Backfilled subscribe_events for {updated} agent(s) from {filepath}")
+    except Exception as e:
+        log.warning(f"Backfill subscribe_events failed: {e}")
