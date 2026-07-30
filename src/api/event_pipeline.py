@@ -98,7 +98,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
             if os.path.exists(_defaults_path):
                 with open(_defaults_path, "r", encoding="utf-8") as _f:
                     _defaults = json.load(_f)
-                _default_skill = _defaults.get(agent_type, "")
+                _scene = _defaults.get("scenes", {}).get("default", {})
+                _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
+                _default_skill = _mapping.get(agent_type, "")
                 if _default_skill:
                     backend = "opencode"
                     skill_name = _default_skill

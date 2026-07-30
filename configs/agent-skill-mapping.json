@@ -1,7 +1,44 @@
 {
-  "issue": "issue",
-  "coding": "implementation",
-  "qa": "code-review-and-quality",
-  "sre": "cloud-deploy",
-  "vod": ""
+  "scenes": {
+    "default": {
+      "name": "Default",
+      "mapping": {
+        "vod": "",
+        "issue": "issue",
+        "coding": "implementation",
+        "qa": "code-review-and-quality",
+        "sre": "cloud-deploy"
+      }
+    },
+    "cloud-native": {
+      "name": "云原生开发",
+      "mapping": {
+        "vod": "",
+        "issue": "issue",
+        "coding": "",
+        "qa": "",
+        "sre": ""
+      }
+    },
+    "iac": {
+      "name": "IaC开发",
+      "mapping": {
+        "vod": "",
+        "issue": "issue",
+        "coding": "",
+        "qa": "",
+        "sre": ""
+      }
+    },
+    "agent-dev": {
+      "name": "Agent开发",
+      "mapping": {
+        "vod": "",
+        "issue": "issue",
+        "coding": "",
+        "qa": "",
+        "sre": ""
+      }
+    }
+  }
 }
