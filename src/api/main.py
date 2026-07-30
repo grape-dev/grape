@@ -1,5 +1,5 @@
 """Agentic DevOps API — FastAPI REST API Server (port 3000)"""
-import sys, os, threading
+import sys, os, asyncio
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import FastAPI, Request
@@ -14,8 +14,9 @@ from src.api.routes import auth, repos, dashboard, agents, events, chat, setting
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from src.config import log
+    ws_tasks = []
 
-    # 启动 IM Bot WebSocket（线程 + asyncio.run 隔离 loop）
+    # 启动所有 IM Bot WebSocket（单事件循环 + async task）
     try:
         from src.session_manager import db, db_lock
         with db_lock:
@@ -24,35 +25,38 @@ async def lifespan(app: FastAPI):
             rows = c.fetchall()
         from src.im.feishu import start_ws_async, start_vod_ws_async
         from src.im.handler import process_chat
-        import asyncio
 
         for bot_app_id, bot_app_secret, bot_type in rows:
             try:
                 if bot_type == "chat_bot":
-                    threading.Thread(
-                        target=lambda a=bot_app_id, s=bot_app_secret: asyncio.run(start_ws_async(process_chat, a, s)),
-                        daemon=True, name=f"chat-ws-{bot_app_id[:20]}"
-                    ).start()
-                    log.info(f"Chat WS thread: {bot_app_id[:40]}")
+                    task = asyncio.get_event_loop().create_task(
+                        start_ws_async(process_chat, bot_app_id, bot_app_secret)
+                    )
+                    ws_tasks.append(task)
+                    log.info(f"Chat WS task: {bot_app_id[:40]}")
                 elif bot_type == "vod_bot":
-                    threading.Thread(
-                        target=lambda a=bot_app_id, s=bot_app_secret: asyncio.run(start_vod_ws_async(a, s)),
-                        daemon=True, name=f"vod-ws-{bot_app_id[:20]}"
-                    ).start()
-                    log.info(f"VOD WS thread: {bot_app_id[:40]}")
+                    task = asyncio.get_event_loop().create_task(
+                        start_vod_ws_async(bot_app_id, bot_app_secret)
+                    )
+                    ws_tasks.append(task)
+                    log.info(f"VOD WS task: {bot_app_id[:40]}")
             except Exception as e:
-                log.warning(f"WS failed for {bot_app_id[:20]}: {e}")
+                log.warning(f"WS task failed: {e}")
+
+        log.info(f"IM WS: {len(ws_tasks)} task(s)")
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
 
     yield
 
     log.info("IM WS: stopping...")
-    try:
-        from src.im.feishu import stop_ws
-        stop_ws()
-    except Exception:
-        pass
+    for task in ws_tasks:
+        task.cancel()
+    for task in ws_tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     log.info("IM WS stopped")
 
 
