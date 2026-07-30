@@ -1,5 +1,5 @@
 """Agentic DevOps API — FastAPI REST API Server (port 3000)"""
-import sys, os, asyncio
+import sys, os, threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import FastAPI, Request
@@ -13,60 +13,46 @@ from src.api.routes import auth, repos, dashboard, agents, events, chat, setting
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     from src.config import log
-    ws_tasks = []
-    chat_bots = []
 
+    # 启动 IM Bot WebSocket（线程 + asyncio.run 隔离 loop）
     try:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT DISTINCT bot_app_id, bot_app_secret, bot_type FROM im_bot_config")
             rows = c.fetchall()
-
         from src.im.feishu import start_ws_async, start_vod_ws_async
         from src.im.handler import process_chat
+        import asyncio
 
         for bot_app_id, bot_app_secret, bot_type in rows:
             try:
                 if bot_type == "chat_bot":
-                    class WsTask:
-                        pass
-                    task = asyncio.get_event_loop().create_task(
-                        start_ws_async(process_chat, bot_app_id, bot_app_secret)
-                    )
-                    ws_tasks.append(task)
-                    log.info(f"Chat WS task created: {bot_app_id[:40]}")
-
+                    threading.Thread(
+                        target=lambda: asyncio.run(start_ws_async(process_chat, bot_app_id, bot_app_secret)),
+                        daemon=True, name=f"chat-ws-{bot_app_id[:20]}"
+                    ).start()
+                    log.info(f"Chat WS thread: {bot_app_id[:40]}")
                 elif bot_type == "vod_bot":
-                    task = asyncio.get_event_loop().create_task(
-                        start_vod_ws_async(bot_app_id, bot_app_secret)
-                    )
-                    ws_tasks.append(task)
-                    log.info(f"VOD WS task created: {bot_app_id[:40]}")
-
+                    threading.Thread(
+                        target=lambda: asyncio.run(start_vod_ws_async(bot_app_id, bot_app_secret)),
+                        daemon=True, name=f"vod-ws-{bot_app_id[:20]}"
+                    ).start()
+                    log.info(f"VOD WS thread: {bot_app_id[:40]}")
             except Exception as e:
-                log.warning(f"WS task create failed for {bot_app_id[:20]}: {e}")
-
-        log.info(f"IM WS: {len(ws_tasks)} task(s) created")
-
+                log.warning(f"WS failed for {bot_app_id[:20]}: {e}")
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
 
     yield
 
-    # Shutdown
-    log.info("Shutting down IM WS...")
-    for task in ws_tasks:
-        task.cancel()
-    for task in ws_tasks:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    from src.im.feishu import stop_ws
-    stop_ws()
+    log.info("IM WS: stopping...")
+    try:
+        from src.im.feishu import stop_ws
+        stop_ws()
+    except Exception:
+        pass
     log.info("IM WS stopped")
 
 
@@ -110,7 +96,6 @@ if os.path.isdir(STATIC_DIR):
 from src.api.db_setup import init_database
 init_database()
 
-# Re-load accounts after DB init (fix circular import issue)
 from src.config import _load_accounts
 _load_accounts()
 
