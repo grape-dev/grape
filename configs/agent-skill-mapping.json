@@ -15,9 +15,9 @@
       "mapping": {
         "vod": "",
         "issue": "issue",
-        "coding": "",
-        "qa": "",
-        "sre": ""
+        "coding": "implementation",
+        "qa": "pr",
+        "sre": "cloud-deploy"
       }
     },
     "iac": {
@@ -25,9 +25,9 @@
       "mapping": {
         "vod": "",
         "issue": "issue",
-        "coding": "",
-        "qa": "",
-        "sre": ""
+        "coding": "implementation",
+        "qa": "code-review-and-quality",
+        "sre": "cloud-deploy"
       }
     },
     "agent-dev": {
@@ -35,9 +35,19 @@
       "mapping": {
         "vod": "",
         "issue": "issue",
-        "coding": "",
-        "qa": "",
-        "sre": ""
+        "coding": "implementation",
+        "qa": "code-review-and-quality",
+        "sre": "cloud-deploy"
+      }
+    },
+    "skill-dev": {
+      "name": "Skill开发",
+      "mapping": {
+        "vod": "",
+        "issue": "issue",
+        "coding": "implementation",
+        "qa": "code-review-and-quality",
+        "sre": "cloud-deploy"
       }
     }
   }
