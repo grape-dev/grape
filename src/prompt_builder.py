@@ -235,6 +235,11 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
             # 检测是否 @ 了 Bot
             if any(f"@{u}" in note for u in __import__("src.user.db", fromlist=["get_all_bot_usernames"]).get_all_bot_usernames()):
                 parts.append("(User @mentioned the bot)")
+    elif evt_type == "vod_signal":
+        user_msg = payload.get("user_message", "")
+        user_name = evt.get("actor", "未知用户")
+        parts.append(f"## 用户消息\n来自 {user_name} 在仓库 {repo}")
+        parts.append(f"消息内容: {user_msg[:2000]}")
     else:
         if number is not None:
             parts.append(f"Event: {evt_type} #{number} on {repo}")

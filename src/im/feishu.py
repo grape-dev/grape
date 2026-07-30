@@ -680,6 +680,85 @@ def stop_ws(account_name: str | None = None):
     _ws_clients = {}
 
 
+def start_vod_ws(bot_app_id: str):
+    """启动 VOD Agent 的 WebSocket 连接（读取 vod_bot_config 的凭证）"""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    import lark_oapi.ws.client as _lark_ws
+    _lark_ws.loop = loop
+
+    global _ws_clients
+    app_id = ""
+    app_secret = ""
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT bot_app_id, bot_app_secret FROM vod_bot_config WHERE bot_app_id=?", (bot_app_id,))
+            row = c.fetchone()
+            if row and row[0] and row[1]:
+                app_id = row[0]
+                app_secret = row[1]
+        except Exception:
+            pass
+
+    if not app_id or not app_secret:
+        log.warning(f"VOD WS: no credentials found for bot_app_id={bot_app_id}, skipping")
+        return
+
+    from src.im.vod_handler import process_vod_message
+
+    def _handle_vod(event):
+        try:
+            header = getattr(event, 'header', None)
+            if header is None:
+                return
+            event_type = getattr(header, 'event_type', None)
+            if isinstance(event_type, str) and event_type == "im.message.receive_v1":
+                log.info(f"VOD WS: im.message.receive_v1 received")
+            event_body = getattr(event, 'event', None)
+            if event_body is None:
+                return
+            message_dict = {
+                "event": {
+                    "message": {
+                        "message_id": getattr(getattr(event_body, 'message', None), 'message_id', ''),
+                        "chat_id": getattr(getattr(event_body, 'message', None), 'chat_id', ''),
+                        "message_type": getattr(getattr(event_body, 'message', None), 'message_type', ''),
+                        "content": getattr(getattr(event_body, 'message', None), 'content', ''),
+                    },
+                    "sender": {
+                        "sender_id": {
+                            "open_id": getattr(getattr(getattr(event_body, 'sender', None), 'sender_id', None), 'open_id', ''),
+                            "union_id": getattr(getattr(getattr(event_body, 'sender', None), 'sender_id', None), 'union_id', ''),
+                            "user_id": getattr(getattr(getattr(event_body, 'sender', None), 'sender_id', None), 'user_id', ''),
+                        }
+                    }
+                }
+            }
+            process_vod_message(message_dict, bot_app_id)
+        except Exception as e:
+            log.warning(f"VOD WS handle error: {e}")
+
+    import lark_oapi
+    handler = (lark_oapi.EventDispatcherHandler.builder("", "")
+               .register_p2_im_message_receive_v1(_handle_vod)
+               .build())
+
+    lark_oapi.APP_ID = app_id
+    lark_oapi.APP_SECRET = app_secret
+
+    client = lark_oapi.ws.Client(
+        app_id=app_id,
+        app_secret=app_secret,
+        handler=handler,
+    )
+    _ws_clients[f"vod_{bot_app_id}"] = client
+    log.info(f"VOD WS started for bot_app_id={bot_app_id}")
+    client.start()
+
+
+
 def _handle_message(event, on_message_callback, account_name: str = "default"):
     """处理收到的飞书消息（在 WS 线程中调用）"""
     try:

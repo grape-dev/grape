@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import get_current_user, get_bot_token
+from src.config import log
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -69,20 +70,43 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
     session_data = {}
     event_stats = {"pending": 0, "running": 0, "completed": 0, "failed": 0}
     recent_events = []
+    vod_bot_connected = False
+    vod_conversations = []
 
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT backend, skill, repo_gitcode_token, oc_session_id, status, last_active_at, im_provider, im_app_id FROM agent_sessions WHERE repo_key=? AND agent_type=?",
+                "SELECT id, backend, skill, repo_gitcode_token, oc_session_id, status, last_active_at, vod_bot_app_id FROM agent_sessions WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
             if row:
-                session_data = {"backend": row[0], "skill": row[1] or "", "repo_gitcode_token": row[2] or "", "oc_session_id": row[3], "status": row[4], "last_active_at": row[5],
-                               "im_provider": row[6] or "", "im_app_id": row[7] or ""}
+                session_data = {"id": row[0], "backend": row[1], "skill": row[2] or "", "repo_gitcode_token": row[3] or "", "oc_session_id": row[4], "status": row[5], "last_active_at": row[6],
+                               "vod_bot_app_id": row[7] or ""}
         except Exception:
             pass
+
+        # VOD IM — 查询已绑定的群
+        if name == "vod" and session_data.get("id"):
+            try:
+                c.execute(
+                    "SELECT vc.feishu_chat_id, vc.feishu_chat_name, vc.oc_session_id, vc.status, vc.last_active_at FROM vod_conversations vc WHERE vc.agent_session_id=? ORDER BY vc.last_active_at DESC",
+                    (session_data["id"],)
+                )
+                vod_conversations = [
+                    {"chat_id": r[0], "chat_name": r[1] or "", "oc_session_id": r[2] or "",
+                     "status": r[3], "last_active_at": r[4] or ""}
+                    for r in c.fetchall()
+                ]
+            except Exception:
+                pass
+            if session_data.get("vod_bot_app_id"):
+                try:
+                    c.execute("SELECT COUNT(*) FROM vod_bot_config WHERE bot_app_id=?", (session_data["vod_bot_app_id"],))
+                    vod_bot_connected = c.fetchone()[0] > 0
+                except Exception:
+                    pass
 
         try:
             c.execute(
@@ -132,19 +156,19 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         },
         "recent_events": recent_events,
         "im": {
-            "provider": session_data.get("im_provider", ""),
-            "app_id": session_data.get("im_app_id", ""),
-            "connected": bool(session_data.get("im_app_id")),
-        },
+            "vod_bot_app_id": session_data.get("vod_bot_app_id", ""),
+            "connected": vod_bot_connected,
+            "conversations": vod_conversations,
+        } if name == "vod" else None,
     }
 
 
 class AgentConfig(BaseModel):
     backend: str = "opencode"
     skill: str = ""
-    im_provider: str = ""
-    im_app_id: str = ""
-    im_app_secret: str = ""
+    # VOD IM 配置（仅在 name=="vod" 时生效）
+    vod_bot_app_id: str = ""
+    vod_bot_app_secret: str = ""
 
 
 @router.put("/{name}/{owner}/{repo}")
@@ -157,37 +181,52 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     import uuid
     session_id = str(uuid.uuid4())
 
-    # 获取 repo 绑定的 DevOps Bot Token
     from src.user.db import get_bot_token_by_repo
     repo_token = get_bot_token_by_repo(owner, repo)
 
-    # 密码掩码处理：如果传 "********" 表示不修改
     from src.session_manager import db, db_lock
-    # IM 配置仅在 VOD Agent 有效
-    im_provider = body.im_provider if name == "vod" else ""
-    im_app_id = body.im_app_id if name == "vod" else ""
-    im_secret = body.im_app_secret if name == "vod" else ""
-    if im_secret == "********":
-        try:
+
+    # VOD IM 配置：保存到 vod_bot_config + 更新 agent_sessions.vod_bot_app_id
+    if name == "vod" and body.vod_bot_app_id:
+        app_secret = body.vod_bot_app_secret
+        if app_secret == "********":
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT bot_app_secret FROM vod_bot_config WHERE bot_app_id=?", (body.vod_bot_app_id,))
+                    row = c.fetchone()
+                    if row:
+                        app_secret = row[0]
+            except Exception:
+                pass
+        if app_secret:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT im_app_secret FROM agent_sessions WHERE repo_key=? AND agent_type=?", (repo_key, name))
-                row = c.fetchone()
-                if row:
-                    im_secret = row[0] or ""
-        except Exception:
-            pass
+                c.execute(
+                    "INSERT OR REPLACE INTO vod_bot_config (bot_app_id, bot_app_secret) VALUES (?,?)",
+                    (body.vod_bot_app_id, app_secret)
+                )
+                db.commit()
 
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, im_provider, im_app_id, im_app_secret) VALUES (?,?,?,?,?,?,?,datetime('now'),?,?,?)",
-                 (session_id, repo_key, name, body.backend, body.skill, repo_token, "idle",
-                  im_provider, im_app_id, im_secret)
+                "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, vod_bot_app_id) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
+                (session_id, repo_key, name, body.backend, body.skill, repo_token, "idle",
+                 body.vod_bot_app_id if name == "vod" else "")
             )
             db.commit()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"保存配置失败: {e}"})
+
+    # VOD IM：若凭证变更，重启 WS
+    if name == "vod" and body.vod_bot_app_id:
+        try:
+            from src.im.feishu import start_vod_ws
+            import threading
+            threading.Thread(target=start_vod_ws, args=(body.vod_bot_app_id,), daemon=True).start()
+        except Exception as e:
+            log.warning(f"VOD WS start failed: {e}")
 
     return {"message": "Agent 配置已更新", "session_id": session_id}

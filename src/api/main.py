@@ -23,6 +23,24 @@ async def lifespan(app: FastAPI):
         log.info("Feishu WS started in background thread")
     except Exception as e:
         log.warning(f"Feishu WS start skipped: {e}")
+
+    # 启动 VOD Agent Feishu WS
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT DISTINCT bot_app_id FROM vod_bot_config")
+            rows = c.fetchall()
+        from src.im.feishu import start_vod_ws
+        for r in rows:
+            bot_id = r[0]
+            t = threading.Thread(target=start_vod_ws, args=(bot_id,), daemon=True,
+                                 name=f"vod-ws-{bot_id[:20]}")
+            t.start()
+            log.info(f"VOD WS started for bot_app_id={bot_id[:40]}")
+    except Exception as e:
+        log.warning(f"VOD WS start skipped: {e}")
+
     yield
     # Shutdown
     try:

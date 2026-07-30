@@ -168,6 +168,28 @@ CREATE TABLE IF NOT EXISTS chat_config (
 )
 """
 
+_VOD_BOT_CONFIG_DDL = """
+CREATE TABLE IF NOT EXISTS vod_bot_config (
+    bot_app_id TEXT PRIMARY KEY,
+    bot_app_secret TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_VOD_CONVERSATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS vod_conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_session_id TEXT NOT NULL,
+    feishu_chat_id TEXT NOT NULL,
+    feishu_chat_name TEXT DEFAULT '',
+    oc_session_id TEXT DEFAULT '',
+    status TEXT DEFAULT 'active',
+    created_at TEXT DEFAULT (datetime('now')),
+    last_active_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(agent_session_id, feishu_chat_id)
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("backend_agents", _BACKEND_AGENTS_DDL),
@@ -181,6 +203,8 @@ _NEW_TABLES = [
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type_config", _AGENT_TYPE_CONFIG_DDL),
     ("agent_registry", _AGENT_REGISTRY_DDL),
+    ("vod_bot_config", _VOD_BOT_CONFIG_DDL),
+    ("vod_conversations", _VOD_CONVERSATIONS_DDL),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -370,6 +394,7 @@ def _migrate_tables():
         "ALTER TABLE agent_sessions ADD COLUMN im_provider TEXT DEFAULT ''",
         "ALTER TABLE agent_sessions ADD COLUMN im_app_id TEXT DEFAULT ''",
         "ALTER TABLE agent_sessions ADD COLUMN im_app_secret TEXT DEFAULT ''",
+        "ALTER TABLE agent_sessions ADD COLUMN vod_bot_app_id TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
