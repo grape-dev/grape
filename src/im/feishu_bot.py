@@ -7,6 +7,23 @@ from src.config import log
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 
 
+def _get_ws_endpoint_sync(app_id: str, app_secret: str) -> str:
+    """同步获取飞书 WebSocket 端点 URL（用于注入 lark_oapi 客户端）"""
+    url = "https://open.feishu.cn/callback/ws/endpoint"
+    payload = json.dumps({"AppID": app_id, "AppSecret": app_secret}).encode()
+    try:
+        resp = urlopen(Request(url, data=payload, headers={
+            "Content-Type": "application/json",
+            "User-Agent": "devops-bot/1.0",
+        }), timeout=10)
+        data = json.loads(resp.read())
+        if data.get("code") == 0:
+            return data.get("data", {}).get("URL", "")
+    except Exception as e:
+        log.warning(f"get_ws_endpoint error: {e}")
+    return ""
+
+
 class FeishuBot:
     """单个飞书机器人的完整生命周期管理"""
 
