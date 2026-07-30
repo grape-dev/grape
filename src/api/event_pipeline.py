@@ -92,8 +92,26 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
         log.warning(f"Pipeline: agent session lookup failed: {e}")
 
     if not backend:
-        log.info(f"Pipeline: no agent session for repo={repo_name}, agent={agent_type}, skip")
-        return result
+        # 从默认映射配置文件加载 skill
+        try:
+            _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-defaults.json")
+            if os.path.exists(_defaults_path):
+                with open(_defaults_path, "r", encoding="utf-8") as _f:
+                    _defaults = json.load(_f)
+                _default_skill = _defaults.get(agent_type, "")
+                if _default_skill:
+                    backend = "opencode"
+                    skill_name = _default_skill
+                    log.info(f"Pipeline: using default skill for {agent_type}={_default_skill}")
+                else:
+                    log.info(f"Pipeline: no agent session and no default skill for {agent_type}, skip")
+                    return result
+            else:
+                log.info(f"Pipeline: no agent session for repo={repo_name}, agent={agent_type}, skip")
+                return result
+        except Exception as e:
+            log.warning(f"Pipeline: failed to load default skill config: {e}")
+            return result
 
     # 5. 提取 Issue ID
     payload = evt.get("payload", {})

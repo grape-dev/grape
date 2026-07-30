@@ -1,0 +1,7 @@
+{
+  "issue": "issue",
+  "coding": "implementation",
+  "qa": "code-review-and-quality",
+  "sre": "cloud-deploy",
+  "vod": ""
+}
