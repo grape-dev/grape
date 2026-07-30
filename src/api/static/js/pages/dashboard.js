@@ -13,9 +13,8 @@ function renderDashboard(data) {
   const sceneOpts = scenes.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
 
   const agentOrder = ['vod','issue','coding','qa','sre'];
-  const agentIcons = ['🎤','🎫','⚙','✔','🚀'];
   const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
-  const emojiLabels = ['🎤 feedback→issue','🎫 2 bugs · 1 feature','⚙ implementing...','✔ pass: 92%','🚀 uptime 99.9%'];
+  const bottomLabels = ['feedback→issue','2 bugs · 1 feature','implementing...','pass: 92%','uptime 99.9%'];
 
   let html = `<div class="cd" style="background:linear-gradient(135deg,#eef3ff,#eefdf2);border-color:#c6d9f7">
     <div class="flex fc gap12">
@@ -62,7 +61,7 @@ function renderDashboard(data) {
       <div class="nds">${meta.description || ''}</div>
       <div class="nm"><span class="ml">Backend</span><span class="mv">${backend}</span></div>
       <div class="ns"><span class="d" style="background:${statusDot}"></span>${nsText}</div>
-      <div class="nt ${ntCls}">${emojiLabels[i]}</div>
+      <div class="nt ${ntCls}">${bottomLabels[i]}</div>
     </div>`;
   });
 
