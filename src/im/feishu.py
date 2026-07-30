@@ -641,10 +641,17 @@ def start_ws(on_message_callback, account_name: str = "default"):
     )
     _ws_clients[account_name] = client
     log.info(f"Feishu WS client starting (account={account_name})...")
+    # 直接用自定义 loop 调用 _connect 和 _select，绕过模块级 loop 变量
     try:
-        client.start()
-    except RuntimeError:
-        pass
+        loop.run_until_complete(client._connect())
+    except Exception as e:
+        loop.run_until_complete(client._disconnect())
+        if client._auto_reconnect:
+            loop.run_until_complete(client._reconnect())
+        else:
+            raise
+    loop.create_task(client._ping_loop())
+    loop.run_until_complete(_lark_ws._select())
 
 
 def get_user_id_by_app_id(app_id: str) -> int | None:
@@ -759,9 +766,15 @@ def start_vod_ws(bot_app_id: str):
     _ws_clients[f"vod_{bot_app_id}"] = client
     log.info(f"VOD WS started for bot_app_id={bot_app_id}")
     try:
-        client.start()
-    except RuntimeError:
-        pass
+        loop.run_until_complete(client._connect())
+    except Exception as e:
+        loop.run_until_complete(client._disconnect())
+        if client._auto_reconnect:
+            loop.run_until_complete(client._reconnect())
+        else:
+            raise
+    loop.create_task(client._ping_loop())
+    loop.run_until_complete(_lark_ws._select())
 
 
 
