@@ -48,7 +48,12 @@ function renderSettings(tab) {
     el.innerHTML = html;
 
     API.get('/settings/gitcode-repo/' + repo.owner + '/' + repo.name).then(d => {
-      document.getElementById('sGitcode').innerHTML = `
+      // 同时获取场景列表
+      API.get('/scenes').then(scenesRes => {
+        const scenes = scenesRes.scenes || [];
+        const sceneOpts = scenes.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+
+        document.getElementById('sGitcode').innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">DevOps Bot Token</h3>
           <div class="srow"><label>Bot Token</label><input type="password" id="gitcodeBotToken" value="${d.devops_bot_token_exists ? 'ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx' : ''}" placeholder="输入 DevOps Bot Token"></div>
           <div class="srow"><label>Scope</label><input type="text" value="read_repo, write_repo, manage_webhook" disabled style="background:#f1f5f9;font-size:10px"></div>
@@ -59,11 +64,19 @@ function renderSettings(tab) {
           <div class="srow"><label>Bot Username</label><input type="text" id="gitcodeBotUsername" value="${d.bot_username || 'devops-bot'}"></div>
           <button class="bt bt-p mt8" onclick="saveGitcodeRepoConfig()">Save</button>
         </div>
+        <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">开发场景</h3>
+          <p class="tx t2" style="margin-bottom:10px">选择开发场景后，系统将根据场景配置自动更新所有 Agent 的 Skill 映射。</p>
+          <div class="srow"><label>场景</label><select id="sceneSelect">${sceneOpts}</select></div>
+          <button class="bt bt-p mt8" onclick="applyScene('${repo.owner}', '${repo.name}')">应用场景</button>
+        </div>
         <div class="cd mt16" style="border-color:var(--r)">
           <div class="cd-h"><h2 style="color:var(--r)">解除托管</h2></div>
           <p class="tx t2" style="margin-bottom:8px">解除托管后，该仓库的 Webhook 将被删除，事件将不再被监听。您可以稍后重新加入。</p>
           <button class="bt" style="background:var(--r);color:#fff;border:none;padding:8px 16px" onclick="unhostFromSettings('${repo.fullName}')">解除托管</button>
         </div>`;
+      }).catch(() => {
+        document.getElementById('sGitcode').innerHTML = '<div class="error">加载场景列表失败</div>';
+      });
     }).catch(e => document.getElementById('sGitcode').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
   } else {
     html += `<div class="ts t2">${current}</div></div>`;
@@ -120,4 +133,12 @@ function unhostFromSettings(fullName) {
       }
     });
   }).catch(e => app.showToast('解除托管失败: ' + e.message));
+}
+
+function applyScene(owner, repo) {
+  const sceneId = document.getElementById('sceneSelect').value;
+  if (!sceneId) return app.showToast('请选择一个场景');
+  API.post('/scenes/apply/' + owner + '/' + repo, {scene_id: sceneId})
+    .then(r => app.showToast(r.message || '场景已应用'))
+    .catch(e => app.showToast('应用场景失败: ' + (e.message || e)));
 }
