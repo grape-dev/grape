@@ -703,9 +703,9 @@ async def start_ws_async(on_message_callback, bot_app_id: str, bot_app_secret: s
                .register_p2_im_message_receive_v1(_handle_with_account)
                .build())
 
-    # 预先获取 WS URL（使用 async HTTP，避免 _get_conn_url 的同步 requests.post 阻塞事件循环）
-    from src.im.feishu_bot import _get_ws_endpoint_sync
-    ws_url = _get_ws_endpoint_sync(bot_app_id, bot_app_secret)
+    # 异步获取 WS URL
+    from src.im.feishu_bot import _get_ws_endpoint_async
+    ws_url = await _get_ws_endpoint_async(bot_app_id, bot_app_secret)
     if not ws_url:
         log.warning(f"Chat WS: no ws endpoint for {bot_app_id[:20]}, skip")
         return
@@ -881,9 +881,9 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
                .register_p2_im_message_receive_v1(_handle_vod)
                .build())
 
-    # 预先获取 WS URL（避免 _get_conn_url 的同步 requests.post 阻塞事件循环）
-    from src.im.feishu_bot import _get_ws_endpoint_sync
-    ws_url = _get_ws_endpoint_sync(bot_app_id, bot_app_secret)
+    # 异步获取 WS URL
+    from src.im.feishu_bot import _get_ws_endpoint_async
+    ws_url = await _get_ws_endpoint_async(bot_app_id, bot_app_secret)
     if not ws_url:
         log.warning(f"VOD WS: no ws endpoint for {bot_app_id[:20]}, skip")
         return

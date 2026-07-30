@@ -8,7 +8,7 @@ FEISHU_BASE = "https://open.feishu.cn/open-apis"
 
 
 def _get_ws_endpoint_sync(app_id: str, app_secret: str) -> str:
-    """同步获取飞书 WebSocket 端点 URL（用于注入 lark_oapi 客户端）"""
+    """同步获取飞书 WebSocket 端点 URL"""
     url = "https://open.feishu.cn/callback/ws/endpoint"
     payload = json.dumps({"AppID": app_id, "AppSecret": app_secret}).encode()
     try:
@@ -23,6 +23,12 @@ def _get_ws_endpoint_sync(app_id: str, app_secret: str) -> str:
         log.warning(f"get_ws_endpoint error: {e}")
     return ""
 
+
+async def _get_ws_endpoint_async(app_id: str, app_secret: str) -> str:
+    """异步获取飞书 WebSocket 端点 URL（线程池中执行同步 HTTP）"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_ws_endpoint_sync, app_id, app_secret)
 
 class FeishuBot:
     """单个飞书机器人的完整生命周期管理"""
