@@ -439,11 +439,14 @@ def _migrate_tables():
             c = db.cursor()
             # Chat Agent 凭证
             c.execute("INSERT OR IGNORE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) SELECT feishu_app_id, feishu_app_secret, 'chat_bot' FROM chat_config WHERE feishu_app_id!='' AND feishu_app_secret!='' AND feishu_app_secret!='********'")
-            # VOD Agent 凭证
-            c.execute("INSERT OR IGNORE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) SELECT bot_app_id, bot_app_secret, 'vod_bot' FROM vod_bot_config")
             db.commit()
-            migrated = c.lastrowid
-            if migrated:
-                log.info(f"Migrated IM configs to im_bot_config")
+            log.info(f"Migrated IM configs to im_bot_config")
     except Exception as e:
-        log.warning(f"Migrate im_bot_config failed: {e}")
+        log.info(f"Migrate im_bot_config skipped: {e}")
+    # 清理旧表（如果存在）
+    try:
+        with db_lock:
+            db.execute("DROP TABLE IF EXISTS vod_bot_config")
+            db.commit()
+    except Exception:
+        pass

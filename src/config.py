@@ -111,4 +111,5 @@ def get_agent_backend(skill_name: str = "") -> str:
     return "opencode"
 
 
-_load_accounts()
+# 延迟到 main.py 中显式调用，避免循环导入
+# _load_accounts()
