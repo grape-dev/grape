@@ -689,6 +689,7 @@ def start_vod_ws(bot_app_id: str):
     global _ws_clients
     app_id = ""
     app_secret = ""
+    from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
