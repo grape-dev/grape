@@ -816,10 +816,8 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
 async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
     """在运行中事件循环上创建并连接 VOD WS Client"""
     global _ws_clients
-    log.info(f"[ws] start_vod_ws_async entered for {bot_app_id[:20]}")
     import lark_oapi.ws.client as _lark_ws
     _lark_ws.loop = asyncio.get_running_loop()
-    log.info(f"[ws] VOD loop set for {bot_app_id[:20]}")
 
     from src.im.vod_handler import process_vod_message
 
@@ -829,31 +827,45 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
             if header is None:
                 return
             event_type = getattr(header, 'event_type', None)
-            if isinstance(event_type, str) and event_type == "im.message.receive_v1":
-                log.info(f"VOD WS: im.message.receive_v1 received")
-            event_body = getattr(event, 'event', None)
-            if event_body is None:
+            if callable(event_type):
+                event_type = event_type()
+            if event_type != "im.message.receive_v1":
+                return
+            ev = getattr(event, 'event', None)
+            if ev is None:
+                return
+            message = getattr(ev, 'message', None)
+            sender = getattr(ev, 'sender', None)
+            if message is None or sender is None:
+                return
+            msg_content = getattr(message, 'content', '{}') or '{}'
+            msg_type = getattr(message, 'message_type', 'text') or 'text'
+            text = ""
+            if msg_type == "text":
+                try:
+                    text = json.loads(msg_content).get("text", "")
+                except json.JSONDecodeError:
+                    text = msg_content
+            if not text:
                 return
             message_dict = {
                 "event": {
                     "message": {
-                        "message_id": getattr(getattr(event_body, 'message', None), 'message_id', ''),
-                        "chat_id": getattr(getattr(event_body, 'message', None), 'chat_id', ''),
-                        "message_type": getattr(getattr(event_body, 'message', None), 'message_type', ''),
-                        "content": getattr(getattr(event_body, 'message', None), 'content', ''),
+                        "message_id": getattr(message, 'message_id', ''),
+                        "chat_id": getattr(message, 'chat_id', ''),
+                        "message_type": msg_type,
+                        "content": msg_content,
                     },
                     "sender": {
                         "sender_id": {
-                            "open_id": getattr(getattr(getattr(event_body, 'sender', None), 'sender_id', None), 'open_id', ''),
-                            "union_id": getattr(getattr(getattr(event_body, 'sender', None), 'sender_id', None), 'union_id', ''),
-                            "user_id": getattr(getattr(getattr(event_body, 'sender', None), 'sender_id', None), 'user_id', ''),
+                            "open_id": getattr(getattr(sender, 'sender_id', None), 'open_id', ''),
                         }
                     }
                 }
             }
             process_vod_message(message_dict, bot_app_id)
         except Exception as e:
-            log.warning(f"VOD WS handle error: {e}")
+            log.warning(f"VOD handle error: {e}")
 
     import lark_oapi
     handler = (lark_oapi.EventDispatcherHandler.builder("", "")
