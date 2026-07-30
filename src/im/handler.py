@@ -7,7 +7,8 @@ from src.prompt_builder import build_chat_prompt, get_skill_capabilities, build_
 from src.agent.executor import stream_agent
 from src.im.feishu import (
     resolve_repo, process_command, detect_bind_intent, detect_clean_intent,
-    get_user_name, start_ws, stop_ws, get_chat_members, sync_repo_feishu_mapping
+    get_user_name, start_ws, stop_ws, get_chat_members, sync_repo_feishu_mapping,
+    add_reaction,
 )
 from src.session_manager import db
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
