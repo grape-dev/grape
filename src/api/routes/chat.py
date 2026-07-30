@@ -457,6 +457,15 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
             row = c.fetchone()
             if row and row[0] == "vod_bot":
                 raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent"})
+
+            # 如果用户换了新的 app_id，删除旧 app_id 及其所有对话
+            old_cfg = _get_chat_config(user["id"])
+            old_app_id = old_cfg.get("feishu_app_id", "")
+            if old_app_id and old_app_id != app_id:
+                c.execute("DELETE FROM im_bot_config WHERE bot_app_id=?", (old_app_id,))
+                c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
+                log.info(f"Chat IM: replaced old app_id={old_app_id[:30]} with new app_id={app_id[:30]}")
+
             # 保存到 im_bot_config
             app_secret = feishu.get("app_secret", "")
             if app_secret and app_secret != "********":
