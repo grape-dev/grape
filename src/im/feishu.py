@@ -690,20 +690,9 @@ def stop_ws(bot_key: str | None = None):
 
 async def start_ws_async(on_message_callback, bot_app_id: str, bot_app_secret: str):
     """在运行中事件循环上创建并连接 Chat WS Client"""
-    log.info(f"[ws_dbg] start_ws_async ENTERED for {bot_app_id[:20]}")
     global _ws_clients
     import lark_oapi.ws.client as _lark_ws
     _lark_ws.loop = asyncio.get_running_loop()
-
-    # 记录当前 WS 使用的 app_id 到 meta 表
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ws_feishu_app_id', ?)", (bot_app_id,))
-            db.commit()
-    except Exception:
-        pass
 
     def _handle_with_account(event):
         return _handle_message(event, on_message_callback, bot_app_id)
