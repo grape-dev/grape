@@ -716,11 +716,6 @@ async def start_ws_async(on_message_callback, bot_app_id: str, bot_app_secret: s
         auto_reconnect=True,
     )
     client._get_conn_url = lambda: ws_url
-        app_id=bot_app_id,
-        app_secret=bot_app_secret,
-        event_handler=handler,
-        auto_reconnect=True,
-    )
     ws_key = f"chat_{bot_app_id}"
     _ws_clients[ws_key] = client
     log.info(f"Chat WS connecting (bot_app_id={bot_app_id[:30]}...)")
