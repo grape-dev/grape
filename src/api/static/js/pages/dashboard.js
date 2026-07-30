@@ -5,6 +5,10 @@ function renderDashboard(data) {
   const act = data.activity || [];
   const m = data.metrics || {};
   const repo = data.repo || '';
+  const scenes = data._scenes || [];
+  const owner = data._owner || '';
+  const name = data._name || '';
+  const sceneOpts = scenes.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
 
   const agentOrder = ['vod','issue','coding','qa','sre'];
   const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
