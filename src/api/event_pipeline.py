@@ -168,7 +168,20 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     ws = os.path.join(WORKSPACE_DIR, repository, f"{agent_type}-agent")
     os.makedirs(ws, exist_ok=True)
 
-    log.info(f"Exec agent: type={agent_type}, backend={backend}, skill={skill_name}, seq={seq}")
+    # 读取上次的 oc_session_id（用于延续对话上下文）
+    repo_name = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
+    oc_session_id = ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT oc_session_id FROM agent_sessions WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
+            row = c.fetchone()
+            if row and row[0]:
+                oc_session_id = row[0]
+    except Exception:
+        pass
+
+    log.info(f"Exec agent: type={agent_type}, backend={backend}, skill={skill_name}, seq={seq}, oc_session={oc_session_id[:20] if oc_session_id else 'none'}")
 
     try:
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type])
@@ -189,9 +202,10 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     exit_code = -1
     final_text = ""
+    new_oc_session_id = ""
     try:
         for evt_type, data in stream_agent(
-            prompt, ws, session_id="", event_type=evt.get("type", ""),
+            prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
             backend_name=backend, account="default",
             repo_gitcode_token=repo_gitcode_token,
         ):
@@ -199,11 +213,23 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
                 d = data
                 exit_code = d.get("exit_code", -1)
                 final_text = d.get("text", "")
-                log.info(f"Agent done: exit={exit_code}, text_len={len(final_text)}")
+                new_oc_session_id = d.get("oc_session_id", "")
+                log.info(f"Agent done: exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
             elif evt_type == "error":
                 log.warning(f"Agent error: {data}")
     except Exception as e:
         log.warning(f"Exec agent failed: {e}")
+
+    # 更新 oc_session_id（持久化对话上下文）
+    if new_oc_session_id and new_oc_session_id != oc_session_id:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("UPDATE agent_sessions SET oc_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
+                          (new_oc_session_id, repo_name, agent_type))
+                db.commit()
+        except Exception as e:
+            log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
     new_status = "completed" if exit_code == 0 else "failed"
     update_event_status(seq, new_status)

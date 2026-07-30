@@ -86,20 +86,27 @@ GitCode 触发事件 (Push Hook / Issue Hook / Note Hook / Merge Request Hook...
                                      ▼
 ┌─ 4. Agent 执行（event_pipeline.py:_execute_agent）─── 后台线程 ─┐
 │                                                                  │
-│  ├── (a) 创建工作目录:                                           │
+│  ├── (a) 参数来源                                                │
+│  │    ├── backend:   agent_sessions.backend 或 默认 "opencode"  │
+│  │    ├── skill:     agent_sessions.skill 或 agent-skill-mapping │
+│  │    │              → scenes.default.mapping[agent_type]        │
+│  │    └── oc_session_id:  agent_sessions.oc_session_id           │
+│  │                   （当前传 ""，未读此字段，Agent 无上下文记忆） │
+│  │                                                              │
+│  ├── (b) 创建工作目录:                                           │
 │  │    data/workspaces/{repo}/{agent_type}-agent/                 │
 │  │                                                              │
-│  ├── (b) 构建 Prompt（prompt_builder.py:build_prompt）            │
+│  ├── (c) 构建 Prompt（prompt_builder.py:build_prompt）            │
 │  │   ├── 事件描述（Issue/PR 标题、内容、评论等）                  │
 │  │   ├── Issue 聚类摘要（events 表按 issue 聚类）                │
 │  │   ├── Skill 指令注入（skills/{skill}/SKILL.md）               │
 │  │   ├── 角色定义（build_role_definition）                        │
 │  │   └── A2A 协议指令 + 可用 Agent 注册表                       │
 │  │                                                              │
-│  ├── (c) 获取 repo Bot Token                                     │
+│  ├── (d) 获取 repo Bot Token                                     │
 │  │    get_bot_token_by_repo(owner, repo)                        │
 │  │                                                              │
-│  ├── (d) 调用 stream_agent()（agent/executor.py）                 │
+│  ├── (e) 调用 stream_agent()（agent/executor.py）                 │
 │  │   ├── 选择 Backend（opencode / codearts）                      │
 │  │   ├── 注入环境变量:                                           │
 │  │   │   GITCODE_API_TOKEN (repo Bot Token)                     │
@@ -111,7 +118,7 @@ GitCode 触发事件 (Push Hook / Issue Hook / Note Hook / Merge Request Hook...
 │  │   │   step_finish / error / done                             │
 │  │   └── 阻塞等待 Agent 完成                                     │
 │  │                                                              │
-│  └── (e) 更新事件状态                                            │
+│  └── (f) 更新事件状态                                            │
 │       exit_code == 0 → update_event_status(seq, "completed")    │
 │       exit_code != 0 → update_event_status(seq, "failed")       │
 │                                                                  │
@@ -156,7 +163,22 @@ def get_domain_agent(event_type: str) -> str:
 | Agent 配置页 | `PUT /api/agents/{name}/{owner}/{repo}` | 手动配置单个 Agent 的 backend + skill |
 | 解除托管 | `remove_agent_sessions()` | 删除仓库所有 agent_sessions |
 
-## 4. 关键修复记录
+## 4. _execute_agent() 参数来源
+
+_execute_agent() 的参数从 pipeline 的 Step 4（查找 Agent 会话 + 回填默认）决定：
+
+| 参数 | 来源 | 说明 |
+|------|------|------|
+| `backend` | `agent_sessions.backend` 或 `"opencode"`（默认映射固定写死） | Agent 引擎（opencode / codearts），仅 UI 可修改 |
+| `skill_name` | `agent_sessions.skill` 或 `agent-skill-mapping.json` 的 default 场景映射 | 决定注入哪个 SKILL.md |
+| `oc_session_id` | `agent_sessions.oc_session_id`（当前传 `""`） | opencode 对话记忆，**当前未启用**。如果读取此字段传给 `stream_agent()` 并在执行完毕后更新回 `agent_sessions`，Agent 可延续上下文 |
+
+**当前缺口：** `session_id` 传空，Agent 对同一个 repo 的多次事件没有上下文连贯性。需要补充：
+1. `_execute_agent()` 开始前从 `agent_sessions` 读 `oc_session_id`
+2. 传给 `stream_agent(session_id=oc_session_id)`
+3. 执行完毕后从 done event 提取新的 `oc_session_id` → `UPDATE agent_sessions`
+
+## 5. 关键修复记录
 
 | 问题 | 根因 | 修复 |
 |------|------|------|
@@ -165,11 +187,10 @@ def get_domain_agent(event_type: str) -> str:
 | raw_type=unknown | `dict(request.headers)` 转小写，`X-GitCode-Event` 匹配不到 | `get_event_header()` 改为大小写不敏感匹配 |
 | Agent 不执行 | pipeline 只存事件，未调用 `stream_agent()` | 新增 `_execute_agent()` 后台线程执行 |
 
-## 5. Token 验证
+## 6. Token 验证
 
 ```python
 def get_webhook_token_by_repo(full_name: str) -> str:
-    """根据 full_name 查找 repo 的预期 webhook token"""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT gitcode_webhook_token FROM managed_repos WHERE full_name=? LIMIT 1", (full_name,))
@@ -177,17 +198,41 @@ def get_webhook_token_by_repo(full_name: str) -> str:
         return row[0] if row else ""
 ```
 
-## 6. 数据表关系
+## 7. 数据表关系
 
 ```sql
 -- agent_type_config: Agent 类型定义 + 订阅事件
-agent_type_config (agent_type, display_name, order_num, subscribe_events, ...)
+agent_type_config (
+    agent_type TEXT PRIMARY KEY,        -- "issue", "coding" ...
+    display_name TEXT NOT NULL,
+    order_num INTEGER DEFAULT 0,        -- >0 的为 DevOps Agent
+    subscribe_events TEXT DEFAULT '[]',  -- JSON 数组 ["issue_opened","issue_comment"]
+    ...
+)
 
 -- agent_sessions: 每个 repo 下每个 Agent 的运行时配置
-agent_sessions (repo_key, agent_type, backend, skill, repo_gitcode_token, status)
+agent_sessions (
+    id TEXT PRIMARY KEY,                -- 自生成 UUID
+    repo_key TEXT NOT NULL,             -- "owner/repo"
+    agent_type TEXT NOT NULL,           -- "issue", "coding" ...
+    backend TEXT DEFAULT 'opencode',    -- Agent 引擎
+    skill TEXT DEFAULT '',              -- 绑定的 Skill 名称
+    oc_session_id TEXT DEFAULT '',      -- opencode 会话 ID（用于上下文记忆）
+    repo_gitcode_token TEXT DEFAULT '', -- repo 级 Bot Token
+    status TEXT DEFAULT 'idle',         -- idle / running
+    created_at / last_active_at,
+    UNIQUE(repo_key, agent_type)        -- 每个 repo 每种 Agent 只有一行
+)
 
 -- events: 事件记录（pipeline 存储 + Agent 执行结果）
-events (seq, repo_key, event_type, agent_type, status running/completed/failed)
+events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_key TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    agent_type TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',      -- running / completed / failed
+    ...
+)
 
 -- managed_repos: 仓库托管信息 + token 验证
 managed_repos (full_name, gitcode_webhook_token, bot_gitcode_token)
@@ -196,7 +241,7 @@ managed_repos (full_name, gitcode_webhook_token, bot_gitcode_token)
 -- agent-description.json（配置文件）：Agent 类型 + subscribe_events
 ```
 
-## 7. 日志关键节点示例
+## 8. 日志关键节点示例
 
 ```
 Webhook: received event=Note Hook, body_size=3134, token=Cz9ZX1kU...
@@ -219,7 +264,7 @@ Agent done: exit=0, text_len=120
 Exec agent: seq=2 -> completed
 ```
 
-## 8. 涉及端口
+## 9. 涉及端口
 
 | 端口 | 进程 | CMD | 用途 |
 |------|------|-----|------|
