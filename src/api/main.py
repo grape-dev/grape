@@ -15,14 +15,6 @@ from src.api.routes import auth, repos, dashboard, agents, events, chat, setting
 async def lifespan(app: FastAPI):
     # Startup
     from src.config import log
-    try:
-        from src.im.handler import process_chat
-        from src.im.feishu import start_ws
-        t = threading.Thread(target=start_ws, args=(process_chat,), daemon=True)
-        t.start()
-        log.info("Feishu WS started in background thread")
-    except Exception as e:
-        log.warning(f"Feishu WS start skipped: {e}")
 
     # 启动所有已配置的 IM Bot WebSocket
     try:
