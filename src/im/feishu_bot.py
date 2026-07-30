@@ -58,6 +58,7 @@ class FeishuBot:
 
         while self._running:
             try:
+                self.token = await self._get_tenant_token()
                 ws_url = await self._get_ws_endpoint()
                 if not ws_url:
                     log.warning(f"[{self.name}] no ws endpoint, retry in 10s")
@@ -70,6 +71,8 @@ class FeishuBot:
                     log.info(f"[{self.name}] connected")
 
                     async for raw in ws:
+                        if not isinstance(raw, str):
+                            continue
                         try:
                             data = json.loads(raw)
                         except json.JSONDecodeError:
