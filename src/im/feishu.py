@@ -750,7 +750,8 @@ def start_vod_ws(bot_app_id: str):
     client = lark_oapi.ws.Client(
         app_id=app_id,
         app_secret=app_secret,
-        handler=handler,
+        event_handler=handler,
+        auto_reconnect=True,
     )
     _ws_clients[f"vod_{bot_app_id}"] = client
     log.info(f"VOD WS started for bot_app_id={bot_app_id}")
