@@ -1,8 +1,8 @@
-# Agentic DevOps 系统使用场景与工作流设计
+# Grape — Multi-Agent DevOps 使用场景与工作流设计
 
 ## 一、系统概述
 
-Agentic DevOps 是一个多 Agent 协作的 DevOps 平台，致力于实现 Loop Engineer。
+Grape 是一个多 Agent 协作的 DevOps 平台，致力于实现 Multi-Agent DevOps。
 
 **核心理念：**
 - **Bot** — 事件编排器，负责监听事件、路由分发、会话管理
@@ -34,8 +34,9 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 ```
 ┌─ Login Page ──────────────────────────────────────┐
 │                                                     │
-│                    Agentic DevOps                   │
-│          致力于实现 Loop Engineer                   │
+│                   [Logo Image]                       │
+│                    Grape                             │
+│              Multi-Agent DevOps                      │
 │                                                     │
 │  ┌─────────────────────────────────────────────┐   │
 │  │  [▦ 使用 GitCode 登录]                      │   │
@@ -135,7 +136,8 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 
 ```
 ┌─ Sidebar ──────────────────────────────────────────┐
-│  Agentic DevOps                                         │
+│  [Logo] Grape                                           │
+│  Multi-Agent DevOps                                     │
 │                                                     │
 │  [team/backend-service ▼]        [Maintainer ▼]       │
 │       ┌─────────────────────┐                       │
@@ -195,7 +197,7 @@ Dashboard 主内容区域展示所选仓库的完整工作流看板：
 │  │   98.5% Auto-Reso. │ 47 Events/Week │ 12s Avg  │  │
 │  └────────────────────────────────────────────────┘  │
 │                                                        │
-│  Agent Workflow (Logical flow: VOD→Issue→Coding→QA→SRE)│
+│  Agent Workflow · [开发场景: 通用开发 ▼] [应用]         │
 │                                                        │
  │  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐   │
  │  │♫ VOD │→│⚠ Issue│→│⚙Coding│→│✔ QA  │→│♡ SRE │   │
@@ -222,7 +224,7 @@ Dashboard 主要区域说明：
 | 区域 | 内容 |
 |------|------|
 | **Repo Header** | 当前仓库名称、状态（Webhook OK）、指标（自动解决率、事件量、平均响应时间） |
-| **Agent Flow** | 5 个 Agent 横向流水线卡片，每个显示状态、关键指标，统一基于 OpenCode |
+| **Agent Flow** | 5 个 Agent 横向流水线卡片，每个显示状态、关键指标；右上角提供开发场景下拉选择器（可切换 Agent-Skill 映射） |
 | **Chat Lane** | 个人 Chat Agent 横贯连接条，点击进入 Chat 页面 |
 | **Recent Activity** | 最近 24 小时事件流，点击事件可跳转到 Event Detail 详情页 |
 
@@ -594,7 +596,6 @@ Chat Agent 是三栏布局：左侧对话列表、中间对话区、右侧固定
 │  └────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
-;
 
 > **DevOps Bot Token 说明：** 此 Token 是 DevOps 系统的**全局凭证**，所有 DevOps Agents（VOD/Issue/Coding/QA/SRE）在执行 GitCode 操作时自动使用此 Token。Bot Token 需要有仓库的读写权限（`read_repo, write_repo, manage_webhook`），建议使用单独的 Bot 账号创建，与用户个人 Token 隔离。  
 > **回退规则：** 若当前仓库未配置 Bot Token，系统自动使用 `default` 账户下的默认 Token。管理员可在 GitCode Repo 页中编辑 `default` 条目来配置系统默认 Token，确保新仓库零配置即可运行。
@@ -941,8 +942,9 @@ SRE Agent
 
 | 配置项 | 说明 | 配置入口 |
 |--------|------|---------|
+| **开发场景** | 选择场景（通用开发/云原生开发/IaC开发/Agent开发/Skill开发），自动刷新所有 Agent 的 Skill 映射 | Dashboard → Agent Workflow 右上角场景选择器 |
 | **已加入 Repo 列表** | 用户参与的所有仓库，展示角色（成员/维护者/管理员） | Repositories 页面 |
-| **已托管 Repo 列表** | 被 Agentic DevOps 监听的项目，显示 Webhook 状态 | Repositories 页面 |
+| **已托管 Repo 列表** | 被 Grape 监听的项目，显示 Webhook 状态 | Repositories 页面 |
 | **Dashboard 仓库切换** | 侧边栏下拉选择已托管仓库，Dashboard 跟随切换 | 侧边栏 Repo Selector |
 | **Channel 配置** | Chat Agent 选择（默认/自有），IM 绑定 | Settings → Channel |
 | **云平台凭据** | 华为云 AK/SK，为 Coding Agent 提供云端开发环境 | Settings → Credentials |
@@ -972,16 +974,23 @@ SRE Agent
 - 自定义 Skill 通过 `repo_skill_mapping` 绑定到特定仓库和事件类型
 - 自定义 Skill 的优先级高于系统预制 Skill
 
-### 6.3 事件路由优先级
+### 6.3 事件处理流程
 
 ```
-事件到达
-  → 检查 repo_skill_mapping（用户自定义配置）
-    → 有 → 使用用户自定义 Skill
-    → 无 → 检查 event-routing.json repo_routing（全局仓库覆盖）
-      → 有 → 使用全局指定 Skill
-      → 无 → 检查 event-routing.json routing（全局默认路由）
+事件到达 webhook:8080
+  → 验证 X-GitCode-Token（从 managed_repos 按 repo 查找预期 token）
+  → 提取 repo + 事件类型
+  → run_pipeline():
+     ├── 1. 归一化（adapter.py — gitcode/github 事件转统一格式）
+     ├── 2. 反循环过滤（跳过 Bot 自身事件）
+     ├── 3. 路由（routing.py — 查询 agent_type_config.subscribe_events）
+     ├── 4. 查找 Agent 会话（agent_sessions 表）
+     │     ├── 有配置 → 使用用户配置的 backend + skill
+     │     └── 无配置 → 从 agent-skill-mapping.json 读取默认 skill
+     └── 5. 存储事件（events 表）→ 返回结果
 ```
+
+场景选择器通过 `POST /api/scenes/apply` 为仓库生成 `agent_sessions` 行，替换默认映射。
 
 ---
 
@@ -993,56 +1002,46 @@ SRE Agent
 │             Webhook / API / OAuth                       │
 └────────────────────┬────────────────────────────────────┘
                      │
+          ┌──────────┴──────────┐
+          ▼                     ▼
+┌──────────────────┐  ┌──────────────────────┐
+│  Port 80          │  │  Port 8080            │
+│  src.api.main     │  │  src.api.run_webhook  │
+│  SPA + API + 用户   │  │  Webhook + A2A 端点   │
+│  Feishu WS        │  │  仅 webhook 路由      │
+└────────┬─────────┘  └──────────┬───────────┘
+         │                       │
+         └───────────┬───────────┘
                      ▼
 ┌─────────────────────────────────────────────────────────┐
-│              事件处理器（端口 8080）                      │
+│              事件处理管道（event_pipeline.py）            │
 │                                                         │
-│  webhook_handler.py → event_processor.py                │
-│    ├── 事件归一化（VCS Adapter）                          │
-│    ├── 反循环过滤（跳过 Bot 自身事件）                     │
-│    ├── 仓库级锁（串行化每个 Repo 的事件处理）               │
-│    ├── 路由解析（自定义 > 全局覆盖 > 默认路由）             │
-│    ├── A2A 深度追踪（最大 5 层）                          │
-│    └── Feishu 上下文预取                                 │
+│    ├── 1. 事件归一化（VCS Adapter）                       │
+│    ├── 2. 反循环过滤（跳过 Bot 自身事件）                  │
+│    ├── 3. 路由解析（查询 agent_type_config.subscribe_events）│
+│    ├── 4. Agent 会话查找（agent_sessions 表）              │
+│    │     ├── 有配置 → 使用用户配置                          │
+│    │     └── 无配置 → 从 agent-skill-mapping.json 取默认    │
+│    └── 5. 事件存储（events 表）                            │
 └────────────────────┬────────────────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────────────────┐
-│               Prompt 构建器                              │
-│                                                         │
-│  prompt_builder.py                                       │
-│    ├── A2A 上下文注入                                    │
-│    ├── 事件描述 + 历史记录                                │
-│    ├── Skill 指令注入（SKILL.md）                         │
-│    ├── 角色定义 + 行为规则                                │
-│    └── Agent 注册表 + A2A 调用指令                        │
-└────────────────────┬────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│               Agent 执行器                               │
+│            Agent 执行器（子进程）                          │
 │                                                         │
 │  agent/executor.py                                       │
-│    ├── Backend 选择（Opencode / CodeArts）                │
-│    ├── 环境变量注入（Repo、Token、凭据等）                 │
-│    ├── NDJSON 流式输出                                   │
-│    └── 超时控制（120s）                                   │
-└────────────────────┬────────────────────────────────────┘
-                     │
-         ┌───────────┼───────────┐
-         ▼           ▼           ▼
-   ┌──────────┐┌──────────┐┌──────────┐
-   │ A2A 协议  ││ 会话管理 ││ 历史持久化│
-   │ /api/a2a  ││session  ││ workspace│
-   └──────────┘└──────────┘└──────────┘
+│    ├── Backend 选择（OpenCode / CodeArts）                │
+│    ├── 环境变量注入（Repo、Token、Skill 等）               │
+│    └── NDJSON 流式输出                                    │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ### 7.1 端口与协议
 
 | 端口 | 用途 | 协议 |
 |------|------|------|
-| **80** | Admin/User Web 面板、OAuth、JSON API | HTTP |
-| **8080** | GitCode Webhook、A2A、Health、Session API | HTTP |
+| **80** | SPA + API + Feishu WS（`uvicorn src.api.main:app`） | HTTP |
+| **8080** | Webhook 端点（`uvicorn src.api.run_webhook:app`，仅 webhook + A2A） | HTTP |
 | **WebSocket** | 飞书 IM 长连接 | WSS |
 
 ### 7.2 数据存储
@@ -1052,7 +1051,7 @@ SRE Agent
 | `data/sessions.db` | 用户、账户、Session、VM、Skill、映射 | SQLite |
 | `data/workspaces/` | Agent 执行历史和工作目录 | 文件系统 |
 | `skills/` | 预制 Skill + 自定义 Skill | 文件系统 |
-| `configs/` | 事件路由、Agent 路由、Agent 注册 | JSON 文件 |
+| `configs/` | 事件路由、Agent 路由、场景映射（agent-skill-mapping.json） | JSON 文件 |
 
 ---
 
