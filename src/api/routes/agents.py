@@ -163,7 +163,10 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 
     # 密码掩码处理：如果传 "********" 表示不修改
     from src.session_manager import db, db_lock
-    im_secret = body.im_app_secret
+    # IM 配置仅在 VOD Agent 有效
+    im_provider = body.im_provider if name == "vod" else ""
+    im_app_id = body.im_app_id if name == "vod" else ""
+    im_secret = body.im_app_secret if name == "vod" else ""
     if im_secret == "********":
         try:
             with db_lock:
@@ -180,8 +183,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         try:
             c.execute(
                 "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, im_provider, im_app_id, im_app_secret) VALUES (?,?,?,?,?,?,?,datetime('now'),?,?,?)",
-                (session_id, repo_key, name, body.backend, body.skill, repo_token, "idle",
-                 body.im_provider, body.im_app_id, im_secret)
+                 (session_id, repo_key, name, body.backend, body.skill, repo_token, "idle",
+                  im_provider, im_app_id, im_secret)
             )
             db.commit()
         except Exception as e:

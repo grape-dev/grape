@@ -72,6 +72,7 @@ function renderAgent(name, data) {
       <option value="">加载中...</option>
     </select>
   </div>
+  ${name === 'vod' ? `
   <div style="margin:16px 0 12px;border-top:1px solid var(--b);padding-top:12px">
     <div class="flex fc jbtw" style="margin-bottom:8px">
       <h3 style="font-size:13px;font-weight:600">IM 通知</h3>
@@ -85,7 +86,7 @@ function renderAgent(name, data) {
     </div>
     <div class="srow"><label>App ID</label><input id="imAppId" value="${(data.im && data.im.app_id) || ''}" placeholder="cli_xxxxxxxx" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
     <div class="srow"><label>App Secret</label><input id="imSecret" type="password" value="${data.im && data.im.connected ? '********' : ''}" placeholder="留空不修改" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
-  </div>
+  </div>` : ''}
   <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg()">Cancel</button></div>
 </div>
 <div class="stats mt16 mb16">
