@@ -125,7 +125,7 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
 
     skill_name = agent_session.get("skill", "vod")
     prompt = _build_vod_prompt(evt, skill_name)
-    ws = os.path.join(WORKSPACE_DIR, repo_key.split("/", 1)[-1] if "/" in repo_key else repo_key, "vod-agent")
+    ws = os.path.join(WORKSPACE_DIR, repo_key, "vod-agent")
     os.makedirs(ws, exist_ok=True)
 
     exit_code = -1
