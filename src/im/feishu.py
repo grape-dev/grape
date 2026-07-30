@@ -641,7 +641,10 @@ def start_ws(on_message_callback, account_name: str = "default"):
     )
     _ws_clients[account_name] = client
     log.info(f"Feishu WS client starting (account={account_name})...")
-    client.start()
+    try:
+        client.start()
+    except RuntimeError:
+        pass
 
 
 def get_user_id_by_app_id(app_id: str) -> int | None:
@@ -755,7 +758,10 @@ def start_vod_ws(bot_app_id: str):
     )
     _ws_clients[f"vod_{bot_app_id}"] = client
     log.info(f"VOD WS started for bot_app_id={bot_app_id}")
-    client.start()
+    try:
+        client.start()
+    except RuntimeError:
+        pass
 
 
 
