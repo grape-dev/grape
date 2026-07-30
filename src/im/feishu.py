@@ -691,8 +691,10 @@ def stop_ws(bot_key: str | None = None):
 async def start_ws_async(on_message_callback, bot_app_id: str, bot_app_secret: str):
     """在运行中事件循环上创建并连接 Chat WS Client"""
     global _ws_clients
+    log.info(f"[ws] start_ws_async entered for {bot_app_id[:20]}")
     import lark_oapi.ws.client as _lark_ws
     _lark_ws.loop = asyncio.get_running_loop()
+    log.info(f"[ws] loop set for {bot_app_id[:20]}")
 
     def _handle_with_account(event):
         return _handle_message(event, on_message_callback, bot_app_id)
@@ -701,6 +703,7 @@ async def start_ws_async(on_message_callback, bot_app_id: str, bot_app_secret: s
     handler = (lark_oapi.EventDispatcherHandler.builder("", "")
                .register_p2_im_message_receive_v1(_handle_with_account)
                .build())
+    log.info(f"[ws] handler built for {bot_app_id[:20]}")
 
     client = lark_oapi.ws.Client(
         app_id=bot_app_id,
@@ -710,26 +713,28 @@ async def start_ws_async(on_message_callback, bot_app_id: str, bot_app_secret: s
     )
     ws_key = f"chat_{bot_app_id}"
     _ws_clients[ws_key] = client
-    log.info(f"Chat WS connecting (bot_app_id={bot_app_id[:30]}...)")
+    log.info(f"[ws] client created for {bot_app_id[:20]}, connecting...")
 
     try:
         await client._connect()
     except Exception as e:
-        log.warning(f"Chat WS connect failed for {bot_app_id[:20]}: {e}")
-        await client._disconnect()
+        log.warning(f"[ws] Chat WS connect failed: {e}")
+        return
 
-    log.info(f"Chat WS connected (bot_app_id={bot_app_id[:30]}...)")
+    log.info(f"[ws] Chat WS connected ({bot_app_id[:20]})")
     try:
         await asyncio.Event().wait()
     except asyncio.CancelledError:
-        log.info(f"Chat WS cancelled (bot_app_id={bot_app_id[:30]}...)")
+        log.info(f"[ws] Chat WS cancelled ({bot_app_id[:20]}...)")
 
 
 async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
     """在运行中事件循环上创建并连接 VOD WS Client"""
     global _ws_clients
+    log.info(f"[ws] start_vod_ws_async entered for {bot_app_id[:20]}")
     import lark_oapi.ws.client as _lark_ws
     _lark_ws.loop = asyncio.get_running_loop()
+    log.info(f"[ws] VOD loop set for {bot_app_id[:20]}")
 
     from src.im.vod_handler import process_vod_message
 

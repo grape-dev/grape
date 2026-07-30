@@ -1,5 +1,5 @@
 """Agentic DevOps API — FastAPI REST API Server (port 3000)"""
-import sys, os, asyncio
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import FastAPI, Request
@@ -15,38 +15,40 @@ from src.api.routes import auth, repos, dashboard, agents, events, chat, setting
 async def lifespan(app: FastAPI):
     # Startup
     from src.config import log
-    ws_tasks = []
+    import threading, time
 
-    # 启动所有已配置的 IM Bot WebSocket（单事件循环多 task）
+    # 启动所有已配置的 IM Bot WebSocket（线程方式）
     try:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT DISTINCT bot_app_id, bot_app_secret, bot_type FROM im_bot_config")
             rows = c.fetchall()
-        from src.im.feishu import start_ws_async, start_vod_ws_async
+        from src.im.feishu import start_ws_thread, start_vod_ws_thread
         from src.im.handler import process_chat
 
+        started = 0
         for bot_app_id, bot_app_secret, bot_type in rows:
             try:
                 if bot_type == "chat_bot":
-                    task = asyncio.create_task(
-                        start_ws_async(process_chat, bot_app_id, bot_app_secret),
-                        name=f"chat-ws-{bot_app_id[:20]}"
-                    )
-                    ws_tasks.append(task)
-                    log.info(f"Chat WS task created for {bot_app_id[:40]}")
+                    t = threading.Thread(target=start_ws_thread,
+                                         args=(process_chat, bot_app_id, bot_app_secret),
+                                         daemon=True, name=f"chat-ws-{bot_app_id[:20]}")
+                    t.start()
+                    log.info(f"Chat WS thread started for {bot_app_id[:40]}")
+                    started += 1
                 elif bot_type == "vod_bot":
-                    task = asyncio.create_task(
-                        start_vod_ws_async(bot_app_id, bot_app_secret),
-                        name=f"vod-ws-{bot_app_id[:20]}"
-                    )
-                    ws_tasks.append(task)
-                    log.info(f"VOD WS task created for {bot_app_id[:40]}")
+                    t = threading.Thread(target=start_vod_ws_thread,
+                                         args=(bot_app_id, bot_app_secret),
+                                         daemon=True, name=f"vod-ws-{bot_app_id[:20]}")
+                    t.start()
+                    log.info(f"VOD WS thread started for {bot_app_id[:40]}")
+                    started += 1
+                time.sleep(0.5)
             except Exception as e:
-                log.warning(f"WS task create failed for {bot_app_id[:20]}: {e}")
+                log.warning(f"WS thread start failed for {bot_app_id[:20]}: {e}")
 
-        log.info(f"IM Bot WS: {len(ws_tasks)} task(s) created")
+        log.info(f"IM Bot WS: {started}/{len(rows)} threads started")
 
     except Exception as e:
         log.warning(f"IM Bot WS startup failed: {e}")
@@ -54,71 +56,9 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    log.info("Shutting down IM Bot WS...")
-    for task in ws_tasks:
-        task.cancel()
-    for task in ws_tasks:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    from src.im.feishu import stop_ws
-    stop_ws()
-    log.info("IM Bot WS stopped")
-
-
-app = FastAPI(title="Agentic DevOps API", version="2.0.0", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(auth.router)
-app.include_router(repos.router)
-app.include_router(dashboard.router)
-app.include_router(agents.router)
-app.include_router(events.router)
-app.include_router(chat.router)
-app.include_router(settings.router)
-app.include_router(skills.router)
-app.include_router(search.router)
-app.include_router(pipeline.router)
-app.include_router(webhook.router)
-app.include_router(scenes.router)
-
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-if os.path.isdir(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-    from fastapi.responses import FileResponse
-    @app.get("/")
-    async def serve_spa():
-        from fastapi.responses import FileResponse
-        resp = FileResponse(os.path.join(STATIC_DIR, "index.html"))
-        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
-        return resp
-
-from src.api.db_setup import init_database
-init_database()
-
-# Re-load accounts after DB init (fix circular import issue)
-from src.config import _load_accounts
-_load_accounts()
-
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    from src.config import log
-    log.warning(f"API error: {exc}")
-    return JSONResponse(status_code=500, content={"code": 500, "message": str(exc)})
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "version": "2.0.0"}
+    try:
+        from src.im.feishu import stop_ws
+        stop_ws()
+        log.info("IM Bot WS stopped")
+    except Exception:
+        pass
