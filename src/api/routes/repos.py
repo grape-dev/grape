@@ -87,6 +87,8 @@ async def join_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
     user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=0, is_admin=False)
+    from src.api.session_store import ensure_default_agent_sessions
+    ensure_default_agent_sessions(body.full_name)
     return {"message": "已加入仓库"}
 
 
@@ -133,10 +135,14 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         existing_id = find_existing_webhook(webhook_token, owner, repo_name, webhook_url)
         if existing_id:
             user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=existing_id, is_admin=True, gitcode_webhook_token=webhook_token)
+            from src.api.session_store import ensure_default_agent_sessions
+            ensure_default_agent_sessions(body.full_name)
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
 
         hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=webhook_token)
         user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=hook_id, is_admin=True, gitcode_webhook_token=webhook_token)
+        from src.api.session_store import ensure_default_agent_sessions
+        ensure_default_agent_sessions(body.full_name)
         return {"message": "仓库托管成功", "webhook_id": hook_id}
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
@@ -203,4 +209,6 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
     removed = user_db.remove_managed_repo(user["id"], owner, repo_name)
     if not removed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
+    from src.api.session_store import remove_agent_sessions
+    remove_agent_sessions(body.full_name)
     return {"message": "已移除仓库"}

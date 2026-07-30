@@ -90,7 +90,7 @@ def list_agent_sessions(repo_key: str) -> list[dict]:
 
 
 def delete_agent_session(repo_key: str, agent_type: str) -> bool:
-    """删除 Agent 会话"""
+    """删除单个 Agent 会话"""
     with db_lock:
         try:
             c = db.cursor()
@@ -100,3 +100,54 @@ def delete_agent_session(repo_key: str, agent_type: str) -> bool:
             return c.rowcount > 0
         except Exception:
             return False
+
+
+def ensure_default_agent_sessions(repo_key: str):
+    """基于 agent-skill-mapping.json 的 default 场景，为仓库创建默认 Agent 会话"""
+    import os
+    _path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
+    if not os.path.exists(_path):
+        log.warning(f"ensure_default_agent_sessions: {_path} not found, skip")
+        return
+
+    with open(_path, "r", encoding="utf-8") as _f:
+        _cfg = json.load(_f)
+    _mapping = _cfg.get("scenes", {}).get("default", {}).get("mapping", {})
+    if not _mapping:
+        return
+
+    _parts = repo_key.split("/")
+    _owner, _rname = _parts[0], _parts[-1]
+    from src.user.db import get_bot_token_by_repo
+    _token = get_bot_token_by_repo(_owner, _rname)
+
+    with db_lock:
+        c = db.cursor()
+        for _at, _sk in _mapping.items():
+            _sid = str(uuid.uuid4())
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at) VALUES (?,?,?,?,?,?,?,datetime('now'))",
+                    (_sid, repo_key, _at, "opencode", _sk, _token, "idle")
+                )
+            except Exception as e:
+                log.warning(f"Failed to create session for {_at}: {e}")
+        db.commit()
+
+    log.info(f"Auto-created agent sessions for repo={repo_key} from default scene")
+
+
+def remove_agent_sessions(repo_key: str) -> int:
+    """删除仓库的所有 Agent 会话"""
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_sessions WHERE repo_key=?", (repo_key,))
+            db.commit()
+            _cnt = c.rowcount
+            if _cnt:
+                log.info(f"Removed {_cnt} agent session(s) for repo={repo_key}")
+            return _cnt
+        except Exception as e:
+            log.warning(f"Failed to remove sessions for {repo_key}: {e}")
+            return 0
