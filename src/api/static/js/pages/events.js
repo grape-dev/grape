@@ -20,6 +20,7 @@ function renderEventDetail(data) {
         <div>Repository: ${data.repo_key || ''}</div>
         <div>Issue: ${data.issue_id || '—'}</div>
         <div>Actor: ${data.actor || '—'}</div>
+        <div>Summary: ${data.summary || data.title || '—'}</div>
         <div>Time: ${data.created_at || ''}</div>
       </div>
       <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Agent Execution Log</h3>

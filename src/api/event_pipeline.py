@@ -124,6 +124,47 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
     title = evt.get("title", "") or event_type
     log.info(f"Pipeline: issue_id={issue_id or '(none)'}, title={title}")
 
+    # 5.5 构建摘要描述
+    actor = evt.get("actor", "")
+    branch = evt.get("branch", "")
+    if event_type == "issue_opened":
+        summary = f"新 Issue {issue_id}: {title}" if issue_id else f"新 Issue: {title}"
+    elif event_type == "issue_updated":
+        summary = f"Issue {issue_id} 已更新" if issue_id else "Issue 已更新"
+    elif event_type == "issue_comment":
+        summary = f"@{actor} 评论了 Issue {issue_id}" if issue_id else f"@{actor} 发表了评论"
+    elif event_type == "note_hook_pr":
+        summary = f"@{actor} 评论了 PR {issue_id}" if issue_id else f"@{actor} 评论了 PR"
+    elif event_type == "pull_request_opened":
+        summary = f"新 PR {issue_id}: {title}" if issue_id else f"新 PR: {title}"
+    elif event_type == "pull_request_updated":
+        summary = f"PR {issue_id} 已更新" if issue_id else "PR 已更新"
+    elif event_type == "pull_request_merged":
+        summary = f"PR {issue_id} 已合并: {title}" if issue_id else f"PR 已合并: {title}"
+    elif event_type == "push":
+        summary = f"@{actor} 推送到 {branch}" if branch else f"@{actor} 推送了代码"
+    elif event_type == "tag_created":
+        summary = f"创建标签: {title}" if title else "创建新标签"
+    elif event_type == "release_created":
+        summary = f"发布 Release: {title}" if title else "发布新 Release"
+    elif event_type == "build_start":
+        summary = "构建开始"
+    elif event_type == "build_failure":
+        summary = f"构建失败: {title}" if title else "构建失败"
+    elif event_type == "deploy_start":
+        summary = "部署开始"
+    elif event_type == "deploy_failure":
+        summary = "部署失败"
+    elif event_type == "issue_labeled":
+        summary = f"Issue {issue_id} 已打标签" if issue_id else "Issue 已打标签"
+    elif event_type == "vod_signal":
+        summary = f"VOD 信号: {title}" if title else "VOD 信号"
+    elif event_type == "a2a_event":
+        summary = f"A2A: {actor} → {agent_type}"
+    else:
+        summary = title or event_type
+    log.info(f"Pipeline: summary={summary}")
+
     # 6. 存储事件
     log.info(f"Pipeline: storing event, repo_key={repo_key}, agent={agent_type}")
     actor = evt.get("actor", "")
@@ -135,6 +176,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
         source=source,
         agent_type=agent_type,
         actor=actor,
+        summary=summary,
         payload=payload,
         status="running",
     )

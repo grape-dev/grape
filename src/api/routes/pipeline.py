@@ -80,7 +80,7 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, status, created_at FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
+                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
                 (repo_key,)
             )
             rows = c.fetchall()

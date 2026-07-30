@@ -37,7 +37,7 @@ function renderAgent(name, data) {
   const evtHtml = events.length > 0 ? events.map(ev =>
     `<div class="ai" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
       <div class="t">${(ev.created_at || '').substring(11,16) || '--:--'}</div>
-      <div class="ac">${ev.title || ev.event_type}
+      <div class="ac">${ev.summary || ev.title || ev.event_type}
         ${ev.actor ? ` <span class="ts t2">@${ev.actor}</span>` : ''}
         ${ev.duration ? ` <span class="ts t3">${ev.duration}s</span>` : ''}
         ${ev.backend ? ` <span class="tg tg-d">${ev.backend}</span>` : ''}

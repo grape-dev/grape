@@ -18,14 +18,15 @@ def acquire_repo_lock(repo_key: str) -> threading.Lock:
 
 def append_event(repo_key: str, event_type: str, title: str = "",
                  issue_id: str = "", agent_type: str = "", source: str = "gitcode",
-                 actor: str = "", payload: dict = None, status: str = "pending") -> int:
+                 actor: str = "", summary: str = "",
+                 payload: dict = None, status: str = "pending") -> int:
     """写入事件到 events 表，返回 seq"""
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, payload, status) VALUES (?,?,?,?,?,?,?,?,?)",
-                (repo_key, issue_id, event_type, source, agent_type, title, actor,
+                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
                  json.dumps(payload or {}), status)
             )
             db.commit()
@@ -33,7 +34,7 @@ def append_event(repo_key: str, event_type: str, title: str = "",
             payload_keys = list((payload or {}).keys())
             log.info(f"Event stored: seq={seq}, repo={repo_key}, type={event_type}, "
                      f"agent={agent_type}, issue={issue_id}, actor={actor}, source={source}, "
-                     f"status={status}, payload_keys={payload_keys}")
+                     f"status={status}, summary={summary[:60]}, payload_keys={payload_keys}")
             return seq
         except Exception as e:
             log.warning(f"Event store FAILED: seq=0, repo={repo_key}, type={event_type}, "
@@ -101,15 +102,16 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
         c = db.cursor()
         try:
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, actor, status, created_at, backend, skill, exit_code, duration, started_at, completed_at FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, backend, skill, exit_code, duration, started_at, completed_at FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
                 params + [limit, offset]
             )
             return [
                 {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "",
-                 "title": r[4] or r[2], "actor": r[5] or "", "status": r[6], "created_at": r[7],
-                 "backend": r[8] or "", "skill": r[9] or "",
-                 "exit_code": r[10], "duration": r[11],
-                 "started_at": r[12] or "", "completed_at": r[13] or ""}
+                 "title": r[4] or r[2], "actor": r[5] or "", "summary": r[6] or r[4] or r[2],
+                 "status": r[7], "created_at": r[8],
+                 "backend": r[9] or "", "skill": r[10] or "",
+                 "exit_code": r[11], "duration": r[12],
+                 "started_at": r[13] or "", "completed_at": r[14] or ""}
                 for r in c.fetchall()
             ]
         except Exception:
@@ -138,7 +140,7 @@ def get_events_grouped_by_issue(repo_key: str) -> dict[str, list[dict]]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, actor, status, created_at FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
+                "SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
                 (repo_key,)
             )
             rows = c.fetchall()
@@ -152,7 +154,8 @@ def get_events_grouped_by_issue(repo_key: str) -> dict[str, list[dict]]:
             grouped[iid] = []
         grouped[iid].append({
             "seq": r[0], "event_type": r[2], "agent_type": r[3] or "",
-            "title": r[4] or r[2], "actor": r[5] or "", "status": r[6], "created_at": r[7],
+            "title": r[4] or r[2], "actor": r[5] or "", "summary": r[6] or r[4] or r[2],
+            "status": r[7], "created_at": r[8],
         })
     return grouped
 

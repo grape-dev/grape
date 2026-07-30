@@ -17,11 +17,12 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         recent_events = []
         try:
             c.execute(
-                "SELECT seq, event_type, agent_type, title, status, created_at FROM events WHERE repo_key=? ORDER BY seq DESC LIMIT 5",
+                "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key=? ORDER BY seq DESC LIMIT 5",
                 (repo_key,)
             )
             recent_events = [
-                {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1], "status": r[4], "created_at": r[5]}
+                {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
+                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": r[6]}
                 for r in c.fetchall()
             ]
         except Exception:

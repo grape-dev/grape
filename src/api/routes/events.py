@@ -12,7 +12,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, payload, status, created_at, backend, skill, exit_code, duration, agent_logs, started_at, completed_at FROM events WHERE seq=?",
+                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, backend, skill, exit_code, duration, agent_logs, started_at, completed_at FROM events WHERE seq=?",
                 (seq,)
             )
             row = c.fetchone()
@@ -25,13 +25,13 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
     import json
     payload = {}
     try:
-        payload = json.loads(row[8]) if row[8] else {}
+        payload = json.loads(row[9]) if row[9] else {}
     except Exception:
         pass
 
     agent_logs = []
     try:
-        agent_logs = json.loads(row[15]) if row[15] else []
+        agent_logs = json.loads(row[16]) if row[16] else []
     except Exception:
         pass
 
@@ -44,16 +44,17 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         "agent_type": row[5] or "",
         "title": row[6] or row[3],
         "actor": row[7] or "",
+        "summary": row[8] or row[6] or row[3],
         "payload": payload,
-        "status": row[9],
-        "created_at": row[10],
-        "backend": row[11] or "",
-        "skill": row[12] or "",
-        "exit_code": row[13],
-        "duration": row[14],
+        "status": row[10],
+        "created_at": row[11],
+        "backend": row[12] or "",
+        "skill": row[13] or "",
+        "exit_code": row[14],
+        "duration": row[15],
         "agent_logs": agent_logs,
-        "started_at": row[16] or "",
-        "completed_at": row[17] or "",
+        "started_at": row[17] or "",
+        "completed_at": row[18] or "",
     }
 
 
@@ -82,11 +83,12 @@ async def list_events(owner: str, repo: str,
 
             offset = (page - 1) * page_size
             c.execute(
-                f"SELECT seq, event_type, agent_type, title, status, created_at FROM events WHERE {where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                f"SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE {where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
                 params + [page_size, offset]
             )
             events = [
-                {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1], "status": r[4], "created_at": r[5]}
+                {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
+                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": r[6]}
                 for r in c.fetchall()
             ]
         except Exception:
