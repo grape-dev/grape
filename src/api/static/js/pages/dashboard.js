@@ -25,7 +25,12 @@ function renderDashboard(data) {
   </div>`;
 
   html += `<div class="cd">
-    <div class="cd-h"><h2>DevOps Agent Workflow</h2><span class="ts t3">VOD → Issue → Coding → QA → SRE</span></div>
+    <div class="cd-h"><h2>DevOps Agent Workflow</h2>
+      <div class="flex fc gap8">
+        <span class="ts t2">开发场景:</span>
+        <select id="sceneSelect" style="padding:4px 8px;border-radius:6px;border:1px solid var(--b);font-size:11px;background:var(--bg);color:var(--t);outline:none">${sceneOpts}</select>
+        <button class="bt bt-p bt-s" onclick="applyScene('${owner}', '${name}')">应用</button>
+      </div>
     <div class="af">`;
 
   agentOrder.forEach((at, i) => {

@@ -15,19 +15,10 @@ function renderPipeline(data) {
   _pipeData = data;
   const active = _pipeData.active;
   const history = _pipeData.history || [];
-  const scenes = data._scenes || [];
-  const owner = data._owner || '';
-  const name = data._name || '';
-  const sceneOpts = scenes.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
 
   let html = `<div class="cd">
   <div class="cd-h"><h2>Pipeline · ${data.repo || ''}</h2>
-  <div class="flex gap12"><span class="ts t2">Active: <b>${data.active_count || 0}</b></span><span class="ts t2">Today: <b>${data.today_count || 0}</b></span></div></div>
-  <div class="flex fc gap12" style="margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--b)">
-    <span class="ts t2">开发场景:</span>
-    <select id="sceneSelect" style="padding:5px 10px;border-radius:6px;border:1px solid var(--b);font-size:11px;background:var(--bg);color:var(--t);outline:none">${sceneOpts}</select>
-    <button class="bt bt-p bt-s" onclick="applyScene('${owner}', '${name}')">应用</button>
-  </div>`;
+  <div class="flex gap12"><span class="ts t2">Active: <b>${data.active_count || 0}</b></span><span class="ts t2">Today: <b>${data.today_count || 0}</b></span></div></div>`;
 
   if (active) {
     const iss = active.issue_id || '#?';

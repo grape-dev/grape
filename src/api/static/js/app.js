@@ -148,20 +148,20 @@ function loadAgentTypes() {
 
     if (view === 'dash') {
       title.textContent = 'Dashboard';
-      const loadDash = () => API.get('/dashboard/' + repo.owner + '/' + repo.name).then(renderDashboard).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+      const loadDash = () => Promise.all([
+        API.get('/dashboard/' + repo.owner + '/' + repo.name),
+        API.get('/scenes'),
+      ]).then(([dashData, scenesData]) => {
+        dashData._scenes = scenesData.scenes || [];
+        dashData._owner = repo.owner;
+        dashData._name = repo.name;
+        renderDashboard(dashData);
+      }).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = 'Pipeline';
-      Promise.all([
-        API.get('/pipeline/' + repo.owner + '/' + repo.name),
-        API.get('/scenes'),
-      ]).then(([pipeData, scenesData]) => {
-        pipeData._scenes = scenesData.scenes || [];
-        pipeData._owner = repo.owner;
-        pipeData._name = repo.name;
-        renderPipeline(pipeData);
-      }).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = (_AGENT_TYPES[view] && _AGENT_TYPES[view].display_name) || view;
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
