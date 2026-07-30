@@ -847,6 +847,8 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
     _lark_ws.loop = asyncio.get_running_loop()
 
     from src.im.vod_handler import process_vod_message
+    import concurrent.futures
+    _vod_pool = concurrent.futures.ThreadPoolExecutor(max_workers=3, thread_name_prefix="vod")
 
     def _handle_vod(event):
         # 去重：跳过已处理的消息 ID
@@ -887,6 +889,8 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
                     text = msg_content
             if not text:
                 return
+            
+            # 线程池处理，不阻塞 WS 接收
             message_dict = {
                 "event": {
                     "message": {
@@ -901,8 +905,9 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
                         }
                     }
                 }
+                }
             }
-            process_vod_message(message_dict, bot_app_id)
+            _vod_pool.submit(process_vod_message, message_dict, bot_app_id)
         except Exception as e:
             log.warning(f"VOD handle error: {e}")
 
