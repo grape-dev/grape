@@ -849,6 +849,9 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
     from src.im.vod_handler import process_vod_message
 
     def _handle_vod(event):
+        # 去重：跳过已处理的消息 ID
+        if not hasattr(_handle_vod, "_seen"):
+            _handle_vod._seen = set()
         try:
             header = getattr(event, 'header', None)
             if header is None:
@@ -857,15 +860,22 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
             if callable(event_type):
                 event_type = event_type()
             if event_type != "im.message.receive_v1":
-                log.info(f"[VOD] skip event: {event_type}")
                 return
-            log.info(f"[VOD] event: receive_v1")
             ev = getattr(event, 'event', None)
             if ev is None:
                 return
             message = getattr(ev, 'message', None)
+            if message is None:
+                return
+            msg_id = getattr(message, 'message_id', '')
+            if msg_id:
+                if msg_id in _handle_vod._seen:
+                    return
+                _handle_vod._seen.add(msg_id)
+                if len(_handle_vod._seen) > 1000:
+                    _handle_vod._seen = set(list(_handle_vod._seen)[-500:])
             sender = getattr(ev, 'sender', None)
-            if message is None or sender is None:
+            if sender is None:
                 return
             msg_content = getattr(message, 'content', '{}') or '{}'
             msg_type = getattr(message, 'message_type', 'text') or 'text'
