@@ -57,17 +57,20 @@ function renderDashboard(data) {
     const hasSession = !!ag.status;
     const statusDot = st === 'failed' ? 'var(--r)' : st === 'running' ? 'var(--y)' : hasSession ? 'var(--g)' : '#ddd';
     const statusLabel = st === 'completed' ? 'Done' : st === 'running' ? 'Active' : st === 'failed' ? 'Failed' : hasSession ? 'Active' : '—';
-    const backend = ag.backend || meta.default_backend || 'OpenCode';
+    const backend = ag.backend || meta.default_backend || 'opencode';
     const count = agentCounts[at] || 0;
     const nsText = count > 0 ? count + ' events today' : hasSession ? (st === 'running' ? 'Processing...' : 'Idle') : '—';
     const ntCls = at === 'vod' ? 'tg-v' : at === 'issue' ? 'tg-i' : at === 'coding' ? 'tg-c' : at === 'qa' ? 'tg-q' : 'tg-s';
+    const colors = {vod:'var(--pk)',issue:'var(--r)',coding:'var(--a)',qa:'var(--pu)',sre:'var(--or)'};
+    const borderColor = meta.color || colors[at] || 'var(--t2)';
+    const dotColor = meta.color || colors[at] || 'var(--t2)';
 
-    html += `<div class="nd" style="border-top:3px solid ${meta.color || 'var(--t2)'}" onclick="app.nav('${at}')">
-      <div class="nh"><span class="n" style="background:${meta.color || 'var(--t2)'}"></span><h4>${meta.display_name || agentLabels[i]}</h4></div>
+    html += `<div class="nd" style="border-top:3px solid ${borderColor}" onclick="app.nav('${at}')">
+      <div class="nh"><span class="n" style="background:${dotColor}"></span><h4>${meta.display_name || agentLabels[i]}</h4></div>
       <div class="nds">${agentTaglines[at] || ''}</div>
       <div class="nm"><span class="ml">Backend</span><span class="mv">${backend}</span></div>
       <div class="ns"><span class="d" style="background:${statusDot}"></span>${nsText}</div>
-      <div class="nt ${ntCls}">${agentIcons[i]} ${emojiLabels[i]}</div>
+      <div class="nt ${ntCls}">${emojiLabels[i]}</div>
     </div>`;
   });
 
