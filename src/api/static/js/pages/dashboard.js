@@ -17,14 +17,6 @@ function renderDashboard(data) {
   const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
   const emojiLabels = ['🎤 feedback→issue','🎫 2 bugs · 1 feature','⚙ implementing...','✔ pass: 92%','🚀 uptime 99.9%'];
 
-  const agentTaglines = {
-    vod: 'Voice of Developer',
-    issue: 'Issue Manager',
-    coding: 'Developer',
-    qa: 'Quality Assurance',
-    sre: 'DevOps',
-  };
-
   let html = `<div class="cd" style="background:linear-gradient(135deg,#eef3ff,#eefdf2);border-color:#c6d9f7">
     <div class="flex fc gap12">
       <div style="font-size:26px">■</div>
@@ -67,7 +59,7 @@ function renderDashboard(data) {
 
     html += `<div class="nd" style="border-top:3px solid ${borderColor}" onclick="app.nav('${at}')">
       <div class="nh"><span class="n" style="background:${dotColor}"></span><h4>${meta.display_name || agentLabels[i]}</h4></div>
-      <div class="nds">${agentTaglines[at] || ''}</div>
+      <div class="nds">${meta.description || ''}</div>
       <div class="nm"><span class="ml">Backend</span><span class="mv">${backend}</span></div>
       <div class="ns"><span class="d" style="background:${statusDot}"></span>${nsText}</div>
       <div class="nt ${ntCls}">${emojiLabels[i]}</div>
