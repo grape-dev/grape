@@ -690,6 +690,7 @@ def stop_ws(bot_key: str | None = None):
 
 async def start_ws_async(on_message_callback, bot_app_id: str, bot_app_secret: str):
     """在运行中事件循环上创建并连接 Chat WS Client"""
+    log.info(f"[ws_dbg] start_ws_async ENTERED for {bot_app_id[:20]}")
     global _ws_clients
     import lark_oapi.ws.client as _lark_ws
     _lark_ws.loop = asyncio.get_running_loop()
