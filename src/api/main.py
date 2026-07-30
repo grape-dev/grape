@@ -1,5 +1,5 @@
 """Agentic DevOps API — FastAPI REST API Server (port 3000)"""
-import sys, os, threading
+import sys, os, asyncio
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import FastAPI, Request
@@ -15,39 +15,56 @@ from src.api.routes import auth, repos, dashboard, agents, events, chat, setting
 async def lifespan(app: FastAPI):
     # Startup
     from src.config import log
+    ws_tasks = []
 
-    # 启动所有已配置的 IM Bot WebSocket
+    # 启动所有已配置的 IM Bot WebSocket（单事件循环多 task）
     try:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT DISTINCT bot_app_id, bot_app_secret, bot_type FROM im_bot_config")
             rows = c.fetchall()
-        from src.im.feishu import start_vod_ws
+        from src.im.feishu import start_ws_async, start_vod_ws_async
         from src.im.handler import process_chat
-        from src.im.feishu import start_ws as start_chat_ws
+
         for bot_app_id, bot_app_secret, bot_type in rows:
-            if bot_type == "chat_bot":
-                t = threading.Thread(target=start_chat_ws, args=(process_chat,), daemon=True,
-                                     name=f"chat-ws-{bot_app_id[:20]}")
-                t.start()
-                log.info(f"Chat WS started for bot_app_id={bot_app_id[:40]}")
-            elif bot_type == "vod_bot":
-                t = threading.Thread(target=start_vod_ws, args=(bot_app_id,), daemon=True,
-                                     name=f"vod-ws-{bot_app_id[:20]}")
-                t.start()
-                log.info(f"VOD WS started for bot_app_id={bot_app_id[:40]}")
+            try:
+                if bot_type == "chat_bot":
+                    task = asyncio.create_task(
+                        start_ws_async(process_chat, bot_app_id, bot_app_secret),
+                        name=f"chat-ws-{bot_app_id[:20]}"
+                    )
+                    ws_tasks.append(task)
+                    log.info(f"Chat WS task created for {bot_app_id[:40]}")
+                elif bot_type == "vod_bot":
+                    task = asyncio.create_task(
+                        start_vod_ws_async(bot_app_id, bot_app_secret),
+                        name=f"vod-ws-{bot_app_id[:20]}"
+                    )
+                    ws_tasks.append(task)
+                    log.info(f"VOD WS task created for {bot_app_id[:40]}")
+            except Exception as e:
+                log.warning(f"WS task create failed for {bot_app_id[:20]}: {e}")
+
+        log.info(f"IM Bot WS: {len(ws_tasks)} task(s) created")
+
     except Exception as e:
-        log.warning(f"IM Bot WS start skipped: {e}")
+        log.warning(f"IM Bot WS startup failed: {e}")
 
     yield
+
     # Shutdown
-    try:
-        from src.im.feishu import stop_ws
-        stop_ws()
-        log.info("Feishu WS stopped")
-    except Exception:
-        pass
+    log.info("Shutting down IM Bot WS...")
+    for task in ws_tasks:
+        task.cancel()
+    for task in ws_tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    from src.im.feishu import stop_ws
+    stop_ws()
+    log.info("IM Bot WS stopped")
 
 
 app = FastAPI(title="Agentic DevOps API", version="2.0.0", lifespan=lifespan)

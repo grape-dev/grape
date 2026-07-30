@@ -669,11 +669,11 @@ def get_user_id_by_app_id(app_id: str) -> int | None:
     return None
 
 
-def stop_ws(account_name: str | None = None):
+def stop_ws(bot_key: str | None = None):
     """停止指定或所有 WS 连接"""
     global _ws_clients
-    if account_name:
-        client = _ws_clients.pop(account_name, None)
+    if bot_key:
+        client = _ws_clients.pop(bot_key, None)
         if client:
             try:
                 client.stop()
@@ -688,7 +688,119 @@ def stop_ws(account_name: str | None = None):
     _ws_clients = {}
 
 
-def start_vod_ws(bot_app_id: str):
+async def start_ws_async(on_message_callback, bot_app_id: str, bot_app_secret: str):
+    """在运行中事件循环上创建并连接 Chat WS Client"""
+    global _ws_clients
+    import lark_oapi.ws.client as _lark_ws
+    _lark_ws.loop = asyncio.get_running_loop()
+
+    # 记录当前 WS 使用的 app_id 到 meta 表
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ws_feishu_app_id', ?)", (bot_app_id,))
+            db.commit()
+    except Exception:
+        pass
+
+    def _handle_with_account(event):
+        return _handle_message(event, on_message_callback, bot_app_id)
+
+    import lark_oapi
+    handler = (lark_oapi.EventDispatcherHandler.builder("", "")
+               .register_p2_im_message_receive_v1(_handle_with_account)
+               .build())
+
+    client = lark_oapi.ws.Client(
+        app_id=bot_app_id,
+        app_secret=bot_app_secret,
+        event_handler=handler,
+        auto_reconnect=True,
+    )
+    ws_key = f"chat_{bot_app_id}"
+    _ws_clients[ws_key] = client
+    log.info(f"Chat WS connecting (bot_app_id={bot_app_id[:30]}...)")
+
+    try:
+        await client._connect()
+    except Exception as e:
+        log.warning(f"Chat WS connect failed for {bot_app_id[:20]}: {e}")
+        await client._disconnect()
+
+    log.info(f"Chat WS connected (bot_app_id={bot_app_id[:30]}...)")
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        log.info(f"Chat WS cancelled (bot_app_id={bot_app_id[:30]}...)")
+
+
+async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
+    """在运行中事件循环上创建并连接 VOD WS Client"""
+    global _ws_clients
+    import lark_oapi.ws.client as _lark_ws
+    _lark_ws.loop = asyncio.get_running_loop()
+
+    from src.im.vod_handler import process_vod_message
+
+    def _handle_vod(event):
+        try:
+            header = getattr(event, 'header', None)
+            if header is None:
+                return
+            event_type = getattr(header, 'event_type', None)
+            if isinstance(event_type, str) and event_type == "im.message.receive_v1":
+                log.info(f"VOD WS: im.message.receive_v1 received")
+            event_body = getattr(event, 'event', None)
+            if event_body is None:
+                return
+            message_dict = {
+                "event": {
+                    "message": {
+                        "message_id": getattr(getattr(event_body, 'message', None), 'message_id', ''),
+                        "chat_id": getattr(getattr(event_body, 'message', None), 'chat_id', ''),
+                        "message_type": getattr(getattr(event_body, 'message', None), 'message_type', ''),
+                        "content": getattr(getattr(event_body, 'message', None), 'content', ''),
+                    },
+                    "sender": {
+                        "sender_id": {
+                            "open_id": getattr(getattr(getattr(event_body, 'sender', None), 'sender_id', None), 'open_id', ''),
+                            "union_id": getattr(getattr(getattr(event_body, 'sender', None), 'sender_id', None), 'union_id', ''),
+                            "user_id": getattr(getattr(getattr(event_body, 'sender', None), 'sender_id', None), 'user_id', ''),
+                        }
+                    }
+                }
+            }
+            process_vod_message(message_dict, bot_app_id)
+        except Exception as e:
+            log.warning(f"VOD WS handle error: {e}")
+
+    import lark_oapi
+    handler = (lark_oapi.EventDispatcherHandler.builder("", "")
+               .register_p2_im_message_receive_v1(_handle_vod)
+               .build())
+
+    client = lark_oapi.ws.Client(
+        app_id=bot_app_id,
+        app_secret=bot_app_secret,
+        event_handler=handler,
+        auto_reconnect=True,
+    )
+    ws_key = f"vod_{bot_app_id}"
+    _ws_clients[ws_key] = client
+    log.info(f"VOD WS connecting (bot_app_id={bot_app_id[:30]}...)")
+
+    try:
+        await client._connect()
+    except Exception as e:
+        log.warning(f"VOD WS connect failed for {bot_app_id[:20]}: {e}")
+        await client._disconnect()
+
+    log.info(f"VOD WS connected (bot_app_id={bot_app_id[:30]}...)")
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        log.info(f"VOD WS cancelled (bot_app_id={bot_app_id[:30]}...)")
     """启动 VOD Agent 的 WebSocket 连接（读取 im_bot_config 的凭证）"""
     import asyncio
     loop = asyncio.new_event_loop()
