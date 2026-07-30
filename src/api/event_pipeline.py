@@ -165,7 +165,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     from src.prompt_builder import build_prompt
 
     repository = evt.get("repository", repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key)
-    ws = os.path.join(WORKSPACE_DIR, repository)
+    ws = os.path.join(WORKSPACE_DIR, repository, f"{agent_type}-agent")
     os.makedirs(ws, exist_ok=True)
 
     log.info(f"Exec agent: type={agent_type}, backend={backend}, skill={skill_name}, seq={seq}")
