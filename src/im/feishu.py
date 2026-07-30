@@ -905,7 +905,6 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
                         }
                     }
                 }
-                }
             }
             _vod_pool.submit(process_vod_message, message_dict, bot_app_id)
         except Exception as e:
