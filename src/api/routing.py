@@ -4,7 +4,7 @@ from src.session_manager import db, db_lock
 from src.config import log
 
 
-def get_domain_skill(event_type: str, repo_key: str = "",
+def get_domain_agent(event_type: str, repo_key: str = "",
                      user_id: int = 0) -> str:
     """三级路由：repo_skill_mapping(user) → event_route_config(repo) → agent_type_config.subscribe_events(global)"""
     # 第一级：用户自定义映射（repo_skill_mapping）

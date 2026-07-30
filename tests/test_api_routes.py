@@ -568,8 +568,8 @@ class TestEventPipeline:
             db.commit()
 
     def test_routing_db(self):
-        from src.api.routing import get_domain_skill, get_agent_skill_map
-        skill = get_domain_skill("issue_opened")
+        from src.api.routing import get_domain_agent, get_agent_skill_map
+        skill = get_domain_agent("issue_opened")
         assert skill == "issue" or skill != ""
         sm = get_agent_skill_map()
         assert len(sm) > 0

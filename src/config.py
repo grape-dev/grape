@@ -99,9 +99,9 @@ def save_accounts(new_accounts: list):
 # ====== 事件路由 ======
 
 
-def get_domain_skill(evt_type: str, repo_key: str = "", user_id: int = 0) -> str:
+def get_domain_agent(evt_type: str, repo_key: str = "", user_id: int = 0) -> str:
     try:
-        from src.api.routing import get_domain_skill as _db_route
+        from src.api.routing import get_domain_agent as _db_route
         return _db_route(evt_type, repo_key, user_id)
     except Exception:
         return ""

@@ -3,7 +3,7 @@ import json, os, time, uuid
 from datetime import datetime
 from src.config import log
 from src.vcs.adapter import normalize_event, get_event_header
-from src.api.routing import get_domain_skill
+from src.api.routing import get_domain_agent
 from src.api.event_store import append_event, update_event_status, get_issue_summary
 from src.session_manager import db, db_lock
 
@@ -67,7 +67,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
             return result
 
     # 3. 路由判定
-    skill = get_domain_skill(event_type, f"{source}:{evt['repository']}")
+    skill = get_domain_agent(event_type, f"{source}:{evt['repository']}")
     if not skill:
         log.info(f"Pipeline: no route for type={event_type}")
         return result
