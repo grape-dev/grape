@@ -49,6 +49,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
     evt["account"] = account
 
     repo_key = repo_key_override or f"{source}:{evt['repository']}"
+    # 统一 repo_key 格式：去掉 "source:" 前缀，所有查询都用 "owner/repo"
+    if ":" in repo_key:
+        repo_key = repo_key.split(":", 1)[1]
     event_type = evt.get("type", "unknown")
 
     log.info(f"Pipeline: start, raw_type={event_header}, source={source}, repo={evt['repository']}")
