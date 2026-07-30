@@ -170,7 +170,7 @@ def _get_bot_credential(bot_app_id: str) -> tuple[str, str]:
 
 
 def _send_feishu_reply(bot_app_id: str, bot_app_secret: str, chat_id: str, text: str):
-    """通过 VOD 机器人回复飞书消息"""
+    """通过 VOD 机器人回复飞书卡片消息"""
     from src.im.feishu import get_tenant_token_from
     token = get_tenant_token_from(bot_app_id, bot_app_secret)
     if not token:
@@ -179,19 +179,26 @@ def _send_feishu_reply(bot_app_id: str, bot_app_secret: str, chat_id: str, text:
     try:
         from urllib.request import Request, urlopen
         url = f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
+        card = {
+            "elements": [{
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": text[:2000]}
+            }],
+            "header": {"title": {"tag": "plain_text", "content": "DevOps Bot"}, "template": "blue"}
+        }
         payload = json.dumps({
             "receive_id": chat_id,
-            "msg_type": "text",
-            "content": json.dumps({"text": text[:2000]}, ensure_ascii=False),
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
         }).encode()
         req = Request(url, data=payload, headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         })
         resp = urlopen(req, timeout=10)
-        log.info(f"VOD IM: reply sent to chat={chat_id}, status={resp.status}")
+        log.info(f"VOD IM: card reply sent to chat={chat_id}, status={resp.status}")
     except Exception as e:
-        log.warning(f"VOD IM: send reply failed: {e}")
+        log.warning(f"VOD IM: send card reply failed: {e}")
 
 
 def _list_vod_repos(bot_app_id: str) -> list[dict]:
