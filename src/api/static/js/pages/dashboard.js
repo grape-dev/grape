@@ -41,17 +41,19 @@ function renderDashboard(data) {
   agentOrder.forEach((at, i) => {
     const ag = a.find(x => x.agent_type === at) || {};
     const meta = _AGENT_TYPES[at] || {};
-    const st = ag.status || 'idle';
-    const statusDot = st === 'completed' ? 'var(--g)' : st === 'running' ? 'var(--y)' : st === 'failed' ? 'var(--r)' : '#ddd';
-    const statusLabel = st === 'completed' ? 'Done' : st === 'running' ? 'Active' : st === 'failed' ? 'Failed' : 'Idle';
+    const st = ag.status || '';
+    const hasSession = !!ag.status;
+    const statusDot = st === 'failed' ? 'var(--r)' : st === 'running' ? 'var(--y)' : hasSession ? 'var(--g)' : '#ddd';
+    const statusLabel = st === 'completed' ? 'Done' : st === 'running' ? 'Active' : st === 'failed' ? 'Failed' : hasSession ? 'Active' : '—';
     const backend = ag.backend || meta.default_backend || 'OpenCode';
+    const ntText = at === 'vod' ? '分析开发者声音' : at === 'issue' ? 'Issue 处理中' : at === 'coding' ? '编码实现' : at === 'qa' ? '质量审查' : '构建部署';
 
     html += `<div class="nd" style="border-top:3px solid ${meta.color || 'var(--t2)'}" onclick="app.nav('${at}')">
       <div class="nh"><span class="n" style="background:${meta.color || 'var(--t2)'}"></span><h4>${meta.display_name || agentLabels[i]}</h4></div>
       <div class="nds">${meta.description || ''}</div>
       <div class="nm"><span class="ml">Backend</span><span class="mv">${backend}</span></div>
       <div class="ns"><span class="d" style="background:${statusDot}"></span>${statusLabel}</div>
-      <div class="nt" style="background:${meta.bg || 'var(--bg)'};color:${meta.color || 'var(--t2)'}">${statusLabel}</div>
+      <div class="nt" style="background:${meta.bg || 'var(--bg)'};color:${meta.color || 'var(--t2)'}">${ntText}</div>
     </div>`;
   });
 
