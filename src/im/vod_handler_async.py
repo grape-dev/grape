@@ -60,13 +60,15 @@ def _get_or_create_conversation(chat_id: str, agent_session_id: str) -> dict:
                       (chat_id,))
             row = c.fetchone()
             if row:
+                log.debug(f"VOD conv found: chat_id={chat_id[:20]}, id={row[0]}")
                 return {"id": row[0], "agent_session_id": row[1], "oc_session_id": row[2] or ""}
             import uuid
             conv_id = str(uuid.uuid4())[:8]
             c.execute("INSERT INTO vod_conversations (id, feishu_chat_id, agent_session_id, feishu_chat_name) "
                       "VALUES (?,?,?,?)", (conv_id, chat_id, agent_session_id, ""))
             db.commit()
-            return {"id": conv_id, "agent_session_id": agent_session_id, "oc_session_id": ""}
+            log.info(f"VOD conv created: id={conv_id}, chat_id={chat_id[:20]}, agent_session={agent_session_id[:20]}")
+            return {"id": conv_id, "agent_session_id": agent_session_id, "oc_session_id": "", "is_new": True}
     except Exception as e:
         log.warning(f"VOD conversation error: {e}")
     return {"id": "", "agent_session_id": agent_session_id, "oc_session_id": ""}
@@ -204,10 +206,11 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
                 c.execute("SELECT agent_session_id, oc_session_id FROM vod_conversations WHERE feishu_chat_id=?",
                           (chat_id,))
                 row = c.fetchone()
-        except Exception:
+        except Exception as e:
+            log.warning(f"[VOD:{ctx.name}] conv query error: {e}")
             row = None
 
-        log.info(f"[VOD:{ctx.name}] chat_id={chat_id}, conv_row={row}")
+        log.info(f"[VOD:{ctx.name}] chat_id={chat_id[:30]}, conv_row={row}")
 
         if not row:
             repos = _list_vod_repos(ctx.app_id)
@@ -219,7 +222,8 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
                 agent_session = _get_vod_session(repos[0]["repo_key"])
                 if agent_session:
                     conv = _get_or_create_conversation(chat_id, agent_session["id"])
-                    await api.reply_text(ctx, msg_id, f"✅ 已自动绑定 `{repos[0]['repo_key']}`")
+                    if conv.get("is_new"):
+                        await api.reply_text(ctx, msg_id, f"✅ 已自动绑定 `{repos[0]['repo_key']}`")
                     row = (agent_session["id"], conv["oc_session_id"])
                 else:
                     await api.reply_text(ctx, msg_id, "❌ 自动绑定失败")
