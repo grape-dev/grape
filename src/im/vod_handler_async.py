@@ -2,7 +2,7 @@
 
 VOD Bot 职责：收集反馈、创建 Issue、查询进展，不修改代码/创建PR。
 """
-import json, os, re, asyncio
+import json, os, re, asyncio, time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -87,33 +87,95 @@ def _list_vod_repos(bot_app_id: str) -> list:
     return results
 
 
+def _build_vod_prompt(evt: dict, skill_name: str) -> str:
+    from src.api.event_store import get_issue_summary
+    user_msg = evt.get("payload", {}).get("user_message", "")
+    user_name = evt.get("actor", "未知用户")
+    repo = evt.get("repository", "")
+
+    parts = []
+    parts.append(f"## 用户消息\n来自 {user_name} 在仓库 {repo}")
+    parts.append(f"消息内容: {user_msg[:2000]}")
+    parts.append("")
+
+    repo_key = f"gitcode:{repo}"
+    summary = get_issue_summary(repo_key)
+    if summary:
+        parts.append(summary)
+        parts.append("")
+
+    skill_path = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
+    if os.path.exists(skill_path):
+        with open(skill_path, encoding="utf-8") as f:
+            parts.append(f"## Skill: {skill_name}\n{f.read()}\n")
+    else:
+        parts.append(f"Read the file at {skill_path} using the read tool. Execute its instructions step by step.")
+
+    parts.append("## 角色定义")
+    parts.append(_VOD_ROLE_DEFINITION)
+
+    try:
+        agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
+        if os.path.isfile(agents_file):
+            with open(agents_file, encoding="utf-8") as f:
+                registry = json.load(f)
+            parts.append("\n## Available Agents (for A2A calls)")
+            for agent_type, info in registry.items():
+                parts.append(f"- {info.get('name', agent_type)} ({agent_type})")
+    except Exception:
+        pass
+
+    return "\n".join(parts)
+
+
 def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict) -> str:
-    from src.prompt_builder import build_chat_prompt
+    from src.api.event_store import append_event, update_event_status, update_event_config, update_event_complete
     oc_session_id = conv.get("oc_session_id", "")
     backend = agent_session.get("backend", "opencode")
     skill = agent_session.get("skill", "vod")
     repo_token = agent_session.get("repo_gitcode_token", "")
-    user_msg = evt.get("payload", {}).get("user_message", "")
 
-    prompt = _VOD_ROLE_DEFINITION + "\n\n用户消息: " + user_msg
+    user_msg = evt.get("payload", {}).get("user_message", "")
+    actor = evt.get("actor", "unknown")
+    chat_id = evt.get("payload", {}).get("feishu_chat_id", "")
+
+    event_seq = append_event(
+        repo_key=repo_key, event_type="vod_signal", source="vod_im",
+        agent_type="vod", actor=actor, title=user_msg[:100],
+        summary=f"VOD IM from {actor}", payload=evt.get("payload", {}),
+        status="running"
+    )
+    if event_seq:
+        update_event_config(event_seq, backend, skill, datetime.now().isoformat())
+
+    prompt = _build_vod_prompt(evt, skill)
     wsd = os.path.join(WORKSPACE_DIR, "vod", repo_key.replace(":", "_").replace("/", "_"))
     os.makedirs(wsd, exist_ok=True)
 
     final_text = ""
     new_oc_sid = oc_session_id
+    exit_code = -1
+    start_time = time.time()
     for event_type, data in stream_agent(prompt, wsd, oc_session_id, skill,
                                           backend_name=backend, account=repo_key,
                                           repo_gitcode_token=repo_token):
         if event_type == "done":
             final_text = data.get("text", "")
-            if data.get("exit_code", 1) == 0 and data.get("oc_session_id"):
+            exit_code = data.get("exit_code", -1)
+            if exit_code == 0 and data.get("oc_session_id"):
                 new_oc_sid = data["oc_session_id"]
+
+    duration = time.time() - start_time
+    if event_seq:
+        update_event_complete(event_seq, "completed" if exit_code == 0 else "failed",
+                              exit_code=exit_code, duration=duration,
+                              completed_at=datetime.now().isoformat())
 
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE vod_conversations SET oc_session_id=? WHERE feishu_chat_id=?",
-                      (new_oc_sid, evt.get("payload", {}).get("feishu_chat_id", "")))
+            c.execute("UPDATE vod_conversations SET oc_session_id=?, last_active_at=datetime('now') WHERE feishu_chat_id=?",
+                      (new_oc_sid, chat_id))
             db.commit()
     except Exception:
         pass

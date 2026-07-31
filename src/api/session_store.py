@@ -138,7 +138,7 @@ def ensure_default_agent_sessions(repo_key: str):
             _sid = str(uuid.uuid4())
             try:
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, vod_bot_app_id) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
+                    "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, vod_bot_app_id) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
                     (_sid, repo_key, _at, "opencode", _sk, _token, "idle",
                      _vod_bot_app_id if _at == "vod" else "")
                 )
