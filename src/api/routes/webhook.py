@@ -91,4 +91,47 @@ async def a2a_endpoint(request: Request):
     )
 
     log.info(f"A2A: agent={agent_name}, repo={repository}, seq={seq}")
+
+    # 启动后台执行目标 Agent（与 run_pipeline 一致）
+    if seq > 0:
+        try:
+            from src.api.event_pipeline import _execute_agent
+            from src.session_manager import db, db_lock
+            backend = "opencode"
+            skill_name = ""
+            repo_name = repository.split("/", 1)[-1] if "/" in repository else repository
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT backend, skill FROM agent_sessions WHERE repo_key=? AND agent_type=?", (repository, agent_name))
+                    row = c.fetchone()
+                    if row:
+                        backend = row[0] or "opencode"
+                        skill_name = row[1] or ""
+            except Exception:
+                pass
+
+            evt = {
+                "type": "a2a_event",
+                "repository": repository,
+                "source": "a2a",
+                "actor": "",
+                "account": account,
+                "_a2a_context": context,
+                "payload": {
+                    "repository": repository,
+                    "account": account,
+                    "issue_number": issue_number,
+                    "context": context,
+                },
+            }
+
+            import threading
+            threading.Thread(target=_execute_agent, args=(
+                repo_key, seq, agent_name, backend, skill_name or agent_name, evt,
+            ), daemon=True, name=f"a2a-{agent_name}-{seq}").start()
+            log.info(f"A2A: started agent execution for {agent_name}, seq={seq}")
+        except Exception as e:
+            log.warning(f"A2A: failed to start agent execution: {e}")
+
     return {"status": "ok", "seq": seq, "agent": agent_name}
