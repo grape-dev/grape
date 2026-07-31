@@ -22,6 +22,7 @@ FEISHU_BASE = "https://open.feishu.cn/open-apis"
 _TOKEN = None
 _TOKEN_EXPIRE = 0
 _TOKEN_LOCK = threading.Lock()
+_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
 
 FEISHU_BINDINGS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS feishu_bindings (
@@ -88,16 +89,24 @@ def get_tenant_token() -> str:
 
 
 def get_tenant_token_from(app_id: str, app_secret: str) -> str:
-    """根据自定义 app_id/app_secret 获取 tenant_access_token（不从 chat_config 读取）"""
+    """根据自定义 app_id/app_secret 获取 tenant_access_token（带缓存）"""
     import time
     if not app_id or not app_secret:
         return ""
+    now = time.time()
+    cached = _TOKEN_CACHE.get(app_id)
+    if cached and now < cached[1] and cached[0]:
+        return cached[0]
     url = f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal"
     payload = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
     try:
         resp = urlopen(Request(url, data=payload, headers={"Content-Type": "application/json"}), timeout=10)
         data = json.loads(resp.read())
-        return data.get("tenant_access_token", "")
+        token = data.get("tenant_access_token", "")
+        expire = data.get("expire", 7200)
+        if token:
+            _TOKEN_CACHE[app_id] = (token, now + expire - 300)
+        return token
     except Exception as e:
         log.warning(f"Feishu: get_tenant_token_from failed: {e}")
         return ""
@@ -687,145 +696,6 @@ def stop_ws(bot_key: str | None = None):
         except:
             pass
     _ws_clients = {}
-
-
-async def start_ws_async(on_message_callback, bot_app_id: str, bot_app_secret: str):
-    """在运行中事件循环上创建并连接 Chat WS Client（使用 lark_oapi）"""
-    global _ws_clients
-    import lark_oapi.ws.client as _lark_ws
-    _lark_ws.loop = asyncio.get_running_loop()
-
-    def _handle_with_account(event):
-        return _handle_message(event, on_message_callback, bot_app_id)
-
-    def _noop(event):
-        pass
-
-    import lark_oapi
-    handler = (lark_oapi.EventDispatcherHandler.builder("", "")
-               .register_p2_im_message_receive_v1(_handle_with_account)
-               .register_p2_im_message_reaction_created_v1(_noop)
-               .register_p2_im_message_reaction_deleted_v1(_noop)
-               .register_p2_im_message_recalled_v1(_noop)
-               .build())
-
-    # 异步获取 WS URL
-    from src.im.feishu_bot import _get_ws_endpoint_async
-    ws_url = await _get_ws_endpoint_async(bot_app_id, bot_app_secret)
-    if not ws_url:
-        log.warning(f"Chat WS: no ws endpoint for {bot_app_id[:20]}, skip")
-        return
-
-    client = lark_oapi.ws.Client(
-        app_id=bot_app_id,
-        app_secret=bot_app_secret,
-        event_handler=handler,
-        auto_reconnect=True,
-    )
-    client._get_conn_url = lambda: ws_url
-    ws_key = f"chat_{bot_app_id}"
-    _ws_clients[ws_key] = client
-    log.info(f"Chat WS connecting (bot_app_id={bot_app_id[:30]}...)")
-
-    try:
-        await client._connect()
-    except Exception as e:
-        log.warning(f"Chat WS connect failed for {bot_app_id[:20]}: {e}")
-        return
-
-    log.info(f"Chat WS connected (bot_app_id={bot_app_id[:30]}...)")
-    try:
-        await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        log.info(f"Chat WS cancelled (bot_app_id={bot_app_id[:30]}...)")
-
-
-async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
-    """在运行中事件循环上创建并连接 VOD WS Client（使用 lark_oapi）"""
-    global _ws_clients
-    import lark_oapi.ws.client as _lark_ws
-    _lark_ws.loop = asyncio.get_running_loop()
-
-    from src.im.vod_handler import process_vod_message
-    _vod_bot_id = bot_app_id
-
-    def _handle_vod(event):
-        try:
-            header = getattr(event, 'header', None)
-            if header is None:
-                return
-            event_type = getattr(header, 'event_type', None)
-            if event_type != "im.message.receive_v1":
-                return
-            ev = getattr(event, 'event', None)
-            if ev is None:
-                return
-            message = getattr(ev, 'message', None)
-            sender = getattr(ev, 'sender', None)
-            if message is None or sender is None:
-                return
-            msg_content = getattr(message, 'content', '{}') or '{}'
-            msg_type = getattr(message, 'message_type', 'text') or 'text'
-            text = ""
-            if msg_type == "text":
-                try:
-                    text = json.loads(msg_content).get("text", "")
-                except json.JSONDecodeError:
-                    text = msg_content
-            if not text:
-                return
-            from src.im.feishu import _feishu_slot, _feishu_executor
-            message_dict = {
-                "event": {
-                    "message": {
-                        "message_id": getattr(message, 'message_id', ''),
-                        "chat_id": getattr(message, 'chat_id', ''),
-                        "message_type": msg_type,
-                        "content": msg_content,
-                    },
-                    "sender": {
-                        "sender_id": {
-                            "open_id": getattr(getattr(sender, 'sender_id', None), 'open_id', ''),
-                        }
-                    }
-                }
-            }
-            if not _feishu_slot.acquire(blocking=False):
-                log.warning("VOD IM: queue full, dropping")
-                return
-            try:
-                process_vod_message(message_dict, _vod_bot_id)
-            finally:
-                _feishu_slot.release()
-        except Exception as e:
-            log.warning(f"VOD handle error: {e}")
-
-    import lark_oapi
-    handler = (lark_oapi.EventDispatcherHandler.builder("", "")
-               .register_p2_im_message_receive_v1(_handle_vod)
-               .build())
-
-    client = lark_oapi.ws.Client(
-        app_id=bot_app_id,
-        app_secret=bot_app_secret,
-        event_handler=handler,
-        auto_reconnect=True,
-    )
-    ws_key = f"vod_{bot_app_id}"
-    _ws_clients[ws_key] = client
-    log.info(f"VOD WS connecting (bot_app_id={bot_app_id[:30]}...)")
-
-    try:
-        await client._connect()
-    except Exception as e:
-        log.warning(f"VOD WS connect failed for {bot_app_id[:20]}: {e}")
-        return
-
-    log.info(f"VOD WS connected (bot_app_id={bot_app_id[:30]}...)")
-    try:
-        await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        log.info(f"VOD WS cancelled (bot_app_id={bot_app_id[:30]}...)")
 
 
 async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):

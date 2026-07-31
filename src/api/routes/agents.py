@@ -187,6 +187,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     from src.session_manager import db, db_lock
 
     # VOD IM 配置：保存到 im_bot_config + 类型独占校验 + 清理旧 app_id
+    old_app_id = ""
     if name == "vod" and body.vod_bot_app_id:
         app_secret = body.vod_bot_app_secret
         if app_secret == "********":
@@ -241,14 +242,17 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"保存配置失败: {e}"})
 
-    # VOD IM：若凭证变更，在线程中重启 WS
-    if name == "vod" and body.vod_bot_app_id:
+    # VOD IM：通过 BotManager 动态增删 Bot
+    if name == "vod" and body.vod_bot_app_id and app_secret:
         try:
-            import threading, asyncio
-            from src.im.feishu import start_vod_ws_async
-            threading.Thread(target=lambda: asyncio.run(start_vod_ws_async(body.vod_bot_app_id, app_secret)),
-                             daemon=True, name=f"vod-ws-{body.vod_bot_app_id[:20]}").start()
+            from src.api.main import bot_manager
+            if bot_manager and bot_manager.api:
+                if old_app_id and old_app_id != body.vod_bot_app_id:
+                    await bot_manager.remove_bot(old_app_id)
+                    log.info(f"VOD IM: removed old bot {old_app_id[:30]} from BotManager")
+                await bot_manager.add_bot(body.vod_bot_app_id, app_secret, bot_type="vod_bot")
+                log.info(f"VOD IM: added bot {body.vod_bot_app_id[:30]} to BotManager")
         except Exception as e:
-            log.warning(f"VOD WS start failed: {e}")
+            log.warning(f"VOD BotManager update failed: {e}")
 
     return {"message": "Agent 配置已更新", "session_id": session_id}

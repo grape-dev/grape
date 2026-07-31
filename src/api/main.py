@@ -11,52 +11,41 @@ from contextlib import asynccontextmanager
 from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes
 
 
+bot_manager = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global bot_manager
     from src.config import log
-    ws_tasks = []
 
-    # 启动所有 IM Bot WebSocket（单事件循环 + async task）
     try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT DISTINCT bot_app_id, bot_app_secret, bot_type FROM im_bot_config")
-            rows = c.fetchall()
-        from src.im.feishu import start_ws_async, start_vod_ws_async
-        from src.im.handler import process_chat
+        from src.im.feishu_async import BotManager
+        from src.im.handler_async import process_chat_async
+        from src.im.vod_handler_async import process_vod_async
 
-        for bot_app_id, bot_app_secret, bot_type in rows:
-            try:
-                if bot_type == "chat_bot":
-                    task = asyncio.get_event_loop().create_task(
-                        start_ws_async(process_chat, bot_app_id, bot_app_secret)
-                    )
-                    ws_tasks.append(task)
-                    log.info(f"Chat WS task: {bot_app_id[:40]}")
-                elif bot_type == "vod_bot":
-                    task = asyncio.get_event_loop().create_task(
-                        start_vod_ws_async(bot_app_id, bot_app_secret)
-                    )
-                    ws_tasks.append(task)
-                    log.info(f"VOD WS task: {bot_app_id[:40]}")
-            except Exception as e:
-                log.warning(f"WS task failed: {e}")
+        bot_manager = BotManager(max_concurrent_per_bot=10)
+        await bot_manager.start()
 
-        log.info(f"IM WS: {len(ws_tasks)} task(s)")
+        async def _on_message(ctx, parsed):
+            if ctx.bot_type == "vod_bot":
+                await process_vod_async(ctx, bot_manager.api, parsed)
+            else:
+                await process_chat_async(ctx, bot_manager.api, parsed)
+
+        bot_manager.set_message_handler(_on_message)
+        await bot_manager.load_from_db()
+
+        hc = bot_manager.health_check()
+        log.info(f"IM WS: {hc['total_bots']} bot(s), {hc['connected']} connected")
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
 
     yield
 
     log.info("IM WS: stopping...")
-    for task in ws_tasks:
-        task.cancel()
-    for task in ws_tasks:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    if bot_manager:
+        await bot_manager.stop()
     log.info("IM WS stopped")
 
 
@@ -113,4 +102,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.0"}
+    result = {"status": "ok", "version": "2.0.0"}
+    if bot_manager:
+        result["im"] = bot_manager.health_check()
+    return result

@@ -135,7 +135,7 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
         for evt_type, data in stream_agent(
             prompt, ws, session_id=conv.get("oc_session_id", ""),
             event_type="vod_signal", backend_name=agent_session.get("backend", "opencode"),
-            account="default", repo_gitcode_token=agent_session.get("repo_gitcode_token", ""),
+            account=repo_key, repo_gitcode_token=agent_session.get("repo_gitcode_token", ""),
         ):
             if evt_type == "done":
                 d = data
