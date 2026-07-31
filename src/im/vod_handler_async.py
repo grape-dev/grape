@@ -307,13 +307,30 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             session_row = None
 
         if not session_row:
-            log.warning(f"[VOD:{ctx.name}] agent_session_id={agent_session_id} not found in agent_sessions")
-            await api.reply_text(ctx, msg_id, "❌ 找不到 Agent 配置，请重新绑定")
-            return
-
-        repo_key = session_row[0]
-        agent_session = {"backend": session_row[1] or "opencode", "skill": session_row[2] or "vod",
-                         "repo_gitcode_token": session_row[3] or ""}
+            log.warning(f"[VOD:{ctx.name}] agent_session_id={agent_session_id} not found, auto-rebind")
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM vod_conversations WHERE feishu_chat_id=?", (chat_id,))
+                db.commit()
+            repos = _list_vod_repos(ctx.app_id)
+            if len(repos) == 0:
+                await api.reply_text(ctx, msg_id, "❌ 未绑定仓库，请联系管理员配置")
+                return
+            agent_session = _get_vod_session(repos[0]["repo_key"])
+            if not agent_session:
+                await api.reply_text(ctx, msg_id, "❌ 自动绑定失败")
+                return
+            conv = _get_or_create_conversation(chat_id, agent_session["id"])
+            agent_session_id = agent_session["id"]
+            oc_session_id = ""
+            repo_key = repos[0]["repo_key"]
+            agent_session = {"backend": agent_session.get("backend", "opencode"),
+                             "skill": agent_session.get("skill", "vod"),
+                             "repo_gitcode_token": agent_session.get("repo_gitcode_token", "")}
+        else:
+            repo_key = session_row[0]
+            agent_session = {"backend": session_row[1] or "opencode", "skill": session_row[2] or "vod",
+                             "repo_gitcode_token": session_row[3] or ""}
 
         evt = {
             "type": "vod_signal", "repository": repo_key, "source": "vod_im",
