@@ -274,7 +274,7 @@ def _seed_from_json():
             else:
                 c.execute(f"SELECT COUNT(*) FROM {db_table}")
             count = c.fetchone()[0]
-            if count > 0:
+            if count > 0 and db_table != "agent_type_config":
                 log.info(f"Table '{db_table}' already has {count} rows, skip seed from {json_file}")
                 continue
 
