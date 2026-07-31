@@ -257,7 +257,7 @@ def _seed_from_json():
         seeded_keys = set(row[0].split(",")) if row and row[0] else set()
 
     for seed_key, json_file, db_table in _SEED_FILES:
-        if seed_key in seeded_keys:
+        if seed_key in seeded_keys and seed_key != "agent_type_config":
             log.info(f"Seed key '{seed_key}' already run, skip")
             continue
 
