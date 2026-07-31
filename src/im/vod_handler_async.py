@@ -60,13 +60,12 @@ def _get_or_create_conversation(chat_id: str, agent_session_id: str) -> dict:
                       (chat_id,))
             row = c.fetchone()
             if row:
-                log.debug(f"VOD conv found: chat_id={chat_id[:20]}, id={row[0]}")
                 return {"id": row[0], "agent_session_id": row[1], "oc_session_id": row[2] or ""}
-            import uuid
-            conv_id = str(uuid.uuid4())[:8]
-            c.execute("INSERT INTO vod_conversations (id, feishu_chat_id, agent_session_id, feishu_chat_name) "
-                      "VALUES (?,?,?,?)", (conv_id, chat_id, agent_session_id, ""))
+            import time
+            c.execute("INSERT INTO vod_conversations (agent_session_id, feishu_chat_id, feishu_chat_name) "
+                      "VALUES (?,?,?)", (agent_session_id, chat_id, ""))
             db.commit()
+            conv_id = c.lastrowid
             log.info(f"VOD conv created: id={conv_id}, chat_id={chat_id[:20]}, agent_session={agent_session_id[:20]}")
             return {"id": conv_id, "agent_session_id": agent_session_id, "oc_session_id": "", "is_new": True}
     except Exception as e:
