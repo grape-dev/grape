@@ -320,7 +320,7 @@ def _insert_seed_data(table: str, data: dict):
                 order_num = info.get("order_num", 0)
                 subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
                 c.execute(
-                    "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO agent_type_config (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
                     (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events)
                 )
 
