@@ -207,8 +207,11 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
         except Exception:
             row = None
 
+        log.info(f"[VOD:{ctx.name}] chat_id={chat_id}, conv_row={row}")
+
         if not row:
             repos = _list_vod_repos(ctx.app_id)
+            log.info(f"[VOD:{ctx.name}] no conv, vod_repos={[r['repo_key'] for r in repos]}")
             if len(repos) == 0:
                 await api.reply_text(ctx, msg_id, "❌ 未绑定仓库，请联系管理员配置")
                 return
@@ -240,6 +243,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             session_row = None
 
         if not session_row:
+            log.warning(f"[VOD:{ctx.name}] agent_session_id={agent_session_id} not found in agent_sessions")
             await api.reply_text(ctx, msg_id, "❌ 找不到 Agent 配置，请重新绑定")
             return
 
