@@ -12,8 +12,6 @@ const app = (() => {
     $('mainView').style.display = 'none';
   }
 
-const _AGENT_TYPES = {};
-
 function loadAgentTypes() {
   fetch('/api/agents/types').then(r => r.json()).then(d => {
     (d.types || []).forEach(t => { _AGENT_TYPES[t.agent_type] = t; });
