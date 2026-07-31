@@ -119,37 +119,10 @@ def _build_vod_prompt(evt: dict, skill_name: str) -> str:
         if os.path.isfile(agents_file):
             with open(agents_file, encoding="utf-8") as f:
                 registry = json.load(f)
-            parts.append("\n## Agent-to-Agent 协议\n")
-            parts.append("当你需要调用其他 Agent 时，从下表中选择最合适的：\n")
+            parts.append("\n## Available Agents")
             for ag, info in registry.items():
                 desc = info.get("description", "")
                 parts.append(f"- {ag}：{desc}")
-            parts.append(f"""
-### 调用方式
-
-如果你认为当前任务需要其他技能继续处理（例如创建了 Issue 后) 后需要 Issue Agent 接手分类），
-请先完成当前任务，然后调用 A2A API：
-
-  curl -X POST http://localhost:8080/api/a2a \\
-    -H "Content-Type: application/json" \\
-    -d '{{
-      "agent": "issue",
-      "payload": {{
-        "repository": "{repo}",
-        "account": "default",
-        "context": "当前处理摘要"
-      }}
-    }}'
-
-📌 重要：payload 中G必须传递 `repository(ry` 和 `account`，如能获取到 `issue_number` 也一并传递。
-
-### context 构造规则
-
-context 是传给下一个 Agent 的接力说明，应包含：
-1. 当前 Agent 的处理结果摘要
-2. 需要下一个 Agent 执行的具体任务
-3. 相关的上下文信息（issue 编号、分支名等）
-""")
     except Exception:
         pass
 

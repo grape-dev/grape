@@ -60,7 +60,7 @@ def _build_vod_prompt(evt: dict, skill_name: str) -> str:
         if os.path.isfile(agents_file):
             with open(agents_file, encoding="utf-8") as f:
                 registry = json.load(f)
-            parts.append("\n## Available Agents (for A2A calls)")
+            parts.append("\n## Available Agents")
             for agent_type, info in registry.items():
                 parts.append(f"- {info.get('name', agent_type)} ({agent_type})")
     except Exception:

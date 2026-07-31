@@ -17,7 +17,7 @@
     "description": "Issue 分类、标签、指派、A2A 触发 Coding Agent",
     "backend": "opencode",
     "order_num": 2,
-    "subscribe_events": ["issue_opened", "issue_labeled", "issue_comment"]
+    "subscribe_events": ["issue_opened", "issue_updated", "issue_labeled", "issue_comment"]
   },
   "coding": {
     "name": "Coding Agent",

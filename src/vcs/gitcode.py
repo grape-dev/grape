@@ -21,7 +21,7 @@ class GitCodeBackend(VcsBackend):
         if event_header == "Issue Hook":
             obj = payload.get("object_attributes", {})
             action = obj.get("action", "") if isinstance(obj, dict) else ""
-            if action == "open":
+            if action in ("open", "create"):
                 evt_type = "issue_opened"
             else:
                 evt_type = "issue_updated"
