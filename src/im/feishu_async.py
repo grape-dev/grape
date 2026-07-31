@@ -417,6 +417,76 @@ def parse_ws_message(raw: str) -> dict | None:
     return None
 
 
+# ── Protobuf 帧解析辅助 ─────────────────────────────────────
+
+def _get_header(headers, key: str) -> str:
+    for h in headers:
+        if h.key == key:
+            return h.value
+    return ""
+
+
+def _parse_event(event_data: dict) -> dict | None:
+    """从飞书事件 JSON 提取标准化消息 dict"""
+    header = event_data.get("header", {})
+    event_type = header.get("event_type", "")
+
+    if event_type != "im.message.receive_v1":
+        return None
+
+    event = event_data.get("event", {})
+    message = event.get("message", {})
+    sender = event.get("sender", {})
+    msg_content = message.get("content", "{}") or "{}"
+    msg_type = message.get("message_type", "text") or "text"
+
+    text = ""
+    if msg_type == "text":
+        try:
+            text = json.loads(msg_content).get("text", "")
+        except json.JSONDecodeError:
+            text = msg_content
+    elif msg_type == "post":
+        try:
+            content_data = json.loads(msg_content)
+            content_body = content_data.get("content", {})
+            if isinstance(content_body, dict):
+                for lang_data in content_body.values():
+                    if isinstance(lang_data, list):
+                        for paragraph in lang_data:
+                            if isinstance(paragraph, list):
+                                for segment in paragraph:
+                                    if segment.get("tag") == "text":
+                                        text += segment.get("text", "") + " "
+            elif isinstance(content_body, list):
+                for paragraph in content_body:
+                    if isinstance(paragraph, list):
+                        for segment in paragraph:
+                            if segment.get("tag") == "text":
+                                text += segment.get("text", "") + " "
+        except (json.JSONDecodeError, KeyError, TypeError):
+            text = msg_content
+
+    text = re.sub(r'@_?\w+\s*', '', text).strip()
+
+    sender_id = ""
+    sender_open_id = ""
+    sender_id_obj = sender.get("sender_id", {})
+    if sender_id_obj:
+        sender_id = sender_id_obj.get("user_id", "") or ""
+        sender_open_id = sender_id_obj.get("open_id", "") or ""
+
+    return {
+        "type": "message",
+        "text": text,
+        "chat_id": message.get("chat_id", ""),
+        "sender_id": sender_id,
+        "sender_open_id": sender_open_id,
+        "message_id": message.get("message_id", ""),
+        "message_type": msg_type,
+    }
+
+
 # ── 单Bot WS 协程 ─────────────────────────────────────────
 
 async def run_bot(ctx: BotContext, api: FeishuAsync,
@@ -457,35 +527,57 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                 delay = ctx.reconnect_delay
                 log.info(f"[{ctx.name}] connected")
 
+                from lark_oapi.ws.pb.pbbp2_pb2 import Frame
+                from lark_oapi.ws.enum import FrameType, MessageType
+
                 async for raw in ws:
-                    if not isinstance(raw, str):
+                    if not isinstance(raw, bytes):
                         continue
 
-                    parsed = parse_ws_message(raw)
-                    if parsed is None:
+                    try:
+                        frame = Frame()
+                        frame.ParseFromString(raw)
+                        ft = FrameType(frame.method)
+                    except Exception:
                         continue
 
-                    ws_type = parsed.get("ws_type")
-
-                    if ws_type == "ping":
-                        await ws.send(json.dumps({"type": "pong"}))
+                    if ft == FrameType.CONTROL:
+                        hs = frame.headers
+                        type_ = _get_header(hs, "type")
+                        if type_ == MessageType.PING.value:
+                            pass
                         continue
 
-                    if ws_type == "pong":
+                    if ft != FrameType.DATA:
                         continue
 
-                    if ws_type == "message" and parsed.get("text"):
-                        ctx.metrics.messages_received += 1
-                        ctx.metrics.last_message_at = time.time()
-                        if not ctx.semaphore.locked() or ctx.semaphore._value > 0:
-                            t = asyncio.create_task(
-                                _safe_handle(ctx, api, on_message, parsed),
-                                name=f"msg-{ctx.name}-{ctx.metrics.messages_received}",
-                            )
-                            ctx._handle_tasks.add(t)
-                            t.add_done_callback(ctx._handle_tasks.discard)
-                        else:
-                            log.warning(f"[{ctx.name}] concurrency limit reached, dropping message")
+                    hs = frame.headers
+                    type_ = _get_header(hs, "type")
+                    if type_ != MessageType.EVENT.value:
+                        continue
+
+                    try:
+                        payload_str = frame.payload.decode("utf-8") if frame.payload else ""
+                        event_data = json.loads(payload_str)
+                    except Exception:
+                        continue
+
+                    parsed = _parse_event(event_data)
+                    if not parsed or not parsed.get("text"):
+                        continue
+
+                    log.info(f"[{ctx.name}] received message: chat={parsed.get('chat_id','')[:20]} text={parsed.get('text','')[:50]}")
+                    ctx.metrics.messages_received += 1
+                    ctx.metrics.last_message_at = time.time()
+                    if not ctx.semaphore.locked() or ctx.semaphore._value > 0:
+                        t = asyncio.create_task(
+                            _safe_handle(ctx, api, on_message, parsed),
+                            name=f"msg-{ctx.name}-{ctx.metrics.messages_received}",
+                        )
+                        ctx._handle_tasks.add(t)
+                        t.add_done_callback(ctx._handle_tasks.discard)
+                    else:
+                        log.warning(f"[{ctx.name}] concurrency limit reached, dropping message")
 
         except asyncio.CancelledError:
             ctx._running = False
