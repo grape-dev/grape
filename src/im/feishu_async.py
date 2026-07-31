@@ -10,7 +10,7 @@
 import json, asyncio, time, logging, re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Awaitable, Optional
+from typing import Callable, Awaitable, Optional, Any
 
 import aiohttp
 import websockets
@@ -74,7 +74,7 @@ class BotContext:
     ws_ping_interval: float = 20.0
 
     _task: Optional[asyncio.Task] = None
-    _ws: Optional[websockets.WebClientProtocol] = None
+    _ws: Optional[Any] = None
     _session: Optional[aiohttp.ClientSession] = None
     _running: bool = False
     _handle_tasks: set = field(default_factory=set)
