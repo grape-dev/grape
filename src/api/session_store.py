@@ -121,14 +121,26 @@ def ensure_default_agent_sessions(repo_key: str):
     from src.user.db import get_bot_token_by_repo
     _token = get_bot_token_by_repo(_owner, _rname)
 
+    _vod_bot_app_id = ""
+    try:
+        with db_lock:
+            c2 = db.cursor()
+            c2.execute("SELECT bot_app_id FROM im_bot_config WHERE bot_type='vod_bot' LIMIT 1")
+            _row = c2.fetchone()
+            if _row:
+                _vod_bot_app_id = _row[0]
+    except Exception:
+        pass
+
     with db_lock:
         c = db.cursor()
         for _at, _sk in _mapping.items():
             _sid = str(uuid.uuid4())
             try:
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at) VALUES (?,?,?,?,?,?,?,datetime('now'))",
-                    (_sid, repo_key, _at, "opencode", _sk, _token, "idle")
+                    "INSERT OR REPLACE INTO agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, vod_bot_app_id) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
+                    (_sid, repo_key, _at, "opencode", _sk, _token, "idle",
+                     _vod_bot_app_id if _at == "vod" else "")
                 )
             except Exception as e:
                 log.warning(f"Failed to create session for {_at}: {e}")

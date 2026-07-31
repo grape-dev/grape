@@ -78,6 +78,7 @@ class BotContext:
     _session: Optional[aiohttp.ClientSession] = None
     _running: bool = False
     _handle_tasks: set = field(default_factory=set)
+    _seen_msg_ids: set = field(default_factory=set)
 
     def __post_init__(self):
         if not self.name:
@@ -565,6 +566,14 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                     parsed = _parse_event(event_data)
                     if not parsed or not parsed.get("text"):
                         continue
+
+                    msg_id = parsed.get("message_id", "")
+                    if msg_id:
+                        if msg_id in ctx._seen_msg_ids:
+                            continue
+                        ctx._seen_msg_ids.add(msg_id)
+                        if len(ctx._seen_msg_ids) > 2000:
+                            ctx._seen_msg_ids = set(list(ctx._seen_msg_ids)[-1000:])
 
                     log.info(f"[{ctx.name}] received message: chat={parsed.get('chat_id','')[:20]} text={parsed.get('text','')[:50]}")
                     ctx.metrics.messages_received += 1
