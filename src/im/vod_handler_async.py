@@ -129,24 +129,10 @@ def _build_vod_prompt(evt: dict, skill_name: str) -> str:
 
 
 def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict) -> str:
-    from src.api.event_store import append_event, update_event_status, update_event_config, update_event_complete
     oc_session_id = conv.get("oc_session_id", "")
     backend = agent_session.get("backend", "opencode")
     skill = agent_session.get("skill", "vod")
     repo_token = agent_session.get("repo_gitcode_token", "")
-
-    user_msg = evt.get("payload", {}).get("user_message", "")
-    actor = evt.get("actor", "unknown")
-    chat_id = evt.get("payload", {}).get("feishu_chat_id", "")
-
-    event_seq = append_event(
-        repo_key=repo_key, event_type="vod_signal", source="vod_im",
-        agent_type="vod", actor=actor, title=user_msg[:100],
-        summary=f"VOD IM from {actor}", payload=evt.get("payload", {}),
-        status="running"
-    )
-    if event_seq:
-        update_event_config(event_seq, backend, skill, datetime.now().isoformat())
 
     prompt = _build_vod_prompt(evt, skill)
     wsd = os.path.join(WORKSPACE_DIR, "vod", repo_key.replace(":", "_").replace("/", "_"))
@@ -166,11 +152,24 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
                 new_oc_sid = data["oc_session_id"]
 
     duration = time.time() - start_time
-    if event_seq:
-        update_event_complete(event_seq, "completed" if exit_code == 0 else "failed",
-                              exit_code=exit_code, duration=duration,
-                              completed_at=datetime.now().isoformat())
 
+    # 仅当创建了 Issue 时才写入 events 审计记录
+    if final_text and re.search(r'/issues/\d+', final_text):
+        from src.api.event_store import append_event, update_event_config, update_event_complete
+        user_msg = evt.get("payload", {}).get("user_message", "")
+        actor = evt.get("actor", "unknown")
+        event_seq = append_event(
+            repo_key=repo_key, event_type="vod_signal", source="vod_im",
+            agent_type="vod", actor=actor, title=user_msg[:100],
+            summary=f"VOD IM: issue created", payload=evt.get("payload", {}),
+            status="completed"
+        )
+        if event_seq:
+            update_event_config(event_seq, backend, skill, datetime.now().isoformat())
+            update_event_complete(event_seq, "completed", exit_code=exit_code,
+                                  duration=duration, completed_at=datetime.now().isoformat())
+
+    chat_id = evt.get("payload", {}).get("feishu_chat_id", "")
     try:
         with db_lock:
             c = db.cursor()
