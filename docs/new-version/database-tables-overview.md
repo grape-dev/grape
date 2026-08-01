@@ -144,7 +144,7 @@ UNIQUE (user_id, repo_id)
 ```sql
 id TEXT PRIMARY KEY,                   -- UUID
 repo_key TEXT NOT NULL,                -- owner/repo
-agent_type TEXT NOT NULL,              -- vod/issue/coding/qa/sre/chat
+agent_type TEXT NOT NULL,              -- vod/issue/coding/qa/sre（repo 级，不含用户级 chat）
 backend TEXT DEFAULT 'opencode',
 skill TEXT DEFAULT '',
 oc_session_id TEXT DEFAULT '',         -- opencode 会话（pipeline 事件用）
