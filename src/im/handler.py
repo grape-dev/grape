@@ -21,7 +21,7 @@ def process_chat(parsed: dict):
         text = parsed["text"]
         chat_id = parsed["chat_id"]
         msg_id = parsed["message_id"]
-        account = parsed.get("account", "default")
+        account = parsed.get("account", "")
         log.info(f"[Chat] message: {text[:100]} (chat={chat_id[:20]}, bot={account[:20]})")
 
         # 能力询问
@@ -132,7 +132,7 @@ def process_chat(parsed: dict):
             pass
 
 
-def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, cc_sid, is_new, account="default"):
+def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, history, oc_sid, cc_sid, is_new, account=""):
     try:
         sender_id = parsed.get('sender_id', '')
         sender_name = get_user_name(sender_id) if sender_id else ""

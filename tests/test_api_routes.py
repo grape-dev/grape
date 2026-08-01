@@ -203,7 +203,7 @@ class TestRepos:
             json={"username": "test", "password": "test123"}, headers=_headers)
         # 用 default 账户的 token
         from src.config import get_account
-        acc = get_account()
+        acc = get_account("default")
         bot_token = acc.get("gitcode_api_token", "")
         assert bot_token, "Need bot token for this test"
 

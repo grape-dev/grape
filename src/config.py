@@ -22,11 +22,12 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 # ====== 多账户配置（从 DB 加载） ======
 ACCOUNTS: dict[str, dict] = {}
-_DEFAULT_ACCOUNT = "default"
+_DEFAULT_ACCOUNT = ""
 
 
 def get_account(name=None) -> dict:
-    return ACCOUNTS.get(name or _DEFAULT_ACCOUNT, ACCOUNTS.get("default", {}))
+    """按名称获取账户配置；无匹配返回空 dict（不兜底 default）"""
+    return ACCOUNTS.get(name or "", {})
 
 
 def _load_accounts():

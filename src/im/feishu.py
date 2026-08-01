@@ -438,7 +438,7 @@ def detect_clean_intent(text: str) -> bool:
     return False
 
 
-def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "default") -> str:
+def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "") -> str:
     # 1. 自然语言绑定检测
     bind_repo = detect_bind_intent(text)
     if bind_repo:
@@ -459,7 +459,7 @@ def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "de
     return ""
 
 
-def process_command(text: str, chat_id: str, sender_id: str, db, account: str = "default") -> str:
+def process_command(text: str, chat_id: str, sender_id: str, db, account: str = "") -> str:
     text = text.strip()
     parts = text.split()
     if not parts:

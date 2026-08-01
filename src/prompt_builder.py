@@ -37,9 +37,11 @@ def get_skill_capabilities() -> str:
         return "我是 DevOps Bot，专注于 DevOps 相关领域。"
 
 
-def _build_history_file_guide(repo_key: str, account: str = "default") -> str:
+def _build_history_file_guide(repo_key: str, account: str = "") -> str:
     """Build prompt section listing available history files."""
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
+    if not account:
+        account = repo_key.replace("gitcode:", "")
     base = f"/root/devops-bot/data/workspaces/history/{account}/{repo_name}/"
     from src.session_manager import get_history_file_list
     files = get_history_file_list(repo_key, account)
@@ -269,7 +271,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
         pass
 
     repo_key = f"{evt['source']}:{evt['repository']}"
-    account = evt.get("account", "default")
+    account = evt.get("account") or evt.get("repository", "")
     parts.append(_build_history_file_guide(repo_key, account))
 
     if skills:
@@ -332,7 +334,7 @@ context 是传给下一个 Agent 的接力说明，应包含：
     return "\n".join(parts)
 
 
-def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "default") -> str:
+def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "") -> str:
     parts = [f"User asks about {repo_key}: {user_text}"]
     # Chat messages don't have `evt`, so A2A context is not injected here
     if history:

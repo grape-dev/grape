@@ -122,7 +122,7 @@ def update_session(sid, history, status, oc_session_id=None, backend="opencode")
         db.commit()
 
 
-def dump_history_to_file(repo_key: str, history: list, account: str = "default"):
+def dump_history_to_file(repo_key: str, history: list, account: str = ""):
     """将 event_history 写入 workspace 目录（按 account 分目录，每文件最多 10 条）"""
     from src.config import WORKSPACE_DIR
     clean = []
@@ -153,7 +153,7 @@ def dump_history_to_file(repo_key: str, history: list, account: str = "default")
         log.warning(f"Failed to dump history: {e}")
 
 
-def get_history_file_list(repo_key: str, account: str = "default") -> list[str]:
+def get_history_file_list(repo_key: str, account: str = "") -> list[str]:
     """返回可用的历史文件路径列表（最新在前）"""
     from src.config import WORKSPACE_DIR
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
@@ -264,7 +264,7 @@ def set_notify_enabled(repo_key, enabled):
 
 def create_im_channel(provider: str, channel_id: str, repo_key: str,
                       channel_name: str = "", bind_by: str = "",
-                      account: str = "default") -> str | None:
+                      account: str = "") -> str | None:
     import uuid
     cid = str(uuid.uuid4())
     try:

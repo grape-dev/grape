@@ -38,7 +38,7 @@ def resolve_actor(payload: dict, evt: dict) -> str:
     return "unknown"
 
 
-def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
+def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                  repo_key_override: str = "") -> dict:
     """事件处理管道入口：归一化 → 路由 → 存储 → 返回结果"""
     result = {"seq": 0, "event_type": "", "skill": "", "repo_key": "", "ok": False}
@@ -52,6 +52,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "default",
     # 统一 repo_key 格式：去掉 "source:" 前缀，所有查询都用 "owner/repo"
     if ":" in repo_key:
         repo_key = repo_key.split(":", 1)[1]
+    # account 兜底用仓库全名（无 default 概念）
+    if not account and evt.get("repository"):
+        evt["account"] = evt["repository"]
     event_type = evt.get("type", "unknown")
 
     log.info(f"Pipeline: start, raw_type={event_header}, source={source}, repo={evt['repository']}")
@@ -255,10 +258,11 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     final_text = ""
     new_oc_session_id = ""
     agent_logs = []
+    exec_account = evt.get("account") or repo_name
     try:
         for evt_type, data in stream_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
-            backend_name=backend, account="default",
+            backend_name=backend, account=exec_account,
             repo_gitcode_token=repo_gitcode_token,
         ):
             agent_logs.append({"time": datetime.now().isoformat(), "type": evt_type, "msg": str(data)[:200]})

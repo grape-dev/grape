@@ -50,7 +50,7 @@ async def gitcode_webhook(request: Request):
 
     # 4. 处理事件
     log.info(f"Webhook: calling run_pipeline for repo={repo}")
-    result = run_pipeline(body, dict(request.headers), repo_key_override=f"gitcode:{repo}")
+    result = run_pipeline(body, dict(request.headers), account=repo, repo_key_override=f"gitcode:{repo}")
     log.info(f"Webhook: pipeline done, seq={result.get('seq')}, event_type={result.get('event_type')}, ok={result.get('ok')}")
     return {"status": "ok", "seq": result.get("seq", 0), "event_type": result.get("event_type", "")}
 
@@ -73,7 +73,7 @@ async def a2a_endpoint(request: Request):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "A2A endpoint is internal only"})
 
     repository = payload.get("repository", "")
-    account = payload.get("account", "default")
+    account = payload.get("account", "") or repository
     context = payload.get("context", "")
     issue_number = payload.get("issue_number", "")
 

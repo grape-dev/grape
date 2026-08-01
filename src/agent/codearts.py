@@ -14,7 +14,7 @@ class CodeArtsBackend(AgentBackend):
             args.extend(["--session", session_id])
         return args
 
-    def get_env(self, account: str = "default", user_id: int = 0) -> dict:
+    def get_env(self, account: str = "", user_id: int = 0) -> dict:
         from src.config import get_account
         acc = get_account(account)
         env = os.environ.copy()

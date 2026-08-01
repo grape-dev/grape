@@ -29,7 +29,7 @@ async def password_login(body: PasswordLogin):
 @router.get("/login/gitcode")
 async def gitcode_oauth_login(request: Request):
     from src.config import get_account
-    acc = get_account()
+    acc = get_account("default")  # OAuth 全局配置存储在 default 账户
     client_id = acc.get("gitcode_oauth_client_id", "")
     if not client_id:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode OAuth 未配置"})
@@ -63,7 +63,7 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
         raise HTTPException(status_code=400, detail={"code": 400, "message": "state 无效或已过期"})
 
     from src.config import get_account
-    acc = get_account()
+    acc = get_account("default")  # OAuth 全局配置存储在 default 账户
     client_id = acc.get("gitcode_oauth_client_id", "")
     client_secret = acc.get("gitcode_oauth_client_secret", "")
 

@@ -31,7 +31,8 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         text = parsed["text"]
         chat_id = parsed["chat_id"]
         msg_id = parsed["message_id"]
-        account = "default"
+        # account 用于 feishu_bindings 隔离（区分不同 Feishu bot app）
+        account = ctx.app_id
 
         log.info(f"[Chat:{ctx.name}] message: {text[:100]} (chat={chat_id[:20]})")
 
@@ -121,7 +122,8 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         lock.acquire()
         try:
             await _process_chat_inner_async(ctx, api, parsed, text, repo_key, repository,
-                                            msg_id, sess, history, oc_sid, cc_sid, is_new, account)
+                                            msg_id, sess, history, oc_sid, cc_sid, is_new,
+                                            bind_account=account, exec_account=repo_key)
         finally:
             lock.release()
 
@@ -139,8 +141,12 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                                      parsed, text, repo_key, repository,
                                      msg_id, sess, history, oc_sid, cc_sid, is_new,
-                                     account="default"):
-    """异步版内部处理逻辑"""
+                                     bind_account="", exec_account=""):
+    """异步版内部处理逻辑
+
+    bind_account: 用于 feishu_bindings 隔离（Chat Bot 场景 = bot app_id）
+    exec_account: 用于 workspace history / agent 执行（= 仓库全名 owner/repo）
+    """
     try:
         sender_id = parsed.get('sender_id', '')
         sender_name = await api.get_user_name(ctx, sender_id) if sender_id else ""
@@ -176,7 +182,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                 log.warning(f"Failed to resolve GitCode login for {sender_name}: {e}")
 
         skills = ["chat"]
-        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, account)
+        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, exec_account)
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])
@@ -200,7 +206,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             pass
 
         for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat",
-                                              backend_name=backend, account=account,
+                                              backend_name=backend, account=exec_account,
                                               repo_gitcode_token=repo_token):
             if event_type == "done":
                 d = data
@@ -214,7 +220,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             "type": "chat", "time": datetime.now().isoformat(),
             "success": exit_code == 0, "exit_code": exit_code,
             "actor": parsed.get("sender_id", ""),
-            "account": account,
+            "account": exec_account,
             "backend": backend,
             "skill": "chat",
             "stdout": final_text[:2000],
@@ -222,7 +228,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         }
         history.append(record)
         from src.session_manager import dump_history_to_file
-        dump_history_to_file(repo_key, history, account)
+        dump_history_to_file(repo_key, history, exec_account)
         update_session(sess, history, "idle", new_oc_session_id, backend)
 
         output = final_text.strip()

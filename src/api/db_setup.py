@@ -450,3 +450,18 @@ def _migrate_tables():
             db.commit()
     except Exception:
         pass
+    # 迁移 feishu_bindings 的 account='default' → Chat Bot app_id（清理 default 兜底账户）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM feishu_bindings WHERE account='default' OR account IS NULL OR account=''")
+            cnt = c.fetchone()[0]
+            if cnt > 0:
+                c.execute("SELECT bot_app_id FROM im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
+                row = c.fetchone()
+                if row and row[0]:
+                    c.execute("UPDATE feishu_bindings SET account=? WHERE account='default' OR account IS NULL OR account=''", (row[0],))
+                    db.commit()
+                    log.info(f"Migrated {cnt} feishu_bindings account='default' -> {row[0]}")
+    except Exception as e:
+        log.warning(f"Migrate feishu_bindings account failed: {e}")

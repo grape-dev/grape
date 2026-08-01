@@ -45,7 +45,7 @@ def discover_backends() -> list[dict]:
 
 def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  event_type: str = "", backend_name: str = "opencode",
-                 account: str = "default", user_id: int = 0,
+                 account: str = "", user_id: int = 0,
                  env_extra: dict | None = None,
                  repo_gitcode_token: str = "") -> Generator:
     """流式执行 Agent，yield 事件。"""
