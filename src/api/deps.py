@@ -35,15 +35,6 @@ def get_bot_token(repo_owner: str = "", repo_name: str = "") -> str:
     return ""
 
 
-def get_webhook_token(owner: str, repo: str) -> str:
-    """获取仓库的 Webhook Token"""
-    acc = user_db.get_user_account(f"{owner}/{repo}") or {}
-    wh_token = acc.get("gitcode_webhook_token", "")
-    if wh_token:
-        return wh_token
-    return ""
-
-
 def require_devops_token(user: dict = Depends(get_current_user)):
     """确保该端点只能由拥有 Bot Token 配置的管理员访问"""
     # 检查用户是否有任一托管仓库配置了 Bot Token

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user, get_webhook_token, get_user_token
+from src.api.deps import get_current_user, get_user_token
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -102,8 +102,6 @@ async def update_notifications(body: NotificationPrefs, user: dict = Depends(get
 
 @router.get("/gitcode-repo/{owner}/{repo}")
 async def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
-    repo_key = f"{owner}/{repo}"
-    acc = user_db.get_user_account(repo_key) or {}
     from src.user.db import get_bot_token_by_repo
     bot_token = get_bot_token_by_repo(owner, repo)
     # 从 managed_repos 读取 webhook_token 和 bot_username
@@ -119,7 +117,7 @@ async def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(ge
     return {
         "devops_bot_token_exists": bool(bot_token),
         "webhook_token_exists": bool(wh_token),
-        "webhook_url": acc.get("webhook_url", "http://localhost:8080/webhook/gitcode"),
+        "webhook_url": user_db.get_meta_value("webhook_url") or "http://localhost:8080/webhook/gitcode",
         "bot_username": bot_username,
     }
 

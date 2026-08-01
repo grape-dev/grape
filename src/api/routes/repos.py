@@ -100,8 +100,8 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     owner, repo_name = parts
 
     api_token = get_user_token(user["username"])
-    acc = user_db.get_user_account(user["username"]) or {}
-    webhook_url = acc.get("webhook_url", "")
+    from src.user.db import get_meta_value
+    webhook_url = get_meta_value("webhook_url")
 
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})

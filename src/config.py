@@ -35,10 +35,10 @@ def _load_accounts():
     global ACCOUNTS, _DEFAULT_ACCOUNT
     ACCOUNTS = {}
     try:
-        from src.user.db import get_all_user_accounts, save_user_account
+        from src.user.db import get_all_user_accounts
         for a in get_all_user_accounts():
             ACCOUNTS[a["name"]] = a
-        # 自动检测并填入 webhook_url
+        # 自动检测并填入 webhook_url（全局配置 → meta 表）
         def _detect_webhook_url():
             methods = [
                 "https://api.ipify.org?format=json",
@@ -61,21 +61,15 @@ def _load_accounts():
                     return f"http://{ip}:8080/webhook/gitcode"
             except:
                 pass
-        detected = False
-        for n, a in ACCOUNTS.items():
-            if not a.get("webhook_url"):
-                if not detected:
-                    url = _detect_webhook_url()
-                    if url:
-                        a["webhook_url"] = url
-                        save_user_account(n, a)
-                        detected = True
-                        log.info(f"Auto-detected webhook URL: {url}")
-                    else:
-                        break
-                else:
-                    a["webhook_url"] = list(ACCOUNTS.values())[0].get("webhook_url", "")
-                    save_user_account(n, a)
+        try:
+            from src.user.db import get_meta_value, set_meta_value
+            if not get_meta_value("webhook_url"):
+                url = _detect_webhook_url()
+                if url:
+                    set_meta_value("webhook_url", url)
+                    log.info(f"Auto-detected webhook URL: {url}")
+        except Exception:
+            pass
         log.info(f"Loaded {len(ACCOUNTS)} accounts from DB")
     except Exception as e:
         log.warning(f"Failed to load accounts from DB: {e}")

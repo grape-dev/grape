@@ -16,10 +16,6 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     password_hash TEXT NOT NULL DEFAULT '',
     gitcode_id TEXT DEFAULT '',
     gitcode_api_token TEXT DEFAULT '',
-    gitcode_webhook_token TEXT DEFAULT '',
-    gitcode_oauth_client_id TEXT DEFAULT '',
-    gitcode_oauth_client_secret TEXT DEFAULT '',
-    gitcode_oauth_redirect_uri TEXT DEFAULT '',
     feishu_app_id TEXT DEFAULT '',
     feishu_app_secret TEXT DEFAULT '',
     huawei_cloud_ak TEXT DEFAULT '',
@@ -27,8 +23,6 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     CODEARTS_CLI_AK TEXT DEFAULT '',
     CODEARTS_CLI_SK TEXT DEFAULT '',
     password TEXT DEFAULT '',
-    bot_usernames TEXT DEFAULT '',
-    webhook_url TEXT DEFAULT '',
     created_by INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 )
@@ -508,21 +502,15 @@ def init_db():
                 db.execute("""
                     INSERT OR IGNORE INTO user_accounts
                         (id, username, password_hash, gitcode_id,
-                         gitcode_api_token, gitcode_webhook_token,
-                         gitcode_oauth_client_id, gitcode_oauth_client_secret,
-                         gitcode_oauth_redirect_uri,
+                         gitcode_api_token,
                          feishu_app_id, feishu_app_secret,
                          huawei_cloud_ak, huawei_cloud_sk,
                          CODEARTS_CLI_AK, CODEARTS_CLI_SK,
-                         password, bot_usernames, webhook_url,
+                         password,
                          created_by, created_at)
                     SELECT
                         u.id, u.username, u.password_hash, u.gitcode_id,
                         COALESCE(b.gitcode_api_token, ''),
-                        COALESCE(b.gitcode_webhook_token, ''),
-                        COALESCE(b.gitcode_oauth_client_id, ''),
-                        COALESCE(b.gitcode_oauth_client_secret, ''),
-                        COALESCE(b.gitcode_oauth_redirect_uri, ''),
                         COALESCE(b.feishu_app_id, ''),
                         COALESCE(b.feishu_app_secret, ''),
                         COALESCE(b.huawei_cloud_ak, ''),
@@ -530,8 +518,6 @@ def init_db():
                         COALESCE(b.CODEARTS_CLI_AK, ''),
                         COALESCE(b.CODEARTS_CLI_SK, ''),
                         COALESCE(b.password, ''),
-                        COALESCE(b.bot_usernames, ''),
-                        COALESCE(b.webhook_url, ''),
                         u.created_by, u.created_at
                     FROM users u
                     LEFT JOIN bot_accounts b ON u.username = b.name
@@ -589,33 +575,67 @@ def init_db():
             db.execute("ALTER TABLE managed_repos ADD COLUMN bot_username TEXT DEFAULT ''")
         except Exception:
             pass
-        # 迁移 bot_usernames 从 user_accounts → managed_repos.bot_username
+        # 迁移 user_accounts 废弃字段 → 正确位置（须在 DROP COLUMN 之前执行）
         try:
-            # 对每个配置了 bot_usernames 的账户，将 bot 用户名映射到该账户托管的所有 repo
             c = db.cursor()
-            c.execute("SELECT username, bot_usernames FROM user_accounts WHERE bot_usernames IS NOT NULL AND bot_usernames!=''")
-            for uname, raw in c.fetchall():
-                try:
-                    names = json.loads(raw)
-                    if not isinstance(names, list):
-                        names = []
-                except (json.JSONDecodeError, TypeError):
-                    names = [s.strip() for s in raw.split(",") if s.strip()]
-                if not names:
-                    continue
-                bot_name = names[0]
-                # 匹配该账户名（可能是 owner/repo 或真实用户）对应的托管仓库
-                c.execute("UPDATE managed_repos SET bot_username=? WHERE full_name=? AND (bot_username='' OR bot_username IS NULL)", (bot_name, uname))
-                c.execute("UPDATE managed_repos SET bot_username=? WHERE (repo_owner=? OR full_name=?) AND (bot_username='' OR bot_username IS NULL)", (bot_name, uname, uname))
-            # 兜底：若 user_accounts 已无记录但 managed_repos 有 bot_gitcode_token，设置默认 bot_username
-            c.execute("UPDATE managed_repos SET bot_username=COALESCE(NULLIF(bot_username,''), 'devops-bot') WHERE bot_username='' OR bot_username IS NULL")
+            ua_cols = [r[1] for r in c.execute("PRAGMA table_info(user_accounts)").fetchall()]
+            # 1. webhook_url → meta 表（全局配置，取首个非空值）
+            if "webhook_url" in ua_cols:
+                c.execute("SELECT webhook_url FROM user_accounts WHERE webhook_url IS NOT NULL AND webhook_url!='' LIMIT 1")
+                row = c.fetchone()
+                if row and row[0]:
+                    c.execute("SELECT COUNT(*) FROM meta WHERE key='webhook_url'")
+                    if c.fetchone()[0] == 0:
+                        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('webhook_url', ?)", (row[0],))
+            # 2. OAuth 配置 → meta 表（default 账户清理时已完成，此处兜底）
+            if "gitcode_oauth_client_id" in ua_cols:
+                c.execute("SELECT gitcode_oauth_client_id, gitcode_oauth_client_secret, gitcode_oauth_redirect_uri FROM user_accounts WHERE gitcode_oauth_client_id IS NOT NULL AND gitcode_oauth_client_id!='' LIMIT 1")
+                row = c.fetchone()
+                if row:
+                    for meta_key, val in zip(("oauth_gitcode_client_id", "oauth_gitcode_client_secret", "oauth_gitcode_redirect_uri"), row):
+                        if val:
+                            c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
+                            if c.fetchone()[0] == 0:
+                                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
+            # 3. bot_usernames → managed_repos.bot_username（对每个配置了 bot_usernames 的账户）
+            if "bot_usernames" in ua_cols:
+                c.execute("SELECT username, bot_usernames FROM user_accounts WHERE bot_usernames IS NOT NULL AND bot_usernames!=''")
+                for uname, raw in c.fetchall():
+                    try:
+                        names = json.loads(raw)
+                        if not isinstance(names, list):
+                            names = []
+                    except (json.JSONDecodeError, TypeError):
+                        names = [s.strip() for s in raw.split(",") if s.strip()]
+                    if not names:
+                        continue
+                    bot_name = names[0]
+                    c.execute("UPDATE managed_repos SET bot_username=? WHERE full_name=? AND (bot_username='' OR bot_username IS NULL)", (bot_name, uname))
+                    c.execute("UPDATE managed_repos SET bot_username=? WHERE (repo_owner=? OR full_name=?) AND (bot_username='' OR bot_username IS NULL)", (bot_name, uname, uname))
+                # 兜底：managed_repos 有 bot_gitcode_token 但无 bot_username 时设置默认值
+                c.execute("UPDATE managed_repos SET bot_username=COALESCE(NULLIF(bot_username,''), 'devops-bot') WHERE bot_username='' OR bot_username IS NULL")
             db.commit()
         except Exception as e:
-            log.warning(f"Migrate bot_username to managed_repos failed: {e}")
+            log.warning(f"Migrate user_accounts deprecated fields failed: {e}")
         try:
             db.execute("ALTER TABLE user_vms ADD COLUMN status TEXT DEFAULT ''")
         except Exception:
             pass
+        # 收敛 user_accounts：移除废弃列（须在所有读取迁移之后执行）
+        try:
+            c = db.cursor()
+            ua_cols = [r[1] for r in c.execute("PRAGMA table_info(user_accounts)").fetchall()]
+            for col in ["gitcode_webhook_token", "gitcode_oauth_client_id", "gitcode_oauth_client_secret",
+                        "gitcode_oauth_redirect_uri", "webhook_url", "bot_usernames"]:
+                if col in ua_cols:
+                    try:
+                        db.execute(f"ALTER TABLE user_accounts DROP COLUMN {col}")
+                    except Exception:
+                        pass
+            db.commit()
+            log.info("Cleaned up user_accounts deprecated columns (webhook_token/oauth/webhook_url/bot_usernames)")
+        except Exception as e:
+            log.warning(f"Cleanup user_accounts columns failed: {e}")
         db.commit()
     _cleanup_expired_oauth_states()
 
@@ -893,12 +913,10 @@ def get_all_managed_repos() -> list[dict]:
 USER_ACCOUNT_FIELDS = [
     "id", "username", "password_hash", "gitcode_id",
     "gitcode_api_token",
-    "gitcode_oauth_client_id", "gitcode_oauth_client_secret",
-    "gitcode_oauth_redirect_uri",
     "feishu_app_id", "feishu_app_secret",
     "huawei_cloud_ak", "huawei_cloud_sk",
     "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",
-    "password", "bot_usernames", "webhook_url",
+    "password",
     "created_by", "created_at",
 ]
 
@@ -940,15 +958,7 @@ def get_user_account(username: str) -> dict | None:
 
 def save_user_account(username: str, data: dict):
     """创建或更新用户账户（保留 id，不会因 INSERT OR REPLACE 产生新 id）"""
-    bu = data.get("bot_usernames", [])
-    if isinstance(bu, list):
-        bu = json.dumps(bu, ensure_ascii=False)
-    elif isinstance(bu, str):
-        bu = json.dumps([s.strip() for s in bu.split(",") if s.strip()], ensure_ascii=False)
-    else:
-        bu = "[]"
     fields = {k: data.get(k, "") for k in USER_ACCOUNT_FIELDS if k not in ("id", "username", "created_at")}
-    fields["bot_usernames"] = bu
     set_clause = ",".join(f"{k}=?" for k in fields)
     vals = list(fields.values())
     with db_lock:
@@ -967,17 +977,6 @@ def delete_user_account(username: str) -> bool:
         c.execute("DELETE FROM user_accounts WHERE username=?", (username,))
         db.commit()
         return c.rowcount > 0
-
-
-def resolve_user_account_by_webhook_token(token: str) -> str | None:
-    """通过 webhook token 查找用户名"""
-    if not token:
-        return None
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT username FROM user_accounts WHERE gitcode_webhook_token=?", (token,))
-        row = c.fetchone()
-    return row[0] if row else None
 
 
 def get_all_bot_usernames() -> list[str]:
