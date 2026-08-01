@@ -28,13 +28,12 @@ async def password_login(body: PasswordLogin):
 
 @router.get("/login/gitcode")
 async def gitcode_oauth_login(request: Request):
-    from src.config import get_account
-    acc = get_account("default")  # OAuth 全局配置存储在 default 账户
-    client_id = acc.get("gitcode_oauth_client_id", "")
+    from src.user.db import get_meta_value
+    client_id = get_meta_value("oauth_gitcode_client_id")
     if not client_id:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode OAuth 未配置"})
 
-    redirect_uri = os.environ.get("OAUTH_REDIRECT_URI") or acc.get("gitcode_oauth_redirect_uri", "")
+    redirect_uri = os.environ.get("OAUTH_REDIRECT_URI") or get_meta_value("oauth_gitcode_redirect_uri")
     if not redirect_uri:
         scheme = "https" if request.headers.get("X-Forwarded-Proto") == "https" else "http"
         host = request.headers.get("Host", "localhost:80").split(":")[0]
@@ -62,10 +61,9 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
     if state_data is None:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "state 无效或已过期"})
 
-    from src.config import get_account
-    acc = get_account("default")  # OAuth 全局配置存储在 default 账户
-    client_id = acc.get("gitcode_oauth_client_id", "")
-    client_secret = acc.get("gitcode_oauth_client_secret", "")
+    from src.user.db import get_meta_value
+    client_id = get_meta_value("oauth_gitcode_client_id")
+    client_secret = get_meta_value("oauth_gitcode_client_secret")
 
     import urllib.request, urllib.parse, json
     token_data = None

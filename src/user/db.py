@@ -961,6 +961,29 @@ def get_all_bot_usernames() -> list[str]:
     return list(set(result))
 
 
+def get_meta_value(key: str) -> str:
+    """从 meta 表读取配置值"""
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT value FROM meta WHERE key=?", (key,))
+            row = c.fetchone()
+            return row[0] if row else ""
+        except Exception:
+            return ""
+
+
+def set_meta_value(key: str, value: str):
+    """写入配置值到 meta 表"""
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (key, value))
+            db.commit()
+        except Exception as e:
+            log.warning(f"set_meta_value failed: {key}: {e}")
+
+
 def migrate_accounts_from_json():
     """从 accounts.json 迁移数据到 user_accounts 表（仅首次）"""
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "accounts.json")

@@ -465,3 +465,47 @@ def _migrate_tables():
                     log.info(f"Migrated {cnt} feishu_bindings account='default' -> {row[0]}")
     except Exception as e:
         log.warning(f"Migrate feishu_bindings account failed: {e}")
+    # 迁移 default 账户：OAuth 配置 → meta 表，bot_usernames → hwc-dev-bot 账户，删除 default
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT * FROM user_accounts WHERE username='default'")
+            row = c.fetchone()
+            if row:
+                cols = [d[0] for d in c.description]
+                acc = dict(zip(cols, row))
+                migrated = False
+                # 1. OAuth 配置 → meta 表
+                oauth_keys = [
+                    ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
+                    ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
+                    ("gitcode_oauth_redirect_uri", "oauth_gitcode_redirect_uri"),
+                ]
+                for src_key, meta_key in oauth_keys:
+                    val = acc.get(src_key, "")
+                    if val:
+                        c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
+                        if c.fetchone()[0] == 0:
+                            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
+                            migrated = True
+                # 2. bot_usernames → 迁移到 hwc-dev-bot 自身账户（若有该账户）
+                bu = acc.get("bot_usernames", "") or ""
+                try:
+                    bu_list = json.loads(bu) if bu else []
+                except (json.JSONDecodeError, TypeError):
+                    bu_list = [s.strip() for s in bu.split(",") if s.strip()] if bu else []
+                if bu_list:
+                    c.execute("SELECT COUNT(*) FROM user_accounts WHERE username='hwc-dev-bot'")
+                    if c.fetchone()[0] > 0:
+                        for bot_name in bu_list:
+                            c.execute("UPDATE user_accounts SET bot_usernames=? WHERE username=?", (json.dumps([bot_name]), bot_name))
+                        migrated = True
+                # 3. 删除 default 账户
+                c.execute("DELETE FROM user_accounts WHERE username='default'")
+                db.commit()
+                if migrated:
+                    log.info("Migrated default account config to meta/user_accounts and deleted default")
+                else:
+                    log.info("Deleted default account (no config to migrate)")
+    except Exception as e:
+        log.warning(f"Migrate/delete default account failed: {e}")

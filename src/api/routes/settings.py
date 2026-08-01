@@ -153,10 +153,10 @@ async def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoCon
 
 @router.get("/oauth")
 async def get_oauth_config(user: dict = Depends(get_current_user)):
-    acc = user_db.get_user_account("default") or {}
+    from src.user.db import get_meta_value
     return {
-        "gitcode_oauth_client_id": bool(acc.get("gitcode_oauth_client_id", "")),
-        "gitcode_oauth_redirect_uri": acc.get("gitcode_oauth_redirect_uri", ""),
+        "gitcode_oauth_client_id": bool(get_meta_value("oauth_gitcode_client_id")),
+        "gitcode_oauth_redirect_uri": get_meta_value("oauth_gitcode_redirect_uri"),
     }
 
 
@@ -168,17 +168,13 @@ class OAuthConfig(BaseModel):
 
 @router.put("/oauth")
 async def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_current_user)):
-    acc = user_db.get_user_account("default") or {}
+    from src.user.db import set_meta_value
     if body.gitcode_oauth_client_id:
-        acc["gitcode_oauth_client_id"] = body.gitcode_oauth_client_id
+        set_meta_value("oauth_gitcode_client_id", body.gitcode_oauth_client_id)
     if body.gitcode_oauth_client_secret:
-        acc["gitcode_oauth_client_secret"] = body.gitcode_oauth_client_secret
+        set_meta_value("oauth_gitcode_client_secret", body.gitcode_oauth_client_secret)
     if body.gitcode_oauth_redirect_uri:
-        acc["gitcode_oauth_redirect_uri"] = body.gitcode_oauth_redirect_uri
-    user_db.save_user_account("default", acc)
-    # Re-initialize config accounts
-    from src.config import _load_accounts
-    _load_accounts()
+        set_meta_value("oauth_gitcode_redirect_uri", body.gitcode_oauth_redirect_uri)
     return {"message": "OAuth 配置已更新"}
 
 
