@@ -25,15 +25,15 @@ def setup_module():
     user_db.save_user_account("test_api", acc)
     _token = user_db.create_session_token(_uid["id"])
     _headers = {"Authorization": f"Bearer {_token}"}
-    # 确保 agent_type_config 表中有 5 个 Agent 类型和技能
+    # 确保 agent_type 表中有 5 个 Agent 类型和技能
     from src.session_manager import db, db_lock
     with db_lock:
         for at, dn, ord_num in [("vod","VOD Agent",1),("issue","Issue Agent",2),("coding","Coding Agent",3),("qa","QA Agent",4),("sre","SRE Agent",5)]:
-            db.execute("INSERT OR REPLACE INTO agent_type_config (agent_type, display_name, description, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?)",
+            db.execute("INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?)",
                        (at, dn, f"Description for {at}", "●", ord_num, '["issue_opened"]' if at == "issue" else "[]"))
         for skill, dn, parent in [("issue","Issue 管理","issue"),("implementation","代码实现","coding"),("pr","PR 管理","coding")]:
-            db.execute("INSERT OR REPLACE INTO agent_type_config (agent_type, display_name, description, parent_agent_type, subscribe_events) VALUES (?,?,?,?,?)",
-                       (skill, dn, f"{dn} description", parent, '["issue_opened"]' if skill == "issue" else "[]"))
+            db.execute("INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope) VALUES (?,?,?,?,?,'official')",
+                       (skill, dn, f"{dn} description", parent, skill))
         db.commit()
 
 def teardown_module():
@@ -326,7 +326,7 @@ class TestAgents:
                 # Agent type not configured in DB yet, insert it
                 from src.session_manager import db, db_lock
                 with db_lock:
-                    db.execute("INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, icon, order_num) VALUES (?,?,?,?,?)",
+                    db.execute("INSERT OR IGNORE INTO agent_type (agent_type, display_name, description, icon, order_num) VALUES (?,?,?,?,?)",
                                (agent, f"{agent} Agent", f"Description for {agent}", "●", 0))
                     db.commit()
                 r = client.get(f"/api/agents/{agent}/org/test", headers=_headers)
@@ -572,7 +572,7 @@ class TestEventPipeline:
         from src.api.routing import get_domain_agent, get_agent_skill_map
         from src.session_manager import db, db_lock
         with db_lock:
-            db.execute("INSERT OR REPLACE INTO agent_type_config (agent_type, display_name, description, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?)",
+            db.execute("INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?)",
                        ("issue", "Issue Agent", "Test", "●", 2, '["issue_opened"]'))
             db.commit()
         skill = get_domain_agent("issue_opened")

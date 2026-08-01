@@ -428,32 +428,6 @@ def clear_vm_repos(vm_id: int) -> bool:
         return False
 
 
-# ====== 自定义技能表 ======
-_SKILLS_DDL = """
-CREATE TABLE IF NOT EXISTS user_skills (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    skill_name TEXT NOT NULL,
-    agent_type TEXT DEFAULT '',
-    description TEXT DEFAULT '',
-    parent_agent_type TEXT DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (user_id, skill_name)
-)
-"""
-
-# ====== 仓库技能映射表 ======
-_REPO_SKILL_DDL = """
-CREATE TABLE IF NOT EXISTS repo_skill_mapping (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    repo_key TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    skill_name TEXT NOT NULL,
-    UNIQUE (user_id, repo_key, event_type)
-)
-"""
-
 # ====== 托管仓库表 ======
 _MANAGED_REPOS_DDL = """
 CREATE TABLE IF NOT EXISTS managed_repos (
@@ -488,8 +462,6 @@ def init_db():
         db.execute(_CREDENTIALS_DDL)
         db.execute(_VMS_DDL)
         db.execute(_VM_REPOS_DDL)
-        db.execute(_SKILLS_DDL)
-        db.execute(_REPO_SKILL_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
         # 从旧表迁移数据（幂等）
@@ -655,8 +627,8 @@ def create_skill(user_id: int, skill_name: str, agent_type: str = "", descriptio
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR IGNORE INTO user_skills (user_id, skill_name, agent_type, description, parent_agent_type) VALUES (?,?,?,?,?)",
-                      (user_id, skill_name, agent_type, description, parent_agent_type))
+            c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'user',?)",
+                      (skill_name, skill_name, description, agent_type, skill_name, str(user_id)))
             db.commit()
             ensure_skill_dir(user_id, skill_name)
             return True
@@ -669,15 +641,15 @@ def delete_skill(user_id: int, skill_name: str) -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM user_skills WHERE user_id=? AND skill_name=?", (user_id, skill_name))
-            c.execute("DELETE FROM repo_skill_mapping WHERE user_id=? AND skill_name=?", (user_id, skill_name))
+            c.execute("DELETE FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?", (skill_name, str(user_id)))
             db.commit()
+            deleted = c.rowcount > 0
             # 删除技能目录
             import shutil
             path = os.path.join(SKILL_DIR, str(user_id), skill_name)
             if os.path.exists(path):
                 shutil.rmtree(path)
-            return True
+            return deleted
     except Exception as e:
         log.warning(f"Delete skill failed: {e}")
         return False
@@ -686,8 +658,8 @@ def delete_skill(user_id: int, skill_name: str) -> bool:
 def list_skills(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, skill_name, agent_type, description, parent_agent_type, created_at FROM user_skills WHERE user_id=? ORDER BY id", (user_id,))
-        return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "parent_agent_type": r[4] or "", "created_at": r[5]} for r in c.fetchall()]
+        c.execute("SELECT id, skill_name, agent_type, description, scope, owner_id FROM skill WHERE scope='user' AND owner_id=? ORDER BY id", (str(user_id),))
+        return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "scope": r[4], "owner_id": r[5], "created_at": ""} for r in c.fetchall()]
 
 
 def save_skill_md(user_id: int, skill_name: str, content: str) -> bool:
@@ -713,69 +685,6 @@ def get_skill_md(user_id: int, skill_name: str) -> str | None:
     return None
 
 
-# ====== 仓库技能映射 CRUD ======
-
-def set_repo_mapping(user_id: int, repo_key: str, event_type: str, skill_name: str) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO repo_skill_mapping (user_id, repo_key, event_type, skill_name) VALUES (?,?,?,?)",
-                      (user_id, repo_key, event_type, skill_name))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Set repo mapping failed: {e}")
-        return False
-
-
-def get_skill_mappings(user_id: int, skill_name: str) -> list[dict]:
-    """获取指定技能的所有映射"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT repo_key, event_type FROM repo_skill_mapping WHERE user_id=? AND skill_name=? ORDER BY repo_key, event_type", (user_id, skill_name))
-        return [{"repo_key": r[0], "event_type": r[1]} for r in c.fetchall()]
-
-
-def clear_skill_mappings(user_id: int, skill_name: str) -> bool:
-    """清除指定技能的所有映射"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM repo_skill_mapping WHERE user_id=? AND skill_name=?", (user_id, skill_name))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Clear skill mappings failed: {e}")
-        return False
-
-
-def delete_repo_mapping(user_id: int, repo_key: str, event_type: str) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM repo_skill_mapping WHERE user_id=? AND repo_key=? AND event_type=?", (user_id, repo_key, event_type))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Delete repo mapping failed: {e}")
-        return False
-
-
-def get_repo_mappings(user_id: int) -> list[dict]:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT repo_key, event_type, skill_name FROM repo_skill_mapping WHERE user_id=? ORDER BY repo_key", (user_id,))
-        return [{"repo_key": r[0], "event_type": r[1], "skill_name": r[2]} for r in c.fetchall()]
-
-
-def get_skill_for_event(user_id: int, repo_key: str, event_type: str) -> str | None:
-    """路由用：根据 user_id + repo + event 查找自定义技能名称"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT skill_name FROM repo_skill_mapping WHERE user_id=? AND repo_key=? AND event_type=?",
-                  (user_id, repo_key, event_type))
-        row = c.fetchone()
-    return row[0] if row else None
 
 
 # ====== 托管仓库 CRUD ======

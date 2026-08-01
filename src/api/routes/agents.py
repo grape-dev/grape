@@ -11,13 +11,13 @@ AGENT_TYPES = ["vod", "issue", "coding", "qa", "sre"]
 
 
 def _get_agent_type_meta(agent_type: str) -> dict | None:
-    """从 agent_type_config 表读取 Agent 元数据"""
+    """从 agent_type 表读取 Agent 元数据"""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT agent_type, display_name, description, default_backend, icon, order_num FROM agent_type_config WHERE agent_type=?",
+                "SELECT agent_type, display_name, description, default_backend, icon, order_num FROM agent_type WHERE agent_type=?",
                 (agent_type,)
             )
             row = c.fetchone()
@@ -37,7 +37,7 @@ async def list_agent_types():
         c = db.cursor()
         try:
             c.execute(
-                "SELECT agent_type, display_name, description, default_backend, icon, order_num FROM agent_type_config ORDER BY order_num, agent_type"
+                "SELECT agent_type, display_name, description, default_backend, icon, order_num FROM agent_type ORDER BY order_num, agent_type"
             )
             rows = c.fetchall()
         except Exception:

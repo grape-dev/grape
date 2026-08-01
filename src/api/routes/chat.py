@@ -328,7 +328,7 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
             from src.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT skill_path FROM agent_type_config WHERE agent_type=? AND skill_path!=''", (skill_name,))
+                c.execute("SELECT skill_path FROM skill WHERE skill_name=? AND skill_path!='' AND is_active=1 LIMIT 1", (skill_name,))
                 row = c.fetchone()
                 if row:
                     skill_dir = row[0]
@@ -401,13 +401,13 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
     from src.user.db import get_backend_agents as _get_cached_backends
     from src.session_manager import db, db_lock
     backends = _get_cached_backends()
-    # Load chat skills from agent_type_config
+    # Load chat skills from skill table
     chat_skills = []
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT agent_type, display_name, description, skill_path FROM agent_type_config WHERE parent_agent_type='chat' ORDER BY agent_type")
-            chat_skills = [{"name": r[0], "display_name": r[1], "description": r[2], "skill_path": r[3] or r[0]} for r in c.fetchall()]
+            c.execute("SELECT skill_name, display_name, description, skill_path FROM skill WHERE agent_type='chat' AND scope='official' AND is_active=1 ORDER BY skill_name")
+            chat_skills = [{"name": r[0], "display_name": r[1] or r[0], "description": r[2], "skill_path": r[3] or r[0]} for r in c.fetchall()]
         except Exception:
             pass
 

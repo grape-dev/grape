@@ -10,40 +10,30 @@ router = APIRouter(prefix="/api/skills", tags=["skills"])
 
 @router.get("/")
 async def list_skills(user: dict = Depends(get_current_user)):
-    """返回技能列表：official 从 agent_type_config 读取，custom 从用户上传"""
+    """返回技能列表：official 对所有用户可见，user 仅本人可见"""
     from src.session_manager import db, db_lock
 
-    official = []
+    skills = []
     with db_lock:
         c = db.cursor()
         try:
+            # 官方技能 + 个人技能（scope=user 且 owner_id=当前用户）
             c.execute(
-                "SELECT agent_type, display_name, description, parent_agent_type FROM agent_type_config WHERE parent_agent_type!='' ORDER BY parent_agent_type, agent_type"
+                "SELECT skill_name, display_name, description, agent_type, scope FROM skill WHERE is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?)) ORDER BY agent_type, skill_name",
+                (str(user["id"]),)
             )
             for r in c.fetchall():
-                official.append({
+                skills.append({
                     "name": r[0],
-                    "display_name": r[1],
+                    "display_name": r[1] or r[0],
                     "description": r[2] or "",
-                    "agent_type": r[3],
-                    "type": "official",
+                    "agent_type": r[3] or "",
+                    "type": "official" if r[4] == "official" else "user-uploaded",
                 })
         except Exception:
             pass
 
-    custom = []
-    user_skills_raw = user_db.list_skills(user["id"])
-    for s in user_skills_raw:
-        custom.append({
-            "name": s.get("skill_name", "unknown"),
-            "display_name": s.get("skill_name", "unknown"),
-            "description": s.get("description", ""),
-            "agent_type": s.get("agent_type", ""),
-            "parent_agent_type": s.get("parent_agent_type", ""),
-            "type": "user-uploaded",
-        })
-
-    return {"skills": official + custom}
+    return {"skills": skills}
 
 
 @router.get("/{name}")
@@ -52,33 +42,31 @@ async def get_skill_detail(name: str, user: dict = Depends(get_current_user)):
     from src.session_manager import db, db_lock
     from src.config import SKILLS_DIR
 
-    # 查官方技能
+    # 查官方技能 + 个人技能
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT agent_type, display_name, description, parent_agent_type, skill_path FROM agent_type_config WHERE agent_type=?", (name,))
+        c.execute(
+            "SELECT skill_name, display_name, description, agent_type, skill_path, scope FROM skill WHERE skill_name=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?))",
+            (name, str(user["id"]))
+        )
         row = c.fetchone()
 
     if row:
         skill_dir = row[4] or name
-        skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
+        scope = row[5]
+        if scope == "user":
+            skill_path = os.path.join(SKILLS_DIR, "custom", str(user["id"]), skill_dir, "SKILL.md")
+        else:
+            skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
         content = ""
         if os.path.exists(skill_path):
             with open(skill_path, encoding="utf-8") as f:
                 content = f.read()
         return {
-            "name": row[0], "display_name": row[1], "description": row[2] or "",
-            "agent_type": row[3], "type": "official", "content": content,
+            "name": row[0], "display_name": row[1] or row[0], "description": row[2] or "",
+            "agent_type": row[3] or "", "type": "official" if scope == "official" else "user-uploaded",
+            "content": content,
         }
-
-    # 查用户上传技能
-    skills = user_db.list_skills(user["id"])
-    for s in skills:
-        if s.get("skill_name") == name:
-            md = user_db.get_skill_md(user["id"], name)
-            return {
-                "name": name, "display_name": name, "description": s.get("description", ""),
-                "agent_type": s.get("agent_type", ""), "type": "user-uploaded", "content": md or "",
-            }
 
     raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
@@ -120,7 +108,6 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         shutil.copytree(skill_dir, user_skill_dir)
 
         user_db.create_skill(user["id"], skill_name, "", "", "")
-        user_db.save_skill_md(user["id"], skill_name)
 
         return {"message": f"技能 {skill_name} 上传成功"}
     except HTTPException:
@@ -134,9 +121,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
 
 @router.delete("/{skill_name}")
 async def delete_skill(skill_name: str, user: dict = Depends(get_current_user)):
-    skills = user_db.list_skills(user["id"])
-    exists = any(s.get("skill_name") == skill_name for s in skills)
+    exists = user_db.delete_skill(user["id"], skill_name)
     if not exists:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
-    user_db.delete_skill(user["id"], skill_name)
     return {"message": f"技能 {skill_name} 已删除"}

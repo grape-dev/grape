@@ -13,9 +13,9 @@
 
 | 领域 | 表 | 说明 |
 |------|----|------|
-| **用户体系** | `user_accounts`, `user_credentials`, `user_vms`, `user_vm_repos`, `user_skills`, `repo_skill_mapping`, `user_repos`, `oauth_states` | 用户、凭据、云主机、技能、仓库缓存、OAuth |
+| **用户体系** | `user_accounts`, `user_credentials`, `user_vms`, `user_vm_repos`, `user_repos`, `oauth_states` | 用户、凭据、云主机、仓库缓存、OAuth |
 | **仓库托管** | `managed_repos`, `user_managed_repos` | 仓库级配置 + 用户-仓库多对多关联 |
-| **Agent 配置** | `devops_agent_session`, `agent_type_config`, `agent_registry`, `event_route_config`, `backend_agents` | Agent 会话、类型、注册表、事件路由 |
+| **Agent 配置** | `devops_agent_session`, `agent_type`, `skill`, `agent_registry`, `event_route_config`, `backend_agents` | Agent 会话、类型、技能、注册表、事件路由 |
 | **事件流水线** | `events`, `meta` | 事件审计、元数据 |
 | **IM / 飞书** | `im_bot_config`, `im_channels`, `user_im_bindings`, `feishu_bindings`, `feishu_users`, `vod_conversations` | 多 Bot、群绑定、用户映射、VOD 会话 |
 | **聊天** | `chat_conversations`, `chat_messages`, `chat_config`, `chat_agent_session` | Chat 对话、消息、配置、会话 |
@@ -74,24 +74,6 @@ vm_id INTEGER NOT NULL,               -- → user_vms.id
 repo_key TEXT NOT NULL, deploy_dir TEXT DEFAULT '',
 service_name TEXT DEFAULT '', branch TEXT DEFAULT 'master',
 UNIQUE (vm_id, repo_key)
-```
-
-#### `user_skills` — 用户自定义技能
-```sql
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-user_id INTEGER NOT NULL, skill_name TEXT NOT NULL,
-agent_type TEXT DEFAULT '', description TEXT DEFAULT '',
-parent_agent_type TEXT DEFAULT '',
-created_at TEXT DEFAULT (datetime('now')),
-UNIQUE (user_id, skill_name)
-```
-
-#### `repo_skill_mapping` — 仓库事件→技能映射
-```sql
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-user_id INTEGER NOT NULL, repo_key TEXT NOT NULL,
-event_type TEXT NOT NULL, skill_name TEXT NOT NULL,
-UNIQUE (user_id, repo_key, event_type)
 ```
 
 #### `user_repos` — 用户仓库缓存（OAuth 拉取）
@@ -160,17 +142,33 @@ UNIQUE(repo_key, agent_type)
 ```
 > 2026-08 由 `agent_sessions` 重命名而来，存 DevOps Agent（VOD/Issue/Coding/QA/SRE）的运行时配置。
 
-#### `agent_type_config` — Agent 类型元数据
+#### `agent_type` — Agent 类型定义表
 ```sql
-agent_type TEXT PRIMARY KEY,
+agent_type TEXT PRIMARY KEY,        -- vod/issue/coding/qa/sre
 display_name TEXT NOT NULL, description TEXT DEFAULT '',
 default_backend TEXT DEFAULT 'opencode', icon TEXT DEFAULT '',
-order_num INTEGER DEFAULT 0,           -- >0 为 DevOps Agent
-parent_agent_type TEXT DEFAULT '',     -- 技能归属父类型
-skill_path TEXT DEFAULT '',
-subscribe_events TEXT DEFAULT '[]',    -- JSON 数组，事件路由依据
+order_num INTEGER DEFAULT 0,        -- >0 为 DevOps Agent（事件路由依据）
+subscribe_events TEXT DEFAULT '[]', -- JSON 数组，事件路由
 created_at TEXT DEFAULT (datetime('now'))
 ```
+
+#### `skill` — 通用技能表（官方/仓库/个人）
+```sql
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+skill_name TEXT NOT NULL,           -- 技能名
+display_name TEXT DEFAULT '',
+description TEXT DEFAULT '',
+agent_type TEXT DEFAULT '',          -- 分类：vod/issue/coding/qa/sre/chat
+skill_path TEXT DEFAULT '',          -- SKILL.md 相对路径
+scope TEXT DEFAULT 'official',       -- official/repo/user
+owner_id TEXT DEFAULT '',            -- repo→repo_key；user→user_id
+is_active INTEGER DEFAULT 1,
+created_at / updated_at,
+UNIQUE (skill_name, scope, owner_id)
+```
+> 可见性：official（所有仓库）/ repo（仅指定仓库）/ user（仅指定用户）。
+> SKILL.md 内容存文件系统（官方 `skills/{path}/`、个人 `skills/custom/{user_id}/`、仓库 `skills/repo/{repo_key}/`）。
+> 详见 `skill-table-rebuild.md`。
 
 #### `agent_registry` — Agent 引擎注册表
 ```sql
@@ -351,8 +349,8 @@ created_at TEXT, last_active_at TEXT
    ┌────────────────────┘      │      │      └────────────────────┐
    ▼                            │      │                          ▼
 ┌─────────────────┐    ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ user_credentials │    │ user_skills  │  │ user_vms     │  │ managed_repos│
-│ (user_id,prov)   │    │ (user_id)    │  │ (user_id)    │  │ (user_id,    │
+│ user_credentials │    │ user_vms     │  │ managed_repos│
+│ (user_id,prov)   │    │ (user_id)    │  │ (user_id,    │
 └─────────────────┘    └──────────────┘  └──────┬───────┘  │  owner,repo)  │
         │                                        │          └──────────────┘
         │                                vm_id FK │
@@ -367,7 +365,7 @@ created_at TEXT, last_active_at TEXT
         ▼
 ┌──────────────────┐
 │  user_repos      │  (user_id, full_name)
-│  repo_skill_mapping (user_id, repo_key)
+
 └──────────────────┘
 ```
 
@@ -403,7 +401,7 @@ created_at TEXT, last_active_at TEXT
       │ agent_type FK（逻辑）
       ▼
 ┌──────────────────┐
-│ agent_type_config │  ← subscribe_events 驱动事件路由
+│ agent_type │  ← subscribe_events 驱动事件路由
 │  (agent_type PK)  │
 └──────────────────┘
       │
@@ -471,7 +469,7 @@ created_at TEXT, last_active_at TEXT
 |------|------|---------|
 | user_accounts → user_credentials | 1:N | user_id |
 | user_accounts → user_vms | 1:N | user_id |
-| user_accounts → user_skills | 1:N | user_id |
+
 | user_accounts → user_repos | 1:N | user_id |
 | user_accounts → user_managed_repos | 1:N | user_id |
 | user_managed_repos → managed_repos | N:1 | repo_id |
@@ -479,7 +477,7 @@ created_at TEXT, last_active_at TEXT
 | user_vms → user_vm_repos | 1:N | vm_id |
 | managed_repos → devops_agent_session | 1:N | repo_key |
 | devops_agent_session → vod_conversations | 1:N | agent_session_id |
-| devops_agent_session → agent_type_config | N:1 | agent_type |
+| devops_agent_session → agent_type | N:1 | agent_type |
 | chat_conversations → chat_messages | 1:N | conversation_id |
 | im_bot_config → devops_agent_session (VOD) | 1:N | vod_bot_app_id |
 | im_bot_config → feishu_bindings (Chat) | 1:N | account=app_id |
@@ -490,7 +488,7 @@ created_at TEXT, last_active_at TEXT
 
 ```
 webhook 事件 → routing.get_domain_agent(event_type)
-              → agent_type_config.subscribe_events LIKE '%"event_type"%'
+              → agent_type.subscribe_events LIKE '%"event_type"%'
               → 匹配 agent_type（如 issue/coding）
               → devops_agent_session 查 backend + skill
               → append_event() 写 events 表
@@ -515,9 +513,9 @@ BotManager.load_from_db()
 |----|------|----|------|
 | user_accounts | 5 | events | 165 |
 | user_credentials | 2 | devops_agent_session | 12 |
-| managed_repos | 5（含 user_id=7/8 重复行，待拆分迁移） | agent_type_config | 16 |
-| user_managed_repos | —（拆分后新建） | agent_registry | 12 |
-| user_repos | 41 | event_route_config | 15 |
+| managed_repos | 5（含 user_id=7/8 重复行，待拆分迁移） | agent_type | 5 |
+| user_managed_repos | —（拆分后新建） | skill | 10（官方） |
+| user_repos | 41 | agent_registry | 12 |
 | feishu_bindings | 2 | event_route_config | 15 |
 | feishu_users | 0 | meta | 5 |
 | chat_agent_session | 2 | backend_agents | 2 |

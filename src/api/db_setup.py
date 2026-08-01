@@ -56,6 +56,36 @@ CREATE TABLE IF NOT EXISTS event_route_config (
 )
 """
 
+_AGENT_TYPE_DDL = """
+CREATE TABLE IF NOT EXISTS agent_type (
+    agent_type TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    default_backend TEXT DEFAULT 'opencode',
+    icon TEXT DEFAULT '',
+    order_num INTEGER DEFAULT 0,
+    subscribe_events TEXT DEFAULT '[]',
+    created_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_SKILL_DDL = """
+CREATE TABLE IF NOT EXISTS skill (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name TEXT NOT NULL,
+    display_name TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    agent_type TEXT DEFAULT '',
+    skill_path TEXT DEFAULT '',
+    scope TEXT DEFAULT 'official',
+    owner_id TEXT DEFAULT '',
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (skill_name, scope, owner_id)
+)
+"""
+
 _AGENT_TYPE_CONFIG_DDL = """
 CREATE TABLE IF NOT EXISTS agent_type_config (
     agent_type TEXT PRIMARY KEY,
@@ -202,7 +232,8 @@ _NEW_TABLES = [
     ("chat_config", _CHAT_CONFIG_DDL),
     ("devops_agent_session", _AGENT_SESSIONS_TABLE_DDL),
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
-    ("agent_type_config", _AGENT_TYPE_CONFIG_DDL),
+    ("agent_type", _AGENT_TYPE_DDL),
+    ("skill", _SKILL_DDL),
     ("agent_registry", _AGENT_REGISTRY_DDL),
     ("im_bot_config", _IM_BOT_CONFIG_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
@@ -212,8 +243,8 @@ _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 
 # (seed_key, json_filename, actual_table_name)
 _SEED_FILES = [
-    ("agent_type_config", "agent-description.json", "agent_type_config"),
-    ("agent_type_config_skills", "skill-description.json", "agent_type_config"),
+    ("agent_type", "agent-description.json", "agent_type"),
+    ("skill_official", "skill-description.json", "skill"),
 ]
 
 
@@ -257,7 +288,7 @@ def _seed_from_json():
         seeded_keys = set(row[0].split(",")) if row and row[0] else set()
 
     for seed_key, json_file, db_table in _SEED_FILES:
-        if seed_key in seeded_keys and seed_key != "agent_type_config":
+        if seed_key in seeded_keys and seed_key != "agent_type":
             log.info(f"Seed key '{seed_key}' already run, skip")
             continue
 
@@ -268,13 +299,13 @@ def _seed_from_json():
 
         with db_lock:
             c = db.cursor()
-            if seed_key == "agent_type_config_skills":
-                # Skills share the same table as agent types, check for skill rows specifically
-                c.execute("SELECT COUNT(*) FROM agent_type_config WHERE parent_agent_type!=''")
+            if seed_key == "skill_official":
+                # 官方技能：scope='official' 行
+                c.execute("SELECT COUNT(*) FROM skill WHERE scope='official'")
             else:
                 c.execute(f"SELECT COUNT(*) FROM {db_table}")
             count = c.fetchone()[0]
-            if count > 0 and db_table != "agent_type_config":
+            if count > 0 and db_table != "agent_type":
                 log.info(f"Table '{db_table}' already has {count} rows, skip seed from {json_file}")
                 continue
 
@@ -310,7 +341,7 @@ def _insert_seed_data(table: str, data: dict):
                         (repo_key, event_type, skill)
                     )
 
-        elif table == "agent_type_config":
+        elif table == "agent_type":
             # agent-description.json: {"agent_type": {"name": "...", ...}}
             for agent_type, info in data.items():
                 display_name = info.get("name", agent_type)
@@ -320,29 +351,21 @@ def _insert_seed_data(table: str, data: dict):
                 order_num = info.get("order_num", 0)
                 subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_type_config (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
                     (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events)
                 )
 
-        elif table == "agent_type_config_skills":
+        elif table == "skill_official":
             # skill-description.json: {"skill_name": {"name": "...", "agent_type": "...", "path": "...", ...}}
             for skill_name, info in data.items():
                 display_name = info.get("name", skill_name)
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
                 skill_path = info.get("path", skill_name)
-                subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
-                # Try UPDATE first (row may already exist from agent-description.json)
                 c.execute(
-                    "UPDATE agent_type_config SET parent_agent_type=?, description=?, skill_path=?, subscribe_events=? WHERE agent_type=? AND parent_agent_type=''",
-                    (agent_type, description, skill_path, subscribe_events, skill_name)
+                    "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
+                    (skill_name, display_name, description, agent_type, skill_path)
                 )
-                if c.rowcount == 0:
-                    # Skill-only key (not in agent-description.json), INSERT
-                    c.execute(
-                        "INSERT OR IGNORE INTO agent_type_config (agent_type, display_name, description, parent_agent_type, skill_path, subscribe_events) VALUES (?,?,?,?,?,?)",
-                        (skill_name, display_name, description, agent_type, skill_path, subscribe_events)
-                    )
 
         elif table == "agent_registry":
             # agent-routing.json: {"default_backend": "...", "skill_backends": {...}}
@@ -404,35 +427,6 @@ def _migrate_tables():
                 db.commit()
         except Exception:
             pass  # column already exists
-    # 补填已有技能的 skill_path（空值则用 agent_type 自身作为 path）
-    try:
-        with db_lock:
-            db.execute("UPDATE agent_type_config SET skill_path=agent_type WHERE skill_path='' AND parent_agent_type!=''")
-            db.commit()
-    except Exception:
-        pass
-    # 回填 subscribe_events：当已有行因 seed 跳过而保持 '[]' 时，从 JSON 重新写入
-    try:
-        filepath = os.path.join(_CONFIG_DIR, "agent-description.json")
-        if os.path.exists(filepath):
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            updated = 0
-            with db_lock:
-                c = db.cursor()
-                for agent_type, info in data.items():
-                    events = info.get("subscribe_events", [])
-                    if events:
-                        c.execute(
-                            "UPDATE agent_type_config SET subscribe_events=? WHERE agent_type=? AND subscribe_events='[]'",
-                            (json.dumps(events, ensure_ascii=False), agent_type)
-                        )
-                        updated += c.rowcount
-                db.commit()
-            if updated:
-                log.info(f"Backfilled subscribe_events for {updated} agent(s) from {filepath}")
-    except Exception as e:
-        log.warning(f"Backfill subscribe_events failed: {e}")
     # 迁移 im 凭证到 im_bot_config 统一表
     try:
         with db_lock:
@@ -526,3 +520,53 @@ def _migrate_tables():
                 log.info("Migrated agent_sessions data into devops_agent_session and dropped agent_sessions")
     except Exception as e:
         log.warning(f"Migrate agent_sessions table failed: {e}")
+    # 迁移 agent_type_config → agent_type + skill（旧架构拆分）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "agent_type_config" in _tables:
+                # 1. Agent 类型（order_num>0）→ agent_type 表
+                c.execute("SELECT agent_type, display_name, description, default_backend, icon, order_num, subscribe_events FROM agent_type_config WHERE order_num>0")
+                for r in c.fetchall():
+                    c.execute(
+                        "INSERT OR IGNORE INTO agent_type (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
+                        (r[0], r[1], r[2] or "", r[3] or "opencode", r[4] or "", r[5] or 0, r[6] or '[]')
+                    )
+                # 2. 官方技能（parent_agent_type!=''）→ skill 表（scope=official）
+                c.execute("SELECT agent_type, display_name, description, parent_agent_type, skill_path FROM agent_type_config WHERE parent_agent_type!=''")
+                for r in c.fetchall():
+                    c.execute(
+                        "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
+                        (r[0], r[1], r[2] or "", r[3] or "", r[4] or r[0])
+                    )
+                db.commit()
+                log.info("Migrated agent_type_config -> agent_type + skill")
+    except Exception as e:
+        log.warning(f"Migrate agent_type_config failed: {e}")
+    # 迁移 user_skills → skill 表（scope=user）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "user_skills" in _tables:
+                c.execute("SELECT user_id, skill_name, agent_type, description, parent_agent_type FROM user_skills")
+                for r in c.fetchall():
+                    c.execute(
+                        "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'user',?)",
+                        (r[1], r[1], r[3] or "", r[2] or "", r[1], str(r[0]))
+                    )
+                db.commit()
+                log.info("Migrated user_skills -> skill (scope=user)")
+    except Exception as e:
+        log.warning(f"Migrate user_skills failed: {e}")
+    # 删除旧表（agent_type_config / user_skills / repo_skill_mapping）
+    try:
+        with db_lock:
+            c = db.cursor()
+            for tbl in ["agent_type_config", "user_skills", "repo_skill_mapping"]:
+                c.execute(f"DROP TABLE IF EXISTS {tbl}")
+            db.commit()
+            log.info("Dropped legacy tables: agent_type_config, user_skills, repo_skill_mapping")
+    except Exception as e:
+        log.warning(f"Drop legacy skill tables failed: {e}")
