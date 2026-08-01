@@ -235,6 +235,12 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
             # 检测是否 @ 了 Bot
             if any(f"@{u}" in note for u in __import__("src.user.db", fromlist=["get_all_bot_usernames"]).get_all_bot_usernames()):
                 parts.append("(User @mentioned the bot)")
+        if number is None:
+            parts.append("\n⚠️ 本评论事件未携带 Issue 编号。你必须先通过 GitCode API 定位该评论落在哪个 Issue：")
+            parts.append(f"  查询仓库 {repo} 最近的 Issue 评论（GET /repos/{repo.split('/')[0]}/{repo.split('/')[-1]}/issues/{{n}}/comments），")
+            parts.append("  用评论内容匹配确认 Issue 编号，然后对用户评论进行回复。")
+            parts.append("  注意：即使缺少编号，也必须对用户评论作出回复，不得静默跳过。")
+        parts.append("\n必须回复该评论：使用 POST /repos/{owner}/{repo}/issues/{n}/comments，body 以 [DevOps Bot] 开头并引用用户评论原文。")
     elif evt_type == "vod_signal":
         user_msg = payload.get("user_message", "")
         user_name = evt.get("actor", "未知用户")

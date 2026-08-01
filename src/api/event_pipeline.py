@@ -20,7 +20,7 @@ def resolve_issue_id(payload: dict) -> str:
                 return f"#{num}"
     obj = payload.get("object_attributes", {})
     if isinstance(obj, dict):
-        num = obj.get("number", obj.get("iid", obj.get("id", "")))
+        num = obj.get("number", obj.get("iid", obj.get("noteable_iid", obj.get("id", ""))))
         if num:
             return f"#{num}"
     return ""

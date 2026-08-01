@@ -40,6 +40,10 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 ## Issue 分析（每次处理前先执行，⚠️ 必须按 1→2→3→4→5 顺序依次执行，上一步未完成不得进入下一步）
 
+0. **先判断事件类型**（⚠️ 最重要，决定后续流程）
+    - 事件类型为 `issue_comment`（评论）→ **直接进入「评论处理流程」**，不执行下面的 Issue 有效性检查/打标签/分配
+    - 事件类型为 `issue_opened`/`issue_updated`（新 Issue 或更新）→ 进入下面第 1 步
+
 1. **Issue 是否有效**（⚠️ 新 Issue 必须执行此检查，不可跳过）
     - 已有标签或负责人 → 已被处理过，跳过有效性检查
     - 全新 Issue（无标签、无负责人）→ **必须先读取 `references/issue-validity-check.md` 执行完整性检查，检查通过后才能执行以下能力项**
@@ -66,6 +70,25 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 ```
 
 分析完成后，按需执行以下能力项，无固定顺序。
+
+## 评论处理流程（事件类型为 issue_comment 时执行）
+
+收到 Issue 评论时，按以下流程处理：
+
+1. **确定评论落在哪个 Issue** — 从事件 payload 提取 issue 编号（`noteable_iid`/`issue.iid`）。如果 payload 没有编号，用评论内容或时间通过 GitCode API 查询最近的 Issue 评论来定位（`GET /repos/{owner}/{repo}/issues/{n}/comments`），确认后记住 issue 编号
+2. **读取讨论记录** — 读取该 Issue 的全部评论，了解上下文（`GET /repos/{owner}/{repo}/issues/{n}/comments`）
+3. **理解评论意图** — 判断评论是什么类型：
+    | 评论类型 | 处理 |
+    |---------|------|
+    | 用户提问/@提及机器人 | 分析并回复（见 comment-guide.md） |
+    | 用户要求启动开发/实现功能 | **通过 A2A API 交办 implementation/coding Agent**，构造 context 传原始需求 |
+    | 评论补充信息（原 need-info） | 重新分类、PATCH 更新 labels、回复 |
+    | 评论请求关闭 Issue | 验证后回复建议 |
+    | 讨论方案设计 | 参与讨论给出建议 |
+    | 质疑分配结果 | 重新核对 CODEOWNERS，维持或调整 |
+    | 其他 DevOps 相关 | 分析并回复 |
+4. **必须回复评论**（⚠️ 除非是机器人自己的评论）— 按 comment-guide.md 格式 `POST /repos/{owner}/{repo}/issues/{n}/comments`，body 以 `[DevOps Bot]` 开头并引用用户评论原文
+5. **需要 A2A 时** — 查本 prompt 底部的 Agent 列表，构造 context（原始需求 + 分析结论 + 建议下一步），调用 `curl -X POST http://localhost:8080/api/a2a`
 
 ## 能力项
 
