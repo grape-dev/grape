@@ -88,7 +88,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT backend, skill FROM agent_sessions WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
+            c.execute("SELECT backend, skill FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
             row = c.fetchone()
             if row:
                 backend = row[0] or "opencode"
@@ -225,7 +225,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT oc_session_id FROM agent_sessions WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
+            c.execute("SELECT oc_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
             row = c.fetchone()
             if row and row[0]:
                 oc_session_id = row[0]
@@ -282,7 +282,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("UPDATE agent_sessions SET oc_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
+                c.execute("UPDATE devops_agent_session SET oc_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
                           (new_oc_session_id, repo_name, agent_type))
                 db.commit()
         except Exception as e:

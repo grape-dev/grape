@@ -28,8 +28,23 @@ _db_path = os.path.join(os.path.dirname(__file__), "..", "data/sessions.db")
 db_lock = threading.Lock()
 
 db = sqlite3.connect(_db_path, check_same_thread=False)
+# 迁移旧表 sessions → chat_agent_session（幂等，须先于 CREATE 执行）
+try:
+    _old_tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    if "sessions" in _old_tables and "chat_agent_session" not in _old_tables:
+        db.execute("ALTER TABLE sessions RENAME TO chat_agent_session")
+        db.commit()
+        log.info("Migrated table sessions -> chat_agent_session")
+    elif "sessions" in _old_tables and "chat_agent_session" in _old_tables:
+        # 新表已被创建但旧表仍存在（历史库），迁移数据后删除旧表
+        db.execute("INSERT OR IGNORE INTO chat_agent_session (id, repo_key, source, repository, status, event_history, oc_session_id, created_at, last_active_at) SELECT id, repo_key, source, repository, status, event_history, oc_session_id, created_at, last_active_at FROM sessions")
+        db.execute("DROP TABLE sessions")
+        db.commit()
+        log.info("Migrated sessions data into chat_agent_session and dropped sessions")
+except Exception as e:
+    log.warning(f"Migrate sessions table failed: {e}")
 db.execute("""
-    CREATE TABLE IF NOT EXISTS sessions (
+    CREATE TABLE IF NOT EXISTS chat_agent_session (
         id TEXT PRIMARY KEY,
         repo_key TEXT UNIQUE,
         source TEXT, repository TEXT, status TEXT,
@@ -49,7 +64,7 @@ try:
 except:
     pass
 try:
-    db.execute("ALTER TABLE sessions ADD COLUMN account TEXT DEFAULT 'default'")
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN account TEXT DEFAULT 'default'")
 except:
     pass
 try:
@@ -57,15 +72,15 @@ try:
 except:
     pass
 try:
-    db.execute("ALTER TABLE sessions ADD COLUMN backend TEXT DEFAULT ''")
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN backend TEXT DEFAULT ''")
 except:
     pass
 try:
-    db.execute("ALTER TABLE sessions ADD COLUMN opencode_session_id TEXT DEFAULT ''")
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN opencode_session_id TEXT DEFAULT ''")
 except:
     pass
 try:
-    db.execute("ALTER TABLE sessions ADD COLUMN codearts_session_id TEXT DEFAULT ''")
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN codearts_session_id TEXT DEFAULT ''")
 except:
     pass
 db.execute("UPDATE feishu_bindings SET notify_enabled=0 WHERE notify_enabled IS NULL")
@@ -83,20 +98,20 @@ def _session_col(backend: str) -> str:
 def get_or_create_session(repo_key, source, repository, backend="opencode"):
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, event_history, opencode_session_id, codearts_session_id, status FROM sessions WHERE repo_key=?", (repo_key,))
+        c.execute("SELECT id, event_history, opencode_session_id, codearts_session_id, status FROM chat_agent_session WHERE repo_key=?", (repo_key,))
         row = c.fetchone()
         if row:
             sid, hist_json, oc_sid, cc_sid, status = row
             history = json.loads(hist_json) if hist_json else []
             if status == "failed":
-                c.execute("UPDATE sessions SET status=? WHERE id=?", ("idle", sid))
+                c.execute("UPDATE chat_agent_session SET status=? WHERE id=?", ("idle", sid))
                 db.commit()
             sid_val = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
             return sid, history, sid_val or "", "", False
         sid = f"sess-{repo_key}-{int(time.time()*1000000)}"
         now = datetime.now().isoformat()
         c.execute(
-            "INSERT INTO sessions (id, repo_key, source, repository, status, event_history, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO chat_agent_session (id, repo_key, source, repository, status, event_history, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,?)",
             (sid, repo_key, source, repository, "idle", "[]", now, now)
         )
         db.commit()
@@ -111,12 +126,12 @@ def update_session(sid, history, status, oc_session_id=None, backend="opencode")
             history = history[-MAX_HISTORY:]
         if oc_session_id:
             c.execute(
-                f"UPDATE sessions SET event_history=?, status=?, {col}=?, last_active_at=? WHERE id=?",
+                f"UPDATE chat_agent_session SET event_history=?, status=?, {col}=?, last_active_at=? WHERE id=?",
                 (json.dumps(history), status, oc_session_id, datetime.now().isoformat(), sid)
             )
         else:
             c.execute(
-                "UPDATE sessions SET event_history=?, status=?, last_active_at=? WHERE id=?",
+                "UPDATE chat_agent_session SET event_history=?, status=?, last_active_at=? WHERE id=?",
                 (json.dumps(history), status, datetime.now().isoformat(), sid)
             )
         db.commit()

@@ -31,7 +31,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         agent_sessions = []
         try:
             c.execute(
-                "SELECT agent_type, backend, status, last_active_at FROM agent_sessions WHERE repo_key=? ORDER BY agent_type",
+                "SELECT agent_type, backend, status, last_active_at FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type",
                 (repo_key,)
             )
             agent_sessions = [

@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS events (
 """
 
 _AGENT_SESSIONS_TABLE_DDL = """
-CREATE TABLE IF NOT EXISTS agent_sessions (
+CREATE TABLE IF NOT EXISTS devops_agent_session (
     id TEXT PRIMARY KEY,
     repo_key TEXT NOT NULL,
     agent_type TEXT NOT NULL,
@@ -200,7 +200,7 @@ _NEW_TABLES = [
     ("chat_conversations", _CHAT_CONVERSATIONS_DDL),
     ("chat_messages", _CHAT_MESSAGES_DDL),
     ("chat_config", _CHAT_CONFIG_DDL),
-    ("agent_sessions", _AGENT_SESSIONS_TABLE_DDL),
+    ("devops_agent_session", _AGENT_SESSIONS_TABLE_DDL),
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type_config", _AGENT_TYPE_CONFIG_DDL),
     ("agent_registry", _AGENT_REGISTRY_DDL),
@@ -235,7 +235,7 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_events_repo_key ON events(repo_key)",
         "CREATE INDEX IF NOT EXISTS idx_events_issue_id ON events(issue_id)",
         "CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)",
-        "CREATE INDEX IF NOT EXISTS idx_agent_sessions_repo ON agent_sessions(repo_key)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_sessions_repo ON devops_agent_session(repo_key)",
         "CREATE INDEX IF NOT EXISTS idx_event_route_config_repo ON event_route_config(repo_key)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_config_feishu_app_id ON chat_config(feishu_app_id) WHERE feishu_app_id != ''",
     ]
@@ -375,11 +375,11 @@ def _migrate_tables():
         "ALTER TABLE user_skills ADD COLUMN agent_type TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN description TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN parent_agent_type TEXT DEFAULT ''",
-        "ALTER TABLE agent_sessions ADD COLUMN skill TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN skill TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN session_id TEXT DEFAULT ''",
         "ALTER TABLE chat_config ADD COLUMN skill TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN user_gitcode_token TEXT DEFAULT ''",
-        "ALTER TABLE agent_sessions ADD COLUMN repo_gitcode_token TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN repo_gitcode_token TEXT DEFAULT ''",
         "ALTER TABLE agent_type_config ADD COLUMN skill_path TEXT DEFAULT ''",
         "ALTER TABLE feishu_users ADD COLUMN user_id INTEGER DEFAULT 0",
         "ALTER TABLE agent_type_config ADD COLUMN subscribe_events TEXT DEFAULT '[]'",
@@ -392,10 +392,10 @@ def _migrate_tables():
         "ALTER TABLE events ADD COLUMN agent_logs TEXT DEFAULT '[]'",
         "ALTER TABLE events ADD COLUMN started_at TEXT DEFAULT ''",
         "ALTER TABLE events ADD COLUMN completed_at TEXT DEFAULT ''",
-        "ALTER TABLE agent_sessions ADD COLUMN im_provider TEXT DEFAULT ''",
-        "ALTER TABLE agent_sessions ADD COLUMN im_app_id TEXT DEFAULT ''",
-        "ALTER TABLE agent_sessions ADD COLUMN im_app_secret TEXT DEFAULT ''",
-        "ALTER TABLE agent_sessions ADD COLUMN vod_bot_app_id TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN im_provider TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN im_app_id TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN im_app_secret TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN vod_bot_app_id TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
@@ -509,3 +509,20 @@ def _migrate_tables():
                     log.info("Deleted default account (no config to migrate)")
     except Exception as e:
         log.warning(f"Migrate/delete default account failed: {e}")
+    # 迁移旧表 agent_sessions → devops_agent_session（幂等）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "agent_sessions" in _tables and "devops_agent_session" not in _tables:
+                c.execute("ALTER TABLE agent_sessions RENAME TO devops_agent_session")
+                db.commit()
+                log.info("Migrated table agent_sessions -> devops_agent_session")
+            elif "agent_sessions" in _tables and "devops_agent_session" in _tables:
+                # 新表已被创建但旧表仍存在（历史库），迁移数据后删除旧表
+                c.execute("INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at, im_provider, im_app_id, im_app_secret, vod_bot_app_id) SELECT id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at, im_provider, im_app_id, im_app_secret, vod_bot_app_id FROM agent_sessions")
+                c.execute("DROP TABLE agent_sessions")
+                db.commit()
+                log.info("Migrated agent_sessions data into devops_agent_session and dropped agent_sessions")
+    except Exception as e:
+        log.warning(f"Migrate agent_sessions table failed: {e}")

@@ -558,7 +558,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后再清理。"
             repo_key = row[0]
             full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
-            c.execute("UPDATE sessions SET opencode_session_id='', codearts_session_id='', backend='' WHERE repo_key=? OR repo_key=?", (repo_key, full_key))
+            c.execute("UPDATE chat_agent_session SET opencode_session_id='', codearts_session_id='', backend='' WHERE repo_key=? OR repo_key=?", (repo_key, full_key))
             db.commit()
             return f"✅ 已清除仓库 `{full_key}` 的 Agent 会话缓存。下次事件将使用全新的 Agent 上下文。"
         except Exception as e:
@@ -705,7 +705,7 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM agent_sessions WHERE agent_type='vod' AND vod_bot_app_id=?", (bot_app_id,))
+            c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE agent_type='vod' AND vod_bot_app_id=?", (bot_app_id,))
             if c.fetchone()[0] == 0:
                 log.info(f"VOD WS: {bot_app_id[:20]} has no agent_session, skip")
                 return

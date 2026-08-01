@@ -84,7 +84,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                         reply_parts.append("你可能还没有加入任何仓库。")
                         reply_parts.append("请先在网页端加入仓库，或发送 /bind owner/repo 直接绑定。")
                 else:
-                    c.execute("SELECT DISTINCT repo_key, repository, source FROM sessions ORDER BY last_active_at DESC LIMIT 10")
+                    c.execute("SELECT DISTINCT repo_key, repository, source FROM chat_agent_session ORDER BY last_active_at DESC LIMIT 10")
                     rows = c.fetchall()
                     if rows:
                         reply_parts.append("已有处理的仓库：")

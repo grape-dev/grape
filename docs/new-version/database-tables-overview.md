@@ -15,10 +15,10 @@
 |------|----|------|
 | **用户体系** | `user_accounts`, `user_credentials`, `user_vms`, `user_vm_repos`, `user_skills`, `repo_skill_mapping`, `user_repos`, `oauth_states` | 用户、凭据、云主机、技能、仓库缓存、OAuth |
 | **仓库托管** | `managed_repos`, `user_managed_repos` | 仓库级配置 + 用户-仓库多对多关联 |
-| **Agent 配置** | `agent_sessions`, `agent_type_config`, `agent_registry`, `event_route_config`, `backend_agents` | Agent 会话、类型、注册表、事件路由 |
+| **Agent 配置** | `devops_agent_session`, `agent_type_config`, `agent_registry`, `event_route_config`, `backend_agents` | Agent 会话、类型、注册表、事件路由 |
 | **事件流水线** | `events`, `meta` | 事件审计、元数据 |
 | **IM / 飞书** | `im_bot_config`, `im_channels`, `user_im_bindings`, `feishu_bindings`, `feishu_users`, `vod_conversations` | 多 Bot、群绑定、用户映射、VOD 会话 |
-| **聊天** | `chat_conversations`, `chat_messages`, `chat_config`, `sessions` | Chat 对话、消息、配置、会话 |
+| **聊天** | `chat_conversations`, `chat_messages`, `chat_config`, `chat_agent_session` | Chat 对话、消息、配置、会话 |
 | **历史遗留** | `users`, `bot_accounts`, `pipeline_instances`, `system_config`, `user_sessions` | 旧表/迁移源 |
 
 ---
@@ -140,7 +140,7 @@ UNIQUE (user_id, repo_id)
 
 ### 2.3 Agent 配置
 
-#### `agent_sessions` — Agent 运行时配置
+#### `devops_agent_session` — DevOps Agent 运行时配置（原 `agent_sessions`）
 ```sql
 id TEXT PRIMARY KEY,                   -- UUID
 repo_key TEXT NOT NULL,                -- owner/repo
@@ -158,6 +158,7 @@ im_app_secret TEXT DEFAULT '',
 vod_bot_app_id TEXT DEFAULT '',        -- VOD 专用：关联 im_bot_config
 UNIQUE(repo_key, agent_type)
 ```
+> 2026-08 由 `agent_sessions` 重命名而来，存 DevOps Agent（VOD/Issue/Coding/QA/SRE）的运行时配置。
 
 #### `agent_type_config` — Agent 类型元数据
 ```sql
@@ -274,7 +275,7 @@ PRIMARY KEY (repo_key, gitcode_user)
 #### `vod_conversations` — VOD 群会话
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT,
-agent_session_id TEXT NOT NULL,        -- → agent_sessions.id
+agent_session_id TEXT NOT NULL,        -- → devops_agent_session.id
 feishu_chat_id TEXT NOT NULL,
 feishu_chat_name TEXT DEFAULT '',
 oc_session_id TEXT DEFAULT '',         -- VOD 独立 opencode 会话
@@ -312,7 +313,7 @@ feishu_app_id TEXT DEFAULT '', feishu_app_secret TEXT DEFAULT '',
 updated_at TEXT DEFAULT (datetime('now'))
 ```
 
-#### `sessions` — 会话（聊天/仓库会话）
+#### `chat_agent_session` — Chat Agent 会话（原 `sessions`）
 ```sql
 id TEXT PRIMARY KEY,
 repo_key TEXT UNIQUE, source TEXT, repository TEXT,
@@ -324,6 +325,7 @@ opencode_session_id TEXT DEFAULT '',
 codearts_session_id TEXT DEFAULT '',
 created_at TEXT, last_active_at TEXT
 ```
+> 2026-08 由 `sessions` 重命名而来，存 Chat Agent（飞书）的会话历史 + opencode/codearts 会话 ID。
 
 ### 2.7 历史遗留表
 
@@ -393,7 +395,7 @@ created_at TEXT, last_active_at TEXT
    ┌────────────┬───────────────┼───────────────┬──────────────┐
    ▼            ▼               ▼               ▼              ▼
 ┌─────────┐ ┌──────────┐ ┌─────────────┐ ┌────────────┐ ┌──────────────┐
-│agent_sessions│ │ events   │ │feishu_bindings│ │im_channels │ │feishu_users  │
+│devops_agent_session│ │ events   │ │feishu_bindings│ │im_channels │ │feishu_users  │
 │(repo_key,   │ │(repo_key)│ │(repo_key)    │ │(repo_key)  │ │(repo_key)    │
 │ agent_type) │ └──────────┘ └─────────────┘ └────────────┘ └──────────────┘
 └─────┬───────┘
@@ -423,10 +425,10 @@ created_at TEXT, last_active_at TEXT
          │            │
          │            │ vod_bot_app_id FK
          │            ▼
-         │   ┌──────────────────┐
-         │   │  agent_sessions  │
-         │   │  vod_bot_app_id  │
-         │   └────────┬─────────┘
+         │   ┌────────────────────────┐
+         │   │  devops_agent_session  │
+         │   │  vod_bot_app_id        │
+         │   └──────────┬─────────────┘
          │            │ agent_session_id FK
          │            ▼
          │   ┌──────────────────┐
@@ -475,11 +477,11 @@ created_at TEXT, last_active_at TEXT
 | user_managed_repos → managed_repos | N:1 | repo_id |
 | **user_accounts ↔ managed_repos** | **N:M**（通过 user_managed_repos） | user_id + repo_id |
 | user_vms → user_vm_repos | 1:N | vm_id |
-| managed_repos → agent_sessions | 1:N | repo_key |
-| agent_sessions → vod_conversations | 1:N | agent_session_id |
-| agent_sessions → agent_type_config | N:1 | agent_type |
+| managed_repos → devops_agent_session | 1:N | repo_key |
+| devops_agent_session → vod_conversations | 1:N | agent_session_id |
+| devops_agent_session → agent_type_config | N:1 | agent_type |
 | chat_conversations → chat_messages | 1:N | conversation_id |
-| im_bot_config → agent_sessions (VOD) | 1:N | vod_bot_app_id |
+| im_bot_config → devops_agent_session (VOD) | 1:N | vod_bot_app_id |
 | im_bot_config → feishu_bindings (Chat) | 1:N | account=app_id |
 
 > 注：系统为 SQLite 单库，**物理外键约束（FOREIGN KEY）未强制启用**，所有表间关系为**逻辑外键**（通过应用层查询关联）。
@@ -490,7 +492,7 @@ created_at TEXT, last_active_at TEXT
 webhook 事件 → routing.get_domain_agent(event_type)
               → agent_type_config.subscribe_events LIKE '%"event_type"%'
               → 匹配 agent_type（如 issue/coding）
-              → agent_sessions 查 backend + skill
+              → devops_agent_session 查 backend + skill
               → append_event() 写 events 表
               → _execute_agent() 执行 opencode
 ```
@@ -501,7 +503,7 @@ webhook 事件 → routing.get_domain_agent(event_type)
 BotManager.load_from_db()
   → im_bot_config 每行一个 BotContext
   → chat_bot → process_chat_async → feishu_bindings (account=app_id)
-  → vod_bot  → process_vod_async  → agent_sessions (vod_bot_app_id)
+  → vod_bot  → process_vod_async  → devops_agent_session (vod_bot_app_id)
                                    → vod_conversations
 ```
 
@@ -512,13 +514,13 @@ BotManager.load_from_db()
 | 表 | 行数 | 表 | 行数 |
 |----|------|----|------|
 | user_accounts | 5 | events | 165 |
-| user_credentials | 2 | agent_sessions | 12 |
+| user_credentials | 2 | devops_agent_session | 12 |
 | managed_repos | 5（含 user_id=7/8 重复行，待拆分迁移） | agent_type_config | 16 |
 | user_managed_repos | —（拆分后新建） | agent_registry | 12 |
 | user_repos | 41 | event_route_config | 15 |
 | feishu_bindings | 2 | event_route_config | 15 |
 | feishu_users | 0 | meta | 5 |
-| sessions | 2 | backend_agents | 2 |
+| chat_agent_session | 2 | backend_agents | 2 |
 | chat_messages | 40 | im_bot_config | 2 |
 | chat_config | 1 | vod_conversations | 1 |
 | users（遗留） | 2 | bot_accounts（遗留） | 1 |
@@ -532,6 +534,6 @@ BotManager.load_from_db()
 | `users`/`bot_accounts` 遗留 | 迁移源表，仍存数据 | 确认迁移完整后可 DROP |
 | `pipeline_instances`/`system_config`/`user_sessions` | 代码无引用 | 可安全 DROP |
 | **`managed_repos` 冗余冲突** | 仓库级配置存在 `user_id+repo` 维度，多 user 时冗余/不一致 | 按 `managed-repos-normalization.md` 拆分为 managed_repos + user_managed_repos |
-| `sessions.account`/`feishu_bindings.account` 默认值 | 代码已显式传入 app_id/repo_key | 默认值不影响业务 |
+| `chat_agent_session.account`/`feishu_bindings.account` 默认值 | 代码已显式传入 app_id/repo_key | 默认值不影响业务 |
 | 物理外键未启用 | SQLite 无 FK 强制 | 应用层已通过 db_lock + 逻辑校验保障 |
 | ~~user_accounts 废弃字段~~ | webhook_token/oauth_*/webhook_url/bot_usernames | 已移除列，见 `user-accounts-field-cleanup.md`（已完成） |

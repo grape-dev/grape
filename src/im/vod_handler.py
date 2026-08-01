@@ -75,7 +75,7 @@ def _get_vod_session(repo_key: str) -> dict | None:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT id, backend, skill, repo_gitcode_token, vod_bot_app_id FROM agent_sessions WHERE repo_key=? AND agent_type='vod'",
+                "SELECT id, backend, skill, repo_gitcode_token, vod_bot_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
                 (repo_key,)
             )
             row = c.fetchone()
@@ -207,7 +207,7 @@ def _list_vod_repos(bot_app_id: str) -> list[dict]:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM agent_sessions WHERE agent_type='vod' AND vod_bot_app_id=?", (bot_app_id,))
+            c.execute("SELECT repo_key FROM devops_agent_session WHERE agent_type='vod' AND vod_bot_app_id=?", (bot_app_id,))
             for r in c.fetchall():
                 results.append({"repo_key": r[0]})
     except Exception:
@@ -269,7 +269,7 @@ def process_vod_message(message: dict, bot_app_id: str):
                     # 通过 agent_session_id 查 repo_key
                     with db_lock:
                         c = db.cursor()
-                        c.execute("SELECT repo_key FROM agent_sessions WHERE id=?", (row[0],))
+                        c.execute("SELECT repo_key FROM devops_agent_session WHERE id=?", (row[0],))
                         repo_row = c.fetchone()
                     repo = repo_row[0] if repo_row else "?"
                     _send_feishu_reply_text(bot_app_id, chat_id, f"📋 当前绑定: `{repo}`")
@@ -352,7 +352,7 @@ def process_vod_message(message: dict, bot_app_id: str):
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT repo_key, backend, skill, repo_gitcode_token FROM agent_sessions WHERE id=?", (agent_session_id,))
+                c.execute("SELECT repo_key, backend, skill, repo_gitcode_token FROM devops_agent_session WHERE id=?", (agent_session_id,))
                 session_row = c.fetchone()
         except Exception:
             session_row = None

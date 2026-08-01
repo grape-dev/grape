@@ -41,7 +41,7 @@ def _get_vod_session(repo_key: str) -> dict | None:
         with db_lock:
             c = db.cursor()
             c.execute("SELECT id, repo_key, backend, skill, vod_bot_app_id, repo_gitcode_token "
-                      "FROM agent_sessions WHERE agent_type='vod' AND repo_key=?", (repo_key,))
+                      "FROM devops_agent_session WHERE agent_type='vod' AND repo_key=?", (repo_key,))
             row = c.fetchone()
         if row:
             return {"id": row[0], "repo_key": row[1], "backend": row[2] or "opencode",
@@ -78,7 +78,7 @@ def _list_vod_repos(bot_app_id: str) -> list:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM agent_sessions WHERE agent_type='vod' AND vod_bot_app_id=?",
+            c.execute("SELECT repo_key FROM devops_agent_session WHERE agent_type='vod' AND vod_bot_app_id=?",
                       (bot_app_id,))
             for r in c.fetchall():
                 results.append({"repo_key": r[0]})
@@ -216,7 +216,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
                 if row:
                     with db_lock:
                         c = db.cursor()
-                        c.execute("SELECT repo_key FROM agent_sessions WHERE id=?", (row[0],))
+                        c.execute("SELECT repo_key FROM devops_agent_session WHERE id=?", (row[0],))
                         repo_row = c.fetchone()
                     repo = repo_row[0] if repo_row else "?"
                     await api.reply_text(ctx, msg_id, f"📋 当前绑定: `{repo}`")
@@ -301,7 +301,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT repo_key, backend, skill, repo_gitcode_token FROM agent_sessions WHERE id=?",
+                c.execute("SELECT repo_key, backend, skill, repo_gitcode_token FROM devops_agent_session WHERE id=?",
                           (agent_session_id,))
                 session_row = c.fetchone()
         except Exception:

@@ -28,7 +28,7 @@ def _import_session_manager(tmp_path):
     import sqlite3
     sm.db = sqlite3.connect(db_path, check_same_thread=False)
     sm.db.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
+        CREATE TABLE IF NOT EXISTS chat_agent_session (
             id TEXT PRIMARY KEY, repo_key TEXT UNIQUE,
             source TEXT, repository TEXT, status TEXT,
             event_history TEXT DEFAULT '[]',

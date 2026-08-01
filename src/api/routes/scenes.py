@@ -55,7 +55,7 @@ async def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
             sid = str(uuid.uuid4())
             try:
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at) VALUES (?,?,?,?,?,?,?,datetime('now'))",
+                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at) VALUES (?,?,?,?,?,?,?,datetime('now'))",
                     (sid, repo_key, agent_type, "opencode", skill, repo_token, "idle")
                 )
                 updated += 1

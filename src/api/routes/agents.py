@@ -77,7 +77,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, backend, skill, repo_gitcode_token, oc_session_id, status, last_active_at, vod_bot_app_id FROM agent_sessions WHERE repo_key=? AND agent_type=?",
+                "SELECT id, backend, skill, repo_gitcode_token, oc_session_id, status, last_active_at, vod_bot_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
@@ -210,18 +210,18 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent"})
 
                 # 如果换了新的 app_id，删除旧的 app_id
-                c.execute("SELECT vod_bot_app_id FROM agent_sessions WHERE repo_key=? AND agent_type='vod'", (repo_key,))
+                c.execute("SELECT vod_bot_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'", (repo_key,))
                 old_row = c.fetchone()
                 old_app_id = old_row[0] if old_row else ""
                 if old_app_id and old_app_id != body.vod_bot_app_id:
                     # 检查是否还有其他 agent_session 引用旧 app_id
-                    c.execute("SELECT COUNT(*) FROM agent_sessions WHERE vod_bot_app_id=? AND repo_key!=?", (old_app_id, repo_key))
+                    c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE vod_bot_app_id=? AND repo_key!=?", (old_app_id, repo_key))
                     other_refs = c.fetchone()[0]
                     if other_refs == 0:
                         c.execute("DELETE FROM im_bot_config WHERE bot_app_id=?", (old_app_id,))
                         log.info(f"VOD IM: removed old app_id={old_app_id[:30]}")
                     # 清理旧 conversations
-                    c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE repo_key=? AND agent_type='vod')", (repo_key,))
+                    c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN (SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod')", (repo_key,))
                     log.info(f"VOD IM: cleaned conversations for {repo_key}")
 
                 c.execute(
@@ -234,7 +234,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         c = db.cursor()
         try:
             c.execute(
-                "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, vod_bot_app_id) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
+                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, vod_bot_app_id) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
                 (session_id, repo_key, name, body.backend, body.skill, repo_token, "idle",
                  body.vod_bot_app_id if name == "vod" else "")
             )

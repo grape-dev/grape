@@ -12,7 +12,7 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, oc_session_id, status, last_active_at FROM agent_sessions WHERE repo_key=? AND agent_type=?",
+                "SELECT id, oc_session_id, status, last_active_at FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
                 (repo_key, agent_type)
             )
             row = c.fetchone()
@@ -34,7 +34,7 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
         now = datetime.now().isoformat()
         try:
             c.execute(
-                "INSERT INTO agent_sessions (id, repo_key, agent_type, backend, status, last_active_at) VALUES (?,?,?,?,?,?)",
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, backend, status, last_active_at) VALUES (?,?,?,?,?,?)",
                 (sid, repo_key, agent_type, backend, "idle", now)
             )
             db.commit()
@@ -57,12 +57,12 @@ def update_agent_session(session_id: str, status: str = "idle",
         try:
             if oc_session_id:
                 c.execute(
-                    "UPDATE agent_sessions SET status=?, oc_session_id=?, last_active_at=? WHERE id=?",
+                    "UPDATE devops_agent_session SET status=?, oc_session_id=?, last_active_at=? WHERE id=?",
                     (status, oc_session_id, datetime.now().isoformat(), session_id)
                 )
             else:
                 c.execute(
-                    "UPDATE agent_sessions SET status=?, last_active_at=? WHERE id=?",
+                    "UPDATE devops_agent_session SET status=?, last_active_at=? WHERE id=?",
                     (status, datetime.now().isoformat(), session_id)
                 )
             db.commit()
@@ -76,7 +76,7 @@ def list_agent_sessions(repo_key: str) -> list[dict]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, agent_type, backend, oc_session_id, status, last_active_at FROM agent_sessions WHERE repo_key=? ORDER BY agent_type",
+                "SELECT id, agent_type, backend, oc_session_id, status, last_active_at FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type",
                 (repo_key,)
             )
             return [
@@ -94,7 +94,7 @@ def delete_agent_session(repo_key: str, agent_type: str) -> bool:
     with db_lock:
         try:
             c = db.cursor()
-            c.execute("DELETE FROM agent_sessions WHERE repo_key=? AND agent_type=?",
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
                       (repo_key, agent_type))
             db.commit()
             return c.rowcount > 0
@@ -138,7 +138,7 @@ def ensure_default_agent_sessions(repo_key: str):
             _sid = str(uuid.uuid4())
             try:
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_sessions (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, vod_bot_app_id) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
+                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, vod_bot_app_id) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
                     (_sid, repo_key, _at, "opencode", _sk, _token, "idle",
                      _vod_bot_app_id if _at == "vod" else "")
                 )
@@ -154,7 +154,7 @@ def remove_agent_sessions(repo_key: str) -> int:
     with db_lock:
         try:
             c = db.cursor()
-            c.execute("DELETE FROM agent_sessions WHERE repo_key=?", (repo_key,))
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (repo_key,))
             db.commit()
             _cnt = c.rowcount
             if _cnt:

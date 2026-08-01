@@ -216,7 +216,7 @@ class TestProcessCommandClean:
             )
         """)
         db.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
+            CREATE TABLE IF NOT EXISTS chat_agent_session (
                 repo_key TEXT UNIQUE,
                 event_history TEXT DEFAULT '[]',
                 opencode_session_id TEXT DEFAULT '',
@@ -226,7 +226,7 @@ class TestProcessCommandClean:
         """)
         db.execute("INSERT OR REPLACE INTO feishu_bindings (chat_id, repo_key, account) VALUES (?,?,?)",
                    ("chat_clean_test", "owner/repo", "default"))
-        db.execute("INSERT OR REPLACE INTO sessions (repo_key, event_history, opencode_session_id, codearts_session_id, backend) VALUES (?,?,?,?,?)",
+        db.execute("INSERT OR REPLACE INTO chat_agent_session (repo_key, event_history, opencode_session_id, codearts_session_id, backend) VALUES (?,?,?,?,?)",
                    ("owner/repo", json.dumps([{"type": "chat", "text": "hello"}]), "ses_opencode_old", "ses_codearts_old", "opencode"))
         db.commit()
         return db, db_path
@@ -236,7 +236,7 @@ class TestProcessCommandClean:
         result = process_command("/clean", "chat_clean_test", "tester", db, "default")
         assert "已清除" in result
         c = db.cursor()
-        c.execute("SELECT opencode_session_id, codearts_session_id, backend, event_history FROM sessions WHERE repo_key=?", ("owner/repo",))
+        c.execute("SELECT opencode_session_id, codearts_session_id, backend, event_history FROM chat_agent_session WHERE repo_key=?", ("owner/repo",))
         row = c.fetchone()
         assert row[0] == ""  # opencode_session_id cleared
         assert row[1] == ""  # codearts_session_id cleared
@@ -262,10 +262,10 @@ class TestProcessCommandClean:
         db, _ = self._setup_db(tmp_path)
         c = db.cursor()
         # Add session with gitcode: prefix
-        c.execute("INSERT OR REPLACE INTO sessions (repo_key, opencode_session_id) VALUES (?,?)",
+        c.execute("INSERT OR REPLACE INTO chat_agent_session (repo_key, opencode_session_id) VALUES (?,?)",
                   ("gitcode:owner/repo", "ses_another"))
         db.commit()
         result = process_command("/clean", "chat_clean_test", "tester", db, "default")
         assert "已清除" in result
-        c.execute("SELECT opencode_session_id FROM sessions WHERE repo_key=?", ("gitcode:owner/repo",))
+        c.execute("SELECT opencode_session_id FROM chat_agent_session WHERE repo_key=?", ("gitcode:owner/repo",))
         assert c.fetchone()[0] == ""
