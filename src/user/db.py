@@ -471,6 +471,7 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     is_admin INTEGER DEFAULT 0,
     bot_gitcode_token TEXT DEFAULT '',
     gitcode_webhook_token TEXT DEFAULT '',
+    bot_username TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE (user_id, repo_owner, repo_name)
 )
@@ -584,6 +585,33 @@ def init_db():
             db.execute("ALTER TABLE managed_repos ADD COLUMN gitcode_webhook_token TEXT DEFAULT ''")
         except Exception:
             pass
+        try:
+            db.execute("ALTER TABLE managed_repos ADD COLUMN bot_username TEXT DEFAULT ''")
+        except Exception:
+            pass
+        # 迁移 bot_usernames 从 user_accounts → managed_repos.bot_username
+        try:
+            # 对每个配置了 bot_usernames 的账户，将 bot 用户名映射到该账户托管的所有 repo
+            c = db.cursor()
+            c.execute("SELECT username, bot_usernames FROM user_accounts WHERE bot_usernames IS NOT NULL AND bot_usernames!=''")
+            for uname, raw in c.fetchall():
+                try:
+                    names = json.loads(raw)
+                    if not isinstance(names, list):
+                        names = []
+                except (json.JSONDecodeError, TypeError):
+                    names = [s.strip() for s in raw.split(",") if s.strip()]
+                if not names:
+                    continue
+                bot_name = names[0]
+                # 匹配该账户名（可能是 owner/repo 或真实用户）对应的托管仓库
+                c.execute("UPDATE managed_repos SET bot_username=? WHERE full_name=? AND (bot_username='' OR bot_username IS NULL)", (bot_name, uname))
+                c.execute("UPDATE managed_repos SET bot_username=? WHERE (repo_owner=? OR full_name=?) AND (bot_username='' OR bot_username IS NULL)", (bot_name, uname, uname))
+            # 兜底：若 user_accounts 已无记录但 managed_repos 有 bot_gitcode_token，设置默认 bot_username
+            c.execute("UPDATE managed_repos SET bot_username=COALESCE(NULLIF(bot_username,''), 'devops-bot') WHERE bot_username='' OR bot_username IS NULL")
+            db.commit()
+        except Exception as e:
+            log.warning(f"Migrate bot_username to managed_repos failed: {e}")
         try:
             db.execute("ALTER TABLE user_vms ADD COLUMN status TEXT DEFAULT ''")
         except Exception:
@@ -732,12 +760,12 @@ def get_skill_for_event(user_id: int, repo_key: str, event_type: str) -> str | N
 
 # ====== 托管仓库 CRUD ======
 
-def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: str, webhook_id: int = 0, is_admin: bool = True, bot_gitcode_token: str = "", gitcode_webhook_token: str = "") -> bool:
+def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: str, webhook_id: int = 0, is_admin: bool = True, bot_gitcode_token: str = "", gitcode_webhook_token: str = "", bot_username: str = "") -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, webhook_id, is_admin, bot_gitcode_token, gitcode_webhook_token) VALUES (?,?,?,?,?,?,?,?)",
-                      (user_id, repo_owner, repo_name, full_name, webhook_id, int(is_admin), bot_gitcode_token, gitcode_webhook_token))
+            c.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, webhook_id, is_admin, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
+                      (user_id, repo_owner, repo_name, full_name, webhook_id, int(is_admin), bot_gitcode_token, gitcode_webhook_token, bot_username))
             db.commit()
             return True
     except Exception as e:
@@ -748,8 +776,8 @@ def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: s
 def get_managed_repos(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_owner, repo_name, full_name, webhook_id, is_admin, bot_gitcode_token, gitcode_webhook_token, created_at FROM managed_repos WHERE user_id=? ORDER BY full_name", (user_id,))
-        return [{"repo_owner": r[0], "repo_name": r[1], "full_name": r[2], "webhook_id": r[3], "is_admin": bool(r[4]), "bot_gitcode_token": r[5] or "", "gitcode_webhook_token": r[6] or "", "created_at": r[7]} for r in c.fetchall()]
+        c.execute("SELECT repo_owner, repo_name, full_name, webhook_id, is_admin, bot_gitcode_token, gitcode_webhook_token, bot_username, created_at FROM managed_repos WHERE user_id=? ORDER BY full_name", (user_id,))
+        return [{"repo_owner": r[0], "repo_name": r[1], "full_name": r[2], "webhook_id": r[3], "is_admin": bool(r[4]), "bot_gitcode_token": r[5] or "", "gitcode_webhook_token": r[6] or "", "bot_username": r[7] or "", "created_at": r[8]} for r in c.fetchall()]
 
 
 def update_managed_repo_admin(user_id: int, repo_owner: str, repo_name: str, is_admin: bool) -> bool:
@@ -773,6 +801,18 @@ def update_managed_repo_bot_token(user_id: int, repo_owner: str, repo_name: str,
             return c.rowcount > 0
     except Exception as e:
         log.warning(f"Update managed repo bot token failed: {e}")
+        return False
+
+
+def update_managed_repo_bot_username(user_id: int, repo_owner: str, repo_name: str, bot_username: str) -> bool:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE managed_repos SET bot_username=? WHERE user_id=? AND repo_owner=? AND repo_name=?", (bot_username, user_id, repo_owner, repo_name))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"Update managed repo bot username failed: {e}")
         return False
 
 
@@ -941,21 +981,14 @@ def resolve_user_account_by_webhook_token(token: str) -> str | None:
 
 
 def get_all_bot_usernames() -> list[str]:
-    """获取所有账户中配置的 bot_usernames 列表"""
+    """获取所有托管仓库配置的 bot 用户名列表（用于 self-comment 检测）"""
     result = []
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT bot_usernames FROM user_accounts WHERE bot_usernames IS NOT NULL AND bot_usernames!=''")
+            c.execute("SELECT DISTINCT bot_username FROM managed_repos WHERE bot_username IS NOT NULL AND bot_username!=''")
             for row in c.fetchall():
-                raw = row[0]
-                try:
-                    names = json.loads(raw)
-                    if isinstance(names, list):
-                        result.extend(names)
-                except (json.JSONDecodeError, TypeError):
-                    names = [s.strip() for s in raw.split(",") if s.strip()]
-                    result.extend(names)
+                result.append(row[0])
         except Exception:
             pass
     return list(set(result))
