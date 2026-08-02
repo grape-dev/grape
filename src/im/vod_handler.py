@@ -75,14 +75,14 @@ def _get_vod_session(repo_key: str) -> dict | None:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT id, backend, skill, repo_gitcode_token, vod_bot_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                "SELECT id, backend, skill, repo_gitcode_token, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
                 (repo_key,)
             )
             row = c.fetchone()
             if row:
                 return {"id": row[0], "backend": row[1] or "opencode",
                         "skill": row[2] or "vod", "repo_gitcode_token": row[3] or "",
-                        "vod_bot_app_id": row[4] or ""}
+                        "im_app_id": row[4] or ""}
     except Exception:
         pass
     return None
@@ -207,7 +207,7 @@ def _list_vod_repos(bot_app_id: str) -> list[dict]:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM devops_agent_session WHERE agent_type='vod' AND vod_bot_app_id=?", (bot_app_id,))
+            c.execute("SELECT repo_key FROM devops_agent_session WHERE agent_type='vod' AND im_app_id=?", (bot_app_id,))
             for r in c.fetchall():
                 results.append({"repo_key": r[0]})
     except Exception:
@@ -285,7 +285,7 @@ def process_vod_message(message: dict, bot_app_id: str):
             if not agent_session:
                 _send_feishu_reply_text(bot_app_id, chat_id, f"❌ 仓库 `{repo_key}` 未托管或未配置 VOD Agent")
                 return
-            if agent_session["vod_bot_app_id"] != bot_app_id:
+            if agent_session["im_app_id"] != bot_app_id:
                 _send_feishu_reply_text(bot_app_id, chat_id, f"❌ 仓库 `{repo_key}` 使用了其他机器人凭证，无法绑定")
                 return
             _get_or_create_conversation(chat_id, agent_session["id"])

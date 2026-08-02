@@ -78,7 +78,7 @@ function renderAgent(name, data) {
       <h3 style="font-size:13px;font-weight:600">IM 配置</h3>
       <span class="ts t3">${data.im && data.im.connected ? '🟢 已配置' : ''}</span>
     </div>
-    <div class="srow"><label>Bot App ID</label><input id="vodImAppId" value="${(data.im && data.im.vod_bot_app_id) || ''}" placeholder="cli_xxxxxxxx" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
+    <div class="srow"><label>Bot App ID</label><input id="vodImAppId" value="${(data.im && data.im.im_app_id) || ''}" placeholder="cli_xxxxxxxx" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
     <div class="srow"><label>Bot Secret</label><input id="vodImSecret" type="password" value="${data.im && data.im.connected ? '********' : ''}" placeholder="留空不修改" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
     ${data.im && data.im.conversations && data.im.conversations.length > 0 ? `
     <div style="margin-top:8px">
@@ -107,8 +107,8 @@ function saveAgentConfig(name) {
   if (name === 'vod') {
     const appId = document.getElementById('vodImAppId')?.value || '';
     const rawSecret = document.getElementById('vodImSecret')?.value || '';
-    body.vod_bot_app_id = appId;
-    body.vod_bot_app_secret = rawSecret === '********' ? '' : rawSecret;
+    body.im_app_id = appId;
+    body.im_app_secret = rawSecret === '********' ? '' : rawSecret;
   }
   API.put('/agents/' + name + '/' + repo.owner + '/' + repo.name, body).then(r => {
     app.showToast('配置已保存');

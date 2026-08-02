@@ -121,14 +121,16 @@ def ensure_default_agent_sessions(repo_key: str):
     from src.user.db import get_bot_token_by_repo
     _token = get_bot_token_by_repo(_owner, _rname)
 
-    _vod_bot_app_id = ""
+    _im_app_id = ""
+    _im_app_secret = ""
     try:
         with db_lock:
             c2 = db.cursor()
-            c2.execute("SELECT bot_app_id FROM im_bot_config WHERE bot_type='vod_bot' LIMIT 1")
+            c2.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='vod_bot' LIMIT 1")
             _row = c2.fetchone()
             if _row:
-                _vod_bot_app_id = _row[0]
+                _im_app_id = _row[0]
+                _im_app_secret = _row[1] or ""
     except Exception:
         pass
 
@@ -138,9 +140,9 @@ def ensure_default_agent_sessions(repo_key: str):
             _sid = str(uuid.uuid4())
             try:
                 c.execute(
-                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, vod_bot_app_id) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
+                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,datetime('now'),?,?,'feishu')",
                     (_sid, repo_key, _at, "opencode", _sk, _token, "idle",
-                     _vod_bot_app_id if _at == "vod" else "")
+                     _im_app_id if _at == "vod" else "", _im_app_secret if _at == "vod" else "")
                 )
             except Exception as e:
                 log.warning(f"Failed to create session for {_at}: {e}")

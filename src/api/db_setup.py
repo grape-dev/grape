@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS devops_agent_session (
     oc_session_id TEXT DEFAULT '',
     repo_gitcode_token TEXT DEFAULT '',
     status TEXT DEFAULT 'idle',
+    im_provider TEXT DEFAULT '',
+    im_app_id TEXT DEFAULT '',
+    im_app_secret TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     last_active_at TEXT DEFAULT (datetime('now')),
     UNIQUE(repo_key, agent_type)
@@ -418,7 +421,6 @@ def _migrate_tables():
         "ALTER TABLE devops_agent_session ADD COLUMN im_provider TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN im_app_id TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN im_app_secret TEXT DEFAULT ''",
-        "ALTER TABLE devops_agent_session ADD COLUMN vod_bot_app_id TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
@@ -514,7 +516,7 @@ def _migrate_tables():
                 log.info("Migrated table agent_sessions -> devops_agent_session")
             elif "agent_sessions" in _tables and "devops_agent_session" in _tables:
                 # 新表已被创建但旧表仍存在（历史库），迁移数据后删除旧表
-                c.execute("INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at, im_provider, im_app_id, im_app_secret, vod_bot_app_id) SELECT id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at, im_provider, im_app_id, im_app_secret, vod_bot_app_id FROM agent_sessions")
+                c.execute("INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at, im_provider, im_app_id, im_app_secret) SELECT id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at, im_provider, im_app_id, im_app_secret FROM agent_sessions")
                 c.execute("DROP TABLE agent_sessions")
                 db.commit()
                 log.info("Migrated agent_sessions data into devops_agent_session and dropped agent_sessions")
@@ -570,3 +572,22 @@ def _migrate_tables():
             log.info("Dropped legacy tables: agent_type_config, user_skills, repo_skill_mapping")
     except Exception as e:
         log.warning(f"Drop legacy skill tables failed: {e}")
+    # 迁移 devops_agent_session：vod_bot_app_id → im_app_id（通用化，保留 im_* 通用字段）
+    try:
+        with db_lock:
+            c = db.cursor()
+            cols = [r[1] for r in c.execute("PRAGMA table_info(devops_agent_session)").fetchall()]
+            if "vod_bot_app_id" in cols:
+                # 1. vod_bot_app_id → im_app_id + im_provider='feishu' + im_app_secret 补齐
+                c.execute("UPDATE devops_agent_session SET im_app_id=vod_bot_app_id, im_provider='feishu' WHERE vod_bot_app_id!='' AND vod_bot_app_id IS NOT NULL")
+                c.execute("UPDATE devops_agent_session SET im_app_secret=(SELECT bot_app_secret FROM im_bot_config WHERE bot_app_id=devops_agent_session.im_app_id) WHERE im_app_id!='' AND im_app_secret=''")
+                db.commit()
+                # 2. 删除 vod_bot_app_id 列
+                try:
+                    c.execute("ALTER TABLE devops_agent_session DROP COLUMN vod_bot_app_id")
+                    db.commit()
+                    log.info("Migrated devops_agent_session vod_bot_app_id -> im_app_id, dropped vod_bot_app_id")
+                except Exception:
+                    log.warning("DROP COLUMN vod_bot_app_id failed (may need rebuild)")
+    except Exception as e:
+        log.warning(f"Migrate vod_bot_app_id -> im_app_id failed: {e}")

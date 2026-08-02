@@ -705,7 +705,7 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE agent_type='vod' AND vod_bot_app_id=?", (bot_app_id,))
+            c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE agent_type='vod' AND im_app_id=?", (bot_app_id,))
             if c.fetchone()[0] == 0:
                 log.info(f"VOD WS: {bot_app_id[:20]} has no agent_session, skip")
                 return

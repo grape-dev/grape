@@ -40,12 +40,12 @@ def _get_vod_session(repo_key: str) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, repo_key, backend, skill, vod_bot_app_id, repo_gitcode_token "
+            c.execute("SELECT id, repo_key, backend, skill, im_app_id, repo_gitcode_token "
                       "FROM devops_agent_session WHERE agent_type='vod' AND repo_key=?", (repo_key,))
             row = c.fetchone()
         if row:
             return {"id": row[0], "repo_key": row[1], "backend": row[2] or "opencode",
-                    "skill": row[3] or "vod", "vod_bot_app_id": row[4] or "",
+                    "skill": row[3] or "vod", "im_app_id": row[4] or "",
                     "repo_gitcode_token": row[5] or ""}
     except Exception:
         pass
@@ -78,7 +78,7 @@ def _list_vod_repos(bot_app_id: str) -> list:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM devops_agent_session WHERE agent_type='vod' AND vod_bot_app_id=?",
+            c.execute("SELECT repo_key FROM devops_agent_session WHERE agent_type='vod' AND im_app_id=?",
                       (bot_app_id,))
             for r in c.fetchall():
                 results.append({"repo_key": r[0]})
@@ -232,7 +232,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             if not agent_session:
                 await api.reply_text(ctx, msg_id, f"❌ 仓库 `{repo_key}` 未配置 VOD Agent")
                 return
-            if agent_session["vod_bot_app_id"] != ctx.app_id:
+            if agent_session["im_app_id"] != ctx.app_id:
                 await api.reply_text(ctx, msg_id, f"❌ 仓库使用了其他机器人凭证")
                 return
             _get_or_create_conversation(chat_id, agent_session["id"])

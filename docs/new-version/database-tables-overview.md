@@ -134,10 +134,9 @@ repo_gitcode_token TEXT DEFAULT '',    -- repo 级 bot token
 status TEXT DEFAULT 'idle',
 created_at TEXT DEFAULT (datetime('now')),
 last_active_at TEXT DEFAULT (datetime('now')),
-im_provider TEXT DEFAULT '',
-im_app_id TEXT DEFAULT '',
-im_app_secret TEXT DEFAULT '',
-vod_bot_app_id TEXT DEFAULT '',        -- VOD 专用：关联 im_bot_config
+im_provider TEXT DEFAULT '',           -- IM 平台：feishu/wecom/dingtalk
+im_app_id TEXT DEFAULT '',             -- 关联的 IM bot app_id（VOD = 原 vod_bot_app_id）
+im_app_secret TEXT DEFAULT '',         -- IM bot app_secret
 UNIQUE(repo_key, agent_type)
 ```
 > 2026-08 由 `agent_sessions` 重命名而来，存 DevOps Agent（VOD/Issue/Coding/QA/SRE）的运行时配置。
@@ -421,11 +420,11 @@ created_at TEXT, last_active_at TEXT
   │  bot_type: chat/vod      │
   └──────┬────────────┬──────┘
          │            │
-         │            │ vod_bot_app_id FK
+         │            │ im_app_id FK
          │            ▼
          │   ┌────────────────────────┐
          │   │  devops_agent_session  │
-         │   │  vod_bot_app_id        │
+         │   │  im_app_id             │
          │   └──────────┬─────────────┘
          │            │ agent_session_id FK
          │            ▼
@@ -479,7 +478,7 @@ created_at TEXT, last_active_at TEXT
 | devops_agent_session → vod_conversations | 1:N | agent_session_id |
 | devops_agent_session → agent_type | N:1 | agent_type |
 | chat_conversations → chat_messages | 1:N | conversation_id |
-| im_bot_config → devops_agent_session (VOD) | 1:N | vod_bot_app_id |
+| im_bot_config → devops_agent_session (VOD) | 1:N | im_app_id |
 | im_bot_config → feishu_bindings (Chat) | 1:N | account=app_id |
 
 > 注：系统为 SQLite 单库，**物理外键约束（FOREIGN KEY）未强制启用**，所有表间关系为**逻辑外键**（通过应用层查询关联）。
@@ -501,7 +500,7 @@ webhook 事件 → routing.get_domain_agent(event_type)
 BotManager.load_from_db()
   → im_bot_config 每行一个 BotContext
   → chat_bot → process_chat_async → feishu_bindings (account=app_id)
-  → vod_bot  → process_vod_async  → devops_agent_session (vod_bot_app_id)
+  → vod_bot  → process_vod_async  → devops_agent_session (im_app_id)
                                    → vod_conversations
 ```
 

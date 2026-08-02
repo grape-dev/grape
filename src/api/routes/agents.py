@@ -77,13 +77,13 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, backend, skill, repo_gitcode_token, oc_session_id, status, last_active_at, vod_bot_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                "SELECT id, backend, skill, repo_gitcode_token, oc_session_id, status, last_active_at, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
             if row:
                 session_data = {"id": row[0], "backend": row[1], "skill": row[2] or "", "repo_gitcode_token": row[3] or "", "oc_session_id": row[4], "status": row[5], "last_active_at": row[6],
-                               "vod_bot_app_id": row[7] or ""}
+                               "im_app_id": row[7] or ""}
         except Exception:
             pass
 
@@ -101,9 +101,9 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
                 ]
             except Exception:
                 pass
-            if session_data.get("vod_bot_app_id"):
+            if session_data.get("im_app_id"):
                 try:
-                    c.execute("SELECT COUNT(*) FROM im_bot_config WHERE bot_type='vod_bot' AND bot_app_id=?", (session_data["vod_bot_app_id"],))
+                    c.execute("SELECT COUNT(*) FROM im_bot_config WHERE bot_type='vod_bot' AND bot_app_id=?", (session_data["im_app_id"],))
                     vod_bot_connected = c.fetchone()[0] > 0
                 except Exception:
                     pass
@@ -156,7 +156,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         },
         "recent_events": recent_events,
         "im": {
-            "vod_bot_app_id": session_data.get("vod_bot_app_id", ""),
+            "im_app_id": session_data.get("im_app_id", ""),
             "connected": vod_bot_connected,
             "conversations": vod_conversations,
         } if name == "vod" else None,
@@ -167,8 +167,8 @@ class AgentConfig(BaseModel):
     backend: str = "opencode"
     skill: str = ""
     # VOD IM 配置（仅在 name=="vod" 时生效）
-    vod_bot_app_id: str = ""
-    vod_bot_app_secret: str = ""
+    im_app_id: str = ""
+    im_app_secret: str = ""
 
 
 @router.put("/{name}/{owner}/{repo}")
@@ -181,6 +181,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     import uuid
     session_id = str(uuid.uuid4())
 
+    app_secret = ""
     from src.user.db import get_bot_token_by_repo
     repo_token = get_bot_token_by_repo(owner, repo)
 
@@ -188,13 +189,13 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 
     # VOD IM 配置：保存到 im_bot_config + 类型独占校验 + 清理旧 app_id
     old_app_id = ""
-    if name == "vod" and body.vod_bot_app_id:
-        app_secret = body.vod_bot_app_secret
+    if name == "vod" and body.im_app_id:
+        app_secret = body.im_app_secret
         if app_secret == "********":
             try:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("SELECT bot_app_secret FROM im_bot_config WHERE bot_app_id=?", (body.vod_bot_app_id,))
+                    c.execute("SELECT bot_app_secret FROM im_bot_config WHERE bot_app_id=?", (body.im_app_id,))
                     row = c.fetchone()
                     if row:
                         app_secret = row[0]
@@ -204,18 +205,18 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             with db_lock:
                 c = db.cursor()
                 # 类型独占校验
-                c.execute("SELECT bot_type FROM im_bot_config WHERE bot_app_id=?", (body.vod_bot_app_id,))
+                c.execute("SELECT bot_type FROM im_bot_config WHERE bot_app_id=?", (body.im_app_id,))
                 row = c.fetchone()
                 if row and row[0] == "chat_bot":
                     raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent"})
 
                 # 如果换了新的 app_id，删除旧的 app_id
-                c.execute("SELECT vod_bot_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'", (repo_key,))
+                c.execute("SELECT im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'", (repo_key,))
                 old_row = c.fetchone()
                 old_app_id = old_row[0] if old_row else ""
-                if old_app_id and old_app_id != body.vod_bot_app_id:
+                if old_app_id and old_app_id != body.im_app_id:
                     # 检查是否还有其他 agent_session 引用旧 app_id
-                    c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE vod_bot_app_id=? AND repo_key!=?", (old_app_id, repo_key))
+                    c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE im_app_id=? AND repo_key!=?", (old_app_id, repo_key))
                     other_refs = c.fetchone()[0]
                     if other_refs == 0:
                         c.execute("DELETE FROM im_bot_config WHERE bot_app_id=?", (old_app_id,))
@@ -226,7 +227,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 
                 c.execute(
                     "INSERT OR REPLACE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) VALUES (?,?,?)",
-                    (body.vod_bot_app_id, app_secret, "vod_bot")
+                    (body.im_app_id, app_secret, "vod_bot")
                 )
                 db.commit()
 
@@ -234,24 +235,26 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         c = db.cursor()
         try:
             c.execute(
-                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, vod_bot_app_id) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
+                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,datetime('now'),?,?,?)",
                 (session_id, repo_key, name, body.backend, body.skill, repo_token, "idle",
-                 body.vod_bot_app_id if name == "vod" else "")
+                 body.im_app_id if name == "vod" else "",
+                 app_secret if name == "vod" and app_secret else "",
+                 "feishu" if name == "vod" and body.im_app_id else "")
             )
             db.commit()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"保存配置失败: {e}"})
 
     # VOD IM：通过 BotManager 动态增删 Bot
-    if name == "vod" and body.vod_bot_app_id and app_secret:
+    if name == "vod" and body.im_app_id and app_secret:
         try:
             from src.api.main import bot_manager
             if bot_manager and bot_manager.api:
-                if old_app_id and old_app_id != body.vod_bot_app_id:
+                if old_app_id and old_app_id != body.im_app_id:
                     await bot_manager.remove_bot(old_app_id)
                     log.info(f"VOD IM: removed old bot {old_app_id[:30]} from BotManager")
-                await bot_manager.add_bot(body.vod_bot_app_id, app_secret, bot_type="vod_bot")
-                log.info(f"VOD IM: added bot {body.vod_bot_app_id[:30]} to BotManager")
+                await bot_manager.add_bot(body.im_app_id, app_secret, bot_type="vod_bot")
+                log.info(f"VOD IM: added bot {body.im_app_id[:30]} to BotManager")
         except Exception as e:
             log.warning(f"VOD BotManager update failed: {e}")
 
