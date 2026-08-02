@@ -40,6 +40,20 @@
 
 **判定函数**：`evaluate_agent_output(agent_type, tool_uses, final_text) -> (has_output: bool, result: str)`
 
+### Agent 职责与事件路由（v2.1 调整）
+
+| Agent | 触发方式 | 订阅事件 | skill |
+|-------|---------|---------|-------|
+| coding | **仅 A2A**（由 Issue/QA 背后触发，不感知 PR 事件） | `[]` | implementation |
+| qa | 直接监听 PR 事件 | `pull_request_opened` / `pull_request_updated` / `note_hook_pr` | pr |
+| issue | webhook 事件 | issue_* 事件 | issue |
+| sre | webhook 事件 | 构建/部署/发布事件 | cloud-deploy 等 |
+| vod | IM 群消息 | vod_signal | vod |
+
+> v2.1 将 PR 事件从 coding 转移到 qa：coding 专注于 A2A 触发的代码实现，qa 负责 PR 代码审查、测试、功能验证、安全检查。
+> 配置文件：`configs/agent-description.json`（订阅）、`configs/skill-description.json`（skill 归属）、`configs/agent-skill-mapping.json`（默认 skill）。
+> 启动时 seed 自动更新 agent_type 订阅，迁移逻辑同步 skill 归属。
+
 ## 四、表结构
 
 ### 4.1 events 表（瘦身 + 新增 result）
