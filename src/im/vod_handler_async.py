@@ -151,7 +151,8 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
     start_time = time.time()
     for event_type, data in stream_agent(prompt, wsd, backend_session_id, skill,
                                           backend_name=backend, account=repo_key,
-                                          repo_gitcode_token=repo_token):
+                                          repo_gitcode_token=repo_token,
+                                          agent_label=f"[Agent:vod|repo:{repo_key}]"):
         if event_type == "done":
             final_text = data.get("text", "")
             exit_code = data.get("exit_code", -1)

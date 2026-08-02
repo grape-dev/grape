@@ -200,7 +200,8 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
 
         for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat",
                                               backend_name=backend, account=exec_account,
-                                              repo_gitcode_token=repo_token):
+                                              repo_gitcode_token=repo_token,
+                                              agent_label=f"[Agent:chat|repo:{repository}]"):
             if event_type == "done":
                 d = data
                 final_text = d["text"]

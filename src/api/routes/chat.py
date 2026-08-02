@@ -134,6 +134,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
                 prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=backend_session_id,
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], env_extra=env_extra,
+                agent_label=f"[Agent:chat|user:{user['username']}]",
             ):
                 # 日志输出
                 if evt_type == "step_start":
@@ -229,6 +230,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=backend_session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], env_extra=env_extra,
+                    agent_label=f"[Agent:chat|user:{user['username']}]",
                 ):
                     # 日志输出（对齐 master 分支 im/handler.py）
                     if evt_type == "step_start":

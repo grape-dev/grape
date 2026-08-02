@@ -183,7 +183,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
                 repo_token = get_bot_token_by_repo(parts[0], parts[1])
         except Exception:
             pass
-        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account, repo_gitcode_token=repo_token):
+        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account, repo_gitcode_token=repo_token, agent_label=f"[Agent:chat|repo:{repo_key.replace('gitcode:', '')}]"):
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")
             elif event_type == "text":

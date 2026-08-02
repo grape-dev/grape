@@ -142,6 +142,7 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
             prompt, ws, session_id=conv.get("backend_session_id", ""),
             event_type="vod_signal", backend_name=agent_session.get("backend", "opencode"),
             account=repo_key, repo_gitcode_token=agent_session.get("repo_gitcode_token", ""),
+            agent_label=f"[Agent:vod|repo:{repo_key}]",
         ):
             if evt_type == "done":
                 d = data

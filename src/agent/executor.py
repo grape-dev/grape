@@ -47,8 +47,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  event_type: str = "", backend_name: str = "opencode",
                  account: str = "", user_id: int = 0,
                  env_extra: dict | None = None,
-                 repo_gitcode_token: str = "") -> Generator:
-    """流式执行 Agent，yield 事件。"""
+                 repo_gitcode_token: str = "",
+                 agent_label: str = "") -> Generator:
+    """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）"""
+    label = f"{agent_label} " if agent_label else ""
     backend = get_backend(backend_name)
     env = backend.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
@@ -71,15 +73,15 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     args = backend.build_args(prompt, session_id)
     agent_cmd = shutil.which(backend.binary) or shutil.which(backend.binary + ".cmd")
     if not agent_cmd:
-        log.error(f"{backend.name} CLI not found in PATH")
+        log.error(f"{label}{backend.name} CLI not found in PATH")
         yield ("done", {
             "exit_code": -1, "text": "", "oc_session_id": session_id,
             "errors": [f"{backend.name} not found"], "stderr": ""
         })
         return
 
-    log.info(f"{backend.name} args: {' '.join(args)[:200]}...")
-    log.info(f"{backend.name} cwd: {cwd}")
+    log.info(f"{label}{backend.name} args: {' '.join(args)[:200]}...")
+    log.info(f"{label}{backend.name} cwd: {cwd}")
 
     stdin_pipe = subprocess.PIPE if backend.prompt_via_stdin else None
     proc = subprocess.Popen(
@@ -130,7 +132,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-        log.warning(f"{backend.name} timed out after 120s, killed")
+        log.warning(f"{label}{backend.name} timed out after 120s, killed")
         yield ("done", {
             "exit_code": -1, "text": "", "oc_session_id": new_session_id,
             "errors": [f"{backend.name} timed out"], "stderr": ""

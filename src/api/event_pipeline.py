@@ -237,7 +237,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     except Exception:
         pass
 
-    log.info(f"Exec agent: type={agent_type}, backend={backend}, skill={skill_name}, seq={seq}, oc_session={oc_session_id[:20] if oc_session_id else 'none'}")
+    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] type={agent_type}, backend={backend}, skill={skill_name}, seq={seq}, oc_session={oc_session_id[:20] if oc_session_id else 'none'}")
 
     try:
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type])
@@ -257,7 +257,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     started_at = datetime.now().isoformat()
     update_event_config(seq, backend, skill_name, started_at)
     update_event_status(seq, "running")
-    log.info(f"Exec agent: spawning {backend} for seq={seq}")
+    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] spawning {backend} for seq={seq}")
 
     exit_code = -1
     final_text = ""
@@ -269,6 +269,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
             backend_name=backend, account=exec_account,
             repo_gitcode_token=repo_gitcode_token,
+            agent_label=f"[Agent:{agent_type}|repo:{repo_name}]",
         ):
             agent_logs.append({"time": datetime.now().isoformat(), "type": evt_type, "msg": str(data)[:200]})
             if evt_type == "done":
@@ -276,21 +277,21 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
                 exit_code = d.get("exit_code", -1)
                 final_text = d.get("text", "")
                 new_oc_session_id = d.get("oc_session_id", "")
-                log.info(f"Agent done: exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
+                log.info(f"Agent done: [Agent:{agent_type}|repo:{repo_name}] exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
             elif evt_type == "error":
-                log.warning(f"Agent error: {data}")
+                log.warning(f"Agent error: [Agent:{agent_type}|repo:{repo_name}] {data}")
             elif evt_type == "step_start":
-                log.info(f"[agent seq={seq}] {data}")
+                log.info(f"[agent {agent_type}|repo:{repo_name} seq={seq}] {data}")
             elif evt_type == "tool_use":
-                log.info(f"[agent seq={seq}] TOOL: {str(data)[:160]}")
+                log.info(f"[agent {agent_type}|repo:{repo_name} seq={seq}] TOOL: {str(data)[:160]}")
             elif evt_type == "text":
-                log.info(f"[agent seq={seq}] TEXT: {str(data)[:160]}")
+                log.info(f"[agent {agent_type}|repo:{repo_name} seq={seq}] TEXT: {str(data)[:160]}")
             elif evt_type == "reasoning":
-                log.info(f"[agent seq={seq}] REASONING: {str(data)[:160]}")
+                log.info(f"[agent {agent_type}|repo:{repo_name} seq={seq}] REASONING: {str(data)[:160]}")
             else:
-                log.info(f"[agent seq={seq}] {evt_type}: {str(data)[:160]}")
+                log.info(f"[agent {agent_type}|repo:{repo_name} seq={seq}] {evt_type}: {str(data)[:160]}")
     except Exception as e:
-        log.warning(f"Exec agent failed: {e}")
+        log.warning(f"Exec agent failed: [Agent:{agent_type}|repo:{repo_name}] {e}")
 
     # 更新 oc_session_id（持久化对话上下文）
     if new_oc_session_id and new_oc_session_id != oc_session_id:
