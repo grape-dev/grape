@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS unified_user_mapping (
 """
 
 _db_path = os.path.join(os.path.dirname(__file__), "..", "data/sessions.db")
-db_lock = threading.Lock()
+db_lock = threading.RLock()
 
 db = sqlite3.connect(_db_path, check_same_thread=False)
 # 迁移旧表 sessions → chat_agent_session（幂等，须先于 CREATE 执行）
