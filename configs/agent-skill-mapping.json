@@ -1,54 +1,54 @@
 {
-  "scenes": {
-    "default": {
-      "name": "通用开发",
-      "mapping": {
-        "vod": "vod",
-        "issue": "issue",
-        "coding": "implementation",
-        "qa": "code-review-and-quality",
-        "sre": "cloud-deploy"
-      }
-    },
-    "cloud-native": {
-      "name": "云原生开发",
-      "mapping": {
-        "vod": "vod",
-        "issue": "issue",
-        "coding": "implementation",
-        "qa": "code-review-and-quality",
-        "sre": "cloud-deploy"
-      }
-    },
-    "iac": {
-      "name": "IaC开发",
-      "mapping": {
-        "vod": "vod",
-        "issue": "issue",
-        "coding": "implementation",
-        "qa": "code-review-and-quality",
-        "sre": "cloud-deploy"
-      }
-    },
-    "agent-dev": {
-      "name": "Agent开发",
-      "mapping": {
-        "vod": "vod",
-        "issue": "issue",
-        "coding": "implementation",
-        "qa": "code-review-and-quality",
-        "sre": "cloud-deploy"
-      }
-    },
-    "skill-dev": {
-      "name": "Skill开发",
-      "mapping": {
-        "vod": "vod",
-        "issue": "issue",
-        "coding": "implementation",
-        "qa": "code-review-and-quality",
-        "sre": "cloud-deploy"
-      }
-    }
+ "scenes": {
+  "default": {
+   "name": "通用开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue",
+    "coding": "implementation",
+    "qa": "pr",
+    "sre": "cloud-deploy"
+   }
+  },
+  "cloud-native": {
+   "name": "云原生开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue",
+    "coding": "implementation",
+    "qa": "pr",
+    "sre": "cloud-deploy"
+   }
+  },
+  "iac": {
+   "name": "IaC开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue",
+    "coding": "implementation",
+    "qa": "pr",
+    "sre": "cloud-deploy"
+   }
+  },
+  "agent-dev": {
+   "name": "Agent开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue",
+    "coding": "implementation",
+    "qa": "pr",
+    "sre": "cloud-deploy"
+   }
+  },
+  "skill-dev": {
+   "name": "Skill开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue",
+    "coding": "implementation",
+    "qa": "pr",
+    "sre": "cloud-deploy"
+   }
   }
+ }
 }

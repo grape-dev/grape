@@ -494,6 +494,27 @@ def _migrate_tables():
             log.info("Migrated backend -> backend_id across agent tables")
     except Exception as e:
         log.warning(f"Migrate backend->backend_id failed: {e}")
+    # 同步 skill 归属：从 skill-description.json 更新 skill 表 agent_type（确保 pr→qa 等归属一致）
+    try:
+        _skill_desc_path = os.path.join(_CONFIG_DIR, "skill-description.json")
+        if os.path.exists(_skill_desc_path):
+            with open(_skill_desc_path, "r", encoding="utf-8") as _f:
+                _skill_desc = json.load(_f)
+            with db_lock:
+                c = db.cursor()
+                _updated = 0
+                for _sn, _info in _skill_desc.items():
+                    _at = (_info or {}).get("agent_type", "")
+                    if _sn and _at:
+                        _cur = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=?", (_sn,)).fetchone()
+                        if _cur and _cur[0] > 0:
+                            c.execute("UPDATE skill SET agent_type=? WHERE skill_name=?", (_at, _sn))
+                            _updated += c.rowcount
+                db.commit()
+                if _updated:
+                    log.info(f"Synced {_updated} skill agent_type mappings from skill-description.json")
+    except Exception as e:
+        log.warning(f"Sync skill agent_type failed: {e}")
     # backend_agents 大小写去重（合并为小写 name，保留最小 id，更新引用）
     try:
         with db_lock:
