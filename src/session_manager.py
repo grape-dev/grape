@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS unified_user_mapping (
 )
 """
 
-_db_path = os.path.join(os.path.dirname(__file__), "..", "data/sessions.db")
+_db_path = os.environ.get("DEVOPS_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data/sessions.db"))
 db_lock = threading.RLock()
 
 db = sqlite3.connect(_db_path, check_same_thread=False)

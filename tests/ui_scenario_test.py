@@ -206,12 +206,23 @@ class TestFirstLoginNoRepos:
 @pytest.fixture(scope="session", autouse=True)
 def _backup_and_restore_managed_repos():
     """破坏性测试防护：会话开始前备份 managed_repos 到备份表，会话结束后自动恢复生产数据。
-    这些场景测试需要清空 managed_repos 模拟"首次登录"，绝不能破坏生产托管数据。"""
+    这些场景测试需要清空 managed_repos 模拟"首次登录"，绝不能破坏生产托管数据。
+
+    安全闸：必须显式设置环境变量 DEVOPS_UI_TEST=1 才允许对远端生产库执行破坏性操作，
+    防止误跑/CI 误触发导致生产托管数据丢失。
+    """
+    import os as _os
+    if _os.environ.get("DEVOPS_UI_TEST") != "1":
+        raise RuntimeError(
+            "Refusing to run destructive UI scenario tests against production DB. "
+            "Set DEVOPS_UI_TEST=1 to explicitly allow.")
     import paramiko
     backup_sql = ("python3 -c \"import sqlite3;db=sqlite3.connect('/root/devops-bot/data/sessions.db');"
                   "db.execute('DROP TABLE IF EXISTS managed_repos_backup');"
                   "db.execute('CREATE TABLE managed_repos_backup AS SELECT * FROM managed_repos');"
-                  "db.commit();print('BACKED UP', db.execute('SELECT COUNT(*) FROM managed_repos_backup').fetchone()[0])\"")
+                  "n=db.execute('SELECT COUNT(*) FROM managed_repos_backup').fetchone()[0];"
+                  "assert n>0, 'managed_repos empty before destructive test, aborting';"
+                  "db.commit();print('BACKED UP', n)\"")
     restore_sql = ("python3 -c \"import sqlite3;db=sqlite3.connect('/root/devops-bot/data/sessions.db');"
                    "db.execute('DELETE FROM managed_repos');"
                    "db.execute('INSERT INTO managed_repos SELECT * FROM managed_repos_backup');"

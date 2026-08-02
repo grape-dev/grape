@@ -28,9 +28,17 @@ def setup_module():
     # 确保 agent_type 表中有 5 个 Agent 类型和技能
     from src.session_manager import db, db_lock
     with db_lock:
+        # 订阅配置与 configs/agent-description.json 保持一致，避免污染语义
+        subscribe_map = {
+            "vod": '["vod_signal"]',
+            "issue": '["issue_opened","issue_updated","issue_labeled","issue_comment"]',
+            "coding": '["pull_request_opened","pull_request_updated","note_hook_pr"]',
+            "qa": "[]",
+            "sre": '["pull_request_merged","build_failure","deploy_start","deploy_failure","release_created"]',
+        }
         for at, dn, ord_num in [("vod","VOD Agent",1),("issue","Issue Agent",2),("coding","Coding Agent",3),("qa","QA Agent",4),("sre","SRE Agent",5)]:
             db.execute("INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?)",
-                       (at, dn, f"Description for {at}", "●", ord_num, '["issue_opened"]' if at == "issue" else "[]"))
+                       (at, dn, f"Description for {at}", "●", ord_num, subscribe_map.get(at, "[]")))
         for skill, dn, parent in [("issue","Issue 管理","issue"),("implementation","代码实现","coding"),("pr","PR 管理","coding")]:
             db.execute("INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope) VALUES (?,?,?,?,?,'official')",
                        (skill, dn, f"{dn} description", parent, skill))

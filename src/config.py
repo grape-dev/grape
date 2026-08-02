@@ -20,6 +20,9 @@ LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/lo
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
+# ====== 数据库路径（可通过环境变量指向独立测试库，防止测试污染生产库）======
+DB_PATH = os.environ.get("DEVOPS_DB_PATH", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/sessions.db")))
+
 # ====== 多账户配置（从 DB 加载） ======
 ACCOUNTS: dict[str, dict] = {}
 _DEFAULT_ACCOUNT = ""

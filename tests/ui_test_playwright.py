@@ -9,13 +9,15 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
 # Helpers that bypass server DB lock via subprocess
 def _sql(script):
+    env = dict(os.environ)
+    env.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
     r = subprocess.run([sys.executable, "-c", script],
-        capture_output=True, cwd=ROOT)
+        capture_output=True, cwd=ROOT, env=env)
     return r.stdout.decode().strip()
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
-    _sql(f"import sqlite3; db=sqlite3.connect(r'{ROOT}/data/sessions.db',timeout=30); c=db.cursor(); "
+    _sql(f"import sqlite3, os; db=sqlite3.connect(os.environ['DEVOPS_DB_PATH'],timeout=30); c=db.cursor(); "
          "c.execute('DELETE FROM user_accounts WHERE username=\"uitest\"');"
          "c.execute('DELETE FROM managed_repos');c.execute('DELETE FROM events');db.commit();db.close()")
     global _SERVER
@@ -134,7 +136,7 @@ class TestAgents:
 class TestEventDetail:
     def test_event_page(self, page):
         tk = token(); join_repo(tk)
-        seq = _sql(f"import sqlite3; db=sqlite3.connect(r'{ROOT}/data/sessions.db',timeout=30); c=db.cursor(); "
+        seq = _sql(f"import sqlite3, os; db=sqlite3.connect(os.environ['DEVOPS_DB_PATH'],timeout=30); c=db.cursor(); "
                    "c.execute('INSERT INTO events (repo_key,event_type,agent_type,title,payload,status) VALUES (\"org/test-repo\",\"push\",\"vod\",\"Test\",\"{}\",\"completed\")');db.commit();print(c.lastrowid);db.close()")
         page.add_init_script(f"localStorage.setItem('token','{tk}');localStorage.setItem('app_cache_ver','2');")
         page.goto(BASE); page.wait_for_load_state("networkidle"); time.sleep(1)
