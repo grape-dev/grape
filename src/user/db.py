@@ -1122,19 +1122,6 @@ def ensure_default_backend(name: str = "opencode", scope: str = "global"):
         return c.lastrowid
 
 
-def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
-    """读取 backend agents 缓存"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id FROM backend_agents WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
-        return [
-            {"name": r[0], "display_name": r[1], "installed": bool(r[2]),
-             "cli_path": r[3], "version": r[4], "healthy": bool(r[5]),
-             "pip_package": r[6], "updated_at": r[7], "scope": r[8], "owner_id": r[9]}
-            for r in c.fetchall()
-        ]
-
-
 def get_backend_agents_age() -> float | None:
     """返回缓存数据的 age（秒），无缓存返回 None"""
     with db_lock:
