@@ -1,7 +1,6 @@
 function renderEventDetail(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  const p = data.payload || {};
   const agent = data.agent_type || 'vod';
   const agentName = (_AGENT_TYPES[agent] && _AGENT_TYPES[agent].display_name) || agent;
   const result = data.result || data.summary || '';

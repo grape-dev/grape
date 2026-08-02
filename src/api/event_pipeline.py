@@ -252,6 +252,7 @@ def _execute_agent(repo_key: str, agent_type: str,
     final_text = ""
     new_oc_session_id = ""
     tool_uses = []
+    agent_logs = []
     exec_account = evt.get("account") or repo_name
     try:
         for evt_type, data in stream_agent(
@@ -260,6 +261,7 @@ def _execute_agent(repo_key: str, agent_type: str,
             repo_gitcode_token=repo_gitcode_token,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}]",
         ):
+            agent_logs.append({"time": datetime.now().isoformat(), "type": evt_type, "msg": str(data)[:500]})
             if evt_type == "done":
                 d = data
                 exit_code = d.get("exit_code", -1)
@@ -310,7 +312,7 @@ def _execute_agent(repo_key: str, agent_type: str,
                              f"exit={exit_code}, text_len={len(final_text)}")
         return
 
-    # 有产出 → 存储事件（含结论）
+    # 有产出 → 存储事件（含结论；payload 不再写入以减小体积/避免敏感信息）
     issue_id = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "") or ""
     new_status = "completed" if exit_code == 0 else "failed"
     seq = append_event(
@@ -322,11 +324,11 @@ def _execute_agent(repo_key: str, agent_type: str,
         agent_type=agent_type,
         actor=evt.get("actor", ""),
         summary=result_text[:200],
-        payload=evt.get("payload", {}),
+        payload=None,
         status=new_status,
         result=result_text,
     )
     if seq > 0:
         update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
-                              completed_at=completed_at)
-        log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, result={result_text[:80]}")
+                              agent_logs=agent_logs, completed_at=completed_at)
+        log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")

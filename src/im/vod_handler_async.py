@@ -172,7 +172,7 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
         event_seq = append_event(
             repo_key=repo_key, event_type="vod_signal", source="vod_im",
             agent_type="vod", actor=actor, title=user_msg[:100],
-            summary=result_text, payload=evt.get("payload", {}),
+            summary=result_text, payload=None,
             status="completed", result=result_text
         )
         if event_seq:
