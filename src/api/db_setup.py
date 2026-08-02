@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS devops_agent_session (
     id TEXT PRIMARY KEY,
     repo_key TEXT NOT NULL,
     agent_type TEXT NOT NULL,
-    backend TEXT DEFAULT 'opencode',
+    backend_id INTEGER DEFAULT 0,
     skill TEXT DEFAULT '',
     backend_session_id TEXT DEFAULT '',
     repo_gitcode_token TEXT DEFAULT '',
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS agent_type (
     agent_type TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
     description TEXT DEFAULT '',
-    default_backend TEXT DEFAULT 'opencode',
+    default_backend_id INTEGER DEFAULT 0,
     icon TEXT DEFAULT '',
     order_num INTEGER DEFAULT 0,
     subscribe_events TEXT DEFAULT '[]',
@@ -100,17 +100,6 @@ CREATE TABLE IF NOT EXISTS agent_type_config (
     parent_agent_type TEXT DEFAULT '',
     skill_path TEXT DEFAULT '',
     subscribe_events TEXT DEFAULT '[]',
-    created_at TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_AGENT_REGISTRY_DDL = """
-CREATE TABLE IF NOT EXISTS agent_registry (
-    backend_name TEXT PRIMARY KEY,
-    display_name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    cli_name TEXT DEFAULT '',
-    is_active INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -200,7 +189,6 @@ _NEW_TABLES = [
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type", _AGENT_TYPE_DDL),
     ("skill", _SKILL_DDL),
-    ("agent_registry", _AGENT_REGISTRY_DDL),
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
 ]
@@ -311,13 +299,16 @@ def _insert_seed_data(table: str, data: dict):
             for agent_type, info in data.items():
                 display_name = info.get("name", agent_type)
                 description = info.get("description", "")
-                default_backend = info.get("backend", "opencode")
+                default_backend_name = info.get("backend", "opencode")
+                # 预置 backend（幂等），拿 id
+                from src.user.db import ensure_default_backend
+                default_backend_id = ensure_default_backend(default_backend_name) or 0
                 icon = info.get("icon", "")
                 order_num = info.get("order_num", 0)
                 subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
-                    (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events)
+                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_backend_id, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
+                    (agent_type, display_name, description, default_backend_id, icon, order_num, subscribe_events)
                 )
 
         elif table == "skill_official":
@@ -333,17 +324,8 @@ def _insert_seed_data(table: str, data: dict):
                 )
 
         elif table == "agent_registry":
-            # agent-routing.json: {"default_backend": "...", "skill_backends": {...}}
-            default_backend = data.get("default_backend", "opencode")
-            c.execute(
-                "INSERT OR IGNORE INTO agent_registry (backend_name, display_name, description, cli_name) VALUES (?,?,?,?)",
-                (default_backend, default_backend.capitalize(), f"Default backend: {default_backend}", default_backend)
-            )
-            for skill, backend in data.get("skill_backends", {}).items():
-                c.execute(
-                    "INSERT OR IGNORE INTO agent_registry (backend_name, display_name, description, cli_name) VALUES (?,?,?,?)",
-                    (f"{skill}_{backend}", f"{skill} ({backend})", f"Skill '{skill}' uses {backend}", backend)
-                )
+            # agent-routing.json 已废弃（agent_registry 表移除），backend 统一用 backend_agents
+            pass
 
         db.commit()
 
@@ -380,6 +362,9 @@ def _migrate_tables():
         "ALTER TABLE devops_agent_session ADD COLUMN backend_session_id TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN agent_session_id TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN backend_session_id TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
+        "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
+        "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
     ]
     for sql in migrations:
         try:
@@ -424,11 +409,82 @@ def _migrate_tables():
                 log.info("Migrated chat_config -> chat_agent_session")
     except Exception as e:
         log.warning(f"Migrate chat_config failed: {e}")
+    # 重建 backend_agents 表（旧结构 name 主键 → 新结构 id+scope+owner_id）
+    try:
+        with db_lock:
+            c = db.cursor()
+            ba_cols = [r[1] for r in c.execute("PRAGMA table_info(backend_agents)").fetchall()]
+            if "id" not in ba_cols or "scope" not in ba_cols:
+                c.execute("ALTER TABLE backend_agents RENAME TO backend_agents_old")
+                c.execute("""
+                    CREATE TABLE backend_agents (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        display_name TEXT DEFAULT '',
+                        installed INTEGER DEFAULT 0,
+                        cli_path TEXT DEFAULT '',
+                        version TEXT DEFAULT '',
+                        healthy INTEGER DEFAULT 0,
+                        pip_package TEXT DEFAULT '',
+                        scope TEXT DEFAULT 'global',
+                        owner_id TEXT DEFAULT '',
+                        updated_at TEXT DEFAULT (datetime('now')),
+                        UNIQUE (name, scope, owner_id)
+                    )
+                """)
+                # 迁移旧数据
+                try:
+                    c.execute("SELECT name, display_name, installed, cli_path, version, healthy, pip_package, updated_at FROM backend_agents_old")
+                    for r in c.fetchall():
+                        c.execute("INSERT OR IGNORE INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, updated_at) VALUES (?,?,?,?,?,?,?,'global','',?)",
+                                  (r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]))
+                except Exception:
+                    pass
+                c.execute("DROP TABLE backend_agents_old")
+                db.commit()
+                log.info("Rebuilt backend_agents table (id+scope+owner_id)")
+    except Exception as e:
+        log.warning(f"Rebuild backend_agents failed: {e}")
+    # 迁移 backend → backend_id（引用 backend_agents.id，预置默认 backend）
+    try:
+        with db_lock:
+            c = db.cursor()
+            from src.user.db import ensure_default_backend, get_backend_id_by_name
+            # 预置 opencode 默认 backend
+            default_id = ensure_default_backend("opencode") or 0
+            # devops_agent_session
+            cols = [r[1] for r in c.execute("PRAGMA table_info(devops_agent_session)").fetchall()]
+            if "backend" in cols and "backend_id" in cols:
+                c.execute("SELECT DISTINCT backend FROM devops_agent_session WHERE backend!='' AND backend IS NOT NULL")
+                for r in c.fetchall():
+                    bid = get_backend_id_by_name(r[0]) or ensure_default_backend(r[0]) or default_id
+                    c.execute("UPDATE devops_agent_session SET backend_id=? WHERE backend=?", (bid, r[0]))
+                c.execute("UPDATE devops_agent_session SET backend_id=? WHERE (backend='' OR backend IS NULL) AND backend_id=0", (default_id,))
+            # agent_type
+            acols = [r[1] for r in c.execute("PRAGMA table_info(agent_type)").fetchall()]
+            if "default_backend" in acols and "default_backend_id" in acols:
+                c.execute("SELECT DISTINCT default_backend FROM agent_type WHERE default_backend!='' AND default_backend IS NOT NULL")
+                for r in c.fetchall():
+                    bid = get_backend_id_by_name(r[0]) or ensure_default_backend(r[0]) or default_id
+                    c.execute("UPDATE agent_type SET default_backend_id=? WHERE default_backend=?", (bid, r[0]))
+                c.execute("UPDATE agent_type SET default_backend_id=? WHERE (default_backend='' OR default_backend IS NULL) AND default_backend_id=0", (default_id,))
+            # chat_agent_session
+            ccols = [r[1] for r in c.execute("PRAGMA table_info(chat_agent_session)").fetchall()]
+            if "backend" in ccols and "backend_id" in ccols:
+                c.execute("SELECT DISTINCT backend FROM chat_agent_session WHERE backend!='' AND backend IS NOT NULL")
+                for r in c.fetchall():
+                    bid = get_backend_id_by_name(r[0]) or ensure_default_backend(r[0]) or default_id
+                    c.execute("UPDATE chat_agent_session SET backend_id=? WHERE backend=?", (bid, r[0]))
+                c.execute("UPDATE chat_agent_session SET backend_id=? WHERE (backend='' OR backend IS NULL) AND backend_id=0", (default_id,))
+            db.commit()
+            log.info("Migrated backend -> backend_id across agent tables")
+    except Exception as e:
+        log.warning(f"Migrate backend->backend_id failed: {e}")
     # 清理旧表（如果存在）
     try:
         with db_lock:
             c = db.cursor()
-            for tbl in ["vod_bot_config", "chat_config", "im_channels", "user_im_bindings"]:
+            for tbl in ["vod_bot_config", "chat_config", "im_channels", "user_im_bindings", "agent_registry"]:
                 c.execute(f"DROP TABLE IF EXISTS {tbl}")
             db.commit()
     except Exception:

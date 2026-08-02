@@ -1045,22 +1045,79 @@ init_user_repos_table()
 # ====== Backend Agents 缓存表 ======
 
 def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = ""):
-    """批量写入 backend agents 缓存（scope: global/repo/user）"""
+    """批量写入 backend agents 缓存（scope: global/repo/user）
+
+    幂等 upsert：按 name+scope+owner_id 匹配，存在则更新（保留 id），不存在才插入。
+    保证跨刷新 id 稳定，供各表 backend_id 引用。
+    """
     with db_lock:
         c = db.cursor()
-        if scope == "global":
-            c.execute("DELETE FROM backend_agents WHERE scope='global'")
-        else:
-            c.execute("DELETE FROM backend_agents WHERE scope=? AND owner_id=?", (scope, owner_id))
         for a in agents:
-            c.execute(
-                "INSERT OR REPLACE INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
-                (a.get("name", ""), a.get("display_name", a.get("name", "")),
-                 1 if a.get("installed") else 0, a.get("cli_path", ""),
-                 a.get("version", ""), 1 if a.get("healthy") else 0,
-                 a.get("pip_package", ""), scope, owner_id)
-            )
+            name = a.get("name", "")
+            if not name:
+                continue
+            c.execute("SELECT id FROM backend_agents WHERE name=? AND scope=? AND owner_id=?", (name, scope, owner_id))
+            row = c.fetchone()
+            if row:
+                c.execute(
+                    "UPDATE backend_agents SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now') WHERE id=?",
+                    (a.get("display_name", name),
+                     1 if a.get("installed") else 0, a.get("cli_path", ""),
+                     a.get("version", ""), 1 if a.get("healthy") else 0,
+                     a.get("pip_package", ""), row[0])
+                )
+            else:
+                c.execute(
+                    "INSERT INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (name, a.get("display_name", name),
+                     1 if a.get("installed") else 0, a.get("cli_path", ""),
+                     a.get("version", ""), 1 if a.get("healthy") else 0,
+                     a.get("pip_package", ""), scope, owner_id)
+                )
+        # 清理本次 scope 中已不在列表里的 backend
+        current_names = [a.get("name", "") for a in agents if a.get("name")]
+        if current_names:
+            placeholders = ",".join("?" for _ in current_names)
+            c.execute(f"DELETE FROM backend_agents WHERE scope=? AND owner_id=? AND name NOT IN ({placeholders})", (scope, owner_id, *current_names))
         db.commit()
+
+
+def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
+    """读取 backend agents 缓存"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id FROM backend_agents WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+        return [
+            {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
+             "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
+             "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10]}
+            for r in c.fetchall()
+        ]
+
+
+def get_backend_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
+    """按 name+scope+owner_id 查找 backend id"""
+    if not name:
+        return None
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM backend_agents WHERE name=? AND scope=? AND owner_id=? LIMIT 1", (name, scope, owner_id))
+        row = c.fetchone()
+        return row[0] if row else None
+
+
+def ensure_default_backend(name: str = "opencode", scope: str = "global"):
+    """确保默认 backend 存在（幂等），返回 id"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM backend_agents WHERE name=? AND scope=? AND owner_id='' LIMIT 1", (name, scope))
+        row = c.fetchone()
+        if row:
+            return row[0]
+        c.execute("INSERT INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
+                  (name, name.capitalize(), 1, "", "", 1, name, scope))
+        db.commit()
+        return c.lastrowid
 
 
 def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:

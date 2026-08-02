@@ -40,11 +40,17 @@ def _get_vod_session(repo_key: str) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, repo_key, backend, skill, im_app_id, repo_gitcode_token "
+            c.execute("SELECT id, repo_key, backend_id, skill, im_app_id, repo_gitcode_token "
                       "FROM devops_agent_session WHERE agent_type='vod' AND repo_key=?", (repo_key,))
             row = c.fetchone()
         if row:
-            return {"id": row[0], "repo_key": row[1], "backend": row[2] or "opencode",
+            backend = "opencode"
+            if row[2]:
+                c.execute("SELECT name FROM backend_agents WHERE id=?", (row[2],))
+                brow = c.fetchone()
+                if brow and brow[0]:
+                    backend = brow[0]
+            return {"id": row[0], "repo_key": row[1], "backend": backend,
                     "skill": row[3] or "vod", "im_app_id": row[4] or "",
                     "repo_gitcode_token": row[5] or ""}
     except Exception:
@@ -301,7 +307,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT repo_key, backend, skill, repo_gitcode_token FROM devops_agent_session WHERE id=?",
+                c.execute("SELECT repo_key, backend_id, skill, repo_gitcode_token FROM devops_agent_session WHERE id=?",
                           (agent_session_id,))
                 session_row = c.fetchone()
         except Exception:
@@ -330,7 +336,15 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
                              "repo_gitcode_token": agent_session.get("repo_gitcode_token", "")}
         else:
             repo_key = session_row[0]
-            agent_session = {"backend": session_row[1] or "opencode", "skill": session_row[2] or "vod",
+            backend = "opencode"
+            if session_row[1]:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT name FROM backend_agents WHERE id=?", (session_row[1],))
+                    brow = c.fetchone()
+                    if brow and brow[0]:
+                        backend = brow[0]
+            agent_session = {"backend": backend, "skill": session_row[2] or "vod",
                              "repo_gitcode_token": session_row[3] or ""}
 
         evt = {

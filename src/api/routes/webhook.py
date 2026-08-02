@@ -103,10 +103,15 @@ async def a2a_endpoint(request: Request):
             try:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("SELECT backend, skill FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repository, agent_name))
+                    c.execute("SELECT backend_id, skill FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repository, agent_name))
                     row = c.fetchone()
                     if row:
-                        backend = row[0] or "opencode"
+                        backend = "opencode"
+                        if row[0]:
+                            c.execute("SELECT name FROM backend_agents WHERE id=?", (row[0],))
+                            brow = c.fetchone()
+                            if brow and brow[0]:
+                                backend = brow[0]
                         skill_name = row[1] or ""
             except Exception:
                 pass

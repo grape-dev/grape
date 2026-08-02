@@ -32,10 +32,14 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
 
         sid = str(uuid.uuid4())
         now = datetime.now().isoformat()
+        backend_id = 0
+        if backend:
+            from src.user.db import ensure_default_backend, get_backend_id_by_name
+            backend_id = get_backend_id_by_name(backend) or ensure_default_backend(backend) or 0
         try:
             c.execute(
-                "INSERT INTO devops_agent_session (id, repo_key, agent_type, backend, status, last_active_at) VALUES (?,?,?,?,?,?)",
-                (sid, repo_key, agent_type, backend, "idle", now)
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, backend_id, status, last_active_at) VALUES (?,?,?,?,?,?)",
+                (sid, repo_key, agent_type, backend_id, "idle", now)
             )
             db.commit()
         except Exception as e:
@@ -76,15 +80,21 @@ def list_agent_sessions(repo_key: str) -> list[dict]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, agent_type, backend, backend_session_id, status, last_active_at FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type",
+                "SELECT id, agent_type, backend_id, backend_session_id, status, last_active_at FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type",
                 (repo_key,)
             )
-            return [
-                {"id": r[0], "agent_type": r[1], "backend": r[2],
-                 "backend_session_id": r[3] or "", "status": r[4],
-                 "last_active_at": r[5] or ""}
-                for r in c.fetchall()
-            ]
+            result = []
+            for r in c.fetchall():
+                backend_name = ""
+                if r[2]:
+                    c.execute("SELECT name FROM backend_agents WHERE id=?", (r[2],))
+                    brow = c.fetchone()
+                    if brow and brow[0]:
+                        backend_name = brow[0]
+                result.append({"id": r[0], "agent_type": r[1], "backend": backend_name,
+                               "backend_session_id": r[3] or "", "status": r[4],
+                               "last_active_at": r[5] or ""})
+            return result
         except Exception:
             return []
 
@@ -140,12 +150,14 @@ def ensure_default_agent_sessions(repo_key: str):
 
     with db_lock:
         c = db.cursor()
+        from src.user.db import ensure_default_backend
+        _default_backend_id = ensure_default_backend("opencode") or 0
         for _at, _sk in _mapping.items():
             _sid = str(uuid.uuid4())
             try:
                 c.execute(
-                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,datetime('now'),?,?,'feishu')",
-                    (_sid, repo_key, _at, "opencode", _sk, _token, "idle",
+                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend_id, skill, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,datetime('now'),?,?,'feishu')",
+                    (_sid, repo_key, _at, _default_backend_id, _sk, _token, "idle",
                      _im_app_id if _at == "vod" else "", _im_app_secret if _at == "vod" else "")
                 )
             except Exception as e:

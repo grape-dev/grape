@@ -442,11 +442,17 @@ def get_chat_config(user_id: int) -> dict:
     """获取用户全局 Chat 配置（repo_key='' 表示全局配置行）"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT backend, skill, im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (user_id,))
+        c.execute("SELECT backend_id, skill, im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (user_id,))
         row = c.fetchone()
         if not row:
             return {"backend": "opencode", "skill": "", "im_app_id": "", "im_app_secret": "", "im_provider": "", "updated_at": ""}
-        return {"backend": row[0] or "opencode", "skill": row[1] or "", "im_app_id": row[2] or "", "im_app_secret": row[3] or "", "im_provider": row[4] or "", "updated_at": ""}
+        backend_name = "opencode"
+        if row[0]:
+            c.execute("SELECT name FROM backend_agents WHERE id=?", (row[0],))
+            brow = c.fetchone()
+            if brow and brow[0]:
+                backend_name = brow[0]
+        return {"backend": backend_name, "skill": row[1] or "", "im_app_id": row[2] or "", "im_app_secret": row[3] or "", "im_provider": row[4] or "", "updated_at": ""}
 
 
 def set_chat_config(user_id: int, **kwargs):
@@ -456,11 +462,16 @@ def set_chat_config(user_id: int, **kwargs):
     for k, v in kwargs.items():
         if k in allowed and v is not None:
             data[k] = v
+    # backend name → backend_id
+    backend_id = 0
+    if data.get("backend"):
+        from src.user.db import ensure_default_backend, get_backend_id_by_name
+        backend_id = get_backend_id_by_name(data["backend"]) or ensure_default_backend(data["backend"]) or 0
     sid = f"sess-cfg-{user_id}"
     with db_lock:
         c = db.cursor()
         c.execute(
-            "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, backend, skill, im_app_id, im_app_secret, im_provider, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
-            (sid, user_id, "", data["backend"], data["skill"], data["im_app_id"], data["im_app_secret"], data["im_provider"])
+            "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, backend_id, skill, im_app_id, im_app_secret, im_provider, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
+            (sid, user_id, "", backend_id, data["skill"], data["im_app_id"], data["im_app_secret"], data["im_provider"])
         )
         db.commit()
