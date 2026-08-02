@@ -204,6 +204,34 @@ class TestFirstLoginNoRepos:
             user_db.delete_user(uid["id"])
 
 @pytest.fixture(scope="session", autouse=True)
+def _backup_and_restore_managed_repos():
+    """破坏性测试防护：会话开始前备份 managed_repos 到备份表，会话结束后自动恢复生产数据。
+    这些场景测试需要清空 managed_repos 模拟"首次登录"，绝不能破坏生产托管数据。"""
+    import paramiko
+    backup_sql = ("python3 -c \"import sqlite3;db=sqlite3.connect('/root/devops-bot/data/sessions.db');"
+                  "db.execute('DROP TABLE IF EXISTS managed_repos_backup');"
+                  "db.execute('CREATE TABLE managed_repos_backup AS SELECT * FROM managed_repos');"
+                  "db.commit();print('BACKED UP', db.execute('SELECT COUNT(*) FROM managed_repos_backup').fetchone()[0])\"")
+    restore_sql = ("python3 -c \"import sqlite3;db=sqlite3.connect('/root/devops-bot/data/sessions.db');"
+                   "db.execute('DELETE FROM managed_repos');"
+                   "db.execute('INSERT INTO managed_repos SELECT * FROM managed_repos_backup');"
+                   "db.commit();print('RESTORED', db.execute('SELECT COUNT(*) FROM managed_repos').fetchone()[0])\"")
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect('203.0.113.2', 22, 'root', 'YOUR_SSH_PASSWORD', timeout=10)
+    _stdin, _stdout, _stderr = c.exec_command(backup_sql, timeout=5)
+    print("BACKUP:", _stdout.read().decode().strip(), _stderr.read().decode().strip())
+    c.close()
+    yield
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect('203.0.113.2', 22, 'root', 'YOUR_SSH_PASSWORD', timeout=10)
+    _stdin, _stdout, _stderr = c.exec_command(restore_sql, timeout=5)
+    print("RESTORE:", _stdout.read().decode().strip(), _stderr.read().decode().strip())
+    c.close()
+
+
+@pytest.fixture(scope="session", autouse=True)
 def setup():
     global TOKEN
     r = requests.post(f"{BASE}/api/auth/login",
