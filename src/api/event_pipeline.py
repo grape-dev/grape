@@ -279,6 +279,16 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
                 log.info(f"Agent done: exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
             elif evt_type == "error":
                 log.warning(f"Agent error: {data}")
+            elif evt_type == "step_start":
+                log.info(f"[agent seq={seq}] {data}")
+            elif evt_type == "tool_use":
+                log.info(f"[agent seq={seq}] TOOL: {str(data)[:160]}")
+            elif evt_type == "text":
+                log.info(f"[agent seq={seq}] TEXT: {str(data)[:160]}")
+            elif evt_type == "reasoning":
+                log.info(f"[agent seq={seq}] REASONING: {str(data)[:160]}")
+            else:
+                log.info(f"[agent seq={seq}] {evt_type}: {str(data)[:160]}")
     except Exception as e:
         log.warning(f"Exec agent failed: {e}")
 

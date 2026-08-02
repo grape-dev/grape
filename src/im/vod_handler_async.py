@@ -155,8 +155,9 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
         if event_type == "done":
             final_text = data.get("text", "")
             exit_code = data.get("exit_code", -1)
-            if exit_code == 0 and data.get("oc_session_id"):
-                new_oc_sid = data["backend_session_id"]
+            new_sid = data.get("oc_session_id") or data.get("backend_session_id")
+            if exit_code == 0 and new_sid:
+                new_oc_sid = new_sid
 
     duration = time.time() - start_time
 

@@ -514,6 +514,27 @@ def _migrate_tables():
             db.commit()
     except Exception:
         pass
+    # 迁移 repo_im_group_binding 列规范化：chat_id→im_chat_id，account→im_app_id（旧 feishu_bindings 遗留）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "repo_im_group_binding" in _tables:
+                bcols = [r[1] for r in c.execute("PRAGMA table_info(repo_im_group_binding)").fetchall()]
+                # account → im_app_id（补空）
+                if "account" in bcols and "im_app_id" in bcols:
+                    c.execute("UPDATE repo_im_group_binding SET im_app_id=account WHERE (im_app_id IS NULL OR im_app_id='') AND account IS NOT NULL AND account!=''")
+                    c.execute("ALTER TABLE repo_im_group_binding DROP COLUMN account")
+                    db.commit()
+                    log.info("Migrated repo_im_group_binding: account -> im_app_id (dropped account)")
+                # chat_id → im_chat_id
+                bcols2 = [r[1] for r in c.execute("PRAGMA table_info(repo_im_group_binding)").fetchall()]
+                if "chat_id" in bcols2 and "im_chat_id" not in bcols2:
+                    c.execute("ALTER TABLE repo_im_group_binding RENAME COLUMN chat_id TO im_chat_id")
+                    db.commit()
+                    log.info("Migrated repo_im_group_binding: chat_id -> im_chat_id")
+    except Exception as e:
+        log.warning(f"Migrate repo_im_group_binding columns failed: {e}")
     # 迁移 repo_im_group_binding 的 im_app_id='default' → Chat Bot app_id（清理 default 兜底账户）
     try:
         with db_lock:
