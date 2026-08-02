@@ -30,6 +30,26 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 不要执行 `ls`、`grep`、`cat` 等命令查看 workspace 目录、Bot 代码、日志文件或数据库。
 **所有信息通过 GitCode API 获取**，不读取本地文件。
 
+### 涉及代码需要继续优化时，A2A 通知 Coding Agent
+审查发现代码需要继续优化/修改（存在 Critical 或 Required 级别问题），**必须通过 A2A 调用 Coding Agent 进行优化实现**，不得由 QA 直接改代码。
+
+```bash
+curl -X POST http://localhost:8080/api/a2a \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent": "coding",
+    "payload": {
+      "repository": "'"$REPO_FULL_NAME"'",
+      "account": "'"$ACCOUNT"'",
+      "issue_number": "'"$PR_NUMBER"'",
+      "context": "PR #'"$PR_NUMBER"' 审查发现代码需要优化：'"$REVIEW_SUMMARY"'"
+    }
+  }'
+```
+
+**触发条件**：review_comments 中存在 Critical 或 Required 级别问题需要修改代码时。
+**响应**：A2A 返回后，将优化结论合并进最终审查评论。
+
 ## PR 分析（每次执行前先分析，⚠️ 必须按 1→2→3 顺序依次执行，上一步未完成不得进入下一步）
 
 ### 分析内容
@@ -149,24 +169,26 @@ curl -s -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 
 ### 能力四：A2A 通知
 
-**当审查发现问题需要修改时，调用 A2A 通知 implementation Agent 处理。**
+**当审查发现问题需要修改时，调用 A2A 通知 Coding Agent（coding）处理。**
 
-如果 review_comments 中存在 Critical 或 Required 级别的问题，说明需要修改代码。此时调用 A2A API 将审查意见传递给 implementation Agent：
+如果 review_comments 中存在 Critical 或 Required 级别的问题，说明需要修改代码。此时调用 A2A API 将审查意见传递给 Coding Agent：
 
 ```bash
 curl -X POST http://localhost:8080/api/a2a \
   -H "Content-Type: application/json" \
   -d '{
-    "agent": "implementation",
+    "agent": "coding",
     "payload": {
       "repository": "'"$REPO_FULL_NAME"'",
       "account": "'"$ACCOUNT"'",
+      "issue_number": "'"$PR_NUMBER"'",
       "context": "PR #'$PR_NUMBER' 审查发现问题需要修改：'$REVIEW_SUMMARY'"
     }
   }'
 ```
 
 其中 `$REVIEW_SUMMARY` 为上述审查中发现的 Critical 和 Required 级别问题的汇总。
+A2A 返回后，将 Coding Agent 的优化结论合并进最终审查评论（能力五）。
 
 ### 能力五：评论回复
 
