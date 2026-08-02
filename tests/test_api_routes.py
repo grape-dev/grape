@@ -2,6 +2,10 @@
 import sys, os, json, io
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# 强制使用独立测试库，防止 TestClient 误连生产库（双保险，即使 conftest 未加载）
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")
+
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.user import db as user_db
@@ -39,7 +43,7 @@ def setup_module():
         for at, dn, ord_num in [("vod","VOD Agent",1),("issue","Issue Agent",2),("coding","Coding Agent",3),("qa","QA Agent",4),("sre","SRE Agent",5)]:
             db.execute("INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?)",
                        (at, dn, f"Description for {at}", "●", ord_num, subscribe_map.get(at, "[]")))
-        for skill, dn, parent in [("issue","Issue 管理","issue"),("implementation","代码实现","coding"),("pr","PR 管理","coding")]:
+        for skill, dn, parent in [("issue","Issue 管理","issue"),("implementation","代码实现","coding"),("pr","PR 管理","qa")]:
             db.execute("INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope) VALUES (?,?,?,?,?,'official')",
                        (skill, dn, f"{dn} description", parent, skill))
         db.commit()
