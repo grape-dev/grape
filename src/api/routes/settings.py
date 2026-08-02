@@ -59,7 +59,7 @@ async def get_notifications(user: dict = Depends(get_current_user)):
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT auto_impl_enabled, notify_enabled FROM feishu_bindings LIMIT 1")
+            c.execute("SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding LIMIT 1")
             row = c.fetchone()
             auto_impl = bool(row[0]) if row else True
             notify = bool(row[1]) if row else True
@@ -90,7 +90,7 @@ async def update_notifications(body: NotificationPrefs, user: dict = Depends(get
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("UPDATE feishu_bindings SET auto_impl_enabled=?, notify_enabled=?",
+            c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=?, notify_enabled=?",
                       (1 if body.vod else 0, 1 if body.notifications_enabled else 0))
             db.commit()
         except Exception:

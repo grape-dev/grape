@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS devops_agent_session (
     agent_type TEXT NOT NULL,
     backend TEXT DEFAULT 'opencode',
     skill TEXT DEFAULT '',
-    oc_session_id TEXT DEFAULT '',
+    backend_session_id TEXT DEFAULT '',
     repo_gitcode_token TEXT DEFAULT '',
     status TEXT DEFAULT 'idle',
     im_provider TEXT DEFAULT '',
@@ -124,52 +124,27 @@ CREATE TABLE IF NOT EXISTS meta (
 
 _BACKEND_AGENTS_DDL = """
 CREATE TABLE IF NOT EXISTS backend_agents (
-    name TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
     display_name TEXT DEFAULT '',
     installed INTEGER DEFAULT 0,
     cli_path TEXT DEFAULT '',
     version TEXT DEFAULT '',
     healthy INTEGER DEFAULT 0,
     pip_package TEXT DEFAULT '',
-    updated_at TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_IM_CHANNELS_DDL = """
-CREATE TABLE IF NOT EXISTS im_channels (
-    id TEXT PRIMARY KEY,
-    provider TEXT NOT NULL,
-    channel_id TEXT NOT NULL,
-    channel_name TEXT DEFAULT '',
-    repo_key TEXT NOT NULL,
-    source TEXT DEFAULT 'gitcode',
-    bind_by TEXT DEFAULT '',
-    auto_impl_enabled INTEGER DEFAULT 0,
-    notify_enabled INTEGER DEFAULT 0,
-    account TEXT DEFAULT 'default',
-    created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (provider, channel_id)
-)
-"""
-
-_USER_IM_BINDINGS_DDL = """
-CREATE TABLE IF NOT EXISTS user_im_bindings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    provider TEXT NOT NULL,
-    channel_type TEXT NOT NULL DEFAULT 'direct_message',
-    channel_id TEXT NOT NULL,
-    enabled INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (user_id, provider, channel_type)
+    scope TEXT DEFAULT 'global',
+    owner_id TEXT DEFAULT '',
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (name, scope, owner_id)
 )
 """
 
 _CHAT_CONVERSATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS chat_conversations (
     id TEXT PRIMARY KEY,
+    agent_session_id TEXT DEFAULT '',
     user_id INTEGER NOT NULL,
-    session_id TEXT DEFAULT '',
+    backend_session_id TEXT DEFAULT '',
     user_gitcode_token TEXT DEFAULT '',
     repo_key TEXT DEFAULT '',
     im_channel_id TEXT DEFAULT '',
@@ -190,22 +165,12 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 )
 """
 
-_CHAT_CONFIG_DDL = """
-CREATE TABLE IF NOT EXISTS chat_config (
-    user_id INTEGER PRIMARY KEY,
-    backend TEXT DEFAULT 'opencode',
-    skill TEXT DEFAULT '',
-    feishu_app_id TEXT DEFAULT '',
-    feishu_app_secret TEXT DEFAULT '',
-    updated_at TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_IM_BOT_CONFIG_DDL = """
-CREATE TABLE IF NOT EXISTS im_bot_config (
+_GLOBAL_IM_BOT_CONFIG_DDL = """
+CREATE TABLE IF NOT EXISTS global_im_bot_config (
     bot_app_id TEXT PRIMARY KEY,
-    bot_app_secret TEXT NOT NULL,
     bot_type TEXT NOT NULL,
+    im_provider TEXT DEFAULT 'feishu',
+    is_active INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -214,13 +179,14 @@ _VOD_CONVERSATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS vod_conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_session_id TEXT NOT NULL,
-    feishu_chat_id TEXT NOT NULL,
-    feishu_chat_name TEXT DEFAULT '',
-    oc_session_id TEXT DEFAULT '',
+    im_provider TEXT DEFAULT 'feishu',
+    im_chat_id TEXT NOT NULL,
+    im_channel_name TEXT DEFAULT '',
+    backend_session_id TEXT DEFAULT '',
     status TEXT DEFAULT 'active',
     created_at TEXT DEFAULT (datetime('now')),
     last_active_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(agent_session_id, feishu_chat_id)
+    UNIQUE(agent_session_id, im_chat_id)
 )
 """
 
@@ -228,17 +194,14 @@ _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("backend_agents", _BACKEND_AGENTS_DDL),
     ("events", _EVENTS_TABLE_DDL),
-    ("im_channels", _IM_CHANNELS_DDL),
-    ("user_im_bindings", _USER_IM_BINDINGS_DDL),
     ("chat_conversations", _CHAT_CONVERSATIONS_DDL),
     ("chat_messages", _CHAT_MESSAGES_DDL),
-    ("chat_config", _CHAT_CONFIG_DDL),
     ("devops_agent_session", _AGENT_SESSIONS_TABLE_DDL),
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type", _AGENT_TYPE_DDL),
     ("skill", _SKILL_DDL),
     ("agent_registry", _AGENT_REGISTRY_DDL),
-    ("im_bot_config", _IM_BOT_CONFIG_DDL),
+    ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
 ]
 
@@ -271,7 +234,6 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)",
         "CREATE INDEX IF NOT EXISTS idx_agent_sessions_repo ON devops_agent_session(repo_key)",
         "CREATE INDEX IF NOT EXISTS idx_event_route_config_repo ON event_route_config(repo_key)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_config_feishu_app_id ON chat_config(feishu_app_id) WHERE feishu_app_id != ''",
     ]
     for idx in indexes:
         try:
@@ -399,16 +361,10 @@ def _migrate_tables():
     migrations = [
         "ALTER TABLE agent_type_config ADD COLUMN parent_agent_type TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN agent_type TEXT DEFAULT ''",
-        "ALTER TABLE user_skills ADD COLUMN description TEXT DEFAULT ''",
-        "ALTER TABLE user_skills ADD COLUMN parent_agent_type TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN skill TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN session_id TEXT DEFAULT ''",
-        "ALTER TABLE chat_config ADD COLUMN skill TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN user_gitcode_token TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN repo_gitcode_token TEXT DEFAULT ''",
-        "ALTER TABLE agent_type_config ADD COLUMN skill_path TEXT DEFAULT ''",
-        "ALTER TABLE feishu_users ADD COLUMN user_id INTEGER DEFAULT 0",
-        "ALTER TABLE agent_type_config ADD COLUMN subscribe_events TEXT DEFAULT '[]'",
         "ALTER TABLE events ADD COLUMN actor TEXT DEFAULT ''",
         "ALTER TABLE events ADD COLUMN summary TEXT DEFAULT ''",
         "ALTER TABLE events ADD COLUMN backend TEXT DEFAULT ''",
@@ -421,6 +377,9 @@ def _migrate_tables():
         "ALTER TABLE devops_agent_session ADD COLUMN im_provider TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN im_app_id TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN im_app_secret TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN backend_session_id TEXT DEFAULT ''",
+        "ALTER TABLE chat_conversations ADD COLUMN agent_session_id TEXT DEFAULT ''",
+        "ALTER TABLE chat_conversations ADD COLUMN backend_session_id TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
@@ -433,34 +392,64 @@ def _migrate_tables():
     try:
         with db_lock:
             c = db.cursor()
-            # Chat Agent 凭证
-            c.execute("INSERT OR IGNORE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) SELECT feishu_app_id, feishu_app_secret, 'chat_bot' FROM chat_config WHERE feishu_app_id!='' AND feishu_app_secret!='' AND feishu_app_secret!='********'")
-            db.commit()
-            log.info(f"Migrated IM configs to im_bot_config")
+            # 迁移旧表 im_bot_config → global_im_bot_config（保留 bot_type，secret 移入 devops_agent_session）
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "im_bot_config" in _tables and "global_im_bot_config" not in _tables:
+                c.execute("ALTER TABLE im_bot_config RENAME TO global_im_bot_config")
+                db.commit()
+                log.info("Migrated table im_bot_config -> global_im_bot_config")
+            elif "im_bot_config" in _tables and "global_im_bot_config" in _tables:
+                c.execute("INSERT OR IGNORE INTO global_im_bot_config (bot_app_id, bot_type) SELECT bot_app_id, bot_type FROM im_bot_config")
+                # 补齐 secret 到 devops_agent_session
+                c.execute("UPDATE devops_agent_session SET im_app_secret=(SELECT bot_app_secret FROM im_bot_config WHERE bot_app_id=devops_agent_session.im_app_id) WHERE im_app_id!='' AND im_app_secret=''")
+                c.execute("DROP TABLE im_bot_config")
+                db.commit()
+                log.info("Migrated im_bot_config -> global_im_bot_config (data moved)")
     except Exception as e:
-        log.info(f"Migrate im_bot_config skipped: {e}")
-    # 清理旧表（如果存在）
-    try:
-        with db_lock:
-            db.execute("DROP TABLE IF EXISTS vod_bot_config")
-            db.commit()
-    except Exception:
-        pass
-    # 迁移 feishu_bindings 的 account='default' → Chat Bot app_id（清理 default 兜底账户）
+        log.info(f"Migrate global_im_bot_config skipped: {e}")
+    # 迁移旧表 chat_config → chat_agent_session（合并 user 配置）
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM feishu_bindings WHERE account='default' OR account IS NULL OR account=''")
-            cnt = c.fetchone()[0]
-            if cnt > 0:
-                c.execute("SELECT bot_app_id FROM im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
-                row = c.fetchone()
-                if row and row[0]:
-                    c.execute("UPDATE feishu_bindings SET account=? WHERE account='default' OR account IS NULL OR account=''", (row[0],))
-                    db.commit()
-                    log.info(f"Migrated {cnt} feishu_bindings account='default' -> {row[0]}")
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "chat_config" in _tables:
+                c.execute("SELECT user_id, backend, skill, feishu_app_id, feishu_app_secret FROM chat_config")
+                for r in c.fetchall():
+                    if not r[0]:
+                        continue
+                    sid = f"sess-cfg-{r[0]}"
+                    c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, backend, skill, im_app_id, im_app_secret, im_provider, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,'feishu',datetime('now'),datetime('now'))",
+                              (sid, r[0], "", r[1] or "opencode", r[2] or "", r[3] or "", r[4] or ""))
+                db.commit()
+                log.info("Migrated chat_config -> chat_agent_session")
     except Exception as e:
-        log.warning(f"Migrate feishu_bindings account failed: {e}")
+        log.warning(f"Migrate chat_config failed: {e}")
+    # 清理旧表（如果存在）
+    try:
+        with db_lock:
+            c = db.cursor()
+            for tbl in ["vod_bot_config", "chat_config", "im_channels", "user_im_bindings"]:
+                c.execute(f"DROP TABLE IF EXISTS {tbl}")
+            db.commit()
+    except Exception:
+        pass
+    # 迁移 repo_im_group_binding 的 im_app_id='default' → Chat Bot app_id（清理 default 兜底账户）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "repo_im_group_binding" in _tables:
+                c.execute("SELECT COUNT(*) FROM repo_im_group_binding WHERE im_app_id='default' OR im_app_id IS NULL OR im_app_id=''")
+                cnt = c.fetchone()[0]
+                if cnt > 0:
+                    c.execute("SELECT bot_app_id FROM global_im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
+                    row = c.fetchone()
+                    if row and row[0]:
+                        c.execute("UPDATE repo_im_group_binding SET im_app_id=? WHERE im_app_id='default' OR im_app_id IS NULL OR im_app_id=''", (row[0],))
+                        db.commit()
+                        log.info(f"Migrated {cnt} repo_im_group_binding im_app_id='default' -> {row[0]}")
+    except Exception as e:
+        log.warning(f"Migrate repo_im_group_binding im_app_id failed: {e}")
     # 迁移 default 账户：OAuth 配置 → meta 表，bot_usernames → hwc-dev-bot 账户，删除 default
     try:
         with db_lock:
@@ -580,7 +569,9 @@ def _migrate_tables():
             if "vod_bot_app_id" in cols:
                 # 1. vod_bot_app_id → im_app_id + im_provider='feishu' + im_app_secret 补齐
                 c.execute("UPDATE devops_agent_session SET im_app_id=vod_bot_app_id, im_provider='feishu' WHERE vod_bot_app_id!='' AND vod_bot_app_id IS NOT NULL")
-                c.execute("UPDATE devops_agent_session SET im_app_secret=(SELECT bot_app_secret FROM im_bot_config WHERE bot_app_id=devops_agent_session.im_app_id) WHERE im_app_id!='' AND im_app_secret=''")
+                _tables2 = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+                if "im_bot_config" in _tables2:
+                    c.execute("UPDATE devops_agent_session SET im_app_secret=(SELECT bot_app_secret FROM im_bot_config WHERE bot_app_id=devops_agent_session.im_app_id) WHERE im_app_id!='' AND im_app_secret=''")
                 db.commit()
                 # 2. 删除 vod_bot_app_id 列
                 try:
@@ -591,3 +582,52 @@ def _migrate_tables():
                     log.warning("DROP COLUMN vod_bot_app_id failed (may need rebuild)")
     except Exception as e:
         log.warning(f"Migrate vod_bot_app_id -> im_app_id failed: {e}")
+    # 迁移 devops_agent_session.oc_session_id → backend_session_id
+    try:
+        with db_lock:
+            c = db.cursor()
+            cols = [r[1] for r in c.execute("PRAGMA table_info(devops_agent_session)").fetchall()]
+            if "oc_session_id" in cols and "backend_session_id" in cols:
+                c.execute("UPDATE devops_agent_session SET backend_session_id=oc_session_id WHERE backend_session_id='' AND oc_session_id!=''")
+                db.commit()
+                log.info("Migrated devops_agent_session oc_session_id -> backend_session_id")
+    except Exception as e:
+        log.warning(f"Migrate devops_agent_session oc_session_id failed: {e}")
+    # 迁移 vod_conversations 字段（feishu_chat_id→im_chat_id, oc_session_id→backend_session_id）
+    try:
+        with db_lock:
+            c = db.cursor()
+            cols = [r[1] for r in c.execute("PRAGMA table_info(vod_conversations)").fetchall()]
+            if "feishu_chat_id" in cols:
+                try:
+                    c.execute("ALTER TABLE vod_conversations RENAME COLUMN feishu_chat_id TO im_chat_id")
+                except Exception:
+                    pass
+            if "feishu_chat_name" in cols:
+                try:
+                    c.execute("ALTER TABLE vod_conversations RENAME COLUMN feishu_chat_name TO im_channel_name")
+                except Exception:
+                    pass
+            if "oc_session_id" in cols:
+                try:
+                    c.execute("ALTER TABLE vod_conversations RENAME COLUMN oc_session_id TO backend_session_id")
+                except Exception:
+                    pass
+            cols = [r[1] for r in c.execute("PRAGMA table_info(vod_conversations)").fetchall()]
+            if "im_provider" not in cols:
+                c.execute("ALTER TABLE vod_conversations ADD COLUMN im_provider TEXT DEFAULT 'feishu'")
+            db.commit()
+            log.info("Migrated vod_conversations fields to im_* / backend_session_id")
+    except Exception as e:
+        log.warning(f"Migrate vod_conversations fields failed: {e}")
+    # 迁移 chat_conversations.session_id → backend_session_id
+    try:
+        with db_lock:
+            c = db.cursor()
+            cols = [r[1] for r in c.execute("PRAGMA table_info(chat_conversations)").fetchall()]
+            if "session_id" in cols and "backend_session_id" in cols:
+                c.execute("UPDATE chat_conversations SET backend_session_id=session_id WHERE backend_session_id='' AND session_id!=''")
+                db.commit()
+                log.info("Migrated chat_conversations session_id -> backend_session_id")
+    except Exception as e:
+        log.warning(f"Migrate chat_conversations session_id failed: {e}")

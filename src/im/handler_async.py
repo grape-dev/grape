@@ -31,7 +31,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         text = parsed["text"]
         chat_id = parsed["chat_id"]
         msg_id = parsed["message_id"]
-        # account 用于 feishu_bindings 隔离（区分不同 Feishu bot app）
+        # account 用于 repo_im_group_binding 隔离（区分不同 Feishu bot app）
         account = ctx.app_id
 
         log.info(f"[Chat:{ctx.name}] message: {text[:100]} (chat={chat_id[:20]})")
@@ -144,7 +144,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                                      bind_account="", exec_account=""):
     """异步版内部处理逻辑
 
-    bind_account: 用于 feishu_bindings 隔离（Chat Bot 场景 = bot app_id）
+    bind_account: 用于 repo_im_group_binding 隔离（Chat Bot 场景 = bot app_id）
     exec_account: 用于 workspace history / agent 执行（= 仓库全名 owner/repo）
     """
     try:
@@ -158,19 +158,12 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                 gitcode_login = None
                 nick_name = ""
                 c = db.cursor()
-                c.execute("SELECT gitcode_user, feishu_name FROM feishu_users WHERE repo_key=? AND feishu_open_id=?",
-                          (repo_key, open_id))
+                c.execute("SELECT gitcode_user, feishu_name FROM unified_user_mapping WHERE feishu_open_id=?",
+                          (open_id,))
                 row = c.fetchone()
                 if row:
                     gitcode_login = row[0]
                     nick_name = row[1] or ""
-                if not gitcode_login:
-                    c.execute("SELECT gitcode_user, feishu_name FROM feishu_users WHERE feishu_open_id=?",
-                              (open_id,))
-                    row = c.fetchone()
-                    if row:
-                        gitcode_login = row[0]
-                        nick_name = row[1] or ""
                 if gitcode_login:
                     user_info += f"\nGitCode login: {gitcode_login}"
                     if nick_name and nick_name != gitcode_login:

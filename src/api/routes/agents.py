@@ -77,12 +77,12 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, backend, skill, repo_gitcode_token, oc_session_id, status, last_active_at, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                "SELECT id, backend, skill, repo_gitcode_token, backend_session_id, status, last_active_at, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
             if row:
-                session_data = {"id": row[0], "backend": row[1], "skill": row[2] or "", "repo_gitcode_token": row[3] or "", "oc_session_id": row[4], "status": row[5], "last_active_at": row[6],
+                session_data = {"id": row[0], "backend": row[1], "skill": row[2] or "", "repo_gitcode_token": row[3] or "", "backend_session_id": row[4], "status": row[5], "last_active_at": row[6],
                                "im_app_id": row[7] or ""}
         except Exception:
             pass
@@ -91,11 +91,11 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         if name == "vod" and session_data.get("id"):
             try:
                 c.execute(
-                    "SELECT vc.feishu_chat_id, vc.feishu_chat_name, vc.oc_session_id, vc.status, vc.last_active_at FROM vod_conversations vc WHERE vc.agent_session_id=? ORDER BY vc.last_active_at DESC",
+                    "SELECT vc.im_chat_id, vc.im_channel_name, vc.backend_session_id, vc.status, vc.last_active_at FROM vod_conversations vc WHERE vc.agent_session_id=? ORDER BY vc.last_active_at DESC",
                     (session_data["id"],)
                 )
                 vod_conversations = [
-                    {"chat_id": r[0], "chat_name": r[1] or "", "oc_session_id": r[2] or "",
+                    {"chat_id": r[0], "chat_name": r[1] or "", "backend_session_id": r[2] or "",
                      "status": r[3], "last_active_at": r[4] or ""}
                     for r in c.fetchall()
                 ]
@@ -103,7 +103,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
                 pass
             if session_data.get("im_app_id"):
                 try:
-                    c.execute("SELECT COUNT(*) FROM im_bot_config WHERE bot_type='vod_bot' AND bot_app_id=?", (session_data["im_app_id"],))
+                    c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_type='vod_bot' AND bot_app_id=?", (session_data["im_app_id"],))
                     vod_bot_connected = c.fetchone()[0] > 0
                 except Exception:
                     pass
@@ -187,7 +187,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 
     from src.session_manager import db, db_lock
 
-    # VOD IM 配置：保存到 im_bot_config + 类型独占校验 + 清理旧 app_id
+    # VOD IM 配置：保存到 global_im_bot_config + 类型独占校验 + 清理旧 app_id
     old_app_id = ""
     if name == "vod" and body.im_app_id:
         app_secret = body.im_app_secret
@@ -195,7 +195,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             try:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("SELECT bot_app_secret FROM im_bot_config WHERE bot_app_id=?", (body.im_app_id,))
+                    c.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (body.im_app_id,))
                     row = c.fetchone()
                     if row:
                         app_secret = row[0]
@@ -205,7 +205,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             with db_lock:
                 c = db.cursor()
                 # 类型独占校验
-                c.execute("SELECT bot_type FROM im_bot_config WHERE bot_app_id=?", (body.im_app_id,))
+                c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=?", (body.im_app_id,))
                 row = c.fetchone()
                 if row and row[0] == "chat_bot":
                     raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent"})
@@ -219,15 +219,15 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE im_app_id=? AND repo_key!=?", (old_app_id, repo_key))
                     other_refs = c.fetchone()[0]
                     if other_refs == 0:
-                        c.execute("DELETE FROM im_bot_config WHERE bot_app_id=?", (old_app_id,))
+                        c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (old_app_id,))
                         log.info(f"VOD IM: removed old app_id={old_app_id[:30]}")
                     # 清理旧 conversations
                     c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN (SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod')", (repo_key,))
                     log.info(f"VOD IM: cleaned conversations for {repo_key}")
 
                 c.execute(
-                    "INSERT OR REPLACE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) VALUES (?,?,?)",
-                    (body.im_app_id, app_secret, "vod_bot")
+                    "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?,?)",
+                    (body.im_app_id, "vod_bot")
                 )
                 db.commit()
 

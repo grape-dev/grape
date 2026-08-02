@@ -140,22 +140,16 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         user_info = f"User: {sender_name or sender_id} (ID: {sender_id})"
         if open_id:
             user_info += f"\nFeishu open_id: {open_id}\nTo @mention user, use: <at id={open_id}></at>"
-            # Resolve GitCode login from feishu_users mapping
+            # Resolve GitCode login from unified_user_mapping
             try:
                 gitcode_login = None
                 nick_name = ""
                 c = db.cursor()
-                c.execute("SELECT gitcode_user, feishu_name FROM feishu_users WHERE repo_key=? AND feishu_open_id=?", (repo_key, open_id))
+                c.execute("SELECT gitcode_user, feishu_name FROM unified_user_mapping WHERE feishu_open_id=?", (open_id,))
                 row = c.fetchone()
                 if row:
                     gitcode_login = row[0]
                     nick_name = row[1] or ""
-                if not gitcode_login:
-                    c.execute("SELECT gitcode_user, feishu_name FROM feishu_users WHERE feishu_open_id=?", (open_id,))
-                    row = c.fetchone()
-                    if row:
-                        gitcode_login = row[0]
-                        nick_name = row[1] or ""
                 if gitcode_login:
                     user_info += f"\nGitCode login: {gitcode_login}"
                     if nick_name and nick_name != gitcode_login:

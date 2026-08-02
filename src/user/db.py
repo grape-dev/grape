@@ -1044,31 +1044,34 @@ init_user_repos_table()
 
 # ====== Backend Agents 缓存表 ======
 
-def save_backend_agents(agents: list[dict]):
-    """批量写入 backend agents 缓存"""
+def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = ""):
+    """批量写入 backend agents 缓存（scope: global/repo/user）"""
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM backend_agents")
+        if scope == "global":
+            c.execute("DELETE FROM backend_agents WHERE scope='global'")
+        else:
+            c.execute("DELETE FROM backend_agents WHERE scope=? AND owner_id=?", (scope, owner_id))
         for a in agents:
             c.execute(
-                "INSERT OR REPLACE INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package) VALUES (?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
                 (a.get("name", ""), a.get("display_name", a.get("name", "")),
                  1 if a.get("installed") else 0, a.get("cli_path", ""),
                  a.get("version", ""), 1 if a.get("healthy") else 0,
-                 a.get("pip_package", ""))
+                 a.get("pip_package", ""), scope, owner_id)
             )
         db.commit()
 
 
-def get_backend_agents() -> list[dict]:
+def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
     """读取 backend agents 缓存"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT name, display_name, installed, cli_path, version, healthy, pip_package, updated_at FROM backend_agents ORDER BY name")
+        c.execute("SELECT name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id FROM backend_agents WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"name": r[0], "display_name": r[1], "installed": bool(r[2]),
              "cli_path": r[3], "version": r[4], "healthy": bool(r[5]),
-             "pip_package": r[6], "updated_at": r[7]}
+             "pip_package": r[6], "updated_at": r[7], "scope": r[8], "owner_id": r[9]}
             for r in c.fetchall()
         ]
 

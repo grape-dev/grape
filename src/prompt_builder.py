@@ -99,7 +99,7 @@ def _build_feishu_context_section(repo_key: str, ctx: dict) -> str:
     # Known mappings
     mappings = ctx.get("mappings", {})
     if mappings:
-        lines.append("\n### Known VCS -> Feishu Mappings (cached in feishu_users table)")
+        lines.append("\n### Known VCS -> Feishu Mappings (cached in unified_user_mapping table)")
         for gitcode_user, info in mappings.items():
             lines.append(f"  {gitcode_user}  ->  {info['open_id']}")
 
@@ -147,18 +147,19 @@ curl -sL -X POST \\
   -d '{{"receive_id":"OPEN_ID","msg_type":"interactive","content":"{{\\"header\\":{{\\"title\\":{{\\"tag\\":\\"plain_text\\",\\"content\\":\\"DevOps Bot\\"}},\\"template\\":\\"blue\\"}},\\"elements\\":[{{\\"tag\\":\\"div\\",\\"text\\":{{\\"tag\\":\\"lark_md\\",\\"content\\":\\"MESSAGE\\"}}}}]}}"}}' \\
   "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
 
-### Save User Mapping (INSERT into feishu_users)
+### Save User Mapping (INSERT into unified_user_mapping)
 Use Python to save discovered mappings in /root/devops-bot/data/sessions.db:
   import sqlite3; db = sqlite3.connect('/root/devops-bot/data/sessions.db')
-  db.execute("INSERT OR REPLACE INTO feishu_users (repo_key,gitcode_user,feishu_open_id,feishu_name,updated_at) VALUES (?,?,?,?,datetime('now'))", ('{repo_key}', GITCODE_USER, OPEN_ID, NAME))
+  db.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id,gitcode_user,feishu_open_id,feishu_name,updated_at) VALUES (?,?,?,?,datetime('now'))", (USER_ID, GITCODE_USER, OPEN_ID, NAME))
   db.commit(); db.close()
+  # 若不知道 user_id，可用 0 占位，后续由 sync_repo_feishu_mapping 回填
 
 ### Name Resolution Workflow
 1. Determine target user (vcs_login, e.g. "Jason7602")
 2. If in Known Mappings -> use open_id directly, send notification
 3. Else: find user's nick_name from Collaborators list above
 4. Match nick_name against Group Members name -> get open_id
-5. Match found -> save to feishu_users -> send notification
+5. Match found -> save to unified_user_mapping -> send notification
    6. Match not found -> notify Owner: "{{login}}({{nick_name}})" in Feishu group, ask to check nickname consistency
 7. Card content rules: max 2000 chars, no ```code blocks, use [text](url) for links
 """)

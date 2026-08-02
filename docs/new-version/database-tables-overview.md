@@ -185,14 +185,20 @@ skill TEXT NOT NULL, priority INTEGER DEFAULT 0,
 created_at TEXT DEFAULT (datetime('now'))
 ```
 
-#### `backend_agents` — 后端引擎探测状态
+#### `backend_agents` — 后端引擎探测状态（含 scope 分级）
 ```sql
-name TEXT PRIMARY KEY, display_name TEXT DEFAULT '',
+id INTEGER PRIMARY KEY AUTOINCREMENT,  -- 独立 id
+name TEXT NOT NULL,                    -- 引擎名（opencode/codearts）
+display_name TEXT DEFAULT '',
 installed INTEGER DEFAULT 0, cli_path TEXT DEFAULT '',
 version TEXT DEFAULT '', healthy INTEGER DEFAULT 0,
 pip_package TEXT DEFAULT '',
-updated_at TEXT DEFAULT (datetime('now'))
+scope TEXT DEFAULT 'global',           -- global/repo/user 三级
+owner_id TEXT DEFAULT '',              -- scope=repo 存 repo_key；scope=user 存 user_id
+updated_at TEXT DEFAULT (datetime('now')),
+UNIQUE (name, scope, owner_id)
 ```
+> scope 分级：`global`（系统级引擎探测）、`repo`（仓库级专用引擎配置）、`user`（用户级自定义引擎）。
 
 ### 2.4 事件流水线
 

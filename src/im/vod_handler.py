@@ -88,32 +88,32 @@ def _get_vod_session(repo_key: str) -> dict | None:
     return None
 
 
-def _get_or_create_conversation(feishu_chat_id: str, agent_session_id: str) -> dict:
+def _get_or_create_conversation(im_chat_id: str, agent_session_id: str) -> dict:
     """获取或创建 vod_conversations"""
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, oc_session_id FROM vod_conversations WHERE feishu_chat_id=?", (feishu_chat_id,))
+            c.execute("SELECT id, backend_session_id FROM vod_conversations WHERE im_chat_id=?", (im_chat_id,))
             row = c.fetchone()
             if row:
-                return {"id": row[0], "oc_session_id": row[1] or "", "new": False}
+                return {"id": row[0], "backend_session_id": row[1] or "", "new": False}
             c.execute(
-                "INSERT INTO vod_conversations (agent_session_id, feishu_chat_id, oc_session_id, status, last_active_at) VALUES (?,?,?,?,datetime('now'))",
-                (agent_session_id, feishu_chat_id, "", "active")
+                "INSERT INTO vod_conversations (agent_session_id, im_chat_id, backend_session_id, status, last_active_at) VALUES (?,?,?,?,datetime('now'))",
+                (agent_session_id, im_chat_id, "", "active")
             )
             db.commit()
-            return {"id": c.lastrowid, "oc_session_id": "", "new": True}
+            return {"id": c.lastrowid, "backend_session_id": "", "new": True}
     except Exception:
         pass
-    return {"id": 0, "oc_session_id": "", "new": False}
+    return {"id": 0, "backend_session_id": "", "new": False}
 
 
-def _update_conversation_oc_session(conv_id: int, oc_session_id: str):
-    """更新 vod_conversations 的 oc_session_id"""
+def _update_conversation_oc_session(conv_id: int, backend_session_id: str):
+    """更新 vod_conversations 的 backend_session_id"""
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE vod_conversations SET oc_session_id=?, last_active_at=datetime('now') WHERE id=?", (oc_session_id, conv_id))
+            c.execute("UPDATE vod_conversations SET backend_session_id=?, last_active_at=datetime('now') WHERE id=?", (backend_session_id, conv_id))
             db.commit()
     except Exception:
         pass
@@ -130,10 +130,10 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
 
     exit_code = -1
     final_text = ""
-    new_oc_session_id = ""
+    new_backend_session_id = ""
     try:
         for evt_type, data in stream_agent(
-            prompt, ws, session_id=conv.get("oc_session_id", ""),
+            prompt, ws, session_id=conv.get("backend_session_id", ""),
             event_type="vod_signal", backend_name=agent_session.get("backend", "opencode"),
             account=repo_key, repo_gitcode_token=agent_session.get("repo_gitcode_token", ""),
         ):
@@ -141,14 +141,14 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
                 d = data
                 exit_code = d.get("exit_code", -1)
                 final_text = d.get("text", "")
-                new_oc_session_id = d.get("oc_session_id", "")
+                new_backend_session_id = d.get("oc_session_id", "")
             elif evt_type == "error":
                 log.warning(f"VOD agent error: {data}")
     except Exception as e:
         log.warning(f"VOD agent execute failed: {e}")
 
-    if new_oc_session_id and new_oc_session_id != conv.get("oc_session_id", ""):
-        _update_conversation_oc_session(conv["id"], new_oc_session_id)
+    if new_backend_session_id and new_backend_session_id != conv.get("backend_session_id", ""):
+        _update_conversation_oc_session(conv["id"], new_backend_session_id)
 
     if exit_code != 0:
         return f"处理失败，请稍后重试 (exit={exit_code})"
@@ -156,14 +156,16 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
 
 
 def _get_bot_credential(bot_app_id: str) -> tuple[str, str]:
-    """获取 VOD 机器人凭证"""
+    """获取 VOD 机器人凭证（secret 从 devops_agent_session 取）"""
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='vod_bot' AND bot_app_id=?", (bot_app_id,))
+            c.execute("SELECT bot_app_id FROM global_im_bot_config WHERE bot_type='vod_bot' AND bot_app_id=?", (bot_app_id,))
             row = c.fetchone()
             if row:
-                return row[0], row[1]
+                c.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (bot_app_id,))
+                srow = c.fetchone()
+                return row[0], (srow[0] if srow else "")
     except Exception:
         pass
     return "", ""
@@ -263,7 +265,7 @@ def process_vod_message(message: dict, bot_app_id: str):
             try:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("SELECT agent_session_id, oc_session_id FROM vod_conversations WHERE feishu_chat_id=?", (chat_id,))
+                    c.execute("SELECT agent_session_id, backend_session_id FROM vod_conversations WHERE im_chat_id=?", (chat_id,))
                     row = c.fetchone()
                 if row:
                     # 通过 agent_session_id 查 repo_key
@@ -296,7 +298,7 @@ def process_vod_message(message: dict, bot_app_id: str):
             try:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("DELETE FROM vod_conversations WHERE feishu_chat_id=?", (chat_id,))
+                    c.execute("DELETE FROM vod_conversations WHERE im_chat_id=?", (chat_id,))
                     db.commit()
                 _send_feishu_reply_text(bot_app_id, chat_id, "✅ 已解除绑定，不再接收该仓库的消息")
             except Exception as e:
@@ -307,7 +309,7 @@ def process_vod_message(message: dict, bot_app_id: str):
             try:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("UPDATE vod_conversations SET oc_session_id='' WHERE feishu_chat_id=?", (chat_id,))
+                    c.execute("UPDATE vod_conversations SET backend_session_id='' WHERE im_chat_id=?", (chat_id,))
                     db.commit()
                 _send_feishu_reply_text(bot_app_id, chat_id, "✅ 已清除会话上下文")
             except Exception as e:
@@ -318,7 +320,7 @@ def process_vod_message(message: dict, bot_app_id: str):
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT agent_session_id, oc_session_id FROM vod_conversations WHERE feishu_chat_id=?", (chat_id,))
+                c.execute("SELECT agent_session_id, backend_session_id FROM vod_conversations WHERE im_chat_id=?", (chat_id,))
                 row = c.fetchone()
         except Exception:
             row = None
@@ -335,7 +337,7 @@ def process_vod_message(message: dict, bot_app_id: str):
                     conv = _get_or_create_conversation(chat_id, agent_session["id"])
                     _send_feishu_reply_text(bot_app_id, chat_id, f"✅ 已自动绑定仓库 `{repos[0]['repo_key']}`")
                     # 继续处理当前消息
-                    row = (agent_session["id"], conv["oc_session_id"])
+                    row = (agent_session["id"], conv["backend_session_id"])
                 else:
                     _send_feishu_reply_text(bot_app_id, chat_id, "❌ 自动绑定失败，请联系管理员配置")
                     return
@@ -346,7 +348,7 @@ def process_vod_message(message: dict, bot_app_id: str):
                 return
 
         agent_session_id = row[0]
-        oc_session_id = row[1] or ""
+        backend_session_id = row[1] or ""
 
         # 查 agent_session 获取 repo 等配置
         try:
@@ -372,11 +374,11 @@ def process_vod_message(message: dict, bot_app_id: str):
             "source": "vod_im",
             "actor": sender_id[:20] if sender_id else "unknown",
             "branch": "",
-            "payload": {"user_message": text, "feishu_chat_id": chat_id, "feishu_sender_id": sender_id},
+            "payload": {"user_message": text, "im_chat_id": chat_id, "im_sender_id": sender_id},
         }
 
         # 执行 Agent
-        reply_text = _execute_vod_agent(repo_key, agent_session, {"id": 0, "oc_session_id": oc_session_id}, evt)
+        reply_text = _execute_vod_agent(repo_key, agent_session, {"id": 0, "backend_session_id": backend_session_id}, evt)
 
         # 回复飞书
         bot_app_id_val, bot_app_secret_val = _get_bot_credential(bot_app_id)

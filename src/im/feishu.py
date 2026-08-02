@@ -24,23 +24,13 @@ _TOKEN_EXPIRE = 0
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: dict[str, tuple[str, float]] = {}
 
-FEISHU_BINDINGS_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS feishu_bindings (
-    chat_id TEXT PRIMARY KEY,
-    repo_key TEXT NOT NULL,
-    source TEXT DEFAULT 'gitcode',
-    bind_by TEXT DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now'))
-)
-"""
-
 
 def ensure_configured():
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT bot_app_id FROM im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
+            c.execute("SELECT bot_app_id FROM global_im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
             row = c.fetchone()
             if row and row[0]:
                 return True
@@ -58,18 +48,21 @@ def get_tenant_token() -> str:
     with _TOKEN_LOCK:
         if time.time() < _TOKEN_EXPIRE and _TOKEN:
             return _TOKEN
-        # 从 im_bot_config 获取 Chat Agent 凭据
+        # 从 global_im_bot_config 获取 Chat Agent 凭据（secret 从 devops_agent_session 取）
         app_id = ""
         app_secret = ""
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             try:
-                c.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
+                c.execute("SELECT bot_app_id FROM global_im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
                 row = c.fetchone()
-                if row and row[0] and row[1]:
+                if row and row[0]:
                     app_id = row[0]
-                    app_secret = row[1]
+                    c.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (app_id,))
+                    srow = c.fetchone()
+                    if srow and srow[0]:
+                        app_secret = srow[0]
             except Exception:
                 pass
         if not app_id or not app_secret:
@@ -349,7 +342,7 @@ def get_chat_id_for_repo(repo_key: str) -> str:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT chat_id FROM feishu_bindings WHERE repo_key=?", (repo_key,))
+            c.execute("SELECT im_chat_id FROM repo_im_group_binding WHERE repo_key=?", (repo_key,))
             row = c.fetchone()
             return row[0] if row else ""
     except Exception as e:
@@ -450,7 +443,7 @@ def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "")
     # 3. 查询群绑定表
     try:
         c = db.cursor()
-        c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
+        c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
         row = c.fetchone()
         if row:
             return row[0]
@@ -470,8 +463,8 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
         try:
             c = db.cursor()
             c.execute(
-                "INSERT OR REPLACE INTO feishu_bindings (chat_id, repo_key, source, bind_by, account) VALUES (?,?,?,?,?)",
-                (chat_id, repo_key, "gitcode", sender_id, account)
+                "INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
+                (im_chat_id, repo_key, "gitcode", sender_id, account)
             )
             db.commit()
             matched = sync_repo_feishu_mapping(repo_key, chat_id)
@@ -483,21 +476,17 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
     if cmd == "/unbind":
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
+            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
             row = c.fetchone()
-            c.execute("DELETE FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
-            if row:
-                repo_key = row[0]
-                full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
-                c.execute("DELETE FROM feishu_users WHERE repo_key=? OR repo_key=?", (repo_key, full_key))
+            c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
             db.commit()
-            return "✅ 已解绑当前群并清除用户映射"
+            return "✅ 已解绑当前群"
         except Exception as e:
             return f"❌ 解绑失败: {e}"
     if cmd == "/status":
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key, created_at FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
+            c.execute("SELECT repo_key, created_at FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
             row = c.fetchone()
             if row:
                 return f"📋 当前绑定: `{row[0]}` (since {row[1]})"
@@ -507,7 +496,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
     if cmd == "/refresh":
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
+            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
             row = c.fetchone()
             if not row:
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后刷新。"
@@ -518,7 +507,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
     if cmd == "/autodev":
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
+            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
             row = c.fetchone()
             if not row:
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后设置。"
@@ -535,7 +524,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
     if cmd == "/notify":
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
+            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
             row = c.fetchone()
             if not row:
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后设置。"
@@ -552,13 +541,13 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
     if cmd in ("/clean", "/cleansession", "/reset", "/cleancache"):
         try:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM feishu_bindings WHERE chat_id=? AND account=?", (chat_id, account))
+            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
             row = c.fetchone()
             if not row:
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后再清理。"
             repo_key = row[0]
             full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
-            c.execute("UPDATE chat_agent_session SET opencode_session_id='', codearts_session_id='', backend='' WHERE repo_key=? OR repo_key=?", (repo_key, full_key))
+            c.execute("UPDATE chat_agent_session SET backend_session_id='', backend='' WHERE repo_key=? OR repo_key=?", (repo_key, full_key))
             db.commit()
             return f"✅ 已清除仓库 `{full_key}` 的 Agent 会话缓存。下次事件将使用全新的 Agent 上下文。"
         except Exception as e:
@@ -602,23 +591,26 @@ def start_ws(on_message_callback, account_name: str = "default"):
 
     global _ws_clients
 
-    # 从 im_bot_config 获取 Chat Agent 凭据
+    # 从 global_im_bot_config 获取 Chat Agent 凭据（secret 从 devops_agent_session 取）
     app_id = ""
     app_secret = ""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
+            c.execute("SELECT bot_app_id FROM global_im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
             row = c.fetchone()
-            if row and row[0] and row[1]:
+            if row and row[0]:
                 app_id = row[0]
-                app_secret = row[1]
+                c.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (app_id,))
+                srow = c.fetchone()
+                if srow and srow[0]:
+                    app_secret = srow[0]
         except Exception:
             pass
 
     if not app_id or not app_secret:
-        log.warning(f"Feishu: no chat_bot configured in im_bot_config, skipping WS")
+        log.warning(f"Feishu: no chat_bot configured in global_im_bot_config, skipping WS")
         return
 
     # 记录当前 WS 使用的 app_id 到 meta 表（供后续查询 user_id 用）
@@ -665,12 +657,12 @@ def start_ws(on_message_callback, account_name: str = "default"):
 
 
 def get_user_id_by_app_id(app_id: str) -> int | None:
-    """通过 feishu_app_id 查找关联的 user_id（chat_config）"""
+    """通过 im_app_id 查找关联的 user_id"""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT user_id FROM chat_config WHERE feishu_app_id=?", (app_id,))
+            c.execute("SELECT user_id FROM chat_agent_session WHERE im_app_id=? AND user_id>0 LIMIT 1", (app_id,))
             row = c.fetchone()
             if row:
                 return row[0]

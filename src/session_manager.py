@@ -3,24 +3,31 @@ import sqlite3, json, threading, os, time
 from datetime import datetime
 from src.config import log
 
-FEISHU_BINDINGS_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS feishu_bindings (
-    chat_id TEXT PRIMARY KEY,
+REPO_IM_GROUP_BINDING_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS repo_im_group_binding (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    im_provider TEXT DEFAULT 'feishu',
+    im_chat_id TEXT NOT NULL,
+    im_channel_name TEXT DEFAULT '',
     repo_key TEXT NOT NULL,
-    source TEXT DEFAULT 'gitcode',
     bind_by TEXT DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now'))
+    im_app_id TEXT DEFAULT '',
+    auto_impl_enabled INTEGER DEFAULT 0,
+    notify_enabled INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (im_provider, im_chat_id, im_app_id)
 )
 """
 
-FEISHU_USERS_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS feishu_users (
-    repo_key TEXT NOT NULL,
-    gitcode_user TEXT NOT NULL,
-    feishu_open_id TEXT NOT NULL,
+UNIFIED_USER_MAPPING_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS unified_user_mapping (
+    user_id INTEGER PRIMARY KEY,
+    gitcode_user TEXT DEFAULT '',
+    feishu_open_id TEXT DEFAULT '',
     feishu_name TEXT DEFAULT '',
-    updated_at TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (repo_key, gitcode_user)
+    github_login TEXT DEFAULT '',
+    dingtalk_user_id TEXT DEFAULT '',
+    updated_at TEXT DEFAULT (datetime('now'))
 )
 """
 
@@ -43,71 +50,108 @@ try:
         log.info("Migrated sessions data into chat_agent_session and dropped sessions")
 except Exception as e:
     log.warning(f"Migrate sessions table failed: {e}")
+# 迁移旧表 feishu_bindings → repo_im_group_binding
+try:
+    _tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    if "feishu_bindings" in _tables and "repo_im_group_binding" not in _tables:
+        db.execute("ALTER TABLE feishu_bindings RENAME TO repo_im_group_binding")
+        db.commit()
+        log.info("Migrated table feishu_bindings -> repo_im_group_binding")
+except Exception as e:
+    log.warning(f"Migrate feishu_bindings table failed: {e}")
+# 迁移旧表 feishu_users → unified_user_mapping（重建 user_id 主键）
+try:
+    _tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    if "feishu_users" in _tables and "unified_user_mapping" not in _tables:
+        db.execute("ALTER TABLE feishu_users RENAME TO unified_user_mapping")
+        db.commit()
+        log.info("Migrated table feishu_users -> unified_user_mapping")
+except Exception as e:
+    log.warning(f"Migrate feishu_users table failed: {e}")
 db.execute("""
     CREATE TABLE IF NOT EXISTS chat_agent_session (
         id TEXT PRIMARY KEY,
-        repo_key TEXT UNIQUE,
+        user_id INTEGER DEFAULT 0,
+        repo_key TEXT DEFAULT '',
         source TEXT, repository TEXT, status TEXT,
+        backend TEXT DEFAULT 'opencode',
+        skill TEXT DEFAULT '',
+        im_provider TEXT DEFAULT '',
+        im_app_id TEXT DEFAULT '',
+        im_app_secret TEXT DEFAULT '',
         event_history TEXT DEFAULT '[]',
-        oc_session_id TEXT DEFAULT '',
         created_at TEXT, last_active_at TEXT
     )
 """)
-db.execute(FEISHU_BINDINGS_TABLE_SQL)
-db.execute(FEISHU_USERS_TABLE_SQL)
+db.execute(REPO_IM_GROUP_BINDING_TABLE_SQL)
+db.execute(UNIFIED_USER_MAPPING_TABLE_SQL)
+# 兼容旧列迁移（幂等）
 try:
-    db.execute("ALTER TABLE feishu_bindings ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")
+    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")
 except:
     pass
 try:
-    db.execute("ALTER TABLE feishu_bindings ADD COLUMN notify_enabled INTEGER DEFAULT 0")
+    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN notify_enabled INTEGER DEFAULT 0")
 except:
     pass
 try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN account TEXT DEFAULT 'default'")
+    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN im_app_id TEXT DEFAULT ''")
 except:
     pass
 try:
-    db.execute("ALTER TABLE feishu_bindings ADD COLUMN account TEXT DEFAULT 'default'")
+    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN im_provider TEXT DEFAULT 'feishu'")
 except:
     pass
 try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN backend TEXT DEFAULT ''")
+    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN im_channel_name TEXT DEFAULT ''")
 except:
     pass
 try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN opencode_session_id TEXT DEFAULT ''")
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN backend TEXT DEFAULT 'opencode'")
 except:
     pass
 try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN codearts_session_id TEXT DEFAULT ''")
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN skill TEXT DEFAULT ''")
 except:
     pass
-db.execute("UPDATE feishu_bindings SET notify_enabled=0 WHERE notify_enabled IS NULL")
+try:
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN im_provider TEXT DEFAULT ''")
+except:
+    pass
+try:
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN im_app_id TEXT DEFAULT ''")
+except:
+    pass
+try:
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN im_app_secret TEXT DEFAULT ''")
+except:
+    pass
+try:
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN user_id INTEGER DEFAULT 0")
+except:
+    pass
+try:
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN backend_session_id TEXT DEFAULT ''")
+except:
+    pass
 db.commit()
 
 MAX_HISTORY = 100
 
-_SESSION_COLS = {"opencode": "opencode_session_id", "codearts": "codearts_session_id"}
-
-
-def _session_col(backend: str) -> str:
-    return _SESSION_COLS.get(backend, "opencode_session_id")
-
 
 def get_or_create_session(repo_key, source, repository, backend="opencode"):
+    """获取或创建 repo 级 Chat 会话（chat_agent_session，飞书 Chat 用）"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, event_history, opencode_session_id, codearts_session_id, status FROM chat_agent_session WHERE repo_key=?", (repo_key,))
+        c.execute("SELECT id, event_history, backend_session_id, status FROM chat_agent_session WHERE repo_key=?", (repo_key,))
         row = c.fetchone()
         if row:
-            sid, hist_json, oc_sid, cc_sid, status = row
+            sid, hist_json, bsid, status = row
             history = json.loads(hist_json) if hist_json else []
             if status == "failed":
                 c.execute("UPDATE chat_agent_session SET status=? WHERE id=?", ("idle", sid))
                 db.commit()
-            sid_val = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
-            return sid, history, sid_val or "", "", False
+            return sid, history, bsid or "", "", False
         sid = f"sess-{repo_key}-{int(time.time()*1000000)}"
         now = datetime.now().isoformat()
         c.execute(
@@ -119,14 +163,14 @@ def get_or_create_session(repo_key, source, repository, backend="opencode"):
 
 
 def update_session(sid, history, status, oc_session_id=None, backend="opencode"):
+    """更新 Chat 会话（backend_session_id 存当前 backend 会话）"""
     with db_lock:
         c = db.cursor()
-        col = _session_col(backend)
         if len(history) > MAX_HISTORY:
             history = history[-MAX_HISTORY:]
         if oc_session_id:
             c.execute(
-                f"UPDATE chat_agent_session SET event_history=?, status=?, {col}=?, last_active_at=? WHERE id=?",
+                "UPDATE chat_agent_session SET event_history=?, status=?, backend_session_id=?, last_active_at=? WHERE id=?",
                 (json.dumps(history), status, oc_session_id, datetime.now().isoformat(), sid)
             )
         else:
@@ -185,16 +229,16 @@ def get_history_file_list(repo_key: str, account: str = "") -> list[str]:
 
 
 def get_feishu_open_id(repo_key, gitcode_user):
-    """获取 GitCode 用户名对应的飞书 open_id"""
+    """获取 GitCode 用户名对应的飞书 open_id（按 gitcode_user 全局关联）"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT feishu_open_id FROM feishu_users WHERE repo_key=? AND gitcode_user=?", (repo_key, gitcode_user))
+        c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
         row = c.fetchone()
         return row[0] if row else None
 
 
 def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name=""):
-    """写入 GitCode → Feishu 用户映射（含 user_id）"""
+    """写入 GitCode → Feishu 用户映射（user_id 主键，按 gitcode_user 关联）"""
     user_id = 0
     try:
         from src.user import db as user_db
@@ -205,26 +249,45 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name=""):
         pass
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO feishu_users (repo_key, gitcode_user, feishu_open_id, feishu_name, user_id, updated_at) VALUES (?,?,?,?,?,?)",
-            (repo_key, gitcode_user, open_id, feishu_name, user_id, datetime.now().isoformat())
-        )
+        # 若 user_id 已存在则更新，否则按 gitcode_user 匹配后更新/插入
+        if user_id:
+            c.execute(
+                "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?)",
+                (user_id, gitcode_user, open_id, feishu_name, datetime.now().isoformat())
+            )
+        else:
+            c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
+            row = c.fetchone()
+            if row:
+                c.execute(
+                    "UPDATE unified_user_mapping SET feishu_open_id=?, feishu_name=?, updated_at=? WHERE user_id=?",
+                    (open_id, feishu_name, datetime.now().isoformat(), row[0])
+                )
+            else:
+                # 无 user_id 也无已有记录，用 gitcode_user 作为临时主键占位（user_id 为负数避免冲突）
+                from src.user import db as user_db
+                uid = user_db.get_user_by_username(gitcode_user)
+                new_id = uid["id"] if uid else -1
+                c.execute(
+                    "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?)",
+                    (new_id, gitcode_user, open_id, feishu_name, datetime.now().isoformat())
+                )
         db.commit()
 
 
 def get_feishu_mapping(repo_key):
-    """获取某 repo 的所有已知映射 {gitcode_user: {open_id, name}}"""
+    """获取所有已知映射 {gitcode_user: {open_id, name}}"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT gitcode_user, feishu_open_id, feishu_name FROM feishu_users WHERE repo_key=?", (repo_key,))
+        c.execute("SELECT gitcode_user, feishu_open_id, feishu_name FROM unified_user_mapping WHERE gitcode_user!=''")
         return {row[0]: {"open_id": row[1], "name": row[2]} for row in c.fetchall()}
 
 
 def get_feishu_group_name_map(repo_key):
-    """获取 repo 的飞书群成员 {name: open_id}（从 feishu_users 聚合得到）"""
+    """获取飞书群成员 {name: open_id}（从 unified_user_mapping 聚合得到）"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT feishu_name, feishu_open_id FROM feishu_users WHERE repo_key=? AND feishu_name!=''", (repo_key,))
+        c.execute("SELECT feishu_name, feishu_open_id FROM unified_user_mapping WHERE feishu_name!=''")
         return {row[0]: row[1] for row in c.fetchall()}
 
 
@@ -232,10 +295,10 @@ def get_auto_impl_enabled(repo_key):
     """查询仓库是否开启了自动实现"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT auto_impl_enabled FROM feishu_bindings WHERE repo_key=?", (repo_key,))
+        c.execute("SELECT auto_impl_enabled FROM repo_im_group_binding WHERE repo_key=?", (repo_key,))
         row = c.fetchone()
         if not row:
-            c.execute("SELECT auto_impl_enabled FROM feishu_bindings WHERE repo_key=?", ("gitcode:" + repo_key,))
+            c.execute("SELECT auto_impl_enabled FROM repo_im_group_binding WHERE repo_key=?", ("gitcode:" + repo_key,))
             row = c.fetchone()
         return bool(row[0]) if row else False
 
@@ -244,10 +307,10 @@ def set_auto_impl_enabled(repo_key, enabled):
     """设置仓库的自动实现开关"""
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE feishu_bindings SET auto_impl_enabled=? WHERE repo_key=?", (int(enabled), repo_key))
+        c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=? WHERE repo_key=?", (int(enabled), repo_key))
         if c.rowcount == 0:
             full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
-            c.execute("UPDATE feishu_bindings SET auto_impl_enabled=? WHERE repo_key=?", (int(enabled), full_key))
+            c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=? WHERE repo_key=?", (int(enabled), full_key))
         db.commit()
 
 
@@ -255,10 +318,10 @@ def get_notify_enabled(repo_key):
     """查询仓库是否开启了飞书通知"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT notify_enabled FROM feishu_bindings WHERE repo_key=?", (repo_key,))
+        c.execute("SELECT notify_enabled FROM repo_im_group_binding WHERE repo_key=?", (repo_key,))
         row = c.fetchone()
         if not row:
-            c.execute("SELECT notify_enabled FROM feishu_bindings WHERE repo_key=?", ("gitcode:" + repo_key,))
+            c.execute("SELECT notify_enabled FROM repo_im_group_binding WHERE repo_key=?", ("gitcode:" + repo_key,))
             row = c.fetchone()
         # default to 0 (False) if column is NULL
         return bool(row[0]) if row and row[0] is not None else False
@@ -268,133 +331,23 @@ def set_notify_enabled(repo_key, enabled):
     """设置仓库的飞书通知开关"""
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE feishu_bindings SET notify_enabled=? WHERE repo_key=?", (int(enabled), repo_key))
+        c.execute("UPDATE repo_im_group_binding SET notify_enabled=? WHERE repo_key=?", (int(enabled), repo_key))
         if c.rowcount == 0:
             full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
-            c.execute("UPDATE feishu_bindings SET notify_enabled=? WHERE repo_key=?", (int(enabled), full_key))
-        db.commit()
-
-
-# ====== im_channels CRUD ======
-
-def create_im_channel(provider: str, channel_id: str, repo_key: str,
-                      channel_name: str = "", bind_by: str = "",
-                      account: str = "") -> str | None:
-    import uuid
-    cid = str(uuid.uuid4())
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "INSERT OR IGNORE INTO im_channels (id, provider, channel_id, channel_name, repo_key, bind_by, account) VALUES (?,?,?,?,?,?,?)",
-                (cid, provider, channel_id, channel_name, repo_key, bind_by, account)
-            )
-            db.commit()
-            return cid
-    except Exception as e:
-        log.warning(f"Create im_channel failed: {e}")
-        return None
-
-
-def get_channel_by_repo(repo_key: str, provider: str = "feishu") -> dict | None:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, provider, channel_id, channel_name, repo_key, auto_impl_enabled, notify_enabled, account, created_at FROM im_channels WHERE repo_key=? AND provider=?", (repo_key, provider))
-        row = c.fetchone()
-        if not row:
-            c.execute("SELECT id, provider, channel_id, channel_name, repo_key, auto_impl_enabled, notify_enabled, account, created_at FROM im_channels WHERE repo_key=? AND provider=?", ("gitcode:" + repo_key, provider))
-            row = c.fetchone()
-        if not row:
-            return None
-        return {"id": row[0], "provider": row[1], "channel_id": row[2], "channel_name": row[3],
-                "repo_key": row[4], "auto_impl_enabled": bool(row[5]), "notify_enabled": bool(row[6]),
-                "account": row[7], "created_at": row[8]}
-
-
-def get_channel_by_channel_id(provider: str, channel_id: str) -> dict | None:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, provider, channel_id, channel_name, repo_key, auto_impl_enabled, notify_enabled, account, created_at FROM im_channels WHERE provider=? AND channel_id=?", (provider, channel_id))
-        row = c.fetchone()
-        if not row:
-            return None
-        return {"id": row[0], "provider": row[1], "channel_id": row[2], "channel_name": row[3],
-                "repo_key": row[4], "auto_impl_enabled": bool(row[5]), "notify_enabled": bool(row[6]),
-                "account": row[7], "created_at": row[8]}
-
-
-def update_im_channel(repo_key: str, provider: str, **kwargs):
-    allowed = {"auto_impl_enabled", "notify_enabled", "channel_name"}
-    sets = []
-    vals = []
-    for k, v in kwargs.items():
-        if k in allowed:
-            sets.append(f"{k}=?")
-            vals.append(int(v) if isinstance(v, bool) else v)
-    if not sets:
-        return
-    vals += [repo_key, provider]
-    with db_lock:
-        c = db.cursor()
-        c.execute(f"UPDATE im_channels SET {', '.join(sets)} WHERE repo_key=? AND provider=?", vals)
-        if c.rowcount == 0:
-            full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
-            vals[-2] = full_key
-            c.execute(f"UPDATE im_channels SET {', '.join(sets)} WHERE repo_key=? AND provider=?", vals)
-        db.commit()
-
-
-def delete_im_channel(provider: str, channel_id: str):
-    with db_lock:
-        c = db.cursor()
-        c.execute("DELETE FROM im_channels WHERE provider=? AND channel_id=?", (provider, channel_id))
-        db.commit()
-
-
-# ====== user_im_bindings CRUD ======
-
-def bind_user_im(user_id: int, provider: str, channel_id: str, channel_type: str = "direct_message") -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO user_im_bindings (user_id, provider, channel_type, channel_id) VALUES (?,?,?,?)",
-                      (user_id, provider, channel_type, channel_id))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Bind user IM failed: {e}")
-        return False
-
-
-def get_user_im_channel(user_id: int, provider: str = "feishu", channel_type: str = "direct_message") -> dict | None:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, user_id, provider, channel_type, channel_id, enabled, created_at FROM user_im_bindings WHERE user_id=? AND provider=? AND channel_type=?", (user_id, provider, channel_type))
-        row = c.fetchone()
-        if not row:
-            return None
-        return {"id": row[0], "user_id": row[1], "provider": row[2], "channel_type": row[3],
-                "channel_id": row[4], "enabled": bool(row[5]), "created_at": row[6]}
-
-
-def unbind_user_im(user_id: int, provider: str = "feishu"):
-    with db_lock:
-        c = db.cursor()
-        c.execute("DELETE FROM user_im_bindings WHERE user_id=? AND provider=?", (user_id, provider))
+            c.execute("UPDATE repo_im_group_binding SET notify_enabled=? WHERE repo_key=?", (int(enabled), full_key))
         db.commit()
 
 
 # ====== chat_conversations CRUD ======
 
 def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "", title: str = "",
-                        user_gitcode_token: str = "") -> str:
+                        user_gitcode_token: str = "", agent_session_id: str = "") -> str:
     import uuid
     cid = str(uuid.uuid4())
-    session_id = ""
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT INTO chat_conversations (id, user_id, session_id, repo_key, im_channel_id, title, user_gitcode_token) VALUES (?,?,?,?,?,?,?)",
-                  (cid, user_id, session_id, repo_key, im_channel_id, title, user_gitcode_token))
+        c.execute("INSERT INTO chat_conversations (id, user_id, agent_session_id, backend_session_id, repo_key, im_channel_id, title, user_gitcode_token) VALUES (?,?,?,?,?,?,?,?)",
+                  (cid, user_id, agent_session_id, "", repo_key, im_channel_id, title, user_gitcode_token))
         db.commit()
     return cid
 
@@ -403,25 +356,25 @@ def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) ->
     with db_lock:
         c = db.cursor()
         if repo_key:
-            c.execute("SELECT id, user_id, session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? AND repo_key=? ORDER BY updated_at DESC LIMIT ?", (user_id, repo_key, limit))
+            c.execute("SELECT id, user_id, agent_session_id, backend_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? AND repo_key=? ORDER BY updated_at DESC LIMIT ?", (user_id, repo_key, limit))
         else:
-            c.execute("SELECT id, user_id, session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
-        return [{"id": r[0], "user_id": r[1], "session_id": r[2] or "", "user_gitcode_token": r[3] or "", "repo_key": r[4], "im_channel_id": r[5], "title": r[6], "status": r[7], "created_at": r[8], "updated_at": r[9]} for r in c.fetchall()]
+            c.execute("SELECT id, user_id, agent_session_id, backend_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
+        return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "backend_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": r[5], "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": r[9], "updated_at": r[10]} for r in c.fetchall()]
 
 
 def get_conversation(conv_id: str) -> dict | None:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, user_id, session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE id=?", (conv_id,))
+        c.execute("SELECT id, user_id, agent_session_id, backend_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE id=?", (conv_id,))
         row = c.fetchone()
         if not row:
             return None
-        return {"id": row[0], "user_id": row[1], "session_id": row[2] or "", "user_gitcode_token": row[3] or "", "repo_key": row[4], "im_channel_id": row[5],
-                "title": row[6], "status": row[7], "created_at": row[8], "updated_at": row[9]}
+        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "backend_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5], "im_channel_id": row[6],
+                "title": row[7], "status": row[8], "created_at": row[9], "updated_at": row[10]}
 
 
 def update_conversation(conv_id: str, **kwargs):
-    allowed = {"title", "status", "session_id", "user_gitcode_token"}
+    allowed = {"title", "status", "backend_session_id", "agent_session_id", "user_gitcode_token"}
     sets = []
     vals = []
     for k, v in kwargs.items():
@@ -483,28 +436,31 @@ def delete_conversation(conv_id: str):
         db.commit()
 
 
-# ====== chat_config CRUD ======
+# ====== chat_config CRUD（合并进 chat_agent_session）======
 
 def get_chat_config(user_id: int) -> dict:
+    """获取用户全局 Chat 配置（repo_key='' 表示全局配置行）"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT backend, skill, feishu_app_id, feishu_app_secret, updated_at FROM chat_config WHERE user_id=?", (user_id,))
+        c.execute("SELECT backend, skill, im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (user_id,))
         row = c.fetchone()
         if not row:
-            return {"backend": "opencode", "skill": "", "feishu_app_id": "", "feishu_app_secret": "", "updated_at": ""}
-        return {"backend": row[0] or "opencode", "skill": row[1] or "", "feishu_app_id": row[2] or "", "feishu_app_secret": row[3] or "", "updated_at": row[4] or ""}
+            return {"backend": "opencode", "skill": "", "im_app_id": "", "im_app_secret": "", "im_provider": "", "updated_at": ""}
+        return {"backend": row[0] or "opencode", "skill": row[1] or "", "im_app_id": row[2] or "", "im_app_secret": row[3] or "", "im_provider": row[4] or "", "updated_at": ""}
 
 
 def set_chat_config(user_id: int, **kwargs):
-    allowed = {"backend", "skill", "feishu_app_id", "feishu_app_secret"}
+    """写入用户全局 Chat 配置（合并进 chat_agent_session，repo_key=''）"""
+    allowed = {"backend", "skill", "im_app_id", "im_app_secret", "im_provider"}
     data = get_chat_config(user_id)
     for k, v in kwargs.items():
         if k in allowed and v is not None:
             data[k] = v
+    sid = f"sess-cfg-{user_id}"
     with db_lock:
         c = db.cursor()
         c.execute(
-            "INSERT OR REPLACE INTO chat_config (user_id, backend, skill, feishu_app_id, feishu_app_secret, updated_at) VALUES (?,?,?,?,?,datetime('now'))",
-            (user_id, data["backend"], data["skill"], data["feishu_app_id"], data["feishu_app_secret"])
+            "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, backend, skill, im_app_id, im_app_secret, im_provider, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
+            (sid, user_id, "", data["backend"], data["skill"], data["im_app_id"], data["im_app_secret"], data["im_provider"])
         )
         db.commit()

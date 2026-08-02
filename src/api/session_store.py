@@ -12,7 +12,7 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, oc_session_id, status, last_active_at FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                "SELECT id, backend_session_id, status, last_active_at FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
                 (repo_key, agent_type)
             )
             row = c.fetchone()
@@ -22,7 +22,7 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
         if row:
             return {
                 "id": row[0],
-                "oc_session_id": row[1] or "",
+                "backend_session_id": row[1] or "",
                 "status": row[2] or "idle",
                 "last_active_at": row[3] or "",
                 "new": False,
@@ -40,11 +40,11 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
             db.commit()
         except Exception as e:
             log.warning(f"Failed to create agent session: {e}")
-            return {"id": sid, "oc_session_id": "", "status": "idle",
+            return {"id": sid, "backend_session_id": "", "status": "idle",
                     "last_active_at": now, "new": True,
                     "repo_key": repo_key, "agent_type": agent_type}
 
-        return {"id": sid, "oc_session_id": "", "status": "idle",
+        return {"id": sid, "backend_session_id": "", "status": "idle",
                 "last_active_at": now, "new": True,
                 "repo_key": repo_key, "agent_type": agent_type}
 
@@ -57,7 +57,7 @@ def update_agent_session(session_id: str, status: str = "idle",
         try:
             if oc_session_id:
                 c.execute(
-                    "UPDATE devops_agent_session SET status=?, oc_session_id=?, last_active_at=? WHERE id=?",
+                    "UPDATE devops_agent_session SET status=?, backend_session_id=?, last_active_at=? WHERE id=?",
                     (status, oc_session_id, datetime.now().isoformat(), session_id)
                 )
             else:
@@ -76,12 +76,12 @@ def list_agent_sessions(repo_key: str) -> list[dict]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, agent_type, backend, oc_session_id, status, last_active_at FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type",
+                "SELECT id, agent_type, backend, backend_session_id, status, last_active_at FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type",
                 (repo_key,)
             )
             return [
                 {"id": r[0], "agent_type": r[1], "backend": r[2],
-                 "oc_session_id": r[3] or "", "status": r[4],
+                 "backend_session_id": r[3] or "", "status": r[4],
                  "last_active_at": r[5] or ""}
                 for r in c.fetchall()
             ]
@@ -126,11 +126,15 @@ def ensure_default_agent_sessions(repo_key: str):
     try:
         with db_lock:
             c2 = db.cursor()
-            c2.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='vod_bot' LIMIT 1")
+            c2.execute("SELECT bot_app_id FROM global_im_bot_config WHERE bot_type='vod_bot' LIMIT 1")
             _row = c2.fetchone()
             if _row:
                 _im_app_id = _row[0]
-                _im_app_secret = _row[1] or ""
+                # secret 从已存在的 devops_agent_session 取
+                c2.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (_im_app_id,))
+                _srow = c2.fetchone()
+                if _srow and _srow[0]:
+                    _im_app_secret = _srow[0]
     except Exception:
         pass
 

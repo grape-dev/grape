@@ -723,16 +723,26 @@ class BotManager:
         log.info(f"BotManager: removed bot {ctx.name}")
 
     async def load_from_db(self):
-        """从 im_bot_config 表加载所有Bot配置"""
+        """从 global_im_bot_config 表加载所有Bot配置（secret 从 devops_agent_session 取）"""
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT DISTINCT bot_app_id, bot_app_secret, bot_type FROM im_bot_config")
+            c.execute("SELECT bot_app_id, bot_type FROM global_im_bot_config WHERE is_active=1")
             rows = c.fetchall()
 
         added = 0
-        for bot_app_id, bot_app_secret, bot_type in rows:
-            if not bot_app_id or not bot_app_secret:
+        for bot_app_id, bot_type in rows:
+            if not bot_app_id:
+                continue
+            # 从 devops_agent_session 获取 bot secret
+            bot_app_secret = ""
+            with db_lock:
+                c2 = db.cursor()
+                c2.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (bot_app_id,))
+                srow = c2.fetchone()
+                if srow and srow[0]:
+                    bot_app_secret = srow[0]
+            if not bot_app_secret:
                 continue
             if bot_app_id in self._bots:
                 continue

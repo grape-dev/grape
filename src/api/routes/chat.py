@@ -113,9 +113,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     prompt = _build_chat_prompt(body.message, repo_key, history, skill_name)
-    session_id = conv.get("session_id", "") if conv else ""
-    if session_id and not session_id.startswith("ses_"):
-        session_id = ""
+    backend_session_id = conv.get("backend_session_id", "") if conv else ""
+    if backend_session_id and not backend_session_id.startswith("ses_"):
+        backend_session_id = ""
     gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
     env_extra = {"GITCODE_API_TOKEN": gitcode_token} if gitcode_token else None
 
@@ -125,13 +125,13 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     from src.agent.executor import stream_agent
     loop = asyncio.get_event_loop()
     collected = []
-    new_session_id = ""
+    new_backend_session_id = ""
 
     def run_agent():
-        nonlocal new_session_id
+        nonlocal new_backend_session_id
         with _CHAT_AGENT_SEMAPHORE:
             for evt_type, data in stream_agent(
-                prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=session_id,
+                prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=backend_session_id,
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], env_extra=env_extra,
             ):
@@ -157,7 +157,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
                     if isinstance(data, dict):
                         nsid = data.get("oc_session_id", "")
                         if nsid:
-                            new_session_id = nsid
+                            new_backend_session_id = nsid
                         if not collected:
                             done_text = data.get("text", "")
                             if done_text:
@@ -173,8 +173,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     add_message(conv_id, "agent", reply)
     touch_conversation(conv_id)
     # Save opencode session ID for continuity
-    if new_session_id and not session_id:
-        update_conversation(conv_id, session_id=new_session_id)
+    if new_backend_session_id and not backend_session_id:
+        update_conversation(conv_id, backend_session_id=new_backend_session_id)
     return {"reply": reply, "conversation_id": conv_id}
 
 
@@ -204,9 +204,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     prompt = _build_chat_prompt(body.message, repo_key, history, skill_name)
-    session_id = conv.get("session_id", "") if conv else ""
-    if session_id and not session_id.startswith("ses_"):
-        session_id = ""
+    backend_session_id = conv.get("backend_session_id", "") if conv else ""
+    if backend_session_id and not backend_session_id.startswith("ses_"):
+        backend_session_id = ""
     gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
     env_extra = {"GITCODE_API_TOKEN": gitcode_token} if gitcode_token else None
 
@@ -226,7 +226,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 return
             try:
                 for evt_type, data in stream_agent(
-                    prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=session_id,
+                    prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=backend_session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], env_extra=env_extra,
                 ):
@@ -287,8 +287,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         add_message(conv_id, "agent", final_text)
         touch_conversation(conv_id)
         # Save opencode session ID for continuity
-        if captured_session and not session_id:
-            update_conversation(conv_id, session_id=captured_session)
+        if captured_session and not backend_session_id:
+            update_conversation(conv_id, backend_session_id=captured_session)
         yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
 
     return StreamingResponse(
@@ -411,11 +411,11 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
         except Exception:
             pass
 
-    # 从 im_bot_config 读取 Chat Agent 凭证状态
+    # 从 global_im_bot_config 读取 Chat Agent 凭证状态
     im_app_id = ""
     im_app_secret = ""
     try:
-        c.execute("SELECT bot_app_id, bot_app_secret FROM im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
+        c.execute("SELECT bot_app_id, bot_app_secret FROM global_im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
         row = c.fetchone()
         if row:
             im_app_id = row[0] or ""
@@ -453,36 +453,37 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
         with db_lock:
             c = db.cursor()
             # 类型独占校验
-            c.execute("SELECT bot_type FROM im_bot_config WHERE bot_app_id=?", (app_id,))
+            c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
             row = c.fetchone()
             if row and row[0] == "vod_bot":
                 raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent"})
 
             # 如果用户换了新的 app_id，删除旧 app_id 及其所有对话
             old_cfg = _get_chat_config(user["id"])
-            old_app_id = old_cfg.get("feishu_app_id", "")
+            old_app_id = old_cfg.get("im_app_id", "")
             if old_app_id and old_app_id != app_id:
-                c.execute("DELETE FROM im_bot_config WHERE bot_app_id=?", (old_app_id,))
+                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (old_app_id,))
                 c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
                 log.info(f"Chat IM: replaced old app_id={old_app_id[:30]} with new app_id={app_id[:30]}")
 
-            # 保存到 im_bot_config
+            # 保存到 global_im_bot_config（secret 存 chat_agent_session.im_app_secret）
             app_secret = feishu.get("app_secret", "")
             if app_secret and app_secret != "********":
                 c.execute(
-                    "INSERT OR REPLACE INTO im_bot_config (bot_app_id, bot_app_secret, bot_type) VALUES (?,?,?)",
-                    (app_id, app_secret, "chat_bot")
+                    "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?,?)",
+                    (app_id, "chat_bot")
                 )
                 db.commit()
-                kwargs["feishu_app_id"] = app_id
-                log.info(f"Chat IM: saved im_bot_config for {app_id[:30]}")
+                kwargs["im_app_id"] = app_id
+                kwargs["im_app_secret"] = app_secret
+                log.info(f"Chat IM: saved global_im_bot_config for {app_id[:30]}")
             else:
-                kwargs["feishu_app_id"] = app_id
+                kwargs["im_app_id"] = app_id
     else:
-        kwargs["feishu_app_id"] = ""
-        kwargs["feishu_app_secret"] = ""
+        kwargs["im_app_id"] = ""
+        kwargs["im_app_secret"] = ""
     if feishu.get("app_secret") and feishu["app_secret"] != "********":
-        kwargs["feishu_app_secret"] = feishu["app_secret"]
+        kwargs["im_app_secret"] = feishu["app_secret"]
     if body.get("backend"):
         kwargs["backend"] = body["backend"]
     if body.get("skill") is not None:
