@@ -15,7 +15,7 @@
 |------|----|------|
 | **用户体系** | `user_accounts`, `user_credentials`, `user_vms`, `user_vm_repos`, `user_repos`, `oauth_states` | 用户、凭据、云主机、仓库缓存、OAuth |
 | **仓库托管** | `managed_repos` | 用户-仓库关联 + 仓库级配置 |
-| **Agent 配置** | `devops_agent_session`, `agent_type`, `skill`, `agent_registry`, `event_route_config`, `backend_agents` | Agent 会话、类型、技能、注册表、事件路由、引擎 |
+| **Agent 配置** | `devops_agent_session`, `agent_type`, `skill`, `event_route_config`, `backend_agents` | Agent 会话、类型、技能、事件路由、引擎 |
 | **事件流水线** | `events`, `meta` | 事件审计、元数据 |
 | **IM / 飞书** | `global_im_bot_config`, `repo_im_group_binding`, `unified_user_mapping`, `vod_conversations` | 全局 bot、群绑定、用户映射、VOD 会话 |
 | **聊天** | `chat_conversations`, `chat_messages`, `chat_agent_session` | Chat 对话、消息、配置+会话 |
@@ -118,7 +118,7 @@ UNIQUE (user_id, repo_owner, repo_name)
 id TEXT PRIMARY KEY,                   -- UUID
 repo_key TEXT NOT NULL,                -- owner/repo
 agent_type TEXT NOT NULL,              -- vod/issue/coding/qa/sre（repo 级，不含用户级 chat）
-backend TEXT DEFAULT 'opencode',
+backend_id INTEGER DEFAULT 0,          -- 引用 backend_agents.id（默认 opencode）
 skill TEXT DEFAULT '',
 backend_session_id TEXT DEFAULT '',    -- 通用 backend 会话（支持 opencode/codearts/cursor/codex）
 repo_gitcode_token TEXT DEFAULT '',    -- repo 级 bot token
@@ -131,12 +131,14 @@ last_active_at TEXT DEFAULT (datetime('now')),
 UNIQUE(repo_key, agent_type)
 ```
 > 由 `agent_sessions` 重命名而来。v3 将 `vod_bot_app_id` 通用化为 `im_app_id/im_app_secret/im_provider`。
+> v3.1 将 `backend`（字符串）改为 `backend_id`，引用 `backend_agents.id`（可区分同名不同 scope 的 backend）。
 
 #### `agent_type` — Agent 类型定义表
 ```sql
 agent_type TEXT PRIMARY KEY,        -- vod/issue/coding/qa/sre
 display_name TEXT NOT NULL, description TEXT DEFAULT '',
-default_backend TEXT DEFAULT 'opencode', icon TEXT DEFAULT '',
+default_backend_id INTEGER DEFAULT 0, -- 引用 backend_agents.id（默认 opencode），v3.1 由 default_backend 改名
+icon TEXT DEFAULT '',
 order_num INTEGER DEFAULT 0,        -- >0 为 DevOps Agent（事件路由依据）
 subscribe_events TEXT DEFAULT '[]', -- JSON 数组，事件路由
 created_at TEXT DEFAULT (datetime('now'))
@@ -160,13 +162,9 @@ UNIQUE (skill_name, scope, owner_id)
 > SKILL.md 内容存文件系统（官方 `skills/{path}/`、个人 `skills/custom/{user_id}/`、仓库 `skills/repo/{repo_key}/`）。
 > 详见 `skill-table-rebuild.md`。
 
-#### `agent_registry` — Agent 引擎注册表
-```sql
-backend_name TEXT PRIMARY KEY,
-display_name TEXT NOT NULL, description TEXT DEFAULT '',
-cli_name TEXT DEFAULT '', is_active INTEGER DEFAULT 1,
-created_at TEXT DEFAULT (datetime('now'))
-```
+#### ~~`agent_registry`~~ — Agent 引擎注册表（已废弃，v3.1 删除）
+> 原存 `backend_name`（主键）+ `cli_name`，与 `backend_agents` 职责重叠。
+> v3.1 废弃删除，统一用 `backend_agents`（含 scope/owner_id，id 为主键）。
 
 #### `event_route_config` — 事件路由配置
 ```sql
@@ -176,10 +174,10 @@ skill TEXT NOT NULL, priority INTEGER DEFAULT 0,
 created_at TEXT DEFAULT (datetime('now'))
 ```
 
-#### `backend_agents` — 后端引擎探测状态
+#### `backend_agents` — 后端引擎探测状态（backend_id 主数据表）
 ```sql
-id INTEGER PRIMARY KEY AUTOINCREMENT,  -- 独立 id
-name TEXT NOT NULL,                    -- 引擎名（opencode/codearts）
+id INTEGER PRIMARY KEY AUTOINCREMENT,  -- 独立 id，被各表 backend_id 引用
+name TEXT NOT NULL,                    -- 引擎名（小写：opencode/codearts/cursor/hermes）
 display_name TEXT DEFAULT '',
 installed INTEGER DEFAULT 0, cli_path TEXT DEFAULT '',
 version TEXT DEFAULT '', healthy INTEGER DEFAULT 0,
@@ -190,6 +188,8 @@ updated_at TEXT DEFAULT (datetime('now')),
 UNIQUE (name, scope, owner_id)
 ```
 > scope 分级：`global`（系统级引擎探测）、`repo`（仓库级专用引擎配置）、`user`（用户级自定义引擎）。
+> v3.1 起成为 backend_id 引用表：`devops_agent_session.backend_id`、`agent_type.default_backend_id`、`chat_agent_session.backend_id` 均引用本表 id。
+> 幂等 upsert（按 name+scope+owner_id），跨刷新 id 稳定；name 统一小写存储。
 
 ### 2.4 事件流水线
 
@@ -200,7 +200,7 @@ repo_key TEXT NOT NULL, event_type TEXT NOT NULL,
 source TEXT DEFAULT 'gitcode', issue_id TEXT DEFAULT '',
 title TEXT DEFAULT '', summary TEXT DEFAULT '',
 actor TEXT DEFAULT '', payload TEXT DEFAULT '{}',
-agent_type TEXT DEFAULT '', backend TEXT DEFAULT '',
+agent_type TEXT DEFAULT '', backend TEXT DEFAULT '',   -- backend 保留字符串快照（执行时引擎名，审计用，不改 id）
 skill TEXT DEFAULT '', status TEXT DEFAULT 'pending',  -- pending/running/completed/failed
 exit_code INTEGER DEFAULT NULL, duration REAL DEFAULT NULL,
 agent_logs TEXT DEFAULT '[]',
@@ -299,7 +299,7 @@ created_at TEXT DEFAULT (datetime('now'))
 id TEXT PRIMARY KEY,
 user_id INTEGER DEFAULT 0,             -- → user_accounts.id（合并自 chat_config）
 repo_key TEXT DEFAULT '',              -- 关联仓库（可空=全局配置）
-backend TEXT DEFAULT 'opencode',       -- 合并自 chat_config
+backend_id INTEGER DEFAULT 0,          -- 引用 backend_agents.id（默认 opencode），v3.1 由 backend 改名
 skill TEXT DEFAULT '',                 -- 合并自 chat_config
 im_provider TEXT DEFAULT '',           -- feishu/wecom/dingtalk
 im_app_id TEXT DEFAULT '',             -- 关联的 IM bot app_id
@@ -444,6 +444,9 @@ created_at TEXT, last_active_at TEXT
 | managed_repos → devops_agent_session | 1:N | repo_key |
 | devops_agent_session → vod_conversations | 1:N | agent_session_id |
 | devops_agent_session → agent_type | N:1 | agent_type |
+| backend_agents → devops_agent_session | 1:N | backend_id |
+| backend_agents → agent_type | 1:N | default_backend_id |
+| backend_agents → chat_agent_session | 1:N | backend_id |
 | chat_agent_session → chat_conversations | 1:N | agent_session_id |
 | chat_conversations → chat_messages | 1:N | conversation_id |
 | global_im_bot_config → devops_agent_session (VOD) | 1:N | im_app_id |
@@ -458,7 +461,7 @@ created_at TEXT, last_active_at TEXT
 webhook 事件 → routing.get_domain_agent(event_type)
               → agent_type.subscribe_events LIKE '%"event_type"%'
               → 匹配 agent_type（如 issue/coding）
-              → devops_agent_session 查 backend + skill
+              → devops_agent_session 查 backend_id + skill（backend_id → backend_agents 反查引擎名）
               → append_event() 写 events 表
               → _execute_agent() 执行 opencode
 ```
@@ -486,10 +489,10 @@ BotManager.load_from_db()
 | user_credentials | 2 | devops_agent_session | 12 |
 | managed_repos | 5 | agent_type | 5 |
 | user_repos | 41 | skill | 11（10 官方+1 user） |
-| global_im_bot_config | 2 | agent_registry | 12 |
+| global_im_bot_config | 2 | ~agent_registry~ | 已废弃删除（v3.1） |
 | repo_im_group_binding | 2 | event_route_config | 15 |
 | unified_user_mapping | 0 | meta | 5+ |
-| chat_agent_session | 3 | backend_agents | 2 |
+| chat_agent_session | 3 | backend_agents | 2（opencode/codearts） |
 | chat_messages | 40 | vod_conversations | 1 |
 | chat_conversations | 0 | oauth_states | 0 |
 
@@ -503,7 +506,7 @@ BotManager.load_from_db()
 | `pipeline_instances`/`system_config`/`user_sessions` | 代码无引用 | 可安全 DROP |
 | **`managed_repos` 冗余冲突** | 仓库级配置存在 `user_id+repo` 维度，多 user 时冗余/不一致 | 按 `managed-repos-normalization.md` 拆分为 managed_repos + user_managed_repos |
 | `repo_im_group_binding` 旧列残留 | 服务器保留 chat_id/account 旧列（RENAME 部分失败） | 清理旧列，统一 im_chat_id/im_app_id |
-| `backend_agents` scope 未生效 | 服务器表还是旧结构（name 主键） | 迁移加 scope/owner_id 列 |
+| ~~`backend_agents` scope 未生效~~ | ~~服务器表还是旧结构（name 主键）~~ | 已重建 id+scope+owner_id（v3.1） |
 | `unified_user_mapping` 主键未重建 | 服务器保留 repo_key 复合主键 | 迁移为 user_id 主键 |
 | 物理外键未启用 | SQLite 无 FK 强制 | 应用层已通过 db_lock + 逻辑校验保障 |
 | ~~user_accounts 废弃字段~~ | webhook_token/oauth_*/webhook_url/bot_usernames | 已移除列，见 `user-accounts-field-cleanup.md`（已完成） |
