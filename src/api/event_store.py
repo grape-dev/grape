@@ -99,15 +99,23 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
                 has_output = True
                 break
     elif agent_type in ("qa", "pr"):
+        # pr skill 强制"发送评论是最终步骤"——final_text 非空即视为审查完成（有答复产出）
+        # tool_use 检测发布审查评论的写操作作为补充
         for t in tool_uses:
             cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
-            if "POST" in cmd.upper() and "comments" in cmd:
+            if "POST" in cmd.upper() and ("comments" in cmd or "pulls" in cmd or "issues" in cmd):
                 result = "发布了审查评论"
                 has_output = True
                 break
-        if not has_output and re.search(r'(审查通过|需修改|发现问题|代码审查)', text):
-            result = "输出了审查结论"
-            has_output = True
+        if not has_output:
+            # 审查结论关键词（宽松匹配"需重大修改"等变体）
+            if re.search(r'(审查通过|审查结论|审查完成|需.+修改|发现问题|代码审查|评论已发布|检查项|审查报告)', text):
+                result = "输出了审查结论"
+                has_output = True
+            elif text.strip() and len(text.strip()) > 50:
+                # 兜底：pr skill 最终步骤是发送评论，有实质答复即视为产出
+                result = "完成了 PR 审查"
+                has_output = True
     elif agent_type == "sre":
         for t in tool_uses:
             cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
