@@ -1,25 +1,25 @@
 # 系统数据表全景与关系梳理
 
 > 数据文件：`data/sessions.db`（SQLite 单库）
-> 采集时间：2026-08-01
+> 采集时间：2026-08-02（v3 优化后）
 
 ---
 
 ## 一、表总览
 
-系统共有 **22 张业务表 + 5 张历史遗留表**。
+系统共有 **20 张业务表 + 6 张历史遗留表**。
 
 ### 按领域分组
 
 | 领域 | 表 | 说明 |
 |------|----|------|
 | **用户体系** | `user_accounts`, `user_credentials`, `user_vms`, `user_vm_repos`, `user_repos`, `oauth_states` | 用户、凭据、云主机、仓库缓存、OAuth |
-| **仓库托管** | `managed_repos`, `user_managed_repos` | 仓库级配置 + 用户-仓库多对多关联 |
-| **Agent 配置** | `devops_agent_session`, `agent_type`, `skill`, `agent_registry`, `event_route_config`, `backend_agents` | Agent 会话、类型、技能、注册表、事件路由 |
+| **仓库托管** | `managed_repos` | 用户-仓库关联 + 仓库级配置 |
+| **Agent 配置** | `devops_agent_session`, `agent_type`, `skill`, `agent_registry`, `event_route_config`, `backend_agents` | Agent 会话、类型、技能、注册表、事件路由、引擎 |
 | **事件流水线** | `events`, `meta` | 事件审计、元数据 |
-| **IM / 飞书** | `im_bot_config`, `im_channels`, `user_im_bindings`, `feishu_bindings`, `feishu_users`, `vod_conversations` | 多 Bot、群绑定、用户映射、VOD 会话 |
-| **聊天** | `chat_conversations`, `chat_messages`, `chat_config`, `chat_agent_session` | Chat 对话、消息、配置、会话 |
-| **历史遗留** | `users`, `bot_accounts`, `pipeline_instances`, `system_config`, `user_sessions` | 旧表/迁移源 |
+| **IM / 飞书** | `global_im_bot_config`, `repo_im_group_binding`, `unified_user_mapping`, `vod_conversations` | 全局 bot、群绑定、用户映射、VOD 会话 |
+| **聊天** | `chat_conversations`, `chat_messages`, `chat_agent_session` | Chat 对话、消息、配置+会话 |
+| **历史遗留** | `users`, `bot_accounts`, `pipeline_instances`, `system_config`, `user_sessions`, `user_managed_repos` | 旧表/迁移源/未实施 |
 
 ---
 
@@ -94,52 +94,43 @@ data_json TEXT DEFAULT '{}', expires REAL NOT NULL
 
 ### 2.2 仓库托管
 
-#### `managed_repos` — 仓库级配置表（每仓库一行）
+#### `managed_repos` — 用户-仓库关联 + 仓库级配置
 ```sql
-id INTEGER PRIMARY KEY AUTOINCREMENT,
+user_id INTEGER NOT NULL,             -- → user_accounts.id
 repo_owner TEXT NOT NULL,
 repo_name TEXT NOT NULL,
-full_name TEXT NOT NULL UNIQUE,        -- owner/repo 全局唯一
-webhook_id INTEGER DEFAULT 0,          -- repo 级 GitCode webhook 配置 ID
-bot_gitcode_token TEXT DEFAULT '',     -- repo 级 DevOps Bot token（实际操作身份）
-gitcode_webhook_token TEXT DEFAULT '', -- repo 级 webhook 验证 token
-bot_username TEXT DEFAULT '',          -- repo 级 bot 用户名（self-comment 检测）
-created_at TEXT DEFAULT (datetime('now'))
-```
-> 仓库级配置（webhook/token/bot_username）每仓库只存一份。
-
-#### `user_managed_repos` — 用户-仓库关联表（多对多）
-```sql
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-user_id INTEGER NOT NULL,              -- → user_accounts.id
-repo_id INTEGER NOT NULL,              -- → managed_repos.id
-is_admin INTEGER DEFAULT 0,            -- 该用户对该仓库的管理员状态
+full_name TEXT NOT NULL,              -- owner/repo
+webhook_id INTEGER DEFAULT 0,         -- repo 级 GitCode webhook 配置 ID
+is_admin INTEGER DEFAULT 0,           -- 该用户对该仓库的管理员状态
+bot_gitcode_token TEXT DEFAULT '',    -- repo 级 DevOps Bot token（实际操作身份）
+gitcode_webhook_token TEXT DEFAULT '',-- repo 级 webhook 验证 token
+bot_username TEXT DEFAULT '',         -- repo 级 bot 用户名（self-comment 检测）
 created_at TEXT DEFAULT (datetime('now')),
-UNIQUE (user_id, repo_id)
+UNIQUE (user_id, repo_owner, repo_name)
 ```
-> 一个 user 可关联多个 repo，一个 repo 可关联多个 user。
-> 设计说明见 `managed-repos-normalization.md`。
+> 仓库级配置（webhook/token/bot_username）当前存在 `user_id+repo` 维度，多 user 加入同一 repo 时冗余。
+> 拆分方案见 `managed-repos-normalization.md`（拟拆为 managed_repos + user_managed_repos）。
 
 ### 2.3 Agent 配置
 
-#### `devops_agent_session` — DevOps Agent 运行时配置（原 `agent_sessions`）
+#### `devops_agent_session` — DevOps Agent 运行时配置
 ```sql
 id TEXT PRIMARY KEY,                   -- UUID
 repo_key TEXT NOT NULL,                -- owner/repo
 agent_type TEXT NOT NULL,              -- vod/issue/coding/qa/sre（repo 级，不含用户级 chat）
 backend TEXT DEFAULT 'opencode',
 skill TEXT DEFAULT '',
-oc_session_id TEXT DEFAULT '',         -- opencode 会话（pipeline 事件用）
+backend_session_id TEXT DEFAULT '',    -- 通用 backend 会话（支持 opencode/codearts/cursor/codex）
 repo_gitcode_token TEXT DEFAULT '',    -- repo 级 bot token
 status TEXT DEFAULT 'idle',
+im_provider TEXT DEFAULT '',           -- IM 平台：feishu/wecom/dingtalk
+im_app_id TEXT DEFAULT '',             -- 关联的 IM bot app_id
+im_app_secret TEXT DEFAULT '',         -- IM bot app_secret
 created_at TEXT DEFAULT (datetime('now')),
 last_active_at TEXT DEFAULT (datetime('now')),
-im_provider TEXT DEFAULT '',           -- IM 平台：feishu/wecom/dingtalk
-im_app_id TEXT DEFAULT '',             -- 关联的 IM bot app_id（VOD = 原 vod_bot_app_id）
-im_app_secret TEXT DEFAULT '',         -- IM bot app_secret
 UNIQUE(repo_key, agent_type)
 ```
-> 2026-08 由 `agent_sessions` 重命名而来，存 DevOps Agent（VOD/Issue/Coding/QA/SRE）的运行时配置。
+> 由 `agent_sessions` 重命名而来。v3 将 `vod_bot_app_id` 通用化为 `im_app_id/im_app_secret/im_provider`。
 
 #### `agent_type` — Agent 类型定义表
 ```sql
@@ -185,7 +176,7 @@ skill TEXT NOT NULL, priority INTEGER DEFAULT 0,
 created_at TEXT DEFAULT (datetime('now'))
 ```
 
-#### `backend_agents` — 后端引擎探测状态（含 scope 分级）
+#### `backend_agents` — 后端引擎探测状态
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT,  -- 独立 id
 name TEXT NOT NULL,                    -- 引擎名（opencode/codearts）
@@ -221,81 +212,76 @@ started_at TEXT DEFAULT '', completed_at TEXT DEFAULT ''
 ```sql
 key TEXT PRIMARY KEY, value TEXT NOT NULL
 ```
-> 存储 seeded_keys、ws_feishu_app_id、oauth_gitcode_client_id/secret/redirect_uri 等全局配置。
+> 存储 seeded_keys、ws_feishu_app_id、oauth_gitcode_client_id/secret/redirect_uri、webhook_url 等全局配置。
 
 ### 2.5 IM / 飞书
 
-#### `im_bot_config` — 飞书 Bot 凭证（多 Bot）
+#### `global_im_bot_config` — 全局 IM Bot 配置
 ```sql
 bot_app_id TEXT PRIMARY KEY,
-bot_app_secret TEXT NOT NULL,
 bot_type TEXT NOT NULL,               -- 'chat_bot' / 'vod_bot'
+im_provider TEXT DEFAULT 'feishu',    -- feishu/wecom/dingtalk
+is_active INTEGER DEFAULT 1,
 created_at TEXT DEFAULT (datetime('now'))
 ```
+> 由 `im_bot_config` 重命名而来，已去掉 `bot_app_secret`（secret 存各 agent_session.im_app_secret）。
 > BotManager 从此表加载所有 Bot 建立 WS 连接。
 
-#### `im_channels` — IM 渠道绑定（通用）
-```sql
-id TEXT PRIMARY KEY, provider TEXT NOT NULL,
-channel_id TEXT NOT NULL, channel_name TEXT DEFAULT '',
-repo_key TEXT NOT NULL, source TEXT DEFAULT 'gitcode',
-bind_by TEXT DEFAULT '', auto_impl_enabled INTEGER DEFAULT 0,
-notify_enabled INTEGER DEFAULT 0, account TEXT DEFAULT 'default',
-created_at TEXT DEFAULT (datetime('now')),
-UNIQUE (provider, channel_id)
-```
-
-#### `user_im_bindings` — 用户 IM 绑定
+#### `repo_im_group_binding` — IM 群→仓库绑定
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT,
-user_id INTEGER NOT NULL, provider TEXT NOT NULL,
-channel_type TEXT NOT NULL DEFAULT 'direct_message',
-channel_id TEXT NOT NULL, enabled INTEGER DEFAULT 1,
-created_at TEXT DEFAULT (datetime('now')),
-UNIQUE (user_id, provider, channel_type)
-```
-
-#### `feishu_bindings` — 飞书群→仓库绑定（Chat Bot）
-```sql
-chat_id TEXT PRIMARY KEY,              -- 飞书群 ID
-repo_key TEXT NOT NULL, source TEXT DEFAULT 'gitcode',
-bind_by TEXT DEFAULT '',
-account TEXT DEFAULT 'default',        -- 【已迁移】= chat bot app_id
+im_provider TEXT DEFAULT 'feishu',    -- feishu/wecom/dingtalk
+im_chat_id TEXT NOT NULL,             -- IM 群 ID（原 chat_id/feishu_chat_id）
+im_channel_name TEXT DEFAULT '',      -- 群名称
+repo_key TEXT NOT NULL,               -- 绑定的仓库
+bind_by TEXT DEFAULT '',              -- 绑定人
+im_app_id TEXT DEFAULT '',            -- 绑定的 IM bot app_id（原 account）
 auto_impl_enabled INTEGER DEFAULT 0,
 notify_enabled INTEGER DEFAULT 0,
-created_at TEXT DEFAULT (datetime('now'))
+created_at TEXT DEFAULT (datetime('now')),
+UNIQUE (im_provider, im_chat_id, im_app_id)
 ```
+> 由 `feishu_bindings` 重命名而来，通用化支持多 IM 平台。
 
-#### `feishu_users` — 飞书用户↔GitCode 用户映射
+#### `unified_user_mapping` — 通用用户映射
 ```sql
-repo_key TEXT NOT NULL, gitcode_user TEXT NOT NULL,
-feishu_open_id TEXT NOT NULL, feishu_name TEXT DEFAULT '',
-user_id INTEGER DEFAULT 0,
-updated_at TEXT DEFAULT (datetime('now')),
-PRIMARY KEY (repo_key, gitcode_user)
+user_id INTEGER PRIMARY KEY,          -- → user_accounts.id
+gitcode_user TEXT DEFAULT '',         -- GitCode 用户名
+feishu_open_id TEXT DEFAULT '',       -- 飞书 open_id
+feishu_name TEXT DEFAULT '',          -- 飞书昵称
+github_login TEXT DEFAULT '',         -- 未来扩展：GitHub
+dingtalk_user_id TEXT DEFAULT '',     -- 未来扩展：钉钉
+updated_at TEXT DEFAULT (datetime('now'))
 ```
+> 由 `feishu_users` 重命名而来，user_id 主键，每用户一行，支持多平台账号。
 
 #### `vod_conversations` — VOD 群会话
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT,
 agent_session_id TEXT NOT NULL,        -- → devops_agent_session.id
-feishu_chat_id TEXT NOT NULL,
-feishu_chat_name TEXT DEFAULT '',
-oc_session_id TEXT DEFAULT '',         -- VOD 独立 opencode 会话
+im_provider TEXT DEFAULT 'feishu',
+im_chat_id TEXT NOT NULL,              -- IM 群 ID（原 feishu_chat_id）
+im_channel_name TEXT DEFAULT '',       -- 群名称（原 feishu_chat_name）
+backend_session_id TEXT DEFAULT '',    -- 通用 backend 会话（原 oc_session_id）
 status TEXT DEFAULT 'active',
 created_at TEXT DEFAULT (datetime('now')),
 last_active_at TEXT DEFAULT (datetime('now')),
-UNIQUE(agent_session_id, feishu_chat_id)
+UNIQUE(agent_session_id, im_chat_id)
 ```
 
 ### 2.6 聊天
 
 #### `chat_conversations` — Chat 对话
 ```sql
-id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
-session_id TEXT DEFAULT '', user_gitcode_token TEXT DEFAULT '',
-repo_key TEXT DEFAULT '', im_channel_id TEXT DEFAULT '',
-title TEXT DEFAULT '', status TEXT DEFAULT 'active',
+id TEXT PRIMARY KEY,
+agent_session_id TEXT DEFAULT '',      -- → chat_agent_session.id
+user_id INTEGER NOT NULL,
+backend_session_id TEXT DEFAULT '',    -- 通用 backend 会话（原 session_id）
+user_gitcode_token TEXT DEFAULT '',
+repo_key TEXT DEFAULT '',
+im_channel_id TEXT DEFAULT '',
+title TEXT DEFAULT '',
+status TEXT DEFAULT 'active',
 created_at TEXT DEFAULT (datetime('now')),
 updated_at TEXT DEFAULT (datetime('now'))
 ```
@@ -308,27 +294,21 @@ role TEXT NOT NULL, content TEXT NOT NULL,
 created_at TEXT DEFAULT (datetime('now'))
 ```
 
-#### `chat_config` — Chat 配置
-```sql
-user_id INTEGER PRIMARY KEY,
-backend TEXT DEFAULT 'opencode', skill TEXT DEFAULT '',
-feishu_app_id TEXT DEFAULT '', feishu_app_secret TEXT DEFAULT '',
-updated_at TEXT DEFAULT (datetime('now'))
-```
-
-#### `chat_agent_session` — Chat Agent 会话（原 `sessions`）
+#### `chat_agent_session` — Chat Agent 配置+会话（合并 chat_config）
 ```sql
 id TEXT PRIMARY KEY,
-repo_key TEXT UNIQUE, source TEXT, repository TEXT,
-status TEXT, event_history TEXT DEFAULT '[]',
-oc_session_id TEXT DEFAULT '',
-account TEXT DEFAULT 'default',
-backend TEXT DEFAULT '',
-opencode_session_id TEXT DEFAULT '',
-codearts_session_id TEXT DEFAULT '',
+user_id INTEGER DEFAULT 0,             -- → user_accounts.id（合并自 chat_config）
+repo_key TEXT DEFAULT '',              -- 关联仓库（可空=全局配置）
+backend TEXT DEFAULT 'opencode',       -- 合并自 chat_config
+skill TEXT DEFAULT '',                 -- 合并自 chat_config
+im_provider TEXT DEFAULT '',           -- feishu/wecom/dingtalk
+im_app_id TEXT DEFAULT '',             -- 关联的 IM bot app_id
+im_app_secret TEXT DEFAULT '',         -- IM bot app_secret
+event_history TEXT DEFAULT '[]',
 created_at TEXT, last_active_at TEXT
 ```
-> 2026-08 由 `sessions` 重命名而来，存 Chat Agent（飞书）的会话历史 + opencode/codearts 会话 ID。
+> 由 `sessions` 重命名，v3 合并了 `chat_config`（user 维度配置）。
+> `backend_session_id` 不在本表——backend 会话属于具体对话（chat_conversations），一个 agent 会话对应多个对话。
 
 ### 2.7 历史遗留表
 
@@ -339,6 +319,7 @@ created_at TEXT, last_active_at TEXT
 | `pipeline_instances` | 旧 pipeline 实例 | 代码无引用，废弃 |
 | `system_config` | 旧系统配置 | 代码无引用，废弃 |
 | `user_sessions` | 旧会话 token 表 | 代码无引用，废弃 |
+| `user_managed_repos` | 用户-仓库关联（拆分方案） | 设计文档中，代码未实施 |
 
 ---
 
@@ -354,10 +335,10 @@ created_at TEXT, last_active_at TEXT
    ┌────────────────────┘      │      │      └────────────────────┐
    ▼                            │      │                          ▼
 ┌─────────────────┐    ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ user_credentials │    │ user_vms     │  │ managed_repos│
-│ (user_id,prov)   │    │ (user_id)    │  │ (user_id,    │
-└─────────────────┘    └──────────────┘  └──────┬───────┘  │  owner,repo)  │
-        │                                        │          └──────────────┘
+│ user_credentials │    │ user_vms     │  │ managed_repos│  │unified_user_mapping│
+│ (user_id,prov)   │    │ (user_id)    │  │ (user_id,    │  │ (user_id PK)  │
+└─────────────────┘    └──────────────┘  └──────┬───────┘  └──────────────┘
+        │                                        │
         │                                vm_id FK │
         │                              ┌──────────┘
         │                              ▼
@@ -370,37 +351,18 @@ created_at TEXT, last_active_at TEXT
         ▼
 ┌──────────────────┐
 │  user_repos      │  (user_id, full_name)
-
 └──────────────────┘
 ```
 
 ```
-                    ┌─────────────────────────────┐
-                    │      managed_repos          │   ← bot_username + bot_gitcode_token（仓库级，每 repo 一行）
-                    │  (id, owner, repo, full_name UNIQUE)
-                    └───────────┬─────────────────┘
-                                │ repo_id
-                                ▼
-                    ┌─────────────────────────────┐
-                    │   user_managed_repos        │   ← 多对多关联
-                    │  (user_id, repo_id, is_admin)
-                    └──────┬──────────────┬───────┘
-                           │              │
-             user_id FK    │              │
-   ┌───────────────────────┘              └─────── 通过 full_name/repo_key 关联（逻辑外键）
-   ▼
-┌──────────────┐
-│ user_accounts│
-└──────────────┘
-
    repo_key / full_name 关联（逻辑外键，非物理 FK）
                                 │
    ┌────────────┬───────────────┼───────────────┬──────────────┐
    ▼            ▼               ▼               ▼              ▼
-┌─────────┐ ┌──────────┐ ┌─────────────┐ ┌────────────┐ ┌──────────────┐
-│devops_agent_session│ │ events   │ │feishu_bindings│ │im_channels │ │feishu_users  │
-│(repo_key,   │ │(repo_key)│ │(repo_key)    │ │(repo_key)  │ │(repo_key)    │
-│ agent_type) │ └──────────┘ └─────────────┘ └────────────┘ └──────────────┘
+┌─────────┐ ┌──────────┐ ┌───────────────┐ ┌────────────┐ ┌──────────────┐
+│devops_agent_session│ │ events   │ │repo_im_group_binding│ │vod_conversations │
+│(repo_key,   │ │(repo_key)│ │(repo_key)    │ │(agent_session_id)│
+│ agent_type) │ └──────────┘ └─────────────┘ └────────────┘
 └─────┬───────┘
       │
       │ agent_type FK（逻辑）
@@ -410,7 +372,6 @@ created_at TEXT, last_active_at TEXT
 │  (agent_type PK)  │
 └──────────────────┘
       │
-      │
       ▼
 ┌──────────────────────┐
 │   events（审计）       │
@@ -419,49 +380,51 @@ created_at TEXT, last_active_at TEXT
 ```
 
 ```
-  飞书 Bot 相关（多 Bot 隔离）
+  多 IM Bot（全局 bot + secret 分布存储）
   ┌──────────────────────────┐
-  │       im_bot_config      │
+  │   global_im_bot_config   │
   │  bot_app_id (PK)         │
-  │  bot_type: chat/vod      │
+  │  bot_type · im_provider  │
   └──────┬────────────┬──────┘
          │            │
-         │            │ im_app_id FK
+         │            │ im_app_id FK（VOD）
          │            ▼
          │   ┌────────────────────────┐
          │   │  devops_agent_session  │
-         │   │  im_app_id             │
+         │   │  im_app_id+secret      │
          │   └──────────┬─────────────┘
          │            │ agent_session_id FK
          │            ▼
          │   ┌──────────────────┐
          │   │vod_conversations │
-         │   │ (chat_id,        │
+         │   │ (im_chat_id,     │
          │   │  agent_session)  │
          │   └──────────────────┘
          │
-         │ chat bot app_id
+         │ chat_bot → secret 在 chat_agent_session（全局配置行）
          ▼
-  ┌──────────────────┐
-  │ feishu_bindings  │  (chat_id PK)
-  │ account=app_id   │
-  └──────────────────┘
+  ┌──────────────────────┐
+  │   repo_im_group_binding│
+  │  (im_chat_id, im_app_id)│
+  └──────────────────────┘
 ```
 
 ```
   Chat 对话
   ┌──────────────────────┐
-  │  chat_conversations  │  1 ──< N ──┐
-  │  id (PK)             │            │ conversation_id FK
+  │  chat_agent_session  │  1 ──< N ──┐  agent_session_id FK
+  │  (user_id+repo_key)  │            │
   └──────────┬───────────┘            ▼
              │                 ┌──────────────────┐
-             │ user_id         │  chat_messages   │
-             │                 │  (conversation)  │
-             │                 └──────────────────┘
-             ▼
-  ┌──────────────────────┐
-  │     chat_config      │  (user_id PK)
-  └──────────────────────┘
+             │ user_id         │ chat_conversations│
+             │                 │ (backend_session)│
+             │                 └────────┬─────────┘
+             │                          │ conversation_id FK
+             │                          ▼
+             │                 ┌──────────────────┐
+             │                 │  chat_messages   │
+             ▼                 └──────────────────┘
+  （配置与会话统一在 chat_agent_session）
 ```
 
 ---
@@ -474,18 +437,18 @@ created_at TEXT, last_active_at TEXT
 |------|------|---------|
 | user_accounts → user_credentials | 1:N | user_id |
 | user_accounts → user_vms | 1:N | user_id |
-
 | user_accounts → user_repos | 1:N | user_id |
-| user_accounts → user_managed_repos | 1:N | user_id |
-| user_managed_repos → managed_repos | N:1 | repo_id |
-| **user_accounts ↔ managed_repos** | **N:M**（通过 user_managed_repos） | user_id + repo_id |
+| user_accounts → managed_repos | 1:N | user_id |
+| user_accounts → unified_user_mapping | 1:1 | user_id |
 | user_vms → user_vm_repos | 1:N | vm_id |
 | managed_repos → devops_agent_session | 1:N | repo_key |
 | devops_agent_session → vod_conversations | 1:N | agent_session_id |
 | devops_agent_session → agent_type | N:1 | agent_type |
+| chat_agent_session → chat_conversations | 1:N | agent_session_id |
 | chat_conversations → chat_messages | 1:N | conversation_id |
-| im_bot_config → devops_agent_session (VOD) | 1:N | im_app_id |
-| im_bot_config → feishu_bindings (Chat) | 1:N | account=app_id |
+| global_im_bot_config → devops_agent_session (VOD) | 1:N | im_app_id |
+| global_im_bot_config → chat_agent_session (Chat) | 1:N | im_app_id |
+| global_im_bot_config → repo_im_group_binding | 1:N | im_app_id |
 
 > 注：系统为 SQLite 单库，**物理外键约束（FOREIGN KEY）未强制启用**，所有表间关系为**逻辑外键**（通过应用层查询关联）。
 
@@ -504,29 +467,31 @@ webhook 事件 → routing.get_domain_agent(event_type)
 
 ```
 BotManager.load_from_db()
-  → im_bot_config 每行一个 BotContext
-  → chat_bot → process_chat_async → feishu_bindings (account=app_id)
+  → global_im_bot_config 每行一个 BotContext
+  → secret 来源：
+       chat_bot → chat_agent_session.im_app_secret（全局配置行 repo_key=''）
+       vod_bot  → devops_agent_session.im_app_secret
+  → chat_bot → process_chat_async → repo_im_group_binding (im_app_id)
   → vod_bot  → process_vod_async  → devops_agent_session (im_app_id)
                                    → vod_conversations
 ```
 
 ---
 
-## 五、数据规模（服务器实测）
+## 五、数据规模（服务器实测 2026-08-02）
 
 | 表 | 行数 | 表 | 行数 |
 |----|------|----|------|
-| user_accounts | 5 | events | 165 |
+| user_accounts | 5 | events | 165+ |
 | user_credentials | 2 | devops_agent_session | 12 |
-| managed_repos | 5（含 user_id=7/8 重复行，待拆分迁移） | agent_type | 5 |
-| user_managed_repos | —（拆分后新建） | skill | 10（官方） |
-| user_repos | 41 | agent_registry | 12 |
-| feishu_bindings | 2 | event_route_config | 15 |
-| feishu_users | 0 | meta | 5 |
-| chat_agent_session | 2 | backend_agents | 2 |
-| chat_messages | 40 | im_bot_config | 2 |
-| chat_config | 1 | vod_conversations | 1 |
-| users（遗留） | 2 | bot_accounts（遗留） | 1 |
+| managed_repos | 5 | agent_type | 5 |
+| user_repos | 41 | skill | 11（10 官方+1 user） |
+| global_im_bot_config | 2 | agent_registry | 12 |
+| repo_im_group_binding | 2 | event_route_config | 15 |
+| unified_user_mapping | 0 | meta | 5+ |
+| chat_agent_session | 3 | backend_agents | 2 |
+| chat_messages | 40 | vod_conversations | 1 |
+| chat_conversations | 0 | oauth_states | 0 |
 
 ---
 
@@ -537,6 +502,8 @@ BotManager.load_from_db()
 | `users`/`bot_accounts` 遗留 | 迁移源表，仍存数据 | 确认迁移完整后可 DROP |
 | `pipeline_instances`/`system_config`/`user_sessions` | 代码无引用 | 可安全 DROP |
 | **`managed_repos` 冗余冲突** | 仓库级配置存在 `user_id+repo` 维度，多 user 时冗余/不一致 | 按 `managed-repos-normalization.md` 拆分为 managed_repos + user_managed_repos |
-| `chat_agent_session.account`/`feishu_bindings.account` 默认值 | 代码已显式传入 app_id/repo_key | 默认值不影响业务 |
+| `repo_im_group_binding` 旧列残留 | 服务器保留 chat_id/account 旧列（RENAME 部分失败） | 清理旧列，统一 im_chat_id/im_app_id |
+| `backend_agents` scope 未生效 | 服务器表还是旧结构（name 主键） | 迁移加 scope/owner_id 列 |
+| `unified_user_mapping` 主键未重建 | 服务器保留 repo_key 复合主键 | 迁移为 user_id 主键 |
 | 物理外键未启用 | SQLite 无 FK 强制 | 应用层已通过 db_lock + 逻辑校验保障 |
 | ~~user_accounts 废弃字段~~ | webhook_token/oauth_*/webhook_url/bot_usernames | 已移除列，见 `user-accounts-field-cleanup.md`（已完成） |
