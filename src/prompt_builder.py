@@ -215,8 +215,8 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
         issue_data = payload["issue"]
     elif isinstance(payload.get("object_attributes"), dict):
         issue_data = payload["object_attributes"]
-    title = json.dumps(issue_data.get("title", ""), ensure_ascii=True)
-    body = json.dumps(issue_data.get("body", issue_data.get("description", "")), ensure_ascii=True)[:500]
+    title = json.dumps(issue_data.get("title", ""), ensure_ascii=False)
+    body = json.dumps(issue_data.get("body", issue_data.get("description", "")), ensure_ascii=False)[:500]
     parts = []
     evt_type = evt.get("type", "event")
 
@@ -234,7 +234,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
         prefix = f"User commented on issue #{number} of {repo}" if number is not None else f"User commented on {repo}"
         parts.append(prefix)
         if note:
-            parts.append(f'Comment: {json.dumps(note, ensure_ascii=True)[:1000]}')
+            parts.append(f'Comment: {json.dumps(note, ensure_ascii=False)[:1000]}')
             # 检测是否 @ 了 Bot
             if any(f"@{u}" in note for u in __import__("src.user.db", fromlist=["get_all_bot_usernames"]).get_all_bot_usernames()):
                 parts.append("(User @mentioned the bot)")
