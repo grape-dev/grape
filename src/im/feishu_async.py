@@ -723,7 +723,7 @@ class BotManager:
         log.info(f"BotManager: removed bot {ctx.name}")
 
     async def load_from_db(self):
-        """从 global_im_bot_config 表加载所有Bot配置（secret 从 devops_agent_session 取）"""
+        """从 global_im_bot_config 表加载所有Bot配置（secret 从 agent_session 取）"""
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
@@ -734,11 +734,14 @@ class BotManager:
         for bot_app_id, bot_type in rows:
             if not bot_app_id:
                 continue
-            # 从 devops_agent_session 获取 bot secret
+            # 获取 bot secret：vod_bot 从 devops_agent_session，chat_bot 从 chat_agent_session 全局配置行
             bot_app_secret = ""
             with db_lock:
                 c2 = db.cursor()
-                c2.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (bot_app_id,))
+                if bot_type == "chat_bot":
+                    c2.execute("SELECT im_app_secret FROM chat_agent_session WHERE im_app_id=? AND im_app_secret!='' AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (bot_app_id,))
+                else:
+                    c2.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (bot_app_id,))
                 srow = c2.fetchone()
                 if srow and srow[0]:
                     bot_app_secret = srow[0]

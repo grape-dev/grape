@@ -59,10 +59,15 @@ def get_tenant_token() -> str:
                 row = c.fetchone()
                 if row and row[0]:
                     app_id = row[0]
-                    c.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (app_id,))
+                    c.execute("SELECT im_app_secret FROM chat_agent_session WHERE im_app_id=? AND im_app_secret!='' AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (app_id,))
                     srow = c.fetchone()
                     if srow and srow[0]:
                         app_secret = srow[0]
+                    else:
+                        c.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (app_id,))
+                        srow = c.fetchone()
+                        if srow and srow[0]:
+                            app_secret = srow[0]
             except Exception:
                 pass
         if not app_id or not app_secret:
@@ -602,10 +607,15 @@ def start_ws(on_message_callback, account_name: str = "default"):
             row = c.fetchone()
             if row and row[0]:
                 app_id = row[0]
-                c.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (app_id,))
+                c.execute("SELECT im_app_secret FROM chat_agent_session WHERE im_app_id=? AND im_app_secret!='' AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (app_id,))
                 srow = c.fetchone()
                 if srow and srow[0]:
                     app_secret = srow[0]
+                else:
+                    c.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (app_id,))
+                    srow = c.fetchone()
+                    if srow and srow[0]:
+                        app_secret = srow[0]
         except Exception:
             pass
 

@@ -415,11 +415,14 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
     im_app_id = ""
     im_app_secret = ""
     try:
-        c.execute("SELECT bot_app_id, bot_app_secret FROM global_im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
+        c.execute("SELECT bot_app_id FROM global_im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
         row = c.fetchone()
         if row:
             im_app_id = row[0] or ""
-            im_app_secret = row[1] or ""
+            c.execute("SELECT im_app_secret FROM chat_agent_session WHERE im_app_id=? AND im_app_secret!='' AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (im_app_id,))
+            srow = c.fetchone()
+            if srow and srow[0]:
+                im_app_secret = srow[0]
     except Exception:
         pass
 
