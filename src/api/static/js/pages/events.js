@@ -3,13 +3,8 @@ function renderEventDetail(data) {
   if (!el) return;
   const p = data.payload || {};
   const agent = data.agent_type || 'vod';
-  const logs = data.agent_logs || [];
   const agentName = (_AGENT_TYPES[agent] && _AGENT_TYPES[agent].display_name) || agent;
-  const logHtml = logs.length > 0 ? logs.map(l =>
-    `<div style="${l.type === 'error' ? 'color:var(--r)' : l.type === 'done' ? 'color:var(--g)' : ''}">[${(l.time || '').substring(11,19) || '--:--'}] ${l.type}: ${l.msg}</div>`
-  ).join('') : `<div>[${(data.created_at || '').substring(11,16) || '--:--'}] Agent started</div>
-    <div>[${(data.created_at || '').substring(11,16) || '--:--'}] Processing ${data.event_type} event</div>
-    <div style="color:var(--g)">[${(data.created_at || '').substring(11,16) || '--:--'}] ${data.status === 'completed' ? 'Completed' : data.status === 'failed' ? 'Failed' : data.status}</div>`;
+  const result = data.result || data.summary || '';
 
   let html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← 返回 ${agentName}</button>
   <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;height:calc(100vh - 160px);overflow:hidden">
@@ -20,15 +15,14 @@ function renderEventDetail(data) {
         <div>Repository: ${data.repo_key || ''}</div>
         <div>Issue: ${data.issue_id || '—'}</div>
         <div>Actor: ${data.actor || '—'}</div>
-        <div>Summary: ${data.summary || data.title || '—'}</div>
         <div>Time: ${data.created_at || ''}</div>
       </div>
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Agent Execution Log</h3>
-      <div style="flex:1;overflow-y:auto;background:var(--s);color:#c2cad6;border-radius:8px;padding:12px;font-size:11px;font-family:monospace;line-height:1.7">
-        ${logHtml}
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Agent 答复结论</h3>
+      <div style="flex:1;overflow-y:auto;background:var(--s);color:#c2cad6;border-radius:8px;padding:12px;font-size:12px;font-family:monospace;line-height:1.7;white-space:pre-wrap">
+        ${result || '<div style="color:var(--t3)">（无结论）</div>'}
       </div>
       <div class="cd mt12" style="padding:10px;background:#eef2ff;font-size:11px;flex-shrink:0">
-        <div style="color:var(--a);font-weight:600;margin-bottom:4px">💡 Have a question about these logs?</div>
+        <div style="color:var(--a);font-weight:600;margin-bottom:4px">💡 Have a question about this result?</div>
         <div style="color:var(--t2)">Use the Feedback form on the right to submit your feedback.</div>
       </div>
     </div>

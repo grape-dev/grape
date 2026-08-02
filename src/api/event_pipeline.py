@@ -4,7 +4,7 @@ from datetime import datetime
 from src.config import log, WORKSPACE_DIR
 from src.vcs.adapter import normalize_event, get_event_header
 from src.api.routing import get_domain_agent
-from src.api.event_store import append_event, update_event_status, get_issue_summary
+from src.api.event_store import get_issue_summary
 from src.session_manager import db, db_lock
 
 
@@ -79,6 +79,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     log.info(f"Pipeline: routing result -> agent_type='{agent_type}'")
     if not agent_type:
         log.info(f"Pipeline: no route for type={event_type}, skip")
+        from src.api.event_store import append_skipped_event
+        append_skipped_event(repo_key, event_type, "no_route")
         return result
 
     # 4. 查找 Agent 配置（backend + skill），找不到则不处理
@@ -173,34 +175,21 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         summary = title or event_type
     log.info(f"Pipeline: summary={summary}")
 
-    # 6. 存储事件
-    log.info(f"Pipeline: storing event, repo_key={repo_key}, agent={agent_type}")
-    actor = evt.get("actor", "")
-    seq = append_event(
-        repo_key=repo_key,
-        event_type=event_type,
-        title=title,
-        issue_id=issue_id,
-        source=source,
-        agent_type=agent_type,
-        actor=actor,
-        summary=summary,
-        payload=payload,
-        status="running",
-    )
+    # 6. 后台异步执行 Agent（产出结论后由 _execute_agent 决定是否存储事件）
+    log.info(f"Pipeline: queued agent execution, repo_key={repo_key}, agent={agent_type}")
 
-    result.update({"seq": seq, "event_type": event_type, "skill": agent_type,
+    result.update({"seq": 0, "event_type": event_type, "skill": agent_type,
                    "backend": backend, "skill_name": skill_name,
                    "repo_key": repo_key, "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
-    log.info(f"Pipeline: done, seq={seq}, ok=True, final_agent={agent_type}")
+    log.info(f"Pipeline: done, seq=pending, ok=True, final_agent={agent_type}")
 
-    # 7. 后台异步执行 Agent
-    if seq > 0 and backend and skill_name:
+    # 后台异步执行 Agent
+    if backend and skill_name:
         threading.Thread(target=_execute_agent, args=(
-            repo_key, seq, agent_type, backend, skill_name, evt,
-        ), daemon=True, name=f"ag-{agent_type}-{seq}").start()
-        log.info(f"Pipeline: started agent execution for seq={seq}")
+            repo_key, agent_type, backend, skill_name, evt,
+        ), daemon=True, name=f"ag-{agent_type}-{int(time.time()*1000)%10000}").start()
+        log.info(f"Pipeline: started agent execution for repo={repo_key}, agent={agent_type}")
 
     return result
 
@@ -213,12 +202,14 @@ def get_prompt_context(repo_key: str) -> str:
     return f"\n\n[Event History]\n{summary}\n"
 
 
-def _execute_agent(repo_key: str, seq: int, agent_type: str,
+def _execute_agent(repo_key: str, agent_type: str,
                    backend: str, skill_name: str, evt: dict):
-    """后台执行 Agent：构建 prompt → stream_agent → 更新事件状态"""
+    """后台执行 Agent：构建 prompt → stream_agent → 有产出才存储事件"""
     from src.agent.executor import stream_agent
     from src.prompt_builder import build_prompt
-    from src.api.event_store import update_event_config, update_event_complete
+    from src.api.event_store import (
+        append_event, append_skipped_event, update_event_complete, evaluate_agent_output,
+    )
 
     repository = evt.get("repository", repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key)
     ws = os.path.join(WORKSPACE_DIR, repository, f"{agent_type}-agent")
@@ -237,13 +228,13 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     except Exception:
         pass
 
-    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] type={agent_type}, backend={backend}, skill={skill_name}, seq={seq}, oc_session={oc_session_id[:20] if oc_session_id else 'none'}")
+    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] type={agent_type}, backend={backend}, skill={skill_name}, oc_session={oc_session_id[:20] if oc_session_id else 'none'}")
 
     try:
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type])
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
-        update_event_status(seq, "failed")
+        append_skipped_event(repo_key, evt.get("type", ""), "prompt_build_failed", str(e))
         return
 
     parts = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
@@ -253,16 +244,14 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         from src.user.db import get_bot_token_by_repo
         repo_gitcode_token = get_bot_token_by_repo(owner_repo[0], owner_repo[1]) or ""
 
-    # 写入执行配置
+    # 记录执行配置（执行完成有产出后统一写入 event）
     started_at = datetime.now().isoformat()
-    update_event_config(seq, backend, skill_name, started_at)
-    update_event_status(seq, "running")
-    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] spawning {backend} for seq={seq}")
+    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] spawning {backend}")
 
     exit_code = -1
     final_text = ""
     new_oc_session_id = ""
-    agent_logs = []
+    tool_uses = []
     exec_account = evt.get("account") or repo_name
     try:
         for evt_type, data in stream_agent(
@@ -271,7 +260,6 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             repo_gitcode_token=repo_gitcode_token,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}]",
         ):
-            agent_logs.append({"time": datetime.now().isoformat(), "type": evt_type, "msg": str(data)[:200]})
             if evt_type == "done":
                 d = data
                 exit_code = d.get("exit_code", -1)
@@ -281,15 +269,16 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             elif evt_type == "error":
                 log.warning(f"Agent error: [Agent:{agent_type}|repo:{repo_name}] {data}")
             elif evt_type == "step_start":
-                log.info(f"[agent {agent_type}|repo:{repo_name} seq={seq}] {data}")
+                log.info(f"[agent {agent_type}|repo:{repo_name}] {data}")
             elif evt_type == "tool_use":
-                log.info(f"[agent {agent_type}|repo:{repo_name} seq={seq}] TOOL: {str(data)[:160]}")
+                tool_uses.append(data if isinstance(data, dict) else {})
+                log.info(f"[agent {agent_type}|repo:{repo_name}] TOOL: {str(data)[:160]}")
             elif evt_type == "text":
-                log.info(f"[agent {agent_type}|repo:{repo_name} seq={seq}] TEXT: {str(data)[:160]}")
+                log.info(f"[agent {agent_type}|repo:{repo_name}] TEXT: {str(data)[:160]}")
             elif evt_type == "reasoning":
-                log.info(f"[agent {agent_type}|repo:{repo_name} seq={seq}] REASONING: {str(data)[:160]}")
+                log.info(f"[agent {agent_type}|repo:{repo_name}] REASONING: {str(data)[:160]}")
             else:
-                log.info(f"[agent {agent_type}|repo:{repo_name} seq={seq}] {evt_type}: {str(data)[:160]}")
+                log.info(f"[agent {agent_type}|repo:{repo_name}] {evt_type}: {str(data)[:160]}")
     except Exception as e:
         log.warning(f"Exec agent failed: [Agent:{agent_type}|repo:{repo_name}] {e}")
 
@@ -304,7 +293,8 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
-    # 写入执行结果
+    # 判定 Agent 是否有明确答复产出，有产出才存储事件（记录结论而非过程）
+    has_output, result_text = evaluate_agent_output(agent_type, tool_uses, final_text)
     completed_at = datetime.now().isoformat()
     duration = None
     try:
@@ -313,7 +303,30 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         duration = round((e - s).total_seconds(), 1)
     except Exception:
         pass
+
+    if not has_output:
+        log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no output, skipped")
+        append_skipped_event(repo_key, evt.get("type", ""), "no_output",
+                             f"exit={exit_code}, text_len={len(final_text)}")
+        return
+
+    # 有产出 → 存储事件（含结论）
+    issue_id = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "") or ""
     new_status = "completed" if exit_code == 0 else "failed"
-    update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
-                          agent_logs=agent_logs, completed_at=completed_at)
-    log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, log_count={len(agent_logs)}")
+    seq = append_event(
+        repo_key=repo_key,
+        event_type=evt.get("type", "event"),
+        title=evt.get("title", "") or evt.get("type", "event"),
+        issue_id=issue_id,
+        source=evt.get("source", "gitcode"),
+        agent_type=agent_type,
+        actor=evt.get("actor", ""),
+        summary=result_text[:200],
+        payload=evt.get("payload", {}),
+        status=new_status,
+        result=result_text,
+    )
+    if seq > 0:
+        update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
+                              completed_at=completed_at)
+        log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, result={result_text[:80]}")

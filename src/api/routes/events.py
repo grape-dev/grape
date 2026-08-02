@@ -12,7 +12,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, backend, skill, exit_code, duration, agent_logs, started_at, completed_at FROM events WHERE seq=?",
+                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, backend, skill, exit_code, duration, agent_logs, started_at, completed_at, result FROM events WHERE seq=?",
                 (seq,)
             )
             row = c.fetchone()
@@ -55,6 +55,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         "agent_logs": agent_logs,
         "started_at": row[17] or "",
         "completed_at": row[18] or "",
+        "result": row[19] or "",
     }
 
 

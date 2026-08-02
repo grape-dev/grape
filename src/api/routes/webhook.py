@@ -1,5 +1,5 @@
 """Webhook & A2A 端点 — 集成事件管道"""
-import json
+import json, time
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from src.config import log
@@ -77,66 +77,54 @@ async def a2a_endpoint(request: Request):
     context = payload.get("context", "")
     issue_number = payload.get("issue_number", "")
 
-    from src.api.event_store import append_event
     repo_key = f"gitcode:{repository}"
-    seq = append_event(
-        repo_key=repo_key,
-        event_type="a2a_event",
-        title=f"A2A: {agent_name}",
-        issue_id=str(issue_number),
-        agent_type=agent_name,
-        source="a2a",
-        payload=payload,
-        status="running",
-    )
+    log.info(f"A2A: agent={agent_name}, repo={repository}")
 
-    log.info(f"A2A: agent={agent_name}, repo={repository}, seq={seq}")
-
-    # 启动后台执行目标 Agent（与 run_pipeline 一致）
-    if seq > 0:
+    # 启动后台执行目标 Agent（由 _execute_agent 判定产出后存储事件）
+    try:
+        from src.api.event_pipeline import _execute_agent
+        from src.session_manager import db, db_lock
+        backend = "opencode"
+        skill_name = ""
+        repo_name = repository.split("/", 1)[-1] if "/" in repository else repository
         try:
-            from src.api.event_pipeline import _execute_agent
-            from src.session_manager import db, db_lock
-            backend = "opencode"
-            skill_name = ""
-            repo_name = repository.split("/", 1)[-1] if "/" in repository else repository
-            try:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("SELECT backend_id, skill FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repository, agent_name))
-                    row = c.fetchone()
-                    if row:
-                        backend = "opencode"
-                        if row[0]:
-                            c.execute("SELECT name FROM backend_agents WHERE id=?", (row[0],))
-                            brow = c.fetchone()
-                            if brow and brow[0]:
-                                backend = brow[0]
-                        skill_name = row[1] or ""
-            except Exception:
-                pass
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT backend_id, skill FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repository, agent_name))
+                row = c.fetchone()
+                if row:
+                    backend = "opencode"
+                    if row[0]:
+                        c.execute("SELECT name FROM backend_agents WHERE id=?", (row[0],))
+                        brow = c.fetchone()
+                        if brow and brow[0]:
+                            backend = brow[0]
+                    skill_name = row[1] or ""
+        except Exception:
+            pass
 
-            evt = {
-                "type": "a2a_event",
+        evt = {
+            "type": "a2a_event",
+            "repository": repository,
+            "source": "a2a",
+            "actor": "",
+            "account": account,
+            "issue_id": str(issue_number) if issue_number else "",
+            "_a2a_context": context,
+            "payload": {
                 "repository": repository,
-                "source": "a2a",
-                "actor": "",
                 "account": account,
-                "_a2a_context": context,
-                "payload": {
-                    "repository": repository,
-                    "account": account,
-                    "issue_number": issue_number,
-                    "context": context,
-                },
-            }
+                "issue_number": issue_number,
+                "context": context,
+            },
+        }
 
-            import threading
-            threading.Thread(target=_execute_agent, args=(
-                repo_key, seq, agent_name, backend, skill_name or agent_name, evt,
-            ), daemon=True, name=f"a2a-{agent_name}-{seq}").start()
-            log.info(f"A2A: started agent execution for {agent_name}, seq={seq}")
-        except Exception as e:
-            log.warning(f"A2A: failed to start agent execution: {e}")
+        import threading
+        threading.Thread(target=_execute_agent, args=(
+            repo_key, agent_name, backend, skill_name or agent_name, evt,
+        ), daemon=True, name=f"a2a-{agent_name}-{int(time.time()*1000)%10000}").start()
+        log.info(f"A2A: started agent execution for {agent_name}")
+    except Exception as e:
+        log.warning(f"A2A: failed to start agent execution: {e}")
 
-    return {"status": "ok", "seq": seq, "agent": agent_name}
+    return {"status": "ok", "seq": 0, "agent": agent_name}

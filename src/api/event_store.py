@@ -19,27 +19,109 @@ def acquire_repo_lock(repo_key: str) -> threading.Lock:
 def append_event(repo_key: str, event_type: str, title: str = "",
                  issue_id: str = "", agent_type: str = "", source: str = "gitcode",
                  actor: str = "", summary: str = "",
-                 payload: dict = None, status: str = "pending") -> int:
-    """写入事件到 events 表，返回 seq"""
+                 payload: dict = None, status: str = "completed",
+                 result: str = "") -> int:
+    """写入事件到 events 表，返回 seq。result 为 Agent 答复结论（纯文本）。"""
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
-                 json.dumps(payload or {}), status)
+                 json.dumps(payload or {}), status, result)
             )
             db.commit()
             seq = c.lastrowid
             payload_keys = list((payload or {}).keys())
             log.info(f"Event stored: seq={seq}, repo={repo_key}, type={event_type}, "
                      f"agent={agent_type}, issue={issue_id}, actor={actor}, source={source}, "
-                     f"status={status}, summary={summary[:60]}, payload_keys={payload_keys}")
+                     f"status={status}, result={result[:80]}, payload_keys={payload_keys}")
             return seq
         except Exception as e:
             log.warning(f"Event store FAILED: seq=0, repo={repo_key}, type={event_type}, "
                         f"agent={agent_type}, error={e}")
             return 0
+
+
+def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: str = ""):
+    """写入被跳过/无产出的事件审计记录到 event_skipped 表"""
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute("INSERT INTO event_skipped (repo_key, event_type, reason, detail) VALUES (?,?,?,?)",
+                      (repo_key, event_type, reason, detail))
+            db.commit()
+            log.info(f"Event skipped: repo={repo_key}, type={event_type}, reason={reason}, detail={detail[:80]}")
+        except Exception as e:
+            log.warning(f"Event skipped FAILED: {e}")
+
+
+def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> tuple:
+    """判定 Agent 是否有明确答复产出，返回 (has_output: bool, result: str)
+
+    tool_uses: stream_agent 产生的 tool_use 事件输入列表（含 bash 命令）
+    final_text: Agent 最终答复文本
+    """
+    text = final_text or ""
+    has_output = False
+    result = ""
+
+    # 通用：final_text 含 GitCode 产出链接
+    import re
+    if re.search(r'(merge_requests|pull/[^/]+/merge_requests|/pulls?)/?\d+', text):
+        m = re.search(r'(?:merge_requests|/pulls?)/?(\d+)', text)
+        pr_num = m.group(1) if m else "?"
+        result = f"创建/涉及了 PR #{pr_num}"
+        has_output = True
+        return has_output, result
+    if re.search(r'/issues/\d+', text):
+        m = re.search(r'/issues/(\d+)', text)
+        issue_num = m.group(1) if m else "?"
+        result = f"涉及/创建了 Issue #{issue_num}"
+        has_output = True
+        return has_output, result
+
+    # 按 agent_type 判定
+    if agent_type == "coding":
+        # 检测创建 PR 的写操作
+        for t in tool_uses:
+            cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+            if "POST" in cmd.upper() and ("pulls" in cmd or "merge_requests" in cmd):
+                result = "提交了代码变更（PR）"
+                has_output = True
+                break
+    elif agent_type == "issue":
+        for t in tool_uses:
+            cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+            upper = cmd.upper()
+            if "POST" in upper and ("/comments" in cmd or "labels" in cmd):
+                result = "对 Issue 执行了写操作（评论/标签）"
+                has_output = True
+                break
+    elif agent_type in ("qa", "pr"):
+        for t in tool_uses:
+            cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+            if "POST" in cmd.upper() and "comments" in cmd:
+                result = "发布了审查评论"
+                has_output = True
+                break
+        if not has_output and re.search(r'(审查通过|需修改|发现问题|代码审查)', text):
+            result = "输出了审查结论"
+            has_output = True
+    elif agent_type == "sre":
+        for t in tool_uses:
+            cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+            if "DEPLOY" in cmd.upper() or ("POST" in cmd.upper() and "deploy" in cmd.lower()):
+                result = "执行了部署/构建操作"
+                has_output = True
+                break
+    elif agent_type == "vod":
+        if re.search(r'/issues/\d+', text):
+            m = re.search(r'/issues/(\d+)', text)
+            result = f"创建了 Issue #{m.group(1) if m else '?'}"
+            has_output = True
+
+    return has_output, result
 
 
 def update_event_status(seq: int, status: str):

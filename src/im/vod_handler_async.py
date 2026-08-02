@@ -164,17 +164,18 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
 
     # 仅当创建了 Issue 时才写入 events 审计记录
     if final_text and re.search(r'/issues/\d+', final_text):
-        from src.api.event_store import append_event, update_event_config, update_event_complete
+        from src.api.event_store import append_event, update_event_complete
         user_msg = evt.get("payload", {}).get("user_message", "")
         actor = evt.get("actor", "unknown")
+        m = re.search(r'/issues/(\d+)', final_text)
+        result_text = f"采纳建议创建了 Issue #{m.group(1) if m else '?'}"
         event_seq = append_event(
             repo_key=repo_key, event_type="vod_signal", source="vod_im",
             agent_type="vod", actor=actor, title=user_msg[:100],
-            summary=f"VOD IM: issue created", payload=evt.get("payload", {}),
-            status="completed"
+            summary=result_text, payload=evt.get("payload", {}),
+            status="completed", result=result_text
         )
         if event_seq:
-            update_event_config(event_seq, backend, skill, datetime.now().isoformat())
             update_event_complete(event_seq, "completed", exit_code=exit_code,
                                   duration=duration, completed_at=datetime.now().isoformat())
 

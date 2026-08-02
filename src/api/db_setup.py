@@ -23,9 +23,21 @@ CREATE TABLE IF NOT EXISTS events (
     exit_code INTEGER DEFAULT NULL,
     duration REAL DEFAULT NULL,
     agent_logs TEXT DEFAULT '[]',
+    result TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
     completed_at TEXT DEFAULT ''
+)
+"""
+
+_EVENT_SKIPPED_DDL = """
+CREATE TABLE IF NOT EXISTS event_skipped (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_key TEXT DEFAULT '',
+    event_type TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    detail TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
 )
 """
 
@@ -183,6 +195,7 @@ _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("backend_agents", _BACKEND_AGENTS_DDL),
     ("events", _EVENTS_TABLE_DDL),
+    ("event_skipped", _EVENT_SKIPPED_DDL),
     ("chat_conversations", _CHAT_CONVERSATIONS_DDL),
     ("chat_messages", _CHAT_MESSAGES_DDL),
     ("devops_agent_session", _AGENT_SESSIONS_TABLE_DDL),
@@ -365,6 +378,7 @@ def _migrate_tables():
         "ALTER TABLE devops_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
+        "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
