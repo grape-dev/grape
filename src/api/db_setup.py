@@ -480,6 +480,31 @@ def _migrate_tables():
             log.info("Migrated backend -> backend_id across agent tables")
     except Exception as e:
         log.warning(f"Migrate backend->backend_id failed: {e}")
+    # backend_agents 大小写去重（合并为小写 name，保留最小 id，更新引用）
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 找大小写重复的分组
+            c.execute("SELECT lower(name) AS ln FROM backend_agents GROUP BY lower(name) HAVING COUNT(*)>1")
+            dup_groups = [r[0] for r in c.fetchall()]
+            for ln in dup_groups:
+                c.execute("SELECT id FROM backend_agents WHERE lower(name)=? ORDER BY id ASC LIMIT 1", (ln,))
+                keep_id = c.fetchone()[0]
+                c.execute("SELECT id, name FROM backend_agents WHERE lower(name)=? AND id!=? ORDER BY id ASC", (ln, keep_id))
+                dup_rows = c.fetchall()
+                for did, dname in dup_rows:
+                    # 更新各表引用
+                    for tbl, col in [("devops_agent_session", "backend_id"), ("agent_type", "default_backend_id"), ("chat_agent_session", "backend_id")]:
+                        try:
+                            c.execute(f"UPDATE {tbl} SET {col}=? WHERE {col}=?", (keep_id, did))
+                        except Exception:
+                            pass
+                    # 合并数据后删除重复行
+                    c.execute("DELETE FROM backend_agents WHERE id=?", (did,))
+                    log.info(f"backend_agents dedup: merged '{dname}' (id={did}) -> id={keep_id}")
+            db.commit()
+    except Exception as e:
+        log.warning(f"backend_agents dedup failed: {e}")
     # 清理旧表（如果存在）
     try:
         with db_lock:

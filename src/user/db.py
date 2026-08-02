@@ -1053,7 +1053,7 @@ def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str
     with db_lock:
         c = db.cursor()
         for a in agents:
-            name = a.get("name", "")
+            name = (a.get("name", "") or "").strip().lower()
             if not name:
                 continue
             c.execute("SELECT id FROM backend_agents WHERE name=? AND scope=? AND owner_id=?", (name, scope, owner_id))
@@ -1074,11 +1074,11 @@ def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str
                      a.get("version", ""), 1 if a.get("healthy") else 0,
                      a.get("pip_package", ""), scope, owner_id)
                 )
-        # 清理本次 scope 中已不在列表里的 backend
-        current_names = [a.get("name", "") for a in agents if a.get("name")]
+        # 清理本次 scope 中已不在列表里的 backend（忽略大小写）
+        current_names = [(a.get("name", "") or "").strip().lower() for a in agents if a.get("name")]
         if current_names:
             placeholders = ",".join("?" for _ in current_names)
-            c.execute(f"DELETE FROM backend_agents WHERE scope=? AND owner_id=? AND name NOT IN ({placeholders})", (scope, owner_id, *current_names))
+            c.execute(f"DELETE FROM backend_agents WHERE scope=? AND owner_id=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, *current_names))
         db.commit()
 
 
@@ -1099,18 +1099,20 @@ def get_backend_id_by_name(name: str, scope: str = "global", owner_id: str = "")
     """按 name+scope+owner_id 查找 backend id"""
     if not name:
         return None
+    name = name.strip().lower()
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id FROM backend_agents WHERE name=? AND scope=? AND owner_id=? LIMIT 1", (name, scope, owner_id))
+        c.execute("SELECT id FROM backend_agents WHERE lower(name)=? AND scope=? AND owner_id=? LIMIT 1", (name, scope, owner_id))
         row = c.fetchone()
         return row[0] if row else None
 
 
 def ensure_default_backend(name: str = "opencode", scope: str = "global"):
     """确保默认 backend 存在（幂等），返回 id"""
+    name = (name or "opencode").strip().lower() or "opencode"
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id FROM backend_agents WHERE name=? AND scope=? AND owner_id='' LIMIT 1", (name, scope))
+        c.execute("SELECT id FROM backend_agents WHERE lower(name)=? AND scope=? AND owner_id='' LIMIT 1", (name, scope))
         row = c.fetchone()
         if row:
             return row[0]
