@@ -10,6 +10,7 @@ Bot 通过事件路由（`configs/event-routing.json`）将事件分发到对应
 |-------|------|---------|------|
 | `issue` | Issue 分诊、标签、CODEOWNERS 分配 | `issue_opened`、`issue_comment` | opencode |
 | `pr` | PR 审查（代码审查、IaC 扫描、合并检查） | `pull_request_opened`、`pull_request_updated`、`note_hook_pr` | opencode |
+| `qa` | PR 审查 + 工作流质量审查（pr 的增强版备选：Agent Work Loop 五维模型，按仓库启用） | `pull_request_opened`、`pull_request_updated`、`note_hook_pr` | opencode |
 | `skill-pr` | Skill 仓库专用 PR 审查（同 pr 技能，用于 huaweicloud-skills） | `pull_request_opened`、`pull_request_updated` | opencode |
 | `implementation` | 自主开发实现（spec → plan → TDD → 增量代码 → PR） | `issue_labeled` | opencode |
 | `build-debug` | 构建失败诊断与修复建议 | `build_failure` | opencode |
@@ -62,6 +63,7 @@ skills/
 ├── incident-triage/             # 事件分诊
 ├── issue/                       # Issue 运营
 ├── pr/                          # PR 审查
+├── qa/                          # PR 审查 + 工作流质量审查（pr 增强版）
 └── skill-pr/                    # Skill 仓库 PR 审查
 ```
 

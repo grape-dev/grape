@@ -33,6 +33,7 @@
 |-------|------|
 | `issue` | Issue 全生命周期（分类、标签、CODEOWNERS 分配） |
 | `pr` | PR 审查（差异分析、安全扫描、合并检查、评论回复） |
+| `qa` | PR 审查 + 工作流质量审查（pr 的增强版备选：Agent Work Loop 五维模型，按仓库启用） |
 | `implementation` | 自主开发实现（spec → plan → TDD → 增量代码 → self-review → PR） |
 | `build-debug` | 构建失败诊断与修复建议 |
 | `deploy-guard` | 部署安全守卫与合规检查 |

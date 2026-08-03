@@ -19,9 +19,15 @@
   },
   "pr": {
     "name": "PR 管理",
-    "agent_type": "qa",
+    "agent_type": "coding",
     "path": "pr",
-    "description": "PR 代码审查、自动化测试、功能验证、安全检查（监听 PR 事件）"
+    "description": "Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并操作"
+  },
+  "qa": {
+    "name": "PR 审查与工作流质量审查",
+    "agent_type": "qa",
+    "path": "qa",
+    "description": "pr 技能的平替与增强：PR 全流程审查 + Agent Work Loop 五维工作流审查（任务理解/受控执行/变更验证/可靠交付/经验沉淀）"
   },
   "skill-pr": {
     "name": "技能仓库 PR 审查",
