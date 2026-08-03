@@ -316,6 +316,11 @@ Dashboard 主要区域说明：
 │  └──────────────────────────────────────────────────┘  │
 │                                                        │
 │  [Save] [Cancel]                                       │
+│                                                        │
+│  ──────────────────────────────────────────────────   │
+│  🧹 Clean Session                                      │
+│  清空该 Agent 的 backend_session_id。下一次事件到来     │
+│  时会创建全新的 Agent 上下文（不延续历史对话）。        │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -327,6 +332,14 @@ Agent Detail 页面说明：
 | **指标卡** | 该 Agent 的关键统计数据 |
 | **Event History** | 最近 24h 的操作记录 |
 | **Config 面板** | 点击展开：选择 Backend Engine、勾选启用的 Skills |
+| **🧹 Clean Session** | 清空该 Agent 会话的 `backend_session_id`（置空），下次事件到来时创建全新会话上下文，不延续历史对话 |
+
+Clean Session 行为说明：
+
+- 每个 DevOps Agent（issue / coding / qa / sre / vod）均可清理自己的会话
+- 清理动作：`UPDATE devops_agent_session SET backend_session_id='' WHERE repo_key=? AND agent_type=?`
+- 效果：下一次事件触发该 Agent 时，由于 `backend_session_id` 为空，Agent 会创建新的后端会话（`oc_session_id` 全新），不继承此前的多轮上下文
+- 适用场景：Agent 上下文被污染/走偏、需要重新开始、或排查 Agent 行为异常
 
 ### 2.5 Event Detail 页面
 

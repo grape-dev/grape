@@ -177,6 +177,29 @@ class AgentConfig(BaseModel):
     im_app_secret: str = ""
 
 
+@router.post("/{name}/{owner}/{repo}/clean")
+async def clean_agent_session(name: str, owner: str, repo: str,
+                              user: dict = Depends(get_current_user)):
+    """清理 Agent 会话：将 devops_agent_session.backend_session_id 置空。
+
+    clean 之后清除 backend_session_id，下一次事件到来时会创建新的 backend_session_id
+    （Agent 重新开始全新上下文，不延续历史对话）。
+    """
+    if name not in AGENT_TYPES:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
+
+    repo_key = f"{owner}/{repo}"
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE devops_agent_session SET backend_session_id='' WHERE repo_key=? AND agent_type=?",
+                  (repo_key, name))
+        updated = c.rowcount
+        db.commit()
+    log.info(f"Agent session cleaned: repo={repo_key}, agent={name}, rows={updated}")
+    return {"message": "Agent 会话已清理（backend_session_id 已置空）", "cleaned": updated > 0, "agent_type": name}
+
+
 @router.put("/{name}/{owner}/{repo}")
 async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfig,
                               user: dict = Depends(get_current_user)):

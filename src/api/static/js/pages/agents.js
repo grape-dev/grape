@@ -103,6 +103,10 @@ function renderAgent(name, data) {
     </div>` : ''}
   </div>` : ''}
   <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg()">Cancel</button></div>
+  <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
+    <div class="ts t3" style="margin-bottom:6px">清空会话后，下一次事件将创建全新的 Agent 上下文（不延续历史对话）。</div>
+    <button class="bt bt-r bt-s" onclick="cleanAgentSession('${name}')">🧹 Clean Session</button>
+  </div>
 </div>
 <div class="stats mt16 mb16">
   <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${et}</div><div class="l">事件总量</div></div>
@@ -130,4 +134,13 @@ function saveAgentConfig(name) {
     app.showToast('配置已保存');
     toggleAgentCfg();
   }).catch(e => app.showToast('保存失败: ' + e.message));
+}
+
+function cleanAgentSession(name) {
+  if (!confirm(`确认清理 ${name} Agent 的会话？\n\n将清除 backend_session_id，下一次事件到来时会创建全新会话上下文（不延续历史对话）。`)) return;
+  const repo = app.currentRepo();
+  if (!repo) return;
+  API.post('/agents/' + name + '/' + repo.owner + '/' + repo.name + '/clean').then(r => {
+    app.showToast(r.message || '会话已清理');
+  }).catch(e => app.showToast('清理失败: ' + e.message));
 }
