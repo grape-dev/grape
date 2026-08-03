@@ -1,5 +1,16 @@
 var _AGENT_TYPES = {};  // 全局 Agent 类型缓存（由 app.js 填充）
 
+// 全局工具：UTC 时间字符串（SQLite "YYYY-MM-DD HH:MM:SS" 或 ISO）转本地（+8）展示
+function fmtLocalTime(utcStr) {
+  if (!utcStr) return '';
+  let s = String(utcStr).replace('T', ' ').replace('Z', '');
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ ](\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return utcStr;
+  const d = new Date(Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]));
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 const API = (() => {
   const BASE = '/api';
 
