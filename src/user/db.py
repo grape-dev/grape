@@ -912,7 +912,8 @@ def delete_user_account(username: str) -> bool:
 
 
 def get_all_bot_usernames() -> list[str]:
-    """获取所有托管仓库配置的 bot 用户名列表（用于 self-comment 检测）"""
+    """获取所有托管仓库配置的 bot 用户名列表（用于 self-comment 检测）。
+    包含 managed_repos.bot_username + 全局 bot（configs/global-bot-token.json）。"""
     result = []
     with db_lock:
         c = db.cursor()
@@ -922,7 +923,18 @@ def get_all_bot_usernames() -> list[str]:
                 result.append(row[0])
         except Exception:
             pass
-    return list(set(result))
+    # 全局 bot 用户名（self-comment 检测必须包含，否则 bot 自己评论会死循环）
+    try:
+        import json, os
+        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "global-bot-token.json")
+        if os.path.exists(_gbt_path):
+            with open(_gbt_path, "r", encoding="utf-8") as f:
+                _gbt = json.load(f)
+            _us = _gbt.get("bot_usernames") or []
+            result.extend(_us)
+    except Exception:
+        pass
+    return list(set(r for r in result if r))
 
 
 def get_meta_value(key: str) -> str:
