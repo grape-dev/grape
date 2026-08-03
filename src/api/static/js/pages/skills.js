@@ -13,6 +13,24 @@ function renderSkills() {
   if (!el) return;
   el.innerHTML = '<div class="loading">加载中...</div>';
 
+  // 官方技能页签：先异步检查 configs/skill-description.json 是否有新增官方技能，有则同步后再加载
+  if (_skillTab === 'official') {
+    API.post('/skills/sync-official', {}).then(syncRes => {
+      if (syncRes && syncRes.added > 0) {
+        if (window.app && app.showToast) app.showToast(syncRes.message || '发现新增官方技能，已同步');
+      }
+      _loadSkills();
+    }).catch(() => {
+      _loadSkills();
+    });
+  } else {
+    _loadSkills();
+  }
+}
+
+function _loadSkills() {
+  const el = document.getElementById('pageContent');
+  if (!el) return;
   const repo = _currentRepo();
   const qs = repo ? '?repo=' + encodeURIComponent(repo) : '';
   API.get('/skills' + qs).then(d => {

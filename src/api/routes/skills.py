@@ -44,6 +44,42 @@ async def list_skills(user: dict = Depends(get_current_user), repo: str = ""):
     return {"skills": skills}
 
 
+@router.post("/sync-official")
+async def sync_official_skills(user: dict = Depends(get_current_user)):
+    """从 configs/skill-description.json 同步官方技能到 skill 表。
+    新增的官方技能会被插入，已有的会更新。返回新增数量。
+    """
+    from src.session_manager import db, db_lock
+
+    config_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs")
+    json_path = os.path.join(config_dir, "skill-description.json")
+    if not os.path.exists(json_path):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "skill-description.json 未找到"})
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    added = 0
+    with db_lock:
+        c = db.cursor()
+        for skill_name, info in data.items():
+            display_name = info.get("name", skill_name)
+            description = info.get("description", "")
+            agent_type = info.get("agent_type", "")
+            skill_path = info.get("path", skill_name)
+            # 检查是否已存在
+            existed = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'", (skill_name,)).fetchone()[0]
+            c.execute(
+                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
+                (skill_name, display_name, description, agent_type, skill_path)
+            )
+            if existed == 0:
+                added += 1
+        db.commit()
+
+    return {"message": f"官方技能同步完成，新增 {added} 个", "added": added}
+
+
 @router.get("/{name}")
 async def get_skill_detail(name: str, user: dict = Depends(get_current_user),
                            repo: str = ""):
