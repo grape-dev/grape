@@ -1,6 +1,6 @@
 {
-  "gitcode_api_token": "zmz4QbrJp_tWpBtfr3jTx9YA",
-  "gitcode_webhook_token": "zmz4QbrJp_tWpBtfr3jTx9YA",
-  "bot_usernames": ["hwc-dev-bot"],
+  "gitcode_api_token": "4sLP9JrskB8rvXa1MdgQUaP7",
+  "gitcode_webhook_token": "4sLP9JrskB8rvXa1MdgQUaP7",
+  "bot_usernames": ["grape_bot"],
   "description": "全局 DevOps Bot 账户 token（fallback：当仓库未配置专属 bot token 时使用）。"
 }
