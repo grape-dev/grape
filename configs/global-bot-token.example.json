@@ -1,0 +1,9 @@
+{
+  "gitcode_api_token": "",
+  "gitcode_webhook_token": "",
+  "gitcode_oauth_client_id": "",
+  "gitcode_oauth_client_secret": "",
+  "gitcode_oauth_redirect_uri": "",
+  "bot_usernames": [],
+  "description": "全局 DevOps Bot 配置模板：gitcode_api_token（bot 账户 token，fallback 用）、gitcode_oauth_*（GitCode OAuth 登录凭据，首次运行加载到 meta 表）、bot_usernames（self-comment 检测用 bot 用户名）。复制为 global-bot-token.json 并填入真实值。"
+}
