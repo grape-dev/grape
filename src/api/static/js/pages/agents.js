@@ -10,21 +10,37 @@ function toggleAgentCfg() {
 function loadCfgOptions() {
   const backendSelect = document.querySelector('.cfg-backend');
   const skillSelect = document.querySelector('.cfg-skill');
-  if (!backendSelect || backendSelect.options.length > 1) return; // already loaded
-  API.get('/settings/backend-agents').then(d => {
-    const backends = d.backends || [];
-    const current = backendSelect.dataset.current || 'opencode';
-    backendSelect.innerHTML = backends.map(b =>
-      `<option value="${b.name}" ${b.name === current ? 'selected' : ''}>${b.name}${b.healthy ? ' ✓' : ' ✗'}</option>`
-    ).join('');
-  }).catch(() => {});
-  API.get('/skills').then(d => {
-    const allSkills = d.skills || [];
-    const agentType = skillSelect.dataset.agent || '';
-    const filtered = allSkills.filter(s => s.agent_type === agentType || s.parent_agent_type === agentType);
-    skillSelect.innerHTML = '<option value="">默认官方技能（自动）</option>' +
-      filtered.map(s => `<option value="${s.name}">${s.display_name || s.name}</option>`).join('');
-  }).catch(() => {});
+
+  // Backend 下拉：仅未加载时加载
+  if (backendSelect && backendSelect.options.length <= 1) {
+    API.get('/settings/backend-agents').then(d => {
+      const backends = d.backends || [];
+      const current = backendSelect.dataset.current || 'opencode';
+      backendSelect.innerHTML = backends.map(b =>
+        `<option value="${b.name}" ${b.name === current ? 'selected' : ''}>${b.name}${b.healthy ? ' ✓' : ' ✗'}</option>`
+      ).join('');
+    }).catch(() => {});
+  }
+
+  // Skill 下拉：始终加载（含当前配置技能选中态），不受 backend 加载状态影响
+  if (skillSelect) {
+    let repo = '';
+    try {
+      const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+      repo = c ? (c.fullName || '') : '';
+    } catch {}
+    const qs = repo ? '?repo=' + encodeURIComponent(repo) : '';
+    API.get('/skills' + qs).then(d => {
+      const allSkills = d.skills || [];
+      const agentType = skillSelect.dataset.agent || '';
+      const currentSkill = skillSelect.dataset.current || '';
+      const filtered = allSkills.filter(s => s.agent_type === agentType || s.parent_agent_type === agentType);
+      skillSelect.innerHTML = '<option value="">默认官方技能（自动）</option>' +
+        filtered.map(s =>
+          `<option value="${s.name}" ${s.name === currentSkill ? 'selected' : ''}>${s.display_name || s.name}</option>`
+        ).join('');
+    }).catch(() => {});
+  }
 }
 
 function renderAgent(name, data) {
@@ -68,8 +84,8 @@ function renderAgent(name, data) {
     </select>
   </div>
   <div class="srow"><label>Skill</label>
-    <select class="cfg-skill" data-agent="${name}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
-      <option value="">加载中...</option>
+    <select class="cfg-skill" data-agent="${name}" data-current="${(data.skill || '')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+      <option value="${data.skill || ''}" ${data.skill ? 'selected' : ''}>${data.skill ? '加载中...' : '默认官方技能（自动）'}</option>
     </select>
   </div>
   ${name === 'vod' ? `
