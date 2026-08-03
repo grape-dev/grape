@@ -169,10 +169,11 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
         actor = evt.get("actor", "unknown")
         m = re.search(r'/issues/(\d+)', final_text)
         result_text = f"采纳建议创建了 Issue #{m.group(1) if m else '?'}"
+        vod_issue_id = f"#{m.group(1)}" if m else "#0"
         event_seq = append_event(
             repo_key=repo_key, event_type="vod_signal", source="vod_im",
             agent_type="vod", actor=actor, title=user_msg[:100],
-            summary=result_text, payload=None,
+            issue_id=vod_issue_id, summary=result_text, payload=None,
             status="completed", result=result_text
         )
         if event_seq:

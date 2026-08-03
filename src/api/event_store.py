@@ -16,12 +16,51 @@ def acquire_repo_lock(repo_key: str) -> threading.Lock:
         return _repo_locks[repo_key]
 
 
+def _extract_issue_id_from_text(text: str) -> str:
+    """从文本中提取 Issue/PR 编号（支持 #44、/issues/42、/pulls/26、/merge_requests/3）"""
+    if not text:
+        return ""
+    import re
+    # 优先匹配 GitCode 链接格式
+    m = re.search(r'/(?:issues|pulls|merge_requests)/(\d+)', text)
+    if m:
+        return f"#{m.group(1)}"
+    # 其次匹配 #数字（但不能是 0）
+    m = re.search(r'#(\d+)', text)
+    if m and m.group(1) != "0":
+        return f"#{m.group(1)}"
+    return ""
+
+
 def append_event(repo_key: str, event_type: str, title: str = "",
                  issue_id: str = "", agent_type: str = "", source: str = "gitcode",
                  actor: str = "", summary: str = "",
                  payload: dict = None, status: str = "completed",
                  result: str = "") -> int:
-    """写入事件到 events 表，返回 seq。result 为 Agent 答复结论（纯文本）。"""
+    """写入事件到 events 表，返回 seq。result 为 Agent 答复结论（纯文本）。
+
+    issue_id 保证非空：传入为空时按 payload → result → title/summary 顺序兜底解析，
+    仍无法解析则用 #0 表示"无关联"。
+    """
+    # 兜底解析 issue_id
+    if not issue_id:
+        if isinstance(payload, dict):
+            # A2A 用 issue_number 字段，或 issue/pull_request 对象
+            num = payload.get("issue_number", "")
+            if not num:
+                for key in ("issue", "pull_request", "merge_request"):
+                    obj = payload.get(key)
+                    if isinstance(obj, dict):
+                        num = obj.get("number", obj.get("iid", ""))
+                        if num:
+                            break
+            if num:
+                issue_id = f"#{num}"
+        if not issue_id:
+            issue_id = _extract_issue_id_from_text(result) or _extract_issue_id_from_text(summary) \
+                or _extract_issue_id_from_text(title)
+        if not issue_id:
+            issue_id = "#0"
     with db_lock:
         c = db.cursor()
         try:

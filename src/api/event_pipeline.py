@@ -12,6 +12,10 @@ def resolve_issue_id(payload: dict) -> str:
     """从事件 payload 提取 Issue/PR 编号"""
     if not isinstance(payload, dict):
         return ""
+    # A2A payload 用 issue_number 字段
+    num = payload.get("issue_number", "")
+    if num:
+        return f"#{num}"
     for key in ("issue", "pull_request", "merge_request"):
         obj = payload.get(key, {})
         if isinstance(obj, dict):

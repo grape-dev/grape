@@ -220,9 +220,13 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
     parts = []
     evt_type = evt.get("type", "event")
 
-    # A2A context injection
+    # A2A context injection —— Issue 编号放在最主要位置
     a2a_ctx = evt.get("_a2a_context", "")
     if a2a_ctx:
+        issue_num = evt.get("issue_id", "") or ""
+        if issue_num:
+            parts.append(f"## 目标 Issue：{issue_num}\n")
+            parts.append(f"本次任务围绕 Issue {issue_num} 展开，所有操作必须以该 Issue 为中心。\n")
         parts.append("## 前序 Agent 处理摘要\n")
         parts.append(a2a_ctx)
         parts.append("请基于以上上下文继续处理。\n")
