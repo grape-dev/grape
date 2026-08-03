@@ -107,9 +107,24 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
 
-    # 首次托管使用用户个人 Token 创建 webhook，Bot Token 可在 Repo 设置中后续配置
+    # 读取全局 bot 配置（configs/global-bot-token.json）
+    global_bot_token = ""
+    global_bot_username = ""
+    try:
+        import json, os as _os
+        _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+        if _os.path.exists(_gbt_path):
+            with open(_gbt_path, "r", encoding="utf-8") as _f:
+                _gbt = json.load(_f)
+            global_bot_token = _gbt.get("gitcode_api_token", "") or ""
+            _us = _gbt.get("bot_usernames") or []
+            global_bot_username = _us[0] if _us else ""
+    except Exception:
+        pass
+
+    # webhook 创建使用全局 bot token（个人 OAuth token 无 hooks 权限，已验证 403）
     bot_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
-    webhook_token = bot_token or api_token
+    webhook_token = global_bot_token or bot_token or api_token
     if not webhook_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，无法创建 webhook"})
 
@@ -136,17 +151,6 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         from src.user.repo_manager import add_collaborator
         # 全局 bot（configs/global-bot-token.json）作为维护者加入（用 owner token，GitCode 拒绝 bot 邀请自己）
         # 失败则拒绝托管
-        global_bot_username = ""
-        try:
-            import json, os as _os
-            _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-            if _os.path.exists(_gbt_path):
-                with open(_gbt_path, "r", encoding="utf-8") as _f:
-                    _gbt = json.load(_f)
-                _us = _gbt.get("bot_usernames") or []
-                global_bot_username = _us[0] if _us else ""
-        except Exception:
-            pass
         if api_token and global_bot_username:
             ok = add_collaborator(api_token, owner, repo_name, global_bot_username, "maintainer")
             if not ok:
@@ -236,7 +240,17 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
 
+    # 删除 webhook 需要 hooks 权限 → 优先全局 bot token（个人 OAuth token 无 hooks 权限）
     api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
+    if not api_token:
+        try:
+            import json as _json, os as _os
+            _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+            if _os.path.exists(_gbt_path):
+                with open(_gbt_path, "r", encoding="utf-8") as _f:
+                    api_token = _json.load(_f).get("gitcode_api_token", "") or ""
+        except Exception:
+            pass
     if not api_token:
         api_token = get_user_token(user["username"])
 
@@ -269,8 +283,8 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
                 _gbt = json.load(_f)
             _us = _gbt.get("bot_usernames") or []
             global_bot_username = _us[0] if _us else ""
-        # 移除需 owner token（GitCode 拒绝 bot 操作自己）
-        owner_token = api_token or get_user_token(user["username"])
+        # 移除协作者需个人 owner token（GitCode 拒绝 bot 操作自己；api_token 此时是全局 bot token 用于删 webhook）
+        owner_token = get_user_token(user["username"])
         if owner_token and global_bot_username:
             try:
                 _rm_ok = remove_collaborator(owner_token, owner, repo_name, global_bot_username)
