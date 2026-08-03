@@ -205,14 +205,14 @@ def update_event_config(seq: int, backend: str, skill: str, started_at: str):
 
 def update_event_complete(seq: int, status: str, exit_code: int = None,
                           duration: float = None, agent_logs: list = None,
-                          completed_at: str = ""):
-    """写入执行结果（status, exit_code, duration, agent_logs, completed_at）"""
+                          completed_at: str = "", result: str = ""):
+    """写入执行结果（status, exit_code, duration, agent_logs, completed_at, result）"""
     with db_lock:
         try:
             c = db.cursor()
             c.execute(
-                "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=? WHERE seq=?",
-                (status, exit_code, duration, json.dumps(agent_logs or []), completed_at, seq)
+                "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, result=? WHERE seq=?",
+                (status, exit_code, duration, json.dumps(agent_logs or []), completed_at, result, seq)
             )
             db.commit()
         except Exception as e:

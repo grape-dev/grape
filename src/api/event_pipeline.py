@@ -30,6 +30,53 @@ def resolve_issue_id(payload: dict) -> str:
     return ""
 
 
+def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
+    """从 PR 事件 payload 解析关联的 Issue 编号。
+    优先级：payload 标题 #N → 分支名 issue-N → 同步调 PR 详情 API。
+    """
+    import re, json, urllib.request
+    from src.api.event_store import _extract_issue_id_from_text
+
+    # 1. 从 object_attributes / pull_request 的 title 提取 #N
+    obj = payload.get("object_attributes", {}) or {}
+    pr_obj = payload.get("pull_request", {}) or payload.get("merge_request", {}) or {}
+    title = obj.get("title", "") or pr_obj.get("title", "")
+    issue = _extract_issue_id_from_text(title)
+    if issue:
+        return issue
+
+    # 2. 从分支名提取 issue-N
+    branch = obj.get("source_branch", "") or obj.get("ref", "") or pr_obj.get("head", {}).get("ref", "") if isinstance(pr_obj.get("head"), dict) else (obj.get("source_branch", "") or obj.get("ref", ""))
+    m = re.search(r'issue[-_](\d+)', str(branch))
+    if m and m.group(1) != "0":
+        return f"#{m.group(1)}"
+
+    # 3. 同步调 PR 详情 API
+    pr_number = obj.get("iid", obj.get("number", "")) or pr_obj.get("number", "")
+    if pr_number and api_token:
+        repo_path = payload.get("project", {}).get("path_with_namespace", "") if isinstance(payload.get("project"), dict) else ""
+        if not repo_path:
+            repo = payload.get("repository", {})
+            if isinstance(repo, dict):
+                repo_path = repo.get("full_name", "")
+        if repo_path and "/" in repo_path:
+            try:
+                url = f"https://api.gitcode.com/api/v5/repos/{repo_path}/pulls/{pr_number}"
+                req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_token}"})
+                data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+                # title / head.ref
+                issue = _extract_issue_id_from_text(str(data.get("title", "")))
+                if issue:
+                    return issue
+                head = data.get("head", {}) or {}
+                m = re.search(r'issue[-_](\d+)', str(head.get("ref", "")))
+                if m and m.group(1) != "0":
+                    return f"#{m.group(1)}"
+            except Exception:
+                return ""
+    return ""
+
+
 def resolve_actor(payload: dict, evt: dict) -> str:
     """从 payload 提取执行者"""
     actor = evt.get("actor", "")
@@ -135,6 +182,29 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 5. 提取 Issue ID
     payload = evt.get("payload", {})
     issue_id = resolve_issue_id(payload) or evt.get("issue_id", "")
+    # PR 类事件：尝试解析关联的 Issue（title/branch 提取，必要时同步调 PR 详情 API）
+    if event_type in ("note_hook_pr", "pull_request_opened", "pull_request_updated", "pull_request_merged"):
+        try:
+            _repo_parts = repo_key.split("/", 1)
+            _pr_api_token = ""
+            if len(_repo_parts) == 2:
+                from src.user.db import get_bot_token_by_repo
+                _pr_api_token = get_bot_token_by_repo(_repo_parts[0], _repo_parts[1]) or ""
+            if not _pr_api_token:
+                try:
+                    import os as _os, json as _json
+                    _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "configs", "global-bot-token.json")
+                    if _os.path.exists(_gbt_path):
+                        with open(_gbt_path, "r", encoding="utf-8") as _f:
+                            _pr_api_token = _json.load(_f).get("gitcode_api_token", "") or ""
+                except Exception:
+                    pass
+            _pr_issue = resolve_pr_issue_id(payload, _pr_api_token)
+            if _pr_issue:
+                issue_id = _pr_issue
+                log.info(f"Pipeline: PR 关联 Issue -> {issue_id}")
+        except Exception as e:
+            log.warning(f"Pipeline: resolve PR issue failed: {e}")
     title = evt.get("title", "") or event_type
     log.info(f"Pipeline: issue_id={issue_id or '(none)'}, title={title}")
 
@@ -179,21 +249,33 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         summary = title or event_type
     log.info(f"Pipeline: summary={summary}")
 
-    # 6. 后台异步执行 Agent（产出结论后由 _execute_agent 决定是否存储事件）
-    log.info(f"Pipeline: queued agent execution, repo_key={repo_key}, agent={agent_type}")
+    # 6. 立即创建 event（status=running），Agent 执行完后再刷新 result/status/agent_log
+    from src.api.event_store import append_event
+    seq = append_event(
+        repo_key=repo_key,
+        event_type=event_type,
+        title=title,
+        issue_id=issue_id or "#0",
+        source=source,
+        agent_type=agent_type,
+        actor=actor,
+        summary=summary,
+        payload=payload,
+        status="running",
+    )
+    log.info(f"Pipeline: event created, seq={seq}, repo_key={repo_key}, agent={agent_type}, issue_id={issue_id or '#0'}")
 
-    result.update({"seq": 0, "event_type": event_type, "skill": agent_type,
+    result.update({"seq": seq, "event_type": event_type, "skill": agent_type,
                    "backend": backend, "skill_name": skill_name,
                    "repo_key": repo_key, "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
-    log.info(f"Pipeline: done, seq=pending, ok=True, final_agent={agent_type}")
 
-    # 后台异步执行 Agent
-    if backend and skill_name:
+    # 后台异步执行 Agent（执行完更新该 seq 的 result/status）
+    if backend and skill_name and seq > 0:
         threading.Thread(target=_execute_agent, args=(
-            repo_key, agent_type, backend, skill_name, evt,
-        ), daemon=True, name=f"ag-{agent_type}-{int(time.time()*1000)%10000}").start()
-        log.info(f"Pipeline: started agent execution for repo={repo_key}, agent={agent_type}")
+            repo_key, seq, agent_type, backend, skill_name, evt,
+        ), daemon=True, name=f"ag-{agent_type}-{seq}").start()
+        log.info(f"Pipeline: started agent execution, seq={seq}, repo={repo_key}, agent={agent_type}")
 
     return result
 
@@ -206,13 +288,13 @@ def get_prompt_context(repo_key: str) -> str:
     return f"\n\n[Event History]\n{summary}\n"
 
 
-def _execute_agent(repo_key: str, agent_type: str,
+def _execute_agent(repo_key: str, seq: int, agent_type: str,
                    backend: str, skill_name: str, evt: dict):
-    """后台执行 Agent：构建 prompt → stream_agent → 有产出才存储事件"""
+    """后台执行 Agent：构建 prompt → stream_agent → 更新 event（result/status/agent_log）"""
     from src.agent.executor import stream_agent
     from src.prompt_builder import build_prompt
     from src.api.event_store import (
-        append_event, append_skipped_event, update_event_complete, evaluate_agent_output,
+        update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
     )
 
     repository = evt.get("repository", repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key)
@@ -309,7 +391,7 @@ def _execute_agent(repo_key: str, agent_type: str,
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
-    # 判定 Agent 是否有明确答复产出，有产出才存储事件（记录结论而非过程）
+    # 判定 Agent 是否有明确答复产出
     has_output, result_text = evaluate_agent_output(agent_type, tool_uses, final_text)
     completed_at = datetime.utcnow().isoformat()
     duration = None
@@ -321,28 +403,16 @@ def _execute_agent(repo_key: str, agent_type: str,
         pass
 
     if not has_output:
-        log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no output, skipped")
-        append_skipped_event(repo_key, evt.get("type", ""), "no_output",
-                             f"exit={exit_code}, text_len={len(final_text)}")
+        # 无产出 → 标记 failed（保留 event，不删）
+        log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no output, mark failed")
+        update_event_status(seq, "failed")
+        update_event_complete(seq, "failed", exit_code=exit_code, duration=duration,
+                              agent_logs=agent_logs, completed_at=completed_at, result=result_text)
         return
 
-    # 有产出 → 存储事件（含结论；payload 不再写入以减小体积/避免敏感信息）
-    issue_id = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "") or ""
+    # 有产出 → 更新该 event（写入配置 + 结果 + 结论 + 执行日志）
     new_status = "completed" if exit_code == 0 else "failed"
-    seq = append_event(
-        repo_key=repo_key,
-        event_type=evt.get("type", "event"),
-        title=evt.get("title", "") or evt.get("type", "event"),
-        issue_id=issue_id,
-        source=evt.get("source", "gitcode"),
-        agent_type=agent_type,
-        actor=evt.get("actor", ""),
-        summary=result_text[:200],
-        payload=None,
-        status=new_status,
-        result=result_text,
-    )
-    if seq > 0:
-        update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
-                              agent_logs=agent_logs, completed_at=completed_at)
-        log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")
+    update_event_config(seq, backend, skill_name, started_at)
+    update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
+                          agent_logs=agent_logs, completed_at=completed_at, result=result_text)
+    log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")

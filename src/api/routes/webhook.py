@@ -66,6 +66,8 @@ async def a2a_endpoint(request: Request):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing agent field"})
     if not payload.get("repository"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
+    if not payload.get("issue_number"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing issue_number in payload: 所有 A2A 事件必须关联一个 Issue"})
 
     client_host = request.client.host if request.client else "unknown"
     if client_host not in ("127.0.0.1", "::1", "localhost", "0.0.0.0"):
@@ -79,6 +81,7 @@ async def a2a_endpoint(request: Request):
 
     repo_key = f"gitcode:{repository}"
     log.info(f"A2A: agent={agent_name}, repo={repository}")
+    seq = 0
 
     # 启动后台执行目标 Agent（由 _execute_agent 判定产出后存储事件）
     try:
@@ -119,12 +122,29 @@ async def a2a_endpoint(request: Request):
             },
         }
 
+        # 立即创建 event（status=running），Agent 执行完再更新
+        from src.api.event_store import append_event
+        seq = append_event(
+            repo_key=repo_key,
+            event_type="a2a_event",
+            title=f"A2A: {agent_name}",
+            issue_id=f"#{issue_number}" if issue_number else "#0",
+            source="a2a",
+            agent_type=agent_name,
+            actor="",
+            summary=f"A2A: → {agent_name}",
+            payload={"repository": repository, "account": account, "issue_number": issue_number, "context": context[:500]},
+            status="running",
+        )
+        log.info(f"A2A: event created, seq={seq}")
+
         import threading
         threading.Thread(target=_execute_agent, args=(
-            repo_key, agent_name, backend, skill_name or agent_name, evt,
-        ), daemon=True, name=f"a2a-{agent_name}-{int(time.time()*1000)%10000}").start()
+            repo_key, seq, agent_name, backend, skill_name or agent_name, evt,
+        ), daemon=True, name=f"a2a-{agent_name}-{seq}").start()
         log.info(f"A2A: started agent execution for {agent_name}")
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")
+        seq = 0
 
-    return {"status": "ok", "seq": 0, "agent": agent_name}
+    return {"status": "ok", "seq": seq, "agent": agent_name}
