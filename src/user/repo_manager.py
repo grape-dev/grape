@@ -40,6 +40,45 @@ def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: s
         return False
 
 
+def add_collaborator(api_token: str, owner: str, repo: str, username: str,
+                     permission: str = "maintainer") -> bool:
+    """将用户添加为仓库协作者。返回是否成功。
+
+    GitCode 兼容 GitHub API：PUT /repos/{owner}/{repo}/collaborators/{username}
+    权限级别优先 maintainer，接口不支持时降级 push。
+    """
+    if not username or not api_token:
+        return False
+    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}"
+    for perm in (permission, "push"):
+        try:
+            _req("PUT", url, api_token, {"permission": perm})
+            return True
+        except RuntimeError:
+            try:
+                # 部分实现用 permissions 字段
+                _req("PUT", url, api_token, {"permissions": perm})
+                return True
+            except RuntimeError:
+                continue
+    return False
+
+
+def remove_collaborator(api_token: str, owner: str, repo: str, username: str) -> bool:
+    """将用户从仓库协作者移除。返回是否成功（用户不在时视为成功）。"""
+    if not username or not api_token:
+        return False
+    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}"
+    try:
+        _req("DELETE", url, api_token)
+        return True
+    except RuntimeError as e:
+        # 404（用户本就不是协作者）视为成功
+        if "404" in str(e):
+            return True
+        return False
+
+
 def fetch_repos_with_role(api_token: str) -> list[dict]:
     """获取用户的项目成员仓库，标注 is_admin。
     仓库所有者 | 组织管理员 → is_admin=True

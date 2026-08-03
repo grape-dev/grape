@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook
 from src.api.deps import get_current_user, get_bot_token, get_user_token
-from src.user.db import update_managed_repo_bot_token, get_bot_token_by_repo
+from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
 
@@ -132,6 +132,26 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"权限验证失败: {e}"})
 
     try:
+        from src.user.repo_manager import add_collaborator
+        # 全局 bot（configs/global-bot-token.json）作为维护者加入；失败则拒绝托管
+        global_bot_token = ""
+        global_bot_username = ""
+        try:
+            import json, os as _os
+            _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+            if _os.path.exists(_gbt_path):
+                with open(_gbt_path, "r", encoding="utf-8") as _f:
+                    _gbt = json.load(_f)
+                global_bot_token = _gbt.get("gitcode_api_token", "") or ""
+                _us = _gbt.get("bot_usernames") or []
+                global_bot_username = _us[0] if _us else ""
+        except Exception:
+            pass
+        if global_bot_token and global_bot_username:
+            ok = add_collaborator(global_bot_token, owner, repo_name, global_bot_username, "maintainer")
+            if not ok:
+                raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 无法将全局 Bot（{global_bot_username}）加入仓库维护者"})
+
         existing_id = find_existing_webhook(webhook_token, owner, repo_name, webhook_url)
         if existing_id:
             user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=existing_id, is_admin=True, gitcode_webhook_token=webhook_token)
@@ -144,6 +164,8 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         from src.api.session_store import ensure_default_agent_sessions
         ensure_default_agent_sessions(body.full_name)
         return {"message": "仓库托管成功", "webhook_id": hook_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
 
@@ -175,7 +197,7 @@ async def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(ge
 
 @router.put("/bot-token")
 async def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user)):
-    """设置仓库绑定的 DevOps Bot Token"""
+    """设置仓库绑定的 DevOps Bot Token；自动将 repo bot 加入维护者"""
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
@@ -183,7 +205,26 @@ async def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_curren
     ok = update_managed_repo_bot_token(user["id"], owner, repo_name, body.bot_token)
     if not ok:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
-    return {"message": "Bot Token 已更新"}
+
+    # 用新 token 获取 GitCode 真实登录名，更新 bot_username
+    repo_bot_username = ""
+    try:
+        from src.user.repo_manager import _req
+        user_data = _req("GET", "https://api.gitcode.com/api/v5/user", body.bot_token)
+        repo_bot_username = user_data.get("login", "") or ""
+    except Exception:
+        pass
+    if repo_bot_username:
+        update_managed_repo_bot_username(user["id"], owner, repo_name, repo_bot_username)
+
+    # 将 repo bot 加入仓库维护者（失败仅记日志，不影响托管）
+    if body.bot_token and repo_bot_username:
+        try:
+            from src.user.repo_manager import add_collaborator
+            add_collaborator(body.bot_token, owner, repo_name, repo_bot_username, "maintainer")
+        except Exception:
+            pass
+    return {"message": "Bot Token 已更新", "bot_username": repo_bot_username}
 
 
 @router.post("/remove")
@@ -205,6 +246,42 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
                 remove_webhook(api_token, owner, repo_name, wh_id)
         except Exception:
             pass
+
+    # 解除托管：移除全局 bot 与 repo bot 的项目维护者身份（失败仅记日志）
+    try:
+        import json, os as _os
+        from src.user.repo_manager import remove_collaborator
+        # 读取该仓库配置的 repo bot（先取，再删 managed_repos）
+        repo_bot_token = ""
+        repo_bot_username = ""
+        for _r in user_db.get_managed_repos(user["id"]):
+            if _r["full_name"] == body.full_name:
+                repo_bot_token = _r.get("bot_gitcode_token", "") or ""
+                repo_bot_username = _r.get("bot_username", "") or ""
+                break
+        # 全局 bot
+        _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+        global_bot_token = ""
+        global_bot_username = ""
+        if _os.path.exists(_gbt_path):
+            with open(_gbt_path, "r", encoding="utf-8") as _f:
+                _gbt = json.load(_f)
+            global_bot_token = _gbt.get("gitcode_api_token", "") or ""
+            _us = _gbt.get("bot_usernames") or []
+            global_bot_username = _us[0] if _us else ""
+        if global_bot_token and global_bot_username:
+            try:
+                remove_collaborator(global_bot_token, owner, repo_name, global_bot_username)
+            except Exception:
+                pass
+        # repo bot（若配置且非全局 bot）
+        if repo_bot_token and repo_bot_username and repo_bot_username != global_bot_username:
+            try:
+                remove_collaborator(repo_bot_token, owner, repo_name, repo_bot_username)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     removed = user_db.remove_managed_repo(user["id"], owner, repo_name)
     if not removed:
