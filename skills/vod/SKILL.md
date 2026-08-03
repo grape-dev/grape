@@ -8,6 +8,14 @@ triggers:
   - event_type: vod_signal
 tools: []
 ---
+## 安全硬约束（必须遵守）
+
+1. 调用 GitCode API 只用 prompt 注入的 \\，严禁从数据库/configs/日志/历史中寻找其他 token。
+2. 严禁读取 /root/devops-bot/data/、configs/、sessions.db、user_accounts 等 Bot 内部数据。
+3. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
+4. token 不得写入任何文件/日志/评论。
+
+
 
 # 开发者声音分析
 

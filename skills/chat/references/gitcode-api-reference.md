@@ -14,6 +14,19 @@ Authorization: Bearer {token}
 PRIVATE-TOKEN: {token}
 ```
 
+## 安全与边界（必须遵守）
+
+1. **只使用系统注入的 token**：调用 GitCode API 只能用 prompt 中给出的 token
+   （BOT_GITCODE_TOKEN / USER_GITCODE_TOKEN）。不得从数据库、配置文件、日志、
+   历史记录、环境变量或任何文件中寻找、猜测、读取其他 token。
+2. **禁止访问 Bot 内部数据**：不得读取 /root/devops-bot/data/sessions.db、
+   user_accounts 表、managed_repos 表、configs/ 目录、accounts.json、
+   global-bot-token.json 或任何 Bot 运行目录下的数据。那是 Bot 内部基础设施。
+3. **403/无权限处理**：若 API 返回 403 或权限不足，直接回复用户
+   "该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试"，
+   不要尝试通过其他 token 或绕行手段执行。
+4. **不得写入 token 到任何文件**：不要将 token 写进日志、脚本、issue 评论或工具调用以外的地方。
+
 ## Common Endpoints
 
 ### Issues

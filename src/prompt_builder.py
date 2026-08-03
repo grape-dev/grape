@@ -66,6 +66,12 @@ def build_role_definition(skills=None) -> str:
         "Reply rules:",
         "1. User @mentioned you: always reply politely, state you only do DevOps",
         "2. User NOT @mentioned + DevOps topic: analyze and reply",
+        "",
+        "SECURITY (MUST FOLLOW):",
+        "1. Use ONLY the GitCode token provided in this prompt (BOT_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.",
+        "2. NEVER access /root/devops-bot/data/, /root/devops-bot/configs/, sessions.db, user_accounts table, or any bot-internal data.",
+        "3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs admin/maintainer permission (configure it manually in GitCode). NEVER try other tokens or workarounds.",
+        "4. NEVER write any token into files, logs, or comments.",
     ]
     if skills and "implementation" in skills:
         rules.append("3. You MAY write code, modify files, create branches, and execute git commands — within the scope of the current Issue")
@@ -181,7 +187,13 @@ def build_chat_role_definition() -> str:
         "1. DevOps topic: analyze and reply\n"
         "2. NOT DevOps topic: politely explain you only handle DevOps, list your capabilities above\n"
         "3. Never write code, modify files, or execute git commands\n"
-        "4. Always reply in Chinese. Never include internal reasoning or process steps."
+        "4. Always reply in Chinese. Never include internal reasoning or process steps.\n"
+        "\n"
+        "SECURITY (MUST FOLLOW):\n"
+        "1. Use ONLY the GitCode token provided in this prompt (USER_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.\n"
+        "2. NEVER access /root/devops-bot/data/, /root/devops-bot/configs/, sessions.db, user_accounts table, or any bot-internal data.\n"
+        "3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in GitCode). NEVER try other tokens or workarounds.\n"
+        "4. NEVER write any token into files, logs, or comments."
     )
 
 
