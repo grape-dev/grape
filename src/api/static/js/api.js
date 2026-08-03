@@ -38,5 +38,9 @@ const API = (() => {
     post: (path, body) => fetch(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}).then(handleResp),
     put: (path, body) => fetch(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}).then(handleResp),
     del: (path) => fetch(BASE + path, {method: 'DELETE', headers: headers()}).then(handleResp),
+    upload: (path, formData) => {
+      const h = {'Authorization': 'Bearer ' + localStorage.getItem('token')};
+      return fetch(BASE + path, {method: 'POST', headers: h, body: formData}).then(handleResp);
+    },
   };
 })();

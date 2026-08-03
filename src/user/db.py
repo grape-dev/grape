@@ -617,36 +617,59 @@ def init_db():
 SKILL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "skills", "custom")
 
 def ensure_skill_dir(user_id: int, skill_name: str) -> str:
-    """确保技能目录存在，返回路径"""
+    """确保技能目录存在，返回路径（个人技能）"""
     path = os.path.join(SKILL_DIR, str(user_id), skill_name)
     os.makedirs(path, exist_ok=True)
     return path
 
 
-def create_skill(user_id: int, skill_name: str, agent_type: str = "", description: str = "", parent_agent_type: str = "") -> bool:
+def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
+    """确保仓库技能目录存在，返回路径（skills/repo/{repo_key}/{skill}）"""
+    path = os.path.join(os.path.dirname(SKILL_DIR), "repo", repo_key, skill_name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def create_skill(user_id: int, skill_name: str, agent_type: str = "", description: str = "",
+                 parent_agent_type: str = "", scope: str = "user", owner_id: str = "") -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'user',?)",
-                      (skill_name, skill_name, description, agent_type, skill_name, str(user_id)))
+            if scope == "repo":
+                c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'repo',?)",
+                          (skill_name, skill_name, description, agent_type, skill_name, owner_id or str(user_id)))
+            else:
+                c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'user',?)",
+                          (skill_name, skill_name, description, agent_type, skill_name, str(user_id)))
             db.commit()
-            ensure_skill_dir(user_id, skill_name)
+            if scope == "repo":
+                ensure_repo_skill_dir(owner_id or str(user_id), skill_name)
+            else:
+                ensure_skill_dir(user_id, skill_name)
             return True
     except Exception as e:
         log.warning(f"Create skill failed: {e}")
         return False
 
 
-def delete_skill(user_id: int, skill_name: str) -> bool:
+def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: str = "") -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?", (skill_name, str(user_id)))
+            if scope == "repo":
+                c.execute("DELETE FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
+                          (skill_name, owner_id or str(user_id)))
+            else:
+                c.execute("DELETE FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?",
+                          (skill_name, str(user_id)))
             db.commit()
             deleted = c.rowcount > 0
             # 删除技能目录
             import shutil
-            path = os.path.join(SKILL_DIR, str(user_id), skill_name)
+            if scope == "repo":
+                path = os.path.join(os.path.dirname(SKILL_DIR), "repo", owner_id or str(user_id), skill_name)
+            else:
+                path = os.path.join(SKILL_DIR, str(user_id), skill_name)
             if os.path.exists(path):
                 shutil.rmtree(path)
             return deleted
