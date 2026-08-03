@@ -55,15 +55,16 @@ class GitCodeBackend(VcsBackend):
             if isinstance(sender, dict):
                 actor = sender.get("username", sender.get("login", ""))
         if not actor:
+            # 评论类事件：顶层 user 是评论者/操作者，优先于 issue.author（issue 创建者）
+            user = payload.get("user", {})
+            if isinstance(user, dict):
+                actor = user.get("username", user.get("login", ""))
+        if not actor:
             issue = payload.get("issue", {})
             if isinstance(issue, dict):
                 author = issue.get("author", {})
                 if isinstance(author, dict):
                     actor = author.get("username", "")
-        if not actor:
-            user = payload.get("user", {})
-            if isinstance(user, dict):
-                actor = user.get("username", user.get("login", ""))
         branch = ""
         ref = payload.get("ref", "")
         if isinstance(ref, str) and ref.startswith("refs/heads/"):

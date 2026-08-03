@@ -114,16 +114,31 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.info(f"Pipeline skipped: repository='{evt['repository']}' or event_type='{event_type}' not recognized")
         return result
 
-    # 2. 自循环检测
+    # 2. 自循环检测：actor 是任一 bot 用户名 → 跳过（评论/评论PR/打标签等 bot 自身动作的回声）
     actor = resolve_actor(evt.get("payload", {}), evt)
     log.info(f"Pipeline: actor={actor}, event_type={event_type}")
-    if actor and event_type in ("issue_comment", "note_hook_pr"):
+    if actor:
         from src.user.db import get_all_bot_usernames
         bot_usernames = get_all_bot_usernames()
         if actor in bot_usernames:
             log.info(f"Pipeline skip: self-comment from bot={actor}")
             return result
         log.info(f"Pipeline: comment from {actor}, not a bot ({bot_usernames})")
+
+    # 2.1 issue_updated 纯标签变更（changes.labels 有变化、其余内容未动）→ bot 打标签回声，跳过
+    if event_type == "issue_updated":
+        try:
+            _payload = evt.get("payload", {}) or {}
+            _changes = _payload.get("changes", {}) or {}
+            _content_keys = [k for k in ("title", "description") if k in _changes]
+            _label_changed = "labels" in _changes
+            if _label_changed and not _content_keys:
+                log.info(f"Pipeline skip: issue_updated with only label change (likely bot label echo)")
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "label_only_change")
+                return result
+        except Exception as e:
+            log.warning(f"Pipeline: issue_updated label-only check failed: {e}")
 
     # 3. 路由判定
     agent_type = get_domain_agent(event_type)
