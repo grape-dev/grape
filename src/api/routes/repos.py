@@ -1,6 +1,7 @@
 """仓库路由：列表、加入、托管、移除、同步"""
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from src.config import log
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook
 from src.api.deps import get_current_user, get_bot_token, get_user_token
@@ -272,15 +273,19 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
         owner_token = api_token or get_user_token(user["username"])
         if owner_token and global_bot_username:
             try:
-                remove_collaborator(owner_token, owner, repo_name, global_bot_username)
-            except Exception:
-                pass
+                _rm_ok = remove_collaborator(owner_token, owner, repo_name, global_bot_username)
+                if not _rm_ok:
+                    log.warning(f"Remove global bot collaborator failed (perm?): {global_bot_username} @ {owner}/{repo_name}")
+            except Exception as e:
+                log.warning(f"Remove global bot collaborator error: {e}")
         # repo bot（若配置且非全局 bot）
         if owner_token and repo_bot_username and repo_bot_username != global_bot_username:
             try:
-                remove_collaborator(owner_token, owner, repo_name, repo_bot_username)
-            except Exception:
-                pass
+                _rm_ok2 = remove_collaborator(owner_token, owner, repo_name, repo_bot_username)
+                if not _rm_ok2:
+                    log.warning(f"Remove repo bot collaborator failed (perm?): {repo_bot_username} @ {owner}/{repo_name}")
+            except Exception as e:
+                log.warning(f"Remove repo bot collaborator error: {e}")
     except Exception:
         pass
 
