@@ -56,8 +56,8 @@ def add_collaborator(api_token: str, owner: str, repo: str, username: str,
             _req("PUT", url, api_token, {"permissions": perm})
             return True
         except RuntimeError as e:
-            # 已是成员（幂等成功）或角色已满足
-            if "已经是项目中的成员" in str(e) or "已经是" in str(e) or "已存在" in str(e):
+            # 已是成员 / 已被邀请（幂等成功）：说明该用户已在仓库的成员或邀请列表中
+            if any(k in str(e) for k in ("已经是项目中的成员", "已经是", "已存在", "已被邀请", "已邀请", "已经邀请")):
                 return True
             continue
     return False

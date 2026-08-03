@@ -49,6 +49,15 @@ def test_add_collaborator_already_member():
         assert ok is True
 
 
+def test_add_collaborator_already_invited():
+    """已被邀请（400 用户已被邀请）视为幂等成功"""
+    from src.user.repo_manager import add_collaborator
+    with patch("src.user.repo_manager._req") as mock_req:
+        mock_req.side_effect = RuntimeError("用户已被邀请")
+        ok = add_collaborator("tok", "owner", "repo", "bot", "maintainer")
+        assert ok is True
+
+
 def test_add_collaborator_no_username():
     from src.user.repo_manager import add_collaborator
     with patch("src.user.repo_manager._req") as mock_req:
