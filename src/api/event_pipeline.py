@@ -255,7 +255,7 @@ def _execute_agent(repo_key: str, agent_type: str,
             log.warning(f"Exec agent: global bot token fallback failed: {e}")
 
     # 记录执行配置（执行完成有产出后统一写入 event）
-    started_at = datetime.now().isoformat()
+    started_at = datetime.utcnow().isoformat()
     log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] spawning {backend}")
 
     exit_code = -1
@@ -271,7 +271,7 @@ def _execute_agent(repo_key: str, agent_type: str,
             repo_gitcode_token=repo_gitcode_token,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}]",
         ):
-            agent_logs.append({"time": datetime.now().isoformat(), "type": evt_type, "msg": str(data)[:500]})
+            agent_logs.append({"time": datetime.utcnow().isoformat(), "type": evt_type, "msg": str(data)[:500]})
             if evt_type == "done":
                 d = data
                 exit_code = d.get("exit_code", -1)
@@ -307,7 +307,7 @@ def _execute_agent(repo_key: str, agent_type: str,
 
     # 判定 Agent 是否有明确答复产出，有产出才存储事件（记录结论而非过程）
     has_output, result_text = evaluate_agent_output(agent_type, tool_uses, final_text)
-    completed_at = datetime.now().isoformat()
+    completed_at = datetime.utcnow().isoformat()
     duration = None
     try:
         s = datetime.fromisoformat(started_at)

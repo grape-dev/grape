@@ -211,7 +211,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                 log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
 
         record = {
-            "type": "chat", "time": datetime.now().isoformat(),
+            "type": "chat", "time": datetime.utcnow().isoformat(),
             "success": exit_code == 0, "exit_code": exit_code,
             "actor": parsed.get("sender_id", ""),
             "account": exec_account,

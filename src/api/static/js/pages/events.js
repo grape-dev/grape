@@ -14,7 +14,7 @@ function renderEventDetail(data) {
         <div>Repository: ${data.repo_key || ''}</div>
         <div>Issue: ${data.issue_id || '—'}</div>
         <div>Actor: ${data.actor || '—'}</div>
-        <div>Time: ${data.created_at || ''}</div>
+        <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
       </div>
       <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Agent 答复结论</h3>
       <div style="flex:1;overflow-y:auto;background:var(--s);color:#c2cad6;border-radius:8px;padding:12px;font-size:12px;font-family:monospace;line-height:1.7;white-space:pre-wrap">

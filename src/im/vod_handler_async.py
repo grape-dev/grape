@@ -177,7 +177,7 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
         )
         if event_seq:
             update_event_complete(event_seq, "completed", exit_code=exit_code,
-                                  duration=duration, completed_at=datetime.now().isoformat())
+                                  duration=duration, completed_at=datetime.utcnow().isoformat())
 
     chat_id = evt.get("payload", {}).get("im_chat_id", "")
     try:

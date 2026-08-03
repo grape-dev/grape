@@ -80,7 +80,7 @@ function renderDashboard(data) {
     act.forEach(ev => {
       const colorClass = ev.agent_type === 'vod' ? 'tg-v' : ev.agent_type === 'issue' ? 'tg-i' : ev.agent_type === 'coding' ? 'tg-c' : ev.agent_type === 'qa' ? 'tg-q' : ev.agent_type === 'sre' ? 'tg-s' : 'tg-d';
       html += `<div class="ai" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
-        <div class="t">${(ev.created_at || '').substring(11,16) || '--:--'}</div>
+        <div class="t">${fmtLocalTime(ev.created_at).substring(11,16) || '--:--'}</div>
         <div class="ac"><span class="tg ${colorClass}">${(ev.agent_type || '?').toUpperCase().substring(0,4)}</span><b>${ev.summary || ev.title}</b> · <span class="t2">${ev.event_type}</span></div>
       </div>`;
     });

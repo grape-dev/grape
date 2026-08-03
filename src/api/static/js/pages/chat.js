@@ -90,7 +90,7 @@ function loadConversations(autoSelect) {
       const active = c.id === _currentConvId ? ' style="background:var(--b)"' : '';
       html += `<div class="conv-item" data-id="${c.id}"${active}>
         <div class="conv-title">${c.title || '新对话'}</div>
-        <div class="conv-meta">${(c.created_at || '').substring(0,16)}</div>
+        <div class="conv-meta">${fmtLocalTime(c.created_at).substring(0,16)}</div>
         <span class="conv-del" onclick="event.stopPropagation();deleteConversation('${c.id}')">✕</span>
       </div>`;
     });
