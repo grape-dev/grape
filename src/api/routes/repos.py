@@ -122,9 +122,9 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     except Exception:
         pass
 
-    # webhook 创建使用全局 bot token（个人 OAuth token 无 hooks 权限，已验证 403）
+    # webhook 创建优先使用个人 token（用户已授权全权限）；repo bot token / 全局 bot token 兜底
     bot_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
-    webhook_token = global_bot_token or bot_token or api_token
+    webhook_token = api_token or bot_token or global_bot_token
     if not webhook_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，无法创建 webhook"})
 
@@ -240,8 +240,10 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
 
-    # 删除 webhook 需要 hooks 权限 → 优先全局 bot token（个人 OAuth token 无 hooks 权限）
-    api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
+    # 删除 webhook 优先个人 token（用户已授权全权限）；repo bot / 全局 bot token 兜底
+    api_token = get_user_token(user["username"])
+    if not api_token:
+        api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
     if not api_token:
         try:
             import json as _json, os as _os
@@ -251,8 +253,6 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
                     api_token = _json.load(_f).get("gitcode_api_token", "") or ""
         except Exception:
             pass
-    if not api_token:
-        api_token = get_user_token(user["username"])
 
     if api_token:
         try:
