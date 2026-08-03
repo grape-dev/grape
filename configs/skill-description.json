@@ -19,7 +19,7 @@
   },
   "pr": {
     "name": "PR 管理",
-    "agent_type": "coding",
+    "agent_type": "qa",
     "path": "pr",
     "description": "Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并操作"
   },
