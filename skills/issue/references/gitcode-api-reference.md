@@ -14,7 +14,7 @@ Authorization: Bearer {token}
 PRIVATE-TOKEN: {token}
 ```
 
-Token 从环境变量读取：`$GITCODE_API_TOKEN`
+Token 已在 prompt 中给出：`$BOT_GITCODE_TOKEN`
 （**不要**从代码或 env 文件中找其他值，那不是 API token。）
 
 ## Common Endpoints

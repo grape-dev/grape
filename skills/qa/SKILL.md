@@ -99,7 +99,7 @@ GET /repos/{owner}/{repo}/pulls/{number}/comments
 - 如果已修复 → 调用 API 标记为已解决：
 
 ```bash
-curl -s -X PUT -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -X PUT -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"resolved": true}' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}/comments/{discussion_id}
@@ -117,7 +117,7 @@ GET /repos/{owner}/{repo}/pulls/{number}/files
 从返回中获取每个文件在 diff 中的行号映射。然后在对应位置发布评论：
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "body": "[DevOps Bot] 🔴 Critical: 硬编码密钥，建议使用环境变量",
@@ -197,7 +197,7 @@ curl -X POST http://localhost:8080/api/a2a \
 
 ```bash
 POST /repos/{owner}/{repo}/pulls/{number}/comments
-Authorization: Bearer $GITCODE_API_TOKEN
+Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
 {"body": "[DevOps Bot] 审查报告\n\n## 配置检查\n- ✅ Title：通过\n- ⚠️ Labels：缺少分类标签\n\n## 代码审查\n✅ 通过\n\n## 工作流审查\n⚠️ 2 项发现（见下）\n\n## 安全扫描\n✅ 安全\n\n## 合并检查\n⚠️ 测试未确认"}
 ```

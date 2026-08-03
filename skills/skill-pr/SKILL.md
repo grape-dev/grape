@@ -38,7 +38,7 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 
 1. **获取 PR 详情**：
 ```bash
-curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
 ```
 从返回中提取 `title`、`body`、`head.sha`、`labels`、`assignee`、`user.login` 等字段。
@@ -62,7 +62,7 @@ Skill 仓库 PR 标题必须符合以下格式：
 
 **2a. 获取 PR 变更文件列表**：
 ```bash
-curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}/files
 ```
 从返回中提取每个文件的 `filename` 和 `status`（added / modified）。
@@ -74,7 +74,7 @@ curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 
 **2c. 自动修复标题**：
 ```bash
-curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"title": "add skill: tokauthai/skillscan"}' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
@@ -193,7 +193,7 @@ echo -n "{head.sha}" > /root/devops-bot/data/workspaces/{repository}/.last_pr_re
 
 ```bash
 POST /repos/{owner}/{repo}/pulls/{number}/comments
-Authorization: Bearer $GITCODE_API_TOKEN
+Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
 {"body": "> 用户的问题原文\n\n[DevOps Bot] 这是机器人的回复内容。"}
 ```
@@ -204,7 +204,7 @@ Content-Type: application/json
 
 ```bash
 POST /repos/{owner}/{repo}/pulls/{number}/comments
-Authorization: Bearer $GITCODE_API_TOKEN
+Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
 {"body": "[DevOps Bot] 代码审查完成，结论：通过。"}
 ```

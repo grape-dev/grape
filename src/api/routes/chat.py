@@ -112,12 +112,11 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     skill_name = cfg.get("skill", "") or "chat"
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name)
+    gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
+    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, user_gitcode_token=gitcode_token)
     backend_session_id = conv.get("backend_session_id", "") if conv else ""
     if backend_session_id and not backend_session_id.startswith("ses_"):
         backend_session_id = ""
-    gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
-    env_extra = {"GITCODE_API_TOKEN": gitcode_token} if gitcode_token else None
 
     from src.config import log
     log.info(f"Chat send: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
@@ -133,7 +132,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
             for evt_type, data in stream_agent(
                 prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=backend_session_id,
                 backend_name=backend_name, user_id=user["id"],
-                account=user["username"], env_extra=env_extra,
+                account=user["username"],
                 agent_label=f"[Agent:chat|user:{user['username']}]",
             ):
                 # 日志输出
@@ -204,12 +203,11 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     skill_name = cfg.get("skill", "") or "chat"
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name)
+    gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
+    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, user_gitcode_token=gitcode_token)
     backend_session_id = conv.get("backend_session_id", "") if conv else ""
     if backend_session_id and not backend_session_id.startswith("ses_"):
         backend_session_id = ""
-    gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
-    env_extra = {"GITCODE_API_TOKEN": gitcode_token} if gitcode_token else None
 
     from src.config import log
     log.info(f"Chat send/stream: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
@@ -229,7 +227,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 for evt_type, data in stream_agent(
                     prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=backend_session_id,
                     backend_name=backend_name, user_id=user["id"],
-                    account=user["username"], env_extra=env_extra,
+                    account=user["username"],
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                 ):
                     # 日志输出（对齐 master 分支 im/handler.py）
@@ -300,7 +298,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     )
 
 
-def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: str = "") -> str:
+def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: str = "", user_gitcode_token: str = "") -> str:
     parts = [
         "You are a DevOps assistant for GitCode. You can:",
         "- Query issues, PRs, commits, repository info via GitCode API",
@@ -340,12 +338,19 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
         skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
         parts.append(f"\n## Current Skill: {skill_name}\nSkill file: {skill_path}\nRead this file and follow its instructions.")
     # GitCode API 访问说明
-    parts.append("""
+    if user_gitcode_token:
+        parts.append(f"""
 ## GitCode API Access
-Your token is available as the GITCODE_API_TOKEN environment variable.
-  curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \\
-    https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues
+Your token: USER_GITCODE_TOKEN={user_gitcode_token}
+  curl -s -H "Authorization: Bearer {user_gitcode_token}" \\
+    https://api.gitcode.com/api/v5/repos/{{owner}}/{{repo}}/issues
 Never print or reveal the token value.
+""")
+    else:
+        parts.append("""
+## GitCode API Access
+GitCode API 调用可能需要鉴权；如有可用 token 会由系统注入。
+Never print or reveal any token value.
 """)
     repo_note = f" (in {repo_key})" if repo_key else ""
     parts.append(f"\nUser{repo_note}: {message}\nAssistant:")

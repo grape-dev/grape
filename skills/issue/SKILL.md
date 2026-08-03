@@ -129,7 +129,7 @@ POST /repos/:owner/:repo/labels
 name=feature&color=a2eeef
 
 # 更新 Issue
-curl -s -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"labels": "bug,triaged", "assignee": "younger_eric"}' \
   https://api.gitcode.com/api/v5/repos/:owner/:repo/issues/:number

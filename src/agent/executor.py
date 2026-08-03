@@ -47,16 +47,16 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  event_type: str = "", backend_name: str = "opencode",
                  account: str = "", user_id: int = 0,
                  env_extra: dict | None = None,
-                 repo_gitcode_token: str = "",
+                 gitcode_token: str = "",
                  agent_label: str = "") -> Generator:
     """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）"""
     label = f"{agent_label} " if agent_label else ""
     backend = get_backend(backend_name)
     env = backend.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
-    # 注入 repo 级别的 DevOps Bot Token（优先于 account 的 token）
-    if repo_gitcode_token:
-        env["GITCODE_API_TOKEN"] = repo_gitcode_token
+    # GitCode token 通过 prompt 注入（不再写入环境变量 GITCODE_API_TOKEN）
+    if gitcode_token:
+        prompt = prompt + f"\n\nBOT_GITCODE_TOKEN={gitcode_token}\nGitCode API 调用请使用该 token：curl -H \"Authorization: Bearer {gitcode_token}\"。不得使用或硬编码其他 token。\n"
     if env_extra:
         env.update(env_extra)
 
@@ -169,6 +169,6 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     })
 
 
-def stream_opencode(prompt, cwd, oc_session_id, event_type="", repo_gitcode_token=""):
+def stream_opencode(prompt, cwd, oc_session_id, event_type="", gitcode_token=""):
     """向后兼容包装器，默认使用 opencode 后端。"""
-    yield from stream_agent(prompt, cwd, oc_session_id, event_type, backend_name="opencode", repo_gitcode_token=repo_gitcode_token)
+    yield from stream_agent(prompt, cwd, oc_session_id, event_type, backend_name="opencode", gitcode_token=gitcode_token)

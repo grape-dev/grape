@@ -373,6 +373,21 @@ def get_conversation(conv_id: str) -> dict | None:
                 "title": row[7], "status": row[8], "created_at": row[9], "updated_at": row[10]}
 
 
+def get_conversation_by_im(im_channel_id: str, user_id: int = 0) -> dict | None:
+    """按 IM 渠道 + 用户查询会话（IM chat 场景用，幂等复用）"""
+    with db_lock:
+        c = db.cursor()
+        if user_id > 0:
+            c.execute("SELECT id, user_id, agent_session_id, backend_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE im_channel_id=? AND user_id=? ORDER BY updated_at DESC LIMIT 1", (im_channel_id, user_id))
+        else:
+            c.execute("SELECT id, user_id, agent_session_id, backend_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE im_channel_id=? ORDER BY updated_at DESC LIMIT 1", (im_channel_id,))
+        row = c.fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "backend_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5], "im_channel_id": row[6],
+                "title": row[7], "status": row[8], "created_at": row[9], "updated_at": row[10]}
+
+
 def update_conversation(conv_id: str, **kwargs):
     allowed = {"title", "status", "backend_session_id", "agent_session_id", "user_gitcode_token"}
     sets = []

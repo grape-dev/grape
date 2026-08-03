@@ -73,7 +73,7 @@ hcloud version || echo "hcloud not installed"
 |------|------|------|
 | `HUAWEICLOUD_SDK_AK` | account 配置 | 华为云 Access Key |
 | `HUAWEICLOUD_SDK_SK` | account 配置 | 华为云 Secret Key |
-| `GITCODE_API_TOKEN` | account 配置 | GitCode API Token |
+| `BOT_GITCODE_TOKEN` | account 配置 | GitCode API Token |
 
 ## 硬约束
 

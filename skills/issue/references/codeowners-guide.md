@@ -54,7 +54,7 @@
 ## 创建引导 Issue 的 API 调用
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "title": "[ACTION] 请配置仓库模块负责人",

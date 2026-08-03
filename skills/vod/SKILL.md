@@ -49,7 +49,7 @@ tools: []
 当发现值得跟踪的问题时：
 
 ```bash
-curl -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "title": "问题标题",

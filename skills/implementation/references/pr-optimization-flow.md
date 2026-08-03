@@ -11,7 +11,7 @@
 通过 API 获取 PR 上的行内评论，确认具体问题和代码位置：
 
 ```bash
-curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}/comments"
 ```
 
@@ -57,7 +57,7 @@ git push origin {pr_branch}
 
 ```bash
 POST /repos/{owner}/{repo}/pulls/{number}/comments
-Authorization: Bearer $GITCODE_API_TOKEN
+Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
 {"body": "[DevOps Bot] 已根据审查意见完成修改，请重新审查。"}
 ```

@@ -7,7 +7,7 @@
 ## 获取 PR 详情
 
 ```bash
-curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
 ```
 

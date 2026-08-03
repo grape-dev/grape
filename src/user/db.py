@@ -778,6 +778,52 @@ def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
     return ""
 
 
+def _get_global_bot_token() -> str:
+    """读取全局 bot token（configs/global-bot-token.json）"""
+    import json, os
+    try:
+        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "global-bot-token.json")
+        if os.path.exists(_gbt_path):
+            with open(_gbt_path, "r", encoding="utf-8") as f:
+                return json.load(f).get("gitcode_api_token", "") or ""
+    except Exception as e:
+        log.warning(f"Failed to load global bot token: {e}")
+    return ""
+
+
+def get_agent_bot_token(repo_key: str) -> str:
+    """获取 Agent 执行的 GitCode Bot Token。
+
+    首选 devops_agent_session.repo_gitcode_token（该 repo 任一非空），
+    未配置时 fallback 全局 bot token（configs/global-bot-token.json）。
+    """
+    if repo_key:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT repo_gitcode_token FROM devops_agent_session WHERE repo_key=? AND repo_gitcode_token IS NOT NULL AND repo_gitcode_token!='' LIMIT 1", (repo_key,))
+                row = c.fetchone()
+                if row:
+                    return row[0]
+        except Exception as e:
+            log.warning(f"get_agent_bot_token: query devops_agent_session failed: {e}")
+    return _get_global_bot_token()
+
+
+def get_user_gitcode_token(user_id: int) -> str:
+    """获取用户的 GitCode API token（user_accounts.gitcode_api_token）"""
+    if not user_id or user_id <= 0:
+        return ""
+    try:
+        creds = get_credentials(user_id)
+        for c in creds:
+            if c.get("provider") == "gitcode":
+                return c.get("config", {}).get("token", "") or ""
+    except Exception as e:
+        log.warning(f"get_user_gitcode_token failed for user={user_id}: {e}")
+    return ""
+
+
 def update_managed_repo_webhook_token(user_id: int, repo_owner: str, repo_name: str, webhook_token: str) -> bool:
     try:
         with db_lock:

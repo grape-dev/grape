@@ -18,8 +18,6 @@ class CodeArtsBackend(AgentBackend):
         from src.config import get_account
         acc = get_account(account)
         env = os.environ.copy()
-        if acc.get("gitcode_api_token"):
-            env["GITCODE_API_TOKEN"] = acc["gitcode_api_token"]
         if acc.get("CODEARTS_CLI_AK"):
             env["CODEARTS_CLI_AK"] = acc["CODEARTS_CLI_AK"]
         if acc.get("CODEARTS_CLI_SK"):

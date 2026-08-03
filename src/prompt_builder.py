@@ -206,7 +206,7 @@ def extract_event_number(payload):
     return None
 
 
-def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
+def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, gitcode_token=""):
     number = extract_event_number(evt['payload'])
     repo = evt['repository']
     payload = evt['payload']
@@ -336,10 +336,12 @@ context 是传给下一个 Agent 的接力说明，应包含：
 
 ⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
 """)
+    if gitcode_token:
+        parts.append(f"\n## GitCode API Token\nBOT_GITCODE_TOKEN={gitcode_token}\n调用 GitCode API 请使用该 token：curl -H \"Authorization: Bearer {gitcode_token}\"。不得使用或硬编码其他 token。\n")
     return "\n".join(parts)
 
 
-def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "") -> str:
+def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "", user_gitcode_token: str = "") -> str:
     parts = [f"User asks about {repo_key}: {user_text}"]
     # Chat messages don't have `evt`, so A2A context is not injected here
     if history:
@@ -364,4 +366,6 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
         else:
             parts.append(f"Read the file at {skill_path} using the read tool. Follow its instructions.")
     parts.append(build_chat_role_definition())
+    if user_gitcode_token:
+        parts.append(f"\n## GitCode API Token\nUSER_GITCODE_TOKEN={user_gitcode_token}\n调用 GitCode API 请使用该 token：curl -H \"Authorization: Bearer {user_gitcode_token}\"。不得使用或硬编码其他 token。\n")
     return "\n".join(parts)

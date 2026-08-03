@@ -16,11 +16,7 @@ class OpencodeBackend(AgentBackend):
         return args
 
     def get_env(self, account: str = "", user_id: int = 0) -> dict:
-        from src.config import get_account
-        acc = get_account(account)
         env = os.environ.copy()
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         env["DEVOPS_EVENT_TYPE"] = ""
-        if acc.get("gitcode_api_token"):
-            env["GITCODE_API_TOKEN"] = acc["gitcode_api_token"]
         return env

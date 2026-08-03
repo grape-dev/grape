@@ -48,7 +48,7 @@ tools: []
 ### 1. 查询待启动 Feature
 
 ```bash
-curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -H "Authorization: Bearer $USER_GITCODE_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=open&assignee={login}&labels=feature
 ```
 
@@ -65,7 +65,7 @@ curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 
 ```bash
 # 添加 PATCH 标签，触发 implementation skill
-curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -sL -X PATCH -H "Authorization: Bearer $USER_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"labels": "feature,triaged,PATCH"}' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}

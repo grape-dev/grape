@@ -200,20 +200,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # PR 类事件：尝试解析关联的 Issue（title/branch 提取，必要时同步调 PR 详情 API）
     if event_type in ("note_hook_pr", "pull_request_opened", "pull_request_updated", "pull_request_merged"):
         try:
-            _repo_parts = repo_key.split("/", 1)
-            _pr_api_token = ""
-            if len(_repo_parts) == 2:
-                from src.user.db import get_bot_token_by_repo
-                _pr_api_token = get_bot_token_by_repo(_repo_parts[0], _repo_parts[1]) or ""
-            if not _pr_api_token:
-                try:
-                    import os as _os, json as _json
-                    _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "configs", "global-bot-token.json")
-                    if _os.path.exists(_gbt_path):
-                        with open(_gbt_path, "r", encoding="utf-8") as _f:
-                            _pr_api_token = _json.load(_f).get("gitcode_api_token", "") or ""
-                except Exception:
-                    pass
+            from src.user.db import get_agent_bot_token
+            _pr_api_token = get_agent_bot_token(repo_key) or ""
             _pr_issue = resolve_pr_issue_id(payload, _pr_api_token)
             if _pr_issue:
                 issue_id = _pr_issue
@@ -331,8 +319,17 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] type={agent_type}, backend={backend}, skill={skill_name}, oc_session={oc_session_id[:20] if oc_session_id else 'none'}")
 
+    # 获取 bot token（devops_agent_session.repo_gitcode_token → 全局 bot token）
+    repo_gitcode_token = ""
     try:
-        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type])
+        from src.user.db import get_agent_bot_token
+        repo_gitcode_token = get_agent_bot_token(repo_name) or ""
+    except Exception as e:
+        log.warning(f"Exec agent: get bot token failed: {e}")
+    log.info(f"Exec agent: bot_token={'set' if repo_gitcode_token else 'none'}")
+
+    try:
+        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type], gitcode_token=repo_gitcode_token)
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
         append_skipped_event(repo_key, evt.get("type", ""), "prompt_build_failed", str(e))
@@ -340,20 +337,9 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     parts = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
     owner_repo = parts.split("/", 1)
-    repo_gitcode_token = ""
-    if len(owner_repo) == 2:
-        from src.user.db import get_bot_token_by_repo
-        repo_gitcode_token = get_bot_token_by_repo(owner_repo[0], owner_repo[1]) or ""
-    # repo 未配置专属 bot token 时，回退全局 bot token（configs/global-bot-token.json）
+    exec_account = evt.get("account") or repo_name
     if not repo_gitcode_token:
-        try:
-            _gbt_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "global-bot-token.json")
-            if os.path.exists(_gbt_path):
-                with open(_gbt_path, "r", encoding="utf-8") as _f:
-                    _gbt = json.load(_f)
-                repo_gitcode_token = _gbt.get("gitcode_api_token", "") or ""
-        except Exception as e:
-            log.warning(f"Exec agent: global bot token fallback failed: {e}")
+        log.warning(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no bot token available, agent will fail on API calls")
 
     # 记录执行配置（执行完成有产出后统一写入 event）
     started_at = datetime.utcnow().isoformat()
@@ -364,12 +350,10 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     new_oc_session_id = ""
     tool_uses = []
     agent_logs = []
-    exec_account = evt.get("account") or repo_name
     try:
         for evt_type, data in stream_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
             backend_name=backend, account=exec_account,
-            repo_gitcode_token=repo_gitcode_token,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}]",
         ):
             agent_logs.append({"time": datetime.utcnow().isoformat(), "type": evt_type, "msg": str(data)[:500]})

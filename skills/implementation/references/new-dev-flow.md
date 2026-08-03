@@ -11,7 +11,7 @@
 ⚠️ A2A context 可能只包含摘要。必须通过 GitCode API 获取 Issue 完整内容：
 
 ```bash
-curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}"
 ```
 
@@ -63,7 +63,7 @@ curl -s -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 
 ```bash
 POST /repos/{owner}/{repo}/issues/{number}/comments
-Authorization: Bearer $GITCODE_API_TOKEN
+Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
 {"body": "此需求是否启动开发？回复「启动」或「暂缓」。如需调整方案，请一并说明。"}
 ```
@@ -117,7 +117,7 @@ git push origin feat/issue-{number}
 
 ```bash
 # 创建 PR
-curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -sL -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "title": "feat: #{number} 标题",
@@ -128,7 +128,7 @@ curl -sL -X POST -H "Authorization: Bearer $GITCODE_API_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls
 
 # PATCH 补充 body
-curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
+curl -sL -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"body": "## 概述\n\n自动实现 Issue #{number}", "labels": "auto-pr", "prune_branch": true}' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{pr_number}
@@ -138,7 +138,7 @@ curl -sL -X PATCH -H "Authorization: Bearer $GITCODE_API_TOKEN" \
 
 ```bash
 POST /repos/{owner}/{repo}/issues/{number}/comments
-Authorization: Bearer $GITCODE_API_TOKEN
+Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
 {"body": "[DevOps Bot] ✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pull/{pr_number})。"}
 ```

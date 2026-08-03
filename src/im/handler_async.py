@@ -175,7 +175,26 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                 log.warning(f"Failed to resolve GitCode login for {sender_name}: {e}")
 
         skills = ["chat"]
-        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, exec_account)
+
+        # 获取 IM 用户 token（chat_conversations 持久化，幂等创建）
+        user_token = ""
+        try:
+            from src.im.feishu import get_user_id_by_app_id
+            from src.user.db import get_user_gitcode_token
+            from src.session_manager import create_conversation, get_conversation_by_im, update_conversation
+            user_id = get_user_id_by_app_id(ctx.app_id) or 0
+            if user_id > 0:
+                user_token = get_user_gitcode_token(user_id) or ""
+                conv = get_conversation_by_im(chat_id, user_id)
+                if not conv:
+                    cid = create_conversation(user_id, repo_key, im_channel_id=chat_id, user_gitcode_token=user_token)
+                    log.info(f"[Chat:{ctx.name}] created chat_conversation {cid} for user={user_id} chat={chat_id[:20]}")
+                elif user_token and not conv.get("user_gitcode_token"):
+                    update_conversation(conv["id"], user_gitcode_token=user_token)
+        except Exception as e:
+            log.warning(f"[Chat:{ctx.name}] resolve user gitcode token failed: {e}")
+
+        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, exec_account, user_gitcode_token=user_token)
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])
@@ -189,18 +208,8 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         oc_sid = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
         new_oc_session_id = oc_sid
 
-        repo_token = ""
-        try:
-            parts = repo_key.replace("gitcode:", "").split("/")
-            if len(parts) == 2:
-                from src.user.db import get_bot_token_by_repo
-                repo_token = get_bot_token_by_repo(parts[0], parts[1])
-        except Exception:
-            pass
-
         for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat",
                                               backend_name=backend, account=exec_account,
-                                              repo_gitcode_token=repo_token,
                                               agent_label=f"[Agent:chat|repo:{repository}]"):
             if event_type == "done":
                 d = data
