@@ -133,8 +133,8 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
 
     try:
         from src.user.repo_manager import add_collaborator
-        # 全局 bot（configs/global-bot-token.json）作为维护者加入；失败则拒绝托管
-        global_bot_token = ""
+        # 全局 bot（configs/global-bot-token.json）作为维护者加入（用 owner token，GitCode 拒绝 bot 邀请自己）
+        # 失败则拒绝托管
         global_bot_username = ""
         try:
             import json, os as _os
@@ -142,13 +142,12 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
             if _os.path.exists(_gbt_path):
                 with open(_gbt_path, "r", encoding="utf-8") as _f:
                     _gbt = json.load(_f)
-                global_bot_token = _gbt.get("gitcode_api_token", "") or ""
                 _us = _gbt.get("bot_usernames") or []
                 global_bot_username = _us[0] if _us else ""
         except Exception:
             pass
-        if global_bot_token and global_bot_username:
-            ok = add_collaborator(global_bot_token, owner, repo_name, global_bot_username, "maintainer")
+        if api_token and global_bot_username:
+            ok = add_collaborator(api_token, owner, repo_name, global_bot_username, "maintainer")
             if not ok:
                 raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 无法将全局 Bot（{global_bot_username}）加入仓库维护者"})
 
@@ -217,11 +216,13 @@ async def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_curren
     if repo_bot_username:
         update_managed_repo_bot_username(user["id"], owner, repo_name, repo_bot_username)
 
-    # 将 repo bot 加入仓库维护者（失败仅记日志，不影响托管）
+    # 将 repo bot 加入仓库维护者（用 owner token，失败仅记日志，不影响托管）
     if body.bot_token and repo_bot_username:
         try:
             from src.user.repo_manager import add_collaborator
-            add_collaborator(body.bot_token, owner, repo_name, repo_bot_username, "maintainer")
+            owner_token = get_user_token(user["username"])
+            if owner_token:
+                add_collaborator(owner_token, owner, repo_name, repo_bot_username, "maintainer")
         except Exception:
             pass
     return {"message": "Bot Token 已更新", "bot_username": repo_bot_username}
@@ -259,25 +260,25 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
                 repo_bot_token = _r.get("bot_gitcode_token", "") or ""
                 repo_bot_username = _r.get("bot_username", "") or ""
                 break
-        # 全局 bot
+        # 全局 bot 用户名（移除用 owner token）
         _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-        global_bot_token = ""
         global_bot_username = ""
         if _os.path.exists(_gbt_path):
             with open(_gbt_path, "r", encoding="utf-8") as _f:
                 _gbt = json.load(_f)
-            global_bot_token = _gbt.get("gitcode_api_token", "") or ""
             _us = _gbt.get("bot_usernames") or []
             global_bot_username = _us[0] if _us else ""
-        if global_bot_token and global_bot_username:
+        # 移除需 owner token（GitCode 拒绝 bot 操作自己）
+        owner_token = api_token or get_user_token(user["username"])
+        if owner_token and global_bot_username:
             try:
-                remove_collaborator(global_bot_token, owner, repo_name, global_bot_username)
+                remove_collaborator(owner_token, owner, repo_name, global_bot_username)
             except Exception:
                 pass
         # repo bot（若配置且非全局 bot）
-        if repo_bot_token and repo_bot_username and repo_bot_username != global_bot_username:
+        if owner_token and repo_bot_username and repo_bot_username != global_bot_username:
             try:
-                remove_collaborator(repo_bot_token, owner, repo_name, repo_bot_username)
+                remove_collaborator(owner_token, owner, repo_name, repo_bot_username)
             except Exception:
                 pass
     except Exception:

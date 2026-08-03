@@ -44,28 +44,30 @@ def add_collaborator(api_token: str, owner: str, repo: str, username: str,
                      permission: str = "maintainer") -> bool:
     """将用户添加为仓库协作者。返回是否成功。
 
-    GitCode 兼容 GitHub API：PUT /repos/{owner}/{repo}/collaborators/{username}
-    权限级别优先 maintainer，接口不支持时降级 push。
+    注意：api_token 必须是仓库所有者/管理员的 token（GitCode 拒绝用 bot 自己 token 邀请自己）。
+    GitCode 用 permissions 字段，值如 maintainer/push/developer。
+    已存在成员（400"已是成员"）视为成功（幂等）。
     """
     if not username or not api_token:
         return False
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}"
-    for perm in (permission, "push"):
+    for perm in (permission, "push", "developer"):
         try:
-            _req("PUT", url, api_token, {"permission": perm})
+            _req("PUT", url, api_token, {"permissions": perm})
             return True
-        except RuntimeError:
-            try:
-                # 部分实现用 permissions 字段
-                _req("PUT", url, api_token, {"permissions": perm})
+        except RuntimeError as e:
+            # 已是成员（幂等成功）或角色已满足
+            if "已经是项目中的成员" in str(e) or "已经是" in str(e) or "已存在" in str(e):
                 return True
-            except RuntimeError:
-                continue
+            continue
     return False
 
 
 def remove_collaborator(api_token: str, owner: str, repo: str, username: str) -> bool:
-    """将用户从仓库协作者移除。返回是否成功（用户不在时视为成功）。"""
+    """将用户从仓库协作者移除。返回是否成功（用户不在时视为成功）。
+
+    注意：api_token 必须是仓库所有者/管理员的 token。
+    """
     if not username or not api_token:
         return False
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}"

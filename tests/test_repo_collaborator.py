@@ -26,17 +26,27 @@ def test_add_collaborator_success():
         url = mock_req.call_args[0][1]
         assert "/repos/owner/repo/collaborators/hwc-dev-bot" in url
         body = mock_req.call_args[0][3]
-        assert body.get("permission") == "maintainer"
+        assert body.get("permissions") == "maintainer"
 
 
 def test_add_collaborator_permission_fallback():
-    """maintainer 失败时降级 push（尝试 permission 和 permissions 两字段）"""
+    """maintainer 失败时降级 push/developer（用 permissions 字段）"""
     from src.user.repo_manager import add_collaborator
     with patch("src.user.repo_manager._req") as mock_req:
         mock_req.side_effect = RuntimeError("fail")
         ok = add_collaborator("tok", "owner", "repo", "bot", "maintainer")
-        assert mock_req.call_count >= 4
+        # 尝试 maintainer/push/developer 三种
+        assert mock_req.call_count >= 3
         assert ok is False
+
+
+def test_add_collaborator_already_member():
+    """已是成员（400）视为幂等成功"""
+    from src.user.repo_manager import add_collaborator
+    with patch("src.user.repo_manager._req") as mock_req:
+        mock_req.side_effect = RuntimeError("用户已经是项目中的成员")
+        ok = add_collaborator("tok", "owner", "repo", "bot", "maintainer")
+        assert ok is True
 
 
 def test_add_collaborator_no_username():
@@ -152,13 +162,15 @@ def test_set_repo_bot_token_updates_username():
 
     with patch.object(repos_mod, "update_managed_repo_bot_token", return_value=True) as mock_upd, \
          patch("src.user.repo_manager._req", return_value={"login": "repo-bot-login"}), \
+         patch.object(repos_mod, "get_user_token", return_value="owner_tok"), \
          patch.object(repos_mod, "update_managed_repo_bot_username") as mock_upd_username, \
          patch("src.user.repo_manager.add_collaborator", return_value=True) as mock_add:
         _run(repos_mod.set_repo_bot_token(FakeBody(), fake_user))
         mock_upd.assert_called_once()
         mock_upd_username.assert_called_once()
         args = mock_add.call_args[0]
-        assert args[0] == "repo_bot_tok"
+        # 用 owner token 添加 repo bot 为维护者
+        assert args[0] == "owner_tok"
         assert args[3] == "repo-bot-login"
 
 
