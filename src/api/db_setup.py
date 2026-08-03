@@ -607,48 +607,51 @@ def _migrate_tables():
                 log.info(f"Migrated managed_repos.bot_username legacy placeholder -> {_global_bot_username} ({c.rowcount} rows)")
     except Exception as e:
         log.warning(f"Migrate bot_username placeholder failed: {e}")
-    # 迁移 default 账户：OAuth 配置 → meta 表，bot_usernames → hwc-dev-bot 账户，删除 default
+    # 首次运行加载配置：从 global-bot-token.json 将 OAuth 配置写入 meta 表（仅 meta 无该 key 时）
+    # 兼容旧版：若存在 user_accounts default 账户，仍尝试从其中迁移 OAuth 配置到 meta 表
     try:
+        import json as _cfg_json, os as _cfg_os
+        _cfg_path = _cfg_os.path.join(_CONFIG_DIR, "global-bot-token.json")
+        _cfg_data = {}
+        if _cfg_os.path.exists(_cfg_path):
+            with open(_cfg_path, "r", encoding="utf-8") as _f:
+                _cfg_data = _cfg_json.load(_f) or {}
+        _oauth_keys = [
+            ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
+            ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
+            ("gitcode_oauth_redirect_uri", "oauth_gitcode_redirect_uri"),
+        ]
         with db_lock:
             c = db.cursor()
+            migrated = False
+            # 1. 优先从 global-bot-token.json 首次加载
+            for src_key, meta_key in _oauth_keys:
+                val = _cfg_data.get(src_key, "") or ""
+                if val:
+                    c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
+                    if c.fetchone()[0] == 0:
+                        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
+                        migrated = True
+            # 2. 兼容旧版 default 账户（OAuth 配置曾存于 user_accounts）
             c.execute("SELECT * FROM user_accounts WHERE username='default'")
             row = c.fetchone()
             if row:
                 cols = [d[0] for d in c.description]
                 acc = dict(zip(cols, row))
-                migrated = False
-                # 1. OAuth 配置 → meta 表
-                oauth_keys = [
-                    ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
-                    ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
-                    ("gitcode_oauth_redirect_uri", "oauth_gitcode_redirect_uri"),
-                ]
-                for src_key, meta_key in oauth_keys:
-                    val = acc.get(src_key, "")
+                for src_key, meta_key in _oauth_keys:
+                    val = acc.get(src_key, "") or ""
                     if val:
                         c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
                         if c.fetchone()[0] == 0:
                             c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
                             migrated = True
-                # 2. bot_usernames → 迁移到 hwc-dev-bot 自身账户（若有该账户）
-                bu = acc.get("bot_usernames", "") or ""
-                try:
-                    bu_list = json.loads(bu) if bu else []
-                except (json.JSONDecodeError, TypeError):
-                    bu_list = [s.strip() for s in bu.split(",") if s.strip()] if bu else []
-                if bu_list:
-                    c.execute("SELECT COUNT(*) FROM user_accounts WHERE username='hwc-dev-bot'")
-                    if c.fetchone()[0] > 0:
-                        for bot_name in bu_list:
-                            c.execute("UPDATE user_accounts SET bot_usernames=? WHERE username=?", (json.dumps([bot_name]), bot_name))
-                        migrated = True
-                # 3. 删除 default 账户
+                # 3. 删除 default 账户（OAuth 已收敛到 meta 表）
                 c.execute("DELETE FROM user_accounts WHERE username='default'")
-                db.commit()
-                if migrated:
-                    log.info("Migrated default account config to meta/user_accounts and deleted default")
-                else:
-                    log.info("Deleted default account (no config to migrate)")
+            db.commit()
+            if migrated:
+                log.info("Loaded OAuth config (gitcode client id/secret) from global-bot-token.json into meta table")
+            else:
+                log.info("Deleted default account (no config to migrate)")
     except Exception as e:
         log.warning(f"Migrate/delete default account failed: {e}")
     # 迁移旧表 agent_sessions → devops_agent_session（幂等）

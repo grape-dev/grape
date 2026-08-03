@@ -1007,31 +1007,38 @@ def set_meta_value(key: str, value: str):
 
 
 def migrate_accounts_from_json():
-    """从 accounts.json 迁移数据到 user_accounts 表（仅首次）"""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "accounts.json")
+    """首次运行加载配置：从 global-bot-token.json 将 GitCode OAuth 配置写入 meta 表（仅首次/幂等）。
+
+    accounts.json 已废弃删除；OAuth 凭据收敛到 configs/global-bot-token.json。
+    user_accounts 账户通过 OAuth 登录动态创建，无需预置。
+    """
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "global-bot-token.json")
     if not os.path.exists(path):
-        return
-    with db_lock:
-        c = db.cursor()
-        cnt = c.execute("SELECT COUNT(*) FROM user_accounts").fetchone()[0]
-    if cnt > 0:
         return
     try:
         with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        for a in data.get("accounts", []):
-            name = a.get("name", "default")
-            save_user_account(name, a)
-            pwd = a.get("password", "")
-            if pwd and name:
-                user = get_user_by_username(name)
-                if user:
-                    update_password(user["id"], pwd)
-                else:
-                    create_user(name, pwd, 0)
-        log.info(f"Migrated {len(data.get('accounts',[]))} accounts from accounts.json to DB")
+            data = json.load(f) or {}
+        _oauth_keys = [
+            ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
+            ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
+            ("gitcode_oauth_redirect_uri", "oauth_gitcode_redirect_uri"),
+        ]
+        loaded = []
+        with db_lock:
+            for src_key, meta_key in _oauth_keys:
+                val = data.get(src_key, "") or ""
+                if not val:
+                    continue
+                c = db.cursor()
+                c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
+                if c.fetchone()[0] == 0:
+                    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
+                    loaded.append(meta_key)
+            db.commit()
+        if loaded:
+            log.info(f"Loaded OAuth config from global-bot-token.json into meta: {loaded}")
     except Exception as e:
-        log.warning(f"Migration from accounts.json failed: {e}")
+        log.warning(f"Migration from global-bot-token.json failed: {e}")
 
 
 # 启动时初始化 + 迁移

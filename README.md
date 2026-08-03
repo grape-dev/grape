@@ -20,12 +20,11 @@
 
 ## 多租户
 
-每个 Account（`configs/accounts.json`）有独立配置：
-- GitCode Token / Webhook Token
-- 飞书 App ID / Secret
-- 华为云 AK/SK / CodeArts CLI AK/SK
+全局 Bot 配置（`configs/global-bot-token.json`）：
+- GitCode Bot Token / Webhook Token / OAuth 凭据
+- `bot_usernames`（self-comment 检测用 bot 用户名）
 
-每个 Account 启动独立的 Feishu WS 连接，Webhook 请求通过 `X-GitCode-Token` 路由到对应 Account。
+用户账户（含各自的 GitCode Token、飞书凭据、华为云 AK/SK）通过 GitCode OAuth 登录后动态创建，存储在数据库 `user_accounts` 表。
 
 ## Skills 库
 
@@ -75,8 +74,8 @@
 git clone https://gitcode.com/Jason7602/devops-bot.git
 cd devops-bot
 pip install lark-oapi websocket-client pytest paramiko
-cp configs/accounts.example.json configs/accounts.json
-# 编辑 accounts.json 填入 Token
+cp configs/global-bot-token.example.json configs/global-bot-token.json
+# 编辑 global-bot-token.json 填入 GitCode Bot Token / OAuth 凭据
 python -m src.main
 ```
 
@@ -115,27 +114,20 @@ python -m pytest tests/ -v
 
 ## 配置
 
-### 多账户配置 (`configs/accounts.json`)
+### 全局 Bot 配置 (`configs/global-bot-token.json`)
 
 ```json
 {
-  "default": "default",
-  "accounts": [
-    {
-      "name": "default",
-      "gitcode_api_token": "",
-      "gitcode_webhook_token": "",
-      "feishu_app_id": "",
-      "feishu_app_secret": "",
-      "huawei_cloud_ak": "",
-      "huawei_cloud_sk": "",
-      "CODEARTS_CLI_AK": "",
-      "CODEARTS_CLI_SK": "",
-      "bot_usernames": []
-    }
-  ]
+  "gitcode_api_token": "",
+  "gitcode_webhook_token": "",
+  "gitcode_oauth_client_id": "",
+  "gitcode_oauth_client_secret": "",
+  "gitcode_oauth_redirect_uri": "",
+  "bot_usernames": []
 }
 ```
+
+首次运行时会自动加载到 `meta` 表（OAuth 配置）并作为全局 Bot token fallback。用户账户通过 GitCode OAuth 登录动态创建，无需预置。
 
 ### Agent 路由 (`configs/agent-routing.json`)
 
@@ -169,8 +161,7 @@ devops-bot/
 │   └── admin/
 │       └── server.py           # 管理控制台（Vue 3 SPA）
 ├── configs/
-│   ├── accounts.json           # 多账户凭证（gitignored）
-│   ├── accounts.example.json   # 示例配置
+│   ├── global-bot-token.json    # 全局 Bot token + OAuth 凭据（gitignored）
 │   ├── event-routing.json      # 事件 → Skill 路由
 │   └── agent-routing.json      # Skill → Agent 后端路由
 ├── docs/

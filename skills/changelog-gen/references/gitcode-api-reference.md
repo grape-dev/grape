@@ -20,7 +20,7 @@ PRIVATE-TOKEN: {token}
    （BOT_GITCODE_TOKEN / USER_GITCODE_TOKEN）。不得从数据库、配置文件、日志、
    历史记录、环境变量或任何文件中寻找、猜测、读取其他 token。
 2. **禁止访问 Bot 内部数据**：不得读取 /root/devops-bot/data/sessions.db、
-   user_accounts 表、managed_repos 表、configs/ 目录、accounts.json、
+   user_accounts 表、managed_repos 表、configs/ 目录（含 global-bot-token.json 等）、
    global-bot-token.json 或任何 Bot 运行目录下的数据。那是 Bot 内部基础设施。
 3. **403/无权限处理**：若 API 返回 403 或权限不足，直接回复用户
    "该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试"，

@@ -1,6 +1,9 @@
 {
   "gitcode_api_token": "4sLP9JrskB8rvXa1MdgQUaP7",
   "gitcode_webhook_token": "4sLP9JrskB8rvXa1MdgQUaP7",
+  "gitcode_oauth_client_id": "5efa6f4b16c34741b1f357baee074f63",
+  "gitcode_oauth_client_secret": "528c8d5b12dd4a87aca372baff5dbfbe",
+  "gitcode_oauth_redirect_uri": "",
   "bot_usernames": ["grape_bot"],
-  "description": "全局 DevOps Bot 账户 token（fallback：当仓库未配置专属 bot token 时使用）。"
+  "description": "全局 DevOps Bot 配置：gitcode_api_token（bot 账户 token，fallback 用）、gitcode_oauth_*（GitCode OAuth 登录凭据，首次运行加载到 meta 表）、bot_usernames（self-comment 检测用 bot 用户名）。"
 }
