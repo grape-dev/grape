@@ -587,6 +587,26 @@ def _migrate_tables():
                         log.info(f"Migrated {cnt} repo_im_group_binding im_app_id='default' -> {row[0]}")
     except Exception as e:
         log.warning(f"Migrate repo_im_group_binding im_app_id failed: {e}")
+    # 清理历史 bot_username 占位值：'devops-bot' → 全局 bot 实际用户名（configs/global-bot-token.json）
+    try:
+        import json as _gbt_json, os as _gbt_os
+        _gbt_path = _gbt_os.path.join(_CONFIG_DIR, "global-bot-token.json")
+        _global_bot_username = ""
+        if _gbt_os.path.exists(_gbt_path):
+            with open(_gbt_path, "r", encoding="utf-8") as _f:
+                _gbt_data = _gbt_json.load(_f)
+            _us = _gbt_data.get("bot_usernames") or []
+            _global_bot_username = _us[0] if _us else ""
+        if _global_bot_username:
+            with db_lock:
+                c = db.cursor()
+                # 历史占位值 'devops-bot'（非实际 GitCode 用户名）→ 替换为全局 bot 用户名
+                c.execute("UPDATE managed_repos SET bot_username=? WHERE bot_username='devops-bot' OR bot_username='' OR bot_username IS NULL",
+                          (_global_bot_username,))
+                db.commit()
+                log.info(f"Migrated managed_repos.bot_username legacy placeholder -> {_global_bot_username} ({c.rowcount} rows)")
+    except Exception as e:
+        log.warning(f"Migrate bot_username placeholder failed: {e}")
     # 迁移 default 账户：OAuth 配置 → meta 表，bot_usernames → hwc-dev-bot 账户，删除 default
     try:
         with db_lock:

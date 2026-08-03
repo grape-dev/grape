@@ -158,13 +158,13 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
 
         existing_id = find_existing_webhook(webhook_token, owner, repo_name, webhook_url)
         if existing_id:
-            user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=existing_id, is_admin=True, gitcode_webhook_token=webhook_token)
+            user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=existing_id, is_admin=True, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(body.full_name)
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
 
         hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=webhook_token)
-        user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=hook_id, is_admin=True, gitcode_webhook_token=webhook_token)
+        user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=hook_id, is_admin=True, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
         from src.api.session_store import ensure_default_agent_sessions
         ensure_default_agent_sessions(body.full_name)
         return {"message": "仓库托管成功", "webhook_id": hook_id}
