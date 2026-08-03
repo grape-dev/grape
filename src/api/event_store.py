@@ -91,6 +91,7 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
                 has_output = True
                 break
     elif agent_type == "issue":
+        # issue skill 的最终步骤是"必须回复评论"——final_text 非空即视为已处理（有答复产出）
         for t in tool_uses:
             cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
             upper = cmd.upper()
@@ -98,6 +99,14 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
                 result = "对 Issue 执行了写操作（评论/标签）"
                 has_output = True
                 break
+        if not has_output:
+            # 处理结论关键词（宽松匹配"需重大修改"等变体；排除纯思考过程）
+            if re.search(r'(评论已|已回复|已处理|invalid|标记|关闭|打标签|已创建|审查结论|分类为|已发布|已完成)', text):
+                result = text.strip()[:200]
+                has_output = True
+            elif text.strip() and len(text.strip()) > 50 and re.search(r'(#\d+|issue|Issue|标题)', text):
+                result = text.strip()[:200]
+                has_output = True
     elif agent_type in ("qa", "pr"):
         # pr skill 强制"发送评论是最终步骤"——final_text 非空即视为审查完成（有答复产出）
         # tool_use 检测发布审查评论的写操作作为补充

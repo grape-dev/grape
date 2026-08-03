@@ -243,6 +243,16 @@ def _execute_agent(repo_key: str, agent_type: str,
     if len(owner_repo) == 2:
         from src.user.db import get_bot_token_by_repo
         repo_gitcode_token = get_bot_token_by_repo(owner_repo[0], owner_repo[1]) or ""
+    # repo 未配置专属 bot token 时，回退全局 bot token（configs/global-bot-token.json）
+    if not repo_gitcode_token:
+        try:
+            _gbt_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "global-bot-token.json")
+            if os.path.exists(_gbt_path):
+                with open(_gbt_path, "r", encoding="utf-8") as _f:
+                    _gbt = json.load(_f)
+                repo_gitcode_token = _gbt.get("gitcode_api_token", "") or ""
+        except Exception as e:
+            log.warning(f"Exec agent: global bot token fallback failed: {e}")
 
     # 记录执行配置（执行完成有产出后统一写入 event）
     started_at = datetime.now().isoformat()
