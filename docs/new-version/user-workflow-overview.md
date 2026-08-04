@@ -230,6 +230,11 @@ Dashboard 主要区域说明：
 
 ### 2.3 Pipeline 页面
 
+Pipeline 页面作为**每个 Issue 状态跟进的展示页面**，列出项目下所有 Issue 的进展信息：
+- 每个 Issue 当前进行到哪个阶段（VOD / Issue / Coding / QA / SRE）
+- 当前处理责任人（机器人 Agent 或项目组成员）
+- 点击某个 Issue，上方 Agent 卡片展示该 Issue 下每个 Agent 的处理 Event 的 title 和 status
+
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
 │  Pipeline · team/backend-service                      │
@@ -237,34 +242,48 @@ Dashboard 主要区域说明：
 ├───────────────────────────────────────────────────────┤
 │                                                        │
 │  Active: Issue #342 - Login timeout                    │
+│  👤 当前责任人: QA Agent                                │
 │                                                        │
 │  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌───────┐ │
 │  │ ● VOD  │→│ ● Issue│→│ ● Code │→│ ● QA  │→│ ● SRE │ │
 │  │Signal #│  │Classify│  │ PR #   │  │Review  │  │Await  │ │
 │  │47>#345 │  │bug @ali│  │1278 sub│  │ing...  │  │QA OK  │ │
+│  │✅Done  │  │✅Done  │  │✅Done  │  │🔄InProg│  │⏳Pend │ │
 │  └────────┘  └────────┘  └────────┘  └────────┘  └───────┘ │
 │                                                        │
 │  ──────────────────────────────────────────────────   │
 │                                                        │
-│  Pipeline History                                      │
+│  Pipeline History（点击 Issue 切换上方 Agent 卡片）      │
 │  ┌─────────┬──────────┬──────────────┬───────┬────────┐│
-│  │Pipeline │ Duration │ Agents       │Result │Release ││
+│  │Issue    │ Duration │ Agents       │Result │责任人   ││
 │  ├─────────┼──────────┼──────────────┼───────┼────────┤│
-│  │Issue#338│ 28m 12s  │ V I C Q S   │Released│v2.3.1 ││
-│  │Issue#335│ 1h 05m   │ V I C Q S   │Released│v2.3.0 ││
-│  │Issue#331│ 42m 18s  │ I C Q       │Rollback│v2.2.9 ││
+│  │Issue#342│ 28m 12s  │ V I C Q S   │Processing│QA Agent││
+│  │Issue#338│ 1h 05m   │ V I C Q S   │Released│SRE Agent││
+│  │Issue#331│ 42m 18s  │ I C Q       │Rollback│Jason7602││
 │  └─────────┴──────────┴──────────────┴───────┴────────┘│
 └─────────────────────────────────────────────────────────┘
 ```
 
-点击历史表中的不同 Issue，上方的活跃流水线状态会对应变化：
+**Agent 卡片**展示每个 Agent 对该 Issue 的处理 Event：
 
-| 选中 Issue | VOD | Issue | Coding | QA | SRE |
-|-----------|-----|-------|--------|-----|-----|
-| #342 Login timeout | ✅ Signal #47→#345 | ✅ Classified bug, @alice | ✅ PR #1278 | 🔄 Reviewing... | ⏳ Await QA |
-| #338 Webhook retry | ✅ Signal #12→#338 | ✅ Enhancement, @bob | ✅ PR #1275 | ✅ 156 tests OK | ✅ Deployed v2.3.1 |
-| #335 Refactor auth | ✅ Signal #8→#335 | ✅ Refactor task | ✅ PR #1272 | ✅ Approved | ✅ Deployed v2.3.0 |
-| #331 API rate limit | ❌ Skipped | ✅ Bug confirmed | ✅ PR #1268 | ✅ 2 issues found | ✅ Rolled back |
+| Agent 卡片元素 | 内容 |
+|---------------|------|
+| **Agent 名称** | VOD / Issue / Coding / QA / SRE |
+| **事件描述** | 该 Agent 对该 Issue 最新一条 Event 的 title（如 `issue_opened`、`A2A: coding`）|
+| **状态** | ✅ Done / 🔄 In Progress / ❌ Failed / ⏳ Pending |
+| **当前责任人** | 当前阶段 Agent 的最新 Event 的 actor：若是机器人 → Agent 名（如 QA Agent）；若是项目成员 → 用户名（如 Jason7602）|
+
+点击历史表中的不同 Issue，上方的活跃流水线状态和 Agent 卡片会对应切换为该 Issue 的处理事件：
+
+| 选中 Issue | VOD | Issue | Coding | QA | SRE | 当前责任人 |
+|-----------|-----|-------|--------|-----|-----|-----------|
+| #342 Login timeout | ✅ Signal #47→#345 | ✅ Classified bug, @alice | ✅ PR #1278 | 🔄 Reviewing... | ⏳ Await QA | QA Agent |
+| #338 Webhook retry | ✅ Signal #12→#338 | ✅ Enhancement, @bob | ✅ PR #1275 | ✅ 156 tests OK | ✅ Deployed v2.3.1 | SRE Agent |
+| #335 Refactor auth | ✅ Signal #8→#335 | ✅ Refactor task | ✅ PR #1272 | ✅ Approved | ✅ Deployed v2.3.0 | SRE Agent |
+| #331 API rate limit | ❌ Skipped | ✅ Bug confirmed | ✅ PR #1268 | ✅ 2 issues found | ✅ Rolled back | Jason7602 |
+
+> 责任人判定：取当前阶段 Agent 最新 Event 的 `actor`，若为机器人（bot 用户名）则显示该 Agent 的显示名；若为项目组成员则显示其 GitCode 用户名。
+
 
 ### 2.4 DevOps Agent 详情页面（以 VOD Agent 为例）
 
