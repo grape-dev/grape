@@ -28,21 +28,21 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
     for agent in AGENT_ORDER:
         agent_events = [e for e in issue_events if e.get("agent_type") == agent]
         if not agent_events:
-            stages.append(["—", "—"])
+            stages.append({"agent": agent, "latest_event": None})
             stage_statuses.append(0)
             continue
 
         latest = agent_events[-1]
         status = STAGE_STATUS_MAP.get(latest.get("status", "pending"), 0)
-        first_event_type = agent_events[0].get("event_type", "")
-        stage_desc1 = f"{first_event_type} → {issue_id}" if first_event_type else issue_id
-
-        has_more = len(agent_events) > 1
-        stage_desc2 = latest.get("title", "") or latest.get("event_type", "")
-        if has_more:
-            stage_desc2 += f" ({len(agent_events)} evts)"
-
-        stages.append([stage_desc1, stage_desc2])
+        # 最新一条 event 明细（卡片展示用）
+        latest_event = {
+            "seq": latest.get("seq", 0),
+            "title": latest.get("title", "") or latest.get("event_type", ""),
+            "event_type": latest.get("event_type", ""),
+            "status": latest.get("status", ""),
+            "actor": latest.get("actor", ""),
+        }
+        stages.append({"agent": agent, "latest_event": latest_event})
         stage_statuses.append(status)
 
     all_done = all(s == 2 for s in stage_statuses)
@@ -60,6 +60,22 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
 
     involved_agents = [AGENT_LABELS[i] for i, s in enumerate(stage_statuses) if s > 0]
 
+    # 当前阶段责任人：取最后一个非 pending 阶段（最新处理/正在处理的 agent）的最新 event actor
+    current_owner = ""
+    for i in range(len(stage_statuses) - 1, -1, -1):
+        if stage_statuses[i] > 0:
+            agent = AGENT_ORDER[i]
+            latest = stages[i].get("latest_event") or {}
+            actor = latest.get("actor", "")
+            if actor:
+                from src.user.db import get_all_bot_usernames
+                if actor in get_all_bot_usernames():
+                    from src.api.event_pipeline import get_agent_display_name
+                    current_owner = get_agent_display_name(agent)
+                else:
+                    current_owner = actor
+            break
+
     return {
         "issue_id": issue_id,
         "title": title,
@@ -67,6 +83,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         "statuses": stage_statuses,
         "result": result,
         "agents": involved_agents,
+        "current_owner": current_owner,
         "event_count": len(issue_events),
     }
 
@@ -80,7 +97,7 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
+                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, created_at, actor FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
                 (repo_key,)
             )
             rows = c.fetchall()
@@ -88,7 +105,7 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
             rows = []
 
     events = [
-        {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4], "status": r[5], "created_at": r[6]}
+        {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4], "status": r[5], "created_at": r[6], "actor": r[7] or ""}
         for r in rows
     ]
 
