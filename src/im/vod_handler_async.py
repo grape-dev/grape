@@ -93,7 +93,7 @@ def _list_vod_repos(bot_app_id: str) -> list:
     return results
 
 
-def _build_vod_prompt(evt: dict, skill_name: str, gitcode_token: str = "") -> str:
+def _build_vod_prompt(evt: dict, skill_name: str) -> str:
     from src.api.event_store import get_issue_summary
     user_msg = evt.get("payload", {}).get("user_message", "")
     user_name = evt.get("actor", "未知用户")
@@ -132,9 +132,6 @@ def _build_vod_prompt(evt: dict, skill_name: str, gitcode_token: str = "") -> st
     except Exception:
         pass
 
-    if gitcode_token:
-        parts.append(f"\n## GitCode API Token\nBOT_GITCODE_TOKEN={gitcode_token}\n调用 GitCode API 请使用该 token：curl -H \"Authorization: Bearer {gitcode_token}\"。不得使用或硬编码其他 token。\n")
-
     return "\n".join(parts)
 
 
@@ -145,12 +142,12 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
     repo_token = agent_session.get("repo_gitcode_token", "") or ""
     if not repo_token:
         try:
-            from src.user.db import get_agent_bot_token
-            repo_token = get_agent_bot_token(repo_key) or ""
+            from src.user.db import get_gitcode_token
+            repo_token = get_gitcode_token(repo_key=repo_key) or ""
         except Exception:
             pass
 
-    prompt = _build_vod_prompt(evt, skill, gitcode_token=repo_token)
+    prompt = _build_vod_prompt(evt, skill)
     wsd = os.path.join(WORKSPACE_DIR, "vod", repo_key.replace(":", "_").replace("/", "_"))
     os.makedirs(wsd, exist_ok=True)
 
@@ -160,6 +157,7 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
     start_time = time.time()
     for event_type, data in stream_agent(prompt, wsd, backend_session_id, skill,
                                           backend_name=backend, account=repo_key,
+                                          bot_token=repo_token,
                                           agent_label=f"[Agent:vod|repo:{repo_key}]"):
         if event_type == "done":
             final_text = data.get("text", "")

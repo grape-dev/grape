@@ -319,17 +319,17 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] type={agent_type}, backend={backend}, skill={skill_name}, oc_session={oc_session_id[:20] if oc_session_id else 'none'}")
 
-    # 获取 bot token（devops_agent_session.repo_gitcode_token → 全局 bot token）
+    # 获取 bot token（统一走 get_gitcode_token：devops_agent_session → managed_repos → 全局）
     repo_gitcode_token = ""
     try:
-        from src.user.db import get_agent_bot_token
-        repo_gitcode_token = get_agent_bot_token(repo_name) or ""
+        from src.user.db import get_gitcode_token
+        repo_gitcode_token = get_gitcode_token(repo_key=repo_name) or ""
     except Exception as e:
         log.warning(f"Exec agent: get bot token failed: {e}")
     log.info(f"Exec agent: bot_token={'set' if repo_gitcode_token else 'none'}")
 
     try:
-        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type], gitcode_token=repo_gitcode_token)
+        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type])
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
         append_skipped_event(repo_key, evt.get("type", ""), "prompt_build_failed", str(e))
@@ -353,7 +353,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     try:
         for evt_type, data in stream_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
-            backend_name=backend, account=exec_account,
+            backend_name=backend, account=exec_account, bot_token=repo_gitcode_token,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}]",
         ):
             agent_logs.append({"time": datetime.utcnow().isoformat(), "type": evt_type, "msg": str(data)[:500]})

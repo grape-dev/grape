@@ -791,13 +791,15 @@ def _get_global_bot_token() -> str:
     return ""
 
 
-def get_agent_bot_token(repo_key: str) -> str:
-    """获取 Agent 执行的 GitCode Bot Token。
+def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
+    """统一获取 GitCode API Token。
 
-    首选 devops_agent_session.repo_gitcode_token（该 repo 任一非空），
-    未配置时 fallback 全局 bot token（configs/global-bot-token.json）。
+    - repo_key 非空 → bot token：devops_agent_session.repo_gitcode_token
+      → managed_repos.bot_gitcode_token（get_bot_token_by_repo）→ 全局 bot token
+    - user_id > 0 → user token（user_accounts.gitcode_api_token）
     """
     if repo_key:
+        # 1. devops_agent_session.repo_gitcode_token（agent 专属配置）
         try:
             with db_lock:
                 c = db.cursor()
@@ -806,8 +808,23 @@ def get_agent_bot_token(repo_key: str) -> str:
                 if row:
                     return row[0]
         except Exception as e:
-            log.warning(f"get_agent_bot_token: query devops_agent_session failed: {e}")
-    return _get_global_bot_token()
+            log.warning(f"get_gitcode_token: query devops_agent_session failed: {e}")
+        # 2. managed_repos.bot_gitcode_token（仓库级配置）
+        if "/" in repo_key:
+            owner, repo = repo_key.split("/", 1)
+            tok = get_bot_token_by_repo(owner, repo)
+            if tok:
+                return tok
+        # 3. 全局 bot token
+        return _get_global_bot_token()
+    if user_id > 0:
+        return get_user_gitcode_token(user_id)
+    return ""
+
+
+def get_agent_bot_token(repo_key: str) -> str:
+    """获取 Agent 执行的 GitCode Bot Token（薄包装，统一走 get_gitcode_token）"""
+    return get_gitcode_token(repo_key=repo_key)
 
 
 def get_user_gitcode_token(user_id: int) -> str:

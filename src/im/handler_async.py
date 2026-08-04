@@ -194,7 +194,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         except Exception as e:
             log.warning(f"[Chat:{ctx.name}] resolve user gitcode token failed: {e}")
 
-        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, exec_account, user_gitcode_token=user_token)
+        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, exec_account)
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])
@@ -210,6 +210,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
 
         for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat",
                                               backend_name=backend, account=exec_account,
+                                              user_token=user_token,
                                               agent_label=f"[Agent:chat|repo:{repository}]"):
             if event_type == "done":
                 d = data

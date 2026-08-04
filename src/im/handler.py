@@ -180,7 +180,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         except Exception as e:
             log.warning(f"Resolve user gitcode token failed: {e}")
 
-        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, account, user_gitcode_token=user_token)
+        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, account)
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])
@@ -193,7 +193,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         backend = "opencode"
         oc_sid = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
         new_oc_session_id = oc_sid
-        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account, agent_label=f"[Agent:chat|repo:{repo_key.replace('gitcode:', '')}]"):
+        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account, user_token=user_token, agent_label=f"[Agent:chat|repo:{repo_key.replace('gitcode:', '')}]"):
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")
             elif event_type == "text":
