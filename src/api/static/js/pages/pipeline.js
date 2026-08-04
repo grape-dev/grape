@@ -29,10 +29,14 @@ function renderPipeline(data) {
     stages.forEach((stage, i) => {
       const sc = statuses[i];
       const dotc = sc === 2 ? 'var(--g)' : sc === 1 ? 'var(--y)' : sc === 3 ? 'var(--r)' : sc === 0 ? 'var(--t3)' : '#ddd';
-      html += `<div class="nd" style="padding:10px;width:150px;border-top:3px solid ${agentColors[i]};cursor:pointer${sc === 0 ? ';opacity:.5' : ''}" onclick="app.nav('${agentIds[i]}')">
-        <div class="nh"><span class="n" style="background:${agentColors[i]}"></span><h4 style="font-size:11px">${agentLabels[i]}</h4></div>
-        <div class="nds" style="margin-bottom:1px">${stage[0]}</div>
-        <div class="nds" style="margin-bottom:1px;font-size:9px">${stage[1]}</div>
+      // pending（未涉及任务/未到处理阶段）：整体色调调暗（灰色背景 + 弱化文字），已处理/活跃阶段保持正常色调
+      const dimStyle = sc === 0
+        ? 'background:#eef0f4;border-top-color:#d5d9e0;filter:grayscale(0.6)'
+        : `background:${sc === 1 ? '#fff8e8' : '#fff'};border-top-color:${agentColors[i]}`;
+      html += `<div class="nd" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${agentIds[i]}')">
+        <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : agentColors[i]}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${agentLabels[i]}</h4></div>
+        <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${stage[0]}</div>
+        <div class="nds" style="margin-bottom:1px;font-size:9px;${sc === 0 ? 'color:#a8b0bd' : ''}">${stage[1]}</div>
         <div class="ns"><span class="d" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : sc === 0 ? 'Pending' : '—'}</div>
       </div>`;
     });

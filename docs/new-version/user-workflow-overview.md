@@ -273,6 +273,8 @@ Pipeline 页面作为**每个 Issue 状态跟进的展示页面**，列出项目
 | **状态** | ✅ Done / 🔄 In Progress / ❌ Failed / ⏳ Pending |
 | **当前责任人** | 当前阶段 Agent 的最新 Event 的 actor：若是机器人 → Agent 名（如 QA Agent）；若是项目成员 → 用户名（如 Jason7602）|
 
+**未涉及任务的 Agent 框图调暗**：不涉及该 Issue（或还未到处理阶段，状态为 Pending）的 Agent 卡片，**整体色调调暗**（灰色背景 + 降饱和 + 弱化文字 + 降低透明度），以区分已处理/活跃阶段的卡片；已处理（Done）或正在处理（In Progress）的 Agent 卡片保持正常色调。
+
 点击历史表中的不同 Issue，上方的活跃流水线状态和 Agent 卡片会对应切换为该 Issue 的处理事件：
 
 | 选中 Issue | VOD | Issue | Coding | QA | SRE | 当前责任人 |
