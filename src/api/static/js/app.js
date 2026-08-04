@@ -66,9 +66,10 @@ function loadAgentTypes() {
       $('mainView').style.zIndex = '';
       $('pageTitle').textContent = 'Dashboard';
 
-      if (!current) {
+      if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
         const r = managedRepos[0];
-        localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
+        if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
+        else localStorage.removeItem('currentRepo');
       }
       nav('dash');
     }).catch(() => {
@@ -226,7 +227,8 @@ function loadAgentTypes() {
   function logout() {
     const t = localStorage.getItem('token');
     if (t) API.post('/auth/logout', {}).catch(() => {});
-    localStorage.removeItem('token'); localStorage.removeItem('user'); localStorage.removeItem('currentRepo');
+    // 保留 currentRepo（记录上次选择的仓库），下次登录恢复；只清登录态
+    localStorage.removeItem('token'); localStorage.removeItem('user');
     showLogin();
   }
 
