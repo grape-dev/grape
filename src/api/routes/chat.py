@@ -461,7 +461,6 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
             if row and row[0] == "vod_bot":
                 raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent"})
 
-            # 如果用户换了新的 app_id，删除旧 app_id 及其所有对话
             old_cfg = _get_chat_config(user["id"])
             old_app_id = old_cfg.get("im_app_id", "")
             if old_app_id and old_app_id != app_id:
@@ -469,7 +468,6 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
                 c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
                 log.info(f"Chat IM: replaced old app_id={old_app_id[:30]} with new app_id={app_id[:30]}")
 
-            # 保存到 global_im_bot_config（secret 存 chat_agent_session.im_app_secret）
             app_secret = feishu.get("app_secret", "")
             if app_secret and app_secret != "********":
                 c.execute(
@@ -483,6 +481,8 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
             else:
                 kwargs["im_app_id"] = app_id
     else:
+        old_cfg = _get_chat_config(user["id"])
+        old_app_id = old_cfg.get("im_app_id", "")
         kwargs["im_app_id"] = ""
         kwargs["im_app_secret"] = ""
     if feishu.get("app_secret") and feishu["app_secret"] != "********":
@@ -492,4 +492,25 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
     if body.get("skill") is not None:
         kwargs["skill"] = body["skill"]
     _set_chat_config(user["id"], **kwargs)
+
+    # Chat IM：通过 BotManager 动态增删 Bot
+    try:
+        from src.api.main import bot_manager
+        if bot_manager and bot_manager.api:
+            if feishu.get("app_id") and feishu.get("app_id") == app_id:
+                new_secret = kwargs.get("im_app_secret", "")
+                if new_secret and new_secret != "********":
+                    if old_app_id and old_app_id != app_id:
+                        await bot_manager.remove_bot(old_app_id)
+                        log.info(f"Chat IM: removed old bot {old_app_id[:30]} from BotManager")
+                    if app_id in bot_manager._bots:
+                        await bot_manager.remove_bot(app_id)
+                    await bot_manager.add_bot(app_id, new_secret, bot_type="chat_bot")
+                    log.info(f"Chat IM: added bot {app_id[:30]} to BotManager")
+            elif not feishu.get("app_id") and old_app_id:
+                await bot_manager.remove_bot(old_app_id)
+                log.info(f"Chat IM: removed bot {old_app_id[:30]} from BotManager")
+    except Exception as e:
+        log.warning(f"Chat BotManager update failed: {e}")
+
     return {"message": "配置已更新"}
