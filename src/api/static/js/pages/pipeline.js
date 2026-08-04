@@ -20,11 +20,15 @@ function renderPipeline(data) {
   <div class="cd-h"><h2>Pipeline · ${data.repo || ''}</h2>
   <div class="flex gap12"><span class="ts t2">Active: <b>${data.active_count || 0}</b></span><span class="ts t2">Today: <b>${data.today_count || 0}</b></span></div></div>`;
 
-  if (active) {
-    const iss = active.issue_id || '#?';
-    const stages = active.stages || [];
-    const statuses = active.statuses || [];
-    const owner = active.current_owner || '';
+  const allPipes = active ? [active, ...history] : history;
+  // 当前选中的 Issue（默认 active，点击历史行后切换）
+  const displayPipe = allPipes[_pipeActiveIdx] || active;
+
+  if (displayPipe) {
+    const iss = displayPipe.issue_id || '#?';
+    const stages = displayPipe.stages || [];
+    const statuses = displayPipe.statuses || [];
+    const owner = displayPipe.current_owner || '';
     html += `<div style="margin-bottom:16px"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: Issue ${iss}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
     stages.forEach((stage, i) => {
@@ -48,7 +52,6 @@ function renderPipeline(data) {
 
   const durations = ['—','28m 12s','1h 05m','42m 18s'];
   const releases = ['—','v2.3.1','v2.3.0','v2.2.9'];
-  const allPipes = active ? [active, ...history] : history;
 
   html += `<div class="tw"><table><tr><th>Pipeline</th><th>Duration</th><th>Agents</th><th>Result</th><th>Release</th></tr>`;
   allPipes.forEach((p, i) => {
