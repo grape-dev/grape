@@ -8,7 +8,6 @@ function renderSettings(tab) {
   ];
 
   let html = `<div class="cd"><div class="cd-h"><h2>Settings</h2></div>
-  <p class="tx t3 mt8" style="margin-bottom:12px">> Chat Agent 相关设置（Backend、IM 集成）请在 Chat Agent 页面内配置</p>
   <div class="stabs">${tabs.map(t => `<a class="${t.id === current ? 'ac' : ''}" onclick="renderSettings('${t.id}')">${t.label}</a>`).join('')}</div>`;
 
   if (current === 'credentials') {
@@ -50,13 +49,8 @@ function renderSettings(tab) {
     API.get('/settings/gitcode-repo/' + repo.owner + '/' + repo.name).then(d => {
         document.getElementById('sGitcode').innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">DevOps Bot Token</h3>
-          <div class="srow"><label>Bot Token</label><input type="password" id="gitcodeBotToken" value="${d.devops_bot_token_exists ? 'ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx' : ''}" placeholder="输入 DevOps Bot Token"></div>
+          <div class="srow"><label>Bot Token</label><input type="password" id="gitcodeBotToken" value="${d.devops_bot_token_exists ? 'ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx' : ''}" placeholder="不设置，将默认使用Grape官方机器人"></div>
           <div class="srow"><label>Scope</label><input type="text" value="read_repo, write_repo, manage_webhook" disabled style="background:#f1f5f9;font-size:10px"></div>
-        </div>
-        <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Webhook Bot</h3>
-          <div class="srow"><label>Webhook Token</label><input type="password" id="gitcodeWebhookToken" value="${d.webhook_token_exists ? 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' : ''}" placeholder="输入 Webhook Token"></div>
-          <div class="srow"><label>Webhook URL</label><input type="text" value="${d.webhook_url || 'http://203.0.113.2/webhook/gitcode'}" disabled style="background:#f1f5f9"></div>
-          <div class="srow"><label>Bot Username</label><input type="text" id="gitcodeBotUsername" value="${d.bot_username || 'devops-bot'}"></div>
           <button class="bt bt-p mt8" onclick="saveGitcodeRepoConfig()">Save</button>
         </div>
         <div class="cd mt16" style="border-color:var(--r)">
@@ -83,10 +77,9 @@ function saveCredentials() {
 function saveGitcodeRepoConfig() {
   const repo = app.currentRepo();
   if (!repo) return;
+  const botEl = document.getElementById('gitcodeBotToken');
   API.put('/settings/gitcode-repo/' + repo.owner + '/' + repo.name, {
-    bot_token: document.getElementById('gitcodeBotToken').value || undefined,
-    webhook_token: document.getElementById('gitcodeWebhookToken').value || undefined,
-    bot_username: document.getElementById('gitcodeBotUsername').value || undefined,
+    bot_token: botEl && botEl.value ? botEl.value : undefined,
   }).then(r => app.showToast('GitCode Repo 配置已更新')).catch(e => app.showToast('更新失败'));
 }
 
