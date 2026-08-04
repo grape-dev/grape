@@ -546,6 +546,15 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
     """
     ctx._running = True
     delay = ctx.reconnect_delay
+    _cleanup_seen_msg_ids(ctx.app_id)
+
+    async def _periodic_cleanup():
+        while ctx._running:
+            await asyncio.sleep(3600)
+            if ctx._running:
+                _cleanup_seen_msg_ids(ctx.app_id)
+
+    cleanup_task = asyncio.create_task(_periodic_cleanup(), name=f"cleanup-{ctx.name}")
 
     while ctx._running:
         try:
@@ -656,6 +665,7 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
             delay = min(delay * 2, ctx.max_reconnect_delay)
 
     ctx.state = BotState.STOPPED
+    cleanup_task.cancel()
     log.info(f"[{ctx.name}] stopped")
 
 
