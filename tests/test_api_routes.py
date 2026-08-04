@@ -517,6 +517,27 @@ class TestWebhook:
                         headers={"X-GitCode-Event": "push", "X-GitCode-Token": "wrong_token"})
         assert r.status_code == 403
 
+    def test_webhook_unmanaged_repo_rejected(self):
+        """未托管仓库（不在 managed_repos）的 webhook 应被 404 拒绝，不进入 run_pipeline"""
+        payload = '{"project": {"path_with_namespace": "ghost/not-managed"}, "ref": "refs/heads/main"}'
+        r = client.post("/webhook/gitcode", content=payload.encode(),
+                        headers={"X-GitCode-Event": "push", "X-GitCode-Token": "any_token"})
+        assert r.status_code == 404, f"Got {r.status_code}: {r.text[:200]}"
+        assert r.json()["message"] == "repository not managed"
+
+    def test_webhook_unmanaged_repo_even_with_token(self):
+        """未托管仓库即使带了 token 也被拒绝（token 校验前先查托管状态）"""
+        payload = '{"project": {"path_with_namespace": "ghost/not-managed"}, "ref": "refs/heads/main"}'
+        r = client.post("/webhook/gitcode", content=payload.encode(),
+                        headers={"X-GitCode-Event": "push", "X-GitCode-Token": "some_valid_looking_token"})
+        assert r.status_code == 404, f"Got {r.status_code}: {r.text[:200]}"
+        # 确认未生成事件
+        with db_lock:
+            from src.session_manager import db as _db
+            cur = _db.cursor()
+            cur.execute("SELECT COUNT(*) FROM events WHERE repo_key='ghost/not-managed'")
+            assert cur.fetchone()[0] == 0, "unmanaged repo should not create events"
+
     def test_a2a_reject_external(self):
         """A2A should reject requests from non-localhost IPs"""
         r = client.post("/api/a2a", json={"agent": "issue", "payload": {"repository": "org/test", "issue_number": "1"}})
