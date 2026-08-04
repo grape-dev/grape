@@ -122,7 +122,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         lock.acquire()
         try:
             await _process_chat_inner_async(ctx, api, parsed, text, repo_key, repository,
-                                            msg_id, sess, history, oc_sid, cc_sid, is_new,
+                                            msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
                                             bind_account=account, exec_account=repo_key)
         finally:
             lock.release()
@@ -140,7 +140,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
 async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                                      parsed, text, repo_key, repository,
-                                     msg_id, sess, history, oc_sid, cc_sid, is_new,
+                                     msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
                                      bind_account="", exec_account=""):
     """异步版内部处理逻辑
 

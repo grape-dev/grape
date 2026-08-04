@@ -469,7 +469,7 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
             c = db.cursor()
             c.execute(
                 "INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
-                (im_chat_id, repo_key, "gitcode", sender_id, account)
+                (chat_id, repo_key, "gitcode", sender_id, account)
             )
             db.commit()
             matched = sync_repo_feishu_mapping(repo_key, chat_id)
