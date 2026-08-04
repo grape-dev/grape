@@ -246,6 +246,98 @@ async def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_curren
     return {"message": "Bot Token 已更新", "bot_username": repo_bot_username}
 
 
+def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
+    """解除托管时的同步清理：关联数据表 + 仓库 skill 目录 + workspace 目录。
+
+    repo_key 为 owner/repo（无前缀）；兼容历史可能存在的 gitcode: 前缀数据。
+    用户维度数据（workspaces/chat/{user_id}、workspaces/{owner} 根）不清理。
+    返回清理统计。
+    """
+    import re, shutil, os
+    from src.session_manager import db, db_lock
+
+    stats = {"tables": 0, "skill_dirs": 0, "workspace_dirs": 0}
+    keys = [repo_key]
+    if not repo_key.startswith("gitcode:"):
+        keys.append(f"gitcode:{repo_key}")
+    if repo_key.startswith("gitcode:"):
+        keys.append(repo_key[8:])
+    keys = list(dict.fromkeys(k for k in keys if k))
+
+    # 路径安全校验：owner/repo 仅允许字母数字、点、下划线、连字符（防路径穿越）
+    if not re.match(r'^[\w.\-]+$', owner) or not re.match(r'^[\w.\-]+$', repo):
+        log.warning(f"Cleanup skipped: invalid owner/repo {owner}/{repo}")
+        return stats
+
+    with db_lock:
+        c = db.cursor()
+        try:
+            # 1. vod_conversations（依赖 devops_agent_session.id，需在删 agent_session 前）
+            placeholders = ",".join("?" for _ in keys)
+            c.execute(f"DELETE FROM vod_conversations WHERE agent_session_id IN (SELECT id FROM devops_agent_session WHERE repo_key IN ({placeholders}))", keys)
+            stats["tables"] += c.rowcount
+            # 2. chat_messages（依赖 chat_conversations.id，需在删 conversations 前）
+            c.execute(f"SELECT id FROM chat_conversations WHERE repo_key IN ({placeholders})", keys)
+            conv_ids = [r[0] for r in c.fetchall()]
+            if conv_ids:
+                cid_ph = ",".join("?" for _ in conv_ids)
+                c.execute(f"DELETE FROM chat_messages WHERE conversation_id IN ({cid_ph})", conv_ids)
+                stats["tables"] += c.rowcount
+            # 3. 直接按 repo_key 匹配的表
+            for tbl in ("events", "event_skipped", "chat_conversations", "chat_agent_session",
+                        "repo_im_group_binding", "pipeline_instances", "devops_agent_session"):
+                try:
+                    c.execute(f"DELETE FROM {tbl} WHERE repo_key IN ({placeholders})", keys)
+                    stats["tables"] += c.rowcount
+                except Exception as e:
+                    log.warning(f"Cleanup {tbl} failed: {e}")
+            # 4. 仓库 skill 记录
+            try:
+                c.execute("DELETE FROM skill WHERE scope='repo' AND owner_id IN ({})".format(",".join("?" for _ in keys)), keys)
+                stats["tables"] += c.rowcount
+            except Exception as e:
+                log.warning(f"Cleanup skill records failed: {e}")
+            db.commit()
+        except Exception as e:
+            log.warning(f"Cleanup DB failed: {e}")
+
+    # 5. 仓库 skill 目录（skills/repo/{repo_key}/）
+    try:
+        from src.user.db import SKILL_DIR
+        _repo_skills_base = os.path.join(os.path.dirname(SKILL_DIR), "repo")
+        for k in keys:
+            _dir = os.path.join(_repo_skills_base, k)
+            if os.path.isdir(_dir):
+                shutil.rmtree(_dir)
+                stats["skill_dirs"] += 1
+    except Exception as e:
+        log.warning(f"Cleanup skill dir failed: {e}")
+
+    # 6. workspace 目录（data/workspaces/...）
+    try:
+        from src.config import WORKSPACE_DIR
+        _ws_base = WORKSPACE_DIR
+        # 所有候选目录（规范化后校验必须在 WORKSPACE_DIR 下）
+        candidates = [
+            os.path.join(_ws_base, owner, repo),            # agent 执行目录
+            os.path.join(_ws_base, repo),                   # vod-agent 平级目录
+            os.path.join(_ws_base, "feishu", f"{owner}_{repo}"),
+            os.path.join(_ws_base, "vod", f"{owner}_{repo}"),
+            os.path.join(_ws_base, "history", owner, repo),
+            os.path.join(_ws_base, "history", f"gitcode:{owner}", repo),
+        ]
+        for _dir in candidates:
+            _abs = os.path.normpath(_dir)
+            if os.path.isdir(_abs) and _abs.startswith(os.path.normpath(_ws_base) + os.sep):
+                shutil.rmtree(_abs)
+                stats["workspace_dirs"] += 1
+    except Exception as e:
+        log.warning(f"Cleanup workspace dir failed: {e}")
+
+    log.info(f"Cleanup repo {repo_key}: {stats}")
+    return stats
+
+
 @router.post("/remove")
 async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     parts = body.full_name.split("/", 1)
@@ -319,6 +411,6 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
     removed = user_db.remove_managed_repo(user["id"], owner, repo_name)
     if not removed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
-    from src.api.session_store import remove_agent_sessions
-    remove_agent_sessions(body.full_name)
+    # 同步清理：关联数据表 + 仓库 skill + workspace 目录（替代原 remove_agent_sessions）
+    _cleanup_repo_data(body.full_name, owner, repo_name)
     return {"message": "已移除仓库"}
