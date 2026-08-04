@@ -18,6 +18,7 @@ def _run(coro):
 # ===================== repo_manager.add_collaborator =====================
 
 def test_add_collaborator_success():
+    """GitCode PUT body 用单数 permission 字段，maintainer 映射为 admin（=仓库维护者）"""
     from src.user.repo_manager import add_collaborator
     with patch("src.user.repo_manager._req") as mock_req:
         mock_req.return_value = {}
@@ -26,17 +27,27 @@ def test_add_collaborator_success():
         url = mock_req.call_args[0][1]
         assert "/repos/owner/repo/collaborators/hwc-dev-bot" in url
         body = mock_req.call_args[0][3]
-        assert body.get("permissions") == "maintainer"
+        assert body.get("permission") == "admin"  # maintainer → admin
+        assert "permissions" not in body
 
 
-def test_add_collaborator_permission_fallback():
-    """maintainer 失败时降级 push/developer（用 permissions 字段）"""
+def test_add_collaborator_developer_maps_push():
+    """developer → push（GitCode 枚举）"""
+    from src.user.repo_manager import add_collaborator
+    with patch("src.user.repo_manager._req") as mock_req:
+        mock_req.return_value = {}
+        ok = add_collaborator("tok", "owner", "repo", "bot", "developer")
+        assert ok is True
+        assert mock_req.call_args[0][3].get("permission") == "push"
+
+
+def test_add_collaborator_no_fallback():
+    """maintainer 邀请失败时不再降级 developer，直接返回 False（由调用方拒绝托管）"""
     from src.user.repo_manager import add_collaborator
     with patch("src.user.repo_manager._req") as mock_req:
         mock_req.side_effect = RuntimeError("fail")
         ok = add_collaborator("tok", "owner", "repo", "bot", "maintainer")
-        # 尝试 maintainer/push/developer 三种
-        assert mock_req.call_count >= 3
+        assert mock_req.call_count == 1  # 只试一次，不降级
         assert ok is False
 
 
@@ -97,6 +108,57 @@ def test_remove_collaborator_error_false():
         assert ok is False
 
 
+# ===================== repo_manager invite 系列（GitCode 定制接口） =====================
+
+def test_list_user_invites():
+    from src.user.repo_manager import list_user_invites, _req_query
+    with patch("src.user.repo_manager._req_query") as mock_q:
+        mock_q.return_value = {"content": [
+            {"source_name": "owner/repo", "invitation_token": "tok1", "user_role": "开发者"}
+        ]}
+        invites = list_user_invites("bot_tok")
+        assert len(invites) == 1
+        assert invites[0]["invitation_token"] == "tok1"
+        args = mock_q.call_args[0]
+        assert args[0] == "GET"
+        assert "/user/invite" in args[1]
+        # token 作为第 3 个位置参数传入，走 _req_query（内部拼 query access_token）而非 Bearer
+        assert args[2] == "bot_tok"
+        assert args[3] == {"page": 1, "per_page": 100}
+
+
+def test_accept_invite_for_repo():
+    """按 owner/repo 匹配邀请并接受"""
+    from src.user.repo_manager import accept_invite_for_repo
+    with patch("src.user.repo_manager.list_user_invites", return_value=[
+        {"source_name": "other/repo", "invitation_token": "x"},
+        {"source_name": "owner/repo", "invitation_token": "match_tok"},
+    ]), patch("src.user.repo_manager.accept_project_invite", return_value=True) as mock_acc:
+        ok = accept_invite_for_repo("bot_tok", "owner", "repo")
+        assert ok is True
+        mock_acc.assert_called_once_with("bot_tok", "match_tok")
+
+
+def test_accept_invite_for_repo_no_match():
+    from src.user.repo_manager import accept_invite_for_repo
+    with patch("src.user.repo_manager.list_user_invites", return_value=[
+        {"source_name": "other/repo", "invitation_token": "x"},
+    ]), patch("src.user.repo_manager.accept_project_invite") as mock_acc:
+        ok = accept_invite_for_repo("bot_tok", "owner", "repo")
+        assert ok is False
+        mock_acc.assert_not_called()
+
+
+def test_get_member_permission():
+    from src.user.repo_manager import get_member_permission
+    with patch("src.user.repo_manager._req") as mock_req:
+        mock_req.return_value = {"access_level": 40, "role_name": "Maintainer", "permission": "admin"}
+        data = get_member_permission("tok", "owner", "repo", "grape_bot")
+        assert data["access_level"] == 40
+        url = mock_req.call_args[0][1]
+        assert "/collaborators/grape_bot/permission" in url
+
+
 # ===================== host_repo：添加全局 bot 失败拒绝托管 =====================
 
 def test_host_repo_global_bot_fail_rejects():
@@ -130,7 +192,7 @@ def test_host_repo_global_bot_fail_rejects():
 
 
 def test_host_repo_global_bot_success():
-    """全局 bot 添加协作者成功 → 托管成功"""
+    """全局 bot 添加协作者成功 + 自动接受邀请 + 已是维护者 → 托管成功"""
     import src.api.routes.repos as repos_mod
 
     class FakeBody:
@@ -145,6 +207,8 @@ def test_host_repo_global_bot_success():
          patch("src.user.repo_manager._check_collaborator_admin", return_value=True), \
          patch("src.user.repo_manager._req", return_value={"login": "tester"}), \
          patch("src.user.repo_manager.add_collaborator", return_value=True), \
+         patch("src.user.repo_manager.accept_invite_for_repo", return_value=True) as mock_acc, \
+         patch("src.user.repo_manager.get_member_permission", return_value={"access_level": 40, "role_name": "Maintainer"}) as mock_perm, \
          patch("src.user.repo_manager.find_existing_webhook", return_value=None), \
          patch.object(repos_mod, "setup_webhook", return_value=1), \
          patch.object(repos_mod, "user_db") as mock_udb, \
@@ -156,6 +220,43 @@ def test_host_repo_global_bot_success():
         r = _run(repos_mod.host_repo(FakeBody(), fake_user))
         assert "托管成功" in r["message"]
         mock_udb.add_managed_repo.assert_called_once()
+        mock_acc.assert_called_once()
+        mock_perm.assert_called_once()
+
+
+def test_host_repo_global_bot_not_maintainer_rejects():
+    """bot 已加入但非维护者（access_level<40）→ 拒绝托管"""
+    import src.api.routes.repos as repos_mod
+
+    class FakeBody:
+        full_name = "owner/repo"
+
+    fake_user = {"id": 1, "username": "tester"}
+    gbt_json = '{"gitcode_api_token": "gbt", "bot_usernames": ["hwc-dev-bot"]}'
+
+    with patch.object(repos_mod, "get_user_token", return_value="user_tok"), \
+         patch.object(repos_mod, "get_bot_token", return_value="bot_tok"), \
+         patch("src.user.db.get_meta_value", return_value="http://webhook"), \
+         patch("src.user.repo_manager._check_collaborator_admin", return_value=True), \
+         patch("src.user.repo_manager._req", return_value={"login": "tester"}), \
+         patch("src.user.repo_manager.add_collaborator", return_value=True), \
+         patch("src.user.repo_manager.accept_invite_for_repo", return_value=True), \
+         patch("src.user.repo_manager.get_member_permission", return_value={"access_level": 30, "role_name": "Developer"}), \
+         patch("src.user.repo_manager.find_existing_webhook", return_value=None), \
+         patch.object(repos_mod, "setup_webhook", return_value=1), \
+         patch.object(repos_mod, "user_db") as mock_udb, \
+         patch("src.api.session_store.ensure_default_agent_sessions"), \
+         patch("builtins.open", MagicMock()) as mock_open:
+        mock_f = MagicMock()
+        mock_f.__enter__.return_value.read.return_value = gbt_json
+        mock_open.return_value = mock_f
+        try:
+            _run(repos_mod.host_repo(FakeBody(), fake_user))
+            assert False, "should have raised HTTPException"
+        except HTTPException as e:
+            assert e.status_code == 502
+            assert "维护者" in e.detail["message"]
+        mock_udb.add_managed_repo.assert_not_called()
 
 # ===================== set_repo_bot_token：自动更新 bot_username + 添加 repo bot =====================
 

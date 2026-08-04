@@ -40,27 +40,41 @@ def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: s
         return False
 
 
+# GitCode 成员权限枚举（官方 API：PUT /collaborators/{username} body 用单数字段 permission）
+# 参与者→pull，开发者→push，仓库维护者→admin，自定义角色→customized
+_PERMISSION_TO_GITCODE = {
+    "maintainer": "admin",
+    "admin": "admin",
+    "developer": "push",
+    "push": "push",
+    "member": "pull",
+    "reporter": "pull",
+}
+
+
 def add_collaborator(api_token: str, owner: str, repo: str, username: str,
                      permission: str = "maintainer") -> bool:
-    """将用户添加为仓库协作者。返回是否成功。
+    """将用户添加为仓库协作者（GitCode 邀请制：创建邀请，需对方接受）。
 
-    注意：api_token 必须是仓库所有者/管理员的 token（GitCode 拒绝用 bot 自己 token 邀请自己）。
-    GitCode 用 permissions 字段，值如 maintainer/push/developer。
-    已存在成员（400"已是成员"）视为成功（幂等）。
+    注意：
+      - api_token 必须是仓库所有者/管理员的 token（GitCode 拒绝用 bot 自己 token 邀请自己）。
+      - GitCode PUT body 字段名是单数 `permission`，枚举值：pull/push/admin/customized。
+      - 已存在成员 / 已被邀请（400"已是成员"）视为成功（幂等）。
+      - 不再静默降级：maintainer 邀请失败直接返回 False，由调用方决定是否拒绝托管。
     """
     if not username or not api_token:
         return False
+    gitcode_perm = _PERMISSION_TO_GITCODE.get((permission or "").lower(), permission)
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}"
-    for perm in (permission, "push", "developer"):
-        try:
-            _req("PUT", url, api_token, {"permissions": perm})
+    try:
+        _req("PUT", url, api_token, {"permission": gitcode_perm})
+        return True
+    except RuntimeError as e:
+        # 已是成员 / 已被邀请（幂等成功）：说明该用户已在仓库的成员或邀请列表中
+        if any(k in str(e) for k in ("已经是项目中的成员", "已经是", "已存在", "已被邀请", "已邀请", "已经邀请")):
             return True
-        except RuntimeError as e:
-            # 已是成员 / 已被邀请（幂等成功）：说明该用户已在仓库的成员或邀请列表中
-            if any(k in str(e) for k in ("已经是项目中的成员", "已经是", "已存在", "已被邀请", "已邀请", "已经邀请")):
-                return True
-            continue
-    return False
+        log.warning(f"add_collaborator failed: {e}")
+        return False
 
 
 def remove_collaborator(api_token: str, owner: str, repo: str, username: str) -> bool:
@@ -79,6 +93,107 @@ def remove_collaborator(api_token: str, owner: str, repo: str, username: str) ->
         if "404" in str(e):
             return True
         return False
+
+
+def _req_query(method: str, path: str, token: str, params: dict | None = None,
+               body: dict | None = None) -> dict:
+    """GitCode 定制化接口请求：凭据用 query 参数 access_token（非 Bearer header）。
+
+    用于 /api/v5/user/invite 系列接口（仅全局 bot grape_bot 可调用）。
+    """
+    if params is None:
+        params = {}
+    params["access_token"] = token
+    query = urllib.parse.urlencode(params)
+    url = f"{API_BASE}{path}?{query}"
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode(errors="replace")[:500]
+        raise RuntimeError(f"GitCode API {method} {path} failed ({e.code}): {raw}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
+
+
+def list_user_invites(token: str, page: int = 1, per_page: int = 100) -> list[dict]:
+    """查询当前 token 用户的项目邀请列表（GET /api/v5/user/invite）。
+
+    返回 content 列表，每项含 source_name(owner/repo)、invitation_token、
+    user_role、inviter_username、expires_at 等。
+    """
+    data = _req_query("GET", "/user/invite", token,
+                      {"page": page, "per_page": min(per_page, 100)})
+    content = data.get("content", []) if isinstance(data, dict) else []
+    return content if isinstance(content, list) else []
+
+
+def accept_project_invite(token: str, invitation_token: str) -> bool:
+    """接受项目邀请（POST /api/v5/user/invite/accept）。"""
+    if not token or not invitation_token:
+        return False
+    try:
+        _req_query("POST", "/user/invite/accept", token,
+                   {"invitation_token": invitation_token})
+        return True
+    except RuntimeError as e:
+        log.warning(f"accept_project_invite failed: {e}")
+        return False
+
+
+def reject_project_invite(token: str, invitation_token: str) -> bool:
+    """拒绝项目邀请（POST /api/v5/user/invite/reject）。"""
+    if not token or not invitation_token:
+        return False
+    try:
+        _req_query("POST", "/user/invite/reject", token,
+                   {"invitation_token": invitation_token})
+        return True
+    except RuntimeError as e:
+        log.warning(f"reject_project_invite failed: {e}")
+        return False
+
+
+def accept_invite_for_repo(token: str, owner: str, repo: str) -> bool:
+    """查询邀请列表，找到匹配 owner/repo 的邀请并接受。返回是否成功。
+
+    用于全局 bot（grape_bot）被邀请加入托管仓库后自动同意。
+    """
+    if not token or not owner or not repo:
+        return False
+    try:
+        invites = list_user_invites(token, per_page=100)
+    except RuntimeError as e:
+        log.warning(f"accept_invite_for_repo: list invites failed: {e}")
+        return False
+    target = f"{owner}/{repo}"
+    for inv in invites:
+        source = inv.get("source_name", "") or ""
+        if source.lower() == target.lower():
+            inv_token = inv.get("invitation_token", "")
+            if inv_token:
+                return accept_project_invite(token, inv_token)
+    log.info(f"accept_invite_for_repo: no matching invite for {target} (total={len(invites)})")
+    return False
+
+
+def get_member_permission(api_token: str, owner: str, repo: str, username: str) -> dict | None:
+    """查看仓库成员权限详情（GET /collaborators/{username}/permission）。
+
+    返回含 access_level（30=Developer，40=Maintainer）、role_name、permission 等，失败返回 None。
+    """
+    if not username or not api_token:
+        return None
+    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}/permission"
+    try:
+        return _req("GET", url, api_token)
+    except RuntimeError as e:
+        log.warning(f"get_member_permission failed: {e}")
+        return None
 
 
 def fetch_repos_with_role(api_token: str) -> list[dict]:

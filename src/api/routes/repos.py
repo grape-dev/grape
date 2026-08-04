@@ -148,13 +148,26 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"权限验证失败: {e}"})
 
     try:
-        from src.user.repo_manager import add_collaborator
+        from src.user.repo_manager import add_collaborator, accept_invite_for_repo, get_member_permission
         # 全局 bot（configs/global-bot-token.json）作为维护者加入（用 owner token，GitCode 拒绝 bot 邀请自己）
+        # GitCode 为邀请制：owner 发起邀请（permission=maintainer→admin）→ bot 用 invite 接口同意 → 校验权限
         # 失败则拒绝托管
         if api_token and global_bot_username:
             ok = add_collaborator(api_token, owner, repo_name, global_bot_username, "maintainer")
             if not ok:
                 raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 无法将全局 Bot（{global_bot_username}）加入仓库维护者"})
+
+            # 用全局 bot token 自动接受项目邀请（invite 定制接口仅 grape_bot 可用）
+            if global_bot_token:
+                if not accept_invite_for_repo(global_bot_token, owner, repo_name):
+                    log.warning(f"host: no invite to accept for {owner}/{repo_name}, bot may already be member")
+
+                # 校验 bot 已是维护者（access_level>=40），否则托管失败
+                bot_perm = get_member_permission(api_token, owner, repo_name, global_bot_username)
+                access_level = (bot_perm or {}).get("access_level", 0) or 0
+                if access_level < 40:
+                    role_name = (bot_perm or {}).get("role_name", "")
+                    raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 全局 Bot（{global_bot_username}）当前为{role_name or access_level}，未成为仓库维护者（Maintainer）。请在 GitCode 仓库成员中将 {global_bot_username} 权限设为维护者后重试"})
 
         existing_id = find_existing_webhook(webhook_token, owner, repo_name, webhook_url)
         if existing_id:
