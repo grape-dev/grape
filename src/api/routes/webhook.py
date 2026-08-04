@@ -41,14 +41,19 @@ async def gitcode_webhook(request: Request):
     expected = get_webhook_token_by_repo(repo)
     log.info(f"Webhook: expected_token={'found' if expected else 'none (unmanaged repo)'}")
 
-    # 3. 对比验证（仅托管仓库需要验证）
-    if expected and token != expected:
+    # 3. 未托管仓库拒绝：不在 managed_repos 的仓库不接收事件（防止幽灵 webhook / 无主事件 / 绕过校验）
+    if not expected:
+        log.warning(f"Webhook rejected: unmanaged repo={repo}")
+        return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
+
+    # 4. token 对比验证
+    if token != expected:
         log.warning(f"Webhook rejected: token mismatch for repo={repo}")
         return JSONResponse(status_code=403, content={"code": 403, "message": "invalid webhook token"})
 
     log.info(f"Webhook: token OK, repo={repo}, event={event_header}")
 
-    # 4. 处理事件
+    # 5. 处理事件
     log.info(f"Webhook: calling run_pipeline for repo={repo}")
     result = run_pipeline(body, dict(request.headers), account=repo, repo_key_override=f"gitcode:{repo}")
     log.info(f"Webhook: pipeline done, seq={result.get('seq')}, event_type={result.get('event_type')}, ok={result.get('ok')}")
@@ -78,6 +83,7 @@ async def a2a_endpoint(request: Request):
     account = payload.get("account", "") or repository
     context = payload.get("context", "")
     issue_number = payload.get("issue_number", "")
+    pr_number = payload.get("pr_number", "")
 
     repo_key = f"gitcode:{repository}"
     # 统一 repo_key 格式（与 run_pipeline 一致：去掉 "source:" 前缀，所有查询都用 "owner/repo"）
@@ -121,6 +127,7 @@ async def a2a_endpoint(request: Request):
                 "repository": repository,
                 "account": account,
                 "issue_number": issue_number,
+                "pr_number": pr_number,
                 "context": context,
             },
         }
@@ -136,7 +143,7 @@ async def a2a_endpoint(request: Request):
             agent_type=agent_name,
             actor="",
             summary=f"A2A: → {agent_name}",
-            payload={"repository": repository, "account": account, "issue_number": issue_number, "context": context[:500]},
+            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500]},
             status="running",
         )
         log.info(f"A2A: event created, seq={seq}")

@@ -44,7 +44,7 @@ tools:
 | A2A context 特征 | 场景 | 执行流程 |
 |-----------------|------|---------|
 | 含「PR 审查反馈」「审查发现问题」「需要修改」「优化」 | **代码优化**（从 PR skill） | `references/pr-optimization-flow.md` |
-| 含「启动开发」「实现」「feature」「bug」 | **新开发**（从 issue skill） | `references/new-dev-flow.md` |
+| 含「启动开发」「实现」「feature」「bug」 | **新开发**（从 issue skill） | `references/new-dev-flow.md` → A2A 通知 QA 审查 |
 | 含 `CODEOWNERS`、`模块责任人`、`codeowner 分支` | **生成 CODEOWNERS** | `references/new-dev-flow.md` |
 | 其他 | 不做处理，结束 | — |
 
@@ -57,6 +57,7 @@ tools:
 | 所有开发任务必须包含测试用例 | ✅ **必须做** |
 | ⚠️ 创建 PR 前必须先执行自审查 | ✅ **必须做，不可跳过** |
 | ⚠️ 创建 PR 后必须在 Issue 发评论告知 | ✅ **必须做，不可跳过** |
+| ⚠️ 创建 PR 后必须通过 A2A 通知 QA Agent 进行代码审查 | ✅ **必须做，不可跳过** |
 | 代码优化场景修改完成后必须在 PR 评论告知 | ✅ **必须做** |
 | 每个提交一个原子变更 | ✅ **必须做** |
 | 只通过 GitCode API 获取信息 | ✅ **必须做** |

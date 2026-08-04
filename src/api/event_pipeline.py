@@ -370,12 +370,24 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     new_oc_session_id = ""
     tool_uses = []
     agent_logs = []
+    env_extra = {
+        "REPO_FULL_NAME": repository,
+        "ACCOUNT": exec_account,
+    }
+    _issue_num = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
+    if _issue_num:
+        env_extra["ISSUE_NUMBER"] = str(_issue_num).lstrip("#")
+    _pr_num = evt.get("payload", {}).get("pr_number", "")
+    if _pr_num:
+        env_extra["PR_NUMBER"] = str(_pr_num)
+
     try:
         for evt_type, data in stream_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
             backend_name=backend, account=exec_account, bot_token=repo_gitcode_token,
             agent_name=agent_name,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}]",
+            env_extra=env_extra,
         ):
             # 写库兜底脱敏：即使上游 executor 已脱敏，此处再防御一次（agent 可能在 text/result 复述 token）
             _msg = str(data)[:500]

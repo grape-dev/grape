@@ -241,6 +241,9 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
             parts.append(f"了解任务背景和其它Agent处理过程，请到Issue查看。\n")
         parts.append("## 前序 Agent 处理摘要\n")
         parts.append(a2a_ctx)
+        pr_num = evt.get("payload", {}).get("pr_number", "")
+        if pr_num:
+            parts.append(f"A2A 目标 PR：#{pr_num}\n")
         parts.append("请基于以上上下文继续处理。\n")
 
     if evt_type == "issue_comment":

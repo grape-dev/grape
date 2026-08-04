@@ -519,7 +519,7 @@ class TestWebhook:
 
     def test_a2a_reject_external(self):
         """A2A should reject requests from non-localhost IPs"""
-        r = client.post("/api/a2a", json={"agent": "issue", "payload": {"repository": "org/test"}})
+        r = client.post("/api/a2a", json={"agent": "issue", "payload": {"repository": "org/test", "issue_number": "1"}})
         assert r.status_code == 403
 
     def test_a2a_missing_agent(self):
@@ -529,6 +529,20 @@ class TestWebhook:
     def test_a2a_missing_repo(self):
         r = client.post("/api/a2a", json={"agent": "issue", "payload": {}}, headers=_headers)
         assert r.status_code == 400
+
+    def test_a2a_with_pr_number(self):
+        """A2A should accept optional pr_number in payload (403 = IP check passed validation)"""
+        r = client.post("/api/a2a", json={
+            "agent": "qa",
+            "payload": {
+                "repository": "org/test",
+                "account": "org",
+                "issue_number": "42",
+                "pr_number": "7",
+                "context": "PR #7 created, please review"
+            }
+        }, headers=_headers)
+        assert r.status_code != 400, f"Payload validation failed: {r.text}"
 
 
 # ===================== 13. Token Three-Layer =====================

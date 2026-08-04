@@ -39,9 +39,9 @@ curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 
 | 级别 | 判定标准 | 必须执行的能力 |
 |------|---------|--------------|
-| 简单 | 单文件改动、< 50 行，不涉及外部依赖 | 需求文档 + 方案设计 + 编码 + 测试 + 自审查 + PR |
-| 中等 | 多文件改动、涉及外部 API 或已有模块接口 | 需求文档 + 方案设计 + 编码 + 测试 + 自审查 + PR |
-| 大型 | 跨模块改动、架构调整、新增外部服务集成（如 OAuth） | 需求文档 + 方案设计 + 编码 + 测试 + 自审查 + PR |
+| 简单 | 单文件改动、< 50 行，不涉及外部依赖 | 需求文档 + 方案设计 + 编码 + 测试 + 自审查 + PR + A2A 通知 QA |
+| 中等 | 多文件改动、涉及外部 API 或已有模块接口 | 需求文档 + 方案设计 + 编码 + 测试 + 自审查 + PR + A2A 通知 QA |
+| 大型 | 跨模块改动、架构调整、新增外部服务集成（如 OAuth） | 需求文档 + 方案设计 + 编码 + 测试 + 自审查 + PR + A2A 通知 QA |
 
 ⚠️ **涉及架构变更或新增外部服务集成的，必须归为「大型」，不得低估**
 
@@ -52,7 +52,7 @@ curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 - 场景：新开发（从 issue skill 触发）
 - 任务类型：feature 开发
 - 复杂度：大型（涉及 OAuth 外部服务集成）
-- 必须执行：需求文档 → 方案设计 → 编码 → 测试 → 自审查 → 创建 PR
+- 必须执行：需求文档 → 方案设计 → 编码 → 测试 → 自审查 → 创建 PR → A2A 通知 QA 审查
 ```
 
 ## 执行能力
@@ -146,3 +146,37 @@ Content-Type: application/json
 **跳过此步 = 事件未完成处理。**
 
 > 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。
+
+### 能力九：A2A 通知 QA Agent 代码审查
+
+⚠️ 创建 PR 后必须执行，否则 QA Agent 不会收到审查请求。
+
+```bash
+curl -X POST http://localhost:8080/api/a2a \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent": "qa",
+    "payload": {
+      "repository": "'"$REPO_FULL_NAME"'",
+      "account": "'"$ACCOUNT"'",
+      "issue_number": "'"$ISSUE_NUMBER"'",
+      "pr_number": "'"$PR_NUMBER"'",
+      "context": "Issue #'"$ISSUE_NUMBER"' 开发已完成，PR #'"$PR_NUMBER"' 已创建。请对该 PR 进行代码审查。原始需求：[简要描述]"
+    }
+  }'
+```
+
+#### context 构造规则
+
+context 应包含：
+1. **PR 编号**：`PR #N 已创建`（QA Agent 据此定位 PR）
+2. **原始需求摘要**：Issue 标题和关键功能点
+3. **待审查要点**：如有特别关注的安全/性能/架构风险，一并说明
+
+#### 注意
+
+- 仅「新开发」场景执行此步；代码优化场景（pr-optimization-flow）无新 PR，不触发。
+- `$PR_NUMBER` 来自能力八创建 PR 的 API 返回值。
+- `$ISSUE_NUMBER` 来自原始 Issue 编号。
+
+**跳过此步 = 事件未完成处理。**

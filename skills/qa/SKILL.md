@@ -45,9 +45,18 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 **所有仓库信息通过 GitCode API 获取**，不读取本地文件。
 **唯一例外**：`data/workspaces/history/{account}/{repo}/session_history.json` 会话历史文件是 Bot 明确提供给 Agent 读取的上下文，可以用 read 工具读取用于工作流审查的证据采集。
 
-## 分析（每次执行前先分析，⚠️ 必须按 1→2→3 顺序依次执行，上一步未完成不得进入下一步）
+## 分析（每次执行前先分析，⚠️ 必须按 0→1→2→3 顺序依次执行，上一步未完成不得进入下一步）
 
 ### 分析内容
+
+0. **A2A 触发识别**
+
+   如果事件类型为 `a2a_event`（即通过 A2A 被其他 Agent 主动调用）：
+
+   1. 从 prompt 上下文的「A2A 目标 PR：#N」或前序摘要中提取 PR 编号，设为 `$PR_NUMBER`
+   2. 跳过分析步 1（PR 配置检查，该步仅 `pull_request_opened` 时执行）
+   3. 变更检视（分析步 2）以首次审查处理（`.last_pr_review/{pr_number}.sha` 不存在 → 有新变更）
+   4. 继续执行分析步 3 及后续所有能力项
 
 1. **PR 配置检查（仅首次 `pull_request_opened` 事件时执行）**
 
@@ -259,6 +268,7 @@ Content-Type: application/json
 | 行为 | 态度 |
 |------|------|
 | 按分析结论执行 PR 审查 | ✅ **必须做** |
+| A2A 触发时从上下文提取 PR 编号并执行审查 | ✅ **必须做** |
 | 工作流审查未观察的证据显式标注，不虚构、不评分 | ✅ **必须做** |
 | 审查发现问题需要修改时调用 A2A 通知 implementation | ✅ **必须做** |
 | 所有评论统一在最后发送 | ✅ **必须做，不得在中间步骤发评论** |
