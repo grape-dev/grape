@@ -26,10 +26,19 @@ function renderPipeline(data) {
 
   if (displayPipe) {
     const iss = displayPipe.issue_id || '#?';
+    const num = String(iss).replace(/^#/, '');
+    // GitCode Issue 链接（点击跳转对应 issue）
+    const repoParts = (data.repo || '').split('/');
+    const issueUrl = repoParts.length === 2
+      ? `https://gitcode.com/${repoParts[0]}/${repoParts[1]}/issues/${num}`
+      : '';
+    const issHtml = issueUrl
+      ? `<a href="${issueUrl}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${iss}</a>`
+      : `Issue ${iss}`;
     const stages = displayPipe.stages || [];
     const statuses = displayPipe.statuses || [];
     const owner = displayPipe.current_owner || '';
-    html += `<div style="margin-bottom:16px"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: Issue ${iss}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}</div>
+    html += `<div style="margin-bottom:16px"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
     stages.forEach((stage, i) => {
       const sc = statuses[i];
@@ -51,9 +60,8 @@ function renderPipeline(data) {
   }
 
   const durations = ['—','28m 12s','1h 05m','42m 18s'];
-  const releases = ['—','v2.3.1','v2.3.0','v2.2.9'];
 
-  html += `<div class="tw"><table><tr><th>Pipeline</th><th>Duration</th><th>Agents</th><th>Result</th><th>Release</th></tr>`;
+  html += `<div class="tw"><table><tr><th>Issue</th><th>Duration</th><th>Agents</th><th>Result</th><th>责任人</th></tr>`;
   allPipes.forEach((p, i) => {
     const s = i === _pipeActiveIdx ? ' sel' : '';
     const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
@@ -64,13 +72,19 @@ function renderPipeline(data) {
 
     const resultClass = p.result === 'Released' || p.result === 'completed' ? 'tgx' : p.result === 'Failed' || p.result === 'failed' ? 'tr' : 'ty';
     const dur = durations[i] || '—';
-    const rel = releases[i] || '—';
+    const owner = p.current_owner || '—';
+    // Issue 链接
+    const pnum = String(p.issue_id || '?').replace(/^#/, '');
+    const repoParts = (data.repo || '').split('/');
+    const pIssueUrl = repoParts.length === 2
+      ? `https://gitcode.com/${repoParts[0]}/${repoParts[1]}/issues/${pnum}`
+      : '';
     html += `<tr class="pipe-row${s}" onclick="selPipe(${i})">
-      <td><span class="ts"><b>${p.issue_id || '?'}</b></span></td>
+      <td><span class="ts"><b>${pIssueUrl ? `<a href="${pIssueUrl}" target="_blank" rel="noopener" style="color:var(--a)" onclick="event.stopPropagation()">${p.issue_id || '?'}</a>` : (p.issue_id || '?')}</b></span></td>
       <td>${dur}</td>
       <td>${agentTags}</td>
       <td><span class="${resultClass}">${p.result || 'Processing'}</span></td>
-      <td>${rel}</td></tr>`;
+      <td>${owner}</td></tr>`;
   });
   html += `</table></div>`;
   html += `</div><div class="tx t2 mt8">点击历史表中的 Issue 会切换上方工作流状态展示</div>`;
