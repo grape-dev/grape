@@ -204,6 +204,13 @@ _NEW_TABLES = [
     ("skill", _SKILL_DDL),
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
+    ("bot_seen_messages", """
+CREATE TABLE IF NOT EXISTS bot_seen_messages (
+    app_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    seen_at REAL NOT NULL,
+    PRIMARY KEY (app_id, message_id)
+)"""),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -235,6 +242,8 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)",
         "CREATE INDEX IF NOT EXISTS idx_agent_sessions_repo ON devops_agent_session(repo_key)",
         "CREATE INDEX IF NOT EXISTS idx_event_route_config_repo ON event_route_config(repo_key)",
+        "CREATE INDEX IF NOT EXISTS idx_bot_seen_messages_app_id ON bot_seen_messages(app_id)",
+        "CREATE INDEX IF NOT EXISTS idx_bot_seen_messages_seen_at ON bot_seen_messages(seen_at)",
     ]
     for idx in indexes:
         try:

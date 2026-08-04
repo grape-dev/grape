@@ -21,6 +21,47 @@ FEISHU_BASE = "https://open.feishu.cn/open-apis"
 WS_ENDPOINT_URL = "https://open.feishu.cn/callback/ws/endpoint"
 
 
+_SEEN_MSG_TTL = 86400 * 2
+_SEEN_MSG_MAX_LOAD = 2000
+
+
+def _load_seen_msg_ids(app_id: str) -> set:
+    try:
+        from src.session_manager import db, db_lock
+        cutoff = time.time() - _SEEN_MSG_TTL
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT message_id FROM bot_seen_messages WHERE app_id=? AND seen_at>? ORDER BY seen_at DESC LIMIT ?",
+                      (app_id, cutoff, _SEEN_MSG_MAX_LOAD))
+            return {r[0] for r in c.fetchall()}
+    except Exception:
+        return set()
+
+
+def _persist_seen_msg_id(app_id: str, message_id: str):
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR IGNORE INTO bot_seen_messages (app_id, message_id, seen_at) VALUES (?,?,?)",
+                      (app_id, message_id, time.time()))
+            db.commit()
+    except Exception:
+        pass
+
+
+def _cleanup_seen_msg_ids(app_id: str):
+    try:
+        from src.session_manager import db, db_lock
+        cutoff = time.time() - _SEEN_MSG_TTL
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM bot_seen_messages WHERE app_id=? AND seen_at<?", (app_id, cutoff))
+            db.commit()
+    except Exception:
+        pass
+
+
 class BotState(Enum):
     IDLE = "idle"
     CONNECTING = "connecting"
@@ -84,6 +125,9 @@ class BotContext:
         if not self.name:
             self.name = f"{self.bot_type}_{self.app_id[:12]}"
         self.semaphore = asyncio.Semaphore(self.max_concurrent)
+        self._seen_msg_ids = _load_seen_msg_ids(self.app_id)
+        if self._seen_msg_ids:
+            log.info(f"[{self.name}] loaded {len(self._seen_msg_ids)} seen msg ids from DB")
 
     @property
     def is_connected(self) -> bool:
@@ -572,6 +616,7 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                         if msg_id in ctx._seen_msg_ids:
                             continue
                         ctx._seen_msg_ids.add(msg_id)
+                        _persist_seen_msg_id(ctx.app_id, msg_id)
                         if len(ctx._seen_msg_ids) > 2000:
                             ctx._seen_msg_ids = set(list(ctx._seen_msg_ids)[-1000:])
 
@@ -598,6 +643,7 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
             ctx.metrics.last_error = f"ws closed: code={e.code} reason={e.reason}"
             log.warning(f"[{ctx.name}] ws closed: {e.code}, reconnect in {delay:.0f}s")
             ctx.state = BotState.RECONNECTING
+            _cleanup_seen_msg_ids(ctx.app_id)
             await asyncio.sleep(delay)
             delay = min(delay * 2, ctx.max_reconnect_delay)
         except Exception as e:
@@ -605,6 +651,7 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
             ctx.metrics.last_error = f"connection error: {e}"
             log.warning(f"[{ctx.name}] error: {e}, reconnect in {delay:.0f}s")
             ctx.state = BotState.RECONNECTING
+            _cleanup_seen_msg_ids(ctx.app_id)
             await asyncio.sleep(delay)
             delay = min(delay * 2, ctx.max_reconnect_delay)
 
