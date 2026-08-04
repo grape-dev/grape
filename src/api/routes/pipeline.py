@@ -105,7 +105,8 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
             rows = []
 
     events = [
-        {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4], "status": r[5], "created_at": r[6], "actor": r[7] or ""}
+        {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
+         "status": r[6], "created_at": r[7], "actor": r[8] or ""}
         for r in rows
     ]
 
