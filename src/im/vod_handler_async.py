@@ -173,6 +173,21 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
             new_sid = data.get("oc_session_id") or data.get("backend_session_id")
             if exit_code == 0 and new_sid:
                 new_oc_sid = new_sid
+            log.info(f"[VOD agent|repo:{repo_key}] done: exit={exit_code}, text_len={len(final_text)}")
+        elif event_type == "error":
+            log.warning(f"[VOD agent|repo:{repo_key}] error: {data}")
+        elif event_type == "step_start":
+            log.info(f"[VOD agent|repo:{repo_key}] {data}")
+        elif event_type == "text":
+            log.info(f"[VOD agent|repo:{repo_key}] TEXT: {str(data)[:200]}")
+        elif event_type == "reasoning":
+            log.info(f"[VOD agent|repo:{repo_key}] REASONING: {str(data)[:200]}")
+        elif event_type == "tool_use":
+            log.info(f"[VOD agent|repo:{repo_key}] TOOL: {str(data)[:200]}")
+        elif event_type == "step_finish":
+            log.info(f"[VOD agent|repo:{repo_key}] {data}")
+        else:
+            log.info(f"[VOD agent|repo:{repo_key}] {event_type}: {str(data)[:200]}")
 
     duration = time.time() - start_time
 

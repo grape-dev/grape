@@ -165,8 +165,21 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
                 exit_code = d.get("exit_code", -1)
                 final_text = d.get("text", "")
                 new_backend_session_id = d.get("oc_session_id", "")
+                log.info(f"VOD agent done: exit={exit_code}, text_len={len(final_text)}")
             elif evt_type == "error":
                 log.warning(f"VOD agent error: {data}")
+            elif evt_type == "step_start":
+                log.info(f"[VOD agent|repo:{repo_key}] {data}")
+            elif evt_type == "text":
+                log.info(f"[VOD agent|repo:{repo_key}] TEXT: {str(data)[:200]}")
+            elif evt_type == "reasoning":
+                log.info(f"[VOD agent|repo:{repo_key}] REASONING: {str(data)[:200]}")
+            elif evt_type == "tool_use":
+                log.info(f"[VOD agent|repo:{repo_key}] TOOL: {str(data)[:200]}")
+            elif evt_type == "step_finish":
+                log.info(f"[VOD agent|repo:{repo_key}] {data}")
+            else:
+                log.info(f"[VOD agent|repo:{repo_key}] {evt_type}: {str(data)[:200]}")
     except Exception as e:
         log.warning(f"VOD agent execute failed: {e}")
 
