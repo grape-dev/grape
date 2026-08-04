@@ -356,7 +356,11 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             backend_name=backend, account=exec_account, bot_token=repo_gitcode_token,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}]",
         ):
-            agent_logs.append({"time": datetime.utcnow().isoformat(), "type": evt_type, "msg": str(data)[:500]})
+            # 写库兜底脱敏：即使上游 executor 已脱敏，此处再防御一次（agent 可能在 text/result 复述 token）
+            _msg = str(data)[:500]
+            if repo_gitcode_token:
+                _msg = _msg.replace(repo_gitcode_token, "[REDACTED]")
+            agent_logs.append({"time": datetime.utcnow().isoformat(), "type": evt_type, "msg": _msg})
             if evt_type == "done":
                 d = data
                 exit_code = d.get("exit_code", -1)
@@ -392,6 +396,8 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     # 判定 Agent 是否有明确答复产出
     has_output, result_text = evaluate_agent_output(agent_type, tool_uses, final_text)
+    if repo_gitcode_token and result_text:
+        result_text = result_text.replace(repo_gitcode_token, "[REDACTED]")
     completed_at = datetime.utcnow().isoformat()
     duration = None
     try:

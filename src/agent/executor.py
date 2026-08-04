@@ -43,6 +43,17 @@ def discover_backends() -> list[dict]:
     return results
 
 
+def _redact(text, tokens):
+    """将文本中的敏感 token 替换为 [REDACTED]（用于日志/事件脱敏）"""
+    if not text or not tokens:
+        return text
+    s = str(text)
+    for t in tokens:
+        if t:
+            s = s.replace(t, "[REDACTED]")
+    return s
+
+
 def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  event_type: str = "", backend_name: str = "opencode",
                  account: str = "", user_id: int = 0,
@@ -71,6 +82,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     env[k.upper()] = str(v)
         except Exception as e:
             log.warning(f"Failed to inject user credentials: {e}")
+
+    # 需要脱敏的 token 列表（用于日志/事件输出）
+    _tokens = [t for t in (bot_token, user_token) if t]
 
     args = backend.build_args(prompt, session_id)
     agent_cmd = shutil.which(backend.binary) or shutil.which(backend.binary + ".cmd")
@@ -106,7 +120,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             continue
         parsed = backend.parse_output(line)
         if parsed is None:
-            yield ("raw", line[:200])
+            yield ("raw", _redact(line[:200], _tokens))
             continue
         et = parsed["type"]
         if et == "step_start":
@@ -116,16 +130,16 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
         elif et == "text":
             collected_text.append(parsed["text"])
-            yield ("text", parsed["text"][:150].replace("\n", " "))
+            yield ("text", _redact(parsed["text"][:150], _tokens).replace("\n", " "))
         elif et == "reasoning":
-            yield ("reasoning", parsed["text"][:200])
+            yield ("reasoning", _redact(parsed["text"][:200], _tokens))
         elif et == "tool_use":
-            yield ("tool_use", f"Tool: {parsed['tool']} {json.dumps(parsed.get('input', {}))[:200]}")
+            yield ("tool_use", _redact(f"Tool: {parsed['tool']} {json.dumps(parsed.get('input', {}))[:200]}", _tokens))
         elif et == "step_finish":
             yield ("step_finish", f"Step {step_count} done, tokens={parsed['tokens']}")
         elif et == "error":
-            error_events.append(parsed["message"])
-            yield ("error", parsed["message"])
+            error_events.append(_redact(parsed["message"], _tokens))
+            yield ("error", _redact(parsed["message"], _tokens))
         else:
             yield ("other", et)
 
@@ -164,9 +178,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         pass
 
     yield ("done", {
-        "exit_code": proc.returncode, "text": full_text,
+        "exit_code": proc.returncode, "text": _redact(full_text, _tokens),
         "oc_session_id": new_session_id,
-        "errors": error_events, "stderr": stderr_output,
+        "errors": error_events, "stderr": _redact(stderr_output, _tokens),
         "backend": backend.name,
     })
 
