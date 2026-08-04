@@ -55,7 +55,7 @@ function renderSettings(tab) {
         </div>
         <div class="cd mt16" style="border-color:var(--r)">
           <div class="cd-h"><h2 style="color:var(--r)">解除托管</h2></div>
-          <p class="tx t2" style="margin-bottom:8px">解除托管后，该仓库的 Webhook 将被删除，事件将不再被监听。您可以稍后重新加入。</p>
+          <p class="tx t2" style="margin-bottom:8px;color:var(--r)">⚠️ 解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。</p>
           <button class="bt" style="background:var(--r);color:#fff;border:none;padding:8px 16px" onclick="unhostFromSettings('${repo.fullName}')">解除托管</button>
         </div>`;
     }).catch(e => document.getElementById('sGitcode').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
@@ -84,7 +84,7 @@ function saveGitcodeRepoConfig() {
 }
 
 function unhostFromSettings(fullName) {
-  if (!confirm('确定要解除托管 ' + fullName + ' 吗？相关的 Webhook 将被删除，事件将不再被监听。')) return;
+  if (!confirm('⚠️ 确定要解除托管 ' + fullName + ' 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。\n\n如需保留历史数据，请谨慎操作。')) return;
   API.post('/repos/remove', {full_name: fullName}).then(r => {
     app.showToast('已解除托管');
     const cur = app.currentRepo();

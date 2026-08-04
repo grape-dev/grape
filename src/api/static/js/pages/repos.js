@@ -140,7 +140,7 @@ function selectRepo(fullName, owner, name) {
 }
 
 function unhostRepo(fullName) {
-  if (!confirm('确定要解除托管 ' + fullName + ' 吗？相关的 Webhook 将被删除。')) return;
+  if (!confirm('⚠️ 确定要解除托管 ' + fullName + ' 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。')) return;
   API.post('/repos/remove', {full_name: fullName}).then(r => {
     app.showToast('已解除托管');
     app.loadProfile().then(() => {
