@@ -225,6 +225,7 @@ Dashboard 主要区域说明：
 | 区域 | 内容 |
 |------|------|
 | **Repo Header** | 当前仓库名称、状态（Webhook OK）、指标（自动解决率、事件量、平均响应时间） |
+| **☁ 云开发环境** | 顶部按钮，点击跳转华为云 DevStation AI Shell（`https://devstation.connect.huaweicloud.com/aishell2?utm_source=huawei&utm_medium=floating_ball&utm_campaign=space`）|
 | **Agent Flow** | 5 个 Agent 横向流水线卡片，每个显示 Backend 引擎 + 状态 + **最近 2 个处理事件**（title + status，与 Pipeline 页一致，非假数据）；右上角提供开发场景下拉选择器（可切换 Agent-Skill 映射） |
 | **Chat Lane** | 个人 Chat Agent 横贯连接条，点击进入 Chat 页面 |
 | **Recent Activity** | 最近 24 小时事件流，点击事件可跳转到 Event Detail 详情页 |
