@@ -253,7 +253,7 @@ function loadAgentTypes() {
     if (urlToken) {
       localStorage.setItem('token', urlToken);
       localStorage.setItem('app_cache_ver', '4');
-      if (p.get('first_login')) {
+      if (p.get('first_login') === '1') {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
         $('sidebar').style.display = 'none';

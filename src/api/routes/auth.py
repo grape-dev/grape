@@ -118,9 +118,11 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
     user_db.save_user_account(local_user["username"], user_acc)
 
     token = user_db.create_session_token(local_user["id"])
-    # 首次 OAuth 登录清理旧仓库缓存，确保跳转到仓库选择页
+    # 仅真正首次登录（无任何托管仓库）才 first_login=1（前端清 currentRepo 进仓库选择页）；
+    # 已有托管仓库则保留上次选择的仓库（first_login=0），恢复上次的 repo
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url=f"/?token={token}&first_login=1", status_code=302)
+    has_repos = bool(user_db.get_managed_repos(local_user["id"]))
+    return RedirectResponse(url=f"/?token={token}&first_login={'1' if not has_repos else '0'}", status_code=302)
 
 
 @router.get("/profile")
