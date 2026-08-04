@@ -73,14 +73,8 @@ function renderPipeline(data) {
     const resultClass = p.result === 'Released' || p.result === 'completed' ? 'tgx' : p.result === 'Failed' || p.result === 'failed' ? 'tr' : 'ty';
     const dur = durations[i] || '—';
     const owner = p.current_owner || '—';
-    // Issue 链接
-    const pnum = String(p.issue_id || '?').replace(/^#/, '');
-    const repoParts = (data.repo || '').split('/');
-    const pIssueUrl = repoParts.length === 2
-      ? `https://gitcode.com/${repoParts[0]}/${repoParts[1]}/issues/${pnum}`
-      : '';
     html += `<tr class="pipe-row${s}" onclick="selPipe(${i})">
-      <td><span class="ts"><b>${pIssueUrl ? `<a href="${pIssueUrl}" target="_blank" rel="noopener" style="color:var(--a)" onclick="event.stopPropagation()">${p.issue_id || '?'}</a>` : (p.issue_id || '?')}</b></span></td>
+      <td><span class="ts"><b>${p.issue_id || '?'}</b></span></td>
       <td>${dur}</td>
       <td>${agentTags}</td>
       <td><span class="${resultClass}">${p.result || 'Processing'}</span></td>

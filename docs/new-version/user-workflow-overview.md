@@ -264,7 +264,7 @@ Pipeline 页面作为**每个 Issue 状态跟进的展示页面**，列出项目
 └─────────────────────────────────────────────────────────┘
 ```
 
-- **Issue 链接**：上方 "Active: Issue #342" 和下方历史表的 Issue 号均为可点击链接，点击跳转到 GitCode 对应的 Issue 页面（`https://gitcode.com/{owner}/{repo}/issues/{number}`）。
+- **Issue 链接**：上方 "Active: Issue #342" 为可点击链接，点击跳转到 GitCode 对应的 Issue 页面（`https://gitcode.com/{owner}/{repo}/issues/{number}`）；下方历史表的 Issue 号为纯文本（点击行用于切换上方 Agent 卡片）。
 - **责任人列**：历史表的"责任人"列显示该 Issue 当前阶段的处理责任人（机器人 Agent 名或项目组成员用户名）。
 
 **Agent 卡片**展示每个 Agent 对该 Issue 的处理 Event：
