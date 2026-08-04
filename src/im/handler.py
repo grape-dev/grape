@@ -181,7 +181,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
             log.warning(f"Resolve user gitcode token failed: {e}")
 
         prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, account)
-        log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:200]}")
+        log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:2000]}")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])
         os.makedirs(wsd, exist_ok=True)
