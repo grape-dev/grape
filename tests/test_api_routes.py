@@ -462,6 +462,7 @@ class TestSkills:
     def test_skills_upload_too_big(self):
         r = client.post("/api/skills/upload",
                         files={"file": ("big.zip", b"x" * 11 * 1024 * 1024)},
+                        data={"agent_type": "vod"},
                         headers=_headers)
         assert r.status_code == 400
 
@@ -472,10 +473,80 @@ class TestSkills:
             zf.writestr("empty/", "")
         tmp.close()
         with open(tmp.name, "rb") as f:
-            r = client.post("/api/skills/upload", files={"file": ("empty.zip", f.read())}, headers=_headers)
+            r = client.post("/api/skills/upload", files={"file": ("empty.zip", f.read())},
+                            data={"agent_type": "vod"}, headers=_headers)
         os.unlink(tmp.name)
         # Should validate and fail (no SKILL.md)
         assert r.status_code == 400
+
+    def test_skills_upload_missing_agent_type(self):
+        """不传 agent_type 应返回 400"""
+        import tempfile, zipfile, os
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        with zipfile.ZipFile(tmp.name, "w") as zf:
+            zf.writestr("skill-x/SKILL.md", "---\nname: skill-x\nversion: 1.0.0\ndescription: test\n---\n\n## 场景\n## 知识\n## 步骤\n- step")
+        tmp.close()
+        with open(tmp.name, "rb") as f:
+            r = client.post("/api/skills/upload", files={"file": ("skill-x.zip", f.read())},
+                            headers=_headers)
+        os.unlink(tmp.name)
+        assert r.status_code == 400
+
+    def test_skills_upload_invalid_agent_type(self):
+        """非法 agent_type 应返回 400"""
+        import tempfile, zipfile, os
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        with zipfile.ZipFile(tmp.name, "w") as zf:
+            zf.writestr("skill-x/SKILL.md", "---\nname: skill-x\nversion: 1.0.0\ndescription: test\n---\n\n## 场景\n## 知识\n## 步骤\n- step")
+        tmp.close()
+        with open(tmp.name, "rb") as f:
+            r = client.post("/api/skills/upload", files={"file": ("skill-x.zip", f.read())},
+                            data={"agent_type": "unknown-type"}, headers=_headers)
+        os.unlink(tmp.name)
+        assert r.status_code == 400
+
+    def test_skills_upload_valid_agent_type(self):
+        """合法 agent_type（chat 等）上传应成功"""
+        import tempfile, zipfile, os, sqlite3
+        from src.session_manager import db, db_lock
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        with zipfile.ZipFile(tmp.name, "w") as zf:
+            zf.writestr("skill-uploadtest/SKILL.md", "---\nname: skill-uploadtest\nversion: 1.0.0\ndescription: test skill\n---\n\n## 场景\n## 知识\n## 步骤\n- step")
+        tmp.close()
+        with open(tmp.name, "rb") as f:
+            r = client.post("/api/skills/upload", files={"file": ("skill-uploadtest.zip", f.read())},
+                            data={"agent_type": "chat"}, headers=_headers)
+        os.unlink(tmp.name)
+        assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
+        # 验证 agent_type 已保存
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT agent_type FROM skill WHERE skill_name='skill-uploadtest' AND scope='user'").fetchone()
+        assert row and row[0] == "chat", f"agent_type should be chat, got {row}"
+
+    def test_skills_upload_repo_scope_via_form(self):
+        """scope=repo 通过 form 提交时应正确落到仓库技能目录（此前无 Form() 标注会被当成 query 参数而失效）"""
+        import tempfile, zipfile, os, shutil
+        from src.session_manager import db, db_lock
+        from src.user import db as user_db
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        with zipfile.ZipFile(tmp.name, "w") as zf:
+            zf.writestr("skill-repoupload/SKILL.md", "---\nname: skill-repoupload\nversion: 1.0.0\ndescription: repo skill\n---\n\n## 场景\n## 知识\n## 步骤\n- step")
+        tmp.close()
+        with open(tmp.name, "rb") as f:
+            r = client.post("/api/skills/upload", files={"file": ("skill-repoupload.zip", f.read())},
+                            data={"scope": "repo", "repo": "owner/repo-x", "agent_type": "sre"}, headers=_headers)
+        os.unlink(tmp.name)
+        assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT agent_type, scope, owner_id FROM skill WHERE skill_name='skill-repoupload'").fetchone()
+        assert row, "repo skill should be created"
+        assert row[0] == "sre" and row[1] == "repo" and row[2] == "owner/repo-x", f"got {row}"
+        # 清理磁盘目录，避免污染后续测试
+        target = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", "owner/repo-x", "skill-repoupload")
+        if os.path.exists(target):
+            shutil.rmtree(os.path.dirname(os.path.dirname(target)), ignore_errors=True)
 
     def test_skills_delete_nonexistent(self):
         r = client.delete("/api/skills/nonexistent_skill", headers=_headers)

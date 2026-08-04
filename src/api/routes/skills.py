@@ -1,6 +1,6 @@
 """Skills 路由：列表、上传、删除"""
 import os, tempfile, zipfile, json
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from src.user import db as user_db
 from src.user.validator import validate_skill as validate_custom_skill
 from src.api.deps import get_current_user
@@ -128,12 +128,17 @@ async def get_skill_detail(name: str, user: dict = Depends(get_current_user),
 
 @router.post("/upload")
 async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_current_user),
-                       scope: str = "user", repo: str = ""):
-    """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）"""
+                       scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form("")):
+    """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。"""
+    VALID_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat"}
     if scope not in ("user", "repo"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 user 或 repo"})
     if scope == "repo" and not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库技能必须指定 repo"})
+    if not agent_type:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "必须选择技能类型（agent_type）"})
+    if agent_type not in VALID_AGENT_TYPES:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"技能类型不合法，可选: {', '.join(sorted(VALID_AGENT_TYPES))}"})
 
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
@@ -170,14 +175,14 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             if os.path.exists(target_dir):
                 shutil.rmtree(target_dir)
             shutil.copytree(skill_dir, target_dir)
-            user_db.create_skill(user["id"], skill_name, "", "", "", scope="repo", owner_id=repo_key)
+            user_db.create_skill(user["id"], skill_name, agent_type, "", "", scope="repo", owner_id=repo_key)
         else:
             user_skill_dir = os.path.join(user_db.SKILL_DIR, str(user["id"]), skill_name)
             os.makedirs(os.path.dirname(user_skill_dir), exist_ok=True)
             if os.path.exists(user_skill_dir):
                 shutil.rmtree(user_skill_dir)
             shutil.copytree(skill_dir, user_skill_dir)
-            user_db.create_skill(user["id"], skill_name, "", "", "")
+            user_db.create_skill(user["id"], skill_name, agent_type, "", "")
 
         return {"message": f"技能 {skill_name} 上传成功"}
     except HTTPException:

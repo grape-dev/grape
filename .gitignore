@@ -9,3 +9,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 configs/global-bot-token.json
+skills/custom/
+skills/repo/

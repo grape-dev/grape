@@ -112,6 +112,14 @@ function _loadSkills() {
 function showSkillUpload() {
   const repo = _currentRepo();
   const scope = _skillTab;  // repo / user
+  const AGENT_OPTS = [
+    {v:'vod', label:'VOD Agent (♫ 声音分析)'},
+    {v:'issue', label:'Issue Agent (⚠ 需求管理)'},
+    {v:'coding', label:'Coding Agent (⚙ 代码实现)'},
+    {v:'qa', label:'QA Agent (✔ 审查验证)'},
+    {v:'sre', label:'SRE Agent (♡ 构建部署)'},
+    {v:'chat', label:'Chat Agent (☎ 对话助手)'},
+  ];
   const modal = document.createElement('div');
   modal.id = 'skillUploadModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
@@ -119,6 +127,12 @@ function showSkillUpload() {
     <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">上传技能 (ZIP)</h3>
     <div class="srow" style="margin-bottom:10px"><label>类型</label><span>${scope === 'repo' ? '仓库技能' : '个人技能'}</span></div>
     ${scope === 'repo' ? `<div class="srow" style="margin-bottom:10px"><label>仓库</label><span>${repo}</span></div>` : ''}
+    <div class="srow" style="margin-bottom:10px"><label>技能类型 *</label>
+      <select id="skillAgentType" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">
+        <option value="">-- 请选择技能所属 Agent --</option>
+        ${AGENT_OPTS.map(o => `<option value="${o.v}">${o.label}</option>`).join('')}
+      </select>
+    </div>
     <div style="margin-bottom:14px">
       <label style="font-size:11px;color:var(--t2);display:block;margin-bottom:6px">选择技能 ZIP 文件（目录名 = 技能名，内含 SKILL.md）</label>
       <input type="file" id="skillFile" accept=".zip" style="font-size:12px">
@@ -137,11 +151,17 @@ function doSkillUpload() {
     if (window.app && app.showToast) app.showToast('请选择技能 ZIP 文件');
     return;
   }
+  const agentType = document.getElementById('skillAgentType')?.value || '';
+  if (!agentType) {
+    if (window.app && app.showToast) app.showToast('请选择技能类型（所属 Agent）');
+    return;
+  }
   const scope = _skillTab;
   const repo = _currentRepo();
   const fd = new FormData();
   fd.append('file', fileInput.files[0]);
   fd.append('scope', scope);
+  fd.append('agent_type', agentType);
   if (scope === 'repo' && repo) fd.append('repo', repo);
 
   API.upload('/skills/upload', fd).then(r => {
