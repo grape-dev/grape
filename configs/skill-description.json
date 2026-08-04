@@ -11,6 +11,12 @@
     "path": "issue",
     "description": "Issue 全生命周期管理：分类、打标签、指派人、设置里程碑、关联 PR、回复评论"
   },
+  "issue-advance": {
+    "name": "Issue 高级运营",
+    "agent_type": "issue",
+    "path": "issue-advance",
+    "description": "Issue 高级运营（增强版）：项目知识基线（codegraph）→ 深度可开发性分析 → 分类/标签/分配 → Spec 生成 → A2A 触发开发"
+  },
   "implementation": {
     "name": "代码实现",
     "agent_type": "coding",
