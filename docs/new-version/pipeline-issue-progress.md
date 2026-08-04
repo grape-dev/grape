@@ -119,7 +119,85 @@
 | #338 Webhook retry | SRE | SRE Agent | actor=grape_bot（bot）→ Agent 名 |
 | #331 API rate limit | Issue | Jason7602 | actor=Jason7602（成员）→ 用户名 |
 
-## 7. 验证
+## 7. 测试用例设计
+
+### 7.1 测试文件
+
+新建 `tests/test_pipeline.py`，直接测试 `src/api/routes/pipeline.py` 的 `_get_issue_pipeline` 纯函数（不依赖 HTTP，便于单元测试）。
+
+### 7.2 测试数据构造
+
+```python
+# 模拟 events 表查询结果（与 get_pipeline 的 SQL 列序一致）
+def _ev(seq, issue_id, event_type, agent_type, title, status, actor, created_at="2026-08-04 10:00:00"):
+    return {"seq": seq, "issue_id": issue_id, "event_type": event_type,
+            "agent_type": agent_type, "title": title, "status": status,
+            "created_at": created_at, "actor": actor}
+```
+
+### 7.3 用例列表
+
+| # | 用例名 | 输入 | 断言 |
+|---|--------|------|------|
+| 1 | `test_single_agent_completed` | 1 个 issue，1 个 issue agent completed 事件 | `statuses=[2,0,0,0,0]`；`latest_event.title='issue_opened'`；`current_owner='Issue Agent'`（actor=grape_bot）|
+| 2 | `test_bot_actor_returns_agent_name` | issue agent 事件 actor='grape_bot' | `current_owner == 'Issue Agent'` |
+| 3 | `test_user_actor_returns_username` | issue agent 事件 actor='Jason7602' | `current_owner == 'Jason7602'` |
+| 4 | `test_multiple_agents_chain` | issue+coding+qa 三个 agent 各有事件 | `statuses=[2,2,2,0,0]`；`agents=['Issue','Coding','QA']`；`result='Processing'`（qa 未全完成则看状态）|
+| 5 | `test_running_stage_is_current_owner` | 最后一个 agent（qa）事件 status='running' | `current_owner` = qa 阶段责任人（bot→'QA Agent'）|
+| 6 | `test_no_events_returns_none` | issue_id 无任何事件 | `_get_issue_pipeline` 返回 `None` |
+| 7 | `test_latest_event_is_last` | 同一 agent 多条事件（seq 递增）| `latest_event.seq == max(seq)`（最新一条）|
+| 8 | `test_failed_stage` | 某 agent 事件 status='failed' | `result == 'Failed'`；该阶段 status=3 |
+| 9 | `test_all_done_released` | 5 个 agent 全部 completed | `result == 'Released'` |
+| 10 | `test_missing_agent_stage` | 某 agent 无事件（如 SRE）| 该阶段 `statuses[i]==0`，卡片显示 "—"/Pending |
+
+### 7.4 关键断言示例
+
+```python
+def test_bot_actor_returns_agent_name():
+    from src.api.routes.pipeline import _get_issue_pipeline
+    events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot")]
+    p = _get_issue_pipeline("owner/repo", "#1", events)
+    assert p is not None
+    assert p["statuses"] == [2, 0, 0, 0, 0]
+    assert p["current_owner"] == "Issue Agent"   # bot → Agent display_name
+
+def test_user_actor_returns_username():
+    events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "Jason7602")]
+    p = _get_issue_pipeline("owner/repo", "#1", events)
+    assert p["current_owner"] == "Jason7602"     # 成员 → 用户名
+
+def test_latest_event_is_last():
+    events = [
+        _ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot"),
+        _ev(2, "#1", "issue_comment", "issue", "评论处理", "completed", "Jason7602"),
+    ]
+    p = _get_issue_pipeline("owner/repo", "#1", events)
+    assert p["stages"][1]["latest_event"]["seq"] == 2   # 最新一条
+```
+
+### 7.5 Mock 依赖
+
+- `get_all_bot_usernames`（`src/user/db.py`）：mock 返回 `["grape_bot"]`
+- `get_agent_display_name`（`src/api/event_pipeline.py`）：mock 或真实（读 agent-description.json）
+
+```python
+from unittest.mock import patch
+
+with patch("src.api.routes.pipeline.get_all_bot_usernames", return_value=["grape_bot"]), \
+     patch("src.api.routes.pipeline.get_agent_display_name", side_effect=lambda at: {
+         "issue": "Issue Agent", "qa": "QA Agent"}.get(at, at)):
+    p = _get_issue_pipeline(...)
+```
+
+> 注：`_get_issue_pipeline` 需从 `get_all_bot_usernames`/`get_agent_display_name` 导入（在函数内 import，便于 mock）。
+
+### 7.6 运行命令
+
+```bash
+python -m pytest tests/test_pipeline.py -v
+```
+
+## 8. 验证
 
 1. 后端单测：`_get_issue_pipeline` 返回含 `latest_event` + `current_owner`；bot actor → Agent 名、用户 actor → 用户名
 2. 前端 JS 语法检查（`node --check`）
