@@ -14,6 +14,7 @@ from src.agent import (
     OpencodeBackend, CodeArtsBackend, get_backend,
     AgentBackend, stream_agent, stream_opencode
 )
+from src.agent.executor import _redact
 
 
 class TestOpencodeBackend:
@@ -135,6 +136,64 @@ class TestBackendParseOutput:
         line = json.dumps({"type": "ping"})
         result = backend.parse_output(line)
         assert result["type"] == "other"
+
+
+class TestRedact:
+    """_redact 函数：日志/事件输出中脱敏 token"""
+
+    def test_redact_replaces_token(self):
+        r = _redact("curl -H 'Authorization: Bearer SECRET123'", ["SECRET123"])
+        assert r == "curl -H 'Authorization: Bearer [REDACTED]'"
+        assert "SECRET123" not in r
+
+    def test_redact_multiple_tokens(self):
+        r = _redact("mix SECRET1 and SECRET2", ["SECRET1", "SECRET2"])
+        assert r == "mix [REDACTED] and [REDACTED]"
+
+    def test_redact_no_token_unchanged(self):
+        r = _redact("no secret here", ["SECRET"])
+        assert r == "no secret here"
+
+    def test_redact_empty(self):
+        assert _redact("", ["S"]) == ""
+        assert _redact("text", []) == "text"
+
+    def test_stream_agent_redacts_tool_use_token(self):
+        """stream_agent 输出（tool_use 等）不应含注入的 token，应为 [REDACTED]"""
+        from unittest.mock import patch, MagicMock
+
+        fake_lines = [
+            json.dumps({"type": "tool_use", "part": {"tool": "bash", "state": {"input": {"command": "curl -H 'Authorization: Bearer BOTTOK' https://api.gitcode.com/x"}}}}),
+            json.dumps({"type": "text", "part": {"text": "reply mentions USERTOK", "type": "text"}}),
+        ]
+
+        class FakeStream:
+            returncode = 0
+            def __init__(self):
+                self._lines = list(fake_lines)
+                self._sidx = 0
+                self.stdout = self
+                self.stderr = self
+            def readline(self):
+                if self._sidx < len(self._lines):
+                    line = self._lines[self._sidx]
+                    self._sidx += 1
+                    return line.encode() + b"\n"
+                return b""
+            def wait(self, timeout=None):
+                return 0
+            def read(self):
+                return b""
+
+        fake_proc = FakeStream()
+        with patch("src.agent.executor.subprocess.Popen", return_value=fake_proc), \
+             patch("src.agent.executor.shutil.which", return_value="/fake/opencode"):
+            events = list(stream_agent("prompt", os.getcwd(), "", "issue",
+                                       bot_token="BOTTOK", user_token="USERTOK"))
+        combined = " ".join(str(d) for _, d in events)
+        assert "BOTTOK" not in combined
+        assert "USERTOK" not in combined
+        assert "[REDACTED]" in combined
 
 
 class TestStreamAgentBackwardCompat:
