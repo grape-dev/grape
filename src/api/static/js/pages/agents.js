@@ -12,7 +12,8 @@ function loadCfgOptions() {
   const skillSelect = document.querySelector('.cfg-skill');
 
   // Backend 下拉：仅未加载时加载
-  if (backendSelect && backendSelect.options.length <= 1) {
+  if (backendSelect && !backendSelect.dataset.loaded) {
+    backendSelect.dataset.loaded = '1';
     API.get('/settings/backend-agents').then(d => {
       const backends = d.backends || [];
       const current = backendSelect.dataset.current || 'opencode';
@@ -22,8 +23,9 @@ function loadCfgOptions() {
     }).catch(() => {});
   }
 
-  // Skill 下拉：始终加载（含当前配置技能选中态），不受 backend 加载状态影响
-  if (skillSelect) {
+  // Skill 下拉：仅未加载时加载（幂等），预加载后点 Configure 不再重复请求
+  if (skillSelect && !skillSelect.dataset.loaded) {
+    skillSelect.dataset.loaded = '1';
     let repo = '';
     try {
       const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
@@ -35,10 +37,16 @@ function loadCfgOptions() {
       const agentType = skillSelect.dataset.agent || '';
       const currentSkill = skillSelect.dataset.current || '';
       const filtered = allSkills.filter(s => s.agent_type === agentType || s.parent_agent_type === agentType);
-      skillSelect.innerHTML = '<option value="">默认官方技能（自动）</option>' +
+      // 若当前配置的 skill 不在返回列表（如自定义 skill），保留该值作为一个 option
+      const hasCurrent = filtered.some(s => s.name === currentSkill);
+      let html = '<option value="">默认官方技能（自动）</option>' +
         filtered.map(s =>
           `<option value="${s.name}" ${s.name === currentSkill ? 'selected' : ''}>${s.display_name || s.name}</option>`
         ).join('');
+      if (currentSkill && !hasCurrent) {
+        html += `<option value="${currentSkill}" selected>${currentSkill}（已配置）</option>`;
+      }
+      skillSelect.innerHTML = html;
     }).catch(() => {});
   }
 }
@@ -116,6 +124,8 @@ function renderAgent(name, data) {
 <div class="cd"><div class="cd-h"><h2>Event History</h2><span class="ts t3">最近 ${events.length} 条</span></div>${evtHtml}</div>`;
 
   el.innerHTML = html;
+  // 预加载配置下拉（即使面板隐藏），确保首次打开 Configure 立即显示 skill/backend，不显示"加载中..."
+  loadCfgOptions();
 }
 
 function saveAgentConfig(name) {
