@@ -1,5 +1,5 @@
 """Agent 执行器：流式子进程调度 (NDJSON)，不绑定具体后端。"""
-import os, subprocess, json, shutil
+import os, subprocess, json, shutil, time
 from typing import Generator
 from src.config import log
 from .base import AgentBackend
@@ -60,7 +60,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  env_extra: dict | None = None,
                  bot_token: str = "", user_token: str = "",
                  agent_name: str = "",
-                 agent_label: str = "") -> Generator:
+                 agent_label: str = "",
+                 max_exec_seconds: int = 600) -> Generator:
     """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）"""
     label = f"{agent_label} " if agent_label else ""
     backend = get_backend(backend_name)
@@ -117,35 +118,78 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     new_session_id = session_id
     error_events = []
     step_count = 0
+    _start_time = time.time()
 
-    for raw_line in iter(proc.stdout.readline, b""):
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line:
-            continue
-        parsed = backend.parse_output(line)
-        if parsed is None:
-            yield ("raw", _redact(line[:200], _tokens))
-            continue
-        et = parsed["type"]
-        if et == "step_start":
-            step_count += 1
-            if parsed.get("sessionID"):
-                new_session_id = parsed["sessionID"]
-            yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
-        elif et == "text":
-            collected_text.append(parsed["text"])
-            yield ("text", _redact(parsed["text"][:150], _tokens).replace("\n", " "))
-        elif et == "reasoning":
-            yield ("reasoning", _redact(parsed["text"][:200], _tokens))
-        elif et == "tool_use":
-            yield ("tool_use", _redact(f"Tool: {parsed['tool']} {json.dumps(parsed.get('input', {}))[:200]}", _tokens))
-        elif et == "step_finish":
-            yield ("step_finish", f"Step {step_count} done, tokens={parsed['tokens']}")
-        elif et == "error":
-            error_events.append(_redact(parsed["message"], _tokens))
-            yield ("error", _redact(parsed["message"], _tokens))
+    import threading
+    _line_queue = []
+    _line_queue_lock = threading.Lock()
+    _reader_done = False
+
+    def _stdout_reader():
+        nonlocal _reader_done
+        try:
+            for raw_line in iter(proc.stdout.readline, b""):
+                with _line_queue_lock:
+                    _line_queue.append(raw_line)
+        except Exception:
+            pass
+        finally:
+            _reader_done = True
+
+    _reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
+    _reader_thread.start()
+
+    while True:
+        with _line_queue_lock:
+            if _line_queue:
+                raw_lines = _line_queue[:]
+                _line_queue.clear()
+            else:
+                raw_lines = []
+        if raw_lines:
+            for raw_line in raw_lines:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                parsed = backend.parse_output(line)
+                if parsed is None:
+                    yield ("raw", _redact(line[:200], _tokens))
+                    continue
+                et = parsed["type"]
+                if et == "step_start":
+                    step_count += 1
+                    if parsed.get("sessionID"):
+                        new_session_id = parsed["sessionID"]
+                    yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
+                elif et == "text":
+                    collected_text.append(parsed["text"])
+                    yield ("text", _redact(parsed["text"][:150], _tokens).replace("\n", " "))
+                elif et == "reasoning":
+                    yield ("reasoning", _redact(parsed["text"][:200], _tokens))
+                elif et == "tool_use":
+                    yield ("tool_use", _redact(f"Tool: {parsed['tool']} {json.dumps(parsed.get('input', {}))[:200]}", _tokens))
+                elif et == "step_finish":
+                    yield ("step_finish", f"Step {step_count} done, tokens={parsed['tokens']}")
+                elif et == "error":
+                    error_events.append(_redact(parsed["message"], _tokens))
+                    yield ("error", _redact(parsed["message"], _tokens))
+                else:
+                    yield ("other", et)
+        elif _reader_done:
+            break
         else:
-            yield ("other", et)
+            elapsed = time.time() - _start_time
+            if elapsed > max_exec_seconds:
+                log.warning(f"{label}{backend.name} exec timeout ({max_exec_seconds}s), killing")
+                proc.kill()
+                yield ("done", {
+                    "exit_code": -9, "text": _redact("\n".join(collected_text), _tokens),
+                    "oc_session_id": new_session_id,
+                    "errors": error_events + [f"exec timeout after {max_exec_seconds}s"],
+                    "stderr": "",
+                })
+                return
+            time.sleep(0.1)
 
     try:
         proc.wait(timeout=120)
