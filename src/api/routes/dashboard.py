@@ -41,6 +41,22 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         except Exception:
             pass
 
+        # 每个 Agent 的最近 2 个事件（供 Dashboard Agent 卡片展示，替代假数据）
+        agent_recent_events = {}
+        try:
+            for atype in ["vod", "issue", "coding", "qa", "sre"]:
+                c.execute(
+                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key=? AND agent_type=? ORDER BY seq DESC LIMIT 2",
+                    (repo_key, atype)
+                )
+                agent_recent_events[atype] = [
+                    {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
+                     "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": r[6]}
+                    for r in c.fetchall()
+                ]
+        except Exception:
+            pass
+
     agent_types_present = {a["agent_type"] for a in agent_sessions}
     all_types = ["vod", "issue", "coding", "qa", "sre"]
     for atype in all_types:
@@ -91,5 +107,6 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         },
         "agents": agent_sessions,
         "agent_event_counts": agent_event_counts,
+        "agent_recent_events": agent_recent_events,
         "activity": recent_events,
     }

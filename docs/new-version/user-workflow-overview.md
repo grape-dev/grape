@@ -201,8 +201,9 @@ Dashboard 主内容区域展示所选仓库的完整工作流看板：
 │                                                        │
  │  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐   │
  │  │♫ VOD │→│⚠ Issue│→│⚙Coding│→│✔ QA  │→│♡ SRE │   │
- │  │47 sig│  │3 open │  │PR1278│  │92%pas│  │v2.3.1│   │
  │  │OpenCode│  │OpenCode│  │OpenCode│  │OpenCode│  │OpenCode│   │
+ │  │▶ Signal→│  │✓ Issue#342│  │✓ A2A:cod│  │▶ PR#1278│  │✓ Release│   │
+ │  │   Issue│  │  done  │  │  done  │  │ review  │  │  done  │   │
  │  └──────┘  └──────┘  └──────┘  └──────┘  └──────┘   │
 │                                                        │
 │  ┌─ Chat Agent (Personal Assistant) ──────────────┐  │
@@ -224,7 +225,7 @@ Dashboard 主要区域说明：
 | 区域 | 内容 |
 |------|------|
 | **Repo Header** | 当前仓库名称、状态（Webhook OK）、指标（自动解决率、事件量、平均响应时间） |
-| **Agent Flow** | 5 个 Agent 横向流水线卡片，每个显示状态、关键指标；右上角提供开发场景下拉选择器（可切换 Agent-Skill 映射） |
+| **Agent Flow** | 5 个 Agent 横向流水线卡片，每个显示 Backend 引擎 + 状态 + **最近 2 个处理事件**（title + status，与 Pipeline 页一致，非假数据）；右上角提供开发场景下拉选择器（可切换 Agent-Skill 映射） |
 | **Chat Lane** | 个人 Chat Agent 横贯连接条，点击进入 Chat 页面 |
 | **Recent Activity** | 最近 24 小时事件流，点击事件可跳转到 Event Detail 详情页 |
 

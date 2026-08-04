@@ -14,7 +14,7 @@ function renderDashboard(data) {
 
   const agentOrder = ['vod','issue','coding','qa','sre'];
   const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
-  const bottomLabels = ['feedback→issue','2 bugs · 1 feature','implementing...','pass: 92%','uptime 99.9%'];
+  const recentByAgent = data.agent_recent_events || {};
 
   let html = `<div class="cd" style="background:linear-gradient(135deg,#eef3ff,#eefdf2);border-color:#c6d9f7">
     <div class="flex fc gap12">
@@ -58,12 +58,28 @@ function renderDashboard(data) {
     const dotColor = meta.color || colors[at] || 'var(--t2)';
     const desc = meta.description || descs[at] || '';
 
+    // 该 Agent 最近 2 个事件（替代假数据）
+    const evs = (recentByAgent[at] || []).slice(0, 2);
+    let evHtml = '';
+    if (evs.length > 0) {
+      evHtml = evs.map(ev => {
+        const stCls = ev.status === 'failed' ? 'tr' : ev.status === 'running' ? 'ty' : ev.status === 'completed' ? 'tgx' : 't2';
+        const stTxt = ev.status === 'completed' ? 'Done' : ev.status === 'running' ? 'In Progress' : ev.status === 'failed' ? 'Failed' : ev.status || '—';
+        return `<div style="font-size:9px;padding:1px 0;border-bottom:1px dashed var(--b);display:flex;justify-content:space-between;gap:4px">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ev.summary || ev.title || ev.event_type}</span>
+          <span class="${stCls}" style="flex-shrink:0">${stTxt}</span>
+        </div>`;
+      }).join('');
+    } else {
+      evHtml = '<div class="t2" style="font-size:9px">暂无事件</div>';
+    }
+
     html += `<div class="nd" style="border-top:3px solid ${borderColor}" onclick="app.nav('${at}')">
       <div class="nh"><span class="n" style="background:${dotColor}"></span><h4>${meta.display_name || agentLabels[i]}</h4></div>
       <div class="nds">${desc}</div>
       <div class="nm"><span class="ml">Backend</span><span class="mv">${backend}</span></div>
       <div class="ns"><span class="d" style="background:${statusDot}"></span>${nsText}</div>
-      <div class="nt ${ntCls}">${bottomLabels[i]}</div>
+      <div class="nt ${ntCls}">${evHtml}</div>
     </div>`;
   });
 
