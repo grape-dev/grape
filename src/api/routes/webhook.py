@@ -80,6 +80,9 @@ async def a2a_endpoint(request: Request):
     issue_number = payload.get("issue_number", "")
 
     repo_key = f"gitcode:{repository}"
+    # 统一 repo_key 格式（与 run_pipeline 一致：去掉 "source:" 前缀，所有查询都用 "owner/repo"）
+    if ":" in repo_key:
+        repo_key = repo_key.split(":", 1)[1]
     log.info(f"A2A: agent={agent_name}, repo={repository}")
     seq = 0
 
