@@ -176,7 +176,7 @@ function loadAgentTypes() {
       title.textContent = 'DevOps Skills';
       renderSkills();
     } else if (view === 'backends') {
-      title.textContent = 'Backend Agents';
+      title.textContent = 'Backend Runtimes';
       API.get('/settings/backend-agents').then(renderBackends).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (view === 'repos') {
       title.textContent = '选择仓库';

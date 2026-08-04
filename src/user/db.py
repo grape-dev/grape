@@ -1204,7 +1204,7 @@ def has_user_repos(user_id: int) -> bool:
 init_user_repos_table()
 
 
-# ====== Backend Agents 缓存表 ======
+# ====== Backend Runtimes 缓存表 ======
 
 def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = ""):
     """批量写入 backend agents 缓存（scope: global/repo/user）

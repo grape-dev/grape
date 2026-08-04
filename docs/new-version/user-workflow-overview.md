@@ -166,7 +166,7 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 │  Settings                                           │
 │    ⚙ General Settings                                │
 │    ⎘ GitCode Repo                                    │
-│    ⎘ Backend Agents                                   │
+│    ⎘ Backend Runtimes                                   │
 │                                                     │
 │    ↩ Logout                                          │
 └─────────────────────────────────────────────────────┘
@@ -177,7 +177,7 @@ Dashboard 以**单个已托管仓库**为维度展示，左侧导航栏可下拉
 - **DevOps Agents**：核心工作流的 5 个 Agent，点击进入对应 Agent 详情
 - **Account**：用户个人信息、在线状态
 - **Settings**：仓库级别的通用设置（凭据、通知、自定义 Skill 等），与 Account 并列
-- **Backend Agents**：检测本地 Agent 引擎安装状态（OpenCode/CodeArts/Hermes），配置连接凭据
+- **Backend Runtimes**：检测本地 Agent 引擎安装状态（OpenCode/CodeArts/Hermes），配置连接凭据
 - **Chat Agent 设置**：集成在 Chat Agent 页面内部，不在侧边栏展示
 
 切换仓库后，Dashboard、Pipeline 等页面内容跟随切换为该仓库的数据。
@@ -703,13 +703,13 @@ GET /api/repos/member → {"repos": [...]}
 POST /api/repos/sync → 调 GitCode API 拉取 → 写入 user_repos → 返回 {"repos": [...]}
 ```
 
-### 2.12 Backend Agents 页面
+### 2.12 Backend Runtimes 页面
 
 管理和检测本地已安装的 Agent 引擎（OpenCode、CodeArts、Hermes 等），检查运行状态和配置连接凭据。此页面不与具体的 DevOps Agent 绑定，属于系统级 Agent 引擎管理：
 
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
-│  Backend Agents                                      │
+│  Backend Runtimes                                      │
 ├───────────────────────────────────────────────────────┤
 │                                                        │
 │  ┌─ OpenCode ──────────────────────────────────────┐  │
@@ -741,7 +741,7 @@ POST /api/repos/sync → 调 GitCode API 拉取 → 写入 user_repos → 返回
 └─────────────────────────────────────────────────────────┘
 ```
 
-Backend Agents 页面说明：
+Backend Runtimes 页面说明：
 
 | 元素 | 说明 |
 |------|------|

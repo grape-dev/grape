@@ -1,4 +1,4 @@
-"""Settings 路由：凭据、通知偏好、GitCode Repo、Backend Agents"""
+"""Settings 路由：凭据、通知偏好、GitCode Repo、Backend Runtimes"""
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
@@ -175,7 +175,7 @@ async def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_curren
     return {"message": "OAuth 配置已更新"}
 
 
-# ====== Backend Agents ======
+# ====== Backend Runtimes ======
 
 @router.get("/backend-agents")
 async def get_backend_agents(user: dict = Depends(get_current_user)):
