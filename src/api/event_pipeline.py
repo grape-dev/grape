@@ -169,11 +169,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 4. 查找 Agent 配置（backend + skill），找不到则不处理
     backend = None
     skill_name = ""
+    skill_id = 0
+    skill_path = ""
     repo_name = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT backend_id, skill FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
+            c.execute("SELECT backend_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
             row = c.fetchone()
             if row:
                 backend = "opencode"
@@ -182,8 +184,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     brow = c.fetchone()
                     if brow and brow[0]:
                         backend = brow[0]
+                skill_id = row[2] or 0
                 skill_name = row[1] or ""
-                log.info(f"Pipeline: agent session found, backend={backend}, skill={skill_name or '(default)'}")
+                # skill_id 优先：关联 skill 表拿 skill_name + skill_path
+                if skill_id:
+                    from src.user.db import get_skill_by_id
+                    _sk = get_skill_by_id(skill_id)
+                    if _sk:
+                        skill_name = _sk.get("skill_name") or skill_name
+                        skill_path = _sk.get("skill_path") or skill_name
+                log.info(f"Pipeline: agent session found, backend={backend}, skill={skill_name or '(default)'}, skill_id={skill_id}")
     except Exception as e:
         log.warning(f"Pipeline: agent session lookup failed: {e}")
 
@@ -292,6 +302,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # 后台异步执行 Agent（执行完更新该 seq 的 result/status）
     if backend and skill_name and seq > 0:
+        evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
         threading.Thread(target=_execute_agent, args=(
             repo_key, seq, agent_type, backend, skill_name, evt,
         ), daemon=True, name=f"ag-{agent_type}-{seq}").start()
@@ -349,7 +360,8 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     agent_name = get_agent_display_name(agent_type)
 
     try:
-        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type])
+        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
+                              skill_path=evt.get("_skill_path", ""))
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
         append_skipped_event(repo_key, evt.get("type", ""), "prompt_build_failed", str(e))

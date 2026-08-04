@@ -155,9 +155,11 @@ def ensure_default_agent_sessions(repo_key: str):
         for _at, _sk in _mapping.items():
             _sid = str(uuid.uuid4())
             try:
+                from src.user.db import resolve_skill_id
+                _skill_id = resolve_skill_id(_sk)
                 c.execute(
-                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend_id, skill, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,datetime('now'),?,?,'feishu')",
-                    (_sid, repo_key, _at, _default_backend_id, _sk, _token, "idle",
+                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,'feishu')",
+                    (_sid, repo_key, _at, _default_backend_id, _sk, _skill_id, _token, "idle",
                      _im_app_id if _at == "vod" else "", _im_app_secret if _at == "vod" else "")
                 )
             except Exception as e:

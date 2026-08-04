@@ -40,7 +40,7 @@ def _get_vod_session(repo_key: str) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, repo_key, backend_id, skill, im_app_id, repo_gitcode_token "
+            c.execute("SELECT id, repo_key, backend_id, skill, skill_id, im_app_id, repo_gitcode_token "
                       "FROM devops_agent_session WHERE agent_type='vod' AND repo_key=?", (repo_key,))
             row = c.fetchone()
         if row:
@@ -51,8 +51,8 @@ def _get_vod_session(repo_key: str) -> dict | None:
                 if brow and brow[0]:
                     backend = brow[0]
             return {"id": row[0], "repo_key": row[1], "backend": backend,
-                    "skill": row[3] or "vod", "im_app_id": row[4] or "",
-                    "repo_gitcode_token": row[5] or ""}
+                    "skill": row[3] or "vod", "skill_id": row[4] or 0, "im_app_id": row[5] or "",
+                    "repo_gitcode_token": row[6] or ""}
     except Exception:
         pass
     return None
@@ -93,7 +93,7 @@ def _list_vod_repos(bot_app_id: str) -> list:
     return results
 
 
-def _build_vod_prompt(evt: dict, skill_name: str) -> str:
+def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     from src.api.event_store import get_issue_summary
     user_msg = evt.get("payload", {}).get("user_message", "")
     user_name = evt.get("actor", "未知用户")
@@ -110,12 +110,13 @@ def _build_vod_prompt(evt: dict, skill_name: str) -> str:
         parts.append(summary)
         parts.append("")
 
-    skill_path = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
-    if os.path.exists(skill_path):
-        with open(skill_path, encoding="utf-8") as f:
-            parts.append(f"## Skill: {skill_name}\n{f.read()}\n")
-    else:
-        parts.append(f"Read the file at {skill_path} using the read tool. Execute its instructions step by step.")
+    _sp = skill_path or os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
+    parts.append(
+        f"## Skill: {skill_name}\n"
+        f"Skill 文件：{_sp}\n"
+        f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令（不得跳过读取或凭名称猜测）。\n"
+        f"SKILL.md 中如指引读取 references/ 目录下的文件，请按需读取后再执行。"
+    )
 
     parts.append("## 角色定义")
     parts.append(_VOD_ROLE_DEFINITION)
@@ -139,6 +140,13 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
     backend_session_id = conv.get("backend_session_id", "")
     backend = agent_session.get("backend", "opencode")
     skill = agent_session.get("skill", "vod")
+    skill_path = ""
+    if agent_session.get("skill_id"):
+        try:
+            from src.user.db import get_skill_path
+            skill_path = get_skill_path(agent_session.get("skill_id"))
+        except Exception:
+            pass
     repo_token = agent_session.get("repo_gitcode_token", "") or ""
     if not repo_token:
         try:
@@ -147,7 +155,7 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
         except Exception:
             pass
 
-    prompt = _build_vod_prompt(evt, skill)
+    prompt = _build_vod_prompt(evt, skill, skill_path)
     wsd = os.path.join(WORKSPACE_DIR, "vod", repo_key.replace(":", "_").replace("/", "_"))
     os.makedirs(wsd, exist_ok=True)
 
@@ -318,7 +326,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT repo_key, backend_id, skill, repo_gitcode_token FROM devops_agent_session WHERE id=?",
+                c.execute("SELECT repo_key, backend_id, skill, skill_id, repo_gitcode_token FROM devops_agent_session WHERE id=?",
                           (agent_session_id,))
                 session_row = c.fetchone()
         except Exception:
@@ -344,6 +352,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             repo_key = repos[0]["repo_key"]
             agent_session = {"backend": agent_session.get("backend", "opencode"),
                              "skill": agent_session.get("skill", "vod"),
+                             "skill_id": agent_session.get("skill_id", 0) or 0,
                              "repo_gitcode_token": agent_session.get("repo_gitcode_token", "")}
         else:
             repo_key = session_row[0]
@@ -356,7 +365,8 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
                     if brow and brow[0]:
                         backend = brow[0]
             agent_session = {"backend": backend, "skill": session_row[2] or "vod",
-                             "repo_gitcode_token": session_row[3] or ""}
+                             "skill_id": session_row[3] or 0,
+                             "repo_gitcode_token": session_row[4] or ""}
 
         evt = {
             "type": "vod_signal", "repository": repo_key, "source": "vod_im",

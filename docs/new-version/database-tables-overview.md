@@ -119,7 +119,8 @@ id TEXT PRIMARY KEY,                   -- UUID
 repo_key TEXT NOT NULL,                -- owner/repo
 agent_type TEXT NOT NULL,              -- vod/issue/coding/qa/sre（repo 级，不含用户级 chat）
 backend_id INTEGER DEFAULT 0,          -- 引用 backend_agents.id（默认 opencode）
-skill TEXT DEFAULT '',
+skill TEXT DEFAULT '',                  -- skill_name（冗余保留，供调试/回退）
+skill_id INTEGER DEFAULT 0,             -- 引用 skill.id（skill 主键，prompt 构建经 skill_id 查 skill_name/skill_path）
 backend_session_id TEXT DEFAULT '',    -- 通用 backend 会话（支持 opencode/codearts/cursor/codex）
 repo_gitcode_token TEXT DEFAULT '',    -- repo 级 bot token
 status TEXT DEFAULT 'idle',
@@ -300,7 +301,8 @@ id TEXT PRIMARY KEY,
 user_id INTEGER DEFAULT 0,             -- → user_accounts.id（合并自 chat_config）
 repo_key TEXT DEFAULT '',              -- 关联仓库（可空=全局配置）
 backend_id INTEGER DEFAULT 0,          -- 引用 backend_agents.id（默认 opencode），v3.1 由 backend 改名
-skill TEXT DEFAULT '',                 -- 合并自 chat_config
+skill TEXT DEFAULT '',                 -- skill_name（冗余保留），合并自 chat_config
+skill_id INTEGER DEFAULT 0,            -- 引用 skill.id（skill 主键，prompt 构建经 skill_id 查 skill_name/skill_path）
 im_provider TEXT DEFAULT '',           -- feishu/wecom/dingtalk
 im_app_id TEXT DEFAULT '',             -- 关联的 IM bot app_id
 im_app_secret TEXT DEFAULT '',         -- IM bot app_secret

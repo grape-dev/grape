@@ -366,6 +366,9 @@ def _migrate_tables():
         "ALTER TABLE agent_type_config ADD COLUMN parent_agent_type TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN agent_type TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN skill TEXT DEFAULT ''",
+        "ALTER TABLE chat_agent_session ADD COLUMN skill TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN skill_id INTEGER DEFAULT 0",
+        "ALTER TABLE chat_agent_session ADD COLUMN skill_id INTEGER DEFAULT 0",
         "ALTER TABLE chat_conversations ADD COLUMN session_id TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN user_gitcode_token TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN repo_gitcode_token TEXT DEFAULT ''",
@@ -800,3 +803,29 @@ def _migrate_tables():
                 log.info("Migrated chat_conversations session_id -> backend_session_id")
     except Exception as e:
         log.warning(f"Migrate chat_conversations session_id failed: {e}")
+    # 迁移 devops_agent_session / chat_agent_session：skill_name(TEXT) → skill_id(INTEGER)
+    # 按 skill_name 匹配 skill 表（official 优先）拿 id，匹配不到则保留 skill_name（兼容旧数据）
+    try:
+        with db_lock:
+            c = db.cursor()
+            for _tbl in ("devops_agent_session", "chat_agent_session"):
+                _cols = [r[1] for r in c.execute(f"PRAGMA table_info({_tbl})").fetchall()]
+                if "skill" not in _cols or "skill_id" not in _cols:
+                    continue
+                # 先构建 skill_name → id 映射（official 优先）
+                c.execute("SELECT id, skill_name FROM skill WHERE scope='official'")
+                _name2id = {r[1]: r[0] for r in c.fetchall()}
+                c.execute(f"SELECT id, skill FROM {_tbl} WHERE skill IS NOT NULL AND skill!='' AND (skill_id IS NULL OR skill_id=0)")
+                _rows = c.fetchall()
+                _updated = 0
+                for _sid, _sname in _rows:
+                    _sname = (_sname or "").strip()
+                    _id = _name2id.get(_sname)
+                    if _id:
+                        c.execute(f"UPDATE {_tbl} SET skill_id=? WHERE id=?", (_id, _sid))
+                        _updated += 1
+                db.commit()
+                if _updated:
+                    log.info(f"Migrated {_tbl}.skill_name -> skill_id ({_updated} rows)")
+    except Exception as e:
+        log.warning(f"Migrate skill_name -> skill_id failed: {e}")

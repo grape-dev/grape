@@ -54,9 +54,11 @@ async def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
         for agent_type, skill in mapping.items():
             sid = str(uuid.uuid4())
             try:
+                from src.user.db import resolve_skill_id
+                skill_id = resolve_skill_id(skill)
                 c.execute(
-                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, repo_gitcode_token, status, last_active_at) VALUES (?,?,?,?,?,?,?,datetime('now'))",
-                    (sid, repo_key, agent_type, "opencode", skill, repo_token, "idle")
+                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, skill_id, repo_gitcode_token, status, last_active_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'))",
+                    (sid, repo_key, agent_type, "opencode", skill, skill_id, repo_token, "idle")
                 )
                 updated += 1
             except Exception as e:

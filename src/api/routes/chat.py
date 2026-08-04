@@ -110,10 +110,11 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "opencode")
     skill_name = cfg.get("skill", "") or "chat"
+    skill_id = cfg.get("skill_id", 0) or 0
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
-    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name)
+    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id)
     backend_session_id = conv.get("backend_session_id", "") if conv else ""
     if backend_session_id and not backend_session_id.startswith("ses_"):
         backend_session_id = ""
@@ -201,10 +202,11 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "opencode")
     skill_name = cfg.get("skill", "") or "chat"
+    skill_id = cfg.get("skill_id", 0) or 0
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
-    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name)
+    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id)
     backend_session_id = conv.get("backend_session_id", "") if conv else ""
     if backend_session_id and not backend_session_id.startswith("ses_"):
         backend_session_id = ""
@@ -298,7 +300,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     )
 
 
-def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: str = "") -> str:
+def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: str = "", skill_id: int = 0) -> str:
     parts = [
         "You are a DevOps assistant for GitCode. You can:",
         "- Query issues, PRs, commits, repository info via GitCode API",
@@ -321,22 +323,28 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
                 parts.append(f"\nRepository event context:\n{summary}")
         except Exception:
             pass
-    if skill_name:
-        # 从 DB 查找 skill 的实际目录路径
-        skill_dir = skill_name
-        try:
-            from src.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT skill_path FROM skill WHERE skill_name=? AND skill_path!='' AND is_active=1 LIMIT 1", (skill_name,))
-                row = c.fetchone()
-                if row:
-                    skill_dir = row[0]
-        except Exception:
-            pass
-        from src.config import SKILLS_DIR
-        skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
-        parts.append(f"\n## Current Skill: {skill_name}\nSkill file: {skill_path}\nRead this file and follow its instructions.")
+    if skill_name or skill_id:
+        # skill_id 优先：通过 skill 表拿真实路径（含 custom/repo scope）
+        skill_path = ""
+        if skill_id:
+            from src.user.db import get_skill_path
+            skill_path = get_skill_path(skill_id)
+        if not skill_path:
+            # fallback：按 skill_name 查 DB skill_path
+            skill_dir = skill_name
+            try:
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT skill_path FROM skill WHERE skill_name=? AND skill_path!='' AND is_active=1 LIMIT 1", (skill_name,))
+                    row = c.fetchone()
+                    if row:
+                        skill_dir = row[0]
+            except Exception:
+                pass
+            from src.config import SKILLS_DIR
+            skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
+        parts.append(f"\n## Current Skill: {skill_name or skill_id}\nSkill file: {skill_path}\nRead this file and follow its instructions.")
     # GitCode API 访问说明
     parts.append("""
 ## GitCode API Access

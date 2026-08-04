@@ -218,7 +218,7 @@ def extract_event_number(payload):
     return None
 
 
-def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
+def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path=""):
     number = extract_event_number(evt['payload'])
     repo = evt['repository']
     payload = evt['payload']
@@ -295,13 +295,14 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None):
     parts.append(_build_history_file_guide(repo_key, account))
 
     if skills:
-        skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
-        if os.path.exists(skill_path):
-            with open(skill_path, encoding="utf-8") as f:
-                skill_content = f.read()
-            parts.append(f"## Skill: {skills[0]}\n{skill_content}\n\nExecute the instructions above step by step. Do not analyze or propose — execute.")
-        else:
-            parts.append(f"Read the file at {skill_path} using the read tool. Execute its instructions step by step. Do not analyze or propose — execute.")
+        _sp = skill_path or os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
+        parts.append(
+            f"## Skill: {skills[0]}\n"
+            f"Skill 文件：{_sp}\n"
+            f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令（不得跳过读取或凭名称猜测）。\n"
+            f"SKILL.md 中如指引读取 references/ 目录下的文件，请按需读取后再执行。\n"
+            f"执行以上指令，不要分析或提议——直接执行。"
+        )
 
     if feishu_ctx and skills and skills[0] == "im-notify":
         repo_key = f"{evt['source']}:{evt['repository']}"
@@ -372,11 +373,9 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
         skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
-        if os.path.exists(skill_path):
-            with open(skill_path, encoding="utf-8") as f:
-                skill_content = f.read()
-            parts.append(f"## Skill: {skills[0]}\n{skill_content}\n\nFollow the instructions above.")
-        else:
-            parts.append(f"Read the file at {skill_path} using the read tool. Follow its instructions.")
+        parts.append(
+            f"Skill 文件：{skill_path}\n"
+            f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令（不得跳过读取或凭名称猜测）。"
+        )
     parts.append(build_chat_role_definition())
     return "\n".join(parts)

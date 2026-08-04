@@ -77,7 +77,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, backend_id, skill, repo_gitcode_token, backend_session_id, status, last_active_at, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                "SELECT id, backend_id, skill, skill_id, repo_gitcode_token, backend_session_id, status, last_active_at, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
@@ -88,8 +88,8 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
                     brow = c.fetchone()
                     if brow and brow[0]:
                         backend_name = brow[0]
-                session_data = {"id": row[0], "backend": backend_name, "skill": row[2] or "", "repo_gitcode_token": row[3] or "", "backend_session_id": row[4], "status": row[5], "last_active_at": row[6],
-                               "im_app_id": row[7] or ""}
+                session_data = {"id": row[0], "backend": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_gitcode_token": row[4] or "", "backend_session_id": row[5], "status": row[6], "last_active_at": row[7],
+                               "im_app_id": row[8] or ""}
         except Exception:
             pass
 
@@ -153,6 +153,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         "bg": BGS.get(name, "var(--bg)"),
         "backend": session_data.get("backend", meta.get("default_backend", "opencode")),
         "skill": session_data.get("skill", ""),
+        "skill_id": session_data.get("skill_id", 0),
         "repo_gitcode_token": session_data.get("repo_gitcode_token", ""),
         "status": session_data.get("status", "idle"),
         "last_active": session_data.get("last_active_at", ""),
@@ -263,11 +264,12 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     with db_lock:
         c = db.cursor()
         try:
-            from src.user.db import ensure_default_backend, get_backend_id_by_name
+            from src.user.db import ensure_default_backend, get_backend_id_by_name, resolve_skill_id
             backend_id = get_backend_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
+            skill_id = resolve_skill_id(body.skill) if body.skill else 0
             c.execute(
-                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend_id, skill, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,datetime('now'),?,?,?)",
-                (session_id, repo_key, name, backend_id, body.skill, repo_token, "idle",
+                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?)",
+                (session_id, repo_key, name, backend_id, body.skill, skill_id, repo_token, "idle",
                  body.im_app_id if name == "vod" else "",
                  app_secret if name == "vod" and app_secret else "",
                  "feishu" if name == "vod" and body.im_app_id else "")

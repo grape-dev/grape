@@ -630,6 +630,63 @@ def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
     return path
 
 
+def get_skill_by_id(skill_id) -> dict | None:
+    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type）"""
+    if not skill_id:
+        return None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id, skill_name, display_name, description, agent_type, skill_path, scope, owner_id FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
+            row = c.fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0], "skill_name": row[1], "display_name": row[2] or row[1],
+                "description": row[3] or "", "agent_type": row[4] or "",
+                "skill_path": row[5] or row[1], "scope": row[6] or "official", "owner_id": row[7] or "",
+            }
+    except Exception as e:
+        log.warning(f"get_skill_by_id failed: {e}")
+        return None
+
+
+def resolve_skill_id(skill_name: str, owner_id: str = "") -> int:
+    """按 skill_name 匹配 skill 表拿主键 id（official 优先，其次 user/repo 匹配 owner）"""
+    if not skill_name:
+        return 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1", (skill_name,))
+            row = c.fetchone()
+            if row:
+                return row[0]
+            if owner_id:
+                c.execute("SELECT id FROM skill WHERE skill_name=? AND (scope='user' OR scope='repo') AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, owner_id))
+                row = c.fetchone()
+                if row:
+                    return row[0]
+    except Exception as e:
+        log.warning(f"resolve_skill_id failed: {e}")
+    return 0
+
+
+def get_skill_path(skill_id) -> str:
+    """按 skill_id 返回 skill 的实际 SKILL.md 绝对路径（official/user/repo scope 处理）"""
+    skill = get_skill_by_id(skill_id)
+    if not skill:
+        return ""
+    from src.config import SKILLS_DIR
+    sp = skill.get("skill_path") or skill.get("skill_name") or ""
+    if skill.get("scope") == "user":
+        return os.path.join(SKILLS_DIR, "custom", skill.get("owner_id") or "", sp, "SKILL.md")
+    if skill.get("scope") == "repo":
+        return os.path.join(SKILLS_DIR, "repo", skill.get("owner_id") or "", sp, "SKILL.md")
+    return os.path.join(SKILLS_DIR, sp, "SKILL.md")
+
+
+
 def create_skill(user_id: int, skill_name: str, agent_type: str = "", description: str = "",
                  parent_agent_type: str = "", scope: str = "user", owner_id: str = "") -> bool:
     try:

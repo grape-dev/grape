@@ -98,11 +98,12 @@ async def a2a_endpoint(request: Request):
         from src.session_manager import db, db_lock
         backend = "opencode"
         skill_name = ""
+        skill_path = ""
         repo_name = repository.split("/", 1)[-1] if "/" in repository else repository
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT backend_id, skill FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repository, agent_name))
+                c.execute("SELECT backend_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repository, agent_name))
                 row = c.fetchone()
                 if row:
                     backend = "opencode"
@@ -112,6 +113,12 @@ async def a2a_endpoint(request: Request):
                         if brow and brow[0]:
                             backend = brow[0]
                     skill_name = row[1] or ""
+                    if row[2]:
+                        from src.user.db import get_skill_by_id
+                        _sk = get_skill_by_id(row[2])
+                        if _sk:
+                            skill_name = _sk.get("skill_name") or skill_name
+                            skill_path = _sk.get("skill_path") or skill_name
         except Exception:
             pass
 
@@ -123,6 +130,7 @@ async def a2a_endpoint(request: Request):
             "account": account,
             "issue_id": str(issue_number) if issue_number else "",
             "_a2a_context": context,
+            "_skill_path": skill_path,
             "payload": {
                 "repository": repository,
                 "account": account,

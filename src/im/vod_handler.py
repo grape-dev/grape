@@ -28,7 +28,7 @@ _VOD_ROLE_DEFINITION = """
 """
 
 
-def _build_vod_prompt(evt: dict, skill_name: str) -> str:
+def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     """构建 VOD IM 专用的 prompt"""
     user_msg = evt.get("payload", {}).get("user_message", "")
     user_name = evt.get("actor", "未知用户")
@@ -45,12 +45,13 @@ def _build_vod_prompt(evt: dict, skill_name: str) -> str:
         parts.append(summary)
         parts.append("")
 
-    skill_path = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
-    if os.path.exists(skill_path):
-        with open(skill_path, encoding="utf-8") as f:
-            parts.append(f"## Skill: {skill_name}\n{f.read()}\n")
-    else:
-        parts.append(f"Read the file at {skill_path} using the read tool. Execute its instructions step by step.")
+    _sp = skill_path or os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
+    parts.append(
+        f"## Skill: {skill_name}\n"
+        f"Skill 文件：{_sp}\n"
+        f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令（不得跳过读取或凭名称猜测）。\n"
+        f"SKILL.md 中如指引读取 references/ 目录下的文件，请按需读取后再执行。"
+    )
 
     parts.append("## 角色定义")
     parts.append(_VOD_ROLE_DEFINITION)
@@ -75,7 +76,7 @@ def _get_vod_session(repo_key: str) -> dict | None:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT id, backend_id, skill, repo_gitcode_token, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                "SELECT id, backend_id, skill, skill_id, repo_gitcode_token, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
                 (repo_key,)
             )
             row = c.fetchone()
@@ -87,8 +88,9 @@ def _get_vod_session(repo_key: str) -> dict | None:
                     if brow and brow[0]:
                         backend = brow[0]
                 return {"id": row[0], "backend": backend,
-                        "skill": row[2] or "vod", "repo_gitcode_token": row[3] or "",
-                        "im_app_id": row[4] or ""}
+                        "skill": row[2] or "vod", "skill_id": row[3] or 0,
+                        "repo_gitcode_token": row[4] or "",
+                        "im_app_id": row[5] or ""}
     except Exception:
         pass
     return None
@@ -130,6 +132,13 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
     from src.agent.executor import stream_agent
 
     skill_name = agent_session.get("skill", "vod")
+    skill_path = ""
+    if agent_session.get("skill_id"):
+        try:
+            from src.user.db import get_skill_path
+            skill_path = get_skill_path(agent_session.get("skill_id"))
+        except Exception:
+            pass
     repo_token = agent_session.get("repo_gitcode_token", "") or ""
     if not repo_token:
         try:
@@ -137,7 +146,7 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
             repo_token = get_gitcode_token(repo_key=repo_key) or ""
         except Exception:
             pass
-    prompt = _build_vod_prompt(evt, skill_name)
+    prompt = _build_vod_prompt(evt, skill_name, skill_path)
     ws = os.path.join(WORKSPACE_DIR, repo_key, "vod-agent")
     os.makedirs(ws, exist_ok=True)
 
@@ -368,7 +377,7 @@ def process_vod_message(message: dict, bot_app_id: str):
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT repo_key, backend_id, skill, repo_gitcode_token FROM devops_agent_session WHERE id=?", (agent_session_id,))
+                c.execute("SELECT repo_key, backend_id, skill, skill_id, repo_gitcode_token FROM devops_agent_session WHERE id=?", (agent_session_id,))
                 session_row = c.fetchone()
         except Exception:
             session_row = None
@@ -390,7 +399,8 @@ def process_vod_message(message: dict, bot_app_id: str):
             except Exception:
                 pass
         agent_session = {"backend": backend, "skill": session_row[2] or "vod",
-                         "repo_gitcode_token": session_row[3] or ""}
+                         "skill_id": session_row[3] or 0,
+                         "repo_gitcode_token": session_row[4] or ""}
 
         # 构建事件
         evt = {
