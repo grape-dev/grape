@@ -76,8 +76,61 @@ cd devops-bot
 pip install lark-oapi websocket-client pytest paramiko
 cp configs/global-bot-token.example.json configs/global-bot-token.json
 # 编辑 global-bot-token.json 填入 GitCode Bot Token / OAuth 凭据
-python -m src.main
+python -m src.api.run
 ```
+
+## 启动方式（双端口）
+
+生产环境采用**双端口**架构，由 `src/api/run.py` 统一启动：
+
+| 端口 | 服务 | 入口 |
+|------|------|------|
+| **80** | WebUI + 完整 API（前端页面、Dashboard、Agent 配置等） | `src.api.main:app` |
+| **8080** | Webhook 专用（GitCode webhook 事件接收） | `src.api.run_webhook:app` |
+
+```bash
+# 生产启动（同时拉起 80 + 8080）
+python -m src.api.run
+
+# 开发模式（单端口 3000，热重载）
+python -m src.api.run --dev
+```
+
+### systemd 托管（推荐，生产服务器）
+
+服务器通过 systemd 服务 `devops-bot.service` 管理，配置于 `/etc/systemd/system/devops-bot.service`：
+
+```ini
+[Unit]
+Description=DevOps Bot API (80 webui + 8080 webhook)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/devops-bot
+ExecStartPre=-/usr/bin/fuser -k 80/tcp
+ExecStartPre=-/usr/bin/fuser -k 8080/tcp
+ExecStart=/usr/bin/python3 -m src.api.run
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=OAUTH_REDIRECT_URI=http://<服务器IP>/api/auth/callback/gitcode
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**部署/重启命令**（替代手动 nohup，避免端口冲突）：
+
+```bash
+git pull
+systemctl restart devops-bot     # 重启服务（会自动拉起 80 + 8080）
+systemctl status devops-bot      # 查看状态
+journalctl -u devops-bot -f      # 查看日志（systemd 托管时日志走 journalctl，不是 devops-prod.log）
+```
+
+> 注意：systemd 托管后日志输出到 journalctl，不再是 `data/devops-bot.log` 或 `/tmp/devops-prod.log`。
 
 ## 事件处理流程
 
