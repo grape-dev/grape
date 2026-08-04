@@ -8,6 +8,23 @@ from src.api.event_store import get_issue_summary
 from src.session_manager import db, db_lock
 
 
+def get_agent_display_name(agent_type: str) -> str:
+    """从 configs/agent-description.json 读取 Agent 显示名（Issue Agent / QA Agent / Coding Agent 等）。
+
+    注入给 agent 的环境变量 AGENT_NAME 使用（skill 中 [$AGENT_NAME]）。
+    未配置时返回 agent_type 本身。
+    """
+    try:
+        _path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-description.json")
+        if os.path.exists(_path):
+            with open(_path, "r", encoding="utf-8") as _f:
+                _data = json.load(_f)
+            return (_data.get(agent_type) or {}).get("name", "") or agent_type
+    except Exception as e:
+        log.warning(f"get_agent_display_name failed for {agent_type}: {e}")
+    return agent_type
+
+
 def resolve_issue_id(payload: dict) -> str:
     """从事件 payload 提取 Issue/PR 编号"""
     if not isinstance(payload, dict):
@@ -328,6 +345,9 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         log.warning(f"Exec agent: get bot token failed: {e}")
     log.info(f"Exec agent: bot_token={'set' if repo_gitcode_token else 'none'}")
 
+    # Agent 显示名（注入 AGENT_NAME 环境变量，skill 中 [$AGENT_NAME] 使用）
+    agent_name = get_agent_display_name(agent_type)
+
     try:
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type])
     except Exception as e:
@@ -354,6 +374,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         for evt_type, data in stream_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
             backend_name=backend, account=exec_account, bot_token=repo_gitcode_token,
+            agent_name=agent_name,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}]",
         ):
             # 写库兜底脱敏：即使上游 executor 已脱敏，此处再防御一次（agent 可能在 text/result 复述 token）

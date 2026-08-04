@@ -140,7 +140,9 @@ curl -sL -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "[DevOps Bot] ✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pull/{pr_number})。"}
+{"body": "[$AGENT_NAME] ✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pull/{pr_number})。"}
 ```
 
 **跳过此步 = 事件未完成处理。**
+
+> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。

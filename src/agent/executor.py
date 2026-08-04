@@ -59,6 +59,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  account: str = "", user_id: int = 0,
                  env_extra: dict | None = None,
                  bot_token: str = "", user_token: str = "",
+                 agent_name: str = "",
                  agent_label: str = "") -> Generator:
     """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）"""
     label = f"{agent_label} " if agent_label else ""
@@ -70,6 +71,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         env["BOT_GITCODE_TOKEN"] = bot_token
     if user_token:
         env["USER_GITCODE_TOKEN"] = user_token
+    # Agent 显示名（skill 中 [$AGENT_NAME] 使用，如 "Issue Agent" / "QA Agent"）
+    if agent_name:
+        env["AGENT_NAME"] = agent_name
     if env_extra:
         env.update(env_extra)
 
@@ -185,6 +189,6 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     })
 
 
-def stream_opencode(prompt, cwd, oc_session_id, event_type="", bot_token=""):
+def stream_opencode(prompt, cwd, oc_session_id, event_type="", bot_token="", agent_name=""):
     """向后兼容包装器，默认使用 opencode 后端。"""
-    yield from stream_agent(prompt, cwd, oc_session_id, event_type, backend_name="opencode", bot_token=bot_token)
+    yield from stream_agent(prompt, cwd, oc_session_id, event_type, backend_name="opencode", bot_token=bot_token, agent_name=agent_name)

@@ -193,7 +193,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         backend = "opencode"
         oc_sid = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
         new_oc_session_id = oc_sid
-        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account, user_token=user_token, agent_label=f"[Agent:chat|repo:{repo_key.replace('gitcode:', '')}]"):
+        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account, user_token=user_token, agent_name="Chat Agent", agent_label=f"[Agent:chat|repo:{repo_key.replace('gitcode:', '')}]"):
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")
             elif event_type == "text":

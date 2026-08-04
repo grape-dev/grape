@@ -93,7 +93,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
     | 讨论方案设计 | 参与讨论给出建议 |
     | 质疑分配结果 | 重新核对 CODEOWNERS，维持或调整 |
     | 其他 DevOps 相关 | 分析并回复 |
-4. **必须回复评论**（⚠️ 除非是机器人自己的评论）— 按 comment-guide.md 格式 `POST /repos/{owner}/{repo}/issues/{n}/comments`，body 以 `[DevOps Bot]` 开头并引用用户评论原文
+4. **必须回复评论**（⚠️ 除非是机器人自己的评论）— 按 comment-guide.md 格式 `POST /repos/{owner}/{repo}/issues/{n}/comments`，body 以 `[$AGENT_NAME]` 开头并引用用户评论原文
 5. **需要 A2A 时** — 查本 prompt 底部的 Agent 列表，构造 context（原始需求 + 分析结论 + 建议下一步），调用 `curl -X POST http://localhost:8080/api/a2a`
 
 ## 能力项
@@ -148,3 +148,5 @@ curl -s -X PATCH ... -d '{"state": "close"}' \
 ## 参考
 
 需要调用更全面的 GitCode API 时，读取 `references/gitcode-api-reference.md`。
+
+> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。

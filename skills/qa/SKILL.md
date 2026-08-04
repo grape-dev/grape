@@ -128,7 +128,7 @@ GET /repos/{owner}/{repo}/pulls/{number}/files
 curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "body": "[DevOps Bot] 🔴 Critical: 硬编码密钥，建议使用环境变量",
+    "body": "[$AGENT_NAME] 🔴 Critical: 硬编码密钥，建议使用环境变量",
     "commit_id": "'"$HEAD_SHA"'",
     "path": "src/config.py",
     "position": 42
@@ -207,13 +207,13 @@ curl -X POST http://localhost:8080/api/a2a \
 POST /repos/{owner}/{repo}/pulls/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "[DevOps Bot] 审查报告\n\n## 配置检查\n- ✅ Title：通过\n- ⚠️ Labels：缺少分类标签\n\n## 代码审查\n✅ 通过\n\n## 工作流审查\n⚠️ 2 项发现（见下）\n\n## 安全扫描\n✅ 安全\n\n## 合并检查\n⚠️ 测试未确认"}
+{"body": "[$AGENT_NAME] 审查报告\n\n## 配置检查\n- ✅ Title：通过\n- ⚠️ Labels：缺少分类标签\n\n## 代码审查\n✅ 通过\n\n## 工作流审查\n⚠️ 2 项发现（见下）\n\n## 安全扫描\n✅ 安全\n\n## 合并检查\n⚠️ 测试未确认"}
 ```
 
-- body **必须**以 `[DevOps Bot]` 开头
+- body **必须**以 `[$AGENT_NAME]` 开头
 - 汇总所有能力项的发现，按章节组织
 - 工作流审查发现按 `findings-format.md` 契约列出（维度、证据状态、严重度、影响、修复、验收）
-- 如果全部通过，评论：`[DevOps Bot] 审查通过，所有检查项均正常。`
+- 如果全部通过，评论：`[$AGENT_NAME] 审查通过，所有检查项均正常。`
 
 **跳过此步 = 事件未完成处理。**
 
@@ -278,3 +278,5 @@ Content-Type: application/json
 - 5 轴代码审查标准，读取 `references/code-review-and-quality.md`
 - Skill 文件审查标准，读取 `references/skill-review-and-quality.md`
 - PR 配置检查，读取 `references/pr-config-check.md`
+
+> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。

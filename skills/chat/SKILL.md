@@ -126,7 +126,7 @@ curl -sL -X PATCH -H "Authorization: Bearer $USER_GITCODE_TOKEN" \
 **提交人**: @用户飞书昵称 (Feishu ID: xxx)
 **渠道**: 飞书
 **时间**: 当前时间
-**归属**: 🤖 DevOps Bot 本身 / 📦 当前仓库
+**归属**: 🤖 Chat Agent 本身 / 📦 当前仓库
 
 **建议内容**:
 > 用户原文
@@ -134,7 +134,7 @@ curl -sL -X PATCH -H "Authorization: Bearer $USER_GITCODE_TOKEN" \
 **补充信息**:
 用户回答的补充内容
 ---
-auto-submitted by DevOps Bot Feishu feedback
+auto-submitted by Chat Agent Feishu feedback
 ```
 
 ### 4. 回复用户

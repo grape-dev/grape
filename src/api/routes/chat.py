@@ -132,7 +132,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
             for evt_type, data in stream_agent(
                 prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=backend_session_id,
                 backend_name=backend_name, user_id=user["id"],
-                account=user["username"], user_token=gitcode_token,
+                account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                 agent_label=f"[Agent:chat|user:{user['username']}]",
             ):
                 # 日志输出
@@ -227,7 +227,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 for evt_type, data in stream_agent(
                     prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=backend_session_id,
                     backend_name=backend_name, user_id=user["id"],
-                    account=user["username"], user_token=gitcode_token,
+                    account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                 ):
                     # 日志输出（对齐 master 分支 im/handler.py）

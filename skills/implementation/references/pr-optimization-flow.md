@@ -59,5 +59,7 @@ git push origin {pr_branch}
 POST /repos/{owner}/{repo}/pulls/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "[DevOps Bot] 已根据审查意见完成修改，请重新审查。"}
+{"body": "[$AGENT_NAME] 已根据审查意见完成修改，请重新审查。"}
 ```
+
+> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。

@@ -210,7 +210,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
 
         for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat",
                                               backend_name=backend, account=exec_account,
-                                              user_token=user_token,
+                                              user_token=user_token, agent_name="Chat Agent",
                                               agent_label=f"[Agent:chat|repo:{repository}]"):
             if event_type == "done":
                 d = data

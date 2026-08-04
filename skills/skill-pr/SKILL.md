@@ -197,24 +197,24 @@ echo -n "{head.sha}" > /root/devops-bot/data/workspaces/{repository}/.last_pr_re
 | PR | `[#2](https://gitcode.com/{owner}/{repo}/pulls/2)` |
 
 ### 评论格式要求
-通过 curl 发送评论时，body 必须以 `[DevOps Bot]` 开头，回复 PR 评论时应引用原文：
+通过 curl 发送评论时，body 必须以 `[$AGENT_NAME]` 开头，回复 PR 评论时应引用原文：
 
 ```bash
 POST /repos/{owner}/{repo}/pulls/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "> 用户的问题原文\n\n[DevOps Bot] 这是机器人的回复内容。"}
+{"body": "> 用户的问题原文\n\n[$AGENT_NAME] 这是机器人的回复内容。"}
 ```
 
 ### 必须执行：发评论
 
-事件处理完成后（阶段 1-4），**必须**用 curl 发送一条评论到 Issue，body 以 `[DevOps Bot]` 开头：
+事件处理完成后（阶段 1-4），**必须**用 curl 发送一条评论到 Issue，body 以 `[$AGENT_NAME]` 开头：
 
 ```bash
 POST /repos/{owner}/{repo}/pulls/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "[DevOps Bot] 代码审查完成，结论：通过。"}
+{"body": "[$AGENT_NAME] 代码审查完成，结论：通过。"}
 ```
 
 这是强制步骤，不能省略。
@@ -264,3 +264,5 @@ Content-Type: application/json
 ## 参考
 
 需要调用 GitCode API 时，读取 `references/gitcode-api-reference.md`。
+
+> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。
