@@ -75,7 +75,7 @@ function renderRepoSelection(repos) {
       <h3>创建新空间</h3>
       <p>在 GitCode 上新建项目，从零开始搭建你的 DevOps 流水线。</p>
     </div>
-    ${(repos || []).map(r => _buildLobbyCard(r)).join('')}
+    ${[...(repos || [])].sort((a, b) => (b.is_hosted ? 1 : 0) - (a.is_hosted ? 1 : 0) || (b.is_joined ? 1 : 0) - (a.is_joined ? 1 : 0)).map(r => _buildLobbyCard(r)).join('')}
   </div>
 
   <div class="lobby-empty" id="rsEmpty" style="display:none">
@@ -94,7 +94,7 @@ function _buildLobbyCard(r) {
   const clickAction = enter
     ? `selectRepo('${r.full_name}','${r.owner}','${r.name}')`
     : `event.stopPropagation();${isAdmin ? 'hostAndSelect' : 'joinAndSelect'}('${r.full_name}','${r.owner}','${r.name}')`;
-  const btnTxt = r.is_hosted ? '进入空间' : r.is_joined ? '进入空间' : isAdmin ? '加入并托管' : '加入';
+  const btnTxt = r.is_hosted ? '进入项目' : r.is_joined ? '进入项目' : isAdmin ? '加入并托管' : '加入';
   const statusTxt = r.is_hosted ? '已托管' : r.is_joined ? '已加入' : '未加入';
   const initials = (r.name || '?').substring(0, 2).toUpperCase();
 
