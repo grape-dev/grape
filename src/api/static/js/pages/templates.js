@@ -88,6 +88,16 @@ function doCreateFromTemplate(templateId) {
   }).catch(e => {
     btn.disabled = false;
     btn.textContent = '创建';
-    app.showToast('创建失败: ' + e.message);
+    if (e.status === 409) {
+      // 同名冲突：保持弹窗打开，提示换名重试
+      const input = document.getElementById('ptRepoName');
+      if (input) {
+        input.focus();
+        input.select();
+        app.showToast('⚠️ ' + (e.message || '仓库名已存在') + '，请更换仓库名后重试');
+      }
+    } else {
+      app.showToast('创建失败: ' + e.message);
+    }
   });
 }

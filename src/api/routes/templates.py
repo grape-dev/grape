@@ -93,7 +93,8 @@ async def create_from_template(body: CreateTemplateRequest,
         raise
     except Exception as e:
         msg = str(e)
-        if "409" in msg or "已存在" in msg or "已经存在" in msg:
+        # GitCode 同名仓库冲突：HTTP 409/422 + "already exists"/"same name"/"已存在"
+        if any(k in msg for k in ("409", "422", "already exists", "same name", "已存在", "已经存在")):
             raise HTTPException(status_code=409, detail={"code": 409, "message": f"同名仓库 {gitcode_login}/{repo_name} 已存在，请更换仓库名"})
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {msg}"})
 

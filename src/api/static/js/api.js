@@ -28,7 +28,12 @@ const API = (() => {
         localStorage.removeItem('user');
         if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
       }
-      return r.json().then(err => { throw new Error(err?.detail?.message || `请求失败 (${r.status})`); });
+      return r.json().then(err => {
+        const e = new Error(err?.detail?.message || `请求失败 (${r.status})`);
+        e.status = r.status;
+        e.errors = err?.detail?.errors || null;
+        throw e;
+      });
     }
     return r.json();
   }
