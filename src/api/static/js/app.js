@@ -122,12 +122,24 @@ function loadAgentTypes() {
     nav('dash');
   }
 
-  // 点击 Grape Logo → 返回仓库选择/管理页（我的项目）
+  // 点击 Grape Logo → 返回仓库选择页（与解除托管后跳转的页面完全一致：全屏卡片页）
   function goToRepos() {
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     localStorage.setItem('sidebarTab', 'projects');
+    $('sidebar').style.display = 'none';
+    $('tb').style.display = 'none';
+    const mv = $('mainView');
+    mv.style.display = 'flex';
+    mv.style.position = 'fixed';
+    mv.style.inset = '0';
+    mv.style.zIndex = '100';
     $('pageTitle').textContent = '选择仓库';
-    renderRepos();
+    API.get('/repos/member').then(d => {
+      renderRepoSelection(d.repos || []);
+    }).catch(e => {
+      const pc = $('pageContent');
+      if (pc) pc.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">加载失败: ' + e.message + '</div></div>';
+    });
   }
 
   let _refreshTimer = null;
