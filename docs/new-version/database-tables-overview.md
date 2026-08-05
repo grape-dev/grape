@@ -248,13 +248,14 @@ UNIQUE (im_provider, im_chat_id, im_app_id)
 ```sql
 user_id INTEGER PRIMARY KEY,          -- → user_accounts.id
 gitcode_user TEXT DEFAULT '',         -- GitCode 用户名
+gitcode_nickname TEXT DEFAULT '',     -- GitCode 昵称（来自 user_accounts.nickname）
 feishu_open_id TEXT DEFAULT '',       -- 飞书 open_id
 feishu_name TEXT DEFAULT '',          -- 飞书昵称
 github_login TEXT DEFAULT '',         -- 未来扩展：GitHub
 dingtalk_user_id TEXT DEFAULT '',     -- 未来扩展：钉钉
 updated_at TEXT DEFAULT (datetime('now'))
 ```
-> 由 `feishu_users` 重命名而来，user_id 主键，每用户一行，支持多平台账号。
+> 由 `feishu_users` 重建而来，user_id 主键，每用户一行，支持多平台账号。绑定仓库时同步刷新 gitcode_nickname / feishu_open_id / feishu_name。
 
 #### `vod_conversations` — VOD 群会话
 ```sql

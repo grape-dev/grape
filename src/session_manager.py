@@ -23,6 +23,7 @@ UNIFIED_USER_MAPPING_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS unified_user_mapping (
     user_id INTEGER PRIMARY KEY,
     gitcode_user TEXT DEFAULT '',
+    gitcode_nickname TEXT DEFAULT '',
     feishu_open_id TEXT DEFAULT '',
     feishu_name TEXT DEFAULT '',
     github_login TEXT DEFAULT '',
@@ -59,15 +60,15 @@ try:
         log.info("Migrated table feishu_bindings -> repo_im_group_binding")
 except Exception as e:
     log.warning(f"Migrate feishu_bindings table failed: {e}")
-# 迁移旧表 feishu_users → unified_user_mapping（重建 user_id 主键）
+# 迁移旧表 feishu_users → unified_user_mapping（旧表废弃，直接删除）
 try:
     _tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-    if "feishu_users" in _tables and "unified_user_mapping" not in _tables:
-        db.execute("ALTER TABLE feishu_users RENAME TO unified_user_mapping")
+    if "feishu_users" in _tables:
+        db.execute("DROP TABLE feishu_users")
         db.commit()
-        log.info("Migrated table feishu_users -> unified_user_mapping")
+        log.info("Dropped legacy table feishu_users")
 except Exception as e:
-    log.warning(f"Migrate feishu_users table failed: {e}")
+    log.warning(f"Drop feishu_users table failed: {e}")
 db.execute("""
     CREATE TABLE IF NOT EXISTS chat_agent_session (
         id TEXT PRIMARY KEY,
@@ -97,6 +98,16 @@ try:
 except Exception:
     pass
 db.execute(REPO_IM_GROUP_BINDING_TABLE_SQL)
+# 彻底重建 unified_user_mapping：若表结构不匹配新 DDL（缺 gitcode_nickname/github_login/dingtalk_user_id）
+# 则 DROP 后重建。当前表为空（历史遗留），直接 DROP 无数据丢失。
+try:
+    _um_cols = [r[1] for r in db.execute("PRAGMA table_info(unified_user_mapping)").fetchall()]
+    if _um_cols and not {"gitcode_nickname", "github_login", "dingtalk_user_id"}.issubset(set(_um_cols)):
+        db.execute("DROP TABLE unified_user_mapping")
+        db.commit()
+        log.info("Rebuilt unified_user_mapping (structure mismatch -> dropped & recreated)")
+except Exception as e:
+    log.warning(f"Rebuild unified_user_mapping check failed: {e}")
 db.execute(UNIFIED_USER_MAPPING_TABLE_SQL)
 # 兼容旧列迁移（幂等）
 try:
@@ -252,14 +263,20 @@ def get_feishu_open_id(repo_key, gitcode_user):
         return row[0] if row else None
 
 
-def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name=""):
-    """写入 GitCode → Feishu 用户映射（user_id 主键，按 gitcode_user 关联）"""
+def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_nickname=""):
+    """写入 GitCode → Feishu 用户映射（user_id 主键，按 gitcode_user 关联）。
+
+    同步刷新 gitcode_nickname / feishu_open_id / feishu_name。
+    gitcode_nickname 优先取传入值，否则从 user_accounts.nickname 获取。
+    """
     user_id = 0
     try:
         from src.user import db as user_db
         acc = user_db.get_user_account(gitcode_user)
         if acc:
             user_id = acc.get("id", 0)
+            if not gitcode_nickname:
+                gitcode_nickname = acc.get("nickname", "") or ""
     except Exception:
         pass
     with db_lock:
@@ -267,16 +284,16 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name=""):
         # 若 user_id 已存在则更新，否则按 gitcode_user 匹配后更新/插入
         if user_id:
             c.execute(
-                "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?)",
-                (user_id, gitcode_user, open_id, feishu_name, datetime.now().isoformat())
+                "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?,?)",
+                (user_id, gitcode_user, gitcode_nickname, open_id, feishu_name, datetime.now().isoformat())
             )
         else:
             c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
             row = c.fetchone()
             if row:
                 c.execute(
-                    "UPDATE unified_user_mapping SET feishu_open_id=?, feishu_name=?, updated_at=? WHERE user_id=?",
-                    (open_id, feishu_name, datetime.now().isoformat(), row[0])
+                    "UPDATE unified_user_mapping SET gitcode_nickname=?, feishu_open_id=?, feishu_name=?, updated_at=? WHERE user_id=?",
+                    (gitcode_nickname, open_id, feishu_name, datetime.now().isoformat(), row[0])
                 )
             else:
                 # 无 user_id 也无已有记录，用 gitcode_user 派生唯一负数 id 占位（避免不同用户互相覆盖）
@@ -288,18 +305,18 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name=""):
                     import hashlib
                     new_id = -(abs(int(hashlib.md5(gitcode_user.encode()).hexdigest()[:8], 16)) or 1)
                 c.execute(
-                    "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?)",
-                    (new_id, gitcode_user, open_id, feishu_name, datetime.now().isoformat())
+                    "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?,?)",
+                    (new_id, gitcode_user, gitcode_nickname, open_id, feishu_name, datetime.now().isoformat())
                 )
         db.commit()
 
 
 def get_feishu_mapping(repo_key):
-    """获取所有已知映射 {gitcode_user: {open_id, name}}"""
+    """获取所有已知映射 {gitcode_user: {open_id, name, gitcode_nickname}}"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT gitcode_user, feishu_open_id, feishu_name FROM unified_user_mapping WHERE gitcode_user!=''")
-        return {row[0]: {"open_id": row[1], "name": row[2]} for row in c.fetchall()}
+        c.execute("SELECT gitcode_user, feishu_open_id, feishu_name, gitcode_nickname FROM unified_user_mapping WHERE gitcode_user!=''")
+        return {row[0]: {"open_id": row[1], "name": row[2], "gitcode_nickname": row[3] or ""} for row in c.fetchall()}
 
 
 def get_feishu_group_name_map(repo_key):

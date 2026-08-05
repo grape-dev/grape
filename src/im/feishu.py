@@ -397,7 +397,7 @@ def sync_repo_feishu_mapping(repo_key: str, chat_id: str) -> int:
             continue
         for m in members:
             if m.get("name") == nick:
-                set_feishu_open_id(full_key, login, m["open_id"], nick)
+                set_feishu_open_id(full_key, login, m["open_id"], nick, gitcode_nickname=nick)
                 matched += 1
                 break
     log.info(f"Feishu sync: {repo_key} -> {matched} users matched from {len(members)} group members")

@@ -175,6 +175,23 @@ class TestFeishuUsers:
         assert name_map["张三"] == "ou_1"
         assert "" not in name_map
 
+    def test_gitcode_nickname_stored(self, tmp_path):
+        """set_feishu_open_id 传入 gitcode_nickname 后，get_feishu_mapping 应返回"""
+        sm = _import_session_manager(tmp_path)
+        sm.set_feishu_open_id("gitcode:owner/repo", "user1", "ou_1", "张三", gitcode_nickname="廖某")
+        mapping = sm.get_feishu_mapping("gitcode:owner/repo")
+        assert mapping["user1"]["gitcode_nickname"] == "廖某"
+
+    def test_gitcode_nickname_refreshed_on_update(self, tmp_path):
+        """已有映射时，更新会同步刷新 gitcode_nickname / feishu_open_id / feishu_name"""
+        sm = _import_session_manager(tmp_path)
+        sm.set_feishu_open_id("gitcode:owner/repo", "user1", "ou_old", "旧名", gitcode_nickname="旧昵称")
+        sm.set_feishu_open_id("gitcode:owner/repo", "user1", "ou_new", "新名", gitcode_nickname="新昵称")
+        mapping = sm.get_feishu_mapping("gitcode:owner/repo")
+        assert mapping["user1"]["open_id"] == "ou_new"
+        assert mapping["user1"]["name"] == "新名"
+        assert mapping["user1"]["gitcode_nickname"] == "新昵称"
+
 
 class TestAutoImplEnabled:
     def test_default_is_false(self, tmp_path):
