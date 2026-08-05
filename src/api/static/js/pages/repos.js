@@ -61,7 +61,7 @@ function renderRepoSelection(repos) {
   let inner = `<div class="lobby-hero">
     <div class="lobby-eyebrow"><i></i>WELCOME TO GRAPE<i></i></div>
     <h1 class="lobby-title">你好，<span>${name}</span><span class="lobby-hello">👋</span></h1>
-    <p class="lobby-sub">选择一个工作项目，开启由 Agent 驱动的自动化 DevOps 之旅。</p>
+    <p class="lobby-sub">选择一个工作项目，开启您的 AI for AI DevOps 之旅。</p>
     <div class="lobby-stats-inline">
       <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${repos ? repos.length : 0}</b><span>工作项目</span></div>
       <div class="lobby-stat"><span class="lobby-stat-ic">✓</span><b>${hostedCount}</b><span>已托管</span></div>
