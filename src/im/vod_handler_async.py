@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import db, db_lock
-from src.agent.executor import stream_agent
+from src.agent.executor import consume_stream_async
 
 if TYPE_CHECKING:
     from src.im.feishu_async import BotContext, FeishuAsync
@@ -136,7 +136,7 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     return "\n".join(parts)
 
 
-def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict) -> str:
+async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict) -> str:
     backend_session_id = conv.get("backend_session_id", "")
     backend = agent_session.get("backend", "opencode")
     skill = agent_session.get("skill", "vod")
@@ -163,10 +163,10 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
     new_oc_sid = backend_session_id
     exit_code = -1
     start_time = time.time()
-    for event_type, data in stream_agent(prompt, wsd, backend_session_id, skill,
-                                          backend_name=backend, account=repo_key,
-                                          bot_token=repo_token, agent_name="VOD Agent",
-                                          agent_label=f"[Agent:vod|repo:{repo_key}]"):
+    async for event_type, data in consume_stream_async(prompt, wsd, backend_session_id, skill,
+                                                       backend_name=backend, account=repo_key,
+                                                       bot_token=repo_token, agent_name="VOD Agent",
+                                                       agent_label=f"[Agent:vod|repo:{repo_key}]"):
         if event_type == "done":
             final_text = data.get("text", "")
             exit_code = data.get("exit_code", -1)
@@ -390,7 +390,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             "payload": {"user_message": text, "im_chat_id": chat_id, "im_sender_id": sender_open_id},
         }
 
-        reply = _execute_vod_agent(repo_key, agent_session, {"id": 0, "backend_session_id": backend_session_id}, evt)
+        reply = await _execute_vod_agent(repo_key, agent_session, {"id": 0, "backend_session_id": backend_session_id}, evt)
 
         if reply and reply != "SKIP":
             await api.reply_card(ctx, msg_id, reply[:2000], title="VOD Agent", template="green")

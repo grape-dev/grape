@@ -1,6 +1,6 @@
 """Agent 执行器：流式子进程调度 (NDJSON)，不绑定具体后端。"""
-import os, subprocess, json, shutil, time
-from typing import Generator
+import os, subprocess, json, shutil, time, signal
+from typing import Generator, AsyncGenerator
 from src.config import log
 from .base import AgentBackend
 from .opencode import OpencodeBackend
@@ -54,6 +54,55 @@ def _redact(text, tokens):
     return s
 
 
+def _terminate_proc(proc, label: str = "", grace_seconds: float = 10.0):
+    """优雅终止 agent 进程树。
+
+    流程：SIGTERM 整个进程组 → 等待 ≤ grace_seconds → 超时 SIGKILL 兜底 → proc.wait() 确认回收。
+    agent 子进程由 start_new_session=True 放入独立进程组，killpg 可连带清理其 fork 出的
+    node/git/shell 等孙进程，避免残留。Windows 无进程组概念时 fallback terminate/kill。
+    """
+    if proc.poll() is not None:
+        return
+    pgid = None
+    if hasattr(os, "getpgid"):
+        try:
+            pgid = os.getpgid(proc.pid)
+        except Exception:
+            pgid = None
+    try:
+        if pgid is not None:
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            proc.terminate()
+        try:
+            proc.wait(timeout=grace_seconds)
+            log.info(f"{label} terminated gracefully (SIGTERM)")
+            return
+        except subprocess.TimeoutExpired:
+            pass
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    # 兜底：强制杀死整个进程组
+    try:
+        if pgid is not None:
+            os.killpg(pgid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+    log.warning(f"{label} force killed (SIGKILL) after grace {grace_seconds}s")
+
+
 def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  event_type: str = "", backend_name: str = "opencode",
                  account: str = "", user_id: int = 0,
@@ -105,10 +154,13 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     log.info(f"{label}{backend.name} cwd: {cwd}")
 
     stdin_pipe = subprocess.PIPE if backend.prompt_via_stdin else None
+    _popen_kwargs = {}
+    if hasattr(os, "getpgid"):  # POSIX：独立进程组，便于整组优雅终止
+        _popen_kwargs["start_new_session"] = True
     proc = subprocess.Popen(
         [agent_cmd] + args,
         stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        cwd=cwd, env=env, bufsize=0
+        cwd=cwd, env=env, bufsize=0, **_popen_kwargs
     )
     if backend.prompt_via_stdin:
         proc.stdin.write(prompt.encode("utf-8"))
@@ -118,7 +170,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     new_session_id = session_id
     error_events = []
     step_count = 0
-    _start_time = time.time()
+    _last_output = time.time()
 
     import threading
     _line_queue = []
@@ -147,6 +199,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             else:
                 raw_lines = []
         if raw_lines:
+            _last_output = time.time()
             for raw_line in raw_lines:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:
@@ -178,14 +231,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         elif _reader_done:
             break
         else:
-            elapsed = time.time() - _start_time
-            if elapsed > max_exec_seconds:
-                log.warning(f"{label}{backend.name} exec timeout ({max_exec_seconds}s), killing")
-                proc.kill()
+            elapsed_silent = time.time() - _last_output
+            if elapsed_silent > max_exec_seconds:
+                log.warning(f"{label}{backend.name} no output for {max_exec_seconds}s, terminating")
+                _terminate_proc(proc, f"{label}{backend.name}")
                 yield ("done", {
                     "exit_code": -9, "text": _redact("\n".join(collected_text), _tokens),
                     "oc_session_id": new_session_id,
-                    "errors": error_events + [f"exec timeout after {max_exec_seconds}s"],
+                    "errors": error_events + [f"no output for {max_exec_seconds}s, killed"],
                     "stderr": "",
                 })
                 return
@@ -194,14 +247,16 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     try:
         proc.wait(timeout=120)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        log.warning(f"{label}{backend.name} timed out after 120s, killed")
+        log.warning(f"{label}{backend.name} did not exit after stdout EOF, terminating")
+        _terminate_proc(proc, f"{label}{backend.name}")
+        _reader_thread.join(timeout=5)
         yield ("done", {
             "exit_code": -1, "text": "", "oc_session_id": new_session_id,
             "errors": [f"{backend.name} timed out"], "stderr": ""
         })
         return
+
+    _reader_thread.join(timeout=5)
 
     stdout_remainder = ""
     try:
@@ -236,3 +291,40 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 def stream_opencode(prompt, cwd, oc_session_id, event_type="", bot_token="", agent_name=""):
     """向后兼容包装器，默认使用 opencode 后端。"""
     yield from stream_agent(prompt, cwd, oc_session_id, event_type, backend_name="opencode", bot_token=bot_token, agent_name=agent_name)
+
+
+async def consume_stream_async(prompt: str, cwd: str, session_id: str = "",
+                               event_type: str = "", backend_name: str = "opencode",
+                               account: str = "", user_id: int = 0,
+                               env_extra: dict | None = None,
+                               bot_token: str = "", user_token: str = "",
+                               agent_name: str = "", agent_label: str = "") -> AsyncGenerator:
+    """async 桥接：在线程池中消费 stream_agent 生成器，逐事件桥接回 event loop。
+
+    避免 agent 的同步生成器阻塞整个 event loop（否则 WS ping 超时掉线、其他消息/API 全卡住）。
+    stream_agent 内部的"无输出 10 分钟优雅终止"保护在后台线程中照常生效。
+    """
+    import asyncio
+    q = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def _run():
+        try:
+            for evt_type, data in stream_agent(
+                prompt, cwd, session_id=session_id, event_type=event_type,
+                backend_name=backend_name, account=account, user_id=user_id,
+                env_extra=env_extra, bot_token=bot_token, user_token=user_token,
+                agent_name=agent_name, agent_label=agent_label,
+            ):
+                loop.call_soon_threadsafe(q.put_nowait, (evt_type, data))
+        except Exception as e:
+            loop.call_soon_threadsafe(q.put_nowait, ("error", str(e)))
+        finally:
+            loop.call_soon_threadsafe(q.put_nowait, (None, None))
+
+    loop.run_in_executor(None, _run)
+    while True:
+        evt_type, data = await q.get()
+        if evt_type is None:
+            break
+        yield evt_type, data

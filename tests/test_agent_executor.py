@@ -215,3 +215,128 @@ class TestConfigIntegration:
         assert get_agent_backend("implementation") == "opencode"
         assert get_agent_backend("build-debug") == "opencode"
         assert get_agent_backend("unknown_skill") == "opencode"
+
+
+class _SleepBackend(AgentBackend):
+    """无输出的假 backend：spawn `python -c time.sleep(60)`，用于测超时终止。"""
+    name = "sleepbackend"
+    binary = "python"
+    prompt_via_stdin = True
+
+    def build_args(self, prompt, session_id=""):
+        return ["-c", "import time; time.sleep(60)"]
+
+    def get_env(self, account="", user_id=0):
+        return {}
+
+
+class _ChatterBackend(_SleepBackend):
+    """持续输出的假 backend：每 0.05s 输出一行 text，测"持续输出不超时"。"""
+    name = "chatterbackend"
+
+    def build_args(self, prompt, session_id=""):
+        code = "import time,json,sys\nfor i in range(50):\n    print(json.dumps({'type':'text','part':{'type':'text','text':'t'+str(i)}}), flush=True)\n    time.sleep(0.05)\nprint(json.dumps({'type':'text','part':{'type':'text','text':'final'}}), flush=True)"
+        return ["-c", code]
+
+
+class TestStreamAgentTimeout:
+    def _register(self, backend):
+        from src.agent.executor import register_backend, _BACKENDS
+        _BACKENDS[backend.name] = backend
+        return backend.name
+
+    def test_kills_silent_process_on_no_output(self):
+        """完全无输出的 agent，超过 max_exec_seconds 后被优雅终止，返回 done(exit_code=-9)"""
+        name = self._register(_SleepBackend())
+        from src.agent.executor import stream_agent
+        events = list(stream_agent("p", os.getcwd(), "", backend_name=name, max_exec_seconds=1))
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == -9
+        assert any("no output" in e for e in done["errors"])
+        # POSIX：验证无遗留子进程；Windows 无 pgrep，跳过
+        if sys.platform.startswith("win"):
+            return
+        import subprocess
+        leftovers = subprocess.run(
+            ["pgrep", "-f", "import time; time.sleep(60)"],
+            capture_output=True, text=True).stdout.strip()
+        assert leftovers == "", f"leftover agent process: {leftovers}"
+
+    def test_continuous_output_no_timeout(self):
+        """持续有输出的 agent 不被超时杀掉，正常走完并返回 done(exit_code=0)"""
+        name = self._register(_ChatterBackend())
+        from src.agent.executor import stream_agent
+        events = list(stream_agent("p", os.getcwd(), "", backend_name=name, max_exec_seconds=0.4))
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == 0, done
+        # 应产出多条 text 事件
+        texts = [d for et, d in events if et == "text"]
+        assert len(texts) >= 10
+
+
+class TestTerminateProc:
+    def test_graceful_then_kill(self):
+        """SIGTERM 优雅失败后，SIGKILL 兜底并回收进程。仅 POSIX。"""
+        import signal as _signal
+        from unittest.mock import patch
+        from subprocess import TimeoutExpired
+        if not hasattr(os, "killpg"):
+            import pytest
+            pytest.skip("POSIX process groups not available on this platform")
+        from src.agent.executor import _terminate_proc
+
+        class FakeProc:
+            pid = 12345
+            def __init__(self):
+                self._wait_count = 0
+            def poll(self):
+                return None
+            def terminate(self):
+                pass
+            def kill(self):
+                pass
+            def wait(self, timeout=None):
+                self._wait_count += 1
+                if self._wait_count == 1:
+                    raise TimeoutExpired  # SIGTERM 后 10s 未退出
+                return 0
+
+        fp = FakeProc()
+        with patch("src.agent.executor.os.killpg") as mock_killpg:
+            _terminate_proc(fp, "test")
+        # 第一次 SIGTERM 进程组，第二次 SIGKILL 进程组
+        sigs = [c.args[1] for c in mock_killpg.call_args_list]
+        assert sigs == [_signal.SIGTERM, _signal.SIGKILL]
+
+    def test_already_exited_returns_early(self):
+        from src.agent.executor import _terminate_proc
+        class ExitedProc:
+            pid = 1
+            def poll(self):
+                return 0
+        _terminate_proc(ExitedProc(), "test")  # 不应抛异常
+
+
+class TestConsumeStreamAsync:
+    def test_bridges_events(self):
+        """consume_stream_async 在线程池消费 stream_agent，逐事件回传。"""
+        import asyncio
+        from src.agent.executor import consume_stream_async
+        name = _register_tmp(_ChatterBackend())
+
+        async def main():
+            events = []
+            async for et, d in consume_stream_async("p", os.getcwd(), "", backend_name=name):
+                events.append((et, d))
+            return events
+
+        events = asyncio.run(main())
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == 0
+        assert len([1 for et, _ in events if et == "text"]) >= 10
+
+
+def _register_tmp(backend):
+    from src.agent.executor import _BACKENDS
+    _BACKENDS[backend.name] = backend
+    return backend.name

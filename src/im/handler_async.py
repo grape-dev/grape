@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import get_or_create_session, update_session, db
 from src.prompt_builder import build_chat_prompt, get_skill_capabilities
-from src.agent.executor import stream_agent
+from src.agent.executor import consume_stream_async
 from src.im.feishu import (
     resolve_repo, process_command, detect_bind_intent, detect_clean_intent,
     get_chat_members, sync_repo_feishu_mapping,
@@ -208,10 +208,10 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         oc_sid = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
         new_oc_session_id = oc_sid
 
-        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat",
-                                              backend_name=backend, account=exec_account,
-                                              user_token=user_token, agent_name="Chat Agent",
-                                              agent_label=f"[Agent:chat|repo:{repository}]"):
+        async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
+                                                           backend_name=backend, account=exec_account,
+                                                           user_token=user_token, agent_name="Chat Agent",
+                                                           agent_label=f"[Agent:chat|repo:{repository}]"):
             if event_type == "done":
                 d = data
                 final_text = d["text"]
