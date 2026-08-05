@@ -1,6 +1,92 @@
 {
   "categories": [
     {
+      "id": "agent-best-practices",
+      "name": "Agent 最佳实践",
+      "icon": "🚀",
+      "description": "agent-best-practices 组织沉淀的 AI Agent 落地实战项目模板",
+      "scene_id": "default",
+      "templates": [
+        {
+          "id": "redbook-operate",
+          "name": "小红书自动化运营助手",
+          "description": "基于 AI 能力的小红书自动化运营助手：笔记智能创作、图文自动发布、评论互动管理及数据分析优化",
+          "icon": "📕",
+          "source": "git",
+          "source_repo": "agent-best-practices/redbook-operate",
+          "default_repo_name": "redbook-operate",
+          "tags": ["agent", "automation", "content"],
+          "scene_id": "default"
+        },
+        {
+          "id": "ai-interview-swarm",
+          "name": "AI面试天团",
+          "description": "多 Agent 协同完成完整面试流程：破冰、技术面试、HR 面试到生成综合评估报告",
+          "icon": "🎯",
+          "source": "git",
+          "source_repo": "agent-best-practices/ai-interview-swarm",
+          "default_repo_name": "ai-interview-swarm",
+          "tags": ["agent", "multi-agent", "interview"],
+          "scene_id": "default"
+        },
+        {
+          "id": "get-together",
+          "name": "一路同行",
+          "description": "出行社交场景智能体：解析出行意图、匹配活动、推荐同行伙伴，支持一键创建新活动",
+          "icon": "🧭",
+          "source": "git",
+          "source_repo": "agent-best-practices/get-together",
+          "default_repo_name": "get-together",
+          "tags": ["agent", "social", "travel"],
+          "scene_id": "default"
+        },
+        {
+          "id": "prompt-to-premiere",
+          "name": "一句话完成爆款短视频打造",
+          "description": "输入主题输出完整视频：脚本 + 分镜 + 成片，AI 完成短视频从策划到出片 90% 的工作",
+          "icon": "🎬",
+          "source": "git",
+          "source_repo": "agent-best-practices/Prompt_to_Premiere",
+          "default_repo_name": "Prompt-to-Premiere",
+          "tags": ["agent", "video", "content"],
+          "scene_id": "default"
+        },
+        {
+          "id": "ai-campus-event-planner",
+          "name": "AI校园活动策划天团",
+          "description": "多 Agent 协同的校园活动自动策划系统：活动方案、预算测算、风险评估、宣传文案，输出 HTML 方案及附件",
+          "icon": "🎓",
+          "source": "git",
+          "source_repo": "agent-best-practices/ai-campus-event-planner",
+          "default_repo_name": "ai-campus-event-planner",
+          "tags": ["agent", "multi-agent", "campus"],
+          "scene_id": "default"
+        },
+        {
+          "id": "powered-by-jiuwen",
+          "name": "AI创业项目孵化平台",
+          "description": "基于 openJiuWen 二次开发的 AI 创业项目孵化平台前端，支持多智能体团队协作管理创业项目",
+          "icon": "💡",
+          "source": "git",
+          "source_repo": "agent-best-practices/powered-by-jiuwen",
+          "default_repo_name": "powered-by-jiuwen",
+          "tags": ["agent", "jiuwen", "incubator"],
+          "scene_id": "default"
+        },
+        {
+          "id": "xhs-cross-platform-rewrite",
+          "name": "跨平台内容适配-小红书改写Skill",
+          "description": "跨平台内容适配的小红书专属二次改写 Skill，用于内容多平台分发",
+          "icon": "✍️",
+          "source": "git",
+          "source_repo": "agent-best-practices/xhs-cross-platform-rewrite",
+          "default_repo_name": "xhs-cross-platform-rewrite",
+          "tags": ["skill", "content", "xhs"],
+          "scene_id": "default"
+        }
+      ]
+    },
+    {
       "id": "skills",
       "name": "Skills 项目模板",
       "icon": "🧩",
