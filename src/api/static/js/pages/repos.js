@@ -18,7 +18,7 @@ function renderSelectionShell(tab, innerHtml) {
         <span class="lobby-brand-sub">Agentic DevOps</span>
       </div>
       <nav class="lobby-tabs">
-        <a class="${tabCls('projects')}" onclick="switchSidebarTab('projects')">工作空间</a>
+        <a class="${tabCls('projects')}" onclick="switchSidebarTab('projects')">工作项目</a>
         <a class="${tabCls('templates')}" onclick="switchSidebarTab('templates')">项目模板</a>
       </nav>
       <div class="lobby-user" onclick="app.logout()" title="退出登录">
@@ -61,9 +61,9 @@ function renderRepoSelection(repos) {
   let inner = `<div class="lobby-hero">
     <div class="lobby-eyebrow"><i></i>WELCOME TO GRAPE<i></i></div>
     <h1 class="lobby-title">你好，<span>${name}</span><span class="lobby-hello">👋</span></h1>
-    <p class="lobby-sub">选择一个工作空间，开启由 Agent 驱动的自动化 DevOps 之旅。</p>
+    <p class="lobby-sub">选择一个工作项目，开启由 Agent 驱动的自动化 DevOps 之旅。</p>
     <div class="lobby-stats-inline">
-      <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${repos ? repos.length : 0}</b><span>工作空间</span></div>
+      <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${repos ? repos.length : 0}</b><span>工作项目</span></div>
       <div class="lobby-stat"><span class="lobby-stat-ic">✓</span><b>${hostedCount}</b><span>已托管</span></div>
       <div class="lobby-stat"><span class="lobby-stat-ic">◇</span><b>${joinedCount}</b><span>已加入</span></div>
     </div>
@@ -72,7 +72,7 @@ function renderRepoSelection(repos) {
   <div class="lobby-grid">
     <div class="lobby-card lobby-card-add" onclick="window.open('https://gitcode.com/create','_blank')">
       <div class="lobby-card-plus">＋</div>
-      <h3>创建新空间</h3>
+      <h3>创建新项目</h3>
       <p>在 GitCode 上新建项目，从零开始搭建你的 DevOps 流水线。</p>
     </div>
     ${[...(repos || [])].sort((a, b) => (b.is_hosted ? 1 : 0) - (a.is_hosted ? 1 : 0) || (b.is_joined ? 1 : 0) - (a.is_joined ? 1 : 0)).map(r => _buildLobbyCard(r)).join('')}
@@ -80,7 +80,7 @@ function renderRepoSelection(repos) {
 
   <div class="lobby-empty" id="rsEmpty" style="display:none">
     <div class="lobby-empty-ic">🔭</div>
-    <h3>未找到匹配的空间</h3>
+    <h3>未找到匹配的项目</h3>
     <p>试试更换关键词或筛选条件。</p>
   </div>`;
 
