@@ -166,6 +166,8 @@ curl -X POST http://localhost:8080/api/a2a \
   }'
 ```
 
+> ⚠️ **字段规则（A2A 服务端强制校验）：** `issue_number` 必填（当前开发任务的 Issue 真实编号）。**若无法确定 issue_number，则不要调用 A2A**，在最终评论中说明 PR 已创建但未通知 QA 的原因。`pr_number` 有则填（PR 编号）、无则不填，严禁把 PR 编号填入 issue_number。
+
 #### context 构造规则
 
 context 应包含：

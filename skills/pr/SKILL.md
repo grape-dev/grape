@@ -49,11 +49,14 @@ curl -X POST http://localhost:8080/api/a2a \
     "payload": {
       "repository": "'"$REPO_FULL_NAME"'",
       "account": "'"$ACCOUNT"'",
-      "issue_number": "'"$PR_NUMBER"'",
+      "issue_number": "'"$ISSUE_NUMBER"'",
+      "pr_number": "'"$PR_NUMBER"'",
       "context": "PR #'"$PR_NUMBER"' 审查发现代码需要优化：'"$REVIEW_SUMMARY"'"
     }
   }'
 ```
+
+> ⚠️ **字段规则（A2A 服务端强制校验）：** `issue_number` 必填，必须是本 PR 关联的真实 Issue 编号（`$ISSUE_NUMBER`）。**若无法确定关联的 issue_number，则不要调用 A2A**，在最终审查评论中说明。`pr_number` 填写 PR 编号（`$PR_NUMBER`）；**严禁把 PR 编号填入 issue_number，两者不可混用**。
 
 **触发条件**：review_comments 中存在 Critical 或 Required 级别问题需要修改代码时。
 **响应**：A2A 返回后，将优化结论合并进最终审查评论。
@@ -189,11 +192,14 @@ curl -X POST http://localhost:8080/api/a2a \
     "payload": {
       "repository": "'"$REPO_FULL_NAME"'",
       "account": "'"$ACCOUNT"'",
-      "issue_number": "'"$PR_NUMBER"'",
+      "issue_number": "'"$ISSUE_NUMBER"'",
+      "pr_number": "'"$PR_NUMBER"'",
       "context": "PR #'$PR_NUMBER' 审查发现问题需要修改：'$REVIEW_SUMMARY'"
     }
   }'
 ```
+
+> ⚠️ **字段规则（A2A 服务端强制校验）：** `issue_number` 必填（本 PR 关联的真实 Issue 编号 `$ISSUE_NUMBER`），**无法确定则不要调用 A2A**；`pr_number` 填 PR 编号；**严禁把 PR 编号填入 issue_number，两者不可混用**。
 
 其中 `$REVIEW_SUMMARY` 为上述审查中发现的 Critical 和 Required 级别问题的汇总。
 A2A 返回后，将 Coding Agent 的优化结论合并进最终审查评论（能力五）。

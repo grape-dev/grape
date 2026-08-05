@@ -176,9 +176,13 @@ curl -X POST http://localhost:8080/api/a2a \
       "repository": "'"$REPO_FULL_NAME"'",
       "account": "'"$ACCOUNT"'",
       "issue_number": "'"$ISSUE_NUMBER"'",
+      "pr_number": "'"$PR_NUMBER"'",
       "context": "Issue #'"$ISSUE_NUMBER"' 已通过深度可开发性分析（评级: ready），Spec 已发布，负责人已分配给机器人。\n\n## Objective\n{spec.objective 摘要}\n\n## Scope (In)\n{spec.in_scope 摘要}\n\n## Technical Approach\n{spec.technical_approach 摘要}\n\n## Affected Modules\n{spec.affected_modules 摘要}\n\n## Acceptance Criteria\n{spec.acceptance_criteria 摘要}\n\n请基于以上 Spec 启动开发实现。完整 Spec 见 Issue 评论。"
     }
   }'
+```
+
+⚠️ **字段规则（A2A 服务端强制校验）：** `issue_number` 必填（当前 Issue 的真实编号）；**无法确定 issue_number 就不要调用 A2A**。`pr_number` 有则填（PR 编号）、无则不填（Spec 阶段通常无 PR），严禁将 PR 编号填入 issue_number。
 ```
 
 ### context 构造规则

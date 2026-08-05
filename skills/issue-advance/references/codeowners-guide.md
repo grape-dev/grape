@@ -94,7 +94,11 @@ curl -X POST http://localhost:8080/api/a2a \
     "payload": {
       "repository": "'"$REPO_FULL_NAME"'",
       "account": "'"$ACCOUNT"'",
+      "issue_number": "'"$ISSUE_NUMBER"'",
+      "pr_number": "'"$PR_NUMBER"'",
       "context": "用户填写的模块责任人信息（见上方）"
     }
   }'
 ```
+
+⚠️ **字段规则（A2A 服务端强制校验）：** `issue_number` 必填（当前 Issue 的真实编号）；**无法确定 issue_number 就不要调用 A2A**。`pr_number` 有则填（PR 编号）、无则不填，严禁将 PR 编号填入 issue_number。

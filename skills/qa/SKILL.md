@@ -199,10 +199,14 @@ curl -X POST http://localhost:8080/api/a2a \
     "payload": {
       "repository": "'"$REPO_FULL_NAME"'",
       "account": "'"$ACCOUNT"'",
+      "issue_number": "'"$ISSUE_NUMBER"'",
+      "pr_number": "'"$PR_NUMBER"'",
       "context": "PR #'$PR_NUMBER' 审查发现问题需要修改：'$REVIEW_SUMMARY'"
     }
   }'
 ```
+
+> ⚠️ **字段规则（A2A 服务端强制校验）：** `issue_number` 必填（本 PR 关联的真实 Issue 编号 `$ISSUE_NUMBER`），**无法确定则不要调用 A2A**，在最终审查评论中说明；`pr_number` 填 PR 编号；**严禁把 PR 编号填入 issue_number，两者不可混用**。
 
 其中 `$REVIEW_SUMMARY` 为上述审查中发现的 Critical 和 Required 级别问题（含工作流发现）的汇总。
 

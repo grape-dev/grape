@@ -337,11 +337,17 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
       "payload": {
         "repository": "'"$REPO_FULL_NAME"'",
         "account": "'"$ACCOUNT"'",
+        "issue_number": "'"$ISSUE_NUMBER"'",
+        "pr_number": "'"$PR_NUMBER"'",
         "context": "当前处理摘要"
       }
     }'
 
-📌 重要：payload 中必须传递 `repository` 和 `account`，如能获取到 `issue_number` 也一并传递。
+⚠️ **字段规则（A2A 服务端强制校验，必须遵守）：**
+1. `issue_number`（Issue 编号）**必填**：必须填写当前任务关联的真实 Issue 编号。**如果无法确定对应的 issue_number，就不要调用 A2A API**，直接在回复中说明原因。
+2. `pr_number`（PR 编号）**可选但有则必填**：如果当前任务涉及 PR（有 `$PR_NUMBER`），必须一并传入；没有则不传（例如 Issue 刚创建、PR 尚未创建）。
+3. **严禁字段混用**：`pr_number` 只能填 PR 编号，`issue_number` 只能填 Issue 编号，两者不可互换。
+4. `repository` 与 `account` 必填。
 
 ### context 构造规则
 
