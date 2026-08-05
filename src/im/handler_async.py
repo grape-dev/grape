@@ -36,26 +36,26 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         log.info(f"[Chat:{ctx.name}] message: {text[:100]} (chat={chat_id[:20]})")
 
-        # 自动绑定：Chat Agent 每用户独立，消息发送者即配置该 bot 的用户。
-        # 用 sender_open_id 建立 gitcode_user ↔ 飞书 open_id 映射（无需群成员权限）。
+        # 自动绑定：仅在私聊（p2p）场景，且该 gitcode_user 尚无映射时建立。
+        # 群聊中可能是别人与 bot 对话，不能把别人的 open_id 绑到 bot 配置者；
+        # 已有映射也不覆盖（以首次绑定为准，防止他人消息覆盖配置者）。
         sender_open_id = parsed.get("sender_open_id", "")
-        if sender_open_id:
+        chat_type = parsed.get("chat_type", "")
+        if sender_open_id and chat_type == "p2p":
             try:
                 from src.im.feishu import get_user_id_by_app_id
                 from src.user import db as user_db
-                from src.session_manager import set_feishu_open_id
+                from src.session_manager import set_feishu_open_id, get_feishu_open_id
                 uid = get_user_id_by_app_id(ctx.app_id)
                 if uid:
                     user_row = user_db.get_user(uid)
                     username = (user_row or {}).get("username", "") if user_row else ""
                     if username and user_row:
                         acc = user_db.get_user_account(username) or {}
-                        # 仅在尚未建立该 open_id 映射时写入，避免高频覆盖
-                        from src.session_manager import get_feishu_open_id
                         existing = get_feishu_open_id("", username)
-                        if existing != sender_open_id:
+                        if not existing:
                             set_feishu_open_id("", username, sender_open_id, gitcode_nickname=acc.get("nickname", "") or "")
-                            log.info(f"Chat: auto-bound feishu open_id for {username} (app={ctx.app_id[:20]})")
+                            log.info(f"Chat: auto-bound feishu open_id for {username} in p2p (app={ctx.app_id[:20]})")
             except Exception as e:
                 log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
 

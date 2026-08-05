@@ -525,6 +525,7 @@ def _parse_event(event_data: dict) -> dict | None:
         "type": "message",
         "text": text,
         "chat_id": message.get("chat_id", ""),
+        "chat_type": message.get("chat_type", ""),  # p2p=私聊 / group=群聊
         "sender_id": sender_id,
         "sender_open_id": sender_open_id,
         "message_id": message.get("message_id", ""),
