@@ -1,9 +1,9 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Grape 鈥?Multi-Agent DevOps</title>
+<title>Grape — Multi-Agent DevOps</title>
 <link rel="icon" type="image/png" href="/static/logo.png">
 <link rel="stylesheet" href="/static/css/app.css">
 </head>
@@ -16,53 +16,53 @@
 <p class="sub">Multi-Agent DevOps</p>
 <button class="obtn" id="gitBtn" onclick="app.oauthLogin()">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-  浣跨敤 GitCode 鐧诲綍
+  使用 GitCode 登录
 </button>
 <div class="links" id="loginLinks">
-  <a onclick="app.togglePwdLogin()">鈫?鐢ㄦ埛鍚嶅瘑鐮佺櫥褰?/a>
+  <a onclick="app.togglePwdLogin()">← 用户名密码登录</a>
 </div>
 <div class="inp" id="pwdLogin">
-  <input type="text" placeholder="鐢ㄦ埛鍚? id="loginUser">
-  <input type="password" placeholder="瀵嗙爜" id="loginPass">
-  <button class="obtn" onclick="app.pwdLogin()">鐧诲綍</button>
-  <p style="margin-top:12px;font-size:12px;text-align:center"><a onclick="app.togglePwdLogin()" style="color:var(--t3);text-decoration:underline;cursor:pointer">鈫?杩斿洖 GitCode 鐧诲綍</a></p>
+  <input type="text" placeholder="用户名" id="loginUser">
+  <input type="password" placeholder="密码" id="loginPass">
+  <button class="obtn" onclick="app.pwdLogin()">登录</button>
+  <p style="margin-top:12px;font-size:12px;text-align:center"><a onclick="app.togglePwdLogin()" style="color:var(--t3);text-decoration:underline;cursor:pointer">← 返回 GitCode 登录</a></p>
 </div>
 </div>
 </div>
 
 <div class="sb" id="sidebar">
 <div class="sb-h">
-<div class="logo-s" style="cursor:pointer" onclick="app.goToRepos()" title="杩斿洖浠撳簱閫夋嫨"><img class="sq" src="/static/logo.png" alt="A"><h1>Grape</h1></div>
+<div class="logo-s" style="cursor:pointer" onclick="app.goToRepos()" title="返回仓库选择"><img class="sq" src="/static/logo.png" alt="A"><h1>Grape</h1></div>
 <div class="tagline">Multi-Agent DevOps</div>
 </div>
-<div class="sb-sel"><select id="repoSelect" onchange="app.switchRepo(this.value)"><option value="">閫夋嫨浠撳簱...</option></select></div>
+<div class="sb-sel"><select id="repoSelect" onchange="app.switchRepo(this.value)"><option value="">选择仓库...</option></select></div>
 <div class="sb-nav">
 <div class="grp">Workspace</div>
-<a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">鈻?/span>Dashboard</a>
-<a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">鈻?/span>Pipeline</a>
+<a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span>Dashboard</a>
+<a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">▶</span>Pipeline</a>
 
 <div class="grp">DevOps Agents</div>
-<a id="nav-vod" onclick="app.nav('vod')"><span class="ic" style="color:var(--pk)">鈼?/span>VOD Agent</a>
-<a id="nav-issue" onclick="app.nav('issue')"><span class="ic" style="color:var(--r)">鈼?/span>Issue Agent</a>
-<a id="nav-coding" onclick="app.nav('coding')"><span class="ic" style="color:var(--a)">鈼?/span>Coding Agent</a>
-<a id="nav-qa" onclick="app.nav('qa')"><span class="ic" style="color:var(--pu)">鈼?/span>QA Agent</a>
-<a id="nav-sre" onclick="app.nav('sre')"><span class="ic" style="color:var(--or)">鈼?/span>SRE Agent</a>
+<a id="nav-vod" onclick="app.nav('vod')"><span class="ic" style="color:var(--pk)">●</span>VOD Agent</a>
+<a id="nav-issue" onclick="app.nav('issue')"><span class="ic" style="color:var(--r)">●</span>Issue Agent</a>
+<a id="nav-coding" onclick="app.nav('coding')"><span class="ic" style="color:var(--a)">●</span>Coding Agent</a>
+<a id="nav-qa" onclick="app.nav('qa')"><span class="ic" style="color:var(--pu)">●</span>QA Agent</a>
+<a id="nav-sre" onclick="app.nav('sre')"><span class="ic" style="color:var(--or)">●</span>SRE Agent</a>
 
 <div class="grp">DevOps Skills</div>
-<a id="nav-skills" onclick="app.nav('skills')"><span class="ic">鈼?/span>Skills Library</a>
+<a id="nav-skills" onclick="app.nav('skills')"><span class="ic">◈</span>Skills Library</a>
 
 <div class="grp">Account</div>
-<a id="nav-chat" onclick="app.nav('chat')"><span class="ic">鈽?/span>Chat Agent</a>
+<a id="nav-chat" onclick="app.nav('chat')"><span class="ic">☎</span>Chat Agent</a>
 
 <div class="grp">Settings</div>
-<a id="nav-settings-credentials" onclick="app.nav('settings','credentials')"><span class="ic">鈿?/span>General Settings</a>
-<a id="nav-settings-gitcode" onclick="app.nav('settings','gitcode')"><span class="ic">鈳?/span>GitCode Repo</a>
-<a id="nav-backends" onclick="app.nav('backends')"><span class="ic">鈿?/span>Backend Runtimes</a>
+<a id="nav-settings-credentials" onclick="app.nav('settings','credentials')"><span class="ic">⚙</span>General Settings</a>
+<a id="nav-settings-gitcode" onclick="app.nav('settings','gitcode')"><span class="ic">⎘</span>GitCode Repo</a>
+<a id="nav-backends" onclick="app.nav('backends')"><span class="ic">⚡</span>Backend Runtimes</a>
 </div>
 <div class="sb-ft">
 <div class="av" id="userAvatar">U</div>
 <div class="by"><span id="userName">User</span><span id="userRole" style="font-size:10px;color:var(--t3)">Maintainer</span></div>
-<div style="margin-left:auto"><a onclick="app.logout()" style="color:var(--t3);font-size:10px;cursor:pointer;text-decoration:none" title="鐧诲嚭">鈫?/a></div>
+<div style="margin-left:auto"><a onclick="app.logout()" style="color:var(--t3);font-size:10px;cursor:pointer;text-decoration:none" title="登出">↩</a></div>
 </div>
 </div>
 
@@ -70,11 +70,11 @@
 <div class="tb" id="tb">
 <div class="bc"><b id="pageTitle"></b> <span id="repoTitle" style="color:var(--a);font-weight:500"></span></div>
 <div class="sp"></div>
-<button class="bt bt-o bt-s" onclick="window.open('https://devstation.connect.huaweicloud.com/aishell2?utm_source=huawei&utm_medium=floating_ball&utm_campaign=space','_blank')" style="margin-right:6px">鈽?浜戝紑鍙戠幆澧?/button>
-<div class="srch"><span>鈱?/span><input placeholder="鎼滅储..." id="searchInput" onkeydown="if(event.key==='Enter')app.search(this.value)" onfocus="this.style.width='260px'" onblur="this.style.width='100%'"></div>
+<button class="bt bt-o bt-s" onclick="window.open('https://devstation.connect.huaweicloud.com/aishell2?utm_source=huawei&utm_medium=floating_ball&utm_campaign=space','_blank')" style="margin-right:6px">☁ 云开发环境</button>
+<div class="srch"><span>⌕</span><input placeholder="搜索..." id="searchInput" onkeydown="if(event.key==='Enter')app.search(this.value)" onfocus="this.style.width='260px'" onblur="this.style.width='100%'"></div>
 </div>
 <div class="ct" id="pageContent">
-<div class="loading">鍔犺浇涓?..</div>
+<div class="loading">加载中...</div>
 </div>
 </div>
 
