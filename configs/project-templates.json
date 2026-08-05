@@ -129,18 +129,51 @@
       "id": "cloud-native",
       "name": "云原生项目模板",
       "icon": "☁️",
-      "description": "容器化 / 微服务项目起点",
+      "description": "容器化 / 微服务 / 云原生部署项目起点",
       "scene_id": "cloud-native",
       "templates": [
         {
-          "id": "micro-svc",
-          "name": "Micro Service",
-          "description": "Go + Docker + Kubernetes 微服务骨架",
-          "icon": "☁️",
+          "id": "bp-gateway",
+          "name": "Best Practice Gateway",
+          "description": "最佳实践网关服务：Go 微服务网关，含 Dockerfile 与 Kubernetes 部署清单（configmap/service/secret）",
+          "icon": "🚪",
           "source": "git",
-          "source_repo": "devops-bot/cloud-native-microsvc",
-          "default_repo_name": "micro-svc",
-          "tags": ["golang", "k8s", "docker"],
+          "source_repo": "Lingxi-HandsOn/bp-gateway",
+          "default_repo_name": "bp-gateway",
+          "tags": ["golang", "gateway", "k8s", "docker"],
+          "scene_id": "cloud-native"
+        },
+        {
+          "id": "codearts-mcp",
+          "name": "CodeArts MCP 服务",
+          "description": "码道对接 CodeArts 的 MCP 服务：Dockerfile + docker-compose + deploy 运维脚本，云原生部署形态",
+          "icon": "🔌",
+          "source": "git",
+          "source_repo": "Lingxi-HandsOn/codearts-mcp",
+          "default_repo_name": "codearts-mcp",
+          "tags": ["node", "mcp", "docker", "compose"],
+          "scene_id": "cloud-native"
+        },
+        {
+          "id": "gallery",
+          "name": "作品陈列馆 Gallery",
+          "description": "华为云高校训练营作品展示平台：全栈应用 + Dockerfile + deploy/frontend 容器化部署",
+          "icon": "🖼️",
+          "source": "git",
+          "source_repo": "Lingxi-HandsOn/gallery",
+          "default_repo_name": "gallery",
+          "tags": ["web", "fullstack", "docker"],
+          "scene_id": "cloud-native"
+        },
+        {
+          "id": "practice-hub",
+          "name": "PracticeHub 实操平台",
+          "description": "知行 AI 实操实验室：开发者 AI 技能在线实践平台（Vue+TS），含 docs/deployment 部署文档",
+          "icon": "🧪",
+          "source": "git",
+          "source_repo": "Lingxi-HandsOn/PracticeHub",
+          "default_repo_name": "PracticeHub",
+          "tags": ["vue", "ai", "platform"],
           "scene_id": "cloud-native"
         }
       ]
