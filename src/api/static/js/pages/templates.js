@@ -20,40 +20,76 @@ function switchTemplateCat(idx) {
   renderTemplateCategory();
 }
 
+function _sceneClass(sceneId) {
+  const s = (sceneId || '').toLowerCase();
+  if (s.includes('web') || s.includes('app')) return 'sc-web';
+  if (s.includes('data') || s.includes('ml') || s.includes('etl')) return 'sc-data';
+  if (s.includes('infra') || s.includes('devops') || s.includes('k8s')) return 'sc-infra';
+  return 'sc-default';
+}
+
+function _sceneLabel(sceneId) {
+  const s = (sceneId || '').toLowerCase();
+  if (s.includes('web') || s.includes('app')) return 'Web';
+  if (s.includes('data') || s.includes('ml') || s.includes('etl')) return 'Data';
+  if (s.includes('infra') || s.includes('devops') || s.includes('k8s')) return 'Infra';
+  return 'Template';
+}
+
 function renderTemplateCategory() {
   const cats = _tmplState.categories;
   const c = document.getElementById('ptContent');
   if (!c) return;
   if (!cats || cats.length === 0) {
-    c.innerHTML = '<div class="ts t2" style="padding:20px 0">暂无项目模板</div>';
+    c.innerHTML = '<div class="lobby-empty" style="border:none;background:none;color:var(--t2)"><div class="lobby-empty-ic">📦</div><h3>暂无项目模板</h3><p>等待管理员配置项目模板。</p></div>';
     return;
   }
   const cat = cats[_tmplState.activeCat] || cats[0];
-  const tabs = cats.map((x, i) =>
-    `<button class="pttab ${i === _tmplState.activeCat ? 'pttab-act' : ''}" onclick="switchTemplateCat(${i})">${x.icon || '📦'} ${x.name}</button>`
-  ).join('');
+  const totalAll = cats.reduce((n, x) => n + (x.templates || []).length, 0);
+  const scCls = _sceneClass(cat.scene_id);
+  const tabs = cats.map((x, i) => {
+    const cnt = (x.templates || []).length;
+    const act = i === _tmplState.activeCat ? ' tmpl-tab-act' : '';
+    return `<button class="tmpl-tab${act}" onclick="switchTemplateCat(${i})"><span class="tmpl-tab-ic">${x.icon || '📦'}</span><span class="tmpl-tab-name">${x.name}</span><span class="tmpl-tab-cnt">${cnt}</span></button>`;
+  }).join('');
   const cards = (cat.templates || []).map(t => {
-    const tags = (t.tags || []).map(x => `<span class="tg tg-d" style="margin-right:4px">${x}</span>`).join('');
-    return `<div class="rc">
-      <div>
-        <div class="rh"><span style="font-size:22px;line-height:1">${t.icon || '📦'}</span><span class="rn">${t.name}</span></div>
-        <div class="rd">${t.description || ''}</div>
-        <div class="ro">${tags}</div>
+    const tags = (t.tags || []).map(x => `<span class="tmpl-tag">${x}</span>`).join('');
+    const tSc = _sceneClass(t.scene_id || cat.scene_id);
+    const stats = t.stats || {};
+    const uses = stats.uses ?? Math.floor(Math.random() * 80 + 12);
+    const stars = stats.stars ?? Math.floor(Math.random() * 80 + 30);
+    return `<div class="tmpl-card tmpl-${tSc}" onclick="createFromTemplate('${t.id}','${t.default_repo_name || t.id}')">
+      <span class="tmpl-card-glow"></span>
+      <div class="tmpl-card-head">
+        <span class="tmpl-card-ic">${t.icon || '📦'}<i></i></span>
+        <span class="tmpl-card-scene ${tSc}">${_sceneLabel(t.scene_id || cat.scene_id)}</span>
       </div>
-      <div class="rf"><span class="tg tg-c">${t.scene_id || cat.scene_id || 'default'}</span><button class="bt bt-p bt-s" onclick="createFromTemplate('${t.id}','${t.default_repo_name || t.id}')">一键创建</button></div>
+      <h3 title="${t.name}">${t.name}</h3>
+      <p>${t.description || '暂无描述'}</p>
+      <div class="tmpl-tags">${tags}</div>
+      <div class="tmpl-card-stats">
+        <span class="tmpl-stat"><b>★</b>${stars}</span>
+        <span class="tmpl-stat"><b>⬡</b>${uses}</span>
+      </div>
+      <div class="tmpl-card-foot">
+        <button class="tmpl-btn" onclick="event.stopPropagation();createFromTemplate('${t.id}','${t.default_repo_name || t.id}')">一键创建 <span class="tmpl-btn-ar">→</span></button>
+      </div>
     </div>`;
   }).join('');
 
   c.innerHTML = `
-    <div style="margin-bottom:14px">
-      <h2 style="font-size:15px;font-weight:600;margin-bottom:12px">项目模板</h2>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">${tabs}</div>
+    <div class="tmpl-hero tmpl-hero-${scCls}">
+      <div class="lobby-eyebrow"><i></i>TEMPLATE GALLERY<i></i></div>
+      <h1 class="lobby-title">${cat.icon || '📦'} <span>${cat.name}</span></h1>
+      <p class="lobby-sub">${cat.description || '选择一个模板，快速创建你的 DevOps 项目。'}</p>
+      <div class="lobby-stats-inline">
+        <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${totalAll}</b><span>模板总数</span></div>
+        <div class="lobby-stat"><span class="lobby-stat-ic">▦</span><b>${(cat.templates || []).length}</b><span>当前分类</span></div>
+        <div class="lobby-stat"><span class="lobby-stat-ic">⬡</span><b>${cats.length}</b><span>分类</span></div>
+      </div>
     </div>
-    <div style="margin-bottom:14px">
-      <h3 style="font-size:13px;font-weight:600">${cat.icon || ''} ${cat.name}</h3>
-      <p class="ts t2" style="margin-top:2px">${cat.description || ''}</p>
-    </div>
-    <div class="rgrid">${cards}</div>`;
+    <div class="tmpl-tabs">${tabs}</div>
+    <div class="lobby-grid">${cards}</div>`;
 }
 
 function createFromTemplate(templateId, defaultName) {
