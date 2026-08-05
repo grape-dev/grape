@@ -1186,6 +1186,15 @@ def get_user_repos(user_id: int) -> list[dict]:
         ]
 
 
+def get_user_repos_synced_at(user_id: int) -> str:
+    """返回用户仓库缓存的最近同步时间（synced_at），无缓存返回空串"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT MAX(synced_at) FROM user_repos WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+        return row[0] or "" if row else ""
+
+
 def clear_user_repos(user_id: int):
     """清除用户仓库缓存"""
     with db_lock:

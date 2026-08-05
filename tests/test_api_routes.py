@@ -304,6 +304,19 @@ class TestRepos:
         assert not has_user_repos(uid), "Should be empty after final clear"
         print("  [OK] user_repos table operations verified")
 
+    def test_user_repos_synced_at(self):
+        """save_user_repos 后 synced_at 应写入时间戳，get_user_repos_synced_at 应能读取"""
+        from src.user.db import save_user_repos, clear_user_repos, get_user_repos_synced_at
+        uid = 10001
+        clear_user_repos(uid)
+        assert get_user_repos_synced_at(uid) == "", "No cache -> empty synced_at"
+        save_user_repos(uid, [{"full_name": "org/ttl-a", "owner": "org", "name": "ttl-a",
+                               "description": "", "role": "Admin", "is_admin": True}])
+        ts = get_user_repos_synced_at(uid)
+        import re
+        assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", ts), f"bad synced_at: {ts!r}"
+        clear_user_repos(uid)
+
 
 # ===================== 4. Dashboard =====================
 class TestDashboard:

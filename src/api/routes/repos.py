@@ -9,6 +9,9 @@ from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_u
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
 
+# 仓库列表缓存有效期（秒）：超过后自动从 GitCode 重新拉取
+REPOS_CACHE_TTL = 300  # 5 分钟
+
 
 class RepoAction(BaseModel):
     full_name: str
@@ -47,20 +50,38 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
 
 @router.get("/member")
 async def list_member_repos(user: dict = Depends(get_current_user)):
-    """获取用户可操作仓库列表：优先从 user_repos 缓存读取，缓存为空时自动从 GitCode 拉取"""
+    """获取用户可操作仓库列表：优先从 user_repos 缓存读取；缓存为空或超过 TTL 时自动从 GitCode 拉取刷新"""
+    from datetime import datetime, timezone
+
     api_token = get_user_token(user["username"])
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
-    # 优先读取 DB 缓存
+    # 优先读取 DB 缓存（未过期）
     cached = user_db.get_user_repos(user["id"])
-    if cached:
+    synced_at = user_db.get_user_repos_synced_at(user["id"])
+
+    def _is_expired() -> bool:
+        if not synced_at:
+            return True
+        try:
+            # SQLite datetime('now') 是 UTC "YYYY-MM-DD HH:MM:SS"
+            t = datetime.strptime(synced_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - t).total_seconds()
+            return age > REPOS_CACHE_TTL
+        except Exception:
+            return True
+
+    if cached and not _is_expired():
         return {"repos": _filter_repos(user["id"], cached), "_cached": True}
 
-    # 缓存为空 → 从 GitCode 拉取
+    # 缓存为空或已过期 → 从 GitCode 拉取并刷新缓存
     try:
         repos = _fetch_and_cache(user["id"], api_token)
     except Exception as e:
+        # 拉取失败但有旧缓存兜底（避免 GitCode 抖动导致页面空白）
+        if cached:
+            return {"repos": _filter_repos(user["id"], cached), "_cached": True, "_stale": True}
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"加载仓库列表失败: {e}"})
 
     return {"repos": _filter_repos(user["id"], repos), "_cached": False}
