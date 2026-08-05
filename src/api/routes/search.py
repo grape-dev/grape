@@ -39,13 +39,21 @@ async def global_search(q: str = Query("", min_length=1),
                 })
 
     if type in ("all", "agent"):
-        from src.api.routes.agents import AGENT_META
-        for name, meta in AGENT_META.items():
-            if q_lower in name or q_lower in meta["display_name"].lower():
-                results["agents"].append({
-                    "name": name,
-                    "display_name": meta["display_name"],
-                    "icon": meta["icon"],
-                })
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute(
+                    "SELECT agent_type, display_name, icon FROM agent_type WHERE LOWER(agent_type) LIKE ? OR LOWER(display_name) LIKE ?",
+                    (f"%{q_lower}%", f"%{q_lower}%")
+                )
+                for r in c.fetchall():
+                    results["agents"].append({
+                        "name": r[0],
+                        "display_name": r[1] or r[0],
+                        "icon": r[2] or "",
+                    })
+            except Exception:
+                pass
 
     return results

@@ -2,77 +2,68 @@
 import pytest
 import os
 import sys
-import tempfile
 import json
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
 
-
-def _import_config(routing_json=None):
-    """Import config with optional custom routing JSON path."""
-    # Clear module cache
-    for mod in ["src.config", "config"]:
-        if mod in sys.modules:
-            del sys.modules[mod]
-    if SRC_DIR not in sys.path:
-        sys.path.insert(0, SRC_DIR)
-
-    if routing_json is not None:
-        # Write routing to temp file and override CONFIG_DIR
-        import src.config as cfg
-        tmp_dir = tempfile.mkdtemp()
-        routing_path = os.path.join(tmp_dir, "event-routing.json")
-        with open(routing_path, "w", encoding="utf-8") as f:
-            json.dump(routing_json, f)
-        cfg.CONFIG_DIR = tmp_dir
-        cfg._load_routing_config()
-        return cfg
-    else:
-        import src.config as cfg
-        return cfg
+os.environ["DEVOPS_DB_PATH"] = os.path.join(os.path.dirname(__file__), "..", "data", "test_sessions.db")
 
 
 class TestEventRouting:
+    def _seed(self):
+        """确保测试库 agent_type 表有标准的订阅事件映射"""
+        from src.session_manager import db, db_lock
+        subscribe_map = {
+            "vod": ["vod_signal"],
+            "issue": ["issue_opened", "issue_updated", "issue_labeled", "issue_comment"],
+            "coding": [],
+            "qa": ["pull_request_opened", "pull_request_updated", "note_hook_pr"],
+            "sre": ["pull_request_merged", "build_failure", "deploy_start", "deploy_failure", "release_created"],
+        }
+        with db_lock:
+            c = db.cursor()
+            for at, events in subscribe_map.items():
+                c.execute("INSERT OR REPLACE INTO agent_type (agent_type, display_name, order_num, subscribe_events) VALUES (?,?,?,?)",
+                          (at, at, {"vod": 1, "issue": 2, "coding": 3, "qa": 4, "sre": 5}[at], json.dumps(events)))
+            db.commit()
+
     def test_default_fallback(self):
-        """Unknown event types should return fallback_skill."""
-        cfg = _import_config()
-        skill = cfg.get_domain_skill("unknown_event_type")
-        # Default fallback from event-routing.json is empty string
-        assert skill == ""
+        """未知事件类型应返回空（无匹配 Agent）"""
+        from src.api.routing import get_domain_agent
+        self._seed()
+        assert get_domain_agent("unknown_event_type") == ""
 
     def test_known_routes(self):
-        """Known event types route to correct skills."""
-        cfg = _import_config()
-        assert cfg.get_domain_skill("issue_opened") == "issue"
-        assert cfg.get_domain_skill("issue_comment") == "issue"
-        assert cfg.get_domain_skill("issue_labeled") == "issue"
-        assert cfg.get_domain_skill("pull_request_opened") == "pr"
-        assert cfg.get_domain_skill("pull_request_updated") == "pr"
-        assert cfg.get_domain_skill("build_failure") == "build-debug"
-        assert cfg.get_domain_skill("deploy_start") == "deploy-guard"
-        assert cfg.get_domain_skill("deploy_failure") == "deploy-guard"
-        assert cfg.get_domain_skill("release_created") == "changelog-gen"
+        """已知事件类型路由到正确 Agent"""
+        from src.api.routing import get_domain_agent
+        self._seed()
+        assert get_domain_agent("issue_opened") == "issue"
+        assert get_domain_agent("issue_comment") == "issue"
+        assert get_domain_agent("issue_labeled") == "issue"
+        assert get_domain_agent("pull_request_opened") == "qa"
+        assert get_domain_agent("pull_request_updated") == "qa"
+        assert get_domain_agent("build_failure") == "sre"
+        assert get_domain_agent("deploy_start") == "sre"
+        assert get_domain_agent("deploy_failure") == "sre"
+        assert get_domain_agent("release_created") == "sre"
+        assert get_domain_agent("vod_signal") == "vod"
 
     def test_removed_events_not_in_routing(self):
-        """Events like push, tag_created, build_success should fallback to empty."""
-        cfg = _import_config()
-        assert cfg.get_domain_skill("push") == ""
-        assert cfg.get_domain_skill("tag_created") == ""
-        assert cfg.get_domain_skill("build_success") == ""
+        """push / tag_created / build_success 等未订阅事件应回落到空"""
+        from src.api.routing import get_domain_agent
+        self._seed()
+        assert get_domain_agent("push") == ""
+        assert get_domain_agent("tag_created") == ""
+        assert get_domain_agent("build_success") == ""
 
-    def test_custom_routing(self):
-        """Custom routing JSON overwrites defaults."""
-        cfg = _import_config({
-            "routing": {"custom_event": "custom-skill"},
-            "fallback_skill": "fallback-skill"
-        })
-        assert cfg.get_domain_skill("custom_event") == "custom-skill"
-        assert cfg.get_domain_skill("unknown") == "fallback-skill"
-
-    def test_empty_routing(self):
-        """Empty routing with custom fallback."""
-        cfg = _import_config({
-            "routing": {},
-            "fallback_skill": "my-fallback"
-        })
-        assert cfg.get_domain_skill("anything") == "my-fallback"
+    def test_agent_skill_map(self):
+        """get_agent_skill_map 应返回 {event_type: agent_type} 映射"""
+        from src.api.routing import get_agent_skill_map
+        self._seed()
+        m = get_agent_skill_map()
+        assert m.get("issue_opened") == "issue"
+        assert m.get("build_failure") == "sre"
+        assert m.get("vod_signal") == "vod"
+        assert "push" not in m

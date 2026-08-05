@@ -840,9 +840,11 @@ class TestTokenLayers:
         assert isinstance(token, str)
 
     def test_webhook_token_fallback(self):
-        from src.api.deps import get_webhook_token
-        token = get_webhook_token("org", "nonexistent")
+        from src.user.db import get_webhook_token_by_repo
+        token = get_webhook_token_by_repo("org/nonexistent")
+        # 未托管仓库应返回空串（无 webhook token）
         assert isinstance(token, str)
+        assert token == ""
 
 
 # ===================== 14. Event Pipeline (unit) =====================

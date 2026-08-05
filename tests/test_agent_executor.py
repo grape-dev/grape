@@ -209,8 +209,7 @@ class TestStreamAgentBackwardCompat:
 class TestConfigIntegration:
     """Test that config.py's get_agent_backend works with the routing file."""
     def test_config_routing(self):
-        from src.config import get_agent_backend, _load_agent_routing_config
-        _load_agent_routing_config()
+        from src.config import get_agent_backend
         assert get_agent_backend("issue") == "opencode"
         assert get_agent_backend("implementation") == "opencode"
         assert get_agent_backend("build-debug") == "opencode"

@@ -83,6 +83,19 @@ db.execute("""
         created_at TEXT, last_active_at TEXT
     )
 """)
+# 兼容旧列迁移（幂等）
+try:
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN backend_session_id TEXT DEFAULT ''")
+except Exception:
+    pass
+try:
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0")
+except Exception:
+    pass
+try:
+    db.execute("ALTER TABLE chat_agent_session ADD COLUMN skill_id INTEGER DEFAULT 0")
+except Exception:
+    pass
 db.execute(REPO_IM_GROUP_BINDING_TABLE_SQL)
 db.execute(UNIFIED_USER_MAPPING_TABLE_SQL)
 # 兼容旧列迁移（幂等）
@@ -189,7 +202,8 @@ def dump_history_to_file(repo_key: str, history: list, account: str = ""):
         entry = {k: v for k, v in r.items() if k != "oc_session_id"}
         clean.append(entry)
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
-    hist_dir = os.path.join(WORKSPACE_DIR, "history", account, repo_name)
+    account_dir = account or "default"
+    hist_dir = os.path.join(WORKSPACE_DIR, "history", account_dir, repo_name)
     try:
         os.makedirs(hist_dir, exist_ok=True)
         # Write most recent 10 to base file, older chunks to numbered files
@@ -216,7 +230,8 @@ def get_history_file_list(repo_key: str, account: str = "") -> list[str]:
     """返回可用的历史文件路径列表（最新在前）"""
     from src.config import WORKSPACE_DIR
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
-    hist_dir = os.path.join(WORKSPACE_DIR, "history", account, repo_name)
+    account_dir = account or "default"
+    hist_dir = os.path.join(WORKSPACE_DIR, "history", account_dir, repo_name)
     files = []
     try:
         if os.path.isdir(hist_dir):
@@ -264,10 +279,14 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name=""):
                     (open_id, feishu_name, datetime.now().isoformat(), row[0])
                 )
             else:
-                # 无 user_id 也无已有记录，用 gitcode_user 作为临时主键占位（user_id 为负数避免冲突）
+                # 无 user_id 也无已有记录，用 gitcode_user 派生唯一负数 id 占位（避免不同用户互相覆盖）
                 from src.user import db as user_db
                 uid = user_db.get_user_by_username(gitcode_user)
-                new_id = uid["id"] if uid else -1
+                if uid:
+                    new_id = uid["id"]
+                else:
+                    import hashlib
+                    new_id = -(abs(int(hashlib.md5(gitcode_user.encode()).hexdigest()[:8], 16)) or 1)
                 c.execute(
                     "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?)",
                     (new_id, gitcode_user, open_id, feishu_name, datetime.now().isoformat())

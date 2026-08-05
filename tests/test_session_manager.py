@@ -29,24 +29,28 @@ def _import_session_manager(tmp_path):
     sm.db = sqlite3.connect(db_path, check_same_thread=False)
     sm.db.execute("""
         CREATE TABLE IF NOT EXISTS chat_agent_session (
-            id TEXT PRIMARY KEY, repo_key TEXT UNIQUE,
+            id TEXT PRIMARY KEY,
+            user_id INTEGER DEFAULT 0,
+            repo_key TEXT DEFAULT '',
             source TEXT, repository TEXT, status TEXT,
+            backend TEXT DEFAULT 'opencode',
+            skill TEXT DEFAULT '',
+            im_provider TEXT DEFAULT '',
+            im_app_id TEXT DEFAULT '',
+            im_app_secret TEXT DEFAULT '',
             event_history TEXT DEFAULT '[]',
-            oc_session_id TEXT DEFAULT '',
-            opencode_session_id TEXT DEFAULT '',
-            codearts_session_id TEXT DEFAULT '',
-            backend TEXT DEFAULT '',
+            backend_session_id TEXT DEFAULT '',
             created_at TEXT, last_active_at TEXT
         )
     """)
-    sm.db.execute(sm.FEISHU_BINDINGS_TABLE_SQL)
-    sm.db.execute(sm.FEISHU_USERS_TABLE_SQL)
+    sm.db.execute(sm.REPO_IM_GROUP_BINDING_TABLE_SQL)
+    sm.db.execute(sm.UNIFIED_USER_MAPPING_TABLE_SQL)
     try:
-        sm.db.execute("ALTER TABLE feishu_bindings ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")
+        sm.db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")
     except:
         pass
     try:
-        sm.db.execute("ALTER TABLE feishu_bindings ADD COLUMN notify_enabled INTEGER DEFAULT 0")
+        sm.db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN notify_enabled INTEGER DEFAULT 0")
     except:
         pass
     sm.db.commit()
@@ -147,10 +151,13 @@ class TestFeishuUsers:
         assert mapping["user2"]["name"] == "李四"
 
     def test_mapping_repo_isolation(self, tmp_path):
+        """用户映射按 gitcode_user 全局关联（非按 repo 隔离），不同 repo 共享同一用户映射"""
         sm = _import_session_manager(tmp_path)
         sm.set_feishu_open_id("gitcode:repoA", "user1", "ou_1", "张三")
+        # 全局映射：repoB 也能看到 repoA 中登记的同一用户
         mapping_b = sm.get_feishu_mapping("gitcode:repoB")
-        assert len(mapping_b) == 0
+        assert "user1" in mapping_b
+        assert mapping_b["user1"]["open_id"] == "ou_1"
 
     def test_update_existing_mapping(self, tmp_path):
         sm = _import_session_manager(tmp_path)
@@ -175,8 +182,8 @@ class TestAutoImplEnabled:
         # First create a binding
         with sm.db_lock:
             sm.db.execute(
-                "INSERT OR REPLACE INTO feishu_bindings (chat_id, repo_key, source, bind_by) VALUES (?,?,?,?)",
-                ("chat_1", "gitcode:owner/repo", "gitcode", "tester")
+                "INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, bind_by) VALUES (?,?,?)",
+                ("chat_1", "gitcode:owner/repo", "tester")
             )
             sm.db.commit()
         enabled = sm.get_auto_impl_enabled("gitcode:owner/repo")
@@ -186,7 +193,7 @@ class TestAutoImplEnabled:
         sm = _import_session_manager(tmp_path)
         with sm.db_lock:
             sm.db.execute(
-                "INSERT OR REPLACE INTO feishu_bindings (chat_id, repo_key) VALUES (?,?)",
+                "INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key) VALUES (?,?)",
                 ("chat_1", "gitcode:owner/repo")
             )
             sm.db.commit()
@@ -201,7 +208,7 @@ class TestNotifyEnabled:
         sm = _import_session_manager(tmp_path)
         with sm.db_lock:
             sm.db.execute(
-                "INSERT OR REPLACE INTO feishu_bindings (chat_id, repo_key) VALUES (?,?)",
+                "INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key) VALUES (?,?)",
                 ("chat_1", "gitcode:owner/repo")
             )
             sm.db.commit()
@@ -212,7 +219,7 @@ class TestNotifyEnabled:
         sm = _import_session_manager(tmp_path)
         with sm.db_lock:
             sm.db.execute(
-                "INSERT OR REPLACE INTO feishu_bindings (chat_id, repo_key) VALUES (?,?)",
+                "INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key) VALUES (?,?)",
                 ("chat_1", "gitcode:owner/repo")
             )
             sm.db.commit()

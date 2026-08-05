@@ -17,7 +17,7 @@ def _get_agent_type_meta(agent_type: str) -> dict | None:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT agent_type, display_name, description, default_backend, icon, order_num FROM agent_type WHERE agent_type=?",
+                "SELECT agent_type, display_name, description, default_backend_id, icon, order_num FROM agent_type WHERE agent_type=?",
                 (agent_type,)
             )
             row = c.fetchone()
@@ -37,7 +37,7 @@ async def list_agent_types():
         c = db.cursor()
         try:
             c.execute(
-                "SELECT agent_type, display_name, description, default_backend, icon, order_num FROM agent_type ORDER BY order_num, agent_type"
+                "SELECT agent_type, display_name, description, default_backend_id, icon, order_num FROM agent_type ORDER BY order_num, agent_type"
             )
             rows = c.fetchall()
         except Exception:

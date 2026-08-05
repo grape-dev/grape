@@ -29,6 +29,37 @@ from src.im.feishu import (
 )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _seed_chat_bot_config():
+    """Seed 一个已配置 chat bot 的用户（global_im_bot_config + chat_agent_session），
+    使 ensure_configured()/get_tenant_token() 等同步函数可读到配置。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("CREATE TABLE IF NOT EXISTS global_im_bot_config (bot_app_id TEXT PRIMARY KEY, bot_type TEXT, is_active INTEGER DEFAULT 1)")
+        except Exception:
+            pass
+        try:
+            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, is_active) VALUES ('cli_test','chat_bot',1)")
+        except Exception:
+            pass
+        try:
+            c.execute("CREATE TABLE IF NOT EXISTS chat_agent_session (id TEXT PRIMARY KEY, user_id INTEGER DEFAULT 0, repo_key TEXT DEFAULT '', im_app_id TEXT DEFAULT '', im_app_secret TEXT DEFAULT '', im_provider TEXT DEFAULT '')")
+        except Exception:
+            pass
+        try:
+            c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_app_secret, im_provider) VALUES ('sess-feishu-test',1,'','cli_test','test_secret','feishu')")
+        except Exception:
+            pass
+        try:
+            c.execute("CREATE TABLE IF NOT EXISTS repo_im_group_binding (id INTEGER PRIMARY KEY AUTOINCREMENT, im_provider TEXT DEFAULT 'feishu', im_chat_id TEXT NOT NULL, im_channel_name TEXT DEFAULT '', repo_key TEXT NOT NULL, bind_by TEXT DEFAULT '', im_app_id TEXT DEFAULT '', auto_impl_enabled INTEGER DEFAULT 0, notify_enabled INTEGER DEFAULT 0)")
+        except Exception:
+            pass
+        db.commit()
+    yield
+
+
 class TestBuildCardPayload:
     def test_contains_header(self):
         card = _build_card_payload("Hello World")
@@ -208,26 +239,33 @@ class TestProcessCommandClean:
         db_path = os.path.join(tmp_path, "test.db")
         db = sqlite3.connect(db_path)
         db.execute("""
-            CREATE TABLE IF NOT EXISTS feishu_bindings (
-                chat_id TEXT PRIMARY KEY, repo_key TEXT,
-                source TEXT DEFAULT 'gitcode', bind_by TEXT DEFAULT '',
-                account TEXT DEFAULT 'default',
+            CREATE TABLE IF NOT EXISTS repo_im_group_binding (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                im_provider TEXT DEFAULT 'feishu',
+                im_chat_id TEXT NOT NULL,
+                im_channel_name TEXT DEFAULT '',
+                repo_key TEXT NOT NULL,
+                bind_by TEXT DEFAULT '',
+                im_app_id TEXT DEFAULT '',
+                auto_impl_enabled INTEGER DEFAULT 0,
+                notify_enabled INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
         db.execute("""
             CREATE TABLE IF NOT EXISTS chat_agent_session (
-                repo_key TEXT UNIQUE,
+                id TEXT PRIMARY KEY,
+                repo_key TEXT DEFAULT '',
                 event_history TEXT DEFAULT '[]',
-                opencode_session_id TEXT DEFAULT '',
-                codearts_session_id TEXT DEFAULT '',
-                backend TEXT DEFAULT ''
+                backend_session_id TEXT DEFAULT '',
+                backend TEXT DEFAULT '',
+                created_at TEXT, last_active_at TEXT
             )
         """)
-        db.execute("INSERT OR REPLACE INTO feishu_bindings (chat_id, repo_key, account) VALUES (?,?,?)",
+        db.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, im_app_id) VALUES (?,?,?)",
                    ("chat_clean_test", "owner/repo", "default"))
-        db.execute("INSERT OR REPLACE INTO chat_agent_session (repo_key, event_history, opencode_session_id, codearts_session_id, backend) VALUES (?,?,?,?,?)",
-                   ("owner/repo", json.dumps([{"type": "chat", "text": "hello"}]), "ses_opencode_old", "ses_codearts_old", "opencode"))
+        db.execute("INSERT OR REPLACE INTO chat_agent_session (id, repo_key, event_history, backend_session_id, backend) VALUES (?,?,?,?,?)",
+                   ("sess-1", "owner/repo", json.dumps([{"type": "chat", "text": "hello"}]), "ses_opencode_old", "opencode"))
         db.commit()
         return db, db_path
 
@@ -236,21 +274,26 @@ class TestProcessCommandClean:
         result = process_command("/clean", "chat_clean_test", "tester", db, "default")
         assert "已清除" in result
         c = db.cursor()
-        c.execute("SELECT opencode_session_id, codearts_session_id, backend, event_history FROM chat_agent_session WHERE repo_key=?", ("owner/repo",))
+        c.execute("SELECT backend_session_id, backend, event_history FROM chat_agent_session WHERE repo_key=?", ("owner/repo",))
         row = c.fetchone()
-        assert row[0] == ""  # opencode_session_id cleared
-        assert row[1] == ""  # codearts_session_id cleared
-        assert row[2] == ""  # backend cleared
-        assert "hello" in row[3]  # event_history preserved
+        assert row[0] == ""  # backend_session_id cleared
+        assert row[1] == ""  # backend cleared
+        assert "hello" in row[2]  # event_history preserved
 
     def test_clean_no_binding(self, tmp_path):
         import sqlite3
         db = sqlite3.connect(os.path.join(tmp_path, "empty.db"))
         db.execute("""
-            CREATE TABLE IF NOT EXISTS feishu_bindings (
-                chat_id TEXT PRIMARY KEY, repo_key TEXT,
-                source TEXT DEFAULT 'gitcode', bind_by TEXT DEFAULT '',
-                account TEXT DEFAULT 'default',
+            CREATE TABLE IF NOT EXISTS repo_im_group_binding (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                im_provider TEXT DEFAULT 'feishu',
+                im_chat_id TEXT NOT NULL,
+                im_channel_name TEXT DEFAULT '',
+                repo_key TEXT NOT NULL,
+                bind_by TEXT DEFAULT '',
+                im_app_id TEXT DEFAULT '',
+                auto_impl_enabled INTEGER DEFAULT 0,
+                notify_enabled INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
@@ -262,10 +305,11 @@ class TestProcessCommandClean:
         db, _ = self._setup_db(tmp_path)
         c = db.cursor()
         # Add session with gitcode: prefix
-        c.execute("INSERT OR REPLACE INTO chat_agent_session (repo_key, opencode_session_id) VALUES (?,?)",
-                  ("gitcode:owner/repo", "ses_another"))
+        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, repo_key, backend_session_id) VALUES (?,?,?)",
+                  ("sess-2", "gitcode:owner/repo", "ses_another"))
         db.commit()
         result = process_command("/clean", "chat_clean_test", "tester", db, "default")
         assert "已清除" in result
-        c.execute("SELECT opencode_session_id FROM chat_agent_session WHERE repo_key=?", ("gitcode:owner/repo",))
+        c = db.cursor()
+        c.execute("SELECT backend_session_id FROM chat_agent_session WHERE repo_key='gitcode:owner/repo'")
         assert c.fetchone()[0] == ""

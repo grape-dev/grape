@@ -116,6 +116,7 @@ class TestQaSkillPrompt:
             "account": "owner/repo",
         }
         prompt = pb.build_prompt(evt, [], "", ["qa"])
-        assert "QA 审查" in prompt
-        assert "工作流审查" in prompt
-        assert "Never write code" in prompt
+        # 新版：skill 通过 SKILL.md 路径引用注入（agent 运行时读取），prompt 应包含 Skill 指引
+        assert "## Skill: qa" in prompt
+        assert "SKILL.md" in prompt
+        assert "必须先执行" in prompt
