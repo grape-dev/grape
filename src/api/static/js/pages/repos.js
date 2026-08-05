@@ -1,5 +1,6 @@
 // ====== 仓库选择/管理页：内嵌 Sidebar 壳（我的项目 / 项目模板）======
 let _projectsContent = '';
+let _currentReposView = 'selection';  // 'selection' 首屏卡片视图 | 'management' 仓库管理列表视图
 
 function renderSelectionShell(tab, innerHtml) {
   const d = document.getElementById('pageContent');
@@ -39,11 +40,15 @@ function switchSidebarTab(tab) {
 function renderRepoSelection(repos) {
   const d = document.getElementById('pageContent');
   if (!d) return;
+  _currentReposView = 'selection';
   const user = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).username : 'User';
   let inner = `<div style="max-width:900px;margin:0 auto">
     <div style="margin-bottom:20px;display:flex;justify-content:space-between;align-items:center">
       <div><h2 style="font-size:17px;font-weight:600;margin-bottom:3px">Welcome, <span id="welcomeUser">${user}</span></h2><p class="ts t2">选择你要加入的 GitCode 仓库</p></div>
-      <button class="bt bt-o bt-s" onclick="app.logout()" style="color:var(--r);border-color:var(--r)">退出登录</button>
+      <div style="display:flex;gap:8px">
+        <button class="bt bt-o bt-s" onclick="syncRepos()">↻ Sync from GitCode</button>
+        <button class="bt bt-o bt-s" onclick="app.logout()" style="color:var(--r);border-color:var(--r)">退出登录</button>
+      </div>
     </div>
     <div class="flex gap8" style="margin-bottom:24px"><input placeholder="搜索仓库..." style="flex:1;padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c)"><select style="padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:11px;background:var(--c);outline:none"><option>全部</option><option>成员</option><option>管理员</option></select></div>
     <div class="rgrid">
@@ -78,6 +83,7 @@ function renderRepoSelection(repos) {
 function renderRepos() {
   const el = document.getElementById('pageContent');
   if (!el) return;
+  _currentReposView = 'management';
   renderSelectionShell('projects', '<div class="loading">加载中...</div>');
 
   API.get('/repos/member').then(d => {
@@ -143,7 +149,15 @@ function renderRepos() {
 function syncRepos() {
   API.post('/repos/sync').then(d => {
     app.showToast('同步成功');
-    renderRepos();
+    if (_currentReposView === 'selection') {
+      // 首屏卡片视图：重新拉取并渲染卡片
+      API.get('/repos/member').then(r => {
+        _projectsContent = '';
+        renderRepoSelection(r.repos || []);
+      }).catch(() => renderRepoSelection(d.repos || []));
+    } else {
+      renderRepos();
+    }
   }).catch(e => app.showToast('同步失败: ' + e.message));
 }
 
