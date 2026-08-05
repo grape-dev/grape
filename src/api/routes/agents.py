@@ -144,6 +144,17 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
     COLORS = {"vod": "var(--pk)", "issue": "var(--r)", "coding": "var(--a)", "qa": "var(--pu)", "sre": "var(--or)"}
     BGS = {"vod": "#fde8f0", "issue": "#fce5e5", "coding": "#e3edfd", "qa": "#f3e9fe", "sre": "#fef0e4"}
 
+    # 当前配置技能的 scope（用于前端下拉回显同名技能）
+    skill_scope = ""
+    if session_data.get("skill_id"):
+        try:
+            with db_lock:
+                c = db.cursor()
+                row = c.execute("SELECT scope FROM skill WHERE id=? AND is_active=1", (session_data["skill_id"],)).fetchone()
+                skill_scope = row[0] if row else ""
+        except Exception:
+            pass
+
     return {
         "agent_type": name,
         "display_name": meta["display_name"],
@@ -154,6 +165,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         "backend": session_data.get("backend", meta.get("default_backend", "opencode")),
         "skill": session_data.get("skill", ""),
         "skill_id": session_data.get("skill_id", 0),
+        "skill_scope": skill_scope,
         "repo_gitcode_token": session_data.get("repo_gitcode_token", ""),
         "status": session_data.get("status", "idle"),
         "last_active": session_data.get("last_active_at", ""),
@@ -173,6 +185,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
 class AgentConfig(BaseModel):
     backend: str = "opencode"
     skill: str = ""
+    skill_scope: str = ""  # official / repo（前端下拉回显同名技能时精确匹配）
     # VOD IM 配置（仅在 name=="vod" 时生效）
     im_app_id: str = ""
     im_app_secret: str = ""
@@ -264,12 +277,31 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     with db_lock:
         c = db.cursor()
         try:
-            from src.user.db import ensure_default_backend, get_backend_id_by_name, resolve_skill_id
+            from src.user.db import ensure_default_backend, get_backend_id_by_name
             backend_id = get_backend_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
-            # 仓库技能按 repo_key 解析；official 兜底
-            skill_id = resolve_skill_id(body.skill, owner_id=repo_key) if body.skill else 0
-            if not skill_id and body.skill:
-                skill_id = resolve_skill_id(body.skill)
+            # 精确按 scope(+owner) 解析 skill_id，避免同名时官方优先误命中
+            skill_id = 0
+            if body.skill:
+                from src.session_manager import db as _db, db_lock as _db_lock
+                def _find_skill(scope, owner_id=""):
+                    with _db_lock:
+                        _c = _db.cursor()
+                        if owner_id:
+                            row = _c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? AND is_active=1 LIMIT 1",
+                                             (body.skill, scope, owner_id)).fetchone()
+                        else:
+                            row = _c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
+                                             (body.skill, scope)).fetchone()
+                        return row[0] if row else 0
+
+                if getattr(body, "skill_scope", "") == "repo":
+                    skill_id = _find_skill("repo", repo_key)
+                elif getattr(body, "skill_scope", "") == "official":
+                    skill_id = _find_skill("official")
+                else:
+                    skill_id = _find_skill("repo", repo_key)
+                    if not skill_id:
+                        skill_id = _find_skill("official")
             c.execute(
                 "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?)",
                 (session_id, repo_key, name, backend_id, body.skill, skill_id, repo_token, "idle",

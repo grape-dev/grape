@@ -31,9 +31,10 @@ function loadSideConfig() {
     const backendsOpts = (d._backends || []).map(b =>
       `<option value="${b.name}" ${b.name === (backend.type || '').toLowerCase() ? 'selected' : ''}>${b.display_name || b.name}</option>`
     ).join('') || '<option>Default</option>';
-    const skillsOpts = (d._skills || []).map(s =>
-      `<option value="${s.name}" ${s.name === currentSkill ? 'selected' : ''}>${s.display_name || s.name}</option>`
-    ).join('') || '<option value="">无专用技能</option>';
+    const skillsOpts = (d._skills || []).map(s => {
+      const scopeLabel = s.scope === 'official' ? '官方' : s.scope === 'repo' ? '仓库' : '个人';
+      return `<option value="${s.scope}:${s.name}" ${(d.skill_scope + ':' + currentSkill) === (s.scope + ':' + s.name) ? 'selected' : ''}>${s.display_name || s.name} (${scopeLabel})</option>`;
+    }).join('') || '<option value="">无专用技能</option>';
     const side = document.getElementById('chatSide');
     if (!side) return;
     side.innerHTML = `
@@ -251,7 +252,14 @@ function doSend(input, body) {
 
 function saveChatConfig() {
   const backend = document.getElementById('cfgBackend')?.value || '';
-  const skill = document.getElementById('cfgSkill')?.value || '';
+  const skillVal = document.getElementById('cfgSkill')?.value || '';
+  // 下拉 value 格式 "scope:name"（如 "repo:chat-advance"），拆出 scope 与 name
+  let skill = skillVal, skillScope = '';
+  if (skillVal.indexOf(':') > 0) {
+    const _sp = skillVal.indexOf(':');
+    skillScope = skillVal.slice(0, _sp);
+    skill = skillVal.slice(_sp + 1);
+  }
   const provider = document.getElementById('cfgImProvider')?.value || 'feishu';
   const appId = document.getElementById('cfgImAppId')?.value || '';
   const rawSecret = document.getElementById('cfgImSecret')?.value || '';
@@ -261,7 +269,9 @@ function saveChatConfig() {
   im[provider] = {app_id: appId, app_secret: secret};
   const _repo = app.currentRepo();
   const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
-  API.put('/chat/config' + _qs, {backend, skill, im}).then(() => {
+  const _body = {backend, skill, im};
+  if (skillScope) _body.skill_scope = skillScope;
+  API.put('/chat/config' + _qs, _body).then(() => {
     app.showToast('配置已保存');
   }).catch(e => app.showToast('保存失败: ' + e.message));
 }

@@ -679,6 +679,50 @@ class TestChat:
                 c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"chatsid{uniq}%",))
                 db.commit()
 
+    def test_chat_config_put_skill_scope_precise(self):
+        """同名技能时 skill_scope 精确定位（官方/仓库同名选对的那个）"""
+        import uuid
+        from src.session_manager import db, db_lock
+
+        uid = _uid["id"]
+        uniq = uuid.uuid4().hex[:8]
+        repo_key = f"org/scope-{uniq}"
+        same_name = f"dupname{uniq}"
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,))
+            c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"dupname{uniq}%",))
+            # 同名：一个官方 + 一个仓库
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (same_name, "official-dup", "o", "chat", same_name, "official", ""))
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (same_name, "repo-dup", "r", "chat", same_name, "repo", repo_key))
+            db.commit()
+        try:
+            # 不带 skill_scope：repo 优先 → 命中仓库技能
+            r = client.put(f"/api/chat/config?repo={repo_key}", json={"skill": same_name}, headers=_headers)
+            assert r.status_code == 200, f"save failed: {r.text[:200]}"
+            with db_lock:
+                c = db.cursor()
+                row = c.execute("SELECT skill, skill_id FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,)).fetchone()
+            repo_id = c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?", (same_name, repo_key)).fetchone()
+            assert row and row[1] == repo_id[0], f"default should resolve repo skill (repo-first), got {row}"
+
+            # 显式 skill_scope=official → 解析官方技能（精确匹配）
+            r2 = client.put(f"/api/chat/config?repo={repo_key}", json={"skill": same_name, "skill_scope": "official"}, headers=_headers)
+            assert r2.status_code == 200, f"save official failed: {r2.text[:200]}"
+            with db_lock:
+                c = db.cursor()
+                row2 = c.execute("SELECT skill, skill_id FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,)).fetchone()
+            official_id = c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='official'", (same_name,)).fetchone()
+            assert row2 and row2[1] == official_id[0], f"skill_scope=official should resolve official skill, got {row2}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,))
+                c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"dupname{uniq}%",))
+                db.commit()
+
 
 # ===================== 9. Settings =====================
 class TestSettings:

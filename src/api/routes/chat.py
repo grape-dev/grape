@@ -433,12 +433,24 @@ async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""
     im_app_id = cfg.get("im_app_id", "") or ""
     im_app_secret = cfg.get("im_app_secret", "") or ""
 
+    # 当前配置技能的 scope（用于前端下拉回显同名技能）
+    skill_scope = cfg.get("skill_scope", "")
+    if not skill_scope and cfg.get("skill_id"):
+        try:
+            with db_lock:
+                c = db.cursor()
+                row = c.execute("SELECT scope FROM skill WHERE id=? AND is_active=1", (cfg["skill_id"],)).fetchone()
+                skill_scope = row[0] if row else ""
+        except Exception:
+            pass
+
     return {
         "backend": {
             "type": cfg.get("backend", "opencode"),
         },
         "skill": cfg.get("skill", ""),
         "skill_id": cfg.get("skill_id", 0) or 0,
+        "skill_scope": skill_scope,
         "_backends": backends,
         "_skills": chat_skills,
         "im": {
@@ -508,18 +520,39 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user),
         kwargs["backend"] = body["backend"]
     if body.get("skill") is not None:
         kwargs["skill"] = body["skill"]
-        # 解析 skill_id：优先仓库 owner → 个人 owner → official（同名冲突由 resolve_skill_id 内部处理）
+        # 解析 skill_id：若前端带 skill_scope 则精确匹配该作用域；否则 repo → user → official
         skill_name = body["skill"]
+        skill_scope = body.get("skill_scope", "")
         skill_id = 0
         if skill_name:
-            from src.user.db import resolve_skill_id
-            if repo:
-                skill_id = resolve_skill_id(skill_name, owner_id=repo)
-            if not skill_id:
-                skill_id = resolve_skill_id(skill_name, owner_id=str(user["id"]))
-            if not skill_id:
-                skill_id = resolve_skill_id(skill_name)  # official
+            from src.session_manager import db as _db, db_lock as _db_lock
+            def _find_skill(scope, owner_id=""):
+                """精确按 scope(+owner) 查 skill_id，不走 official 优先"""
+                with _db_lock:
+                    c = _db.cursor()
+                    if owner_id:
+                        row = c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? AND is_active=1 LIMIT 1",
+                                        (skill_name, scope, owner_id)).fetchone()
+                    else:
+                        row = c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
+                                        (skill_name, scope)).fetchone()
+                    return row[0] if row else 0
+
+            if skill_scope == "repo" and repo:
+                skill_id = _find_skill("repo", repo)
+            elif skill_scope == "user":
+                skill_id = _find_skill("user", str(user["id"]))
+            elif skill_scope == "official":
+                skill_id = _find_skill("official")
+            else:
+                if repo:
+                    skill_id = _find_skill("repo", repo)
+                if not skill_id:
+                    skill_id = _find_skill("user", str(user["id"]))
+                if not skill_id:
+                    skill_id = _find_skill("official")
         kwargs["skill_id"] = skill_id
+        kwargs["skill_scope"] = skill_scope
     _set_chat_config(user["id"], **kwargs)
 
     # Chat IM：通过 BotManager 动态增删 Bot

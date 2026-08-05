@@ -36,17 +36,20 @@ function loadCfgOptions() {
       const allSkills = d.skills || [];
       const agentType = skillSelect.dataset.agent || '';
       const currentSkill = skillSelect.dataset.current || '';
+      const currentScope = skillSelect.dataset.scope || '';
       const filtered = allSkills.filter(s => s.agent_type === agentType || s.parent_agent_type === agentType);
       // 若当前配置的 skill 不在返回列表（如自定义 skill），保留该值作为一个 option
       const hasCurrent = filtered.some(s => s.name === currentSkill);
+      const scopeLabel = sc => sc === 'official' ? '官方' : sc === 'repo' ? '仓库' : '个人';
       let html = '<option value="">默认官方技能（自动）</option>' +
         filtered.map(s =>
-          `<option value="${s.name}" ${s.name === currentSkill ? 'selected' : ''}>${s.display_name || s.name}</option>`
+          `<option value="${s.scope}:${s.name}" ${(currentScope + ':' + currentSkill) === (s.scope + ':' + s.name) ? 'selected' : ''}>${s.display_name || s.name} (${scopeLabel(s.scope)})</option>`
         ).join('');
       if (currentSkill && !hasCurrent) {
         html += `<option value="${currentSkill}" selected>${currentSkill}（已配置）</option>`;
       }
       skillSelect.innerHTML = html;
+      skillSelect.dataset.currentScope = currentScope || '';
     }).catch(() => {});
   }
 }
@@ -91,8 +94,8 @@ function renderAgent(name, data) {
       <option value="${currentBackend}" selected>${currentBackend} ...</option>
     </select>
   </div>
-  <div class="srow"><label>Skill</label>
-    <select class="cfg-skill" data-agent="${name}" data-current="${(data.skill || '')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+    <div class="srow"><label>Skill</label>
+    <select class="cfg-skill" data-agent="${name}" data-current="${(data.skill || '')}" data-scope="${(data.skill_scope || '')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
       <option value="${data.skill || ''}" ${data.skill ? 'selected' : ''}>${data.skill ? '加载中...' : '默认官方技能（自动）'}</option>
     </select>
   </div>
@@ -130,10 +133,17 @@ function renderAgent(name, data) {
 
 function saveAgentConfig(name) {
   const backend = document.querySelector('.cfg-backend')?.value || 'opencode';
-  const skill = document.querySelector('.cfg-skill')?.value || '';
+  const skillVal = document.querySelector('.cfg-skill')?.value || '';
+  let skill = skillVal, skillScope = '';
+  if (skillVal.indexOf(':') > 0) {
+    const _sp = skillVal.indexOf(':');
+    skillScope = skillVal.slice(0, _sp);
+    skill = skillVal.slice(_sp + 1);
+  }
   const repo = app.currentRepo();
   if (!repo) return;
   const body = {backend, skill};
+  if (skillScope) body.skill_scope = skillScope;
   if (name === 'vod') {
     const appId = document.getElementById('vodImAppId')?.value || '';
     const rawSecret = document.getElementById('vodImSecret')?.value || '';
