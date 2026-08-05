@@ -94,6 +94,23 @@ class TestAuth:
         r = client.get("/api/auth/profile", headers=_headers)
         assert r.status_code == 200
         assert r.json()["username"] == "test_api"
+        # nickname 字段存在（无 OAuth 昵称时回退 username）
+        assert r.json()["nickname"] == "test_api"
+
+    def test_profile_nickname_roundtrip(self):
+        """save_user_account 写 nickname 后 profile 返回该昵称"""
+        # 给测试用户设置一个昵称
+        acc = user_db.get_user_account("test_api") or {}
+        acc["nickname"] = "测试昵称"
+        user_db.save_user_account("test_api", acc)
+        try:
+            r = client.get("/api/auth/profile", headers=_headers)
+            assert r.status_code == 200
+            assert r.json()["nickname"] == "测试昵称"
+        finally:
+            acc2 = user_db.get_user_account("test_api") or {}
+            acc2["nickname"] = ""
+            user_db.save_user_account("test_api", acc2)
 
     def test_profile_no_auth(self):
         r = client.get("/api/auth/profile")

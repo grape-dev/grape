@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     password_hash TEXT NOT NULL DEFAULT '',
     gitcode_id TEXT DEFAULT '',
     gitcode_api_token TEXT DEFAULT '',
+    nickname TEXT DEFAULT '',
     feishu_app_id TEXT DEFAULT '',
     feishu_app_secret TEXT DEFAULT '',
     huawei_cloud_ak TEXT DEFAULT '',
@@ -459,6 +460,12 @@ def init_db():
     """初始化用户相关表（幂等）"""
     with db_lock:
         db.execute(_USER_ACCOUNTS_DDL)
+        # 兼容旧列迁移（幂等）：nickname 列
+        for col in ["nickname"]:
+            try:
+                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
+            except Exception:
+                pass
         db.execute(_CREDENTIALS_DDL)
         db.execute(_VMS_DDL)
         db.execute(_VM_REPOS_DDL)
@@ -965,6 +972,7 @@ def get_all_managed_repos() -> list[dict]:
 USER_ACCOUNT_FIELDS = [
     "id", "username", "password_hash", "gitcode_id",
     "gitcode_api_token",
+    "nickname",
     "feishu_app_id", "feishu_app_secret",
     "huawei_cloud_ak", "huawei_cloud_sk",
     "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",

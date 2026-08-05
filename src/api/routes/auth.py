@@ -99,6 +99,8 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
 
     gitcode_id = str(gitcode_user.get("id", ""))
     gitcode_login = gitcode_user.get("login", "")
+    # 昵称：优先 nickname，次选 name（每次 OAuth 登录刷新）
+    gitcode_nickname = gitcode_user.get("nickname") or gitcode_user.get("name") or ""
     if not gitcode_id:
         raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取用户信息"})
 
@@ -115,6 +117,8 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
 
     user_acc = user_db.get_user_account(local_user["username"]) or {}
     user_acc["gitcode_api_token"] = access_token
+    if gitcode_nickname:
+        user_acc["nickname"] = gitcode_nickname
     user_db.save_user_account(local_user["username"], user_acc)
 
     token = user_db.create_session_token(local_user["id"])
@@ -133,6 +137,7 @@ async def get_profile(user: dict = Depends(get_current_user)):
                for r in managed_repos_raw[:10]]
     return {
         "username": user["username"],
+        "nickname": acc.get("nickname", "") or user["username"],
         "status": "online",
         "managed_repos": managed,
         "gitcode_bound": bool(user_db.get_credential(user["id"], "gitcode_oauth")),
