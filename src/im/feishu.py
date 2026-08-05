@@ -365,9 +365,20 @@ def sync_repo_feishu_mapping(repo_key: str, chat_id: str) -> int:
     if len(parts) < 2:
         return 0
     owner, repo = parts
-    # 从 managed_repos 获取 repo 绑定的 Bot Token
+    # 从 managed_repos 获取 repo 绑定的 Bot Token；无则用全局 bot token 兜底
     from src.user.db import get_bot_token_by_repo
     api_token = get_bot_token_by_repo(owner, repo)
+    if not api_token:
+        # 全局 bot token（configs/global-bot-token.json）兜底
+        try:
+            import json as _json, os as _os
+            _gbt_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "..", "..", "configs", "global-bot-token.json")
+            if _os.path.exists(_gbt_path):
+                with open(_gbt_path, "r", encoding="utf-8") as _f:
+                    _gbt = _json.load(_f)
+                api_token = _gbt.get("gitcode_api_token", "") or ""
+        except Exception:
+            pass
     if not api_token:
         log.warning(f"Feishu sync: no bot token for {repo_key}, skipping")
         return 0
