@@ -346,11 +346,11 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
             clone_token = bot_token or ""
             if not clone_token:
                 raise RuntimeError("git 模板需要全局 Bot token 拉取")
-            url = f"https://{clone_token}@gitcode.com/{source_repo}.git"
+            url = f"https://oauth2:{clone_token}@gitcode.com/{source_repo}.git"
             workdir = os.path.join(tmp, "repo")
             _run_git(["clone", "--quiet", url, workdir], tmp)
 
-        target_url = f"https://{user_token}@gitcode.com/{gitcode_login}/{target_repo}.git"
+        target_url = f"https://oauth2:{user_token}@gitcode.com/{gitcode_login}/{target_repo}.git"
         if _run_git_has_origin(workdir):
             _run_git(["remote", "remove", "origin"], workdir)
         _run_git(["remote", "add", "origin", target_url], workdir)
