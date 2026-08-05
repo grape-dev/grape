@@ -130,6 +130,16 @@ class TestUpdateSession:
 
 
 class TestFeishuUsers:
+    @pytest.fixture(autouse=True)
+    def _ensure_users(self):
+        """set_feishu_open_id 需要 user_id 来自 user_accounts（user_db 全局库）。
+        在全局测试库创建 user1/user2，使映射可写入。"""
+        from src.user import db as user_db
+        for uname in ("user1", "user2"):
+            if not user_db.get_user_account(uname):
+                user_db.create_user(uname, "pw_test")
+        yield
+
     def test_set_and_get_open_id(self, tmp_path):
         sm = _import_session_manager(tmp_path)
         sm.set_feishu_open_id("gitcode:owner/repo", "user1", "ou_12345", "张三")

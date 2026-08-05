@@ -246,7 +246,7 @@ UNIQUE (im_provider, im_chat_id, im_app_id)
 
 #### `unified_user_mapping` — 通用用户映射
 ```sql
-user_id INTEGER PRIMARY KEY,          -- → user_accounts.id
+user_id INTEGER PRIMARY KEY,          -- 直接等于 user_accounts.id（无占位 id）
 gitcode_user TEXT DEFAULT '',         -- GitCode 用户名
 gitcode_nickname TEXT DEFAULT '',     -- GitCode 昵称（来自 user_accounts.nickname）
 feishu_open_id TEXT DEFAULT '',       -- 飞书 open_id
@@ -255,7 +255,7 @@ github_login TEXT DEFAULT '',         -- 未来扩展：GitHub
 dingtalk_user_id TEXT DEFAULT '',     -- 未来扩展：钉钉
 updated_at TEXT DEFAULT (datetime('now'))
 ```
-> 由 `feishu_users` 重建而来，user_id 主键，每用户一行，支持多平台账号。绑定仓库时同步刷新 gitcode_nickname / feishu_open_id / feishu_name。
+> 由 `feishu_users` 重建而来，user_id 主键且**始终等于 user_accounts.id**（不生成负数占位 id）。每用户一行，支持多平台账号。绑定仓库时同步刷新 gitcode_nickname / feishu_open_id / feishu_name；若 gitcode_user 未在 user_accounts 中且无已有记录则跳过。
 
 #### `vod_conversations` — VOD 群会话
 ```sql

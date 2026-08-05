@@ -264,14 +264,16 @@ def get_feishu_open_id(repo_key, gitcode_user):
 
 
 def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_nickname=""):
-    """写入 GitCode → Feishu 用户映射（user_id 主键，按 gitcode_user 关联）。
+    """写入 GitCode → Feishu 用户映射（user_id = user_accounts.id，按 gitcode_user 关联）。
 
     同步刷新 gitcode_nickname / feishu_open_id / feishu_name。
     gitcode_nickname 优先取传入值，否则从 user_accounts.nickname 获取。
+    user_id 始终为真实 user_accounts.id：若该 gitcode_user 未在 user_accounts 中，
+    则尝试按已有记录更新；两者都不可得时跳过（不写入负数占位）。
     """
+    from src.user import db as user_db
     user_id = 0
     try:
-        from src.user import db as user_db
         acc = user_db.get_user_account(gitcode_user)
         if acc:
             user_id = acc.get("id", 0)
@@ -279,36 +281,29 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_
                 gitcode_nickname = acc.get("nickname", "") or ""
     except Exception:
         pass
+
     with db_lock:
         c = db.cursor()
-        # 若 user_id 已存在则更新，否则按 gitcode_user 匹配后更新/插入
         if user_id:
+            # 有真实 user_id：直接以 user_id 为主键写入/覆盖
             c.execute(
                 "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?,?)",
                 (user_id, gitcode_user, gitcode_nickname, open_id, feishu_name, datetime.now().isoformat())
             )
         else:
-            c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
-            row = c.fetchone()
+            # 无 user_id：尝试按 gitcode_user 更新已有记录（保留其 user_id）
+            row = c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,)).fetchone()
             if row:
                 c.execute(
                     "UPDATE unified_user_mapping SET gitcode_nickname=?, feishu_open_id=?, feishu_name=?, updated_at=? WHERE user_id=?",
                     (gitcode_nickname, open_id, feishu_name, datetime.now().isoformat(), row[0])
                 )
             else:
-                # 无 user_id 也无已有记录，用 gitcode_user 派生唯一负数 id 占位（避免不同用户互相覆盖）
-                from src.user import db as user_db
-                uid = user_db.get_user_by_username(gitcode_user)
-                if uid:
-                    new_id = uid["id"]
-                else:
-                    import hashlib
-                    new_id = -(abs(int(hashlib.md5(gitcode_user.encode()).hexdigest()[:8], 16)) or 1)
-                c.execute(
-                    "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?,?)",
-                    (new_id, gitcode_user, gitcode_nickname, open_id, feishu_name, datetime.now().isoformat())
-                )
+                # 无 user_id 也无已有记录：跳过（user_id 必须为真实 user_accounts.id）
+                log.info(f"set_feishu_open_id: skip mapping for {gitcode_user} (no user_accounts record)")
+                return False
         db.commit()
+        return True
 
 
 def get_feishu_mapping(repo_key):
