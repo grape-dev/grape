@@ -419,20 +419,10 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
         except Exception:
             pass
 
-    # 从 global_im_bot_config 读取 Chat Agent 凭证状态
-    im_app_id = ""
-    im_app_secret = ""
-    try:
-        c.execute("SELECT bot_app_id FROM global_im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
-        row = c.fetchone()
-        if row:
-            im_app_id = row[0] or ""
-            c.execute("SELECT im_app_secret FROM chat_agent_session WHERE im_app_id=? AND im_app_secret!='' AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (im_app_id,))
-            srow = c.fetchone()
-            if srow and srow[0]:
-                im_app_secret = srow[0]
-    except Exception:
-        pass
+    # 从用户级 chat_agent_session 读取 Chat Agent 凭证状态（每用户独立）
+    # 不再查 global_im_bot_config（该表仅作类型注册，不承载用户 IM 配置）
+    im_app_id = cfg.get("im_app_id", "") or ""
+    im_app_secret = cfg.get("im_app_secret", "") or ""
 
     return {
         "backend": {
@@ -463,16 +453,25 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            # 类型独占校验
-            c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
+            # 强约束：一个 app_id 全局唯一。类型注册表校验 VOD 占用 + 其他用户占用
+            c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1", (app_id,))
             row = c.fetchone()
             if row and row[0] == "vod_bot":
                 raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent"})
+            # 其他用户是否已占用（app_id 全局唯一）
+            c.execute("SELECT user_id FROM chat_agent_session WHERE im_app_id=? AND user_id>0 AND user_id!=? AND im_app_id!='' LIMIT 1", (app_id, user["id"]))
+            other = c.fetchone()
+            if other:
+                raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被其他用户使用，不能重复绑定"})
 
             old_cfg = _get_chat_config(user["id"])
             old_app_id = old_cfg.get("im_app_id", "")
             if old_app_id and old_app_id != app_id:
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (old_app_id,))
+                # 更换 app_id：检查旧 app_id 是否还被其他用户/其他记录引用
+                c.execute("SELECT COUNT(*) FROM chat_agent_session WHERE im_app_id=? AND user_id!=? AND im_app_id!=''", (old_app_id, user["id"]))
+                other_refs = c.fetchone()[0]
+                if other_refs == 0:
+                    c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=? AND bot_type='chat_bot'", (old_app_id,))
                 c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
                 log.info(f"Chat IM: replaced old app_id={old_app_id[:30]} with new app_id={app_id[:30]}")
 
@@ -485,7 +484,7 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
                 db.commit()
                 kwargs["im_app_id"] = app_id
                 kwargs["im_app_secret"] = app_secret
-                log.info(f"Chat IM: saved global_im_bot_config for {app_id[:30]}")
+                log.info(f"Chat IM: saved im config for user={user['id']} app_id={app_id[:30]}")
             else:
                 kwargs["im_app_id"] = app_id
     else:

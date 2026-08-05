@@ -431,7 +431,137 @@ class TestChat:
         r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "test", "app_secret": "test"}}}, headers=_headers)
         assert r.status_code in (200, 400), f"Unexpected status: {r.status_code}"
         if r.status_code == 400:
-            assert "已被其他用户绑定" in r.text
+            assert "已被其他用户" in r.text or "已被 VOD Agent" in r.text
+
+    def test_chat_im_user_isolation(self):
+        """Chat IM 配置每用户独立：A 配置后，B 的 GET /chat/config 应为空 IM"""
+        import uuid
+        from src.session_manager import db, db_lock
+
+        app_a = "cli_" + uuid.uuid4().hex[:12]
+        # 清理测试用户配置，保证干净
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM chat_agent_session WHERE user_id IN (?,?) AND repo_key=''", (_uid["id"], 7777))
+            db.commit()
+
+        # 用户 A（当前登录）配置 IM
+        r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_a, "app_secret": "sec_a"}}}, headers=_headers)
+        assert r.status_code == 200, f"A save failed: {r.text[:200]}"
+
+        # 用户 A 自己能读到
+        r = client.get("/api/chat/config", headers=_headers)
+        assert r.status_code == 200
+        assert r.json()["im"]["feishu"]["app_id"] == app_a
+
+        # 用户 B（新用户，无配置）读不到 A 的 app_id
+        user_b = user_db.get_user_by_username("chat_iso_b") or user_db.create_user("chat_iso_b", "pw123")
+        token_b = user_db.create_session_token(user_b["id"])
+        headers_b = {"Authorization": f"Bearer {token_b}"}
+        r = client.get("/api/chat/config", headers=headers_b)
+        assert r.status_code == 200
+        feishu = r.json()["im"]["feishu"]
+        assert feishu["app_id"] == "", f"user B should see empty app_id, got {feishu['app_id']!r}"
+        assert feishu["app_secret_exists"] is False
+
+        # 清理
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM chat_agent_session WHERE im_app_id=? OR user_id IN (?,?)", (app_a, _uid["id"], user_b["id"]))
+            c.execute("DELETE FROM user_accounts WHERE id=?", (user_b["id"],))
+            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_a,))
+            db.commit()
+
+    def test_chat_im_app_id_global_unique(self):
+        """强约束：同一 app_id 被其他用户保存时应 400"""
+        import uuid
+        from src.session_manager import db, db_lock
+
+        app_id = "cli_" + uuid.uuid4().hex[:12]
+
+        # 用户 A 绑定该 app_id
+        r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec_b"}}}, headers=_headers)
+        assert r.status_code == 200, f"A save failed: {r.text[:200]}"
+
+        # 用户 B 尝试绑定同一 app_id → 400
+        user_b = user_db.get_user_by_username("chat_uniq_b") or user_db.create_user("chat_uniq_b", "pw123")
+        token_b = user_db.create_session_token(user_b["id"])
+        headers_b = {"Authorization": f"Bearer {token_b}"}
+        r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec_x"}}}, headers=headers_b)
+        assert r.status_code == 400, f"Expected 400, got {r.status_code}: {r.text[:200]}"
+        assert "已被其他用户" in r.text
+
+        # 清理
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM chat_agent_session WHERE im_app_id=? OR user_id IN (?,?)", (app_id, _uid["id"], user_b["id"]))
+            c.execute("DELETE FROM user_accounts WHERE id=?", (user_b["id"],))
+            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
+            db.commit()
+
+    def test_chat_im_vod_conflict(self):
+        """强约束：app_id 已被 VOD Agent 占用时，Chat 保存应 400"""
+        import uuid
+        from src.session_manager import db, db_lock
+
+        app_id = "cli_" + uuid.uuid4().hex[:12]
+        # 登记一个 vod_bot
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?, 'vod_bot')", (app_id,))
+            db.commit()
+
+        r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec"}}}, headers=_headers)
+        assert r.status_code == 400, f"Expected 400, got {r.status_code}: {r.text[:200]}"
+        assert "已被 VOD Agent 使用" in r.text
+
+        # 清理
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (_uid["id"],))
+            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
+            db.commit()
+
+    def test_chat_im_release_old_app_id(self):
+        """用户更换 app_id 后，旧 app_id 应从 global_im_bot_config 释放"""
+        import uuid
+        from src.session_manager import db, db_lock
+
+        old_app = "cli_" + uuid.uuid4().hex[:12]
+        new_app = "cli_" + uuid.uuid4().hex[:12]
+
+        # 清理
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (_uid["id"],))
+            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id IN (?,?)", (old_app, new_app))
+            db.commit()
+
+        # 用户先绑定旧 app_id
+        r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": old_app, "app_secret": "sec_old"}}}, headers=_headers)
+        assert r.status_code == 200, f"old save failed: {r.text[:200]}"
+        with db_lock:
+            c = db.cursor()
+            assert c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_app_id=?", (old_app,)).fetchone()[0] == 1
+
+        # 再绑定新 app_id（换绑）
+        r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": new_app, "app_secret": "sec_new"}}}, headers=_headers)
+        assert r.status_code == 200, f"new save failed: {r.text[:200]}"
+        with db_lock:
+            c = db.cursor()
+            assert c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_app_id=?", (old_app,)).fetchone()[0] == 0, "old app_id should be released"
+            assert c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_app_id=?", (new_app,)).fetchone()[0] == 1
+
+        # 用户读到新 app_id
+        r = client.get("/api/chat/config", headers=_headers)
+        assert r.json()["im"]["feishu"]["app_id"] == new_app
+
+        # 清理
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (_uid["id"],))
+            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id IN (?,?)", (old_app, new_app))
+            db.commit()
 
 
 # ===================== 9. Settings =====================
@@ -685,6 +815,20 @@ class TestWebhook:
             }
         }, headers=_headers)
         assert r.status_code != 400, f"Payload validation failed: {r.text}"
+
+    def test_a2a_pr_number_alone_rejected(self):
+        """B1 语义：pr_number 可选但不能替代 issue_number——只有 pr_number 而无 issue_number 必须 400"""
+        r = client.post("/api/a2a", json={
+            "agent": "qa",
+            "payload": {
+                "repository": "org/test",
+                "account": "org",
+                "pr_number": "7",
+                "context": "PR #7 created, please review"
+            }
+        }, headers=_headers)
+        assert r.status_code == 400, f"Should reject missing issue_number: {r.text}"
+        assert "issue_number" in r.json()["detail"]["message"]
 
 
 # ===================== 13. Token Three-Layer =====================

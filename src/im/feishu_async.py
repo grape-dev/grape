@@ -780,33 +780,71 @@ class BotManager:
         log.info(f"BotManager: removed bot {ctx.name}")
 
     async def load_from_db(self):
-        """从 global_im_bot_config 表加载所有Bot配置（secret 从 agent_session 取）"""
+        """从 DB 加载所有Bot配置。
+
+        - chat_bot：以用户级 chat_agent_session（repo_key='' 的配置行）为准，
+          每个用户配置的 im_app_id 都启动一个 bot（按 app_id 去重）；
+          global_im_bot_config 的 chat_bot 登记作为兜底来源。
+        - vod_bot：从 devops_agent_session（repo 维度）取 secret，
+          以 global_im_bot_config 登记为准。
+        """
         from src.session_manager import db, db_lock
+
+        bots: dict[str, str] = {}  # app_id -> bot_type（先去重）
+        secrets: dict[str, str] = {}  # app_id -> secret
+
+        # 1) chat_bot：用户级配置优先
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute(
+                    "SELECT im_app_id, im_app_secret FROM chat_agent_session "
+                    "WHERE im_app_id!='' AND im_app_secret!='' AND user_id>0 AND (repo_key='' OR repo_key IS NULL)"
+                )
+                for cid, csec in c.fetchall():
+                    if cid and cid not in bots:
+                        bots[cid] = "chat_bot"
+                        secrets[cid] = csec or ""
+            except Exception:
+                pass
+
+        # 2) global_im_bot_config 登记表（chat 兜底 + vod 全部）
         with db_lock:
             c = db.cursor()
             c.execute("SELECT bot_app_id, bot_type FROM global_im_bot_config WHERE is_active=1")
             rows = c.fetchall()
 
-        added = 0
         for bot_app_id, bot_type in rows:
             if not bot_app_id:
                 continue
-            # 获取 bot secret：vod_bot 从 devops_agent_session，chat_bot 从 chat_agent_session 全局配置行
-            bot_app_secret = ""
-            with db_lock:
-                c2 = db.cursor()
-                if bot_type == "chat_bot":
+            if bot_type == "chat_bot":
+                if bot_app_id in bots:
+                    continue  # 用户级已加载
+                # 兜底：从用户级配置补 secret
+                with db_lock:
+                    c2 = db.cursor()
                     c2.execute("SELECT im_app_secret FROM chat_agent_session WHERE im_app_id=? AND im_app_secret!='' AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (bot_app_id,))
-                else:
-                    c2.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (bot_app_id,))
-                srow = c2.fetchone()
+                    srow = c2.fetchone()
                 if srow and srow[0]:
-                    bot_app_secret = srow[0]
-            if not bot_app_secret:
-                continue
+                    bots[bot_app_id] = "chat_bot"
+                    secrets[bot_app_id] = srow[0]
+            else:
+                # vod_bot：从 devops_agent_session（repo 维度）取 secret
+                with db_lock:
+                    c2 = db.cursor()
+                    c2.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (bot_app_id,))
+                    srow = c2.fetchone()
+                if srow and srow[0]:
+                    bots[bot_app_id] = bot_type
+                    secrets[bot_app_id] = srow[0]
+
+        added = 0
+        for bot_app_id, bot_type in bots.items():
             if bot_app_id in self._bots:
                 continue
-            await self.add_bot(bot_app_id, bot_app_secret, bot_type)
+            if not secrets.get(bot_app_id):
+                continue
+            await self.add_bot(bot_app_id, secrets[bot_app_id], bot_type)
             added += 1
 
         log.info(f"BotManager: loaded {added} bot(s) from DB, total={len(self._bots)}")
