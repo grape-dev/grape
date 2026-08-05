@@ -73,7 +73,7 @@ function renderRepoSelection(repos) {
     <div class="lobby-card lobby-card-add" onclick="window.open('https://gitcode.com/create','_blank')">
       <div class="lobby-card-plus">＋</div>
       <h3>创建新项目</h3>
-      <p>在 GitCode 上新建项目，从零开始搭建你的 DevOps 流水线。</p>
+      <p>在 GitCode 上新建项目，从零开始搭建你的 AI 开发工作流。</p>
     </div>
     ${[...(repos || [])].sort((a, b) => (b.is_hosted ? 1 : 0) - (a.is_hosted ? 1 : 0) || (b.is_joined ? 1 : 0) - (a.is_joined ? 1 : 0)).map(r => _buildLobbyCard(r)).join('')}
   </div>
