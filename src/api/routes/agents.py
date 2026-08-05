@@ -266,7 +266,10 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         try:
             from src.user.db import ensure_default_backend, get_backend_id_by_name, resolve_skill_id
             backend_id = get_backend_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
-            skill_id = resolve_skill_id(body.skill) if body.skill else 0
+            # 仓库技能按 repo_key 解析；official 兜底
+            skill_id = resolve_skill_id(body.skill, owner_id=repo_key) if body.skill else 0
+            if not skill_id and body.skill:
+                skill_id = resolve_skill_id(body.skill)
             c.execute(
                 "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?)",
                 (session_id, repo_key, name, backend_id, body.skill, skill_id, repo_token, "idle",

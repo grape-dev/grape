@@ -1,6 +1,7 @@
-"""Skills 路由：列表、上传、删除"""
-import os, tempfile, zipfile, json
+"""Skills 路由：列表、上传、删除、个人技能转仓库技能"""
+import os, tempfile, zipfile, json, shutil
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from pydantic import BaseModel
 from src.user import db as user_db
 from src.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
 from src.api.deps import get_current_user
@@ -251,3 +252,62 @@ async def delete_skill(skill_name: str, user: dict = Depends(get_current_user),
     if not exists:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
     return {"message": f"技能 {skill_name} 已删除"}
+
+
+class ConvertSkillRequest(BaseModel):
+    skill_name: str
+    repo: str  # 目标仓库 repo_key（如 Jason7602/skill-evaluator）
+
+
+@router.post("/convert")
+async def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_current_user)):
+    """将个人技能（scope=user）复制为仓库技能（scope=repo）。
+
+    原个人技能记录与目录保留（复制而非移动）。复制后可在此仓库的 Agent 中配置使用。
+    """
+    skill_name = (body.skill_name or "").strip()
+    repo = (body.repo or "").strip()
+    if not skill_name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "技能名不能为空"})
+    if not repo:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "目标仓库不能为空"})
+
+    # 1. 查原个人技能（须属于当前用户）
+    skill_rec = next((s for s in user_db.list_skills(user["id"]) if s["skill_name"] == skill_name), None)
+    if not skill_rec:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "个人技能未找到或不属于当前用户"})
+
+    # 2. 校验目标仓库下无同名仓库技能
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        exists = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1", (skill_name, repo)).fetchone()[0]
+    if exists:
+        raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
+
+    # 3. 复制目录 skills/custom/{user_id}/{skill}/ → skills/repo/{repo}/{skill}/
+    src_dir = os.path.join(user_db.SKILL_DIR, str(user["id"]), skill_name)
+    dst_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", repo, skill_name)
+    if not os.path.isdir(src_dir):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "个人技能目录不存在"})
+    if os.path.exists(dst_dir):
+        raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
+
+    os.makedirs(os.path.dirname(dst_dir), exist_ok=True)
+    shutil.copytree(src_dir, dst_dir)
+
+    # 4. 创建仓库技能记录（沿用 agent_type / description）
+    try:
+        ok = user_db.create_skill(user["id"], skill_name, skill_rec.get("agent_type", ""),
+                                  skill_rec.get("description", ""), "", scope="repo", owner_id=repo)
+        if not ok:
+            # 若创建失败（如并发冲突），回滚目录
+            shutil.rmtree(dst_dir, ignore_errors=True)
+            raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        shutil.rmtree(dst_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail={"code": 500, "message": f"复制技能失败: {e}"})
+
+    return {"message": f"技能 {skill_name} 已复制到仓库 {repo}", "skill_name": skill_name, "scope": "repo", "repo": repo}

@@ -404,18 +404,27 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
 # ====== Config ======
 
 @router.get("/config")
-async def get_chat_config(user: dict = Depends(get_current_user)):
+async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
     cfg = _get_chat_config(user["id"])
     from src.user.db import get_backend_agents as _get_cached_backends
     from src.session_manager import db, db_lock
     backends = _get_cached_backends()
-    # Load chat skills from skill table
+    # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
     chat_skills = []
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT skill_name, display_name, description, skill_path FROM skill WHERE agent_type='chat' AND scope='official' AND is_active=1 ORDER BY skill_name")
-            chat_skills = [{"name": r[0], "display_name": r[1] or r[0], "description": r[2], "skill_path": r[3] or r[0]} for r in c.fetchall()]
+            if repo:
+                c.execute(
+                    "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) ORDER BY scope, skill_name",
+                    (str(user["id"]), repo)
+                )
+            else:
+                c.execute(
+                    "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?)) ORDER BY scope, skill_name",
+                    (str(user["id"]),)
+                )
+            chat_skills = [{"name": r[0], "display_name": r[1] or r[0], "description": r[2], "skill_path": r[3] or r[0], "scope": r[4] or ""} for r in c.fetchall()]
         except Exception:
             pass
 
@@ -429,6 +438,7 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
             "type": cfg.get("backend", "opencode"),
         },
         "skill": cfg.get("skill", ""),
+        "skill_id": cfg.get("skill_id", 0) or 0,
         "_backends": backends,
         "_skills": chat_skills,
         "im": {
@@ -444,7 +454,7 @@ async def get_chat_config(user: dict = Depends(get_current_user)):
 
 
 @router.put("/config")
-async def update_chat_config(body: dict, user: dict = Depends(get_current_user)):
+async def update_chat_config(body: dict, user: dict = Depends(get_current_user), repo: str = ""):
     im = body.get("im", {})
     feishu = im.get("feishu", {})
     kwargs = {}
@@ -498,6 +508,18 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user))
         kwargs["backend"] = body["backend"]
     if body.get("skill") is not None:
         kwargs["skill"] = body["skill"]
+        # 解析 skill_id：优先仓库 owner → 个人 owner → official（同名冲突由 resolve_skill_id 内部处理）
+        skill_name = body["skill"]
+        skill_id = 0
+        if skill_name:
+            from src.user.db import resolve_skill_id
+            if repo:
+                skill_id = resolve_skill_id(skill_name, owner_id=repo)
+            if not skill_id:
+                skill_id = resolve_skill_id(skill_name, owner_id=str(user["id"]))
+            if not skill_id:
+                skill_id = resolve_skill_id(skill_name)  # official
+        kwargs["skill_id"] = skill_id
     _set_chat_config(user["id"], **kwargs)
 
     # Chat IM：通过 BotManager 动态增删 Bot

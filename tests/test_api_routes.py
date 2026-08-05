@@ -369,6 +369,38 @@ class TestAgents:
         r = client.put("/api/agents/vod/org/test", json={"backend": "opencode"}, headers=_headers)
         assert r.status_code == 200
 
+    def test_agent_config_repo_skill(self):
+        """DevOps Agent 保存仓库技能时 skill_id 正确解析（仓库级 skill 配置）"""
+        import uuid
+        from src.session_manager import db, db_lock
+
+        uniq = uuid.uuid4().hex[:8]
+        skill_name = f"agentskill{uniq}"
+        repo_key = f"org/agent-repo-{uniq}"
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"agentskill{uniq}%",))
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (repo_key,))
+            # 仓库技能（agent_type='sre'）
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (skill_name, "agent-skill", "d", "sre", skill_name, "repo", repo_key))
+            db.commit()
+        try:
+            owner, repo = repo_key.split("/", 1)
+            r = client.put(f"/api/agents/sre/{owner}/{repo}", json={"backend": "opencode", "skill": skill_name}, headers=_headers)
+            assert r.status_code == 200, f"save repo skill failed: {r.text[:200]}"
+            with db_lock:
+                c = db.cursor()
+                row = c.execute("SELECT skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type='sre'", (repo_key,)).fetchone()
+            assert row and row[0] == skill_name, f"skill not saved: {row}"
+            assert row and row[1] and row[1] > 0, f"repo skill_id should be resolved, got {row}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"agentskill{uniq}%",))
+                c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (repo_key,))
+                db.commit()
+
 
 # ===================== 7. Events =====================
 class TestEvents:
@@ -563,6 +595,90 @@ class TestChat:
             c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id IN (?,?)", (old_app, new_app))
             db.commit()
 
+    def test_chat_config_skills_include_user_repo(self):
+        """Chat GET /config：带 repo 时 skill 列表含官方+个人+仓库；不带 repo 时含官方+个人"""
+        import uuid
+        from src.session_manager import db, db_lock
+
+        uid = _uid["id"]
+        uniq = uuid.uuid4().hex[:8]
+        repo_key = f"org/chat-skill-{uniq}"
+        # 造一个个人 chat 技能 + 一个仓库 chat 技能（agent_type='chat'）
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"chatskill{uniq}%",))
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (f"chatskill{uniq}-user", f"chat-skill-user-{uniq}", "desc", "chat", f"chatskill{uniq}-user", "user", str(uid)))
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (f"chatskill{uniq}-repo", f"chat-skill-repo-{uniq}", "desc", "chat", f"chatskill{uniq}-repo", "repo", repo_key))
+            db.commit()
+
+        try:
+            # 无 repo：只含官方 + 个人（不含仓库）
+            r = client.get("/api/chat/config", headers=_headers)
+            assert r.status_code == 200
+            names = [s["name"] for s in r.json()["_skills"]]
+            assert f"chatskill{uniq}-user" in names, f"user skill should appear without repo, got {names}"
+            assert f"chatskill{uniq}-repo" not in names, f"repo skill should NOT appear without repo param, got {names}"
+
+            # 带 repo：含官方 + 个人 + 仓库
+            r2 = client.get(f"/api/chat/config?repo={repo_key}", headers=_headers)
+            assert r2.status_code == 200
+            names2 = [s["name"] for s in r2.json()["_skills"]]
+            assert f"chatskill{uniq}-user" in names2, f"user skill should appear with repo, got {names2}"
+            assert f"chatskill{uniq}-repo" in names2, f"repo skill should appear with repo param, got {names2}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"chatskill{uniq}%",))
+                db.commit()
+
+    def test_chat_config_put_skill_id_resolution(self):
+        """Chat PUT /config 保存个人/仓库技能时 skill_id 正确解析"""
+        import uuid
+        from src.session_manager import db, db_lock
+
+        uid = _uid["id"]
+        uniq = uuid.uuid4().hex[:8]
+        repo_key = f"org/chat-skillid-{uniq}"
+        user_skill = f"chatsid{uniq}-user"
+        repo_skill = f"chatsid{uniq}-repo"
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,))
+            c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"chatsid{uniq}%",))
+            # 个人 chat 技能 + 仓库 chat 技能
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (user_skill, "u", "d", "chat", user_skill, "user", str(uid)))
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (repo_skill, "r", "d", "chat", repo_skill, "repo", repo_key))
+            db.commit()
+
+        try:
+            # 保存个人技能（无 repo 也能解析 user）
+            r = client.put("/api/chat/config", json={"skill": user_skill}, headers=_headers)
+            assert r.status_code == 200, f"save user skill failed: {r.text[:200]}"
+            with db_lock:
+                c = db.cursor()
+                row = c.execute("SELECT skill, skill_id FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,)).fetchone()
+            assert row and row[0] == user_skill, f"skill not saved: {row}"
+            assert row and row[1] and row[1] > 0, f"skill_id should be resolved, got {row}"
+
+            # 保存仓库技能（带 repo）
+            r2 = client.put(f"/api/chat/config?repo={repo_key}", json={"skill": repo_skill}, headers=_headers)
+            assert r2.status_code == 200, f"save repo skill failed: {r2.text[:200]}"
+            with db_lock:
+                c = db.cursor()
+                row2 = c.execute("SELECT skill, skill_id FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,)).fetchone()
+            assert row2 and row2[0] == repo_skill, f"repo skill not saved: {row2}"
+            assert row2 and row2[1] and row2[1] > 0, f"repo skill_id should be resolved, got {row2}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,))
+                c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"chatsid{uniq}%",))
+                db.commit()
+
 
 # ===================== 9. Settings =====================
 class TestSettings:
@@ -731,6 +847,110 @@ class TestSkills:
     def test_skills_delete_nonexistent(self):
         r = client.delete("/api/skills/nonexistent_skill", headers=_headers)
         assert r.status_code == 404
+
+    def test_skills_convert_user_to_repo(self):
+        """个人技能复制为仓库技能：目录复制 + DB 记录 + 原个人技能保留"""
+        import uuid, os, shutil
+        from src.session_manager import db, db_lock
+        from src.user import db as user_db
+
+        uniq = uuid.uuid4().hex[:8]
+        skill_name = f"convskill{uniq}"
+        repo_key = f"org/convert-{uniq}"
+
+        # 造一个个人技能（目录 + DB）
+        user_dir = os.path.join(user_db.SKILL_DIR, str(_uid["id"]), skill_name)
+        os.makedirs(user_dir, exist_ok=True)
+        with open(os.path.join(user_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: " + skill_name + "\nversion: 1.0.0\ndescription: conv test\n---\n\n## 场景\n## 知识\n## 步骤\n- step")
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"convskill{uniq}%",))
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (skill_name, skill_name, "conv test", "vod", skill_name, "user", str(_uid["id"])))
+            db.commit()
+
+        try:
+            # 转换
+            r = client.post("/api/skills/convert", json={"skill_name": skill_name, "repo": repo_key}, headers=_headers)
+            assert r.status_code == 200, f"convert failed: {r.text[:300]}"
+            assert r.json()["scope"] == "repo"
+
+            # DB：仓库技能记录创建，原个人技能保留
+            with db_lock:
+                c = db.cursor()
+                repo_row = c.execute("SELECT scope, owner_id, agent_type, description FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?", (skill_name, repo_key)).fetchone()
+                user_row = c.execute("SELECT scope FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?", (skill_name, str(_uid["id"]))).fetchone()
+            assert repo_row, "repo skill record should exist"
+            assert repo_row[0] == "repo" and repo_row[1] == repo_key
+            assert repo_row[2] == "vod", f"agent_type should carry over, got {repo_row[2]}"
+            assert user_row, "original user skill should be preserved"
+
+            # 目录：仓库目录存在 + 个人目录仍存在
+            repo_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", repo_key, skill_name)
+            assert os.path.isdir(repo_dir), "repo skill dir should exist"
+            assert os.path.isdir(user_dir), "original user skill dir should exist"
+        finally:
+            # 清理
+            repo_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", repo_key)
+            if os.path.isdir(repo_dir):
+                shutil.rmtree(repo_dir, ignore_errors=True)
+            if os.path.isdir(user_dir):
+                shutil.rmtree(user_dir, ignore_errors=True)
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"convskill{uniq}%",))
+                db.commit()
+
+    def test_skills_convert_duplicate_repo_skill(self):
+        """目标仓库已有同名技能时转换返回 409"""
+        import uuid
+        from src.session_manager import db, db_lock
+
+        uniq = uuid.uuid4().hex[:8]
+        skill_name = f"convdup{uniq}"
+        repo_key = f"org/dup-{uniq}"
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"convdup{uniq}%",))
+            # 造同名仓库技能 + 该用户拥有的个人技能
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (skill_name, skill_name, "d", "vod", skill_name, "repo", repo_key))
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (skill_name, skill_name, "d", "vod", skill_name, "user", str(_uid["id"])))
+            db.commit()
+        try:
+            r = client.post("/api/skills/convert", json={"skill_name": skill_name, "repo": repo_key}, headers=_headers)
+            assert r.status_code == 409, f"expected 409, got {r.status_code}: {r.text[:200]}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"convdup{uniq}%",))
+                db.commit()
+
+    def test_skills_convert_not_owner(self):
+        """个人技能不属于当前用户时转换返回 404"""
+        import uuid
+        from src.session_manager import db, db_lock
+
+        uniq = uuid.uuid4().hex[:8]
+        skill_name = f"convother{uniq}"
+        repo_key = f"org/other-{uniq}"
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"convother{uniq}%",))
+            # 造属于其他用户（99999）的个人技能
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
+                      (skill_name, skill_name, "d", "vod", skill_name, "user", "99999"))
+            db.commit()
+        try:
+            r = client.post("/api/skills/convert", json={"skill_name": skill_name, "repo": repo_key}, headers=_headers)
+            assert r.status_code == 404, f"expected 404, got {r.status_code}: {r.text[:200]}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"convother{uniq}%",))
+                db.commit()
 
 
 # ===================== 11. Search =====================

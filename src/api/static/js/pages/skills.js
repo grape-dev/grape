@@ -93,6 +93,7 @@ function _loadSkills() {
           <div style="display:flex;gap:6px">
             <button class="bt bt-o bt-s" onclick="event.stopPropagation();app.nav('skill','${s.name}')">View</button>
             ${s.scope !== 'official' ? `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteSkill('${s.name}','${s.scope}')">Delete</button>` : ''}
+            ${s.scope === 'user' && _currentRepo() ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}')">转为仓库技能</button>` : ''}
           </div>
         </div>`;
       });
@@ -213,6 +214,21 @@ function deleteSkill(name, scope) {
     renderSkills();
   }).catch(e => {
     if (app && app.showToast) app.showToast('删除失败: ' + e.message);
+  });
+}
+
+function convertSkill(skillName) {
+  const repo = _currentRepo();
+  if (!repo) {
+    if (app && app.showToast) app.showToast('请先选择当前仓库');
+    return;
+  }
+  if (!confirm('将个人技能「' + skillName + '」复制到仓库 ' + repo + '？\n\n原个人技能保留，复制后可在该仓库的 DevOps/Chat Agent 中配置。')) return;
+  API.post('/skills/convert', {skill_name: skillName, repo}).then(r => {
+    if (app && app.showToast) app.showToast(r.message || '转换成功');
+    renderSkills();
+  }).catch(e => {
+    if (app && app.showToast) app.showToast('转换失败: ' + e.message);
   });
 }
 

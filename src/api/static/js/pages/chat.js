@@ -22,7 +22,9 @@ function renderChat() {
 }
 
 function loadSideConfig() {
-  API.get('/chat/config').then(d => {
+  const _repo = app.currentRepo();
+  const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
+  API.get('/chat/config' + _qs).then(d => {
     const feishu = d.im?.feishu || {};
     const backend = d.backend || {};
     const currentSkill = d.skill || '';
@@ -257,7 +259,9 @@ function saveChatConfig() {
   const secret = rawSecret === '********' ? '' : rawSecret;
   const im = {};
   im[provider] = {app_id: appId, app_secret: secret};
-  API.put('/chat/config', {backend, skill, im}).then(() => {
+  const _repo = app.currentRepo();
+  const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
+  API.put('/chat/config' + _qs, {backend, skill, im}).then(() => {
     app.showToast('配置已保存');
   }).catch(e => app.showToast('保存失败: ' + e.message));
 }
