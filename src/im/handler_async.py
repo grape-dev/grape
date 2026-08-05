@@ -36,6 +36,29 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         log.info(f"[Chat:{ctx.name}] message: {text[:100]} (chat={chat_id[:20]})")
 
+        # 自动绑定：Chat Agent 每用户独立，消息发送者即配置该 bot 的用户。
+        # 用 sender_open_id 建立 gitcode_user ↔ 飞书 open_id 映射（无需群成员权限）。
+        sender_open_id = parsed.get("sender_open_id", "")
+        if sender_open_id:
+            try:
+                from src.im.feishu import get_user_id_by_app_id
+                from src.user import db as user_db
+                from src.session_manager import set_feishu_open_id
+                uid = get_user_id_by_app_id(ctx.app_id)
+                if uid:
+                    user_row = user_db.get_user(uid)
+                    username = (user_row or {}).get("username", "") if user_row else ""
+                    if username and user_row:
+                        acc = user_db.get_user_account(username) or {}
+                        # 仅在尚未建立该 open_id 映射时写入，避免高频覆盖
+                        from src.session_manager import get_feishu_open_id
+                        existing = get_feishu_open_id("", username)
+                        if existing != sender_open_id:
+                            set_feishu_open_id("", username, sender_open_id, gitcode_nickname=acc.get("nickname", "") or "")
+                            log.info(f"Chat: auto-bound feishu open_id for {username} (app={ctx.app_id[:20]})")
+            except Exception as e:
+                log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
+
         capability_patterns = [
             r'(?:你|您)(?:有|会|能|可以)?\s*什么\s*(?:能力|功能|本领|技能|用处|作用)',
             r'(?:你|您)(?:会|能|可以)\s*(?:做|干|处理|干嘛)\s*(?:什么|哪些)',
