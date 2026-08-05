@@ -80,6 +80,33 @@ async def sync_official_skills(user: dict = Depends(get_current_user)):
     return {"message": f"官方技能同步完成，新增 {added} 个", "added": added}
 
 
+@router.get("/template")
+async def download_skill_template():
+    """下载技能模板 ZIP（skills/_template 目录打包）。免鉴权（token 通过 query 传递）。"""
+    from src.config import SKILLS_DIR
+
+    template_dir = os.path.join(SKILLS_DIR, "_template")
+    if not os.path.isdir(template_dir):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能模板未找到"})
+
+    import io as _io
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(template_dir):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for f in files:
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, template_dir)
+                zf.write(full, rel)
+    buf.seek(0)
+    from fastapi.responses import Response
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="skill-template.zip"'},
+    )
+
+
 @router.get("/{name}")
 async def get_skill_detail(name: str, user: dict = Depends(get_current_user),
                            repo: str = ""):
@@ -151,21 +178,29 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             f.write(content)
 
         extract_dir = os.path.join(tmp_dir, "extracted")
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(extract_dir)
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(extract_dir)
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "不是有效的 ZIP 文件，请上传 .zip 格式"})
 
         entries = os.listdir(extract_dir)
         if not entries:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "ZIP 文件为空"})
 
-        skill_dir = os.path.join(extract_dir, entries[0])
+        # 过滤系统杂项目录（macOS __MACOSX、.DS_Store 等），取第一个真实目录
+        real_entries = [e for e in entries if e not in ("__MACOSX", ".DS_Store", ".git") and not e.startswith(".")]
+        if not real_entries:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "ZIP 中未找到技能目录"})
+
+        skill_dir = os.path.join(extract_dir, real_entries[0])
         if not os.path.isdir(skill_dir):
             skill_dir = extract_dir
 
-        skill_name = os.path.basename(skill_dir) if os.path.isdir(skill_dir) else entries[0]
+        skill_name = os.path.basename(skill_dir) if os.path.isdir(skill_dir) else real_entries[0]
         errors = validate_custom_skill(skill_dir, skill_name)
         if errors:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": f"Skill 校验失败: {'; '.join(errors)}"})
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "Skill 校验失败", "errors": errors})
 
         import shutil
         if scope == "repo":

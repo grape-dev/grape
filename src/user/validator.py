@@ -11,6 +11,8 @@ PROJECT_SKILLS = {"pr", "issue", "implementation", "build-debug", "deploy-guard"
 def validate_skill(upload_dir: str, skill_name: str) -> list[str]:
     """
     校验自定义技能，返回错误列表。空列表表示通过。
+    与官方技能格式保持一致：只要求 SKILL.md 存在 + Front Matter 必填字段，
+    不强制特定正文章节（三章节为可选约定）。
     """
     errors = []
 
@@ -57,18 +59,7 @@ def validate_skill(upload_dir: str, skill_name: str) -> list[str]:
     if name_val in PROJECT_SKILLS:
         errors.append(f"技能名「{name_val}」与项目级技能冲突，请换一个名称")
 
-    # 3. Body 章节检查
-    body = parts[2] if len(parts) > 2 else ""
-    for sec in REQUIRED_SECTIONS:
-        if sec not in body:
-            errors.append(f"缺少「{sec.replace('## ', '')}」章节")
-
-    if "## 步骤" in body:
-        steps_section = body.split("## 步骤", 1)[1].split("##", 1)[0]
-        if not re.search(r"^\s*[-*\d.]", steps_section, re.MULTILINE):
-            errors.append("「步骤」章节必须包含至少一个列表项")
-
-    # 4. 检查禁止文件
+    # 3. 检查禁止文件
     for root, dirs, files in os.walk(upload_dir):
         for f in files:
             ext = os.path.splitext(f)[1].lower()

@@ -17,7 +17,7 @@ function renderSkills() {
   if (_skillTab === 'official') {
     API.post('/skills/sync-official', {}).then(syncRes => {
       if (syncRes && syncRes.added > 0) {
-        if (window.app && app.showToast) app.showToast(syncRes.message || '发现新增官方技能，已同步');
+        if (app && app.showToast) app.showToast(syncRes.message || '发现新增官方技能，已同步');
       }
       _loadSkills();
     }).catch(() => {
@@ -123,7 +123,7 @@ function showSkillUpload() {
   const modal = document.createElement('div');
   modal.id = 'skillUploadModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
-  modal.innerHTML = `<div class="cd" style="width:440px;padding:20px;border-radius:10px">
+  modal.innerHTML = `<div class="cd" style="width:480px;padding:20px;border-radius:10px">
     <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">上传技能 (ZIP)</h3>
     <div class="srow" style="margin-bottom:10px"><label>类型</label><span>${scope === 'repo' ? '仓库技能' : '个人技能'}</span></div>
     ${scope === 'repo' ? `<div class="srow" style="margin-bottom:10px"><label>仓库</label><span>${repo}</span></div>` : ''}
@@ -137,6 +137,15 @@ function showSkillUpload() {
       <label style="font-size:11px;color:var(--t2);display:block;margin-bottom:6px">选择技能 ZIP 文件（目录名 = 技能名，内含 SKILL.md）</label>
       <input type="file" id="skillFile" accept=".zip" style="font-size:12px">
     </div>
+    <div class="srow" style="margin-bottom:12px"><label></label>
+      <span style="font-size:11px;color:var(--t2)">格式要求：<a href="javascript:void(0)" onclick="downloadSkillTemplate()" style="color:var(--a);cursor:pointer">📄 下载技能模板 ZIP</a></span>
+    </div>
+    <div id="skillUploadProgress" style="display:none;margin-bottom:12px">
+      <div style="font-size:11px;color:var(--t2);margin-bottom:4px">上传中... <span id="skillUploadPct">0%</span></div>
+      <div style="background:var(--bg);border-radius:8px;height:8px;overflow:hidden">
+        <div id="skillUploadBar" style="background:var(--a);height:100%;width:0%;transition:width .2s"></div>
+      </div>
+    </div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="bt bt-o bt-s" onclick="document.getElementById('skillUploadModal').remove()">取消</button>
       <button class="bt bt-p bt-s" onclick="doSkillUpload()">上传</button>
@@ -145,15 +154,29 @@ function showSkillUpload() {
   document.body.appendChild(modal);
 }
 
+function downloadSkillTemplate() {
+  window.open('/api/skills/template?token=' + encodeURIComponent(localStorage.getItem('token') || ''), '_blank');
+}
+
+function _setSkillUploadProgress(pct, done) {
+  const prog = document.getElementById('skillUploadProgress');
+  const bar = document.getElementById('skillUploadBar');
+  const pctEl = document.getElementById('skillUploadPct');
+  if (!prog || !bar || !pctEl) return;
+  prog.style.display = done ? 'none' : 'block';
+  bar.style.width = pct + '%';
+  pctEl.textContent = pct + '%';
+}
+
 function doSkillUpload() {
   const fileInput = document.getElementById('skillFile');
   if (!fileInput || !fileInput.files || !fileInput.files[0]) {
-    if (window.app && app.showToast) app.showToast('请选择技能 ZIP 文件');
+    if (app && app.showToast) app.showToast('请选择技能 ZIP 文件');
     return;
   }
   const agentType = document.getElementById('skillAgentType')?.value || '';
   if (!agentType) {
-    if (window.app && app.showToast) app.showToast('请选择技能类型（所属 Agent）');
+    if (app && app.showToast) app.showToast('请选择技能类型（所属 Agent）');
     return;
   }
   const scope = _skillTab;
@@ -164,12 +187,19 @@ function doSkillUpload() {
   fd.append('agent_type', agentType);
   if (scope === 'repo' && repo) fd.append('repo', repo);
 
-  API.upload('/skills/upload', fd).then(r => {
+  _setSkillUploadProgress(0, false);
+  API.upload('/skills/upload', fd, (pct) => _setSkillUploadProgress(pct, false)).then(r => {
+    _setSkillUploadProgress(100, true);
     document.getElementById('skillUploadModal')?.remove();
-    if (window.app && app.showToast) app.showToast(r.message || '上传成功');
+    if (app && app.showToast) app.showToast(r.message || '上传成功');
     renderSkills();
   }).catch(e => {
-    if (window.app && app.showToast) app.showToast('上传失败: ' + e.message);
+    _setSkillUploadProgress(0, true);
+    if (e && e.errors && e.errors.length) {
+      if (app && app.showToast) app.showToast('Skill 校验失败（' + e.errors.length + ' 项）：\n' + e.errors.join('\n'));
+    } else if (app && app.showToast) {
+      app.showToast('上传失败: ' + e.message);
+    }
   });
 }
 
@@ -179,10 +209,10 @@ function deleteSkill(name, scope) {
   let qs = '?scope=' + scope;
   if (scope === 'repo' && repo) qs += '&repo=' + encodeURIComponent(repo);
   API.del('/skills/' + encodeURIComponent(name) + qs).then(r => {
-    if (window.app && app.showToast) app.showToast(r.message || '已删除');
+    if (app && app.showToast) app.showToast(r.message || '已删除');
     renderSkills();
   }).catch(e => {
-    if (window.app && app.showToast) app.showToast('删除失败: ' + e.message);
+    if (app && app.showToast) app.showToast('删除失败: ' + e.message);
   });
 }
 

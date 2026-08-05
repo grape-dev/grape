@@ -524,6 +524,36 @@ class TestSkills:
             row = c.execute("SELECT agent_type FROM skill WHERE skill_name='skill-uploadtest' AND scope='user'").fetchone()
         assert row and row[0] == "chat", f"agent_type should be chat, got {row}"
 
+    def test_skills_upload_no_sections_allowed(self):
+        """放宽校验：无 场景/知识/步骤 三章节的自定义技能也应能上传（与官方技能格式一致）"""
+        import tempfile, zipfile, os
+        from src.session_manager import db, db_lock
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        with zipfile.ZipFile(tmp.name, "w") as zf:
+            zf.writestr("skill-nosections/SKILL.md", "---\nname: skill-nosections\nversion: 1.0.0\ndescription: 无三章节自定义技能\n---\n\n# 技能说明\n\n处理特定流程。")
+        tmp.close()
+        with open(tmp.name, "rb") as f:
+            r = client.post("/api/skills/upload", files={"file": ("skill-nosections.zip", f.read())},
+                            data={"agent_type": "issue"}, headers=_headers)
+        os.unlink(tmp.name)
+        assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT agent_type FROM skill WHERE skill_name='skill-nosections' AND scope='user'").fetchone()
+        assert row and row[0] == "issue", f"agent_type should be issue, got {row}"
+
+    def test_skills_template_download(self):
+        """GET /api/skills/template 应返回可用的 ZIP 技能模板"""
+        import zipfile, io as _io
+        r = client.get("/api/skills/template", headers=_headers)
+        assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
+        assert r.headers["content-type"].startswith("application/zip")
+        with zipfile.ZipFile(_io.BytesIO(r.content)) as z:
+            names = z.namelist()
+            valid = z.testzip() is None
+        assert any(n.endswith("SKILL.md") for n in names), f"模板应包含 SKILL.md, got {names}"
+        assert valid
+
     def test_skills_upload_repo_scope_via_form(self):
         """scope=repo 通过 form 提交时应正确落到仓库技能目录（此前无 Form() 标注会被当成 query 参数而失效）"""
         import tempfile, zipfile, os, shutil

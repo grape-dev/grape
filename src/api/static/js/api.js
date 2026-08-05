@@ -38,9 +38,37 @@ const API = (() => {
     post: (path, body) => fetch(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}).then(handleResp),
     put: (path, body) => fetch(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}).then(handleResp),
     del: (path) => fetch(BASE + path, {method: 'DELETE', headers: headers()}).then(handleResp),
-    upload: (path, formData) => {
-      const h = {'Authorization': 'Bearer ' + localStorage.getItem('token')};
-      return fetch(BASE + path, {method: 'POST', headers: h, body: formData}).then(handleResp);
+    upload: (path, formData, onUploadProgress) => {
+      const token = localStorage.getItem('token');
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', BASE + path);
+        if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+        xhr.upload.onprogress = (e) => {
+          if (onUploadProgress && e.lengthComputable) {
+            onUploadProgress(Math.round((e.loaded / e.total) * 100));
+          }
+        };
+        xhr.onload = () => {
+          const resp = xhr.responseText;
+          let json = null;
+          try { json = JSON.parse(resp); } catch { /* ignore */ }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(json || {message: resp});
+          } else {
+            if (xhr.status === 401) {
+              localStorage.removeItem('token');
+              localStorage.removeItem('user');
+              if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+            }
+            const err = new Error(json?.detail?.message || `请求失败 (${xhr.status})`);
+            err.errors = json?.detail?.errors || null;
+            reject(err);
+          }
+        };
+        xhr.onerror = () => reject(new Error('网络错误，上传失败'));
+        xhr.send(formData);
+      });
     },
   };
 })();

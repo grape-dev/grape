@@ -248,17 +248,22 @@ skills/
   │
   ├── 1. 系统自动校验:
   │     ✓ 包含 SKILL.md
-  │     ✓ name 符合 kebab-case
+  │     ✓ YAML Front Matter 必填（name/version/description）
+  │     ✓ name 符合 kebab-case 且与目录名一致
   │     ✓ version 符合语义化
   │     ✓ description ≤ 200 字
-  │     ✓ 不含 .py/.sh/.jar
-  │     ✓ 总大小 ≤ 1MB
+  │     ✓ 不含 .py/.sh/.jar 等可执行文件
+  │     ✓ 总大小 ≤ 10MB
+  │     ✓ 必须选择技能类型（vod/issue/coding/qa/sre/chat）
+  │     （不强制特定正文章节，与官方技能格式一致）
   │
   ├── 2. 管理员可选审核:
   │     查看 skills/custom/{user_id}/{skill_name}/SKILL.md
   │
   └── 3. 用户通过 repo_skill_mapping 绑定到仓库
 ```
+
+用户可从 Skills 页「＋新增技能」弹窗下载技能模板 ZIP（`GET /api/skills/template`，内含 `my-skill/` 示例），按模板格式制作自定义技能。
 
 ---
 
