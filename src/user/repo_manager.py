@@ -272,6 +272,9 @@ def create_repo(api_token: str, name: str, description: str = "", private: bool 
         "description": description,
         "private": bool(private),
         "auto_init": False,
+        "default_branch": "main",
+        "repository_type": "code",
+        "path": name,
     }
     result = _req("POST", f"{API_BASE}/user/repos", api_token, body)
     full_name = result.get("full_name", "")
