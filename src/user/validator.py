@@ -8,6 +8,28 @@ PROJECT_SKILLS = {"pr", "issue", "implementation", "build-debug", "deploy-guard"
                   "incident-triage", "changelog-gen", "chat", "cloud-deploy", "im-notify", "agent"}
 
 
+def parse_skill_frontmatter(skill_dir: str) -> dict:
+    """解析 SKILL.md 的 YAML Front Matter，返回 {name, description, version}（缺失字段为空串）"""
+    result = {"name": "", "description": "", "version": ""}
+    skill_path = os.path.join(skill_dir, "SKILL.md")
+    if not os.path.exists(skill_path):
+        return result
+    try:
+        with open(skill_path, encoding="utf-8") as f:
+            content = f.read()
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return result
+        fm = yaml.safe_load(parts[1])
+        if isinstance(fm, dict):
+            result["name"] = str(fm.get("name", ""))
+            result["description"] = str(fm.get("description", "")).strip()
+            result["version"] = str(fm.get("version", ""))
+    except Exception:
+        pass
+    return result
+
+
 def validate_skill(upload_dir: str, skill_name: str) -> list[str]:
     """
     校验自定义技能，返回错误列表。空列表表示通过。

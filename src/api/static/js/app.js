@@ -184,7 +184,9 @@ function loadAgentTypes() {
       loadRepos();
     } else if (view === 'skill') {
       title.textContent = 'Skill Detail';
-      API.get('/skills/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+      const _cr = currentRepo();
+      const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
+      API.get('/skills/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     }
   }
 

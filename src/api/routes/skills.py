@@ -2,7 +2,7 @@
 import os, tempfile, zipfile, json
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from src.user import db as user_db
-from src.user.validator import validate_skill as validate_custom_skill
+from src.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
 from src.api.deps import get_current_user
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
@@ -114,17 +114,17 @@ async def get_skill_detail(name: str, user: dict = Depends(get_current_user),
     from src.session_manager import db, db_lock
     from src.config import SKILLS_DIR
 
-    # 查官方技能 + 个人技能 + 指定仓库技能
+    # 查官方技能 + 个人技能 + 仓库技能（指定 repo 或用户可访问的全部）
     with db_lock:
         c = db.cursor()
         if repo:
             c.execute(
-                "SELECT skill_name, display_name, description, agent_type, skill_path, scope FROM skill WHERE skill_name=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))",
+                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id FROM skill WHERE skill_name=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))",
                 (name, str(user["id"]), repo)
             )
         else:
             c.execute(
-                "SELECT skill_name, display_name, description, agent_type, skill_path, scope FROM skill WHERE skill_name=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?))",
+                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id FROM skill WHERE skill_name=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo')",
                 (name, str(user["id"]))
             )
         row = c.fetchone()
@@ -132,10 +132,11 @@ async def get_skill_detail(name: str, user: dict = Depends(get_current_user),
     if row:
         skill_dir = row[4] or name
         scope = row[5]
+        owner_id = row[6] or ""
         if scope == "user":
-            skill_path = os.path.join(SKILLS_DIR, "custom", str(user["id"]), skill_dir, "SKILL.md")
+            skill_path = os.path.join(SKILLS_DIR, "custom", owner_id or str(user["id"]), skill_dir, "SKILL.md")
         elif scope == "repo":
-            skill_path = os.path.join(SKILLS_DIR, "repo", repo or "", skill_dir, "SKILL.md")
+            skill_path = os.path.join(SKILLS_DIR, "repo", owner_id, skill_dir, "SKILL.md")
         else:
             skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
         content = ""
@@ -202,7 +203,12 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         if errors:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "Skill 校验失败", "errors": errors})
 
+        # 从 SKILL.md Front Matter 提取描述（上传后技能列表需要展示）
+        fm = parse_skill_frontmatter(skill_dir)
+        description = fm.get("description", "") or ""
+
         import shutil
+        from src.session_manager import db, db_lock
         if scope == "repo":
             repo_key = repo
             target_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", repo_key, skill_name)
@@ -210,14 +216,20 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             if os.path.exists(target_dir):
                 shutil.rmtree(target_dir)
             shutil.copytree(skill_dir, target_dir)
-            user_db.create_skill(user["id"], skill_name, agent_type, "", "", scope="repo", owner_id=repo_key)
+            with db_lock:
+                db.cursor().execute("DELETE FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?", (skill_name, repo_key))
+                db.commit()
+            user_db.create_skill(user["id"], skill_name, agent_type, description, "", scope="repo", owner_id=repo_key)
         else:
             user_skill_dir = os.path.join(user_db.SKILL_DIR, str(user["id"]), skill_name)
             os.makedirs(os.path.dirname(user_skill_dir), exist_ok=True)
             if os.path.exists(user_skill_dir):
                 shutil.rmtree(user_skill_dir)
             shutil.copytree(skill_dir, user_skill_dir)
-            user_db.create_skill(user["id"], skill_name, agent_type, "", "")
+            with db_lock:
+                db.cursor().execute("DELETE FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?", (skill_name, str(user["id"])))
+                db.commit()
+            user_db.create_skill(user["id"], skill_name, agent_type, description, "")
 
         return {"message": f"技能 {skill_name} 上传成功"}
     except HTTPException:

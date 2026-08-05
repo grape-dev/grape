@@ -518,11 +518,12 @@ class TestSkills:
                             data={"agent_type": "chat"}, headers=_headers)
         os.unlink(tmp.name)
         assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
-        # 验证 agent_type 已保存
+        # 验证 agent_type 与 description（从 SKILL.md Front Matter 解析）均已保存
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT agent_type FROM skill WHERE skill_name='skill-uploadtest' AND scope='user'").fetchone()
+            row = c.execute("SELECT agent_type, description FROM skill WHERE skill_name='skill-uploadtest' AND scope='user'").fetchone()
         assert row and row[0] == "chat", f"agent_type should be chat, got {row}"
+        assert row and row[1] == "test skill", f"description should be parsed from front matter, got {row}"
 
     def test_skills_upload_no_sections_allowed(self):
         """放宽校验：无 场景/知识/步骤 三章节的自定义技能也应能上传（与官方技能格式一致）"""
@@ -570,9 +571,15 @@ class TestSkills:
         assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT agent_type, scope, owner_id FROM skill WHERE skill_name='skill-repoupload'").fetchone()
+            row = c.execute("SELECT agent_type, scope, owner_id, description FROM skill WHERE skill_name='skill-repoupload'").fetchone()
         assert row, "repo skill should be created"
         assert row[0] == "sre" and row[1] == "repo" and row[2] == "owner/repo-x", f"got {row}"
+        assert row[3] == "repo skill", f"description should be parsed from front matter, got {row}"
+        # 无 repo 参数也应能查看仓库技能详情（此前只查 official+user，导致 404 加载失败）
+        detail = client.get("/api/skills/skill-repoupload", headers=_headers)
+        assert detail.status_code == 200, f"Got {detail.status_code}: {detail.text[:200]}"
+        assert detail.json().get("scope") == "repo"
+        assert "skill-repoupload" in detail.json().get("content", "")
         # 清理磁盘目录，避免污染后续测试
         target = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", "owner/repo-x", "skill-repoupload")
         if os.path.exists(target):
