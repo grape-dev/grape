@@ -1,5 +1,5 @@
 """Tests for BotManager.load_from_db — chat_bot 按用户级 chat_agent_session 加载，多用户多 bot"""
-import pytest, asyncio, os, sys
+import pytest, asyncio, os, sys, unittest
 from unittest.mock import AsyncMock, patch
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..")
@@ -109,3 +109,46 @@ def test_load_from_db_empty():
 
     calls = asyncio.run(run())
     assert calls == [], f"expected no bots, got {calls}"
+
+
+def test_ensure_default_sessions_no_vod_im_injection(tmp_path, monkeypatch):
+    """ensure_default_agent_sessions 不应自动注入 VOD IM 配置（无全局 vod bot 概念）"""
+    from unittest.mock import patch as _patch
+    from src.session_manager import db, db_lock
+
+    # 清理目标仓库
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM devops_agent_session WHERE repo_key='iso/no-inject'")
+        c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id='iso_ghost_vod'")
+        db.commit()
+
+    # 造一个假的全局 vod_bot 登记，验证 ensure_default_agent_sessions 不会引用它
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES ('iso_ghost_vod','vod_bot')")
+        db.commit()
+
+    # mock agent-skill-mapping.json 的 default 场景（含 vod 映射）
+    fake_cfg = {"scenes": {"default": {"mapping": {"vod": "vod", "issue": "issue"}}}}
+    from src.api import session_store
+    import json as _json
+
+    monkeypatch.setattr(os.path, "exists", lambda p: True)
+    with patch("builtins.open", unittest.mock.mock_open(read_data=_json.dumps(fake_cfg))):
+        session_store.ensure_default_agent_sessions("iso/no-inject")
+
+    # 验证：vod session 的 im_app_id 应为空（未被注入全局 vod_bot）
+    with db_lock:
+        c = db.cursor()
+        row = c.execute("SELECT im_app_id, im_app_secret FROM devops_agent_session WHERE repo_key='iso/no-inject' AND agent_type='vod'").fetchone()
+        assert row, "vod session should exist"
+        assert row[0] == "", f"vod im_app_id should be empty (no auto-inject), got {row[0]!r}"
+        assert row[1] == "", f"vod im_app_secret should be empty, got {row[1]!r}"
+
+    # 清理
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM devops_agent_session WHERE repo_key='iso/no-inject'")
+        c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id='iso_ghost_vod'")
+        db.commit()

@@ -131,22 +131,9 @@ def ensure_default_agent_sessions(repo_key: str):
     from src.user.db import get_bot_token_by_repo
     _token = get_bot_token_by_repo(_owner, _rname)
 
+    # VOD IM 配置：不自动注入。VOD 助手无全局 bot 概念，同一 vod bot 由用户在多个 repo 中显式配置。
     _im_app_id = ""
     _im_app_secret = ""
-    try:
-        with db_lock:
-            c2 = db.cursor()
-            c2.execute("SELECT bot_app_id FROM global_im_bot_config WHERE bot_type='vod_bot' LIMIT 1")
-            _row = c2.fetchone()
-            if _row:
-                _im_app_id = _row[0]
-                # secret 从已存在的 devops_agent_session 取
-                c2.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (_im_app_id,))
-                _srow = c2.fetchone()
-                if _srow and _srow[0]:
-                    _im_app_secret = _srow[0]
-    except Exception:
-        pass
 
     with db_lock:
         c = db.cursor()
