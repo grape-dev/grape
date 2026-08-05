@@ -11,3 +11,4 @@ __pycache__/
 configs/global-bot-token.json
 skills/custom/
 skills/repo/
+DEPLOYMENT-REMOTE.md

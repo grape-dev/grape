@@ -1,9 +1,46 @@
+// ====== 仓库选择/管理页：内嵌 Sidebar 壳（我的项目 / 项目模板）======
+let _projectsContent = '';
+
+function renderSelectionShell(tab, innerHtml) {
+  const d = document.getElementById('pageContent');
+  if (!d) return;
+  const active = tab || localStorage.getItem('sidebarTab') || 'projects';
+  const tabCls = t => 'ptab' + (active === t ? ' ptab-act' : '');
+  const html = `<div style="display:flex;gap:18px;max-width:1200px;margin:0 auto;min-height:calc(100vh - 32px)">
+    <div class="ptsb">
+      <div style="display:flex;align-items:center;gap:9px;padding:4px 10px;margin-bottom:16px">
+        <img src="/static/logo.png" class="sq" style="width:30px;height:30px;border-radius:8px">
+        <div><div style="font-size:14px;font-weight:700;line-height:1.1">Grape</div><div style="font-size:9px;color:#8d97a8">Multi-Agent DevOps</div></div>
+      </div>
+      <div style="font-size:10px;color:#8d97a8;padding:2px 10px;margin-bottom:4px;letter-spacing:.5px">NAVIGATION</div>
+      <div class="${tabCls('projects')}" onclick="switchSidebarTab('projects')"><span class="ic">🗂️</span>我的项目</div>
+      <div class="${tabCls('templates')}" onclick="switchSidebarTab('templates')"><span class="ic">📦</span>项目模板</div>
+      <div class="ptft"><a onclick="app.logout()">↩ Logout</a></div>
+    </div>
+    <div style="flex:1;min-width:0" id="ptContent">${innerHtml || ''}</div>
+  </div>`;
+  d.innerHTML = html;
+  localStorage.setItem('sidebarTab', active);
+}
+
+function switchSidebarTab(tab) {
+  if (tab === 'templates') {
+    renderTemplates();
+  } else {
+    if (_projectsContent) {
+      renderSelectionShell('projects', _projectsContent);
+    } else {
+      renderRepos();
+    }
+  }
+}
+
 // ====== 首次登录/新增仓库：卡片式仓库选择页 ======
 function renderRepoSelection(repos) {
   const d = document.getElementById('pageContent');
   if (!d) return;
   const user = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).username : 'User';
-  let html = `<div style="max-width:900px;margin:0 auto">
+  let inner = `<div style="max-width:900px;margin:0 auto">
     <div style="margin-bottom:20px;display:flex;justify-content:space-between;align-items:center">
       <div><h2 style="font-size:17px;font-weight:600;margin-bottom:3px">Welcome, <span id="welcomeUser">${user}</span></h2><p class="ts t2">选择你要加入的 GitCode 仓库</p></div>
       <button class="bt bt-o bt-s" onclick="app.logout()" style="color:var(--r);border-color:var(--r)">退出登录</button>
@@ -25,22 +62,23 @@ function renderRepoSelection(repos) {
                     isAdmin ? '<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">加入并托管</button>' :
                     '<button class="bt bt-o bt-s" onclick="event.stopPropagation();joinAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">加入</button>';
     const statusIcon = r.is_hosted ? '✅ Hosted' : r.is_joined ? '👋 Joined' : '🚧 Not added';
-    html += `<div class="rc" onclick="${r.is_joined || r.is_hosted ? 'selectRepo(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')' : 'event.stopPropagation();' + (isAdmin ? 'hostAndSelect' : 'joinAndSelect') + '(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')'}">
+    inner += `<div class="rc" onclick="${r.is_joined || r.is_hosted ? 'selectRepo(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')' : 'event.stopPropagation();' + (isAdmin ? 'hostAndSelect' : 'joinAndSelect') + '(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')'}">
       <div><div class="rh"><span class="rn">${r.full_name}</span><span class="tg tg-d" style="font-size:9px">${r.role}</span></div>
       <div class="rd">${r.description || ''}</div>
       <div class="ro">Owner: ${r.owner}</div></div>
       <div class="rf"><span class="s">${statusIcon}</span>${btnHtml}</div>
     </div>`;
   });
-  html += `</div></div>`;
-  d.innerHTML = html;
+  inner += `</div></div>`;
+  _projectsContent = inner;
+  renderSelectionShell('projects', inner);
 }
 
 // ====== 仓库管理页（侧边栏"＋ 新增仓库托管"）=======
 function renderRepos() {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  el.innerHTML = '<div class="loading">加载中...</div>';
+  renderSelectionShell('projects', '<div class="loading">加载中...</div>');
 
   API.get('/repos/member').then(d => {
     const allRepos = d.repos || [];
@@ -91,9 +129,12 @@ function renderRepos() {
     }
     html += `</div>`;
 
-    el.innerHTML = html;
+    _projectsContent = html;
+    const pc = document.getElementById('ptContent');
+    if (pc) pc.innerHTML = html;
   }).catch(() => {
-    el.innerHTML = '<div class="error">加载失败</div>';
+    const pc = document.getElementById('ptContent');
+    if (pc) pc.innerHTML = '<div class="error">加载失败</div>';
   });
 }
 

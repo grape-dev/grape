@@ -1,0 +1,83 @@
+{
+  "categories": [
+    {
+      "id": "skills",
+      "name": "Skills 项目模板",
+      "icon": "🧩",
+      "description": "面向 Skill 开发与维护的项目起点",
+      "scene_id": "skill-dev",
+      "templates": [
+        {
+          "id": "hello-skill",
+          "name": "Hello Skill",
+          "description": "一个最小的 Skill 项目模板：SKILL.md + 示例资源",
+          "icon": "🧩",
+          "source": "local",
+          "default_repo_name": "hello-skill",
+          "tags": ["skill", "starter"],
+          "scene_id": "skill-dev"
+        }
+      ]
+    },
+    {
+      "id": "ai-office",
+      "name": "AI office 项目模板",
+      "icon": "🤖",
+      "description": "AI 办公场景应用模板",
+      "scene_id": "default",
+      "templates": [
+        {
+          "id": "ai-assistant",
+          "name": "AI Assistant",
+          "description": "基于大模型的办公助手项目骨架",
+          "icon": "🤖",
+          "source": "git",
+          "source_repo": "devops-bot/ai-office-assistant",
+          "default_repo_name": "ai-assistant",
+          "tags": ["ai", "office"],
+          "scene_id": "default"
+        }
+      ]
+    },
+    {
+      "id": "cloud-native",
+      "name": "云原生项目模板",
+      "icon": "☁️",
+      "description": "容器化 / 微服务项目起点",
+      "scene_id": "cloud-native",
+      "templates": [
+        {
+          "id": "micro-svc",
+          "name": "Micro Service",
+          "description": "Go + Docker + Kubernetes 微服务骨架",
+          "icon": "☁️",
+          "source": "git",
+          "source_repo": "devops-bot/cloud-native-microsvc",
+          "default_repo_name": "micro-svc",
+          "tags": ["golang", "k8s", "docker"],
+          "scene_id": "cloud-native"
+        }
+      ]
+    },
+    {
+      "id": "iac",
+      "name": "IaC 项目模板",
+      "icon": "🏗️",
+      "description": "基础设施即代码项目起点",
+      "scene_id": "iac",
+      "templates": [
+        {
+          "id": "tf-infra",
+          "name": "Terraform Infra",
+          "description": "Terraform 基础设施管理骨架",
+          "icon": "🏗️",
+          "source": "git",
+          "source_repo": "devops-bot/terraform-infra",
+          "default_repo_name": "tf-infra",
+          "tags": ["terraform", "iac"],
+          "scene_id": "iac"
+        }
+      ]
+    }
+  ]
+}

@@ -246,6 +246,139 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
     return repos
 
 
+def get_user_gitcode_login(api_token: str) -> str:
+    """获取当前 token 的 GitCode 登录用户名（GET /api/v5/user）。"""
+    if not api_token:
+        return ""
+    try:
+        data = _req("GET", f"{API_BASE}/user", api_token)
+        return data.get("login", "") or ""
+    except RuntimeError as e:
+        log.warning(f"get_user_gitcode_login failed: {e}")
+        return ""
+
+
+def create_repo(api_token: str, name: str, description: str = "", private: bool = False) -> dict:
+    """在 token 用户个人名下创建一个空仓库（POST /api/v5/user/repos）。
+
+    返回 GitCode 仓库信息（含 full_name / html_url 等）。同名仓库冲突时抛 RuntimeError。
+    """
+    if not api_token:
+        raise RuntimeError("GitCode API Token 未配置")
+    if not name:
+        raise RuntimeError("仓库名不能为空")
+    body = {
+        "name": name,
+        "description": description,
+        "private": bool(private),
+        "auto_init": False,
+    }
+    result = _req("POST", f"{API_BASE}/user/repos", api_token, body)
+    full_name = result.get("full_name", "")
+    if not full_name and result.get("name"):
+        full_name = f"{get_user_gitcode_login(api_token)}/{result.get('name')}"
+    if not full_name:
+        raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
+    return result
+
+
+def _run_git(args: list[str], cwd: str) -> str:
+    """在指定目录执行 git 命令，返回 stdout。失败抛 RuntimeError。"""
+    import subprocess
+    try:
+        p = subprocess.run(
+            ["git"] + args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("服务器未安装 git CLI")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("git 操作超时")
+    if p.returncode != 0:
+        err = (p.stderr or p.stdout or "").strip()[:500]
+        raise RuntimeError(f"git {' '.join(args[:2])} 失败: {err}")
+    return (p.stdout or "").strip()
+
+
+def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
+                          user_token: str, bot_token: str = "") -> bool:
+    """将模板内容推送到新仓库。
+
+    template: 配置中的模板对象（含 source / source_repo / id）
+    target_repo: 目标仓库名（不含 owner）
+    来源:
+      - source="local" → 复制 configs/project-templates/{template_id}/ 到临时目录
+      - source="git"   → git clone source_repo（用 bot_token 拉取）
+    目标: 设置 remote 为个人新仓库（https://{user_token}@gitcode.com/{login}/{repo}.git）
+          并 git push -u origin HEAD:main。成功返回 True。
+    """
+    import os
+    import shutil
+    import tempfile
+    from src.config import CONFIG_DIR
+
+    if not user_token or not gitcode_login or not target_repo:
+        raise RuntimeError("缺少用户 token 或目标仓库信息")
+    if not template:
+        raise RuntimeError("模板配置缺失")
+
+    source = template.get("source", "git")
+    tmp = tempfile.mkdtemp(prefix="ptmpl_")
+    try:
+        if source == "local":
+            src_dir = os.path.join(CONFIG_DIR, "project-templates", template.get("id", ""))
+            if not os.path.isdir(src_dir):
+                raise RuntimeError(f"本地模板目录不存在: {src_dir}")
+            workdir = os.path.join(tmp, "repo")
+            shutil.copytree(src_dir, workdir)
+            if not os.path.isdir(os.path.join(workdir, ".git")):
+                _run_git(["init"], workdir)
+        else:
+            source_repo = template.get("source_repo", "")
+            if not source_repo:
+                raise RuntimeError("git 模板缺少 source_repo 配置")
+            clone_token = bot_token or ""
+            if not clone_token:
+                raise RuntimeError("git 模板需要全局 Bot token 拉取")
+            url = f"https://{clone_token}@gitcode.com/{source_repo}.git"
+            workdir = os.path.join(tmp, "repo")
+            _run_git(["clone", "--quiet", url, workdir], tmp)
+
+        target_url = f"https://{user_token}@gitcode.com/{gitcode_login}/{target_repo}.git"
+        if _run_git_has_origin(workdir):
+            _run_git(["remote", "remove", "origin"], workdir)
+        _run_git(["remote", "add", "origin", target_url], workdir)
+        _run_git(["config", "user.email", "devops-bot@gitcode.com"], workdir)
+        _run_git(["config", "user.name", "DevOps Bot"], workdir)
+        _run_git(["add", "-A"], workdir)
+        if _git_has_changes(workdir):
+            _run_git(["commit", "-m", "Init from project template"], workdir)
+        _run_git(["branch", "-M", "main"], workdir)
+        _run_git(["push", "-u", "origin", "HEAD:main"], workdir)
+        return True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _run_git_has_origin(workdir: str) -> bool:
+    try:
+        out = _run_git(["remote"], workdir)
+        return bool(out.strip())
+    except RuntimeError:
+        return False
+
+
+def _git_has_changes(workdir: str) -> bool:
+    try:
+        out = _run_git(["status", "--porcelain"], workdir)
+        return bool(out.strip())
+    except RuntimeError:
+        return True
+
+
 def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int | None:
     """检查仓库是否已有指向 webhook_url 的 webhook，有则返回 webhook_id"""
     if not webhook_url:
