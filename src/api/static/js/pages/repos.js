@@ -8,7 +8,7 @@ function renderSelectionShell(tab, innerHtml) {
   const tabCls = t => 'ptab' + (active === t ? ' ptab-act' : '');
   const html = `<div style="display:flex;gap:18px;max-width:1200px;margin:0 auto;min-height:calc(100vh - 32px)">
     <div class="ptsb">
-      <div style="display:flex;align-items:center;gap:9px;padding:4px 10px;margin-bottom:16px">
+      <div style="display:flex;align-items:center;gap:9px;padding:4px 10px;margin-bottom:16px;cursor:pointer" onclick="switchSidebarTab('projects')" title="返回我的项目">
         <img src="/static/logo.png" class="sq" style="width:30px;height:30px;border-radius:8px">
         <div><div style="font-size:14px;font-weight:700;line-height:1.1">Grape</div><div style="font-size:9px;color:#8d97a8">Multi-Agent DevOps</div></div>
       </div>

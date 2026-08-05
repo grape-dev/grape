@@ -122,6 +122,14 @@ function loadAgentTypes() {
     nav('dash');
   }
 
+  // 点击 Grape Logo → 返回仓库选择/管理页（我的项目）
+  function goToRepos() {
+    if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+    localStorage.setItem('sidebarTab', 'projects');
+    $('pageTitle').textContent = '选择仓库';
+    renderRepos();
+  }
+
   let _refreshTimer = null;
   function nav(view, param) {
     const repo = currentRepo();
@@ -291,6 +299,6 @@ function loadAgentTypes() {
     else { showLogin(); }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile};
+  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile};
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
