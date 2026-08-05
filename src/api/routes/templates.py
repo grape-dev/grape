@@ -83,20 +83,24 @@ async def create_from_template(body: CreateTemplateRequest,
     if not _REPO_NAME_RE.match(repo_name):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名只能包含字母、数字、下划线和短横线"})
 
-    # 1. 创建空仓库（用户个人名下）
+    # 1. 创建空仓库（用户个人名下）。同名已存在时不视为致命错误：
+    #    继续走 push + 托管流程（空仓库可复用；非空仓库 push 冲突时再报错）
+    repo_created = False
     try:
         gitcode_login = get_user_gitcode_login(api_token)
         if not gitcode_login:
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
         create_repo(api_token, repo_name, description=tpl.get("description", ""))
+        repo_created = True
     except HTTPException:
         raise
     except Exception as e:
         msg = str(e)
         # GitCode 同名仓库冲突：HTTP 409/422 + "already exists"/"same name"/"已存在"
         if any(k in msg for k in ("409", "422", "already exists", "same name", "已存在", "已经存在")):
-            raise HTTPException(status_code=409, detail={"code": 409, "message": f"同名仓库 {gitcode_login}/{repo_name} 已存在，请更换仓库名"})
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {msg}"})
+            repo_created = False  # 仓库已存在，尝试复用
+        else:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {msg}"})
 
     full_name = f"{gitcode_login}/{repo_name}"
 
@@ -106,6 +110,8 @@ async def create_from_template(body: CreateTemplateRequest,
         push_template_to_repo(tpl, gitcode_login, repo_name, api_token, bot_token=bot_token)
     except Exception as e:
         log.warning(f"template push failed: {e}")
+        if not repo_created:
+            raise HTTPException(status_code=409, detail={"code": 409, "message": f"同名仓库 {gitcode_login}/{repo_name} 已存在且模板代码写入失败（可能是该仓库已有内容）。请更换仓库名，或在仓库管理页对该仓库手动操作。"})
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"仓库已创建但模板代码写入失败: {e}"})
 
     # 3. 自动加入托管（复用 /api/repos/host 全链路）
