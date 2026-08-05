@@ -22,6 +22,16 @@ from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
 if TYPE_CHECKING:
     from src.im.feishu_async import BotContext, FeishuAsync
 
+# p2p 首次消息待确认绑定：{app_id: {username: {"open_id", "gitcode_nickname", "expires"}}}
+# 用户确认后才写入 unified_user_mapping，防止错误绑定。
+_pending_binds: dict[str, dict] = {}
+
+# 确认/否认意图
+_CONFIRM_RE = re.compile(r'^(?:是|对|确认|确定|是的|对的|没错|对的是|对，是|嗯|可以|yes|y)\s*$', re.IGNORECASE)
+_DENY_RE = re.compile(r'^(?:不是|不对|否|错|不要|取消|no|n)\s*$', re.IGNORECASE)
+
+_PENDING_TTL = 120  # 秒，待确认有效期
+
 
 async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict):
     """异步消息处理入口 — 通过 ctx + api 实现Bot隔离"""
@@ -36,9 +46,8 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         log.info(f"[Chat:{ctx.name}] message: {text[:100]} (chat={chat_id[:20]})")
 
-        # 自动绑定：仅在私聊（p2p）场景，且该 gitcode_user 尚无映射时建立。
-        # 群聊中可能是别人与 bot 对话，不能把别人的 open_id 绑到 bot 配置者；
-        # 已有映射也不覆盖（以首次绑定为准，防止他人消息覆盖配置者）。
+        # p2p 私聊身份绑定：仅私聊场景处理。首次消息发确认询问，用户确认后才写入映射。
+        # 群聊不处理（可能是别人与 bot 对话）；已有映射不覆盖（以用户确认为准）。
         sender_open_id = parsed.get("sender_open_id", "")
         chat_type = parsed.get("chat_type", "")
         if sender_open_id and chat_type == "p2p":
@@ -52,10 +61,45 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                     username = (user_row or {}).get("username", "") if user_row else ""
                     if username and user_row:
                         acc = user_db.get_user_account(username) or {}
-                        existing = get_feishu_open_id("", username)
-                        if not existing:
-                            set_feishu_open_id("", username, sender_open_id, gitcode_nickname=acc.get("nickname", "") or "")
-                            log.info(f"Chat: auto-bound feishu open_id for {username} in p2p (app={ctx.app_id[:20]})")
+                        nickname = acc.get("nickname", "") or ""
+                        existing = get_feishu_open_id(username)
+                        if existing:
+                            # 已绑定，无需处理
+                            pass
+                        else:
+                            import time as _time
+                            now = _time.time()
+                            key = f"{ctx.app_id}:{username}"
+                            # 清理过期 pending
+                            if key in _pending_binds and _pending_binds[key]["expires"] < now:
+                                _pending_binds.pop(key, None)
+                            pending = _pending_binds.get(key)
+                            if pending:
+                                # 有待确认项：判断用户回复是确认还是否认
+                                if _CONFIRM_RE.match(text.strip()):
+                                    bind_open_id = pending.get("open_id") or sender_open_id
+                                    set_feishu_open_id("", username, bind_open_id, gitcode_nickname=nickname)
+                                    _pending_binds.pop(key, None)
+                                    await api.reply_text(ctx, msg_id, f"✅ 已确认，你的 GitCode 账号「{username}」已绑定当前飞书账号。")
+                                    log.info(f"Chat: confirmed feishu mapping for {username} (app={ctx.app_id[:20]})")
+                                    return
+                                elif _DENY_RE.match(text.strip()):
+                                    _pending_binds.pop(key, None)
+                                    await api.reply_text(ctx, msg_id, "好的，本次不绑定。如需绑定请再次给我发任意消息。")
+                                    return
+                                else:
+                                    # 既不是确认也不是否认，重新提示
+                                    await api.reply_text(ctx, msg_id, f"请问你的 GitCode 昵称是否是「{nickname or username}」？请回复「是」或「不是」。")
+                                    return
+                            else:
+                                # 首次：发确认询问，不直接绑定
+                                _pending_binds[key] = {
+                                    "open_id": sender_open_id,
+                                    "gitcode_nickname": nickname,
+                                    "expires": now + _PENDING_TTL,
+                                }
+                                await api.reply_text(ctx, msg_id, f"🤝 检测到你正在与我私聊。为绑定你的 GitCode 账号，请确认：\n你的 GitCode 昵称是否是「{nickname or username}」？\n回复「是」确认绑定，回复「不是」则取消。")
+                                return
             except Exception as e:
                 log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
 
