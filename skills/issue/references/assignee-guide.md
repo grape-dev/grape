@@ -72,9 +72,9 @@ curl -s -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}
 ```
 
-### 7.1 分配后通知责任人（必做）
+### 7.1 通知责任人 / 确保任务存在（必做）
 
-分配负责人后，调用个人任务通知接口，创建任务并让 devops-bot 通过该用户的 chat-agent 处理、Web 任务中心可见、飞书通知：
+**只要本 Issue 的责任人已确定（无论是本次新分配，还是确认已有责任人），都要调用个人任务通知接口**，确保该用户的任务已创建（接口幂等：同 assignee 同 issue 已有 active 任务则复用，不会重复创建）：
 
 ```bash
 curl -X POST http://localhost:8080/api/tasks/notify \
@@ -87,11 +87,15 @@ curl -X POST http://localhost:8080/api/tasks/notify \
   }'
 ```
 
+场景覆盖：
+- **本次新分配** → 创建新任务
+- **责任人已存在（本次仅确认/复核）** → 复用已有 active 任务（若之前没建过则补建）
+- **换人** → 本调用会自动将原责任人任务标记为已完成（已转派），并为新责任人建任务
+
 说明：
 - `assignee` 必须是本仓库的有效成员（GitCode 用户名）
 - 若该用户未注册平台，接口返回 `{ok:false}`，此时在 Issue 评论中说明「该用户未注册 devops-bot 平台，无法收到任务通知」
 - 若该用户已注册但未绑定飞书，任务仍会创建（Web 任务中心可见），仅跳过飞书通知
-- 若该 Issue 之前分配给其他人（换人），本调用会自动将原责任人任务标记为已完成（已转派）
 
 ### 8. 检查跨仓同步
 
