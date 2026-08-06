@@ -46,8 +46,6 @@ function _filteredTasks() {
 function _render() {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  const repo = app.currentRepo();
-  const repoKey = repo ? repo.fullName : '';
   const filtered = _filteredTasks();
   const cntAll = _tasksAll.length;
   const cntActive = _tasksAll.filter(t => t.status === 'active').length;
@@ -98,9 +96,7 @@ function _render() {
   el.innerHTML = `
   <div class="tsk-page">
     <div class="tsk-top">
-      <div class="tsk-eyebrow"><i></i>TASK CENTER</div>
       <h1>任务中心</h1>
-      ${repoKey ? `<span class="tsk-repo">📦 ${repoKey}</span>` : ''}
       <div class="tsk-controls">
         ${tab('all', '全部', cntAll)}${tab('active', '待处理', cntActive)}${tab('completed', '已完成', cntDone)}
         <div class="tsk-search"><span>🔍</span><input placeholder="搜索任务..." value="${_taskQuery}" oninput="_taskQuery=this.value;if(_taskQuery.length>1||!_taskQuery){_render()}" onkeyup="if(event.key==='Enter')_render()"></div>
