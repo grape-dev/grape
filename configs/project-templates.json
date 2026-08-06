@@ -94,9 +94,9 @@
     },
     {
       "id": "agent-best-practices",
-      "name": "Agent 最佳实践",
-      "icon": "🚀",
-      "description": "agent-best-practices 组织沉淀的 AI Agent 落地实战项目模板",
+      "name": "AI Office 项目模板",
+      "icon": "🤖",
+      "description": "AI 办公场景应用模板",
       "scene_id": "default",
       "templates": [
         {
@@ -232,30 +232,6 @@
             "starter"
           ],
           "scene_id": "skill-dev",
-          "video_url": ""
-        }
-      ]
-    },
-    {
-      "id": "ai-office",
-      "name": "AI office 项目模板",
-      "icon": "🤖",
-      "description": "AI 办公场景应用模板",
-      "scene_id": "default",
-      "templates": [
-        {
-          "id": "ai-assistant",
-          "name": "AI Assistant",
-          "description": "基于大模型的办公助手项目骨架",
-          "icon": "🤖",
-          "source": "git",
-          "source_repo": "devops-bot/ai-office-assistant",
-          "default_repo_name": "ai-assistant",
-          "tags": [
-            "ai",
-            "office"
-          ],
-          "scene_id": "default",
           "video_url": ""
         }
       ]
