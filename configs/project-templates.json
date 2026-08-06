@@ -240,6 +240,23 @@
           ],
           "scene_id": "cloud-native",
           "video_url": ""
+        },
+        {
+          "id": "730harmony-ecommerce",
+          "name": "Harmony 电商应用",
+          "description": "基于 HarmonyOS ArkTS 的分布式电商应用：跨设备协同购物，多端购物车同步、商品详情流转，含首页推荐、商品详情、订单管理，展示华为云码道 730 新特性",
+          "icon": "🛍️",
+          "source": "git",
+          "source_repo": "Lingxi-HandsOn/730harmony-ecommerce",
+          "default_repo_name": "730harmony-ecommerce",
+          "tags": [
+            "harmonyos",
+            "arkts",
+            "ecommerce",
+            "distributed"
+          ],
+          "scene_id": "cloud-native",
+          "video_url": ""
         }
       ]
     },
