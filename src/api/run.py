@@ -1,9 +1,9 @@
-"""Agentic DevOps API 启动入口 — 生产模式双端口 (80 + 8080)，--dev 单端口 reload"""
+"""Agentic DevOps API 启动入口 - 生产模式：主 API 内网 3000 + webhook 8080，由 nginx 反代对外 80/443；--dev 单端口 reload"""
 import uvicorn, multiprocessing, signal, sys
 
 
 def _start_main():
-    uvicorn.run("src.api.main:app", host="0.0.0.0", port=80, log_level="info")
+    uvicorn.run("src.api.main:app", host="127.0.0.1", port=3000, log_level="info")
 
 
 def _start_webhook():
