@@ -1,5 +1,6 @@
 // ====== 仓库选择页：宏观大堂（Lobby）风格 ======
-let _projectsContent = '';
+let _projectsContent = '';     // 仓库管理页（Hosted/Available 表格）缓存
+let _workspaceContent = '';    // 工作项目大堂（Lobby 卡片）缓存
 let _projectsRepos = [];
 
 function renderSelectionShell(tab, innerHtml) {
@@ -39,12 +40,24 @@ function switchSidebarTab(tab) {
   if (tab === 'templates') {
     renderTemplates();
   } else {
-    // 先渲染缓存（秒开），再后台静默刷新（拉到最新，含新创建项目）
-    if (_projectsContent) {
-      renderSelectionShell('projects', _projectsContent);
+    // 工作项目大堂：先秒开缓存，再后台强制 sync 拉最新（含新创建项目）
+    if (_workspaceContent) {
+      renderSelectionShell('projects', _workspaceContent);
     }
-    renderRepos({silent: true});
+    refreshWorkspace();
   }
+}
+
+// 拉取最新仓库并渲染「工作项目」大堂（强制 sync 刷新 user_repos 缓存）
+function refreshWorkspace() {
+  API.post('/repos/sync').then(d => {
+    renderRepoSelection(d.repos || []);
+  }).catch(() => {
+    // sync 失败回退读缓存
+    API.get('/repos/member').then(d => {
+      renderRepoSelection(d.repos || []);
+    }).catch(() => {});
+  });
 }
 
 // ====== 仓库选择主内容 ======
@@ -84,7 +97,7 @@ function renderRepoSelection(repos) {
     <p>试试更换关键词或筛选条件。</p>
   </div>`;
 
-  _projectsContent = inner;
+  _workspaceContent = inner;
   renderSelectionShell('projects', inner);
 }
 
