@@ -109,5 +109,32 @@ def get_agent_backend(skill_name: str = "") -> str:
     return "opencode"
 
 
+# ====== 登录白名单 ======
+
+LOGIN_WHITELIST_PATH = os.path.join(CONFIG_DIR, "login-whitelist.json")
+
+
+def is_gitcode_user_allowed(gitcode_login: str) -> bool:
+    """白名单判定（GitCode 用户名，非昵称）。
+
+    - 配置文件缺失 / whitelist 为空 → 全部放行（默认开放）
+    - 读取异常 → 保守放行（避免误锁所有用户）
+    - 否则 gitcode_login 必须在 whitelist 内才放行
+    """
+    if not gitcode_login:
+        return False
+    try:
+        if not os.path.exists(LOGIN_WHITELIST_PATH):
+            return True
+        with open(LOGIN_WHITELIST_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        wl = data.get("whitelist") if isinstance(data, dict) else None
+        if not wl:
+            return True
+        return gitcode_login in wl
+    except Exception:
+        return True
+
+
 # 延迟到 main.py 中显式调用，避免循环导入
 # _load_accounts()

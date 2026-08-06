@@ -9,6 +9,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 configs/global-bot-token.json
+configs/login-whitelist.json
 skills/custom/
 skills/repo/
 DEPLOYMENT-REMOTE.md
+.huaweicloud/
