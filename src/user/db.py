@@ -558,6 +558,7 @@ def _migrate_repo_key_tables():
 
         # ===== 其余含 repo_key 的表：历史无前缀数据统一加 'gitcode:' 前缀（幂等）=====
         # 部署后所有查询均以带前缀 repo_key 进行；历史数据若无前缀将查不到。
+        # 含 UNIQUE(repo_key) 的表逐行处理：加前缀后若与已有带前缀行冲突，删除旧无前缀行（保留最新带前缀会话）。
         _REPO_KEY_TABLES = (
             "events", "event_skipped", "devops_agent_session", "tasks",
             "chat_conversations", "chat_agent_session", "repo_im_group_binding",
@@ -568,11 +569,38 @@ def _migrate_repo_key_tables():
                 _rk_cols = [r[1] for r in c.execute(f"PRAGMA table_info({_tbl})").fetchall()]
                 if "repo_key" not in _rk_cols:
                     continue
-                c.execute(
-                    f"UPDATE {_tbl} SET repo_key='gitcode:'||repo_key "
-                    f"WHERE repo_key!='' AND repo_key NOT LIKE '%:%'"
-                )
-                db.commit()
+                # 主键/唯一键列（用于删除冲突行）；无则退化为批量 UPDATE
+                _pk = None
+                for _ci in c.execute(f"PRAGMA table_info({_tbl})").fetchall():
+                    if _ci[5] == 1:  # pk
+                        _pk = _ci[1]
+                        break
+                _uniq = None
+                for _idx in c.execute(f"PRAGMA index_list({_tbl})").fetchall():
+                    if _idx[2] == 1:  # unique index
+                        _cols = [x[2] for x in c.execute(f"PRAGMA index_info({_idx[1]})").fetchall()]
+                        if _cols and _cols[0] == "repo_key":
+                            _uniq = True
+                            break
+                if _pk and (_uniq or _pk == "repo_key"):
+                    # 逐行处理 UNIQUE 表
+                    _rows = c.execute(
+                        f"SELECT {_pk}, repo_key FROM {_tbl} WHERE repo_key!='' AND repo_key NOT LIKE '%:%'").fetchall()
+                    for _rid, _rk in _rows:
+                        _newk = "gitcode:" + _rk
+                        _conflict = c.execute(
+                            f"SELECT 1 FROM {_tbl} WHERE repo_key=? LIMIT 1", (_newk,)).fetchone()
+                        if _conflict:
+                            c.execute(f"DELETE FROM {_tbl} WHERE {_pk}=?", (_rid,))
+                        else:
+                            c.execute(f"UPDATE {_tbl} SET repo_key=? WHERE {_pk}=?", (_newk, _rid))
+                    db.commit()
+                else:
+                    c.execute(
+                        f"UPDATE {_tbl} SET repo_key='gitcode:'||repo_key "
+                        f"WHERE repo_key!='' AND repo_key NOT LIKE '%:%'"
+                    )
+                    db.commit()
             except Exception as e:
                 log.warning(f"Migrate {_tbl} repo_key prefix failed: {e}")
         # skill 表 repo 级记录：owner_id 存 repo_key（scope='repo'）
@@ -584,6 +612,18 @@ def _migrate_repo_key_tables():
             db.commit()
         except Exception as e:
             log.warning(f"Migrate skill repo_key prefix failed: {e}")
+
+        # 幂等清理：迁移后遗留的 legacy 表删除（如 managed_repos_legacy / user_repos_legacy）
+        try:
+            for _leg in ("managed_repos_legacy", "user_repos_legacy"):
+                _exists = c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (_leg,)).fetchone()
+                if _exists:
+                    c.execute(f"DROP TABLE IF EXISTS {_leg}")
+                    db.commit()
+                    log.info(f"Migrate repo_key: dropped leftover {_leg}")
+        except Exception as e:
+            log.warning(f"Cleanup legacy repo tables failed: {e}")
 
 
 def init_db():
