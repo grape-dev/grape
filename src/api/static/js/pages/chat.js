@@ -84,8 +84,9 @@ function loadSideConfig() {
 }
 
 function loadConversations(autoSelect) {
+  // 去对话指定会话时，不过滤 repo，确保任务会话可被定位
   const repo = app.currentRepo();
-  const repoKey = repo ? repo.fullName : '';
+  const repoKey = (_openConvId ? '' : (repo ? repo.fullName : ''));
   API.get('/chat/conversations' + (repoKey ? '?repo_key=' + encodeURIComponent(repoKey) : '')).then(d => {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
@@ -124,6 +125,8 @@ function newConversation() {
     document.getElementById('chatBody').innerHTML = '';
     document.getElementById('chatInput').disabled = false;
     document.querySelector('.chat-in button').disabled = false;
+    const hdr = document.querySelector('.chat-hdr h2');
+    if (hdr) hdr.textContent = 'Chat Agent · Personal Assistant';
   }).catch(e => app.showToast('创建失败: ' + e.message));
 }
 
@@ -147,6 +150,10 @@ function switchConversation(convId) {
   body.innerHTML = '<div class="loading">加载中...</div>';
   API.get('/chat/messages/' + convId).then(d => {
     const msgs = d.messages || [];
+    // 更新会话标题（如 Issue #4）到页头
+    const conv = d.conversation || {};
+    const hdr = document.querySelector('.chat-hdr h2');
+    if (hdr) hdr.textContent = 'Chat Agent · ' + (conv.title || 'Personal Assistant');
     body.innerHTML = msgs.map(m =>
       `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${m.content}</div>`
     ).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">开始新对话</div>';

@@ -103,6 +103,19 @@ def _get_issue_title(repo_key: str, issue_number: int) -> str:
             return ""
 
 
+def _build_task_context_message(title: str, task_description: str, repo_key: str, issue_number: int) -> str:
+    """构建写入会话的任务上下文消息（用户侧可见）"""
+    lines = [f"📋 任务分配 · Issue #{issue_number}"]
+    lines.append(f"仓库: {repo_key}")
+    if title:
+        lines.append(f"Issue 标题: {title}")
+    lines.append("")
+    lines.append(f"任务描述: {task_description}")
+    lines.append("")
+    lines.append("请在下方与我沟通处理进度，或提出疑问。")
+    return "\n".join(lines)
+
+
 def _build_task_prompt(task_description: str, repo_key: str, issue_number: int, user_id: int) -> str:
     """构建任务 prompt：issue 上下文 + 任务描述"""
     from src.prompt_builder import build_chat_prompt
@@ -216,6 +229,12 @@ async def notify_task(body: TaskNotifyBody):
             c = db.cursor()
             c.execute("UPDATE tasks SET conversation_id=? WHERE id=?", (conv_id, task_id))
             db.commit()
+        # 立即写入任务上下文消息（不等后台 agent，保证会话非空、去对话可见上下文）
+        try:
+            ctx_msg = _build_task_context_message(title, body.task_description, body.repo_key, body.issue_number)
+            add_message(conv_id, "user", ctx_msg)
+        except Exception as e:
+            log.warning(f"Task notify write context message failed: {e}")
     except Exception as e:
         log.warning(f"Task notify conversation create failed: {e}")
 
