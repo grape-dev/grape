@@ -74,7 +74,7 @@ curl -s -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 
 ### 7.1 通知责任人 / 确保任务存在（必做）
 
-**只要责任人已确定（新分配或确认已有），就调用 `POST /api/tasks/notify`** 创建任务（接口幂等，换人时自动关闭原责任人任务）：
+**在分配动作完成后（处理结束、责任人最终确定时），调用 `POST /api/tasks/notify`** 创建任务（接口幂等，换人时自动关闭原责任人任务）：
 
 ```bash
 curl -X POST http://localhost:8080/api/tasks/notify \
