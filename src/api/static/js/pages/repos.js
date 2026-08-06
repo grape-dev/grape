@@ -14,7 +14,7 @@ function renderSelectionShell(tab, innerHtml) {
   const html = `<div class="lobby">
     <header class="lobby-head">
       <div class="lobby-brand">
-        <img class="lobby-logo" src="/static/logo.png" alt="Grape">
+        <img class="lobby-logo" src="/static/logo-128.png" alt="Grape">
         <span class="lobby-brand-name">Grape</span>
         <span class="lobby-brand-sub">Agentic DevOps</span>
       </div>
