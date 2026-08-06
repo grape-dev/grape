@@ -25,25 +25,36 @@ def _fetch_and_cache(user_id: int, api_token: str) -> list[dict]:
 
 
 def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
-    """过滤仓库列表：只返回可托管（Admin/Maintainer）或已托管的仓库"""
-    managed = {r["full_name"]: r["is_admin"] for r in user_db.get_managed_repos(user_id)}
+    """过滤仓库列表：只返回「管理员 / 已加入 / 已被托管（全局）」的仓库。
+
+    - user_repos 缓存行带 is_admin / is_join（用户级）。
+    - managed_repos 全局集合决定「该仓库是否已被任何人托管」（仓库级）。
+    - 只要仓库被任一用户托管，任何用户视角都显示「已托管/已加入」，杜绝误显「加入并托管」→ 403。
+    """
+    from src.repo_key import to_repo_key
+    managed = {r["repo_key"]: r["webhook_id"] for r in user_db.get_all_managed_repos()}
     result = []
     for r in repos:
         full_name = r.get("full_name", "")
+        repo_key = to_repo_key(r.get("repo_key", "") or full_name)
         is_admin = r.get("is_admin", False)
-        in_managed = full_name in managed
+        is_join = r.get("is_join", False)
+        in_managed = repo_key in managed
+        hosted = in_managed and bool(managed.get(repo_key))
 
-        if not is_admin and not in_managed:
+        if not is_admin and not is_join and not in_managed:
             continue
 
+        role = "Admin" if is_admin else "Maintainer" if in_managed else "Member"
         result.append({
+            "repo_key": repo_key,
             "full_name": full_name,
             "owner": r.get("owner", ""),
             "name": r.get("name", ""),
             "description": r.get("description", ""),
-            "role": "Admin" if is_admin else "Maintainer" if in_managed else "Member",
-            "is_joined": in_managed,
-            "is_hosted": in_managed and managed.get(full_name, False),
+            "role": role,
+            "is_joined": is_join or in_managed,
+            "is_hosted": hosted,
         })
     return result
 
@@ -104,18 +115,22 @@ async def sync_repos(user: dict = Depends(get_current_user)):
 
 @router.post("/join")
 async def join_repo(body: RepoAction, user: dict = Depends(get_current_user)):
+    from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
-    user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=0, is_admin=False)
+    repo_key = to_repo_key(body.full_name)
+    user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=0)
+    user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=False)
     from src.api.session_store import ensure_default_agent_sessions
-    ensure_default_agent_sessions(body.full_name)
+    ensure_default_agent_sessions(repo_key)
     return {"message": "已加入仓库"}
 
 
 @router.post("/host")
 async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
+    from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
@@ -192,15 +207,19 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
 
         existing_id = find_existing_webhook(webhook_token, owner, repo_name, webhook_url)
         if existing_id:
-            user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=existing_id, is_admin=True, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
+            repo_key = to_repo_key(body.full_name)
+            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
+            user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             from src.api.session_store import ensure_default_agent_sessions
-            ensure_default_agent_sessions(body.full_name)
+            ensure_default_agent_sessions(repo_key)
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
 
         hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=webhook_token)
-        user_db.add_managed_repo(user["id"], owner, repo_name, body.full_name, webhook_id=hook_id, is_admin=True, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
+        repo_key = to_repo_key(body.full_name)
+        user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
+        user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
         from src.api.session_store import ensure_default_agent_sessions
-        ensure_default_agent_sessions(body.full_name)
+        ensure_default_agent_sessions(repo_key)
         return {"message": "仓库托管成功", "webhook_id": hook_id}
     except HTTPException:
         raise
@@ -236,11 +255,13 @@ async def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(ge
 @router.put("/bot-token")
 async def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user)):
     """设置仓库绑定的 DevOps Bot Token；自动将 repo bot 加入维护者"""
+    from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
-    ok = update_managed_repo_bot_token(user["id"], owner, repo_name, body.bot_token)
+    repo_key = to_repo_key(body.full_name)
+    ok = update_managed_repo_bot_token(repo_key, body.bot_token)
     if not ok:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
 
@@ -253,7 +274,7 @@ async def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_curren
     except Exception:
         pass
     if repo_bot_username:
-        update_managed_repo_bot_username(user["id"], owner, repo_name, repo_bot_username)
+        update_managed_repo_bot_username(repo_key, repo_bot_username)
 
     # 将 repo bot 加入仓库维护者（用 owner token，失败仅记日志，不影响托管）
     if body.bot_token and repo_bot_username:
@@ -361,10 +382,12 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
 
 @router.post("/remove")
 async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current_user)):
+    from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
+    repo_key = to_repo_key(body.full_name)
 
     # 删除 webhook 优先个人 token（用户已授权全权限）；repo bot / 全局 bot token 兜底
     api_token = get_user_token(user["username"])
@@ -383,7 +406,7 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
     if api_token:
         try:
             from src.user.repo_manager import _get_managed_webhook, remove_webhook
-            wh_id = _get_managed_webhook(user["id"], owner, repo_name)
+            wh_id = _get_managed_webhook(repo_key)
             if wh_id:
                 remove_webhook(api_token, owner, repo_name, wh_id)
         except Exception:
@@ -397,7 +420,7 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
         repo_bot_token = ""
         repo_bot_username = ""
         for _r in user_db.get_managed_repos(user["id"]):
-            if _r["full_name"] == body.full_name:
+            if _r["repo_key"] == repo_key:
                 repo_bot_token = _r.get("bot_gitcode_token", "") or ""
                 repo_bot_username = _r.get("bot_username", "") or ""
                 break
@@ -429,7 +452,7 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
     except Exception:
         pass
 
-    removed = user_db.remove_managed_repo(user["id"], owner, repo_name)
+    removed = user_db.remove_managed_repo(repo_key)
     if not removed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
     # 同步清理：关联数据表 + 仓库 skill + workspace 目录（替代原 remove_agent_sessions）

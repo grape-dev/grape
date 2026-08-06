@@ -343,6 +343,8 @@ def get_chat_members(chat_id: str) -> list:
 
 def get_chat_id_for_repo(repo_key: str) -> str:
     """Get the bound Feishu chat_id for a repo."""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
     try:
         from src.session_manager import db, db_lock
         with db_lock:
@@ -361,10 +363,11 @@ def sync_repo_feishu_mapping(repo_key: str, chat_id: str) -> int:
     if not members:
         return 0
     # Get GitCode collaborators
-    parts = repo_key.replace("gitcode:", "").split("/", 1)
-    if len(parts) < 2:
+    from src.repo_key import split_owner_repo, to_repo_key
+    owner, repo = split_owner_repo(repo_key)
+    if not owner or not repo:
         return 0
-    owner, repo = parts
+    repo_key = to_repo_key(repo_key)
     # 从 managed_repos 获取 repo 绑定的 Bot Token；无则用全局 bot token 兜底
     from src.user.db import get_bot_token_by_repo
     api_token = get_bot_token_by_repo(owner, repo)
@@ -399,7 +402,7 @@ def sync_repo_feishu_mapping(repo_key: str, chat_id: str) -> int:
         log.warning(f"Feishu sync: failed to fetch collaborators for {repo_key}: {e}")
         return 0
     from src.session_manager import set_feishu_open_id
-    full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
+    full_key = repo_key  # repo_key 已带平台前缀
     matched = 0
     for collab in collabs:
         nick = collab.get("nick_name", "")
@@ -456,7 +459,7 @@ def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "")
     m = re.search(r'[\w.-]+/[\w.-]+', text)
     if m:
         return m.group(0)
-    # 3. 查询群绑定表
+    # 3. 查询群绑定表（repo_key 带前缀）
     try:
         c = db.cursor()
         c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
@@ -475,7 +478,8 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
         return ""
     cmd = parts[0].lower()
     if cmd == "/bind" and len(parts) >= 2:
-        repo_key = parts[1]
+        from src.repo_key import to_repo_key
+        repo_key = to_repo_key(parts[1])
         try:
             c = db.cursor()
             c.execute(
@@ -562,8 +566,10 @@ def process_command(text: str, chat_id: str, sender_id: str, db, account: str = 
             if not row:
                 return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后再清理。"
             repo_key = row[0]
-            full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
-            c.execute("UPDATE chat_agent_session SET backend_session_id='', backend='' WHERE repo_key=? OR repo_key=?", (repo_key, full_key))
+            from src.repo_key import to_repo_key, from_repo_key
+            full_key = to_repo_key(repo_key)
+            legacy_key = from_repo_key(repo_key)
+            c.execute("UPDATE chat_agent_session SET backend_session_id='', backend='' WHERE repo_key=? OR repo_key=?", (full_key, legacy_key))
             db.commit()
             return f"✅ 已清除仓库 `{full_key}` 的 Agent 会话缓存。下次事件将使用全新的 Agent 上下文。"
         except Exception as e:

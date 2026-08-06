@@ -40,8 +40,8 @@ def setup_module():
     # 建一个托管仓库（供 notify 校验）
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, webhook_id, is_admin) VALUES (?,?,?,?,?,?)",
-                  (_uid["id"], "org", "test", "org/test", 1, 1))
+        c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id) VALUES (?,?,?,?,?)",
+                  ("gitcode:org/test", "org", "test", "org/test", 1))
         db.commit()
 
 
@@ -113,7 +113,7 @@ class TestNotify:
         with db_lock:
             c = db.cursor()
             c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
-                      (_uid["id"], "alice", "org/test", 7))
+                      (_uid["id"], "alice", "gitcode:org/test", 7))
             db.commit()
             alice_task = c.lastrowid
         # bob 用独立 user_id 注册（unified_user_mapping.user_id 为主键，避免覆盖 younger_eric）
@@ -167,7 +167,7 @@ class TestNotify:
         with db_lock:
             c = db.cursor()
             rows = c.execute(
-                "SELECT id, task_description FROM tasks WHERE repo_key='org/test' AND issue_number=9 AND assignee='younger_eric' AND status='active'"
+                "SELECT id, task_description FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number=9 AND assignee='younger_eric' AND status='active'"
             ).fetchall()
         assert len(rows) == 1, rows
 
@@ -178,7 +178,7 @@ class TestClose:
         with db_lock:
             c = db.cursor()
             c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
-                      (_uid["id"], "younger_eric", "org/test", 11))
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 11))
             db.commit()
             tid = c.lastrowid
         r = client.post("/api/tasks/close", json={"repo_key": "org/test", "issue_number": 11})
@@ -205,10 +205,10 @@ class TestMine:
         with db_lock:
             c = db.cursor()
             c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
-                      (_uid["id"], "younger_eric", "org/test", 13))
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 13))
             db.commit()
             c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (9999,?,?,?, 'active')",
-                      ("other", "org/test", 14))
+                      ("other", "gitcode:org/test", 14))
             db.commit()
         r = client.get("/api/tasks/mine", headers=_headers)
         assert r.status_code == 200
@@ -221,10 +221,10 @@ class TestMine:
         with db_lock:
             c = db.cursor()
             c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
-                      (_uid["id"], "younger_eric", "org/test", 15))
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 15))
             db.commit()
             c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, completed_reason, completed_at) VALUES (?,?,?,?, 'completed', 'issue_closed', datetime('now'))",
-                      (_uid["id"], "younger_eric", "org/test", 16))
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 16))
             db.commit()
         r_active = client.get("/api/tasks/mine?status=active", headers=_headers)
         r_done = client.get("/api/tasks/mine?status=completed", headers=_headers)
@@ -237,10 +237,10 @@ class TestMine:
         with db_lock:
             c = db.cursor()
             c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
-                      (_uid["id"], "younger_eric", "org/repoA", 20))
+                      (_uid["id"], "younger_eric", "gitcode:org/repoA", 20))
             db.commit()
             c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
-                      (_uid["id"], "younger_eric", "org/repoB", 21))
+                      (_uid["id"], "younger_eric", "gitcode:org/repoB", 21))
             db.commit()
         # 按 repoA 过滤
         r = client.get("/api/tasks/mine?repo_key=" + "org/repoA", headers=_headers)

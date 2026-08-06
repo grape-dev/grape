@@ -133,16 +133,14 @@ async def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoCon
                                      user: dict = Depends(get_current_user)):
     # 将 Bot Token / Webhook Token / Bot Username 存储到 managed_repos
     from src.user.db import update_managed_repo_bot_token, update_managed_repo_webhook_token, update_managed_repo_bot_username
-    repos = user_db.get_managed_repos(user["id"])
-    for r in repos:
-        if r["repo_owner"] == owner and r["repo_name"] == repo:
-            if body.bot_token:
-                update_managed_repo_bot_token(user["id"], owner, repo, body.bot_token)
-            if body.webhook_token:
-                update_managed_repo_webhook_token(user["id"], owner, repo, body.webhook_token)
-            if body.bot_username:
-                update_managed_repo_bot_username(user["id"], owner, repo, body.bot_username)
-            break
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(f"{owner}/{repo}")
+    if body.bot_token:
+        update_managed_repo_bot_token(repo_key, body.bot_token)
+    if body.webhook_token:
+        update_managed_repo_webhook_token(repo_key, body.webhook_token)
+    if body.bot_username:
+        update_managed_repo_bot_username(repo_key, body.bot_username)
     return {"message": "GitCode Repo 配置已更新"}
 
 

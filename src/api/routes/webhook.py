@@ -90,10 +90,8 @@ async def a2a_endpoint(request: Request):
     issue_number = payload.get("issue_number", "")
     pr_number = payload.get("pr_number", "")
 
-    repo_key = f"gitcode:{repository}"
-    # 统一 repo_key 格式（与 run_pipeline 一致：去掉 "source:" 前缀，所有查询都用 "owner/repo"）
-    if ":" in repo_key:
-        repo_key = repo_key.split(":", 1)[1]
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(f"gitcode:{repository}") if repository else ""
     log.info(f"A2A: agent={agent_name}, repo={repository}")
     seq = 0
 
@@ -108,7 +106,7 @@ async def a2a_endpoint(request: Request):
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT backend_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repository, agent_name))
+                c.execute("SELECT backend_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_name))
                 row = c.fetchone()
                 if row:
                     backend = "opencode"

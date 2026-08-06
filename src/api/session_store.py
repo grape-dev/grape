@@ -126,8 +126,8 @@ def ensure_default_agent_sessions(repo_key: str):
     if not _mapping:
         return
 
-    _parts = repo_key.split("/")
-    _owner, _rname = _parts[0], _parts[-1]
+    from src.repo_key import split_owner_repo
+    _owner, _rname = split_owner_repo(repo_key)
     from src.user.db import get_bot_token_by_repo
     _token = get_bot_token_by_repo(_owner, _rname)
 

@@ -117,9 +117,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     evt["account"] = account
 
     repo_key = repo_key_override or f"{source}:{evt['repository']}"
-    # 统一 repo_key 格式：去掉 "source:" 前缀，所有查询都用 "owner/repo"
-    if ":" in repo_key:
-        repo_key = repo_key.split(":", 1)[1]
+    # 统一 repo_key：带平台前缀贯穿（gitcode:owner/repo），与 DB 内部一致
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
     # account 兜底用仓库全名（无 default 概念）
     if not account and evt.get("repository"):
         evt["account"] = evt["repository"]
@@ -171,7 +171,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     skill_name = ""
     skill_id = 0
     skill_path = ""
-    repo_name = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
+    repo_name = repo_key  # repo_key 带平台前缀，devops_agent_session/events 统一用带前缀值
     try:
         with db_lock:
             c = db.cursor()
@@ -295,9 +295,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     )
     log.info(f"Pipeline: event created, seq={seq}, repo_key={repo_key}, agent={agent_type}, issue_id={issue_id or '#0'}")
 
+    from src.repo_key import from_repo_key
     result.update({"seq": seq, "event_type": event_type, "skill": agent_type,
                    "backend": backend, "skill_name": skill_name,
-                   "repo_key": repo_key, "ok": True, "issue_id": issue_id,
+                   "repo_key": from_repo_key(repo_key), "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
 
     # 后台异步执行 Agent（执行完更新该 seq 的 result/status）
@@ -328,12 +329,13 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
     )
 
-    repository = evt.get("repository", repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key)
+    from src.repo_key import from_repo_key
+    repository = evt.get("repository", from_repo_key(repo_key))
     ws = os.path.join(WORKSPACE_DIR, repository, f"{agent_type}-agent")
     os.makedirs(ws, exist_ok=True)
 
-    # 读取上次的 oc_session_id（用于延续对话上下文）
-    repo_name = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
+    # 读取上次的 oc_session_id（用于延续对话上下文）——repo_key 带前缀查 DB
+    repo_name = repo_key
     oc_session_id = ""
     try:
         with db_lock:
@@ -368,9 +370,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         append_skipped_event(repo_key, evt.get("type", ""), "prompt_build_failed", str(e))
         return
 
-    parts = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
-    owner_repo = parts.split("/", 1)
-    exec_account = evt.get("account") or repo_name
+    exec_account = evt.get("account") or repository
     if not repo_gitcode_token:
         log.warning(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no bot token available, agent will fail on API calls")
 

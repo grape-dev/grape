@@ -131,7 +131,9 @@ def _build_task_prompt(task_description: str, repo_key: str, issue_number: int, 
     if issue_summary:
         ctx += f"\n\n{issue_summary}"
     ctx += f"\n\n## 任务描述\n{task_description}"
-    return build_chat_prompt(ctx, repo_key, [], ["chat"], account=repo_key.split("/", 1)[0] if "/" in repo_key else "")
+    from src.repo_key import split_owner_repo
+    _owner, _repo = split_owner_repo(repo_key)
+    return build_chat_prompt(ctx, repo_key, [], ["chat"], account=_owner)
 
 
 async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
@@ -159,8 +161,9 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
 
         # 飞书仅作通知（D3）
         if open_id and api and ctx:
+            from src.repo_key import from_repo_key
             notify_text = (f"📋 你有新的任务\n\n"
-                           f"仓库: {repo_key}\nIssue: #{issue_number}\n\n"
+                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
                            f"{task_description}\n\n"
                            f"请在任务中心查看并处理。")
             try:
@@ -174,10 +177,12 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
 async def _consume(prompt: str, cwd: str, cfg: dict, user_id: int, user_token: str, repo_key: str):
     """async 桥接 consume_stream_async（在线程池消费 stream_agent，不阻塞事件循环）"""
     from src.agent.executor import consume_stream_async
+    from src.repo_key import split_owner_repo
     backend = cfg.get("backend", "opencode")
+    _owner, _repo = split_owner_repo(repo_key)
     async for evt_type, data in consume_stream_async(
         prompt, cwd, session_id="",
-        backend_name=backend, account=repo_key.split("/", 1)[0] if "/" in repo_key else "",
+        backend_name=backend, account=_owner,
         user_id=user_id, user_token=user_token,
         agent_name="Chat Agent", agent_label=f"[Agent:task|repo:{repo_key}]",
     ):
@@ -187,12 +192,14 @@ async def _consume(prompt: str, cwd: str, cfg: dict, user_id: int, user_token: s
 @router.post("/notify")
 async def notify_task(body: TaskNotifyBody):
     """issue agent 分配/换人后调用：建任务 + 换人刷新 + Web conversation + 后台 chat-agent + 飞书通知"""
+    from src.repo_key import to_repo_key
     if not body.assignee or not body.repo_key or not body.issue_number:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "assignee / repo_key / issue_number 必填"})
+    body.repo_key = to_repo_key(body.repo_key)
 
-    # repo 已托管
+    # repo 已托管（repo_key 带前缀）
     from src.user.db import get_all_managed_repos
-    managed = {r["full_name"] for r in get_all_managed_repos()}
+    managed = {r["repo_key"] for r in get_all_managed_repos()}
     if body.repo_key not in managed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未托管"})
 
@@ -255,8 +262,10 @@ async def notify_task(body: TaskNotifyBody):
 @router.post("/close")
 async def close_tasks(body: TaskCloseBody):
     """issue agent 关闭 Issue 后调用：该 issue 全部 active 任务 → completed（issue_closed）"""
+    from src.repo_key import to_repo_key
     if not body.repo_key or not body.issue_number:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key / issue_number 必填"})
+    body.repo_key = to_repo_key(body.repo_key)
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -274,6 +283,9 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                    repo_key: str = Query("", description="按仓库过滤"),
                    user: dict = Depends(get_current_user)):
     """任务中心：当前登录用户的待处理/已完成任务（可按 repo 过滤）"""
+    from src.repo_key import to_repo_key, from_repo_key
+    if repo_key:
+        repo_key = to_repo_key(repo_key)
     clauses = ["user_id=?"]
     params = [user["id"]]
     if status:
@@ -296,7 +308,7 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
         except Exception:
             rows = []
     return {"tasks": [{
-        "id": r[0], "assignee": r[1], "repo_key": r[2], "issue_number": r[3],
+        "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
         "title": r[4] or "", "task_description": r[5] or "",
         "conversation_id": r[6] or "", "status": r[7],
         "completed_reason": r[8] or "", "created_at": r[9], "completed_at": r[10],

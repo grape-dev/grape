@@ -64,7 +64,8 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
     if not meta:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"Agent 类型未配置: {name}"})
 
-    repo_key = f"{owner}/{repo}"
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(f"{owner}/{repo}")
 
     from src.session_manager import db, db_lock
     session_data = {}
@@ -202,7 +203,8 @@ async def clean_agent_session(name: str, owner: str, repo: str,
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
-    repo_key = f"{owner}/{repo}"
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(f"{owner}/{repo}")
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -220,7 +222,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
-    repo_key = f"{owner}/{repo}"
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(f"{owner}/{repo}")
     import uuid
     session_id = str(uuid.uuid4())
 

@@ -432,17 +432,15 @@ def clear_vm_repos(vm_id: int) -> bool:
 # ====== 托管仓库表 ======
 _MANAGED_REPOS_DDL = """
 CREATE TABLE IF NOT EXISTS managed_repos (
-    user_id INTEGER NOT NULL,
+    repo_key TEXT PRIMARY KEY,             -- gitcode:owner/repo（跨平台全局唯一键）
     repo_owner TEXT NOT NULL,
     repo_name TEXT NOT NULL,
-    full_name TEXT NOT NULL,
+    full_name TEXT NOT NULL,               -- owner/repo（无前缀，兼容/展示）
     webhook_id INTEGER DEFAULT 0,
-    is_admin INTEGER DEFAULT 0,
     bot_gitcode_token TEXT DEFAULT '',
     gitcode_webhook_token TEXT DEFAULT '',
     bot_username TEXT DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (user_id, repo_owner, repo_name)
+    created_at TEXT DEFAULT (datetime('now'))
 )
 """
 
@@ -454,6 +452,138 @@ CREATE TABLE IF NOT EXISTS oauth_states (
     expires REAL NOT NULL
 )
 """
+
+
+# ====== 用户仓库缓存表（user_repos）======
+# 定义须在 _migrate_repo_key_tables 之前（init_db 会在模块底部调用迁移）
+_USER_REPOS_DDL = """
+CREATE TABLE IF NOT EXISTS user_repos (
+    user_id INTEGER NOT NULL,
+    repo_key TEXT NOT NULL,               -- gitcode:owner/repo（含平台前缀）
+    owner TEXT DEFAULT '',
+    name TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    role TEXT DEFAULT '',
+    is_admin INTEGER DEFAULT 0,
+    is_join INTEGER DEFAULT 0,            -- 该用户是否已「加入」该仓库（用户级状态）
+    synced_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, repo_key)
+)
+"""
+
+
+def _migrate_repo_key_tables():
+    """repo_key 统一整改迁移（幂等）。
+
+    - managed_repos：旧结构含 user_id 列 → 重建为 repo_key 主键（值带 gitcode: 前缀），每仓库去重一行。
+    - user_repos：旧结构含 full_name 列 → 重建为 repo_key + is_join（值带 gitcode: 前缀）。
+    """
+    with db_lock:
+        c = db.cursor()
+        # ===== managed_repos 迁移（独立异常，失败不影响 user_repos）=====
+        try:
+            mr_cols = [r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()]
+            if "user_id" in mr_cols and "repo_key" not in mr_cols:
+                c.execute("ALTER TABLE managed_repos RENAME TO managed_repos_legacy")
+                c.execute(_MANAGED_REPOS_DDL.replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE"))
+                # 兼容不同旧表列：bot token / webhook token / bot_username 可能不存在
+                def _agg_col(col):
+                    return f"MAX(NULLIF({col},''))" if col in mr_cols else "''"
+                bt = _agg_col("bot_gitcode_token")
+                wt = _agg_col("gitcode_webhook_token")
+                bu = _agg_col("bot_username")
+                c.execute(
+                    f"""INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name,
+                               webhook_id, bot_gitcode_token, gitcode_webhook_token, bot_username, created_at)
+                       SELECT 'gitcode:' || full_name, repo_owner, repo_name, full_name,
+                              MAX(webhook_id), {bt}, {wt}, {bu}, MIN(created_at)
+                       FROM managed_repos_legacy GROUP BY full_name""")
+                legacy_pairs = c.execute(
+                    "SELECT DISTINCT user_id, 'gitcode:' || full_name FROM managed_repos_legacy").fetchall()
+                db.commit()
+                try:
+                    c.execute("DROP TABLE managed_repos_legacy")
+                except Exception:
+                    pass
+                db.commit()
+                if legacy_pairs:
+                    try:
+                        for uid, rk in legacy_pairs:
+                            c.execute("UPDATE user_repos SET is_join=1 WHERE user_id=? AND repo_key=?", (uid, rk))
+                        db.commit()
+                    except Exception as e:
+                        log.warning(f"Backfill user_repos.is_join failed: {e}")
+        except Exception as e:
+            log.warning(f"Migrate managed_repos failed: {e}")
+
+        # ===== user_repos 迁移（独立异常）=====
+        try:
+            ur_cols = [r[1] for r in c.execute("PRAGMA table_info(user_repos)").fetchall()]
+            if "full_name" in ur_cols and "repo_key" not in ur_cols:
+                c.execute("ALTER TABLE user_repos RENAME TO user_repos_legacy")
+                c.execute(_USER_REPOS_DDL.replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE"))
+                def _ur_col(col):
+                    return col if col in ur_cols else "''"
+                _desc = _ur_col("description")
+                _role = _ur_col("role")
+                _isadmin = _ur_col("is_admin")
+                _synced = _ur_col("synced_at")
+                c.execute(
+                    f"""INSERT INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join, synced_at)
+                       SELECT user_id, 'gitcode:' || full_name, owner, name, {_desc}, {_role}, {_isadmin}, 0, {_synced}
+                       FROM user_repos_legacy""")
+                try:
+                    m_joined = c.execute(
+                        "SELECT repo_key FROM managed_repos WHERE webhook_id>0 OR bot_username!=''").fetchall()
+                    db.commit()
+                    for (rk,) in m_joined:
+                        c.execute("UPDATE user_repos SET is_join=1 WHERE repo_key=?", (rk,))
+                    db.commit()
+                except Exception:
+                    pass
+                try:
+                    c.execute("DROP TABLE user_repos_legacy")
+                except Exception:
+                    pass
+                db.commit()
+            ur_cols2 = [r[1] for r in c.execute("PRAGMA table_info(user_repos)").fetchall()]
+            if "is_join" not in ur_cols2:
+                try:
+                    c.execute("ALTER TABLE user_repos ADD COLUMN is_join INTEGER DEFAULT 0")
+                    db.commit()
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning(f"Migrate user_repos failed: {e}")
+
+        # ===== 其余含 repo_key 的表：历史无前缀数据统一加 'gitcode:' 前缀（幂等）=====
+        # 部署后所有查询均以带前缀 repo_key 进行；历史数据若无前缀将查不到。
+        _REPO_KEY_TABLES = (
+            "events", "event_skipped", "devops_agent_session", "tasks",
+            "chat_conversations", "chat_agent_session", "repo_im_group_binding",
+            "user_vm_repos",
+        )
+        for _tbl in _REPO_KEY_TABLES:
+            try:
+                _rk_cols = [r[1] for r in c.execute(f"PRAGMA table_info({_tbl})").fetchall()]
+                if "repo_key" not in _rk_cols:
+                    continue
+                c.execute(
+                    f"UPDATE {_tbl} SET repo_key='gitcode:'||repo_key "
+                    f"WHERE repo_key!='' AND repo_key NOT LIKE '%:%'"
+                )
+                db.commit()
+            except Exception as e:
+                log.warning(f"Migrate {_tbl} repo_key prefix failed: {e}")
+        # skill 表 repo 级记录：owner_id 存 repo_key（scope='repo'）
+        try:
+            c.execute(
+                "UPDATE skill SET owner_id='gitcode:'||owner_id "
+                "WHERE scope='repo' AND owner_id!='' AND owner_id NOT LIKE '%:%'"
+            )
+            db.commit()
+        except Exception as e:
+            log.warning(f"Migrate skill repo_key prefix failed: {e}")
 
 
 def init_db():
@@ -471,6 +601,8 @@ def init_db():
         db.execute(_VM_REPOS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
+        # repo_key 统一整改迁移（managed_repos 去 user_id + user_repos 加前缀/is_join）
+        _migrate_repo_key_tables()
         # 从旧表迁移数据（幂等）
         try:
             cnt = db.execute("SELECT COUNT(*) FROM user_accounts").fetchone()[0]
@@ -776,12 +908,19 @@ def get_skill_md(user_id: int, skill_name: str) -> str | None:
 
 # ====== 托管仓库 CRUD ======
 
-def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: str, webhook_id: int = 0, is_admin: bool = True, bot_gitcode_token: str = "", gitcode_webhook_token: str = "", bot_username: str = "") -> bool:
+def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id: int = 0,
+                     bot_gitcode_token: str = "", gitcode_webhook_token: str = "",
+                     bot_username: str = "") -> bool:
+    """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。"""
+    from src.repo_key import to_repo_key, from_repo_key
+    repo_key = to_repo_key(repo_key)
+    full_name = from_repo_key(repo_key)
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, webhook_id, is_admin, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
-                      (user_id, repo_owner, repo_name, full_name, webhook_id, int(is_admin), bot_gitcode_token, gitcode_webhook_token, bot_username))
+            c.execute(
+                "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?)",
+                (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token, gitcode_webhook_token, bot_username))
             db.commit()
             return True
     except Exception as e:
@@ -790,17 +929,41 @@ def add_managed_repo(user_id: int, repo_owner: str, repo_name: str, full_name: s
 
 
 def get_managed_repos(user_id: int) -> list[dict]:
+    """返回该用户可见（JOIN user_repos）的托管仓库；对外 full_name 无前缀、repo_key 带前缀。"""
+    from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_owner, repo_name, full_name, webhook_id, is_admin, bot_gitcode_token, gitcode_webhook_token, bot_username, created_at FROM managed_repos WHERE user_id=? ORDER BY full_name", (user_id,))
-        return [{"repo_owner": r[0], "repo_name": r[1], "full_name": r[2], "webhook_id": r[3], "is_admin": bool(r[4]), "bot_gitcode_token": r[5] or "", "gitcode_webhook_token": r[6] or "", "bot_username": r[7] or "", "created_at": r[8]} for r in c.fetchall()]
+        try:
+            c.execute(
+                "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
+                "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
+                "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
+                "FROM managed_repos m "
+                "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
+                "WHERE u.repo_key IS NOT NULL "
+                "ORDER BY m.full_name", (user_id,))
+        except Exception as e:
+            log.warning(f"get_managed_repos join failed: {e}")
+            c.execute(
+                "SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, "
+                "bot_gitcode_token, gitcode_webhook_token, bot_username, created_at, 0, 0 "
+                "FROM managed_repos ORDER BY full_name")
+        return [{
+            "repo_key": r[0], "repo_owner": r[1], "repo_name": r[2],
+            "full_name": from_repo_key(r[0]), "webhook_id": r[4],
+            "bot_gitcode_token": r[5] or "", "gitcode_webhook_token": r[6] or "",
+            "bot_username": r[7] or "", "created_at": r[8],
+            "is_join": bool(r[9]), "is_admin": bool(r[10]),
+        } for r in c.fetchall()]
 
 
-def update_managed_repo_admin(user_id: int, repo_owner: str, repo_name: str, is_admin: bool) -> bool:
+def update_managed_repo_admin(user_id: int, repo_key: str, is_admin: bool) -> bool:
+    """更新该用户在 user_repos 的管理员状态（用户级）"""
+    from src.repo_key import to_repo_key
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE managed_repos SET is_admin=? WHERE user_id=? AND repo_owner=? AND repo_name=?", (int(is_admin), user_id, repo_owner, repo_name))
+            c.execute("UPDATE user_repos SET is_admin=? WHERE user_id=? AND repo_key=?", (int(is_admin), user_id, to_repo_key(repo_key)))
             db.commit()
             return c.rowcount > 0
     except Exception as e:
@@ -808,11 +971,11 @@ def update_managed_repo_admin(user_id: int, repo_owner: str, repo_name: str, is_
         return False
 
 
-def update_managed_repo_bot_token(user_id: int, repo_owner: str, repo_name: str, bot_token: str) -> bool:
+def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE managed_repos SET bot_gitcode_token=? WHERE user_id=? AND repo_owner=? AND repo_name=?", (bot_token, user_id, repo_owner, repo_name))
+            c.execute("UPDATE managed_repos SET bot_gitcode_token=? WHERE repo_key=?", (bot_token, repo_key))
             db.commit()
             return c.rowcount > 0
     except Exception as e:
@@ -820,11 +983,11 @@ def update_managed_repo_bot_token(user_id: int, repo_owner: str, repo_name: str,
         return False
 
 
-def update_managed_repo_bot_username(user_id: int, repo_owner: str, repo_name: str, bot_username: str) -> bool:
+def update_managed_repo_bot_username(repo_key: str, bot_username: str) -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE managed_repos SET bot_username=? WHERE user_id=? AND repo_owner=? AND repo_name=?", (bot_username, user_id, repo_owner, repo_name))
+            c.execute("UPDATE managed_repos SET bot_username=? WHERE repo_key=?", (bot_username, repo_key))
             db.commit()
             return c.rowcount > 0
     except Exception as e:
@@ -833,9 +996,12 @@ def update_managed_repo_bot_username(user_id: int, repo_owner: str, repo_name: s
 
 
 def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
+    """按 owner/repo 查仓库 bot token（内部按带前缀 repo_key 命中）"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(f"{repo_owner}/{repo_name}")
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT bot_gitcode_token FROM managed_repos WHERE repo_owner=? AND repo_name=? AND bot_gitcode_token!='' LIMIT 1", (repo_owner, repo_name))
+        c.execute("SELECT bot_gitcode_token FROM managed_repos WHERE repo_key=? AND bot_gitcode_token!='' LIMIT 1", (repo_key,))
         row = c.fetchone()
         if row:
             return row[0]
@@ -862,6 +1028,8 @@ def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
       → managed_repos.bot_gitcode_token（get_bot_token_by_repo）→ 全局 bot token
     - user_id > 0 → user token（user_accounts.gitcode_api_token）
     """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
     if repo_key:
         # 1. devops_agent_session.repo_gitcode_token（agent 专属配置）
         try:
@@ -875,7 +1043,8 @@ def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
             log.warning(f"get_gitcode_token: query devops_agent_session failed: {e}")
         # 2. managed_repos.bot_gitcode_token（仓库级配置）
         if "/" in repo_key:
-            owner, repo = repo_key.split("/", 1)
+            from src.repo_key import split_owner_repo
+            owner, repo = split_owner_repo(repo_key)
             tok = get_bot_token_by_repo(owner, repo)
             if tok:
                 return tok
@@ -905,11 +1074,11 @@ def get_user_gitcode_token(user_id: int) -> str:
     return ""
 
 
-def update_managed_repo_webhook_token(user_id: int, repo_owner: str, repo_name: str, webhook_token: str) -> bool:
+def update_managed_repo_webhook_token(repo_key: str, webhook_token: str) -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE managed_repos SET gitcode_webhook_token=? WHERE user_id=? AND repo_owner=? AND repo_name=?", (webhook_token, user_id, repo_owner, repo_name))
+            c.execute("UPDATE managed_repos SET gitcode_webhook_token=? WHERE repo_key=?", (webhook_token, repo_key))
             db.commit()
             return c.rowcount > 0
     except Exception as e:
@@ -918,16 +1087,17 @@ def update_managed_repo_webhook_token(user_id: int, repo_owner: str, repo_name: 
 
 
 def resolve_repo_by_webhook_token(token: str) -> str | None:
-    """通过 webhook token 查找仓库全名（owner/repo）"""
+    """通过 webhook token 查找仓库全名（owner/repo，无前缀）"""
+    from src.repo_key import from_repo_key
     if not token:
         return None
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT full_name FROM managed_repos WHERE gitcode_webhook_token=? LIMIT 1", (token,))
+            c.execute("SELECT repo_key FROM managed_repos WHERE gitcode_webhook_token=? LIMIT 1", (token,))
             row = c.fetchone()
             if row:
-                return row[0]
+                return from_repo_key(row[0])
         except Exception:
             pass
     return None
@@ -935,36 +1105,41 @@ def resolve_repo_by_webhook_token(token: str) -> str | None:
 
 def get_webhook_token_by_repo(full_name: str) -> str:
     """根据 full_name（owner/repo）查找 repo 的预期 webhook token"""
+    from src.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT gitcode_webhook_token FROM managed_repos WHERE full_name=? LIMIT 1", (full_name,))
+        c.execute("SELECT gitcode_webhook_token FROM managed_repos WHERE repo_key=? LIMIT 1", (to_repo_key(full_name),))
         row = c.fetchone()
         return row[0] if row else ""
 
 
-def remove_managed_repo(user_id: int, repo_owner: str, repo_name: str) -> dict | None:
-    """删除托管仓库记录，返回被删除的记录（含 webhook_id）或 None"""
+def remove_managed_repo(repo_key: str) -> dict | None:
+    """删除仓库级托管行，返回被删除的记录（含 webhook_id）或 None；同时复位所有用户 is_join。"""
+    from src.repo_key import from_repo_key
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT full_name, webhook_id FROM managed_repos WHERE user_id=? AND repo_owner=? AND repo_name=?", (user_id, repo_owner, repo_name))
+            c.execute("SELECT full_name, webhook_id FROM managed_repos WHERE repo_key=?", (repo_key,))
             row = c.fetchone()
             if not row:
                 return None
-            c.execute("DELETE FROM managed_repos WHERE user_id=? AND repo_owner=? AND repo_name=?", (user_id, repo_owner, repo_name))
+            c.execute("DELETE FROM managed_repos WHERE repo_key=?", (repo_key,))
+            c.execute("UPDATE user_repos SET is_join=0 WHERE repo_key=?", (repo_key,))
             db.commit()
-            return {"full_name": row[0], "webhook_id": row[1]}
+            return {"full_name": from_repo_key(repo_key), "webhook_id": row[1]}
     except Exception as e:
         log.warning(f"Remove managed repo failed: {e}")
         return None
 
 
 def get_all_managed_repos() -> list[dict]:
-    """Admin 用：获取所有托管记录"""
+    """Admin 用：获取所有托管记录（repo_key 带前缀，full_name 无前缀）"""
+    from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT user_id, repo_owner, repo_name, full_name, webhook_id, is_admin, created_at FROM managed_repos ORDER BY full_name")
-        return [{"user_id": r[0], "repo_owner": r[1], "repo_name": r[2], "full_name": r[3], "webhook_id": r[4], "is_admin": bool(r[5]), "created_at": r[6]} for r in c.fetchall()]
+        c.execute("SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, created_at FROM managed_repos ORDER BY full_name")
+        return [{"repo_key": r[0], "repo_owner": r[1], "repo_name": r[2],
+                 "full_name": from_repo_key(r[0]), "webhook_id": r[4], "created_at": r[5]} for r in c.fetchall()]
 
 
 # ====== 用户账户 CRUD ======
@@ -1147,21 +1322,7 @@ if os.path.isdir(_OLD_SKILL_DIR) and _OLD_SKILL_DIR != SKILL_DIR:
 
 
 # ====== 用户仓库缓存表（user_repos）======
-
-_USER_REPOS_DDL = """
-CREATE TABLE IF NOT EXISTS user_repos (
-    user_id INTEGER NOT NULL,
-    full_name TEXT NOT NULL,
-    owner TEXT DEFAULT '',
-    name TEXT DEFAULT '',
-    description TEXT DEFAULT '',
-    role TEXT DEFAULT '',
-    is_admin INTEGER DEFAULT 0,
-    synced_at TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (user_id, full_name)
-)
-"""
-
+# DDL 定义已移至文件前部（_migrate_repo_key_tables 之前），此处仅保留 init 函数
 
 def init_user_repos_table():
     with db_lock:
@@ -1170,28 +1331,47 @@ def init_user_repos_table():
 
 
 def save_user_repos(user_id: int, repos: list[dict]):
-    """批量写入用户仓库缓存"""
+    """批量写入用户仓库缓存（repos 元素含 full_name/owner/name/...，full_name 无前缀）"""
+    from src.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
         for r in repos:
+            full_name = r.get("full_name", "") or r.get("repo_key", "")
             c.execute(
-                "INSERT OR REPLACE INTO user_repos (user_id, full_name, owner, name, description, role, is_admin) VALUES (?,?,?,?,?,?,?)",
-                (user_id, r.get("full_name", ""), r.get("owner", ""), r.get("name", ""),
+                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join) VALUES (?,?,?,?,?,?,?,0)",
+                (user_id, to_repo_key(full_name), r.get("owner", ""), r.get("name", ""),
                  r.get("description", ""), r.get("role", ""), 1 if r.get("is_admin") else 0)
             )
         db.commit()
 
 
 def get_user_repos(user_id: int) -> list[dict]:
-    """读取用户仓库缓存"""
+    """读取用户仓库缓存（对外返回 full_name 无前缀）"""
+    from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT full_name, owner, name, description, role, is_admin FROM user_repos WHERE user_id=? ORDER BY full_name", (user_id,))
+        c.execute("SELECT repo_key, owner, name, description, role, is_admin, is_join FROM user_repos WHERE user_id=? ORDER BY repo_key", (user_id,))
         return [
-            {"full_name": r[0], "owner": r[1], "name": r[2], "description": r[3], "role": r[4], "is_admin": bool(r[5])}
+            {"repo_key": r[0], "full_name": from_repo_key(r[0]), "owner": r[1], "name": r[2],
+             "description": r[3], "role": r[4], "is_admin": bool(r[5]), "is_join": bool(r[6])}
             for r in c.fetchall()
         ]
+
+
+def mark_user_repo_join(user_id: int, repo_key: str, is_join: bool = True, is_admin: bool = False):
+    """标记用户已加入某仓库（user_repos.is_join），无对应缓存行则插入最小记录。"""
+    from src.repo_key import parse_repo_key
+    provider, owner, repo = parse_repo_key(repo_key)
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE user_repos SET is_join=?, is_admin=? WHERE user_id=? AND repo_key=?",
+                  (int(is_join), int(is_admin), user_id, repo_key))
+        if c.rowcount == 0:
+            c.execute(
+                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (?,?,?,?,?,?)",
+                (user_id, repo_key, owner, repo, int(is_admin), int(is_join)))
+        db.commit()
 
 
 def get_user_repos_synced_at(user_id: int) -> str:

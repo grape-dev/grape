@@ -104,7 +104,8 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     parts.append(f"消息内容: {user_msg[:2000]}")
     parts.append("")
 
-    repo_key = f"gitcode:{repo}"
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo)
     summary = get_issue_summary(repo_key)
     if summary:
         parts.append(summary)

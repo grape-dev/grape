@@ -176,12 +176,11 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
             await api.reply_text(ctx, msg_id, result)
             return
 
-        source, repository = (repo_key.split(":", 1) + ["", ""])[:2]
-        if not source or not repository:
-            if "/" in repo_key:
-                source = "gitcode"
-                repository = repo_key
-                repo_key = f"gitcode:{repo_key}"
+        from src.repo_key import to_repo_key, from_repo_key, parse_repo_key
+        repo_key = to_repo_key(repo_key)
+        _provider, _owner, _repo = parse_repo_key(repo_key)
+        source = _provider
+        repository = _repo or from_repo_key(repo_key)
 
         sess, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
@@ -235,7 +234,8 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     user_info += f"\nGitCode login: {gitcode_login}"
                     if nick_name and nick_name != gitcode_login:
                         user_info += f"\nGitCode nick (use this in cards): {nick_name}"
-                    repository_part = repo_key.replace("gitcode:", "").split("/", 1)
+                    from src.repo_key import from_repo_key
+                    repository_part = from_repo_key(repo_key).split("/", 1)
                     if len(repository_part) == 2:
                         user_info += f"\nTo check pending features: GET /api/v5/repos/{repository_part[0]}/{repository_part[1]}/issues?state=open&assignee={gitcode_login}&labels=feature"
             except Exception as e:

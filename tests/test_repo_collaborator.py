@@ -296,8 +296,8 @@ def test_remove_managed_repo_removes_collaborators():
     fake_user = {"id": 1, "username": "tester"}
 
     def fake_managed(user_id):
-        return [{"full_name": "owner/repo", "bot_gitcode_token": "repo_tok",
-                 "bot_username": "repo-bot-login"}]
+        return [{"repo_key": "gitcode:owner/repo", "full_name": "owner/repo",
+                 "bot_gitcode_token": "repo_tok", "bot_username": "repo-bot-login"}]
 
     gbt_json = '{"gitcode_api_token": "gbt", "bot_usernames": ["hwc-dev-bot"]}'
 

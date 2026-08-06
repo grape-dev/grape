@@ -2,6 +2,7 @@
 import re, os
 from datetime import datetime
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR
+from src.repo_key import from_repo_key
 from src.session_manager import get_or_create_session, update_session
 from src.prompt_builder import build_chat_prompt, get_skill_capabilities, build_role_definition
 from src.agent.executor import stream_agent
@@ -104,12 +105,11 @@ def process_chat(parsed: dict):
             reply_text(msg_id, result)
             return
 
-        source, repository = (repo_key.split(":", 1) + ["", ""])[:2]
-        if not source or not repository:
-            if "/" in repo_key:
-                source = "gitcode"
-                repository = repo_key
-                repo_key = f"gitcode:{repo_key}"
+        from src.repo_key import to_repo_key, from_repo_key, parse_repo_key
+        repo_key = to_repo_key(repo_key)
+        _provider, _owner, _repo = parse_repo_key(repo_key)
+        source = _provider
+        repository = _repo or from_repo_key(repo_key)
 
         sess, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
@@ -155,7 +155,8 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
                     if nick_name and nick_name != gitcode_login:
                         user_info += f"\nGitCode nick (use this in cards): {nick_name}"
                     # Check for pending feature issues
-                    repository_part = repo_key.replace("gitcode:", "").split("/", 1)
+                    from src.repo_key import from_repo_key
+                    repository_part = from_repo_key(repo_key).split("/", 1)
                     if len(repository_part) == 2:
                         user_info += f"\nTo check pending features: GET /api/v5/repos/{repository_part[0]}/{repository_part[1]}/issues?state=open&assignee={gitcode_login}&labels=feature"
             except Exception as e:
@@ -193,7 +194,7 @@ def _process_chat_inner(parsed, text, repo_key, repository, msg_id, sess, histor
         backend = "opencode"
         oc_sid = {"opencode": oc_sid, "codearts": cc_sid}.get(backend, "")
         new_oc_session_id = oc_sid
-        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account, user_token=user_token, agent_name="Chat Agent", agent_label=f"[Agent:chat|repo:{repo_key.replace('gitcode:', '')}]"):
+        for event_type, data in stream_agent(prompt, wsd, oc_sid, "chat", backend_name=backend, account=account, user_token=user_token, agent_name="Chat Agent", agent_label=f"[Agent:chat|repo:{from_repo_key(repo_key)}]"):
             if event_type == "step_start":
                 log.info(f"  ▶ {data}")
             elif event_type == "text":

@@ -165,6 +165,8 @@ MAX_HISTORY = 100
 
 def get_or_create_session(repo_key, source, repository, backend="opencode"):
     """获取或创建 repo 级 Chat 会话（chat_agent_session，飞书 Chat 用）"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, event_history, backend_session_id, status FROM chat_agent_session WHERE repo_key=?", (repo_key,))
@@ -324,48 +326,44 @@ def get_feishu_group_name_map(repo_key):
 
 def get_auto_impl_enabled(repo_key):
     """查询仓库是否开启了自动实现"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
     with db_lock:
         c = db.cursor()
         c.execute("SELECT auto_impl_enabled FROM repo_im_group_binding WHERE repo_key=?", (repo_key,))
         row = c.fetchone()
-        if not row:
-            c.execute("SELECT auto_impl_enabled FROM repo_im_group_binding WHERE repo_key=?", ("gitcode:" + repo_key,))
-            row = c.fetchone()
         return bool(row[0]) if row else False
 
 
 def set_auto_impl_enabled(repo_key, enabled):
     """设置仓库的自动实现开关"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=? WHERE repo_key=?", (int(enabled), repo_key))
-        if c.rowcount == 0:
-            full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
-            c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=? WHERE repo_key=?", (int(enabled), full_key))
         db.commit()
 
 
 def get_notify_enabled(repo_key):
     """查询仓库是否开启了飞书通知"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
     with db_lock:
         c = db.cursor()
         c.execute("SELECT notify_enabled FROM repo_im_group_binding WHERE repo_key=?", (repo_key,))
         row = c.fetchone()
-        if not row:
-            c.execute("SELECT notify_enabled FROM repo_im_group_binding WHERE repo_key=?", ("gitcode:" + repo_key,))
-            row = c.fetchone()
         # default to 0 (False) if column is NULL
         return bool(row[0]) if row and row[0] is not None else False
 
 
 def set_notify_enabled(repo_key, enabled):
     """设置仓库的飞书通知开关"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE repo_im_group_binding SET notify_enabled=? WHERE repo_key=?", (int(enabled), repo_key))
-        if c.rowcount == 0:
-            full_key = "gitcode:" + repo_key if not repo_key.startswith("gitcode:") else repo_key
-            c.execute("UPDATE repo_im_group_binding SET notify_enabled=? WHERE repo_key=?", (int(enabled), full_key))
         db.commit()
 
 
@@ -373,6 +371,8 @@ def set_notify_enabled(repo_key, enabled):
 
 def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "", title: str = "",
                         user_gitcode_token: str = "", agent_session_id: str = "") -> str:
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
     import uuid
     cid = str(uuid.uuid4())
     with db_lock:
@@ -384,28 +384,33 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
 
 
 def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) -> list[dict]:
+    from src.repo_key import to_repo_key, from_repo_key
+    if repo_key:
+        repo_key = to_repo_key(repo_key)
     with db_lock:
         c = db.cursor()
         if repo_key:
             c.execute("SELECT id, user_id, agent_session_id, backend_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? AND repo_key=? ORDER BY updated_at DESC LIMIT ?", (user_id, repo_key, limit))
         else:
             c.execute("SELECT id, user_id, agent_session_id, backend_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
-        return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "backend_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": r[5], "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": r[9], "updated_at": r[10]} for r in c.fetchall()]
+        return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "backend_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": from_repo_key(r[5]), "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": r[9], "updated_at": r[10]} for r in c.fetchall()]
 
 
 def get_conversation(conv_id: str) -> dict | None:
+    from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, user_id, agent_session_id, backend_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at FROM chat_conversations WHERE id=?", (conv_id,))
         row = c.fetchone()
         if not row:
             return None
-        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "backend_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5], "im_channel_id": row[6],
+        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "backend_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": from_repo_key(row[5]), "im_channel_id": row[6],
                 "title": row[7], "status": row[8], "created_at": row[9], "updated_at": row[10]}
 
 
 def get_conversation_by_im(im_channel_id: str, user_id: int = 0) -> dict | None:
     """按 IM 渠道 + 用户查询会话（IM chat 场景用，幂等复用）"""
+    from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
         if user_id > 0:
@@ -415,7 +420,7 @@ def get_conversation_by_im(im_channel_id: str, user_id: int = 0) -> dict | None:
         row = c.fetchone()
         if not row:
             return None
-        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "backend_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5], "im_channel_id": row[6],
+        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "backend_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": from_repo_key(row[5]), "im_channel_id": row[6],
                 "title": row[7], "status": row[8], "created_at": row[9], "updated_at": row[10]}
 
 

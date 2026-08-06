@@ -8,7 +8,8 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 @router.get("/{owner}/{repo}")
 async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
-    repo_key = f"{owner}/{repo}"
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(f"{owner}/{repo}")
 
     from src.session_manager import db, db_lock
     with db_lock:

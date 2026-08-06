@@ -23,6 +23,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
 
     import json
+    from src.repo_key import from_repo_key
     payload = {}
     try:
         payload = json.loads(row[9]) if row[9] else {}
@@ -37,7 +38,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
 
     return {
         "seq": row[0],
-        "repo_key": row[1],
+        "repo_key": from_repo_key(row[1] or ""),
         "issue_id": row[2],
         "event_type": row[3],
         "source": row[4],
@@ -65,7 +66,8 @@ async def list_events(owner: str, repo: str,
                       page_size: int = Query(20, ge=1, le=100),
                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
                       user: dict = Depends(get_current_user)):
-    repo_key = f"{owner}/{repo}"
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(f"{owner}/{repo}")
     from src.session_manager import db, db_lock
 
     where_clauses = ["repo_key=?"]

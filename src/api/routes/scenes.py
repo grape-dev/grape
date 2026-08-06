@@ -43,7 +43,8 @@ async def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     if not mapping:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "场景无 Agent-Skill 映射"})
 
-    repo_key = f"{owner}/{repo}"
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(f"{owner}/{repo}")
     from src.session_manager import db, db_lock
     from src.user.db import get_bot_token_by_repo
     repo_token = get_bot_token_by_repo(owner, repo)

@@ -393,7 +393,7 @@ class TestAgents:
 
         uniq = uuid.uuid4().hex[:8]
         skill_name = f"agentskill{uniq}"
-        repo_key = f"org/agent-repo-{uniq}"
+        repo_key = f"gitcode:org/agent-repo-{uniq}"
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"agentskill{uniq}%",))
@@ -1034,8 +1034,8 @@ class TestWebhook:
     def test_webhook_push(self):
         from src.session_manager import db, db_lock
         with db_lock:
-            db.execute("INSERT OR REPLACE INTO managed_repos (user_id, repo_owner, repo_name, full_name, gitcode_webhook_token, is_admin) VALUES (?,?,?,?,?,?)",
-                       (1, "org", "repo", "org/repo", "test_webhook_token_123", 1))
+            db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, gitcode_webhook_token) VALUES (?,?,?,?,?)",
+                       ("gitcode:org/repo", "org", "repo", "org/repo", "test_webhook_token_123"))
             db.commit()
         payload = '{"project": {"path_with_namespace": "org/repo"}, "ref": "refs/heads/main"}'
         r = client.post("/webhook/gitcode", content=payload.encode(),
