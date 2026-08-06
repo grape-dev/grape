@@ -318,3 +318,40 @@ def test_remove_managed_repo_removes_collaborators():
         usernames = [c.args[3] for c in mock_rm.call_args_list]
         assert "hwc-dev-bot" in usernames
         assert "repo-bot-login" in usernames
+
+
+# ===================== repo_manager.fetch_repos_with_role (N+1 优化) =====================
+
+def test_fetch_repos_uses_permission_field_no_nplus1():
+    """列表响应含 permission 字段时直接判定 is_admin，不再对每个非 owner 仓库调 collaborator API"""
+    from src.user.repo_manager import fetch_repos_with_role
+
+    repos_payload = [
+        {"full_name": "me/own-repo", "name": "own-repo",
+         "owner": {"login": "me"}, "permission": {"pull": True, "push": True, "admin": True}},
+        {"full_name": "org/repo-admin", "name": "repo-admin",
+         "owner": {"login": "org"}, "permission": {"pull": True, "push": True, "admin": True}},
+        {"full_name": "org/repo-member", "name": "repo-member",
+         "owner": {"login": "org"}, "permission": {"pull": True, "push": False, "admin": False}},
+    ]
+
+    calls = []
+    def fake_req(method, url, token="", body=None):
+        calls.append(url)
+        if url.endswith("/user"):
+            return {"login": "me"}
+        if "/user/repos" in url:
+            return repos_payload
+        return {}
+
+    with patch("src.user.repo_manager._req", side_effect=fake_req) as mock_req:
+        result = fetch_repos_with_role("tok")
+
+    # 只应有 2 次请求：/user + /user/repos（无 collaborator permission N+1）
+    assert len(calls) == 2, f"应只有 2 次 GitCode 请求，实际 {len(calls)}: {calls}"
+    assert not any("collaborators" in u for u in calls), "不应调用 collaborator API"
+
+    by_name = {r["full_name"]: r["is_admin"] for r in result}
+    assert by_name["me/own-repo"] is True        # owner -> admin
+    assert by_name["org/repo-admin"] is True     # permission.admin -> admin
+    assert by_name["org/repo-member"] is False   # permission.admin=false -> member

@@ -201,6 +201,10 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
     仓库所有者 | 组织管理员 → is_admin=True
     维护者 → is_admin=False
     返回：[{"full_name": "owner/repo", "owner": "owner", "name": "repo", "is_admin": bool}, ...]
+
+    优化（避免 N+1）：GitCode /user/repos 列表响应已含 `permission` 字段
+    （{pull, push, admin} 布尔），直接用它判定管理员，不再对每个仓库单独调
+    collaborator permission API。
     """
     if not api_token:
         raise RuntimeError("GitCode API Token 未配置")
@@ -234,10 +238,11 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
             owner_obj = r.get("owner", {})
             owner_login = owner_obj.get("login", "") if isinstance(owner_obj, dict) else ""
             release_owner = full_name.split("/", 1)[0]
+            # 所有者或 permission.admin=true → 管理员（列表响应已含权限，无需额外 API）
+            perm = r.get("permission") or {}
+            is_admin = bool(perm.get("admin")) if isinstance(perm, dict) else False
             if current_user and owner_login and current_user == owner_login:
                 is_admin = True
-            else:
-                is_admin = _check_collaborator_admin(api_token, release_owner, r.get("name", ""), current_user)
             repos.append({"full_name": full_name, "owner": release_owner, "name": r.get("name", ""), "is_admin": is_admin})
         if len(items) < 100:
             break

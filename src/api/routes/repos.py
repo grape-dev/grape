@@ -10,7 +10,7 @@ from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_u
 router = APIRouter(prefix="/api/repos", tags=["repos"])
 
 # 仓库列表缓存有效期（秒）：超过后自动从 GitCode 重新拉取
-REPOS_CACHE_TTL = 300  # 5 分钟
+REPOS_CACHE_TTL = 1800  # 30 分钟（避免频繁触发 GitCode N+1 权限查询）
 
 
 class RepoAction(BaseModel):
