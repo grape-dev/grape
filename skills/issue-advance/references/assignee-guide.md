@@ -72,6 +72,27 @@ curl -s -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}
 ```
 
+### 7.1 分配后通知责任人（必做）
+
+分配负责人后，调用个人任务通知接口，创建任务并让 devops-bot 通过该用户的 chat-agent 处理、Web 任务中心可见、飞书通知：
+
+```bash
+curl -X POST http://localhost:8080/api/tasks/notify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "assignee": "younger_eric",
+    "repo_key": "'"$REPO_FULL_NAME"'",
+    "issue_number": "'"$ISSUE_NUMBER"'",
+    "task_description": "Issue #'"$ISSUE_NUMBER"' 已分配给你，请处理：<简要任务描述>"
+  }'
+```
+
+说明：
+- `assignee` 必须是本仓库的有效成员（GitCode 用户名）
+- 若该用户未注册平台，接口返回 `{ok:false}`，此时在 Issue 评论中说明「该用户未注册 devops-bot 平台，无法收到任务通知」
+- 若该用户已注册但未绑定飞书，任务仍会创建（Web 任务中心可见），仅跳过飞书通知
+- 若该 Issue 之前分配给其他人（换人），本调用会自动将原责任人任务标记为已完成（已转派）
+
 ### 8. 检查跨仓同步
 
 该负责人的模块定义中是否有 `# 仓库：` 字段？
