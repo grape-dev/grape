@@ -58,7 +58,11 @@ function renderTemplateCategory() {
     const stats = t.stats || {};
     const uses = stats.uses ?? Math.floor(Math.random() * 80 + 12);
     const stars = stats.stars ?? Math.floor(Math.random() * 80 + 30);
-    return `<div class="tmpl-card tmpl-${tSc}" onclick="createFromTemplate('${t.id}','${t.default_repo_name || t.id}')">
+    // 卡片点击：git 模板跳转到 GitCode 对应仓库；无 source_repo（local 模板）回退打开创建弹窗
+    const cardOnClick = t.source_repo
+      ? `window.open('https://gitcode.com/${t.source_repo}','_blank')`
+      : `createFromTemplate('${t.id}','${t.default_repo_name || t.id}')`;
+    return `<div class="tmpl-card tmpl-${tSc}" onclick="${cardOnClick}">
       <span class="tmpl-card-glow"></span>
       <div class="tmpl-card-head">
         <span class="tmpl-card-ic">${t.icon || '📦'}<i></i></span>
