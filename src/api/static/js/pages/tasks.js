@@ -96,7 +96,7 @@ function _render() {
   el.innerHTML = `
   <div class="tsk-page">
     <div class="tsk-top">
-      <h1>任务中心</h1>
+      <h1>Task Center</h1>
       <div class="tsk-controls">
         ${tab('all', '全部', cntAll)}${tab('active', '待处理', cntActive)}${tab('completed', '已完成', cntDone)}
         <div class="tsk-search"><span>🔍</span><input placeholder="搜索任务..." value="${_taskQuery}" oninput="_taskQuery=this.value;if(_taskQuery.length>1||!_taskQuery){_render()}" onkeyup="if(event.key==='Enter')_render()"></div>

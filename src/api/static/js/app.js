@@ -218,7 +218,7 @@ function loadAgentTypes() {
       title.textContent = 'Chat Agent';
       renderChat(param || null);
     } else if (view === 'tasks') {
-      title.textContent = '任务中心';
+      title.textContent = 'Task Center';
       renderTasks();
     } else if (view === 'settings') {
       title.textContent = 'General Settings';
