@@ -102,3 +102,7 @@ curl -X POST http://localhost:8080/api/a2a \
 ```
 
 ⚠️ **字段规则（A2A 服务端强制校验）：** `issue_number` 必填（当前 Issue 的真实编号）；**无法确定 issue_number 就不要调用 A2A**。`pr_number` 有则填（PR 编号）、无则不填，严禁将 PR 编号填入 issue_number。
+
+### 通知责任人（必做）
+
+当本 Issue 的责任人已确定（无论是否走 CODEOWNERS），调用 `POST /api/tasks/notify` 为该责任人创建任务（详见 SKILL.md「任务通知硬规则」）。
