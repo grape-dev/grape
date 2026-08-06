@@ -8,6 +8,7 @@ let _taskQuery = '';          // 搜索关键字
 function renderTasks() {
   const el = document.getElementById('pageContent');
   if (!el) return;
+  _taskSel = null;   // 进入页面重置选中（避免切换 repo 后详情残留旧仓库任务）
   el.innerHTML = '<div class="loading">加载中...</div>';
   loadTasks();
 }
@@ -20,6 +21,8 @@ function loadTasks() {
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
   API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey)).then(d => {
     _tasksAll = d.tasks || [];
+    // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
+    if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
     _render();
   }).catch(e => {
@@ -47,6 +50,12 @@ function _render() {
   const el = document.getElementById('pageContent');
   if (!el) return;
   const filtered = _filteredTasks();
+  // 选中项失效时回退到当前过滤列表第一条
+  if (_taskSel && !filtered.some(t => t.id === _taskSel.id)) {
+    _taskSel = filtered.length > 0 ? filtered[0] : null;
+  } else if (!_taskSel && filtered.length > 0) {
+    _taskSel = filtered[0];
+  }
   const cntAll = _tasksAll.length;
   const cntActive = _tasksAll.filter(t => t.status === 'active').length;
   const cntDone = _tasksAll.filter(t => t.status === 'completed').length;
