@@ -84,8 +84,8 @@
 .tmpl-hero-sc-data .lobby-eyebrow{color:#0d9488}
 .tmpl-hero-sc-infra .lobby-eyebrow{color:#7c3aed}
 .tmpl-hero-sc-default .lobby-eyebrow{color:var(--a)}
-.tmpl-tabs{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-bottom:32px;animation:fadeUp .4s ease both}
-.tmpl-tab{display:inline-flex;align-items:center;gap:9px;padding:10px 18px;border-radius:12px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:var(--c);color:var(--t2);transition:all .2s;box-shadow:0 1px 3px rgba(16,23,36,.04)}
+.tmpl-tabs{display:flex;gap:8px;flex-wrap:nowrap;justify-content:flex-start;margin-bottom:32px;animation:fadeUp .4s ease both;overflow-x:auto;padding-bottom:4px}
+.tmpl-tab{display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:12px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:var(--c);color:var(--t2);transition:all .2s;box-shadow:0 1px 3px rgba(16,23,36,.04);white-space:nowrap;flex-shrink:0}
 .tmpl-tab:hover{border-color:#b9cdf7;color:var(--a);box-shadow:0 8px 20px rgba(49,104,224,.10);transform:translateY(-1px)}
 .tmpl-tab-ic{font-size:16px;display:inline-flex;align-items:center;justify-content:center}
 .tmpl-tab-name{font-weight:600}
