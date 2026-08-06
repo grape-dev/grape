@@ -163,7 +163,7 @@
 .tmpl-btn-video:hover{background:var(--b);color:var(--t)}
 
 /* ===== Task Center (方案 B: 列表工作流风) ===== */
-.tsk-page{max-width:1120px;margin:0 auto;padding:36px 24px 56px;position:relative}
+.tsk-page{width:100%;max-width:1080px;padding:8px 0 48px;position:relative}
 .tsk-top{display:flex;align-items:center;gap:12px;margin-bottom:26px;flex-wrap:wrap}
 .tsk-eyebrow{display:flex;align-items:center;gap:10px;font-size:10px;letter-spacing:3px;text-transform:uppercase;color:var(--a);font-weight:700}
 .tsk-eyebrow i{width:26px;height:1px;background:linear-gradient(90deg,transparent,var(--a))}
