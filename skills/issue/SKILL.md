@@ -18,7 +18,7 @@ tools: []
 可以打标签、发评论、分配负责人，但**不要直接写代码修 bug**。
 
 ### ⚠️ 任务通知硬规则（不可跳过）
-**只要确定了 Issue 责任人，就必须调用 `POST /api/tasks/notify` 创建任务**（接口幂等）。唯一例外：完全未确定责任人（如关闭/等待配置）。
+**只要确定了 Issue 责任人（人，非 gitcode_bot 机器人账号），就必须调用 `POST /api/tasks/notify` 创建任务**（接口幂等）。唯一例外：完全未确定责任人（如关闭/等待配置）。
 
 ```bash
 curl -X POST http://localhost:8080/api/tasks/notify \

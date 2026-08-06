@@ -183,6 +183,11 @@ async def notify_task(body: TaskNotifyBody):
     if body.repo_key not in managed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未托管"})
 
+    # 责任人必须是"人"而非 bot 账号（避免给 gitcode_bot 建任务）
+    from src.user.db import get_all_bot_usernames
+    if body.assignee in get_all_bot_usernames():
+        return {"ok": False, "code": 400, "message": f"责任人 {body.assignee} 是 bot 账号，不创建任务"}
+
     # 解析 user_id
     user_id = _get_user_id_by_gitcode(body.assignee)
     if not user_id:
