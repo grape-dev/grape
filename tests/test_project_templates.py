@@ -83,6 +83,17 @@ class TestConfig:
                     d = os.path.join(ROOT, "configs", "project-templates", t["id"])
                     assert os.path.isdir(d), f"local 模板目录不存在: {d}"
 
+    def test_video_url_field_valid(self):
+        """video_url 可选：空或合法 http(s) 链接"""
+        data = _reload_config()
+        for cat in data.get("categories", []):
+            for t in cat.get("templates", []):
+                v = t.get("video_url", "")
+                assert isinstance(v, str), f"{t.get('id')} video_url 必须是字符串"
+                if v:
+                    assert v.startswith("http://") or v.startswith("https://"), \
+                        f"{t.get('id')} video_url 必须是 http(s) 链接: {v}"
+
     def test_scene_id_valid(self):
         data = _reload_config()
         with open(os.path.join(ROOT, "configs", "agent-skill-mapping.json"), "r", encoding="utf-8") as f:

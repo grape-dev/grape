@@ -156,3 +156,8 @@
 .msg th{background:var(--bg);font-weight:600}
 .msg a{color:var(--a)}
 .msg hr{border:none;border-top:1px solid var(--b);margin:8px 0}
+
+/* ===== Template card video link ===== */
+.tmpl-card-foot{gap:8px}
+.tmpl-btn-video{background:rgba(0,0,0,.05);color:var(--t2);box-shadow:none}
+.tmpl-btn-video:hover{background:var(--b);color:var(--t)}

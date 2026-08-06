@@ -72,6 +72,7 @@ function renderTemplateCategory() {
         <span class="tmpl-stat"><b>⬡</b>${uses}</span>
       </div>
       <div class="tmpl-card-foot">
+        ${t.video_url ? `<button class="tmpl-btn tmpl-btn-video" onclick="event.stopPropagation();window.open('${t.video_url}','_blank')">▶ 视频</button>` : ''}
         <button class="tmpl-btn" onclick="event.stopPropagation();createFromTemplate('${t.id}','${t.default_repo_name || t.id}')">一键创建 <span class="tmpl-btn-ar">→</span></button>
       </div>
     </div>`;

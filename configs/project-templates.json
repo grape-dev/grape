@@ -15,8 +15,13 @@
           "source": "git",
           "source_repo": "agent-best-practices/redbook-operate",
           "default_repo_name": "redbook-operate",
-          "tags": ["agent", "automation", "content"],
-          "scene_id": "default"
+          "tags": [
+            "agent",
+            "automation",
+            "content"
+          ],
+          "scene_id": "default",
+          "video_url": ""
         },
         {
           "id": "ai-interview-swarm",
@@ -26,8 +31,13 @@
           "source": "git",
           "source_repo": "agent-best-practices/ai-interview-swarm",
           "default_repo_name": "ai-interview-swarm",
-          "tags": ["agent", "multi-agent", "interview"],
-          "scene_id": "default"
+          "tags": [
+            "agent",
+            "multi-agent",
+            "interview"
+          ],
+          "scene_id": "default",
+          "video_url": ""
         },
         {
           "id": "get-together",
@@ -37,8 +47,13 @@
           "source": "git",
           "source_repo": "agent-best-practices/get-together",
           "default_repo_name": "get-together",
-          "tags": ["agent", "social", "travel"],
-          "scene_id": "default"
+          "tags": [
+            "agent",
+            "social",
+            "travel"
+          ],
+          "scene_id": "default",
+          "video_url": ""
         },
         {
           "id": "prompt-to-premiere",
@@ -48,8 +63,13 @@
           "source": "git",
           "source_repo": "agent-best-practices/Prompt_to_Premiere",
           "default_repo_name": "Prompt-to-Premiere",
-          "tags": ["agent", "video", "content"],
-          "scene_id": "default"
+          "tags": [
+            "agent",
+            "video",
+            "content"
+          ],
+          "scene_id": "default",
+          "video_url": ""
         },
         {
           "id": "ai-campus-event-planner",
@@ -59,8 +79,13 @@
           "source": "git",
           "source_repo": "agent-best-practices/ai-campus-event-planner",
           "default_repo_name": "ai-campus-event-planner",
-          "tags": ["agent", "multi-agent", "campus"],
-          "scene_id": "default"
+          "tags": [
+            "agent",
+            "multi-agent",
+            "campus"
+          ],
+          "scene_id": "default",
+          "video_url": ""
         },
         {
           "id": "powered-by-jiuwen",
@@ -70,8 +95,13 @@
           "source": "git",
           "source_repo": "agent-best-practices/powered-by-jiuwen",
           "default_repo_name": "powered-by-jiuwen",
-          "tags": ["agent", "jiuwen", "incubator"],
-          "scene_id": "default"
+          "tags": [
+            "agent",
+            "jiuwen",
+            "incubator"
+          ],
+          "scene_id": "default",
+          "video_url": ""
         },
         {
           "id": "xhs-cross-platform-rewrite",
@@ -81,8 +111,13 @@
           "source": "git",
           "source_repo": "agent-best-practices/xhs-cross-platform-rewrite",
           "default_repo_name": "xhs-cross-platform-rewrite",
-          "tags": ["skill", "content", "xhs"],
-          "scene_id": "default"
+          "tags": [
+            "skill",
+            "content",
+            "xhs"
+          ],
+          "scene_id": "default",
+          "video_url": ""
         }
       ]
     },
@@ -100,8 +135,12 @@
           "icon": "🧩",
           "source": "local",
           "default_repo_name": "hello-skill",
-          "tags": ["skill", "starter"],
-          "scene_id": "skill-dev"
+          "tags": [
+            "skill",
+            "starter"
+          ],
+          "scene_id": "skill-dev",
+          "video_url": ""
         }
       ]
     },
@@ -120,8 +159,12 @@
           "source": "git",
           "source_repo": "devops-bot/ai-office-assistant",
           "default_repo_name": "ai-assistant",
-          "tags": ["ai", "office"],
-          "scene_id": "default"
+          "tags": [
+            "ai",
+            "office"
+          ],
+          "scene_id": "default",
+          "video_url": ""
         }
       ]
     },
@@ -140,8 +183,14 @@
           "source": "git",
           "source_repo": "Lingxi-HandsOn/bp-gateway",
           "default_repo_name": "bp-gateway",
-          "tags": ["golang", "gateway", "k8s", "docker"],
-          "scene_id": "cloud-native"
+          "tags": [
+            "golang",
+            "gateway",
+            "k8s",
+            "docker"
+          ],
+          "scene_id": "cloud-native",
+          "video_url": ""
         },
         {
           "id": "codearts-mcp",
@@ -151,8 +200,14 @@
           "source": "git",
           "source_repo": "Lingxi-HandsOn/codearts-mcp",
           "default_repo_name": "codearts-mcp",
-          "tags": ["node", "mcp", "docker", "compose"],
-          "scene_id": "cloud-native"
+          "tags": [
+            "node",
+            "mcp",
+            "docker",
+            "compose"
+          ],
+          "scene_id": "cloud-native",
+          "video_url": ""
         },
         {
           "id": "gallery",
@@ -162,8 +217,13 @@
           "source": "git",
           "source_repo": "Lingxi-HandsOn/gallery",
           "default_repo_name": "gallery",
-          "tags": ["web", "fullstack", "docker"],
-          "scene_id": "cloud-native"
+          "tags": [
+            "web",
+            "fullstack",
+            "docker"
+          ],
+          "scene_id": "cloud-native",
+          "video_url": ""
         },
         {
           "id": "practice-hub",
@@ -173,8 +233,13 @@
           "source": "git",
           "source_repo": "Lingxi-HandsOn/PracticeHub",
           "default_repo_name": "PracticeHub",
-          "tags": ["vue", "ai", "platform"],
-          "scene_id": "cloud-native"
+          "tags": [
+            "vue",
+            "ai",
+            "platform"
+          ],
+          "scene_id": "cloud-native",
+          "video_url": ""
         }
       ]
     },
@@ -193,8 +258,12 @@
           "source": "git",
           "source_repo": "devops-bot/terraform-infra",
           "default_repo_name": "tf-infra",
-          "tags": ["terraform", "iac"],
-          "scene_id": "iac"
+          "tags": [
+            "terraform",
+            "iac"
+          ],
+          "scene_id": "iac",
+          "video_url": ""
         }
       ]
     }
