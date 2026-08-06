@@ -37,12 +37,12 @@
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "> 用户的问题原文\n\n[$AGENT_NAME] 这是机器人的回复内容。"}
+{"body": "> 用户的问题原文\n\n[issue agent] 这是机器人的回复内容。"}
 ```
 
-- body 必须以 `[$AGENT_NAME]` 开头
-- issue_comment 事件需引用原文：`> {用户评论}\n\n[$AGENT_NAME] {机器人回复}`
+- body 必须以 `[issue agent]` 开头
+- issue_comment 事件需引用原文：`> {用户评论}\n\n[issue agent] {机器人回复}`
 - 引用 commit：` [`sha`](https://gitcode.com/{owner}/{repo}/commit/sha) `
 - 引用 Issue/PR：`[#N](https://gitcode.com/{owner}/{repo}/issues/N)`
 
-> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。
+> 注：评论 body 前缀固定为 `[issue agent]`，不再使用 `$AGENT_NAME` 环境变量。

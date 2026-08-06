@@ -212,4 +212,4 @@ curl -s -X PATCH ... -d '{"state": "close"}' \
 需要调用更全面的 GitCode API 时，读取 `references/gitcode-api-reference.md`。
 需要使用 codegraph 工具时，读取 `references/codegraph-commands.md`。
 
-> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。
+> 注：评论 body 前缀固定为 `[issue agent]`，不再使用 `$AGENT_NAME` 环境变量。
