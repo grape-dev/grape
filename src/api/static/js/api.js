@@ -11,6 +11,30 @@ function fmtLocalTime(utcStr) {
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+// 全局工具：Markdown 渲染（先转义 HTML 防 XSS，再由 marked 解析）
+let _markedReady = false;
+try {
+  if (window.marked && typeof marked.parse === 'function') {
+    marked.setOptions({breaks: true, gfm: true});
+    _markedReady = true;
+  }
+} catch (e) { _markedReady = false; }
+
+function renderMarkdown(text) {
+  if (!text) return '';
+  const safe = String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+  try {
+    return _markedReady ? marked.parse(safe) : safe;
+  } catch (e) {
+    return safe;
+  }
+}
+
 const API = (() => {
   const BASE = '/api';
 

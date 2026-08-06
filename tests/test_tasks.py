@@ -230,3 +230,25 @@ class TestMine:
         r_done = client.get("/api/tasks/mine?status=completed", headers=_headers)
         assert all(t["status"] == "active" for t in r_active.json()["tasks"])
         assert all(t["status"] == "completed" for t in r_done.json()["tasks"])
+
+    def test_mine_repo_filter(self):
+        """按 repo_key 过滤：传 repo 只返回该 repo 任务；不传返回全部"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "org/repoA", 20))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "org/repoB", 21))
+            db.commit()
+        # 按 repoA 过滤
+        r = client.get("/api/tasks/mine?repo_key=" + "org/repoA", headers=_headers)
+        assert r.status_code == 200
+        tasks = r.json()["tasks"]
+        assert all(t["repo_key"] == "org/repoA" for t in tasks)
+        assert len(tasks) == 1
+        # 不传 repo → 全部
+        r_all = client.get("/api/tasks/mine", headers=_headers)
+        assert all(t["repo_key"] in ("org/repoA", "org/repoB") for t in r_all.json()["tasks"])
+        assert len(r_all.json()["tasks"]) == 2

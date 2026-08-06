@@ -155,7 +155,7 @@ function switchConversation(convId) {
     const hdr = document.querySelector('.chat-hdr h2');
     if (hdr) hdr.textContent = 'Chat Agent · ' + (conv.title || 'Personal Assistant');
     body.innerHTML = msgs.map(m =>
-      `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${m.content}</div>`
+      `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${renderMarkdown(m.content)}</div>`
     ).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">开始新对话</div>';
     body.scrollTop = body.scrollHeight;
     if (input) input.disabled = false;
@@ -221,11 +221,11 @@ function doSend(input, body) {
         lines.forEach(line => {
           if (line.startsWith('data: ')) {
             const d = JSON.parse(line.substring(6));
-            if (d.text && el) el.innerHTML = d.text;
+            if (d.text && el) el.innerHTML = renderMarkdown(d.text);
           }
         });
       } catch(e) {}
-      if (el) el.innerHTML = text || 'Done';
+      if (el) el.innerHTML = renderMarkdown(text) || 'Done';
       loadConversations();
       return;
     }
@@ -235,7 +235,7 @@ function doSend(input, body) {
     function read() {
       reader.read().then(({done, value}) => {
         if (done) {
-          if (el) el.innerHTML = finalText || 'Done';
+          if (el) el.innerHTML = renderMarkdown(finalText) || 'Done';
           body.scrollTop = body.scrollHeight;
           _chatAbort = null;
           loadConversations();
@@ -249,7 +249,7 @@ function doSend(input, body) {
             try {
               const d = JSON.parse(line.substring(6));
               if (d.type === 'done') finalText = d.text;
-              else if (d.text && el) el.innerHTML = d.text;
+              else if (d.text && el) el.innerHTML = renderMarkdown(d.text);
             } catch(e) {}
           }
         });

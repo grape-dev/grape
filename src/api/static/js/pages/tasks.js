@@ -11,13 +11,16 @@ function renderTasks() {
 function loadTasks() {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  API.get('/tasks/mine?status=' + _tasksTab).then(d => {
+  const repo = app.currentRepo();
+  const repoKey = repo ? repo.fullName : '';
+  API.get('/tasks/mine?status=' + _tasksTab + '&repo_key=' + encodeURIComponent(repoKey)).then(d => {
     const tasks = d.tasks || [];
     const tab = t => `<button class="pttab ${_tasksTab === t ? 'pttab-act' : ''}" onclick="_tasksTab='${t}';loadTasks()">${t === 'active' ? '● 待处理' : '✓ 已完成'}</button>`;
     let html = `<div style="max-width:900px;margin:0 auto">
       <div style="margin-bottom:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <h2 style="font-size:16px;font-weight:600;margin-right:12px">任务中心</h2>
         ${tab('active')}${tab('completed')}
+        ${repoKey ? `<span class="ts t3" style="margin-left:auto">📦 ${repoKey}</span>` : ''}
       </div>`;
     if (tasks.length === 0) {
       html += '<div class="ts t2" style="padding:40px 0;text-align:center">暂无' + (_tasksTab === 'active' ? '待处理' : '已完成') + '任务</div>';

@@ -271,13 +271,17 @@ async def close_tasks(body: TaskCloseBody):
 
 @router.get("/mine")
 async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
+                   repo_key: str = Query("", description="按仓库过滤"),
                    user: dict = Depends(get_current_user)):
-    """任务中心：当前登录用户的待处理/已完成任务"""
+    """任务中心：当前登录用户的待处理/已完成任务（可按 repo 过滤）"""
     clauses = ["user_id=?"]
     params = [user["id"]]
     if status:
         clauses.append("status=?")
         params.append(status)
+    if repo_key:
+        clauses.append("repo_key=?")
+        params.append(repo_key)
     where = " AND ".join(clauses)
     with db_lock:
         c = db.cursor()

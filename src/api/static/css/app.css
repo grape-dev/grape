@@ -139,3 +139,20 @@
 .tmpl-sc-data .tmpl-btn:hover{box-shadow:0 10px 26px rgba(13,148,136,.45)}
 .tmpl-sc-infra .tmpl-btn{background:linear-gradient(135deg,#7c3aed,#a855f7);box-shadow:0 6px 18px rgba(124,58,237,.35)}
 .tmpl-sc-infra .tmpl-btn:hover{box-shadow:0 10px 26px rgba(124,58,237,.45)}
+
+/* ===== Chat message markdown content ===== */
+.msg{overflow-wrap:break-word}
+.msg h1,.msg h2,.msg h3,.msg h4{font-size:14px;font-weight:600;margin:8px 0 4px}
+.msg h1{font-size:15px}.msg h2{font-size:14px}.msg h3{font-size:13px}
+.msg p{margin:4px 0}
+.msg ul,.msg ol{margin:4px 0 4px 18px;padding:0}
+.msg li{margin:2px 0}
+.msg code{background:rgba(0,0,0,.06);padding:1px 4px;border-radius:4px;font-size:11px;font-family:monospace}
+.msg pre{background:var(--s);color:#c2cad6;padding:10px;border-radius:8px;overflow-x:auto;margin:6px 0}
+.msg pre code{background:transparent;padding:0;color:inherit;font-size:11px}
+.msg blockquote{border-left:3px solid var(--b);padding-left:10px;margin:6px 0;color:var(--t2)}
+.msg table{border-collapse:collapse;margin:6px 0;font-size:11px}
+.msg th,.msg td{border:1px solid var(--b);padding:4px 8px}
+.msg th{background:var(--bg);font-weight:600}
+.msg a{color:var(--a)}
+.msg hr{border:none;border-top:1px solid var(--b);margin:8px 0}
