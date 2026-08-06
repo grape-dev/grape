@@ -39,11 +39,11 @@ function switchSidebarTab(tab) {
   if (tab === 'templates') {
     renderTemplates();
   } else {
+    // 先渲染缓存（秒开），再后台静默刷新（拉到最新，含新创建项目）
     if (_projectsContent) {
       renderSelectionShell('projects', _projectsContent);
-    } else {
-      renderRepos();
     }
+    renderRepos({silent: true});
   }
 }
 
@@ -114,10 +114,14 @@ function _buildLobbyCard(r) {
 }
 
 // ====== 仓库管理页（侧边栏「＋ 新增仓库托管」）======
-function renderRepos() {
+function renderRepos(opts) {
+  opts = opts || {};
   const el = document.getElementById('pageContent');
   if (!el) return;
-  renderSelectionShell('projects', '<div class="loading">加载中...</div>');
+  // 静默模式：不先渲染 loading（保留当前缓存画面），fetch 完成后原地更新
+  if (!opts.silent) {
+    renderSelectionShell('projects', '<div class="loading">加载中...</div>');
+  }
 
   API.get('/repos/member').then(d => {
     const allRepos = d.repos || [];
@@ -170,6 +174,8 @@ function renderRepos() {
     const pc = document.getElementById('ptContent');
     if (pc) pc.innerHTML = html;
   }).catch(() => {
+    // 静默模式失败：保留已有缓存画面，不覆盖
+    if (opts.silent) return;
     const pc = document.getElementById('ptContent');
     if (pc) pc.innerHTML = '<div class="error">加载失败</div>';
   });
