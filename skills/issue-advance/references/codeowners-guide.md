@@ -105,4 +105,4 @@ curl -X POST http://localhost:8080/api/a2a \
 
 ### 通知责任人（必做）
 
-当本 Issue 的责任人已确定（无论是否走 CODEOWNERS），调用 `POST /api/tasks/notify` 为该责任人创建任务（详见 SKILL.md「任务通知硬规则」）。
+责任人确定后调用 `POST /api/tasks/notify` 创建任务（详见 SKILL.md「任务通知硬规则」）。

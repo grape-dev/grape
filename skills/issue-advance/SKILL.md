@@ -29,8 +29,8 @@ tools:
 ### 守门不修 bug
 可以打标签、发评论、分配负责人，但**不要直接写代码修 bug**。
 
-### ⚠️ 任务通知硬规则（最高优先级，不可跳过）
-**只要本 Issue 的责任人（assignee）被确定——无论是通过 CODEOWNERS 自动分配、兜底负责人、还是确认已有责任人，也不管仓库是否配置了 CODEOWNERS——都必须调用任务通知接口 `POST /api/tasks/notify`**，为该责任人创建任务。该接口幂等，重复调用安全。
+### ⚠️ 任务通知硬规则（不可跳过）
+**只要确定了 Issue 责任人（无论是否走 CODEOWNERS），就必须调用 `POST /api/tasks/notify` 创建任务**（接口幂等）。唯一例外：完全未确定责任人（如关闭/等待配置）。
 
 ```bash
 curl -X POST http://localhost:8080/api/tasks/notify \
@@ -43,9 +43,7 @@ curl -X POST http://localhost:8080/api/tasks/notify \
   }'
 ```
 
-- **只要分配/确认了责任人就必须调用 notify**，与是否找到 CODEOWNERS 无关。
-- 唯一不调用 notify 的情况：**完全没有确定任何责任人**（例如 Issue 与仓库无关被关闭、或等待用户先配置负责人）。
-- 若 notify 返回 `{ok:false}`（责任人未注册平台），在 Issue 评论说明即可，不影响分配本身。
+若 notify 返回 `{ok:false}`（责任人未注册平台），在 Issue 评论说明即可。
 
 ### 超出能力范围时主动请求支援
 对于以下任务，issue 技能能力有限或无能力处理，应通过 A2A 协议调用更专业的 Agent：
