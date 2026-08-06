@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>任务中心 · 方案 B（列表工作流风）高保真原型</title>
+<style>
+:root{--bg:#f5f6f8;--c:#fff;--b:#e3e6ee;--t:#101724;--t2:#5b667b;--t3:#8d97a8;--a:#3168e0;--g:#1ca44c;--or:#ea5a0c;--pu:#7b3cf2}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:var(--bg);color:var(--t);min-height:100vh}
+.page{max-width:1100px;margin:0 auto;padding:40px 28px 56px}
+.top{display:flex;align-items:center;gap:12px;margin-bottom:28px;flex-wrap:wrap}
+.eyebrow{display:flex;align-items:center;gap:10px;font-size:10px;letter-spacing:3px;text-transform:uppercase;color:var(--a);font-weight:700}
+.eyebrow i{width:26px;height:1px;background:linear-gradient(90deg,transparent,var(--a))}
+.top h1{font-size:22px;font-weight:700;letter-spacing:-.5px}
+.top .repo{font-size:12px;color:var(--t3);padding:5px 12px;border-radius:20px;background:var(--c);border:1px solid var(--b)}
+.controls{margin-left:auto;display:flex;gap:8px;align-items:center}
+.tab{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--b);background:var(--c);color:var(--t2);transition:all .2s}
+.tab.act{background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;border-color:transparent;box-shadow:0 4px 14px rgba(49,104,224,.3)}
+.tab .cnt{font-size:10px;background:rgba(0,0,0,.06);padding:1px 7px;border-radius:8px}
+.tab.act .cnt{background:rgba(255,255,255,.2);color:#fff}
+.search{display:inline-flex;align-items:center;gap:7px;padding:7px 12px;border-radius:20px;border:1px solid var(--b);background:var(--c)}
+.search input{border:none;outline:none;font-size:12px;width:120px;background:transparent}
+.layout{display:grid;grid-template-columns:1fr 340px;gap:20px}
+.list{background:var(--c);border:1px solid var(--b);border-radius:16px;overflow:hidden}
+.list-sec{padding:14px 18px 6px;font-size:12px;font-weight:600;color:var(--t3);letter-spacing:1px;text-transform:uppercase}
+.list-sec .n{float:right;color:var(--a)}
+.row{display:flex;align-items:center;gap:12px;padding:14px 18px;border-top:1px solid var(--b);cursor:pointer;transition:all .18s;position:relative}
+.row:first-of-type{border-top:none}
+.row:hover{background:#f7f9ff}
+.row.sel{background:#f0f5ff;box-shadow:inset 3px 0 0 var(--a)}
+.row::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:transparent;transition:background .18s}
+.row.sel::before{background:var(--a)}
+.r-ic{width:36px;height:36px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0}
+.r-ic.p{background:linear-gradient(135deg,#fef0e4,#fde8f0);color:var(--or)}
+.r-ic.d{background:linear-gradient(135deg,#e7f9ee,#e3edfd);color:var(--g)}
+.r-main{flex:1;min-width:0}
+.r-title{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r-title.sel{color:var(--a)}
+.r-meta{font-size:11px;color:var(--t3);margin-top:3px}
+.tag{font-size:10.5px;padding:3px 10px;border-radius:16px;font-weight:600;white-space:nowrap}
+.tag.p{background:rgba(234,90,12,.08);color:#c2410c}
+.tag.d{background:rgba(28,164,76,.08);color:#1a9c52}
+.detail{background:var(--c);border:1px solid var(--b);border-radius:16px;padding:22px;height:fit-content;position:sticky;top:20px;box-shadow:0 8px 24px rgba(16,23,36,.05)}
+.det-ic{width:52px;height:52px;border-radius:16px;background:linear-gradient(135deg,#eaf0ff,#ede8fd);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--a);margin-bottom:14px}
+.det-ic.p{background:linear-gradient(135deg,#fef0e4,#fde8f0);color:var(--or)}
+.det-label{font-size:10px;color:var(--t3);letter-spacing:1.5px;text-transform:uppercase;font-weight:600;margin-bottom:4px}
+.det-title{font-size:19px;font-weight:700;letter-spacing:-.4px;margin-bottom:8px}
+.det-meta{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--t2);padding:12px 0;border-top:1px solid var(--b);border-bottom:1px solid var(--b);margin-bottom:12px}
+.det-meta .m{display:flex;justify-content:space-between}
+.det-meta .m span:first-child{color:var(--t3)}
+.det-desc{font-size:13px;color:var(--t2);line-height:1.7;margin-bottom:18px}
+.det-actions{display:flex;gap:8px;flex-direction:column}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:11px 16px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;border:none}
+.btn-primary{background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;box-shadow:0 6px 16px rgba(49,104,224,.3)}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(49,104,224,.4)}
+.btn-ghost{background:var(--c);border:1px solid var(--b);color:var(--t2)}
+.btn-ghost:hover{border-color:var(--a);color:var(--a);background:#f4f7ff}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="top">
+    <div class="eyebrow"><i></i>TASK CENTER</div>
+    <h1>任务中心</h1>
+    <span class="repo">📦 owner/repo</span>
+    <div class="controls">
+      <button class="tab act">全部 <span class="cnt">12</span></button>
+      <button class="tab">待处理 <span class="cnt">5</span></button>
+      <button class="tab">已完成 <span class="cnt">7</span></button>
+      <div class="search"><span>🔍</span><input placeholder="搜索任务..."></div>
+    </div>
+  </div>
+
+  <div class="layout">
+    <div class="list">
+      <div class="list-sec">待处理 <span class="n">5</span></div>
+      <div class="row sel">
+        <div class="r-ic p">#</div>
+        <div class="r-main"><div class="r-title sel">Issue #12 · 商品详情页加载优化</div><div class="r-meta">⏱ 2小时前 · owner/repo</div></div>
+        <span class="tag p">待处理</span>
+      </div>
+      <div class="row">
+        <div class="r-ic p">#</div>
+        <div class="r-main"><div class="r-title">Issue #11 · 购物车同步延迟</div><div class="r-meta">⏱ 昨天 · owner/repo</div></div>
+        <span class="tag p">待处理</span>
+      </div>
+      <div class="row">
+        <div class="r-ic p">#</div>
+        <div class="r-main"><div class="r-title">Issue #10 · 支付回调幂等</div><div class="r-meta">⏱ 2天前 · owner/repo</div></div>
+        <span class="tag p">待处理</span>
+      </div>
+      <div class="list-sec">已完成 <span class="n">7</span></div>
+      <div class="row">
+        <div class="r-ic d">✓</div>
+        <div class="r-main"><div class="r-title">Issue #9 · 首页推荐位调整</div><div class="r-meta">⏱ 昨天 · 已完成 · Issue 已关闭</div></div>
+        <span class="tag d">已完成</span>
+      </div>
+      <div class="row">
+        <div class="r-ic d">✓</div>
+        <div class="r-main"><div class="r-title">Issue #7 · 订单状态同步</div><div class="r-meta">⏱ 08-04 · 已完成 · 已转派</div></div>
+        <span class="tag d">已完成</span>
+      </div>
+      <div class="row">
+        <div class="r-ic d">✓</div>
+        <div class="r-main"><div class="r-title">Issue #5 · 登录态刷新</div><div class="r-meta">⏱ 08-02 · 已完成 · Issue 已关闭</div></div>
+        <span class="tag d">已完成</span>
+      </div>
+    </div>
+
+    <div class="detail">
+      <div class="det-ic p">#</div>
+      <div class="det-label">Issue #12</div>
+      <div class="det-title">商品详情页加载优化</div>
+      <div class="det-meta">
+        <div class="m"><span>状态</span><b style="color:var(--or)">● 待处理</b></div>
+        <div class="m"><span>仓库</span><b>owner/repo</b></div>
+        <div class="m"><span>创建时间</span><b>2026-08-05 10:24</b></div>
+      </div>
+      <div class="det-desc">商品详情接口超时导致白屏，需要优化接口响应与前端降级策略，涉及首页推荐位与商品卡片渲染逻辑。</div>
+      <div class="det-actions">
+        <button class="btn btn-primary">去对话</button>
+        <button class="btn btn-ghost">查看 Issue ↗</button>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

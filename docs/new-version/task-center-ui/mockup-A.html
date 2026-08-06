@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>任务中心 · 方案 A（工作台风）高保真原型</title>
+<style>
+:root{--bg:#f5f6f8;--c:#fff;--b:#e3e6ee;--t:#101724;--t2:#5b667b;--t3:#8d97a8;--a:#3168e0;--ah:#2556c2;--g:#1ca44c;--y:#d49c0f;--r:#dc2828;--pu:#7b3cf2;--or:#ea5a0c}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:var(--bg);color:var(--t);min-height:100vh}
+.page{max-width:960px;margin:0 auto;padding:48px 32px 64px;position:relative}
+.page::before{content:'';position:absolute;top:-80px;left:50%;transform:translateX(-50%);width:700px;height:360px;background:radial-gradient(ellipse at center,rgba(49,104,224,.08) 0%,rgba(123,60,242,.05) 45%,transparent 70%);pointer-events:none}
+.eyebrow{display:flex;align-items:center;justify-content:center;gap:14px;font-size:10.5px;letter-spacing:4px;text-transform:uppercase;color:var(--a);font-weight:700;margin-bottom:18px}
+.eyebrow i{width:34px;height:1px;background:linear-gradient(90deg,transparent,var(--a))}
+.eyebrow i:last-child{background:linear-gradient(90deg,var(--a),transparent)}
+h1{font-size:40px;font-weight:700;letter-spacing:-2px;text-align:center;margin-bottom:10px}
+h1 span{background:linear-gradient(135deg,#3168e0,#7c5cf5);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.sub{text-align:center;font-size:14px;color:var(--t2);margin-bottom:34px}
+.stats{display:flex;justify-content:center;gap:20px;margin-bottom:40px;flex-wrap:wrap}
+.stat{flex:1;max-width:200px;text-align:center;padding:20px;border-radius:16px;border:1px solid var(--b);background:var(--c);box-shadow:0 1px 3px rgba(0,0,0,.04);position:relative;overflow:hidden}
+.stat::after{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--a),var(--pu))}
+.stat.total::after{background:linear-gradient(90deg,#3168e0,#7b3cf2)}
+.stat.pending::after{background:linear-gradient(90deg,#ea5a0c,#f59e0b)}
+.stat.done::after{background:linear-gradient(90deg,#1ca44c,#34d399)}
+.stat .num{font-size:30px;font-weight:700;letter-spacing:-1px;line-height:1.1}
+.stat.pending .num{color:var(--or)}
+.stat.done .num{color:var(--g)}
+.stat .lbl{font-size:11px;color:var(--t3);letter-spacing:1px;text-transform:uppercase;font-weight:500;margin-top:6px}
+.group{margin-bottom:32px}
+.group-head{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;margin-bottom:14px}
+.dot{width:8px;height:8px;border-radius:50%}
+.dot.p{background:var(--or);box-shadow:0 0 0 4px rgba(234,90,12,.12)}
+.dot.d{background:var(--g);box-shadow:0 0 0 4px rgba(28,164,76,.12)}
+.group-head .cnt{font-size:11px;background:var(--bg);color:var(--t3);padding:2px 8px;border-radius:10px;font-weight:600}
+.card{background:var(--c);border:1px solid var(--b);border-radius:16px;padding:20px;margin-bottom:12px;transition:all .2s;position:relative;overflow:hidden;animation:fadeUp .4s ease both}
+.card:hover{transform:translateY(-2px);box-shadow:0 12px 28px rgba(49,104,224,.08);border-color:#c6d6fa}
+.card::after{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--a),var(--pu));opacity:0;transition:opacity .2s}
+.card:hover::after{opacity:1}
+.card.done-card::after{background:linear-gradient(90deg,#1ca44c,#34d399)}
+.card-head{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.ic{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;flex-shrink:0;position:relative}
+.ic.p{background:linear-gradient(135deg,#fef0e4,#fde8f0);color:var(--or);box-shadow:inset 0 0 0 1px rgba(234,90,12,.12)}
+.ic.d{background:linear-gradient(135deg,#e7f9ee,#e3edfd);color:var(--g);box-shadow:inset 0 0 0 1px rgba(28,164,76,.12)}
+.ic i{position:absolute;top:-3px;right:-3px;width:12px;height:12px;border-radius:50%}
+.ic.p i{background:var(--or);box-shadow:0 0 0 3px rgba(234,90,12,.15)}
+.ic.d i{background:var(--g);box-shadow:0 0 0 3px rgba(28,164,76,.15)}
+.card-title{font-size:16px;font-weight:600;flex:1}
+.tag{font-size:11px;padding:4px 12px;border-radius:20px;font-weight:600;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.tag.p{background:rgba(234,90,12,.08);color:#c2410c}
+.tag.p b{width:5px;height:5px;border-radius:50%;background:var(--or);display:inline-block}
+.tag.d{background:rgba(28,164,76,.08);color:#1a9c52}
+.tag.d b{width:5px;height:5px;border-radius:50%;background:var(--g);display:inline-block}
+.card-desc{font-size:13px;color:var(--t2);line-height:1.6;margin-bottom:10px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.meta{font-size:11px;color:var(--t3);display:flex;gap:16px;margin-bottom:14px}
+.meta .repo{display:inline-flex;align-items:center;gap:5px}
+.card-actions{display:flex;gap:8px;padding-top:14px;border-top:1px solid var(--b)}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 18px;border-radius:10px;font-size:12.5px;font-weight:600;cursor:pointer;transition:all .2s;border:none}
+.btn-primary{background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;box-shadow:0 6px 16px rgba(49,104,224,.3)}
+.btn-primary:hover{box-shadow:0 8px 22px rgba(49,104,224,.4);transform:translateY(-1px)}
+.btn-ghost{background:var(--c);border:1px solid var(--b);color:var(--t2)}
+.btn-ghost:hover{border-color:var(--a);color:var(--a);background:#f4f7ff}
+.empty{text-align:center;padding:48px 20px;border:1px dashed var(--b);border-radius:16px;color:var(--t2);background:var(--c)}
+.empty .ic{font-size:40px;margin-bottom:12px;opacity:.6}
+.empty h3{font-size:15px;font-weight:600;color:var(--t);margin-bottom:6px}
+.empty p{font-size:12px}
+@keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="eyebrow"><i></i>TASK CENTER<i></i></div>
+  <h1><span>任务中心</span></h1>
+  <p class="sub">管理分配给你的 Issue 任务，跟踪处理进度与结果。</p>
+
+  <div class="stats">
+    <div class="stat total"><div class="num">12</div><div class="lbl">总任务</div></div>
+    <div class="stat pending"><div class="num">5</div><div class="lbl">待处理</div></div>
+    <div class="stat done"><div class="num">7</div><div class="lbl">已完成</div></div>
+  </div>
+
+  <div class="group">
+    <div class="group-head"><span class="dot p"></span>待处理 <span class="cnt">5</span></div>
+    <div class="card">
+      <div class="card-head">
+        <div class="ic p">#<i></i></div>
+        <div class="card-title">Issue #12 · 商品详情页加载优化</div>
+        <span class="tag p"><b></b>待处理</span>
+      </div>
+      <div class="card-desc">商品详情接口超时导致白屏，需要优化接口响应与前端降级策略，涉及首页推荐位与商品卡片。</div>
+      <div class="meta">
+        <span>⏱ 2小时前</span>
+        <span class="repo">📦 owner/repo</span>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">去对话</button>
+        <button class="btn btn-ghost">查看 Issue ↗</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <div class="ic p">#<i></i></div>
+        <div class="card-title">Issue #11 · 购物车同步延迟</div>
+        <span class="tag p"><b></b>待处理</span>
+      </div>
+      <div class="card-desc">跨设备购物车同步存在明显延迟，需要排查分布式缓存与消息队列配置。</div>
+      <div class="meta">
+        <span>⏱ 昨天</span>
+        <span class="repo">📦 owner/repo</span>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">去对话</button>
+        <button class="btn btn-ghost">查看 Issue ↗</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-head"><span class="dot d"></span>已完成 <span class="cnt">7</span></div>
+    <div class="card done-card">
+      <div class="card-head">
+        <div class="ic d">✓<i></i></div>
+        <div class="card-title">Issue #9 · 首页推荐位调整</div>
+        <span class="tag d"><b></b>已完成 · Issue 已关闭</span>
+      </div>
+      <div class="card-desc">调整首页推荐位排序规则，上线后 CTR 提升约 12%。</div>
+      <div class="meta">
+        <span>⏱ 昨天</span>
+        <span class="repo">📦 owner/repo</span>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-ghost">查看会话</button>
+        <button class="btn btn-ghost">查看 Issue ↗</button>
+      </div>
+    </div>
+    <div class="card done-card">
+      <div class="card-head">
+        <div class="ic d">✓<i></i></div>
+        <div class="card-title">Issue #7 · 订单状态同步</div>
+        <span class="tag d"><b></b>已完成 · 已转派</span>
+      </div>
+      <div class="card-desc">订单状态机与物流回调同步逻辑修复。</div>
+      <div class="meta">
+        <span>⏱ 08-04</span>
+        <span class="repo">📦 owner/repo</span>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-ghost">查看会话</button>
+        <button class="btn btn-ghost">查看 Issue ↗</button>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
