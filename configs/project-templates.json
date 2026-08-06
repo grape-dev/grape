@@ -1,6 +1,98 @@
 {
   "categories": [
     {
+      "id": "cloud-native",
+      "name": "云原生项目模板",
+      "icon": "☁️",
+      "description": "容器化 / 微服务 / 云原生部署项目起点",
+      "scene_id": "cloud-native",
+      "templates": [
+        {
+          "id": "730harmony-ecommerce",
+          "name": "Harmony 电商应用",
+          "description": "基于 HarmonyOS ArkTS 的分布式电商应用：跨设备协同购物，多端购物车同步、商品详情流转，含首页推荐、商品详情、订单管理，展示华为云码道 730 新特性",
+          "icon": "🛍️",
+          "source": "git",
+          "source_repo": "Lingxi-HandsOn/730harmony-ecommerce",
+          "default_repo_name": "730harmony-ecommerce",
+          "tags": [
+            "harmonyos",
+            "arkts",
+            "ecommerce",
+            "distributed"
+          ],
+          "scene_id": "cloud-native",
+          "video_url": "https://weixin.qq.com/sph/AGelTzuCcf"
+        },
+        {
+          "id": "bp-gateway",
+          "name": "Best Practice Gateway",
+          "description": "最佳实践网关服务：Go 微服务网关，含 Dockerfile 与 Kubernetes 部署清单（configmap/service/secret）",
+          "icon": "🚪",
+          "source": "git",
+          "source_repo": "Lingxi-HandsOn/bp-gateway",
+          "default_repo_name": "bp-gateway",
+          "tags": [
+            "golang",
+            "gateway",
+            "k8s",
+            "docker"
+          ],
+          "scene_id": "cloud-native",
+          "video_url": ""
+        },
+        {
+          "id": "codearts-mcp",
+          "name": "CodeArts MCP 服务",
+          "description": "码道对接 CodeArts 的 MCP 服务：Dockerfile + docker-compose + deploy 运维脚本，云原生部署形态",
+          "icon": "🔌",
+          "source": "git",
+          "source_repo": "Lingxi-HandsOn/codearts-mcp",
+          "default_repo_name": "codearts-mcp",
+          "tags": [
+            "node",
+            "mcp",
+            "docker",
+            "compose"
+          ],
+          "scene_id": "cloud-native",
+          "video_url": ""
+        },
+        {
+          "id": "gallery",
+          "name": "作品陈列馆 Gallery",
+          "description": "华为云高校训练营作品展示平台：全栈应用 + Dockerfile + deploy/frontend 容器化部署",
+          "icon": "🖼️",
+          "source": "git",
+          "source_repo": "Lingxi-HandsOn/gallery",
+          "default_repo_name": "gallery",
+          "tags": [
+            "web",
+            "fullstack",
+            "docker"
+          ],
+          "scene_id": "cloud-native",
+          "video_url": ""
+        },
+        {
+          "id": "practice-hub",
+          "name": "PracticeHub 实操平台",
+          "description": "知行 AI 实操实验室：开发者 AI 技能在线实践平台（Vue+TS），含 docs/deployment 部署文档",
+          "icon": "🧪",
+          "source": "git",
+          "source_repo": "Lingxi-HandsOn/PracticeHub",
+          "default_repo_name": "PracticeHub",
+          "tags": [
+            "vue",
+            "ai",
+            "platform"
+          ],
+          "scene_id": "cloud-native",
+          "video_url": ""
+        }
+      ]
+    },
+    {
       "id": "agent-best-practices",
       "name": "Agent 最佳实践",
       "icon": "🚀",
@@ -165,98 +257,6 @@
           ],
           "scene_id": "default",
           "video_url": ""
-        }
-      ]
-    },
-    {
-      "id": "cloud-native",
-      "name": "云原生项目模板",
-      "icon": "☁️",
-      "description": "容器化 / 微服务 / 云原生部署项目起点",
-      "scene_id": "cloud-native",
-      "templates": [
-        {
-          "id": "bp-gateway",
-          "name": "Best Practice Gateway",
-          "description": "最佳实践网关服务：Go 微服务网关，含 Dockerfile 与 Kubernetes 部署清单（configmap/service/secret）",
-          "icon": "🚪",
-          "source": "git",
-          "source_repo": "Lingxi-HandsOn/bp-gateway",
-          "default_repo_name": "bp-gateway",
-          "tags": [
-            "golang",
-            "gateway",
-            "k8s",
-            "docker"
-          ],
-          "scene_id": "cloud-native",
-          "video_url": ""
-        },
-        {
-          "id": "codearts-mcp",
-          "name": "CodeArts MCP 服务",
-          "description": "码道对接 CodeArts 的 MCP 服务：Dockerfile + docker-compose + deploy 运维脚本，云原生部署形态",
-          "icon": "🔌",
-          "source": "git",
-          "source_repo": "Lingxi-HandsOn/codearts-mcp",
-          "default_repo_name": "codearts-mcp",
-          "tags": [
-            "node",
-            "mcp",
-            "docker",
-            "compose"
-          ],
-          "scene_id": "cloud-native",
-          "video_url": ""
-        },
-        {
-          "id": "gallery",
-          "name": "作品陈列馆 Gallery",
-          "description": "华为云高校训练营作品展示平台：全栈应用 + Dockerfile + deploy/frontend 容器化部署",
-          "icon": "🖼️",
-          "source": "git",
-          "source_repo": "Lingxi-HandsOn/gallery",
-          "default_repo_name": "gallery",
-          "tags": [
-            "web",
-            "fullstack",
-            "docker"
-          ],
-          "scene_id": "cloud-native",
-          "video_url": ""
-        },
-        {
-          "id": "practice-hub",
-          "name": "PracticeHub 实操平台",
-          "description": "知行 AI 实操实验室：开发者 AI 技能在线实践平台（Vue+TS），含 docs/deployment 部署文档",
-          "icon": "🧪",
-          "source": "git",
-          "source_repo": "Lingxi-HandsOn/PracticeHub",
-          "default_repo_name": "PracticeHub",
-          "tags": [
-            "vue",
-            "ai",
-            "platform"
-          ],
-          "scene_id": "cloud-native",
-          "video_url": ""
-        },
-        {
-          "id": "730harmony-ecommerce",
-          "name": "Harmony 电商应用",
-          "description": "基于 HarmonyOS ArkTS 的分布式电商应用：跨设备协同购物，多端购物车同步、商品详情流转，含首页推荐、商品详情、订单管理，展示华为云码道 730 新特性",
-          "icon": "🛍️",
-          "source": "git",
-          "source_repo": "Lingxi-HandsOn/730harmony-ecommerce",
-          "default_repo_name": "730harmony-ecommerce",
-          "tags": [
-            "harmonyos",
-            "arkts",
-            "ecommerce",
-            "distributed"
-          ],
-          "scene_id": "cloud-native",
-          "video_url": "https://weixin.qq.com/sph/AGelTzuCcf"
         }
       ]
     },
