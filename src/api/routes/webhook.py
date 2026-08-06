@@ -15,7 +15,12 @@ async def gitcode_webhook(request: Request):
     token = request.headers.get("X-GitCode-Token", "")
     event_header = request.headers.get("X-Gitcode-Event", "unknown")
 
-    log.info(f"Webhook: received event={event_header}, body_size={len(body)}, token={token[:8] if token else 'none'}...")
+    # 记录来源 IP（用于排查 GitCode webhook IP 变更后防火墙/白名单问题）
+    client_host = request.client.host if request.client else "unknown"
+    xff = request.headers.get("X-Forwarded-For", "")
+    xri = request.headers.get("X-Real-IP", "")
+    log.info(f"Webhook: from ip={client_host}, xff={xff or 'none'}, xri={xri or 'none'}, "
+             f"event={event_header}, body_size={len(body)}, token={token[:8] if token else 'none'}...")
 
     # 1. 解析事件体获取 repo 名
     try:
