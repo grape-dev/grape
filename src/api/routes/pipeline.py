@@ -15,6 +15,47 @@ STAGE_STATUS_MAP = {
 }
 
 
+def _get_latest_assignee(issue_events: list) -> str:
+    """从 issue 事件（最新在前倒序）payload 解析 assignee（GitCode 用户名）
+
+    优先 object_attributes.assignee / issue.assignee，assignee 可能为 str 或 dict{username}。
+    """
+    import json as _json
+    for e in reversed(issue_events):
+        payload = e.get("payload") or ""
+        if isinstance(payload, str):
+            try:
+                payload = _json.loads(payload)
+            except Exception:
+                payload = {}
+        if not isinstance(payload, dict):
+            continue
+        obj = payload.get("issue") or payload.get("object_attributes") or {}
+        if not isinstance(obj, dict):
+            continue
+        asg = obj.get("assignee", "")
+        if isinstance(asg, dict):
+            asg = asg.get("username", "") or asg.get("login", "")
+        if asg:
+            return asg
+    return ""
+
+
+def _resolve_feishu_name(gitcode_user: str) -> str:
+    """按 GitCode 用户名查飞书昵称（缺失回退用户名）"""
+    if not gitcode_user:
+        return ""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT feishu_name FROM unified_user_mapping WHERE gitcode_user=? AND feishu_name!='' LIMIT 1", (gitcode_user,))
+            row = c.fetchone()
+            return row[0] if row else gitcode_user
+        except Exception:
+            return gitcode_user
+
+
 def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
     """根据 issue_id 下的事件列表构建单个 Pipeline"""
     issue_events = [e for e in events if e.get("issue_id") == issue_id]
@@ -60,21 +101,25 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
 
     involved_agents = [AGENT_LABELS[i] for i, s in enumerate(stage_statuses) if s > 0]
 
-    # 当前阶段责任人：取最后一个非 pending 阶段（最新处理/正在处理的 agent）的最新 event actor
+    # 责任人：优先 Issue assignee（从事件 payload 解析，最新优先），回退 actor 推断
+    assignee = _get_latest_assignee(issue_events)
     current_owner = ""
-    for i in range(len(stage_statuses) - 1, -1, -1):
-        if stage_statuses[i] > 0:
-            agent = AGENT_ORDER[i]
-            latest = stages[i].get("latest_event") or {}
-            actor = latest.get("actor", "")
-            if actor:
-                from src.user.db import get_all_bot_usernames
-                if actor in get_all_bot_usernames():
-                    from src.api.event_pipeline import get_agent_display_name
-                    current_owner = get_agent_display_name(agent)
-                else:
-                    current_owner = actor
-            break
+    if assignee:
+        current_owner = _resolve_feishu_name(assignee)
+    else:
+        for i in range(len(stage_statuses) - 1, -1, -1):
+            if stage_statuses[i] > 0:
+                agent = AGENT_ORDER[i]
+                latest = stages[i].get("latest_event") or {}
+                actor = latest.get("actor", "")
+                if actor:
+                    from src.user.db import get_all_bot_usernames
+                    if actor in get_all_bot_usernames():
+                        from src.api.event_pipeline import get_agent_display_name
+                        current_owner = get_agent_display_name(agent)
+                    else:
+                        current_owner = actor
+                break
 
     return {
         "issue_id": issue_id,
@@ -97,7 +142,7 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, created_at, actor FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
+                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, created_at, actor, payload FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
                 (repo_key,)
             )
             rows = c.fetchall()
@@ -106,7 +151,7 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
 
     events = [
         {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
-         "status": r[6], "created_at": r[7], "actor": r[8] or ""}
+         "status": r[6], "created_at": r[7], "actor": r[8] or "", "payload": r[9] or ""}
         for r in rows
     ]
 

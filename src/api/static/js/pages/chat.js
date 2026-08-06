@@ -1,8 +1,10 @@
 let _currentConvId = null;
 let _chatAbort = null;
+let _openConvId = null;
 
-function renderChat() {
+function renderChat(openConvId) {
   _currentConvId = null;
+  _openConvId = openConvId || null;
   const el = document.getElementById('pageContent');
   if (!el) return;
   el.innerHTML = `<div class="chat-wrap" style="height:calc(100vh - 96px)">
@@ -105,9 +107,11 @@ function loadConversations(autoSelect) {
     list.querySelectorAll('.conv-item').forEach(item => {
       item.addEventListener('click', () => switchConversation(item.dataset.id));
     });
-    // Auto-select first conversation
+    // Auto-select: 优先打开任务指定的 conversation，否则第一个
     if (autoSelect && convs.length > 0 && !_currentConvId) {
-      switchConversation(convs[0].id);
+      const target = _openConvId && convs.some(c => c.id === _openConvId) ? _openConvId : convs[0].id;
+      _openConvId = null;
+      switchConversation(target);
     }
   }).catch(() => {});
 }

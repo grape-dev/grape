@@ -112,6 +112,19 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 1. `git log --oneline -20 --all` 检查 master 是否已实现
 2. 已实现 → 回复说明已实现并**关闭 Issue**；未实现 → 回复当前进展
 
+### 关闭 Issue 后刷新任务（必做）
+
+关闭 Issue 后，调用任务关闭接口，将该 Issue 的待处理任务标记为已完成（任务中心「已完成」可见，原因=Issue 已关闭）：
+
+```bash
+curl -X POST http://localhost:8080/api/tasks/close \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo_key": "'"$REPO_FULL_NAME"'",
+    "issue_number": "'"$ISSUE_NUMBER"'"
+  }'
+```
+
 ## 里程碑设置（可选）
 
 仅当 Issue 正文明确提及版本号时：`PATCH /issues/{number}` `{"milestone_id": id}`

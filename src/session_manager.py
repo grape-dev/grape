@@ -254,7 +254,7 @@ def get_history_file_list(repo_key: str, account: str = "") -> list[str]:
     return files or []
 
 
-def get_feishu_open_id(repo_key, gitcode_user):
+def get_feishu_open_id(gitcode_user):
     """获取 GitCode 用户名对应的飞书 open_id（按 gitcode_user 全局关联）"""
     with db_lock:
         c = db.cursor()

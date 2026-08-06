@@ -191,6 +191,23 @@ CREATE TABLE IF NOT EXISTS vod_conversations (
 )
 """
 
+_TASKS_DDL = """
+CREATE TABLE IF NOT EXISTS tasks (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL,
+    assignee         TEXT NOT NULL,
+    repo_key         TEXT NOT NULL,
+    issue_number     INTEGER NOT NULL,
+    title            TEXT DEFAULT '',
+    task_description TEXT DEFAULT '',
+    conversation_id  TEXT DEFAULT '',
+    status           TEXT DEFAULT 'active',
+    completed_reason TEXT DEFAULT '',
+    created_at       TEXT DEFAULT (datetime('now')),
+    completed_at     TEXT DEFAULT NULL
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("backend_agents", _BACKEND_AGENTS_DDL),
@@ -204,6 +221,7 @@ _NEW_TABLES = [
     ("skill", _SKILL_DDL),
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
+    ("tasks", _TASKS_DDL),
     ("bot_seen_messages", """
 CREATE TABLE IF NOT EXISTS bot_seen_messages (
     app_id TEXT NOT NULL,
@@ -244,6 +262,8 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_event_route_config_repo ON event_route_config(repo_key)",
         "CREATE INDEX IF NOT EXISTS idx_bot_seen_messages_app_id ON bot_seen_messages(app_id)",
         "CREATE INDEX IF NOT EXISTS idx_bot_seen_messages_seen_at ON bot_seen_messages(seen_at)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_repo_issue ON tasks(repo_key, issue_number)",
     ]
     for idx in indexes:
         try:

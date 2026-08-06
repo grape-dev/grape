@@ -10,10 +10,10 @@ from unittest.mock import patch
 from src.api.routes.pipeline import _get_issue_pipeline, AGENT_ORDER, STAGE_STATUS_MAP
 
 
-def _ev(seq, issue_id, event_type, agent_type, title, status, actor, created_at="2026-08-04 10:00:00"):
+def _ev(seq, issue_id, event_type, agent_type, title, status, actor, created_at="2026-08-04 10:00:00", payload=None):
     return {"seq": seq, "issue_id": issue_id, "event_type": event_type,
             "agent_type": agent_type, "title": title, "status": status,
-            "created_at": created_at, "actor": actor}
+            "created_at": created_at, "actor": actor, "payload": payload}
 
 
 def _mock_bots():
@@ -108,3 +108,62 @@ class TestPipeline:
         # SRE 无事件 → statuses 为 0，latest_event 为 None
         assert p["statuses"][4] == 0
         assert p["stages"][4]["latest_event"] is None
+
+    # ===== Issue assignee 责任人 =====
+
+    def test_assignee_returns_feishu_name(self):
+        """有 assignee 且有飞书映射 → 责任人 = 飞书昵称"""
+        events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
+                      payload={"object_attributes": {"assignee": "younger_eric"}})]
+        with _mock_bots()[0], _mock_bots()[1], \
+             patch("src.api.routes.pipeline._resolve_feishu_name", return_value="吴扬"):
+            p = _get_issue_pipeline("owner/repo", "#1", events)
+        assert p["current_owner"] == "吴扬"
+
+    def test_assignee_no_feishu_mapping_returns_username(self):
+        """有 assignee 无飞书映射 → 责任人 = GitCode 用户名"""
+        events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
+                      payload={"object_attributes": {"assignee": "younger_eric"}})]
+        with _mock_bots()[0], _mock_bots()[1], \
+             patch("src.api.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+            p = _get_issue_pipeline("owner/repo", "#1", events)
+        assert p["current_owner"] == "younger_eric"
+
+    def test_assignee_dict_username(self):
+        """assignee 为 dict（含 username 字段）也能解析"""
+        events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
+                      payload={"issue": {"assignee": {"username": "alice"}}})]
+        with _mock_bots()[0], _mock_bots()[1], \
+             patch("src.api.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+            p = _get_issue_pipeline("owner/repo", "#1", events)
+        assert p["current_owner"] == "alice"
+
+    def test_assignee_change_takes_latest(self):
+        """assignee 变更 → 取最新事件的 assignee"""
+        events = [
+            _ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
+                payload={"object_attributes": {"assignee": "old_owner"}}),
+            _ev(2, "#1", "issue_updated", "issue", "issue_updated", "completed", "grape_bot",
+                payload={"object_attributes": {"assignee": "new_owner"}}),
+        ]
+        with _mock_bots()[0], _mock_bots()[1], \
+             patch("src.api.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+            p = _get_issue_pipeline("owner/repo", "#1", events)
+        assert p["current_owner"] == "new_owner"
+
+    def test_assignee_json_string_payload(self):
+        """payload 为 JSON 字符串（DB 存储形态）也能解析"""
+        import json as _json
+        events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
+                      payload=_json.dumps({"object_attributes": {"assignee": "bob"}}))]
+        with _mock_bots()[0], _mock_bots()[1], \
+             patch("src.api.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+            p = _get_issue_pipeline("owner/repo", "#1", events)
+        assert p["current_owner"] == "bob"
+
+    def test_no_assignee_falls_back_to_actor(self):
+        """无 assignee → 回退现有 actor 推断（bot → Agent 名）"""
+        events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot")]
+        with _mock_bots()[0], _mock_bots()[1]:
+            p = _get_issue_pipeline("owner/repo", "#1", events)
+        assert p["current_owner"] == "Issue Agent"

@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','backends','event','repos','skill'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','backends','event','repos','skill','tasks'];
 
   function currentRepo() {
     try { return JSON.parse(localStorage.getItem('currentRepo')); } catch { return null; }
@@ -146,7 +146,7 @@ function loadAgentTypes() {
   let _refreshTimer = null;
   function nav(view, param) {
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks') { loadRepos(); return; }
 
     document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));
     const navEl = $('nav-' + view);
@@ -190,7 +190,10 @@ function loadAgentTypes() {
       API.get('/events/detail/' + param).then(renderEventDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (view === 'chat') {
       title.textContent = 'Chat Agent';
-      renderChat();
+      renderChat(param || null);
+    } else if (view === 'tasks') {
+      title.textContent = '任务中心';
+      renderTasks();
     } else if (view === 'settings') {
       title.textContent = 'General Settings';
       renderSettings(param || 'credentials');

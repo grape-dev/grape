@@ -143,12 +143,12 @@ class TestFeishuUsers:
     def test_set_and_get_open_id(self, tmp_path):
         sm = _import_session_manager(tmp_path)
         sm.set_feishu_open_id("gitcode:owner/repo", "user1", "ou_12345", "张三")
-        oid = sm.get_feishu_open_id("gitcode:owner/repo", "user1")
+        oid = sm.get_feishu_open_id("user1")
         assert oid == "ou_12345"
 
     def test_get_non_existent(self, tmp_path):
         sm = _import_session_manager(tmp_path)
-        oid = sm.get_feishu_open_id("gitcode:other/repo", "nobody")
+        oid = sm.get_feishu_open_id("nobody")
         assert oid is None
 
     def test_get_mapping_all(self, tmp_path):
@@ -173,7 +173,7 @@ class TestFeishuUsers:
         sm = _import_session_manager(tmp_path)
         sm.set_feishu_open_id("gitcode:owner/repo", "user1", "ou_old", "旧名")
         sm.set_feishu_open_id("gitcode:owner/repo", "user1", "ou_new", "新名")
-        oid = sm.get_feishu_open_id("gitcode:owner/repo", "user1")
+        oid = sm.get_feishu_open_id("user1")
         assert oid == "ou_new"
 
     def test_group_name_map(self, tmp_path):
