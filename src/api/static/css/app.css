@@ -161,3 +161,65 @@
 .tmpl-card-foot{gap:8px}
 .tmpl-btn-video{background:rgba(0,0,0,.05);color:var(--t2);box-shadow:none}
 .tmpl-btn-video:hover{background:var(--b);color:var(--t)}
+
+/* ===== Task Center (方案 B: 列表工作流风) ===== */
+.tsk-page{max-width:1120px;margin:0 auto;padding:36px 24px 56px;position:relative}
+.tsk-top{display:flex;align-items:center;gap:12px;margin-bottom:26px;flex-wrap:wrap}
+.tsk-eyebrow{display:flex;align-items:center;gap:10px;font-size:10px;letter-spacing:3px;text-transform:uppercase;color:var(--a);font-weight:700}
+.tsk-eyebrow i{width:26px;height:1px;background:linear-gradient(90deg,transparent,var(--a))}
+.tsk-top h1{font-size:22px;font-weight:700;letter-spacing:-.5px;color:var(--t)}
+.tsk-repo{font-size:12px;color:var(--t3);padding:5px 12px;border-radius:20px;background:var(--c);border:1px solid var(--b)}
+.tsk-controls{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.tsk-tab{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--b);background:var(--c);color:var(--t2);transition:all .2s}
+.tsk-tab:hover{border-color:#b9cdf7;color:var(--a)}
+.tsk-tab-act{background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;border-color:transparent;box-shadow:0 4px 14px rgba(49,104,224,.3)}
+.tsk-tab-act:hover{color:#fff}
+.tsk-tab-cnt{font-size:10px;background:rgba(0,0,0,.06);padding:1px 7px;border-radius:8px}
+.tsk-tab-act .tsk-tab-cnt{background:rgba(255,255,255,.2);color:#fff}
+.tsk-search{display:inline-flex;align-items:center;gap:7px;padding:7px 12px;border-radius:20px;border:1px solid var(--b);background:var(--c)}
+.tsk-search input{border:none;outline:none;font-size:12px;width:130px;background:transparent;color:var(--t)}
+.tsk-layout{display:grid;grid-template-columns:1fr 340px;gap:20px;align-items:start}
+.tsk-list{background:var(--c);border:1px solid var(--b);border-radius:16px;overflow:hidden;box-shadow:0 1px 3px rgba(16,23,36,.04)}
+.tsk-list-sec{padding:14px 18px 6px;font-size:11px;font-weight:600;color:var(--t3);letter-spacing:1px;text-transform:uppercase;display:flex;align-items:center;justify-content:space-between}
+.tsk-sec-n{color:var(--a)}
+.tsk-row{display:flex;align-items:center;gap:12px;padding:14px 18px;border-top:1px solid var(--b);cursor:pointer;transition:all .18s;position:relative}
+.tsk-list .tsk-list-sec:first-child ~ .tsk-row{border-top:none}
+.tsk-row:first-of-type{border-top:none}
+.tsk-row:hover{background:#f7f9ff}
+.tsk-row-sel{background:#f0f5ff}
+.tsk-row::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:transparent;transition:background .18s}
+.tsk-row-sel::before{background:var(--a)}
+.tsk-r-ic{width:36px;height:36px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0}
+.tsk-ic-p{background:linear-gradient(135deg,#fef0e4,#fde8f0);color:var(--or);box-shadow:inset 0 0 0 1px rgba(234,90,12,.12)}
+.tsk-ic-d{background:linear-gradient(135deg,#e7f9ee,#e3edfd);color:var(--g);box-shadow:inset 0 0 0 1px rgba(28,164,76,.12)}
+.tsk-r-main{flex:1;min-width:0}
+.tsk-r-title{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--t)}
+.tsk-row-sel .tsk-r-title{color:var(--a)}
+.tsk-r-meta{font-size:11px;color:var(--t3);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tsk-tag{font-size:10.5px;padding:3px 10px;border-radius:16px;font-weight:600;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.tsk-tag-p{background:rgba(234,90,12,.08);color:#c2410c}
+.tsk-tag-p b{width:5px;height:5px;border-radius:50%;background:var(--or);display:inline-block}
+.tsk-tag-d{background:rgba(28,164,76,.08);color:#1a9c52}
+.tsk-tag-d b{width:5px;height:5px;border-radius:50%;background:var(--g);display:inline-block}
+.tsk-empty{text-align:center;padding:48px 20px;color:var(--t2)}
+.tsk-empty div{font-size:36px;margin-bottom:10px;opacity:.55}
+.tsk-empty h3{font-size:14px;font-weight:600;color:var(--t);margin-bottom:6px}
+.tsk-empty p{font-size:12px}
+.tsk-detail{background:var(--c);border:1px solid var(--b);border-radius:16px;padding:22px;position:sticky;top:20px;box-shadow:0 8px 24px rgba(16,23,36,.05)}
+.tsk-det-ic{width:52px;height:52px;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;margin-bottom:14px}
+.tsk-det-ic-p{background:linear-gradient(135deg,#fef0e4,#fde8f0);color:var(--or);box-shadow:inset 0 0 0 1px rgba(234,90,12,.12)}
+.tsk-det-ic-d{background:linear-gradient(135deg,#e7f9ee,#e3edfd);color:var(--g);box-shadow:inset 0 0 0 1px rgba(28,164,76,.12)}
+.tsk-det-label{font-size:10px;color:var(--t3);letter-spacing:1.5px;text-transform:uppercase;font-weight:600;margin-bottom:4px}
+.tsk-det-title{font-size:19px;font-weight:700;letter-spacing:-.4px;margin-bottom:8px;color:var(--t);line-height:1.4}
+.tsk-det-meta{display:flex;flex-direction:column;gap:8px;font-size:12px;padding:14px 0;border-top:1px solid var(--b);border-bottom:1px solid var(--b);margin-bottom:12px}
+.tsk-m{display:flex;justify-content:space-between;align-items:center}
+.tsk-m span:first-child{color:var(--t3)}
+.tsk-m b{font-weight:600;color:var(--t)}
+.tsk-det-desc{font-size:13px;color:var(--t2);line-height:1.7;margin-bottom:18px}
+.tsk-det-actions{display:flex;gap:8px;flex-direction:column}
+.tsk-btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:11px 16px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;border:none}
+.tsk-btn-primary{background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;box-shadow:0 6px 16px rgba(49,104,224,.3)}
+.tsk-btn-primary:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(49,104,224,.4)}
+.tsk-btn-ghost{background:var(--c);border:1px solid var(--b);color:var(--t2)}
+.tsk-btn-ghost:hover{border-color:var(--a);color:var(--a);background:#f4f7ff}
+@media(max-width:860px){.tsk-layout{grid-template-columns:1fr}.tsk-detail{position:static}.tsk-controls{margin-left:0;width:100%}.tsk-search{flex:1}.tsk-search input{flex:1}}

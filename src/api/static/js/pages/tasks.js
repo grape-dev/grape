@@ -1,5 +1,9 @@
 // ====== 任务中心（Account ▸ 任务中心）======
-let _tasksTab = 'active';
+// 方案 B：列表工作流风（左列表 + 右详情面板）
+let _tasksTab = 'all';        // all / active / completed
+let _tasksAll = [];           // 全部任务缓存
+let _taskSel = null;          // 选中的任务
+let _taskQuery = '';          // 搜索关键字
 
 function renderTasks() {
   const el = document.getElementById('pageContent');
@@ -13,43 +17,127 @@ function loadTasks() {
   if (!el) return;
   const repo = app.currentRepo();
   const repoKey = repo ? repo.fullName : '';
-  API.get('/tasks/mine?status=' + _tasksTab + '&repo_key=' + encodeURIComponent(repoKey)).then(d => {
-    const tasks = d.tasks || [];
-    const tab = t => `<button class="pttab ${_tasksTab === t ? 'pttab-act' : ''}" onclick="_tasksTab='${t}';loadTasks()">${t === 'active' ? '● 待处理' : '✓ 已完成'}</button>`;
-    let html = `<div style="max-width:900px;margin:0 auto">
-      <div style="margin-bottom:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <h2 style="font-size:16px;font-weight:600;margin-right:12px">任务中心</h2>
-        ${tab('active')}${tab('completed')}
-        ${repoKey ? `<span class="ts t3" style="margin-left:auto">📦 ${repoKey}</span>` : ''}
-      </div>`;
-    if (tasks.length === 0) {
-      html += '<div class="ts t2" style="padding:40px 0;text-align:center">暂无' + (_tasksTab === 'active' ? '待处理' : '已完成') + '任务</div>';
-    } else {
-      html += tasks.map(t => {
-        const statusTag = t.status === 'active'
-          ? '<span class="tg tg-s">● 待处理</span>'
-          : '<span class="tg tg-d">✓ 已完成 · ' + (t.completed_reason === 'issue_closed' ? 'Issue 已关闭' : t.completed_reason === 'reassigned' ? '已转派' : t.completed_reason || '') + '</span>';
-        return `<div class="cd" style="padding:14px 16px;margin-bottom:10px">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-            <span style="font-size:14px">📋</span>
-            <b style="font-size:13px">Issue #${t.issue_number} · ${t.repo_key}</b>
-            <span style="margin-left:auto">${statusTag}</span>
-          </div>
-          <div style="font-size:12px;font-weight:500;margin-bottom:4px">${t.title || ''}</div>
-          <div class="ts t2" style="margin-bottom:8px">${t.task_description || ''}</div>
-          <div class="ts t3">⏱ ${fmtLocalTime(t.created_at).substring(0,16)}</div>
-          <div style="display:flex;gap:8px;margin-top:10px">
-            <button class="bt bt-p bt-s" onclick="openTaskConversation('${t.conversation_id || ''}')">去对话</button>
-            <button class="bt bt-o bt-s" onclick="window.open('https://gitcode.com/${t.repo_key}/issues/${t.issue_number}','_blank')">查看 Issue ↗</button>
-          </div>
-        </div>`;
-      }).join('');
-    }
-    html += '</div>';
-    el.innerHTML = html;
+  // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
+  API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey)).then(d => {
+    _tasksAll = d.tasks || [];
+    if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
+    _render();
   }).catch(e => {
     el.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
   });
+}
+
+function _filteredTasks() {
+  let list = _tasksAll;
+  if (_tasksTab === 'active') list = list.filter(t => t.status === 'active');
+  else if (_tasksTab === 'completed') list = list.filter(t => t.status === 'completed');
+  if (_taskQuery) {
+    const q = _taskQuery.toLowerCase();
+    list = list.filter(t =>
+      (t.title || '').toLowerCase().includes(q) ||
+      (t.task_description || '').toLowerCase().includes(q) ||
+      String(t.issue_number).includes(q) ||
+      (t.repo_key || '').toLowerCase().includes(q)
+    );
+  }
+  return list;
+}
+
+function _render() {
+  const el = document.getElementById('pageContent');
+  if (!el) return;
+  const repo = app.currentRepo();
+  const repoKey = repo ? repo.fullName : '';
+  const filtered = _filteredTasks();
+  const cntAll = _tasksAll.length;
+  const cntActive = _tasksAll.filter(t => t.status === 'active').length;
+  const cntDone = _tasksAll.filter(t => t.status === 'completed').length;
+
+  const tab = (key, label, cnt) => {
+    const act = _tasksTab === key ? ' tsk-tab-act' : '';
+    return `<button class="tsk-tab${act}" onclick="_tasksTab='${key}';_render()">${label} <span class="tsk-tab-cnt">${cnt}</span></button>`;
+  };
+
+  // 分组列表（待处理在前，已完成在后）
+  const activeRows = filtered.filter(t => t.status === 'active');
+  const doneRows = filtered.filter(t => t.status === 'completed');
+
+  const rowHtml = (t) => {
+    const isP = t.status === 'active';
+    const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
+    const rIc = isP ? 'tsk-ic-p' : 'tsk-ic-d';
+    const icon = isP ? '#' : '✓';
+    const tagCls = isP ? 'tsk-tag-p' : 'tsk-tag-d';
+    const tagText = isP ? '<b></b>待处理' : '<b></b>已完成';
+    return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()">
+      <div class="tsk-r-ic ${rIc}">${icon}</div>
+      <div class="tsk-r-main">
+        <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
+        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key}</div>
+      </div>
+      <span class="tsk-tag ${tagCls}">${tagText}</span>
+    </div>`;
+  };
+
+  let listHtml = '';
+  if (activeRows.length > 0) {
+    listHtml += `<div class="tsk-list-sec">待处理 <span class="tsk-sec-n">${activeRows.length}</span></div>` +
+      activeRows.map(rowHtml).join('');
+  }
+  if (doneRows.length > 0) {
+    listHtml += `<div class="tsk-list-sec">已完成 <span class="tsk-sec-n">${doneRows.length}</span></div>` +
+      doneRows.map(rowHtml).join('');
+  }
+  if (!listHtml) {
+    listHtml = `<div class="tsk-empty"><div>🗒</div><h3>暂无任务</h3><p>当前筛选下没有匹配的任务。</p></div>`;
+  }
+
+  // 详情面板
+  const detailHtml = _taskSel ? _detailHtml(_taskSel) : '<div class="tsk-empty" style="border:none"><div>🗒</div><h3>选择一项任务</h3><p>从左侧列表选择任务查看详情。</p></div>';
+
+  el.innerHTML = `
+  <div class="tsk-page">
+    <div class="tsk-top">
+      <div class="tsk-eyebrow"><i></i>TASK CENTER</div>
+      <h1>任务中心</h1>
+      ${repoKey ? `<span class="tsk-repo">📦 ${repoKey}</span>` : ''}
+      <div class="tsk-controls">
+        ${tab('all', '全部', cntAll)}${tab('active', '待处理', cntActive)}${tab('completed', '已完成', cntDone)}
+        <div class="tsk-search"><span>🔍</span><input placeholder="搜索任务..." value="${_taskQuery}" oninput="_taskQuery=this.value;if(_taskQuery.length>1||!_taskQuery){_render()}" onkeyup="if(event.key==='Enter')_render()"></div>
+      </div>
+    </div>
+    <div class="tsk-layout">
+      <div class="tsk-list">${listHtml}</div>
+      <div class="tsk-detail">${detailHtml}</div>
+    </div>
+  </div>`;
+
+  // 建立 id → task 映射供行点击
+  window._tasksById = {};
+  _tasksAll.forEach(t => { window._tasksById[t.id] = t; });
+}
+
+function _detailHtml(t) {
+  const isP = t.status === 'active';
+  const tagCls = isP ? 'tsk-tag-p' : 'tsk-tag-d';
+  const tagText = isP ? '● 待处理' : '✓ 已完成 · ' + (t.completed_reason === 'issue_closed' ? 'Issue 已关闭' : t.completed_reason === 'reassigned' ? '已转派' : t.completed_reason || '');
+  const detIc = isP ? 'tsk-det-ic-p' : 'tsk-det-ic-d';
+  const icon = isP ? '#' : '✓';
+  return `
+    <div class="tsk-det-ic ${detIc}">${icon}</div>
+    <div class="tsk-det-label">Issue #${t.issue_number}</div>
+    <div class="tsk-det-title">${t.title || ''}</div>
+    <div class="tsk-det-meta">
+      <div class="tsk-m"><span>状态</span><b class="${tagCls}">${tagText}</b></div>
+      <div class="tsk-m"><span>仓库</span><b>${t.repo_key}</b></div>
+      <div class="tsk-m"><span>创建时间</span><b>${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
+      ${t.completed_at ? `<div class="tsk-m"><span>完成时间</span><b>${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
+    </div>
+    <div class="tsk-det-desc">${t.task_description || '暂无任务描述。'}</div>
+    <div class="tsk-det-actions">
+      <button class="tsk-btn tsk-btn-primary" onclick="openTaskConversation('${t.conversation_id || ''}')">去对话</button>
+      <button class="tsk-btn tsk-btn-ghost" onclick="window.open('https://gitcode.com/${t.repo_key}/issues/${t.issue_number}','_blank')">查看 Issue ↗</button>
+    </div>`;
 }
 
 function openTaskConversation(convId) {
