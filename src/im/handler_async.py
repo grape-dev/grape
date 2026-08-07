@@ -3,7 +3,8 @@
 核心改造:
   - process_chat_async: 接收 (BotContext, parsed) 替代全局函数调用
   - 所有飞书API调用通过 ctx + api 实例方法，按Bot身份隔离
-  - 保持与 handler.py 相同的业务逻辑（命令/绑定/Agent执行）
+  - 纯逻辑（bind/clean 意图、repo 解析、用户归属）内联本模块，无同步 HTTP；
+    IO 型命令（/bind、/refresh 的群成员↔协作者映射同步）走 await api 异步方法。
 """
 import re, os, asyncio
 from datetime import datetime
@@ -13,10 +14,6 @@ from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import get_or_create_session, update_session, db
 from src.prompt_builder import build_chat_prompt, get_skill_capabilities
 from src.agent.executor import consume_stream_async
-from src.im.feishu import (
-    resolve_repo, process_command, detect_bind_intent, detect_clean_intent,
-    get_chat_members, sync_repo_feishu_mapping,
-)
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
 
 if TYPE_CHECKING:
@@ -31,6 +28,192 @@ _CONFIRM_RE = re.compile(r'^(?:是|对|确认|确定|是的|对的|没错|对的
 _DENY_RE = re.compile(r'^(?:不是|不对|否|错|不要|取消|no|n)\s*$', re.IGNORECASE)
 
 _PENDING_TTL = 120  # 秒，待确认有效期
+
+# ===== 纯逻辑函数（无网络 IO，仅 SQLite 快查询） =====
+
+_BIND_PATTERNS = [
+    re.compile(r'(?:绑定|连接|关联|设置|使用|切换到|帮我绑定)\s*(?:到)?\s*([\w.-]+/[\w.-]+)'),
+    re.compile(r'(?:把|将|让)\s*([\w.-]+/[\w.-]+)\s*(?:绑定|连上|设置)'),
+]
+
+_CLEAN_PATTERNS = [
+    r'(?:清除|清理|清空|重置)(?:会话|缓存|上下文|Agent|agent|记忆)',
+    r'(?:重来|从头开始)(?:吧|一下)?',
+]
+
+
+def detect_bind_intent(text: str) -> str:
+    """自然语言绑定检测：用户说'绑定到 owner/repo' 等，返回 repo_key 或空"""
+    for pat in _BIND_PATTERNS:
+        m = pat.search(text)
+        if m:
+            repo = m.group(1)
+            log.info(f"Feishu: detected bind intent -> {repo}")
+            return repo
+    return ""
+
+
+def detect_clean_intent(text: str) -> bool:
+    """自然语言清理检测：用户说'清除会话缓存'等"""
+    for pat in _CLEAN_PATTERNS:
+        if re.search(pat, text):
+            log.info("Feishu: detected clean intent")
+            return True
+    return False
+
+
+def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "") -> str:
+    # 1. 自然语言绑定检测
+    bind_repo = detect_bind_intent(text)
+    if bind_repo:
+        return bind_repo
+    # 2. 消息中显式匹配 owner/repo
+    m = re.search(r'[\w.-]+/[\w.-]+', text)
+    if m:
+        return m.group(0)
+    # 3. 查询群绑定表（repo_key 带前缀）
+    try:
+        c = db.cursor()
+        c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
+        row = c.fetchone()
+        if row:
+            return row[0]
+    except Exception as e:
+        log.warning(f"Feishu: resolve_repo db error: {e}")
+    return ""
+
+
+def get_user_id_by_app_id(app_id: str) -> int | None:
+    """通过 im_app_id 查找关联的 user_id"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT user_id FROM chat_agent_session WHERE im_app_id=? AND user_id>0 LIMIT 1", (app_id,))
+            row = c.fetchone()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+    return None
+
+
+async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
+                                text: str, chat_id: str, sender_id: str, db,
+                                account: str = "") -> str:
+    """异步命令处理。纯 DB 命令保持同步（SQLite 毫秒级）；含网络 IO 的
+    /bind、/refresh 走 await api.sync_repo_feishu_mapping，不阻塞事件循环。
+    """
+    text = text.strip()
+    parts = text.split()
+    if not parts:
+        return ""
+    cmd = parts[0].lower()
+    if cmd == "/bind" and len(parts) >= 2:
+        from src.repo_key import to_repo_key
+        repo_key = to_repo_key(parts[1])
+        try:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
+                (chat_id, repo_key, "gitcode", sender_id, account)
+            )
+            db.commit()
+            matched = await api.sync_repo_feishu_mapping(ctx, repo_key, chat_id)
+            if matched > 0:
+                return f"✅ 已绑定 `{repo_key}`，同步了 {matched} 个用户映射"
+            return f"✅ 已绑定当前群到 `{repo_key}`"
+        except Exception as e:
+            return f"❌ 绑定失败: {e}"
+    if cmd == "/unbind":
+        try:
+            c = db.cursor()
+            c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
+            db.commit()
+            return "✅ 已解绑当前群"
+        except Exception as e:
+            return f"❌ 解绑失败: {e}"
+    if cmd == "/status":
+        try:
+            c = db.cursor()
+            c.execute("SELECT repo_key, created_at FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
+            row = c.fetchone()
+            if row:
+                return f"📋 当前绑定: `{row[0]}` (since {row[1]})"
+            return "📋 未绑定任何仓库。使用 `/bind owner/repo` 绑定"
+        except Exception as e:
+            return f"❌ 查询失败: {e}"
+    if cmd == "/refresh":
+        try:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
+            row = c.fetchone()
+            if not row:
+                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后刷新。"
+            matched = await api.sync_repo_feishu_mapping(ctx, row[0], chat_id)
+            return f"✅ 已刷新，同步了 {matched} 个用户映射"
+        except Exception as e:
+            return f"❌ 刷新失败: {e}"
+    if cmd == "/autodev":
+        try:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
+            row = c.fetchone()
+            if not row:
+                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后设置。"
+            repo_key = row[0]
+            from src.session_manager import set_auto_impl_enabled, get_auto_impl_enabled
+            if len(parts) >= 2 and parts[1].lower() in ("on", "off"):
+                enabled = parts[1].lower() == "on"
+                set_auto_impl_enabled(repo_key, enabled)
+                return f"✅ 仓库 `{repo_key}` 自动实现已{'开启' if enabled else '关闭'}"
+            current = get_auto_impl_enabled(repo_key)
+            return f"📋 仓库 `{repo_key}` 自动实现：{'✅ 开启' if current else '❌ 关闭'}"
+        except Exception as e:
+            return f"❌ 设置失败: {e}"
+    if cmd == "/notify":
+        try:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
+            row = c.fetchone()
+            if not row:
+                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后设置。"
+            repo_key = row[0]
+            from src.session_manager import set_notify_enabled, get_notify_enabled
+            if len(parts) >= 2 and parts[1].lower() in ("on", "off"):
+                enabled = parts[1].lower() == "on"
+                set_notify_enabled(repo_key, enabled)
+                return f"✅ 仓库 `{repo_key}` 飞书通知已{'开启' if enabled else '关闭'}"
+            current = get_notify_enabled(repo_key)
+            return f"📋 仓库 `{repo_key}` 飞书通知：{'✅ 开启' if current else '❌ 关闭'}"
+        except Exception as e:
+            return f"❌ 设置失败: {e}"
+    if cmd in ("/clean", "/cleansession", "/reset", "/cleancache"):
+        try:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
+            row = c.fetchone()
+            if not row:
+                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后再清理。"
+            repo_key = row[0]
+            from src.repo_key import to_repo_key, from_repo_key
+            full_key = to_repo_key(repo_key)
+            legacy_key = from_repo_key(repo_key)
+            c.execute("UPDATE chat_agent_session SET backend_session_id='', backend='' WHERE repo_key=? OR repo_key=?", (full_key, legacy_key))
+            db.commit()
+            return f"✅ 已清除仓库 `{full_key}` 的 Agent 会话缓存。下次事件将使用全新的 Agent 上下文。"
+        except Exception as e:
+            return f"❌ 清理失败: {e}"
+    if cmd in ("/help", "/start"):
+        return (
+            f"🤖 DevOps Bot\n\n"
+            f"**命令**:\n  `/bind owner/repo`  — 绑定当前群到仓库\n"
+            f"  `/unbind`           — 解绑并清除用户映射\n  `/status`           — 查看绑定\n  `/refresh`          — 刷新用户映射\n"
+            f"  `/autodev on/off`   — 自动实现开关\n  `/notify on/off`    — 飞书通知开关\n  `/clean`            — 清除 Agent 会话缓存\n"
+            f"  `/help`             — 帮助\n\n"
+            f"**直接提问**:\n  输入问题即可查询仓库状态"
+        )
+    return ""
 
 
 async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict):
@@ -52,7 +235,6 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         chat_type = parsed.get("chat_type", "")
         if sender_open_id and chat_type == "p2p":
             try:
-                from src.im.feishu import get_user_id_by_app_id
                 from src.user import db as user_db
                 from src.session_manager import set_feishu_open_id, get_feishu_open_id
                 uid = get_user_id_by_app_id(ctx.app_id)
@@ -114,13 +296,13 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
             return
 
         if detect_clean_intent(text):
-            result = process_command("/clean", chat_id, parsed.get("sender_id", ""), db, account)
+            result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account)
             if result:
                 await api.reply_text(ctx, msg_id, result)
             return
 
         if text.startswith("/"):
-            result = process_command(text, chat_id, parsed.get("sender_id", ""), db, account)
+            result = await process_command_async(ctx, api, text, chat_id, parsed.get("sender_id", ""), db, account)
             if result:
                 await api.reply_text(ctx, msg_id, result)
             return
@@ -136,7 +318,6 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 row = c.fetchone()
                 if row:
                     app_id = row[0]
-                    from src.im.feishu import get_user_id_by_app_id
                     user_id = get_user_id_by_app_id(app_id)
                 if user_id:
                     from src.user import db as user_db
@@ -172,7 +353,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         bind_repo = detect_bind_intent(text)
         if bind_repo:
-            result = process_command(f"/bind {bind_repo}", chat_id, parsed.get("sender_id", ""), db, account)
+            result = await process_command_async(ctx, api, f"/bind {bind_repo}", chat_id, parsed.get("sender_id", ""), db, account)
             await api.reply_text(ctx, msg_id, result)
             return
 
@@ -250,7 +431,6 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         # 获取 IM 用户 token（chat_conversations 持久化，幂等创建）
         user_token = ""
         try:
-            from src.im.feishu import get_user_id_by_app_id
             from src.user.db import get_user_gitcode_token
             from src.session_manager import create_conversation, get_conversation_by_im, update_conversation
             user_id = get_user_id_by_app_id(ctx.app_id) or 0

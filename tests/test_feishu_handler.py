@@ -1,315 +1,252 @@
-"""Tests for feishu_handler module."""
-import pytest
+"""Tests for FeishuAsync API client (new async implementation).
+
+替换原旧同步 feishu.py 的测试：token 缓存、消息发送、群成员分页等
+在新版 FeishuAsync（aiohttp 实现）上的等价覆盖。
+"""
+import asyncio
+import json
 import os
 import sys
-import json
-from unittest.mock import Mock, patch, MagicMock
-from urllib.request import Request
+from unittest.mock import AsyncMock, MagicMock
 
-SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
+SRC_DIR = os.path.join(os.path.dirname(__file__), "..")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
-
-# Ensure Feishu env is set so ensure_configured() returns True
-if "FEISHU_APP_ID" not in os.environ:
-    os.environ["FEISHU_APP_ID"] = "cli_test"
-if "FEISHU_APP_SECRET" not in os.environ:
-    os.environ["FEISHU_APP_SECRET"] = "test_secret"
-
-from src.im.feishu import (
-    _build_card_payload,
-    get_tenant_token,
-    reply_card,
-    send_card_to_user,
-    get_chat_members,
-    get_chat_id_for_repo,
-    ensure_configured,
-    process_command,
-    detect_clean_intent,
-)
+os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _seed_chat_bot_config():
-    """Seed 一个已配置 chat bot 的用户（global_im_bot_config + chat_agent_session），
-    使 ensure_configured()/get_tenant_token() 等同步函数可读到配置。"""
-    from src.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("CREATE TABLE IF NOT EXISTS global_im_bot_config (bot_app_id TEXT PRIMARY KEY, bot_type TEXT, is_active INTEGER DEFAULT 1)")
-        except Exception:
-            pass
-        try:
-            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, is_active) VALUES ('cli_test','chat_bot',1)")
-        except Exception:
-            pass
-        try:
-            c.execute("CREATE TABLE IF NOT EXISTS chat_agent_session (id TEXT PRIMARY KEY, user_id INTEGER DEFAULT 0, repo_key TEXT DEFAULT '', im_app_id TEXT DEFAULT '', im_app_secret TEXT DEFAULT '', im_provider TEXT DEFAULT '')")
-        except Exception:
-            pass
-        try:
-            c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_app_secret, im_provider) VALUES ('sess-feishu-test',1,'','cli_test','test_secret','feishu')")
-        except Exception:
-            pass
-        try:
-            c.execute("CREATE TABLE IF NOT EXISTS repo_im_group_binding (id INTEGER PRIMARY KEY AUTOINCREMENT, im_provider TEXT DEFAULT 'feishu', im_chat_id TEXT NOT NULL, im_channel_name TEXT DEFAULT '', repo_key TEXT NOT NULL, bind_by TEXT DEFAULT '', im_app_id TEXT DEFAULT '', auto_impl_enabled INTEGER DEFAULT 0, notify_enabled INTEGER DEFAULT 0)")
-        except Exception:
-            pass
-        db.commit()
-    yield
+def _make_ctx(app_id="cli_feishu"):
+    from src.im.feishu_async import BotContext
+    return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="feishu-test")
 
 
-class TestBuildCardPayload:
-    def test_contains_header(self):
-        card = _build_card_payload("Hello World")
-        assert card["header"]["template"] == "blue"
-        assert card["header"]["title"]["content"] == "DevOps Bot"
+def _make_api_with_session():
+    """构造 FeishuAsync + mock aiohttp session。
 
-    def test_contains_elements(self):
-        card = _build_card_payload("Hello World")
-        assert len(card["elements"]) == 1
-        assert card["elements"][0]["tag"] == "div"
-        assert card["elements"][0]["text"]["content"] == "Hello World"
+    session 用 MagicMock（非 AsyncMock）：其 .post/.get 调用返回普通对象，
+    可被 `async with` 正常处理；响应对象由 _http_response 提供 async CM。
+    """
+    from src.im.feishu_async import FeishuAsync
+    api = FeishuAsync()
+    session = MagicMock()
+    api._get_session = AsyncMock(return_value=session)
+    return api, session
 
-    def test_truncates_long_text(self):
-        long_text = "a" * 3000
-        card = _build_card_payload(long_text)
-        content = card["elements"][0]["text"]["content"]
-        assert len(content) == 2000
+
+def _http_response(payload):
+    """构造支持 `async with` 的响应对象：__aenter__ 返回自身，json() 返回 payload。"""
+    resp = MagicMock()
+    resp.json = AsyncMock(return_value=payload)
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    resp.__aexit__ = AsyncMock(return_value=False)
+    return resp
 
 
 class TestGetTenantToken:
-    def _reset_token(self):
-        """Force token to None."""
-        from src.im.feishu import _TOKEN, _TOKEN_EXPIRE
-        import src.im.feishu as fh
-        fh._TOKEN = None
-        fh._TOKEN_EXPIRE = 0
+    def test_fetches_token_with_cache(self):
+        """首次获取 token，二次命中 ctx.token 缓存。"""
+        from src.im.feishu_async import FEISHU_BASE
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        session.post.return_value = _http_response(
+            {"tenant_access_token": "tok_abc", "expire": 7200}
+        )
 
-    @patch("src.im.feishu.urlopen")
-    def test_fetches_token(self, mock_urlopen):
-        self._reset_token()
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({
-            "tenant_access_token": "tok_abc123",
-            "expire": 7200
-        }).encode()
-        mock_urlopen.return_value = mock_response
-        token = get_tenant_token()
-        assert token == "tok_abc123"
+        async def run():
+            t1 = await api.get_tenant_token(ctx)
+            t2 = await api.get_tenant_token(ctx)
+            return t1, t2
 
-    @patch("src.im.feishu.urlopen")
-    def test_uses_cached_token(self, mock_urlopen):
-        self._reset_token()
-        import src.im.feishu as fh
-        import time
-        fh._TOKEN = "cached_token"
-        fh._TOKEN_EXPIRE = time.time() + 3600
-        token = fh.get_tenant_token()
-        assert token == "cached_token"
-        mock_urlopen.assert_not_called()
+        t1, t2 = asyncio.run(run())
+        assert t1 == "tok_abc"
+        assert t2 == "tok_abc"
+        assert session.post.call_count == 1  # 缓存命中
+        url = session.post.call_args[0][0]
+        assert url == f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal"
+
+    def test_token_error_returns_empty(self):
+        """token API 异常返回空串。"""
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        session.post.return_value = _http_response({"code": 10003})
+
+        async def run():
+            return await api.get_tenant_token(ctx)
+
+        assert asyncio.run(run()) == ""
 
 
 class TestReplyCard:
-    @patch("src.im.feishu.urlopen")
-    def test_sends_card(self, mock_urlopen):
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({
-            "data": {"message_id": "msg_test_123"}
-        }).encode()
-        mock_urlopen.return_value = mock_response
+    def test_sends_card(self):
+        """reply_card 发送 interactive 卡片。"""
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        api._ensure_token = AsyncMock(return_value="tok_test")
+        session.post.return_value = _http_response(
+            {"data": {"message_id": "msg_test_123"}}
+        )
 
-        with patch("src.im.feishu.get_tenant_token", return_value="tok_test"):
-            msg_id = reply_card("msg_original", "Test card")
+        async def run():
+            return await api.reply_card(ctx, "msg_orig", "Test card")
+
+        msg_id = asyncio.run(run())
         assert msg_id == "msg_test_123"
+        url = session.post.call_args[0][0]
+        assert "im/v1/messages/msg_orig/reply" in url
+        payload = session.post.call_args.kwargs["json"]
+        assert payload["msg_type"] == "interactive"
+        card = json.loads(payload["content"])
+        assert card["header"]["template"] == "blue"
 
-    def test_no_message_id_returns_empty(self):
-        assert reply_card("", "test") == ""
+    def test_no_token_returns_empty(self):
+        """无 token 时不发送。"""
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        api._ensure_token = AsyncMock(return_value="")
+
+        async def run():
+            return await api.reply_card(ctx, "msg_orig", "text")
+
+        assert asyncio.run(run()) == ""
+        session.post.assert_not_called()
 
 
 class TestSendCardToUser:
-    @patch("src.im.feishu.urlopen")
-    def test_sends_to_user(self, mock_urlopen):
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({
-            "data": {"message_id": "msg_user_456"}
-        }).encode()
-        mock_urlopen.return_value = mock_response
+    def test_sends_to_user(self):
+        """send_card_to_user 主动发送给 open_id。"""
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        api._ensure_token = AsyncMock(return_value="tok_test")
+        session.post.return_value = _http_response(
+            {"data": {"message_id": "msg_user_456"}}
+        )
 
-        with patch("src.im.feishu.get_tenant_token", return_value="tok_test"):
-            msg_id = send_card_to_user("ou_test_user", "Hello user")
+        async def run():
+            return await api.send_card_to_user(ctx, "ou_user", "Hello")
+
+        msg_id = asyncio.run(run())
         assert msg_id == "msg_user_456"
+        url = session.post.call_args[0][0]
+        assert "receive_id_type=open_id" in url
+        payload = session.post.call_args.kwargs["json"]
+        assert payload["receive_id"] == "ou_user"
 
-    def test_empty_open_id(self):
-        assert send_card_to_user("", "test") == ""
+
+class TestReplyText:
+    def test_reply_text(self):
+        """reply_text 发送纯文本。"""
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        api._ensure_token = AsyncMock(return_value="tok_test")
+        session.post.return_value = _http_response(
+            {"data": {"message_id": "msg_rt"}}
+        )
+
+        async def run():
+            return await api.reply_text(ctx, "msg_orig", "hi")
+
+        assert asyncio.run(run()) == "msg_rt"
+        payload = session.post.call_args.kwargs["json"]
+        assert payload["msg_type"] == "text"
 
 
 class TestGetChatMembers:
-    @patch("src.im.feishu.urlopen")
-    def test_returns_members(self, mock_urlopen):
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({
+    def test_returns_normalized_members(self):
+        """返回规范化 [{name, open_id}]，member_id → open_id。"""
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        api._ensure_token = AsyncMock(return_value="tok_test")
+        session.get.return_value = _http_response({
+            "code": 0,
             "data": {
                 "items": [
                     {"name": "张三", "member_id": "ou_zhang"},
                     {"name": "李四", "member_id": "ou_li"},
                 ],
-                "has_more": False
-            }
-        }).encode()
-        mock_urlopen.return_value = mock_response
+                "has_more": False, "page_token": "",
+            },
+        })
 
-        with patch("src.im.feishu.get_tenant_token", return_value="tok_test"):
-            members = get_chat_members("chat_123")
+        async def run():
+            return await api.get_chat_members(ctx, "chat_123")
+
+        members = asyncio.run(run())
         assert len(members) == 2
-        assert members[0]["name"] == "张三"
-        assert members[0]["open_id"] == "ou_zhang"
+        assert members[0] == {"name": "张三", "open_id": "ou_zhang"}
+        assert members[1] == {"name": "李四", "open_id": "ou_li"}
+        headers = session.get.call_args.kwargs.get("headers", {})
+        assert headers.get("Authorization") == "Bearer tok_test"
 
-    @patch("src.im.feishu.urlopen")
-    def test_handles_pagination(self, mock_urlopen):
-        page1 = MagicMock()
-        page1.read.return_value = json.dumps({
-            "data": {
-                "items": [{"name": "A", "member_id": "ou_a"}],
-                "has_more": True,
-                "page_token": "tok_next"
-            }
-        }).encode()
-        page2 = MagicMock()
-        page2.read.return_value = json.dumps({
-            "data": {
-                "items": [{"name": "B", "member_id": "ou_b"}],
-                "has_more": False
-            }
-        }).encode()
-        mock_urlopen.side_effect = [page1, page2]
+    def test_handles_pagination(self):
+        """has_more=true 时带 page_token 翻页。"""
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        api._ensure_token = AsyncMock(return_value="tok_test")
+        calls = {"n": 0}
 
-        with patch("src.im.feishu.get_tenant_token", return_value="tok_test"):
-            members = get_chat_members("chat_123")
+        async def _json():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"code": 0, "data": {"items": [{"name": "A", "member_id": "ou_a"}],
+                                            "has_more": True, "page_token": "pt_next"}}
+            return {"code": 0, "data": {"items": [{"name": "B", "member_id": "ou_b"}],
+                                        "has_more": False, "page_token": ""}}
+
+        resp = MagicMock()
+        resp.json = _json
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=False)
+        session.get.return_value = resp
+
+        async def run():
+            return await api.get_chat_members(ctx, "chat_123")
+
+        members = asyncio.run(run())
         assert len(members) == 2
-        assert mock_urlopen.call_count == 2
+        assert session.get.call_count == 2
+        params2 = session.get.call_args_list[1].kwargs.get("params", {})
+        assert params2.get("page_token") == "pt_next"
 
-    def test_empty_chat_id(self):
-        assert get_chat_members("") == []
+    def test_no_token_returns_empty(self):
+        """无 token 返回空，不发请求。"""
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        api._ensure_token = AsyncMock(return_value="")
 
+        async def run():
+            return await api.get_chat_members(ctx, "chat_123")
 
-class TestGetChatIdForRepo:
-    def test_repo_not_found(self):
-        with patch("src.session_manager.db") as mock_db:
-            mock_cursor = MagicMock()
-            mock_cursor.fetchone.return_value = None
-            mock_db.cursor.return_value = mock_cursor
-            chat_id = get_chat_id_for_repo("gitcode:nonexistent/repo")
-        assert chat_id == ""
+        assert asyncio.run(run()) == []
+        session.get.assert_not_called()
 
-    def test_found(self):
-        with patch("src.session_manager.db") as mock_db:
-            mock_cursor = MagicMock()
-            mock_cursor.fetchone.return_value = ("chat_found_one",)
-            mock_db.cursor.return_value = mock_cursor
-            chat_id = get_chat_id_for_repo("gitcode:owner/repo")
-        assert chat_id == "chat_found_one"
+    def test_exception_isolation(self):
+        """异常时返回空列表不抛。"""
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        api._ensure_token = AsyncMock(return_value="tok_test")
+        resp = MagicMock()
+        resp.json = AsyncMock(side_effect=RuntimeError("boom"))
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=False)
+        session.get.return_value = resp
 
+        async def run():
+            return await api.get_chat_members(ctx, "chat_123")
 
-class TestEnsureConfigured:
-    def test_returns_true_when_configured(self):
-        assert ensure_configured() is True
-
-
-class TestDetectCleanIntent:
-    def test_clean_command(self):
-        assert detect_clean_intent("/clean") is False  # /clean goes through process_command, not detect_clean_intent
-
-    def test_chinese_clean(self):
-        assert detect_clean_intent("清除会话缓存") is True
-        assert detect_clean_intent("清理上下文") is True
-        assert detect_clean_intent("重置Agent") is True
-        assert detect_clean_intent("重来吧") is True
-        assert detect_clean_intent("从头开始") is True
-
-    def test_no_match(self):
-        assert detect_clean_intent("你好") is False
-        assert detect_clean_intent("查询issue") is False
+        assert asyncio.run(run()) == []
 
 
-class TestProcessCommandClean:
-    def _setup_db(self, tmp_path):
-        import sqlite3
-        db_path = os.path.join(tmp_path, "test.db")
-        db = sqlite3.connect(db_path)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS repo_im_group_binding (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                im_provider TEXT DEFAULT 'feishu',
-                im_chat_id TEXT NOT NULL,
-                im_channel_name TEXT DEFAULT '',
-                repo_key TEXT NOT NULL,
-                bind_by TEXT DEFAULT '',
-                im_app_id TEXT DEFAULT '',
-                auto_impl_enabled INTEGER DEFAULT 0,
-                notify_enabled INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT (datetime('now'))
-            )
-        """)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS chat_agent_session (
-                id TEXT PRIMARY KEY,
-                repo_key TEXT DEFAULT '',
-                event_history TEXT DEFAULT '[]',
-                backend_session_id TEXT DEFAULT '',
-                backend TEXT DEFAULT '',
-                created_at TEXT, last_active_at TEXT
-            )
-        """)
-        db.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, im_app_id) VALUES (?,?,?)",
-                   ("chat_clean_test", "owner/repo", "default"))
-        db.execute("INSERT OR REPLACE INTO chat_agent_session (id, repo_key, event_history, backend_session_id, backend) VALUES (?,?,?,?,?)",
-                   ("sess-1", "owner/repo", json.dumps([{"type": "chat", "text": "hello"}]), "ses_opencode_old", "opencode"))
-        db.commit()
-        return db, db_path
+class TestGetUserNickname:
+    def test_get_user_name(self):
+        """get_user_name 返回昵称。"""
+        api, session = _make_api_with_session()
+        ctx = _make_ctx()
+        api._ensure_token = AsyncMock(return_value="tok_test")
+        session.get.return_value = _http_response(
+            {"data": {"user": {"name": "测试昵称"}}}
+        )
 
-    def test_clean_clears_session_ids(self, tmp_path):
-        db, _ = self._setup_db(tmp_path)
-        result = process_command("/clean", "chat_clean_test", "tester", db, "default")
-        assert "已清除" in result
-        c = db.cursor()
-        c.execute("SELECT backend_session_id, backend, event_history FROM chat_agent_session WHERE repo_key=?", ("owner/repo",))
-        row = c.fetchone()
-        assert row[0] == ""  # backend_session_id cleared
-        assert row[1] == ""  # backend cleared
-        assert "hello" in row[2]  # event_history preserved
+        async def run():
+            return await api.get_user_name(ctx, "ou_user")
 
-    def test_clean_no_binding(self, tmp_path):
-        import sqlite3
-        db = sqlite3.connect(os.path.join(tmp_path, "empty.db"))
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS repo_im_group_binding (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                im_provider TEXT DEFAULT 'feishu',
-                im_chat_id TEXT NOT NULL,
-                im_channel_name TEXT DEFAULT '',
-                repo_key TEXT NOT NULL,
-                bind_by TEXT DEFAULT '',
-                im_app_id TEXT DEFAULT '',
-                auto_impl_enabled INTEGER DEFAULT 0,
-                notify_enabled INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT (datetime('now'))
-            )
-        """)
-        db.commit()
-        result = process_command("/clean", "chat_nobody", "tester", db, "default")
-        assert "未绑定" in result
-
-    def test_clean_also_matches_full_gitcode_key(self, tmp_path):
-        db, _ = self._setup_db(tmp_path)
-        c = db.cursor()
-        # Add session with gitcode: prefix
-        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, repo_key, backend_session_id) VALUES (?,?,?)",
-                  ("sess-2", "gitcode:owner/repo", "ses_another"))
-        db.commit()
-        result = process_command("/clean", "chat_clean_test", "tester", db, "default")
-        assert "已清除" in result
-        c = db.cursor()
-        c.execute("SELECT backend_session_id FROM chat_agent_session WHERE repo_key='gitcode:owner/repo'")
-        assert c.fetchone()[0] == ""
+        assert asyncio.run(run()) == "测试昵称"

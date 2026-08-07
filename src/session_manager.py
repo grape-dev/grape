@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS repo_im_group_binding (
     repo_key TEXT NOT NULL,
     bind_by TEXT DEFAULT '',
     im_app_id TEXT DEFAULT '',
+    source TEXT DEFAULT '',
     auto_impl_enabled INTEGER DEFAULT 0,
     notify_enabled INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
@@ -128,6 +129,10 @@ except:
     pass
 try:
     db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN im_channel_name TEXT DEFAULT ''")
+except:
+    pass
+try:
+    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN source TEXT DEFAULT ''")
 except:
     pass
 try:
