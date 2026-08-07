@@ -14,6 +14,11 @@ init_database()
 _load_accounts()
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok", "version": "2.0.0", "service": "webhook"}
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     log.warning(f"Webhook error: {exc}")
