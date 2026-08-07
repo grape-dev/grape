@@ -9,7 +9,7 @@ headers = {
     'Authorization': 'Bearer XmMqZP6LJ89XpPkAL2YYm8yY',
     'Content-Type': 'application/x-www-form-urlencoded'
 }
-req = urllib.request.Request(f'{base}/repos/Jason7602/devops-bot/milestones', data=form_data, headers=headers, method='POST')
+req = urllib.request.Request(f'{base}/repos/Jason7602/grape/milestones', data=form_data, headers=headers, method='POST')
 try:
     with urllib.request.urlopen(req, timeout=15) as resp:
         body = resp.read().decode('utf-8')
@@ -24,7 +24,7 @@ print()
 # Also try with different param names for milestone
 for field_name in ['title', 'name', 'milestone', 'subject', 'summary']:
     form_data = urllib.parse.urlencode({field_name: 'v1.0.0'}).encode('utf-8')
-    req = urllib.request.Request(f'{base}/repos/Jason7602/devops-bot/milestones', data=form_data, headers=headers, method='POST')
+    req = urllib.request.Request(f'{base}/repos/Jason7602/grape/milestones', data=form_data, headers=headers, method='POST')
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read().decode('utf-8')

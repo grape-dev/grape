@@ -20,7 +20,7 @@ field_names = [
 
 for field in field_names:
     data = json.dumps({field: "v1.0.0"}).encode("utf-8")
-    req = urllib.request.Request(f"{base}/repos/Jason7602/devops-bot/milestones", data=data, headers=headers, method="POST")
+    req = urllib.request.Request(f"{base}/repos/Jason7602/grape/milestones", data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             body_resp = resp.read().decode("utf-8")
@@ -33,7 +33,7 @@ for field in field_names:
 
 # Also try sending empty body to see what it expects
 print("\n=== TRY EMPTY BODY ===")
-req = urllib.request.Request(f"{base}/repos/Jason7602/devops-bot/milestones", data=b"{}", headers=headers, method="POST")
+req = urllib.request.Request(f"{base}/repos/Jason7602/grape/milestones", data=b"{}", headers=headers, method="POST")
 try:
     with urllib.request.urlopen(req, timeout=10) as resp:
         print(f"HTTP {resp.status}: {resp.read().decode()[:300]}")

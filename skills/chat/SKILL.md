@@ -169,7 +169,7 @@ curl -s -X POST -H "Authorization: Bearer $USER_GITCODE_TOKEN" \
 
 用你的理解判断建议是给谁的：
 
-- 🤖 针对 Bot 自身能力 → 目标仓库 `Jason7602/devops-bot`
+- 🤖 针对 Bot 自身能力 → 目标仓库 `Jason7602/grape`
 - 📦 针对当前运营的仓库 → 目标仓库为当前群绑定仓库
 - ❓ 不确定 → 回复用户"请问这个建议是关于机器人本身，还是当前仓库？"
 

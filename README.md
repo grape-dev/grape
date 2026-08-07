@@ -71,8 +71,8 @@
 ## 快速开始
 
 ```bash
-git clone https://gitcode.com/Jason7602/devops-bot.git
-cd devops-bot
+git clone https://gitcode.com/Jason7602/grape.git
+cd grape
 pip install lark-oapi websocket-client pytest paramiko
 cp configs/global-bot-token.example.json configs/global-bot-token.json
 # 编辑 global-bot-token.json 填入 GitCode Bot Token / OAuth 凭据

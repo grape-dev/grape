@@ -5,7 +5,7 @@ import pytest, requests
 
 BASE = "http://203.0.113.2"
 TOKEN = None
-TEST_REPO = "Jason7602/devops-bot"
+TEST_REPO = "Jason7602/grape"
 
 
 # ==================== S0: 首次登录（无托管 → 仓库选择页）========================
@@ -193,7 +193,7 @@ class TestFirstLoginNoRepos:
 
         # 直接用 API 测试 host（绕过前端，因为 normal_user 没有任何仓库显示）
         r = requests.post(f"{BASE}/api/repos/host",
-            json={"full_name": "Jason7602/devops-bot"},
+            json={"full_name": "Jason7602/grape"},
             headers={"Authorization": f"Bearer {normal_token}"}, timeout=15)
         print(f"  Host by non-admin: {r.status_code} {r.json().get('detail',{}).get('message','')[:80]}")
         assert r.status_code == 403, f"Expected 403, got {r.status_code}: {r.text[:100]}"
