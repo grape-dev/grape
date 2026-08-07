@@ -2,7 +2,7 @@
 name: chat
 version: 1.1.0
 description: |
-  飞书等 IM 对话处理指南。当用户在飞书/Slack/其他 IM 中与 Bot 对话时使用此技能。
+  飞书等 IM 对话处理指南。当用户在飞书/Slack/其他 IM 中与 Grape 对话时使用此技能。
   包括：判断话题相关性、决定是否回复、能力边界管理。
   扩展能力：任务处理（澄清被分配 Issue 的需求并回帖）、需求引导（将用户想法明确为可开发 Issue）。
   不适用于：GitCode 网页上的 Issue/PR 评论直接触发（用 issue skill）。
@@ -16,14 +16,14 @@ tools: []
 ## 安全硬约束（必须遵守）
 
 1. 调用 GitCode API 只用 prompt 注入的 `$USER_GITCODE_TOKEN`，严禁从数据库/configs/日志/历史中寻找其他 token。
-2. 严禁读取 /opt/grape/data/、configs/、sessions.db、user_accounts 等 Bot 内部数据。
+2. 严禁读取 data/、configs/、sessions.db、user_accounts 等 Grape 内部数据。
 3. API 返回 403/无权限时：立即停止并回复用户「该操作需要相应权限，请在 GitCode 中手动配置后重试」，严禁尝试其他 token 或绕行手段。
 4. token 不得写入任何文件/日志/评论。
 
 ## 场景
 
-用户在飞书等 IM 工具中向 Bot 提问时，Agent 需要根据话题相关性决定是否回复。
-此外，当用户在任务中心被分配了 Issue 处理任务、或向 Bot 提出新需求/建议时，Bot 需要协助澄清需求并回写到 Issue。
+用户在飞书等 IM 工具中向 Grape 提问时，Agent 需要根据话题相关性决定是否回复。
+此外，当用户在任务中心被分配了 Issue 处理任务、或向 Grape 提出新需求/建议时，Grape 需要协助澄清需求并回写到 Issue。
 
 ## 能力边界
 
@@ -155,7 +155,7 @@ curl -s -X POST -H "Authorization: Bearer $USER_GITCODE_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}/comments
 ```
 
-> **重要**：回帖使用用户自己的 `$USER_GITCODE_TOKEN`（不是 Bot token）。回帖后会触发该 Issue 的 webhook 事件，由于是用户本人（非 bot）发出的评论，**不会被 self-comment 过滤**，issue agent 会重新分诊并刷新责任人。
+> **重要**：回帖使用用户自己的 `$USER_GITCODE_TOKEN`（不是 Grape token）。回帖后会触发该 Issue 的 webhook 事件，由于是用户本人（非 bot）发出的评论，**不会被 self-comment 过滤**，issue agent 会重新分诊并刷新责任人。
 
 ### 6. 回复用户
 
@@ -169,7 +169,7 @@ curl -s -X POST -H "Authorization: Bearer $USER_GITCODE_TOKEN" \
 
 用你的理解判断建议是给谁的：
 
-- 🤖 针对 Bot 自身能力 → 目标仓库 `Jason7602/grape`
+- 🤖 针对 Grape 自身能力 → 目标仓库 `Jason7602/grape`
 - 📦 针对当前运营的仓库 → 目标仓库为当前群绑定仓库
 - ❓ 不确定 → 回复用户"请问这个建议是关于机器人本身，还是当前仓库？"
 

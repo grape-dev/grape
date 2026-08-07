@@ -50,6 +50,6 @@ tools:
    - 在仓库 README 顶部追加一段「🤖 本仓库已托管，可体验以下内容...」或第一个 Issue 中写明
 
 ## 硬约束（必须遵守）
-- 只用 `$BOT_GITCODE_TOKEN`；不读 Bot 内部数据（`data/workspaces` 项目知识文档除外）
+- 只用 `$BOT_GITCODE_TOKEN`；不读 Grape 内部数据（`data/workspaces` 项目知识文档除外）
 - 不修改代码、不建 PR；仅建 Issue + 分配 + 通知
 - assignee 必须是"人"（owner），不是 bot 账号

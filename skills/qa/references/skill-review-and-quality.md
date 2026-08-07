@@ -1,6 +1,6 @@
 # Skill Review and Quality
 
-Skill（技能）是 Agent 的能力定义文件，位于仓库 `skills/` 目录下的 `SKILL.md`。它为 Agent 提供特定领域的指令、行为原则、执行流程和约束规则。Skill 可以是 DevOps Bot 自身的技能文件，也可以是 DevOps Bot 所管理仓库（如华为云 Skills 仓库）中的技能定义。
+Skill（技能）是 Agent 的能力定义文件，位于仓库 `skills/` 目录下的 `SKILL.md`。它为 Agent 提供特定领域的指令、行为原则、执行流程和约束规则。Skill 可以是 DevOps Grape 自身的技能文件，也可以是 DevOps Grape 所管理仓库（如华为云 Skills 仓库）中的技能定义。
 
 ## 通用审查维度（适用于所有 Skill）
 

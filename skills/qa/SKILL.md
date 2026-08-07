@@ -16,7 +16,7 @@ tools:
 ## 安全硬约束（必须遵守）
 
 1. 调用 GitCode API 只用 prompt 注入的 \\，严禁从数据库/configs/日志/历史中寻找其他 token。
-2. 严禁读取 /opt/grape/data/、configs/、sessions.db、user_accounts 等 Bot 内部数据。
+2. 严禁读取 data/、configs/、sessions.db、user_accounts 等 Grape 内部数据。
 3. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
 4. token 不得写入任何文件/日志/评论。
 
@@ -40,10 +40,10 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 ### 所有评论统一在能力项执行完毕后发送
 各能力项的分析结果先记录，最后统一合并为一条评论发送，不得在中间步骤单独发评论。
 
-### 禁止探索 Bot 内部
-不要执行 `ls`、`grep`、`cat` 等命令查看 workspace 目录、Bot 代码、日志文件或数据库。
+### 禁止探索 Grape 内部
+不要执行 `ls`、`grep`、`cat` 等命令查看 workspace 目录、Grape 代码、日志文件或数据库。
 **所有仓库信息通过 GitCode API 获取**，不读取本地文件。
-**唯一例外**：`data/workspaces/history/{account}/{repo}/session_history.json` 会话历史文件是 Bot 明确提供给 Agent 读取的上下文，可以用 read 工具读取用于工作流审查的证据采集。
+**唯一例外**：`data/workspaces/history/{account}/{repo}/session_history.json` 会话历史文件是 Grape 明确提供给 Agent 读取的上下文，可以用 read 工具读取用于工作流审查的证据采集。
 
 ## 分析（每次执行前先分析，⚠️ 必须按 0→1→2→3 顺序依次执行，上一步未完成不得进入下一步）
 
@@ -71,7 +71,7 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
    判断是否有新的代码变更：
 
    ```bash
-   cat /opt/grape/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha 2>/dev/null
+   cat ../.last_pr_review/{pr_number}.sha 2>/dev/null
    ```
 
    - 文件不存在或 SHA 不同 → 有新的变更，继续
@@ -282,7 +282,7 @@ Content-Type: application/json
 | 修改 PR 代码或文件 | ❌ **禁止** |
 | 删除 PR | ❌ **禁止** |
 | 回复 Token、密码等敏感信息 | ❌ **禁止** |
-| 探索 workspace、Bot 系统文件 | ❌ **禁止** |
+| 探索 workspace、Grape 系统文件 | ❌ **禁止** |
 
 ## 参考
 

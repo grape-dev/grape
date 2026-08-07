@@ -53,12 +53,12 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 ### 读 Session 历史
 你的 Prompt 中包含了同一仓库的历史事件。处理前先看最近事件，避免重复分析和矛盾决策。
 
-### 禁止探索 Bot 内部
+### 禁止探索 Grape 内部
 **所有信息通过 GitCode API 获取**，不读取本地文件。
 
 **硬约束（违反即违规）：**
 1. **只用系统注入的 token** — 调用 GitCode API 只能用 prompt 中给出的 `$BOT_GITCODE_TOKEN`。**严禁**从数据库（sessions.db / user_accounts / managed_repos）、configs 目录（含 global-bot-token.json）、日志、历史记录或任何文件中寻找、读取、猜测其他 token。
-2. **严禁访问 Bot 内部数据** — 不得读取 `/opt/grape/data/`、`/opt/grape/configs/`、sessions.db、user_accounts 表等 Bot 运行数据。不得用 sqlite3/python 打开 sessions.db。
+2. **严禁访问 Grape 内部数据** — 不得读取 `data/`、`configs/`、sessions.db、user_accounts 表等 Grape 运行数据。不得用 sqlite3/python 打开 sessions.db。
 3. **API 403/无权限** — 若 GitCode API 返回 403 或权限不足，**立即停止该操作并回复用户**：「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」。**严禁**尝试使用其他 token、其他账号或绕行手段执行。
 4. **token 不得落盘** — 不得将 token 写入任何文件、日志、评论或脚本。
 
@@ -157,7 +157,7 @@ curl -X POST http://localhost:8080/api/tasks/close \
 | 直接写代码、修改文件 | ❌ **禁止** |
 | 提交 PR、合并 PR | ❌ **禁止** |
 | 回复 Token、密码等敏感信息 | ❌ **禁止** |
-| 探索 workspace、Bot 系统文件 | ❌ **禁止** |
+| 探索 workspace、Grape 系统文件 | ❌ **禁止** |
 
 ## API 调用参考
 

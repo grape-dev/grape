@@ -180,14 +180,14 @@ ELSE (不通过维度数 <= 2 且均为 minor 缺失)
 
 | 评级 | 负责人 | 理由 |
 |------|--------|------|
-| `ready` | 机器人（Bot 账号） | 需求已充分明确，机器人接管后续开发流程（Spec → A2A → Coding Agent） |
+| `ready` | 机器人（Grape 账号） | 需求已充分明确，机器人接管后续开发流程（Spec → A2A → Coding Agent） |
 | `almost-ready` | 项目责任人（CODEOWNERS） | 需要项目相关负责人补充信息后才能进入开发 |
 | `needs-discussion` | 项目责任人（CODEOWNERS） | 需要项目相关负责人深入讨论后才能确定方向 |
 | `not-feasible` | 不分配 | Issue 不可行，无需跟踪 |
 
 **CODEOWNERS 匹配**：按 `references/assignee-guide.md` 的现有逻辑，基于 Issue 内容匹配 CODEOWNERS 中的模块负责人。
 
-**机器人分配**：使用 Bot 的 GitCode 用户名（从 `AGENT_NAME` 环境变量或 Bot 配置获取）作为 assignee。
+**机器人分配**：使用 Grape 的 GitCode 用户名（从 `AGENT_NAME` 环境变量或 Grape 配置获取）作为 assignee。
 
 ## 追问策略
 

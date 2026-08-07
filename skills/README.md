@@ -1,8 +1,8 @@
-# DevOps Bot Skills 库
+# DevOps Grape Skills 库
 
-本目录是 DevOps Bot 的**技能库**，每个子目录对应一个 Skill，包含 `SKILL.md`（技能指令）和 `references/`（参考文档）。
+本目录是 DevOps Grape 的**技能库**，每个子目录对应一个 Skill，包含 `SKILL.md`（技能指令）和 `references/`（参考文档）。
 
-Bot 通过事件路由（`configs/event-routing.json`）将事件分发到对应 Skill，Bot 读取 `SKILL.md` 拼入 Prompt 后交给 Agent 执行。
+Grape 通过事件路由（`configs/event-routing.json`）将事件分发到对应 Skill，Grape 读取 `SKILL.md` 拼入 Prompt 后交给 Agent 执行。
 
 ## 技能列表
 

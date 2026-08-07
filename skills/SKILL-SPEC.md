@@ -65,7 +65,7 @@ Agent 输出应遵循的格式。
 
 ## 发现与触发机制
 
-Bot **不读取、不注入** Skill 内容。Bot 只做一件事：将 Skills 目录路径通过环境变量 `DEVOPS_SKILLS_DIR` 传给 Agent。
+Grape **不读取、不注入** Skill 内容。Grape 只做一件事：将 Skills 目录路径通过环境变量 `DEVOPS_SKILLS_DIR` 传给 Agent。
 
 Agent 的职责：
 
@@ -90,4 +90,4 @@ CLI 参数:
   --workspace "/path/to/repo"
 ```
 
-Agent 自行从 `DEVOPS_SKILLS_DIR` 发现和加载所需技能，Bot 不干预。
+Agent 自行从 `DEVOPS_SKILLS_DIR` 发现和加载所需技能，Grape 不干预。

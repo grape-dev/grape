@@ -163,7 +163,7 @@ curl -s -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{number}
 ```
 
-使用 Bot 的 GitCode 用户名作为 assignee，表示机器人接管后续开发流程。
+使用 Grape 的 GitCode 用户名作为 assignee，表示机器人接管后续开发流程。
 
 ## A2A 通知 Coding Agent
 
