@@ -135,7 +135,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
 
 @router.get("/{owner}/{repo}")
 async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
-    repo_key = f"{owner}/{repo}"
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(f"{owner}/{repo}")
 
     from src.session_manager import db, db_lock
     with db_lock:
@@ -163,7 +164,7 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
     history = pipelines[1:] if len(pipelines) > 1 else []
 
     return {
-        "repo": repo_key,
+        "repo": f"{owner}/{repo}",
         "active": active,
         "history": history,
         "active_count": 1 if active and active["result"] in ("Processing", "Pending") else 0,

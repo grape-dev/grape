@@ -358,6 +358,31 @@ class TestPipeline:
         assert "active_count" in d
         assert "today_count" in d
 
+    def test_pipeline_queries_prefixed_repo_key(self):
+        """get_pipeline 应按带前缀 repo_key 查 events（repo_key 整改后 events 值带 gitcode: 前缀）"""
+        from src.session_manager import db, db_lock
+        repo_key = "gitcode:pipeline/repo-prefix"
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM events WHERE repo_key=?", (repo_key,))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, issue_id, title, summary, status, payload) VALUES (?,?,?,?,?,?,?,?)",
+                      (repo_key, "issue_opened", "issue", "#1", "pipeline-test", "s", "completed", '{}'))
+            db.commit()
+        try:
+            r = client.get("/api/pipeline/pipeline/repo-prefix", headers=_headers)
+            assert r.status_code == 200
+            d = r.json()
+            # 带前缀 events 应被查中 → 生成 pipeline
+            assert d["active"] is not None, f"应命中带前缀 events，active 不应为空: {d}"
+            assert d["active"]["issue_id"] == "#1"
+            # 返回给前端的 repo 无前缀（前端拼 GitCode 链接）
+            assert d["repo"] == "pipeline/repo-prefix"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM events WHERE repo_key=?", (repo_key,))
+                db.commit()
+
 
 # ===================== 6. Agents =====================
 class TestAgents:
