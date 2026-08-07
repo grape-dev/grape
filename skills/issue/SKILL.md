@@ -105,7 +105,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
     | 评论类型 | 处理 |
     |---------|------|
     | 用户提问/@提及机器人 | 分析并回复（见 comment-guide.md） |
-    | 用户要求启动开发/实现功能 | **通过 A2A API 交办 implementation/coding Agent**，构造 context 传原始需求 |
+    | 用户要求启动开发/实现功能 | **通过 A2A API 交办 coding Agent**，构造 context 传原始需求 |
     | 评论补充信息（原 need-info） | 重新分类、PATCH 更新 labels、回复 |
     | 评论请求关闭 Issue | 验证后回复建议 |
     | 讨论方案设计 | 参与讨论给出建议 |

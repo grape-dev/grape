@@ -65,7 +65,7 @@ curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 
 ## 用户回复后的处理
 
-当用户在引导 Issue 中回复了模块责任人信息后，将用户填写的内容提取出来，作为 A2A context 发送给 implementation Agent。
+当用户在引导 Issue 中回复了模块责任人信息后，将用户填写的内容提取出来，作为 A2A context 发送给 coding Agent。
 
 ### context 构造示例
 
@@ -90,7 +90,7 @@ curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 curl -X POST http://localhost:8080/api/a2a \
   -H "Content-Type: application/json" \
   -d '{
-    "agent": "implementation",
+    "agent": "coding",
     "payload": {
       "repository": "'"$REPO_FULL_NAME"'",
       "account": "'"$ACCOUNT"'",

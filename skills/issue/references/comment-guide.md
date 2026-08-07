@@ -28,7 +28,7 @@
 | 评论讨论方案设计 | 参与讨论给出建议 |
 | 用户质疑分配结果 | 重新核对 CODEOWNERS，基于分析维持或调整，不盲从 |
 | 用户要求启动开发等超出范围的任务 | 查 Agent 列表，通过 A2A API 交办 |
-| 用户回复了 CODEOWNERS 引导 Issue | 提取内容，构造 context，A2A 调用 implementation Agent |
+    | 用户回复了 CODEOWNERS 引导 Issue | 提取内容，构造 context，A2A 调用 coding Agent |
 | 其他 DevOps 相关评论 | 分析并回复 |
 
 ## 评论格式要求
