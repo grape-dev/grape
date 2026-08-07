@@ -140,7 +140,7 @@ curl -sL -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "[$AGENT_NAME] ✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pull/{pr_number})。"}
+{"body": "[Coding Agent] ✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pull/{pr_number})。"}
 ```
 
 **跳过此步 = 事件未完成处理。**
