@@ -148,7 +148,8 @@ def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict
         except Exception:
             pass
     prompt = _build_vod_prompt(evt, skill_name, skill_path)
-    ws = os.path.join(WORKSPACE_DIR, repo_key, "vod-agent")
+    from src.repo_key import from_repo_key
+    ws = os.path.join(WORKSPACE_DIR, from_repo_key(repo_key), "vod-agent")
     os.makedirs(ws, exist_ok=True)
 
     exit_code = -1
