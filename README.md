@@ -1,244 +1,139 @@
-# DevOps Bot
+# Grape — AI for AI DevOps 工作流
 
-**Agent 驱动的 DevOps 事件编排器**。Bot 监听 GitCode Webhook 和飞书 IM 消息，通过 opencode / codearts CLI 调用 Agent 实现 Issue 分诊、PR 审查、自动代码实现等 DevOps 全流程自动化。Bot 是壳，Agent 是脑。
+**基于 Multi-Agent 实现 "AI for AI" 的 DevOps 工作流平台**。Grape 通过多个 AI Agent 自主协作，将**传统工作流的 Git 项目一键转变为具备全流程 AI 工作流的 AI Native 项目**——项目接入后，Issue 分诊、代码实现、PR 审查、构建部署等环节全部由 AI Agent 接力完成，而非传统的人工 + CI 流水线。
 
-## 支持的入口
+## 解决的问题
 
-| 入口 | 方式 | 状态 |
-|------|------|------|
-| GitCode | HTTP Webhook | ✅ 运行中 |
-| 飞书 | WebSocket 长连接（lark-oapi SDK） | ✅ 运行中 |
+传统 DevOps 中，从需求到发布的大量工作依赖人工：Issue 要手动分诊打标签、代码要开发自己写、PR 要人肉 Review、构建部署要手动触发。项目越多，人力成本越高。
 
-## 多后端 Agent
+Grape 让 AI 来处理这些 AI 能做的开发工作，把开发者从重复劳动中解放出来。
 
-| 后端 | CLI | 认证方式 | 适用场景 |
-|------|-----|----------|----------|
-| opencode | `opencode run --format json` | GitCode API Token | 开源场景、开发调试 |
-| codearts | `codearts run --format json` | 华为云 AK/SK | 华为云 CodeArts 集成 |
-
-两个后端通过 `configs/agent-routing.json` 按 Skill 路由，可混合使用。
-
-## 多租户
-
-全局 Bot 配置（`configs/global-bot-token.json`）：
-- GitCode Bot Token / Webhook Token / OAuth 凭据
-- `bot_usernames`（self-comment 检测用 bot 用户名）
-
-用户账户（含各自的 GitCode Token、飞书凭据、华为云 AK/SK）通过 GitCode OAuth 登录后动态创建，存储在数据库 `user_accounts` 表。
-
-## Skills 库
-
-| Skill | 说明 |
-|-------|------|
-| `issue` | Issue 全生命周期（分类、标签、CODEOWNERS 分配） |
-| `pr` | PR 审查（差异分析、安全扫描、合并检查、评论回复） |
-| `qa` | PR 审查 + 工作流质量审查（pr 的增强版备选：Agent Work Loop 五维模型，按仓库启用） |
-| `implementation` | 自主开发实现（spec → plan → TDD → 增量代码 → self-review → PR） |
-| `build-debug` | 构建失败诊断与修复建议 |
-| `deploy-guard` | 部署安全守卫与合规检查 |
-| `incident-triage` | 事件分诊与定级 |
-| `changelog-gen` | 变更日志生成与发布说明 |
-| `im-notify` | 飞书通知 — 接收 GitCode 事件，按事件类型决策发送通知 |
-| `chat` | 飞书 IM 对话、意见反馈、实施审批 |
-| `agent` | 5 个 agent-skills 子技能（spec-driven-dev / planning / TDD / incremental-impl / code-review） |
+| 环节 | 传统工作流 | Grape AI Native 工作流 |
+|------|-----------|----------------------|
+| Issue 处理 | 人工分诊、标签、指派 | VOD / Issue Agent 自动分类、分派 |
+| 代码实现 | 开发者手动编码 | Coding Agent 自动实现 + 提交 PR |
+| 代码审查 | 人工 Review | QA Agent 自动审查 + 安全扫描 |
+| 构建部署 | 手动 / CI 触发 | SRE Agent 自动构建、部署、运维 |
+| 需求收集 | 人工汇总反馈 | VOD Agent 收集开发者声音、聚类提炼 |
 
 ## 核心能力
 
-| 能力 | 说明 |
-|------|------|
-| **Issue 分诊** | CODEOWNERS 触发词 + 语义匹配 → 自动标签 + 分配责任人 |
-| **飞书通知** | webhook 事件自动前置路由至 `im-notify` 技能，Agent 按事件类型决策通知 |
-| **GitCode ↔ 飞书映射** | 绑定群时自动 name-matching，按需 API 查询 open_id |
-| **自动实现开关** | `/autodev on/off` 控制；ON 时 Bug 自动修复、Feature 征求同意后开发 |
-| **飞书通知开关** | `/notify on/off` 控制飞书推送通知 |
-| **CODEOWNERS 兜底** | 名名匹配失败时通知仓库管理员 |
-| **PR 关联 Issue** | `inner_issue_nums` 字符串格式 + `close_related_issue` + PATCH `body/labels/prune_branch` |
-| **Session 历史文件** | 每次操作后写入 `data/workspaces/history/{account}/{repo}/session_history.json`，Agent 可自行 `read` 获取上下文 |
+### Multi-Agent 工作流
 
-## 飞书命令
+项目接入 Grape 后，每个 Issue / PR 事件由多个 Agent 按流水线接力处理（AI 处理 AI 产生的开发任务）：
 
-| 命令 | 说明 |
-|------|------|
-| `/bind owner/repo` | 绑定当前群到仓库 |
-| `/unbind` | 解绑并清除用户映射 |
-| `/status` | 查看当前绑定仓库 |
-| `/refresh` | 刷新 GitCode ↔ 飞书用户映射 |
-| `/autodev on/off` | 自动实现开关 |
-| `/notify on/off` | 飞书通知开关 |
-| `/clean` | 清除所有后端 Agent 会话缓存（下次触发全新会话） |
-| `/help` | 帮助 |
+```
+VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──→ SRE Agent
+ 收集声音      分类需求         编码实现         审查验证       构建部署
+```
+
+- **VOD Agent**：收集开发者反馈、聚类共性、自动创建 Issue
+- **Issue Agent**：分类、打标签、指派、触发 Coding
+- **Coding Agent**：代码实现、PR 创建、自我审查
+- **QA Agent**：PR 审查、自动化测试、安全检查
+- **SRE Agent**：构建部署、发布管理、运维监控
+- **Chat Agent**：个人对话助手，可通过飞书或 WebUI 随时查询/操作
+
+Agent 之间通过 A2A 协议链式协作，一个任务自动贯穿全流程。
+
+### 一键转化为 AI Native 项目
+
+```
+选择模板 / 现有 Git 项目
+  → 一键创建 & 托管
+  → 自动应用开发场景（Agent × Skill 映射）
+  → 异步首次引导（分析项目、创建「快速部署体验」与「二次开发方向」Issue）
+  → 从此该项目的每个 Issue / PR 由 Multi-Agent 流水线自主处理
+```
+
+### Skills 技能库
+
+15+ 官方技能覆盖开发全流程：`vod`（声音收集）、`issue` / `issue-advance`（Issue 管理）、`implementation`（代码实现）、`pr` / `qa` / `skill-pr`（PR 审查）、`build-debug` / `cloud-deploy` / `deploy-guard` / `changelog-gen` / `incident-triage`（构建部署运维）、`chat` / `im-notify`（对话通知）、`repo-onboarding`（首次托管引导）。
+
+支持上传自定义技能（官方 / 仓库级 / 个人级三态），并可前端按仓库配置。
+
+### 其他特性
+
+- **多飞书 Bot**：单进程隔离运行 100+ 飞书机器人，热加载、自动重连
+- **GitCode ↔ 飞书用户映射**：私聊身份确认绑定，防误绑
+- **多租户**：GitCode OAuth 登录动态建号，登录白名单，凭据按用户隔离
+- **事件审计**：每次 Agent 执行留痕（日志、耗时、结论），Pipeline 可视化追踪
+- **多后端**：opencode / codearts 可插拔切换
+
+## 支持的入口
+
+| 入口 | 方式 | 说明 |
+|------|------|------|
+| GitCode | HTTP Webhook | Issue / PR / 评论 / 构建 / 部署 事件 |
+| 飞书 | WebSocket 长连接 | 多 Bot 隔离运行，支持 100+ Bot |
+| WebUI | SPA | Dashboard / Pipeline / Agent 详情 / Chat / Skills / Settings |
 
 ## 快速开始
 
 ```bash
 git clone https://gitcode.com/Jason7602/grape.git
 cd grape
-pip install lark-oapi websocket-client pytest paramiko
+pip install -r requirements.txt
+
+# 安装 Agent CLI（至少一个）：
+npm install -g opencode        # 或 pip install codearts-cli
+
 cp configs/global-bot-token.example.json configs/global-bot-token.json
-# 编辑 global-bot-token.json 填入 GitCode Bot Token / OAuth 凭据
-python -m src.api.run
+# 编辑 global-bot-token.json，填入 GitCode Bot Token / OAuth 凭据
+
+mkdir -p data
+python -m src.api.run --dev    # 开发模式，打开 http://localhost:3000
 ```
 
-## 启动方式（双端口）
+首次登录用 GitCode OAuth 一键授权，即可开始托管仓库、把项目接入 AI 工作流。
 
-生产环境采用**双端口**架构，由 `src/api/run.py` 统一启动：
-
-| 端口 | 服务 | 入口 |
-|------|------|------|
-| **80** | WebUI + 完整 API（前端页面、Dashboard、Agent 配置等） | `src.api.main:app` |
-| **8080** | Webhook 专用（GitCode webhook 事件接收） | `src.api.run_webhook:app` |
+## 部署
 
 ```bash
-# 生产启动（同时拉起 80 + 8080）
-python -m src.api.run
-
-# 开发模式（单端口 3000，热重载）
-python -m src.api.run --dev
+python -m src.api.run          # 生产：主服务 3000 + Webhook 8080 双进程
+python -m src.api.run --dev    # 开发：单端口 3000，热重载
 ```
 
-### systemd 托管（推荐，生产服务器）
-
-服务器通过 systemd 服务 `devops-bot.service` 管理，配置于 `/etc/systemd/system/devops-bot.service`：
-
-```ini
-[Unit]
-Description=DevOps Bot API (80 webui + 8080 webhook)
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/root/devops-bot
-ExecStartPre=-/usr/bin/fuser -k 80/tcp
-ExecStartPre=-/usr/bin/fuser -k 8080/tcp
-ExecStart=/usr/bin/python3 -m src.api.run
-Restart=always
-RestartSec=5
-Environment=PYTHONUNBUFFERED=1
-Environment=OAUTH_REDIRECT_URI=http://<服务器IP>/api/auth/callback/gitcode
-
-[Install]
-WantedBy=multi-user.target
-```
-
-**部署/重启命令**（替代手动 nohup，避免端口冲突）：
-
-```bash
-git pull
-systemctl restart devops-bot     # 重启服务（会自动拉起 80 + 8080）
-systemctl status devops-bot      # 查看状态
-journalctl -u devops-bot -f      # 查看日志（systemd 托管时日志走 journalctl，不是 devops-prod.log）
-```
-
-> 注意：systemd 托管后日志输出到 journalctl，不再是 `data/devops-bot.log` 或 `/tmp/devops-prod.log`。
-
-## 事件处理流程
-
-```
-GitCode webhook 到达
-  → event_processor.py（归一化）
-    → 前置通知: im-notify 技能（异步，不受防循环限制）
-    → 防循环检查（bot 自身事件跳过）
-    → 按 event-routing.json 分配到对应 Skill（issue / pr / impl 等）
-```
-
-- `Issue Hook` 按 `action` 区分：`open` → `issue_opened`，`update`/`close` → `issue_updated`
-- `im-notify` 技能独立处理通知逻辑，不阻塞主流程
+生产环境由 nginx 反代对外 `80/443 → 127.0.0.1:3000`，Webhook 8080 直连，systemd 托管示例见 `docs/DEPLOYMENT`。也可直接使用仓库内 `Dockerfile` / `docker-compose.yml`。
 
 ## 测试
 
 ```bash
 pip install pytest pytest-mock
+mkdir -p data
 python -m pytest tests/ -v
 ```
 
-共 **136** 个测试用例，覆盖：
-
-| 模块 | 用例数 | 说明 |
-|------|--------|------|
-| `test_session_manager` | 25 | Session CRUD、Feishu 映射表、autodev/notify 开关、并发安全、历史文件转储 |
-| `test_config` | 5 | 事件路由、fallback、自定义路由 |
-| `test_prompt_builder` | 20 | Issue/PR/评论 prompt 构建、Feishu context 注入、角色定义 |
-| `test_event_processor` | 19 | normalize_event（GitCode/Issue Hook 动作/GBK/字节流/边界） |
-| `test_webhook_handler` | 12 | Health/Sessions/UserMapping API、Token 校验 |
-| `test_feishu_handler` | 21 | Card 构建、Token 缓存、消息发送、群成员分页、清理命令 |
-| `test_chat_handler` | 6 | 命令路由、绑定检测、能力查询 |
-| `test_agent_executor` | 20 | opencode/codearts 参数构建、NDJSON 解析、环境变量 |
-
 ## 配置
 
-### 全局 Bot 配置 (`configs/global-bot-token.json`)
-
-```json
-{
-  "gitcode_api_token": "",
-  "gitcode_webhook_token": "",
-  "gitcode_oauth_client_id": "",
-  "gitcode_oauth_client_secret": "",
-  "gitcode_oauth_redirect_uri": "",
-  "bot_usernames": []
-}
-```
-
-首次运行时会自动加载到 `meta` 表（OAuth 配置）并作为全局 Bot token fallback。用户账户通过 GitCode OAuth 登录动态创建，无需预置。
-
-### Agent 路由 (`configs/agent-routing.json`)
-
-按 Skill 指定使用 opencode 还是 codearts 后端。
-
-### 事件路由 (`configs/event-routing.json`)
-
-事件类型 → Skill 映射。
-
-## 项目结构
-
-```
-devops-bot/
-├── src/
-│   ├── main.py                 # 启动入口（HTTP server + WS 线程）
-│   ├── config.py               # 环境变量 + 事件/Agent 路由 + 多账户配置
-│   ├── session_manager.py      # SQLite Session + Feishu 用户映射 + 历史文件转储
-│   ├── prompt_builder.py       # Agent Prompt 构建（含 history 文件指引）
-│   ├── event_processor.py      # 事件归一化 + 路由 + 执行
-│   ├── webhook_handler.py      # HTTP Webhook 处理器
-│   ├── agent/
-│   │   ├── base.py             # AgentBackend 抽象基类
-│   │   ├── executor.py         # 流式子进程调度（NDJSON 事件循环）
-│   │   ├── opencode.py         # opencode 后端（--session, --dangerously-skip-permissions）
-│   │   └── codearts.py         # codearts 后端（stdin 传 prompt, 华为云 AK/SK）
-│   ├── im/
-│   │   ├── handler.py          # 飞书 IM 消息处理
-│   │   └── feishu.py           # 飞书 API（WS + REST）
-│   ├── vcs/
-│   │   └── gitcode.py          # GitCode VCS 适配器
-│   └── admin/
-│       └── server.py           # 管理控制台（Vue 3 SPA）
-├── configs/
-│   ├── global-bot-token.json    # 全局 Bot token + OAuth 凭据（gitignored）
-│   ├── event-routing.json      # 事件 → Skill 路由
-│   └── agent-routing.json      # Skill → Agent 后端路由
-├── docs/
-│   └── codearts-cli-guide.md   # CodeArts CLI 使用指南
-├── skills/                     # 技能库
-│   ├── issue/pr/implementation/build-debug/...
-│   ├── im-notify/              # 飞书通知技能
-│   └── agent/                  # 5 个 agent-skills 子技能
-├── tests/                      # 136 个测试用例（pytest）
-├── data/
-│   ├── sessions.db             # SQLite 数据库
-│   ├── workspaces/             # 工作区 + Agent session 历史
-│   └── devops-bot.log          # 运行日志（按天轮转）
-└── CODEOWNERS                  # 模块责任人配置
-```
-
-## Directory Structure
-
-The workspace directory `data/workspaces/` contains:
-
-| 路径 | 说明 |
+| 文件 | 说明 |
 |------|------|
-| `workspaces/history/{account}/{repo}/session_history.json` | 最近 10 条事件（有分片时按序号递增） |
-| `workspaces/{repo}/` | Agent 执行工作区（.codeartsdoer 配置等） |
+| `configs/global-bot-token.json` | 全局 Bot token + GitCode OAuth 凭据（gitignored） |
+| `configs/agent-description.json` | Agent 类型种子（订阅事件、默认后端） |
+| `configs/skill-description.json` | 官方技能种子 |
+| `configs/agent-skill-mapping.json` | 开发场景 → Agent × Skill 映射 |
+| `configs/project-templates.json` | 项目模板库 |
+| `configs/login-whitelist.json` | GitCode 登录白名单 |
+
+## 如何贡献
+
+欢迎参与 Grape 的开发。建议的工作流：
+
+1. **提 Issue**：先到 [Issues](https://gitcode.com/Jason7602/grape/issues) 描述你要做的事或发现的问题，确认方向
+2. **Fork & 开发**：Fork 仓库，在特性分支上开发
+3. **补充测试**：新增/修改功能请补充 pytest 测试
+4. **提交 PR**：描述改动内容、测试情况、关联的 Issue 编号
+
+代码风格与模块说明见 `docs/` 下的设计文档。
+
+## 反馈问题
+
+遇到问题或想提建议，请通过以下任一渠道：
+
+- **GitCode Issues**：https://gitcode.com/Jason7602/grape/issues
+  - Bug 请附上运行环境、复现步骤、相关日志
+  - 特性建议请描述使用场景和预期行为
+- **飞书**：接入 Grape 后可在绑定的群中直接反馈
 
 ## License
 
