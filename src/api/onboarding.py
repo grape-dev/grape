@@ -64,6 +64,7 @@ async def _run_onboarding(repo_key: str, owner: str, skill: str):
 
         from src.agent.executor import consume_stream_async
         final_text = ""
+        tool_uses = []
         async for evt_type, data in consume_stream_async(
             prompt, ws, session_id="", event_type="onboarding",
             backend_name="opencode", account=repository, bot_token=bot_token,
@@ -71,11 +72,27 @@ async def _run_onboarding(repo_key: str, owner: str, skill: str):
             agent_label=f"[Agent:onboarding|repo:{repo_key}]",
             env_extra={"REPO_FULL_NAME": repository, "REPO_OWNER": owner},
         ):
+            # 写库兜底脱敏：agent 可能在 text/result 复述 token
+            _msg = str(data)[:500]
+            if bot_token:
+                _msg = _msg.replace(bot_token, "[REDACTED]")
             if evt_type == "done" and isinstance(data, dict):
                 final_text = data.get("text", "") or ""
+                log.info(f"[Onboarding|repo:{repo_key}] done, exit={data.get('exit_code')}, text_len={len(final_text)}")
             elif evt_type == "error":
-                log.warning(f"[Onboarding|repo:{repo_key}] agent error: {data}")
-        log.info(f"[Onboarding|repo:{repo_key}] done, text_len={len(final_text)}")
+                log.warning(f"[Onboarding|repo:{repo_key}] agent error: {_msg}")
+            elif evt_type == "step_start":
+                log.info(f"[agent onboarding|repo:{repo_key}] {_msg}")
+            elif evt_type == "tool_use":
+                tool_uses.append(data if isinstance(data, dict) else {})
+                log.info(f"[agent onboarding|repo:{repo_key}] TOOL: {_msg[:160]}")
+            elif evt_type == "text":
+                log.info(f"[agent onboarding|repo:{repo_key}] TEXT: {_msg[:160]}")
+            elif evt_type == "reasoning":
+                log.info(f"[agent onboarding|repo:{repo_key}] REASONING: {_msg[:160]}")
+            else:
+                log.info(f"[agent onboarding|repo:{repo_key}] {evt_type}: {_msg[:160]}")
+        log.info(f"[Onboarding|repo:{repo_key}] finished, text_len={len(final_text)}, tool_uses={len(tool_uses)}")
     except Exception as e:
         log.warning(f"[Onboarding|repo:{repo_key}] failed: {e}")
 
