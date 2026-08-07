@@ -133,5 +133,17 @@ async def create_from_template(body: CreateTemplateRequest,
     except Exception as e:
         log.warning(f"template apply scene failed: {e}")
 
+    # 5. 持久化开发场景 + 异步首次托管引导（仅模板创建触发）
+    try:
+        from src.repo_key import to_repo_key
+        from src.user.db import set_repo_scene
+        from src.api.onboarding import trigger_onboarding
+        repo_key = to_repo_key(full_name)
+        owner = user.get("username", "") or gitcode_login
+        set_repo_scene(repo_key, scene_id)
+        trigger_onboarding(repo_key, owner)
+    except Exception as e:
+        log.warning(f"template onboarding trigger failed: {e}")
+
     return {"full_name": full_name, "webhook_id": webhook_id, "scene_id": scene_id,
             "message": f"项目 {full_name} 创建并托管成功"}

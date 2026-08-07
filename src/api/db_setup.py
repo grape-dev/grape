@@ -284,8 +284,10 @@ def _seed_from_json():
 
     for seed_key, json_file, db_table in _SEED_FILES:
         if seed_key in seeded_keys and seed_key != "agent_type":
-            log.info(f"Seed key '{seed_key}' already run, skip")
-            continue
+            # 已 seed 过：skill_official 仍需幂等补种缺失技能；其余跳过
+            if seed_key != "skill_official":
+                log.info(f"Seed key '{seed_key}' already run, skip")
+                continue
 
         filepath = os.path.join(_CONFIG_DIR, json_file)
         if not os.path.exists(filepath):
@@ -301,7 +303,23 @@ def _seed_from_json():
                 c.execute(f"SELECT COUNT(*) FROM {db_table}")
             count = c.fetchone()[0]
             if count > 0 and db_table != "agent_type":
-                log.info(f"Table '{db_table}' already has {count} rows, skip seed from {json_file}")
+                # 表已有数据：跳过全量 seed，但对 skill-description.json 中缺失的官方技能幂等补种
+                if seed_key == "skill_official":
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    for skill_name, info in data.items():
+                        existing = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=?", (skill_name,)).fetchone()
+                        if existing and existing[0] == 0:
+                            display_name = info.get("name", skill_name)
+                            description = info.get("description", "")
+                            agent_type = info.get("agent_type", "")
+                            skill_path = info.get("path", skill_name)
+                            c.execute(
+                                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
+                                (skill_name, display_name, description, agent_type, skill_path)
+                            )
+                            log.info(f"Seeded missing official skill: {skill_name}")
+                    db.commit()
                 continue
 
         with open(filepath, "r", encoding="utf-8") as f:

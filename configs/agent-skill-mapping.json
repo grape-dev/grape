@@ -8,7 +8,8 @@
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
-   }
+   },
+   "onboarding": "repo-onboarding"
   },
   "cloud-native": {
    "name": "云原生开发",
@@ -18,7 +19,8 @@
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
-   }
+   },
+   "onboarding": "repo-onboarding"
   },
   "iac": {
    "name": "IaC开发",
@@ -28,7 +30,8 @@
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
-   }
+   },
+   "onboarding": "repo-onboarding"
   },
   "agent-dev": {
    "name": "Agent开发",
@@ -38,7 +41,8 @@
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
-   }
+   },
+   "onboarding": "repo-onboarding"
   },
   "skill-dev": {
    "name": "Skill开发",
@@ -48,7 +52,8 @@
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
-   }
+   },
+   "onboarding": "repo-onboarding"
   }
  }
 }

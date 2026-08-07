@@ -437,6 +437,7 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     repo_name TEXT NOT NULL,
     full_name TEXT NOT NULL,               -- owner/repo（无前缀，兼容/展示）
     webhook_id INTEGER DEFAULT 0,
+    dev_scene TEXT DEFAULT 'default',      -- 开发场景（agent-skill-mapping.json 的 scene_id，模板创建时写入）
     bot_gitcode_token TEXT DEFAULT '',
     gitcode_webhook_token TEXT DEFAULT '',
     bot_username TEXT DEFAULT '',
@@ -624,6 +625,16 @@ def _migrate_repo_key_tables():
                     log.info(f"Migrate repo_key: dropped leftover {_leg}")
         except Exception as e:
             log.warning(f"Cleanup legacy repo tables failed: {e}")
+
+        # 幂等补充：managed_repos 已有表加 dev_scene 列（开发场景持久化）
+        try:
+            _mr_cols = [r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()]
+            if "dev_scene" not in _mr_cols:
+                c.execute("ALTER TABLE managed_repos ADD COLUMN dev_scene TEXT DEFAULT 'default'")
+                db.commit()
+                log.info("Migrate repo_key: added managed_repos.dev_scene")
+        except Exception as e:
+            log.warning(f"Add managed_repos.dev_scene failed: {e}")
 
 
 def init_db():
@@ -950,7 +961,7 @@ def get_skill_md(user_id: int, skill_name: str) -> str | None:
 
 def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id: int = 0,
                      bot_gitcode_token: str = "", gitcode_webhook_token: str = "",
-                     bot_username: str = "") -> bool:
+                     bot_username: str = "", dev_scene: str = "default") -> bool:
     """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。"""
     from src.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo_key)
@@ -959,13 +970,41 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?)",
-                (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token, gitcode_webhook_token, bot_username))
+                "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
+                (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "default", bot_gitcode_token, gitcode_webhook_token, bot_username))
             db.commit()
             return True
     except Exception as e:
         log.warning(f"Add managed repo failed: {e}")
         return False
+
+
+def set_repo_scene(repo_key: str, scene_id: str):
+    """写入仓库开发场景（managed_repos.dev_scene），幂等。"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE managed_repos SET dev_scene=? WHERE repo_key=?", (scene_id or "default", repo_key))
+            db.commit()
+    except Exception as e:
+        log.warning(f"Set repo scene failed: {e}")
+
+
+def get_repo_scene(repo_key: str) -> str:
+    """读取仓库开发场景（managed_repos.dev_scene），无记录返回 'default'。"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            return (row[0] or "default") if row else "default"
+    except Exception as e:
+        log.warning(f"Get repo scene failed: {e}")
+        return "default"
 
 
 def get_managed_repos(user_id: int) -> list[dict]:
