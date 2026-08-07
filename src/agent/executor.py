@@ -111,7 +111,13 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  agent_name: str = "",
                  agent_label: str = "",
                  max_exec_seconds: int = 600) -> Generator:
-    """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）"""
+    """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）。
+
+    **会话失效自动重建**：当 opencode 会话在服务端已不存在（如被清理/误删）时，
+    opencode 会以 exit=1 + stderr "Session not found" 快速失败。
+    本函数检测到该情况自动降级为「不带 session」重跑一次，用新会话继续，
+    避免 agent 因旧 session 失效而整体失败（无回复）。
+    """
     label = f"{agent_label} " if agent_label else ""
     backend = get_backend(backend_name)
     env = backend.get_env(account=account, user_id=user_id)
@@ -140,7 +146,6 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     # 需要脱敏的 token 列表（用于日志/事件输出）
     _tokens = [t for t in (bot_token, user_token) if t]
 
-    args = backend.build_args(prompt, session_id)
     agent_cmd = shutil.which(backend.binary) or shutil.which(backend.binary + ".cmd")
     if not agent_cmd:
         log.error(f"{label}{backend.name} CLI not found in PATH")
@@ -150,142 +155,177 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         })
         return
 
-    log.info(f"{label}{backend.name} args: {' '.join(args)[:2000]}...")
-    log.info(f"{label}{backend.name} cwd: {cwd}")
+    # 单次进程执行：返回 (full_text, new_session_id, exit_code, stderr, error_events)
+    def _run_once(use_session_id: str):
+        args = backend.build_args(prompt, use_session_id)
+        log.info(f"{label}{backend.name} args: {' '.join(args)[:2000]}...")
+        log.info(f"{label}{backend.name} cwd: {cwd}")
 
-    stdin_pipe = subprocess.PIPE if backend.prompt_via_stdin else None
-    _popen_kwargs = {}
-    if hasattr(os, "getpgid"):  # POSIX：独立进程组，便于整组优雅终止
-        _popen_kwargs["start_new_session"] = True
-    proc = subprocess.Popen(
-        [agent_cmd] + args,
-        stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        cwd=cwd, env=env, bufsize=0, **_popen_kwargs
-    )
-    if backend.prompt_via_stdin:
-        proc.stdin.write(prompt.encode("utf-8"))
-        proc.stdin.close()
+        stdin_pipe = subprocess.PIPE if backend.prompt_via_stdin else None
+        _popen_kwargs = {}
+        if hasattr(os, "getpgid"):  # POSIX：独立进程组，便于整组优雅终止
+            _popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(
+            [agent_cmd] + args,
+            stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=cwd, env=env, bufsize=0, **_popen_kwargs
+        )
+        if backend.prompt_via_stdin:
+            proc.stdin.write(prompt.encode("utf-8"))
+            proc.stdin.close()
 
-    collected_text = []
-    new_session_id = session_id
-    error_events = []
-    step_count = 0
-    _last_output = time.time()
+        collected_text = []
+        new_session_id = use_session_id
+        error_events = []
+        step_count = 0
+        _last_output = time.time()
 
-    import threading
-    _line_queue = []
-    _line_queue_lock = threading.Lock()
-    _reader_done = False
+        import threading
+        _line_queue = []
+        _line_queue_lock = threading.Lock()
+        _reader_done = False
 
-    def _stdout_reader():
-        nonlocal _reader_done
-        try:
-            for raw_line in iter(proc.stdout.readline, b""):
-                with _line_queue_lock:
-                    _line_queue.append(raw_line)
-        except Exception:
-            pass
-        finally:
-            _reader_done = True
+        def _stdout_reader():
+            nonlocal _reader_done
+            try:
+                for raw_line in iter(proc.stdout.readline, b""):
+                    with _line_queue_lock:
+                        _line_queue.append(raw_line)
+            except Exception:
+                pass
+            finally:
+                _reader_done = True
 
-    _reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
-    _reader_thread.start()
+        _reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
+        _reader_thread.start()
 
-    while True:
-        with _line_queue_lock:
-            if _line_queue:
-                raw_lines = _line_queue[:]
-                _line_queue.clear()
+        while True:
+            with _line_queue_lock:
+                if _line_queue:
+                    raw_lines = _line_queue[:]
+                    _line_queue.clear()
+                else:
+                    raw_lines = []
+            if raw_lines:
+                _last_output = time.time()
+                for raw_line in raw_lines:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    parsed = backend.parse_output(line)
+                    if parsed is None:
+                        yield ("raw", _redact(line[:200], _tokens))
+                        continue
+                    et = parsed["type"]
+                    if et == "step_start":
+                        step_count += 1
+                        if parsed.get("sessionID"):
+                            new_session_id = parsed["sessionID"]
+                        yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
+                    elif et == "text":
+                        collected_text.append(parsed["text"])
+                        yield ("text", _redact(parsed["text"][:150], _tokens).replace("\n", " "))
+                    elif et == "reasoning":
+                        yield ("reasoning", _redact(parsed["text"][:200], _tokens))
+                    elif et == "tool_use":
+                        yield ("tool_use", _redact(f"Tool: {parsed['tool']} {json.dumps(parsed.get('input', {}))[:200]}", _tokens))
+                    elif et == "step_finish":
+                        yield ("step_finish", f"Step {step_count} done, tokens={parsed['tokens']}")
+                    elif et == "error":
+                        error_events.append(_redact(parsed["message"], _tokens))
+                        yield ("error", _redact(parsed["message"], _tokens))
+                    else:
+                        yield ("other", et)
+            elif _reader_done:
+                break
             else:
-                raw_lines = []
-        if raw_lines:
-            _last_output = time.time()
-            for raw_line in raw_lines:
-                line = raw_line.decode("utf-8", errors="replace").strip()
+                elapsed_silent = time.time() - _last_output
+                if elapsed_silent > max_exec_seconds:
+                    log.warning(f"{label}{backend.name} no output for {max_exec_seconds}s, terminating")
+                    _terminate_proc(proc, f"{label}{backend.name}")
+                    yield ("done", {
+                        "exit_code": -9, "text": _redact("\n".join(collected_text), _tokens),
+                        "oc_session_id": new_session_id,
+                        "errors": error_events + [f"no output for {max_exec_seconds}s, killed"],
+                        "stderr": "",
+                    })
+                    return
+                time.sleep(0.1)
+
+        try:
+            proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            log.warning(f"{label}{backend.name} did not exit after stdout EOF, terminating")
+            _terminate_proc(proc, f"{label}{backend.name}")
+            _reader_thread.join(timeout=5)
+            yield ("done", {
+                "exit_code": -1, "text": "", "oc_session_id": new_session_id,
+                "errors": [f"{backend.name} timed out"], "stderr": ""
+            })
+            return
+
+        _reader_thread.join(timeout=5)
+
+        stdout_remainder = ""
+        try:
+            stdout_remainder = proc.stdout.read().decode("utf-8", errors="replace")
+        except:
+            pass
+
+        if stdout_remainder:
+            for line in stdout_remainder.strip().split("\n"):
+                line = line.strip()
                 if not line:
                     continue
                 parsed = backend.parse_output(line)
-                if parsed is None:
-                    yield ("raw", _redact(line[:200], _tokens))
-                    continue
-                et = parsed["type"]
-                if et == "step_start":
-                    step_count += 1
-                    if parsed.get("sessionID"):
-                        new_session_id = parsed["sessionID"]
-                    yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
-                elif et == "text":
+                if parsed and parsed["type"] == "text":
                     collected_text.append(parsed["text"])
-                    yield ("text", _redact(parsed["text"][:150], _tokens).replace("\n", " "))
-                elif et == "reasoning":
-                    yield ("reasoning", _redact(parsed["text"][:200], _tokens))
-                elif et == "tool_use":
-                    yield ("tool_use", _redact(f"Tool: {parsed['tool']} {json.dumps(parsed.get('input', {}))[:200]}", _tokens))
-                elif et == "step_finish":
-                    yield ("step_finish", f"Step {step_count} done, tokens={parsed['tokens']}")
-                elif et == "error":
-                    error_events.append(_redact(parsed["message"], _tokens))
-                    yield ("error", _redact(parsed["message"], _tokens))
-                else:
-                    yield ("other", et)
-        elif _reader_done:
-            break
-        else:
-            elapsed_silent = time.time() - _last_output
-            if elapsed_silent > max_exec_seconds:
-                log.warning(f"{label}{backend.name} no output for {max_exec_seconds}s, terminating")
-                _terminate_proc(proc, f"{label}{backend.name}")
-                yield ("done", {
-                    "exit_code": -9, "text": _redact("\n".join(collected_text), _tokens),
-                    "oc_session_id": new_session_id,
-                    "errors": error_events + [f"no output for {max_exec_seconds}s, killed"],
-                    "stderr": "",
-                })
-                return
-            time.sleep(0.1)
 
-    try:
-        proc.wait(timeout=120)
-    except subprocess.TimeoutExpired:
-        log.warning(f"{label}{backend.name} did not exit after stdout EOF, terminating")
-        _terminate_proc(proc, f"{label}{backend.name}")
-        _reader_thread.join(timeout=5)
+        full_text = "\n".join(collected_text)
+        stderr_output = ""
+        try:
+            stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
+        except:
+            pass
+
         yield ("done", {
-            "exit_code": -1, "text": "", "oc_session_id": new_session_id,
-            "errors": [f"{backend.name} timed out"], "stderr": ""
+            "exit_code": proc.returncode, "text": _redact(full_text, _tokens),
+            "oc_session_id": new_session_id,
+            "errors": error_events, "stderr": _redact(stderr_output, _tokens),
+            "backend": backend.name,
         })
+
+    # 执行一次；若因会话失效失败（stderr 含 Session not found），降级重跑一次（不带 session）
+    # 注意：run 内部产生的 done 不立即转发，先判定是否需重跑；避免调用方收到多个 done
+    run_gen = _run_once(session_id)
+    done = None
+    _forwarded_done = False
+    for evt_type, data in run_gen:
+        if evt_type == "done":
+            done = data
+        else:
+            yield (evt_type, data)
+    if done is None:
         return
 
-    _reader_thread.join(timeout=5)
-
-    stdout_remainder = ""
-    try:
-        stdout_remainder = proc.stdout.read().decode("utf-8", errors="replace")
-    except:
-        pass
-
-    if stdout_remainder:
-        for line in stdout_remainder.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            parsed = backend.parse_output(line)
-            if parsed and parsed["type"] == "text":
-                collected_text.append(parsed["text"])
-
-    full_text = "\n".join(collected_text)
-    stderr_output = ""
-    try:
-        stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
-    except:
-        pass
-
-    yield ("done", {
-        "exit_code": proc.returncode, "text": _redact(full_text, _tokens),
-        "oc_session_id": new_session_id,
-        "errors": error_events, "stderr": _redact(stderr_output, _tokens),
-        "backend": backend.name,
-    })
+    session_missing = (
+        done.get("exit_code", 0) != 0
+        and session_id
+        and ("session not found" in (done.get("stderr") or "").lower()
+             or any("session not found" in (e or "").lower() for e in (done.get("errors") or [])))
+    )
+    if session_missing:
+        log.warning(f"{label}{backend.name} session {session_id[:20]}... not found on server, retrying without session")
+        run_gen2 = _run_once("")
+        done2 = None
+        for evt_type, data in run_gen2:
+            if evt_type == "done":
+                done2 = data
+            else:
+                yield (evt_type, data)
+        if done2 is not None:
+            done = done2
+    yield ("done", done)
 
 
 def stream_opencode(prompt, cwd, oc_session_id, event_type="", bot_token="", agent_name=""):
