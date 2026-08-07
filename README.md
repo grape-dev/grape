@@ -1,12 +1,33 @@
 # Grape — AI for AI DevOps 工作流
 
-**基于 Multi-Agent 实现 "AI for AI" 的 DevOps 工作流平台**。Grape 通过多个 AI Agent 自主协作，将**传统工作流的 Git 项目一键转变为具备全流程 AI 工作流的 AI Native 项目**——项目接入后，Issue 分诊、代码实现、PR 审查、构建部署等环节全部由 AI Agent 接力完成，而非传统的人工 + CI 流水线。
+<p align="center">
+  <strong>基于 Multi-Agent 实现 "AI for AI" 的 DevOps 工作流平台</strong>
+  <br>
+  将传统工作流的 Git 项目，一键转变为具备全流程 AI 工作流的 AI Native 项目
+  <br>
+  <em>A Multi-Agent DevOps workflow platform — turn your traditional Git projects into AI-native ones with one click.</em>
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#核心能力">核心能力</a> ·
+  <a href="#安装部署">安装部署</a> ·
+  <a href="#开发测试">开发测试</a> ·
+  <a href="#如何贡献">如何贡献</a> ·
+  <a href="#反馈问题">反馈问题</a>
+</p>
+
+---
+
+## 这是什么
+
+Grape 通过多个 AI Agent 自主协作，让开发工作流中的重复环节全部交由 AI 接力完成：Issue 分诊、代码实现、PR 审查、构建部署——项目接入 Grape 后即获得完整的多 Agent AI 工作流，开发者只需定义方向、review 结果。
+
+**一句话：AI 处理 AI 能做的开发工作，把开发者从重复劳动中解放出来。**
 
 ## 解决的问题
 
 传统 DevOps 中，从需求到发布的大量工作依赖人工：Issue 要手动分诊打标签、代码要开发自己写、PR 要人肉 Review、构建部署要手动触发。项目越多，人力成本越高。
-
-Grape 让 AI 来处理这些 AI 能做的开发工作，把开发者从重复劳动中解放出来。
 
 | 环节 | 传统工作流 | Grape AI Native 工作流 |
 |------|-----------|----------------------|
@@ -20,11 +41,11 @@ Grape 让 AI 来处理这些 AI 能做的开发工作，把开发者从重复劳
 
 ### Multi-Agent 工作流
 
-项目接入 Grape 后，每个 Issue / PR 事件由多个 Agent 按流水线接力处理（AI 处理 AI 产生的开发任务）：
+项目接入后，每个 Issue / PR 事件由多个 Agent 按流水线接力处理：
 
 ```
-VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──→ SRE Agent
- 收集声音      分类需求         编码实现         审查验证       构建部署
+VOD Agent → Issue Agent → Coding Agent → QA Agent → SRE Agent
+ 收集声音    分类需求      编码实现      审查验证    构建部署
 ```
 
 - **VOD Agent**：收集开发者反馈、聚类共性、自动创建 Issue
@@ -32,7 +53,7 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 - **Coding Agent**：代码实现、PR 创建、自我审查
 - **QA Agent**：PR 审查、自动化测试、安全检查
 - **SRE Agent**：构建部署、发布管理、运维监控
-- **Chat Agent**：个人对话助手，可通过飞书或 WebUI 随时查询/操作
+- **Chat Agent**：个人对话助手，通过飞书或 WebUI 随时查询 / 操作
 
 Agent 之间通过 A2A 协议链式协作，一个任务自动贯穿全流程。
 
@@ -50,7 +71,15 @@ Agent 之间通过 A2A 协议链式协作，一个任务自动贯穿全流程。
 
 15+ 官方技能覆盖开发全流程：`vod`（声音收集）、`issue` / `issue-advance`（Issue 管理）、`implementation`（代码实现）、`pr` / `qa` / `skill-pr`（PR 审查）、`build-debug` / `cloud-deploy` / `deploy-guard` / `changelog-gen` / `incident-triage`（构建部署运维）、`chat` / `im-notify`（对话通知）、`repo-onboarding`（首次托管引导）。
 
-支持上传自定义技能（官方 / 仓库级 / 个人级三态），并可前端按仓库配置。
+支持上传自定义技能（官方 / 仓库级 / 个人级三态），并可按仓库配置。
+
+### 支持的入口
+
+| 入口 | 方式 | 说明 |
+|------|------|------|
+| GitCode | HTTP Webhook | Issue / PR / 评论 / 构建 / 部署 事件 |
+| 飞书 | WebSocket 长连接 | 多 Bot 隔离运行，支持 100+ Bot |
+| WebUI | SPA | Dashboard / Pipeline / Agent 详情 / Chat / Skills / Settings |
 
 ### 其他特性
 
@@ -59,14 +88,6 @@ Agent 之间通过 A2A 协议链式协作，一个任务自动贯穿全流程。
 - **多租户**：GitCode OAuth 登录动态建号，登录白名单，凭据按用户隔离
 - **事件审计**：每次 Agent 执行留痕（日志、耗时、结论），Pipeline 可视化追踪
 - **多后端**：opencode / codearts 可插拔切换
-
-## 支持的入口
-
-| 入口 | 方式 | 说明 |
-|------|------|------|
-| GitCode | HTTP Webhook | Issue / PR / 评论 / 构建 / 部署 事件 |
-| 飞书 | WebSocket 长连接 | 多 Bot 隔离运行，支持 100+ Bot |
-| WebUI | SPA | Dashboard / Pipeline / Agent 详情 / Chat / Skills / Settings |
 
 ## 快速开始
 
@@ -87,24 +108,16 @@ python -m src.api.run --dev    # 开发模式，打开 http://localhost:3000
 
 首次登录用 GitCode OAuth 一键授权，即可开始托管仓库、把项目接入 AI 工作流。
 
-## 部署
+## 安装部署
 
 ```bash
 python -m src.api.run          # 生产：主服务 3000 + Webhook 8080 双进程
 python -m src.api.run --dev    # 开发：单端口 3000，热重载
 ```
 
-生产环境由 nginx 反代对外 `80/443 → 127.0.0.1:3000`，Webhook 8080 直连，systemd 托管示例见 `docs/DEPLOYMENT`。也可直接使用仓库内 `Dockerfile` / `docker-compose.yml`。
+生产部署（nginx 反代 / systemd / Docker）示例见 `docs/DEPLOYMENT`。
 
-## 测试
-
-```bash
-pip install pytest pytest-mock
-mkdir -p data
-python -m pytest tests/ -v
-```
-
-## 配置
+### 配置
 
 | 文件 | 说明 |
 |------|------|
@@ -115,16 +128,49 @@ python -m pytest tests/ -v
 | `configs/project-templates.json` | 项目模板库 |
 | `configs/login-whitelist.json` | GitCode 登录白名单 |
 
+## 开发测试
+
+```bash
+# 安装依赖
+pip install -r requirements.txt
+pip install pytest pytest-mock
+
+# 运行测试
+mkdir -p data
+python -m pytest tests/ -v
+```
+
+测试覆盖：事件归一化、Prompt 构建、Agent 执行器（NDJSON 解析 / 会话重建）、飞书 handler、p2p 绑定、OAuth 白名单、Pipeline、项目模板、仓库托管、任务中心、UI 场景测试（Playwright）。
+
 ## 如何贡献
 
 欢迎参与 Grape 的开发。建议的工作流：
 
 1. **提 Issue**：先到 [Issues](https://gitcode.com/Jason7602/grape/issues) 描述你要做的事或发现的问题，确认方向
 2. **Fork & 开发**：Fork 仓库，在特性分支上开发
-3. **补充测试**：新增/修改功能请补充 pytest 测试
+3. **补充测试**：新增 / 修改功能请补充 pytest 测试
 4. **提交 PR**：描述改动内容、测试情况、关联的 Issue 编号
 
-代码风格与模块说明见 `docs/` 下的设计文档。
+### 分支命名
+
+| 前缀 | 用途 |
+|------|------|
+| `feat/` | 新功能 |
+| `fix/` | Bug 修复 |
+| `refactor/` | 代码重构（不改变行为） |
+| `docs/` | 文档 |
+| `chore/` | 构建、工具链调整 |
+
+### 不写代码也能贡献
+
+- **文档**：改进 README、补充设计文档、修正错别字
+- **Skills**：为 `skills/` 库贡献新的 Agent 技能（Markdown 即可，无需改后端代码）
+- **项目模板**：为 `configs/project-templates.json` 补充可一键创建的模板
+- **Bug 报告**：提供清晰的复现步骤、运行环境、相关日志
+- **测试用例**：补充覆盖边界场景的用例
+- **社区支持**：帮助解答问题、写教程
+
+每一个贡献，代码或非代码，都在让 Grape 变得更好。
 
 ## 反馈问题
 
