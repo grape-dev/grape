@@ -1,4 +1,4 @@
-<h1 align="center">Grape — AI for AI DevOps 工作流</h1>
+<h1 align="center">Grape</h1>
 
 <p align="center">
   <strong>基于 Multi-Agent 实现 "AI for AI" 的 DevOps 工作流平台</strong>
