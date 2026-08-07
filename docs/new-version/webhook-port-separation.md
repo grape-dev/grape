@@ -215,7 +215,7 @@ fuser -k 80/tcp
 fuser -k 8080/tcp
 
 # 2. 启动（一个新入口启动两个端口）
-cd /root/devops-bot && \
+cd /opt/grape && \
 OAUTH_REDIRECT_URI=http://203.0.113.2/api/auth/callback/gitcode \
 nohup python3 -m src.api.run > /tmp/devops-prod.log 2>&1 &
 ```

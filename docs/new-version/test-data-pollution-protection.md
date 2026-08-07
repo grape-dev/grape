@@ -49,7 +49,7 @@ seq=181      issue_comment → issue agent（bot 评论被回发）
 | 创建 PR 前必须自审查 | ✅ 5 轴自审查 |
 | PR 创建后 Issue 评论告知 | ✅ |
 | 每个提交一个原子变更 | ✅ 分步 commit |
-| **只通过 GitCode API 获取信息** | ❌ 大量读取本地 `/root/devops-bot/src/...` |
+| **只通过 GitCode API 获取信息** | ❌ 大量读取本地 `/opt/grape/src/...` |
 | **直接合并 PR** | ✅ 未合并，仅创建等待审批 |
 
 **结论**：Coding Agent 大体符合流程，但违反"禁止探索 Bot 内部"（读取本地源码）。这是 prompt/skill 约束执行问题。
@@ -129,5 +129,5 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(ROOT, "data/test_sessions.db")
 | 问题 | 说明 | 处理 |
 |------|------|------|
 | Jason7602 GitCode token 无 hooks 权限 | `GET/POST /repos/*/hooks` 返回 403 | 在 GitCode 后台给 token 加 hooks 权限 |
-| Coding Agent 探索 Bot 内部 | 读取本地 `/root/devops-bot/src/` | prompt/skill 约束需加强，或审查 agent 日志 |
+| Coding Agent 探索 Bot 内部 | 读取本地 `/opt/grape/src/` | prompt/skill 约束需加强，或审查 agent 日志 |
 | `chat_bot` secret 恢复 | 已恢复 2 bots | 保持 |

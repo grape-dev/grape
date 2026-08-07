@@ -1171,7 +1171,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/devops-bot
+WorkingDirectory=/opt/grape
 ExecStart=/usr/bin/python3 -m src.main
 Restart=always
 RestartSec=10
@@ -1193,7 +1193,7 @@ WantedBy=multi-user.target
 ### 17.4 目录结构
 
 ```
-/root/devops-bot/
+/opt/grape/
 ├── src/
 │   ├── main.py               # 入口 (启动所有服务)
 │   ├── api/                   # FastAPI REST API

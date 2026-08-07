@@ -1,6 +1,9 @@
 """Prompt 构建：角色定义、技能能力列表、事件 prompt、飞书 prompt"""
 import json, os
-from src.config import SKILLS_DIR
+from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH
+
+# 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
+_DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
 
 EMOJI_MAP = {
     "code-review": "📦 代码审查", "build-debug": "🔧 构建诊断",
@@ -42,7 +45,7 @@ def _build_history_file_guide(repo_key: str, account: str = "") -> str:
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
     if not account:
         account = repo_key.replace("gitcode:", "")
-    base = f"/root/devops-bot/data/workspaces/history/{account}/{repo_name}/"
+    base = f"{WORKSPACE_DIR}/history/{account}/{repo_name}/"
     from src.session_manager import get_history_file_list
     files = get_history_file_list(repo_key, account)
     if files:
@@ -69,7 +72,7 @@ def build_role_definition(skills=None) -> str:
         "",
         "SECURITY (MUST FOLLOW):",
         "1. Use ONLY the GitCode token provided in this prompt (BOT_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.",
-        "2. NEVER access /root/devops-bot/data/, /root/devops-bot/configs/, sessions.db, user_accounts table, or any bot-internal data.",
+        "2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data."
         "3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs admin/maintainer permission (configure it manually in GitCode). NEVER try other tokens or workarounds.",
         "4. NEVER write any token into files, logs, or comments.",
     ]
@@ -154,8 +157,8 @@ curl -sL -X POST \\
   "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
 
 ### Save User Mapping (INSERT into unified_user_mapping)
-Use Python to save discovered mappings in /root/devops-bot/data/sessions.db:
-  import sqlite3; db = sqlite3.connect('/root/devops-bot/data/sessions.db')
+Use Python to save discovered mappings in the bot's sessions.db:
+  import sqlite3; db = sqlite3.connect('{DB_PATH}')
   db.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id,gitcode_user,feishu_open_id,feishu_name,updated_at) VALUES (?,?,?,?,datetime('now'))", (USER_ID, GITCODE_USER, OPEN_ID, NAME))
   db.commit(); db.close()
   # 若不知道 user_id，可用 0 占位，后续由 sync_repo_feishu_mapping 回填
@@ -191,7 +194,7 @@ def build_chat_role_definition() -> str:
         "\n"
         "SECURITY (MUST FOLLOW):\n"
         "1. Use ONLY the GitCode token provided in this prompt (USER_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.\n"
-        "2. NEVER access /root/devops-bot/data/, /root/devops-bot/configs/, sessions.db, user_accounts table, or any bot-internal data.\n"
+        "2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.\n"
         "3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in GitCode). NEVER try other tokens or workarounds.\n"
         "4. NEVER write any token into files, logs, or comments."
     )

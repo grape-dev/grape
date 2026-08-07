@@ -30,10 +30,10 @@ class TestFirstLoginNoRepos:
         c = paramiko.SSHClient()
         c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         c.connect('203.0.113.2', 22, 'root', 'YOUR_SSH_PASSWORD', timeout=10)
-        c.exec_command("python3 -c \"import sqlite3;db=sqlite3.connect('/root/devops-bot/data/sessions.db');"
+        c.exec_command("python3 -c \"import sqlite3;db=sqlite3.connect('/opt/grape/data/sessions.db');"
                        "db.execute('DELETE FROM managed_repos');db.commit();print('OK')\"", timeout=5)
         pw = hashlib.sha256(b"testpass123").hexdigest()
-        c.exec_command(f'python3 -c "import sqlite3,hashlib;db=sqlite3.connect(\\\"/root/devops-bot/data/sessions.db\\\");'
+        c.exec_command(f'python3 -c "import sqlite3,hashlib;db=sqlite3.connect(\\\"/opt/grape/data/sessions.db\\\");'
                        f'db.execute(\\\"UPDATE user_accounts SET password_hash=?,password=? WHERE username=?\\\",'
                        f"(\\\"{pw}\\\",\\\"testpass123\\\",\\\"Jason7602\\\"));db.commit();print(\\\"OK\\\")\"", timeout=5)
         c.close()
@@ -171,10 +171,10 @@ class TestFirstLoginNoRepos:
         c = paramiko.SSHClient()
         c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         c.connect('203.0.113.2', 22, 'root', 'YOUR_SSH_PASSWORD', timeout=10)
-        c.exec_command("python3 -c \"import sqlite3;db=sqlite3.connect('/root/devops-bot/data/sessions.db');"
+        c.exec_command("python3 -c \"import sqlite3;db=sqlite3.connect('/opt/grape/data/sessions.db');"
                        "db.execute('DELETE FROM managed_repos');db.commit();print('OK')\"", timeout=5)
         pw = hashlib.sha256(b"testpass123").hexdigest()
-        c.exec_command(f'python3 -c "import sqlite3,hashlib;db=sqlite3.connect(\\\"/root/devops-bot/data/sessions.db\\\");'
+        c.exec_command(f'python3 -c "import sqlite3,hashlib;db=sqlite3.connect(\\\"/opt/grape/data/sessions.db\\\");'
                        f'db.execute(\\\"UPDATE user_accounts SET password_hash=?,password=? WHERE username=?\\\",'
                        f"(\\\"{pw}\\\",\\\"testpass123\\\",\\\"Jason7602\\\"));db.commit();print(\\\"OK\\\")\"", timeout=5)
         c.close()
@@ -217,13 +217,13 @@ def _backup_and_restore_managed_repos():
             "Refusing to run destructive UI scenario tests against production DB. "
             "Set DEVOPS_UI_TEST=1 to explicitly allow.")
     import paramiko
-    backup_sql = ("python3 -c \"import sqlite3;db=sqlite3.connect('/root/devops-bot/data/sessions.db');"
+    backup_sql = ("python3 -c \"import sqlite3;db=sqlite3.connect('/opt/grape/data/sessions.db');"
                   "db.execute('DROP TABLE IF EXISTS managed_repos_backup');"
                   "db.execute('CREATE TABLE managed_repos_backup AS SELECT * FROM managed_repos');"
                   "n=db.execute('SELECT COUNT(*) FROM managed_repos_backup').fetchone()[0];"
                   "assert n>0, 'managed_repos empty before destructive test, aborting';"
                   "db.commit();print('BACKED UP', n)\"")
-    restore_sql = ("python3 -c \"import sqlite3;db=sqlite3.connect('/root/devops-bot/data/sessions.db');"
+    restore_sql = ("python3 -c \"import sqlite3;db=sqlite3.connect('/opt/grape/data/sessions.db');"
                    "db.execute('DELETE FROM managed_repos');"
                    "db.execute('INSERT INTO managed_repos SELECT * FROM managed_repos_backup');"
                    "db.commit();print('RESTORED', db.execute('SELECT COUNT(*) FROM managed_repos').fetchone()[0])\"")

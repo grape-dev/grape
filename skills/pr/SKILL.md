@@ -15,7 +15,7 @@ tools:
 ## 安全硬约束（必须遵守）
 
 1. 调用 GitCode API 只用 prompt 注入的 \\，严禁从数据库/configs/日志/历史中寻找其他 token。
-2. 严禁读取 /root/devops-bot/data/、configs/、sessions.db、user_accounts 等 Bot 内部数据。
+2. 严禁读取 /opt/grape/data/、configs/、sessions.db、user_accounts 等 Bot 内部数据。
 3. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
 4. token 不得写入任何文件/日志/评论。
 
@@ -78,7 +78,7 @@ curl -X POST http://localhost:8080/api/a2a \
    判断是否有新的代码变更：
 
    ```bash
-   cat /root/devops-bot/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha 2>/dev/null
+   cat /opt/grape/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha 2>/dev/null
    ```
 
    - 文件不存在或 SHA 不同 → 有新的变更，继续

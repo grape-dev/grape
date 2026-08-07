@@ -58,7 +58,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 **硬约束（违反即违规）：**
 1. **只用系统注入的 token** — 调用 GitCode API 只能用 prompt 中给出的 `$BOT_GITCODE_TOKEN`。**严禁**从数据库（sessions.db / user_accounts / managed_repos）、configs 目录（含 global-bot-token.json）、日志、历史记录或任何文件中寻找、读取、猜测其他 token。
-2. **严禁访问 Bot 内部数据** — 不得读取 `/root/devops-bot/data/`、`/root/devops-bot/configs/`、sessions.db、user_accounts 表等 Bot 运行数据。不得用 sqlite3/python 打开 sessions.db。
+2. **严禁访问 Bot 内部数据** — 不得读取 `/opt/grape/data/`、`/opt/grape/configs/`、sessions.db、user_accounts 表等 Bot 运行数据。不得用 sqlite3/python 打开 sessions.db。
 3. **API 403/无权限** — 若 GitCode API 返回 403 或权限不足，**立即停止该操作并回复用户**：「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」。**严禁**尝试使用其他 token、其他账号或绕行手段执行。
 4. **token 不得落盘** — 不得将 token 写入任何文件、日志、评论或脚本。
 

@@ -15,7 +15,7 @@ tools:
 ## 安全硬约束（必须遵守）
 
 1. 调用 GitCode API 只用 prompt 注入的 \\，严禁从数据库/configs/日志/历史中寻找其他 token。
-2. 严禁读取 /root/devops-bot/data/、configs/、sessions.db、user_accounts 等 Bot 内部数据。
+2. 严禁读取 /opt/grape/data/、configs/、sessions.db、user_accounts 等 Bot 内部数据。
 3. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
 4. token 不得写入任何文件/日志/评论。
 
@@ -108,7 +108,7 @@ curl -s -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 
 2. **读取上次检视的 SHA**：
 ```bash
-cat /root/devops-bot/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha 2>/dev/null
+cat /opt/grape/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha 2>/dev/null
 ```
 如果文件不存在 → 首次检视，直接进入阶段 1。
 
@@ -118,8 +118,8 @@ cat /root/devops-bot/data/workspaces/{repository}/.last_pr_review/{pr_number}.sh
 
 4. **审查完成后记录 SHA**：在阶段 4 完成后，执行：
 ```bash
-mkdir -p /root/devops-bot/data/workspaces/{repository}/.last_pr_review
-echo -n "{head.sha}" > /root/devops-bot/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha
+mkdir -p /opt/grape/data/workspaces/{repository}/.last_pr_review
+echo -n "{head.sha}" > /opt/grape/data/workspaces/{repository}/.last_pr_review/{pr_number}.sha
 ```
 
 ### 阶段 1：关联 Issue
@@ -256,7 +256,7 @@ Content-Type: application/json
 - ❌ 禁止回复用户 Token、密码、AK/SK 等敏感信息
 - ❌ 禁止探索 workspace 目录和 Bot 系统文件
 - ❌ 禁止读取 devops-bot.log、sessions.db 等 Bot 内部文件
-- ❌ 禁止执行 `ls /root/devops-bot`、`grep *.log` 等无关命令
+- ❌ 禁止执行 `ls /opt/grape`、`grep *.log` 等无关命令
 - ❌ 禁止直接写代码修复问题
 - ✅ 可以审查、扫描、评论、关联 Issue
 - ✅ 只通过 GitCode API 获取 Issue/PR 信息
