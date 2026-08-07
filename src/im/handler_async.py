@@ -223,15 +223,19 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             try:
                 gitcode_login = None
                 nick_name = ""
+                gitcode_nickname = ""
                 c = db.cursor()
-                c.execute("SELECT gitcode_user, feishu_name FROM unified_user_mapping WHERE feishu_open_id=?",
+                c.execute("SELECT gitcode_user, feishu_name, gitcode_nickname FROM unified_user_mapping WHERE feishu_open_id=?",
                           (open_id,))
                 row = c.fetchone()
                 if row:
                     gitcode_login = row[0]
                     nick_name = row[1] or ""
+                    gitcode_nickname = row[2] or ""
                 if gitcode_login:
                     user_info += f"\nGitCode login: {gitcode_login}"
+                    if gitcode_nickname and gitcode_nickname != gitcode_login:
+                        user_info += f"\nGitCode 昵称: {gitcode_nickname}"
                     if nick_name and nick_name != gitcode_login:
                         user_info += f"\nGitCode nick (use this in cards): {nick_name}"
                     from src.repo_key import from_repo_key
