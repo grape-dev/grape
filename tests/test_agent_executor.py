@@ -339,3 +339,130 @@ def _register_tmp(backend):
     from src.agent.executor import _BACKENDS
     _BACKENDS[backend.name] = backend
     return backend.name
+
+
+class TestStreamAgentSessionAutoRetry:
+    """会话失效自动重建：opencode 返回 'Session not found' 时，executor 应降级重跑（不带 session）。"""
+
+    def _make_popen(self, calls):
+        """构造一个每次调用返回不同行为的 FakePopen（模拟进程）。calls: [dict(...), ...]。"""
+        class FakePipe:
+            def __init__(self, data=b""):
+                self._data = data
+            def readline(self, chunk=b""):
+                if self._data:
+                    line, self._data = self._data.split(b"\n", 1)
+                    return line + b"\n"
+                return b""
+            def read(self, *a, **k):
+                return self._data
+            def close(self):
+                pass
+
+        class FakePopen:
+            def __init__(self, *args, **kwargs):
+                idx = self.__class__.call_count
+                self.__class__.call_count += 1
+                spec = calls[min(idx, len(calls) - 1)]
+                self.returncode = spec.get("returncode", 0)
+                self._stdout = spec.get("stdout", "")
+                self._stderr = spec.get("stderr", "")
+                self.__class__.last_args = args  # 记录最近一次调用参数（类级，便于断言）
+            @property
+            def stdout(self):
+                return FakePipe(self._stdout.encode("utf-8"))
+            @property
+            def stderr(self):
+                return FakePipe(self._stderr.encode("utf-8"))
+            def wait(self, timeout=None):
+                return self.returncode
+
+        FakePopen.call_count = 0
+        return FakePopen
+
+    def test_retries_without_session_on_session_not_found(self):
+        """首次带死 session 失败（Session not found），应自动重跑并成功"""
+        from unittest.mock import patch
+        from src.agent import stream_agent
+
+        success_stdout = (
+            '{"type":"step_start","sessionID":"ses_new_abc","part":{"type":"step-start"}}\n'
+            '{"type":"text","part":{"type":"text","text":"RECOVERED"}}\n'
+        )
+        calls = [
+            {"returncode": 1, "stdout": "", "stderr": "Error: Session not found\n"},
+            {"returncode": 0, "stdout": success_stdout, "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_agent("p", os.getcwd(), session_id="ses_dead_old", backend_name="opencode"))
+
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == 0, done
+        assert "RECOVERED" in done["text"]
+        assert done["oc_session_id"] == "ses_new_abc"
+        # 确认重跑：两次 Popen 调用，第二次不带 --session
+        assert FakePopen.call_count == 2, f"expected 2 Popen calls, got {FakePopen.call_count}"
+        second_args = FakePopen.last_args[0]
+        assert "--session" not in second_args, f"second run should drop --session, got {second_args}"
+
+    def test_single_done_event_when_retry(self):
+        """重跑场景下，调用方只应收到一个 done 事件（避免重复 done 破坏上层逻辑）"""
+        from unittest.mock import patch
+        from src.agent import stream_agent
+
+        success_stdout = (
+            '{"type":"text","part":{"type":"text","text":"OK"}}\n'
+        )
+        calls = [
+            {"returncode": 1, "stdout": "", "stderr": "Error: Session not found\n"},
+            {"returncode": 0, "stdout": success_stdout, "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_agent("p", os.getcwd(), session_id="ses_dead", backend_name="opencode"))
+
+        done_events = [et for et, d in events if et == "done"]
+        assert len(done_events) == 1, f"expected exactly 1 done event, got {len(done_events)}"
+
+    def test_no_retry_when_session_valid(self):
+        """会话有效（正常成功）时不触发重跑，仅一次 Popen"""
+        from unittest.mock import patch
+        from src.agent import stream_agent
+
+        success_stdout = (
+            '{"type":"text","part":{"type":"text","text":"NORMAL"}}\n'
+        )
+        calls = [
+            {"returncode": 0, "stdout": success_stdout, "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_agent("p", os.getcwd(), session_id="ses_good", backend_name="opencode"))
+
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == 0
+        assert "NORMAL" in done["text"]
+        assert FakePopen.call_count == 1, f"expected 1 Popen call, got {FakePopen.call_count}"
+
+    def test_no_retry_on_unrelated_error(self):
+        """非会话类错误（如权限失败）不重跑，保持单次 done 且透传错误"""
+        from unittest.mock import patch
+        from src.agent import stream_agent
+
+        calls = [
+            {"returncode": 1, "stdout": "", "stderr": "Error: something else failed\n"},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_agent("p", os.getcwd(), session_id="ses_any", backend_name="opencode"))
+
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == 1
+        assert "something else" in (done.get("stderr") or "")
+        assert FakePopen.call_count == 1, f"expected 1 Popen call (no retry), got {FakePopen.call_count}"
+
