@@ -9,7 +9,9 @@
     "order_num": 1,
     "subscribe_events": [
       "vod_signal",
-      "issue_opened"
+      "issue_opened",
+      "issue_updated",
+      "issue_comment"
     ],
     "enable": true
   },
@@ -24,10 +26,7 @@
     "subscribe_events": [
       "issue_updated",
       "issue_labeled",
-      "issue_comment",
-      "pull_request_opened",
-      "pull_request_updated",
-      "note_hook_pr"
+      "issue_comment"
     ],
     "enable": true
   },

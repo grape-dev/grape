@@ -105,13 +105,29 @@ class TestQaSkillConfig:
         assert "issue_opened" in cfg["vod"]["subscribe_events"]
         assert "issue_opened" not in cfg["issue"]["subscribe_events"]
 
+    def test_issue_subscribes_issue_events_not_pr(self):
+        # issue 订阅 Issue 类事件（issue_updated/issue_comment/issue_labeled），不订阅 PR 事件
+        # （PR 由 coding/qa 订阅进入 pipeline；vod/issue 阶段的 PR 审视由阶段矩阵分配）
+        cfg = _load_json("agent-description.json")
+        for evt in ("issue_updated", "issue_comment", "issue_labeled"):
+            assert evt in cfg["issue"]["subscribe_events"], f"issue should subscribe {evt}"
+        for evt in PR_SUBSCRIBED_EVENTS:
+            assert evt not in cfg["issue"]["subscribe_events"], f"issue should NOT subscribe {evt}"
+
+    def test_vod_subscribes_issue_events(self):
+        # vod 订阅 vod_signal + issue_opened + issue_updated/issue_comment（vod 阶段审视）
+        cfg = _load_json("agent-description.json")
+        for evt in ("vod_signal", "issue_opened", "issue_updated", "issue_comment"):
+            assert evt in cfg["vod"]["subscribe_events"], f"vod should subscribe {evt}"
+
     def test_pr_events_multi_subscribed_but_stage_gated(self):
-        # PR 事件被 issue/coding/qa 多方订阅（接收声明），但执行归属由 issue_state 阶段判定（§3.0.3），
+        # PR 事件由 coding/qa（执行 agent）订阅，执行归属由 issue_state 阶段判定（§3.0.3），
         # 不构成静态路由冲突——get_domain_agent 不再作为主路由
         cfg = _load_json("agent-description.json")
         for evt in PR_SUBSCRIBED_EVENTS:
             subscribers = [a for a, info in cfg.items() if evt in info.get("subscribe_events", [])]
-            assert len(subscribers) >= 2, f"{evt} should be subscribed by multiple agents (stage-gated): {subscribers}"
+            assert "coding" in subscribers and "qa" in subscribers, f"{evt} should be subscribed by coding+qa: {subscribers}"
+            assert "issue" not in subscribers, f"{evt} should NOT be subscribed by issue: {subscribers}"
 
 
 class TestQaSkillPrompt:
