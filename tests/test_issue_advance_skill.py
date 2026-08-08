@@ -1,4 +1,4 @@
-"""issue-advance 技能评论处理校验测试（用户要求开发前置 ready 校验）"""
+"""issue-advance 技能统一处理流程校验测试（知识基线 + 深度分析 + 意图处理）"""
 import os
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
@@ -9,16 +9,15 @@ def _skill():
     return open(SKILL, encoding="utf-8").read()
 
 
-class TestIssueAdvanceDevGate:
+class TestIssueAdvanceUnifiedFlow:
     def test_user_request_dev_requires_ready_check(self):
         s = _skill()
         assert "用户要求启动开发/实现功能" in s
-        assert "先确认该 Issue 是否已深度可开发性分析" in s or "前置校验" in s
+        assert "先确认评级" in s or "先确认该 Issue 是否已深度可开发性分析" in s
 
     def test_not_ready_blocks_a2a(self):
         s = _skill()
-        # 未 ready 不直接 A2A 交办 coding
-        assert "未 ready" in s or "按评级处理后再交办" in s or "不交办" in s
+        assert "未 ready" in s or "按评级处理" in s or "不交办" in s
 
     def test_hard_constraint_dev_gate(self):
         s = _skill()
@@ -28,9 +27,24 @@ class TestIssueAdvanceDevGate:
         s = _skill()
         assert "issue-developability-analysis" in s
 
+    def test_unified_flow_not_split(self):
+        s = _skill()
+        # 合并后：不再有独立"评论处理流程"，统一为 Issue 处理流程
+        assert "统一流程" in s or "Issue 处理流程" in s
+        assert "评论处理流程" not in s
+
+    def test_comment_also_gets_knowledge_baseline(self):
+        s = _skill()
+        # 评论处理同样需要知识基线（用户建议）
+        assert "任何事件都需" in s or "评论答复也要基于项目理解" in s or "不可跳过" in s
+
+    def test_comment_also_gets_deep_analysis(self):
+        s = _skill()
+        # 评论事件同样深度可开发性分析
+        assert "评论事件同样分析" in s or "每次处理都执行" in s or "每次处理都执行" in s
+
     def test_a2a_agents_are_real_types(self):
         s = _skill()
-        # 支援表用真实 agent_type（coding/qa/sre），不用旧技能名（implementation/pr/cloud-deploy/build-debug）
         support_section = s.split("### 超出能力范围时主动请求支援")[1].split("### 验证外部 claim")[0]
         assert "| coding |" in support_section
         assert "| qa |" in support_section
@@ -40,7 +54,11 @@ class TestIssueAdvanceDevGate:
 
     def test_vod_handoff_for_unclear_requirement(self):
         s = _skill()
-        # 需求不清晰时 A2A 求助 vod
         assert "**vod**" in s
         assert "需求理解不清晰" in s or "需求不清晰" in s
         assert "vod" in s.split("超出能力范围")[1]
+
+    def test_triggers_no_issue_opened(self):
+        # issue_opened 已由 VOD 接管——issue-advance triggers 不应含 issue_opened
+        assert "- event_type: issue_opened" not in _skill()
+        assert "- event_type: issue_comment" in _skill()
