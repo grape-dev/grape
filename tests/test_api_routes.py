@@ -68,7 +68,7 @@ class TestInfra:
     def test_spa_static_files(self):
         for f in ["/static/js/app.js", "/static/css/app.css", "/static/js/api.js",
                    "/static/js/pages/dashboard.js", "/static/js/pages/agents.js",
-                   "/static/js/pages/backends.js", "/static/js/pages/chat.js"]:
+                   "/static/js/pages/runtimes.js", "/static/js/pages/chat.js"]:
             r = client.get(f)
             assert r.status_code == 200, f"{f} -> {r.status_code}"
             assert len(r.content) > 100, f"{f} too short"
@@ -790,10 +790,14 @@ class TestSettings:
                        json={"bot_token": "test", "webhook_token": "test"}, headers=_headers)
         assert r.status_code == 200
 
-    def test_backend_agents(self):
-        r = client.get("/api/settings/backend-agents", headers=_headers)
+    def test_agent_runtimes(self):
+        r = client.get("/api/settings/agent-runtimes", headers=_headers)
         assert r.status_code == 200
-        assert "backends" in r.json()
+        assert "runtimes" in r.json()
+        # 兼容旧路径 /backend-agents 仍可用
+        r_old = client.get("/api/settings/backend-agents", headers=_headers)
+        assert r_old.status_code == 200
+        assert "backends" in r_old.json()
 
 
 # ===================== 10. Skills =====================

@@ -2,26 +2,26 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# 9.1 discover_backends
-from src.agent.executor import discover_backends, register_backend
-backends = discover_backends()
+# 9.1 discover_runtimes
+from src.runtime.registry import discover_runtimes, register_runtime
+backends = discover_runtimes()
 assert len(backends) >= 4
-print("P9.1 discover_backends:", len(backends), "engines")
+print("P9.1 discover_runtimes:", len(backends), "engines")
 
-# 9.1 register_backend
-from src.agent.base import AgentBackend
-class HermesBackend(AgentBackend):
+# 9.1 register_runtime
+from src.runtime.base import AgentRuntime
+class HermesRuntime(AgentRuntime):
     name = "hermes"
     binary = "hermes"
     def build_args(self, prompt, session_id=""):
         return ["hermes", "-p", prompt]
-register_backend("hermes", HermesBackend())
-print("P9.1 register_backend: OK (~20 lines)")
+register_runtime("hermes", HermesRuntime())
+print("P9.1 register_runtime: OK (~20 lines)")
 
-from src.agent.executor import get_backend
-b = get_backend("hermes")
+from src.runtime.registry import get_runtime
+b = get_runtime("hermes")
 assert b.name == "hermes"
-print("P9.1 get_backend hermes: OK")
+print("P9.1 get_runtime hermes: OK")
 
 # 9.2 IMChannel
 from src.im.base import IMChannel

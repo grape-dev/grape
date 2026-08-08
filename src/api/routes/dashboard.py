@@ -32,11 +32,13 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         agent_sessions = []
         try:
             c.execute(
-                "SELECT agent_type, backend, status, last_active_at FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type",
+                "SELECT s.agent_type, r.name, s.status, s.last_active_at "
+                "FROM devops_agent_session s LEFT JOIN agent_runtimes r ON s.runtime_id=r.id "
+                "WHERE s.repo_key=? ORDER BY s.agent_type",
                 (repo_key,)
             )
             agent_sessions = [
-                {"agent_type": r[0], "backend": r[1], "status": r[2], "last_active_at": r[3]}
+                {"agent_type": r[0], "runtime": r[1] or "", "status": r[2], "last_active_at": r[3]}
                 for r in c.fetchall()
             ]
         except Exception:

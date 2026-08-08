@@ -115,23 +115,23 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
     prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id)
-    backend_session_id = conv.get("backend_session_id", "") if conv else ""
-    if backend_session_id and not backend_session_id.startswith("ses_"):
-        backend_session_id = ""
+    runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
+    if runtime_session_id and not runtime_session_id.startswith("ses_"):
+        runtime_session_id = ""
 
     from src.config import log
     log.info(f"Chat send: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
-    from src.agent.executor import stream_agent
+    from src.runtime.executor import stream_agent
     loop = asyncio.get_event_loop()
     collected = []
-    new_backend_session_id = ""
+    new_runtime_session_id = ""
 
     def run_agent():
-        nonlocal new_backend_session_id
+        nonlocal new_runtime_session_id
         with _CHAT_AGENT_SEMAPHORE:
             for evt_type, data in stream_agent(
-                prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=backend_session_id,
+                prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=runtime_session_id,
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                 agent_label=f"[Agent:chat|user:{user['username']}]",
@@ -158,7 +158,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
                     if isinstance(data, dict):
                         nsid = data.get("oc_session_id", "")
                         if nsid:
-                            new_backend_session_id = nsid
+                            new_runtime_session_id = nsid
                         if not collected:
                             done_text = data.get("text", "")
                             if done_text:
@@ -174,8 +174,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     add_message(conv_id, "agent", reply)
     touch_conversation(conv_id)
     # Save opencode session ID for continuity
-    if new_backend_session_id and not backend_session_id:
-        update_conversation(conv_id, backend_session_id=new_backend_session_id)
+    if new_runtime_session_id and not runtime_session_id:
+        update_conversation(conv_id, runtime_session_id=new_runtime_session_id)
     return {"reply": reply, "conversation_id": conv_id}
 
 
@@ -207,14 +207,14 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
     prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id)
-    backend_session_id = conv.get("backend_session_id", "") if conv else ""
-    if backend_session_id and not backend_session_id.startswith("ses_"):
-        backend_session_id = ""
+    runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
+    if runtime_session_id and not runtime_session_id.startswith("ses_"):
+        runtime_session_id = ""
 
     from src.config import log
     log.info(f"Chat send/stream: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
-    from src.agent.executor import stream_agent
+    from src.runtime.executor import stream_agent
 
     async def event_stream():
         q = asyncio.Queue()
@@ -227,7 +227,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 return
             try:
                 for evt_type, data in stream_agent(
-                    prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=backend_session_id,
+                    prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
@@ -289,8 +289,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         add_message(conv_id, "agent", final_text)
         touch_conversation(conv_id)
         # Save opencode session ID for continuity
-        if captured_session and not backend_session_id:
-            update_conversation(conv_id, backend_session_id=captured_session)
+        if captured_session and not runtime_session_id:
+            update_conversation(conv_id, runtime_session_id=captured_session)
         yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
 
     return StreamingResponse(

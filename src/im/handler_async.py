@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import get_or_create_session, update_session, db
 from src.prompt_builder import build_chat_prompt, get_skill_capabilities
-from src.agent.executor import consume_stream_async
+from src.runtime.executor import consume_stream_async
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
 
 if TYPE_CHECKING:
@@ -199,7 +199,7 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
             from src.repo_key import to_repo_key, from_repo_key
             full_key = to_repo_key(repo_key)
             legacy_key = from_repo_key(repo_key)
-            c.execute("UPDATE chat_agent_session SET backend_session_id='', backend='' WHERE repo_key=? OR repo_key=?", (full_key, legacy_key))
+            c.execute("UPDATE chat_agent_session SET runtime_session_id='', runtime='' WHERE repo_key=? OR repo_key=?", (full_key, legacy_key))
             db.commit()
             return f"✅ 已清除仓库 `{full_key}` 的 Agent 会话缓存。下次事件将使用全新的 Agent 上下文。"
         except Exception as e:

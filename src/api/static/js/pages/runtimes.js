@@ -1,14 +1,14 @@
-function renderBackends(data) {
+function renderRuntimes(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  const engines = data.backends || [];
+  const engines = data.runtimes || data.backends || [];
 
   if (engines.length === 0) {
     el.innerHTML = `<div style="max-width:600px;margin:40px auto;text-align:center">
       <div style="font-size:40px;margin-bottom:16px">⚡</div>
-      <h3 style="font-size:15px;font-weight:600;margin-bottom:8px">暂无后端引擎数据</h3>
+      <h3 style="font-size:15px;font-weight:600;margin-bottom:8px">暂无 Agent 引擎数据</h3>
       <p class="ts t2" style="margin-bottom:20px">点击下方按钮扫描本地已安装的 Agent 引擎</p>
-      <button class="bt bt-p" onclick="refreshBackends()">⟳ 扫描并刷新</button>
+      <button class="bt bt-p" onclick="refreshRuntimes()">⟳ 扫描并刷新</button>
     </div>`;
     return;
   }
@@ -58,15 +58,15 @@ function buildHtml(engines, creds) {
       `}
     </div>`;
   });
-  html += '<button class="bt bt-o" style="margin-top:8px" onclick="refreshBackends()">⟳ Refresh All</button>';
+  html += '<button class="bt bt-o" style="margin-top:8px" onclick="refreshRuntimes()">⟳ Refresh All</button>';
   el.innerHTML = html;
 }
 
-function refreshBackends() {
+function refreshRuntimes() {
   const el = document.getElementById('pageContent');
   if (el) el.innerHTML = '<div class="loading">刷新中...</div>';
-  API.post('/settings/backend-agents/refresh').then(d => {
-    renderBackends(d);
+  API.post('/settings/agent-runtimes/refresh').then(d => {
+    renderRuntimes(d);
     app.showToast('刷新成功');
   }).catch(e => app.showToast('刷新失败: ' + e.message));
 }

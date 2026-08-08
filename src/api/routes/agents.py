@@ -17,7 +17,7 @@ def _get_agent_type_meta(agent_type: str) -> dict | None:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT agent_type, display_name, description, default_backend_id, icon, order_num FROM agent_type WHERE agent_type=?",
+                "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num FROM agent_type WHERE agent_type=?",
                 (agent_type,)
             )
             row = c.fetchone()
@@ -37,7 +37,7 @@ async def list_agent_types():
         c = db.cursor()
         try:
             c.execute(
-                "SELECT agent_type, display_name, description, default_backend_id, icon, order_num FROM agent_type ORDER BY order_num, agent_type"
+                "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num FROM agent_type ORDER BY order_num, agent_type"
             )
             rows = c.fetchall()
         except Exception:
@@ -78,18 +78,18 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, backend_id, skill, skill_id, repo_gitcode_token, backend_session_id, status, last_active_at, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                "SELECT id, runtime_id, skill, skill_id, repo_gitcode_token, runtime_session_id, status, last_active_at, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
             if row:
                 backend_name = "opencode"
                 if row[1]:
-                    c.execute("SELECT name FROM backend_agents WHERE id=?", (row[1],))
+                    c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[1],))
                     brow = c.fetchone()
                     if brow and brow[0]:
                         backend_name = brow[0]
-                session_data = {"id": row[0], "backend": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_gitcode_token": row[4] or "", "backend_session_id": row[5], "status": row[6], "last_active_at": row[7],
+                session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_gitcode_token": row[4] or "", "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
                                "im_app_id": row[8] or ""}
         except Exception:
             pass
@@ -98,11 +98,11 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         if name == "vod" and session_data.get("id"):
             try:
                 c.execute(
-                    "SELECT vc.im_chat_id, vc.im_channel_name, vc.backend_session_id, vc.status, vc.last_active_at FROM vod_conversations vc WHERE vc.agent_session_id=? ORDER BY vc.last_active_at DESC",
+                    "SELECT vc.im_chat_id, vc.im_channel_name, vc.runtime_session_id, vc.status, vc.last_active_at FROM vod_conversations vc WHERE vc.agent_session_id=? ORDER BY vc.last_active_at DESC",
                     (session_data["id"],)
                 )
                 vod_conversations = [
-                    {"chat_id": r[0], "chat_name": r[1] or "", "backend_session_id": r[2] or "",
+                    {"chat_id": r[0], "chat_name": r[1] or "", "runtime_session_id": r[2] or "",
                      "status": r[3], "last_active_at": r[4] or ""}
                     for r in c.fetchall()
                 ]
@@ -127,7 +127,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
 
         try:
             c.execute(
-                "SELECT seq, event_type, title, actor, summary, status, created_at, backend, skill, exit_code, duration, started_at, completed_at FROM events WHERE repo_key=? AND agent_type=? ORDER BY seq DESC LIMIT 10",
+                "SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at FROM events WHERE repo_key=? AND agent_type=? ORDER BY seq DESC LIMIT 10",
                 (repo_key, name)
             )
             recent_events = [
@@ -195,9 +195,9 @@ class AgentConfig(BaseModel):
 @router.post("/{name}/{owner}/{repo}/clean")
 async def clean_agent_session(name: str, owner: str, repo: str,
                               user: dict = Depends(get_current_user)):
-    """清理 Agent 会话：将 devops_agent_session.backend_session_id 置空。
+    """清理 Agent 会话：将 devops_agent_session.runtime_session_id 置空。
 
-    clean 之后清除 backend_session_id，下一次事件到来时会创建新的 backend_session_id
+    clean 之后清除 runtime_session_id，下一次事件到来时会创建新的 runtime_session_id
     （Agent 重新开始全新上下文，不延续历史对话）。
     """
     if name not in AGENT_TYPES:
@@ -208,12 +208,12 @@ async def clean_agent_session(name: str, owner: str, repo: str,
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE devops_agent_session SET backend_session_id='' WHERE repo_key=? AND agent_type=?",
+        c.execute("UPDATE devops_agent_session SET runtime_session_id='' WHERE repo_key=? AND agent_type=?",
                   (repo_key, name))
         updated = c.rowcount
         db.commit()
     log.info(f"Agent session cleaned: repo={repo_key}, agent={name}, rows={updated}")
-    return {"message": "Agent 会话已清理（backend_session_id 已置空）", "cleaned": updated > 0, "agent_type": name}
+    return {"message": "Agent 会话已清理（runtime_session_id 已置空）", "cleaned": updated > 0, "agent_type": name}
 
 
 @router.put("/{name}/{owner}/{repo}")
@@ -280,8 +280,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     with db_lock:
         c = db.cursor()
         try:
-            from src.user.db import ensure_default_backend, get_backend_id_by_name
-            backend_id = get_backend_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
+            from src.user.db import ensure_default_backend, get_runtime_id_by_name
+            runtime_id = get_runtime_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
             # 精确按 scope(+owner) 解析 skill_id，避免同名时官方优先误命中
             skill_id = 0
             if body.skill:
@@ -306,8 +306,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     if not skill_id:
                         skill_id = _find_skill("official")
             c.execute(
-                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?)",
-                (session_id, repo_key, name, backend_id, body.skill, skill_id, repo_token, "idle",
+                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?)",
+                (session_id, repo_key, name, runtime_id, body.skill, skill_id, repo_token, "idle",
                  body.im_app_id if name == "vod" else "",
                  app_secret if name == "vod" and app_secret else "",
                  "feishu" if name == "vod" and body.im_app_id else "")

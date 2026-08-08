@@ -173,23 +173,35 @@ async def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_curren
     return {"message": "OAuth 配置已更新"}
 
 
-# ====== Backend Runtimes ======
+# ====== Agent Runtimes ======
 
+@router.get("/agent-runtimes")
+async def get_agent_runtimes(user: dict = Depends(get_current_user)):
+    """从 DB 读取 Agent 执行引擎列表，空列表则需手动刷新"""
+    from src.user import db as user_db
+    cached = user_db.get_agent_runtimes()
+    return {"runtimes": cached}
+
+# 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）
 @router.get("/backend-agents")
 async def get_backend_agents(user: dict = Depends(get_current_user)):
-    """从 DB 读取后端引擎列表，空列表则需手动刷新"""
-    from src.user import db as user_db
-    cached = user_db.get_backend_agents()
+    cached = user_db_get_backend_agents_alias()
     return {"backends": cached}
 
-@router.post("/backend-agents/refresh")
-async def refresh_backend_agents(user: dict = Depends(get_current_user)):
+
+def user_db_get_backend_agents_alias():
+    from src.user import db as user_db
+    return user_db.get_backend_agents()
+
+
+@router.post("/agent-runtimes/refresh")
+async def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
     """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB"""
-    from src.agent.executor import discover_backends
+    from src.runtime.registry import discover_runtimes
     from src.user import db as user_db
     import subprocess
 
-    discovered = discover_backends()
+    discovered = discover_runtimes()
     results = []
     for eng in discovered:
         version = None
@@ -220,7 +232,12 @@ async def refresh_backend_agents(user: dict = Depends(get_current_user)):
             "pip_package": eng.get("pip_package", ""),
         })
 
-    # Only persist backends that are actually installed
+    # Only persist runtimes that are actually installed
     results = [r for r in results if r["installed"]]
-    user_db.save_backend_agents(results)
-    return {"backends": results}
+    user_db.save_agent_runtimes(results)
+    return {"runtimes": results}
+
+# 兼容别名：旧路径 /backend-agents/refresh
+@router.post("/backend-agents/refresh")
+async def refresh_backend_agents(user: dict = Depends(get_current_user)):
+    return await refresh_agent_runtimes(user)

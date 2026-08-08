@@ -119,7 +119,7 @@ def test_run_onboarding_consumes_agent():
         yield (None, None)
 
     async def _main():
-        with patch("src.agent.executor.consume_stream_async", side_effect=_fake_consume) as mock_cs:
+        with patch("src.runtime.executor.consume_stream_async", side_effect=_fake_consume) as mock_cs:
             await ob_mod._run_onboarding("gitcode:owner/repo", "owner", "repo-onboarding")
             mock_cs.assert_called_once()
             args, kwargs = mock_cs.call_args

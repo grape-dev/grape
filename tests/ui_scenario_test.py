@@ -384,12 +384,12 @@ class TestScenario9Skills:
         assert page.locator('#pageTitle').inner_text() == "DevOps Skills"
 
 
-# ==================== S10: Backend ====================
+# ==================== S10: Agent Runtimes ====================
 class TestScenario10Backends:
-    def test_s10_backends(self, page):
+    def test_s10_runtimes(self, page):
         _login(page)
-        _nav(page, 'backends')
-        assert page.locator('#pageTitle').inner_text() == "Backend Agents"
+        _nav(page, 'runtimes')
+        assert page.locator('#pageTitle').inner_text() == "Agent Runtimes"
 
 
 # ==================== S11: Navigation ====================
@@ -399,7 +399,7 @@ class TestScenario11Navigation:
         checks = [
             ("dash","Dashboard"),("pipe","Pipeline"),("vod","VOD Agent"),
             ("skills","DevOps Skills"),("chat","Chat Agent"),
-            ("settings","General Settings"),("backends","Backend Agents"),
+            ("settings","General Settings"),("runtimes","Agent Runtimes"),
         ]
         for view, expected in checks:
             _nav(page, view)

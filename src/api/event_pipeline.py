@@ -175,12 +175,12 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT backend_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
+            c.execute("SELECT runtime_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
             row = c.fetchone()
             if row:
                 backend = "opencode"
                 if row[0]:
-                    c.execute("SELECT name FROM backend_agents WHERE id=?", (row[0],))
+                    c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
                     brow = c.fetchone()
                     if brow and brow[0]:
                         backend = brow[0]
@@ -323,7 +323,7 @@ def get_prompt_context(repo_key: str) -> str:
 def _execute_agent(repo_key: str, seq: int, agent_type: str,
                    backend: str, skill_name: str, evt: dict):
     """后台执行 Agent：构建 prompt → stream_agent → 更新 event（result/status/agent_log）"""
-    from src.agent.executor import stream_agent
+    from src.runtime.executor import stream_agent
     from src.prompt_builder import build_prompt
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
@@ -340,7 +340,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT backend_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
+            c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
             row = c.fetchone()
             if row and row[0]:
                 oc_session_id = row[0]
@@ -434,7 +434,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("UPDATE devops_agent_session SET backend_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
+                c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
                           (new_oc_session_id, repo_name, agent_type))
                 db.commit()
         except Exception as e:

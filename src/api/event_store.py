@@ -191,13 +191,13 @@ def update_event_status(seq: int, status: str):
             log.warning(f"Failed to update event {seq}: {e}")
 
 
-def update_event_config(seq: int, backend: str, skill: str, started_at: str):
-    """写入执行配置（backend, skill, started_at）"""
+def update_event_config(seq: int, runtime: str, skill: str, started_at: str):
+    """写入执行配置（runtime, skill, started_at）"""
     with db_lock:
         try:
             c = db.cursor()
-            c.execute("UPDATE events SET backend=?, skill=?, started_at=? WHERE seq=?",
-                      (backend, skill, started_at, seq))
+            c.execute("UPDATE events SET runtime=?, skill=?, started_at=? WHERE seq=?",
+                      (runtime, skill, started_at, seq))
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update event config {seq}: {e}")
@@ -240,14 +240,14 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
         c = db.cursor()
         try:
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, backend, skill, exit_code, duration, started_at, completed_at FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
                 params + [limit, offset]
             )
             return [
                 {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "",
                  "title": r[4] or r[2], "actor": r[5] or "", "summary": r[6] or r[4] or r[2],
                  "status": r[7], "created_at": r[8],
-                 "backend": r[9] or "", "skill": r[10] or "",
+                 "runtime": r[9] or "", "skill": r[10] or "",
                  "exit_code": r[11], "duration": r[12],
                  "started_at": r[13] or "", "completed_at": r[14] or ""}
                 for r in c.fetchall()

@@ -140,6 +140,30 @@ CREATE TABLE IF NOT EXISTS backend_agents (
 )
 """
 
+# new-version2：backend_agents → agent_runtimes（术语重构，见 agent-runtime-design.md §5.2）
+# 结构 = 原 backend_agents + 新增列（credential_id/provider/binary/status/last_seen_at）
+_AGENT_RUNTIMES_DDL = """
+CREATE TABLE IF NOT EXISTS agent_runtimes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER DEFAULT 0,
+    name TEXT NOT NULL,
+    display_name TEXT DEFAULT '',
+    provider TEXT DEFAULT '',
+    binary TEXT DEFAULT '',
+    installed INTEGER DEFAULT 0,
+    cli_path TEXT DEFAULT '',
+    version TEXT DEFAULT '',
+    healthy INTEGER DEFAULT 0,
+    pip_package TEXT DEFAULT '',
+    status TEXT DEFAULT 'offline',
+    last_seen_at TEXT DEFAULT NULL,
+    scope TEXT DEFAULT 'global',
+    owner_id TEXT DEFAULT '',
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (name, scope, owner_id)
+)
+"""
+
 _CHAT_CONVERSATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS chat_conversations (
     id TEXT PRIMARY KEY,
@@ -210,7 +234,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
-    ("backend_agents", _BACKEND_AGENTS_DDL),
+    ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("events", _EVENTS_TABLE_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
     ("chat_conversations", _CHAT_CONVERSATIONS_DDL),
@@ -250,6 +274,62 @@ def _create_tables():
             log.info(f"Table '{name}' ready")
         except Exception as e:
             log.warning(f"Create table '{name}' failed: {e}")
+
+
+def _ensure_column(c, tbl: str, col: str, ddl: str):
+    """幂等补列：PRAGMA 检查列不存在才 ALTER"""
+    cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
+    if col not in cols:
+        c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {ddl}")
+
+
+def _rename_column_if_exists(c, tbl: str, old: str, new: str):
+    """幂等改名：旧列存在才处理（SQLite 3.25+）。
+    - 若 new 不存在：RENAME COLUMN（保数据）
+    - 若 new 已存在（如 session_manager 模块级 ALTER 预建的兼容列）且 old 仍有数据：
+      把 old 数据并入 new，再 DROP old，避免双列并存丢数据
+    """
+    cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
+    if old not in cols:
+        return
+    if new not in cols:
+        c.execute(f"ALTER TABLE {tbl} RENAME COLUMN {old} TO {new}")
+        return
+    # 双列并存：按列类型归并 old → new（new 为默认值才填 old，避免覆盖新值）
+    try:
+        otype = [r[2] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall() if r[1] == old][0].upper()
+    except Exception:
+        otype = "TEXT"
+    if "INT" in otype:
+        c.execute(f"UPDATE {tbl} SET {new}=CASE WHEN {new} IS NULL OR {new}=0 THEN {old} ELSE {new} END WHERE {old} IS NOT NULL AND {old}!=0")
+    else:
+        c.execute(f"UPDATE {tbl} SET {new}=CASE WHEN {new} IS NULL OR {new}='' THEN {old} ELSE {new} END WHERE {old} IS NOT NULL AND {old}!=''")
+    try:
+        c.execute(f"ALTER TABLE {tbl} DROP COLUMN {old}")
+    except Exception:
+        pass
+
+
+def _copy_backend_to_runtime(c):
+    """backend_agents → agent_runtimes 数据搬迁（保留 id；若 agent_runtimes 已有同 name 行——
+    如历史迁移 ensure_default_runtime 预置的空行——则用老库数据补全缺失字段，老库为权威）。"""
+    cols = [r[1] for r in c.execute("PRAGMA table_info(backend_agents)").fetchall()]
+    if "name" not in cols:
+        return
+    rcols = [r[1] for r in c.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
+    rows = c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, updated_at FROM backend_agents").fetchall()
+    for r in rows:
+        rid, name, display, installed, cli, ver, healthy, pip, scope, owner, updated = r
+        existing = c.execute("SELECT id FROM agent_runtimes WHERE lower(name)=? AND scope=? AND owner_id=? LIMIT 1",
+                             (name.lower() if name else name, scope or "global", owner or "")).fetchone()
+        if existing:
+            # 已存在（如 ensure 预置空行）：补全缺失字段，保留其 id
+            c.execute("""UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=?
+                         WHERE id=? AND (display_name='' OR installed=0 OR cli_path='' OR version='' OR healthy=0 OR pip_package='')""",
+                      (display or name, 1 if installed else 0, cli or "", ver or "", 1 if healthy else 0, pip or "", updated or "", existing[0]))
+        else:
+            c.execute("INSERT OR IGNORE INTO agent_runtimes (id, name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                      (rid, name, display or name, 1 if installed else 0, cli or "", ver or "", 1 if healthy else 0, pip or "", scope or "global", owner or "", updated or ""))
 
 
 def _create_indexes():
@@ -359,16 +439,16 @@ def _insert_seed_data(table: str, data: dict):
             for agent_type, info in data.items():
                 display_name = info.get("name", agent_type)
                 description = info.get("description", "")
-                default_backend_name = info.get("backend", "opencode")
-                # 预置 backend（幂等），拿 id
-                from src.user.db import ensure_default_backend
-                default_backend_id = ensure_default_backend(default_backend_name) or 0
+                default_runtime_name = info.get("backend", "opencode")
+                # 预置 runtime（幂等），拿 id
+                from src.user.db import ensure_default_runtime
+                default_runtime_id = ensure_default_runtime(default_runtime_name) or 0
                 icon = info.get("icon", "")
                 order_num = info.get("order_num", 0)
                 subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_backend_id, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
-                    (agent_type, display_name, description, default_backend_id, icon, order_num, subscribe_events)
+                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
+                    (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events)
                 )
 
         elif table == "skill_official":
@@ -400,6 +480,31 @@ def init_database():
 
 def _migrate_tables():
     """已有数据库的 schema 迁移"""
+    # ===== new-version2 数据安全：迁移前自动备份（仅在有改动性迁移时触发一次）=====
+    try:
+        from src.session_manager import _backup_db, _db_path
+        # 仅当存在旧结构（backend_* 表/列）时备份，避免无谓备份
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            _need_backup = "backend_agents" in _tables
+            if not _need_backup:
+                for _t in ("devops_agent_session", "agent_type", "chat_agent_session", "chat_conversations", "vod_conversations", "events"):
+                    if _t in _tables:
+                        _cols = [r[1] for r in c.execute(f"PRAGMA table_info({_t})").fetchall()]
+                        if any(col.startswith("backend") for col in _cols):
+                            _need_backup = True
+                            break
+            if _need_backup:
+                _backup_db(_db_path, tag="pre-m0")
+                # 记录已备份，避免多进程重复备份
+                try:
+                    c.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('m0_backup_done', '1')")
+                    db.commit()
+                except Exception:
+                    pass
+    except Exception as e:
+        log.warning(f"Pre-migration backup skipped: {e}")
     migrations = [
         "ALTER TABLE agent_type_config ADD COLUMN parent_agent_type TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN agent_type TEXT DEFAULT ''",
@@ -867,3 +972,48 @@ def _migrate_tables():
                     log.info(f"Migrated {_tbl}.skill_name -> skill_id ({_updated} rows)")
     except Exception as e:
         log.warning(f"Migrate skill_name -> skill_id failed: {e}")
+    # ===== new-version2 M0：backend_agents → agent_runtimes（术语重构，须在所有 backend_agents 历史迁移之后）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "backend_agents" in _tables and "agent_runtimes" in _tables:
+                # 双表并存：老库升级时 _create_tables 已建空 agent_runtimes → 搬迁数据后删旧表
+                _copy_backend_to_runtime(c)
+                c.execute("DROP TABLE backend_agents")
+                db.commit()
+                log.info("Migrated backend_agents -> agent_runtimes (data copied, old dropped)")
+            elif "backend_agents" in _tables and "agent_runtimes" not in _tables:
+                # 仅有旧表：直接 rename 保数据（理论上不发生，_create_tables 总建新表；防御分支）
+                c.execute("ALTER TABLE backend_agents RENAME TO agent_runtimes")
+                _ensure_column(c, "agent_runtimes", "credential_id", "INTEGER DEFAULT 0")
+                _ensure_column(c, "agent_runtimes", "provider", "TEXT DEFAULT ''")
+                _ensure_column(c, "agent_runtimes", "binary", "TEXT DEFAULT ''")
+                _ensure_column(c, "agent_runtimes", "status", "TEXT DEFAULT 'offline'")
+                _ensure_column(c, "agent_runtimes", "last_seen_at", "TEXT DEFAULT NULL")
+                db.commit()
+                log.info("Migrated backend_agents -> agent_runtimes (rename)")
+    except Exception as e:
+        log.warning(f"Migrate backend_agents -> agent_runtimes failed: {e}")
+    # ===== new-version2 M0：引用列改名（SQLite 3.25+ RENAME COLUMN，幂等）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            _rename_map = {
+                "devops_agent_session": [("backend_id", "runtime_id"), ("backend_session_id", "runtime_session_id")],
+                "agent_type": [("default_backend_id", "default_runtime_id")],
+                "chat_agent_session": [("backend_id", "runtime_id"), ("backend_session_id", "runtime_session_id"), ("backend", "runtime")],
+                "chat_conversations": [("backend_session_id", "runtime_session_id")],
+                "vod_conversations": [("backend_session_id", "runtime_session_id")],
+                "events": [("backend", "runtime")],
+            }
+            for tbl, cols in _rename_map.items():
+                if tbl not in _tables:
+                    continue
+                for old, new in cols:
+                    _rename_column_if_exists(c, tbl, old, new)
+            db.commit()
+            log.info("Renamed backend* -> runtime* columns (M0)")
+    except Exception as e:
+        log.warning(f"Rename backend* -> runtime* columns failed: {e}")

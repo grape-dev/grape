@@ -176,7 +176,7 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
 
 async def _consume(prompt: str, cwd: str, cfg: dict, user_id: int, user_token: str, repo_key: str):
     """async 桥接 consume_stream_async（在线程池消费 stream_agent，不阻塞事件循环）"""
-    from src.agent.executor import consume_stream_async
+    from src.runtime.executor import consume_stream_async
     from src.repo_key import split_owner_repo
     backend = cfg.get("backend", "opencode")
     _owner, _repo = split_owner_repo(repo_key)

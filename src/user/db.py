@@ -1480,13 +1480,18 @@ def has_user_repos(user_id: int) -> bool:
 init_user_repos_table()
 
 
-# ====== Backend Runtimes 缓存表 ======
+# ====== Agent Runtimes 缓存表 ======
 
 def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = ""):
-    """批量写入 backend agents 缓存（scope: global/repo/user）
+    """[兼容别名] 见 save_agent_runtimes"""
+    return save_agent_runtimes(agents, scope, owner_id)
+
+
+def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = ""):
+    """批量写入 agent runtimes 缓存（scope: global/repo/user）
 
     幂等 upsert：按 name+scope+owner_id 匹配，存在则更新（保留 id），不存在才插入。
-    保证跨刷新 id 稳定，供各表 backend_id 引用。
+    保证跨刷新 id 稳定，供各表 runtime_id 引用。
     """
     with db_lock:
         c = db.cursor()
@@ -1494,11 +1499,11 @@ def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str
             name = (a.get("name", "") or "").strip().lower()
             if not name:
                 continue
-            c.execute("SELECT id FROM backend_agents WHERE name=? AND scope=? AND owner_id=?", (name, scope, owner_id))
+            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=?", (name, scope, owner_id))
             row = c.fetchone()
             if row:
                 c.execute(
-                    "UPDATE backend_agents SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now') WHERE id=?",
+                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now') WHERE id=?",
                     (a.get("display_name", name),
                      1 if a.get("installed") else 0, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
@@ -1506,25 +1511,30 @@ def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str
                 )
             else:
                 c.execute(
-                    "INSERT INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
                     (name, a.get("display_name", name),
                      1 if a.get("installed") else 0, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
                      a.get("pip_package", ""), scope, owner_id)
                 )
-        # 清理本次 scope 中已不在列表里的 backend（忽略大小写）
+        # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）
         current_names = [(a.get("name", "") or "").strip().lower() for a in agents if a.get("name")]
         if current_names:
             placeholders = ",".join("?" for _ in current_names)
-            c.execute(f"DELETE FROM backend_agents WHERE scope=? AND owner_id=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, *current_names))
+            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, *current_names))
         db.commit()
 
 
 def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
-    """读取 backend agents 缓存"""
+    """[兼容别名] 见 get_agent_runtimes"""
+    return get_agent_runtimes(scope, owner_id)
+
+
+def get_agent_runtimes(scope: str = "global", owner_id: str = "") -> list[dict]:
+    """读取 agent runtimes 缓存"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id FROM backend_agents WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+        c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
              "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
@@ -1534,37 +1544,52 @@ def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
 
 
 def get_backend_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
-    """按 name+scope+owner_id 查找 backend id"""
+    """[兼容别名] 见 get_runtime_id_by_name"""
+    return get_runtime_id_by_name(name, scope, owner_id)
+
+
+def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
+    """按 name+scope+owner_id 查找 runtime id"""
     if not name:
         return None
     name = name.strip().lower()
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id FROM backend_agents WHERE lower(name)=? AND scope=? AND owner_id=? LIMIT 1", (name, scope, owner_id))
+        c.execute("SELECT id FROM agent_runtimes WHERE lower(name)=? AND scope=? AND owner_id=? LIMIT 1", (name, scope, owner_id))
         row = c.fetchone()
         return row[0] if row else None
 
 
 def ensure_default_backend(name: str = "opencode", scope: str = "global"):
-    """确保默认 backend 存在（幂等），返回 id"""
+    """[兼容别名] 见 ensure_default_runtime"""
+    return ensure_default_runtime(name, scope)
+
+
+def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
+    """确保默认 runtime 存在（幂等），返回 id"""
     name = (name or "opencode").strip().lower() or "opencode"
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id FROM backend_agents WHERE lower(name)=? AND scope=? AND owner_id='' LIMIT 1", (name, scope))
+        c.execute("SELECT id FROM agent_runtimes WHERE lower(name)=? AND scope=? AND owner_id='' LIMIT 1", (name, scope))
         row = c.fetchone()
         if row:
             return row[0]
-        c.execute("INSERT INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
+        c.execute("INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
                   (name, name.capitalize(), 1, "", "", 1, name, scope))
         db.commit()
         return c.lastrowid
 
 
 def get_backend_agents_age() -> float | None:
+    """[兼容别名] 见 get_agent_runtimes_age"""
+    return get_agent_runtimes_age()
+
+
+def get_agent_runtimes_age() -> float | None:
     """返回缓存数据的 age（秒），无缓存返回 None"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT MIN(updated_at) FROM backend_agents")
+        c.execute("SELECT MIN(updated_at) FROM agent_runtimes")
         row = c.fetchone()
         if not row or not row[0]:
             return None

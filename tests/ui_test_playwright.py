@@ -174,10 +174,10 @@ class TestSkills:
         assert page.locator("#pageTitle").inner_text() == "DevOps Skills"
 
 class TestBackendAgents:
-    def test_backend_page(self, page):
+    def test_runtimes_page(self, page):
         login(page, token())
-        page.locator("#nav-backends").click(); time.sleep(1)
-        assert page.locator("#pageTitle").inner_text() == "Backend Agents"
+        page.locator("#nav-runtimes").click(); time.sleep(1)
+        assert page.locator("#pageTitle").inner_text() == "Agent Runtimes"
 
 class TestNavigation:
     def test_all_links(self, page):
@@ -186,7 +186,7 @@ class TestNavigation:
         page.goto(BASE); page.wait_for_load_state("networkidle"); time.sleep(1)
         for sel, exp in [("#nav-dash","Dashboard"),("#nav-pipe","Pipeline"),("#nav-vod","VOD Agent"),
                          ("#nav-skills","DevOps Skills"),("#nav-chat","Chat Agent"),
-                         ("#nav-settings-credentials","General Settings"),("#nav-backends","Backend Agents")]:
+                         ("#nav-settings-credentials","General Settings"),("#nav-runtimes","Agent Runtimes")]:
             page.locator(sel).click(); time.sleep(0.5)
             assert page.locator("#pageTitle").inner_text() == exp
 

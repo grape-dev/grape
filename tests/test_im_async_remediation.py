@@ -219,13 +219,13 @@ class TestProcessCommandAsync:
         from src.session_manager import db, db_lock
         with db_lock:
             db.cursor().execute(
-                "INSERT OR REPLACE INTO chat_agent_session (id, repo_key, backend_session_id) VALUES ('sess-c8','gitcode:owner/repo','old_oc')")
+                "INSERT OR REPLACE INTO chat_agent_session (id, repo_key, runtime_session_id) VALUES ('sess-c8','gitcode:owner/repo','old_oc')")
             db.commit()
         result, _ = asyncio.run(self._run_cmd("/clean", bound_repo="owner/repo"))
         assert "已清除" in result
         with db_lock:
             row = db.cursor().execute(
-                "SELECT backend_session_id FROM chat_agent_session WHERE id='sess-c8'").fetchone()
+                "SELECT runtime_session_id FROM chat_agent_session WHERE id='sess-c8'").fetchone()
         assert row[0] == ""
 
     def test_c9_help(self):

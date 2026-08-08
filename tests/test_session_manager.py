@@ -33,13 +33,13 @@ def _import_session_manager(tmp_path):
             user_id INTEGER DEFAULT 0,
             repo_key TEXT DEFAULT '',
             source TEXT, repository TEXT, status TEXT,
-            backend TEXT DEFAULT 'opencode',
+            runtime TEXT DEFAULT 'opencode',
             skill TEXT DEFAULT '',
             im_provider TEXT DEFAULT '',
             im_app_id TEXT DEFAULT '',
             im_app_secret TEXT DEFAULT '',
             event_history TEXT DEFAULT '[]',
-            backend_session_id TEXT DEFAULT '',
+            runtime_session_id TEXT DEFAULT '',
             created_at TEXT, last_active_at TEXT
         )
     """)

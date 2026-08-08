@@ -62,7 +62,7 @@ async def _run_onboarding(repo_key: str, owner: str, skill: str):
         prompt = _build_onboarding_prompt(repo_key, owner, skill)
         log.info(f"[Onboarding|repo:{repo_key}] starting agent, skill={skill}, ws={ws}")
 
-        from src.agent.executor import consume_stream_async
+        from src.runtime.executor import consume_stream_async
         final_text = ""
         tool_uses = []
         async for evt_type, data in consume_stream_async(

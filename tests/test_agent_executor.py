@@ -10,16 +10,16 @@ if SRC_DIR not in sys.path:
 
 os.environ.setdefault("GITCODE_API_TOKEN", "test_token")  # 兼容旧测试；token 现经 prompt 注入
 
-from src.agent import (
-    OpencodeBackend, CodeArtsBackend, get_backend,
-    AgentBackend, stream_agent, stream_opencode
+from src.runtime import (
+    OpencodeRuntime, CodeArtsRuntime, get_runtime,
+    AgentRuntime, stream_runtime, stream_opencode
 )
-from src.agent.executor import _redact
+from src.runtime.executor import _redact, stream_agent
 
 
-class TestOpencodeBackend:
+class TestOpencodeRuntime:
     def setup_method(self):
-        self.backend = OpencodeBackend()
+        self.backend = OpencodeRuntime()
 
     def test_build_args_basic(self):
         args = self.backend.build_args("hello world")
@@ -43,9 +43,9 @@ class TestOpencodeBackend:
         assert self.backend.name == "opencode"
 
 
-class TestCodeArtsBackend:
+class TestCodeArtsRuntime:
     def setup_method(self):
-        self.backend = CodeArtsBackend()
+        self.backend = CodeArtsRuntime()
 
     def test_build_args_basic(self):
         args = self.backend.build_args("hello world")
@@ -72,24 +72,24 @@ class TestCodeArtsBackend:
 
 class TestGetBackend:
     def test_opencode(self):
-        b = get_backend("opencode")
-        assert isinstance(b, OpencodeBackend)
+        b = get_runtime("opencode")
+        assert isinstance(b, OpencodeRuntime)
 
     def test_codearts(self):
-        b = get_backend("codearts")
-        assert isinstance(b, CodeArtsBackend)
+        b = get_runtime("codearts")
+        assert isinstance(b, CodeArtsRuntime)
 
     def test_unknown_fallback_to_opencode(self):
-        b = get_backend("nonexistent")
-        assert isinstance(b, OpencodeBackend)
+        b = get_runtime("nonexistent")
+        assert isinstance(b, OpencodeRuntime)
 
     def test_case_sensitive(self):
-        b = get_backend("CodeArts")
-        assert isinstance(b, OpencodeBackend)  # case doesn't match, fallback
+        b = get_runtime("CodeArts")
+        assert isinstance(b, OpencodeRuntime)  # case doesn't match, fallback
 
 
 class TestBackendParseOutput:
-    @pytest.fixture(params=[OpencodeBackend(), CodeArtsBackend()])
+    @pytest.fixture(params=[OpencodeRuntime(), CodeArtsRuntime()])
     def backend(self, request):
         return request.param
 
@@ -188,7 +188,7 @@ class TestRedact:
         fake_proc = FakeStream()
         with patch("src.agent.executor.subprocess.Popen", return_value=fake_proc), \
              patch("src.agent.executor.shutil.which", return_value="/fake/opencode"):
-            events = list(stream_agent("prompt", os.getcwd(), "", "issue",
+            events = list(stream_runtime("prompt", os.getcwd(), "", "issue",
                                        bot_token="BOTTOK", user_token="USERTOK"))
         combined = " ".join(str(d) for _, d in events)
         assert "BOTTOK" not in combined
@@ -216,7 +216,7 @@ class TestConfigIntegration:
         assert get_agent_backend("unknown_skill") == "opencode"
 
 
-class _SleepBackend(AgentBackend):
+class _SleepBackend(AgentRuntime):
     """无输出的假 backend：spawn `python -c time.sleep(60)`，用于测超时终止。"""
     name = "sleepbackend"
     binary = "python"
@@ -396,7 +396,7 @@ class TestStreamAgentSessionAutoRetry:
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
              patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
-            events = list(stream_agent("p", os.getcwd(), session_id="ses_dead_old", backend_name="opencode"))
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead_old", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
         assert done["exit_code"] == 0, done
@@ -422,7 +422,7 @@ class TestStreamAgentSessionAutoRetry:
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
              patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
-            events = list(stream_agent("p", os.getcwd(), session_id="ses_dead", backend_name="opencode"))
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead", backend_name="opencode"))
 
         done_events = [et for et, d in events if et == "done"]
         assert len(done_events) == 1, f"expected exactly 1 done event, got {len(done_events)}"
@@ -441,7 +441,7 @@ class TestStreamAgentSessionAutoRetry:
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
              patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
-            events = list(stream_agent("p", os.getcwd(), session_id="ses_good", backend_name="opencode"))
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_good", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
         assert done["exit_code"] == 0
@@ -459,7 +459,7 @@ class TestStreamAgentSessionAutoRetry:
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
              patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
-            events = list(stream_agent("p", os.getcwd(), session_id="ses_any", backend_name="opencode"))
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_any", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
         assert done["exit_code"] == 1

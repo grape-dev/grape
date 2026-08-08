@@ -14,10 +14,10 @@ function loadCfgOptions() {
   // Backend 下拉：仅未加载时加载
   if (backendSelect && !backendSelect.dataset.loaded) {
     backendSelect.dataset.loaded = '1';
-    API.get('/settings/backend-agents').then(d => {
-      const backends = d.backends || [];
+    API.get('/settings/agent-runtimes').then(d => {
+      const runtimes = d.runtimes || d.backends || [];
       const current = backendSelect.dataset.current || 'opencode';
-      backendSelect.innerHTML = backends.map(b =>
+      backendSelect.innerHTML = runtimes.map(b =>
         `<option value="${b.name}" ${b.name === current ? 'selected' : ''}>${b.name}${b.healthy ? ' ✓' : ' ✗'}</option>`
       ).join('');
     }).catch(() => {});

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import db, db_lock
-from src.agent.executor import consume_stream_async
+from src.runtime.executor import consume_stream_async
 
 if TYPE_CHECKING:
     from src.im.feishu_async import BotContext, FeishuAsync
@@ -40,13 +40,13 @@ def _get_vod_session(repo_key: str) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, repo_key, backend_id, skill, skill_id, im_app_id, repo_gitcode_token "
+            c.execute("SELECT id, repo_key, runtime_id, skill, skill_id, im_app_id, repo_gitcode_token "
                       "FROM devops_agent_session WHERE agent_type='vod' AND repo_key=?", (repo_key,))
             row = c.fetchone()
         if row:
             backend = "opencode"
             if row[2]:
-                c.execute("SELECT name FROM backend_agents WHERE id=?", (row[2],))
+                c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[2],))
                 brow = c.fetchone()
                 if brow and brow[0]:
                     backend = brow[0]
@@ -62,21 +62,21 @@ def _get_or_create_conversation(chat_id: str, agent_session_id: str) -> dict:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, agent_session_id, backend_session_id FROM vod_conversations WHERE im_chat_id=?",
+            c.execute("SELECT id, agent_session_id, runtime_session_id FROM vod_conversations WHERE im_chat_id=?",
                       (chat_id,))
             row = c.fetchone()
             if row:
-                return {"id": row[0], "agent_session_id": row[1], "backend_session_id": row[2] or ""}
+                return {"id": row[0], "agent_session_id": row[1], "runtime_session_id": row[2] or ""}
             import time
             c.execute("INSERT INTO vod_conversations (agent_session_id, im_chat_id, im_channel_name) "
                       "VALUES (?,?,?)", (agent_session_id, chat_id, ""))
             db.commit()
             conv_id = c.lastrowid
             log.info(f"VOD conv created: id={conv_id}, chat_id={chat_id[:20]}, agent_session={agent_session_id[:20]}")
-            return {"id": conv_id, "agent_session_id": agent_session_id, "backend_session_id": "", "is_new": True}
+            return {"id": conv_id, "agent_session_id": agent_session_id, "runtime_session_id": "", "is_new": True}
     except Exception as e:
         log.warning(f"VOD conversation error: {e}")
-    return {"id": "", "agent_session_id": agent_session_id, "backend_session_id": ""}
+    return {"id": "", "agent_session_id": agent_session_id, "runtime_session_id": ""}
 
 
 def _list_vod_repos(bot_app_id: str) -> list:
@@ -138,7 +138,7 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
 
 
 async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict) -> str:
-    backend_session_id = conv.get("backend_session_id", "")
+    runtime_session_id = conv.get("runtime_session_id", "")
     backend = agent_session.get("backend", "opencode")
     skill = agent_session.get("skill", "vod")
     skill_path = ""
@@ -162,17 +162,17 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     os.makedirs(wsd, exist_ok=True)
 
     final_text = ""
-    new_oc_sid = backend_session_id
+    new_oc_sid = runtime_session_id
     exit_code = -1
     start_time = time.time()
-    async for event_type, data in consume_stream_async(prompt, wsd, backend_session_id, skill,
+    async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
                                                        backend_name=backend, account=repo_key,
                                                        bot_token=repo_token, agent_name="VOD Agent",
                                                        agent_label=f"[Agent:vod|repo:{repo_key}]"):
         if event_type == "done":
             final_text = data.get("text", "")
             exit_code = data.get("exit_code", -1)
-            new_sid = data.get("oc_session_id") or data.get("backend_session_id")
+            new_sid = data.get("oc_session_id") or data.get("runtime_session_id")
             if exit_code == 0 and new_sid:
                 new_oc_sid = new_sid
             log.info(f"[VOD agent|repo:{repo_key}] done: exit={exit_code}, text_len={len(final_text)}")
@@ -216,7 +216,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE vod_conversations SET backend_session_id=?, last_active_at=datetime('now') WHERE im_chat_id=?",
+            c.execute("UPDATE vod_conversations SET runtime_session_id=?, last_active_at=datetime('now') WHERE im_chat_id=?",
                       (new_oc_sid, chat_id))
             db.commit()
     except Exception:
@@ -296,7 +296,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             try:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("UPDATE vod_conversations SET backend_session_id='' WHERE im_chat_id=?", (chat_id,))
+                    c.execute("UPDATE vod_conversations SET runtime_session_id='' WHERE im_chat_id=?", (chat_id,))
                     db.commit()
                 await api.reply_text(ctx, msg_id, "✅ 已清除会话")
             except Exception as e:
@@ -306,7 +306,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT agent_session_id, backend_session_id FROM vod_conversations WHERE im_chat_id=?",
+                c.execute("SELECT agent_session_id, runtime_session_id FROM vod_conversations WHERE im_chat_id=?",
                           (chat_id,))
                 row = c.fetchone()
         except Exception as e:
@@ -327,7 +327,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
                     conv = _get_or_create_conversation(chat_id, agent_session["id"])
                     if conv.get("is_new"):
                         await api.reply_text(ctx, msg_id, f"✅ 已自动绑定 `{repos[0]['repo_key']}`")
-                    row = (agent_session["id"], conv["backend_session_id"])
+                    row = (agent_session["id"], conv["runtime_session_id"])
                 else:
                     await api.reply_text(ctx, msg_id, "❌ 自动绑定失败")
                     return
@@ -338,12 +338,12 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
                 return
 
         agent_session_id = row[0]
-        backend_session_id = row[1] or ""
+        runtime_session_id = row[1] or ""
 
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT repo_key, backend_id, skill, skill_id, repo_gitcode_token FROM devops_agent_session WHERE id=?",
+                c.execute("SELECT repo_key, runtime_id, skill, skill_id, repo_gitcode_token FROM devops_agent_session WHERE id=?",
                           (agent_session_id,))
                 session_row = c.fetchone()
         except Exception:
@@ -365,7 +365,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
                 return
             conv = _get_or_create_conversation(chat_id, agent_session["id"])
             agent_session_id = agent_session["id"]
-            backend_session_id = ""
+            runtime_session_id = ""
             repo_key = repos[0]["repo_key"]
             agent_session = {"backend": agent_session.get("backend", "opencode"),
                              "skill": agent_session.get("skill", "vod"),
@@ -377,7 +377,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             if session_row[1]:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("SELECT name FROM backend_agents WHERE id=?", (session_row[1],))
+                    c.execute("SELECT name FROM agent_runtimes WHERE id=?", (session_row[1],))
                     brow = c.fetchone()
                     if brow and brow[0]:
                         backend = brow[0]
@@ -392,7 +392,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             "payload": {"user_message": text, "im_chat_id": chat_id, "im_sender_id": sender_open_id},
         }
 
-        reply = await _execute_vod_agent(repo_key, agent_session, {"id": 0, "backend_session_id": backend_session_id}, evt)
+        reply = await _execute_vod_agent(repo_key, agent_session, {"id": 0, "runtime_session_id": runtime_session_id}, evt)
 
         if reply and reply != "SKIP":
             await api.reply_card(ctx, msg_id, reply[:2000], title="VOD Agent", template="green")
