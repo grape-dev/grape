@@ -19,6 +19,7 @@
 | 新增 `agent_tasks` | 任务队列（确定路由 + 事件档案快照 + 技能交付字段） | M1 |
 | 新增 `runtime_credentials` | RuntimeAgent 独立凭据（`rta_` token，D2） | M3 |
 | `meta` 新增 `execution_mode` 键 | 执行模式开关 direct/queue_local/queue_remote | M2 |
+| `agent_type` / `devops_agent_session` 新增 `enable` 列 | Agent 启用开关（全局默认 + 仓库级覆盖，sre 默认关） | 后续小版本 |
 | SQLite WAL + busy_timeout | 跨进程写安全（`session_manager.py` PRAGMA） | M0 |
 
 > 术语：v3.1 的 `backend_*` 全部更名为 `runtime_*`（除 VCS 层 `VcsBackend/GitCodeBackend` 等，不迁移）。
@@ -216,6 +217,7 @@ id TEXT PRIMARY KEY,                   -- UUID
 repo_key TEXT NOT NULL,                -- owner/repo（含平台前缀）
 agent_type TEXT NOT NULL,              -- vod/issue/coding/qa/sre（repo 级）
 runtime_id INTEGER DEFAULT 0,          -- ★ 引用 agent_runtimes.id（原 backend_id）
+enable INTEGER DEFAULT 1,             -- ★ 仓库级启用开关（用户 Dashboard 切换；创建时继承 agent_type.enable）
 skill TEXT DEFAULT '',                 -- skill_name（冗余保留，供调试/回退）
 skill_id INTEGER DEFAULT 0,            -- 引用 skill.id
 runtime_session_id TEXT DEFAULT '',    -- ★ 通用 runtime 会话（原 backend_session_id）
@@ -235,6 +237,7 @@ UNIQUE(repo_key, agent_type)
 agent_type TEXT PRIMARY KEY,        -- vod/issue/coding/qa/sre
 display_name TEXT NOT NULL, description TEXT DEFAULT '',
 default_runtime_id INTEGER DEFAULT 0, -- ★ 引用 agent_runtimes.id（原 default_backend_id）
+enable INTEGER DEFAULT 1,           -- ★ Agent 启用开关（全局默认；sre 默认 0）
 icon TEXT DEFAULT '',
 order_num INTEGER DEFAULT 0,        -- >0 为 DevOps Agent（事件路由依据）
 subscribe_events TEXT DEFAULT '[]', -- JSON 数组，事件路由

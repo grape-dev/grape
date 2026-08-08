@@ -17,13 +17,14 @@ def _get_agent_type_meta(agent_type: str) -> dict | None:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num FROM agent_type WHERE agent_type=?",
+                "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type WHERE agent_type=?",
                 (agent_type,)
             )
             row = c.fetchone()
             if row:
                 return {"agent_type": row[0], "display_name": row[1], "description": row[2],
-                        "default_backend": row[3] or "opencode", "icon": row[4] or "", "order_num": row[5] or 0}
+                        "default_backend": row[3] or "opencode", "icon": row[4] or "", "order_num": row[5] or 0,
+                        "enable": bool(row[6]) if row[6] is not None else True}
         except Exception:
             pass
     return None
@@ -37,7 +38,7 @@ async def list_agent_types():
         c = db.cursor()
         try:
             c.execute(
-                "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num FROM agent_type ORDER BY order_num, agent_type"
+                "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type ORDER BY order_num, agent_type"
             )
             rows = c.fetchall()
         except Exception:
@@ -50,6 +51,7 @@ async def list_agent_types():
         "agent_type": r[0], "display_name": r[1], "description": r[2] or "",
         "default_backend": r[3] or "opencode", "icon": r[4] or "",
         "order_num": r[5] or 0,
+        "enable": bool(r[6]) if r[6] is not None else True,
         "color": COLORS.get(r[0], "var(--t2)"),
         "bg": BGS.get(r[0], "var(--bg)"),
     } for r in rows]}
@@ -78,7 +80,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, runtime_id, skill, skill_id, repo_gitcode_token, runtime_session_id, status, last_active_at, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                "SELECT id, runtime_id, skill, skill_id, repo_gitcode_token, runtime_session_id, status, last_active_at, im_app_id, enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
@@ -90,7 +92,8 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
                     if brow and brow[0]:
                         backend_name = brow[0]
                 session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_gitcode_token": row[4] or "", "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
-                               "im_app_id": row[8] or ""}
+                               "im_app_id": row[8] or "",
+                               "enable": bool(row[9]) if row[9] is not None else True}
         except Exception:
             pass
 
@@ -187,6 +190,7 @@ class AgentConfig(BaseModel):
     backend: str = "opencode"
     skill: str = ""
     skill_scope: str = ""  # official / repo（前端下拉回显同名技能时精确匹配）
+    enable: bool | None = None  # Agent 启用开关（Dashboard 切换；None=不修改）
     # VOD IM 配置（仅在 name=="vod" 时生效）
     im_app_id: str = ""
     im_app_secret: str = ""
@@ -305,12 +309,19 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     skill_id = _find_skill("repo", repo_key)
                     if not skill_id:
                         skill_id = _find_skill("official")
+            # enable：body 显式传则用；否则继承 agent_type 默认（sre 默认关）
+            if body.enable is not None:
+                _enable = 1 if body.enable else 0
+            else:
+                from src.api.session_store import get_agent_type_enable
+                _enable = get_agent_type_enable(name)
             c.execute(
-                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?)",
+                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider, enable) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?)",
                 (session_id, repo_key, name, runtime_id, body.skill, skill_id, repo_token, "idle",
                  body.im_app_id if name == "vod" else "",
                  app_secret if name == "vod" and app_secret else "",
-                 "feishu" if name == "vod" and body.im_app_id else "")
+                 "feishu" if name == "vod" and body.im_app_id else "",
+                 _enable)
             )
             db.commit()
         except Exception as e:

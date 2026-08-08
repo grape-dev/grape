@@ -78,11 +78,20 @@ class TestQaSkillConfig:
         for scene, info in cfg["scenes"].items():
             assert info["mapping"]["qa"] == "pr", f"scene '{scene}' qa mapping mismatch"
 
-    def test_agent_description_qa_subscribes_pr_events(self):
+    def test_agent_description_qa_not_subscribed_to_pr_events(self):
+        # 新流程：qa 不再直接监听 PR 事件，由 Coding Agent 经 A2A 触发审查
         cfg = _load_json("agent-description.json")
         qa = cfg["qa"]
         for evt in PR_SUBSCRIBED_EVENTS:
-            assert evt in qa["subscribe_events"], f"qa missing subscribe event {evt}"
+            assert evt not in qa["subscribe_events"], f"qa should NOT subscribe {evt}"
+        assert qa["subscribe_events"] == []
+
+    def test_agent_description_enable_defaults(self):
+        # enable 默认：sre=false，其余 true
+        cfg = _load_json("agent-description.json")
+        for at in ("vod", "issue", "coding", "qa"):
+            assert cfg[at].get("enable", True) is True, f"{at} enable should be true"
+        assert cfg["sre"].get("enable", True) is False, "sre enable should be false"
 
     def test_coding_agent_not_subscribed_to_pr_events(self):
         cfg = _load_json("agent-description.json")
@@ -90,7 +99,8 @@ class TestQaSkillConfig:
             assert evt not in cfg["coding"]["subscribe_events"], f"coding still on {evt}"
 
     def test_no_routing_conflict_for_pr_events(self):
-        # 每个 PR 事件只被一个 agent 订阅，避免 get_domain_agent 首匹配产生非确定性
+        # PR 事件当前无人直接订阅（qa 取消、coding 由 A2A 驱动）：
+        # 要么 0 个订阅（A2A 触发），要么 1 个订阅，绝不允许多 agent 订阅造成路由非确定性
         cfg = _load_json("agent-description.json")
         subscribed = {evt: [] for evt in PR_SUBSCRIBED_EVENTS}
         for agent, info in cfg.items():
@@ -98,7 +108,7 @@ class TestQaSkillConfig:
                 if evt in subscribed:
                     subscribed[evt].append(agent)
         for evt, agents in subscribed.items():
-            assert len(agents) == 1, f"{evt} subscribed by {agents}"
+            assert len(agents) <= 1, f"{evt} subscribed by multiple agents: {agents}"
 
 
 class TestQaSkillPrompt:

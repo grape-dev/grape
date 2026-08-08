@@ -95,6 +95,12 @@ async def a2a_endpoint(request: Request):
     log.info(f"A2A: agent={agent_name}, repo={repository}")
     seq = 0
 
+    # Agent 启用检查（仓库级 enable，见 agent-enable-toggle-design.md）
+    from src.api.session_store import is_agent_enabled
+    if not is_agent_enabled(repo_key, agent_name):
+        log.warning(f"A2A: agent '{agent_name}' disabled for repo={repo_key}, rejected")
+        return JSONResponse(status_code=403, content={"code": 403, "message": f"agent {agent_name} disabled"})
+
     # 启动后台执行目标 Agent（由 _execute_agent 判定产出后存储事件）
     try:
         from src.api.event_pipeline import _execute_agent

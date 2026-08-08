@@ -166,6 +166,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         append_skipped_event(repo_key, event_type, "no_route")
         return result
 
+    # 3.1 Agent 启用检查（仓库级 enable，见 agent-enable-toggle-design.md）
+    from src.api.session_store import is_agent_enabled
+    if not is_agent_enabled(repo_key, agent_type):
+        log.info(f"Pipeline: agent '{agent_type}' disabled for repo={repo_key}, skip")
+        from src.api.event_store import append_skipped_event
+        append_skipped_event(repo_key, event_type, "agent_disabled", agent_type)
+        return result
+
     # 4. 查找 Agent 配置（backend + skill），找不到则不处理
     backend = None
     runtime_id = 0

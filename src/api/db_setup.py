@@ -502,9 +502,10 @@ def _insert_seed_data(table: str, data: dict):
                 icon = info.get("icon", "")
                 order_num = info.get("order_num", 0)
                 subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
+                enable = 1 if info.get("enable", True) else 0
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
-                    (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events)
+                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events, enable) VALUES (?,?,?,?,?,?,?,?)",
+                    (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events, enable)
                 )
 
         elif table == "skill_official":
@@ -1073,3 +1074,13 @@ def _migrate_tables():
             log.info("Renamed backend* -> runtime* columns (M0)")
     except Exception as e:
         log.warning(f"Rename backend* -> runtime* columns failed: {e}")
+    # ===== new-version2：Agent 启用开关 enable（见 agent-enable-toggle-design.md）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "agent_type", "enable", "INTEGER DEFAULT 1")
+            _ensure_column(c, "devops_agent_session", "enable", "INTEGER DEFAULT 1")
+            db.commit()
+            log.info("Added enable column to agent_type / devops_agent_session")
+    except Exception as e:
+        log.warning(f"Add enable column failed: {e}")

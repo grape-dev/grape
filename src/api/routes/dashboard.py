@@ -32,13 +32,14 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         agent_sessions = []
         try:
             c.execute(
-                "SELECT s.agent_type, r.name, s.status, s.last_active_at "
+                "SELECT s.agent_type, r.name, s.status, s.last_active_at, s.enable "
                 "FROM devops_agent_session s LEFT JOIN agent_runtimes r ON s.runtime_id=r.id "
                 "WHERE s.repo_key=? ORDER BY s.agent_type",
                 (repo_key,)
             )
             agent_sessions = [
-                {"agent_type": r[0], "runtime": r[1] or "", "status": r[2], "last_active_at": r[3]}
+                {"agent_type": r[0], "runtime": r[1] or "", "status": r[2], "last_active_at": r[3],
+                 "enable": bool(r[4]) if r[4] is not None else True}
                 for r in c.fetchall()
             ]
         except Exception:
@@ -64,11 +65,13 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
     all_types = ["vod", "issue", "coding", "qa", "sre"]
     for atype in all_types:
         if atype not in agent_types_present:
+            from src.api.session_store import get_agent_type_enable
             agent_sessions.append({
                 "agent_type": atype,
                 "backend": "opencode",
                 "status": "",
                 "last_active_at": "",
+                "enable": bool(get_agent_type_enable(atype)),
             })
 
     # 计算每个 Agent 的事件统计
