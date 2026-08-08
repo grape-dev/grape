@@ -232,9 +232,44 @@ CREATE TABLE IF NOT EXISTS tasks (
 )
 """
 
+# ===== new-version2 M1：agent_tasks 任务队列（确定路由 + 事件档案快照）=====
+# 见 agent-runtime-event-full-design.md §4.3 / concurrency-design.md / skill-delivery-remote.md
+_AGENT_TASKS_DDL = """
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    id                TEXT PRIMARY KEY,
+    agent_session_id  TEXT NOT NULL,        -- 外键 → devops_agent_session.id
+    runtime_id        INTEGER NOT NULL,     -- 确定路由 → agent_runtimes.id
+    event_seq         INTEGER,              -- 关联 events 表 seq
+    issue_id          TEXT DEFAULT '',      -- 关联 event.json pipeline 段
+    repo_key          TEXT DEFAULT '',
+    agent_type        TEXT DEFAULT '',
+    skill             TEXT DEFAULT '',
+    prompt            TEXT NOT NULL,
+    cwd               TEXT DEFAULT '',
+    runtime_session_id TEXT DEFAULT '',
+    event_type        TEXT DEFAULT '',
+    account           TEXT DEFAULT '',
+    user_id           INTEGER DEFAULT 0,
+    repo_gitcode_token TEXT DEFAULT '',
+    env_extra         TEXT DEFAULT '{}',    -- JSON（含服务端已注入的账号/用户凭据，见 skill-delivery-remote.md）
+    skill_files       TEXT DEFAULT '{}',    -- JSON: {skill_name: {rel_path: content}}，远端交付技能包
+    server_url        TEXT DEFAULT '',      -- A2A 外呼地址，worker 替换 {{SERVER_URL}}
+    status            TEXT DEFAULT 'queued', -- queued/dispatched/running/completed/failed/cancelled
+    exit_code         INTEGER DEFAULT NULL,
+    result_text       TEXT DEFAULT '',
+    errors            TEXT DEFAULT '',
+    stderr            TEXT DEFAULT '',
+    usage_json        TEXT DEFAULT '{}',
+    started_at        TEXT DEFAULT NULL,
+    completed_at      TEXT DEFAULT NULL,
+    created_at        TEXT DEFAULT (datetime('now'))
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
+    ("agent_tasks", _AGENT_TASKS_DDL),
     ("events", _EVENTS_TABLE_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
     ("chat_conversations", _CHAT_CONVERSATIONS_DDL),
@@ -344,6 +379,10 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_bot_seen_messages_seen_at ON bot_seen_messages(seen_at)",
         "CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_tasks_repo_issue ON tasks(repo_key, issue_number)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_tasks_runtime ON agent_tasks(runtime_id)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(agent_session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_tasks_event ON agent_tasks(event_seq)",
     ]
     for idx in indexes:
         try:

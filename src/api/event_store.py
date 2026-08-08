@@ -95,12 +95,40 @@ def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: st
             log.warning(f"Event skipped FAILED: {e}")
 
 
+def parse_agent_output_json(final_text: str) -> dict | None:
+    """从 final_text 提取末尾 JSON 块（结构化产出契约，见 agent-runtime-event-full-design.md §8）。
+
+    返回含 actions/conclusion/artifacts/next_step/issue_summary 任一字段的 dict，否则 None。
+    """
+    if not final_text:
+        return None
+    import re as _re, json as _json
+    m = _re.search(r"\{.*\}", final_text or "", _re.S)
+    if not m:
+        return None
+    try:
+        obj = _json.loads(m.group(0))
+        if isinstance(obj, dict) and any(k in obj for k in ("actions", "conclusion", "artifacts", "next_step", "issue_summary")):
+            return obj
+    except Exception:
+        return None
+    return None
+
+
 def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> tuple:
     """判定 Agent 是否有明确答复产出，返回 (has_output: bool, result: str)
 
-    tool_uses: stream_agent 产生的 tool_use 事件输入列表（含 bash 命令）
+    tool_uses: stream_runtime 产生的 tool_use 事件输入列表（含 bash 命令）
     final_text: Agent 最终答复文本
+    优先解析末尾 JSON 块（结构化产出契约）；失败走现有正则降级。
     """
+    # 结构化产出优先（M1）：final_text 末尾 JSON 块
+    out = parse_agent_output_json(final_text)
+    if out:
+        conclusion = out.get("conclusion", "")
+        if conclusion:
+            return True, conclusion
+
     text = final_text or ""
     has_output = False
     result = ""

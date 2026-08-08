@@ -361,6 +361,26 @@ context 是传给下一个 Agent 的接力说明，应包含：
 
 ⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
 """)
+
+    # M1 结构化产出契约（所有 skill 生效，一处维护，见 agent-runtime-event-full-design.md §8）
+    parts.append("""
+## 处理记录输出要求
+
+完成当前任务后，在最终答复末尾输出以下 JSON 块（系统会解析写入该 Issue 的 event.json 档案）：
+
+{
+  "actions": ["做了什么，如 labeled:bug / assigned:@bob / 提交了PR / 发布了审查评论"],
+  "conclusion": "处理结论/分析结果（简要）",
+  "artifacts": ["产生的产物：PR#N / 评论 / 标签 / 部署 / Issue"],
+  "next_step": "下一步建议；如需交办其他 Agent 则说明调用 A2A 的目标",
+  "issue_summary": "Issue 最新聚合结论（覆盖档案 summary；紧凑文本，用 | 分隔）"
+}
+
+注意：
+- 只输出一个 JSON 块，放在答复末尾。
+- 若无法确定动作或结论，相应字段填空数组/空字符串，不要伪造。
+- `issue_summary` 应反映截至当前链尾的最新状态，供下游 Agent 快速浏览。
+""")
     return "\n".join(parts)
 
 

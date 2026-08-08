@@ -214,7 +214,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         continue
                     parsed = backend.parse_output(line)
                     if parsed is None:
-                        yield ("raw", _redact(line[:200], _tokens))
+                        yield ("raw", _redact(line, _tokens))
                         continue
                     et = parsed["type"]
                     if et == "step_start":
@@ -224,11 +224,15 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
                     elif et == "text":
                         collected_text.append(parsed["text"])
-                        yield ("text", _redact(parsed["text"][:150], _tokens).replace("\n", " "))
+                        yield ("text", _redact(parsed["text"], _tokens))
                     elif et == "reasoning":
-                        yield ("reasoning", _redact(parsed["text"][:200], _tokens))
+                        yield ("reasoning", _redact(parsed["text"], _tokens))
                     elif et == "tool_use":
-                        yield ("tool_use", _redact(f"Tool: {parsed['tool']} {json.dumps(parsed.get('input', {}))[:200]}", _tokens))
+                        # M1 结构化：yield dict（tool/input），供 evaluate 与档案记录使用
+                        yield ("tool_use", {
+                            "tool": parsed.get("tool", ""),
+                            "input": _redact(json.dumps(parsed.get("input", {}), ensure_ascii=False, default=str), _tokens),
+                        })
                     elif et == "step_finish":
                         yield ("step_finish", f"Step {step_count} done, tokens={parsed['tokens']}")
                     elif et == "error":
