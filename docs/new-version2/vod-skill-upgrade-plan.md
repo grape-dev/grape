@@ -54,8 +54,8 @@
 | D6 | **双触发场景**：VOD 同时承担「开发者声音引导建 Issue」（`vod_signal`/飞书）与「已有 Issue 审视」（`issue_opened`）两条职责，共享知识基线 |
 | D7 | **审视自建排除**：VOD 自己创建的 Issue（`auto-submitted by VOD Agent` 标记）跳过审视，避免自我循环 |
 | D8 | **`issue_opened` 恒给 VOD**：新 Issue 一律先进 VOD 审视阶段 |
-| D9 | **`issue_updated`/`issue_comment` 按阶段归属**：取决于 Issue 当前处于哪个阶段（vod/issue/coding/qa/sre）；由 `issue_state` 表权威判定 |
-| D10 | **阶段权威来源 = 新增 `issue_state` 表**（决策确认：比依赖 event.json 更可靠） |
+| D9 | **`issue_updated`/`issue_comment` 按阶段归属**：Issue 类事件在 vod 阶段归 VOD、issue 及之后阶段归 Issue Agent（coding/qa/sre 不直接处理 Issue 事件，由 Issue Agent 审视后 A2A 转交）；PR 类事件按阶段给 coding/qa/sre（qa 未合入持续接单）。由 `issue_state` 表权威判定 |
+| D10 | **阶段权威来源 = 新增 `issue_state` 表**（决策确认：比依赖 event.json 更可靠）。**event.json 定位**：仅存放该 Issue 从创建后每个 Agent 的处理流程记录，供后续 Agent 快速理解 Issue 背景，**不作为 Issue 状态指引** |
 | D11 | **状态机阶段命名**：`vod` → `issue` → `coding` → `qa` → `sre` → `done`（认可） |
 
 ---
@@ -86,7 +86,7 @@
 | 项目知识基线流程 | `skills/issue-advance/SKILL.md` + `references/codegraph-project-analysis.md` | VOD 复用，生成/校验 project-info |
 | project-info 目录 | `data/workspaces/{owner}/{repo}/project-info/` | 共用，含 project-graph.md / project-capabilities.md / .metadata.json |
 | Issue 聚类摘要 | `src/api/event_store.get_issue_summary`（prompt 已注入） | 现状保留 |
-| event.json 档案 | `src/api/event_archive.py`（M1，`a2a_to` 字段已预留） | 富上下文 + A2A 交办记录 |
+| event.json 档案 | `src/api/event_archive.py`（M1，`a2a_to` 字段已预留） | **背景档案**（Issue 创建后各 Agent 处理流程记录，供后续 Agent 理解背景；**不作状态指引**） + A2A 交办记录 |
 | A2A 协议 | `webhook.py:68` `POST /api/a2a`（agent=issue 等） | 阶段间交办（VOD→issue→coding→qa→sre） |
 | 阶段聚合 | `src/api/routes/pipeline.py`（AGENT_ORDER = vod/issue/coding/qa/sre） | 生命周期展示（与 issue_state 互补） |
 
@@ -129,23 +129,50 @@ CREATE TABLE IF NOT EXISTS issue_state (
 )
 ```
 
-#### 3.0.3 事件路由判定（D9）
+#### 3.0.3 事件路由判定（D9，按事件类型 × 阶段）
+
+> **核心规则**（用户确认）：
+> - `issue_opened` 恒给 VOD（D8）。
+> - **Issue 类事件**（`issue_updated`/`issue_comment`）：仅由 VOD（vod 阶段）或 **Issue Agent**（issue 及之后阶段）处理；
+>   **coding/qa/sre 不直接处理 Issue 事件**——即便要处理，也由 Issue Agent 审视后再 A2A 转交。
+> - **PR 类事件**（`pull_request_opened`/`pull_request_updated`/`note_hook_pr`）：按 Issue 当前阶段路由——
+>   处于 vod/issue 阶段时 coding/qa 不处理；进入 coding 阶段交 coding、qa 阶段交 qa；
+>   **qa 已处理完但 PR 未合入，再收到 PR 事件仍由 qa 处理**。
 
 ```
-事件进入 run_pipeline
-  ├─ event_type == issue_opened → 强制 vod 阶段（建 issue_state 行，D8）
-  └─ event_type in (issue_updated, issue_comment, ...) →
-       查 issue_state.owner_agent
-       ├─ issue → 交给 issue agent
-       ├─ coding → 交给 coding agent
-       ├─ qa → 交给 qa agent
-       ├─ sre → 交给 sre agent
-       └─ 无记录 / vod → 交给 vod agent（默认）
+事件进入 run_pipeline → 关联 issue_id（PR 事件先 resolve 到关联 Issue）
+    │
+    ├── event_type == issue_opened
+    │      → 建 issue_state（stage=vod, owner=vod，D8）→ 交给 VOD
+    │
+    ├── Issue 类事件（issue_updated / issue_comment / issue_labeled ...）
+    │      查 issue_state.stage
+    │      ├─ stage == vod 或无记录 → 交给 VOD（默认）
+    │      └─ stage == issue / coding / qa / sre / done → 交给 Issue Agent
+    │          （coding/qa/sre 不直接处理 Issue 事件；由 Issue Agent 审视后 A2A 转交）
+    │
+    └── PR 类事件（pull_request_* / note_hook_pr）→ 按 stage 分发
+            ├─ stage == vod / issue → 不路由给 coding/qa（由 Issue Agent 审视处理或记录）
+            ├─ stage == coding → 交给 Coding Agent
+            ├─ stage == qa → 交给 QA Agent（PR 未合入则持续由 qa 处理）
+            ├─ stage == sre → 交给 SRE Agent
+            └─ stage == done → 不再分发
 ```
 
-- 阶段推进：A2A 交办时更新 `issue_state.owner_agent`（`webhook.a2a_endpoint`）
-- 回退允许：qa→coding、coding 问题回退（状态机允许，见 §九 回退上限）
-- `issue_state` 为**唯一权威**；`event_archive.a2a_to` 仅记录（不回读判定）
+**归属矩阵（事件类型 × 阶段）**
+
+| 事件类型 | vod | issue | coding | qa | sre | done |
+|---|---|---|---|---|---|---|
+| `issue_opened` | VOD | —（新 Issue 必先 vod） | — | — | — | — |
+| `issue_updated` / `issue_comment` | VOD | Issue | Issue | Issue | Issue | Issue |
+| `pull_request_*` / `note_hook_pr` | Issue* | Issue* | Coding | QA | SRE | — |
+
+> `*`：PR 事件在 vod/issue 阶段由 **Issue Agent** 审视处理（判定是否关联、是否需 A2A 转交对应 Agent），不直接给 coding/qa。
+> 说明：Issue 类事件在 coding/qa/sre 阶段仍归 Issue Agent——这些 Agent 不监听/不直接处理 Issue 事件，需经 Issue Agent 审视后 A2A 转交；PR 类事件则直接按阶段给执行 Agent（qa 未合入持续接单）。
+
+- 阶段推进：A2A 交办时更新 `issue_state.owner_agent`/`stage`（`webhook.a2a_endpoint`）
+- 回退允许：qa→coding、coding 问题回退（状态机允许，见 §八 回退上限）
+- `issue_state` 为**唯一权威**（D10）；`event_archive.a2a_to` 仅记录（不回读判定）
 
 ### 3.1 场景 A：开发者声音引导建 Issue（`vod_signal` / 飞书消息）
 
@@ -322,11 +349,12 @@ auto-submitted by VOD Agent（Feishu）
 
 - `src/api/event_pipeline.py` `run_pipeline`：
   - `event_type == issue_opened` → 建 issue_state（stage=vod, owner=vod）→ 交给 VOD
-  - `event_type in (issue_updated, issue_comment, ...)` → 查 `issue_state.owner_agent` 决定 `_execute_agent` 交给谁（覆盖 get_domain_agent）
+  - **Issue 类事件**（issue_updated/issue_comment/...）→ 查 `issue_state.stage`：vod→VOD；issue 及之后→**Issue Agent**（coding/qa/sre 不直接处理 Issue 事件）
+  - **PR 类事件**（pull_request_*/note_hook_pr）→ 先 resolve 关联 issue_id → 按 stage：vod/issue→Issue Agent 审视；coding→Coding；qa→QA；sre→SRE
   - 无 issue_state 记录 → 回退 get_domain_agent（现状兼容）
 - `src/api/routes/webhook.py` `a2a_endpoint`：
-  - A2A 交办时更新 `issue_state.owner_agent = 目标 agent`（写入 a2a_seq）
-  - 同时写 `event_archive.a2a_to`
+  - A2A 交办时更新 `issue_state.owner_agent`/`stage`（写入 a2a_seq）
+  - 同时写 `event_archive.a2a_to`（仅记录，不回读）
 
 #### 4.4.3 event_archive `a2a_to` 写入
 
@@ -336,16 +364,23 @@ auto-submitted by VOD Agent（Feishu）
 
 - `configs/agent-description.json`：
   - `vod.subscribe_events` 增加 `issue_opened`
-  - vod/issue/coding/qa/sre 均订阅 `issue_updated`/`issue_comment`（由 issue_state 二次分发，消除静态路由歧义）
+  - `issue_updated`/`issue_comment` 等 Issue 类事件：vod + issue 订阅（按阶段：vod→VOD，issue 及之后→Issue Agent）
+  - `pull_request_*`/`note_hook_pr` 等 PR 类事件：issue/coding/qa/sre 订阅（由 issue_state 阶段二次分发：vod/issue→Issue Agent 审视，coding/qa/sre→对应执行 Agent）
+
+> ⚠️ 与上一轮"qa 取消 PR 订阅、由 coding A2A 触发"的关系（需求演进）：PR 事件改为**按 issue 阶段门控**——qa/coding 重新订阅 PR 事件，但**仅当 issue 进入对应阶段时才真正执行**（vod/issue 阶段 PR 事件跳过，不触发 qa/coding），即"PR 一开就触发 qa"的旧问题由阶段门控解决，同时支持"qa 阶段 PR 未合入持续接单"。此语义由 §3.0.3 归属矩阵承载。
 
 #### 4.4.5 prompt 注入（§3.6）
 
 - `src/im/vod_handler_async.py` `_build_vod_prompt`：追加知识基线摘要 + `build_issue_context` + 当前阶段
 
+#### 4.4.6 关联：`skills/qa/SKILL.md` triggers 同步（非 VOD 核心，随订阅调整）
+
+- qa 技能 front matter `triggers` 恢复含 `pull_request_opened`/`pull_request_updated`/`note_hook_pr`（阶段门控执行）+ 保留 `a2a_event`（coding A2A 显式触发仍有效）
+
 ### 4.5 测试
 
 - 新增 `tests/test_issue_state.py`：建表/幂等/get/set/stage 流转（vod→issue→coding→qa→sre→done）
-- 新增 `tests/test_issue_lifecycle_routing.py`：issue_opened→vod；stage=issue 时 comment→issue agent；stage=coding 时→coding agent；qa 回退 coding；done 后不再分发
+- 新增 `tests/test_issue_lifecycle_routing.py`：issue_opened→vod；stage=issue 时 comment→issue agent；stage=coding 时 issue_updated→issue agent（非 coding）；stage=vod/issue 时 PR→不路由 coding/qa；stage=qa 时 PR→qa（未合入持续）；stage=coding 时 PR→coding；qa 回退 coding；done 后不再分发
 - 新增 `tests/test_vod_skill.py`：SKILL.md 含知识基线/引导漏斗/审视/交办/硬约束
 - 回归：`test_qa_skill`（qa 订阅调整）、`test_m2_execution_mode`、全量 pytest
 
@@ -371,13 +406,16 @@ auto-submitted by VOD Agent（Feishu）
 | VD-14 | 审视后 A2A 交办 | 有"审视清晰后 A2A 通知 issue agent"指令（含 issue_number 必填） |
 | **L1** | **issue_opened → issue_state** | 建 stage=vod, owner=vod 行（D8） |
 | **L2** | **VOD A2A 交办 issue** | issue_state.owner→issue；event_archive.a2a_to=issue |
-| **L3** | **stage=issue 时 comment** | 事件交给 issue agent（非 VOD） |
-| **L4** | **stage=coding 时 issue_updated** | 交给 coding agent |
-| **L5** | **qa 发现问题 A2A 回 coding** | owner 回退 coding |
-| **L6** | **done** | 后续事件不再分发给 agent |
-| **L7** | **新 Issue 无记录** | 回退 get_domain_agent（现状兼容） |
-| **L8** | **VOD 技能含双来源+引导+交办+生命周期** | VD-1~14 全过 |
-| **L9** | **全量回归** | 零回归 |
+| **L3** | **stage=issue 时 comment** | 交给 issue agent（非 VOD） |
+| **L4** | **stage=coding 时 issue_updated** | **交给 issue agent**（coding 不直接处理 Issue 事件） |
+| **L5** | **stage=qa 时 PR 事件** | 交给 qa agent（PR 未合入持续接单） |
+| **L6** | **stage=vod/issue 时 PR 事件** | **不路由给 coding/qa**；由 Issue Agent 审视处理 |
+| **L7** | **stage=coding 时 PR 事件** | 交给 coding agent |
+| **L8** | **qa 发现问题 A2A 回 coding** | owner 回退 coding |
+| **L9** | **done** | 后续事件不再分发 |
+| **L10** | **新 Issue 无记录** | 回退 get_domain_agent（现状兼容） |
+| **L11** | **VOD 技能含双来源+引导+交办+生命周期** | VD-1~14 全过 |
+| **L12** | **全量回归** | 零回归 |
 
 ---
 
@@ -386,12 +424,12 @@ auto-submitted by VOD Agent（Feishu）
 | 步骤 | 内容 | 验证 |
 |------|------|------|
 | 1 | `issue_state` 表 + `session_store` get/set 函数 | test_issue_state |
-| 2 | `event_pipeline.run_pipeline` 阶段路由改造（issue_opened→vod；按 owner_agent 分发） | test_issue_lifecycle_routing |
-| 3 | `webhook.a2a_endpoint` 交办写 issue_state + `event_archive.a2a_to` | L2/L5 |
-| 4 | `configs/agent-description.json` 订阅调整（vod+issue_opened；issue_updated/comment 多方订阅） | 路由回归 |
+| 2 | `event_pipeline.run_pipeline` 阶段路由改造（issue_opened→vod；Issue 类→VOD/Issue Agent；PR 类按 stage→Coding/QA/SRE） | test_issue_lifecycle_routing |
+| 3 | `webhook.a2a_endpoint` 交办写 issue_state + `event_archive.a2a_to` | L2/L5/L8 |
+| 4 | `configs/agent-description.json` 订阅调整（vod+issue_opened；Issue/PR 事件按归属矩阵） | 路由回归 |
 | 5 | VOD 技能文件重写 + references + skill-description.json | VD-1~14 |
 | 6 | `_build_vod_prompt` 注入（知识基线 + build_issue_context + 当前阶段） | 手工 |
-| 7 | 测试（issue_state/routing/vod_skill）+ 全量回归 | L1~9 / 全量 pytest |
+| 7 | 测试（issue_state/routing/vod_skill）+ 全量回归 | L1~12 / 全量 pytest |
 
 ---
 
@@ -412,10 +450,11 @@ auto-submitted by VOD Agent（Feishu）
 | 引导无限追问 | 3 轮上限 + 超限建待澄清 Issue |
 | 重复建 Issue | 历史全貌检查（近期 Issue 列表 + VOD 反馈画像） |
 | 与 issue-advance 知识基线冲突 | 共用同一份 project-info + 增量更新策略（commit/7 天） |
-| **阶段判定与 event.json 双源** | issue_state 为唯一权威；event_archive.a2a_to 仅记录（不回读判定） |
+| **阶段判定与 event.json 双源** | `issue_state` 为唯一权威（D10）；event.json 仅作背景档案，**不承担状态指引**；`a2a_to` 仅记录不回读 |
 | **`issue_comment` 无 issue 编号** | 回退 get_domain_agent 或 vod（现状兼容） |
 | **状态机回退死循环** | 回退上限（如 coding↔qa ≤2 次）记录到 issue_state |
 | **VOD/issue 双订阅 issue_comment** | 由 issue_state 明确归属，消除歧义 |
+| **qa/coding 重订阅 PR 与 A2A 触发并存** | 双通道不冲突：PR 事件按阶段门控（qa/coding 仅对应阶段执行）；coding A2A 调 qa 仍有效（A2A 是显式交办，绕过事件门控）。qa 技能 `triggers` 需同步含 PR 事件 + a2a_event |
 | **审视自建循环** | D7 自建排除（auto-submitted 标记跳过） |
 | **澄清失联** | ≤3 轮 + 超限列缺失项后仍交办 Issue Agent（不无限阻塞） |
 | 技能/代码改动影响现网 | 全量回归 + 灰度（execution_mode direct 先验证） |
