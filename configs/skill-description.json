@@ -87,6 +87,6 @@
     "name": "首次托管引导",
     "agent_type": "issue",
     "path": "repo-onboarding",
-    "description": "项目首次托管引导（通用）：分析功能特性与使用方式，创建「快速部署体验」与「二次开发方向」两个 Issue"
+    "description": "项目首次托管引导（通用）：分析功能特性与使用方式，创建「快速部署体验」与「探索方向引导」两个 Issue"
   }
 }
