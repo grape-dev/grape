@@ -102,7 +102,7 @@ tools:
 - 变更描述 (#PR号)
 
 ---
-*自动生成 by devops-bot changelog-gen skill*
+*自动生成 by Grape changelog-gen skill*
 ```
 
 ## 参考
