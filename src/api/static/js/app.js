@@ -190,7 +190,11 @@ function loadAgentTypes() {
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
 
-    repoTitle.textContent = repo ? repo.fullName : '';
+    if (repo) {
+      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.owner}/${repo.name}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
+    } else {
+      repoTitle.textContent = '';
+    }
 
     if (view === 'dash') {
       title.textContent = 'Dashboard';
