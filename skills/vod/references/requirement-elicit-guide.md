@@ -71,7 +71,7 @@ auto-submitted by VOD Agent（Feishu）
 ## 五、A2A 交办格式
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "issue",

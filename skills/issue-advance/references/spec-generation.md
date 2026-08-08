@@ -168,7 +168,7 @@ curl -s -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 ## A2A 通知 Coding Agent
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "coding",

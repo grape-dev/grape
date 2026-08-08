@@ -193,7 +193,7 @@ curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 如果 `review_comments` 中存在 Critical 或 Required 级别的问题（代码问题或工作流问题），说明需要修改代码或补齐工作流资产。此时调用 A2A API 将审查意见传递给 coding Agent（implementation）：
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "coding",

@@ -152,7 +152,7 @@ Content-Type: application/json
 ⚠️ 创建 PR 后必须执行，否则 QA Agent 不会收到审查请求。
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "qa",

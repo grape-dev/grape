@@ -36,7 +36,7 @@ tools:
 > 调用时机：**处理结束时**（所有分类/标签/分配动作完成、责任人不再变化后），不要在处理开始时调用——处理过程中责任人可能被调整。
 
 ```bash
-curl -X POST http://localhost:8080/api/tasks/notify \
+curl -X POST {{SERVER_URL}}/api/tasks/notify \
   -H "Content-Type: application/json" \
   -d '{
     "assignee": "<责任人GitCode用户名>",
@@ -122,7 +122,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 - 按 `references/comment-guide.md` 格式回复，基于知识基线与分析结论
 
 ### 7. 需要 A2A 时
-- 查本 prompt 底部 Agent 列表，构造 context，调用 `curl -X POST http://localhost:8080/api/a2a`
+- 查本 prompt 底部 Agent 列表，构造 context，调用 `curl -X POST {{SERVER_URL}}/api/a2a`
 - ⚠️ **A2A 必须携带真实 `issue_number`（必填）**：无法确定则不调用，评论说明。`pr_number` 有则填，无则不填，严禁混用。
 
 ```
@@ -160,7 +160,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 关闭 Issue 后，调用任务关闭接口，将该 Issue 的待处理任务标记为已完成（任务中心「已完成」可见，原因=Issue 已关闭）：
 
 ```bash
-curl -X POST http://localhost:8080/api/tasks/close \
+curl -X POST {{SERVER_URL}}/api/tasks/close \
   -H "Content-Type: application/json" \
   -d '{
     "repo_key": "'"$REPO_FULL_NAME"'",

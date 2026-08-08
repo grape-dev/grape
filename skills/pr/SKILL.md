@@ -42,7 +42,7 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 审查发现代码需要继续优化/修改（存在 Critical 或 Required 级别问题），**必须通过 A2A 调用 Coding Agent 进行优化实现**，不得由 QA 直接改代码。
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "coding",
@@ -185,7 +185,7 @@ curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 如果 review_comments 中存在 Critical 或 Required 级别的问题，说明需要修改代码。此时调用 A2A API 将审查意见传递给 Coding Agent：
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "coding",

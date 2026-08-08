@@ -40,6 +40,18 @@ def get_skill_capabilities() -> str:
         return "我是 DevOps Bot，专注于 DevOps 相关领域。"
 
 
+def _resolve_server_url() -> str:
+    """返回服务端可达地址（A2A/tasks 等对外调用用）。取 meta.webhook_url；无则 localhost 兜底。"""
+    try:
+        from src.user.db import get_meta_value
+        _url = get_meta_value("webhook_url") or ""
+        if _url:
+            return _url.rstrip("/")
+    except Exception:
+        pass
+    return "http://localhost:8080"
+
+
 def _build_history_file_guide(repo_key: str, account: str = "") -> str:
     """Build prompt section listing available history files."""
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
@@ -333,7 +345,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
 如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
 然后调用 A2A API：
 
-  curl -X POST http://localhost:8080/api/a2a \\
+  curl -X POST {{SERVER_URL}}/api/a2a \\
     -H "Content-Type: application/json" \\
     -d '{
       "agent": "coding",
@@ -381,7 +393,8 @@ context 是传给下一个 Agent 的接力说明，应包含：
 - 若无法确定动作或结论，相应字段填空数组/空字符串，不要伪造。
 - `issue_summary` 应反映截至当前链尾的最新状态，供下游 Agent 快速浏览。
 """)
-    return "\n".join(parts)
+    # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
+    return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url())
 
 
 def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "") -> str:

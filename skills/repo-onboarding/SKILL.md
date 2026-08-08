@@ -35,7 +35,7 @@ tools:
 4. **生成任务**（对每个 Issue）
    - 调用 `POST /api/tasks/notify`，`assignee=owner`，`task_description` 简要描述
    ```bash
-   curl -X POST http://localhost:8080/api/tasks/notify \
+   curl -X POST {{SERVER_URL}}/api/tasks/notify \
      -H "Content-Type: application/json" \
      -d '{
        "assignee": "<owner 的 GitCode 用户名>",
