@@ -10,6 +10,37 @@ from datetime import datetime, timezone
 from src.session_manager import db, db_lock
 from src.config import log
 
+# ===== 执行模式开关（M2，见 implementation-plan §三 / concurrency-design.md）=====
+# direct（就地 stream_agent）/ queue_local（入队 + 本地 worker）/ queue_remote（远端 RuntimeAgent）
+EXEC_MODE_DIRECT = "direct"
+EXEC_MODE_LOCAL = "queue_local"
+EXEC_MODE_REMOTE = "queue_remote"
+
+_DEFAULT_MODE = os.environ.get("DEVOPS_EXECUTION_MODE", EXEC_MODE_DIRECT)
+
+
+def get_execution_mode() -> str:
+    """返回当前执行模式：env 优先，其次 meta 表。"""
+    _m = os.environ.get("DEVOPS_EXECUTION_MODE", "")
+    if _m:
+        return _m
+    try:
+        from src.user.db import get_meta_value
+        _m = get_meta_value("execution_mode") or ""
+    except Exception:
+        pass
+    return _m or _DEFAULT_MODE
+
+
+def set_execution_mode(mode: str):
+    """设置执行模式（落 meta 表，运维可改键值 + 重启生效）。"""
+    try:
+        from src.user.db import set_meta_value
+        set_meta_value("execution_mode", mode)
+        log.info(f"execution_mode set to {mode}")
+    except Exception as e:
+        log.warning(f"set_execution_mode failed: {e}")
+
 # ===== 本地 worker 执行池（有界，替代无界 threading.Thread，见 concurrency-design.md §2.2）=====
 _DEFAULT_MAX_CONCURRENT = int(os.environ.get("RUNTIME_MAX_CONCURRENT_TASKS", "20"))
 _worker_pool = ThreadPoolExecutor(max_workers=_DEFAULT_MAX_CONCURRENT, thread_name_prefix="rt-worker")
@@ -334,3 +365,74 @@ def start_local_worker_loop():
 
 def submit_local(task: dict):
     _worker_pool.submit(_run_task, task)
+
+
+# ===== 回报异步化（M2，见 concurrency-design.md §2.4）=====
+# 供 M3 /api/runtime/* 回报端点使用：入队即返回，后台攒批写库，避免阻塞 event loop。
+# queue_local 本地 worker 仍走同步 report_*（在 worker 线程内，无 event loop 阻塞）。
+
+def start_report_ingestion_loop(loop=None):
+    """启动回报异步落库循环（FastAPI lifespan 调用，见 main.py）。"""
+    try:
+        import asyncio
+        _loop = loop or asyncio.get_running_loop()
+        _task = _loop.create_task(_ingestion_loop())
+        return _task
+    except Exception as e:
+        log.warning(f"report ingestion loop not started (sync fallback): {e}")
+        return None
+
+
+async def _ingestion_loop():
+    """攒批落库：messages/progress/usage 入队，批量写。complete/fail 仍同步（强一致）。"""
+    import asyncio
+    _report_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
+    # 模块级队列引用（供 async 端点 put）
+    global _ASYNC_REPORT_QUEUE
+    _ASYNC_REPORT_QUEUE = _report_queue
+    while True:
+        try:
+            batch = [await _report_queue.get()]
+            while len(batch) < 50:
+                try:
+                    batch.append(await asyncio.wait_for(_report_queue.get(), timeout=0.2))
+                except asyncio.TimeoutError:
+                    break
+            with db_lock:
+                for kind, tid, payload in batch:
+                    try:
+                        if kind == "messages":
+                            report_messages(tid, payload)
+                        elif kind == "progress":
+                            report_progress(tid, payload)
+                    except Exception as e:
+                        log.warning(f"ingestion apply failed: {e}")
+                db.commit()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.warning(f"ingestion loop error: {e}")
+            await asyncio.sleep(1)
+
+
+_ASYNC_REPORT_QUEUE = None
+
+
+def enqueue_async_report(kind: str, task_id: str, payload):
+    """异步回报入队（队列满降级同步，不丢数据）。"""
+    q = _ASYNC_REPORT_QUEUE
+    if q is None:
+        # 队列未启动 → 同步兜底
+        if kind == "messages":
+            report_messages(task_id, payload)
+        elif kind == "progress":
+            report_progress(task_id, payload)
+        return
+    try:
+        q.put_nowait((kind, task_id, payload))
+    except Exception:
+        # 队列满：同步降级
+        if kind == "messages":
+            report_messages(task_id, payload)
+        elif kind == "progress":
+            report_progress(task_id, payload)

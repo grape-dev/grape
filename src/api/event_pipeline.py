@@ -1,6 +1,6 @@
 """事件处理管道：归一化 → 路由 → 存储 → Agent 执行"""
 import json, os, time, uuid, threading
-from datetime import datetime
+from datetime import datetime, timezone
 from src.config import log, WORKSPACE_DIR
 from src.vcs.adapter import normalize_event, get_event_header
 from src.api.routing import get_domain_agent
@@ -168,6 +168,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # 4. 查找 Agent 配置（backend + skill），找不到则不处理
     backend = None
+    runtime_id = 0
     skill_name = ""
     skill_id = 0
     skill_path = ""
@@ -178,6 +179,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             c.execute("SELECT runtime_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
             row = c.fetchone()
             if row:
+                runtime_id = row[0] or 0
                 backend = "opencode"
                 if row[0]:
                     c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
@@ -301,8 +303,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                    "repo_key": from_repo_key(repo_key), "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
 
-    # 后台异步执行 Agent（执行完更新该 seq 的 result/status）
-    if backend and skill_name and seq > 0:
+    # 执行分派：direct（就地）/ queue_local·remote（入队 + RuntimeAgent，M2 见 implementation-plan §三）
+    from src.runtime.service import get_execution_mode, enqueue_task
+    mode = get_execution_mode()
+    if mode != "direct" and backend and skill_name and seq > 0:
+        _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
+                               skill_id, skill_path, runtime_id or 0, issue_id)
+    elif backend and skill_name and seq > 0:
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
         threading.Thread(target=_execute_agent, args=(
             repo_key, seq, agent_type, backend, skill_name, evt,
@@ -310,6 +317,84 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.info(f"Pipeline: started agent execution, seq={seq}, repo={repo_key}, agent={agent_type}")
 
     return result
+
+
+def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
+                           skill_id, skill_path, runtime_id, issue_id=""):
+    """触发点三连的入队侧（M2，见 agent-runtime-event-tech-impl.md §2.3）：
+    init_event_json → enqueue_task（确定路由 runtime_id）。本地 worker/远端 RuntimeAgent 消费。
+    """
+    from src.api.event_archive import init_event_json
+    from src.runtime.service import enqueue_task, get_execution_mode
+    from src.repo_key import from_repo_key
+    import os as _os
+
+    issue_id = issue_id or evt.get("issue_id", "") or "#0"
+    # 1) event.json 骨架（#0 跳过，见 event_archive._extract_num）
+    _evt_copy = dict(evt)
+    _evt_copy["issue_id"] = issue_id
+    init_event_json(repo_key, seq, _evt_copy, agent_type, runtime=backend or "", skill=skill_name)
+    # 2) 确定路由：绑定 runtime_id；未绑定时用默认 opencode runtime id
+    if not runtime_id:
+        try:
+            from src.user.db import ensure_default_runtime
+            runtime_id = ensure_default_runtime("opencode") or 0
+        except Exception:
+            runtime_id = 0
+    if not runtime_id:
+        log.warning(f"Pipeline enqueue: no runtime_id for repo={repo_key} agent={agent_type}, task skipped")
+        return
+
+    repository = evt.get("repository", from_repo_key(repo_key))
+    ws = _os.path.join(WORKSPACE_DIR, repository, f"{agent_type}-agent")
+    _os.makedirs(ws, exist_ok=True)
+
+    # 3) 会话：get_or_create 拿真实 devops_agent_session.id（D9 串行槽依赖）+ 延续指针
+    from src.api.session_store import get_or_create_agent_session
+    from src.api.event_store import update_event_config
+    update_event_config(seq, backend or "opencode", skill_name, datetime.now(timezone.utc).isoformat())
+    session = get_or_create_agent_session(repo_key, agent_type, backend or "opencode")
+    oc_session_id = session.get("runtime_session_id") or ""
+
+    repo_gitcode_token = ""
+    try:
+        from src.user.db import get_gitcode_token
+        repo_gitcode_token = get_gitcode_token(repo_key=repo_key) or ""
+    except Exception:
+        pass
+
+    # 4) 构建 prompt（含技能占位符化，见 skill-delivery-remote.md）
+    try:
+        from src.prompt_builder import build_prompt
+        evt["_skill_path"] = skill_path
+        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
+                              skill_path=skill_path)
+    except Exception as e:
+        log.warning(f"Pipeline enqueue: prompt build failed: {e}")
+        return
+
+    env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
+    _issue_num = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
+    if _issue_num:
+        env_extra["ISSUE_NUMBER"] = str(_issue_num).lstrip("#")
+    _pr_num = evt.get("payload", {}).get("pr_number", "")
+    if _pr_num:
+        env_extra["PR_NUMBER"] = str(_pr_num)
+
+    tid = enqueue_task(
+        agent_session_id=session.get("id") or "",
+        runtime_id=runtime_id,
+        event_seq=seq, issue_id=issue_id,
+        repo_key=repo_key, agent_type=agent_type, skill=skill_name,
+        prompt=prompt, cwd=ws,
+        runtime_session_id=oc_session_id,
+        event_type=evt.get("type", ""),
+        account=evt.get("account") or "",
+        repo_gitcode_token=repo_gitcode_token,
+        env_extra=env_extra,
+        skill_path=skill_path,
+    )
+    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} mode={get_execution_mode()}")
 
 
 def get_prompt_context(repo_key: str) -> str:

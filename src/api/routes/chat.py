@@ -122,6 +122,11 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     from src.config import log
     log.info(f"Chat send: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
+    from src.runtime.service import get_execution_mode
+    if get_execution_mode() != "direct":
+        # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
+        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token)
+
     from src.runtime.executor import stream_agent
     loop = asyncio.get_event_loop()
     collected = []
@@ -298,6 +303,47 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token):
+    """M2 D5：chat 入队 + 轮询任务状态（打字机效果降级，见 implementation-plan §三）。
+
+    返回 {task_id, reply(占位), conversation_id}；前端轮询 GET /api/runtime/tasks/{id}/status。
+    """
+    from src.runtime.service import enqueue_task, get_execution_mode
+    from src.api.session_store import get_or_create_agent_session
+    from src.config import log as _log
+    import os as _os
+
+    cfg = _get_chat_config(user["id"])
+    backend_name = cfg.get("backend", "opencode")
+    # chat 会话：user_id + repo_key 绑定（chat_agent_session 是 chat 专用；此处用 devops_agent_session 保证 D9 串行）
+    session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
+    runtime_id = 0
+    try:
+        from src.user.db import ensure_default_runtime, get_runtime_id_by_name
+        runtime_id = get_runtime_id_by_name(backend_name) or ensure_default_runtime(backend_name) or 0
+    except Exception:
+        pass
+    if not runtime_id:
+        return {"reply": "⚠️ 无可用 runtime，请先在 Agent Runtimes 页刷新", "conversation_id": conv_id}
+
+    cwd = _get_chat_cwd(user["id"], conv_id)
+    _os.makedirs(cwd, exist_ok=True)
+    prompt = _build_chat_prompt(message, repo_key, [], skill_name, skill_id)
+    tid = enqueue_task(
+        agent_session_id=session.get("id") or "",
+        runtime_id=runtime_id,
+        event_seq=None, issue_id="",
+        repo_key=f"chat:{user['id']}", agent_type="chat", skill=skill_name or "chat",
+        prompt=prompt, cwd=cwd,
+        runtime_session_id=session.get("runtime_session_id") or "",
+        event_type="chat", account=user.get("username") or "", user_id=user["id"],
+        repo_gitcode_token=gitcode_token,
+        env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
+    )
+    _log.info(f"Chat enqueued: task={tid} user={user['id']} conv={conv_id} mode={get_execution_mode()}")
+    return {"task_id": tid, "reply": "", "conversation_id": conv_id, "queued": True}
 
 
 def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: str = "", skill_id: int = 0) -> str:
