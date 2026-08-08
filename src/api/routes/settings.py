@@ -241,3 +241,77 @@ async def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
 @router.post("/backend-agents/refresh")
 async def refresh_backend_agents(user: dict = Depends(get_current_user)):
     return await refresh_agent_runtimes(user)
+
+
+# ====== Runtime Credentials（rta_ token，见 agent-runtime-event-full-design.md §4.1 / §10）======
+
+class RuntimeCredBody(BaseModel):
+    name: str
+    scope: str = "global"
+    owner_id: str = ""
+
+
+@router.post("/runtime-credentials")
+async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(get_current_user)):
+    """生成 rta_ token：仅展示一次明文，DB 存 sha256。吊销 = status='revoked'。"""
+    import hashlib, secrets
+    from src.session_manager import db, db_lock
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "凭据名称不能为空"})
+    token = "rta_" + secrets.token_urlsafe(32)
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id) VALUES (?,?,?,?)",
+                      (hashlib.sha256(token.encode()).hexdigest(), name, body.scope, body.owner_id))
+            db.commit()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
+    return {"token": token, "name": name, "message": "token 仅展示一次，请立即保存"}
+
+
+@router.get("/runtime-credentials")
+async def list_runtime_credentials(user: dict = Depends(get_current_user)):
+    """凭据列表（不含 token_hash / 明文）"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, name, device_name, scope, owner_id, status, last_seen_at, created_at FROM runtime_credentials ORDER BY id DESC")
+        return {"credentials": [
+            {"id": r[0], "name": r[1], "device_name": r[2] or "", "scope": r[3],
+             "owner_id": r[4], "status": r[5], "last_seen_at": r[6], "created_at": r[7]}
+            for r in c.fetchall()
+        ]}
+
+
+@router.post("/runtime-credentials/{cid}/revoke")
+async def revoke_runtime_credential(cid: int, user: dict = Depends(get_current_user)):
+    """吊销凭据：status='revoked'，立即失效。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE runtime_credentials SET status='revoked' WHERE id=?", (cid,))
+        db.commit()
+        if c.rowcount == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+    return {"message": f"凭据 {cid} 已吊销"}
+
+
+class ExecModeBody(BaseModel):
+    mode: str
+
+
+@router.get("/execution-mode")
+async def get_execution_mode_api(user: dict = Depends(get_current_user)):
+    from src.runtime.service import get_execution_mode
+    return {"mode": get_execution_mode()}
+
+
+@router.put("/execution-mode")
+async def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_current_user)):
+    from src.runtime.service import set_execution_mode
+    if body.mode not in ("direct", "queue_local", "queue_remote"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 direct/queue_local/queue_remote"})
+    set_execution_mode(body.mode)
+    return {"message": f"执行模式已切换为 {body.mode}", "mode": body.mode}

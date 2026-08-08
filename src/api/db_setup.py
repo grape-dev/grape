@@ -266,10 +266,27 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
 )
 """
 
+# ===== new-version2 M3：runtime_credentials 独立凭据（rta_ token，见 agent-runtime-event-full-design.md §4.1）=====
+_RUNTIME_CREDENTIALS_DDL = """
+CREATE TABLE IF NOT EXISTS runtime_credentials (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash   TEXT NOT NULL,             -- sha256(rta_xxx)，不存明文
+    name         TEXT NOT NULL,             -- 管理端可读名（如 "CI-Worker-01"）
+    device_name  TEXT DEFAULT '',           -- 首次注册时回填
+    scope        TEXT DEFAULT 'global',
+    owner_id     TEXT DEFAULT '',
+    status       TEXT DEFAULT 'active',     -- active / revoked
+    last_seen_at TEXT DEFAULT NULL,
+    created_at   TEXT DEFAULT (datetime('now')),
+    UNIQUE (token_hash)
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
+    ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
     ("events", _EVENTS_TABLE_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
     ("chat_conversations", _CHAT_CONVERSATIONS_DDL),
