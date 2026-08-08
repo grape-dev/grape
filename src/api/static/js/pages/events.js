@@ -5,6 +5,23 @@ function renderEventDetail(data) {
   const agentName = (_AGENT_TYPES[agent] && _AGENT_TYPES[agent].display_name) || agent;
   const result = data.result || data.summary || '';
 
+  // M4：结构化产出（event.json archive 对应段，见 §11.4）
+  let structuredHtml = '';
+  const arch = data.archive || null;
+  if (arch && arch.output) {
+    const o = arch.output;
+    const actions = (o.actions || []).map(a => `<div>• ${a}</div>`).join('');
+    const arts = (o.artifacts || []).map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('');
+    structuredHtml = `<div class="cd" style="padding:14px;margin-top:10px;background:#f8f9fb">
+      <h3 style="font-size:12px;font-weight:600;margin-bottom:8px">Agent 处理记录（结构化）</h3>
+      ${o.conclusion ? `<div style="font-size:12px;margin-bottom:6px"><b>结论:</b> ${o.conclusion}</div>` : ''}
+      ${actions ? `<div style="font-size:12px;margin-bottom:6px"><b>动作:</b> ${actions}</div>` : ''}
+      ${arts ? `<div style="font-size:12px;margin-bottom:6px"><b>产出:</b> ${arts}</div>` : ''}
+      ${o.next_step ? `<div style="font-size:12px;margin-bottom:6px"><b>下一步:</b> ${o.next_step}</div>` : ''}
+      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>Issue 摘要:</b> ${o.issue_summary}</div>` : ''}
+    </div>`;
+  }
+
   let html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← 返回 ${agentName}</button>
   <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;height:calc(100vh - 160px);overflow:hidden">
     <div class="cd" style="padding:16px 20px;display:flex;flex-direction:column;overflow:hidden">
@@ -16,6 +33,7 @@ function renderEventDetail(data) {
         <div>Actor: ${data.actor || '—'}</div>
         <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
       </div>
+      ${structuredHtml}
       <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Agent 答复结论</h3>
       <div style="flex:1;overflow-y:auto;background:var(--s);color:#c2cad6;border-radius:8px;padding:12px;font-size:12px;font-family:monospace;line-height:1.7;white-space:pre-wrap">
         ${result || '<div style="color:var(--t3)">（无结论）</div>'}
@@ -29,7 +47,7 @@ function renderEventDetail(data) {
       <div class="cd" style="padding:16px">
         <h3 style="font-size:12px;font-weight:600;margin-bottom:10px">Event Info</h3>
         <div style="font-size:11px;color:var(--t2);line-height:1.8">
-          <div><span style="color:var(--t3)">Backend:</span> <b>${data.backend || 'OpenCode'}</b></div>
+          <div><span style="color:var(--t3)">Runtime:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b></div>
           <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
           <div><span style="color:var(--t3)">Issue:</span> ${data.issue_id || '—'}</div>
           <div><span style="color:var(--t3)">Actor:</span> @${data.actor || '—'}</div>

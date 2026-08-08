@@ -234,6 +234,28 @@ async def cancel_task(task_id: str, user: dict = Depends(get_current_user)):
     return {"message": f"任务 {task_id} 已取消", "status": "cancelled"}
 
 
+@router.get("/runtimes/{runtime_id}/tasks")
+async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
+                             status: str = "", limit: int = 50):
+    """设备任务列表（M4 前端设备 [查看任务]）。"""
+    from src.session_manager import db, db_lock
+    clauses = ["runtime_id=?"]
+    params = [runtime_id]
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
+                  params + [limit])
+        return {"tasks": [
+            {"id": r[0], "repo_key": r[1], "agent_type": r[2], "skill": r[3],
+             "status": r[4], "exit_code": r[5], "result_text": (r[6] or "")[:200],
+             "created_at": r[7], "started_at": r[8], "completed_at": r[9]}
+            for r in c.fetchall()
+        ]}
+
+
 def _server_url() -> str:
     try:
         from src.user.db import get_meta_value

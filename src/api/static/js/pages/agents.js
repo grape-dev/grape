@@ -11,15 +11,19 @@ function loadCfgOptions() {
   const backendSelect = document.querySelector('.cfg-backend');
   const skillSelect = document.querySelector('.cfg-skill');
 
-  // Backend 下拉：仅未加载时加载
+  // Runtime 下拉：仅未加载时加载；在线 runtime 可选，离线置灰
   if (backendSelect && !backendSelect.dataset.loaded) {
     backendSelect.dataset.loaded = '1';
     API.get('/settings/agent-runtimes').then(d => {
-      const runtimes = d.runtimes || d.backends || [];
+      const runtimes = d.runtimes || [];
       const current = backendSelect.dataset.current || 'opencode';
-      backendSelect.innerHTML = runtimes.map(b =>
-        `<option value="${b.name}" ${b.name === current ? 'selected' : ''}>${b.name}${b.healthy ? ' ✓' : ' ✗'}</option>`
-      ).join('');
+      const online = runtimes.filter(r => r.health === 'online' || r.healthy);
+      const offline = runtimes.filter(r => !(r.health === 'online' || r.healthy));
+      const opt = (r, sel) =>
+        `<option value="${r.name}" ${r.name === current ? 'selected' : ''}>${r.name}${r.health === 'online' || r.healthy ? ' ✓' : ' ✗'}</option>`;
+      let html = online.map(r => opt(r, true)).join('') + offline.map(r => opt(r, false)).join('');
+      if (!html) html = '<option value="opencode">opencode</option>';
+      backendSelect.innerHTML = html;
     }).catch(() => {});
   }
 
