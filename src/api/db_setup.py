@@ -533,6 +533,33 @@ def init_database():
     _migrate_tables()
     _create_indexes()
     _seed_from_json()
+    _align_agent_enable()
+
+
+def _align_agent_enable():
+    """存量会话 enable 对齐 agent_type 默认值（仅执行一次，幂等）。
+
+    依赖：须在 _seed_from_json 之后调用（agent_type.enable 已由 JSON seed 写入正确默认值，
+    如 sre=0）。用 meta 标记 'enable_aligned' 保证只跑一次，避免覆盖用户后续在
+    Dashboard 手动设置的仓库级 enable。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            done = c.execute("SELECT COUNT(*) FROM meta WHERE key='enable_aligned'").fetchone()[0]
+            if done:
+                return
+            # 先确保 enable 列存在（新库可能无）
+            _ensure_column(c, "agent_type", "enable", "INTEGER DEFAULT 1")
+            _ensure_column(c, "devops_agent_session", "enable", "INTEGER DEFAULT 1")
+            c.execute(
+                "UPDATE devops_agent_session SET enable = COALESCE((SELECT enable FROM agent_type WHERE agent_type = devops_agent_session.agent_type), 1)"
+            )
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('enable_aligned', '1')")
+            db.commit()
+            log.info("Aligned existing agent session enable from agent_type defaults")
+    except Exception as e:
+        log.warning(f"Align agent enable failed: {e}")
 
 
 def _migrate_tables():
@@ -1075,6 +1102,7 @@ def _migrate_tables():
     except Exception as e:
         log.warning(f"Rename backend* -> runtime* columns failed: {e}")
     # ===== new-version2：Agent 启用开关 enable（见 agent-enable-toggle-design.md）=====
+    # 仅加列；存量会话对齐在 seed 之后执行（_align_agent_enable），因为对齐依赖 agent_type.enable 已由 seed 写入
     try:
         with db_lock:
             c = db.cursor()
