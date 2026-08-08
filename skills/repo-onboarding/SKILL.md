@@ -36,6 +36,7 @@ tools:
    - 调用 `POST /api/tasks/notify`，`assignee=owner`，`task_description` 简要描述
    ```bash
    curl -X POST {{SERVER_URL}}/api/tasks/notify \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{
        "assignee": "<owner 的 GitCode 用户名>",

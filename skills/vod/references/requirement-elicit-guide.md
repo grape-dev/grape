@@ -72,6 +72,7 @@ auto-submitted by VOD Agent（Feishu）
 
 ```bash
 curl -X POST {{SERVER_URL}}/api/a2a \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "issue",

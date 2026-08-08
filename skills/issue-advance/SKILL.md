@@ -37,6 +37,7 @@ tools:
 
 ```bash
 curl -X POST {{SERVER_URL}}/api/tasks/notify \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "assignee": "<责任人GitCode用户名>",
@@ -122,7 +123,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 - 按 `references/comment-guide.md` 格式回复，基于知识基线与分析结论
 
 ### 7. 需要 A2A 时
-- 查本 prompt 底部 Agent 列表，构造 context，调用 `curl -X POST {{SERVER_URL}}/api/a2a`
+- 查本 prompt 底部 Agent 列表，构造 context，调用 `curl -X POST {{SERVER_URL}}/api/a2a`，需带 `-H "Authorization: Bearer $BOT_GITCODE_TOKEN"`（bot token 鉴权）
 - ⚠️ **A2A 必须携带真实 `issue_number`（必填）**：无法确定则不调用，评论说明。`pr_number` 有则填，无则不填，严禁混用。
 
 ```
@@ -161,6 +162,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 ```bash
 curl -X POST {{SERVER_URL}}/api/tasks/close \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "repo_key": "'"$REPO_FULL_NAME"'",

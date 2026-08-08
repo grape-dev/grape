@@ -19,6 +19,11 @@ client = TestClient(app)
 _uid = None
 _token = ""
 _headers = {}
+_BOT_TOKEN = "bot_test_token"
+
+
+def _bot_headers():
+    return {"Authorization": f"Bearer {_BOT_TOKEN}"}
 
 
 def setup_module():
@@ -37,11 +42,11 @@ def setup_module():
         c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,datetime('now'))",
                   (_uid["id"], "younger_eric", "ou_test_123", "吴扬"))
         db.commit()
-    # 建一个托管仓库（供 notify 校验）
+    # 建一个托管仓库（供 notify 校验）+ bot token（鉴权）
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id) VALUES (?,?,?,?,?)",
-                  ("gitcode:org/test", "org", "test", "org/test", 1))
+        c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token) VALUES (?,?,?,?,?,?)",
+                  ("gitcode:org/test", "org", "test", "org/test", 1, _BOT_TOKEN))
         db.commit()
 
 
@@ -59,20 +64,20 @@ def _clean_tasks():
 
 class TestNotify:
     def test_missing_fields(self):
-        r = client.post("/api/tasks/notify", json={})
+        r = client.post("/api/tasks/notify", headers=_bot_headers(), json={})
         assert r.status_code == 400
-        r = client.post("/api/tasks/notify", json={"assignee": "x", "repo_key": "org/test"})
+        r = client.post("/api/tasks/notify", headers=_bot_headers(), json={"assignee": "x", "repo_key": "org/test"})
         assert r.status_code == 400
 
     def test_repo_not_managed(self):
-        r = client.post("/api/tasks/notify", json={
+        r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
             "assignee": "younger_eric", "repo_key": "nope/missing",
             "issue_number": 1, "task_description": "d"})
         assert r.status_code == 404
 
     def test_assignee_not_registered(self):
         _clean_tasks()
-        r = client.post("/api/tasks/notify", json={
+        r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
             "assignee": "unknown_user", "repo_key": "org/test",
             "issue_number": 5, "task_description": "处理登录超时"})
         assert r.status_code == 200
@@ -91,7 +96,7 @@ class TestNotify:
             return None
 
         with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
-            r = client.post("/api/tasks/notify", json={
+            r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
                 "assignee": "younger_eric", "repo_key": "org/test",
                 "issue_number": 5, "task_description": "处理登录超时"})
         assert r.status_code == 200
@@ -134,7 +139,7 @@ class TestNotify:
             return None
 
         with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
-            r = client.post("/api/tasks/notify", json={
+            r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
                 "assignee": "bob", "repo_key": "org/test",
                 "issue_number": 7, "task_description": "换人处理"})
         assert r.status_code == 200
@@ -157,10 +162,10 @@ class TestNotify:
             return None
 
         with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
-            client.post("/api/tasks/notify", json={
+            client.post("/api/tasks/notify", headers=_bot_headers(), json={
                 "assignee": "younger_eric", "repo_key": "org/test",
                 "issue_number": 9, "task_description": "任务A"})
-            client.post("/api/tasks/notify", json={
+            client.post("/api/tasks/notify", headers=_bot_headers(), json={
                 "assignee": "younger_eric", "repo_key": "org/test",
                 "issue_number": 9, "task_description": "任务B"})
         # 同 assignee 同 issue 只应有 1 条 active 任务
@@ -181,7 +186,7 @@ class TestClose:
                       (_uid["id"], "younger_eric", "gitcode:org/test", 11))
             db.commit()
             tid = c.lastrowid
-        r = client.post("/api/tasks/close", json={"repo_key": "org/test", "issue_number": 11})
+        r = client.post("/api/tasks/close", headers=_bot_headers(), json={"repo_key": "org/test", "issue_number": 11})
         assert r.status_code == 200
         assert r.json()["closed"] >= 1
         with db_lock:
@@ -191,7 +196,7 @@ class TestClose:
         assert row and row[1] == "issue_closed"
 
     def test_close_missing_fields(self):
-        r = client.post("/api/tasks/close", json={})
+        r = client.post("/api/tasks/close", headers=_bot_headers(), json={})
         assert r.status_code == 400
 
 

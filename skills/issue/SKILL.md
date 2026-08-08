@@ -24,6 +24,7 @@ tools: []
 
 ```bash
 curl -X POST {{SERVER_URL}}/api/tasks/notify \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "assignee": "<责任人GitCode用户名>",
@@ -112,7 +113,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
     | 质疑分配结果 | 重新核对 CODEOWNERS，维持或调整 |
     | 其他 DevOps 相关 | 分析并回复 |
 4. **必须回复评论**（⚠️ 除非是机器人自己的评论）— 按 comment-guide.md 格式 `POST /repos/{owner}/{repo}/issues/{n}/comments`，body 以 `[issue agent]` 开头并引用用户评论原文
-5. **需要 A2A 时** — 查本 prompt 底部的 Agent 列表，构造 context（原始需求 + 分析结论 + 建议下一步），调用 `curl -X POST {{SERVER_URL}}/api/a2a`
+5. **需要 A2A 时** — 查本 prompt 底部的 Agent 列表，构造 context（原始需求 + 分析结论 + 建议下一步），调用 `curl -X POST {{SERVER_URL}}/api/a2a`（需带 `-H "Authorization: Bearer $BOT_GITCODE_TOKEN"`）
    ⚠️ **A2A 必须携带当前 Issue 的真实 `issue_number`（必填）**：issue 场景本身就有 Issue 编号，直接填入。**若无法确定 issue_number，则不要调用 A2A**，通过评论回复说明原因。`pr_number` 有则填（PR 编号），无则不填，严禁把 PR 编号填入 issue_number。
 
 ## 能力项
@@ -136,6 +137,7 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 
 ```bash
 curl -X POST {{SERVER_URL}}/api/tasks/close \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "repo_key": "'"$REPO_FULL_NAME"'",

@@ -346,6 +346,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
 然后调用 A2A API：
 
   curl -X POST {{SERVER_URL}}/api/a2a \\
+    -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \\
     -H "Content-Type: application/json" \\
     -d '{
       "agent": "coding",

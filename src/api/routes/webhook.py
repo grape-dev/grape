@@ -79,11 +79,8 @@ async def a2a_endpoint(request: Request):
     if not payload.get("issue_number"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing issue_number in payload: 所有 A2A 事件必须关联一个 Issue"})
 
-    client_host = request.client.host if request.client else "unknown"
-    if client_host not in ("127.0.0.1", "::1", "localhost", "0.0.0.0"):
-        log.warning(f"A2A rejected from external IP: {client_host}")
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "A2A endpoint is internal only"})
-
+    # 仓库级 bot token 鉴权（替代纯内网 IP 校验，支持远端 worker）
+    # Agent 调用时带 Authorization: Bearer <BOT_GITCODE_TOKEN>（或 X-Bot-Token header）
     repository = payload.get("repository", "")
     account = payload.get("account", "") or repository
     context = payload.get("context", "")
@@ -94,6 +91,26 @@ async def a2a_endpoint(request: Request):
     repo_key = to_repo_key(f"gitcode:{repository}") if repository else ""
     log.info(f"A2A: agent={agent_name}, repo={repository}")
     seq = 0
+
+    # 鉴权：Bearer token 对比该 repo 的 bot token（Agent 的 BOT_GITCODE_TOKEN）
+    # 复用仓库级 bot token 机制（对齐 webhook 鉴权思路），支持远端 worker 调用。
+    # 仅当仓库已托管（库中有 bot token）时严格校验；未托管仓库放行，交由后续 agent 配置查找处理。
+    _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
+    if not _auth:
+        _auth = request.headers.get("X-Bot-Token", "") or ""
+    if repo_key:
+        from src.user.db import get_repo_bot_token_no_global
+        _expected = get_repo_bot_token_no_global(repo_key) or ""
+        if _expected and _auth == _expected:
+            log.info(f"A2A: bot token OK, agent={agent_name}")
+        elif not _expected:
+            log.warning(f"A2A: repo not managed (no bot token), defer to downstream: {repo_key}")
+        else:
+            log.warning(f"A2A: unauthorized (token mismatch) for repo={repo_key}")
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid bot token"})
+    else:
+        log.warning(f"A2A: missing repository, reject")
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
 
     # Agent 启用检查（仓库级 enable，见 agent-enable-toggle-design.md）
     from src.api.session_store import is_agent_enabled

@@ -1087,6 +1087,32 @@ def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
     return ""
 
 
+def get_repo_bot_token_no_global(repo_key: str) -> str:
+    """仓库级 bot token（不含全局兜底）：managed_repos.bot_gitcode_token / devops_agent_session.repo_gitcode_token。
+
+    用于服务端内部端点（A2A/tasks）鉴权——对齐 webhook token 思路但用 bot token，
+    避免全局兜底导致未托管仓库也拿到 token。
+    """
+    from src.repo_key import split_owner_repo
+    try:
+        owner, rname = split_owner_repo(repo_key)
+        _tok = get_bot_token_by_repo(owner, rname) or ""
+        if _tok:
+            return _tok
+    except Exception:
+        pass
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_gitcode_token FROM devops_agent_session WHERE repo_key=? AND repo_gitcode_token IS NOT NULL AND repo_gitcode_token!='' LIMIT 1", (repo_key,))
+            row = c.fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return ""
+
+
 def _get_global_bot_token() -> str:
     """读取全局 bot token（configs/global-bot-token.json）"""
     import json, os
@@ -1135,7 +1161,7 @@ def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
 
 
 def get_agent_bot_token(repo_key: str) -> str:
-    """获取 Agent 执行的 GitCode Bot Token（薄包装，统一走 get_gitcode_token）"""
+    """获取 Agent 执行的 GitCode Bot Token（兼容包装，统一走 get_gitcode_token）"""
     return get_gitcode_token(repo_key=repo_key)
 
 

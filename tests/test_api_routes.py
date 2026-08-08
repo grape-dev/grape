@@ -1099,10 +1099,18 @@ class TestWebhook:
             cur.execute("SELECT COUNT(*) FROM events WHERE repo_key='ghost/not-managed'")
             assert cur.fetchone()[0] == 0, "unmanaged repo should not create events"
 
-    def test_a2a_reject_external(self):
-        """A2A should reject requests from non-localhost IPs"""
+    def test_a2a_reject_wrong_token(self):
+        """A2A 鉴权：仓库配置 bot token 后，无/错 token → 403"""
+        from src.session_manager import db, db_lock
+        with db_lock:
+            db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, bot_gitcode_token) VALUES (?,?,?,?,?)",
+                       ("gitcode:org/test", "org", "test", "org/test", "test_bot_token_123"))
+            db.commit()
         r = client.post("/api/a2a", json={"agent": "issue", "payload": {"repository": "org/test", "issue_number": "1"}})
-        assert r.status_code == 403
+        assert r.status_code == 403  # 无 token
+        r2 = client.post("/api/a2a", json={"agent": "issue", "payload": {"repository": "org/test", "issue_number": "1"}},
+                         headers={"Authorization": "Bearer wrong_token"})
+        assert r2.status_code == 403  # 错 token
 
     def test_a2a_missing_agent(self):
         r = client.post("/api/a2a", json={}, headers=_headers)
@@ -1113,7 +1121,12 @@ class TestWebhook:
         assert r.status_code == 400
 
     def test_a2a_with_pr_number(self):
-        """A2A should accept optional pr_number in payload (403 = IP check passed validation)"""
+        """A2A 接受可选 pr_number（正确 bot token 通过鉴权，非 400）"""
+        from src.session_manager import db, db_lock
+        with db_lock:
+            db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, bot_gitcode_token) VALUES (?,?,?,?,?)",
+                       ("gitcode:org/test", "org", "test", "org/test", "test_bot_token_123"))
+            db.commit()
         r = client.post("/api/a2a", json={
             "agent": "qa",
             "payload": {
@@ -1123,7 +1136,7 @@ class TestWebhook:
                 "pr_number": "7",
                 "context": "PR #7 created, please review"
             }
-        }, headers=_headers)
+        }, headers={"Authorization": "Bearer test_bot_token_123"})
         assert r.status_code != 400, f"Payload validation failed: {r.text}"
 
     def test_a2a_pr_number_alone_rejected(self):
