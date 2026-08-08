@@ -240,7 +240,7 @@ default_runtime_id INTEGER DEFAULT 0, -- ★ 引用 agent_runtimes.id（原 defa
 enable INTEGER DEFAULT 1,           -- ★ Agent 启用开关（全局默认；sre 默认 0）
 icon TEXT DEFAULT '',
 order_num INTEGER DEFAULT 0,        -- >0 为 DevOps Agent（事件路由依据）
-subscribe_events TEXT DEFAULT '[]', -- JSON 数组，事件路由
+subscribe_events TEXT DEFAULT '[]', -- JSON 数组，事件路由（v2.0 降级为接收白名单+非 Issue 事件兜底+前端展示；主路由改由 issue_state 阶段矩阵，见 vod-skill-upgrade-plan.md §3.0.4）
 created_at TEXT DEFAULT (datetime('now'))
 ```
 

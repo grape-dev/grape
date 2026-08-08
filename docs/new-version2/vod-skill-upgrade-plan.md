@@ -174,6 +174,34 @@ CREATE TABLE IF NOT EXISTS issue_state (
 - 回退允许：qa→coding、coding 问题回退（状态机允许，见 §八 回退上限）
 - `issue_state` 为**唯一权威**（D10）；`event_archive.a2a_to` 仅记录（不回读判定）
 
+#### 3.0.4 `subscribe_events` 字段的演进与去留（用户考量）
+
+**现状**：`agent_type.subscribe_events`（`configs/agent-description.json` → seed 到 `agent_type` 表）是当前**唯一路由机制**：
+- `src/api/routing.py:get_domain_agent` 按 `event_type` 在 `subscribe_events` 中 LIKE 匹配 → 返回 agent
+- `src/api/routing.py:get_agent_skill_map` 读取它供前端展示（pipeline 页 / Agent 配置）
+- `event_pipeline.run_pipeline` 依赖 `get_domain_agent` 决定 `_execute_agent` 交给谁
+
+**v2.0 引入阶段矩阵后，两者职责分离**：
+
+| 维度 | `subscribe_events`（现状） | 阶段矩阵 `issue_state`（v2.0） |
+|---|---|---|
+| 判定依据 | 事件类型 → agent（静态） | Issue 当前阶段 → 归属 Agent（动态） |
+| 粒度 | 全局（所有仓库） | 按 Issue 实例 |
+| 语义 | "哪些事件类型会触发哪些 Agent"（**接收声明**） | "当前这个 Issue 归谁执行"（**执行判定**） |
+| 能否表达回退 | 否 | 是（qa→coding 等） |
+
+**去留结论（本期设计）**：
+- `subscribe_events` **暂不删除**，但**降级**——不再是 run_pipeline 的主路由（改由阶段矩阵判定），保留为：
+  1. **前端展示**：Agent 配置页 / pipeline 页展示"该 Agent 关注哪些事件"（`get_agent_skill_map` 继续用）
+  2. **接收白名单**：事件进入时的**粗略过滤**（若事件类型不在任何 Agent 订阅中则跳过，作为阶段矩阵的前置快筛）
+  3. **无 Issue 关联事件**（如 `vod_signal`、`build_failure` 等非 Issue 事件）的兜底路由——这些事件没有 issue_id，无法走阶段矩阵，仍需 subscribe_events 静态路由
+- **彻底删除的条件**（后续代码期评估）：
+  - 阶段矩阵完整覆盖所有事件类型（含非 Issue 事件的路由规则）
+  - `get_agent_skill_map` 前端展示改用其他来源（如阶段矩阵/静态映射表）
+  - 此时 `agent_type.subscribe_events` 列、`agent-description.json` 的 `subscribe_events` 字段可移除
+
+> ⚠️ 故 `agent-description.json` 的 `subscribe_events` 字段**本期保留**（不再作为主路由，但承担接收白名单 + 非 Issue 事件兜底 + 前端展示）；文档 §4.4.4 的订阅调整仍生效（新增 `issue_opened` 给 vod、Issue/PR 事件按归属矩阵调整），因为订阅声明仍是阶段矩阵的前置条件。
+
 ### 3.1 场景 A：开发者声音引导建 Issue（`vod_signal` / 飞书消息）
 
 ```
@@ -356,11 +384,16 @@ auto-submitted by VOD Agent（Feishu）
   - A2A 交办时更新 `issue_state.owner_agent`/`stage`（写入 a2a_seq）
   - 同时写 `event_archive.a2a_to`（仅记录，不回读）
 
-#### 4.4.3 event_archive `a2a_to` 写入
+#### 4.4.3 `subscribe_events` 降级（D9 配套，见 §3.0.4）
+
+- `src/api/event_pipeline.py` `run_pipeline`：主路由改由阶段矩阵判定；`subscribe_events` 降级为接收白名单 + 非 Issue 事件兜底 + 无 issue_state 记录时的回退（`get_domain_agent` 保留）
+- `agent-description.json` `subscribe_events` 字段**本期保留**（不删），后续评估彻底移除条件见 §3.0.4
+
+#### 4.4.4 event_archive `a2a_to` 写入
 
 - `src/api/event_archive.py`：A2A 交办时在对应 pipeline 段写入 `a2a_to`（当前恒 None）
 
-#### 4.4.4 订阅调整
+#### 4.4.5 订阅调整
 
 - `configs/agent-description.json`：
   - `vod.subscribe_events` 增加 `issue_opened`
@@ -369,11 +402,11 @@ auto-submitted by VOD Agent（Feishu）
 
 > ⚠️ 与上一轮"qa 取消 PR 订阅、由 coding A2A 触发"的关系（需求演进）：PR 事件改为**按 issue 阶段门控**——qa/coding 重新订阅 PR 事件，但**仅当 issue 进入对应阶段时才真正执行**（vod/issue 阶段 PR 事件跳过，不触发 qa/coding），即"PR 一开就触发 qa"的旧问题由阶段门控解决，同时支持"qa 阶段 PR 未合入持续接单"。此语义由 §3.0.3 归属矩阵承载。
 
-#### 4.4.5 prompt 注入（§3.6）
+#### 4.4.6 prompt 注入（§3.6）
 
 - `src/im/vod_handler_async.py` `_build_vod_prompt`：追加知识基线摘要 + `build_issue_context` + 当前阶段
 
-#### 4.4.6 关联：`skills/qa/SKILL.md` triggers 同步（非 VOD 核心，随订阅调整）
+#### 4.4.7 关联：`skills/qa/SKILL.md` triggers 同步（非 VOD 核心，随订阅调整）
 
 - qa 技能 front matter `triggers` 恢复含 `pull_request_opened`/`pull_request_updated`/`note_hook_pr`（阶段门控执行）+ 保留 `a2a_event`（coding A2A 显式触发仍有效）
 
