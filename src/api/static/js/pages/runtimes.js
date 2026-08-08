@@ -37,12 +37,16 @@ function renderRuntimes(data) {
 function deviceCard(d) {
   const clis = (d.runtimes || []).map(rt =>
     `<span class="tgx">${rt.name}${rt.version ? ' v' + rt.version : ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' ');
+  // 本地引擎（credential_id=0）：无边端心跳概念，显示"就绪/未安装"而非心跳时间
+  const statusText = d.credential_id
+    ? '心跳: ' + relTime(d.last_seen_at)
+    : (d.health === 'online' ? '就绪' : '未安装');
   return `<div class="cd" style="padding:14px 18px;margin-bottom:8px">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <span style="width:10px;height:10px;border-radius:50%;background:${RUNTIME_COLOR[d.health] || 'var(--t3)'};display:inline-block"></span>
       <b style="font-size:14px">${d.device_name || d.name || '?'}</b>
       <span class="ts t2">${d.name || ''}</span>
-      <span class="ts t2">心跳: ${relTime(d.last_seen_at)}</span>
+      <span class="ts t2">${statusText}</span>
       <div class="sp"></div>
       ${d.credential_id ? `<button class="bt bt-o bt-s" onclick="openDeviceTasks(${d.credential_id})">查看任务</button>` : ''}
     </div>

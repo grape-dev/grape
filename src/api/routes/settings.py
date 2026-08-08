@@ -177,14 +177,20 @@ async def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_curren
 
 @router.get("/agent-runtimes")
 async def get_agent_runtimes(user: dict = Depends(get_current_user)):
-    """从 DB 读取 Agent 执行引擎列表，含健康态派生（online/recently_lost/offline/about_to_gc）。"""
+    """从 DB 读取 Agent 执行引擎列表，含健康态派生（online/recently_lost/offline/about_to_gc）。
+
+    健康态语义（见 agent-runtime-design.md D7）：
+    - 绑定凭据的远端 runtime（credential_id>0）：由边端心跳（status + last_seen_at）派生四态
+    - 未绑定凭据的本地 runtime（credential_id=0，历史 backend_agents 迁移而来）：
+      由本机 CLI 就绪态（installed/healthy）派生——就绪=online，未装=offline
+    """
     from src.user import db as user_db
     from src.runtime.health import derive_runtime_health
     from src.session_manager import db, db_lock
     cached = user_db.get_agent_runtimes()
     now = __import__("time").time()
     for rt in cached:
-        rt["health"] = derive_runtime_health(rt.get("status") or "offline", rt.get("last_seen_at"), now)
+        rt["health"] = _runtime_health(rt, now)
     # 设备级视图（按 credential_id 分组：device_name + 承载 CLI + 心跳）
     devices = []
     seen = set()
@@ -193,10 +199,11 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
         c.execute("SELECT id, name, device_name, status, last_seen_at FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
         for r in c.fetchall():
             cid, cname, cdev, cstatus, clast = r
-            c.execute("SELECT id, name, version, healthy, status, last_seen_at FROM agent_runtimes WHERE credential_id=?", (cid,))
+            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at FROM agent_runtimes WHERE credential_id=?", (cid,))
             runtimes = [
                 {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
-                 "health": derive_runtime_health(x[4], x[5], now)}
+                 "installed": bool(x[4]),
+                 "health": derive_runtime_health(x[5], x[6], now)}
                 for x in c.fetchall()
             ]
             seen.add(cid)
@@ -208,11 +215,26 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
     if orphan_ids and not devices:
         for rt in cached:
             devices.append({"credential_id": 0, "name": "本机 Runtime", "device_name": "本机",
-                            "credential_status": "active", "last_seen_at": rt.get("last_seen_at"),
+                            "credential_status": "active", "last_seen_at": None,
                             "health": rt.get("health", "offline"),
                             "runtimes": [{"id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
-                                          "healthy": rt.get("healthy", False), "health": rt.get("health", "offline")}]})
+                                          "healthy": rt.get("healthy", False),
+                                          "installed": rt.get("installed", False),
+                                          "health": rt.get("health", "offline")}]})
     return {"runtimes": cached, "devices": devices}
+
+
+def _runtime_health(rt: dict, now: float) -> str:
+    """单引擎健康态：
+    - credential_id>0（远端边端）：status+last_seen 四态
+    - credential_id=0（本地引擎）：installed/healthy 派生（就绪=online，未装=offline）
+    """
+    from src.runtime.health import derive_runtime_health
+    if rt.get("credential_id"):
+        return derive_runtime_health(rt.get("status") or "offline", rt.get("last_seen_at"), now)
+    if rt.get("installed") and rt.get("healthy"):
+        return "online"
+    return "offline"
 
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）
 @router.get("/backend-agents")

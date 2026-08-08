@@ -1534,11 +1534,12 @@ def get_agent_runtimes(scope: str = "global", owner_id: str = "") -> list[dict]:
     """读取 agent runtimes 缓存"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+        c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
              "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
-             "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10]}
+             "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10],
+             "credential_id": r[11] or 0}
             for r in c.fetchall()
         ]
 
