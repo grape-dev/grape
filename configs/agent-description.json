@@ -34,10 +34,10 @@
     "icon": "🧪",
     "color": "var(--pu)",
     "bg": "#f3e9fe",
-    "description": "代码审查、自动化测试、功能验证、安全检查（监听 PR 事件，对 PR 做审查）",
+    "description": "代码审查、自动化测试、功能验证、安全检查（由 Coding Agent 通过 A2A 事件触发审查，不直接监听 PR 事件）",
     "backend": "opencode",
     "order_num": 4,
-    "subscribe_events": ["pull_request_opened", "pull_request_updated", "note_hook_pr"]
+    "subscribe_events": []
   },
   "sre": {
     "name": "SRE Agent",
