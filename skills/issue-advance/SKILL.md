@@ -48,18 +48,20 @@ curl -X POST http://localhost:8080/api/tasks/notify \
 若 notify 返回 `{ok:false}`（责任人未注册平台），在 Issue 评论说明即可。
 
 ### 超出能力范围时主动请求支援
-对于以下任务，issue 技能能力有限或无能力处理，应通过 A2A 协议调用更专业的 Agent：
+对于以下任务，issue 技能能力有限或无能力处理，应通过 A2A 协议调用更专业的 Agent（agent 名 = `configs/agent-description.json` 中的 agent_type）：
 
 | 任务 | 推荐 Agent |
 |------|-----------|
-| 代码实现、提交 PR | implementation |
-| PR 审查、代码质量检查 | pr |
-| 构建失败分析、编译调试 | build-debug |
-| 云部署、拉取代码、重启服务 | cloud-deploy |
+| 代码实现、提交 PR | coding |
+| PR 审查、代码质量检查 | qa |
+| 构建失败分析、编译调试 | sre |
+| 云部署、拉取代码、重启服务 | sre |
+| **需求理解不清晰 / 需引导澄清开发者需求** | **vod** |
 
 判断标准：
 1. **用户明确要求做某事，而本技能的「硬约束」表中该行为被标记为 ❌ 禁止** → 说明此任务超出你的范围，查 Agent 列表交办。
 2. **可开发性评级为 ready** → 生成 Spec 文档，通过 A2A 交办 coding agent 启动开发。
+3. **需求不清晰 / 无法确定需求边界时** → 通过 A2A 交办 **vod**（开发者声音引导与需求澄清），由 vod 与开发者沟通收敛需求后再回到 issue 流程。
 
 ### 验证外部 claim
 PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 都是 claim。**先打开原对象核对**。

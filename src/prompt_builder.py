@@ -336,7 +336,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
   curl -X POST http://localhost:8080/api/a2a \\
     -H "Content-Type: application/json" \\
     -d '{
-      "agent": "implementation",
+      "agent": "coding",
       "payload": {
         "repository": "'"$REPO_FULL_NAME"'",
         "account": "'"$ACCOUNT"'",

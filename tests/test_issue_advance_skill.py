@@ -27,3 +27,20 @@ class TestIssueAdvanceDevGate:
     def test_analysis_reference_present(self):
         s = _skill()
         assert "issue-developability-analysis" in s
+
+    def test_a2a_agents_are_real_types(self):
+        s = _skill()
+        # 支援表用真实 agent_type（coding/qa/sre），不用旧技能名（implementation/pr/cloud-deploy/build-debug）
+        support_section = s.split("### 超出能力范围时主动请求支援")[1].split("### 验证外部 claim")[0]
+        assert "| coding |" in support_section
+        assert "| qa |" in support_section
+        assert "| sre |" in support_section
+        for old in ("implementation", "cloud-deploy", "build-debug", "| pr |"):
+            assert old not in support_section, f"旧技能名不应出现在支援表: {old}"
+
+    def test_vod_handoff_for_unclear_requirement(self):
+        s = _skill()
+        # 需求不清晰时 A2A 求助 vod
+        assert "**vod**" in s
+        assert "需求理解不清晰" in s or "需求不清晰" in s
+        assert "vod" in s.split("超出能力范围")[1]
