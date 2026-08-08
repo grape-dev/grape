@@ -1,95 +1,120 @@
 ---
 name: vod
-version: 1.0.0
+version: 2.0.0
 description: |
-  开发者声音（VOD）分析技能。从 Issue、PR 评论、IM 对话等渠道收集开发者反馈，
-  聚类分析共性问题，提炼价值信息，自动创建 Issue 提交 Issue Agent。
+  开发者声音（VOD）分析技能。收集、分析、引导、提炼开发者需求，并构建项目知识基线以精准理解项目。
+  双职责：①从 Issue / 飞书收集开发者声音，多轮引导收敛为清晰需求并建 Issue；
+  ②接管 issue_opened 审视非 VOD 创建的 Issue，澄清后结构化总结并 A2A 交办 Issue Agent。
 triggers:
   - event_type: vod_signal
-tools: []
+  - event_type: issue_opened
+tools:
+  - codegraph
 ---
 ## 安全硬约束（必须遵守）
 
-1. 调用 GitCode API 只用 prompt 注入的 \\，严禁从数据库/configs/日志/历史中寻找其他 token。
-2. 严禁读取 data/、configs/、sessions.db、user_accounts 等 Grape 内部数据。
+1. 调用 GitCode API 只用 prompt 注入的 \，严禁从数据库/configs/日志/历史中寻找其他 token。
+2. 严禁读取 data/、configs/、sessions.db、user_accounts 等 Grape 内部数据（data/workspaces/ 项目知识文档除外）。
 3. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
 4. token 不得写入任何文件/日志/评论。
 
+# 开发者声音分析与 Issue 审视（VOD v2.0）
 
+## 定位
 
-# 开发者声音分析
-
-## 场景
-
-当收到 VOD 信号事件时，分析相关反馈内容，识别共性问题，提炼价值，创建 Issue。
+VOD 的职责：**把开发者声音变成清晰开发者需求**。
+- 不负责 spec 设计、打标签、里程碑、分配（那是 Issue Agent / issue-advance 的职责）。
+- 不写代码、不建 PR。
+- 开发者声音来源：
+  - **来源 A**：开发者在 GitCode 直接提交的 Issue（原始声音）→ 审视、引导、结构化
+  - **来源 B**：飞书 VOD Bot 收集的用户需求建议 → 多轮沟通 → 建 Issue
 
 ## 处理流程
 
-### 1. 分析事件内容
+### 场景 A：开发者声音引导建 Issue（vod_signal / 飞书消息）
 
-接收到的 webhook 事件包含 `vod_signal` 类型的信号。从事件 payload 中提取：
+#### A1 项目知识基线（必须最先）
+- 读取 `data/workspaces/{owner}/{repo}/project-info/project-graph.md` 和 `project-capabilities.md`
+- 不存在或过期 → 按 `skills/issue-advance/references/codegraph-project-analysis.md` 生成/更新（与 issue-advance 共用同一份）
+- codegraph 不可用 → 降级 README + GitCode API 基础信息（标注 `[degraded]`）
 
-- 反馈来源（Issue 评论 / PR 评论 / IM 消息）
-- 反馈内容（原始文本）
-- 反馈者（用户名）
-- 所属仓库
+#### A2 项目历史全貌（API 获取）
+- 近期 Issue 列表 `GET /repos/{owner}/{repo}/issues?state=all&per_page=20` → 判断重复/已解决
+- 近期 PR 列表 `GET /repos/{owner}/{repo}/pulls?state=all&per_page=10` → 是否已有方案
+- 历史反馈画像：聚类此前 `auto-submitted by VOD Agent` 的反馈 Issue，识别高频主题
 
-### 2. 聚类分析
+#### A3 需求引导漏斗
+- 判断当前消息需求是否已清晰（见 `references/requirement-elicit-guide.md` 四要素）
+- 已清晰（一轮）→ 直接进入 A4 建 Issue
+- 不清晰 → 飞书群多轮引导（每次 1-3 个澄清问题，结合知识基线，≤3 轮）
+- 超限仍不清晰 → 建「待澄清」Issue（body 列出已获取/缺失信息）
 
-分析反馈内容，识别：
+#### A4 结构化建 Issue
+- 按 `references/requirement-elicit-guide.md` §四 模板创建 Issue
+- 标注 `auto-submitted by VOD Agent（Feishu）`
 
-- **共性问题** — 多个用户提及的同类问题
-- **高频关键词** — 出现频率高的技术术语
-- **情感倾向** — 正面/负面反馈
-- **影响范围** — 影响多少用户或模块
+#### A5 A2A 交办 Issue Agent
+- 需求收敛为清晰后，`POST /api/a2a {"agent":"issue", ...}`（见 guide §五）
+- 交办后 Issue 进入 `issue` 阶段（issue_state 归属更新）
 
-### 3. 价值提炼
+### 场景 B：Issue 审视（接管 issue_opened）
 
-从分析结果中提炼：
+#### B1 项目知识基线（同 A1，若已存在则复用）
 
-- **问题描述** — 清晰说明问题现象
-- **影响评估** — 对开发效率、代码质量、用户体验的影响
-- **建议方案** — 初步的改进建议
-- **优先级建议** — P0（紧急）/ P1（重要）/ P2（一般）
+#### B2 自建排除
+- Issue 含 `auto-submitted by VOD Agent` → 跳过审视，直接 A2A 交办 Issue Agent
 
-### 4. 创建 Issue
+#### B3 清晰度审视
+- 读取 Issue 完整内容（title/body/标签/评论），对照四要素
+- 结合知识基线判断：可执行性、是否重复、是否有歧义
 
-当发现值得跟踪的问题时：
+#### B4 与开发者沟通澄清（不清晰时）
+- 渠道：Issue 评论（@开发者追问）或 飞书群（若绑定）
+- 结合知识基线提 1-3 个具体问题，≤3 轮
+- 超限 → Issue 评论列出已获取/缺失信息，标记「待澄清」
 
-```bash
-curl -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "问题标题",
-    "body": "**来源**: ...\n\n**描述**: ...\n\n**影响**: ...\n\n**建议**: ...\n\n---\nauto-submitted by VOD Agent",
-    "labels": "feedback"
-  }' \
-  https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues
-```
+#### B5 结构化总结
+- `PATCH /issues/{number}` 将 body 收敛为模板结构（来源标注「VOD 审视结构化」）
 
-### 5. 输出摘要
+#### B6 A2A 交办 Issue Agent
+- 审视清晰后 `POST /api/a2a {"agent":"issue", ...}`
+- 交办后 Issue 进入 `issue` 阶段
 
-输出分析结果的文字摘要，包括：
+## 需求引导漏斗规则（A3/B4 通用）
 
-```
-分析完成：本次共分析 N 条反馈，发现 M 个共性问题。
-  - 问题 1：描述 → 已创建 Issue #N
-  - 问题 2：描述 → 无需创建（影响较小）
-  - ...
-```
+见 `references/requirement-elicit-guide.md` §二：
+- 第一轮提取意图判断清晰度；模糊则针对性澄清
+- 结合知识基线提问（问得具体），每次 1-3 个问题，不重复已确认项
+- ≤3 轮；超限建待澄清 Issue 或列缺失项，不无限追问
 
 ## 操作边界
 
 | 行为 | 态度 |
 |------|------|
-| 分析反馈内容 | ✅ **可以做** |
-| 提炼共性问题 | ✅ **可以做** |
-| 创建 Issue | ✅ **可以做** |
-| 修改 Issue 标签 | ❌ **不做**（由 Issue Agent 处理） |
-| 指派负责人 | ❌ **不做**（由 Issue Agent 处理） |
-| 修改代码 | ❌ **禁止** |
+| 构建/复用项目知识基线 | ✅ **必须最先** |
+| 分析反馈、聚类共性 | ✅ **可以做** |
+| 与开发者多轮对话引导需求 | ✅ **可以做** |
+| 审视已有 Issue、沟通澄清 | ✅ **可以做** |
+| 创建/总结 Issue（模板结构） | ✅ **可以做** |
+| A2A 交办 Issue Agent（清晰需求后） | ✅ **必须做** |
+| 修改 Issue 标签/里程碑/分配 | ❌ **不做**（Issue Agent 职责） |
+| 修改代码 / 建 PR | ❌ **禁止** |
 | 回复 Token/密码 | ❌ **禁止** |
+
+## 硬约束
+
+1. **知识基线必须最先**：未读取 project-info 前不进行任何需求分析。
+2. **引导 ≤3 轮**：超限建待澄清 Issue，不无限追问。
+3. **自建排除**：VOD 自己创建的 Issue 跳过审视（防自我循环）。
+4. **交办必带 issue_number**：A2A 无法确定 issue_number 则不调用，在评论中说明。
+5. **结构化产出**：建/总结 Issue 用模板（目标/现状/期望/验收/优先级/来源）。
 
 ## 输出格式
 
-始终输出分析结果摘要，包含分析数量、发现问题和已创建 Issue 的链接。
+始终输出分析摘要：分析数量、发现的问题、已创建/已审视 Issue 及交办情况。
+
+## 参考
+
+- 需求引导 + 审视 + 模板 + A2A 交办：`references/requirement-elicit-guide.md`
+- 项目知识基线生成：`skills/issue-advance/references/codegraph-project-analysis.md`（共用）
+- GitCode API：`references/gitcode-api-reference.md`

@@ -166,6 +166,27 @@ def append_event_archive_log(repo_key, seq, evt_type, data, tokens=None, issue_n
             log.warning(f"Archive append failed: repo={repo_key}, seq={seq}: {e}")
 
 
+def record_a2a_to(repo_key, issue_num, target_agent):
+    """A2A 交办记录：在该 Issue 最新 pipeline 段写入 a2a_to（仅记录，不作状态指引）。
+
+    见 vod-skill-upgrade-plan.md §3.0.2（event.json 仅背景档案，非状态权威）。
+    """
+    path = get_event_json_path(repo_key, issue_num)
+    with _lock_for(repo_key):
+        arch = _load(path)
+        if not arch:
+            return
+        for seg in reversed(arch.get("pipeline", [])):
+            if seg.get("status") in ("running", "completed"):
+                seg["a2a_to"] = target_agent
+                break
+        arch["updated_at"] = _now()
+        try:
+            _atomic_write(path, arch)
+        except Exception as e:
+            log.warning(f"Archive a2a_to failed: repo={repo_key}, issue={issue_num}: {e}")
+
+
 def finalize_event_archive(repo_key, seq, status, exit_code=None, duration=None,
                            output=None, tokens=None, issue_num_hint=""):
     """完成时写 output + 整链 status + 覆盖 summary（有 issue_summary 才覆盖）"""

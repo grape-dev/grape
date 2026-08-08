@@ -111,6 +111,41 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
         parts.append(summary)
         parts.append("")
 
+    # VOD v2.0：项目知识基线 + 生命周期阶段 + Issue 富上下文（见 vod-skill-upgrade-plan.md §3.6）
+    try:
+        from src.repo_key import split_owner_repo
+        _owner, _rname = split_owner_repo(repo_key)
+        _pi = os.path.join(WORKSPACE_DIR, _owner, _rname, "project-info")
+        _g = os.path.join(_pi, "project-graph.md")
+        _c = os.path.join(_pi, "project-capabilities.md")
+        if os.path.exists(_g) or os.path.exists(_c):
+            parts.append("\n## 项目知识基线")
+            for _f, _label in ((_g, "project-graph"), (_c, "project-capabilities")):
+                if os.path.exists(_f):
+                    _content = open(_f, encoding="utf-8").read()[:2500]
+                    parts.append(f"\n### {_label}\n{_content}")
+            parts.append("\n> 若知识基线缺失或过期，请按 issue-advance/references/codegraph-project-analysis.md 生成/更新。")
+        # 当前 Issue 生命周期阶段（若有）
+        _iid = evt.get("issue_id", "") or ""
+        if _iid:
+            try:
+                from src.api.session_store import get_issue_stage
+                _st = get_issue_stage(repo_key, _iid)
+                if _st:
+                    parts.append(f"\n## Issue 生命周期\n当前 Issue {_iid} 处于 **{_st['stage']}** 阶段，归属 **{_st['owner_agent']}**。")
+            except Exception:
+                pass
+        # event.json 富上下文（背景档案）
+        try:
+            from src.api.event_archive import build_issue_context
+            _ctx = build_issue_context(repo_key, _iid.lstrip("#")) if _iid else ""
+            if _ctx:
+                parts.append(f"\n## Issue 档案摘要\n{_ctx}")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     _sp = skill_path or os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
     parts.append(
         f"## Skill: {skill_name}\n"

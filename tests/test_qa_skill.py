@@ -78,13 +78,13 @@ class TestQaSkillConfig:
         for scene, info in cfg["scenes"].items():
             assert info["mapping"]["qa"] == "pr", f"scene '{scene}' qa mapping mismatch"
 
-    def test_agent_description_qa_not_subscribed_to_pr_events(self):
-        # 新流程：qa 不再直接监听 PR 事件，由 Coding Agent 经 A2A 触发审查
+    def test_agent_description_qa_subscribes_pr_with_stage_gate(self):
+        # 生命周期矩阵（vod-skill-upgrade-plan.md §3.0.3）：qa 订阅 PR 事件，但按 issue 阶段门控执行
+        # （qa 阶段才真正处理；vod/issue 阶段 PR 事件不触发 qa，由 Issue Agent 审视）
         cfg = _load_json("agent-description.json")
         qa = cfg["qa"]
         for evt in PR_SUBSCRIBED_EVENTS:
-            assert evt not in qa["subscribe_events"], f"qa should NOT subscribe {evt}"
-        assert qa["subscribe_events"] == []
+            assert evt in qa["subscribe_events"], f"qa should subscribe {evt} (stage-gated)"
 
     def test_agent_description_enable_defaults(self):
         # enable 默认：sre=false，其余 true
@@ -93,22 +93,25 @@ class TestQaSkillConfig:
             assert cfg[at].get("enable", True) is True, f"{at} enable should be true"
         assert cfg["sre"].get("enable", True) is False, "sre enable should be false"
 
-    def test_coding_agent_not_subscribed_to_pr_events(self):
+    def test_coding_agent_subscribes_pr_with_stage_gate(self):
+        # coding 订阅 PR 事件，按阶段门控（coding 阶段处理；vod/issue 阶段由 Issue Agent 审视）
         cfg = _load_json("agent-description.json")
         for evt in PR_SUBSCRIBED_EVENTS:
-            assert evt not in cfg["coding"]["subscribe_events"], f"coding still on {evt}"
+            assert evt in cfg["coding"]["subscribe_events"], f"coding should subscribe {evt}"
 
-    def test_no_routing_conflict_for_pr_events(self):
-        # PR 事件当前无人直接订阅（qa 取消、coding 由 A2A 驱动）：
-        # 要么 0 个订阅（A2A 触发），要么 1 个订阅，绝不允许多 agent 订阅造成路由非确定性
+    def test_issue_opened_only_vod_subscribes(self):
+        # D8：issue_opened 恒给 VOD——仅 vod 订阅，issue 不订阅
         cfg = _load_json("agent-description.json")
-        subscribed = {evt: [] for evt in PR_SUBSCRIBED_EVENTS}
-        for agent, info in cfg.items():
-            for evt in info.get("subscribe_events", []):
-                if evt in subscribed:
-                    subscribed[evt].append(agent)
-        for evt, agents in subscribed.items():
-            assert len(agents) <= 1, f"{evt} subscribed by multiple agents: {agents}"
+        assert "issue_opened" in cfg["vod"]["subscribe_events"]
+        assert "issue_opened" not in cfg["issue"]["subscribe_events"]
+
+    def test_pr_events_multi_subscribed_but_stage_gated(self):
+        # PR 事件被 issue/coding/qa 多方订阅（接收声明），但执行归属由 issue_state 阶段判定（§3.0.3），
+        # 不构成静态路由冲突——get_domain_agent 不再作为主路由
+        cfg = _load_json("agent-description.json")
+        for evt in PR_SUBSCRIBED_EVENTS:
+            subscribers = [a for a, info in cfg.items() if evt in info.get("subscribe_events", [])]
+            assert len(subscribers) >= 2, f"{evt} should be subscribed by multiple agents (stage-gated): {subscribers}"
 
 
 class TestQaSkillPrompt:

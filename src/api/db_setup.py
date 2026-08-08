@@ -282,11 +282,27 @@ CREATE TABLE IF NOT EXISTS runtime_credentials (
 )
 """
 
+# ===== new-version2 VOD：Issue 生命周期状态机（权威阶段，见 vod-skill-upgrade-plan.md §3.0.2）=====
+_ISSUE_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS issue_state (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_key     TEXT NOT NULL,
+    issue_id     TEXT NOT NULL,             -- 如 "#5"
+    stage        TEXT NOT NULL DEFAULT 'vod',   -- vod/issue/coding/qa/sre/done
+    owner_agent  TEXT NOT NULL DEFAULT 'vod',   -- 当前归属 agent（= 最新被交办者）
+    a2a_seq      INTEGER,                   -- 触发当前 stage 的 A2A 事件 seq
+    updated_at   TEXT DEFAULT (datetime('now')),
+    created_at   TEXT DEFAULT (datetime('now')),
+    UNIQUE (repo_key, issue_id)
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
+    ("issue_state", _ISSUE_STATE_DDL),
     ("events", _EVENTS_TABLE_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
     ("chat_conversations", _CHAT_CONVERSATIONS_DDL),

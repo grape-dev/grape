@@ -36,6 +36,51 @@ def is_agent_enabled(repo_key: str, agent_type: str) -> bool:
     return bool(get_agent_type_enable(agent_type))
 
 
+# ===== Issue 生命周期状态机（issue_state，见 vod-skill-upgrade-plan.md §3.0.2）=====
+
+def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
+    """读 Issue 当前阶段。无记录返回 None。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at FROM issue_state WHERE repo_key=? AND issue_id=?",
+                      (repo_key, issue_id))
+            row = c.fetchone()
+            if row:
+                return {"id": row[0], "stage": row[1], "owner_agent": row[2],
+                        "a2a_seq": row[3], "updated_at": row[4]}
+    except Exception:
+        pass
+    return None
+
+
+def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
+                    a2a_seq: int | None = None):
+    """写入/更新 Issue 阶段（幂等 upsert）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO issue_state (id, repo_key, issue_id, stage, owner_agent, a2a_seq, updated_at) "
+            "VALUES ((SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?), ?, ?, ?, ?, ?, datetime('now'))",
+            (repo_key, issue_id, repo_key, issue_id, stage, owner_agent, a2a_seq)
+        )
+        db.commit()
+    from src.config import log
+    log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent}")
+
+
+def get_issue_owner(repo_key: str, issue_id: str) -> str:
+    """返回 Issue 当前归属 agent（无记录默认 'vod'）。"""
+    st = get_issue_stage(repo_key, issue_id)
+    return st["owner_agent"] if st else "vod"
+
+
+def get_issue_stage_name(repo_key: str, issue_id: str) -> str:
+    """返回 Issue 当前阶段名（无记录默认 'vod'）。"""
+    st = get_issue_stage(repo_key, issue_id)
+    return st["stage"] if st else "vod"
+
+
 def get_or_create_agent_session(repo_key: str, agent_type: str,
                                  backend: str = "opencode") -> dict:
     """获取或创建 Agent 会话，每个 (repo_key, agent_type) 独立"""

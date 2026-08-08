@@ -94,6 +94,58 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
     return ""
 
 
+_ISSUE_EVENT_TYPES = {"issue_opened", "issue_updated", "issue_comment", "issue_labeled"}
+_PR_EVENT_TYPES = {"pull_request_opened", "pull_request_updated", "pull_request_merged", "note_hook_pr"}
+
+
+def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
+                               default_agent: str) -> str:
+    """阶段矩阵路由（D9，见 vod-skill-upgrade-plan.md §3.0.3）。
+
+    关联 issue_id 的事件按 issue_state 阶段判定归属：
+    - issue_opened 恒给 vod（D8）
+    - Issue 类事件（issue_updated/comment/...）：vod→VOD；issue 及之后→Issue Agent
+    - PR 类事件：vod/issue→Issue Agent 审视；coding→Coding；qa→QA；sre→SRE；done→不分发
+    无 issue_state 记录 / 非关联事件 → 返回 default_agent（现状 get_domain_agent 结果）。
+    """
+    from src.api.session_store import get_issue_stage, get_issue_stage_name
+
+    if event_type == "issue_opened":
+        return "vod"
+
+    if event_type not in _ISSUE_EVENT_TYPES and event_type not in _PR_EVENT_TYPES:
+        return default_agent
+
+    # 解析关联 issue_id：PR 类事件优先用 title/分支提取（无需 token），Issue 类用 payload 字段
+    if event_type in _PR_EVENT_TYPES:
+        issue_id = resolve_pr_issue_id(payload) or resolve_issue_id(payload) or ""
+    else:
+        issue_id = resolve_issue_id(payload) or ""
+    if not issue_id:
+        return default_agent
+
+    st = get_issue_stage(repo_key, issue_id)
+    if not st:
+        # 无记录：issue_opened 已由上面处理；其余关联事件默认 vod（新 Issue 先审视）
+        return "vod" if event_type in _ISSUE_EVENT_TYPES else default_agent
+    stage = st["stage"]
+
+    if event_type in _ISSUE_EVENT_TYPES:
+        # Issue 类事件：vod→VOD；issue 及之后→Issue Agent（coding/qa/sre 不直接处理）
+        if stage == "vod":
+            return "vod"
+        if stage == "done":
+            return ""  # 已结束不再分发
+        return "issue"
+    else:  # PR 类事件
+        if stage == "vod" or stage == "issue":
+            return "issue"  # Issue Agent 审视
+        if stage == "done":
+            return ""
+        return stage  # coding/qa/sre → 对应执行 Agent
+
+
+
 def resolve_actor(payload: dict, evt: dict) -> str:
     """从 payload 提取执行者"""
     actor = evt.get("actor", "")
@@ -168,6 +220,45 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # 3.1 Agent 启用检查（仓库级 enable，见 agent-enable-toggle-design.md）
     from src.api.session_store import is_agent_enabled
+    if not is_agent_enabled(repo_key, agent_type):
+        log.info(f"Pipeline: agent '{agent_type}' disabled for repo={repo_key}, skip")
+        from src.api.event_store import append_skipped_event
+        append_skipped_event(repo_key, event_type, "agent_disabled", agent_type)
+        return result
+
+    # 3.2 Issue 生命周期阶段路由（D8/D9，见 vod-skill-upgrade-plan.md §3.0.3）
+    from src.api.session_store import set_issue_stage
+    if event_type == "issue_opened":
+        # 新 Issue 建阶段（stage=vod, owner=vod）→ 恒给 VOD
+        _rid = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
+        if _rid:
+            set_issue_stage(repo_key, _rid, "vod", "vod")
+        agent_type = "vod"
+        log.info(f"Pipeline: issue_opened -> VOD (stage init) issue={_rid or '?'}")
+    else:
+        _stage_agent = _resolve_issue_stage_agent(repo_key, event_type, evt.get("payload", {}) or {}, agent_type)
+        if _stage_agent == "":
+            log.info(f"Pipeline: issue in 'done' stage, no dispatch for type={event_type}")
+            from src.api.event_store import append_skipped_event
+            append_skipped_event(repo_key, event_type, "issue_done")
+            return result
+        if _stage_agent != agent_type:
+            log.info(f"Pipeline: stage routing {agent_type} -> {_stage_agent} (issue lifecycle)")
+            agent_type = _stage_agent
+        # 关联 Issue 且无 issue_state 记录 → 建默认 vod 阶段（新 Issue 先审视）
+        if _stage_agent == "vod":
+            from src.api.session_store import get_issue_stage
+            _rid2 = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+            if _rid2 and not get_issue_stage(repo_key, _rid2):
+                set_issue_stage(repo_key, _rid2, "vod", "vod")
+                log.info(f"Pipeline: issue_state init vod for {_rid2}")
+        if not agent_type:
+            log.info(f"Pipeline: stage routing produced no agent for type={event_type}, skip")
+            from src.api.event_store import append_skipped_event
+            append_skipped_event(repo_key, event_type, "no_route")
+            return result
+
+    # 3.3 Agent 启用检查（阶段路由后的最终 agent）
     if not is_agent_enabled(repo_key, agent_type):
         log.info(f"Pipeline: agent '{agent_type}' disabled for repo={repo_key}, skip")
         from src.api.event_store import append_skipped_event

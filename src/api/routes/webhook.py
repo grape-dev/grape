@@ -149,6 +149,17 @@ async def a2a_endpoint(request: Request):
             },
         }
 
+        # Issue 生命周期阶段推进（D9/D10，见 vod-skill-upgrade-plan.md §3.0.2）
+        # A2A 交办 → issue_state 归属转移到目标 agent（qa 回 coding 允许回退）
+        if issue_number:
+            try:
+                from src.api.session_store import set_issue_stage
+                _stage = agent_name if agent_name in ("vod", "issue", "coding", "qa", "sre", "done") else "issue"
+                set_issue_stage(repo_key, f"#{issue_number}", _stage, agent_name, a2a_seq=None)
+                log.info(f"A2A: issue_state updated issue=#{issue_number} stage={_stage} owner={agent_name}")
+            except Exception as _e:
+                log.warning(f"A2A: issue_state update failed: {_e}")
+
         # 立即创建 event（status=running），Agent 执行完再更新
         from src.api.event_store import append_event
         seq = append_event(
