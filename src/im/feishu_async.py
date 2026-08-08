@@ -561,6 +561,17 @@ def _get_header(headers, key: str) -> str:
     return ""
 
 
+def _build_ack_frame(frame) -> bytes:
+    """构造飞书 WS ack 帧：payload 替换为 {"code":200}，其余字段不变，原样回传。
+
+    飞书 WS 长连接要求对每条 DATA(EVENT) 帧回传 ack，否则认为消息未送达，
+    会用新的 message_id 反复投递（导致消息重复消费）。ack 帧 = 原帧 payload
+    替换为 ack 响应后序列化回传，headers（含 message_id）保持不变。
+    """
+    frame.payload = json.dumps({"code": 200}).encode("utf-8")
+    return frame.SerializeToString()
+
+
 def _parse_event(event_data: dict) -> dict | None:
     """从飞书事件 JSON 提取标准化消息 dict"""
     header = event_data.get("header", {})
@@ -702,7 +713,19 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                         payload_str = frame.payload.decode("utf-8") if frame.payload else ""
                         event_data = json.loads(payload_str)
                     except Exception:
+                        # 解析失败也需 ack，否则飞书重推导致死循环
+                        try:
+                            await ws.send(_build_ack_frame(frame))
+                        except Exception:
+                            pass
                         continue
+
+                    # 统一 ack：无论消息是否被处理（seen 命中 / 无文本 / 处理中），
+                    # 都必须回传 ack 帧，否则飞书会用新的 message_id 反复投递该消息。
+                    try:
+                        await ws.send(_build_ack_frame(frame))
+                    except Exception as e:
+                        log.warning(f"[{ctx.name}] send ack failed: {e}")
 
                     parsed = _parse_event(event_data)
                     if not parsed or not parsed.get("text"):
