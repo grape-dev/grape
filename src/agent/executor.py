@@ -209,8 +209,6 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             try:
                 for raw_line in iter(proc.stdout.readline, b""):
                     _reader_total += 1
-                    if _reader_total <= 3:
-                        log.info(f"{label}{backend.name} stdout[{_reader_total}]={raw_line[:120]!r}")
                     with _line_queue_lock:
                         _line_queue.append(raw_line)
             except Exception as e:
@@ -301,10 +299,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         stdout_remainder = ""
         try:
             stdout_remainder = proc.stdout.read().decode("utf-8", errors="replace")
-        except Exception as e:
-            log.warning(f"{label}{backend.name} stdout read tail err: {e}")
-        if stdout_remainder:
-            log.info(f"{label}{backend.name} stdout tail bytes={len(stdout_remainder)}: {stdout_remainder[:200]!r}")
+        except Exception:
+            pass
 
         if stdout_remainder:
             for line in stdout_remainder.strip().split("\n"):

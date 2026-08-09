@@ -238,7 +238,6 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                 ):
-                    log.info(f"  [{evt_type}] {str(data)[:100]}")
                     # 日志输出（对齐 master 分支 im/handler.py）
                     if evt_type == "step_start":
                         log.info(f"  ▶ {data}")
