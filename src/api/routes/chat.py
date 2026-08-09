@@ -149,7 +149,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
                 elif evt_type == "reasoning":
                     log.info(f"  🤔 {data[:120]}")
                 elif evt_type == "tool_use":
-                    log.info(f"  🔧 {data[:150]}")
+                    log.info(f"  🔧 {str(data)[:150]}")
                 elif evt_type == "step_finish":
                     log.info(f"  ✅ {data}")
                 elif evt_type == "done":
@@ -247,7 +247,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     elif evt_type == "reasoning":
                         log.info(f"  🤔 {data[:120]}")
                     elif evt_type == "tool_use":
-                        log.info(f"  🔧 {data[:150]}")
+                        log.info(f"  🔧 {str(data)[:150]}")
                     elif evt_type == "step_finish":
                         log.info(f"  ✅ {data}")
                     elif evt_type == "done":
