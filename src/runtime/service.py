@@ -48,7 +48,8 @@ _worker_pool = ThreadPoolExecutor(max_workers=_DEFAULT_MAX_CONCURRENT, thread_na
 _TASK_COLUMNS = (
     "id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
-    "env_extra, skill_files, server_url, status, exit_code, result_text, errors, stderr, "
+    "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
+    "status, exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
 )
 
@@ -60,9 +61,10 @@ def _row_to_dict(row):
         "prompt": row[8], "cwd": row[9], "runtime_session_id": row[10], "event_type": row[11],
         "account": row[12], "user_id": row[13], "repo_gitcode_token": row[14],
         "env_extra": row[15], "skill_files": row[16], "server_url": row[17],
-        "status": row[18], "exit_code": row[19], "result_text": row[20], "errors": row[21],
-        "stderr": row[22], "usage_json": row[23], "started_at": row[24], "completed_at": row[25],
-        "created_at": row[26],
+        "issue_session_id": row[18], "project_info_files": row[19], "project_info_meta": row[20],
+        "status": row[21], "exit_code": row[22], "result_text": row[23], "errors": row[24],
+        "stderr": row[25], "usage_json": row[26], "started_at": row[27], "completed_at": row[28],
+        "created_at": row[29],
     }
 
 
@@ -108,11 +110,57 @@ def _collect_server_env(user_id, account):
     return env
 
 
+_PROJECT_INFO_FILES = ("project-graph.md", "project-capabilities.md")
+
+
+def load_project_info(repo_key: str) -> tuple[dict, dict]:
+    """读取服务端权威 project-info（见 multi-issue-isolation-design.md §2.4）。
+
+    返回 (files, meta)：
+    - files: {rel_path: content}（project-graph.md / project-capabilities.md / .metadata.json）
+    - meta: {last_commit_sha, branches, last_updated, degraded}
+    无基线 → (files={}, meta={})。
+    """
+    if not repo_key:
+        return {}, {}
+    try:
+        from src.config import WORKSPACE_DIR
+        from src.repo_key import split_owner_repo
+        owner, rname = split_owner_repo(repo_key)
+        pi = os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
+        if not os.path.isdir(pi):
+            return {}, {}
+        files = {}
+        for rel in _PROJECT_INFO_FILES:
+            p = os.path.join(pi, rel)
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        files[rel] = f.read()
+                except Exception:
+                    pass
+        meta = {}
+        mp = os.path.join(pi, ".metadata.json")
+        if os.path.isfile(mp):
+            try:
+                with open(mp, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                meta = {}
+        if files:
+            files[".metadata.json"] = json.dumps(meta, ensure_ascii=False)
+        return files, meta
+    except Exception as e:
+        log.warning(f"load_project_info failed for {repo_key}: {e}")
+        return {}, {}
+
+
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
                  repo_gitcode_token="", env_extra=None,
                  event_seq=None, issue_id="", repo_key="", agent_type="",
-                 skill="", skill_path="", server_url=""):
+                 skill="", skill_path="", server_url="", issue_session_id="",
+                 project_info_files=None, project_info_meta=None):
     """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。"""
     if not agent_session_id or not runtime_id:
         raise ValueError("agent_session_id and runtime_id are required (确定路由 D3)")
@@ -126,6 +174,11 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             skill_files = _pack_skill_dir(skill, _path or (skill_path or ""))
         except Exception as e:
             log.warning(f"enqueue: skill pack failed for {skill}: {e}")
+    # project-info 随任务（服务端权威，多 VM 共享，见 multi-issue-isolation-design.md §2.4）
+    if project_info_files is None:
+        _pif, _pim = load_project_info(repo_key)
+        project_info_files = _pif
+        project_info_meta = _pim
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
@@ -140,11 +193,12 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         c = db.cursor()
         c.execute(
             f"INSERT INTO agent_tasks ({_TASK_COLUMNS}) VALUES "
-            f"({','.join(['?'] * 27)})",
+            f"({','.join(['?'] * 30)})",
             (task_id, agent_session_id, runtime_id, event_seq, issue_id or "", repo_key or "",
              agent_type or "", skill or "", prompt, cwd or "", runtime_session_id or "",
              event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
              json.dumps(env), json.dumps(skill_files), _server_url,
+             issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
              "queued", None, "", "", "", "{}", None, None, datetime.now(timezone.utc).isoformat())
         )
         db.commit()
@@ -153,9 +207,10 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
 
 
 def claim(runtime_id) -> dict | None:
-    """原子抢单 + 串行槽 D9（见 concurrency-design.md §2.3）。
+    """原子抢单 + 串行槽（见 multi-issue-isolation-design.md §3.3 / concurrency-design.md §2.3）。
 
-    仅 queued → dispatched 者胜出，且同 agent_session_id 无活跃 task。
+    串行粒度（M2）：任务带 issue_session_id → 同 Issue 严格串行（跨 Issue 并行）；
+    issue_session_id 为空（旧任务/#0 事件）→ 回退按 agent_session_id 串行（现状语义）。
     """
     with db_lock:
         c = db.cursor()
@@ -167,8 +222,13 @@ def claim(runtime_id) -> dict | None:
                     WHERE runtime_id=? AND status='queued'
                       AND NOT EXISTS (
                         SELECT 1 FROM agent_tasks a2
-                        WHERE a2.agent_session_id=agent_tasks.agent_session_id
-                          AND a2.status IN ('dispatched','running'))
+                        WHERE a2.status IN ('dispatched','running')
+                          AND (
+                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                            OR
+                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                          )
+                      )
                     ORDER BY created_at ASC LIMIT 1
                 ) AND status='queued'
                 RETURNING id
@@ -280,6 +340,24 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
                        exit_code=exit_code, result_text=result_text or "",
                        usage_json=json.dumps(usage or {}))
+    # 新会话续接指针回写（Issue 级优先，repo 级兼容，见 multi-issue-isolation-design.md §3.3/§3.5）
+    _new_sid = (usage or {}).get("session_id") or ""
+    if _new_sid:
+        try:
+            from src.api.session_store import update_issue_session
+            if task and task.get("issue_session_id"):
+                update_issue_session(task["issue_session_id"], runtime_session_id=_new_sid)
+        except Exception as e:
+            log.warning(f"complete_task update issue session failed: {e}")
+        try:
+            with db_lock:
+                c = db.cursor()
+                if task and task.get("agent_session_id"):
+                    c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE id=?",
+                              (_new_sid, task["agent_session_id"]))
+                    db.commit()
+        except Exception as e:
+            log.warning(f"complete_task update repo session failed: {e}")
     log.info(f"Task completed: {task_id} exit={exit_code}")
 
 
@@ -303,7 +381,7 @@ def fail_task(task_id, error, exit_code=-1):
 
 
 def _run_task(task: dict):
-    """worker 线程：stream_runtime → 回报。技能落地 + 占位符替换（skill-delivery-remote.md §3.5）。"""
+    """worker 线程：stream_runtime → 回报。技能 + project-info 落地 + 占位符替换（skill-delivery-remote.md §3.5 / multi-issue-isolation-design.md §2.4）。"""
     import os as _os
     cwd = task.get("cwd") or _os.getcwd()
     env = {}
@@ -327,6 +405,31 @@ def _run_task(task: dict):
             env["DEVOPS_SKILLS_DIR"] = skill_dir
     except Exception as e:
         log.warning(f"skill materialize failed: {e}")
+    # project-info 落地（repo 全局共享，多 VM 一致；见 multi-issue-isolation-design.md §2.4）
+    proj_dir = _os.path.join(cwd, ".project-info")
+    try:
+        proj_files = json.loads(task.get("project_info_files") or "{}")
+        for rel, content in (proj_files or {}).items():
+            if rel == ".metadata.json":
+                continue
+            dest = _os.path.join(proj_dir, rel)
+            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(content)
+        prompt = prompt.replace("{{PROJECT_INFO_DIR}}", proj_dir)
+    except Exception as e:
+        log.warning(f"project-info materialize failed: {e}")
+    # git worktree（coding/qa/sre，X 工作模型，见 multi-issue-isolation-design.md §3.4.1）
+    try:
+        from src.runtime import repogit
+        _num = repogit.issue_num_from(task.get("issue_id") or "")
+        if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
+            _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
+                                                _num, token=task.get("repo_gitcode_token") or "")
+            if _wt:
+                env["GIT_ASKPASS"] = _os.path.join(_wt, ".git-askpass.sh")
+    except Exception as e:
+        log.warning(f"git worktree ensure failed: {e}")
     try:
         from src.runtime.executor import stream_runtime
         from src.agent.executor import stream_agent
@@ -350,7 +453,8 @@ def _run_task(task: dict):
             report_messages(task["id"], messages_batch)
         if done:
             complete_task(task["id"], done.get("text", ""), done.get("exit_code", 0),
-                          usage={"errors": done.get("errors", []), "stderr": done.get("stderr", "")})
+                          usage={"errors": done.get("errors", []), "stderr": done.get("stderr", ""),
+                                 "session_id": done.get("oc_session_id", "")})
         else:
             fail_task(task["id"], "no done event")
     except Exception as e:

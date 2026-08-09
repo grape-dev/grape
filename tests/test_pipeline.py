@@ -7,7 +7,9 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 
 from unittest.mock import patch
-from src.api.routes.pipeline import _get_issue_pipeline, AGENT_ORDER, STAGE_STATUS_MAP
+import pytest
+from src.api.routes.pipeline import _get_issue_pipeline, _running_issue_ids, AGENT_ORDER, STAGE_STATUS_MAP
+from src.session_manager import db, db_lock
 
 
 def _ev(seq, issue_id, event_type, agent_type, title, status, actor, created_at="2026-08-04 10:00:00", payload=None):
@@ -167,3 +169,36 @@ class TestPipeline:
         with _mock_bots()[0], _mock_bots()[1]:
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "Issue Agent"
+
+
+class TestExecutingDerivation:
+    """前端 B：executing 由 agent_tasks 实时派生（见 multi-issue-isolation-design.md §4.4）"""
+
+    @pytest.fixture(autouse=True)
+    def _clean_tasks(self):
+        with db_lock:
+            db.cursor().execute("DELETE FROM agent_tasks WHERE repo_key='gitcode:org/pipeline-test'")
+            db.commit()
+        yield
+        with db_lock:
+            db.cursor().execute("DELETE FROM agent_tasks WHERE repo_key='gitcode:org/pipeline-test'")
+            db.commit()
+
+    def test_running_issue_detected(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO agent_tasks (id, agent_session_id, runtime_id, issue_id, repo_key, agent_type, status, prompt) "
+                      "VALUES ('t1', 's1', 1, '#5', 'gitcode:org/pipeline-test', 'coding', 'running', 'p')")
+            db.commit()
+        assert "#5" in _running_issue_ids("gitcode:org/pipeline-test")
+
+    def test_completed_issue_not_running(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO agent_tasks (id, agent_session_id, runtime_id, issue_id, repo_key, agent_type, status, prompt) "
+                      "VALUES ('t2', 's1', 1, '#6', 'gitcode:org/pipeline-test', 'coding', 'completed', 'p')")
+            db.commit()
+        assert "#6" not in _running_issue_ids("gitcode:org/pipeline-test")
+
+    def test_empty_repo(self):
+        assert _running_issue_ids("gitcode:org/pipeline-test") == set()

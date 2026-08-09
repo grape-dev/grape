@@ -54,6 +54,11 @@ def _resolve_server_url() -> str:
 
 def _build_history_file_guide(repo_key: str, account: str = "") -> str:
     """Build prompt section listing available history files."""
+    from src.runtime.service import get_execution_mode
+    if get_execution_mode() == "queue_remote":
+        # 远端模式：本地历史文件不可达，历史上下文改由 event.json 档案承载
+        #（见 multi-issue-isolation-design.md §4.2 / skill-delivery-remote.md §3.4）
+        return ""
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
     if not account:
         account = repo_key.replace("gitcode:", "")
@@ -67,6 +72,42 @@ def _build_history_file_guide(repo_key: str, account: str = "") -> str:
         lines.append("Use the read tool to access any of these files when you need context about past events.")
         return "\n".join(lines)
     return f"Session history file: {base}session_history.json (none yet)"
+
+
+_PROJECT_INFO_MAX_CHARS = 2500
+
+
+def _build_project_info_section(repo_key: str) -> str:
+    """注入 repo 全局项目知识基线（服务端权威、多 VM 共享，见 multi-issue-isolation-design.md §2.4/§4.2）。
+
+    - 内联摘要（截断）+ {{PROJECT_INFO_DIR}} 占位符（worker/本地落地后可用 read tool 读全文）
+    - 无基线 → 明确允许降级分析
+    """
+    try:
+        from src.runtime.service import load_project_info
+        files, meta = load_project_info(repo_key)
+    except Exception:
+        files, meta = {}, {}
+    lines = ["\n## 项目知识基线（repo 全局）"]
+    if not files:
+        lines.append("[无项目知识基线] 允许降级分析：可基于 README 与 GitCode API 获取基础信息，相关结论标注 [degraded]。")
+        return "\n".join(lines)
+    _meta = meta or {}
+    if _meta.get("degraded"):
+        lines.append("> ⚠️ 该基线为降级生成（codegraph 不可用），仅供基础参考。")
+    _sha = _meta.get("last_commit_sha") or ""
+    _upd = _meta.get("last_updated") or ""
+    if _sha or _upd:
+        lines.append(f"> 基线 commit={_sha or '-'} updated={_upd or '-'}")
+    for rel, label in (("project-graph.md", "Project Graph"), ("project-capabilities.md", "Project Capabilities")):
+        content = files.get(rel, "")
+        if not content:
+            continue
+        truncated = len(content) > _PROJECT_INFO_MAX_CHARS
+        body = content[:_PROJECT_INFO_MAX_CHARS] + ("\n...(已截断)" if truncated else "")
+        lines.append(f"### {label}\n{body}")
+    lines.append("> 全文副本已落地：{{PROJECT_INFO_DIR}}/project-graph.md 与 {{PROJECT_INFO_DIR}}/project-capabilities.md，可用 read tool 读取全文。")
+    return "\n".join(lines)
 
 
 def build_role_definition(skills=None) -> str:
@@ -308,6 +349,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
     repo_key = f"{evt['source']}:{evt['repository']}"
     account = evt.get("account") or evt.get("repository", "")
     parts.append(_build_history_file_guide(repo_key, account))
+    parts.append(_build_project_info_section(repo_key))
 
     if skills:
         _sp = skill_path or os.path.join(SKILLS_DIR, skills[0], "SKILL.md")

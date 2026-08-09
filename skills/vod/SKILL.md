@@ -34,9 +34,9 @@ VOD 的职责：**把开发者声音变成清晰开发者需求**。
 ### 场景 A：开发者声音引导建 Issue（vod_signal / 飞书消息）
 
 #### A1 项目知识基线（必须最先）
-- 读取 `data/workspaces/{owner}/{repo}/project-info/project-graph.md` 和 `project-capabilities.md`
-- 不存在或过期 → 按 `skills/issue-advance/references/codegraph-project-analysis.md` 生成/更新（与 issue-advance 共用同一份）
-- codegraph 不可用 → 降级 README + GitCode API 基础信息（标注 `[degraded]`）
+- 项目知识基线已由 Grape 服务端在 prompt 的「项目知识基线」章节**内联注入**（含 project-graph + project-capabilities 摘要）
+- 如需全文：读取 prompt 该章节末尾标注的**全文副本路径**（`project-info/` 下，执行前已被替换为实际落地目录，可用 read tool 读取）
+- ⚠️ **不再自行生成**：知识基线由服务端统一维护（多机共享）；若 prompt 标注「无项目知识基线」或「[degraded]」，允许降级分析（README + GitCode API）
 
 #### A2 项目历史全貌（API 获取）
 - 近期 Issue 列表 `GET /repos/{owner}/{repo}/issues?state=all&per_page=20` → 判断重复/已解决

@@ -17,11 +17,11 @@ def _clean_tasks():
         db.commit()
 
 
-def _enqueue(session_id="sess-1", runtime_id=1, prompt="p", seq=1):
+def _enqueue(session_id="sess-1", runtime_id=1, prompt="p", seq=1, issue_session_id="", issue_id="#5"):
     return service.enqueue_task(
         agent_session_id=session_id, runtime_id=runtime_id, prompt=prompt,
-        event_seq=seq, issue_id="#5", repo_key="gitcode:test/repo", agent_type="issue",
-        skill="issue", env_extra={"K": "v"},
+        event_seq=seq, issue_id=issue_id, repo_key="gitcode:test/repo", agent_type="issue",
+        skill="issue", env_extra={"K": "v"}, issue_session_id=issue_session_id,
     )
 
 
@@ -76,6 +76,44 @@ class TestClaim:
         assert first and first["agent_session_id"] == "s1"
         second = service.claim(1)
         assert second is None, "同 session 已有活跃 task，不得 claim（D9）"
+
+    def test_claim_serial_by_issue_session(self):
+        """同 issue_session_id 严格串行（M2，见 multi-issue-isolation-design.md §3.3）"""
+        isess = "isess-1"
+        _enqueue(session_id="s1", runtime_id=1, seq=1, issue_session_id=isess)
+        _enqueue(session_id="s1", runtime_id=1, seq=2, issue_session_id=isess)
+        first = service.claim(1)
+        assert first["issue_session_id"] == isess
+        second = service.claim(1)
+        assert second is None, "同 Issue 已有活跃 task，不得并行（串行槽）"
+
+    def test_claim_parallel_across_issues(self):
+        """不同 issue_session_id 可并行（M2 核心：跨 Issue 不互相阻塞）"""
+        a = _enqueue(session_id="s1", runtime_id=1, seq=1, issue_session_id="isess-A", issue_id="#5")
+        b = _enqueue(session_id="s1", runtime_id=1, seq=2, issue_session_id="isess-B", issue_id="#6")
+        got_a = service.claim(1)
+        got_b = service.claim(1)
+        assert got_a and got_b, "不同 Issue 的两个 queued 任务都应被 claim（并行）"
+        assert {got_a["id"], got_b["id"]} == {a, b}
+
+    def test_claim_fallback_to_agent_session(self):
+        """issue_session_id 为空（旧任务/#0）→ 回退按 agent_session_id 串行"""
+        _enqueue(session_id="s1", runtime_id=1, seq=1, issue_id="#0")
+        _enqueue(session_id="s1", runtime_id=1, seq=2, issue_id="#0")
+        first = service.claim(1)
+        assert first
+        second = service.claim(1)
+        assert second is None, "无 issue_session_id 时按 agent_session_id 串行（现状语义）"
+
+    def test_complete_updates_issue_session(self):
+        """complete 后新会话续接指针回写 Issue 级会话"""
+        from src.api.session_store import get_or_create_issue_session, get_issue_session
+        isess = get_or_create_issue_session("gitcode:test/repo", "issue", "#5")
+        _enqueue(session_id="s1", runtime_id=1, seq=1, issue_session_id=isess["id"], issue_id="#5")
+        tid = service.claim(1)["id"]
+        service.complete_task(tid, "done", 0, usage={"session_id": "new_ses"})
+        got = get_issue_session("gitcode:test/repo", "issue", "#5")
+        assert got["runtime_session_id"] == "new_ses", "续接指针应写回 Issue 级会话"
 
     def test_claim_order_fifo(self):
         _enqueue(session_id="s1", runtime_id=1, seq=1)

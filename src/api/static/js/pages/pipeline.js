@@ -38,7 +38,10 @@ function renderPipeline(data) {
     const stages = displayPipe.stages || [];
     const statuses = displayPipe.statuses || [];
     const owner = displayPipe.current_owner || '';
-    html += `<div style="margin-bottom:16px"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}</div>
+    const execBadge = displayPipe.executing
+      ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>'
+      : ' &nbsp;<span class="ts t2">空闲</span>';
+    html += `<div style="margin-bottom:16px"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
     stages.forEach((stage, i) => {
       const sc = statuses[i];
@@ -73,8 +76,11 @@ function renderPipeline(data) {
     const resultClass = p.result === 'Released' || p.result === 'completed' ? 'tgx' : p.result === 'Failed' || p.result === 'failed' ? 'tr' : 'ty';
     const dur = durations[i] || '—';
     const owner = p.current_owner || '—';
+    const execBadge = p.executing
+      ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ 执行中</span>'
+      : '<span class="ts t2">空闲</span>';
     html += `<tr class="pipe-row${s}" onclick="selPipe(${i})">
-      <td><span class="ts"><b>${p.issue_id || '?'}</b></span></td>
+      <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
       <td>${dur}</td>
       <td>${agentTags}</td>
       <td><span class="${resultClass}">${p.result || 'Processing'}</span></td>

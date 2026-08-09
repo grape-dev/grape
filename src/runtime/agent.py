@@ -72,6 +72,30 @@ async def _execute_task(client, task):
             env["DEVOPS_SKILLS_DIR"] = skill_dir
     except Exception as e:
         log.warning(f"skill materialize failed: {e}")
+    # project-info 落地 + git worktree（coding/qa/sre，X 工作模型，见 multi-issue-isolation-design.md §3.4.1）
+    proj_dir = _os.path.join(cwd, ".project-info")
+    try:
+        proj_files = json.loads(task.get("project_info_files") or "{}")
+        for rel, content in (proj_files or {}).items():
+            if rel == ".metadata.json":
+                continue
+            dest = _os.path.join(proj_dir, rel)
+            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(content)
+        prompt = prompt.replace("{{PROJECT_INFO_DIR}}", proj_dir)
+    except Exception as e:
+        log.warning(f"project-info materialize failed: {e}")
+    try:
+        from src.runtime import repogit
+        _num = repogit.issue_num_from(task.get("issue_id") or "")
+        if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
+            _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
+                                                _num, token=task.get("repo_gitcode_token") or "")
+            if _wt:
+                env["GIT_ASKPASS"] = _os.path.join(_wt, ".git-askpass.sh")
+    except Exception as e:
+        log.warning(f"git worktree ensure failed: {e}")
 
     await client.task_start(tid)
     done = None

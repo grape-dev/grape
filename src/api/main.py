@@ -41,11 +41,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
 
+    # sweeper：Issue done 后清理 workdir（见 multi-issue-isolation-design.md §3.4.2）
+    _sweep_task = None
+    try:
+        from src.runtime.cleanup import sweep_loop
+        _sweep_task = asyncio.create_task(sweep_loop())
+        log.info("Sweeper loop started")
+    except Exception as e:
+        log.warning(f"Sweeper loop start failed: {e}")
+
     yield
 
     log.info("IM WS: stopping...")
     if bot_manager:
         await bot_manager.stop()
+    if _sweep_task:
+        _sweep_task.cancel()
     log.info("IM WS stopped")
 
 

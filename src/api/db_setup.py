@@ -254,6 +254,9 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     env_extra         TEXT DEFAULT '{}',    -- JSON（含服务端已注入的账号/用户凭据，见 skill-delivery-remote.md）
     skill_files       TEXT DEFAULT '{}',    -- JSON: {skill_name: {rel_path: content}}，远端交付技能包
     server_url        TEXT DEFAULT '',      -- A2A 外呼地址，worker 替换 {{SERVER_URL}}
+    issue_session_id  TEXT DEFAULT '',      -- 外键 → issue_agent_session.id（Issue 级执行会话，串行粒度，见 multi-issue-isolation-design.md §3.3）
+    project_info_files TEXT DEFAULT '{}',   -- JSON: {rel_path: content}，repo 全局 project-info 随任务交付（§2.4）
+    project_info_meta  TEXT DEFAULT '{}',   -- JSON: {last_commit_sha, branches, last_updated, degraded}
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/completed/failed/cancelled
     exit_code         INTEGER DEFAULT NULL,
     result_text       TEXT DEFAULT '',
@@ -297,12 +300,29 @@ CREATE TABLE IF NOT EXISTS issue_state (
 )
 """
 
+# ===== new-version2 Issue 级执行会话（多 Issue 并行，见 multi-issue-isolation-design.md §3.3）=====
+# 配置层（devops_agent_session，repo+agent）与执行层（issue_agent_session，repo+agent+issue）分离。
+_ISSUE_AGENT_SESSION_DDL = """
+CREATE TABLE IF NOT EXISTS issue_agent_session (
+    id                TEXT PRIMARY KEY,          -- uuid，agent_tasks.issue_session_id 外键
+    repo_key          TEXT NOT NULL,
+    agent_type        TEXT NOT NULL,
+    issue_id          TEXT NOT NULL,             -- 如 "#5"（对应 event.json 的 issue_num）
+    runtime_session_id TEXT DEFAULT '',          -- opencode --session 续接指针（Issue 级）
+    status            TEXT DEFAULT 'idle',       -- idle / running / failed
+    last_active_at    TEXT DEFAULT (datetime('now')),
+    created_at        TEXT DEFAULT (datetime('now')),
+    UNIQUE (repo_key, agent_type, issue_id)
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
     ("issue_state", _ISSUE_STATE_DDL),
+    ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
     ("events", _EVENTS_TABLE_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
     ("chat_conversations", _CHAT_CONVERSATIONS_DDL),
@@ -416,6 +436,8 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_runtime ON agent_tasks(runtime_id)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(agent_session_id)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_event ON agent_tasks(event_seq)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_tasks_issue_session ON agent_tasks(issue_session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_issue_agent_session_repo ON issue_agent_session(repo_key, agent_type, issue_id)",
     ]
     for idx in indexes:
         try:
@@ -1128,3 +1150,15 @@ def _migrate_tables():
             log.info("Added enable column to agent_type / devops_agent_session")
     except Exception as e:
         log.warning(f"Add enable column failed: {e}")
+    # ===== new-version2 多 Issue 隔离（见 multi-issue-isolation-design.md）：agent_tasks 新列 + issue_agent_session 表 =====
+    # 表由 _create_tables 建；此处仅幂等补列（老库升级）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "agent_tasks", "issue_session_id", "TEXT DEFAULT ''")
+            _ensure_column(c, "agent_tasks", "project_info_files", "TEXT DEFAULT '{}'")
+            _ensure_column(c, "agent_tasks", "project_info_meta", "TEXT DEFAULT '{}'")
+            db.commit()
+            log.info("Added issue_session_id / project_info_* columns to agent_tasks")
+    except Exception as e:
+        log.warning(f"Add agent_tasks issue isolation columns failed: {e}")

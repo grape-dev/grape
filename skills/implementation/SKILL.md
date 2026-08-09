@@ -37,6 +37,11 @@ tools:
 ### 禁止探索 Grape 内部
 **所有信息通过 GitCode API 获取**，不读取本地文件。
 
+### 本地代码基线已就绪（coding 工作模型）
+Grape 已在当前工作目录准备好该 Issue 的 **git worktree**（分支 `feat/issue-{issue_number}`），可直接执行
+`git checkout -b` / `git add` / `git commit` / `git push` 等命令（push 鉴权已注入）。若目录非 git 仓库（降级），
+改用 GitCode contents API 读写文件。
+
 ## 场景识别
 
 收到事件或 A2A 调用后，先判断触发场景：

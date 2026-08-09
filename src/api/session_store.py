@@ -251,3 +251,127 @@ def remove_agent_sessions(repo_key: str) -> int:
         except Exception as e:
             log.warning(f"Failed to remove sessions for {repo_key}: {e}")
             return 0
+
+
+# ===== Issue 级执行会话（多 Issue 并行，见 multi-issue-isolation-design.md §3.3）=====
+# 与 devops_agent_session（repo+agent 配置）分离：issue_agent_session 只承载 Issue 级
+# 会话续接指针（runtime_session_id）+ 状态，作为 agent_tasks.issue_session_id 的串行粒度。
+
+def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str) -> dict:
+    """获取或创建 Issue 级执行会话，per (repo_key, agent_type, issue_id) 独立。
+
+    首个会话建立时：若 devops_agent_session.runtime_session_id 有存量值（迁移期读侧回退），
+    作为初始续接指针沿用，避免丢上下文。
+    """
+    issue_id = issue_id or ""
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT id, runtime_session_id, status, last_active_at FROM issue_agent_session "
+                "WHERE repo_key=? AND agent_type=? AND issue_id=?",
+                (repo_key, agent_type, issue_id)
+            )
+            row = c.fetchone()
+        except Exception:
+            row = None
+        if row:
+            return {"id": row[0], "runtime_session_id": row[1] or "",
+                    "status": row[2] or "idle", "last_active_at": row[3] or "", "new": False}
+
+        _seed = ""
+        try:
+            c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                      (repo_key, agent_type))
+            _r = c.fetchone()
+            if _r:
+                _seed = _r[0] or ""
+        except Exception:
+            pass
+        sid = str(uuid.uuid4())
+        now = datetime.now().isoformat()
+        try:
+            c.execute(
+                "INSERT INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, status, last_active_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (sid, repo_key, agent_type, issue_id, _seed, "idle", now)
+            )
+            db.commit()
+        except Exception as e:
+            log.warning(f"Failed to create issue session: {e}")
+            return {"id": sid, "runtime_session_id": _seed, "status": "idle",
+                    "last_active_at": now, "new": True}
+        return {"id": sid, "runtime_session_id": _seed, "status": "idle",
+                "last_active_at": now, "new": True}
+
+
+def update_issue_session(session_id: str, runtime_session_id: str = None, status: str = None):
+    """更新 Issue 级执行会话：续接指针 / 状态。指针为空则不覆盖（避免丢上下文）。"""
+    if not session_id:
+        return
+    sets = []
+    params = []
+    if runtime_session_id is not None:
+        sets.append("runtime_session_id=?")
+        params.append(runtime_session_id)
+    if status is not None:
+        sets.append("status=?")
+        params.append(status)
+    if not sets:
+        return
+    sets.append("last_active_at=?")
+    params.append(datetime.now().isoformat())
+    params.append(session_id)
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute(f"UPDATE issue_agent_session SET {', '.join(sets)} WHERE id=?", params)
+            db.commit()
+        except Exception as e:
+            log.warning(f"Failed to update issue session {session_id}: {e}")
+
+
+def get_issue_session(repo_key: str, agent_type: str, issue_id: str) -> dict | None:
+    """按 (repo, agent, issue) 查 Issue 级执行会话；无记录返回 None。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, runtime_session_id, status, last_active_at FROM issue_agent_session "
+                  "WHERE repo_key=? AND agent_type=? AND issue_id=?",
+                  (repo_key, agent_type, issue_id))
+        row = c.fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "runtime_session_id": row[1] or "",
+                "status": row[2] or "idle", "last_active_at": row[3] or ""}
+
+
+def list_issue_sessions(repo_key: str, agent_type: str = "") -> list[dict]:
+    """列出仓库的 Issue 级执行会话（运维/前端展示并行情况）。"""
+    sql = "SELECT id, repo_key, agent_type, issue_id, runtime_session_id, status, last_active_at, created_at FROM issue_agent_session WHERE repo_key=?"
+    params = [repo_key]
+    if agent_type:
+        sql += " AND agent_type=?"
+        params.append(agent_type)
+    sql += " ORDER BY last_active_at DESC"
+    with db_lock:
+        c = db.cursor()
+        try:
+            rows = c.execute(sql, params).fetchall()
+        except Exception:
+            return []
+        return [{"id": r[0], "repo_key": r[1], "agent_type": r[2], "issue_id": r[3],
+                 "runtime_session_id": r[4] or "", "status": r[5], "last_active_at": r[6],
+                 "created_at": r[7]} for r in rows]
+
+
+def remove_issue_sessions(repo_key: str):
+    """删除仓库的所有 Issue 级执行会话（随仓库移除清理）。"""
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute("DELETE FROM issue_agent_session WHERE repo_key=?", (repo_key,))
+            db.commit()
+            return c.rowcount
+        except Exception as e:
+            log.warning(f"Failed to remove issue sessions for {repo_key}: {e}")
+            return 0

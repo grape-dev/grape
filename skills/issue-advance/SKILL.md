@@ -90,8 +90,9 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 - 读取该 Issue 全部评论/标签/关联 PR，了解完整上下文（含生命周期 `issue_state` 阶段）
 
 ### 2. 项目知识基线（⚠️ 必须执行，任何事件都需）
-- 读取 `data/workspaces/{owner}/{repo}/project-info/project-graph.md` 和 `project-capabilities.md`
-- 文档不存在或过期 → 执行 `references/codegraph-project-analysis.md` 生成/更新
+- 项目知识基线已由 Grape 服务端在 prompt 的「项目知识基线」章节**内联注入**（含 project-graph + project-capabilities 摘要）
+- 如需全文：读取 prompt 该章节末尾标注的**全文副本路径**（`project-info/` 下，执行前已被替换为实际落地目录，可用 read tool 读取）
+- ⚠️ **不再自行生成**：知识基线由服务端统一维护（多机共享）；若 prompt 标注「无项目知识基线」或「[degraded]」，允许降级分析（README + GitCode API）
 - ⚠️ 此步骤是后续分析与答复的基础，不可跳过——评论答复也要基于项目理解
 
 ### 3. 深度可开发性分析（⚠️ 每次处理都执行）

@@ -418,6 +418,26 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     return result
 
 
+def _issue_num_from(issue_id: str) -> str:
+    """"#5" / "5" → "5"；#0/空 → ''（无关联 Issue，按 repo 级兜底）。"""
+    s = (issue_id or "").strip().lstrip("#")
+    return s if s and s != "0" else ""
+
+
+def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str:
+    """Agent 工作目录（多 Issue 并行，见 multi-issue-isolation-design.md §3.4）。
+
+    - 有关联 Issue：#5 → {owner}/{repo}/{agent_type}/issues/5/
+    - 无关联 Issue（push/#0）→ {owner}/{repo}/{agent_type}-agent（兼容现状）
+    """
+    from src.repo_key import split_owner_repo
+    owner, rname = split_owner_repo(repo_key)
+    num = _issue_num_from(issue_id)
+    if num:
+        return os.path.join(WORKSPACE_DIR, owner, rname, agent_type, "issues", num)
+    return os.path.join(WORKSPACE_DIR, owner, rname, f"{agent_type}-agent")
+
+
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                            skill_id, skill_path, runtime_id, issue_id=""):
     """触发点三连的入队侧（M2，见 agent-runtime-event-tech-impl.md §2.3）：
@@ -445,15 +465,20 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         return
 
     repository = evt.get("repository", from_repo_key(repo_key))
-    ws = _os.path.join(WORKSPACE_DIR, repository, f"{agent_type}-agent")
+    ws = get_agent_workdir(repo_key, agent_type, issue_id)
     _os.makedirs(ws, exist_ok=True)
 
-    # 3) 会话：get_or_create 拿真实 devops_agent_session.id（D9 串行槽依赖）+ 延续指针
-    from src.api.session_store import get_or_create_agent_session
+    # 3) 会话：配置会话（repo+agent）+ 执行会话（Issue 级，串行粒度，见 multi-issue-isolation-design.md §3.3）
+    from src.api.session_store import get_or_create_agent_session, get_or_create_issue_session
     from src.api.event_store import update_event_config
     update_event_config(seq, backend or "opencode", skill_name, datetime.now(timezone.utc).isoformat())
     session = get_or_create_agent_session(repo_key, agent_type, backend or "opencode")
     oc_session_id = session.get("runtime_session_id") or ""
+    issue_session_id = ""
+    if _issue_num_from(issue_id):
+        _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
+        issue_session_id = _isess.get("id") or ""
+        oc_session_id = _isess.get("runtime_session_id") or oc_session_id
 
     repo_gitcode_token = ""
     try:
@@ -487,13 +512,14 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         repo_key=repo_key, agent_type=agent_type, skill=skill_name,
         prompt=prompt, cwd=ws,
         runtime_session_id=oc_session_id,
+        issue_session_id=issue_session_id,
         event_type=evt.get("type", ""),
         account=evt.get("account") or "",
         repo_gitcode_token=repo_gitcode_token,
         env_extra=env_extra,
         skill_path=skill_path,
     )
-    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} mode={get_execution_mode()}")
+    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
 
 
 def get_prompt_context(repo_key: str) -> str:
@@ -515,19 +541,27 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     from src.repo_key import from_repo_key
     repository = evt.get("repository", from_repo_key(repo_key))
-    ws = os.path.join(WORKSPACE_DIR, repository, f"{agent_type}-agent")
+    issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
+    ws = get_agent_workdir(repo_key, agent_type, issue_id)
     os.makedirs(ws, exist_ok=True)
 
-    # 读取上次的 oc_session_id（用于延续对话上下文）——repo_key 带前缀查 DB
+    # 读取上次的 oc_session_id（用于延续对话上下文）——Issue 级执行会话优先，回退 repo 级
     repo_name = repo_key
     oc_session_id = ""
+    issue_session_id = ""
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
-            row = c.fetchone()
-            if row and row[0]:
-                oc_session_id = row[0]
+        if _issue_num_from(issue_id):
+            from src.api.session_store import get_or_create_issue_session
+            _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
+            issue_session_id = _isess.get("id") or ""
+            oc_session_id = _isess.get("runtime_session_id") or ""
+        if not oc_session_id:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
+                row = c.fetchone()
+                if row and row[0]:
+                    oc_session_id = row[0]
     except Exception:
         pass
 
@@ -548,6 +582,14 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     try:
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                               skill_path=evt.get("_skill_path", ""))
+        # 直接模式（direct）：project-info 服务端本地可达，替换占位符为权威路径
+        try:
+            from src.repo_key import split_owner_repo
+            _o, _r = split_owner_repo(repo_name)
+            _pi_path = os.path.join(WORKSPACE_DIR, _o, _r, "project-info")
+            prompt = prompt.replace("{{PROJECT_INFO_DIR}}", _pi_path)
+        except Exception:
+            pass
         log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
@@ -577,6 +619,17 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     _pr_num = evt.get("payload", {}).get("pr_number", "")
     if _pr_num:
         env_extra["PR_NUMBER"] = str(_pr_num)
+
+    # git worktree（coding/qa/sre，direct 模式；见 multi-issue-isolation-design.md §3.4.1）
+    try:
+        from src.runtime import repogit
+        _gnum = repogit.issue_num_from(issue_id)
+        if repogit.is_git_agent(agent_type) and _gnum and issue_session_id:
+            _wt = repogit.ensure_issue_worktree(repo_key, agent_type, _gnum, token=repo_gitcode_token)
+            if _wt:
+                env_extra["GIT_ASKPASS"] = os.path.join(_wt, ".git-askpass.sh")
+    except Exception as e:
+        log.warning(f"Exec agent: git worktree ensure failed: {e}")
 
     try:
         for evt_type, data in stream_agent(
@@ -613,9 +666,12 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent failed: [Agent:{agent_type}|repo:{repo_name}] {e}")
 
-    # 更新 oc_session_id（持久化对话上下文）
+    # 更新 oc_session_id（持久化对话上下文）——Issue 级执行会话优先，回退 repo 级
     if new_oc_session_id and new_oc_session_id != oc_session_id:
         try:
+            if issue_session_id:
+                from src.api.session_store import update_issue_session
+                update_issue_session(issue_session_id, runtime_session_id=new_oc_session_id)
             with db_lock:
                 c = db.cursor()
                 c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",

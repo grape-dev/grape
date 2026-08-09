@@ -133,6 +133,21 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
     }
 
 
+def _running_issue_ids(repo_key: str) -> set[str]:
+    """按 repo 查 agent_tasks 中 dispatched/running 的 issue_id 集合（前端 B 执行态派生）。"""
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT DISTINCT issue_id FROM agent_tasks WHERE repo_key=? AND status IN ('dispatched','running') AND issue_id!=''",
+                (repo_key,)
+            )
+            return {r[0] for r in c.fetchall()}
+    except Exception:
+        return set()
+
+
 @router.get("/{owner}/{repo}")
 async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
@@ -159,6 +174,12 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
     issue_ids = list(dict.fromkeys(e["issue_id"] for e in events if e["issue_id"]))
     pipelines = [_get_issue_pipeline(repo_key, iid, events) for iid in issue_ids]
     pipelines = [p for p in pipelines if p is not None]
+
+    # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，
+    # 不维护 issue_agent_session.status 双份记账，避免状态漂移
+    running_issues = _running_issue_ids(repo_key)
+    for p in pipelines:
+        p["executing"] = p["issue_id"] in running_issues
 
     active = pipelines[0] if pipelines else None
     history = pipelines[1:] if len(pipelines) > 1 else []
