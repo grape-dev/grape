@@ -166,25 +166,23 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         if hasattr(os, "getpgid"):  # POSIX：独立进程组，便于整组优雅终止
             _popen_kwargs["start_new_session"] = True
 
-        # opencode(Bun) 仅在 stdout 为 TTY 时输出 NDJSON；grape 用管道会收不到输出
-        #（见 opencode-incident-20260808.md §九 二次复发）。POSIX 用 PTY，非 POSIX 回退管道。
-        master_fd = None
-        use_pty = os.name == "posix"
-        if use_pty:
+        # opencode(Bun) 仅在 stdout 为带控制终端的 TTY 时输出 NDJSON，grape 用纯管道收不到
+        #（见 opencode-incident-20260808.md §九 二次复发）。Linux 用 `script` 分配控制终端
+        #（其 stdout 是管道，grape 照常 readline 读）；非 POSIX 回退原管道。
+        use_script = os.name == "posix"
+        if use_script:
             try:
-                import pty as _pty
-                master_fd, slave_fd = _pty.openpty()
+                import shlex
+                _inner = " ".join(shlex.quote(a) for a in [agent_cmd] + args)
                 proc = subprocess.Popen(
-                    [agent_cmd] + args,
-                    stdin=stdin_pipe, stdout=slave_fd, stderr=slave_fd,
+                    ["script", "-qec", _inner, "/dev/null"],
+                    stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     cwd=cwd, env=env, bufsize=0, **_popen_kwargs,
                 )
-                os.close(slave_fd)
             except Exception as e:
-                log.warning(f"{label}{backend.name} PTY spawn failed, fallback pipe: {e}")
-                use_pty = False
-                master_fd = None
-        if not use_pty:
+                log.warning(f"{label}{backend.name} script-wrap failed, fallback pipe: {e}")
+                use_script = False
+        if not use_script:
             proc = subprocess.Popen(
                 [agent_cmd] + args,
                 stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -208,21 +206,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         def _stdout_reader():
             nonlocal _reader_done
             try:
-                if master_fd is not None:
-                    # PTY：从 master 读，子进程退出时读 EIO → 视为 EOF
-                    while True:
-                        try:
-                            chunk = os.read(master_fd, 65536)
-                        except OSError:
-                            break  # EIO：子进程已退出
-                        if not chunk:
-                            break
-                        with _line_queue_lock:
-                            _line_queue.extend(chunk.split(b"\n"))
-                else:
-                    for raw_line in iter(proc.stdout.readline, b""):
-                        with _line_queue_lock:
-                            _line_queue.append(raw_line)
+                for raw_line in iter(proc.stdout.readline, b""):
+                    with _line_queue_lock:
+                        _line_queue.append(raw_line)
             except Exception:
                 pass
             finally:
@@ -301,18 +287,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             return
 
         _reader_thread.join(timeout=5)
-        if master_fd is not None:
-            try:
-                os.close(master_fd)
-            except Exception:
-                pass
 
         stdout_remainder = ""
-        if master_fd is None:
-            try:
-                stdout_remainder = proc.stdout.read().decode("utf-8", errors="replace")
-            except:
-                pass
+        try:
+            stdout_remainder = proc.stdout.read().decode("utf-8", errors="replace")
+        except:
+            pass
 
         if stdout_remainder:
             for line in stdout_remainder.strip().split("\n"):
@@ -325,11 +305,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
         full_text = "\n".join(collected_text)
         stderr_output = ""
-        if master_fd is None:
-            try:
-                stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
-            except:
-                pass
+        try:
+            stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
+        except:
+            pass
 
         yield ("done", {
             "exit_code": proc.returncode, "text": _redact(full_text, _tokens),
