@@ -268,7 +268,14 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
         final_text = ""
         while True:
-            item = await q.get()
+            # 看门狗：Agent 长时间无输出（如 opencode 卡住/超慢）时主动报错，
+            # 避免 SSE 流一直挂着直到连接被代理/浏览器掐断 → 前端落到无意义兜底
+            try:
+                item = await asyncio.wait_for(q.get(), timeout=60)
+            except asyncio.TimeoutError:
+                if not final_text:
+                    yield f"data: {json.dumps({'type': 'error', 'text': '⚠️ Agent 长时间无响应，未收到回复，请稍后重试。', 'conversation_id': conv_id})}\n\n"
+                return
             if item is None:
                 break
             evt_type, data = item

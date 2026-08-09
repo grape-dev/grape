@@ -1,6 +1,7 @@
 let _currentConvId = null;
 let _chatAbort = null;
 let _openConvId = null;
+const _NO_REPLY = '⚠️ 未收到回复，连接可能中断，请重试。';
 
 function renderChat(openConvId) {
   _currentConvId = null;
@@ -213,7 +214,7 @@ function doSend(input, body) {
     if (ctype.includes('application/json')) {
       const data = await resp.json().catch(() => ({}));
       if (data && data.task_id) { pollTaskStatus(data.task_id, el, body, tid); return; }
-      if (el) el.innerHTML = renderMarkdown(data.reply || '') || 'Done';
+      if (el) el.innerHTML = renderMarkdown(data.reply || '') || _NO_REPLY;
       loadConversations();
       return;
     }
@@ -234,7 +235,7 @@ function doSend(input, body) {
           }
         });
       } catch(e) {}
-      if (el) el.innerHTML = renderMarkdown(text) || 'Done';
+      if (el) el.innerHTML = renderMarkdown(text) || _NO_REPLY;
       loadConversations();
       return;
     }
@@ -244,7 +245,7 @@ function doSend(input, body) {
     function read() {
       reader.read().then(({done, value}) => {
         if (done) {
-          if (el) el.innerHTML = renderMarkdown(finalText) || 'Done';
+          if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
           body.scrollTop = body.scrollHeight;
           _chatAbort = null;
           loadConversations();
