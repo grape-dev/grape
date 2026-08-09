@@ -600,6 +600,42 @@ def _align_agent_enable():
         log.warning(f"Align agent enable failed: {e}")
 
 
+def _drop_chat_session_repo_unique(c):
+    """幂等修复：重建 chat_agent_session，去掉陈旧的 `repo_key TEXT UNIQUE` 约束。
+
+    背景：chat_agent_session 由旧 `sessions` 表 `ALTER TABLE ... RENAME` 而来，SQLite RENAME
+    保留了旧表 `repo_key TEXT UNIQUE`；而代码 DDL（session_manager.py）意图为 per-user
+    （repo_key TEXT DEFAULT ''，无 UNIQUE）。陈旧约束使全局 chat 配置（repo_key=''）只能有一行，
+    多用户配置互相 INSERT OR REPLACE 顶掉，导致 chat bot secret 丢失、断连。
+
+    检测 sqlite_master 中该表定义含 `repo_key TEXT UNIQUE` → 按当前 PRAGMA 列定义重建表
+    （保留数据与全部列，仅去掉 UNIQUE）。返回是否执行了重建。
+    """
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_agent_session'").fetchone()
+    if not row or not row[0]:
+        return False
+    if "repo_key text unique" not in row[0].lower():
+        return False
+    info = c.execute("PRAGMA table_info(chat_agent_session)").fetchall()
+    cols = [r[1] for r in info]
+    col_defs = []
+    for r in info:
+        _cid, name, typ, notnull, dflt, pk = r
+        d = f'"{name}" {typ or ""}'.rstrip()
+        if notnull:
+            d += " NOT NULL"
+        if dflt is not None:
+            d += " DEFAULT " + str(dflt)
+        if pk:
+            d += " PRIMARY KEY"
+        col_defs.append(d)
+    c.execute("CREATE TABLE chat_agent_session_new (" + ", ".join(col_defs) + ")")
+    c.execute(f"INSERT INTO chat_agent_session_new ({','.join(cols)}) SELECT {','.join(cols)} FROM chat_agent_session")
+    c.execute("DROP TABLE chat_agent_session")
+    c.execute("ALTER TABLE chat_agent_session_new RENAME TO chat_agent_session")
+    return True
+
+
 def _migrate_tables():
     """已有数据库的 schema 迁移"""
     # ===== new-version2 数据安全：迁移前自动备份（仅在有改动性迁移时触发一次）=====
@@ -1162,3 +1198,12 @@ def _migrate_tables():
             log.info("Added issue_session_id / project_info_* columns to agent_tasks")
     except Exception as e:
         log.warning(f"Add agent_tasks issue isolation columns failed: {e}")
+    # ===== 修复 chat_agent_session 陈旧 UNIQUE(repo_key) 约束（多用户 chat 配置互斥顶掉，见 session_manager 注释）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            if _drop_chat_session_repo_unique(c):
+                db.commit()
+                log.info("Rebuilt chat_agent_session: removed stale UNIQUE(repo_key) constraint")
+    except Exception as e:
+        log.warning(f"Drop chat_agent_session UNIQUE(repo_key) failed: {e}")
