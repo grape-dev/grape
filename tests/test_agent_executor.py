@@ -466,3 +466,54 @@ class TestStreamAgentSessionAutoRetry:
         assert "something else" in (done.get("stderr") or "")
         assert FakePopen.call_count == 1, f"expected 1 Popen call (no retry), got {FakePopen.call_count}"
 
+
+class TestExecutorPipeInvocation:
+    """守护：executor 用纯管道直接启动 agent 命令，不得引入 `script` 包装。
+
+    2026-08-09 复盘：曾误判「opencode 需控制终端」而加 script 包装，实为多余修复
+    （飞书一直走纯管道正常），且远端 worker 无 util-linux script 会退化。
+    见 docs/new-version2/web-chat-postmortem.md §四。
+    """
+
+    def test_popen_uses_direct_command_and_pipe(self):
+        from unittest.mock import patch
+        import subprocess as _subprocess
+
+        fake_lines = [
+            json.dumps({"type": "step_start", "sessionID": "s1", "part": {"step": 1}}),
+            json.dumps({"type": "text", "part": {"text": "ok", "type": "text"}}),
+            json.dumps({"type": "step_finish", "part": {"tokens": {"total": 1}}}),
+        ]
+
+        class FakeProc:
+            returncode = 0
+            def __init__(self, *a, **k):
+                self._lines = list(fake_lines)
+                self._i = 0
+                self.stdout = self
+                self.stderr = self
+            def readline(self):
+                if self._i < len(self._lines):
+                    line = self._lines[self._i]
+                    self._i += 1
+                    return line.encode() + b"\n"
+                return b""
+            def wait(self, timeout=None):
+                return 0
+            def read(self):
+                return b""
+
+        captured = {}
+        def fake_popen(cmd, *a, **k):
+            captured["cmd"] = cmd
+            captured["stdout"] = k.get("stdout")
+            return FakeProc(cmd, *a, **k)
+
+        with patch("src.agent.executor.subprocess.Popen", side_effect=fake_popen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            list(stream_runtime("p", os.getcwd(), "", "issue"))
+
+        assert captured["cmd"][0] == "/usr/bin/opencode", "命令应为直接 agent CLI，不得是 script 包装"
+        assert "script" not in captured["cmd"]
+        assert captured["cmd"][1] == "run"
+        assert captured["stdout"] == _subprocess.PIPE, "应为纯管道 stdout"
