@@ -197,6 +197,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         error_events = []
         step_count = 0
         _last_output = time.time()
+        _reader_total = 0
 
         import threading
         _line_queue = []
@@ -204,19 +205,25 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         _reader_done = False
 
         def _stdout_reader():
-            nonlocal _reader_done
+            nonlocal _reader_done, _reader_total
             try:
                 for raw_line in iter(proc.stdout.readline, b""):
+                    _reader_total += 1
+                    if _reader_total <= 3:
+                        log.info(f"{label}{backend.name} stdout[{_reader_total}]={raw_line[:120]!r}")
                     with _line_queue_lock:
                         _line_queue.append(raw_line)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"{label}{backend.name} reader exception: {e}")
             finally:
+                log.info(f"{label}{backend.name} reader EOF, total_lines={_reader_total}")
                 _reader_done = True
 
         _reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
         _reader_thread.start()
 
+        _raw_count = 0
+        _parsed_count = 0
         while True:
             with _line_queue_lock:
                 if _line_queue:
@@ -232,8 +239,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         continue
                     parsed = backend.parse_output(line)
                     if parsed is None:
+                        _raw_count += 1
                         yield ("raw", _redact(line, _tokens))
                         continue
+                    _parsed_count += 1
                     et = parsed["type"]
                     if et == "step_start":
                         step_count += 1
@@ -259,6 +268,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     else:
                         yield ("other", et)
             elif _reader_done:
+                log.info(f"{label}{backend.name} loop break on reader EOF: raw={_raw_count} parsed={_parsed_count} total_lines={_reader_total}")
                 break
             else:
                 elapsed_silent = time.time() - _last_output
@@ -291,8 +301,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         stdout_remainder = ""
         try:
             stdout_remainder = proc.stdout.read().decode("utf-8", errors="replace")
-        except:
-            pass
+        except Exception as e:
+            log.warning(f"{label}{backend.name} stdout read tail err: {e}")
+        if stdout_remainder:
+            log.info(f"{label}{backend.name} stdout tail bytes={len(stdout_remainder)}: {stdout_remainder[:200]!r}")
 
         if stdout_remainder:
             for line in stdout_remainder.strip().split("\n"):
@@ -307,8 +319,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         stderr_output = ""
         try:
             stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
-        except:
-            pass
+        except Exception as e:
+            log.warning(f"{label}{backend.name} stderr read err: {e}")
+
+        log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={stderr_output[:120]!r}")
 
         yield ("done", {
             "exit_code": proc.returncode, "text": _redact(full_text, _tokens),

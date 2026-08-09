@@ -229,6 +229,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         def agent_worker():
             nonlocal captured_session
             if not _CHAT_AGENT_SEMAPHORE.acquire(blocking=True):
+                log.warning(f"[Agent:chat|user:{user['username']}] semaphore NOT acquired (exhausted)")
                 return
             try:
                 for evt_type, data in stream_agent(
@@ -237,6 +238,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                 ):
+                    log.info(f"  [{evt_type}] {str(data)[:100]}")
                     # 日志输出（对齐 master 分支 im/handler.py）
                     if evt_type == "step_start":
                         log.info(f"  ▶ {data}")
@@ -257,8 +259,12 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                             captured_session = nsid
                     q.put_nowait((evt_type, data))
             except Exception as e:
+                import traceback as _tb
+                log.warning(f"[Agent:chat|user:{user['username']}] agent_worker EXC: {e}")
+                _tb.print_exc()
                 q.put_nowait(("error", str(e)))
             finally:
+                log.info(f"[Agent:chat|user:{user['username']}] agent_worker finished")
                 q.put_nowait(None)
                 _CHAT_AGENT_SEMAPHORE.release()
 
