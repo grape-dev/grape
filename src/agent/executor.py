@@ -166,28 +166,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         if hasattr(os, "getpgid"):  # POSIX：独立进程组，便于整组优雅终止
             _popen_kwargs["start_new_session"] = True
 
-        # opencode(Bun) 仅在 stdout 为带控制终端的 TTY 时输出 NDJSON，grape 用纯管道收不到
-        #（见 opencode-incident-20260808.md §九 二次复发）。Linux 用 `script` 分配控制终端
-        #（其 stdout 是管道，grape 照常 readline 读）；非 POSIX 回退原管道。
-        use_script = os.name == "posix"
-        if use_script:
-            try:
-                import shlex
-                _inner = " ".join(shlex.quote(a) for a in [agent_cmd] + args)
-                proc = subprocess.Popen(
-                    ["script", "-qec", _inner, "/dev/null"],
-                    stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    cwd=cwd, env=env, bufsize=0, **_popen_kwargs,
-                )
-            except Exception as e:
-                log.warning(f"{label}{backend.name} script-wrap failed, fallback pipe: {e}")
-                use_script = False
-        if not use_script:
-            proc = subprocess.Popen(
-                [agent_cmd] + args,
-                stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                cwd=cwd, env=env, bufsize=0, **_popen_kwargs
-            )
+        # 纯管道启动（与 main 一致；script 包装为临时对照，已按分析移除）
+        proc = subprocess.Popen(
+            [agent_cmd] + args,
+            stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=cwd, env=env, bufsize=0, **_popen_kwargs
+        )
         if backend.prompt_via_stdin:
             proc.stdin.write(prompt.encode("utf-8"))
             proc.stdin.close()
