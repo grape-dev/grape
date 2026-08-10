@@ -123,7 +123,9 @@ async def a2a_endpoint(request: Request):
         from src.api.event_pipeline import _execute_agent
         from src.session_manager import db, db_lock
         backend = "opencode"
+        runtime_id = 0
         skill_name = ""
+        skill_id = 0
         skill_path = ""
         repo_name = repository.split("/", 1)[-1] if "/" in repository else repository
         try:
@@ -132,6 +134,7 @@ async def a2a_endpoint(request: Request):
                 c.execute("SELECT runtime_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_name))
                 row = c.fetchone()
                 if row:
+                    runtime_id = row[0] or 0
                     backend = "opencode"
                     if row[0]:
                         c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
@@ -139,6 +142,7 @@ async def a2a_endpoint(request: Request):
                         if brow and brow[0]:
                             backend = brow[0]
                     skill_name = row[1] or ""
+                    skill_id = row[2] or 0
                     if row[2]:
                         from src.user.db import get_skill_by_id
                         _sk = get_skill_by_id(row[2])
@@ -193,11 +197,22 @@ async def a2a_endpoint(request: Request):
         )
         log.info(f"A2A: event created, seq={seq}")
 
-        import threading
-        threading.Thread(target=_execute_agent, args=(
-            repo_key, seq, agent_name, backend, skill_name or agent_name, evt,
-        ), daemon=True, name=f"a2a-{agent_name}-{seq}").start()
-        log.info(f"A2A: started agent execution for {agent_name}")
+        # 执行分派：与 run_pipeline 一致——direct 就地线程；queue 模式入队（A2A 也走 agent_tasks，
+        # 使 pipeline executing 派生/串行槽/可观测性与 webhook 事件一致，见 a2a-queue-refactor-design.md）
+        from src.runtime.service import get_execution_mode
+        if get_execution_mode() == "direct":
+            import threading
+            threading.Thread(target=_execute_agent, args=(
+                repo_key, seq, agent_name, backend, skill_name or agent_name, evt,
+            ), daemon=True, name=f"a2a-{agent_name}-{seq}").start()
+            log.info(f"A2A: started agent execution for {agent_name} (direct)")
+        else:
+            from src.api.event_pipeline import _enqueue_pipeline_task
+            _enqueue_pipeline_task(repo_key, seq, agent_name, backend,
+                                   skill_name or agent_name, evt,
+                                   skill_id, skill_path, runtime_id or 0,
+                                   f"#{issue_number}" if issue_number else "")
+            log.info(f"A2A: enqueued task for {agent_name}, seq={seq}, mode={get_execution_mode()}")
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")
         seq = 0

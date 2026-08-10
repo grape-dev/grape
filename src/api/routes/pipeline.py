@@ -134,13 +134,13 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
 
 
 def _running_issue_ids(repo_key: str) -> set[str]:
-    """按 repo 查 agent_tasks 中 dispatched/running 的 issue_id 集合（前端 B 执行态派生）。"""
+    """按 repo 查 agent_tasks 中 queued/dispatched/running 的 issue_id 集合（前端 B 执行态派生）。"""
     from src.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT DISTINCT issue_id FROM agent_tasks WHERE repo_key=? AND status IN ('dispatched','running') AND issue_id!=''",
+                "SELECT DISTINCT issue_id FROM agent_tasks WHERE repo_key=? AND status IN ('queued','dispatched','running') AND issue_id!=''",
                 (repo_key,)
             )
             return {r[0] for r in c.fetchall()}
