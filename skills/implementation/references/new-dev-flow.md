@@ -145,8 +145,6 @@ Content-Type: application/json
 
 **跳过此步 = 事件未完成处理。**
 
-> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。
-
 ### 能力九：A2A 通知 QA Agent 代码审查
 
 ⚠️ 创建 PR 后必须执行，否则 QA Agent 不会收到审查请求。

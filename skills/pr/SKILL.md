@@ -140,7 +140,7 @@ GET /repos/{owner}/{repo}/pulls/{number}/files
 curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "body": "[$AGENT_NAME] 🔴 Critical: 硬编码密钥，建议使用环境变量",
+    "body": "[QA Agent] 🔴 Critical: 硬编码密钥，建议使用环境变量",
     "commit_id": "'"$HEAD_SHA"'",
     "path": "src/config.py",
     "position": 42
@@ -211,12 +211,12 @@ A2A 返回后，将 Coding Agent 的优化结论合并进最终审查评论（�
 POST /repos/{owner}/{repo}/pulls/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "[$AGENT_NAME] 审查报告\n\n## 配置检查\n- ✅ Title：通过\n- ⚠️ Labels：缺少分类标签\n\n## 代码审查\n✅ 通过\n\n## 安全扫描\n✅ 安全\n\n## 合并检查\n⚠️ 测试未确认"}
+{"body": "[QA Agent] 审查报告\n\n## 配置检查\n- ✅ Title：通过\n- ⚠️ Labels：缺少分类标签\n\n## 代码审查\n✅ 通过\n\n## 安全扫描\n✅ 安全\n\n## 合并检查\n⚠️ 测试未确认"}
 ```
 
-- body **必须**以 `[$AGENT_NAME]` 开头
+- body **必须**以 `[QA Agent]` 开头
 - 汇总所有能力项的发现，按章节组织
-- 如果全部通过，评论：`[$AGENT_NAME] 审查通过，所有检查项均正常。`
+- 如果全部通过，评论：`[QA Agent] 审查通过，所有检查项均正常。`
 
 **跳过此步 = 事件未完成处理。**
 
@@ -266,5 +266,3 @@ Content-Type: application/json
 ## 参考
 
 需要调用 GitCode API 时，读取 `references/gitcode-api-reference.md`。
-
-> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。

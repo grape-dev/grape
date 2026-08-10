@@ -26,6 +26,19 @@ VOD 的职责：**把开发者声音变成清晰开发者需求**。
   - **来源 A**：开发者在 GitCode 直接提交的 Issue（原始声音）→ 审视、引导、结构化
   - **来源 B**：飞书 VOD Bot 收集的用户需求建议 → 多轮沟通 → 建 Issue
 
+## 评论前缀规范
+
+场景 A、场景 B 都需要在 Issue 上发评论/答复评论，**所有 VOD 评论的 body 一律以 `[VOD Agent]` 开头**：
+
+```bash
+POST /repos/{owner}/{repo}/issues/{number}/comments
+Authorization: Bearer $BOT_GITCODE_TOKEN
+Content-Type: application/json
+{"body": "[VOD Agent] 这是 VOD 的答复内容。"}
+```
+
+覆盖：B4 澄清追问、待澄清说明、A2A 交办说明、建 Issue 后的说明评论等。
+
 ## 处理流程
 
 ### 场景 A：开发者声音引导建 Issue（vod_signal / 飞书消息）

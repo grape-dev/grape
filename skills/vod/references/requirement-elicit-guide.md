@@ -35,12 +35,19 @@
     "您指的是哪个对象的批量操作？（当前项目有任务、仓库、用户三类管理对象）
      另外期望的批量操作是仅后端接口，还是需要前端入口？"
   ```
+- **Issue 评论追问格式**（body 以 `[VOD Agent]` 开头）：
+  ```bash
+  POST /repos/{owner}/{repo}/issues/{number}/comments
+  Authorization: Bearer $BOT_GITCODE_TOKEN
+  Content-Type: application/json
+  {"body": "> 用户的问题原文\n\n[VOD Agent] 您指的是哪个对象的批量操作？……"}
+  ```
 
 ## 三、Issue 审视流程（场景 B，`issue_opened`）
 
 1. **自建排除**：Issue 含 `auto-submitted by VOD Agent` 标记 → 跳过审视，直接 A2A 交办 Issue Agent
 2. **清晰度审视**：读取 Issue 完整内容（title/body/标签/评论），对照四要素；结合知识基线判断可执行性/重复/歧义
-3. **沟通澄清**（不清晰时）：在 Issue 评论 @开发者 追问，或飞书群沟通；≤3 轮
+3. **沟通澄清**（不清晰时）：在 Issue 评论 @开发者 追问（body 以 `[VOD Agent]` 开头），或飞书群沟通；≤3 轮
 4. **结构化总结**：`PATCH /issues/{number}` 将 body 收敛为模板结构
 5. **A2A 交办**：`POST /api/a2a {"agent":"issue", ...}` → Issue Agent 做 spec/标签/里程碑/分配
 
