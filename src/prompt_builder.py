@@ -41,12 +41,11 @@ def get_skill_capabilities() -> str:
 
 
 def _resolve_server_url() -> str:
-    """返回服务端可达地址（A2A/tasks 等对外调用用）。取 meta.webhook_url；无则 localhost 兜底。"""
+    """返回服务端可达地址（A2A/tasks 等对外调用用）。取 meta.server_base_url（仅基址），
+    无则从 webhook_url 剥后缀兜底；再兜底 localhost:8080。"""
     try:
-        from src.user.db import get_meta_value
-        _url = get_meta_value("webhook_url") or ""
-        if _url:
-            return _url.rstrip("/")
+        from src.user.db import get_server_base_url
+        return get_server_base_url()
     except Exception:
         pass
     return "http://localhost:8080"

@@ -303,7 +303,7 @@ async def list_credential_tasks(cid: int, user: dict = Depends(get_current_user)
 
 def _server_url() -> str:
     try:
-        from src.user.db import get_meta_value
-        return get_meta_value("webhook_url") or ""
+        from src.user.db import get_server_base_url
+        return get_server_base_url()
     except Exception:
         return ""

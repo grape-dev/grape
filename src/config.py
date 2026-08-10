@@ -42,8 +42,8 @@ def _load_accounts():
         from src.user.db import get_all_user_accounts
         for a in get_all_user_accounts():
             ACCOUNTS[a["name"]] = a
-        # 自动检测并填入 webhook_url（全局配置 → meta 表）
-        def _detect_webhook_url():
+        # 自动检测并填入 webhook_url / server_base_url（全局配置 → meta 表）
+        def _detect_server_base():
             methods = [
                 "https://api.ipify.org?format=json",
                 "http://api.ipify.org?format=json",
@@ -55,23 +55,31 @@ def _load_accounts():
                     data = json.loads(resp.read())
                     ip = data.get("ip", "")
                     if ip:
-                        return f"http://{ip}:8080/webhook/gitcode"
+                        return f"http://{ip}:8080"
                 except:
                     pass
             try:
                 hostname = socket.gethostname()
                 ip = socket.gethostbyname(hostname)
                 if ip and not ip.startswith("127.") and not ip.startswith("192.168."):
-                    return f"http://{ip}:8080/webhook/gitcode"
+                    return f"http://{ip}:8080"
             except:
                 pass
+            return ""
         try:
             from src.user.db import get_meta_value, set_meta_value
+            # webhook_url（GitCode 回调注册用）：基址 + /webhook/gitcode
             if not get_meta_value("webhook_url"):
-                url = _detect_webhook_url()
-                if url:
-                    set_meta_value("webhook_url", url)
-                    log.info(f"Auto-detected webhook URL: {url}")
+                base = _detect_server_base()
+                if base:
+                    set_meta_value("webhook_url", base + "/webhook/gitcode")
+                    log.info(f"Auto-detected webhook URL: {base}/webhook/gitcode")
+            # server_base_url（A2A/tasks 等协议端点基址）：仅基址，不含 /webhook/gitcode
+            if not get_meta_value("server_base_url"):
+                base = _detect_server_base()
+                if base:
+                    set_meta_value("server_base_url", base)
+                    log.info(f"Auto-detected server base URL: {base}")
         except Exception:
             pass
         log.info(f"Loaded {len(ACCOUNTS)} accounts from DB")

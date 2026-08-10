@@ -1339,6 +1339,28 @@ def set_meta_value(key: str, value: str):
             log.warning(f"set_meta_value failed: {key}: {e}")
 
 
+def get_server_base_url() -> str:
+    """返回服务端 API 基址（A2A/tasks 等协议端点用，不含 /webhook/gitcode 后缀）。
+
+    优先取 meta.server_base_url；无则从 meta.webhook_url 剥掉 /webhook/gitcode 后缀兜底；
+    再兜底 http://localhost:8080。
+    """
+    try:
+        base = get_meta_value("server_base_url") or ""
+        if base:
+            return base.rstrip("/")
+        wu = get_meta_value("webhook_url") or ""
+        if wu:
+            base = wu.rstrip("/")
+            for suffix in ("/webhook/gitcode", "/webhook"):
+                if base.endswith(suffix):
+                    return base[: -len(suffix)]
+            return base
+    except Exception:
+        pass
+    return "http://localhost:8080"
+
+
 def migrate_accounts_from_json():
     """首次运行加载配置：从 global-bot-token.json 将 GitCode OAuth 配置写入 meta 表（仅首次/幂等）。
 

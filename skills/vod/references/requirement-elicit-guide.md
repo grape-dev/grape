@@ -94,3 +94,5 @@ curl -X POST {{SERVER_URL}}/api/a2a \
 ```
 
 > ⚠️ `issue_number` 必填；无法确定则不调 A2A，在评论中说明。交办后 Issue 生命周期进入 `issue` 阶段（`issue_state` 归属更新）。
+>
+> ⚠️ **失败降级**：A2A 调用返回非 2xx 或连接超时 → 重试最多 3 次（每次间隔数秒）；仍失败 → 在 Issue 评论说明"A2A 服务不可达，待恢复后重试交办"，并在 `next_step` 标注需人工介入，不得静默跳过。

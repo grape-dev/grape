@@ -185,8 +185,8 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     _server_url = server_url or ""
     if not _server_url:
         try:
-            from src.user.db import get_meta_value
-            _server_url = get_meta_value("webhook_url") or ""
+            from src.user.db import get_server_base_url
+            _server_url = get_server_base_url()
         except Exception:
             pass
     with db_lock:
