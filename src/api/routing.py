@@ -14,6 +14,7 @@ PR_DEFAULT_AGENT = "qa"
 
 # 非 Issue 事件静态映射（兜底路由）
 # push 显式忽略（开发由 issue 驱动，不触发 agent；如需刷新 project-info 可后续挂接）
+# issue_labeled 与 issue_comment 一致，走阶段矩阵（ISSUE_EVENT_TYPES），不在此映射
 NON_ISSUE_EVENT_ROUTE = {
     "vod_signal": "vod",
     "release_created": "sre",
@@ -22,7 +23,6 @@ NON_ISSUE_EVENT_ROUTE = {
     "build_failure": "sre",
     "deploy_start": "sre",
     "deploy_failure": "sre",
-    "issue_labeled": "issue",
 }
 
 
