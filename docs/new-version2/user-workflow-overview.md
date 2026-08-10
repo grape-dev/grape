@@ -142,7 +142,7 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 
 ### 2.3 侧边栏与仓库切换
 
-进入某个仓库后，主界面由**侧边栏 + 顶部栏 + 内容区**组成。侧边栏仓库下拉**仅显示已加入/已托管仓库**，底部带「＋ 新增仓库托管」入口：
+进入某个仓库后，主界面由**侧边栏 + 顶部栏 + 内容区**组成。侧边栏仓库下拉**仅显示已加入/已托管仓库**，底部带「＋ 新增仓库托管」入口——选择后与点击 Grape Logo 一致，进入**全屏仓库选择大堂**（隐藏侧边栏）：
 
 ```
 ┌─ Sidebar ──────────────────────────────────────────┐
@@ -173,8 +173,8 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 │    ◈ Skills Library                                 │
 │                                                     │
 │  Account                                            │
-│    ☎ Chat Agent                                     │
 │    📋 Task Center                                   │
+│    ☎ Chat Agent                                     │
 │                                                     │
 │  Settings                                           │
 │    ⚙ General Settings                                │
@@ -539,7 +539,7 @@ Issue Agent 在分配/换人时通过 `/api/tasks/notify` 为用户创建任务�
 
 ### 2.11 仓库管理页（Repositories）
 
-侧边栏仓库下拉选「＋ 新增仓库托管」，或从仓库选择大堂进入管理视图。顶部带 **[↻ Sync from GitCode]** 手动强制刷新缓存：
+侧边栏仓库下拉选「＋ 新增仓库托管」后，与点击 Grape Logo 行为一致，进入**全屏仓库选择大堂**（工作项目页签卡片视图）。此处的 **Hosted / Available to Join 管理表格**（顶部带 **[↻ Sync from GitCode]**）用于集中管理，在**解除托管后仍有剩余托管仓库**时展示；日常的加入、托管、进入项目操作均在全屏大堂中完成：
 
 ```
 ┌─ Repositories ───────────────────────────────────────┐
@@ -864,7 +864,7 @@ issue_opened ──► vod ──A2A──► issue ──A2A──► coding �
 | **Agent 启用开关** | 按仓库开启/关闭某个 Agent（SRE 默认关）；关闭后不再路由事件 | Dashboard → Agent 卡片开关（仅 Maintainer） |
 | **Agent 运行时引擎** | 绑定具体引擎实例（DevOps Agent 仅仓库/全局；Chat Agent 仅个人） | Agent 详情 → Configure → Backend Engine |
 | **Agent 技能** | 为仓库的每个 Agent 指定官方/仓库/个人技能 | Agent 详情 → Configure → Skill |
-| **已加入/已托管 Repo** | 查看与操作参与/托管的仓库 | 仓库选择大堂 / 仓库管理页 |
+| **已加入/已托管 Repo** | 查看与操作参与/托管的仓库 | 仓库选择大堂（工作项目页签） |
 | **项目模板** | 从模板一键创建项目（建仓+托管+应用场景+首次引导） | 仓库选择大堂 → 项目模板 |
 | **GitCode Token** | 用户个人 API Token（OAuth 自动填充，Chat Agent 使用） | Settings → Credentials |
 | **云平台凭据** | 华为云 AK/SK（Coding Agent 云端环境）；CodeArts AK/SK | Settings → Credentials |

@@ -139,9 +139,8 @@ function loadAgentTypes() {
       const cur = currentRepo();
       const sel = $('repoSelect');
       if (cur) sel.value = cur.fullName;
-      // 显示仓库管理页（已托管 + 可加入列表）
-      $('pageTitle').textContent = '选择仓库';
-      renderRepos();
+      // 与点击 Grape Logo「返回仓库选择大堂」一致：进入全屏仓库选择大堂（隐藏侧边栏）
+      goToRepos();
       return;
     }
     const parts = val.split('/');
