@@ -1,10 +1,16 @@
-/* Agent Runtime 管理页（M4 双视图）：Engines / Workers 两个子页，各按 scope 分三张表。
-   见 runtime-admin-two-view-design.md。 */
-const RUNTIME_ICON = { online: '●', recently_lost: '○', offline: '○', about_to_gc: '○' };
+/* Agent Runtime 管理页（M4 双视图）：Engines / Workers 两个子页，各按 scope 分区展示。
+   见 runtime-admin-two-view-design.md。卡片式布局：状态徽章置顶，异常引擎优先捕捉。 */
+const RUNTIME_ICON = { online: '●', recently_lost: '◐', offline: '○', about_to_gc: '⚠' };
 const RUNTIME_COLOR = { online: 'var(--g)', recently_lost: 'var(--or)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
 const SCOPE_NAMES = { global: '全局', repo: '仓库', user: '个人' };
 const SCOPE_ORDER = ['global', 'repo', 'user'];
 const HEALTH_NAMES = { online: '在线', recently_lost: '刚失联', offline: '离线', about_to_gc: '待回收' };
+const HEALTH_BADGE = {
+  online: { color: 'var(--g)', bg: '#dcfce7' },
+  recently_lost: { color: 'var(--or)', bg: '#fef3c7' },
+  offline: { color: 'var(--t3)', bg: '#eef0f3' },
+  about_to_gc: { color: 'var(--r)', bg: '#fee2e2' },
+};
 
 let _runtimeTab = 'engines';
 let __runtimeData = null;
@@ -19,6 +25,22 @@ function _currentUser() {
 function _healthDot(h) { return `<span style="color:${RUNTIME_COLOR[h] || 'var(--t3)'}">${RUNTIME_ICON[h] || '○'}</span>`; }
 function _healthLabel(h) { return HEALTH_NAMES[h] || h || '离线'; }
 function _scopeLabel(s) { return SCOPE_NAMES[s] || s || '全局'; }
+
+function _healthBadge(h, suffix) {
+  const st = HEALTH_BADGE[h] || HEALTH_BADGE.offline;
+  return `<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:${st.color};background:${st.bg};padding:3px 10px;border-radius:999px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:${st.color}"></span>${_healthLabel(h)}${suffix ? ' · ' + suffix : ''}</span>`;
+}
+
+function _scopeBar(sc, n) {
+  return `<div style="display:inline-flex;align-items:center;gap:8px;background:var(--s);color:#fff;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;margin:16px 0 10px">${_scopeLabel(sc)} <span style="background:rgba(255,255,255,.2);border-radius:10px;padding:0 8px;font-size:11px">${n}</span></div>`;
+}
+
+function _legendHtml() {
+  return `<div style="display:flex;gap:14px;flex-wrap:wrap;padding:12px 0;font-size:11px;color:var(--t3);border-top:1px dashed var(--b)">
+    ${Object.entries(HEALTH_NAMES).map(([k, v]) =>
+      `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:${(HEALTH_BADGE[k] || {}).color || 'var(--t3)'}"></span>${v}${k === 'recently_lost' ? '(<5min)' : k === 'about_to_gc' ? '(>6d)' : ''}</span>`).join('')}
+  </div>`;
+}
 
 function renderRuntimes(data) {
   const el = document.getElementById('pageContent');
@@ -41,6 +63,7 @@ function renderRuntimes(data) {
       <button class="bt bt-o" onclick="refreshRuntimes()">⟳ Refresh</button>
     </div>`;
   html += _runtimeTab === 'engines' ? renderEngines(data, devices) : renderWorkers(data, devices);
+  html += _legendHtml();
   el.innerHTML = html;
 }
 
@@ -52,16 +75,21 @@ function renderEngines(data, devices) {
   SCOPE_ORDER.forEach(sc => {
     const list = groups[sc];
     if (!list.length) return;
-    html += `<div style="font-size:13px;font-weight:600;color:var(--t3);margin:14px 0 8px">${_scopeLabel(sc)} (${list.length})</div>`;
-    html += `<table style="width:100%;font-size:12px;border-collapse:collapse">
-      <thead><tr style="color:var(--t3)"><th align="left">Engine Name</th><th align="left">Type</th><th align="left">Version</th><th align="left">Worker Name</th><th align="left">Scope</th><th align="left">Owner</th><th align="left">Status</th></tr></thead><tbody>`;
+    html += _scopeBar(sc, list.length);
+    html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">`;
     list.forEach(rt => {
-      html += `<tr style="border-bottom:1px solid var(--b)">
-        <td>${rt.instance_name || rt.name}</td><td>${rt.name}</td><td>${rt.version || ''}</td>
-        <td>${rt.worker_name || ''}</td><td>${_scopeLabel(rt.scope)}</td><td>${rt.owner || ''}</td>
-        <td>${_healthDot(rt.health)} ${_healthLabel(rt.health)}</td></tr>`;
+      html += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          ${_healthBadge(rt.health)}
+          <span style="font-weight:600;font-size:14px">${rt.instance_name || rt.name} <span style="font-weight:400;color:var(--t3);font-size:12px">${rt.name} v${rt.version || ''}</span></span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">worker</span> ${rt.worker_name || '—'}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${rt.owner || '—'}</div>
+        </div>
+      </div>`;
     });
-    html += `</tbody></table>`;
+    html += `</div>`;
   });
   return html || '<div class="ts t2" style="padding:12px">暂无引擎</div>';
 }
@@ -73,20 +101,27 @@ function renderWorkers(data, devices) {
   SCOPE_ORDER.forEach(sc => {
     const list = groups[sc];
     if (!list.length) return;
-    html += `<div style="font-size:13px;font-weight:600;color:var(--t3);margin:14px 0 8px">${_scopeLabel(sc)} (${list.length})</div>`;
-    html += `<table style="width:100%;font-size:12px;border-collapse:collapse">
-      <thead><tr style="color:var(--t3)"><th align="left">Worker Name</th><th align="left">IP</th><th align="left">Scope</th><th align="left">Owner</th><th align="left">心跳</th><th align="left">凭据</th><th align="left">承载引擎</th><th align="left"></th></tr></thead><tbody>`;
+    html += _scopeBar(sc, list.length);
+    html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">`;
     list.forEach(d => {
       const clis = (d.runtimes || []).map(rt => `${rt.name} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}`).join(' · ');
-      html += `<tr style="border-bottom:1px solid var(--b)">
-        <td>${d.name || d.device_name || '?'}</td><td>${d.worker_ip || ''}</td>
-        <td>${_scopeLabel(d.scope)}</td><td>${d.owner || ''}</td>
-        <td>${_healthDot(d.health)} ${_healthLabel(d.health)} · ${relTime(d.last_seen_at)}</td>
-        <td>${d.credential_status || ''}${d.credential_id ? ` <button class="bt bt-o bt-s" onclick="renameCredential(${d.credential_id})">改名</button> <button class="bt bt-r bt-s" onclick="revokeCredential(${d.credential_id})">吊销</button>` : ''}</td>
-        <td>${clis || '—'}</td>
-        <td>${d.credential_id ? `<button class="bt bt-o bt-s" onclick="openDeviceTasks(${d.credential_id})">任务</button>` : ''}</td></tr>`;
+      const credColor = d.credential_status === 'revoked' ? 'var(--r)' : 'var(--g)';
+      html += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          ${_healthBadge(d.health, relTime(d.last_seen_at))}
+          <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'} <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span></span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${d.owner || '—'}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">凭据</span> <b style="color:${credColor}">${d.credential_status || ''}</b>${d.credential_id ? ` <button class="bt bt-o bt-s" onclick="renameCredential(${d.credential_id})">改名</button> <button class="bt bt-r bt-s" onclick="revokeCredential(${d.credential_id})">吊销</button>` : ''}</div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;font-size:12px;color:var(--t2)">
+          <div><span style="color:var(--t3);min-width:46px;display:inline-block">承载引擎</span> ${clis || '—'}</div>
+          ${d.credential_id ? `<button class="bt bt-o bt-s" onclick="openDeviceTasks(${d.credential_id})">任务</button>` : ''}
+        </div>
+      </div>`;
     });
-    html += `</tbody></table>`;
+    html += `</div>`;
   });
   return html || '<div class="ts t2" style="padding:12px">暂无 Worker</div>';
 }

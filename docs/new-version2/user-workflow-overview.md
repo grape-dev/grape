@@ -635,16 +635,30 @@ Settings 包含 **Credentials** 与 **Notifications** 两个页签：
 ```
 [Engines 引擎] [Workers 设备]                          [⟳ Refresh]
 
-【全局】
-┌─ engine name ─────────────┬─ type ────┬─ version ─┬─ worker name ─────┬─ scope ─┬─ owner ─────┬─ status ─┐
-│ opencode-local            │ opencode  │ 1.17.7    │ grape-server-local│ 全局    │ Jason7602   │ ● 在线   │
-│ codearts-local            │ codearts  │ 26.6.2    │ grape-server-local│ 全局    │ Jason7602   │ ● 在线   │
-└───────────────────────────┴───────────┴───────────┴───────────────────┴─────────┴─────────────┴──────────┘
-【仓库】
-│ opencode-repo-abc         │ opencode  │ 1.18.0    │ repo-worker-a     │ 仓库    │ RepoOwner   │ ● 在线   │
-【个人】
-│ opencode-worker-23249     │ opencode  │ 1.18.15   │ worker-123249     │ 个人    │ Jason7602   │ ● 在线   │
+■ 全局
+┌────────────────────────────────────────────────────────────┐
+│  ● 在线     opencode-local · opencode v1.17.7              │
+│             worker: grape-server-local   owner: Jason7602  │
+└────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  ● 在线     codearts-local · codearts v26.6.2              │
+│             worker: grape-server-local   owner: Jason7602  │
+└────────────────────────────────────────────────────────────┘
+
+■ 仓库
+┌────────────────────────────────────────────────────────────┐
+│  ● 在线     opencode-repo-abc · opencode v1.18.0           │
+│             worker: repo-worker-a      owner: RepoOwner    │
+└────────────────────────────────────────────────────────────┘
+
+■ 个人
+┌────────────────────────────────────────────────────────────┐
+│  ● 在线     opencode-worker-23249 · opencode v1.18.15      │
+│             worker: worker-123249     owner: Jason7602     │
+└────────────────────────────────────────────────────────────┘
 ```
+
+> 状态徽章：● 在线　◐ 刚失联(<5min)　○ 离线　⚠ 待回收(>6d)。高保真 HTML 原型见 `temp/engine-table-prototypes-c-hifi.html`。
 
 - **engine name（引擎实例唯一名）**：`{引擎类型}-{设备短名}`（如 `opencode-worker-23249`），由服务端派生，是 Agent 配置页 Backend 下拉的选择标识。
 - **Engine 的 scope/owner 与其承载 worker（凭据）一致**。
@@ -655,11 +669,15 @@ Settings 包含 **Credentials** 与 **Notifications** 两个页签：
 ```
 [Engines 引擎] [Workers 设备]  [＋ 生成凭据]          [⟳ Refresh]
 
-【个人】
-┌─ worker name ────┬─ ip address ──┬─ scope ─┬─ owner ──┬─ 心跳 ────────┬─ 凭据 ──────────────┬─ 承载引擎 ───────────┐
-│ worker-123249    │ 123.249.12.67 │ 个人    │ Jason7602│ ● 在线 · 8s 前 │ active [改名][吊销]   │ opencode v1.18.15 ✓ │
-└──────────────────┴───────────────┴─────────┴──────────┴────────────────┴──────────────────────┴─────────────────────┘
+■ 个人
+┌────────────────────────────────────────────────────────────┐
+│  ● 在线 · 8s 前   worker-123249 · 123.249.12.67           │
+│             owner: Jason7602  凭据: active [改名][吊销]      │
+│             承载引擎: opencode v1.18.15 ✓                  │
+└────────────────────────────────────────────────────────────┘
 ```
+
+> 状态徽章：● 在线　◐ 刚失联(<5min)　○ 离线　⚠ 待回收(>6d)；凭据：active / revoked。高保真 HTML 原型见 `temp/engine-table-prototypes-c-hifi.html`。
 
 | 列 | 说明 |
 |----|------|
