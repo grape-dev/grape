@@ -7,12 +7,7 @@
     "description": "从开发者声音中收集反馈、聚类分析共性、提炼价值、自动创建 Issue",
     "backend": "opencode",
     "order_num": 1,
-    "subscribe_events": [
-      "vod_signal",
-      "issue_opened",
-      "issue_updated",
-      "issue_comment"
-    ],
+    "subscribe_events": [],
     "enable": true
   },
   "issue": {
@@ -23,11 +18,7 @@
     "description": "Issue 分类、标签、指派、A2A 触发 Coding Agent",
     "backend": "opencode",
     "order_num": 2,
-    "subscribe_events": [
-      "issue_updated",
-      "issue_labeled",
-      "issue_comment"
-    ],
+    "subscribe_events": [],
     "enable": true
   },
   "coding": {
@@ -49,11 +40,7 @@
     "description": "代码审查、自动化测试、功能验证、安全检查（由 Coding Agent 通过 A2A 事件触发审查，不直接监听 PR 事件）",
     "backend": "opencode",
     "order_num": 4,
-    "subscribe_events": [
-      "pull_request_opened",
-      "pull_request_updated",
-      "note_hook_pr"
-    ],
+    "subscribe_events": [],
     "enable": true
   },
   "sre": {
@@ -64,13 +51,7 @@
     "description": "构建部署、发布管理、监控运维、故障排查",
     "backend": "opencode",
     "order_num": 5,
-    "subscribe_events": [
-      "pull_request_merged",
-      "build_failure",
-      "deploy_start",
-      "deploy_failure",
-      "release_created"
-    ],
+    "subscribe_events": [],
     "enable": false
   }
 }

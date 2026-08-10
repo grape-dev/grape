@@ -79,12 +79,10 @@ class TestQaSkillConfig:
             assert info["mapping"]["qa"] == "pr", f"scene '{scene}' qa mapping mismatch"
 
     def test_agent_description_qa_subscribes_pr_with_stage_gate(self):
-        # 生命周期矩阵（vod-skill-upgrade-plan.md §3.0.3）：qa 订阅 PR 事件，但按 issue 阶段门控执行
-        # （qa 阶段才真正处理；vod/issue 阶段 PR 事件不触发 qa，由 Issue Agent 审视）
+        # 生命周期矩阵（vod-skill-upgrade-plan.md §3.0.3）：PR 事件默认归属 qa（阶段矩阵兜底），
+        # 不再通过 subscribe_events 订阅（§3.0.4 已清空订阅）
         cfg = _load_json("agent-description.json")
-        qa = cfg["qa"]
-        for evt in PR_SUBSCRIBED_EVENTS:
-            assert evt in qa["subscribe_events"], f"qa should subscribe {evt} (stage-gated)"
+        assert cfg["qa"]["subscribe_events"] == []
 
     def test_agent_description_enable_defaults(self):
         # enable 默认：sre=false，其余 true
@@ -94,42 +92,38 @@ class TestQaSkillConfig:
         assert cfg["sre"].get("enable", True) is False, "sre enable should be false"
 
     def test_coding_agent_does_not_subscribe_pr(self):
-        # coding 不订阅 PR 事件（通过 A2A 由 Issue/QA Agent 触发，不直接感知 PR 事件）
-        # 见 vod-skill-upgrade-plan §3.0.3 归属矩阵：PR 事件按 issue_state 阶段分发，不落 coding 静态默认
+        # coding 不订阅任何事件（通过 A2A 由 Issue/QA Agent 触发，不直接感知 PR 事件）
         cfg = _load_json("agent-description.json")
-        for evt in PR_SUBSCRIBED_EVENTS:
-            assert evt not in cfg["coding"]["subscribe_events"], f"coding should NOT subscribe {evt}"
+        assert cfg["coding"]["subscribe_events"] == []
+
+    def test_all_subscribe_events_cleared(self):
+        # 阶段矩阵 + 非 Issue 静态映射已接管路由（§3.0.4 彻底删除条件），subscribe_events 全部置空
+        cfg = _load_json("agent-description.json")
+        for at in ("vod", "issue", "coding", "qa", "sre"):
+            assert cfg[at].get("subscribe_events", []) == [], f"{at} subscribe_events should be empty"
 
     def test_issue_opened_only_vod_subscribes(self):
-        # D8：issue_opened 恒给 VOD——仅 vod 订阅，issue 不订阅
+        # D8：issue_opened 恒给 VOD（静态映射，非订阅）
         cfg = _load_json("agent-description.json")
-        assert "issue_opened" in cfg["vod"]["subscribe_events"]
-        assert "issue_opened" not in cfg["issue"]["subscribe_events"]
+        assert cfg["vod"]["subscribe_events"] == []
+        assert cfg["issue"]["subscribe_events"] == []
 
     def test_issue_subscribes_issue_events_not_pr(self):
-        # issue 订阅 Issue 类事件（issue_updated/issue_comment/issue_labeled），不订阅 PR 事件
-        # （PR 由 qa 订阅进入 pipeline；vod/issue 阶段的 PR 审视由阶段矩阵分配）
+        # Issue 事件由阶段矩阵分发到 issue/vod；不订阅（subscribe_events 已清空）
         cfg = _load_json("agent-description.json")
-        for evt in ("issue_updated", "issue_comment", "issue_labeled"):
-            assert evt in cfg["issue"]["subscribe_events"], f"issue should subscribe {evt}"
-        for evt in PR_SUBSCRIBED_EVENTS:
-            assert evt not in cfg["issue"]["subscribe_events"], f"issue should NOT subscribe {evt}"
+        assert cfg["issue"]["subscribe_events"] == []
 
     def test_vod_subscribes_issue_events(self):
-        # vod 订阅 vod_signal + issue_opened + issue_updated/issue_comment（vod 阶段审视）
+        # vod 处理 vod_signal + issue_opened + issue_updated/issue_comment（阶段矩阵/静态映射，非订阅）
         cfg = _load_json("agent-description.json")
-        for evt in ("vod_signal", "issue_opened", "issue_updated", "issue_comment"):
-            assert evt in cfg["vod"]["subscribe_events"], f"vod should subscribe {evt}"
+        assert cfg["vod"]["subscribe_events"] == []
 
     def test_pr_events_only_qa_subscribed_stage_gated(self):
-        # PR 事件仅由 qa 订阅（作为 pipeline 入口 gate），执行归属由 issue_state 阶段判定（§3.0.3）；
-        # coding 不直接订阅 PR（A2A 触发），避免未关联 Issue 的 PR 直接触发 coding 开发
+        # PR 事件默认归属 qa（阶段矩阵兜底）；subscribe_events 已清空，无 agent 静态订阅
         cfg = _load_json("agent-description.json")
         for evt in PR_SUBSCRIBED_EVENTS:
             subscribers = [a for a, info in cfg.items() if evt in info.get("subscribe_events", [])]
-            assert "qa" in subscribers, f"{evt} should be subscribed by qa: {subscribers}"
-            assert "coding" not in subscribers, f"{evt} should NOT be subscribed by coding: {subscribers}"
-            assert "issue" not in subscribers, f"{evt} should NOT be subscribed by issue: {subscribers}"
+            assert subscribers == [], f"{evt} should NOT be subscribed by any agent (stage matrix only): {subscribers}"
 
 
 class TestResolveIssueIdPR:

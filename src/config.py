@@ -101,7 +101,7 @@ def save_accounts(new_accounts: list):
 def get_domain_agent(evt_type: str, repo_key: str = "", user_id: int = 0) -> str:
     try:
         from src.api.routing import get_domain_agent as _db_route
-        return _db_route(evt_type, repo_key, user_id)
+        return _db_route(evt_type)
     except Exception:
         return ""
 

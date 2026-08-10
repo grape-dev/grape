@@ -57,5 +57,6 @@ class TestVodSkill:
         assert "知识基线" in cfg["vod"]["description"] or "引导" in cfg["vod"]["description"]
 
     def test_agent_description_vod_subscribes_issue_opened(self):
+        # issue_opened 由阶段矩阵恒给 VOD（§3.0.3 D8）；subscribe_events 已清空（§3.0.4）
         cfg = json.load(open(os.path.join(ROOT, "configs", "agent-description.json"), encoding="utf-8"))
-        assert "issue_opened" in cfg["vod"]["subscribe_events"]
+        assert cfg["vod"].get("subscribe_events", []) == []

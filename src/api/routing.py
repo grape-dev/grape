@@ -1,41 +1,50 @@
-"""事件路由 — 单级路由：从 agent_type.subscribe_events 查找匹配的 Agent"""
-import json
-from src.session_manager import db, db_lock
+"""事件路由 — 阶段矩阵 + 非 Issue 静态映射（替代 agent_type.subscribe_events 单级路由）。
+
+见 vod-skill-upgrade-plan.md §3.0.3/§3.0.4：Issue/PR 事件按 issue_state 阶段矩阵判定；
+非 Issue 事件（vod_signal/release/build/deploy 等）用静态映射兜底；订阅声明不再作为路由依据。
+"""
 from src.config import log
+
+# 事件类型集合（阶段矩阵覆盖）
+ISSUE_EVENT_TYPES = {"issue_opened", "issue_updated", "issue_comment", "issue_labeled"}
+PR_EVENT_TYPES = {"pull_request_opened", "pull_request_updated", "pull_request_merged", "note_hook_pr"}
+
+# PR 事件无关联 Issue / 无 issue_state 时的默认归属（PR 审查）
+PR_DEFAULT_AGENT = "qa"
+
+# 非 Issue 事件静态映射（兜底路由）
+# push 显式忽略（开发由 issue 驱动，不触发 agent；如需刷新 project-info 可后续挂接）
+NON_ISSUE_EVENT_ROUTE = {
+    "vod_signal": "vod",
+    "release_created": "sre",
+    "tag_created": "sre",
+    "build_start": "sre",
+    "build_failure": "sre",
+    "deploy_start": "sre",
+    "deploy_failure": "sre",
+    "issue_labeled": "issue",
+}
 
 
 def get_domain_agent(event_type: str) -> str:
-    """单级路由：从 agent_type.subscribe_events 查找匹配的 Agent"""
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT agent_type FROM agent_type WHERE order_num>0 AND subscribe_events LIKE ?",
-            (f'%"{event_type}"%',)
-        )
-        row = c.fetchone()
-        if row:
-            log.info(f"Route: {event_type} -> {row[0]}")
-            return row[0]
-    log.info(f"Route: no match for type={event_type}")
-    return ""
+    """事件 → 默认归属 Agent（静态：阶段矩阵 + 非 Issue 映射，不读 subscribe_events）"""
+    if event_type == "issue_opened":
+        return "vod"
+    if event_type in ISSUE_EVENT_TYPES:
+        return "issue"
+    if event_type in PR_EVENT_TYPES:
+        return PR_DEFAULT_AGENT
+    return NON_ISSUE_EVENT_ROUTE.get(event_type, "")
 
 
 def get_agent_skill_map() -> dict[str, str]:
-    """获取 {event_type: agent_type} 映射，用于前端展示"""
+    """返回 {event_type: agent_type} 映射，供前端 pipeline/Agent 页展示（静态源）"""
     result = {}
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT agent_type, subscribe_events FROM agent_type WHERE order_num>0")
-            for r in c.fetchall():
-                agent_type = r[0]
-                try:
-                    events = json.loads(r[1])
-                    if isinstance(events, list):
-                        for evt in events:
-                            result[evt] = agent_type
-                except (json.JSONDecodeError, TypeError):
-                    pass
-    except Exception:
-        pass
+    for evt in ISSUE_EVENT_TYPES - {"issue_opened"}:
+        result[evt] = "issue"
+    result["issue_opened"] = "vod"          # D8：恒给 VOD
+    for evt in PR_EVENT_TYPES:
+        result[evt] = PR_DEFAULT_AGENT
+    for evt, agent in NON_ISSUE_EVENT_ROUTE.items():
+        result[evt] = agent
     return result
