@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import db, db_lock
 from src.runtime.executor import consume_stream_async
+from src.runtime.service import get_execution_mode
 
 if TYPE_CHECKING:
     from src.im.feishu_async import BotContext, FeishuAsync
@@ -205,31 +206,65 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     new_oc_sid = runtime_session_id
     exit_code = -1
     start_time = time.time()
-    async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
-                                                       backend_name=backend, account=repo_key,
-                                                       bot_token=repo_token, agent_name="VOD Agent",
-                                                       agent_label=f"[Agent:vod|repo:{repo_key}]"):
-        if event_type == "done":
-            final_text = data.get("text", "")
-            exit_code = data.get("exit_code", -1)
-            new_sid = data.get("oc_session_id") or data.get("runtime_session_id")
-            if exit_code == 0 and new_sid:
-                new_oc_sid = new_sid
-            log.info(f"[VOD agent|repo:{repo_key}] done: exit={exit_code}, text_len={len(final_text)}")
-        elif event_type == "error":
-            log.warning(f"[VOD agent|repo:{repo_key}] error: {data}")
-        elif event_type == "step_start":
-            log.info(f"[VOD agent|repo:{repo_key}] {data}")
-        elif event_type == "text":
-            log.info(f"[VOD agent|repo:{repo_key}] TEXT: {str(data)[:200]}")
-        elif event_type == "reasoning":
-            log.info(f"[VOD agent|repo:{repo_key}] REASONING: {str(data)[:200]}")
-        elif event_type == "tool_use":
-            log.info(f"[VOD agent|repo:{repo_key}] TOOL: {str(data)[:200]}")
-        elif event_type == "step_finish":
-            log.info(f"[VOD agent|repo:{repo_key}] {data}")
+    mode = get_execution_mode()
+    if mode != "direct":
+        # 入队 + 轮询：任务由 RuntimeAgent（本地/远端边端）claim 执行（见 multi-runtime-instance-design）
+        from src.runtime.service import enqueue_task, wait_task_terminal
+        from src.user.db import get_runtime_id_by_name, ensure_default_runtime
+        runtime_id = get_runtime_id_by_name(backend) or ensure_default_runtime(backend) or 0
+        if runtime_id:
+            tid = enqueue_task(
+                agent_session_id=f"vod:{repo_key}",
+                runtime_id=runtime_id,
+                event_seq=None, issue_id=evt.get("issue_id", ""),
+                repo_key=repo_key, agent_type="vod", skill=skill,
+                prompt=prompt, cwd=wsd,
+                runtime_session_id=runtime_session_id,
+                event_type=evt.get("type", "vod_signal"),
+                account=repo_key, user_id=0,
+                repo_gitcode_token=repo_token or "",
+                skill_path=skill_path or "",
+            )
+            log.info(f"[VOD agent|repo:{repo_key}] enqueued task={tid} mode={mode}")
+            task = await wait_task_terminal(tid)
+            final_text = task.get("result_text") or ""
+            exit_code = int(task.get("exit_code") or -1)
+            try:
+                usage = json.loads(task.get("usage_json") or "{}") or {}
+                new_oc_sid = usage.get("session_id") or runtime_session_id
+            except Exception:
+                new_oc_sid = runtime_session_id
+            log.info(f"[VOD agent|repo:{repo_key}] task done: exit={exit_code}, text_len={len(final_text)}")
         else:
-            log.info(f"[VOD agent|repo:{repo_key}] {event_type}: {str(data)[:200]}")
+            log.warning(f"[VOD agent|repo:{repo_key}] no runtime for backend={backend}, task skipped")
+            final_text = ""
+            exit_code = -1
+    else:
+        async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
+                                                           backend_name=backend, account=repo_key,
+                                                           bot_token=repo_token, agent_name="VOD Agent",
+                                                           agent_label=f"[Agent:vod|repo:{repo_key}]"):
+            if event_type == "done":
+                final_text = data.get("text", "")
+                exit_code = data.get("exit_code", -1)
+                new_sid = data.get("oc_session_id") or data.get("runtime_session_id")
+                if exit_code == 0 and new_sid:
+                    new_oc_sid = new_sid
+                log.info(f"[VOD agent|repo:{repo_key}] done: exit={exit_code}, text_len={len(final_text)}")
+            elif event_type == "error":
+                log.warning(f"[VOD agent|repo:{repo_key}] error: {data}")
+            elif event_type == "step_start":
+                log.info(f"[VOD agent|repo:{repo_key}] {data}")
+            elif event_type == "text":
+                log.info(f"[VOD agent|repo:{repo_key}] TEXT: {str(data)[:200]}")
+            elif event_type == "reasoning":
+                log.info(f"[VOD agent|repo:{repo_key}] REASONING: {str(data)[:200]}")
+            elif event_type == "tool_use":
+                log.info(f"[VOD agent|repo:{repo_key}] TOOL: {str(data)[:200]}")
+            elif event_type == "step_finish":
+                log.info(f"[VOD agent|repo:{repo_key}] {data}")
+            else:
+                log.info(f"[VOD agent|repo:{repo_key}] {event_type}: {str(data)[:200]}")
 
     duration = time.time() - start_time
 

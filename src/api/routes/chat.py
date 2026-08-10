@@ -219,6 +219,66 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     from src.config import log
     log.info(f"Chat send/stream: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
+    from src.runtime.service import get_execution_mode
+    if get_execution_mode() != "direct":
+        # M2 D5 入队 + 轮询：任务由 RuntimeAgent（本地/远端边端）claim 执行，SSE 以终态结果返回
+        import json as _json
+        from src.runtime.service import enqueue_task, wait_task_terminal
+        from src.api.session_store import get_or_create_agent_session
+
+        session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
+        runtime_id = 0
+        try:
+            from src.user.db import ensure_default_runtime, get_runtime_id_by_name
+            runtime_id = get_runtime_id_by_name(backend_name) or ensure_default_runtime(backend_name) or 0
+        except Exception:
+            pass
+
+        async def event_stream():
+            yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...', 'conversation_id': conv_id})}\n\n"
+            final_text = ""
+            new_sid = runtime_session_id
+            if runtime_id:
+                tid = enqueue_task(
+                    agent_session_id=session.get("id") or "",
+                    runtime_id=runtime_id,
+                    event_seq=None, issue_id="",
+                    repo_key=repo_key or f"chat:{user['id']}", agent_type="chat",
+                    skill=skill_name or "chat",
+                    prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id),
+                    runtime_session_id=runtime_session_id,
+                    event_type="chat",
+                    account=user.get("username") or "", user_id=user["id"],
+                    repo_gitcode_token=gitcode_token,
+                    env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
+                )
+                log.info(f"Chat stream enqueued: task={tid} user={user['id']} conv={conv_id}")
+                task = await wait_task_terminal(tid)
+                final_text = task.get("result_text") or ""
+                try:
+                    usage = _json.loads(task.get("usage_json") or "{}") or {}
+                    new_sid = usage.get("session_id") or runtime_session_id
+                except Exception:
+                    new_sid = runtime_session_id
+                if final_text:
+                    yield f"data: {json.dumps({'type': '生成中', 'text': final_text, 'conversation_id': conv_id})}\n\n"
+            else:
+                log.warning(f"Chat stream: no runtime for backend={backend_name}, fallback reply")
+
+            if not final_text:
+                final_text = f"收到您的消息：「{body.message}」\n\n当前使用 {backend_name} 后端处理。"
+            add_message(conv_id, "agent", final_text)
+            touch_conversation(conv_id)
+            if new_sid and not runtime_session_id:
+                update_conversation(conv_id, runtime_session_id=new_sid)
+            yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
     from src.runtime.executor import stream_agent
 
     async def event_stream():
@@ -466,9 +526,24 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
 @router.get("/config")
 async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
     cfg = _get_chat_config(user["id"])
-    from src.user.db import get_backend_agents as _get_cached_backends
+    # Chat Agent 仅可选个人引擎（scope=user，见 runtime-admin-two-view-design §5.1）
+    from src.runtime.instances import instance_name
     from src.session_manager import db, db_lock
-    backends = _get_cached_backends()
+    backends = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("""
+                SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id
+                FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
+                WHERE rc.scope = 'user'
+            """)
+            for r in c.fetchall():
+                _rid, ename, ver, dev, owner, cid = r
+                ins = instance_name(ename, dev or "", cid or 0)
+                backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}", "scope": "user", "owner": owner or ""})
+        except Exception:
+            pass
     # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
     chat_skills = []
     with db_lock:

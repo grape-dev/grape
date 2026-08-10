@@ -12,5 +12,5 @@ from .service import (
     enqueue_task, claim, get_task, update_task_status, cancel_task,
     report_messages, report_progress, complete_task, fail_task, submit_local,
     get_execution_mode, set_execution_mode,
-    enqueue_async_report, start_report_ingestion_loop,
+    enqueue_async_report, start_report_ingestion_loop, wait_task_terminal,
 )

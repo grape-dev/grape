@@ -169,3 +169,114 @@ class TestTerminal:
     def test_unknown_task_noop(self):
         service.complete_task("t_nonexistent", "x", 0)
         service.fail_task("t_nonexistent", "x")
+
+
+class TestWaitTaskTerminal:
+    """wait_task_terminal：入队 + 轮询终态（IM/web 队列路径的回报助手，见 multi-runtime-instance-design 配套）"""
+
+    def test_wait_returns_terminal_dict(self):
+        import asyncio
+        tid = _enqueue(seq=1)
+        service.claim(1)
+        service.complete_task(tid, "ok", 0)
+        t = asyncio.run(service.wait_task_terminal(tid, poll_interval=0.05))
+        assert t["status"] == "completed"
+        assert t["result_text"] == "ok"
+
+    def test_wait_times_out_on_queued(self):
+        import asyncio
+        tid = _enqueue(seq=1)  # 保持 queued，无人 claim
+        with pytest.raises(TimeoutError):
+            asyncio.run(service.wait_task_terminal(tid, timeout=0.2, poll_interval=0.05))
+
+    def test_wait_polls_until_terminal(self):
+        """任务稍后完成：应轮询直到终态（而非只查一次）"""
+        import asyncio, threading, time
+        tid = _enqueue(seq=1)
+
+        def _finish():
+            time.sleep(0.3)
+            service.complete_task(tid, "late-ok", 0)
+
+        th = threading.Thread(target=_finish)
+        th.start()
+        try:
+            t = asyncio.run(service.wait_task_terminal(tid, timeout=5, poll_interval=0.1))
+        finally:
+            th.join()
+        assert t["status"] == "completed"
+        assert t["result_text"] == "late-ok"
+
+    def test_wait_returns_failed_dict(self):
+        import asyncio
+        tid = _enqueue(seq=1)
+        service.claim(1)
+        service.fail_task(tid, "boom")
+        t = asyncio.run(service.wait_task_terminal(tid, poll_interval=0.05))
+        assert t["status"] == "failed"
+        assert "boom" in t["errors"]
+
+
+class TestMultiInstanceRouting:
+    """R2/R3：多实例路由（S2 健康实例选择）与实例级隔离队列（multi-runtime-instance-design §4）"""
+
+    @staticmethod
+    def _seed_runtimes(rows):
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_runtimes")
+            for r in rows:
+                c.execute(
+                    "INSERT INTO agent_runtimes (credential_id, name, scope, owner_id, status, last_seen_at) VALUES (?,?,?,?,?,?)",
+                    (r["credential_id"], r["name"], r.get("scope", "global"), r.get("owner_id", ""),
+                     r.get("status", "offline"), r.get("last_seen_at")))
+            db.commit()
+
+    def test_pick_online_instance(self):
+        from src.user.db import get_runtime_id_by_name
+        self._seed_runtimes([
+            {"credential_id": 1, "name": "opencode", "status": "offline", "last_seen_at": None},
+            {"credential_id": 2, "name": "opencode", "status": "online", "last_seen_at": "2026-08-09T00:00:00+00:00"},
+        ])
+        rid = get_runtime_id_by_name("opencode")
+        from src.session_manager import db, db_lock
+        with db_lock:
+            st = db.cursor().execute("SELECT status FROM agent_runtimes WHERE id=?", (rid,)).fetchone()[0]
+        assert st == "online", f"应优先选 online 实例, got id={rid} status={st}"
+
+    def test_fallback_when_all_offline(self):
+        from src.user.db import get_runtime_id_by_name
+        self._seed_runtimes([
+            {"credential_id": 1, "name": "opencode", "status": "offline", "last_seen_at": None},
+            {"credential_id": 2, "name": "opencode", "status": "offline", "last_seen_at": None},
+        ])
+        assert get_runtime_id_by_name("opencode") is not None, "全 offline 应回退任意实例保证可入队"
+
+    def test_ensure_default_no_dup(self):
+        from src.user.db import ensure_default_runtime
+        self._seed_runtimes([
+            {"credential_id": 1, "name": "opencode", "status": "online", "last_seen_at": "2026-08-09T00:00:00+00:00"},
+        ])
+        rid = ensure_default_runtime("opencode")
+        from src.session_manager import db, db_lock
+        with db_lock:
+            cnt = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE name='opencode'").fetchone()[0]
+        assert cnt == 1, f"ensure_default_runtime 不应重复插入, got {cnt}"
+        assert rid is not None
+
+    def test_claim_isolation_per_instance(self):
+        """R3：任务绑实例 A → 仅 A 能 claim，实例 B 的 claim 拿不到（跨实例隔离队列）"""
+        self._seed_runtimes([
+            {"credential_id": 1, "name": "opencode", "status": "online", "last_seen_at": "2026-08-09T00:00:00+00:00"},
+            {"credential_id": 2, "name": "opencode", "status": "online", "last_seen_at": "2026-08-09T00:00:00+00:00"},
+        ])
+        from src.session_manager import db, db_lock
+        with db_lock:
+            r1, r2 = [r[0] for r in db.cursor().execute("SELECT id FROM agent_runtimes ORDER BY id").fetchall()]
+        _enqueue(session_id="s-m1", runtime_id=r1, seq=1)
+        _enqueue(session_id="s-m2", runtime_id=r2, seq=2)
+        got1 = service.claim(r1)
+        got2 = service.claim(r2)
+        assert got1 and got2 and got1["id"] != got2["id"], "两个实例各自 claim 各自队列"
+        assert service.claim(r1) is None, "实例 1 不得跨实例 claim"

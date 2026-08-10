@@ -222,6 +222,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     parsed = backend.parse_output(line)
                     if parsed is None:
                         _raw_count += 1
+                        # opencode 会话失效错误经 stdout 以 ANSI 原始行输出（非 NDJSON），
+                        # 计入 error_events 使下方 session_missing 检测能命中（重跑无 session）
+                        if "session not found" in line.lower():
+                            error_events.append(_redact(line, _tokens))
                         yield ("raw", _redact(line, _tokens))
                         continue
                     _parsed_count += 1

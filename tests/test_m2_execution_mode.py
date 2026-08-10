@@ -26,6 +26,9 @@ class TestExecutionModeSwitch:
         with db_lock:
             db.cursor().execute("DELETE FROM agent_tasks")
             db.cursor().execute("DELETE FROM events")
+            # 清掉可能由其他 pipeline 测试残留的会话/阶段行，保证本测试不依赖共享库顺序
+            db.cursor().execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
+            db.cursor().execute("DELETE FROM issue_state WHERE repo_key LIKE 'gitcode:owner/repo%'")
             db.commit()
 
     def test_mode_getter_meta(self):

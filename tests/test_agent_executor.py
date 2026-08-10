@@ -466,6 +466,55 @@ class TestStreamAgentSessionAutoRetry:
         assert "something else" in (done.get("stderr") or "")
         assert FakePopen.call_count == 1, f"expected 1 Popen call (no retry), got {FakePopen.call_count}"
 
+    def test_retries_when_session_not_found_in_stdout_raw(self):
+        """远端 worker 场景：opencode 把 'Session not found' 打到 stdout 的 ANSI 原始行（非 NDJSON、非 stderr）。
+
+        回归：2026-08-09 远端 RuntimeAgent 接入后，旧检测只查 stderr/errors，
+        stdout 原始行被当作 raw 丢弃 → 不触发无 session 重跑 → 任务空回复。
+        修复点：executor 对含 'session not found' 的 raw 行计入 error_events。
+        """
+        from unittest.mock import patch
+        from src.agent import stream_agent
+
+        success_stdout = (
+            '{"type":"step_start","sessionID":"ses_new_xyz","part":{"type":"step-start"}}\n'
+            '{"type":"text","part":{"type":"text","text":"RAW_RECOVERED"}}\n'
+        )
+        calls = [
+            # stdout 为 ANSI 彩色原始错误行（opencode 1.18.x 实际输出形态）
+            {"returncode": 1, "stdout": "\x1b[91m\x1b[1mError: \x1b[0mSession not found\r\n", "stderr": ""},
+            {"returncode": 0, "stdout": success_stdout, "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_raw_dead", backend_name="opencode"))
+
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == 0, done
+        assert "RAW_RECOVERED" in done["text"]
+        assert done["oc_session_id"] == "ses_new_xyz"
+        assert FakePopen.call_count == 2, f"expected 2 Popen calls (stdout raw retry), got {FakePopen.call_count}"
+        second_args = FakePopen.last_args[0]
+        assert "--session" not in second_args, f"second run should drop --session, got {second_args}"
+
+    def test_no_retry_when_stdout_raw_unrelated_error(self):
+        """stdout 原始行不含 session not found（如权限错误）→ 不重跑，单次 Popen"""
+        from unittest.mock import patch
+        from src.agent import stream_agent
+
+        calls = [
+            {"returncode": 1, "stdout": "Error: permission denied\n", "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_raw_any", backend_name="opencode"))
+
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == 1
+        assert FakePopen.call_count == 1, f"expected 1 Popen call (no retry), got {FakePopen.call_count}"
+
 
 class TestExecutorPipeInvocation:
     """守护：executor 用纯管道直接启动 agent 命令，不得引入 `script` 包装。

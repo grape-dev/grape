@@ -31,6 +31,14 @@ def _auth_credential(request: Request) -> int:
     return row[0]
 
 
+def _client_ip(request: Request) -> str:
+    """解析来源 IP（经 nginx 反代优先 X-Forwarded-For；仅展示用，不入唯一键，见 multi-runtime-instance-design §3.2）。"""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
 class RuntimeRegBody(BaseModel):
     device_name: str = ""
     cli_version: str = ""
@@ -90,24 +98,29 @@ def _require_credential(request: Request) -> int:
 # ===== 协议端点（M3）=====
 
 @router.post("/register")
-async def runtime_register(body: RuntimeRegBody, credential_id: int = Depends(_require_credential)):
-    """凭据校验 + upsert agent_runtimes（幂等），返回 server 权威 runtime IDs。"""
+async def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int = Depends(_require_credential)):
+    """凭据校验 + 按实例键 upsert agent_runtimes（幂等），返回 server 权威 runtime IDs。
+
+    多实例键（multi-runtime-instance-design §3.1）：每台 worker（凭据）对每个引擎独占一行，
+    多 worker 注册同名引擎并存，互不覆盖 cli_path/version/credential_id。
+    """
     registered = []
+    client_ip = _client_ip(request)
     with db_lock:
         c = db.cursor()
-        # 回填 device_name
-        c.execute("UPDATE runtime_credentials SET device_name=?, last_seen_at=? WHERE id=?",
-                  (body.device_name, datetime.now(timezone.utc).isoformat(), credential_id))
+        # 回填 device_name + 来源 IP
+        c.execute("UPDATE runtime_credentials SET device_name=?, last_seen_at=?, last_ip=? WHERE id=?",
+                  (body.device_name, datetime.now(timezone.utc).isoformat(), client_ip, credential_id))
         for rt in body.runtimes or []:
             name = (rt.get("name") or "").strip().lower()
             if not name:
                 continue
-            c.execute("SELECT id FROM agent_runtimes WHERE lower(name)=? AND scope='global' AND owner_id='' LIMIT 1", (name,))
+            c.execute("SELECT id FROM agent_runtimes WHERE credential_id=? AND lower(name)=? AND scope='global' AND owner_id='' LIMIT 1", (credential_id, name))
             row = c.fetchone()
             if row:
                 rid = row[0]
-                c.execute("UPDATE agent_runtimes SET credential_id=?, version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=? WHERE id=?",
-                          (credential_id, rt.get("version", ""), 1 if rt.get("healthy", True) else 0,
+                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=? WHERE id=?",
+                          (rt.get("version", ""), 1 if rt.get("healthy", True) else 0,
                            datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), rid))
             else:
                 c.execute(
@@ -122,12 +135,13 @@ async def runtime_register(body: RuntimeRegBody, credential_id: int = Depends(_r
 
 
 @router.post("/heartbeat")
-async def runtime_heartbeat(body: HeartbeatBody, credential_id: int = Depends(_require_credential)):
+async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
     """更新 runtime 在线态 / last_seen_at。"""
     now = datetime.now(timezone.utc).isoformat()
+    client_ip = _client_ip(request)
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE runtime_credentials SET last_seen_at=? WHERE id=?", (now, credential_id))
+        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=? WHERE id=?", (now, client_ip, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph})", [now] + body.runtime_ids)
@@ -248,6 +262,37 @@ async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_u
         c = db.cursor()
         c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
                   params + [limit])
+        return {"tasks": [
+            {"id": r[0], "repo_key": r[1], "agent_type": r[2], "skill": r[3],
+             "status": r[4], "exit_code": r[5], "result_text": (r[6] or "")[:200],
+             "created_at": r[7], "started_at": r[8], "completed_at": r[9]}
+            for r in c.fetchall()
+        ]}
+
+
+@router.get("/credentials/{cid}/tasks")
+async def list_credential_tasks(cid: int, user: dict = Depends(get_current_user),
+                                status: str = "", limit: int = 50):
+    """按凭据聚合任务（该凭据所有引擎实例的 agent_tasks，见 runtime-admin-two-view-design.md §4.3）。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
+        rid_rows = c.fetchall()
+    if not rid_rows:
+        return {"tasks": []}
+    rids = [r[0] for r in rid_rows]
+    ph = ",".join("?" for _ in rids)
+    clauses = [f"runtime_id IN ({ph})"]
+    params = list(rids)
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    params.append(limit)
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
+                  params)
         return {"tasks": [
             {"id": r[0], "repo_key": r[1], "agent_type": r[2], "skill": r[3],
              "status": r[4], "exit_code": r[5], "result_text": (r[6] or "")[:200],

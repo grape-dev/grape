@@ -284,6 +284,14 @@ def report_messages(task_id, messages):
     task = get_task(task_id)
     if not task:
         return
+    # 逐步日志（服务端观察：step_start/step_finish 等；远端执行时 step 详情在 worker 日志）
+    for m in (messages or []):
+        if not isinstance(m, dict):
+            continue
+        _t = m.get("type")
+        if _t in ("step_start", "step_finish", "text", "reasoning", "tool_use", "error"):
+            _d = m.get("data")
+            log.info(f"[task {task_id}] {_t}: {str(_d)[:120]}")
     if task.get("event_seq"):
         try:
             from src.api.event_archive import append_event_archive_log
@@ -540,3 +548,20 @@ def enqueue_async_report(kind: str, task_id: str, payload):
             report_messages(task_id, payload)
         elif kind == "progress":
             report_progress(task_id, payload)
+
+
+async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interval: float = 3.0) -> dict:
+    """异步轮询任务直到终态（completed/failed/cancelled）。
+
+    供 IM / web 等"入队 + 等结果"路径使用（见 multi-runtime-instance-design 配套）。
+    超时抛 TimeoutError。返回终态 task dict（含 result_text / exit_code / usage_json.session_id）。
+    """
+    import asyncio, time as _time
+    deadline = _time.monotonic() + timeout
+    while True:
+        t = get_task(task_id)
+        if t and t.get("status") in ("completed", "failed", "cancelled"):
+            return t
+        if _time.monotonic() > deadline:
+            raise TimeoutError(f"task {task_id} not finished within {timeout}s")
+        await asyncio.sleep(poll_interval)

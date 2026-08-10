@@ -1525,7 +1525,8 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             name = (a.get("name", "") or "").strip().lower()
             if not name:
                 continue
-            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=?", (name, scope, owner_id))
+            # 仅操作本机未绑定凭据的行（credential_id=0）；凭据绑定行由边端 register 独占管理
+            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0", (name, scope, owner_id))
             row = c.fetchone()
             if row:
                 c.execute(
@@ -1536,6 +1537,12 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                      a.get("pip_package", ""), row[0])
                 )
             else:
+                # 防再生：若该引擎名已有凭据绑定行（边端 register 承载），不再创建 credential_id=0 占位行
+                #（否则会再生出 `{name}-cred0` 的离线孤儿行，见 runtime-admin-two-view-design §6.2）
+                c.execute("SELECT 1 FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id>0 LIMIT 1",
+                          (name, scope, owner_id))
+                if c.fetchone():
+                    continue
                 c.execute(
                     "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
                     (name, a.get("display_name", name),
@@ -1543,11 +1550,13 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                      a.get("version", ""), 1 if a.get("healthy") else 0,
                      a.get("pip_package", ""), scope, owner_id)
                 )
-        # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）
+        # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）。
+        # 仅清理未绑定凭据的本机行（credential_id=0）；凭据绑定的远端/边端注册行一律保留
+        #（见 multi-runtime-instance-design §5.1 防误删）。
         current_names = [(a.get("name", "") or "").strip().lower() for a in agents if a.get("name")]
         if current_names:
             placeholders = ",".join("?" for _ in current_names)
-            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, *current_names))
+            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND lower(name) NOT IN ({placeholders})", (scope, owner_id, *current_names))
         db.commit()
 
 
@@ -1557,15 +1566,15 @@ def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
 
 
 def get_agent_runtimes(scope: str = "global", owner_id: str = "") -> list[dict]:
-    """读取 agent runtimes 缓存"""
+    """读取 agent runtimes 缓存（含 status/last_seen_at，供健康态派生）"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+        c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
              "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
              "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10],
-             "credential_id": r[11] or 0}
+             "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13]}
             for r in c.fetchall()
         ]
 
@@ -1576,13 +1585,18 @@ def get_backend_id_by_name(name: str, scope: str = "global", owner_id: str = "")
 
 
 def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
-    """按 name+scope+owner_id 查找 runtime id"""
+    """按 name+scope+owner_id 查找 runtime id（多实例：优先 online + 最近心跳，见 multi-runtime-instance-design §4.3 S2）"""
     if not name:
         return None
     name = name.strip().lower()
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id FROM agent_runtimes WHERE lower(name)=? AND scope=? AND owner_id=? LIMIT 1", (name, scope, owner_id))
+        c.execute("""
+            SELECT id FROM agent_runtimes
+            WHERE lower(name)=? AND scope=? AND owner_id=?
+            ORDER BY CASE WHEN status='online' THEN 0 ELSE 1 END, last_seen_at DESC
+            LIMIT 1
+        """, (name, scope, owner_id))
         row = c.fetchone()
         return row[0] if row else None
 
@@ -1593,11 +1607,16 @@ def ensure_default_backend(name: str = "opencode", scope: str = "global"):
 
 
 def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
-    """确保默认 runtime 存在（幂等），返回 id"""
+    """确保默认 runtime 存在（幂等），返回 id（多实例：优先 online，见 multi-runtime-instance-design §4.3 S2）"""
     name = (name or "opencode").strip().lower() or "opencode"
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id FROM agent_runtimes WHERE lower(name)=? AND scope=? AND owner_id='' LIMIT 1", (name, scope))
+        c.execute("""
+            SELECT id FROM agent_runtimes
+            WHERE lower(name)=? AND scope=? AND owner_id=''
+            ORDER BY CASE WHEN status='online' THEN 0 ELSE 1 END, last_seen_at DESC
+            LIMIT 1
+        """, (name, scope))
         row = c.fetchone()
         if row:
             return row[0]

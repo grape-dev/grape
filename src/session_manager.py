@@ -553,11 +553,16 @@ def set_chat_config(user_id: int, **kwargs):
     for k, v in kwargs.items():
         if k in allowed and v is not None:
             data[k] = v
-    # backend name → runtime_id
+    # backend → runtime_id：优先按唯一引擎名（engine name）解析；Chat 仅个人引擎（见 runtime-admin-two-view-design §5.1）
     runtime_id = 0
     if data.get("backend"):
         from src.user.db import ensure_default_backend, get_runtime_id_by_name
-        runtime_id = get_runtime_id_by_name(data["backend"]) or ensure_default_backend(data["backend"]) or 0
+        from src.runtime.instances import resolve_instance_id, scope_of_runtime
+        _rid = resolve_instance_id(data["backend"])
+        if _rid is not None and scope_of_runtime(_rid) == "user":
+            runtime_id = _rid
+        else:
+            runtime_id = get_runtime_id_by_name(data["backend"]) or ensure_default_backend(data["backend"]) or 0
     # skill name → skill_id（若未显式传 skill_id）
     if data.get("skill") and not data.get("skill_id"):
         from src.user.db import resolve_skill_id

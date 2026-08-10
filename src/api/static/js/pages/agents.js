@@ -11,16 +11,19 @@ function loadCfgOptions() {
   const backendSelect = document.querySelector('.cfg-backend');
   const skillSelect = document.querySelector('.cfg-skill');
 
-  // Runtime 下拉：仅未加载时加载；在线 runtime 可选，离线置灰
+  // Runtime 下拉：仅未加载时加载；DevOps Agent 仅可选 仓库/全局 引擎（个人引擎不出现，见 runtime-admin-two-view-design §5.1）
   if (backendSelect && !backendSelect.dataset.loaded) {
     backendSelect.dataset.loaded = '1';
     API.get('/settings/agent-runtimes').then(d => {
       const runtimes = d.runtimes || [];
       const current = backendSelect.dataset.current || 'opencode';
-      const online = runtimes.filter(r => r.health === 'online' || r.healthy);
-      const offline = runtimes.filter(r => !(r.health === 'online' || r.healthy));
+      const scopeLabel = sc => sc === 'global' ? '全局' : sc === 'repo' ? '仓库' : '个人';
+      const ok = runtimes.filter(r => r.scope === 'repo' || r.scope === 'global');
+      const online = ok.filter(r => r.health === 'online' || r.healthy);
+      const offline = ok.filter(r => !(r.health === 'online' || r.healthy));
+      const val = r => r.instance_name || r.name;
       const opt = (r, sel) =>
-        `<option value="${r.name}" ${r.name === current ? 'selected' : ''}>${r.name}${r.health === 'online' || r.healthy ? ' ✓' : ' ✗'}</option>`;
+        `<option value="${val(r)}" ${(val(r) === current || r.name === current) ? 'selected' : ''}>${val(r)} · ${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${scopeLabel(r.scope)}${r.health === 'online' || r.healthy ? ' ✓' : ' ✗'}</option>`;
       let html = online.map(r => opt(r, true)).join('') + offline.map(r => opt(r, false)).join('');
       if (!html) html = '<option value="opencode">opencode</option>';
       backendSelect.innerHTML = html;

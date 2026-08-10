@@ -65,3 +65,48 @@ class TestWebChatToolUseRegression:
         src = inspect.getsource(chat_mod)
         # 断言不再存在对 tool_use 的裸切片
         assert "data[:150]" not in src, "tool_use 日志不得对 data 直接切片（dict）"
+
+    def test_send_stream_queue_mode_returns_result(self, client, monkeypatch):
+        """send/stream 非 direct 模式：应入队 + 轮询，由 RuntimeAgent 执行后以 SSE done 返回结果。"""
+        from unittest.mock import AsyncMock, patch
+        monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
+        with patch("src.runtime.service.enqueue_task", return_value="t_q") as m_enq, \
+             patch("src.runtime.service.wait_task_terminal",
+                   new=AsyncMock(return_value={"status": "completed", "exit_code": 0,
+                                               "result_text": "QUEUE_OK",
+                                               "usage_json": '{"session_id": "ses_q"}'})), \
+             patch("src.user.db.get_runtime_id_by_name", return_value=1), \
+             patch("src.runtime.executor.stream_agent") as m_sa:
+            r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
+
+        assert r.status_code == 200
+        assert "QUEUE_OK" in r.text, f"SSE 应包含任务结果: {r.text[:500]}"
+        assert '"type": "done"' in r.text
+        m_enq.assert_called_once()
+        assert m_enq.call_args.kwargs["runtime_id"] == 1
+        m_sa.assert_not_called(), "queue 模式不应本地 stream_agent"
+        # 清理 get_or_create_agent_session 产生的会话行，避免污染其他测试
+        with db_lock:
+            c2 = db.cursor()
+            c2.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'chat:99901%' OR id LIKE 'chat:99901%'")
+            db.commit()
+
+    def test_send_stream_direct_still_streams(self, client, monkeypatch):
+        """send/stream direct 模式：仍走本地 stream_agent（回归保护）。"""
+        from unittest.mock import patch
+
+        def _done_text(sse):
+            import json
+            for line in sse.splitlines():
+                if line.startswith("data: "):
+                    evt = json.loads(line[len("data: "):])
+                    if evt.get("type") == "done":
+                        return evt.get("text", "")
+            return ""
+
+        monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
+        with patch("src.runtime.executor.stream_agent", side_effect=_fake_stream_agent):
+            r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
+        assert r.status_code == 200
+        assert _done_text(r.text) == "联通成功"
+        assert '"type": "done"' in r.text

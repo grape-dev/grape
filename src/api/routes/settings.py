@@ -177,51 +177,96 @@ async def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_curren
 
 @router.get("/agent-runtimes")
 async def get_agent_runtimes(user: dict = Depends(get_current_user)):
-    """从 DB 读取 Agent 执行引擎列表，含健康态派生（online/recently_lost/offline/about_to_gc）。
+    """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
-    健康态语义（见 agent-runtime-design.md D7）：
-    - 绑定凭据的远端 runtime（credential_id>0）：由边端心跳（status + last_seen_at）派生四态
-    - 未绑定凭据的本地 runtime（credential_id=0，历史 backend_agents 迁移而来）：
-      由本机 CLI 就绪态（installed/healthy）派生——就绪=online，未装=offline
+    可见性（按当前登录用户）：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级（仓库所有成员可见，不只 owner）。
+    派生字段：instance_name / worker_name / worker_ip / scope / owner（见 runtime-admin-two-view-design.md §7）。
     """
     from src.user import db as user_db
     from src.runtime.health import derive_runtime_health
+    from src.runtime.instances import instance_name
     from src.session_manager import db, db_lock
-    cached = user_db.get_agent_runtimes()
-    now = __import__("time").time()
-    for rt in cached:
-        rt["health"] = _runtime_health(rt, now)
-    # 设备级视图（按 credential_id 分组：device_name + 承载 CLI + 心跳）
-    devices = []
-    seen = set()
+
+    uid = user.get("id") or 0
+    uname = user.get("username") or ""
+    user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}
+
+    # 凭据映射：id -> 派生所需字段
+    cred_map = {}
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, status, last_seen_at FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip FROM runtime_credentials")
         for r in c.fetchall():
-            cid, cname, cdev, cstatus, clast = r
+            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip = r
+            cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
+                             "owner_id": cowner_id or "", "owner_name": cowner_name or "",
+                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or ""}
+
+    def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
+        if not cid:                      # credential_id=0（历史本机引擎）
+            return True
+        if cscope == "global":
+            return True
+        if cscope == "user":
+            return cowner_name == uname
+        if cscope == "repo":
+            return cowner_name == uname or cowner_id in user_repos
+        return False
+
+    cached = user_db.get_agent_runtimes()
+    now = __import__("time").time()
+    visible_runtimes = []
+    for rt in cached:
+        rt["health"] = _runtime_health(rt, now)
+        cid = rt.get("credential_id") or 0
+        cred = cred_map.get(cid) or {"name": "", "device_name": "", "scope": "global",
+                                     "owner_name": "", "owner_id": "", "last_ip": ""}
+        if not _visible_credential(cid, cred["scope"], cred["owner_name"], cred["owner_id"]):
+            continue
+        rt["instance_name"] = instance_name(rt["name"], cred["device_name"], cid)
+        rt["worker_name"] = cred["name"]
+        rt["worker_ip"] = cred["last_ip"]
+        rt["owner"] = cred["owner_name"]
+        rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
+        visible_runtimes.append(rt)
+
+    # 设备级视图（按 credential_id 分组：worker_name + 承载 CLI + 心跳）
+    devices = []
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
+        for (cid,) in c.fetchall():
+            cred = cred_map.get(cid) or {}
+            if not _visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
+                continue
             c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at FROM agent_runtimes WHERE credential_id=?", (cid,))
             runtimes = [
                 {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
                  "installed": bool(x[4]),
+                 "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
                  "health": derive_runtime_health(x[5], x[6], now)}
                 for x in c.fetchall()
             ]
-            seen.add(cid)
-            devices.append({"credential_id": cid, "name": cname, "device_name": cdev or "",
-                            "credential_status": cstatus, "last_seen_at": clast,
-                            "health": derive_runtime_health(cstatus, clast, now), "runtimes": runtimes})
+            devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
+                            "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
+                            "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
+                            "owner": cred.get("owner_name", ""),
+                            "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
+                            "runtimes": runtimes})
     # 未绑定凭据的本地 runtime（历史 backend_agents 迁移而来）
     orphan_ids = {rt["id"] for rt in cached if rt.get("id")}
     if orphan_ids and not devices:
         for rt in cached:
             devices.append({"credential_id": 0, "name": "本机 Runtime", "device_name": "本机",
                             "credential_status": "active", "last_seen_at": None,
+                            "worker_ip": "", "scope": "global", "owner": "",
                             "health": rt.get("health", "offline"),
                             "runtimes": [{"id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
                                           "healthy": rt.get("healthy", False),
                                           "installed": rt.get("installed", False),
+                                          "instance_name": rt.get("instance_name", rt.get("name", "")),
                                           "health": rt.get("health", "offline")}]})
-    return {"runtimes": cached, "devices": devices}
+    return {"runtimes": visible_runtimes, "devices": devices}
 
 
 def _runtime_health(rt: dict, now: float) -> str:
@@ -234,6 +279,29 @@ def _runtime_health(rt: dict, now: float) -> str:
         return derive_runtime_health(rt.get("status") or "offline", rt.get("last_seen_at"), now)
     if rt.get("installed") and rt.get("healthy"):
         return "online"
+    return "offline"
+
+
+_DEVICE_ONLINE_WINDOW = 60  # 心跳间隔 15s，容差 60s 内视为在线
+
+
+def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
+    """设备（凭据维度）健康态：由心跳新鲜度派生。
+
+    凭据 `status` 恒为 'active'（不表达在线），不能像 runtime 行那样按 `status='online'` 判定；
+    在线 = 最近心跳在 _DEVICE_ONLINE_WINDOW 内；失联 <5min = 刚失联；>6d = 待回收；其余离线。
+    """
+    from src.runtime.health import parse_dt
+    ts = parse_dt(last_seen_at)
+    if ts is None:
+        return "offline"
+    offline_for = now - ts
+    if offline_for < _DEVICE_ONLINE_WINDOW:
+        return "online"
+    if offline_for < 5 * 60:
+        return "recently_lost"
+    if offline_for > 6 * 24 * 3600:
+        return "about_to_gc"
     return "offline"
 
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）
@@ -299,30 +367,77 @@ async def refresh_backend_agents(user: dict = Depends(get_current_user)):
 
 # ====== Runtime Credentials（rta_ token，见 agent-runtime-event-full-design.md §4.1 / §10）======
 
+_SCOPE_ALIAS = {"user": "user", "个人": "user", "repo": "repo", "仓库": "repo", "global": "global", "全局": "global"}
+
+
 class RuntimeCredBody(BaseModel):
     name: str
-    scope: str = "global"
-    owner_id: str = ""
+    scope: str = "user"       # user(个人)/repo(仓库)/global(全局)，默认个人
+    repo_key: str = ""        # scope=repo 时必填（目标仓库全名，如 owner/repo）
+
+
+def _normalize_scope(scope: str) -> str:
+    s = _SCOPE_ALIAS.get((scope or "").strip().lower())
+    if not s:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 user/repo/global（个人/仓库/全局）"})
+    return s
 
 
 @router.post("/runtime-credentials")
 async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(get_current_user)):
-    """生成 rta_ token：仅展示一次明文，DB 存 sha256。吊销 = status='revoked'。"""
+    """生成 rta_ token：仅展示一次明文，DB 存 sha256。owner=当前登录用户（不可选），scope 默认个人。"""
     import hashlib, secrets
     from src.session_manager import db, db_lock
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "凭据名称不能为空"})
+    scope = _normalize_scope(body.scope)
+    owner = user.get("username") or ""
+    repo_key = ""
+    if scope == "repo":
+        repo_key = (body.repo_key or "").strip()
+        if not repo_key:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库范围凭据必须指定 repo_key"})
     token = "rta_" + secrets.token_urlsafe(32)
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id) VALUES (?,?,?,?)",
-                      (hashlib.sha256(token.encode()).hexdigest(), name, body.scope, body.owner_id))
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name) VALUES (?,?,?,?,?)",
+                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key, owner))
             db.commit()
         except Exception as e:
+            msg = str(e)
+            if "UNIQUE" in msg and "runtime_credentials.name" in msg:
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
-    return {"token": token, "name": name, "message": "token 仅展示一次，请立即保存"}
+    return {"token": token, "name": name, "scope": scope, "owner": owner, "message": "token 仅展示一次，请立即保存"}
+
+
+@router.put("/runtime-credentials/{cid}")
+async def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depends(get_current_user)):
+    """改名凭据（worker 名）：全局唯一，重名拒绝。owner/scope 不可改。"""
+    from src.session_manager import db, db_lock
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "凭据名称不能为空"})
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("UPDATE runtime_credentials SET name=? WHERE id=? AND status='active'", (name, cid))
+            if c.rowcount == 0:
+                row = c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+                raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改名"})
+            db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            msg = str(e)
+            if "UNIQUE" in msg and "runtime_credentials.name" in msg:
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"改名失败: {e}"})
+    return {"message": f"凭据已改名为 {name}"}
 
 
 @router.get("/runtime-credentials")
@@ -331,24 +446,25 @@ async def list_runtime_credentials(user: dict = Depends(get_current_user)):
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, status, last_seen_at, created_at FROM runtime_credentials ORDER BY id DESC")
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at FROM runtime_credentials ORDER BY id DESC")
         return {"credentials": [
             {"id": r[0], "name": r[1], "device_name": r[2] or "", "scope": r[3],
-             "owner_id": r[4], "status": r[5], "last_seen_at": r[6], "created_at": r[7]}
+             "owner_id": r[4], "owner": r[5] or "", "status": r[6], "last_seen_at": r[7], "created_at": r[8]}
             for r in c.fetchall()
         ]}
 
 
 @router.post("/runtime-credentials/{cid}/revoke")
 async def revoke_runtime_credential(cid: int, user: dict = Depends(get_current_user)):
-    """吊销凭据：status='revoked'，立即失效。"""
+    """吊销凭据：status='revoked'，立即失效；级联其 agent_runtimes 行置 offline（见 multi-runtime-instance-design §5.2）。"""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE runtime_credentials SET status='revoked' WHERE id=?", (cid,))
-        db.commit()
         if c.rowcount == 0:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+        c.execute("UPDATE agent_runtimes SET status='offline', last_seen_at=NULL WHERE credential_id=?", (cid,))
+        db.commit()
     return {"message": f"凭据 {cid} 已吊销"}
 
 

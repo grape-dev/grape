@@ -141,7 +141,8 @@ CREATE TABLE IF NOT EXISTS backend_agents (
 """
 
 # new-version2：backend_agents → agent_runtimes（术语重构，见 agent-runtime-design.md §5.2）
-# 结构 = 原 backend_agents + 新增列（credential_id/provider/binary/status/last_seen_at）
+# 多实例键（multi-runtime-instance-design §2.1）：注册键 = (credential_id, name, scope, owner_id)，
+# 使每台 worker（凭据）对每个引擎独占一行、同时在线。老库由迁移重建（_rebuild_agent_runtimes_inst_key）。
 _AGENT_RUNTIMES_DDL = """
 CREATE TABLE IF NOT EXISTS agent_runtimes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,7 +161,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     scope TEXT DEFAULT 'global',
     owner_id TEXT DEFAULT '',
     updated_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (name, scope, owner_id)
+    UNIQUE (credential_id, name, scope, owner_id)
 )
 """
 
@@ -274,12 +275,14 @@ _RUNTIME_CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS runtime_credentials (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     token_hash   TEXT NOT NULL,             -- sha256(rta_xxx)，不存明文
-    name         TEXT NOT NULL,             -- 管理端可读名（如 "CI-Worker-01"）
-    device_name  TEXT DEFAULT '',           -- 首次注册时回填
-    scope        TEXT DEFAULT 'global',
-    owner_id     TEXT DEFAULT '',
+    name         TEXT NOT NULL UNIQUE,      -- 凭据名=worker 名，全局唯一（可改名）
+    device_name  TEXT DEFAULT '',           -- 首次注册时回填（边端自报，辅助展示）
+    scope        TEXT DEFAULT 'user',       -- user(个人)/repo(仓库)/global(全局)，默认个人
+    owner_id     TEXT DEFAULT '',           -- 仓库 scope 时存 repo 全名（如 owner/repo）；个人/全局为 ''
+    owner_name   TEXT DEFAULT '',           -- 归属用户 user_name（生成凭据的当前登录用户）
     status       TEXT DEFAULT 'active',     -- active / revoked
     last_seen_at TEXT DEFAULT NULL,
+    last_ip      TEXT DEFAULT '',           -- 最近注册/心跳来源 IP（展示用，不入唯一键）
     created_at   TEXT DEFAULT (datetime('now')),
     UNIQUE (token_hash)
 )
@@ -633,6 +636,34 @@ def _drop_chat_session_repo_unique(c):
     c.execute(f"INSERT INTO chat_agent_session_new ({','.join(cols)}) SELECT {','.join(cols)} FROM chat_agent_session")
     c.execute("DROP TABLE chat_agent_session")
     c.execute("ALTER TABLE chat_agent_session_new RENAME TO chat_agent_session")
+    return True
+
+
+def _rebuild_agent_runtimes_inst_key(c):
+    """多实例键迁移（multi-runtime-instance-design §7）：把 agent_runtimes 的旧唯一约束
+    `UNIQUE (name, scope, owner_id)` 升级为 `UNIQUE (credential_id, name, scope, owner_id)`。
+
+    SQLite 无法直接改约束 → 检测到旧约束时重建表（用新 DDL，保留数据）。重建前清理
+    `credential_id=0` 的同名重复行（历史迁移遗留，仅保留 id 最小的一行），避免新唯一键冲突。
+    返回是否执行了重建（幂等：已是新键则跳过）。
+    """
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_runtimes'").fetchone()
+    if not row or not row[0]:
+        return False
+    sql = row[0].lower()
+    if "unique" not in sql or "credential_id, name" in sql:
+        return False
+    c.execute("""
+        DELETE FROM agent_runtimes
+        WHERE credential_id=0 AND id NOT IN (
+            SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 GROUP BY lower(name), scope, owner_id
+        )
+    """)
+    cols = [r[1] for r in c.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
+    c.execute(_AGENT_RUNTIMES_DDL.replace("CREATE TABLE IF NOT EXISTS agent_runtimes", "CREATE TABLE agent_runtimes_new"))
+    c.execute(f"INSERT INTO agent_runtimes_new ({','.join(cols)}) SELECT {','.join(cols)} FROM agent_runtimes")
+    c.execute("DROP TABLE agent_runtimes")
+    c.execute("ALTER TABLE agent_runtimes_new RENAME TO agent_runtimes")
     return True
 
 
@@ -1207,3 +1238,27 @@ def _migrate_tables():
                 log.info("Rebuilt chat_agent_session: removed stale UNIQUE(repo_key) constraint")
     except Exception as e:
         log.warning(f"Drop chat_agent_session UNIQUE(repo_key) failed: {e}")
+    # ===== multi-runtime-instance-design §7：agent_runtimes 多实例唯一键 + runtime_credentials.last_ip =====
+    # 注册键 (name, scope, owner_id) → (credential_id, name, scope, owner_id)，使多 worker 同名引擎并存。
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "runtime_credentials" in _tables:
+                _ensure_column(c, "runtime_credentials", "last_ip", "TEXT DEFAULT ''")
+                _ensure_column(c, "runtime_credentials", "owner_name", "TEXT DEFAULT ''")
+                # 凭据名全局唯一：先清重（同名多行仅保留最小 id），再建唯一索引
+                c.execute("""
+                    DELETE FROM runtime_credentials WHERE id NOT IN (
+                        SELECT MIN(id) FROM runtime_credentials GROUP BY name
+                    )
+                """)
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_runtime_credentials_name ON runtime_credentials(name)")
+                db.commit()
+            if "agent_runtimes" in _tables:
+                _rebuilt = _rebuild_agent_runtimes_inst_key(c)
+                if _rebuilt:
+                    log.info("Rebuilt agent_runtimes: unique key -> (credential_id, name, scope, owner_id)")
+            db.commit()
+    except Exception as e:
+        log.warning(f"Migrate agent_runtimes instance unique key failed: {e}")

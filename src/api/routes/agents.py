@@ -86,13 +86,22 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
             row = c.fetchone()
             if row:
                 backend_name = "opencode"
+                instance_name_val = ""
                 if row[1]:
-                    c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[1],))
+                    c.execute("SELECT name, credential_id FROM agent_runtimes WHERE id=?", (row[1],))
                     brow = c.fetchone()
                     if brow and brow[0]:
                         backend_name = brow[0]
+                        _dev = ""
+                        if brow[1]:
+                            c.execute("SELECT device_name FROM runtime_credentials WHERE id=?", (brow[1],))
+                            _d = c.fetchone()
+                            _dev = _d[0] if _d else ""
+                        from src.runtime.instances import instance_name
+                        instance_name_val = instance_name(brow[0], _dev or "", brow[1] or 0)
                 session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_gitcode_token": row[4] or "", "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
                                "im_app_id": row[8] or "",
+                               "instance_name": instance_name_val,
                                "enable": bool(row[9]) if row[9] is not None else True}
         except Exception:
             pass
@@ -166,7 +175,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         "description": meta["description"],
         "color": COLORS.get(name, "var(--t2)"),
         "bg": BGS.get(name, "var(--bg)"),
-        "backend": session_data.get("backend", meta.get("default_backend", "opencode")),
+        "backend": session_data.get("instance_name") or session_data.get("backend", meta.get("default_backend", "opencode")),
         "skill": session_data.get("skill", ""),
         "skill_id": session_data.get("skill_id", 0),
         "skill_scope": skill_scope,
@@ -285,7 +294,16 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         c = db.cursor()
         try:
             from src.user.db import ensure_default_backend, get_runtime_id_by_name
-            runtime_id = get_runtime_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
+            from src.runtime.instances import resolve_instance_id, scope_of_runtime
+            # 优先按唯一引擎名（engine name / instance_name）解析；否则按类型名（S2 健康选择）兜底
+            runtime_id = resolve_instance_id(body.backend)
+            if runtime_id is not None:
+                _scope = scope_of_runtime(runtime_id)
+                # DevOps Agent 只能绑定 仓库/全局 引擎（个人引擎仅 Chat 可用，见 runtime-admin-two-view-design §5.1）
+                if _scope == "user":
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"DevOps Agent 只能绑定仓库/全局引擎，所选为个人引擎: {body.backend}"})
+            else:
+                runtime_id = get_runtime_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
             # 精确按 scope(+owner) 解析 skill_id，避免同名时官方优先误命中
             skill_id = 0
             if body.skill:

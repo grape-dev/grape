@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Grape Admin — 管理运营系统高保真原型</title>
+<style>
+:root{--s:#0c1222;--s2:#161e30;--s3:#1e2940;--bg:#f5f6f8;--c:#fff;--b:#e3e6ee;--t:#101724;--t2:#5b667b;--t3:#8d97a8;--a:#3168e0;--ah:#2556c2;--g:#1ca44c;--y:#d49c0f;--r:#dc2828;--pu:#7b3cf2;--or:#ea5a0c;--pk:#d83076;--sk:#0c92d4;--rd:8px;--r2:12px;--sh:0 1px 3px rgba(0,0,0,.04)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:var(--bg);color:var(--t);display:flex;min-height:100vh}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#ccd2db;border-radius:3px}
+
+/* Login（原型演示用，可跳过） */
+.ln{position:fixed;inset:0;z-index:200;background:radial-gradient(ellipse at 20% 50%,#162240 0%,#0c1222 60%);display:flex;align-items:center;justify-content:center;transition:all .4s}
+.ln.hid{opacity:0;pointer-events:none}
+.lbox{width:400px;text-align:center}
+.lbox .logo{display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;border-radius:14px;background:linear-gradient(135deg,#3168e0,#7b3cf2);color:#fff;font-size:22px;font-weight:800;margin-bottom:20px}
+.lbox h1{color:#fff;font-size:26px;font-weight:700;letter-spacing:-1px;margin-bottom:6px}
+.lbox .sub{color:#8d97a8;font-size:14px;margin-bottom:32px}
+.lbox .obtn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:14px;border-radius:10px;border:none;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:all .2s;margin-bottom:20px}
+.lbox .obtn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,.3)}
+.lbox .obtn.small{font-size:13px;padding:11px;background:#1e2940;box-shadow:none}
+.lbox .obtn.small:hover{background:var(--s3)}
+
+/* Sidebar */
+.sb{width:232px;background:var(--s);color:#fff;display:flex;flex-direction:column;flex-shrink:0;height:100vh;position:sticky;top:0}
+.sb-h{padding:18px 18px 14px;border-bottom:1px solid rgba(255,255,255,.06)}
+.sb-h .logo-s{display:flex;align-items:center;gap:9px;margin-bottom:3px;cursor:pointer}
+.sb-h .logo-s .sq{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,var(--a),var(--pu));display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:800}
+.sb-h h1{font-size:15px;font-weight:700;letter-spacing:-.5px}
+.sb-h .tagline{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.8px}
+.sb-sel{margin:10px 12px}
+.sb-sel select{width:100%;padding:7px 10px;border-radius:7px;border:1px solid rgba(255,255,255,.08);background:var(--s2);color:#fff;font-size:11px;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%238d97a8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center}
+.sb-nav{flex:1;padding:6px 10px;overflow-y:auto}
+.sb-nav .grp{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--t3);padding:14px 8px 5px;font-weight:600}
+.sb-nav a{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:7px;color:#c2cad6;text-decoration:none;font-size:12px;cursor:pointer;transition:all .12s;margin-bottom:1px}
+.sb-nav a:hover{background:var(--s2);color:#fff}
+.sb-nav a.act{background:var(--a);color:#fff;font-weight:500}
+.sb-nav a .ic{width:16px;text-align:center;font-size:13px;opacity:.8}
+.sb-nav a.act .ic{opacity:1}
+.sb-nav .ad-grp{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:#7d8fb5;padding:16px 8px 5px;font-weight:700;display:flex;align-items:center;gap:6px}
+.sb-nav .ad-grp::before{content:'';width:8px;height:8px;border-radius:2px;background:linear-gradient(135deg,#6ea2ff,#a78bfa);display:inline-block}
+.sb-nav a.ad{color:#aeb8d0}
+.sb-nav a.ad.act{background:linear-gradient(135deg,#3168e0,#7b3cf2)}
+.sb-ft{padding:10px 16px;border-top:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:10px}
+.sb-ft .av{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--a),var(--pu));display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+.sb-ft .by{font-size:11px;font-weight:500}
+.sb-ft .by span{font-size:10px;color:#6ea2ff;display:block}
+.sb-ft .by span::before{content:'';display:inline-block;width:5px;height:5px;background:var(--g);border-radius:50%;margin-right:4px;vertical-align:middle}
+.sb-ft .out{margin-left:auto;color:var(--t3);font-size:14px;cursor:pointer}
+.sb-ft .out:hover{color:var(--r)}
+
+/* Main */
+.mn{flex:1;min-width:0;display:flex;flex-direction:column}
+.tb{background:var(--c);border-bottom:1px solid var(--b);padding:0 28px;height:52px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.tb .bc{font-size:13px;color:var(--t2)}
+.tb .bc b{color:var(--t);font-weight:600}
+.tb .sp{flex:1}
+.tb .act{display:flex;gap:8px}
+.ct{padding:22px 28px;overflow-y:auto;flex:1}
+
+/* Cards */
+.cd{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:18px 20px;margin-bottom:14px;box-shadow:var(--sh)}
+.cd-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.cd-h h2{font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px}
+.cd-h h2 .c{font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px}
+
+/* Stats */
+.stats{display:flex;gap:10px;flex-wrap:wrap}
+.st{display:flex;flex-direction:column;align-items:center;padding:12px 18px;background:var(--bg);border-radius:10px;min-width:72px;border:1px solid var(--b)}
+.st .v{font-size:18px;font-weight:700;line-height:1.2}
+.st .l{font-size:10px;color:var(--t2);margin-top:2px}
+.stat-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:14px}
+.stat-card{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:16px 18px;box-shadow:var(--sh);display:flex;align-items:center;gap:12px}
+.stat-card .sic{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.stat-card .sv{font-size:22px;font-weight:700;letter-spacing:-.5px;line-height:1.1}
+.stat-card .sl{font-size:11px;color:var(--t2);margin-top:1px}
+.stat-card.sic-a .sic{background:linear-gradient(135deg,#eaf0ff,#ede8fd);color:var(--a)}
+.stat-card.sic-g .sic{background:linear-gradient(135deg,#e7f9ee,#e3edfd);color:var(--g)}
+.stat-card.sic-r .sic{background:linear-gradient(135deg,#fdeaea,#fce5e5);color:var(--r)}
+.stat-card.sic-o .sic{background:linear-gradient(135deg,#fef0e4,#fde8f0);color:var(--or)}
+.stat-card.sic-p .sic{background:linear-gradient(135deg,#f3e8ff,#ede9fe);color:var(--pu)}
+
+/* Health */
+.health-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:14px}
+.health-card{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:16px;box-shadow:var(--sh);display:flex;align-items:center;gap:12px}
+.health-card .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.health-card.ok .dot{background:var(--g);box-shadow:0 0 0 4px rgba(28,164,76,.12)}
+.health-card.bad .dot{background:var(--r);box-shadow:0 0 0 4px rgba(220,40,40,.12)}
+.health-card.warn .dot{background:var(--y);box-shadow:0 0 0 4px rgba(212,156,15,.12)}
+.health-card .hn{font-size:13px;font-weight:600}
+.health-card .hs{font-size:11px;color:var(--t3);margin-top:2px}
+
+/* Layout two-col */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:980px){.two-col{grid-template-columns:1fr}}
+
+/* Tags */
+.tg{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:14px;font-size:10px;font-weight:600;white-space:nowrap}
+.tg-v{background:#fde8f0;color:#b91b5e}
+.tg-i{background:#fce5e5;color:#c12929}
+.tg-c{background:#e3edfd;color:#235ec7}
+.tg-q{background:#f3e9fe;color:#7728d4}
+.tg-s{background:#fef0e4;color:#d15408}
+.tg-ch{background:#e2f4fd;color:#0c7aaa}
+.tg-d{background:var(--bg);color:var(--t2)}
+.tg-g{background:rgba(28,164,76,.08);color:#1a9c52}
+.tg-y{background:rgba(212,156,15,.1);color:#a67c06}
+.tg-r{background:rgba(220,40,40,.08);color:#c12929}
+.tg-a{background:rgba(49,104,224,.08);color:#235ec7}
+.tg-p{background:rgba(123,60,242,.08);color:#7728d4}
+.tg .dot{width:5px;height:5px;border-radius:50%;display:inline-block}
+
+/* Tables */
+.tw{overflow-x:auto;background:var(--c);border:1px solid var(--b);border-radius:var(--r2);box-shadow:var(--sh)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:10px 12px;font-weight:500;color:var(--t2);border-bottom:1px solid var(--b);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg)}
+td{padding:10px 12px;border-bottom:1px solid var(--b)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#f8f9fb}
+.pager{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:10px 12px;font-size:11px;color:var(--t3)}
+
+/* Buttons */
+.bt{display:inline-flex;align-items:center;gap:5px;padding:6px 13px;border-radius:7px;font-size:11px;font-weight:500;cursor:pointer;border:none;transition:all .15s;text-decoration:none}
+.bt-p{background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;box-shadow:0 4px 12px rgba(49,104,224,.25)}
+.bt-p:hover{background:linear-gradient(135deg,#2556c2,#4338ca);transform:translateY(-1px)}
+.bt-o{background:var(--c);border:1px solid var(--b);color:var(--t2)}
+.bt-o:hover{border-color:var(--a);color:var(--a)}
+.bt-g{background:var(--g);color:#fff}
+.bt-g:hover{background:#189c45}
+.bt-r{background:var(--r);color:#fff}
+.bt-r:hover{background:#c22323}
+.bt-s{padding:4px 10px;font-size:10px}
+.bt-link{background:none;border:none;color:var(--a);cursor:pointer;font-size:11px;padding:2px 4px}
+.bt-link.danger{color:var(--r)}
+
+/* Tabs */
+.stabs{display:flex;gap:0;border-bottom:1px solid var(--b);margin-bottom:16px}
+.stabs a{padding:9px 16px;font-size:12px;font-weight:500;color:var(--t2);cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}
+.stabs a:hover{color:var(--t)}
+.stabs a.ac{color:var(--a);border-bottom-color:var(--a)}
+.pill-tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:7px 16px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--b);background:var(--c);color:var(--t2);transition:all .2s}
+.pill:hover{border-color:#b9cdf7;color:var(--a)}
+.pill.act{background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;border-color:transparent;box-shadow:0 4px 14px rgba(49,104,224,.3)}
+.pill .cnt{font-size:10px;background:rgba(0,0,0,.06);padding:1px 7px;border-radius:8px}
+.pill.act .cnt{background:rgba(255,255,255,.2);color:#fff}
+
+/* Toolbar */
+.toolbar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.toolbar input[type=text],.toolbar select{padding:7px 12px;border:1px solid var(--b);border-radius:7px;font-size:12px;background:var(--c);outline:none;color:var(--t)}
+.toolbar input[type=text]:focus,.toolbar select:focus{border-color:var(--a)}
+.toolbar .search{display:inline-flex;align-items:center;gap:6px;background:var(--c);border:1px solid var(--b);border-radius:7px;padding:6px 12px;font-size:12px;color:var(--t2);min-width:200px}
+.toolbar .search input{border:none;background:none;outline:none;font-size:12px;width:100%;color:var(--t)}
+.toolbar .sp{flex:1}
+
+/* Forms */
+.srow{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.srow label{font-size:11px;color:var(--t2);width:110px;flex-shrink:0}
+.srow input,.srow select,.srow textarea{flex:1;padding:8px 11px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none;color:var(--t)}
+.srow input:focus,.srow select:focus,.srow textarea:focus{border-color:var(--a)}
+.srow textarea{resize:vertical;min-height:80px;font-family:inherit}
+
+/* Modal */
+.mask{position:fixed;inset:0;background:rgba(12,18,34,.5);z-index:300;display:none;align-items:center;justify-content:center;padding:20px}
+.mask.on{display:flex}
+.modal{width:480px;max-width:100%;background:var(--c);border-radius:14px;overflow:hidden;box-shadow:0 24px 60px rgba(12,18,34,.3);animation:pop .18s ease}
+.modal.wide{width:640px}
+.modal-h{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--b)}
+.modal-h h3{font-size:14px;font-weight:600}
+.modal-x{cursor:pointer;color:var(--t3);font-size:16px;padding:2px 6px;border-radius:6px}
+.modal-x:hover{background:var(--bg);color:var(--t)}
+.modal-b{padding:20px}
+.modal-f{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;border-top:1px solid var(--b);background:var(--bg)}
+@keyframes pop{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+
+/* Drawer */
+.drawer{position:fixed;top:0;right:0;bottom:0;width:460px;max-width:92vw;background:var(--c);z-index:320;box-shadow:-24px 0 60px rgba(12,18,34,.25);transform:translateX(105%);transition:transform .22s;display:flex;flex-direction:column}
+.drawer.on{transform:translateX(0)}
+.drawer-h{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--b)}
+.drawer-h h3{font-size:14px;font-weight:600}
+.drawer-b{padding:20px;overflow-y:auto;flex:1}
+.drawer-b .dsec{font-size:10px;color:var(--t3);letter-spacing:1.5px;text-transform:uppercase;font-weight:600;margin:18px 0 10px;display:flex;align-items:center;gap:6px}
+.drawer-b .dsec:first-child{margin-top:0}
+.drawer-b .dsec::after{content:'';flex:1;height:1px;background:var(--b)}
+
+/* Toasts */
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#101724;color:#fff;padding:10px 20px;border-radius:8px;font-size:12px;z-index:400;box-shadow:0 4px 16px rgba(0,0,0,.2);white-space:pre-line;max-width:80vw;display:none}
+.toast.on{display:block;animation:fadeup .25s ease}
+
+/* utility */
+.ts{font-size:11px}.tx{font-size:10px}.t2{color:var(--t2)}.t3{color:var(--t3)}.tgx{color:var(--g)}.ty{color:var(--y)}.tr{color:var(--r)}
+.flex{display:flex}.fc{align-items:center}.f1{flex:1}.gap6{gap:6px}.gap8{gap:8px}.gap12{gap:12px}.gap16{gap:16px}.jbtw{justify-content:space-between}.mt8{margin-top:8px}.mt12{margin-top:12px}.mt16{margin-top:16px}.mb8{margin-bottom:8px}.hidden{display:none}
+.vw{display:none}.vw.ac{display:block}
+.kv{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--b);font-size:12px}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--t3)}
+.kv .v{font-weight:600;color:var(--t)}
+.cred-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px}
+.cred-dot.on{background:var(--g)}.cred-dot.off{background:var(--t3)}
+.event-list{font-size:12px}
+.event-list .row{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--b);align-items:center}
+.event-list .row:last-child{border-bottom:none}
+.alerts .al{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--b);font-size:12px}
+.alerts .al:last-child{border-bottom:none}
+.alerts .al .mark{flex-shrink:0}
+.bars{display:flex;align-items:flex-end;gap:8px;height:120px;padding:6px 2px 0}
+.bar{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px}
+.bar .b{width:100%;border-radius:6px 6px 0 0;background:linear-gradient(180deg,#3168e0,#4f46e5);min-height:4px}
+.bar .l{font-size:9px;color:var(--t3)}
+.leg{display:flex;flex-direction:column;gap:8px;font-size:12px}
+.leg .li{display:flex;align-items:center;gap:8px}
+.leg .li .sw{width:10px;height:10px;border-radius:3px;flex-shrink:0}
+.leg .li .lb{color:var(--t2);flex:1}
+.leg .li .pv{font-weight:700}
+.switch{width:38px;height:20px;border-radius:20px;background:var(--b);position:relative;cursor:pointer;transition:background .2s;flex-shrink:0}
+.switch.on{background:var(--g)}
+.switch::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.switch.on::after{left:20px}
+.radio-row{display:flex;align-items:center;gap:10px;font-size:12px;padding:6px 0}
+.radio-row input{accent-color:var(--a)}
+</style>
+</head>
+<body>
+
+<!-- ===== Login ===== -->
+<div class="ln hid" id="ln">
+  <div class="lbox">
+    <div class="logo">G</div>
+    <h1>Grape</h1>
+    <p class="sub">管理运营系统 · 高保真原型</p>
+    <button class="obtn" onclick="doLogin()">进入管理台（管理员演示）</button>
+    <button class="obtn small" onclick="doLoginUser()">普通用户视角（无 Admin 分组）</button>
+  </div>
+</div>
+
+<!-- ===== Sidebar ===== -->
+<div class="sb" id="sidebar">
+  <div class="sb-h">
+    <div class="logo-s"><span class="sq">G</span><h1>Grape</h1></div>
+    <div class="tagline">Multi-Agent DevOps</div>
+  </div>
+  <div class="sb-sel"><select><option>team/backend-service</option><option>org/data-pipeline</option><option>team/web-frontend</option></select></div>
+  <div class="sb-nav">
+    <div class="grp">Workspace</div>
+    <a onclick="nav('dash')"><span class="ic">■</span>Dashboard</a>
+    <a onclick="nav('pipe')"><span class="ic">▶</span>Pipeline</a>
+    <div class="grp">DevOps Agents</div>
+    <a onclick="nav('vod')"><span class="ic">●</span>VOD Agent</a>
+    <a onclick="nav('issue')"><span class="ic">●</span>Issue Agent</a>
+    <a onclick="nav('coding')"><span class="ic">●</span>Coding Agent</a>
+    <a onclick="nav('qa')"><span class="ic">●</span>QA Agent</a>
+    <a onclick="nav('sre')"><span class="ic">●</span>SRE Agent</a>
+    <div class="grp">DevOps Skills</div>
+    <a onclick="nav('skills')"><span class="ic">◈</span>Skills Library</a>
+    <div class="grp">Account</div>
+    <a onclick="nav('chat')"><span class="ic">☎</span>Chat Agent</a>
+    <a onclick="nav('tasks')"><span class="ic">📋</span>Task Center</a>
+    <div class="grp">Settings</div>
+    <a onclick="nav('settings')"><span class="ic">⚙</span>General Settings</a>
+    <a onclick="nav('backends')"><span class="ic">⚡</span>Backend Runtimes</a>
+    <div id="adminGrp">
+      <div class="ad-grp">Admin 管理运营</div>
+      <a class="ad" id="nav-ad-overview" onclick="nav('ad-overview')"><span class="ic">◉</span>总览</a>
+      <a class="ad" id="nav-ad-users" onclick="nav('ad-users')"><span class="ic">👤</span>用户管理</a>
+      <a class="ad" id="nav-ad-whitelist" onclick="nav('ad-whitelist')"><span class="ic">☰</span>白名单</a>
+      <a class="ad" id="nav-ad-repos" onclick="nav('ad-repos')"><span class="ic">⎇</span>仓库运营</a>
+      <a class="ad" id="nav-ad-agents" onclick="nav('ad-agents')"><span class="ic">⚡</span>Agent/Runtime</a>
+      <a class="ad" id="nav-ad-skills" onclick="nav('ad-skills')"><span class="ic">◈</span>技能治理</a>
+      <a class="ad" id="nav-ad-events" onclick="nav('ad-events')"><span class="ic">✉</span>事件监控</a>
+      <a class="ad" id="nav-ad-im" onclick="nav('ad-im')"><span class="ic">💬</span>IM Bot</a>
+      <a class="ad" id="nav-ad-notices" onclick="nav('ad-notices')"><span class="ic">📢</span>公告</a>
+      <a class="ad" id="nav-ad-audit" onclick="nav('ad-audit')"><span class="ic">🔍</span>审计日志</a>
+      <a class="ad" id="nav-ad-settings" onclick="nav('ad-settings')"><span class="ic">⚙</span>系统设置</a>
+    </div>
+  </div>
+  <div class="sb-ft">
+    <div class="av">A</div>
+    <div class="by">Admin<span>超级管理员</span></div>
+    <span class="out" title="退出" onclick="logout()">↩</span>
+  </div>
+</div>
+
+<!-- ===== Main ===== -->
+<div class="mn">
+  <div class="tb">
+    <div class="bc"><b id="pageTitle">Admin · 总览</b></div>
+    <div class="sp"></div>
+    <div class="act" id="topActions"></div>
+  </div>
+  <div class="ct" id="pageContent"><div class="loading">加载中...</div></div>
+</div>
+
+<!-- ===== Modal ===== -->
+<div class="mask" id="mask"><div class="modal" id="modalBox"></div></div>
+
+<!-- ===== Drawer ===== -->
+<div class="drawer" id="drawer">
+  <div class="drawer-h"><h3 id="drawerTitle">详情</h3><span class="modal-x" onclick="closeDrawer()">✕</span></div>
+  <div class="drawer-b" id="drawerBody"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ====== 工具 ======
+let ROLE='super_admin'; // super_admin | user
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),2500);}
+function mask(html){document.getElementById('modalBox').innerHTML=html;document.getElementById('mask').classList.add('on');}
+function closeMask(){document.getElementById('mask').classList.remove('on');}
+function openDrawer(title,html){document.getElementById('drawerTitle').textContent=title;document.getElementById('drawerBody').innerHTML=html;document.getElementById('drawer').classList.add('on');}
+function closeDrawer(){document.getElementById('drawer').classList.remove('on');}
+function setPage(t){document.getElementById('pageTitle').textContent=t;}
+
+function nav(v){
+  document.querySelectorAll('.sb-nav a').forEach(a=>a.classList.remove('act'));
+  const el=document.getElementById('nav-'+v);
+  if(el)el.classList.add('act');
+  document.querySelectorAll('.vw').forEach(x=>x.classList.remove('ac'));
+  const pc=document.getElementById('pageContent');
+  const renderers={dash:rDash,pipe:rPipe,vod:rAgent,issue:rAgent,coding:rAgent,qa:rAgent,sre:rAgent,skills:rBizSkills,chat:rChat,tasks:rTasks,settings:rBizSettings,backends:rBackends,
+    'ad-overview':rOverview,'ad-users':rUsers,'ad-whitelist':rWhitelist,'ad-repos':rRepos,'ad-agents':rAgents,'ad-skills':rSkills,
+    'ad-events':rEvents,'ad-im':rIm,'ad-notices':rNotices,'ad-audit':rAudit,'ad-settings':rSettings};
+  const fn=renderers[v];
+  if(fn){
+    const T={'dash':'Dashboard','pipe':'Pipeline','vod':'VOD Agent','issue':'Issue Agent','coding':'Coding Agent','qa':'QA Agent','sre':'SRE Agent','skills':'DevOps Skills','chat':'Chat Agent','tasks':'Task Center','settings':'General Settings','backends':'Backend Runtimes',
+      'ad-overview':'Admin · 总览','ad-users':'Admin · 用户管理','ad-whitelist':'Admin · 登录白名单','ad-repos':'Admin · 仓库运营','ad-agents':'Admin · Agent/Runtime','ad-skills':'Admin · 技能治理',
+      'ad-events':'Admin · 事件监控','ad-im':'Admin · IM Bot','ad-notices':'Admin · 公告','ad-audit':'Admin · 审计日志','ad-settings':'Admin · 系统设置'};
+    setPage(T[v]||v);
+    pc.innerHTML='';
+    document.getElementById('topActions').innerHTML='';
+    fn(pc);
+  }
+}
+
+function doLogin(){document.getElementById('ln').classList.add('hid');ROLE='super_admin';document.getElementById('adminGrp').style.display='';document.querySelector('.sb-ft .by span').textContent='超级管理员';nav('ad-overview');}
+function doLoginUser(){document.getElementById('ln').classList.add('hid');ROLE='user';document.getElementById('adminGrp').style.display='none';document.querySelector('.sb-ft .by span').textContent='普通用户';nav('dash');}
+function logout(){document.getElementById('ln').classList.remove('hid');}
+
+// ====== 业务面占位页（仅示意，管理台以 Admin 页为主） ======
+function rDash(pc){pc.innerHTML='<div class="cd"><div class="cd-h"><h2>Dashboard</h2></div><p class="ts t2">业务面页面（保持现状，本原型聚焦 Admin 管理运营）。</p></div>';}
+function rPipe(pc){pc.innerHTML='<div class="cd"><div class="cd-h"><h2>Pipeline</h2></div><p class="ts t2">业务面页面。</p></div>';}
+function rAgent(pc){pc.innerHTML='<div class="cd"><div class="cd-h"><h2>Agent</h2></div><p class="ts t2">业务面页面。</p></div>';}
+function rBizSkills(pc){pc.innerHTML='<div class="cd"><div class="cd-h"><h2>Skills Library</h2></div><p class="ts t2">业务面页面。</p></div>';}
+function rChat(pc){pc.innerHTML='<div class="cd"><div class="cd-h"><h2>Chat Agent</h2></div><p class="ts t2">业务面页面。</p></div>';}
+function rTasks(pc){pc.innerHTML='<div class="cd"><div class="cd-h"><h2>Task Center</h2></div><p class="ts t2">业务面页面。</p></div>';}
+function rBizSettings(pc){pc.innerHTML='<div class="cd"><div class="cd-h"><h2>General Settings</h2></div><p class="ts t2">业务面页面。</p></div>';}
+function rBackends(pc){pc.innerHTML='<div class="cd"><div class="cd-h"><h2>Backend Runtimes</h2></div><p class="ts t2">业务面页面。</p></div>';}
+
+// ====== 1. 总览 Overview ======
+function rOverview(pc){
+  document.getElementById('topActions').innerHTML='<button class="bt bt-o bt-s" onclick="toast(\'已刷新\')">⟳ 刷新</button>';
+  pc.innerHTML=`
+  <div class="health-grid">
+    <div class="health-card ok"><span class="dot"></span><div><div class="hn">主服务</div><div class="hs">http://127.0.0.1:3000 · ok</div></div></div>
+    <div class="health-card ok"><span class="dot"></span><div><div class="hn">Webhook</div><div class="hs">:8080/webhook/gitcode · ok</div></div></div>
+    <div class="health-card ok"><span class="dot"></span><div><div class="hn">数据库</div><div class="hs">SQLite 可写 · 46 表</div></div></div>
+    <div class="health-card warn"><span class="dot"></span><div><div class="hn">IM WS</div><div class="hs">5/6 在线 · 1 异常</div></div></div>
+  </div>
+  <div class="stat-cards">
+    <div class="stat-card sic-a"><div class="sic">👥</div><div><div class="sv">128</div><div class="sl">用户总数</div></div></div>
+    <div class="stat-card sic-g"><div class="sic">＋</div><div><div class="sv">5</div><div class="sl">今日新增</div></div></div>
+    <div class="stat-card sic-r"><div class="sic">⛔</div><div><div class="sv">2</div><div class="sl">禁用账号</div></div></div>
+    <div class="stat-card sic-o"><div class="sic">⎇</div><div><div class="sv">47</div><div class="sl">托管仓库</div></div></div>
+    <div class="stat-card sic-a"><div class="sic">✉</div><div><div class="sv">404</div><div class="sl">今日事件</div></div></div>
+    <div class="stat-card sic-r"><div class="sic">✕</div><div><div class="sv">28</div><div class="sl">失败事件</div></div></div>
+  </div>
+  <div class="two-col">
+    <div class="cd">
+      <div class="cd-h"><h2>事件趋势（近 7 日）</h2></div>
+      <div class="bars">
+        <div class="bar"><div class="b" style="height:60%"></div><div class="l">08-02</div></div>
+        <div class="bar"><div class="b" style="height:75%"></div><div class="l">08-03</div></div>
+        <div class="bar"><div class="b" style="height:55%"></div><div class="l">08-04</div></div>
+        <div class="bar"><div class="b" style="height:85%"></div><div class="l">08-05</div></div>
+        <div class="bar"><div class="b" style="height:70%"></div><div class="l">08-06</div></div>
+        <div class="bar"><div class="b" style="height:92%"></div><div class="l">08-07</div></div>
+        <div class="bar"><div class="b" style="height:100%"></div><div class="l">08-08</div></div>
+      </div>
+    </div>
+    <div class="cd">
+      <div class="cd-h"><h2>事件状态分布</h2></div>
+      <div class="leg">
+        <div class="li"><span class="sw" style="background:var(--g)"></span><span class="lb">completed</span><span class="pv">320 · 72%</span></div>
+        <div class="li"><span class="sw" style="background:var(--y)"></span><span class="lb">pending</span><span class="pv">52 · 14%</span></div>
+        <div class="li"><span class="sw" style="background:var(--a)"></span><span class="lb">running</span><span class="pv">4 · 5%</span></div>
+        <div class="li"><span class="sw" style="background:var(--r)"></span><span class="lb">failed</span><span class="pv">28 · 9%</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="two-col">
+    <div class="cd">
+      <div class="cd-h"><h2>Runtime 概览 <span class="c">backend_agents</span></h2></div>
+      <div class="event-list">
+        <div class="row"><span class="tg tg-g"><span class="dot" style="background:var(--g)"></span>healthy</span><span class="f1">opencode</span><span class="ts t3">v1.5.2</span></div>
+        <div class="row"><span class="tg tg-g"><span class="dot" style="background:var(--g)"></span>healthy</span><span class="f1">codearts</span><span class="ts t3">v2.1.0</span></div>
+        <div class="row"><span class="tg tg-d"><span class="dot" style="background:var(--t3)"></span>offline</span><span class="f1">hermes</span><span class="ts t3">未检测</span></div>
+        <div class="row"><span class="tg tg-d"><span class="dot" style="background:var(--t3)"></span>未安装</span><span class="f1">cursor</span><span class="ts t3">—</span></div>
+      </div>
+    </div>
+    <div class="cd">
+      <div class="cd-h"><h2>IM Bot 概览 <span class="c">global_im_bot_config</span></h2></div>
+      <div class="leg" style="margin-bottom:14px">
+        <div class="li"><span class="sw" style="background:var(--g)"></span><span class="lb">在线</span><span class="pv">5</span></div>
+        <div class="li"><span class="sw" style="background:var(--r)"></span><span class="lb">异常</span><span class="pv">1</span></div>
+        <div class="li"><span class="sw" style="background:var(--b)"></span><span class="lb">停用</span><span class="pv">0</span></div>
+      </div>
+      <div class="dsec">待办告警</div>
+      <div class="alerts">
+        <div class="al"><span class="mark ty">⚠</span><span class="f1">IM Bot <b>cli_g7h8i9</b> 离线（重连 14 次）</span><button class="bt-link" onclick="nav('ad-im')">处理 →</button></div>
+        <div class="al"><span class="mark tr">⚠</span><span class="f1">近 24h <b>3 个事件</b> 执行失败（build_failure ×2, deploy_failure ×1）</span><button class="bt-link" onclick="nav('ad-events')">处理 →</button></div>
+        <div class="al"><span class="mark tr">⚠</span><span class="f1"><b>2 个</b> 禁用账号仍有托管仓库</span><button class="bt-link" onclick="nav('ad-users')">处理 →</button></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ====== 2. 用户管理 Users ======
+const USERS=[
+  {id:1,name:'Jason7602',nick:'Jason',role:'super_admin',roleT:'超管',status:'active',repos:12,last:'08-08 10:12',created:'06-01',creds:{g:1,h:1,c:1,f:0}},
+  {id:2,name:'alice',nick:'Alice Chen',role:'ops_admin',roleT:'运营',status:'active',repos:5,last:'08-07 22:41',created:'06-12',creds:{g:1,h:1,c:0,f:1}},
+  {id:3,name:'bob',nick:'Bob',role:'user',roleT:'用户',status:'disabled',repos:1,last:'08-01 09:20',created:'07-02',creds:{g:1,h:0,c:0,f:0}},
+  {id:4,name:'carol',nick:'Carol',role:'user',roleT:'用户',status:'active',repos:0,last:'08-06 14:02',created:'07-15',creds:{g:1,h:1,c:0,f:0}},
+  {id:5,name:'dave',nick:'Dave',role:'auditor',roleT:'审计',status:'active',repos:0,last:'08-05 11:30',created:'07-20',creds:{g:1,h:0,c:0,f:0}},
+];
+function rUsers(pc){
+  document.getElementById('topActions').innerHTML='<button class="bt bt-p bt-s" onclick="openCreateUser()">＋ 创建用户</button>';
+  pc.innerHTML=`
+  <div class="toolbar">
+    <div class="search"><span>⌕</span><input placeholder="搜索用户名..."></div>
+    <select><option>角色: 全部</option><option>超管</option><option>运营</option><option>用户</option><option>审计</option></select>
+    <select><option>状态: 全部</option><option>启用</option><option>禁用</option></select>
+    <div class="sp"></div>
+  </div>
+  <div class="tw"><table>
+    <tr><th>用户名</th><th>角色</th><th>状态</th><th>仓库</th><th>最近登录</th><th>创建时间</th><th>操作</th></tr>
+    ${USERS.map(u=>`<tr>
+      <td><b>${u.name}</b><span class="ts t3"> · ${u.nick}</span></td>
+      <td><span class="tg ${u.role==='super_admin'?'tg-p':u.role==='ops_admin'?'tg-a':u.role==='auditor'?'tg-ch':'tg-d'}">${u.roleT}</span></td>
+      <td>${u.status==='active'?'<span class="tg tg-g"><span class="dot" style="background:var(--g)"></span>启用</span>':'<span class="tg tg-r"><span class="dot" style="background:var(--r)"></span>禁用</span>'}</td>
+      <td>${u.repos}</td><td class="ts t3">${u.last}</td><td class="ts t3">${u.created}</td>
+      <td><button class="bt bt-o bt-s" onclick="openUserDetail(${u.id})">详情</button>
+          ${u.status==='active'?'<button class="bt bt-o bt-s" style="color:var(--r);border-color:#f3c9c9" onclick="confirmDisable(\''+u.name+'\')">禁用</button>':'<button class="bt bt-g bt-s" onclick="confirmEnable(\''+u.name+'\')">启用</button>'}
+          <button class="bt bt-o bt-s" onclick="openResetPwd(\''+u.name+'\')">重置密码</button></td>
+    </tr>`).join('')}
+  </table>
+  <div class="pager">共 128 条 · 上一页 <b>1</b>/13 下一页</div></div>`;
+}
+function openCreateUser(){
+  mask(`<div class="modal-h"><h3>创建用户</h3><span class="modal-x" onclick="closeMask()">✕</span></div>
+  <div class="modal-b">
+    <div class="srow"><label>用户名</label><input placeholder="GitCode 用户名"></div>
+    <div class="srow"><label>初始密码</label><select><option>自动生成</option><option>手动指定</option></select></div>
+    <div class="srow"><label>角色</label><select><option>用户 user</option><option>运营 ops_admin</option><option>审计 auditor</option><option>仓库管理员 repo_admin</option><option>超管 super_admin</option></select></div>
+    <div class="srow"><label>配额(预留)</label><input placeholder="max_repos: 10"></div>
+  </div>
+  <div class="modal-f"><button class="bt bt-o" onclick="closeMask()">取消</button><button class="bt bt-p" onclick="closeMask();toast('用户已创建，初始密码已复制')">创建</button></div>`);
+}
+function openUserDetail(id){
+  const u=USERS.find(x=>x.id===id);
+  openDrawer(u.name+' 详情',`
+    <div class="flex fc gap12"><span class="av" style="width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--a),var(--pu));display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff">${u.nick[0]}</span>
+    <div><div style="font-size:15px;font-weight:600">${u.nick}</div><div class="ts t3">@${u.name}</div></div>
+    <div class="f1"></div>
+    ${u.status==='active'?'<span class="tg tg-g">启用</span>':'<span class="tg tg-r">禁用</span>'}</div>
+    <div class="dsec">基本信息</div>
+    <div class="kv"><span class="k">用户名</span><span class="v">${u.name}</span></div>
+    <div class="kv"><span class="k">角色</span><span class="v">${u.roleT}</span></div>
+    <div class="kv"><span class="k">关联仓库</span><span class="v">${u.repos} 个</span></div>
+    <div class="kv"><span class="k">创建时间</span><span class="v">${u.created}</span></div>
+    <div class="dsec">凭据（脱敏）</div>
+    <div class="kv"><span class="k">GitCode</span><span class="v"><span class="cred-dot ${u.creds.g?'on':'off'}"></span>${u.creds.g?'已配置':'未配置'}</span></div>
+    <div class="kv"><span class="k">华为云</span><span class="v"><span class="cred-dot ${u.creds.h?'on':'off'}"></span>${u.creds.h?'已配置':'未配置'}</span></div>
+    <div class="kv"><span class="k">CodeArts</span><span class="v"><span class="cred-dot ${u.creds.c?'on':'off'}"></span>${u.creds.c?'已配置':'未配置'}</span></div>
+    <div class="kv"><span class="k">飞书</span><span class="v"><span class="cred-dot ${u.creds.f?'on':'off'}"></span>${u.creds.f?'已配置':'未配置'}</span></div>
+    <div class="dsec">关联仓库</div>
+    <div class="event-list">
+      <div class="row"><span class="tg tg-c">Admin</span><span class="f1">team/backend-srv</span></div>
+      <div class="row"><span class="tg tg-d">Member</span><span class="f1">org/data-pipeline</span></div>
+    </div>
+    <div class="dsec">事件统计</div>
+    <div class="kv"><span class="k">近 24h 事件</span><span class="v">12</span></div>
+    <div class="kv"><span class="k">失败事件</span><span class="v tr">1</span></div>
+    <div class="dsec">操作</div>
+    <div class="flex gap8">
+      ${u.status==='active'?'<button class="bt bt-r" onclick="closeDrawer();confirmDisable(\''+u.name+'\')">禁用</button>':'<button class="bt bt-g" onclick="closeDrawer();toast(\''+u.name+' 已启用\')">启用</button>'}
+      <button class="bt bt-o" onclick="closeDrawer();openResetPwd(\''+u.name+'\')">重置密码</button>
+      <button class="bt bt-o" onclick="closeDrawer();openRoleEdit(\''+u.name+'\')">改角色</button>
+    </div>`);
+}
+function confirmDisable(name){mask(`<div class="modal-h"><h3>禁用用户</h3></div><div class="modal-b"><p class="ts" style="line-height:1.7">禁用后 <b>${name}</b> 将无法登录（现有 token 立即失效）。事件与对话数据不受影响。确定？</p></div><div class="modal-f"><button class="bt bt-o" onclick="closeMask()">取消</button><button class="bt bt-r" onclick="closeMask();toast('${name} 已禁用（审计已记录）')">确认禁用</button></div>`);}
+function confirmEnable(name){mask(`<div class="modal-h"><h3>启用用户</h3></div><div class="modal-b"><p class="ts">确定恢复 <b>${name}</b> 的登录权限？</p></div><div class="modal-f"><button class="bt bt-o" onclick="closeMask()">取消</button><button class="bt bt-g" onclick="closeMask();toast('${name} 已启用')">确认启用</button></div>`);}
+function openResetPwd(name){mask(`<div class="modal-h"><h3>重置密码</h3><span class="modal-x" onclick="closeMask()">✕</span></div>
+  <div class="modal-b">
+    <div class="srow"><label>新密码</label><input value="Gp9#kZ2mQw" readonly style="background:#f1f5f9;font-family:monospace"></div>
+    <p class="tx t3">明文仅显示一次，请立即复制并安全交付给用户。</p>
+  </div>
+  <div class="modal-f"><button class="bt bt-o" onclick="closeMask()">关闭</button><button class="bt bt-p" onclick="closeMask();toast('已复制新密码')">复制</button></div>`);}
+function openRoleEdit(name){mask(`<div class="modal-h"><h3>修改角色</h3><span class="modal-x" onclick="closeMask()">✕</span></div>
+  <div class="modal-b">
+    <div class="srow"><label>用户</label><input value="${name}" disabled style="background:#f1f5f9"></div>
+    <div class="srow"><label>角色</label><select><option>用户 user</option><option>运营 ops_admin</option><option>审计 auditor</option><option>仓库管理员 repo_admin</option><option>超管 super_admin</option></select></div>
+    <div class="srow"><label>仓库范围</label><input placeholder="repo_admin 时填 repo_key，留空=全局"></div>
+  </div>
+  <div class="modal-f"><button class="bt bt-o" onclick="closeMask()">取消</button><button class="bt bt-p" onclick="closeMask();toast('角色已更新（审计已记录）')">保存</button></div>`);}
+
+// ====== 3. 白名单 Whitelist ======
+function rWhitelist(pc){
+  document.getElementById('topActions').innerHTML='<button class="bt bt-p bt-s" onclick="openAddWhitelist()">＋ 新增</button>';
+  pc.innerHTML=`
+  <div class="cd" style="display:flex;align-items:center;gap:14px;padding:14px 20px">
+    <span class="switch on" onclick="toggleWL(this)"></span>
+    <div><div style="font-size:13px;font-weight:600">白名单已启用</div><div class="tx t3">关闭后全部 GitCode 账号均可登录本系统（回到默认开放行为）</div></div>
+  </div>
+  <div class="tw"><table>
+    <tr><th>GitCode 用户名</th><th>备注</th><th>添加人</th><th>添加时间</th><th>操作</th></tr>
+    <tr><td><b>Jason7602</b></td><td>核心管理员</td><td>admin</td><td class="ts t3">06-01</td><td><button class="bt-link danger" onclick="confirmDelWL('Jason7602')">删除</button></td></tr>
+    <tr><td><b>alice</b></td><td>运营</td><td>admin</td><td class="ts t3">06-12</td><td><button class="bt-link danger" onclick="confirmDelWL('alice')">删除</button></td></tr>
+    <tr><td><b>bob</b></td><td></td><td>admin</td><td class="ts t3">07-02</td><td><button class="bt-link danger" onclick="confirmDelWL('bob')">删除</button></td></tr>
+    <tr><td><b>carol</b></td><td>合作伙伴</td><td>admin</td><td class="ts t3">07-15</td><td><button class="bt-link danger" onclick="confirmDelWL('carol')">删除</button></td></tr>
+  </table><div class="pager">共 24 条 · 上一页 1/2 下一页</div></div>`;
+}
+function toggleWL(el){el.classList.toggle('on');toast(el.classList.contains('on')?'白名单已启用':'白名单已关闭（全部放行）');}
+function openAddWhitelist(){mask(`<div class="modal-h"><h3>新增白名单</h3><span class="modal-x" onclick="closeMask()">✕</span></div>
+  <div class="modal-b">
+    <div class="srow"><label>GitCode 用户名</label><input placeholder="gitcode_login"></div>
+    <div class="srow"><label>备注</label><input placeholder="选填"></div>
+  </div>
+  <div class="modal-f"><button class="bt bt-o" onclick="closeMask()">取消</button><button class="bt bt-p" onclick="closeMask();toast('已添加（审计已记录）')">添加</button></div>`);}
+function confirmDelWL(n){mask(`<div class="modal-h"><h3>删除白名单</h3></div><div class="modal-b"><p class="ts">移除后 <b>${n}</b> 下次登录将被拒绝。确定？</p></div><div class="modal-f"><button class="bt bt-o" onclick="closeMask()">取消</button><button class="bt bt-r" onclick="closeMask();toast('已移除 '+n)">确认删除</button></div>`);}
+
+// ====== 4. 仓库运营 Repos ======
+const REPOS=[
+  {full:'team/backend-srv',owner:'Jason7602',wh:1,bot:'devops-bot',scene:'web',ev:128},
+  {full:'org/data-pipeline',owner:'alice',wh:1,bot:'devops-bot',scene:'data',ev:86},
+  {full:'team/web-frontend',owner:'bob',wh:0,bot:'devops-bot',scene:'web',ev:12},
+];
+function rRepos(pc){
+  document.getElementById('topActions').innerHTML='<button class="bt bt-o bt-s" onclick="toast(\'已同步\')">⟳ 同步</button>';
+  pc.innerHTML=`
+  <div class="toolbar">
+    <div class="search"><span>⌕</span><input placeholder="搜索仓库..."></div>
+    <select><option>状态: 全部</option><option>已托管</option><option>已加入</option></select>
+    <div class="sp"></div>
+  </div>
+  <div class="tw"><table>
+    <tr><th>仓库</th><th>托管人</th><th>Webhook</th><th>Bot 用户名</th><th>场景</th><th>事件数</th><th>操作</th></tr>
+    ${REPOS.map(r=>`<tr>
+      <td><b>${r.full}</b></td><td>${r.owner}</td>
+      <td>${r.wh?'<span class="tg tg-g"><span class="dot" style="background:var(--g)"></span>正常</span>':'<span class="tg tg-r"><span class="dot" style="background:var(--r)"></span>缺失</span>'}</td>
+      <td class="ts">${r.bot}</td>
+      <td><span class="tg ${r.scene==='data'?'tg-g':'tg-c'}">${r.scene}</span></td>
+      <td>${r.ev}</td>
+      <td><button class="bt bt-o bt-s" onclick="openRepoDetail(\'${r.full}\')">详情</button>
+          <button class="bt bt-o bt-s" style="color:var(--r);border-color:#f3c9c9" onclick="confirmRemoveRepo(\'${r.full}\')">解除托管</button></td>
+    </tr>`).join('')}
+  </table><div class="pager">共 47 条 · 上一页 1/4 下一页</div></div>`;
+}
+function openRepoDetail(full){
+  openDrawer(full+' 详情',`
+    <div class="flex fc gap8"><span style="font-size:15px;font-weight:600">${full}</span><span class="tg tg-d">gitcode:${full}</span></div>
+    <div class="ts t3 mt8">Webhook <span class="tgx">● 正常</span> · Bot: devops-bot · 场景: web</div>
+    <div class="dsec">Agent 配置</div>
+    <div class="event-list">
+      <div class="row"><span class="tg tg-v">VOD</span><span class="f1 ts">opencode · skills/vod</span><span class="ts t3">idle</span></div>
+      <div class="row"><span class="tg tg-i">Issue</span><span class="f1 ts">opencode · skills/issue</span><span class="ts t3">idle</span></div>
+      <div class="row"><span class="tg tg-c">Coding</span><span class="f1 ts">opencode · skills/implementation</span><span class="ts t3">idle</span></div>
+      <div class="row"><span class="tg tg-q">QA</span><span class="f1 ts">opencode · skills/pr</span><span class="ts t3">idle</span></div>
+      <div class="row"><span class="tg tg-s">SRE</span><span class="f1 ts">opencode · skills/cloud-deploy</span><span class="ts t3">idle</span></div>
+    </div>
+    <div class="dsec">数据</div>
+    <div class="kv"><span class="k">近 7 日事件</span><span class="v">42</span></div>
+    <div class="kv"><span class="k">失败事件</span><span class="v tr">3</span></div>
+    <div class="dsec">操作</div>
+    <div class="flex gap8"><button class="bt bt-o" onclick="toast('打开配置')">修改配置</button><button class="bt bt-r" onclick="closeDrawer();confirmRemoveRepo('${full}')">解除托管</button></div>`);
+}
+function confirmRemoveRepo(n){mask(`<div class="modal-h"><h3>解除托管</h3></div><div class="modal-b"><p class="ts" style="line-height:1.7">解除后：<br>1. 删除 GitCode Webhook<br>2. 清理关联事件/会话/技能/workspace 目录<br>3. 所有用户对该仓库的「已加入」状态复位<br><br>该操作不可撤销，确定？</p></div><div class="modal-f"><button class="bt bt-o" onclick="closeMask()">取消</button><button class="bt bt-r" onclick="closeMask();toast('已解除托管 '+n)">确认解除</button></div>`);}
+
+// ====== 5. Agent / Runtime ======
+function rAgents(pc){
+  document.getElementById('topActions').innerHTML='<button class="bt bt-o bt-s" onclick="toast(\'引擎已重新探测\')">⟳ 刷新全部</button>';
+  pc.innerHTML=`
+  <div class="stabs"><a class="ac" onclick="switchATab(this,\'runtime\')">Runtime 引擎</a><a onclick="switchATab(this,\'agents\')">Agent 配置</a></div>
+  <div id="atab-runtime">
+    <div class="rgrid">
+      <div class="rc"><div class="rh"><span class="tg tg-g"><span class="dot" style="background:var(--g)"></span>healthy</span><span class="rn">opencode</span></div><div class="ro">/usr/local/bin/opencode</div><div class="rf"><span class="s">v1.5.2</span><span class="flex gap6"><button class="bt bt-o bt-s">测试连接</button><button class="bt bt-o bt-s">日志</button></span></div></div>
+      <div class="rc"><div class="rh"><span class="tg tg-g"><span class="dot" style="background:var(--g)"></span>healthy</span><span class="rn">codearts</span></div><div class="ro">/usr/local/bin/codearts</div><div class="rf"><span class="s">v2.1.0</span><span class="flex gap6"><button class="bt bt-o bt-s">测试连接</button><button class="bt bt-o bt-s">日志</button></span></div></div>
+      <div class="rc"><div class="rh"><span class="tg tg-d"><span class="dot" style="background:var(--t3)"></span>offline</span><span class="rn">hermes</span></div><div class="ro">/usr/local/bin/hermes</div><div class="rf"><span class="s">未检测</span><span class="flex gap6"><button class="bt bt-o bt-s">测试连接</button></span></div></div>
+      <div class="rc"><div class="rh"><span class="tg tg-d"><span class="dot" style="background:var(--t3)"></span>未安装</span><span class="rn">cursor</span></div><div class="ro">—</div><div class="rf"><span class="s">—</span><button class="bt bt-o bt-s">安装引导</button></div></div>
+    </div>
+  </div>
+  <div id="atab-agents" class="hidden">
+    <div class="tw"><table>
+      <tr><th>Agent</th><th>仓库</th><th>Backend</th><th>Skill</th><th>会话状态</th><th>操作</th></tr>
+      <tr><td><span class="tg tg-v">VOD</span></td><td>team/backend-srv</td><td>opencode</td><td class="ts">skills/vod</td><td><span class="tg tg-d">idle</span></td><td><button class="bt bt-o bt-s">清会话</button></td></tr>
+      <tr><td><span class="tg tg-i">Issue</span></td><td>team/backend-srv</td><td>opencode</td><td class="ts">skills/issue</td><td><span class="tg tg-d">idle</span></td><td><button class="bt bt-o bt-s">清会话</button></td></tr>
+      <tr><td><span class="tg tg-c">Coding</span></td><td>org/data-pipeline</td><td>codearts</td><td class="ts">skills/implementation</td><td><span class="tg tg-g">running</span></td><td><button class="bt bt-o bt-s">清会话</button></td></tr>
+    </table></div>
+  </div>`;
+}
+function switchATab(el,tab){
+  document.querySelectorAll('.stabs a').forEach(a=>a.classList.remove('ac'));el.classList.add('ac');
+  document.getElementById('atab-runtime').classList.toggle('hidden',tab!=='runtime');
+  document.getElementById('atab-agents').classList.toggle('hidden',tab!=='agents');
+}
+
+// ====== 6. 技能治理 Skills ======
+const SKILLS=[
+  {n:'vod',type:'官方',tag:'tg-d',at:'vod',st:1,au:null},
+  {n:'issue-advance',type:'官方',tag:'tg-d',at:'issue',st:1,au:null},
+  {n:'my-pr-rule',type:'个人',tag:'tg-c',at:'qa',st:1,au:'pending'},
+  {n:'team-repo-x',type:'仓库',tag:'tg-q',at:'sre',st:0,au:'approved'},
+  {n:'build-debug',type:'官方',tag:'tg-d',at:'sre',st:1,au:null},
+  {n:'custom-vod',type:'个人',tag:'tg-c',at:'vod',st:1,au:'approved'},
+];
+function rSkills(pc){
+  document.getElementById('topActions').innerHTML='<button class="bt bt-o bt-s" onclick="toast(\'官方技能已同步，新增 0 个\')">⟳ 同步官方技能</button>';
+  pc.innerHTML=`
+  <div class="pill-tabs">
+    <span class="pill act">全部 <span class="cnt">6</span></span>
+    <span class="pill">官方 <span class="cnt">3</span></span>
+    <span class="pill">个人 <span class="cnt">2</span></span>
+    <span class="pill">仓库 <span class="cnt">1</span></span>
+  </div>
+  <div class="toolbar"><div class="search"><span>⌕</span><input placeholder="搜索技能..."></div><div class="sp"></div></div>
+  <div class="tw"><table>
+    <tr><th>技能名</th><th>类型</th><th>Agent</th><th>状态</th><th>审核</th><th>操作</th></tr>
+    ${SKILLS.map(s=>`<tr>
+      <td><b>${s.n}</b></td><td><span class="tg ${s.tag}">${s.type}</span></td>
+      <td><span class="tg ${s.at==='vod'?'tg-v':s.at==='issue'?'tg-i':s.at==='qa'?'tg-q':'tg-s'}">${s.at}</span></td>
+      <td>${s.st?'<span class="tg tg-g">启用</span>':'<span class="tg tg-r">禁用</span>'}</td>
+      <td>${s.au==='pending'?'<span class="tg tg-y">待审核</span>':s.au==='rejected'?'<span class="tg tg-r">已驳回</span>':'<span class="tg tg-d">—</span>'}</td>
+      <td><button class="bt bt-o bt-s" onclick="openSkillAudit(\'${s.n}\')">${s.au==='pending'?'审核':'查看'}</button>
+          ${s.st?'<button class="bt-link danger" onclick="toast(\''+s.n+' 已禁用\')">禁用</button>':'<button class="bt-link" onclick="toast(\''+s.n+' 已启用\')">启用</button>'}</td>
+    </tr>`).join('')}
+  </table></div>`;
+}
+function openSkillAudit(n){
+  mask(`<div class="modal-h"><h3>技能审核 · ${n}</h3><span class="modal-x" onclick="closeMask()">✕</span></div>
+  <div class="modal-b">
+    <div class="srow"><label>类型</label><span class="ts">个人技能 · QA Agent</span></div>
+    <div class="srow"><label>描述</label><span class="ts">特定项目的 PR 审查规则...</span></div>
+    <div class="dsec">SKILL.md 摘要</div>
+    <pre style="background:var(--s);color:#c2cad6;padding:12px;border-radius:8px;font-size:11px;line-height:1.6;overflow-x:auto">---
+name: my-pr-rule
+version: 1.0.0
+description: 特定项目 PR 审查规则
+---
+## 场景
+审查 Pull Request 时应用本项目安全规范...
+## 知识
+...（脱敏省略）
+## 步骤
+1. 读取变更文件
+2. 对照安全清单逐项检查
+...</pre>
+  </div>
+  <div class="modal-f"><button class="bt bt-o" onclick="closeMask()">取消</button><button class="bt bt-r" onclick="closeMask();toast('已驳回 '+n)">驳回</button><button class="bt bt-p" onclick="closeMask();toast('已通过 '+n)">通过</button></div>`);
+}
+
+// ====== 7. 事件监控 Events ======
+const EVENTS=[
+  {seq:2018,repo:'team/backend-srv',type:'issue_opened',agent:'issue',sum:'新 Issue #451: 登录超时',st:'completed',dur:'22s'},
+  {seq:2017,repo:'team/backend-srv',type:'note_hook_pr',agent:'qa',sum:'PR #1278 评论',st:'completed',dur:'12s'},
+  {seq:2016,repo:'org/data-pipeline',type:'build_failure',agent:'sre',sum:'构建失败: pipeline-ci',st:'failed',dur:'35s'},
+  {seq:2015,repo:'team/backend-srv',type:'pull_request_opened',agent:'qa',sum:'新 PR #1278: webhook retry',st:'running',dur:'—'},
+  {seq:2014,repo:'team/web-frontend',type:'issue_comment',agent:'issue',sum:'@bob 评论了 Issue #320',st:'pending',dur:'—'},
+];
+function rEvents(pc){
+  document.getElementById('topActions').innerHTML='';
+  pc.innerHTML=`
+  <div class="toolbar">
+    <div class="search"><span>⌕</span><input placeholder="搜索事件/仓库..."></div>
+    <select><option>状态: 全部</option><option>completed</option><option>failed</option><option>running</option><option>pending</option></select>
+    <select><option>类型: 全部</option><option>issue_*</option><option>pull_request_*</option><option>build_*</option></select>
+    <select><option>时间: 24h</option><option>7天</option><option>30天</option></select>
+    <div class="sp"></div>
+  </div>
+  <div class="cd" style="display:flex;gap:24px;flex-wrap:wrap;padding:14px 20px;font-size:12px">
+    <span><span class="tgx">●</span> 完成 <b>320</b></span>
+    <span><span class="tr">●</span> 失败 <b>28</b></span>
+    <span><span class="tg tg-a">● 进行中 <b>4</b></span></span>
+    <span><span style="color:var(--y)">●</span> 排队 <b>52</b></span>
+    <span style="color:var(--t2)">成功率 <b style="color:var(--t)">92%</b></span>
+    <span style="color:var(--t2)">平均耗时 <b style="color:var(--t)">18s</b></span>
+  </div>
+  <div class="tw"><table>
+    <tr><th>Seq</th><th>仓库</th><th>类型</th><th>Agent</th><th>摘要</th><th>状态</th><th>耗时</th><th>操作</th></tr>
+    ${EVENTS.map(e=>`<tr>
+      <td class="ts t3">${e.seq}</td><td class="ts">${e.repo}</td>
+      <td><span class="tg ${e.type.includes('issue')?'tg-i':e.type.includes('pull')?'tg-c':e.type.includes('build')?'tg-s':'tg-d'}">${e.type}</span></td>
+      <td><span class="tg ${e.agent==='issue'?'tg-i':e.agent==='qa'?'tg-q':e.agent==='sre'?'tg-s':e.agent==='vod'?'tg-v':'tg-c'}">${e.agent}</span></td>
+      <td>${e.sum}</td>
+      <td>${e.st==='completed'?'<span class="tg tg-g">完成</span>':e.st==='failed'?'<span class="tg tg-r">失败</span>':e.st==='running'?'<span class="tg tg-a">进行中</span>':'<span class="tg tg-y">排队</span>'}</td>
+      <td class="ts t3">${e.dur}</td>
+      <td><button class="bt bt-o bt-s" onclick="toast('事件 ${e.seq} 详情（复用现有 Event Detail）')">详情</button></td>
+    </tr>`).join('')}
+  </table><div class="pager">共 404 条 · 上一页 1/21 下一页</div></div>`;
+}
+
+// ====== 8. IM Bot ======
+const BOTS=[
+  {id:'cli_a1b2c3',type:'chat',st:'connected',recv:128,sent:124,re:'0',err:'—'},
+  {id:'cli_d4e5f6',type:'vod',st:'connected',recv:96,sent:90,re:'2',err:'—'},
+  {id:'cli_g7h8i9',type:'chat',st:'failed',recv:12,sent:10,re:'14',err:'WS 连接断开'},
+];
+function rIm(pc){
+  document.getElementById('topActions').innerHTML='<button class="bt bt-o bt-s" onclick="toast(\'已刷新\')">⟳ 刷新</button>';
+  pc.innerHTML=`
+  <div class="cd" style="display:flex;gap:24px;flex-wrap:wrap;font-size:12px;padding:14px 20px">
+    <span><span class="tgx">●</span> 在线 <b>5</b></span>
+    <span><span class="tr">●</span> 异常 <b>1</b></span>
+    <span><span class="t3">●</span> 停用 <b>0</b></span>
+    <span style="color:var(--t2)">共 <b>6</b> 个 Bot</span>
+  </div>
+  <div class="tw"><table>
+    <tr><th>App ID</th><th>类型</th><th>状态</th><th>收发消息</th><th>重连次数</th><th>最后错误</th><th>操作</th></tr>
+    ${BOTS.map(b=>`<tr>
+      <td><b>${b.id}</b></td>
+      <td><span class="tg ${b.type==='chat'?'tg-ch':'tg-v'}">${b.type}</span></td>
+      <td>${b.st==='connected'?'<span class="tg tg-g"><span class="dot" style="background:var(--g)"></span>connected</span>':b.st==='reconnecting'?'<span class="tg tg-y">reconnecting</span>':'<span class="tg tg-r">failed</span>'}</td>
+      <td class="ts">${b.recv}/${b.sent}</td><td class="ts">${b.re}</td>
+      <td class="ts tr">${b.err}</td>
+      <td><button class="bt bt-o bt-s" onclick="toast('Bot ${b.id} 重启中...')">重启</button>
+          <button class="bt bt-o bt-s" style="color:var(--r);border-color:#f3c9c9" onclick="toast('Bot ${b.id} 已停用')">停用</button></td>
+    </tr>`).join('')}
+  </table></div>`;
+}
+
+// ====== 9. 公告 Notices ======
+function rNotices(pc){
+  document.getElementById('topActions').innerHTML='<button class="bt bt-p bt-s" onclick="openNotice()">＋ 发布公告</button>';
+  pc.innerHTML=`
+  <div class="cd">
+    <div class="flex fc gap12">
+      <span class="tg tg-y">warning</span><span class="tg tg-d">全部</span>
+      <div class="f1"><div style="font-size:13px;font-weight:600">📢 系统维护通知</div>
+      <div class="ts t2 mt8" style="line-height:1.6">2026-08-08 02:00 进行数据库备份与性能维护，预计 10 分钟，期间事件将排队处理。</div>
+      <div class="tx t3 mt8">发布于 admin · 08-05 10:00</div></div>
+      <span class="tg tg-g">启用</span>
+      <span class="flex gap6"><button class="bt bt-o bt-s" onclick="openNotice()">编辑</button><button class="bt bt-o bt-s" onclick="toast('公告已下线')">下线</button></span>
+    </div>
+  </div>
+  <div class="cd">
+    <div class="flex fc gap12">
+      <span class="tg tg-c">info</span><span class="tg tg-d">全部</span>
+      <div class="f1"><div style="font-size:13px;font-weight:600">🎉 新技能上线</div>
+      <div class="ts t2 mt8" style="line-height:1.6">官方新增 issue-advance 技能，支持知识库(codegraph)接入与高级运营。</div>
+      <div class="tx t3 mt8">发布于 admin · 08-01 09:30</div></div>
+      <span class="tg tg-g">启用</span>
+      <span class="flex gap6"><button class="bt bt-o bt-s" onclick="openNotice()">编辑</button><button class="bt bt-o bt-s" onclick="toast('公告已下线')">下线</button></span>
+    </div>
+  </div>`;
+}
+function openNotice(){mask(`<div class="modal-h"><h3>发布公告</h3><span class="modal-x" onclick="closeMask()">✕</span></div>
+  <div class="modal-b">
+    <div class="srow"><label>标题</label><input placeholder="公告标题"></div>
+    <div class="srow"><label>级别</label><select><option>info</option><option>warning</option><option>danger</option></select></div>
+    <div class="srow"><label>范围</label><select><option>all 全部</option><option>repo 仓库</option><option>user 用户</option></select></div>
+    <div class="srow"><label>目标</label><input placeholder="范围=repo/user 时填写"></div>
+    <div class="srow"><label>内容</label><textarea placeholder="公告正文..."></textarea></div>
+    <div class="srow"><label>过期时间</label><input placeholder="2026-08-15"></div>
+  </div>
+  <div class="modal-f"><button class="bt bt-o" onclick="closeMask()">取消</button><button class="bt bt-p" onclick="closeMask();toast('公告已发布')">发布</button></div>`);}
+
+// ====== 10. 审计日志 Audit ======
+const AUDITS=[
+  {t:'08-08 10:12:03',u:'admin',a:'disable_user',tgt:'user#3 (bob)',ip:'10.0.0.8'},
+  {t:'08-08 09:58:41',u:'admin',a:'create_user',tgt:'user#12 (carol)',ip:'10.0.0.8'},
+  {t:'08-07 22:31:00',u:'admin',a:'update_whitelist',tgt:'gitcode_login: alice',ip:'10.0.0.8'},
+  {t:'08-07 20:14:22',u:'admin',a:'update_settings',tgt:'meta: execution_mode',ip:'10.0.0.8'},
+  {t:'08-07 18:03:09',u:'admin',a:'reset_password',tgt:'user#5 (dave)',ip:'10.0.0.9'},
+];
+function rAudit(pc){
+  document.getElementById('topActions').innerHTML='<button class="bt bt-o bt-s" onclick="toast(\'已导出 audit.csv\')">导出 CSV</button>';
+  pc.innerHTML=`
+  <div class="toolbar">
+    <div class="search"><span>⌕</span><input placeholder="操作者/目标..."></div>
+    <select><option>操作: 全部</option><option>create_user</option><option>disable_user</option><option>update_whitelist</option></select>
+    <select><option>目标: 全部</option><option>user</option><option>repo</option><option>skill</option><option>config</option></select>
+    <select><option>时间: 7天</option><option>24h</option><option>30天</option></select>
+    <div class="sp"></div>
+  </div>
+  <div class="tw"><table>
+    <tr><th>时间</th><th>操作者</th><th>操作</th><th>目标</th><th>详情</th><th>IP</th></tr>
+    ${AUDITS.map(a=>`<tr>
+      <td class="ts t3">${a.t}</td><td><b>${a.u}</b></td>
+      <td><span class="tg ${a.a.includes('delete')||a.a.includes('disable')?'tg-r':a.a.includes('create')?'tg-g':'tg-a'}">${a.a}</span></td>
+      <td class="ts">${a.tgt}</td>
+      <td class="ts t3">{"user_id":3,"detail":"[REDACTED]"}</td><td class="ts t3">${a.ip}</td>
+    </tr>`).join('')}
+  </table><div class="pager">共 1,204 条 · 上一页 1/61 下一页</div></div>`;
+}
+
+// ====== 11. 系统设置 Settings ======
+function rSettings(pc){
+  document.getElementById('topActions').innerHTML='<button class="bt bt-p bt-s" onclick="toast(\'设置已保存（审计已记录）\')">保存</button>';
+  pc.innerHTML=`
+  <div class="stabs"><a class="ac" onclick="switchSTab(this)">执行模式</a><a onclick="switchSTab(this)">Webhook</a><a onclick="switchSTab(this)">OAuth</a><a onclick="switchSTab(this)">白名单</a></div>
+  <div class="cd">
+    <div class="cd-h"><h2>执行模式 <span class="c">仅 super_admin</span></h2></div>
+    <div class="radio-row"><input type="radio" name="em" checked><div><b>direct</b> <span class="ts t3">· 事件/chat 直接就地执行（现状）</span></div></div>
+    <div class="radio-row"><input type="radio" name="em"><div><b>queue_local</b> <span class="ts t3">· 入队 → bot 进程内本地 worker 执行</span></div></div>
+    <div class="radio-row"><input type="radio" name="em"><div><b>queue_remote</b> <span class="ts t3">· 入队 → 远端 RuntimeAgent 边端执行</span></div></div>
+  </div>
+  <div class="cd">
+    <div class="cd-h"><h2>Webhook</h2></div>
+    <div class="srow"><label>Webhook URL</label><input value="http://203.0.113.2:8080/webhook/gitcode"></div>
+  </div>
+  <div class="cd">
+    <div class="cd-h"><h2>OAuth <span class="c">仅 super_admin</span></h2></div>
+    <div class="srow"><label>Client ID</label><input value="cli_xxxxxxxx"></div>
+    <div class="srow"><label>Client Secret</label><input type="password" value="********"><span class="bt bt-o bt-s" style="cursor:pointer">👁</span></div>
+    <div class="srow"><label>Redirect URI</label><input value="https://grape.example.com/api/auth/callback/gitcode"></div>
+  </div>
+  <div class="cd">
+    <div class="cd-h"><h2>白名单开关</h2></div>
+    <div class="srow"><label></label><div style="display:flex;align-items:center;gap:10px"><span class="switch on"></span><span class="ts t2">启用登录白名单（当前 24 条）</span></div></div>
+  </div>`;
+}
+function switchSTab(el){document.querySelectorAll('.stabs a').forEach(a=>a.classList.remove('ac'));el.classList.add('ac');}
+
+// init：默认先进入登录页
+document.addEventListener('DOMContentLoaded',()=>{});
+</script>
+</body>
+</html>
