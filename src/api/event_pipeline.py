@@ -25,23 +25,41 @@ def get_agent_display_name(agent_type: str) -> str:
     return agent_type
 
 
+def _is_pr_payload(payload: dict) -> bool:
+    """判断是否为 PR 事件 payload（PR webhook 带 issues 关联列表 / pull_request 键）。"""
+    return ("issues" in payload) or bool(payload.get("pull_request")) or bool(payload.get("merge_request"))
+
+
 def resolve_issue_id(payload: dict) -> str:
-    """从事件 payload 提取 Issue/PR 编号"""
+    """从事件 payload 提取 Issue 编号。
+
+    注意：PR 事件不返回 PR 号（其 object_attributes.iid 是 PR 号，会误当 issue_id）；
+    PR 事件的真实关联 Issue 用 resolve_pr_issue_id（title/分支/issues 列表）。
+    """
     if not isinstance(payload, dict):
         return ""
     # A2A payload 用 issue_number 字段
     num = payload.get("issue_number", "")
     if num:
         return f"#{num}"
-    for key in ("issue", "pull_request", "merge_request"):
-        obj = payload.get(key, {})
-        if isinstance(obj, dict):
-            num = obj.get("number", obj.get("iid", ""))
-            if num:
-                return f"#{num}"
-    obj = payload.get("object_attributes", {})
+    # Issue 类事件（issue_comment 等）顶层 issue 对象
+    obj = payload.get("issue", {})
     if isinstance(obj, dict):
-        num = obj.get("number", obj.get("iid", obj.get("noteable_iid", obj.get("id", ""))))
+        num = obj.get("number", obj.get("iid", ""))
+        if num:
+            return f"#{num}"
+    # PR payload 中显式关联的 issues 列表（GitCode pull_request_*）
+    issues = payload.get("issues")
+    if isinstance(issues, list):
+        for it in issues:
+            if isinstance(it, dict):
+                num = it.get("number", it.get("iid", ""))
+                if num:
+                    return f"#{num}"
+    # Issue 类 webhook 的 object_attributes.iid（PR 事件的该字段是 PR 号，跳过）
+    obj = payload.get("object_attributes", {})
+    if isinstance(obj, dict) and not _is_pr_payload(payload):
+        num = obj.get("number", obj.get("iid", obj.get("noteable_iid", "")))
         if num:
             return f"#{num}"
     return ""
@@ -61,6 +79,15 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
     issue = _extract_issue_id_from_text(title)
     if issue:
         return issue
+
+    # 1.5 从 payload.issues 关联列表提取（GitCode pull_request_* 直接给出关联 Issue）
+    issues = payload.get("issues")
+    if isinstance(issues, list):
+        for it in issues:
+            if isinstance(it, dict):
+                _num = it.get("number", it.get("iid", ""))
+                if _num and str(_num) != "0":
+                    return f"#{_num}"
 
     # 2. 从分支名提取 issue-N
     branch = obj.get("source_branch", "") or obj.get("ref", "") or pr_obj.get("head", {}).get("ref", "") if isinstance(pr_obj.get("head"), dict) else (obj.get("source_branch", "") or obj.get("ref", ""))

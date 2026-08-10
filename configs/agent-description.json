@@ -38,11 +38,7 @@
     "description": "代码实现、PR 创建、自我审查（通过 A2A 由 Issue/QA Agent 触发，不直接感知 PR 事件）",
     "backend": "opencode",
     "order_num": 3,
-    "subscribe_events": [
-      "pull_request_opened",
-      "pull_request_updated",
-      "note_hook_pr"
-    ],
+    "subscribe_events": [],
     "enable": true
   },
   "qa": {

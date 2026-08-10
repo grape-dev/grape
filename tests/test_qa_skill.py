@@ -93,11 +93,12 @@ class TestQaSkillConfig:
             assert cfg[at].get("enable", True) is True, f"{at} enable should be true"
         assert cfg["sre"].get("enable", True) is False, "sre enable should be false"
 
-    def test_coding_agent_subscribes_pr_with_stage_gate(self):
-        # coding 订阅 PR 事件，按阶段门控（coding 阶段处理；vod/issue 阶段由 Issue Agent 审视）
+    def test_coding_agent_does_not_subscribe_pr(self):
+        # coding 不订阅 PR 事件（通过 A2A 由 Issue/QA Agent 触发，不直接感知 PR 事件）
+        # 见 vod-skill-upgrade-plan §3.0.3 归属矩阵：PR 事件按 issue_state 阶段分发，不落 coding 静态默认
         cfg = _load_json("agent-description.json")
         for evt in PR_SUBSCRIBED_EVENTS:
-            assert evt in cfg["coding"]["subscribe_events"], f"coding should subscribe {evt}"
+            assert evt not in cfg["coding"]["subscribe_events"], f"coding should NOT subscribe {evt}"
 
     def test_issue_opened_only_vod_subscribes(self):
         # D8：issue_opened 恒给 VOD——仅 vod 订阅，issue 不订阅
@@ -107,7 +108,7 @@ class TestQaSkillConfig:
 
     def test_issue_subscribes_issue_events_not_pr(self):
         # issue 订阅 Issue 类事件（issue_updated/issue_comment/issue_labeled），不订阅 PR 事件
-        # （PR 由 coding/qa 订阅进入 pipeline；vod/issue 阶段的 PR 审视由阶段矩阵分配）
+        # （PR 由 qa 订阅进入 pipeline；vod/issue 阶段的 PR 审视由阶段矩阵分配）
         cfg = _load_json("agent-description.json")
         for evt in ("issue_updated", "issue_comment", "issue_labeled"):
             assert evt in cfg["issue"]["subscribe_events"], f"issue should subscribe {evt}"
@@ -120,14 +121,42 @@ class TestQaSkillConfig:
         for evt in ("vod_signal", "issue_opened", "issue_updated", "issue_comment"):
             assert evt in cfg["vod"]["subscribe_events"], f"vod should subscribe {evt}"
 
-    def test_pr_events_multi_subscribed_but_stage_gated(self):
-        # PR 事件由 coding/qa（执行 agent）订阅，执行归属由 issue_state 阶段判定（§3.0.3），
-        # 不构成静态路由冲突——get_domain_agent 不再作为主路由
+    def test_pr_events_only_qa_subscribed_stage_gated(self):
+        # PR 事件仅由 qa 订阅（作为 pipeline 入口 gate），执行归属由 issue_state 阶段判定（§3.0.3）；
+        # coding 不直接订阅 PR（A2A 触发），避免未关联 Issue 的 PR 直接触发 coding 开发
         cfg = _load_json("agent-description.json")
         for evt in PR_SUBSCRIBED_EVENTS:
             subscribers = [a for a, info in cfg.items() if evt in info.get("subscribe_events", [])]
-            assert "coding" in subscribers and "qa" in subscribers, f"{evt} should be subscribed by coding+qa: {subscribers}"
+            assert "qa" in subscribers, f"{evt} should be subscribed by qa: {subscribers}"
+            assert "coding" not in subscribers, f"{evt} should NOT be subscribed by coding: {subscribers}"
             assert "issue" not in subscribers, f"{evt} should NOT be subscribed by issue: {subscribers}"
+
+
+class TestResolveIssueIdPR:
+    """resolve_issue_id / resolve_pr_issue_id：PR 事件不得把 PR 号当 issue_id（见 event_pipeline.py）"""
+
+    def _pr_payload(self, pr_number=114, issues=None):
+        return {"object_attributes": {"iid": pr_number, "number": pr_number, "title": "feat: x", "source_branch": "feat/x"},
+                "issues": issues or []}
+
+    def test_pr_number_not_used_as_issue_id(self):
+        from src.api.event_pipeline import resolve_issue_id
+        p = self._pr_payload(pr_number=114)
+        assert resolve_issue_id(p) == "", "PR 事件不应把 PR 号当 issue_id"
+
+    def test_pr_linked_issues_extracted(self):
+        from src.api.event_pipeline import resolve_issue_id, resolve_pr_issue_id
+        p = self._pr_payload(pr_number=114, issues=[{"number": 23, "iid": 23}])
+        assert resolve_issue_id(p) == "#23", resolve_issue_id(p)
+        assert resolve_pr_issue_id(p) == "#23", resolve_pr_issue_id(p)
+
+    def test_issue_event_still_extracts_issue(self):
+        from src.api.event_pipeline import resolve_issue_id
+        assert resolve_issue_id({"issue": {"number": 21, "iid": 21}}) == "#21"
+        # Issue 类 webhook：object_attributes.iid = Issue 号（非 PR payload）
+        assert resolve_issue_id({"object_attributes": {"iid": 20, "number": 20}}) == "#20"
+        # A2A
+        assert resolve_issue_id({"issue_number": 5}) == "#5"
 
 
 class TestQaSkillPrompt:
