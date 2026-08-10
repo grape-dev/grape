@@ -113,5 +113,5 @@ VOD 的职责：**把开发者声音变成清晰开发者需求**。
 ## 参考
 
 - 需求引导 + 审视 + 模板 + A2A 交办：`references/requirement-elicit-guide.md`
-- 项目知识基线生成：`skills/issue-advance/references/codegraph-project-analysis.md`（共用）
+- 项目知识基线生成：`references/codegraph-project-analysis.md`
 - GitCode API：`references/gitcode-api-reference.md`
