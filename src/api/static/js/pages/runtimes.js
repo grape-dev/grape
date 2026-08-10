@@ -32,7 +32,7 @@ function _healthBadge(h, suffix) {
 }
 
 function _scopeBar(sc, n) {
-  return `<div style="display:inline-flex;align-items:center;gap:8px;background:var(--s);color:#fff;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;margin:16px 0 10px">${_scopeLabel(sc)} <span style="background:rgba(255,255,255,.2);border-radius:10px;padding:0 8px;font-size:11px">${n}</span></div>`;
+  return `<div style="display:inline-flex;align-items:center;gap:8px;background:#e3edfd;color:#235ec7;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;margin:16px 0 10px">${_scopeLabel(sc)} <span style="background:rgba(35,94,199,.12);border-radius:10px;padding:0 8px;font-size:11px">${n}</span></div>`;
 }
 
 function _legendHtml() {
