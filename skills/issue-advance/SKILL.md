@@ -4,10 +4,6 @@ version: 3.1.0
 description: |
   Issue 高级运营（增强版，独立于基础 issue 技能）：项目知识基线 → 深度可开发性分析 → 分类/标签/分配 → Spec 生成 → A2A 触发开发。
   处理进入 `issue` 生命周期阶段的 Issue（由 VOD Agent 审视交办后；`issue_opened` 由 VOD 接管）。
-triggers:
-  - event_type: issue_updated
-  - event_type: issue_comment
-  - event_type: issue_labeled
 tools:
   - codegraph
 ---

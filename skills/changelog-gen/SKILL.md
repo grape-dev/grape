@@ -2,9 +2,6 @@
 name: changelog-gen
 version: 1.0.0
 description: 自动生成变更日志
-triggers:
-  - event_type: push
-  - event_type: release_created
 tools:
   - git
 ---

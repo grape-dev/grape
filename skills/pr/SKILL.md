@@ -4,11 +4,6 @@ version: 2.0.0
 description: |
   Pull Request 全生命周期管理：接收 → 关联 Issue → 代码审查 → 安全扫描 → 合并检查 → 评论回复。
    当收到 pull_request_opened、pull_request_updated、push 或 PR 上的评论事件时使用此技能。
-triggers:
-  - event_type: pull_request_opened
-  - event_type: pull_request_updated
-  - event_type: push
-  - event_type: note_hook_pr
 tools:
   - git
 ---

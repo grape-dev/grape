@@ -5,9 +5,6 @@ description: |
   开发者声音（VOD）分析技能。收集、分析、引导、提炼开发者需求，并构建项目知识基线以精准理解项目。
   双职责：①从 Issue / 飞书收集开发者声音，多轮引导收敛为清晰需求并建 Issue；
   ②接管 issue_opened 审视非 VOD 创建的 Issue，澄清后结构化总结并 A2A 交办 Issue Agent。
-triggers:
-  - event_type: vod_signal
-  - event_type: issue_opened
 tools:
   - codegraph
 ---

@@ -9,9 +9,6 @@
 name: skill-name
 version: 1.0.0
 description: 一句话描述技能用途
-triggers:
-  - event_type: push
-  - event_type: pull_request_opened
 tools:
   - git
   - docker
@@ -45,7 +42,6 @@ Agent 输出应遵循的格式。
 | `name` | 是 | Skill 唯一标识，与目录名一致 |
 | `version` | 是 | 语义化版本号 |
 | `description` | 是 | 一句话描述 |
-| `triggers` | 否 | 建议的触发事件类型列表（仅作文档，路由由 rules.yaml 决定） |
 | `tools` | 否 | 该 Skill 依赖的外部工具（供 Agent 判断环境是否满足） |
 
 ### Body (Markdown)
@@ -72,11 +68,12 @@ Agent 的职责：
 ```
 1. 读取 DEVOPS_SKILLS_DIR 环境变量
 2. 遍历目录下的子目录，每个子目录即一个 Skill
-3. 读取每个 Skill 的 SKILL.md，解析 front matter 中的 triggers 字段
-4. 根据当前事件类型匹配 triggers，决定激活哪些 Skills
-5. 加载激活 Skills 的完整内容（知识 + 步骤 + 判断标准）
-6. 按技能定义执行处理流程
+3. 读取每个 Skill 的 SKILL.md，按其正文说明判断是否适用
+4. 加载适用 Skills 的完整内容（知识 + 步骤 + 判断标准）
+5. 按技能定义执行处理流程
 ```
+
+> 事件 → Skill 的路由由 Grape 阶段矩阵/静态映射决定（见 `vod-skill-upgrade-plan.md` §3.0.3）；SKILL.md 不再声明 `triggers`。
 
 Agent 收到的运行环境：
 

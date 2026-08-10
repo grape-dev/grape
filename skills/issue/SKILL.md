@@ -4,9 +4,6 @@ version: 2.0.0
 description: |
   Issue 全生命周期管理：接收 → 分类 → 打标签 → 分配负责人 → 设置里程碑 → 关联 PR → 回复评论。
    当收到 issue_opened 或 issue_comment 事件时使用此技能。
-triggers:
-  - event_type: issue_opened
-  - event_type: issue_comment
 tools: []
 ---
 

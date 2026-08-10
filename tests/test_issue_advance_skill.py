@@ -58,7 +58,6 @@ class TestIssueAdvanceUnifiedFlow:
         assert "需求理解不清晰" in s or "需求不清晰" in s
         assert "vod" in s.split("超出能力范围")[1]
 
-    def test_triggers_no_issue_opened(self):
-        # issue_opened 已由 VOD 接管——issue-advance triggers 不应含 issue_opened
-        assert "- event_type: issue_opened" not in _skill()
-        assert "- event_type: issue_comment" in _skill()
+    def test_triggers_removed(self):
+        # 路由由 Grape 阶段矩阵/静态映射决定（§3.0.4）；issue-advance SKILL.md 不再声明 triggers
+        assert "triggers:" not in _skill()

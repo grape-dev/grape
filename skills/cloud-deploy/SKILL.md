@@ -6,8 +6,6 @@ description: |
   automatically determines build method from project files,
   deploys to Huawei Cloud using hcloud CLI, and verifies deployment.
   NOT for: non-merge PR events, pushes to non-master branches.
-triggers:
-  - event_type: pull_request_merged
 tools:
   - curl
   - git

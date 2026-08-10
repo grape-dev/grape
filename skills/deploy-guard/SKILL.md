@@ -2,9 +2,6 @@
 name: deploy-guard
 version: 1.0.0
 description: 部署前安全与合规检查守卫
-triggers:
-  - event_type: deploy_start
-  - event_type: build_success
 tools:
   - kubectl
   - docker

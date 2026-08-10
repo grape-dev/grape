@@ -6,8 +6,6 @@ description: |
   包括：判断话题相关性、决定是否回复、能力边界管理。
   扩展能力：任务处理（澄清被分配 Issue 的需求并回帖）、需求引导（将用户想法明确为可开发 Issue）。
   不适用于：GitCode 网页上的 Issue/PR 评论直接触发（用 issue skill）。
-triggers:
-  - event_type: chat
 tools: []
 ---
 

@@ -2,9 +2,6 @@
 name: incident-triage
 version: 1.0.0
 description: 生产事件分诊与定级方法论
-triggers:
-  - event_type: deploy_failure
-  - event_type: build_failure
 tools:
   - kubectl
   - git

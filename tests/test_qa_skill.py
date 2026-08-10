@@ -50,10 +50,12 @@ class TestQaSkillFile:
         assert "description:" in content
         assert content.split("---", 2)[1].strip() != ""
 
-    def test_front_matter_triggers_match_pr(self):
+    def test_front_matter_no_triggers(self):
+        # 路由由 Grape 阶段矩阵/静态映射决定（§3.0.4）；SKILL.md 不再声明 triggers
         content = _read_skill_md()
+        assert "triggers:" not in content
         for t in PR_TRIGGERS:
-            assert f"- event_type: {t}" in content, f"missing trigger {t}"
+            assert f"- event_type: {t}" not in content, f"triggers 已移除，不应含 {t}"
 
     def test_required_sections(self):
         content = _read_skill_md()

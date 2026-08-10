@@ -4,11 +4,6 @@ version: 1.0.0
 description: |
   Skill 仓库专有的 PR 审查：整体流程与 pr 技能一致，但审查标准参考 skill-review-and-quality.md。
   仅用于 huaweicloud-skills 等技能类仓库的 PR 审查。
-triggers:
-  - event_type: pull_request_opened
-  - event_type: pull_request_updated
-  - event_type: push
-  - event_type: note_hook_pr
 tools:
   - git
 ---
