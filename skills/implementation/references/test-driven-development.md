@@ -1,8 +1,3 @@
----
-name: test-driven-development
-description: Drives development with tests. Use when implementing any logic, fixing any bug, or changing any behavior. Use when you need to prove that code works, when a bug report arrives, or when you're about to modify existing functionality.
----
-
 # Test-Driven Development
 
 ## Overview
@@ -341,11 +336,6 @@ then verifies the test passes.
 ```
 
 This separation ensures the test is written without knowledge of the fix, making it more robust.
-
-## See Also
-
-For detailed testing patterns, examples, and anti-patterns across frameworks, see `references/testing-patterns.md`.
-
 ## Common Rationalizations
 
 | Rationalization | Reality |

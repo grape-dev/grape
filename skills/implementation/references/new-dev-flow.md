@@ -83,20 +83,20 @@ git push origin feat/issue-{number}
 
 所有 feature 开发都必须执行。
 
-读取 `skills/agent/spec-driven-development/SKILL.md`，编写 PRD 保存到 `docs/spec.md`，评论告知。
+读取 `references/spec-driven-development.md`，编写 PRD 保存到 `docs/spec.md`，评论告知。
 
 ### 能力五：方案设计
 
 所有 feature 开发都必须执行。
 
-读取 `skills/agent/planning-and-task-breakdown/SKILL.md`，输出任务到 `tasks/plan.md` 和 `tasks/todo.md`，评论告知。
+读取 `references/planning-and-task-breakdown.md`，输出任务到 `tasks/plan.md` 和 `tasks/todo.md`，评论告知。
 
 ### 能力六：代码实现
 
 所有开发任务都执行。
 
-1. 测试先行 — 读取 `skills/agent/test-driven-development/SKILL.md`（RED→GREEN→REFACTOR）
-2. 增量实现 — 读取 `skills/agent/incremental-implementation/SKILL.md`
+1. 测试先行 — 读取 `references/test-driven-development.md`（RED→GREEN→REFACTOR）
+2. 增量实现 — 读取 `references/incremental-implementation.md`
 
 ```bash
 git add -A && git commit -m "feat: #{number} 描述"
@@ -109,7 +109,7 @@ git push origin feat/issue-{number}
 
 创建 PR 前必须先执行，审查通过后才能创建 PR。
 
-读取 `skills/agent/code-review-and-quality/SKILL.md`，按五轴审查，修复发现的问题。
+读取 `references/code-review-and-quality.md`，按五轴审查，修复发现的问题。
 
 ### 能力八：创建 PR
 

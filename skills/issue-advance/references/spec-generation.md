@@ -219,7 +219,7 @@ coding agent 收到 A2A 调用后：
 
 1. 从 A2A context 获取 Spec 摘要
 2. 通过 GitCode API 获取 Issue 完整内容（含 Spec 评论）
-3. 基于 Spec 执行 `references/new-dev-flow.md` 的开发流程
+3. 基于 Spec，由 coding agent 按 implementation skill 的开发流程执行（spec 落在 Issue 评论作为上下文）
 4. Spec 中的 Technical Approach 对应方案设计
 5. Spec 中的 Acceptance Criteria 对应测试用例设计
 6. Spec 中的 Affected Modules 对应代码改动范围
