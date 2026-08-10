@@ -37,8 +37,18 @@ _db_path = os.environ.get("DEVOPS_DB_PATH", os.path.join(os.path.dirname(__file_
 db_lock = threading.RLock()
 
 
+def _is_mysql_backend() -> bool:
+    """是否启用 MySQL（云 RDS）后端。"""
+    return os.environ.get("DEVOPS_DB_BACKEND", "").lower() in ("mysql", "rds", "1", "true")
+
+
 def _backup_db(path: str, tag: str = "") -> str:
-    """迁移前备份 DB（仅在有实际数据且首次时），返回备份路径。失败不阻断（仅告警）。"""
+    """迁移前备份 DB（仅在有实际数据且首次时），返回备份路径。失败不阻断（仅告警）。
+
+    MySQL 后端下文件备份无意义（数据在远端），直接返回空串。
+    """
+    if _is_mysql_backend():
+        return ""
     try:
         if not os.path.exists(path):
             return ""
@@ -56,15 +66,20 @@ def _backup_db(path: str, tag: str = "") -> str:
         return ""
 
 
-db = sqlite3.connect(_db_path, check_same_thread=False)
-# WAL + busy_timeout：跨进程写安全（双进程 3000/8080 共享 DB，见 concurrency-design.md §2.1）
-try:
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA busy_timeout=5000")
-    db.execute("PRAGMA synchronous=NORMAL")
-    db.execute("PRAGMA foreign_keys=ON")
-except Exception as e:
-    log.warning(f"SQLite pragma setup failed: {e}")
+if _is_mysql_backend():
+    from src.mysql_compat import MySQLCompatDB, mysql_config
+    db = MySQLCompatDB(**mysql_config())
+    log.info(f"DB backend: MySQL RDS ({mysql_config()['host']}:{mysql_config()['port']}/{mysql_config()['database']})")
+else:
+    db = sqlite3.connect(_db_path, check_same_thread=False)
+    # WAL + busy_timeout：跨进程写安全（双进程 3000/8080 共享 DB，见 concurrency-design.md §2.1）
+    try:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA busy_timeout=5000")
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute("PRAGMA foreign_keys=ON")
+    except Exception as e:
+        log.warning(f"SQLite pragma setup failed: {e}")
 # 迁移旧表 sessions → chat_agent_session（幂等，须先于 CREATE 执行）
 try:
     _old_tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
