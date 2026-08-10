@@ -787,7 +787,7 @@ class TestSettings:
 
     def test_gitcode_repo_update(self):
         r = client.put("/api/settings/gitcode-repo/owner/repo",
-                       json={"bot_token": "test", "webhook_token": "test"}, headers=_headers)
+                       json={"bot_token": "test"}, headers=_headers)
         assert r.status_code == 200
 
     def test_agent_runtimes(self):

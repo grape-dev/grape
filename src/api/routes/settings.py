@@ -104,19 +104,15 @@ async def update_notifications(body: NotificationPrefs, user: dict = Depends(get
 async def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.user.db import get_bot_token_by_repo
     bot_token = get_bot_token_by_repo(owner, repo)
-    # 从 managed_repos 读取 webhook_token 和 bot_username
-    wh_token = ""
     bot_username = "devops-bot"
     repos = user_db.get_managed_repos(user["id"])
     for r in repos:
         if r["repo_owner"] == owner and r["repo_name"] == repo:
-            wh_token = r.get("gitcode_webhook_token", "")
             bot_username = r.get("bot_username", "") or "devops-bot"
             break
 
     return {
         "devops_bot_token_exists": bool(bot_token),
-        "webhook_token_exists": bool(wh_token),
         "webhook_url": user_db.get_meta_value("webhook_url") or "http://localhost:8080/webhook/gitcode",
         "bot_username": bot_username,
     }
@@ -124,21 +120,18 @@ async def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(ge
 
 class GitCodeRepoConfig(BaseModel):
     bot_token: str = ""
-    webhook_token: str = ""
     bot_username: str = "devops-bot"
 
 
 @router.put("/gitcode-repo/{owner}/{repo}")
 async def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
                                      user: dict = Depends(get_current_user)):
-    # 将 Bot Token / Webhook Token / Bot Username 存储到 managed_repos
-    from src.user.db import update_managed_repo_bot_token, update_managed_repo_webhook_token, update_managed_repo_bot_username
+    # 将 Bot Token / Bot Username 存储到 managed_repos（webhook_token 由托管流程自动维护）
+    from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
     if body.bot_token:
         update_managed_repo_bot_token(repo_key, body.bot_token)
-    if body.webhook_token:
-        update_managed_repo_webhook_token(repo_key, body.webhook_token)
     if body.bot_username:
         update_managed_repo_bot_username(repo_key, body.bot_username)
     return {"message": "GitCode Repo 配置已更新"}

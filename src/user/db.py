@@ -1179,35 +1179,6 @@ def get_user_gitcode_token(user_id: int) -> str:
     return ""
 
 
-def update_managed_repo_webhook_token(repo_key: str, webhook_token: str) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE managed_repos SET gitcode_webhook_token=? WHERE repo_key=?", (webhook_token, repo_key))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Update managed repo webhook token failed: {e}")
-        return False
-
-
-def resolve_repo_by_webhook_token(token: str) -> str | None:
-    """通过 webhook token 查找仓库全名（owner/repo，无前缀）"""
-    from src.repo_key import from_repo_key
-    if not token:
-        return None
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("SELECT repo_key FROM managed_repos WHERE gitcode_webhook_token=? LIMIT 1", (token,))
-            row = c.fetchone()
-            if row:
-                return from_repo_key(row[0])
-        except Exception:
-            pass
-    return None
-
-
 def get_webhook_token_by_repo(full_name: str) -> str:
     """根据 full_name（owner/repo）查找 repo 的预期 webhook token"""
     from src.repo_key import to_repo_key
