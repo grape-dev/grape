@@ -24,6 +24,9 @@
 8. 健康状态语义对齐 grape `src/runtime/health.py`（实现前先读该文件核对规则）
 9. 前端中文 UI；菜单/文案与设计文档一致
 10. 所有 DB 写操作必须经过 Service 层校验，禁止在 Controller 直接写共享表
+11. 软删除约定：admin_* 表统一五件套（created_at/created_by/updated_at/updated_by/deleted）；
+    删除=UPDATE deleted=1；查询默认 WHERE deleted=0；唯一键带 deleted 维度；
+    共享表无 deleted 列，清理保持物理删除
 
 ---
 
@@ -97,55 +100,73 @@ curl -s http://127.0.0.1:8081/api/admin/health
 **Files:**
 - Create: `admin/backend/src/main/resources/db/migration/V1__admin_schema.sql`
 
-**Step 1:** V1__admin_schema.sql（实体表/关联表统一含 created_at / updated_at / updated_by 三件套；updated_at 用 MySQL `ON UPDATE CURRENT_TIMESTAMP` 自动维护）
+**Step 1:** V1__admin_schema.sql（admin_* 表统一五件套：created_at / created_by / updated_at / updated_by / deleted 软删除；updated_at 用 MySQL `ON UPDATE CURRENT_TIMESTAMP` 自动维护）
 
 ```sql
+-- 约定：admin_* 表统一含五件套 created_at/created_by/updated_at/updated_by/deleted（软删除）
+-- created_by/updated_by = 操作者 admin 用户名
 CREATE TABLE admin_users (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  username VARCHAR(64) NOT NULL UNIQUE,
+  username VARCHAR(64) NOT NULL,
   password_hash VARCHAR(100) NOT NULL,
   nickname VARCHAR(64) DEFAULT '',
   status TINYINT DEFAULT 1,              -- 1 启用 0 禁用
+  deleted TINYINT DEFAULT 0,             -- 软删除：0 未删除 1 已删除
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  created_by VARCHAR(64) DEFAULT '',     -- 创建人（admin 用户名）
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  updated_by VARCHAR(64) DEFAULT ''      -- 最后更新人（admin 用户名）
+  updated_by VARCHAR(64) DEFAULT '',     -- 最后更新人（admin 用户名）
+  UNIQUE KEY uk_users_username (username, deleted)   -- 软删除下用户名可复用（唯一性带 deleted 维度）
 );
 CREATE TABLE admin_roles (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  code VARCHAR(64) NOT NULL UNIQUE,      -- SUPER_ADMIN / VIEWER / OPS / 自定义
+  code VARCHAR(64) NOT NULL,             -- SUPER_ADMIN / VIEWER / OPS / 自定义
   name VARCHAR(64) NOT NULL,
   is_protected TINYINT DEFAULT 0,
+  deleted TINYINT DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  created_by VARCHAR(64) DEFAULT '',
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  updated_by VARCHAR(64) DEFAULT ''
+  updated_by VARCHAR(64) DEFAULT '',
+  UNIQUE KEY uk_roles_code (code, deleted)
 );
 CREATE TABLE admin_permission_menus (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  code VARCHAR(64) NOT NULL UNIQUE,      -- runtime.devices / runtime.engines / runtime.credentials / ai.assistant / sys.users / sys.roles
+  code VARCHAR(64) NOT NULL,             -- runtime.devices / runtime.engines / runtime.credentials / ai.assistant / sys.users / sys.roles
   name VARCHAR(64) NOT NULL,
   path VARCHAR(128) NOT NULL,            -- /runtime/devices 等前端路由
   parent_id BIGINT DEFAULT 0,
   sort INT DEFAULT 0,
+  deleted TINYINT DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  created_by VARCHAR(64) DEFAULT '',
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  updated_by VARCHAR(64) DEFAULT ''
+  updated_by VARCHAR(64) DEFAULT '',
+  UNIQUE KEY uk_menus_code (code, deleted)
 );
 CREATE TABLE admin_role_menu_rel (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,  -- 软删除下改用自增主键（原复合主键无法容纳 deleted 多版本）
   role_id BIGINT NOT NULL,
   menu_id BIGINT NOT NULL,
+  deleted TINYINT DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  created_by VARCHAR(64) DEFAULT '',
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  updated_by VARCHAR(64) DEFAULT '',     -- 最后一次改角色菜单绑定的操作人
-  PRIMARY KEY (role_id, menu_id)
+  updated_by VARCHAR(64) DEFAULT '',
+  UNIQUE KEY uk_rm (role_id, menu_id, deleted)
 );
 CREATE TABLE admin_user_role_rel (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
   user_id BIGINT NOT NULL,
   role_id BIGINT NOT NULL,
+  deleted TINYINT DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  created_by VARCHAR(64) DEFAULT '',
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  updated_by VARCHAR(64) DEFAULT '',     -- 最后一次改用户角色绑定的操作人
-  PRIMARY KEY (user_id, role_id)
+  updated_by VARCHAR(64) DEFAULT '',
+  UNIQUE KEY uk_ur (user_id, role_id, deleted)
 );
+-- audit_log 保持 append-only：只有 created_at（事件日志无"更新/删除"语义）
 CREATE TABLE admin_audit_log (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   user_id BIGINT, username VARCHAR(64),
@@ -153,9 +174,14 @@ CREATE TABLE admin_audit_log (
   target VARCHAR(255), detail VARCHAR(1024),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
--- audit_log 保持 append-only：只有 created_at（事件日志无"更新"语义，不加 updated_at/updated_by）
--- updated_by 维护规则：所有写操作在 Service 层从 JWT 上下文取当前 username 填充 updated_by，
--- JPA 实体对应映射 created_at/updated_at/updated_by 三字段
+-- 软删除规则（全局约束）：
+-- 1) 所有查询默认 WHERE deleted=0（菜单树/角色/用户列表/绑定关系同理）
+-- 2) 删除操作 = UPDATE deleted=1，不做物理 DELETE；角色权限保存 = 旧绑定标 deleted=1 + 新集合插入 deleted=0
+-- 3) 唯一约束带 deleted 维度（UNIQUE KEY (..., deleted)），软删除后同名/同 code 可重建
+-- 4) 软删除仅适用于 admin_* 表；共享表（agent_runtimes/agent_tasks/runtime_credentials）无 deleted 列，
+--    admin 对共享表的清理保持物理删除（见 P2.4）
+-- created_by/updated_by 维护：所有写操作在 Service 层从 JWT 上下文取当前 username 填充；
+-- JPA 实体对应映射五字段
 -- 种子：角色
 INSERT INTO admin_roles (code, name, is_protected) VALUES
  ('SUPER_ADMIN','超级管理员',1),('VIEWER','只读',1),('OPS','运营',0);
