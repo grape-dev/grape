@@ -54,7 +54,7 @@
               <td>{{ e.name }}</td>
               <td class="t3">{{ e.version || '-' }}</td>
               <td>{{ e.device || '-' }}</td>
-              <td>{{ scopeText(e.scope) }}</td>
+              <td><span class="tg tg-c">{{ scopeText(e.scope) }}</span></td>
               <td><span :class="['tg', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
               <td class="t2">{{ e.status }}</td>
               <td class="t3">{{ e.lastSeenAt || '-' }}</td>
@@ -81,7 +81,7 @@
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">设备</span> {{ e.device || '—' }}</div>
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">状态</span> {{ e.status }}</div>
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">心跳</span> {{ e.lastSeenAt || '—' }}</div>
-            <div><span style="color:var(--t3);display:inline-block;min-width:46px">归属/范围</span> {{ e.ownerId || '—' }} · {{ scopeText(e.scope) }}</div>
+            <div><span style="color:var(--t3);display:inline-block;min-width:46px">归属/范围</span> {{ e.ownerId || '—' }} <span class="tg tg-c" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span></div>
           </div>
           <div style="display:flex;justify-content:flex-end;padding-top:10px;border-top:1px solid var(--b);margin-top:10px">
             <a class="bt bt-o bt-s" @click="remove(e)">删除</a>

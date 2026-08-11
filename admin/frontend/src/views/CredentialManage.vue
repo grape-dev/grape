@@ -57,7 +57,7 @@
           <span style="font-weight:600;font-size:14px">
             {{ c.name }}
             <span style="font-weight:400;color:var(--t3);font-size:12px">
-              {{ scopeText(c.scope) }}<span v-if="c.status !== 'active'"> · {{ c.status }}</span>
+              <span class="tg tg-c" style="font-size:11px;padding:1px 6px">{{ scopeText(c.scope) }}</span><span v-if="c.status !== 'active'" style="color:var(--t3)"> · {{ c.status }}</span>
             </span>
           </span>
         </div>

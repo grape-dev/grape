@@ -33,7 +33,7 @@
         <tbody>
           <tr v-for="d in devices" :key="d.id">
             <td>{{ d.deviceName || d.name }}</td>
-            <td>{{ scopeText(d.scope) }}</td>
+            <td><span class="tg tg-c">{{ scopeText(d.scope) }}</span></td>
             <td><span :class="['tg', d.status === 'active' ? 'tg-g' : 'tg-d']">{{ d.status }}</span></td>
             <td><span :class="['tg', healthClass(d.health)]">{{ healthText(d.health) }}</span></td>
             <td>{{ d.engineCount }}</td>
@@ -60,7 +60,7 @@
           </span>
           <span style="font-weight:600;font-size:14px">
             {{ d.deviceName || d.name }}
-            <span style="font-weight:400;color:var(--t3);font-size:12px">{{ d.status }} · {{ scopeText(d.scope) }}</span>
+            <span style="font-weight:400;color:var(--t3);font-size:12px">{{ d.status }} <span class="tg tg-c" style="font-size:11px;padding:1px 6px">{{ scopeText(d.scope) }}</span></span>
           </span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
