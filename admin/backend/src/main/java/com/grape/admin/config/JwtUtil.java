@@ -36,10 +36,16 @@ public class JwtUtil {
     }
 
     public String generateToken(Long userId, String username) {
+        return generateToken(userId, username, null, expireMinutes);
+    }
+
+    /** 带 type（access/refresh）与自定义有效期的签发 */
+    public String generateToken(Long userId, String username, String type, long expireMinutes) {
         Date now = new Date();
         return Jwts.builder()
                 .setSubject(String.valueOf(userId))
                 .claim("username", username)
+                .claim("type", type == null ? "access" : type)
                 .setIssuedAt(now)
                 .setExpiration(new Date(now.getTime() + expireMinutes * 60_000))
                 .signWith(key, SignatureAlgorithm.HS256)
