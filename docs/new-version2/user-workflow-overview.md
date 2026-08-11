@@ -288,6 +288,7 @@ Pipeline 按 **Issue** 维度聚合展示工作流进展：
 ```
 
 - **Issue 链接**：上方 "Issue #342" 为可点击链接（跳转 `https://gitcode.com/{owner}/{repo}/issues/{n}`）；历史表行点击仅用于切换上方 Agent 卡片。
+- **排序**：Pipeline History 按 Issue 最新活动**倒序**（最新的 issue 排最前，原为 issue 首次出现顺序）。
 - **执行态**：由 `agent_tasks` 中 `dispatched/running` 任务实时派生，执行中的 Issue 显示 `⚡执行中` 徽标（空闲显示「空闲」）。
 - **Agent 卡片**：每阶段展示该 Agent 对该 Issue 最新一条 Event 的 title、状态（✅ Done / 🔄 In Progress / ❌ Failed / ⏳ Pending）与 actor（@用户名）；**未涉及任务的阶段（Pending）卡片整体调暗**（灰色背景 + 降饱和 + 弱化文字 + 降低透明度）。
 - **责任人判定**：优先取 Issue assignee（从事件 payload 解析）；缺失时取当前阶段 Agent 最新 Event 的 `actor`，若为 bot 则显示 Agent 显示名，若为项目成员则显示其用户名。
@@ -327,8 +328,8 @@ Pipeline 按 **Issue** 维度聚合展示工作流进展：
 │  └────────────────────────────────────────────────┘  │
 │                                                        │
 │  ┌─ Event History ────────────────────────────────┐  │
-│  │  12:05 Signal: CI too slow → Issue #345 [Done]  │  │
-│  │  10:30 issue_opened ... @alice 12s [Done]       │  │
+│  │  #503 #345 12:05 Signal: CI too slow [Done]     │  │
+│  │  #499 #345 10:30 issue_opened @alice 12s [Done]  │  │
 │  └────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```

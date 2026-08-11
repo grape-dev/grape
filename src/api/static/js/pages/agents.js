@@ -73,6 +73,8 @@ function renderAgent(name, data) {
       <div class="t">${fmtLocalTime(ev.created_at).substring(11,16) || '--:--'}</div>
       <div class="ac">${ev.summary || ev.title || ev.event_type}
         ${ev.actor ? ` <span class="ts t2">@${ev.actor}</span>` : ''}
+        <span class="ts t3">Seq #${ev.seq || '?'}</span>
+        ${ev.issue_id ? ` <span class="tg tg-d">${ev.issue_id}</span>` : ''}
         ${ev.duration ? ` <span class="ts t3">${ev.duration}s</span>` : ''}
         ${ev.backend ? ` <span class="tg tg-d">${ev.backend}</span>` : ''}
         <span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}">${ev.status}</span>

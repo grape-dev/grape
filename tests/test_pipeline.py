@@ -202,3 +202,49 @@ class TestExecutingDerivation:
 
     def test_empty_repo(self):
         assert _running_issue_ids("gitcode:org/pipeline-test") == set()
+
+    def test_pipeline_issues_sorted_latest_first(self):
+        """最新活动的 issue 排最前（原为 issue 首次出现顺序，最早 issue 恒在前）。"""
+        from fastapi.testclient import TestClient
+        from src.api.main import app
+        from src.api.deps import get_current_user
+
+        def _fake_user():
+            return {"id": 1, "username": "tester", "nickname": "T"}
+        app.dependency_overrides[get_current_user] = _fake_user
+
+        # 清空该 repo 的 events
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE repo_key='gitcode:org/pipeline-test'")
+            db.commit()
+
+        # 插入两个 issue 的事件：issue A 先出现（seq 1-2），issue B 后出现（seq 3）
+        # B 最新活动 seq=3 > A 最新活动 seq=2 → 排序后 B 应在前
+        rows = [
+            (1, "#A", "issue_opened", "vod", "tA", "completed", "alice"),
+            (2, "#A", "issue_comment", "vod", "tA", "completed", "alice"),
+            (3, "#B", "issue_opened", "vod", "tB", "completed", "alice"),
+        ]
+        with db_lock:
+            c = db.cursor()
+            for seq, iid, et, ag, title, status, actor in rows:
+                c.execute(
+                    "INSERT INTO events (seq, repo_key, issue_id, event_type, agent_type, title, summary, status, actor, source, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+                    (seq, "gitcode:org/pipeline-test", iid, et, ag, title, title, status, actor, "gitcode"))
+            db.commit()
+
+        client = TestClient(app)
+        r = client.get("/api/pipeline/org/pipeline-test")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        # active 应为最新活动的 issue（B，seq=3 最新）
+        assert data["active"]["issue_id"] == "#B", \
+            f"最新活动的 issue 应排最前(active), got {data['active']['issue_id']}"
+        # history 第一条应为 A（次新）
+        assert data["history"][0]["issue_id"] == "#A", \
+            f"history 第一条应为 A, got {[h['issue_id'] for h in data['history']]}"
+        app.dependency_overrides.clear()
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE repo_key='gitcode:org/pipeline-test'")
+            db.commit()
