@@ -129,7 +129,8 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
         return None
     work = _analysis_dir(repo_key)
     try:
-        if not os.path.isdir(os.path.join(work, ".git")):
+        _git_marker = os.path.join(work, ".git")
+        if not (os.path.isfile(_git_marker) or os.path.isdir(_git_marker)):
             os.makedirs(work, exist_ok=True)
             # 从 bare mirror 检出（checkout 到分析副本，不 clone 远程，避免重复拉取）
             code, out, err = _run(["git", "--git-dir", base, "worktree", "add", "--force", work, "origin/HEAD"], timeout=900)
@@ -145,11 +146,12 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
         # 刷新 main/master 到最新
         for br in ("origin/main", "origin/master"):
             _run(["git", "-C", work, "fetch", "origin", br], timeout=300)
-        # codegraph 索引初始化（首次需要，持久化于分析副本 .codegraph/）
-        code, out, err = _run(["codegraph", "init"], cwd=work, timeout=600)
-        if code != 0 and "already" not in err.lower():
-            log.warning(f"project-info codegraph init failed {repo_key}: {err[:200]}")
-            return None
+        # codegraph 索引初始化（幂等：已存在则跳过；索引持久化于分析副本 .codegraph/）
+        if not os.path.isdir(os.path.join(work, ".codegraph")):
+            code, out, err = _run(["codegraph", "init"], cwd=work, timeout=600)
+            if code != 0:
+                log.warning(f"project-info codegraph init failed {repo_key}: {err[:200]}")
+                return None
         return work
     except Exception as e:
         log.warning(f"project-info analysis worktree failed {repo_key}: {e}")
