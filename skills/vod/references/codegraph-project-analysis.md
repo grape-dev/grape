@@ -1,6 +1,6 @@
 # Codegraph 项目分析指南
 
-> ⚠️ **职责上收（multi-issue-isolation-design.md §2.6）**：本项目知识基线的生成已**上收为服务端统一维护**（builder / 指定 runtime 执行，结果写回服务端），执行机上的 Agent **不再自行生成**。Agent 只需读取 prompt 注入的「项目知识基线」章节；本指南仅作为服务端 builder 的执行手册保留。
+> ⚠️ **职责上收（multi-issue-isolation-design.md §2.6）**：本项目知识基线的生成已**上收为服务端统一维护**（`src/project_info/builder.py` 调用 codegraph CLI 生成，issue_opened 时后台触发，结果写回服务端），执行机上的 Agent **不再自行生成**。Agent 只需读取 prompt 注入的「项目知识基线」章节；本指南作为服务端 builder 的实现手册保留（已落地）。
 
 ## 执行前提
 

@@ -236,6 +236,12 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if event_type == "issue_opened":
         agent_type = "vod"
         log.info(f"Pipeline: issue_opened -> VOD (stage init)")
+        # project-info 后台刷新（服务端 codegraph 生成基线，不阻塞 webhook；见 codegraph-builder-plan.md）
+        try:
+            from src.project_info.builder import maybe_refresh_project_info
+            threading.Thread(target=maybe_refresh_project_info, args=(repo_key,), daemon=True).start()
+        except Exception as e:
+            log.warning(f"Pipeline: project-info refresh trigger failed: {e}")
     else:
         if event_type in PR_EVENT_TYPES:
             _default = PR_DEFAULT_AGENT
