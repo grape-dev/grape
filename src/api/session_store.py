@@ -56,14 +56,26 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
 
 def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                     a2a_seq: int | None = None):
-    """写入/更新 Issue 阶段（幂等 upsert）。"""
+    """写入/更新 Issue 阶段（幂等 upsert，兼容 SQLite/MySQL）。
+
+    原实现 INSERT OR REPLACE ... VALUES ((SELECT id FROM issue_state ...)) 在
+    MySQL 下报 1093（自引用子查询），改为先查后改/插。
+    """
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO issue_state (id, repo_key, issue_id, stage, owner_agent, a2a_seq, updated_at) "
-            "VALUES ((SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?), ?, ?, ?, ?, ?, datetime('now'))",
-            (repo_key, issue_id, repo_key, issue_id, stage, owner_agent, a2a_seq)
-        )
+        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
+        row = c.fetchone()
+        if row:
+            c.execute(
+                "UPDATE issue_state SET stage=?, owner_agent=?, a2a_seq=?, updated_at=datetime('now') WHERE id=?",
+                (stage, owner_agent, a2a_seq, row[0]),
+            )
+        else:
+            c.execute(
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, a2a_seq, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, datetime('now'))",
+                (repo_key, issue_id, stage, owner_agent, a2a_seq),
+            )
         db.commit()
     from src.config import log
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent}")

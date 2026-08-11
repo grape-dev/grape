@@ -201,9 +201,10 @@ def _translate_create_table(sql: str) -> str:
         # 索引列（复合键成员）中的 TEXT → VARCHAR(191)
         if col_name in index_cols:
             c = re.sub(r"^([`\"\w]+\s+)TEXT\b", r"\1VARCHAR(191)", c, count=1, flags=re.I)
-        # 行内 UNIQUE 的 TEXT 列 → VARCHAR(191)（如 username TEXT UNIQUE NOT NULL）
-        if re.search(r"\bTEXT\s+UNIQUE\b", c, re.I):
-            c = re.sub(r"\bTEXT\s+UNIQUE\b", "VARCHAR(191) UNIQUE", c, count=1, flags=re.I)
+        # 行内 UNIQUE 的 TEXT 列 → VARCHAR(191)（如 username TEXT UNIQUE NOT NULL /
+        # name TEXT NOT NULL UNIQUE —— TEXT 与 UNIQUE 之间允许列修饰符，否则 MySQL 1170）
+        if re.search(r"\bTEXT\b[^,]*\bUNIQUE\b", c, re.I) and not re.search(r"\bUNIQUE\s*\(", c, re.I):
+            c = re.sub(r"\bTEXT\b", "VARCHAR(191)", c, count=1, flags=re.I)
         # TEXT PRIMARY KEY（单列主键）
         c = _COL_TEXT_PK_RE.sub(lambda mm: f"{mm.group(1)}{mm.group(2)} VARCHAR(191) PRIMARY KEY", c)
         # INTEGER PRIMARY KEY AUTOINCREMENT → INT AUTO_INCREMENT PRIMARY KEY
