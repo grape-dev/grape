@@ -14,10 +14,11 @@ echo "[1/5] 构建后端 jar..."
 echo "[2/5] 构建前端 dist..."
 (cd "$FRONTEND_DIR" && npm run build >/dev/null)
 
-echo "[3/5] 拷贝产物..."
+echo "[3/5] 拷贝产物（前端先清空，防旧 bundle 堆积）..."
 mkdir -p "$DEST/backend" "$DEST/frontend" "$DEST/logs"
 cp "$BACKEND_DIR/target/admin-backend-0.1.0.jar" "$DEST/backend/"
 cp "$BACKEND_DIR/ai_hermes_query.py" "$DEST/backend/"
+rm -rf "$DEST/frontend/"*
 cp -r "$FRONTEND_DIR/dist/"* "$DEST/frontend/"
 
 echo "[4/5] 启动服务..."
