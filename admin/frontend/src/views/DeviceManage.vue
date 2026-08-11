@@ -86,11 +86,10 @@
     <div class="modal-box">
       <h4>设备详情：{{ detail.deviceName || detail.name }}</h4>
       <p class="t2">健康：{{ detail.health }} ｜ 最后心跳：{{ detail.lastSeenAt }} ｜ IP：{{ detail.lastIp }}</p>
-      <div class="flex gap8" style="align-items:center;margin:14px 0 4px">
-        <span class="t2" style="font-size:12px">引擎</span>
-        <input v-model="engineSearch" placeholder="搜索..." style="width:110px;padding:3px 8px;font-size:11px;border:1px solid var(--b);border-radius:6px;background:var(--bg);outline:none" />
-        <select v-model="selectedEngineId" @change="onEngineChange" style="padding:3px 8px;font-size:11px;border:1px solid var(--b);border-radius:6px;background:var(--bg);outline:none;cursor:pointer;max-width:240px">
-          <option v-for="e in filteredEngines" :key="e.id" :value="e.id">{{ e.name }} v{{ e.version || '' }}</option>
+      <div style="margin:14px 0 4px">
+        <select v-model="selectedEngineId" @change="onEngineChange" style="padding:3px 8px;font-size:11px;border:1px solid var(--b);border-radius:6px;background:var(--bg);outline:none;cursor:pointer;max-width:260px">
+          <option :value="null">全部引擎</option>
+          <option v-for="e in detail.engines || []" :key="e.id" :value="e.id">{{ e.name }}</option>
         </select>
       </div>
       <h5>关联任务（{{ detail.tasks?.totalElements ?? 0 }} 条）</h5>
@@ -122,7 +121,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import http from '../api'
 
 const devices = ref([])
@@ -134,7 +133,6 @@ const name = ref('')
 const view = ref('list')
 const detail = ref(null)
 const selectedEngineId = ref(null)
-const engineSearch = ref('')
 const activeTab = { background: 'var(--a)', color: '#fff', borderColor: 'var(--a)' }
 const sizeOptions = [5, 10, 20, 50]
 const size = ref(5)
@@ -158,13 +156,6 @@ function dotStyle(h) {
   const b = BADGE[h] || { color: 'var(--t3)' }
   return { width: '7px', height: '7px', borderRadius: '50%', background: b.color, display: 'inline-block' }
 }
-
-const filteredEngines = computed(() => {
-  const list = detail.value?.engines || []
-  const q = engineSearch.value.trim().toLowerCase()
-  if (!q) return list
-  return list.filter(e => (e.name || '').toLowerCase().includes(q) || (e.version || '').toLowerCase().includes(q))
-})
 
 async function load() {
   const { data } = await http.get('/devices', { params: { status: status.value, name: name.value, page: page.value, size: size.value } })
@@ -198,11 +189,6 @@ async function openDetail(d) {
   if (selectedEngineId.value) params.engineId = selectedEngineId.value
   const { data } = await http.get(`/devices/${d.id}`, { params })
   detail.value = data
-  if (!selectedEngineId.value && data.engines?.length) {
-    // 默认选中第一个引擎，再按引擎过滤重取任务
-    selectedEngineId.value = data.engines[0].id
-    return openDetail(detail.value)
-  }
 }
 function onEngineChange() {
   taskPage.value = 0
