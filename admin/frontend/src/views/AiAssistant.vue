@@ -70,7 +70,7 @@ async function send() {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
       body: JSON.stringify({ query: q, sessionId })
     })
-    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`)
+    if (!resp.ok || !resp.body) throw new Error(resp.status === 502 ? '服务暂时不可用（可能正在部署/重启），请稍后重试' : `HTTP ${resp.status}`)
     const reader = resp.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''

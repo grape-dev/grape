@@ -22,6 +22,9 @@ http.interceptors.response.use(
       if (window.location.pathname !== '/login') {
         window.location.href = '/login'
       }
+    } else if (!err.response || err.response.status >= 500) {
+      // 502/503/504/网络错误：后端可能正在部署/重启
+      alert('服务暂时不可用（可能正在部署/重启），请稍后重试')
     }
     return Promise.reject(err)
   }

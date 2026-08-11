@@ -21,11 +21,19 @@ cp "$BACKEND_DIR/ai_hermes_query.py" "$DEST/backend/"
 rm -rf "$DEST/frontend/"*
 cp -r "$FRONTEND_DIR/dist/"* "$DEST/frontend/"
 
-echo "[4/5] 启动服务..."
+echo "[4/5] 启动服务（jar 未变化则跳过后端重启，避免 502 窗口）..."
 cp "$REPO/admin/deploy/admin-backend.service" /etc/systemd/system/
 cp "$REPO/admin/deploy/nginx-grape-admin.conf" /etc/nginx/conf.d/grape-admin.conf
 systemctl daemon-reload
-systemctl enable --now admin-backend >/dev/null 2>&1 || systemctl restart admin-backend
+NEW_SHA=$(sha256sum "$BACKEND_DIR/target/admin-backend-0.1.0.jar" | awk '{print $1}')
+if [ "$NEW_SHA" != "$(cat "$DEST/backend/.jar_sha" 2>/dev/null || true)" ]; then
+  echo "  jar 有变化 → 重启 admin-backend"
+  systemctl enable --now admin-backend >/dev/null 2>&1 || systemctl restart admin-backend
+  echo "$NEW_SHA" > "$DEST/backend/.jar_sha"
+else
+  echo "  jar 无变化 → 跳过后端重启（无 502 窗口）"
+  systemctl is-active admin-backend >/dev/null || systemctl start admin-backend
+fi
 nginx -t >/dev/null && systemctl enable --now nginx >/dev/null 2>&1 || systemctl restart nginx
 
 echo "[5/5] 健康检查..."
