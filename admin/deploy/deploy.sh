@@ -14,12 +14,13 @@ echo "[1/5] 构建后端 jar..."
 echo "[2/5] 构建前端 dist..."
 (cd "$FRONTEND_DIR" && npm run build >/dev/null)
 
-echo "[3/5] 拷贝产物（前端先清空，防旧 bundle 堆积）..."
+echo "[3/5] 拷贝产物（先校验 dist 存在，再清空防旧 bundle 堆积）..."
+[ -f "$FRONTEND_DIR/dist/index.html" ] || { echo "ERROR: dist 产物缺失，中止部署（不清空线上目录）"; exit 1; }
 mkdir -p "$DEST/backend" "$DEST/frontend" "$DEST/logs"
 cp "$BACKEND_DIR/target/admin-backend-0.1.0.jar" "$DEST/backend/"
 cp "$BACKEND_DIR/ai_hermes_query.py" "$DEST/backend/"
 rm -rf "$DEST/frontend/"*
-cp -r "$FRONTEND_DIR/dist/"* "$DEST/frontend/"
+cp -r "$FRONTEND_DIR/dist/." "$DEST/frontend/"
 
 echo "[4/5] 启动服务（jar 未变化则跳过后端重启，避免 502 窗口）..."
 cp "$REPO/admin/deploy/admin-backend.service" /etc/systemd/system/
