@@ -164,6 +164,13 @@ function dotStyle(h) {
   return { width: '7px', height: '7px', borderRadius: '50%', background: b.color, display: 'inline-block' }
 }
 
+const filteredEngines = computed(() => {
+  const list = detail.value?.engines || []
+  const q = engineSearch.value.trim().toLowerCase()
+  if (!q) return list
+  return list.filter(e => (e.name || '').toLowerCase().includes(q) || (e.version || '').toLowerCase().includes(q))
+})
+
 async function load() {
   const { data } = await http.get('/devices', { params: { status: status.value, name: name.value, page: page.value, size: size.value } })
   devices.value = data.content
