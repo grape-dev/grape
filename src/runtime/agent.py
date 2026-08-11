@@ -3,7 +3,17 @@
 见 agent-runtime-design.md §7.4 / tech-impl.md §1.4 / skill-delivery-remote.md §3.5。
 流程：discover_runtimes → register → recover_orphans → 循环 claim（带 jitter）→ 执行 → 回报。
 """
-import asyncio, json, os, random, sys
+import sys
+
+# 版本守卫：代码使用 Python 3.10+ 联合类型语法（X | None），<3.10 会在 import 期崩溃。
+# 放最顶部（任何 import 之前），给清晰报错而非 traceback。
+if sys.version_info < (3, 10):
+    print(f"RuntimeAgent requires Python >= 3.10 (got {sys.version.split()[0]}). "
+          f"请用 python3.12 重建 venv: python3.12 -m venv .venv && .venv/bin/pip install -r requirements-worker.txt",
+          file=sys.stderr)
+    sys.exit(1)
+
+import asyncio, json, os, random
 
 from src.config import log
 
