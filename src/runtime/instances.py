@@ -43,6 +43,30 @@ def resolve_instance_id(engine_name: str) -> int | None:
     return None
 
 
+def runtime_instance_name(runtime_id) -> str:
+    """按 runtime_id 反查引擎实例名（`{type}-{device}`，与 UI 同源）。查不到返回空串。
+
+    日志与 events.runtime 用统一实例名（如 `opencode-worker-123249`），而非仅类型名 `opencode`。
+    """
+    if not runtime_id:
+        return ""
+    try:
+        with _lock():
+            c = _db().cursor()
+            c.execute(
+                "SELECT ar.name, rc.device_name, ar.credential_id "
+                "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                "WHERE ar.id=?",
+                (runtime_id,),
+            )
+            row = c.fetchone()
+            if row:
+                return instance_name(row[0], row[1] or "", row[2] or 0)
+    except Exception:
+        pass
+    return ""
+
+
 def scope_of_runtime(rid: int) -> str | None:
     """返回 runtime 行所属 scope（user/repo/global）；credential_id=0 的历史行视为 global。"""
     if not rid:

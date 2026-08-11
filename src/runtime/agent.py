@@ -53,11 +53,15 @@ def _discover_local_runtimes() -> list[dict]:
     return out
 
 
-async def _execute_task(client, task):
-    """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。"""
+async def _execute_task(client, task, engine_name: str = ""):
+    """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。
+
+    engine_name 为该任务所属引擎实例名（如 opencode-worker-123249），用于日志区分。
+    """
     import os as _os
     tid = task.get("id", "")
     cwd = task.get("cwd") or _os.getcwd()
+    _engine_tag = f"|engine:{engine_name}" if engine_name else ""
     try:
         _os.makedirs(cwd, exist_ok=True)
     except Exception:
@@ -112,18 +116,20 @@ async def _execute_task(client, task):
     batch = []
     try:
         from src.runtime.executor import stream_runtime
+        _agent_label = f"[Agent:{task.get('agent_type') or ''}|repo:{task.get('repo_key') or ''}{_engine_tag}]"
         for evt_type, data in stream_runtime(
             prompt, cwd, session_id=task.get("runtime_session_id") or "",
             event_type=task.get("event_type") or "",
             backend_name="opencode",
             account=task.get("account") or "", user_id=task.get("user_id") or 0,
             env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
+            agent_label=_agent_label,
         ):
             if evt_type == "done":
                 done = data
                 continue
             # 逐步日志（本地模式同款，供 worker 侧 journalctl 观察执行过程）；前缀含 seq/task 便于定位
-            _esq = f"seq={task.get('event_seq') or '?'}"
+            _esq = f"seq={task.get('event_seq') or '?'}{_engine_tag}"
             if evt_type == "step_start":
                 log.info(f"  [{_esq}] ▶ {data}")
             elif evt_type == "text":
@@ -153,9 +159,11 @@ async def _execute_task(client, task):
         await client.fail(tid, str(e))
 
 
-async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent):
+async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
+                    engine_by_rid: dict | None = None):
     active_sessions = set()
     last_heartbeat = 0.0
+    engine_by_rid = engine_by_rid or {}
     while True:
         for rid in runtime_ids:
             try:
@@ -174,9 +182,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             active_sessions.add(sid)
 
-            async def _wrap(t=task, s=sid):
+            async def _wrap(t=task, s=sid, e=engine_by_rid.get(rid, "")):
                 try:
-                    await _execute_task(client, t)
+                    await _execute_task(client, t, e)
                 finally:
                     active_sessions.discard(s)
 
@@ -212,11 +220,16 @@ def main():
         if not ids:
             log.error("Register failed (check RUNTIME_TOKEN / server URL)")
             return
+        # rid → 引擎实例名（`{type}-{device}`，register 返回顺序与 installed 一致）
+        from src.runtime.instances import instance_name
+        engine_by_rid = {rid: instance_name(r.get("name", ""), device, 0)
+                         for rid, r in zip(ids, installed)}
+        log.info(f"RuntimeAgent registered: {ids} -> {server}, engines={list(engine_by_rid.values())}, "
+                 f"poll={poll}s heartbeat={heartbeat}s max_concurrent={max_concurrent}")
         for rid in ids:
             await client.recover_orphans(rid)
-        log.info(f"RuntimeAgent registered: {ids} -> {server}, poll={poll}s heartbeat={heartbeat}s max_concurrent={max_concurrent}")
         try:
-            await _run_loop(client, ids, poll, heartbeat, max_concurrent)
+            await _run_loop(client, ids, poll, heartbeat, max_concurrent, engine_by_rid)
         finally:
             await client.close()
 

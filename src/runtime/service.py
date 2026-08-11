@@ -202,7 +202,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
              "queued", None, "", "", "", "{}", None, None, datetime.now(timezone.utc).isoformat())
         )
         db.commit()
-    log.info(f"Task enqueued: {task_id} session={agent_session_id} runtime={runtime_id} skill={skill}")
+    from src.runtime.instances import runtime_instance_name
+    _inst = runtime_instance_name(runtime_id)
+    log.info(f"Task enqueued: {task_id} session={agent_session_id} runtime={runtime_id}({_inst}) skill={skill}")
     return task_id
 
 
@@ -251,6 +253,8 @@ def claim(runtime_id) -> dict | None:
         task = get_task(task_id)
         if task:
             task["status"] = "dispatched"
+        from src.runtime.instances import runtime_instance_name
+        log.info(f"claim: runtime_id={runtime_id}({runtime_instance_name(runtime_id)}) task={task_id}")
         return task
 
 
