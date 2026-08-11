@@ -148,7 +148,13 @@ tr:hover td { background: #f8f9fb; }
   font-size: 12px; background: var(--bg); outline: none; color: var(--t);
 }
 .modal-box input:focus { border-color: var(--a); }
-.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.modal-box .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+/* 详情弹窗：任务表固定高度滚动；关闭按钮粘性固定在右下角 */
+.modal .tw { height: 300px; overflow-y: auto; }
+.modal .modal-actions {
+  position: sticky; bottom: 0; background: var(--c);
+  margin: 12px -22px -20px; padding: 12px 22px 0; border-top: 1px solid var(--b);
+}
 .err { color: var(--r); font-size: 12px; margin-bottom: 8px; }
 .tip { color: var(--t3); font-size: 11px; margin: 6px 0; }
 

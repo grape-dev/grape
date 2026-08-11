@@ -86,19 +86,14 @@
     <div class="modal-box">
       <h4>设备详情：{{ detail.deviceName || detail.name }}</h4>
       <p class="t2">健康：{{ detail.health }} ｜ 最后心跳：{{ detail.lastSeenAt }} ｜ IP：{{ detail.lastIp }}</p>
-      <h5 style="display:flex;align-items:center;gap:8px">引擎（{{ filteredEngines.length }}/{{ (detail.engines || []).length }}）
-        <input v-model="engineSearch" placeholder="搜索引擎" style="width:140px;padding:3px 8px;font-size:11px;border:1px solid var(--b);border-radius:6px;background:var(--bg);outline:none" />
-      </h5>
-      <div class="flex gap8" style="flex-wrap:wrap">
-        <button
-          v-for="e in filteredEngines" :key="e.id"
-          class="bt" :class="selectedEngine?.id === e.id ? 'bt-p' : 'bt-o'"
-          @click="selectEngine(e)"
-        >
-          {{ e.name }}<span class="t3" style="font-weight:400"> v{{ e.version || '' }}</span>
-        </button>
+      <div class="flex gap8" style="align-items:center;margin:14px 0 4px">
+        <span class="t2" style="font-size:12px">引擎</span>
+        <input v-model="engineSearch" placeholder="搜索..." style="width:110px;padding:3px 8px;font-size:11px;border:1px solid var(--b);border-radius:6px;background:var(--bg);outline:none" />
+        <select v-model="selectedEngineId" @change="onEngineChange" style="padding:3px 8px;font-size:11px;border:1px solid var(--b);border-radius:6px;background:var(--bg);outline:none;cursor:pointer;max-width:240px">
+          <option v-for="e in filteredEngines" :key="e.id" :value="e.id">{{ e.name }} v{{ e.version || '' }}</option>
+        </select>
       </div>
-      <h5>引擎{{ selectedEngine ? '「' + selectedEngine.name + '」' : '' }}的任务（{{ detail.tasks?.totalElements ?? 0 }}）</h5>
+      <h5>关联任务（{{ detail.tasks?.totalElements ?? 0 }} 条）</h5>
       <div class="tw">
         <table>
           <thead><tr><th>ID</th><th>类型</th><th>技能</th><th>状态</th><th>创建时间</th></tr></thead>
@@ -138,7 +133,7 @@ const status = ref('')
 const name = ref('')
 const view = ref('list')
 const detail = ref(null)
-const selectedEngine = ref(null)
+const selectedEngineId = ref(null)
 const engineSearch = ref('')
 const activeTab = { background: 'var(--a)', color: '#fff', borderColor: 'var(--a)' }
 const sizeOptions = [5, 10, 20, 50]
@@ -194,22 +189,22 @@ async function recycle(d) {
   } catch (e) { alert(e.response?.data?.message || '回收失败') }
 }
 async function openDetail(d) {
+  const isNewDevice = d !== detail.value
+  if (isNewDevice) {
+    selectedEngineId.value = null
+    taskPage.value = 0
+  }
   const params = { taskPage: taskPage.value, taskSize: taskSize.value }
-  if (selectedEngine.value) params.engineId = selectedEngine.value.id
+  if (selectedEngineId.value) params.engineId = selectedEngineId.value
   const { data } = await http.get(`/devices/${d.id}`, { params })
   detail.value = data
-  if (!selectedEngine.value && data.engines?.length) {
+  if (!selectedEngineId.value && data.engines?.length) {
     // 默认选中第一个引擎，再按引擎过滤重取任务
-    selectedEngine.value = data.engines[0]
+    selectedEngineId.value = data.engines[0].id
     return openDetail(detail.value)
   }
-  if (selectedEngine.value) {
-    const fresh = data.engines?.find(x => x.id === selectedEngine.value.id)
-    selectedEngine.value = fresh || data.engines?.[0] || null
-  }
 }
-function selectEngine(e) {
-  selectedEngine.value = e
+function onEngineChange() {
   taskPage.value = 0
   openDetail(detail.value)
 }
