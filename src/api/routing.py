@@ -9,8 +9,10 @@ from src.config import log
 ISSUE_EVENT_TYPES = {"issue_opened", "issue_updated", "issue_comment", "issue_labeled"}
 PR_EVENT_TYPES = {"pull_request_opened", "pull_request_updated", "pull_request_merged", "note_hook_pr"}
 
-# PR 事件无关联 Issue / 无 issue_state 时的默认归属（PR 审查）
-PR_DEFAULT_AGENT = "qa"
+# PR 事件无关联 Issue / 无 issue_state 时的默认归属。
+# **no issue, no work**：PR 事件仅在有关联 Issue 且 issue_state 已建立（grape 开发链 A2A 推进）时
+# 按阶段矩阵路由到对应执行 Agent；无关联 Issue 或非 grape 开发的 PR（无 issue_state）一律不触发任何 agent。
+PR_DEFAULT_AGENT = ""
 
 # 非 Issue 事件静态映射（兜底路由）
 # push 显式忽略（开发由 issue 驱动，不触发 agent；如需刷新 project-info 可后续挂接）

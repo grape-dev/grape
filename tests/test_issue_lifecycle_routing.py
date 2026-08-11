@@ -86,3 +86,25 @@ class TestRunPipelineStage:
         # issue_opened（归一化为 issue_updated）→ 建 stage=vod（无 session 时默认 vod）
         st = ss.get_issue_stage(RK, "#5")
         assert st and st["stage"] == "vod" and st["owner_agent"] == "vod"
+
+
+class TestNoIssueNoWork:
+    """no issue, no work：PR 事件无关联 Issue / 无 issue_state 时不得触发任何 agent。"""
+
+    def test_pr_without_issue_not_dispatched(self):
+        """PR 事件无关联 Issue（payload 无 issue 号）→ 不路由到 QA 等任何 agent。"""
+        # payload 不含关联 Issue 号
+        pr_no_issue = {"pull_request": {"number": 99, "title": "docs: fix typo"}, "object_attributes": {"id": 99, "iid": 99, "title": "docs: fix typo"}}
+        assert _resolve_issue_stage_agent(RK, "pull_request_opened", pr_no_issue, "") == ""
+
+    def test_pr_with_issue_but_no_stage_not_dispatched(self):
+        """PR 有关联 Issue 但 issue_state 未建立（非 grape 开发链）→ 不触发任何 agent。"""
+        pr_with_issue = {"pull_request": {"number": 10, "title": "feat: fix #5"}, "object_attributes": {"id": 10, "iid": 10, "title": "feat: fix #5"}}
+        # 未 set_issue_stage（#5 无记录）→ default_agent="" → 不触发
+        assert _resolve_issue_stage_agent(RK, "pull_request_opened", pr_with_issue, "") == ""
+
+    def test_pr_with_stage_qa_dispatched(self):
+        """PR 有关联 Issue 且 issue_state=qa（grape 开发链推进）→ 正常路由 QA。"""
+        pr_with_issue = {"pull_request": {"number": 10, "title": "feat: fix #5"}, "object_attributes": {"id": 10, "iid": 10, "title": "feat: fix #5"}}
+        ss.set_issue_stage(RK, "#5", "qa", "qa")
+        assert _resolve_issue_stage_agent(RK, "pull_request_opened", pr_with_issue, "") == "qa"
