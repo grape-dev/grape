@@ -3,6 +3,7 @@
     <div class="cd-h">
       <h2>凭据管理 <span class="c">{{ credentials.length }} 条</span></h2>
       <div class="flex gap8">
+        <button class="bt bt-p" @click="openIssue">签发凭据</button>
         <button class="bt bt-o" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
         <button class="bt bt-o" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
       </div>
@@ -75,6 +76,23 @@
     </div>
     <p v-if="!credentials.length" class="ts t2" style="padding:12px">无匹配凭据</p>
   </div>
+
+  <div v-if="showIssue" class="modal">
+    <div class="modal-box">
+      <h4>签发设备凭据</h4>
+      <input v-model="deviceName" placeholder="设备名（唯一，≤64字符）" />
+      <div class="modal-actions">
+        <button class="bt bt-o" @click="showIssue = false">取消</button>
+        <button class="bt bt-p" @click="issue">签发</button>
+      </div>
+      <div v-if="issuedToken" class="cd mt12" style="border:1px dashed var(--y)">
+        <p class="ty" style="font-weight:600">⚠ 明文仅显示一次，请立即保存</p>
+        <code style="word-break:break-all;font-size:12px;display:block;margin:8px 0">{{ issuedToken }}</code>
+        <p class="t3">将该 token 填入目标机器 /etc/grape/runtime.env 的 RUNTIME_TOKEN 并重启 runtime-agent</p>
+        <button class="bt bt-p mt8" @click="issuedToken = ''">我已保存</button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -85,6 +103,9 @@ const credentials = ref([])
 const view = ref('list')
 const scope = ref('')
 const owner = ref('')
+const showIssue = ref(false)
+const deviceName = ref('')
+const issuedToken = ref('')
 const activeTab = { background: 'var(--a)', color: '#fff', borderColor: 'var(--a)' }
 
 const SCOPE_NAMES = { global: '全局', repo: '仓库', user: '用户' }
@@ -117,6 +138,13 @@ function reset() {
   scope.value = ''
   owner.value = ''
   load()
+}
+function openIssue() { showIssue.value = true; issuedToken.value = ''; deviceName.value = '' }
+async function issue() {
+  try {
+    const { data } = await http.post('/credentials', { deviceName: deviceName.value })
+    issuedToken.value = data.token
+  } catch (e) { alert(e.response?.data?.message || '签发失败') }
 }
 async function revoke(c) {
   if (!confirm(`确认吊销凭据 ${c.name}（归属 ${c.ownerName || '-'}）？其 worker 将立即失效（401）`)) return

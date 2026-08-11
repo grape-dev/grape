@@ -5,7 +5,6 @@
       <div class="flex gap8">
         <button class="bt bt-o" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
         <button class="bt bt-o" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
-        <button class="bt bt-p" @click="openIssue">签发凭据</button>
       </div>
     </div>
     <div class="toolbar">
@@ -80,23 +79,6 @@
     </div>
   </div>
 
-  <div v-if="showIssue" class="modal">
-    <div class="modal-box">
-      <h4>签发设备凭据</h4>
-      <input v-model="deviceName" placeholder="设备名（唯一，≤64字符）" />
-      <div class="modal-actions">
-        <button class="bt bt-o" @click="showIssue = false">取消</button>
-        <button class="bt bt-p" @click="issue">签发</button>
-      </div>
-      <div v-if="issuedToken" class="cd mt12" style="border:1px dashed var(--y)">
-        <p class="ty" style="font-weight:600">⚠ 明文仅显示一次，请立即保存</p>
-        <code style="word-break:break-all;font-size:12px;display:block;margin:8px 0">{{ issuedToken }}</code>
-        <p class="t3">将该 token 填入目标机器 /etc/grape/runtime.env 的 RUNTIME_TOKEN 并重启 runtime-agent</p>
-        <button class="bt bt-p mt8" @click="issuedToken = ''">我已保存</button>
-      </div>
-    </div>
-  </div>
-
   <div v-if="detail" class="modal wide">
     <div class="modal-box">
       <h4>设备详情：{{ detail.deviceName || detail.name }}</h4>
@@ -143,9 +125,6 @@ const page = ref(0)
 const status = ref('')
 const name = ref('')
 const view = ref('list')
-const showIssue = ref(false)
-const deviceName = ref('')
-const issuedToken = ref('')
 const detail = ref(null)
 const activeTab = { background: 'var(--a)', color: '#fff', borderColor: 'var(--a)' }
 
@@ -176,13 +155,6 @@ async function load() {
 function search() { page.value = 0; load() }
 function reset() { status.value = ''; name.value = ''; page.value = 0; load() }
 
-function openIssue() { showIssue.value = true; issuedToken.value = ''; deviceName.value = '' }
-async function issue() {
-  try {
-    const { data } = await http.post('/credentials', { deviceName: deviceName.value })
-    issuedToken.value = data.token
-  } catch (e) { alert(e.response?.data?.message || '签发失败') }
-}
 async function revoke(d) {
   if (!confirm(`确认吊销设备 ${d.deviceName || d.name} 的凭据？其 worker 将立即失效（401）`)) return
   await http.post(`/devices/${d.id}/revoke`)
