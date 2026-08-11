@@ -92,6 +92,8 @@ else
   # worker 运行 src.runtime.agent 需整个 src/ + skills + 最小依赖清单；configs/data/docs 等不拉取
   git sparse-checkout set src skills requirements-worker.txt >/dev/null 2>&1 || true
 fi
+# data/ 是 gitignore 的运行时目录（sessions.db/workspaces/logs），稀疏拉取不产生，须先建好
+mkdir -p "$INSTALL_DIR/data"
 
 # ===== 3. 建 venv + 最小依赖 =====
 if [ ! -x "$VENV/bin/python" ]; then
