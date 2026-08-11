@@ -41,24 +41,28 @@ public class MenuService {
 
     public List<Map<String, Object>> menuTreeForUser(Long userId) {
         List<AdminPermissionMenu> all = menuRepository.findAllByOrderBySortAsc();
-        Set<Long> menuIds;
+        Set<Long> visibleMenuIds;
         List<AdminUserRoleRel> rels = userRoleRelRepository.findByUserId(userId);
         boolean superAdmin = rels.stream()
                 .map(r -> roleRepository.findById(r.getRoleId()).orElse(null))
                 .filter(r -> r != null && "SUPER_ADMIN".equals(r.getCode()))
                 .findAny().isPresent();
         if (superAdmin) {
-            menuIds = all.stream().map(AdminPermissionMenu::getId).collect(Collectors.toSet());
+            visibleMenuIds = all.stream().map(AdminPermissionMenu::getId).collect(Collectors.toSet());
         } else {
-            menuIds = rels.stream()
+            Set<Long> bound = rels.stream()
                     .flatMap(r -> roleMenuRelRepository.findByRoleId(r.getRoleId()).stream())
                     .map(AdminRoleMenuRel::getMenuId)
                     .collect(Collectors.toSet());
+            // 子菜单可见时自动带上父菜单，避免出现"有叶子没树干"的空树
+            Set<Long> withParents = new java.util.HashSet<>(bound);
+            all.stream()
+                    .filter(m -> bound.contains(m.getId()) && m.getParentId() != null && m.getParentId() > 0)
+                    .forEach(m -> withParents.add(m.getParentId()));
+            visibleMenuIds = withParents;
         }
-        Map<Long, AdminPermissionMenu> byId = all.stream()
-                .collect(Collectors.toMap(AdminPermissionMenu::getId, m -> m));
         List<AdminPermissionMenu> visible = all.stream()
-                .filter(m -> menuIds.contains(m.getId())).collect(Collectors.toList());
+                .filter(m -> visibleMenuIds.contains(m.getId())).collect(Collectors.toList());
 
         List<Map<String, Object>> tree = new ArrayList<>();
         for (AdminPermissionMenu parent : visible.stream()
