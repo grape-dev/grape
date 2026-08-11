@@ -358,21 +358,21 @@ Agent 详情说明：
 │  [← 返回 VOD Agent]                                   │
 │                                                        │
 │  ┌─ Event Context ───────────┐  ┌─ Event Info ────┐  │
-│  │  Trigger: issue_opened    │  │ Runtime: opencode│  │
-│  │  Repository: team/backend-│  │ Skill: vod       │  │
-│  │  Issue: #345              │  │ Issue: #345      │  │
-│  │  Actor: @alice            │  │ Actor: @alice    │  │
-│  │  Time: ...                │  │ Agent: vod       │  │
-│  │                            │  │ Duration: 12s    │  │
-│  │  ┌─ Agent 处理记录（结构化）─┐  │  Status: ✅Success│  │
-│  │  │ 结论: 已确认该反馈为...   │  │                  │  │
-│  │  │ 动作: • 分析 · 聚类      │  │ ──────────────   │  │
-│  │  │ 产出: [artifact-1]       │  │  💬 Feedback     │  │
-│  │  │ 下一步: A2A 交办 Issue   │  │  Issue title...   │  │
-│  │  └────────────────────────┘  │  Description...    │  │
-│  │  ┌─ Agent 答复结论 ─────────┐ │  [Submit Feedback]│  │
-│  │  │（Agent 结论文本，等宽）   │  └────────────────┘  │
-│  │  └────────────────────────┘  │                    │
+│  │  Trigger: issue_opened    │  │ Seq: #1234      │  │
+│  │  Repository: team/backend-│  │ Runtime: opencode│  │
+│  │  Issue: #345              │  │ Skill: vod       │  │
+│  │  Actor: @alice            │  │ Issue: #345      │  │
+│  │  Time: ...                │  │ Actor: @alice    │  │
+│  │                            │  │ Agent: vod       │  │
+│  │  ┌─ Agent 处理记录（结构化）─┐  │ Duration: 12s    │  │
+│  │  │ 结论: 已确认该反馈为...   │  │ Status: ✅Success│  │
+│  │  │ 动作: • 分析 · 聚类      │  │                  │  │
+│  │  │ 产出: [artifact-1]       │  │ ──────────────   │  │
+│  │  │ 下一步: A2A 交办 Issue   │  │  💬 Feedback     │  │
+│  │  └────────────────────────┘  │  Issue title...   │  │
+│  │  ┌─ Agent 答复结论 ─────────┐ │  Description...    │  │
+│  │  │（Agent 结论文本，等宽）   │  │ [Submit Feedback]│  │
+│  │  └────────────────────────┘  │  └────────────────┘  │
 │  │  💡 Have a question about    │                    │
 │  │  these logs? Submit to →     │                    │
 │  └──────────────────────────────┘                    │

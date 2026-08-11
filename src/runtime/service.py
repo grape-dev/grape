@@ -291,7 +291,7 @@ def report_messages(task_id, messages):
         _t = m.get("type")
         if _t in ("step_start", "step_finish", "text", "reasoning", "tool_use", "error"):
             _d = m.get("data")
-            log.info(f"[task {task_id}] {_t}: {str(_d)[:120]}")
+            log.info(f"[task {task_id}] [seq={task.get('event_seq') or '?'}] {_t}: {str(_d)[:120]}")
     if task.get("event_seq"):
         try:
             from src.api.event_archive import append_event_archive_log
