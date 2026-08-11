@@ -5,9 +5,11 @@ sqlite3 风格 API（db.execute / db.cursor / cursor.execute(fetchone|fetchall) 
 c.lastrowid / c.rowcount / c.description / PRAGMA table_info / sqlite_master 查询）。
 本模块提供相同接口的 MySQL 实现，并在 execute 时做 SQL 方言翻译，业务模块零改动。
 
-启用方式：环境变量 DEVOPS_DB_BACKEND=mysql（配合 DEVOPS_DB_HOST/PORT/USER/PASSWORD/NAME，
-或直接用 DEVOPS_DB_URL=mysql://user:pass@host:port/dbname）。
+启用方式（开关）：configs/db-backend.json 的 "backend" 字段（sqlite/mysql），
+也可用环境变量 DEVOPS_DB_BACKEND=mysql 覆盖（配合 DEVOPS_DB_HOST/PORT/USER/PASSWORD/NAME，
+或直接用 DEVOPS_DB_URL=mysql://user:pass@host:port/dbname）。默认 sqlite。
 """
+import json
 import os
 import re
 import threading
@@ -16,9 +18,40 @@ import pymysql
 
 # ====== 配置读取 ======
 
+_DB_BACKEND_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "configs", "db-backend.json"
+)
+
+
+def load_db_backend_config() -> dict:
+    """读取 configs/db-backend.json 开关配置（不存在时返回默认 sqlite）。"""
+    default = {"backend": "sqlite", "mysql": {}}
+    try:
+        if os.path.exists(_DB_BACKEND_CONFIG_PATH):
+            with open(_DB_BACKEND_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f) or {}
+            return {
+                "backend": str(cfg.get("backend", "sqlite")).lower(),
+                "mysql": cfg.get("mysql") or {},
+            }
+    except Exception:
+        pass
+    return default
+
+
+def get_db_backend() -> str:
+    """当前数据库后端：环境变量 DEVOPS_DB_BACKEND 优先，其次配置文件，默认 sqlite。"""
+    env = os.environ.get("DEVOPS_DB_BACKEND", "").lower()
+    if env in ("mysql", "rds", "1", "true"):
+        return "mysql"
+    if env in ("sqlite", "0", "false"):
+        return "sqlite"
+    return load_db_backend_config().get("backend", "sqlite")
+
 
 def mysql_config() -> dict:
-    """从环境变量读取 MySQL 连接配置。"""
+    """从配置文件读取 MySQL 连接配置（环境变量 DEVOPS_DB_* 可覆盖）。"""
+    cfg = load_db_backend_config().get("mysql") or {}
     url = os.environ.get("DEVOPS_DB_URL", "")
     if url:
         # mysql://user:pass@host:port/dbname
@@ -34,11 +67,11 @@ def mysql_config() -> dict:
                 "charset": "utf8mb4",
             }
     return {
-        "host": os.environ.get("DEVOPS_DB_HOST", "127.0.0.1"),
-        "port": int(os.environ.get("DEVOPS_DB_PORT", "3306")),
-        "user": os.environ.get("DEVOPS_DB_USER", "grape"),
-        "password": os.environ.get("DEVOPS_DB_PASSWORD", ""),
-        "database": os.environ.get("DEVOPS_DB_NAME", "grape_db"),
+        "host": os.environ.get("DEVOPS_DB_HOST", cfg.get("host", "127.0.0.1")),
+        "port": int(os.environ.get("DEVOPS_DB_PORT", cfg.get("port", 3306))),
+        "user": os.environ.get("DEVOPS_DB_USER", cfg.get("user", "grape")),
+        "password": os.environ.get("DEVOPS_DB_PASSWORD", cfg.get("password", "")),
+        "database": os.environ.get("DEVOPS_DB_NAME", cfg.get("database", "grape_db")),
         "charset": "utf8mb4",
     }
 

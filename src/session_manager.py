@@ -38,8 +38,16 @@ db_lock = threading.RLock()
 
 
 def _is_mysql_backend() -> bool:
-    """是否启用 MySQL（云 RDS）后端。"""
-    return os.environ.get("DEVOPS_DB_BACKEND", "").lower() in ("mysql", "rds", "1", "true")
+    """是否启用 MySQL（云 RDS）后端。
+
+    开关优先级：环境变量 DEVOPS_DB_BACKEND > configs/db-backend.json 的 backend 字段 > 默认 sqlite。
+    """
+    try:
+        from src.mysql_compat import get_db_backend
+        return get_db_backend() == "mysql"
+    except Exception:
+        env = os.environ.get("DEVOPS_DB_BACKEND", "").lower()
+        return env in ("mysql", "rds", "1", "true")
 
 
 def _backup_db(path: str, tag: str = "") -> str:
