@@ -22,3 +22,4 @@ ADD-WHITELIST.md
 opencode-incident-*.md
 temp/
 .skills/
+.hermes/
