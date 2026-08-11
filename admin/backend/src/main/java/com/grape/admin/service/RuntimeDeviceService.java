@@ -36,6 +36,35 @@ public class RuntimeDeviceService {
         this.healthService = healthService;
     }
 
+    public List<Map<String, Object>> listCredentials(String scope, String owner) {
+        List<RuntimeCredentialRo> credentials = credentialRepository.findAll();
+        List<AgentRuntimeRo> runtimes = runtimeRepository.findAll();
+        Map<Integer, Long> engineCountByCredential = runtimes.stream()
+                .filter(r -> r.getCredentialId() != null)
+                .collect(Collectors.groupingBy(AgentRuntimeRo::getCredentialId, Collectors.counting()));
+        return credentials.stream()
+                .filter(c -> scope == null || scope.isBlank() || scope.equals(c.getScope()))
+                .filter(c -> owner == null || owner.isBlank()
+                        || (c.getOwnerName() != null && c.getOwnerName().toLowerCase().contains(owner.toLowerCase())))
+                .map(c -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("id", c.getId());
+                    m.put("name", c.getName());
+                    m.put("deviceName", c.getDeviceName());
+                    m.put("scope", c.getScope());
+                    m.put("ownerId", c.getOwnerId());
+                    m.put("ownerName", c.getOwnerName());
+                    m.put("status", c.getStatus());
+                    m.put("health", healthService.deviceHealth(c.getStatus(), c.getLastSeenAt()));
+                    m.put("lastSeenAt", c.getLastSeenAt());
+                    m.put("lastIp", c.getLastIp());
+                    m.put("createdAt", c.getCreatedAt());
+                    m.put("engineCount", engineCountByCredential.getOrDefault(c.getId(), 0L).intValue());
+                    return m;
+                })
+                .collect(Collectors.toList());
+    }
+
     public List<Map<String, Object>> listDevices() {
         List<RuntimeCredentialRo> credentials = credentialRepository.findAll();
         List<AgentRuntimeRo> runtimes = runtimeRepository.findAll();

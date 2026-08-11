@@ -58,6 +58,12 @@ public class RuntimeController {
         return deviceService.listTasks(device, status, limit);
     }
 
+    @GetMapping("/credentials")
+    public List<Map<String, Object>> credentials(@RequestParam(required = false) String scope,
+                                                 @RequestParam(required = false) String owner) {
+        return deviceService.listCredentials(scope, owner);
+    }
+
     @PostMapping("/credentials")
     public Map<String, String> issueCredential(@RequestBody Map<String, String> body, HttpServletRequest request) {
         String token = credentialService.issue(body.get("deviceName"), AuthContext.username(request));
