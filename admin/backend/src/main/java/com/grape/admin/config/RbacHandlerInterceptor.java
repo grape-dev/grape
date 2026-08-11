@@ -28,7 +28,7 @@ public class RbacHandlerInterceptor implements HandlerInterceptor {
             "runtime.devices", List.of("/api/admin/devices", "/api/admin/tasks"),
             "runtime.engines", List.of("/api/admin/engines"),
             "runtime.credentials", List.of("/api/admin/credentials"),
-            "ai.assistant", List.of("/api/admin/ai/chat"),
+            "ai.assistant", List.of("/api/admin/ai/chat", "/api/admin/ai/templates"),
             "ai.history", List.of("/api/admin/ai/history"),
             "sys.users", List.of("/api/admin/users"),
             "sys.roles", List.of("/api/admin/roles")

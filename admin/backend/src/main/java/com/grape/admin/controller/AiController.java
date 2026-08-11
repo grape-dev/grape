@@ -1,7 +1,9 @@
 package com.grape.admin.controller;
 
+import com.grape.admin.config.AuthContext;
 import com.grape.admin.service.AiHistoryService;
 import com.grape.admin.service.AiTaskManager;
+import com.grape.admin.service.AiTemplateService;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -13,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import javax.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -22,10 +25,12 @@ public class AiController {
 
     private final AiTaskManager taskManager;
     private final AiHistoryService historyService;
+    private final AiTemplateService templateService;
 
-    public AiController(AiTaskManager taskManager, AiHistoryService historyService) {
+    public AiController(AiTaskManager taskManager, AiHistoryService historyService, AiTemplateService templateService) {
         this.taskManager = taskManager;
         this.historyService = historyService;
+        this.templateService = templateService;
     }
 
     /** 兼容直连模式：提交 + 订阅一步完成（老客户端/单请求场景） */
@@ -80,6 +85,29 @@ public class AiController {
     @DeleteMapping("/history/{id}")
     public Map<String, Object> deleteHistory(@PathVariable Long id) {
         historyService.delete(id);
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("status", "ok");
+        return resp;
+    }
+
+    // ===== AI 模板（参考 VOD AiQueryTemplateController）=====
+
+    /** 模板列表（内置示例在前端，自定义模板在此） */
+    @GetMapping("/templates")
+    public Map<String, Object> templates(HttpServletRequest request) {
+        return templateService.list(AuthContext.username(request));
+    }
+
+    /** 保存自定义模板 */
+    @PostMapping("/templates")
+    public Map<String, Object> saveTemplate(@RequestBody Map<String, String> body, HttpServletRequest request) {
+        return templateService.save(AuthContext.username(request), body.get("name"), body.get("content"));
+    }
+
+    /** 删除自定义模板 */
+    @DeleteMapping("/templates/{id}")
+    public Map<String, Object> deleteTemplate(@PathVariable Long id, HttpServletRequest request) {
+        templateService.delete(AuthContext.username(request), id);
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("status", "ok");
         return resp;
