@@ -10,6 +10,7 @@ __pycache__/
 .pytest_cache/
 configs/global-bot-token.json
 configs/login-whitelist.json
+configs/db-backend.json
 skills/custom/
 skills/repo/
 DEPLOYMENT-REMOTE.md
