@@ -25,7 +25,7 @@ public class RbacHandlerInterceptor implements HandlerInterceptor {
 
     /** 菜单 code → API 前缀（新菜单需在此登记；/api/admin/menus 对已认证用户恒放行） */
     private static final Map<String, List<String>> MENU_API_PREFIXES = Map.of(
-            "runtime.devices", List.of("/api/admin/devices"),
+            "runtime.devices", List.of("/api/admin/devices", "/api/admin/tasks"),
             "runtime.engines", List.of("/api/admin/engines"),
             "runtime.credentials", List.of("/api/admin/credentials"),
             "ai.assistant", List.of("/api/admin/ai"),

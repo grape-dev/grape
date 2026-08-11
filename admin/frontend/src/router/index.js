@@ -6,9 +6,9 @@ const StubView = () => import('../views/StubView.vue')
 const routes = [
   { path: '/login', name: 'login', component: () => import('../views/Login.vue'), meta: { public: true } },
   { path: '/', redirect: '/runtime/devices' },
-  { path: '/runtime/devices', name: 'runtime.devices', component: StubView, meta: { title: '设备列表' } },
-  { path: '/runtime/engines', name: 'runtime.engines', component: StubView, meta: { title: '引擎总览' } },
-  { path: '/runtime/credentials', name: 'runtime.credentials', component: StubView, meta: { title: '凭据管理' } },
+  { path: '/runtime/devices', name: 'runtime.devices', component: () => import('../views/DeviceManage.vue'), meta: { title: '设备列表' } },
+  { path: '/runtime/engines', name: 'runtime.engines', component: () => import('../views/EngineOverview.vue'), meta: { title: '引擎总览' } },
+  { path: '/runtime/credentials', name: 'runtime.credentials', component: () => import('../views/DeviceManage.vue'), meta: { title: '凭据管理' } },
   { path: '/ai/assistant', name: 'ai.assistant', component: StubView, meta: { title: 'AI 助手' } },
   { path: '/sys/users', name: 'sys.users', component: () => import('../views/UserManage.vue'), meta: { title: '用户管理' } },
   { path: '/sys/roles', name: 'sys.roles', component: () => import('../views/RolePermissionConfig.vue'), meta: { title: '角色权限配置' } }

@@ -1,5 +1,7 @@
 package com.grape.admin.config;
 
+import com.grape.admin.common.BizException;
+import com.grape.admin.common.NotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -21,6 +23,16 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleStatus(ResponseStatusException e) {
         return ResponseEntity.status(e.getStatus())
                 .body(Map.of("code", e.getStatus().value(), "message", e.getReason() == null ? "error" : e.getReason()));
+    }
+
+    @ExceptionHandler(BizException.class)
+    public ResponseEntity<Map<String, Object>> handleBiz(BizException e) {
+        return ResponseEntity.badRequest().body(Map.of("code", 400, "message", e.getMessage()));
+    }
+
+    @ExceptionHandler(NotFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleNotFound(NotFoundException e) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("code", 404, "message", e.getMessage()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
