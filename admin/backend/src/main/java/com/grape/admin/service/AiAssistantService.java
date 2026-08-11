@@ -87,7 +87,7 @@ public class AiAssistantService {
                 }
             }, java.time.Instant.now().plusSeconds(timeoutSeconds));
 
-            new Thread(() -> {
+            Thread t = new Thread(() -> {
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
@@ -102,7 +102,9 @@ public class AiAssistantService {
                     emitter.complete();
                     slots.release();
                 }
-            }, "ai-assistant-reader").start();
+            }, "ai-assistant-reader");
+            t.setDaemon(true);   // 防泄漏：子进程僵死时读取线程不阻塞 JVM 退出
+            t.start();
         } catch (Exception e) {
             slots.release();
             sendJson(emitter, "{\"type\":\"error\",\"data\":\"" + escape(e.getMessage()) + "\"}");
