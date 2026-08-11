@@ -145,6 +145,11 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
         # 刷新 main/master 到最新
         for br in ("origin/main", "origin/master"):
             _run(["git", "-C", work, "fetch", "origin", br], timeout=300)
+        # codegraph 索引初始化（首次需要，持久化于分析副本 .codegraph/）
+        code, out, err = _run(["codegraph", "init"], cwd=work, timeout=600)
+        if code != 0 and "already" not in err.lower():
+            log.warning(f"project-info codegraph init failed {repo_key}: {err[:200]}")
+            return None
         return work
     except Exception as e:
         log.warning(f"project-info analysis worktree failed {repo_key}: {e}")
@@ -152,7 +157,7 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
 
 
 def _codegraph_explore(work: str, query: str, max_files: int = 10) -> str:
-    code, out, err = _run(["codegraph", "explore", "--query", query, "--maxFiles", str(max_files)], cwd=work, timeout=120)
+    code, out, err = _run(["codegraph", "explore", "--max-files", str(max_files), query], cwd=work, timeout=120)
     return out or err or ""
 
 
@@ -161,8 +166,8 @@ def _codegraph_files(work: str) -> str:
     return out or err or ""
 
 
-def _codegraph_callees(work: str, symbol: str, depth: int = 3) -> str:
-    code, out, err = _run(["codegraph", "callees", "--symbol", symbol, "--depth", str(depth)], cwd=work, timeout=120)
+def _codegraph_callees(work: str, symbol: str, limit: int = 10) -> str:
+    code, out, err = _run(["codegraph", "callees", "-l", str(limit), symbol], cwd=work, timeout=120)
     return out or err or ""
 
 
