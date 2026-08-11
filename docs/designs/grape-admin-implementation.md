@@ -206,8 +206,14 @@ INSERT INTO admin_permission_menus (code,name,path,parent_id,sort) VALUES
 
 ```bash
 mvn -q spring-boot:run
-mysql -u grape_admin -p vod_db -e "SHOW TABLES LIKE 'admin_%';"   # 6 张表存在
+mysql -u root -p grape_test_db -e "SHOW TABLES LIKE 'admin_%';"   # 6 张表存在
 ```
+
+> 实现发现（已验证）：
+> 1. grape_test_db 是存量库 → application.yml 需 `spring.flyway.baseline-on-migrate: true` + `baseline-version: 0`，
+>    否则 Flyway 报 "Found non-empty schema(s) but no schema history table" 拒绝启动
+> 2. dev 连接默认值：`127.0.0.1:3306/grape_test_db`，用户 root（测试环境临时账号，密码走 ADMIN_DB_PASSWORD 环境变量，
+>    不入 git）；prod 由 ADMIN_DB_URL / ADMIN_DB_USER / ADMIN_DB_PASSWORD 注入，按 D5 用 grape_admin 最小权限账号
 
 **Verification:** flyway 迁移成功（日志 `Migrating schema ... to version 1`）；表结构 + 种子角色/菜单存在；重复启动幂等（flyway 版本控制）。
 
