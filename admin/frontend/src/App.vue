@@ -30,6 +30,7 @@
       <div class="sb-ft" @click="logout">
         <span class="av">{{ me.charAt(0).toUpperCase() }}</span>
         <span class="by">{{ me }}<span>退出登录</span></span>
+        <span class="t3" style="font-size:10px;margin-left:6px" @click.stop>v{{ BUILD_TIME }}</span>
       </div>
     </aside>
     <main class="mn">
@@ -49,6 +50,8 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import http from './api'
 import { getToken, clearTokens } from './utils/auth'
+
+const BUILD_TIME = __BUILD_TIME__
 
 const route = useRoute()
 const router = useRouter()
