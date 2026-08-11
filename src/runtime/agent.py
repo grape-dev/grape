@@ -127,6 +127,9 @@ async def _execute_task(client, task):
             if len(batch) >= 50:
                 await client.report_messages(tid, batch)
                 batch = []
+            # 每次迭代让出事件循环，避免同步生成器迭代阻塞 claim/heartbeat
+            # （见 worker-event-loop-block-rootcause.md 方案 1）
+            await asyncio.sleep(0)
         if batch:
             await client.report_messages(tid, batch)
         if done:

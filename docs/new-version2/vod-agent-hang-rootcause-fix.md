@@ -209,4 +209,4 @@
 - **次因**：agent 完成业务后不退出 + opencode 续跑模式 stdout 无 NDJSON；
 - **修复优先级**：方案 A（每 Issue 独立 session，根除主因）→ 方案 B（agent 结束约束）→ 方案 C（executor 兜底）→ 方案 D（防御校验）。
 
-*本文为根因分析与修复方案，待评审后实施。*
+> ⚠️ **补充（2026-08-11）**：本方案（commit 3c86294）修复的是「session 复用 → cwd 错位」。后续发现的「多任务并发时新任务卡 `dispatched`、worker 日志/心跳停更」是**另一独立缺陷**——worker 侧 `_execute_task` 用同步生成器迭代阻塞 asyncio 事件循环（`stream_runtime` 同步 for + 仅 batch≥50 才 await），导致 claim/heartbeat 无法运行。详见 `worker-event-loop-block-rootcause.md`。两者根因独立，勿混淆。
