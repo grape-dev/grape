@@ -43,6 +43,7 @@ public class RuntimeDeviceService {
                 .filter(r -> r.getCredentialId() != null)
                 .collect(Collectors.groupingBy(AgentRuntimeRo::getCredentialId, Collectors.counting()));
         return credentials.stream()
+                .filter(c -> !"revoked".equals(c.getStatus()))   // 已吊销凭据不展示、不参与查询
                 .filter(c -> scope == null || scope.isBlank() || scope.equals(c.getScope()))
                 .filter(c -> owner == null || owner.isBlank()
                         || (c.getOwnerName() != null && c.getOwnerName().toLowerCase().contains(owner.toLowerCase())))
