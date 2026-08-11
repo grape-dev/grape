@@ -46,7 +46,7 @@
       <div v-if="view === 'list'" class="tw">
         <table>
           <thead>
-            <tr><th>实例名</th><th>类型</th><th>版本</th><th>设备</th><th>健康</th><th>状态</th><th>最后心跳</th><th>操作</th></tr>
+            <tr><th>实例名</th><th>类型</th><th>版本</th><th>设备</th><th>范围</th><th>健康</th><th>状态</th><th>最后心跳</th><th>操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="e in engines" :key="e.id">
@@ -54,6 +54,7 @@
               <td>{{ e.name }}</td>
               <td class="t3">{{ e.version || '-' }}</td>
               <td>{{ e.device || '-' }}</td>
+              <td>{{ scopeText(e.scope) }}</td>
               <td><span :class="['tg', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
               <td class="t2">{{ e.status }}</td>
               <td class="t3">{{ e.lastSeenAt || '-' }}</td>
@@ -80,7 +81,7 @@
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">设备</span> {{ e.device || '—' }}</div>
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">状态</span> {{ e.status }}</div>
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">心跳</span> {{ e.lastSeenAt || '—' }}</div>
-            <div><span style="color:var(--t3);display:inline-block;min-width:46px">归属</span> {{ e.ownerId || '—' }}</div>
+            <div><span style="color:var(--t3);display:inline-block;min-width:46px">归属/范围</span> {{ e.ownerId || '—' }} · {{ scopeText(e.scope) }}</div>
           </div>
           <div style="display:flex;justify-content:flex-end;padding-top:10px;border-top:1px solid var(--b);margin-top:10px">
             <a class="bt bt-o bt-s" @click="remove(e)">删除</a>
@@ -122,6 +123,8 @@ const BADGE = {
   offline: { color: 'var(--t3)', bg: '#eef0f3', label: '离线' },
   about_to_gc: { color: 'var(--r)', bg: '#fee2e2', label: '待回收' }
 }
+const SCOPE_TEXT = { global: '全局', repo: '仓库', user: '个人' }
+function scopeText(s) { return SCOPE_TEXT[s] || s || '—' }
 function healthText(h) { return (BADGE[h] || { label: h }).label }
 function healthClass(h) { return { online: 'tg-g', recently_lost: 'tg-s', offline: 'tg-d', about_to_gc: 'tg-i' }[h] || 'tg-d' }
 function badgeStyle(h) {

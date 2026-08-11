@@ -28,11 +28,12 @@
     <div v-if="view === 'list'" class="tw">
       <table>
         <thead>
-          <tr><th>设备名</th><th>状态</th><th>健康</th><th>引擎</th><th>任务</th><th>最后心跳</th><th>IP</th><th>操作</th></tr>
+          <tr><th>设备名</th><th>范围</th><th>状态</th><th>健康</th><th>引擎</th><th>任务</th><th>最后心跳</th><th>IP</th><th>操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="d in devices" :key="d.id">
             <td>{{ d.deviceName || d.name }}</td>
+            <td>{{ scopeText(d.scope) }}</td>
             <td><span :class="['tg', d.status === 'active' ? 'tg-g' : 'tg-d']">{{ d.status }}</span></td>
             <td><span :class="['tg', healthClass(d.health)]">{{ healthText(d.health) }}</span></td>
             <td>{{ d.engineCount }}</td>
@@ -59,7 +60,7 @@
           </span>
           <span style="font-weight:600;font-size:14px">
             {{ d.deviceName || d.name }}
-            <span style="font-weight:400;color:var(--t3);font-size:12px">{{ d.status }}</span>
+            <span style="font-weight:400;color:var(--t3);font-size:12px">{{ d.status }} · {{ scopeText(d.scope) }}</span>
           </span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
@@ -147,12 +148,14 @@ const taskPage = ref(0)
 const taskSize = ref(10)
 
 const BADGE = {
-  online: { color: 'var(--g)', bg: '#dcfce7', label: '在线' },
-  recently_lost: { color: 'var(--or)', bg: '#fef3c7', label: '刚失联' },
-  offline: { color: 'var(--t3)', bg: '#eef0f3', label: '离线' },
-  about_to_gc: { color: 'var(--r)', bg: '#fee2e2', label: '待回收' },
-  revoked: { color: 'var(--t3)', bg: '#eef0f3', label: '已吊销' }
+  online: { label: '在线', color: 'var(--g)', bg: '#dcfce7' },
+  recently_lost: { label: '刚失联', color: 'var(--or)', bg: '#fef3c7' },
+  offline: { label: '离线', color: 'var(--t3)', bg: '#eef0f3' },
+  about_to_gc: { label: '待回收', color: 'var(--r)', bg: '#fee2e2' },
+  revoked: { label: '已吊销', color: 'var(--t3)', bg: '#eef0f3' }
 }
+const SCOPE_TEXT = { global: '全局', repo: '仓库', user: '个人' }
+function scopeText(s) { return SCOPE_TEXT[s] || s || '—' }
 function healthText(h) { return (BADGE[h] || { label: h }).label }
 function healthClass(h) { return { online: 'tg-g', recently_lost: 'tg-s', offline: 'tg-d', about_to_gc: 'tg-i', revoked: 'tg-d' }[h] || 'tg-d' }
 function badgeStyle(h) {
