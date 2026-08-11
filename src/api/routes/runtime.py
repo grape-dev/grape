@@ -124,7 +124,7 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
                            datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), rid))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, binary, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?,?,'global','')",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?,?,'global','')",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
                      datetime.now(timezone.utc).isoformat(), rt.get("cli_path", "")))
