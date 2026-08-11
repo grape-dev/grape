@@ -66,7 +66,7 @@ public class RuntimeDeviceService {
                 .collect(Collectors.toList());
     }
 
-    public Map<String, Object> listDevices(String status, String name, int page, int size) {
+    public Map<String, Object> listDevices(String scope, String status, String name, int page, int size) {
         List<RuntimeCredentialRo> credentials = credentialRepository.findAll();
         List<AgentRuntimeRo> runtimes = runtimeRepository.findAll();
         Map<Integer, List<AgentRuntimeRo>> enginesByCredential = runtimes.stream()
@@ -78,6 +78,7 @@ public class RuntimeDeviceService {
 
         List<Map<String, Object>> filtered = new ArrayList<>();
         for (RuntimeCredentialRo c : credentials) {
+            if (scope != null && !scope.isBlank() && !scope.equals(c.getScope())) continue;
             if (status != null && !status.isBlank() && !status.equals(c.getStatus())) continue;
             if (name != null && !name.isBlank()
                     && !(c.getName() != null && c.getName().toLowerCase().contains(name.toLowerCase()))
@@ -90,6 +91,7 @@ public class RuntimeDeviceService {
             d.put("name", c.getName());
             d.put("deviceName", c.getDeviceName());
             d.put("status", c.getStatus());
+            d.put("scope", c.getScope());
             d.put("health", healthService.deviceHealth(c.getStatus(), c.getLastSeenAt()));
             d.put("lastSeenAt", c.getLastSeenAt());
             d.put("lastIp", c.getLastIp());

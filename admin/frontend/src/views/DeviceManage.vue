@@ -8,6 +8,12 @@
       </div>
     </div>
     <div class="toolbar">
+      <select v-model="scope">
+        <option value="">全部范围</option>
+        <option value="global">全局</option>
+        <option value="repo">仓库</option>
+        <option value="user">个人</option>
+      </select>
       <select v-model="status">
         <option value="">全部状态</option>
         <option value="active">active</option>
@@ -129,6 +135,7 @@ const total = ref(0)
 const totalPages = ref(0)
 const page = ref(0)
 const status = ref('')
+const scope = ref('')
 const name = ref('')
 const view = ref('list')
 const detail = ref(null)
@@ -158,13 +165,13 @@ function dotStyle(h) {
 }
 
 async function load() {
-  const { data } = await http.get('/devices', { params: { status: status.value, name: name.value, page: page.value, size: size.value } })
+  const { data } = await http.get('/devices', { params: { scope: scope.value, status: status.value, name: name.value, page: page.value, size: size.value } })
   devices.value = data.content
   total.value = data.totalElements
   totalPages.value = data.totalPages
 }
 function search() { page.value = 0; load() }
-function reset() { status.value = ''; name.value = ''; page.value = 0; load() }
+function reset() { scope.value = ''; status.value = ''; name.value = ''; page.value = 0; load() }
 
 async function revoke(d) {
   if (!confirm(`确认吊销设备 ${d.deviceName || d.name} 的凭据？其 worker 将立即失效（401）`)) return
