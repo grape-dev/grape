@@ -1599,8 +1599,37 @@ def ensure_default_backend(name: str = "opencode", scope: str = "global"):
     return ensure_default_runtime(name, scope)
 
 
+def is_known_engine_name(name: str) -> bool:
+    """是否为已知执行引擎类型名（discover_backends 白名单或已注册的自定义引擎）。
+
+    用于 ensure_default_runtime / get_chat_config 等路径防幽灵：拒绝任意字符串
+    （如历史遗留的 'default'）生成 `{name}-cred0` 的 credential_id=0 占位行
+    （见 runtime-admin-two-view-design §6.2 / 防 -cred0 孤儿）。
+    """
+    name = (name or "").strip().lower()
+    if not name:
+        return False
+    try:
+        from src.agent.executor import discover_backends
+        if any((b.get("name") or "").strip().lower() == name for b in discover_backends()):
+            return True
+    except Exception:
+        pass
+    try:
+        from src.agent.executor import _BACKENDS
+        if name in _BACKENDS:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
-    """确保默认 runtime 存在（幂等），返回 id（多实例：优先 online，见 multi-runtime-instance-design §4.3 S2）"""
+    """确保默认 runtime 存在（幂等），返回 id（多实例：优先 online，见 multi-runtime-instance-design §4.3 S2）。
+
+    防幽灵：仅当 name 为已知引擎类型（is_known_engine_name）或已存在同名 runtime 时才创建/复用；
+    否则返回 None，不生成 credential_id=0 占位行。
+    """
     name = (name or "opencode").strip().lower() or "opencode"
     with db_lock:
         c = db.cursor()
@@ -1613,6 +1642,9 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
         row = c.fetchone()
         if row:
             return row[0]
+        if not is_known_engine_name(name):
+            log.warning(f"ensure_default_runtime: 拒绝为未知引擎 '{name}' 创建占位行")
+            return None
         c.execute("INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
                   (name, name.capitalize(), 1, "", "", 1, name, scope))
         db.commit()

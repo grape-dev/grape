@@ -541,7 +541,13 @@ def get_chat_config(user_id: int) -> dict:
             c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
             brow = c.fetchone()
             if brow and brow[0]:
-                backend_name = brow[0]
+                from src.user.db import is_known_engine_name
+                _n = (brow[0] or "").strip().lower()
+                if is_known_engine_name(_n):
+                    backend_name = brow[0]
+                else:
+                    # 幽灵/未知引擎（如历史遗留 'default'）：回退 opencode，避免 chat 路由到不存在的引擎
+                    log.warning(f"get_chat_config: runtime_id={row[0]} 指向未知引擎 '{brow[0]}'，回退 opencode")
         return {"backend": backend_name, "skill": row[1] or "", "skill_id": row[2] or 0,
                 "im_app_id": row[3] or "", "im_app_secret": row[4] or "", "im_provider": row[5] or "", "updated_at": ""}
 

@@ -33,7 +33,7 @@ function loadSideConfig() {
     const currentSkill = d.skill || '';
     const backendsOpts = (d._backends || []).map(b =>
       `<option value="${b.name}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${b.display_name || b.name}</option>`
-    ).join('') || '<option>Default</option>';
+    ).join('') || '<option value="">Default</option>';
     const skillsOpts = (d._skills || []).map(s => {
       const scopeLabel = s.scope === 'official' ? '官方' : s.scope === 'repo' ? '仓库' : '个人';
       return `<option value="${s.scope}:${s.name}" ${(d.skill_scope + ':' + currentSkill) === (s.scope + ':' + s.name) ? 'selected' : ''}>${s.display_name || s.name} (${scopeLabel})</option>`;

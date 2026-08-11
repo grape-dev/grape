@@ -507,6 +507,31 @@ class TestChat:
         if r.status_code == 400:
             assert "已被其他用户" in r.text or "已被 VOD Agent" in r.text
 
+    def test_config_put_default_backend_no_ghost(self):
+        """前端回退 '<option>Default</option>' 提交 backend='Default'：不得创建 default-cred0 幽灵 runtime，
+        GET /chat/config 应回退 opencode（见 TestGhostEnginePrevention 根因说明）。"""
+        import uuid as _uuid
+        user = user_db.create_user("chat_def_" + _uuid.uuid4().hex[:6], "pw123")
+        assert user
+        tok = user_db.create_session_token(user["id"])
+        hd = {"Authorization": f"Bearer {tok}"}
+        # 清理该用户历史 chat 配置，保证干净
+        with db_lock:
+            db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (user["id"],))
+            db.commit()
+        before = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE name='default'").fetchone()[0]
+        r = client.put("/api/chat/config", json={"backend": "Default"}, headers=hd)
+        assert r.status_code == 200, f"save failed: {r.text[:200]}"
+        with db_lock:
+            after = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE name='default'").fetchone()[0]
+        assert after == before, "backend='Default' 不应创建 default-cred0 幽灵 runtime 行"
+        cfg = client.get("/api/chat/config", headers=hd).json()
+        assert cfg["backend"]["type"] == "opencode"
+        with db_lock:
+            db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=?", (user["id"],))
+            db.commit()
+        user_db.delete_user(user["id"])
+
     def test_chat_im_user_isolation(self):
         """Chat IM 配置每用户独立：A 配置后，B 的 GET /chat/config 应为空 IM"""
         import uuid

@@ -427,3 +427,63 @@ class TestRuntimeAdminViews:
         # 仅凭据绑定行（credential_id>0），不得再生 credential_id=0 占位行
         assert rows and all(rr[0] > 0 for rr in rows), f"不应再生 credential_id=0 占位行: {rows}"
         app.dependency_overrides.clear()
+
+
+class TestGhostEnginePrevention:
+    """防幽灵引擎（-cred0 孤儿）回归：ensure_default_runtime / set_chat_config / get_chat_config。
+
+    根因：前端 chat.js 无个人引擎时回退 '<option>Default</option>'（无 value → 提交值 'Default'），
+    经 set_chat_config → ensure_default_backend('Default') 会为任意字符串创建 credential_id=0 占位行，
+    在 Engines 页显示为 `default-cred0` 并让 chat 任务打到不存在的引擎。
+    """
+
+    def test_is_known_engine_name(self):
+        from src.user.db import is_known_engine_name
+        assert is_known_engine_name("opencode") is True
+        assert is_known_engine_name("codearts") is True
+        assert is_known_engine_name("Default") is False   # 前端回退项文本，大小写不敏感
+        assert is_known_engine_name("") is False
+
+    def test_ensure_default_runtime_rejects_unknown(self):
+        """未知引擎名（'default'）不再创建 credential_id=0 占位行。"""
+        from src.user.db import ensure_default_runtime
+        rid = ensure_default_runtime("default")
+        assert rid is None, "未知引擎名不应创建 runtime"
+        with db_lock:
+            cnt = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE name='default'").fetchone()[0]
+        assert cnt == 0, "不得生成 default-cred0 幽灵占位行"
+
+    def test_ensure_default_runtime_allows_known(self):
+        from src.user.db import ensure_default_runtime
+        rid = ensure_default_runtime("opencode")
+        assert rid is not None, "已知引擎名应正常创建/复用"
+
+    def test_set_chat_config_default_backend_no_ghost(self):
+        """set_chat_config(backend='Default') 不得创建幽灵行，且 get_chat_config 回退 opencode。"""
+        from src.session_manager import set_chat_config, get_chat_config
+        from src.user.db import is_known_engine_name
+        set_chat_config(9999, backend="Default")
+        cfg = get_chat_config(9999)
+        assert cfg["backend"] == "opencode"
+        with db_lock:
+            cnt = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE name='default'").fetchone()[0]
+            db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=9999")
+            db.commit()
+        assert cnt == 0, "backend='Default' 不应创建 default-cred0 占位行"
+
+    def test_get_chat_config_fallback_on_ghost_reference(self):
+        """历史配置 runtime_id 指向幽灵引擎（credential_id=0 name='default'）时回退 opencode。"""
+        from src.session_manager import get_chat_config
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO agent_runtimes (credential_id, name, display_name, installed, version, healthy, pip_package, scope, owner_id) VALUES (0,'default','Default',1,'',1,'default','global','')")
+            gid = c.lastrowid
+            c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, skill, created_at, last_active_at) VALUES ('sess-cfg-8888', 8888, '', ?, 'chat', datetime('now'), datetime('now'))", (gid,))
+            db.commit()
+        try:
+            cfg = get_chat_config(8888)
+            assert cfg["backend"] == "opencode", "指向幽灵引擎应回退 opencode"
+        finally:
+            with db_lock:
+                db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=8888")
+                db.commit()
