@@ -72,8 +72,11 @@
 
     <p v-if="!devices.length" class="ts t2" style="padding:12px">无匹配设备</p>
 
-    <div v-if="totalPages > 1" class="pager">
+    <div v-if="total > 0" class="pager">
       第 {{ page + 1 }} / {{ totalPages }} 页（共 {{ total }} 台）
+      <select v-model="size" @change="page = 0; load()">
+        <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}</option>
+      </select>
       <button class="bt bt-o bt-s" :disabled="page <= 0" @click="page--; load()">上一页</button>
       <button class="bt bt-o bt-s" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
     </div>
@@ -97,12 +100,12 @@
           </tbody>
         </table>
       </div>
-      <h5>最近任务（{{ detail.tasks.length }}）<span class="t3" style="font-size:10px;font-weight:400">任务绑定执行引擎（agent_tasks.runtime_id）</span></h5>
+      <h5>最近任务（{{ detail.tasks.totalElements }}）<span class="t3" style="font-size:10px;font-weight:400">任务绑定执行引擎（agent_tasks.runtime_id）</span></h5>
       <div class="tw">
         <table>
           <thead><tr><th>ID</th><th>引擎</th><th>类型</th><th>技能</th><th>状态</th><th>创建时间</th></tr></thead>
           <tbody>
-            <tr v-for="t in detail.tasks" :key="t.id">
+            <tr v-for="t in detail.tasks.content" :key="t.id">
               <td class="t3">{{ t.id }}</td>
               <td>{{ engineName(t.runtimeId) }}</td>
               <td>{{ t.agentType }}</td>
@@ -112,6 +115,14 @@
             </tr>
           </tbody>
         </table>
+      </div>
+      <div v-if="detail.tasks.totalElements > 0" class="pager">
+        第 {{ taskPage + 1 }} / {{ detail.tasks.totalPages }} 页（共 {{ detail.tasks.totalElements }} 条）
+        <select v-model="taskSize" @change="taskPage = 0; openDetail(detail)">
+          <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}</option>
+        </select>
+        <button class="bt bt-o bt-s" :disabled="taskPage <= 0" @click="taskPage--; openDetail(detail)">上一页</button>
+        <button class="bt bt-o bt-s" :disabled="taskPage >= detail.tasks.totalPages - 1" @click="taskPage++; openDetail(detail)">下一页</button>
       </div>
       <div class="modal-actions"><button class="bt bt-o" @click="detail = null">关闭</button></div>
     </div>
@@ -131,6 +142,10 @@ const name = ref('')
 const view = ref('list')
 const detail = ref(null)
 const activeTab = { background: 'var(--a)', color: '#fff', borderColor: 'var(--a)' }
+const sizeOptions = [5, 10, 20, 50]
+const size = ref(5)
+const taskPage = ref(0)
+const taskSize = ref(10)
 
 const BADGE = {
   online: { color: 'var(--g)', bg: '#dcfce7', label: '在线' },
@@ -151,7 +166,7 @@ function dotStyle(h) {
 }
 
 async function load() {
-  const { data } = await http.get('/devices', { params: { status: status.value, name: name.value, page: page.value, size: 5 } })
+  const { data } = await http.get('/devices', { params: { status: status.value, name: name.value, page: page.value, size: size.value } })
   devices.value = data.content
   total.value = data.totalElements
   totalPages.value = data.totalPages
@@ -173,7 +188,7 @@ async function recycle(d) {
   } catch (e) { alert(e.response?.data?.message || '回收失败') }
 }
 async function openDetail(d) {
-  const { data } = await http.get(`/devices/${d.id}`)
+  const { data } = await http.get(`/devices/${d.id}`, { params: { taskPage: taskPage.value, taskSize: taskSize.value } })
   detail.value = data
 }
 function engineName(runtimeId) {

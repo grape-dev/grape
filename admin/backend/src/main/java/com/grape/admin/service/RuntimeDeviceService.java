@@ -110,7 +110,7 @@ public class RuntimeDeviceService {
         return result;
     }
 
-    public Map<String, Object> deviceDetail(Integer credentialId) {
+    public Map<String, Object> deviceDetail(Integer credentialId, int taskPage, int taskSize) {
         RuntimeCredentialRo c = credentialRepository.findById(credentialId)
                 .orElseThrow(() -> new NotFoundException("设备不存在: " + credentialId));
         List<AgentRuntimeRo> engines = runtimeRepository.findByCredentialId(credentialId);
@@ -140,15 +140,23 @@ public class RuntimeDeviceService {
         }).collect(Collectors.toList());
 
         Set<Integer> runtimeIds = engines.stream().map(AgentRuntimeRo::getId).collect(Collectors.toSet());
-        List<AgentTaskRo> recentTasks = runtimeIds.isEmpty() ? List.of()
+        List<AgentTaskRo> allTasks = runtimeIds.isEmpty() ? List.of()
                 : taskRepository.findAll().stream()
                         .filter(t -> t.getRuntimeId() != null && runtimeIds.contains(t.getRuntimeId()))
                         .sorted((a, b) -> String.valueOf(b.getCreatedAt()).compareTo(String.valueOf(a.getCreatedAt())))
-                        .limit(50)
                         .collect(Collectors.toList());
+        int total = allTasks.size();
+        int from = Math.min(taskPage * taskSize, total);
+        int to = Math.min(from + taskSize, total);
+        Map<String, Object> taskPageObj = new LinkedHashMap<>();
+        taskPageObj.put("content", allTasks.subList(from, to).stream().map(this::toTaskMap).collect(Collectors.toList()));
+        taskPageObj.put("totalElements", total);
+        taskPageObj.put("totalPages", taskSize > 0 ? (total + taskSize - 1) / taskSize : 0);
+        taskPageObj.put("page", taskPage);
+        taskPageObj.put("size", taskSize);
 
         device.put("engines", engineList);
-        device.put("tasks", recentTasks.stream().map(this::toTaskMap).collect(Collectors.toList()));
+        device.put("tasks", taskPageObj);
         return device;
     }
 
