@@ -181,3 +181,25 @@ context 应包含：
 - `$ISSUE_NUMBER` 来自原始 Issue 编号。
 
 **跳过此步 = 事件未完成处理。**
+
+---
+
+### ⚠️ 必须执行：任务结束输出结构化 JSON 块
+
+完成所有业务动作（提交代码、创建 PR、发 Issue 评论、A2A 通知 QA）后，**在最终答复末尾输出以下 JSON 块**（系统解析写入该 Issue 的 event.json 档案，供前端展示「Agent 处理记录」与下游 Agent 接力）：
+
+```json
+{
+  "actions": ["git push 分支 feat/issue-N", "创建 PR #N", "在 Issue #N 发评论告知", "A2A 通知 QA 审查 PR #N"],
+  "conclusion": "完成情况总结：改动内容、测试结果、PR 是否创建成功（失败原因）",
+  "artifacts": ["PR #N", "分支 feat/issue-N", "commit xxxxxx"],
+  "next_step": "QA Agent 审查 PR #N；或 PR 创建失败时说明需人工干预",
+  "issue_summary": "实现完成 | 改动摘要 | PR 状态 | 覆盖率结果"
+}
+```
+
+**注意：**
+- 该 JSON 块放在**最终答复末尾**，是任务结束的唯一标记；
+- **不得**用长流程叙述（场景识别→方案→实现过程）替代该 JSON 块；
+- 若 PR 创建失败或某动作未完成，`actions`/`conclusion` 中如实说明（如 `"PR 创建失败：GitCode API 返回 xxx"`），不要伪造；
+- `issue_summary` 覆盖 Issue 档案聚合结论，供下游 Agent 快速浏览。
