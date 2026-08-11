@@ -33,7 +33,7 @@
         │            agent_tasks(清理)                  │
 ┌───────▼────────┐  其余表只读; 自管: admin_* 表  ┌───────▼────────┐
 │ 共享数据库       │◄────────────────────────────│ 共享数据库       │
-│ SQLite/MySQL    │                            │                │
+│ MySQL(dev/prod)  │                            │                │
 └─────────────────┘                            └────────────────┘
 ```
 
@@ -78,7 +78,7 @@ grape/
 │   │   └── vite.config.js               (dev proxy → admin 后端)
 │   └── deploy/               #   独立部署
 │       ├── nginx-admin.conf  #   admin 域名 → 前端静态 + /api 反代 admin 后端
-│       ├── admin.service     #   systemd：admin 后端 uvicorn
+│       ├── admin.service     #   systemd：admin 后端 java -jar（Spring Boot）
 │       └── Dockerfile        #   （可选）容器化
 └── docs/                     # 设计方案归档（可选）
 ```
