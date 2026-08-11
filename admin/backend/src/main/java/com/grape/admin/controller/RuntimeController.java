@@ -47,8 +47,9 @@ public class RuntimeController {
     @GetMapping("/devices/{cid}")
     public Map<String, Object> deviceDetail(@PathVariable Integer cid,
                                             @RequestParam(defaultValue = "0") int taskPage,
-                                            @RequestParam(defaultValue = "10") int taskSize) {
-        return deviceService.deviceDetail(cid, taskPage, taskSize);
+                                            @RequestParam(defaultValue = "10") int taskSize,
+                                            @RequestParam(required = false) Integer engineId) {
+        return deviceService.deviceDetail(cid, taskPage, taskSize, engineId);
     }
 
     @GetMapping("/engines")

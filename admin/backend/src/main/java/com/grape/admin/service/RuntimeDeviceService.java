@@ -110,7 +110,7 @@ public class RuntimeDeviceService {
         return result;
     }
 
-    public Map<String, Object> deviceDetail(Integer credentialId, int taskPage, int taskSize) {
+    public Map<String, Object> deviceDetail(Integer credentialId, int taskPage, int taskSize, Integer engineId) {
         RuntimeCredentialRo c = credentialRepository.findById(credentialId)
                 .orElseThrow(() -> new NotFoundException("设备不存在: " + credentialId));
         List<AgentRuntimeRo> engines = runtimeRepository.findByCredentialId(credentialId);
@@ -143,6 +143,7 @@ public class RuntimeDeviceService {
         List<AgentTaskRo> allTasks = runtimeIds.isEmpty() ? List.of()
                 : taskRepository.findAll().stream()
                         .filter(t -> t.getRuntimeId() != null && runtimeIds.contains(t.getRuntimeId()))
+                        .filter(t -> engineId == null || engineId.equals(t.getRuntimeId()))   // 按引擎过滤关联任务
                         .sorted((a, b) -> String.valueOf(b.getCreatedAt()).compareTo(String.valueOf(a.getCreatedAt())))
                         .collect(Collectors.toList());
         int total = allTasks.size();

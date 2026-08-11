@@ -87,27 +87,36 @@
       <h4>设备详情：{{ detail.deviceName || detail.name }}</h4>
       <p class="t2">健康：{{ detail.health }} ｜ 最后心跳：{{ detail.lastSeenAt }} ｜ IP：{{ detail.lastIp }}</p>
       <h5>引擎（{{ detail.engines.length }}）</h5>
-      <div class="tw">
-        <table>
-          <thead><tr><th>引擎</th><th>版本</th><th>健康</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody>
-            <tr v-for="e in detail.engines" :key="e.id">
-              <td>{{ e.name }}</td><td class="t3">{{ e.version || '-' }}</td>
-              <td><span :class="['tg', healthClass(e.health)]">{{ e.health }}</span></td>
-              <td class="t2">{{ e.status }}</td>
-              <td><a class="bt bt-o bt-s" @click="deleteEngine(e)">删除</a></td>
-            </tr>
-          </tbody>
-        </table>
+      <div class="flex gap8" style="flex-wrap:wrap">
+        <button
+          v-for="e in detail.engines" :key="e.id"
+          class="bt" :class="selectedEngine?.id === e.id ? 'bt-p' : 'bt-o'"
+          @click="selectEngine(e)"
+        >
+          {{ e.name }}<span class="t3" style="font-weight:400"> v{{ e.version || '' }}</span>
+        </button>
       </div>
-      <h5>最近任务（{{ detail.tasks.totalElements }}）<span class="t3" style="font-size:10px;font-weight:400">任务绑定执行引擎（agent_tasks.runtime_id）</span></h5>
+      <div v-if="selectedEngine" class="cd mt8" style="background:var(--bg);padding:10px 14px">
+        <div class="flex fc jbtw gap8" style="flex-wrap:wrap">
+          <div class="flex gap12" style="font-size:12px;color:var(--t2);flex-wrap:wrap">
+            <span>名称 <b class="t">{{ selectedEngine.name }}</b></span>
+            <span>版本 <b>{{ selectedEngine.version || '-' }}</b></span>
+            <span>状态 <b>{{ selectedEngine.status }}</b></span>
+            <span>健康 <b :style="{ color: healthColor(selectedEngine.health) }">{{ healthText(selectedEngine.health) }}</b></span>
+            <span>心跳 {{ selectedEngine.lastSeenAt || '-' }}</span>
+            <span v-if="selectedEngine.cliPath" class="t3">CLI {{ selectedEngine.cliPath }}</span>
+            <span v-if="selectedEngine.scope">范围 {{ selectedEngine.scope }}</span>
+          </div>
+          <a class="bt bt-o bt-s" @click="deleteEngine(selectedEngine)">删除引擎</a>
+        </div>
+      </div>
+      <h5>引擎{{ selectedEngine ? '「' + selectedEngine.name + '」' : '' }}的任务（{{ detail.tasks.totalElements }}）</h5>
       <div class="tw">
         <table>
-          <thead><tr><th>ID</th><th>引擎</th><th>类型</th><th>技能</th><th>状态</th><th>创建时间</th></tr></thead>
+          <thead><tr><th>ID</th><th>类型</th><th>技能</th><th>状态</th><th>创建时间</th></tr></thead>
           <tbody>
             <tr v-for="t in detail.tasks.content" :key="t.id">
               <td class="t3">{{ t.id }}</td>
-              <td>{{ engineName(t.runtimeId) }}</td>
               <td>{{ t.agentType }}</td>
               <td>{{ t.skill }}</td>
               <td><span class="tg tg-d">{{ t.status }}</span></td>
@@ -141,6 +150,7 @@ const status = ref('')
 const name = ref('')
 const view = ref('list')
 const detail = ref(null)
+const selectedEngine = ref(null)
 const activeTab = { background: 'var(--a)', color: '#fff', borderColor: 'var(--a)' }
 const sizeOptions = [5, 10, 20, 50]
 const size = ref(5)
@@ -156,6 +166,7 @@ const BADGE = {
 }
 function healthText(h) { return (BADGE[h] || { label: h }).label }
 function healthClass(h) { return { online: 'tg-g', recently_lost: 'tg-s', offline: 'tg-d', about_to_gc: 'tg-i', revoked: 'tg-d' }[h] || 'tg-d' }
+function healthColor(h) { return (BADGE[h] || { color: 'var(--t3)' }).color }
 function badgeStyle(h) {
   const b = BADGE[h] || { color: 'var(--t3)', bg: '#eef0f3' }
   return { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12px', fontWeight: 600, color: b.color, background: b.bg, padding: '3px 10px', borderRadius: '999px', whiteSpace: 'nowrap' }
@@ -188,12 +199,24 @@ async function recycle(d) {
   } catch (e) { alert(e.response?.data?.message || '回收失败') }
 }
 async function openDetail(d) {
-  const { data } = await http.get(`/devices/${d.id}`, { params: { taskPage: taskPage.value, taskSize: taskSize.value } })
+  const params = { taskPage: taskPage.value, taskSize: taskSize.value }
+  if (selectedEngine.value) params.engineId = selectedEngine.value.id
+  const { data } = await http.get(`/devices/${d.id}`, { params })
   detail.value = data
+  if (!selectedEngine.value && data.engines?.length) {
+    // 默认选中第一个引擎，再按引擎过滤重取任务
+    selectedEngine.value = data.engines[0]
+    return openDetail(detail.value)
+  }
+  if (selectedEngine.value) {
+    const fresh = data.engines?.find(x => x.id === selectedEngine.value.id)
+    selectedEngine.value = fresh || data.engines?.[0] || null
+  }
 }
-function engineName(runtimeId) {
-  const e = detail.value?.engines?.find(x => x.id === runtimeId)
-  return e ? `${e.name}${e.version ? ` v${e.version}` : ''}` : `runtime#${runtimeId}`
+function selectEngine(e) {
+  selectedEngine.value = e
+  taskPage.value = 0
+  openDetail(detail.value)
 }
 async function deleteEngine(e) {
   if (!confirm(`确认删除引擎 ${e.name}（id=${e.id}）？`)) return
