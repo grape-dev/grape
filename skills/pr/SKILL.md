@@ -266,3 +266,5 @@ Content-Type: application/json
 ## 参考
 
 需要调用 GitCode API 时，读取 `references/gitcode-api-reference.md`。
+
+> ⚠️ **任务结束**：完成所有业务动作（审查评论/A2A 交办）后，输出最终 JSON 块并**结束任务**，不要继续思考或等待输入。

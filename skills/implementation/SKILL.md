@@ -74,3 +74,5 @@ Grape 已在当前工作目录准备好该 Issue 的 **git worktree**（分支 `
 ## 参考
 
 需要调用 GitCode API 时，读取 `references/gitcode-api-reference.md`。
+
+> ⚠️ **任务结束**：完成所有业务动作（提交 PR/修改代码/回应审查）后，输出最终 JSON 块并**结束任务**，不要继续思考或等待输入。

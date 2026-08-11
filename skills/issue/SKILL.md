@@ -181,3 +181,5 @@ curl -s -X PATCH ... -d '{"state": "close"}' \
 需要调用更全面的 GitCode API 时，读取 `references/gitcode-api-reference.md`。
 
 > 注：评论 body 前缀固定为 `[Issue Agent]`。
+
+> ⚠️ **任务结束**：完成所有业务动作（评论/打标签/分配/A2A 交办）后，输出最终 JSON 块并**结束任务**，不要继续思考或等待输入。

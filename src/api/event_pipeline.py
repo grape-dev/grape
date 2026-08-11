@@ -478,6 +478,8 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     _os.makedirs(ws, exist_ok=True)
 
     # 3) 会话：配置会话（repo+agent）+ 执行会话（Issue 级，串行粒度，见 multi-issue-isolation-design.md §3.3）
+    #    每 Issue 独立 session（见 vod-agent-hang-rootcause-fix.md 方案 A）：有关联 Issue 只用 Issue 会话；
+    #    repo 级会话仅用于无关联 Issue（push/#0）。
     from src.api.session_store import get_or_create_agent_session, get_or_create_issue_session
     from src.api.event_store import update_event_config
     update_event_config(seq, backend or "opencode", skill_name, datetime.now(timezone.utc).isoformat())
@@ -487,7 +489,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     if _issue_num_from(issue_id):
         _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
         issue_session_id = _isess.get("id") or ""
-        oc_session_id = _isess.get("runtime_session_id") or oc_session_id
+        oc_session_id = _isess.get("runtime_session_id") or ""
 
     repo_gitcode_token = ""
     try:
@@ -513,6 +515,18 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     _pr_num = evt.get("payload", {}).get("pr_number", "")
     if _pr_num:
         env_extra["PR_NUMBER"] = str(_pr_num)
+
+    # 方案 D 防御：有关联 Issue 时，Issue 级会话指针不得指向其他 Issue 的 workdir（防 cwd/session 错位回归）
+    try:
+        _num = _issue_num_from(issue_id)
+        if _num and oc_session_id:
+            from src.repo_key import split_owner_repo
+            _o, _r = split_owner_repo(repo_key)
+            _expected_ws = os.path.join(WORKSPACE_DIR, _o, _r, agent_type, "issues", _num)
+            if ws != _expected_ws:
+                log.warning(f"Pipeline enqueue: cwd/session mismatch, issue={issue_id} ws={ws} expected={_expected_ws}")
+    except Exception:
+        pass
 
     tid = enqueue_task(
         agent_session_id=session.get("id") or "",
@@ -555,16 +569,19 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     os.makedirs(ws, exist_ok=True)
 
     # 读取上次的 oc_session_id（用于延续对话上下文）——Issue 级执行会话优先，回退 repo 级
+    # 注意：有关联 Issue 时只用该 Issue 自己的会话（每 Issue 独立 session，见 vod-agent-hang-rootcause-fix.md 方案 A）；
+    #       repo 级 session 仅用于无关联 Issue（push/#0）。
     repo_name = repo_key
     oc_session_id = ""
     issue_session_id = ""
+    _has_issue = bool(_issue_num_from(issue_id))
     try:
-        if _issue_num_from(issue_id):
+        if _has_issue:
             from src.api.session_store import get_or_create_issue_session
             _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
             issue_session_id = _isess.get("id") or ""
             oc_session_id = _isess.get("runtime_session_id") or ""
-        if not oc_session_id:
+        if not _has_issue and not oc_session_id:
             with db_lock:
                 c = db.cursor()
                 c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))

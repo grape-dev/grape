@@ -260,8 +260,9 @@ def remove_agent_sessions(repo_key: str) -> int:
 def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str) -> dict:
     """获取或创建 Issue 级执行会话，per (repo_key, agent_type, issue_id) 独立。
 
-    首个会话建立时：若 devops_agent_session.runtime_session_id 有存量值（迁移期读侧回退），
-    作为初始续接指针沿用，避免丢上下文。
+    每个 Issue 拥有完全独立的 opencode session：新 Issue 首次创建时 runtime_session_id 为空
+    （不继承 repo 级 devops_agent_session 的指针，避免多 Issue 共用同一 session 导致 cwd/上下文错位，
+    见 vod-agent-hang-rootcause-fix.md 方案 A）；第一次执行由 opencode 生成全新 session 后回写本行。
     """
     issue_id = issue_id or ""
     with db_lock:
@@ -279,15 +280,8 @@ def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str) -
             return {"id": row[0], "runtime_session_id": row[1] or "",
                     "status": row[2] or "idle", "last_active_at": row[3] or "", "new": False}
 
+        # 每 Issue 独立 session：新 Issue 不继承 repo 级 session 指针，_seed 恒为空
         _seed = ""
-        try:
-            c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                      (repo_key, agent_type))
-            _r = c.fetchone()
-            if _r:
-                _seed = _r[0] or ""
-        except Exception:
-            pass
         sid = str(uuid.uuid4())
         now = datetime.now().isoformat()
         try:

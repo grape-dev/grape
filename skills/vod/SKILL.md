@@ -129,3 +129,5 @@ Content-Type: application/json
 - 需求引导 + 审视 + 模板 + A2A 交办：`references/requirement-elicit-guide.md`
 - 项目知识基线生成：`references/codegraph-project-analysis.md`
 - GitCode API：`references/gitcode-api-reference.md`
+
+> ⚠️ **任务结束**：完成所有业务动作（发评论/结构化/A2A 交办）后，输出最终 JSON 块并**结束任务**，不要继续思考或等待输入。

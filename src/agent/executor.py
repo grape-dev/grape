@@ -260,11 +260,42 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 elapsed_silent = time.time() - _last_output
                 if elapsed_silent > max_exec_seconds:
                     log.warning(f"{label}{backend.name} no output for {max_exec_seconds}s, terminating")
+                    # 先 SIGTERM 给 agent 收尾窗口（_terminate_proc 内部 grace_seconds=10 等待优雅退出）
                     _terminate_proc(proc, f"{label}{backend.name}")
+                    # 收尾窗口内尝试读取 SIGTERM 后 opencode 冲刷的最终输出（避免把已产出的收尾当卡死）
+                    _grace_tail = ""
+                    try:
+                        proc.stdout.settimeout(3)
+                        while True:
+                            try:
+                                line = proc.stdout.readline()
+                            except Exception:
+                                break
+                            if not line:
+                                break
+                            _grace_tail += line.decode("utf-8", errors="replace")
+                            _last_output = time.time()
+                    except Exception:
+                        pass
+                    for _gl in _grace_tail.strip().split("\n"):
+                        _gl = _gl.strip()
+                        if not _gl:
+                            continue
+                        _parsed = backend.parse_output(_gl)
+                        if _parsed:
+                            _parsed_count += 1
+                            if _parsed["type"] == "text":
+                                collected_text.append(_parsed["text"])
+                            elif _parsed["type"] == "tool_use":
+                                pass
+                    # 若收尾窗口内收到输出，视为 agent 已收尾（exit 以进程实际状态为准，不再强制 -9）
+                    _killed = "-9" if _grace_tail.strip() == "" else "grace"
+                    log.info(f"{label}{backend.name} hang fallback: tail_chars={len(_grace_tail)} outcome={_killed}")
                     yield ("done", {
-                        "exit_code": -9, "text": _redact("\n".join(collected_text), _tokens),
+                        "exit_code": -9 if _grace_tail.strip() == "" else (proc.returncode if proc.returncode is not None else -1),
+                        "text": _redact("\n".join(collected_text), _tokens),
                         "oc_session_id": new_session_id,
-                        "errors": error_events + [f"no output for {max_exec_seconds}s, killed"],
+                        "errors": error_events + ([f"no output for {max_exec_seconds}s, killed"] if _grace_tail.strip() == "" else []),
                         "stderr": "",
                     })
                     return
