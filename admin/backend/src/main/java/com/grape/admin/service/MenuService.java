@@ -83,6 +83,7 @@ public class MenuService {
 
     private Map<String, Object> toNode(AdminPermissionMenu m) {
         Map<String, Object> node = new LinkedHashMap<>();
+        node.put("id", m.getId());
         node.put("code", m.getCode());
         node.put("name", m.getName());
         node.put("path", m.getPath());

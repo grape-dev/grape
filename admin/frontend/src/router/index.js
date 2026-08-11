@@ -10,8 +10,8 @@ const routes = [
   { path: '/runtime/engines', name: 'runtime.engines', component: StubView, meta: { title: '引擎总览' } },
   { path: '/runtime/credentials', name: 'runtime.credentials', component: StubView, meta: { title: '凭据管理' } },
   { path: '/ai/assistant', name: 'ai.assistant', component: StubView, meta: { title: 'AI 助手' } },
-  { path: '/sys/users', name: 'sys.users', component: StubView, meta: { title: '用户管理' } },
-  { path: '/sys/roles', name: 'sys.roles', component: StubView, meta: { title: '角色权限配置' } }
+  { path: '/sys/users', name: 'sys.users', component: () => import('../views/UserManage.vue'), meta: { title: '用户管理' } },
+  { path: '/sys/roles', name: 'sys.roles', component: () => import('../views/RolePermissionConfig.vue'), meta: { title: '角色权限配置' } }
 ]
 
 const router = createRouter({

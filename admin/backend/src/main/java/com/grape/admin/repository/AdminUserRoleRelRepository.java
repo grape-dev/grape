@@ -12,6 +12,10 @@ public interface AdminUserRoleRelRepository extends JpaRepository<AdminUserRoleR
 
     List<AdminUserRoleRel> findByUserId(Long userId);
 
+    List<AdminUserRoleRel> findByUserIdIn(java.util.Collection<Long> userIds);
+
+    boolean existsByRoleId(Long roleId);
+
     @Modifying
     @Query("update AdminUserRoleRel r set r.deleted = 1, r.updatedBy = :updatedBy where r.userId = :userId and r.deleted = 0")
     int softDeleteByUserId(@Param("userId") Long userId, @Param("updatedBy") String updatedBy);

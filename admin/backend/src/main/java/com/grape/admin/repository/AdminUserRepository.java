@@ -8,4 +8,7 @@ import java.util.Optional;
 public interface AdminUserRepository extends JpaRepository<AdminUser, Long> {
 
     Optional<AdminUser> findByUsername(String username);
+
+    org.springframework.data.domain.Page<AdminUser> findAllByUsernameContaining(
+            String username, org.springframework.data.domain.Pageable pageable);
 }
