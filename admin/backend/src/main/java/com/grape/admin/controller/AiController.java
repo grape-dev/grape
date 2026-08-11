@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import javax.servlet.http.HttpServletRequest;
@@ -85,6 +86,38 @@ public class AiController {
     @DeleteMapping("/history/{id}")
     public Map<String, Object> deleteHistory(@PathVariable Long id) {
         historyService.delete(id);
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("status", "ok");
+        return resp;
+    }
+
+    // ===== 会话管理（对齐 VOD 会话列表）=====
+
+    /** 会话列表（按 session_id 分组） */
+    @GetMapping("/history/sessions")
+    public Map<String, Object> sessions() {
+        return historyService.sessions();
+    }
+
+    /** 某个会话的全部问答 */
+    @GetMapping("/history/session/{sessionId}/messages")
+    public java.util.List<Map<String, Object>> sessionMessages(@PathVariable String sessionId) {
+        return historyService.sessionMessages(sessionId);
+    }
+
+    /** 会话重命名 */
+    @PutMapping("/history/session/{sessionId}/name")
+    public Map<String, Object> renameSession(@PathVariable String sessionId, @RequestBody Map<String, String> body) {
+        historyService.rename(sessionId, body.get("name"));
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("status", "ok");
+        return resp;
+    }
+
+    /** 删除整个会话 */
+    @DeleteMapping("/history/session/{sessionId}")
+    public Map<String, Object> deleteSession(@PathVariable String sessionId) {
+        historyService.deleteBySession(sessionId);
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("status", "ok");
         return resp;

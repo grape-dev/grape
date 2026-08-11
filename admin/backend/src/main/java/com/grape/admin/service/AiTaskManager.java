@@ -214,9 +214,10 @@ public class AiTaskManager {
             }
             if (task.hermesSessionId == null || answer.length() == 0) return;
             AdminAiHistory h = new AdminAiHistory();
-            h.setTaskId(task.taskId);
             h.setSessionId(task.hermesSessionId);
+            h.setTaskId(task.taskId);
             h.setQuery(task.query);
+            h.setName(task.query.length() > 50 ? task.query.substring(0, 50) : task.query);
             h.setAnswer(answer.toString());
             historyRepository.save(h);
         } catch (Exception e) {

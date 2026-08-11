@@ -26,6 +26,9 @@ public class AdminAiHistory {
     @Column(name = "session_id", nullable = false, length = 64)
     private String sessionId;
 
+    @Column(name = "name", length = 100)
+    private String name;
+
     @Column(name = "task_id", nullable = false, length = 64)
     private String taskId;
 
