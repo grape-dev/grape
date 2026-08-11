@@ -7,6 +7,32 @@
 
 ---
 
+## 〇·一、一键安装（推荐）
+
+生成凭据后，WebUI Workers 页会给出**一行命令**，在 Worker 机器上执行即可完成全部安装（拉取代码、Python 环境、venv、opencode 检测、systemd 服务并启动）：
+
+```bash
+curl -sSL https://grape.example.com/api/runtime/install | bash -s -- --token <rta_...>
+```
+
+可选参数：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--token` | 必填 | 凭据 token（rta_），WebUI 生成 |
+| `--server` | `https://grape.example.com` | 服务端地址 |
+| `--device` | `worker-<主机名>` | 设备名 |
+| `--repo` | `https://gitcode.com/Jason7602/grape.git` | Grape 代码仓库（自建/镜像部署时改） |
+| `--branch` | `new-version2` | 拉取分支 |
+
+脚本自动：稀疏拉取（仅 `src/` + `skills`）→ 选择/安装 Python≥3.10 → 建 venv + 装 `requirements-worker.txt` → 检测/安装 opencode → 生成 systemd（token 隔离到 600 权限 env 文件）→ 启动服务。
+
+> 幂等：重复执行安全；token 不暴露在 `systemctl cat` 可见的 service 文件中（在 `/etc/grape/runtime.env`，权限 600）。
+
+**详细手工流程见下文**（一键安装失败或需定制时参考）。
+
+---
+
 ## 〇、背景与原理
 
 **Worker（设备）** = 一台安装了 `opencode` / `codearts` 等 CLI 的机器，通过 `runtime.agent` 进程与 Grape 服务端通信，领取并执行 DevOps Agent 任务（Issue 分析、代码实现、PR 审查等）。
@@ -71,6 +97,7 @@ cd /opt/grape
 git checkout new-version2          # 或生产分支
 
 # 2. 建 venv 并安装依赖（worker 只需最小集 requirements-worker.txt）
+# 先确认 python ≥3.10；若系统无合适版本，一键脚本会自动安装，手工流程可自行 apt/yum 安装 python3.12
 python3.12 -m venv .venv        # 必须 ≥3.10；推荐显式 python3.12，避免默认 python3 是旧版
 .venv/bin/pip install -r requirements-worker.txt   # 只含 aiohttp
 

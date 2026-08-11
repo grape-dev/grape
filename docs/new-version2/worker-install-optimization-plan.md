@@ -42,24 +42,48 @@ curl -sSL <脚本URL> | bash -s \
   --token <rta_...> \
   --server https://grape.example.com \
   --device worker-dev1
+  # --repo 可选：仓库地址，默认 https://gitcode.com/Jason7602/grape.git
 ```
 
 ### 脚本职责
 
 1. **稀疏拉取仓库**（避免全仓 + 敏感暴露）：
+   - **仓库地址**：脚本默认官方仓库 `https://gitcode.com/Jason7602/grape.git`（Grape 代码仓库，worker 从它拉取运行代码）；可用 `--repo <url>` 覆盖（自建/镜像部署时用）。
    ```bash
-   git clone --filter=blob:none --sparse <repo_url> /opt/grape
+   REPO_URL="${REPO_URL:-https://gitcode.com/Jason7602/grape.git}"
+   git clone --filter=blob:none --sparse "$REPO_URL" /opt/grape
    cd /opt/grape
    git sparse-checkout set src/runtime src/config.py src/repo_key.py src/session_manager.py skills
    ```
    - worker 运行仅需这些路径；`configs/`、`data/`、`docs/` 等不拉取；
    - 后续 `git pull` 保持 sparse 子集。
 
-2. **建 venv + 最小依赖**：
+2. **准备 Python（≥3.10）**：代码用 `X | None` 联合类型语法，<3.10 无法运行。脚本**自动选择或安装**，而非仅提示：
    ```bash
-   python3.12 -m venv .venv          # 必须 ≥3.10（代码用 X | None 语法）；推荐显式 3.12
+   # a) 先找系统已有的 ≥3.10 解释器
+   for py in python3.12 python3.11 python3.10 python3; do
+     if command -v "$py" >/dev/null 2>&1 && "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)'; then
+       PY="$py"; break
+     fi
+   done
+   # b) 找不到则自动安装（按发行版）
+   if [ -z "$PY" ]; then
+     if command -v apt-get >/dev/null; then
+       apt-get update && apt-get install -y python3.12 python3.12-venv
+       PY=python3.12
+     elif command -v yum >/dev/null; then
+       yum install -y python3.12
+       PY=python3.12
+     fi
+   fi
+   [ -n "$PY" ] || { echo "无法自动安装 Python>=3.10，请手动安装后重试"; exit 1; }
+
+   # c) 建 venv + 最小依赖
+   "$PY" -m venv .venv
    .venv/bin/pip install -r requirements-worker.txt
    ```
+   - 找不到合适版本时自动安装（apt/yum），而非只给提示；
+   - 安装失败或无法安装才报错退出（并附手动指引）。
 
 3. **检测/安装 opencode**：
    - `command -v opencode` 存在则跳过；
