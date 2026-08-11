@@ -182,6 +182,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         step_count = 0
         _last_output = time.time()
         _reader_total = 0
+        # 进程存活但无输出的累计延长时长（防长命令/长思考无上限；超硬上限仍强杀，见 #501 修复）
+        _silent_extend_total = 0.0
+        _silent_extend_cap = float(os.environ.get("AGENT_SILENT_EXTEND_CAP", str(max_exec_seconds * 3)))
 
         import threading
         _line_queue = []
@@ -259,7 +262,19 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             else:
                 elapsed_silent = time.time() - _last_output
                 if elapsed_silent > max_exec_seconds:
-                    log.warning(f"{label}{backend.name} no output for {max_exec_seconds}s, terminating")
+                    # 若 opencode 进程仍存活（长 bash 命令/长思考中，如 pip install），
+                    # 不立即判超时——重置静默计时继续等待，避免长命令被误杀（见 #501 修复）。
+                    # 但累计延长受硬上限约束（AGENT_SILENT_EXTEND_CAP，默认 3×max_exec_seconds），
+                    # 防止进程活着的死循环永久挂起。
+                    if proc.poll() is None and _silent_extend_total < _silent_extend_cap:
+                        _silent_extend_total += elapsed_silent
+                        log.info(f"{label}{backend.name} silent {elapsed_silent:.0f}s but process alive, "
+                                 f"extending window (long cmd/reasoning, total_extend={_silent_extend_total:.0f}s)")
+                        _last_output = time.time()
+                        time.sleep(0.1)
+                        continue
+                    log.warning(f"{label}{backend.name} no output for {max_exec_seconds}s"
+                                f"(extend_total={_silent_extend_total:.0f}s), terminating")
                     # 先 SIGTERM 给 agent 收尾窗口（_terminate_proc 内部 grace_seconds=10 等待优雅退出）
                     _terminate_proc(proc, f"{label}{backend.name}")
                     # 收尾窗口内尝试读取 SIGTERM 后 opencode 冲刷的最终输出（避免把已产出的收尾当卡死）

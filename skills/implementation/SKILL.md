@@ -15,6 +15,7 @@ tools:
 3. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
 4. token 不得写入任何文件/日志/评论。
 5. **调用 GitCode API 一律以 `references/gitcode-api-reference.md` 为准**：该文档包含 Base URL 与全部端点。**严禁根据经验/记忆/猜测自行拼写 API 路径**（尤其不得使用 GitLab 风格 `/api/v3`、`/api/v4`、`projects/.../merge_requests` 或错误域名）。文档未列出的操作用 `GET /repos/:owner/:repo` 等既有端点组合实现，无法实现时在评论中说明。
+6. **长命令执行会静默**：`pip install`、`git clone`、大测试等长命令运行期间 opencode 无输出。执行这类命令时**加 `timeout` 限制（如 `timeout 300 ...`）**并一次只装必要依赖，避免长时间无输出影响执行；若命令本身可能超长，先输出说明再执行。
 
 
 
