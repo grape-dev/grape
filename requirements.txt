@@ -1,3 +1,7 @@
+# Grape 服务端依赖 —— 运行 src.api.run（WebUI + webhook + IM bot + 服务端执行）需要
+#
+# 端侧（worker）不装此清单，只用最小集 requirements-worker.txt（仅 aiohttp）。
+# 安装：python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 paramiko>=3.0
 lark-oapi>=1.0
 pyyaml>=6.0

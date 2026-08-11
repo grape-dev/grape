@@ -277,21 +277,22 @@ Pipeline 按 **Issue** 维度聚合展示工作流进展：
 │  └────────┘  └────────┘  └────────┘  └────────┘  └───────┘ │
 │                                                        │
 │  Pipeline History（点击 Issue 切换上方 Agent 卡片）      │
-│  ┌─────────┬──────────┬──────────────┬───────┬────────┐│
-│  │Issue    │ Duration │ Agents       │Result │责任人   ││
-│  ├─────────┼──────────┼──────────────┼───────┼────────┤│
-│  │Issue#342│ 28m 12s  │ V I C Q S   │Processing│QA Agent││
-│  │Issue#338│ 1h 05m   │ V I C Q S   │Released│SRE Agent││
-│  │Issue#331│ 42m 18s  │ I C Q       │Rollback│Jason7602││
-│  └─────────┴──────────┴──────────────┴───────┴────────┘│
+│  ┌─────────┬──────────┬──────────────┬────────┬────────┐│
+│  │Issue    │ Duration │ Agents       │阶段     │责任人   ││
+│  ├─────────┼──────────┼──────────────┼────────┼────────┤│
+│  │Issue#342│ 28m 12s  │ V I C Q S   │Coding   │grape_bot││
+│  │Issue#338│ 1h 05m   │ V I C Q S   │QA       │grape_bot││
+│  │Issue#331│ 42m 18s  │ I C Q       │Done     │Jason7602││
+│  └─────────┴──────────┴──────────────┴────────┴────────┘│
 └─────────────────────────────────────────────────────────┘
 ```
 
 - **Issue 链接**：上方 "Issue #342" 为可点击链接（跳转 `https://gitcode.com/{owner}/{repo}/issues/{n}`）；历史表行点击仅用于切换上方 Agent 卡片。
+- **阶段列**：显示 Issue 生命周期当前阶段（VOD / Issue / Coding / QA / SRE / Done），取 `issue_state.stage`。
 - **排序**：Pipeline History 按 Issue 最新活动**倒序**（最新的 issue 排最前，原为 issue 首次出现顺序）。
 - **执行态**：由 `agent_tasks` 中 `dispatched/running` 任务实时派生，执行中的 Issue 显示 `⚡执行中` 徽标（空闲显示「空闲」）。
 - **Agent 卡片**：每阶段展示该 Agent 对该 Issue 最新一条 Event 的 title、状态（✅ Done / 🔄 In Progress / ❌ Failed / ⏳ Pending）与 actor（@用户名）；**未涉及任务的阶段（Pending）卡片整体调暗**（灰色背景 + 降饱和 + 弱化文字 + 降低透明度）。
-- **责任人判定**：优先取 Issue assignee（从事件 payload 解析）；缺失时取当前阶段 Agent 最新 Event 的 `actor`，若为 bot 则显示 Agent 显示名，若为项目成员则显示其用户名。
+- **责任人判定**：优先取 **`issue_state.assignee`**（GitCode Issue 真实指派，可为 `grape_bot` 或项目成员用户名）；缺失时回退取当前阶段 Agent 最新 Event 的 `actor`，若为 bot 则显示 Agent 显示名，若为项目成员则显示其用户名。
 
 > new-version2 说明：事件按 **Issue 生命周期状态机**路由（`issue_state` 表，阶段 `vod→issue→coding→qa→sre→done`）。`issue_opened` 恒进 VOD 审视；Issue 类事件按阶段归 VOD 或 Issue Agent；PR 类事件按阶段归 coding/qa/sre。同时执行采用 **Issue 级会话/工作目录隔离**（`{workspace}/{owner}/{repo}/{agent}/issues/{n}/` + issue 级执行会话），支持同仓库多 Issue 并行，同 Issue 内串行。
 

@@ -170,13 +170,17 @@ function doCreateCredential() {
   API.post('/settings/runtime-credentials', { name, scope, repo_key }).then(d => {
     const token = d.token || '';
     const runCmd = `RUNTIME_TOKEN=${token} python -m runtime.agent`;
+    const oneCmd = `curl -sSL ${window.location.origin}/api/runtime/install | bash -s -- --token ${token}`;
     closeGenCredential();
     const box = `<div class="cd" style="margin-top:12px;padding:16px">
       <div style="font-size:13px;margin-bottom:8px">⚠️ token 仅展示一次，请立即保存（凭据名: ${name}，范围: ${_scopeLabel(scope)}）：</div>
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px">${token}</code>
-      <div style="margin-top:10px;font-size:12px">RuntimeAgent 启动命令：</div>
+      <div style="margin-top:10px;font-size:12px">📦 在 Worker 机器上一键安装（推荐）：</div>
+      <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-top:4px">${oneCmd}</code>
+      <button class="bt bt-p bt-s" style="margin-top:8px" onclick="copyText('${oneCmd.replace(/'/g, "\\'")}')">📋 复制一键命令</button>
+      <div style="margin-top:10px;font-size:12px">或手动启动 RuntimeAgent：</div>
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-top:4px">${runCmd}</code>
-      <button class="bt bt-p bt-s" style="margin-top:10px" onclick="copyText('${token}')">📋 复制</button>
+      <button class="bt bt-o bt-s" style="margin-top:8px" onclick="copyText('${token}')">📋 复制 token</button>
     </div>`;
     const el = document.getElementById('pageContent');
     el.insertAdjacentHTML('afterbegin', box);

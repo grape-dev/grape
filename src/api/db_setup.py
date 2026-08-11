@@ -296,6 +296,7 @@ CREATE TABLE IF NOT EXISTS issue_state (
     issue_id     TEXT NOT NULL,             -- 如 "#5"
     stage        TEXT NOT NULL DEFAULT 'vod',   -- vod/issue/coding/qa/sre/done
     owner_agent  TEXT NOT NULL DEFAULT 'vod',   -- 当前归属 agent（= 最新被交办者）
+    assignee     TEXT DEFAULT '',          -- Issue 责任人（GitCode assignee，可为 grape_bot 或用户）
     a2a_seq      INTEGER,                   -- 触发当前 stage 的 A2A 事件 seq
     updated_at   TEXT DEFAULT (datetime('now')),
     created_at   TEXT DEFAULT (datetime('now')),
@@ -726,6 +727,7 @@ def _migrate_tables():
         "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
+        "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:

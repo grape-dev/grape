@@ -4,7 +4,7 @@ M2：任务状态轮询 / 取消（用户 token）。
 M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_ 凭据可过（D2 凭据隔离）。
 见 agent-runtime-event-full-design.md §6 / tech-impl.md §3。
 """
-import hashlib, json
+import hashlib, json, os
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
@@ -307,3 +307,23 @@ def _server_url() -> str:
         return get_server_base_url()
     except Exception:
         return ""
+
+
+@router.get("/install")
+async def runtime_install_script():
+    """返回 Worker 一键安装脚本（只读，无敏感信息；token 由调用方以 --token 注入）。
+
+    见 worker-install-optimization-plan.md 方案 B。用法：
+      curl -sSL <server>/api/runtime/install | bash -s -- --token <rta_...>
+    """
+    from fastapi.responses import PlainTextResponse
+    script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+                               "scripts", "install-worker.sh")
+    if not os.path.isfile(script_path):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "install script not found"})
+    try:
+        with open(script_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "read install script failed"})
+    return PlainTextResponse(content, media_type="text/plain")
