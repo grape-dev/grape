@@ -31,15 +31,23 @@
 </template>
 
 <script setup>
-import { nextTick, ref } from 'vue'
+import { nextTick, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import * as echarts from 'echarts'
 import { getToken } from '../utils/auth'
+import http from '../api'
 
+const route = useRoute()
 const messages = ref([])
 const input = ref('')
 const busy = ref(false)
 const chatBox = ref(null)
 let sessionId = null
+
+// 从历史页"继续对话"进入时带上会话 id
+onMounted(() => {
+  if (route.query.session) sessionId = String(route.query.session)
+})
 
 function renderParts(content) {
   const parts = []
@@ -65,10 +73,10 @@ async function send() {
   await scrollDown()
 
   try {
-    const resp = await fetch('/api/admin/ai/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-      body: JSON.stringify({ query: q, sessionId })
+    // 异步任务模式（参考 VOD）：submit 立即返回 taskId，再订阅流
+    const { data } = await http.post('/ai/chat/submit', { query: q, sessionId })
+    const resp = await fetch(`/api/admin/ai/chat/task/${data.taskId}/stream`, {
+      headers: { Authorization: `Bearer ${getToken()}` }
     })
     if (!resp.ok || !resp.body) throw new Error(resp.status === 502 ? '服务暂时不可用（可能正在部署/重启），请稍后重试' : `HTTP ${resp.status}`)
     const reader = resp.body.getReader()
