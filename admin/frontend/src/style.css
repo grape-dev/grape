@@ -140,7 +140,7 @@ tr:hover td { background: #f8f9fb; }
 /* ---------- 模态框 ---------- */
 .modal { position: fixed; inset: 0; z-index: 100; background: rgba(12, 18, 34, .55); display: flex; align-items: center; justify-content: center; }
 .modal-box { background: var(--c); border-radius: var(--r2); padding: 20px 22px; width: 440px; box-shadow: 0 12px 40px rgba(0, 0, 0, .18); }
-.modal.wide .modal-box { width: 780px; max-height: 82vh; overflow: auto; }
+.modal.wide .modal-box { width: 780px; height: 78vh; overflow-y: auto; }
 .modal-box h4 { font-size: 14px; font-weight: 600; margin-bottom: 14px; }
 .modal-box h5 { font-size: 12px; font-weight: 600; margin: 14px 0 6px; color: var(--t2); }
 .modal-box input, .modal-box select {

@@ -86,29 +86,17 @@
     <div class="modal-box">
       <h4>设备详情：{{ detail.deviceName || detail.name }}</h4>
       <p class="t2">健康：{{ detail.health }} ｜ 最后心跳：{{ detail.lastSeenAt }} ｜ IP：{{ detail.lastIp }}</p>
-      <h5>引擎（{{ detail.engines.length }}）</h5>
+      <h5 style="display:flex;align-items:center;gap:8px">引擎（{{ filteredEngines.length }}/{{ detail.engines.length }}）
+        <input v-model="engineSearch" placeholder="搜索引擎" style="width:140px;padding:3px 8px;font-size:11px;border:1px solid var(--b);border-radius:6px;background:var(--bg);outline:none" />
+      </h5>
       <div class="flex gap8" style="flex-wrap:wrap">
         <button
-          v-for="e in detail.engines" :key="e.id"
+          v-for="e in filteredEngines" :key="e.id"
           class="bt" :class="selectedEngine?.id === e.id ? 'bt-p' : 'bt-o'"
           @click="selectEngine(e)"
         >
           {{ e.name }}<span class="t3" style="font-weight:400"> v{{ e.version || '' }}</span>
         </button>
-      </div>
-      <div v-if="selectedEngine" class="cd mt8" style="background:var(--bg);padding:10px 14px">
-        <div class="flex fc jbtw gap8" style="flex-wrap:wrap">
-          <div class="flex gap12" style="font-size:12px;color:var(--t2);flex-wrap:wrap">
-            <span>名称 <b class="t">{{ selectedEngine.name }}</b></span>
-            <span>版本 <b>{{ selectedEngine.version || '-' }}</b></span>
-            <span>状态 <b>{{ selectedEngine.status }}</b></span>
-            <span>健康 <b :style="{ color: healthColor(selectedEngine.health) }">{{ healthText(selectedEngine.health) }}</b></span>
-            <span>心跳 {{ selectedEngine.lastSeenAt || '-' }}</span>
-            <span v-if="selectedEngine.cliPath" class="t3">CLI {{ selectedEngine.cliPath }}</span>
-            <span v-if="selectedEngine.scope">范围 {{ selectedEngine.scope }}</span>
-          </div>
-          <a class="bt bt-o bt-s" @click="deleteEngine(selectedEngine)">删除引擎</a>
-        </div>
       </div>
       <h5>引擎{{ selectedEngine ? '「' + selectedEngine.name + '」' : '' }}的任务（{{ detail.tasks.totalElements }}）</h5>
       <div class="tw">
@@ -139,7 +127,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import http from '../api'
 
 const devices = ref([])
@@ -151,6 +139,7 @@ const name = ref('')
 const view = ref('list')
 const detail = ref(null)
 const selectedEngine = ref(null)
+const engineSearch = ref('')
 const activeTab = { background: 'var(--a)', color: '#fff', borderColor: 'var(--a)' }
 const sizeOptions = [5, 10, 20, 50]
 const size = ref(5)
@@ -166,7 +155,6 @@ const BADGE = {
 }
 function healthText(h) { return (BADGE[h] || { label: h }).label }
 function healthClass(h) { return { online: 'tg-g', recently_lost: 'tg-s', offline: 'tg-d', about_to_gc: 'tg-i', revoked: 'tg-d' }[h] || 'tg-d' }
-function healthColor(h) { return (BADGE[h] || { color: 'var(--t3)' }).color }
 function badgeStyle(h) {
   const b = BADGE[h] || { color: 'var(--t3)', bg: '#eef0f3' }
   return { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12px', fontWeight: 600, color: b.color, background: b.bg, padding: '3px 10px', borderRadius: '999px', whiteSpace: 'nowrap' }
@@ -217,13 +205,6 @@ function selectEngine(e) {
   selectedEngine.value = e
   taskPage.value = 0
   openDetail(detail.value)
-}
-async function deleteEngine(e) {
-  if (!confirm(`确认删除引擎 ${e.name}（id=${e.id}）？`)) return
-  try {
-    await http.delete(`/engines/${e.id}`)
-    openDetail(detail.value)
-  } catch (err) { alert(err.response?.data?.message || '删除失败') }
 }
 onMounted(load)
 </script>
