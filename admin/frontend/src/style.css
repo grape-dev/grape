@@ -39,7 +39,10 @@ a { text-decoration: none; }
 .sb-nav .grp {
   font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px;
   color: var(--t3); padding: 14px 8px 5px; font-weight: 600;
+  cursor: pointer; user-select: none; display: flex; align-items: center; gap: 5px;
 }
+.sb-nav .grp:hover { color: #fff; }
+.sb-nav .grp .chev { font-size: 9px; opacity: .8; width: 12px; display: inline-block; }
 .sb-nav a {
   display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 7px;
   color: #c2cad6; font-size: 12px; cursor: pointer; transition: all .12s; margin-bottom: 1px;
