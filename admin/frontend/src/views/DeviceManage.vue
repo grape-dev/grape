@@ -97,14 +97,18 @@
           </tbody>
         </table>
       </div>
-      <h5>最近任务（{{ detail.tasks.length }}）</h5>
+      <h5>最近任务（{{ detail.tasks.length }}）<span class="t3" style="font-size:10px;font-weight:400">任务绑定执行引擎（agent_tasks.runtime_id）</span></h5>
       <div class="tw">
         <table>
-          <thead><tr><th>ID</th><th>类型</th><th>技能</th><th>状态</th><th>创建时间</th></tr></thead>
+          <thead><tr><th>ID</th><th>引擎</th><th>类型</th><th>技能</th><th>状态</th><th>创建时间</th></tr></thead>
           <tbody>
             <tr v-for="t in detail.tasks" :key="t.id">
-              <td class="t3">{{ t.id }}</td><td>{{ t.agentType }}</td><td>{{ t.skill }}</td>
-              <td><span class="tg tg-d">{{ t.status }}</span></td><td class="t3">{{ t.createdAt }}</td>
+              <td class="t3">{{ t.id }}</td>
+              <td>{{ engineName(t.runtimeId) }}</td>
+              <td>{{ t.agentType }}</td>
+              <td>{{ t.skill }}</td>
+              <td><span class="tg tg-d">{{ t.status }}</span></td>
+              <td class="t3">{{ t.createdAt }}</td>
             </tr>
           </tbody>
         </table>
@@ -147,7 +151,7 @@ function dotStyle(h) {
 }
 
 async function load() {
-  const { data } = await http.get('/devices', { params: { status: status.value, name: name.value, page: page.value, size: 10 } })
+  const { data } = await http.get('/devices', { params: { status: status.value, name: name.value, page: page.value, size: 5 } })
   devices.value = data.content
   total.value = data.totalElements
   totalPages.value = data.totalPages
@@ -171,6 +175,10 @@ async function recycle(d) {
 async function openDetail(d) {
   const { data } = await http.get(`/devices/${d.id}`)
   detail.value = data
+}
+function engineName(runtimeId) {
+  const e = detail.value?.engines?.find(x => x.id === runtimeId)
+  return e ? `${e.name}${e.version ? ` v${e.version}` : ''}` : `runtime#${runtimeId}`
 }
 async function deleteEngine(e) {
   if (!confirm(`确认删除引擎 ${e.name}（id=${e.id}）？`)) return
