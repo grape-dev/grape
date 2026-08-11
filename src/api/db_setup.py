@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     name TEXT NOT NULL,
     display_name TEXT DEFAULT '',
     provider TEXT DEFAULT '',
-    binary TEXT DEFAULT '',
+    `binary` TEXT DEFAULT '',
     installed INTEGER DEFAULT 0,
     cli_path TEXT DEFAULT '',
     version TEXT DEFAULT '',
@@ -368,10 +368,13 @@ def _create_tables():
 
 
 def _ensure_column(c, tbl: str, col: str, ddl: str):
-    """幂等补列：PRAGMA 检查列不存在才 ALTER"""
+    """幂等补列：PRAGMA 检查列不存在才 ALTER。
+
+    列名以反引号包裹（`` `col` ``），兼容 MySQL（如 `binary` 为保留字）与 SQLite。
+    """
     cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
     if col not in cols:
-        c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {ddl}")
+        c.execute(f"ALTER TABLE {tbl} ADD COLUMN `{col}` {ddl}")
 
 
 def _rename_column_if_exists(c, tbl: str, old: str, new: str):
