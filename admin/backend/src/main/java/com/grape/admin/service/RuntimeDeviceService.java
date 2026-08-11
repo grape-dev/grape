@@ -151,28 +151,51 @@ public class RuntimeDeviceService {
         return device;
     }
 
-    public List<Map<String, Object>> engineOverview() {
+    public Map<String, Object> engineList(String type, String device, String status, int page, int size) {
         List<AgentRuntimeRo> runtimes = runtimeRepository.findAll();
-        Map<String, List<AgentRuntimeRo>> byName = runtimes.stream()
-                .collect(Collectors.groupingBy(r -> r.getName() == null ? "(unknown)" : r.getName()));
-        List<Map<String, Object>> result = new ArrayList<>();
-        for (Map.Entry<String, List<AgentRuntimeRo>> e : byName.entrySet()) {
-            List<AgentRuntimeRo> list = e.getValue();
-            Map<String, Long> healthCounts = list.stream()
-                    .collect(Collectors.groupingBy(
-                            r -> healthService.engineHealth(r.getStatus(), r.getLastSeenAt()),
-                            Collectors.counting()));
-            Map<String, Long> versionCounts = list.stream()
-                    .collect(Collectors.groupingBy(r -> r.getVersion() == null ? "(未知)" : r.getVersion(),
-                            Collectors.counting()));
+        Map<Integer, String> deviceNameByCredential = credentialRepository.findAll().stream()
+                .collect(Collectors.toMap(RuntimeCredentialRo::getId,
+                        c -> c.getDeviceName() == null || c.getDeviceName().isBlank() ? c.getName() : c.getDeviceName()));
+
+        Map<String, Long> typeCounts = runtimes.stream()
+                .collect(Collectors.groupingBy(r -> r.getName() == null ? "(unknown)" : r.getName(), Collectors.counting()));
+
+        List<Map<String, Object>> filtered = new ArrayList<>();
+        for (AgentRuntimeRo r : runtimes) {
+            String health = healthService.engineHealth(r.getStatus(), r.getLastSeenAt());
+            if (type != null && !type.isBlank() && !type.equals(r.getName())) continue;
+            String devName = deviceNameByCredential.getOrDefault(r.getCredentialId(), "");
+            if (device != null && !device.isBlank() && !devName.toLowerCase().contains(device.toLowerCase())) continue;
+            if (status != null && !status.isBlank() && !status.equals(health)) continue;
             Map<String, Object> m = new LinkedHashMap<>();
-            m.put("name", e.getKey());
-            m.put("binary", list.get(0).getBinary());
-            m.put("total", list.size());
-            m.put("health", healthCounts);
-            m.put("versions", versionCounts);
-            result.add(m);
+            m.put("id", r.getId());
+            m.put("name", r.getName());
+            m.put("displayName", r.getDisplayName());
+            m.put("version", r.getVersion());
+            m.put("binary", r.getBinary());
+            m.put("provider", r.getProvider());
+            m.put("device", devName);
+            m.put("credentialId", r.getCredentialId());
+            m.put("health", health);
+            m.put("status", r.getStatus());
+            m.put("healthy", r.getHealthy());
+            m.put("lastSeenAt", r.getLastSeenAt());
+            m.put("scope", r.getScope());
+            m.put("ownerId", r.getOwnerId());
+            filtered.add(m);
         }
+        filtered.sort((a, b) -> Integer.compare((Integer) b.get("id"), (Integer) a.get("id")));
+
+        int total = filtered.size();
+        int from = Math.min(page * size, total);
+        int to = Math.min(from + size, total);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("stats", typeCounts);
+        result.put("content", filtered.subList(from, to));
+        result.put("totalElements", total);
+        result.put("totalPages", size > 0 ? (total + size - 1) / size : 0);
+        result.put("page", page);
+        result.put("size", size);
         return result;
     }
 

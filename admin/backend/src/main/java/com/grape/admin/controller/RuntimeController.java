@@ -50,8 +50,12 @@ public class RuntimeController {
     }
 
     @GetMapping("/engines")
-    public List<Map<String, Object>> engines() {
-        return deviceService.engineOverview();
+    public Map<String, Object> engines(@RequestParam(required = false) String type,
+                                       @RequestParam(required = false) String device,
+                                       @RequestParam(required = false) String status,
+                                       @RequestParam(defaultValue = "0") int page,
+                                       @RequestParam(defaultValue = "10") int size) {
+        return deviceService.engineList(type, device, status, page, size);
     }
 
     @GetMapping("/tasks")
