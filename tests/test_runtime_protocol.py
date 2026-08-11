@@ -487,3 +487,46 @@ class TestGhostEnginePrevention:
             with db_lock:
                 db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=8888")
                 db.commit()
+
+
+class TestRuntimeInstanceName:
+    """runtime_instance_name：按 runtime_id 反查引擎实例名（`{type}-{device}`，与 UI 同源），
+    供 enqueue/claim/worker 日志与 events.runtime 使用（而非仅类型名 opencode）。"""
+
+    def _seed_bound_runtime(self, device="worker-123249", ename="opencode"):
+        import hashlib
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope) VALUES (?,?,?,?)",
+                      (hashlib.sha256(device.encode()).hexdigest(), device, device, "global"))
+            cid = c.lastrowid
+            c.execute("INSERT INTO agent_runtimes (credential_id, name, display_name, installed, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,1,'1.0',1,?, 'global','')",
+                      (cid, ename, ename.capitalize(), ename))
+            rid = c.lastrowid
+            db.commit()
+        return rid
+
+    def test_resolves_credential_bound(self):
+        from src.runtime.instances import runtime_instance_name
+        rid = self._seed_bound_runtime(device="worker-123249", ename="opencode")
+        assert runtime_instance_name(rid) == "opencode-worker-123249"
+
+    def test_another_device_and_type(self):
+        from src.runtime.instances import runtime_instance_name
+        rid = self._seed_bound_runtime(device="grape-server", ename="codearts")
+        assert runtime_instance_name(rid) == "codearts-grape-server"
+
+    def test_zero_and_unknown_empty(self):
+        from src.runtime.instances import runtime_instance_name
+        assert runtime_instance_name(0) == ""
+        assert runtime_instance_name(999999) == ""
+
+    def test_enqueue_claim_works_with_bound_runtime(self):
+        """绑定凭据的 runtime 入队 + claim 功能正常（日志带实例名，此处验证不崩）"""
+        from src.runtime import service as svc
+        rid = self._seed_bound_runtime(device="grape-server", ename="opencode")
+        tid = svc.enqueue_task(agent_session_id="sess-inst", runtime_id=rid, prompt="p",
+                               event_seq=1, issue_id="#5", repo_key="test/repo",
+                               agent_type="issue", skill="issue")
+        claimed = svc.claim(rid)
+        assert claimed and claimed["id"] == tid

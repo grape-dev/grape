@@ -427,7 +427,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     elif backend and skill_name and seq > 0:
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
         threading.Thread(target=_execute_agent, args=(
-            repo_key, seq, agent_type, backend, skill_name, evt,
+            repo_key, seq, agent_type, backend, skill_name, evt, runtime_id or 0,
         ), daemon=True, name=f"ag-{agent_type}-{seq}").start()
         log.info(f"Pipeline: started agent execution, seq={seq}, repo={repo_key}, agent={agent_type}")
 
@@ -489,21 +489,24 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     """
     from src.api.event_archive import init_event_json
     from src.runtime.service import enqueue_task, get_execution_mode
+    from src.runtime.instances import runtime_instance_name
     from src.repo_key import from_repo_key
     import os as _os
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
-    # 1) event.json 骨架（#0 跳过，见 event_archive._extract_num）
-    _evt_copy = dict(evt)
-    _evt_copy["issue_id"] = issue_id
-    init_event_json(repo_key, seq, _evt_copy, agent_type, runtime=backend or "", skill=skill_name)
-    # 2) 确定路由：绑定 runtime_id；未绑定时用默认 opencode runtime id
+    # 1) 确定路由：绑定 runtime_id；未绑定时用默认 opencode runtime id
     if not runtime_id:
         try:
             from src.user.db import ensure_default_runtime
             runtime_id = ensure_default_runtime("opencode") or 0
         except Exception:
             runtime_id = 0
+    # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名
+    inst_name = runtime_instance_name(runtime_id) or backend or "opencode"
+    # 2) event.json 骨架（#0 跳过，见 event_archive._extract_num）
+    _evt_copy = dict(evt)
+    _evt_copy["issue_id"] = issue_id
+    init_event_json(repo_key, seq, _evt_copy, agent_type, runtime=inst_name, skill=skill_name)
     if not runtime_id:
         log.warning(f"Pipeline enqueue: no runtime_id for repo={repo_key} agent={agent_type}, task skipped")
         return
@@ -517,7 +520,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     #    repo 级会话仅用于无关联 Issue（push/#0）。
     from src.api.session_store import get_or_create_agent_session, get_or_create_issue_session
     from src.api.event_store import update_event_config
-    update_event_config(seq, backend or "opencode", skill_name, datetime.now(timezone.utc).isoformat())
+    update_event_config(seq, inst_name, skill_name, datetime.now(timezone.utc).isoformat())
     session = get_or_create_agent_session(repo_key, agent_type, backend or "opencode")
     oc_session_id = session.get("runtime_session_id") or ""
     issue_session_id = ""
@@ -589,13 +592,17 @@ def get_prompt_context(repo_key: str) -> str:
 
 
 def _execute_agent(repo_key: str, seq: int, agent_type: str,
-                   backend: str, skill_name: str, evt: dict):
+                   backend: str, skill_name: str, evt: dict, runtime_id: int = 0):
     """后台执行 Agent：构建 prompt → stream_agent → 更新 event（result/status/agent_log）"""
     from src.runtime.executor import stream_agent
     from src.prompt_builder import build_prompt
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
     )
+    from src.runtime.instances import runtime_instance_name
+
+    # 引擎实例名（`{type}-{device}`，与 UI 同源）；查不到回退类型名
+    inst_name = runtime_instance_name(runtime_id) or backend or "opencode"
 
     from src.repo_key import from_repo_key
     repository = evt.get("repository", from_repo_key(repo_key))
@@ -626,7 +633,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     except Exception:
         pass
 
-    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] type={agent_type}, backend={backend}, skill={skill_name}, oc_session={oc_session_id[:20] if oc_session_id else 'none'}")
+    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] type={agent_type}, backend={inst_name}, skill={skill_name}, oc_session={oc_session_id[:20] if oc_session_id else 'none'}")
 
     # 获取 bot token（统一走 get_gitcode_token：devops_agent_session → managed_repos → 全局）
     repo_gitcode_token = ""
@@ -663,7 +670,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     # 记录执行配置（执行完成有产出后统一写入 event）
     started_at = datetime.utcnow().isoformat()
-    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] spawning {backend}")
+    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] spawning {inst_name}")
 
     exit_code = -1
     final_text = ""
@@ -697,7 +704,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
             backend_name=backend, account=exec_account, bot_token=repo_gitcode_token,
             agent_name=agent_name,
-            agent_label=f"[Agent:{agent_type}|repo:{repo_name}]",
+            agent_label=f"[Agent:{agent_type}|repo:{repo_name}|engine:{inst_name}]",
             env_extra=env_extra,
         ):
             # 写库兜底脱敏：即使上游 executor 已脱敏，此处再防御一次（agent 可能在 text/result 复述 token）
@@ -764,7 +771,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     # 有产出 → 更新该 event（写入配置 + 结果 + 结论 + 执行日志）
     new_status = "completed" if exit_code == 0 else "failed"
-    update_event_config(seq, backend, skill_name, started_at)
+    update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text)
     log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")
