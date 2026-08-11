@@ -78,7 +78,7 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
             )
         db.commit()
     from src.config import log
-    log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee}")
+    log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent}")
 
 
 def get_issue_owner(repo_key: str, issue_id: str) -> str:
