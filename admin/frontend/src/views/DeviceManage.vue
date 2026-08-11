@@ -86,7 +86,7 @@
     <div class="modal-box">
       <h4>设备详情：{{ detail.deviceName || detail.name }}</h4>
       <p class="t2">健康：{{ detail.health }} ｜ 最后心跳：{{ detail.lastSeenAt }} ｜ IP：{{ detail.lastIp }}</p>
-      <h5 style="display:flex;align-items:center;gap:8px">引擎（{{ filteredEngines.length }}/{{ detail.engines.length }}）
+      <h5 style="display:flex;align-items:center;gap:8px">引擎（{{ filteredEngines.length }}/{{ (detail.engines || []).length }}）
         <input v-model="engineSearch" placeholder="搜索引擎" style="width:140px;padding:3px 8px;font-size:11px;border:1px solid var(--b);border-radius:6px;background:var(--bg);outline:none" />
       </h5>
       <div class="flex gap8" style="flex-wrap:wrap">
@@ -98,12 +98,12 @@
           {{ e.name }}<span class="t3" style="font-weight:400"> v{{ e.version || '' }}</span>
         </button>
       </div>
-      <h5>引擎{{ selectedEngine ? '「' + selectedEngine.name + '」' : '' }}的任务（{{ detail.tasks.totalElements }}）</h5>
+      <h5>引擎{{ selectedEngine ? '「' + selectedEngine.name + '」' : '' }}的任务（{{ detail.tasks?.totalElements ?? 0 }}）</h5>
       <div class="tw">
         <table>
           <thead><tr><th>ID</th><th>类型</th><th>技能</th><th>状态</th><th>创建时间</th></tr></thead>
           <tbody>
-            <tr v-for="t in detail.tasks.content" :key="t.id">
+            <tr v-for="t in detail.tasks?.content || []" :key="t.id">
               <td class="t3">{{ t.id }}</td>
               <td>{{ t.agentType }}</td>
               <td>{{ t.skill }}</td>
@@ -113,13 +113,13 @@
           </tbody>
         </table>
       </div>
-      <div v-if="detail.tasks.totalElements > 0" class="pager">
-        第 {{ taskPage + 1 }} / {{ detail.tasks.totalPages }} 页（共 {{ detail.tasks.totalElements }} 条）
+      <div v-if="detail.tasks?.totalElements > 0" class="pager">
+        第 {{ taskPage + 1 }} / {{ detail.tasks?.totalPages ?? 1 }} 页（共 {{ detail.tasks?.totalElements ?? 0 }} 条）
         <select v-model="taskSize" @change="taskPage = 0; openDetail(detail)">
           <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}</option>
         </select>
         <button class="bt bt-o bt-s" :disabled="taskPage <= 0" @click="taskPage--; openDetail(detail)">上一页</button>
-        <button class="bt bt-o bt-s" :disabled="taskPage >= detail.tasks.totalPages - 1" @click="taskPage++; openDetail(detail)">下一页</button>
+        <button class="bt bt-o bt-s" :disabled="taskPage >= (detail.tasks?.totalPages ?? 1) - 1" @click="taskPage++; openDetail(detail)">下一页</button>
       </div>
       <div class="modal-actions"><button class="bt bt-o" @click="detail = null">关闭</button></div>
     </div>
