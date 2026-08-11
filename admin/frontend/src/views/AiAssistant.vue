@@ -61,7 +61,7 @@ async function send() {
   await scrollDown()
 
   try {
-    const resp = await fetch('/api/ai/chat', {
+    const resp = await fetch('/api/admin/ai/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
       body: JSON.stringify({ query: q, sessionId })

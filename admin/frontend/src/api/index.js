@@ -2,7 +2,7 @@ import axios from 'axios'
 import { getToken, clearTokens } from '../utils/auth'
 
 const http = axios.create({
-  baseURL: '/api',
+  baseURL: '/api/admin',
   timeout: 30000
 })
 
