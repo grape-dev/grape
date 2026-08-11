@@ -2,9 +2,6 @@
 name: changelog-gen
 version: 1.0.0
 description: 自动生成变更日志
-triggers:
-  - event_type: push
-  - event_type: release_created
 tools:
   - git
 ---
@@ -102,7 +99,7 @@ tools:
 - 变更描述 (#PR号)
 
 ---
-*自动生成 by devops-bot changelog-gen skill*
+*自动生成 by Grape changelog-gen skill*
 ```
 
 ## 参考

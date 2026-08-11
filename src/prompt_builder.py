@@ -40,8 +40,24 @@ def get_skill_capabilities() -> str:
         return "我是 DevOps Bot，专注于 DevOps 相关领域。"
 
 
+def _resolve_server_url() -> str:
+    """返回服务端可达地址（A2A/tasks 等对外调用用）。取 meta.server_base_url（仅基址），
+    无则从 webhook_url 剥后缀兜底；再兜底 localhost:8080。"""
+    try:
+        from src.user.db import get_server_base_url
+        return get_server_base_url()
+    except Exception:
+        pass
+    return "http://localhost:8080"
+
+
 def _build_history_file_guide(repo_key: str, account: str = "") -> str:
     """Build prompt section listing available history files."""
+    from src.runtime.service import get_execution_mode
+    if get_execution_mode() == "queue_remote":
+        # 远端模式：本地历史文件不可达，历史上下文改由 event.json 档案承载
+        #（见 multi-issue-isolation-design.md §4.2 / skill-delivery-remote.md §3.4）
+        return ""
     repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
     if not account:
         account = repo_key.replace("gitcode:", "")
@@ -55,6 +71,42 @@ def _build_history_file_guide(repo_key: str, account: str = "") -> str:
         lines.append("Use the read tool to access any of these files when you need context about past events.")
         return "\n".join(lines)
     return f"Session history file: {base}session_history.json (none yet)"
+
+
+_PROJECT_INFO_MAX_CHARS = 2500
+
+
+def _build_project_info_section(repo_key: str) -> str:
+    """注入 repo 全局项目知识基线（服务端权威、多 VM 共享，见 multi-issue-isolation-design.md §2.4/§4.2）。
+
+    - 内联摘要（截断）+ {{PROJECT_INFO_DIR}} 占位符（worker/本地落地后可用 read tool 读全文）
+    - 无基线 → 明确允许降级分析
+    """
+    try:
+        from src.runtime.service import load_project_info
+        files, meta = load_project_info(repo_key)
+    except Exception:
+        files, meta = {}, {}
+    lines = ["\n## 项目知识基线（repo 全局）"]
+    if not files:
+        lines.append("[无项目知识基线] 允许降级分析：可基于 README 与 GitCode API 获取基础信息，相关结论标注 [degraded]。")
+        return "\n".join(lines)
+    _meta = meta or {}
+    if _meta.get("degraded"):
+        lines.append("> ⚠️ 该基线为降级生成（codegraph 不可用），仅供基础参考。")
+    _sha = _meta.get("last_commit_sha") or ""
+    _upd = _meta.get("last_updated") or ""
+    if _sha or _upd:
+        lines.append(f"> 基线 commit={_sha or '-'} updated={_upd or '-'}")
+    for rel, label in (("project-graph.md", "Project Graph"), ("project-capabilities.md", "Project Capabilities")):
+        content = files.get(rel, "")
+        if not content:
+            continue
+        truncated = len(content) > _PROJECT_INFO_MAX_CHARS
+        body = content[:_PROJECT_INFO_MAX_CHARS] + ("\n...(已截断)" if truncated else "")
+        lines.append(f"### {label}\n{body}")
+    lines.append("> 全文副本已落地：{{PROJECT_INFO_DIR}}/project-graph.md 与 {{PROJECT_INFO_DIR}}/project-capabilities.md，可用 read tool 读取全文。")
+    return "\n".join(lines)
 
 
 def build_role_definition(skills=None) -> str:
@@ -265,7 +317,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
             parts.append(f"  查询仓库 {repo} 最近的 Issue 评论（GET /repos/{repo.split('/')[0]}/{repo.split('/')[-1]}/issues/{{n}}/comments），")
             parts.append("  用评论内容匹配确认 Issue 编号，然后对用户评论进行回复。")
             parts.append("  注意：即使缺少编号，也必须对用户评论作出回复，不得静默跳过。")
-        parts.append("\n必须回复该评论：使用 POST /repos/{owner}/{repo}/issues/{n}/comments，body 以 [DevOps Bot] 开头并引用用户评论原文。")
+        parts.append("\n必须回复该评论：使用 POST /repos/{owner}/{repo}/issues/{n}/comments，body 以 [$AGENT_NAME] 开头并引用用户评论原文。")
     elif evt_type == "vod_signal":
         user_msg = payload.get("user_message", "")
         user_name = evt.get("actor", "未知用户")
@@ -296,6 +348,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
     repo_key = f"{evt['source']}:{evt['repository']}"
     account = evt.get("account") or evt.get("repository", "")
     parts.append(_build_history_file_guide(repo_key, account))
+    parts.append(_build_project_info_section(repo_key))
 
     if skills:
         _sp = skill_path or os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
@@ -333,10 +386,11 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
 如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
 然后调用 A2A API：
 
-  curl -X POST http://localhost:8080/api/a2a \\
+  curl -X POST {{SERVER_URL}}/api/a2a \\
+    -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \\
     -H "Content-Type: application/json" \\
     -d '{
-      "agent": "implementation",
+      "agent": "coding",
       "payload": {
         "repository": "'"$REPO_FULL_NAME"'",
         "account": "'"$ACCOUNT"'",
@@ -361,7 +415,33 @@ context 是传给下一个 Agent 的接力说明，应包含：
 
 ⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
 """)
-    return "\n".join(parts)
+
+    # M1 结构化产出契约（所有 skill 生效，一处维护，见 agent-runtime-event-full-design.md §8）
+    parts.append("""
+## 处理记录输出要求
+
+完成当前任务后，在最终答复末尾输出以下 JSON 块（系统会解析写入该 Issue 的 event.json 档案）：
+
+{
+  "actions": ["做了什么，如 labeled:bug / assigned:@bob / 提交了PR / 发布了审查评论"],
+  "conclusion": "处理结论/分析结果（简要）",
+  "artifacts": ["产生的产物：PR#N / 评论 / 标签 / 部署 / Issue"],
+  "next_step": "下一步建议；如需交办其他 Agent 则说明调用 A2A 的目标",
+  "issue_summary": "Issue 最新聚合结论（覆盖档案 summary；紧凑文本，用 | 分隔）"
+}
+
+注意：
+- 只输出一个 JSON 块，放在答复末尾。
+- 若无法确定动作或结论，相应字段填空数组/空字符串，不要伪造。
+- `issue_summary` 应反映截至当前链尾的最新状态，供下游 Agent 快速浏览。
+
+## 任务结束
+
+完成所有业务动作（发评论 / 打标签 / 交办 A2A / 提交 PR 等）后，输出上述最终 JSON 块并**结束任务**。
+不要继续思考、不要等待用户输入、不要追加额外内容；任务以你的最终输出为终点。
+""")
+    # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
+    return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url())
 
 
 def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "") -> str:

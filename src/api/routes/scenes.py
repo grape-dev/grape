@@ -55,11 +55,17 @@ async def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
         for agent_type, skill in mapping.items():
             sid = str(uuid.uuid4())
             try:
-                from src.user.db import resolve_skill_id
+                from src.user.db import resolve_skill_id, ensure_default_runtime
+                from src.api.session_store import get_agent_type_enable
                 skill_id = resolve_skill_id(skill)
+                runtime_id = ensure_default_runtime("opencode") or 0
+                # 场景只改 skill 映射，不动仓库级 enable：已有会话保留原 enable（用户 Dashboard 开关为准），
+                # 仅新建会话才继承 agent_type 全局默认（sre 默认关），避免 INSERT OR REPLACE 落到列默认 1 误开启
+                _row = c.execute("SELECT enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_type)).fetchone()
+                _enable = _row[0] if _row and _row[0] is not None else get_agent_type_enable(agent_type)
                 c.execute(
-                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, skill_id, repo_gitcode_token, status, last_active_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'))",
-                    (sid, repo_key, agent_type, "opencode", skill, skill_id, repo_token, "idle")
+                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, enable) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?)",
+                    (sid, repo_key, agent_type, runtime_id, skill, skill_id, repo_token, "idle", _enable)
                 )
                 updated += 1
             except Exception as e:

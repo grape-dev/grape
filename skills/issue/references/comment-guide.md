@@ -37,12 +37,12 @@
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "> 用户的问题原文\n\n[issue agent] 这是机器人的回复内容。"}
+{"body": "> 用户的问题原文\n\n[Issue Agent] 这是机器人的回复内容。"}
 ```
 
-- body 必须以 `[issue agent]` 开头
-- issue_comment 事件需引用原文：`> {用户评论}\n\n[issue agent] {机器人回复}`
+- body 必须以 `[Issue Agent]` 开头
+- issue_comment 事件需引用原文：`> {用户评论}\n\n[Issue Agent] {机器人回复}`
 - 引用 commit：` [`sha`](https://gitcode.com/{owner}/{repo}/commit/sha) `
 - 引用 Issue/PR：`[#N](https://gitcode.com/{owner}/{repo}/issues/N)`
 
-> 注：评论 body 前缀固定为 `[issue agent]`，不再使用 `$AGENT_NAME` 环境变量。
+> 注：评论 body 前缀固定为 `[Issue Agent]`。

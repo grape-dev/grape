@@ -1,0 +1,172 @@
+"""git 基建：共享 bare mirror 基线 + Issue 级 git worktree（多 Issue 并行）。
+
+见 multi-issue-isolation-design.md §3.4.1。X 工作模型（用户拍板）：coding/qa/sre 使用本地 git 命令，
+跨平台复用（GitHub 只需在 _HOSTS 加映射）。
+
+- 基线：{WORKSPACE_DIR}/{owner}/{repo}/codebase/ 的 bare mirror（每机懒建立，fetch --prune 刷新）
+- worktree：{WORKSPACE_DIR}/{owner}/{repo}/{agent_type}/issues/{issue_num}/（任务 cwd）
+- 鉴权安全：clone 用 `-c http.extraheader` 内联注入（不写 config、不入日志）；push 用 GIT_ASKPASS
+  辅助脚本读已注入的 `$BOT_GITCODE_TOKEN`（不落盘、随目录清理）。
+"""
+import base64, os, shutil, subprocess, threading
+from src import config
+from src.config import log
+
+_HOSTS = {"gitcode": "gitcode.com", "github": "github.com"}
+
+_GIT_AGENTS = ("coding", "qa", "sre")
+
+_lock_guard = threading.Lock()
+_repo_locks = {}
+
+
+def _lock_for(repo_key: str) -> threading.Lock:
+    with _lock_guard:
+        if repo_key not in _repo_locks:
+            _repo_locks[repo_key] = threading.Lock()
+        return _repo_locks[repo_key]
+
+
+def issue_num_from(issue_id: str) -> str:
+    """"#5" / "5" → "5"；#0/空 → ''。"""
+    s = (issue_id or "").strip().lstrip("#")
+    return s if s and s != "0" else ""
+
+
+def is_git_agent(agent_type: str) -> bool:
+    """仅 coding/qa/sre 需要本地 git 工作树。"""
+    return agent_type in _GIT_AGENTS
+
+
+def repo_base_dir(repo_key: str) -> str:
+    from src.repo_key import split_owner_repo
+    owner, rname = split_owner_repo(repo_key)
+    return os.path.join(config.WORKSPACE_DIR, owner, rname, "codebase")
+
+
+def issue_dir_for(repo_key: str, agent_type: str, issue_num) -> str:
+    from src.repo_key import split_owner_repo
+    owner, rname = split_owner_repo(repo_key)
+    return os.path.join(config.WORKSPACE_DIR, owner, rname, agent_type, "issues", str(issue_num))
+
+
+def clone_url_for(repo_key: str) -> str:
+    from src.repo_key import parse_repo_key
+    provider, owner, repo = parse_repo_key(repo_key)
+    host = _HOSTS.get(provider, _HOSTS["gitcode"])
+    return f"https://{host}/{owner}/{repo}.git"
+
+
+def _basic_auth(token: str) -> str:
+    return base64.b64encode(f"x-access-token:{token}".encode()).decode()
+
+
+def _run_git(args: list, token: str = "", timeout: int = 900):
+    """执行 git；token 经 `-c http.extraheader` 注入（不落盘、不进日志）。"""
+    cmd = ["git"]
+    if token:
+        cmd += ["-c", f"http.extraheader=Authorization: Basic {_basic_auth(token)}"]
+    cmd += args
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        log.warning(f"repogit git exec failed {args[:3]}: {e}")
+        return None
+
+
+def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
+    """确保本机 bare 基线存在并刷新（每机懒建立）。
+
+    用 `git init --bare` + refspec 拉取到 `refs/remotes/origin/*`，而非 `--mirror`：
+    mirror 会把 per-Issue 本地分支 refs/heads/feat/issue-* 误当远程跟踪引用，被 `fetch --prune` 误删。
+    """
+    base = repo_base_dir(repo_key)
+    url = clone_url_for(repo_key)
+    with _lock_for(repo_key):
+        try:
+            if not os.path.isdir(base):
+                os.makedirs(os.path.dirname(base), exist_ok=True)
+                r = _run_git(["init", "--bare", base], token=token)
+                if r is None or r.returncode != 0:
+                    log.warning(f"repogit init failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
+                    return None
+                _run_git(["-C", base, "remote", "add", "origin", url], token=token)
+            r = _run_git(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], token=token)
+            if r is None or r.returncode != 0:
+                log.warning(f"repogit fetch failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
+                return None
+            return base
+        except Exception as e:
+            log.warning(f"repogit ensure_repo_base failed {repo_key}: {e}")
+            return None
+
+
+def _default_base_branch(base: str, token: str = "") -> str:
+    """从 refs/remotes/origin/* 推断默认分支（main → master 兜底）。"""
+    for cand in ("main", "master"):
+        r = _run_git(["-C", base, "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{cand}"], token=token)
+        if r is not None and r.returncode == 0:
+            return cand
+    return "main"
+
+
+def _write_askpass(issue_dir: str) -> str:
+    """写 GIT_ASKPASS 辅助脚本：从环境变量读 token，token 不落盘。"""
+    script = os.path.join(issue_dir, ".git-askpass.sh")
+    try:
+        with open(script, "w", encoding="utf-8") as f:
+            f.write('#!/bin/sh\necho "$BOT_GITCODE_TOKEN"\n')
+        try:
+            os.chmod(script, 0o700)
+        except Exception:
+            pass
+        return script
+    except Exception:
+        return ""
+
+
+def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "") -> str | None:
+    """确保共享基线 + Issue 级 worktree（任务 cwd）。已存在则直接复用。"""
+    if not is_git_agent(agent_type):
+        return None
+    base = ensure_repo_base(repo_key, token)
+    if not base:
+        return None
+    issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
+    os.makedirs(os.path.dirname(issue_dir), exist_ok=True)
+    if os.path.isdir(issue_dir) and (os.path.isdir(os.path.join(issue_dir, ".git"))
+                                     or os.path.isfile(os.path.join(issue_dir, ".git"))):
+        _write_askpass(issue_dir)
+        return issue_dir
+    branch = f"feat/issue-{issue_num}"
+    with _lock_for(repo_key):
+        try:
+            base_branch = _default_base_branch(base, token)
+            br = _run_git(["-C", base, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], token=token)
+            if br is not None and br.returncode == 0:
+                r = _run_git(["-C", base, "worktree", "add", "--force", issue_dir, branch], token=token)
+            else:
+                r = _run_git(["-C", base, "worktree", "add", issue_dir, "-b", branch, f"origin/{base_branch}"], token=token)
+            if r is None or r.returncode != 0:
+                log.warning(f"repogit worktree add failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
+                return None
+            _write_askpass(issue_dir)
+            return issue_dir
+        except Exception as e:
+            log.warning(f"repogit worktree failed {repo_key}: {e}")
+            return None
+
+
+def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num):
+    """移除 Issue 级 worktree + 删除目录（sweeper 用）。"""
+    base = repo_base_dir(repo_key)
+    issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
+    if os.path.isdir(base):
+        with _lock_for(repo_key):
+            try:
+                _run_git(["-C", base, "worktree", "remove", "--force", issue_dir])
+            except Exception:
+                pass
+    shutil.rmtree(issue_dir, ignore_errors=True)

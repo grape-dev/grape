@@ -68,7 +68,7 @@ class TestInfra:
     def test_spa_static_files(self):
         for f in ["/static/js/app.js", "/static/css/app.css", "/static/js/api.js",
                    "/static/js/pages/dashboard.js", "/static/js/pages/agents.js",
-                   "/static/js/pages/backends.js", "/static/js/pages/chat.js"]:
+                   "/static/js/pages/runtimes.js", "/static/js/pages/chat.js"]:
             r = client.get(f)
             assert r.status_code == 200, f"{f} -> {r.status_code}"
             assert len(r.content) > 100, f"{f} too short"
@@ -507,6 +507,31 @@ class TestChat:
         if r.status_code == 400:
             assert "已被其他用户" in r.text or "已被 VOD Agent" in r.text
 
+    def test_config_put_default_backend_no_ghost(self):
+        """前端回退 '<option>Default</option>' 提交 backend='Default'：不得创建 default-cred0 幽灵 runtime，
+        GET /chat/config 应回退 opencode（见 TestGhostEnginePrevention 根因说明）。"""
+        import uuid as _uuid
+        user = user_db.create_user("chat_def_" + _uuid.uuid4().hex[:6], "pw123")
+        assert user
+        tok = user_db.create_session_token(user["id"])
+        hd = {"Authorization": f"Bearer {tok}"}
+        # 清理该用户历史 chat 配置，保证干净
+        with db_lock:
+            db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (user["id"],))
+            db.commit()
+        before = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE name='default'").fetchone()[0]
+        r = client.put("/api/chat/config", json={"backend": "Default"}, headers=hd)
+        assert r.status_code == 200, f"save failed: {r.text[:200]}"
+        with db_lock:
+            after = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE name='default'").fetchone()[0]
+        assert after == before, "backend='Default' 不应创建 default-cred0 幽灵 runtime 行"
+        cfg = client.get("/api/chat/config", headers=hd).json()
+        assert cfg["backend"]["type"] == "opencode"
+        with db_lock:
+            db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=?", (user["id"],))
+            db.commit()
+        user_db.delete_user(user["id"])
+
     def test_chat_im_user_isolation(self):
         """Chat IM 配置每用户独立：A 配置后，B 的 GET /chat/config 应为空 IM"""
         import uuid
@@ -787,13 +812,17 @@ class TestSettings:
 
     def test_gitcode_repo_update(self):
         r = client.put("/api/settings/gitcode-repo/owner/repo",
-                       json={"bot_token": "test", "webhook_token": "test"}, headers=_headers)
+                       json={"bot_token": "test"}, headers=_headers)
         assert r.status_code == 200
 
-    def test_backend_agents(self):
-        r = client.get("/api/settings/backend-agents", headers=_headers)
+    def test_agent_runtimes(self):
+        r = client.get("/api/settings/agent-runtimes", headers=_headers)
         assert r.status_code == 200
-        assert "backends" in r.json()
+        assert "runtimes" in r.json()
+        # 兼容旧路径 /backend-agents 仍可用
+        r_old = client.get("/api/settings/backend-agents", headers=_headers)
+        assert r_old.status_code == 200
+        assert "backends" in r_old.json()
 
 
 # ===================== 10. Skills =====================
@@ -1095,10 +1124,18 @@ class TestWebhook:
             cur.execute("SELECT COUNT(*) FROM events WHERE repo_key='ghost/not-managed'")
             assert cur.fetchone()[0] == 0, "unmanaged repo should not create events"
 
-    def test_a2a_reject_external(self):
-        """A2A should reject requests from non-localhost IPs"""
+    def test_a2a_reject_wrong_token(self):
+        """A2A 鉴权：仓库配置 bot token 后，无/错 token → 403"""
+        from src.session_manager import db, db_lock
+        with db_lock:
+            db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, bot_gitcode_token) VALUES (?,?,?,?,?)",
+                       ("gitcode:org/test", "org", "test", "org/test", "test_bot_token_123"))
+            db.commit()
         r = client.post("/api/a2a", json={"agent": "issue", "payload": {"repository": "org/test", "issue_number": "1"}})
-        assert r.status_code == 403
+        assert r.status_code == 403  # 无 token
+        r2 = client.post("/api/a2a", json={"agent": "issue", "payload": {"repository": "org/test", "issue_number": "1"}},
+                         headers={"Authorization": "Bearer wrong_token"})
+        assert r2.status_code == 403  # 错 token
 
     def test_a2a_missing_agent(self):
         r = client.post("/api/a2a", json={}, headers=_headers)
@@ -1109,7 +1146,12 @@ class TestWebhook:
         assert r.status_code == 400
 
     def test_a2a_with_pr_number(self):
-        """A2A should accept optional pr_number in payload (403 = IP check passed validation)"""
+        """A2A 接受可选 pr_number（正确 bot token 通过鉴权，非 400）"""
+        from src.session_manager import db, db_lock
+        with db_lock:
+            db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, bot_gitcode_token) VALUES (?,?,?,?,?)",
+                       ("gitcode:org/test", "org", "test", "org/test", "test_bot_token_123"))
+            db.commit()
         r = client.post("/api/a2a", json={
             "agent": "qa",
             "payload": {
@@ -1119,7 +1161,7 @@ class TestWebhook:
                 "pr_number": "7",
                 "context": "PR #7 created, please review"
             }
-        }, headers=_headers)
+        }, headers={"Authorization": "Bearer test_bot_token_123"})
         assert r.status_code != 400, f"Payload validation failed: {r.text}"
 
     def test_a2a_pr_number_alone_rejected(self):

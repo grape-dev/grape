@@ -95,12 +95,40 @@ def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: st
             log.warning(f"Event skipped FAILED: {e}")
 
 
+def parse_agent_output_json(final_text: str) -> dict | None:
+    """从 final_text 提取末尾 JSON 块（结构化产出契约，见 agent-runtime-event-full-design.md §8）。
+
+    返回含 actions/conclusion/artifacts/next_step/issue_summary 任一字段的 dict，否则 None。
+    """
+    if not final_text:
+        return None
+    import re as _re, json as _json
+    m = _re.search(r"\{.*\}", final_text or "", _re.S)
+    if not m:
+        return None
+    try:
+        obj = _json.loads(m.group(0))
+        if isinstance(obj, dict) and any(k in obj for k in ("actions", "conclusion", "artifacts", "next_step", "issue_summary")):
+            return obj
+    except Exception:
+        return None
+    return None
+
+
 def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> tuple:
     """判定 Agent 是否有明确答复产出，返回 (has_output: bool, result: str)
 
-    tool_uses: stream_agent 产生的 tool_use 事件输入列表（含 bash 命令）
+    tool_uses: stream_runtime 产生的 tool_use 事件输入列表（含 bash 命令）
     final_text: Agent 最终答复文本
+    优先解析末尾 JSON 块（结构化产出契约）；失败走现有正则降级。
     """
+    # 结构化产出优先（M1）：final_text 末尾 JSON 块
+    out = parse_agent_output_json(final_text)
+    if out:
+        conclusion = out.get("conclusion", "")
+        if conclusion:
+            return True, conclusion
+
     text = final_text or ""
     has_output = False
     result = ""
@@ -191,13 +219,13 @@ def update_event_status(seq: int, status: str):
             log.warning(f"Failed to update event {seq}: {e}")
 
 
-def update_event_config(seq: int, backend: str, skill: str, started_at: str):
-    """写入执行配置（backend, skill, started_at）"""
+def update_event_config(seq: int, runtime: str, skill: str, started_at: str):
+    """写入执行配置（runtime, skill, started_at）"""
     with db_lock:
         try:
             c = db.cursor()
-            c.execute("UPDATE events SET backend=?, skill=?, started_at=? WHERE seq=?",
-                      (backend, skill, started_at, seq))
+            c.execute("UPDATE events SET runtime=?, skill=?, started_at=? WHERE seq=?",
+                      (runtime, skill, started_at, seq))
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update event config {seq}: {e}")
@@ -240,14 +268,14 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
         c = db.cursor()
         try:
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, backend, skill, exit_code, duration, started_at, completed_at FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
                 params + [limit, offset]
             )
             return [
                 {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "",
                  "title": r[4] or r[2], "actor": r[5] or "", "summary": r[6] or r[4] or r[2],
                  "status": r[7], "created_at": r[8],
-                 "backend": r[9] or "", "skill": r[10] or "",
+                 "runtime": r[9] or "", "skill": r[10] or "",
                  "exit_code": r[11], "duration": r[12],
                  "started_at": r[13] or "", "completed_at": r[14] or ""}
                 for r in c.fetchall()

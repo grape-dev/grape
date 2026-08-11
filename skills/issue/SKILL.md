@@ -4,9 +4,6 @@ version: 2.0.0
 description: |
   Issue 全生命周期管理：接收 → 分类 → 打标签 → 分配负责人 → 设置里程碑 → 关联 PR → 回复评论。
    当收到 issue_opened 或 issue_comment 事件时使用此技能。
-triggers:
-  - event_type: issue_opened
-  - event_type: issue_comment
 tools: []
 ---
 
@@ -23,7 +20,8 @@ tools: []
 > 调用时机：**处理结束时**（所有分类/标签/分配动作完成、责任人不再变化后），不要在处理开始时调用——处理过程中责任人可能被调整。
 
 ```bash
-curl -X POST http://localhost:8080/api/tasks/notify \
+curl -X POST {{SERVER_URL}}/api/tasks/notify \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "assignee": "<责任人GitCode用户名>",
@@ -111,8 +109,8 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
     | 讨论方案设计 | 参与讨论给出建议 |
     | 质疑分配结果 | 重新核对 CODEOWNERS，维持或调整 |
     | 其他 DevOps 相关 | 分析并回复 |
-4. **必须回复评论**（⚠️ 除非是机器人自己的评论）— 按 comment-guide.md 格式 `POST /repos/{owner}/{repo}/issues/{n}/comments`，body 以 `[issue agent]` 开头并引用用户评论原文
-5. **需要 A2A 时** — 查本 prompt 底部的 Agent 列表，构造 context（原始需求 + 分析结论 + 建议下一步），调用 `curl -X POST http://localhost:8080/api/a2a`
+4. **必须回复评论**（⚠️ 除非是机器人自己的评论）— 按 comment-guide.md 格式 `POST /repos/{owner}/{repo}/issues/{n}/comments`，body 以 `[Issue Agent]` 开头并引用用户评论原文
+5. **需要 A2A 时** — 查本 prompt 底部的 Agent 列表，构造 context（原始需求 + 分析结论 + 建议下一步），调用 `curl -X POST {{SERVER_URL}}/api/a2a`（需带 `-H "Authorization: Bearer $BOT_GITCODE_TOKEN"`）
    ⚠️ **A2A 必须携带当前 Issue 的真实 `issue_number`（必填）**：issue 场景本身就有 Issue 编号，直接填入。**若无法确定 issue_number，则不要调用 A2A**，通过评论回复说明原因。`pr_number` 有则填（PR 编号），无则不填，严禁把 PR 编号填入 issue_number。
 
 ## 能力项
@@ -135,7 +133,8 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 关闭 Issue 后，调用任务关闭接口，将该 Issue 的待处理任务标记为已完成（任务中心「已完成」可见，原因=Issue 已关闭）：
 
 ```bash
-curl -X POST http://localhost:8080/api/tasks/close \
+curl -X POST {{SERVER_URL}}/api/tasks/close \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "repo_key": "'"$REPO_FULL_NAME"'",
@@ -181,4 +180,6 @@ curl -s -X PATCH ... -d '{"state": "close"}' \
 
 需要调用更全面的 GitCode API 时，读取 `references/gitcode-api-reference.md`。
 
-> 注：评论 body 前缀固定为 `[issue agent]`，不再使用 `$AGENT_NAME` 环境变量。
+> 注：评论 body 前缀固定为 `[Issue Agent]`。
+
+> ⚠️ **任务结束**：完成所有业务动作（评论/打标签/分配/A2A 交办）后，输出最终 JSON 块并**结束任务**，不要继续思考或等待输入。

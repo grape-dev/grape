@@ -87,7 +87,8 @@ curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 ### A2A 调用
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "coding",

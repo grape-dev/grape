@@ -3,6 +3,7 @@ let _pipeActiveIdx = 0;
 const agentColors = ['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
 const agentLabels = ['VOD','Issue','Coding','QA','SRE'];
 const agentIds = ['vod','issue','coding','qa','sre'];
+const stageLabels = {vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE',done:'Done'};
 
 function selPipe(idx) {
   _pipeActiveIdx = idx;
@@ -38,7 +39,10 @@ function renderPipeline(data) {
     const stages = displayPipe.stages || [];
     const statuses = displayPipe.statuses || [];
     const owner = displayPipe.current_owner || '';
-    html += `<div style="margin-bottom:16px"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}</div>
+    const execBadge = displayPipe.executing
+      ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>'
+      : ' &nbsp;<span class="ts t2">空闲</span>';
+    html += `<div style="margin-bottom:16px"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
     stages.forEach((stage, i) => {
       const sc = statuses[i];
@@ -61,7 +65,7 @@ function renderPipeline(data) {
 
   const durations = ['—','28m 12s','1h 05m','42m 18s'];
 
-  html += `<div class="tw"><table><tr><th>Issue</th><th>Duration</th><th>Agents</th><th>Result</th><th>责任人</th></tr>`;
+  html += `<div class="tw"><table><tr><th>Issue</th><th>Duration</th><th>Agents</th><th>阶段</th><th>责任人</th></tr>`;
   allPipes.forEach((p, i) => {
     const s = i === _pipeActiveIdx ? ' sel' : '';
     const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
@@ -70,14 +74,18 @@ function renderPipeline(data) {
       return `<span class="tg ${cls}" style="${hasAgent ? '' : 'opacity:0.4'}">${agentLabels[j].substring(0,1)}</span>`;
     }).join('');
 
-    const resultClass = p.result === 'Released' || p.result === 'completed' ? 'tgx' : p.result === 'Failed' || p.result === 'failed' ? 'tr' : 'ty';
+    const stageName = p.stage ? (stageLabels[p.stage] || p.stage) : '—';
+    const stageClass = p.stage === 'done' ? 'tgx' : ['vod','issue','coding','qa','sre'].includes(p.stage) ? 'ty' : 't3';
     const dur = durations[i] || '—';
     const owner = p.current_owner || '—';
+    const execBadge = p.executing
+      ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ 执行中</span>'
+      : '<span class="ts t2">空闲</span>';
     html += `<tr class="pipe-row${s}" onclick="selPipe(${i})">
-      <td><span class="ts"><b>${p.issue_id || '?'}</b></span></td>
+      <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
       <td>${dur}</td>
       <td>${agentTags}</td>
-      <td><span class="${resultClass}">${p.result || 'Processing'}</span></td>
+      <td><span class="${stageClass}">${stageName}</span></td>
       <td>${owner}</td></tr>`;
   });
   html += `</table></div>`;

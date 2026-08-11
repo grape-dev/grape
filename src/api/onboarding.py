@@ -2,7 +2,7 @@
 
 仅在「模板一键创建并托管」的项目上异步触发一次：
 - 读取仓库开发场景（managed_repos.dev_scene）→ 按场景查 agent-skill-mapping.json 的 onboarding 技能
-- 后台以 issue agent 执行引导技能：分析项目 → 建 2 个 Issue（快速部署体验 + 二次开发方向）→ 分派 owner → 建任务
+- 后台以 issue agent 执行引导技能：分析项目 → 建 2 个 Issue（快速部署体验 + 探索方向引导）→ 分派 owner → 建任务
 - 幂等：meta 表 `onboarded:{repo_key}` 标记，仅首次执行；换场景不重跑
 """
 import asyncio
@@ -62,7 +62,7 @@ async def _run_onboarding(repo_key: str, owner: str, skill: str):
         prompt = _build_onboarding_prompt(repo_key, owner, skill)
         log.info(f"[Onboarding|repo:{repo_key}] starting agent, skill={skill}, ws={ws}")
 
-        from src.agent.executor import consume_stream_async
+        from src.runtime.executor import consume_stream_async
         final_text = ""
         tool_uses = []
         async for evt_type, data in consume_stream_async(

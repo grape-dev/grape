@@ -12,7 +12,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, backend, skill, exit_code, duration, agent_logs, started_at, completed_at, result FROM events WHERE seq=?",
+                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, runtime, skill, exit_code, duration, agent_logs, started_at, completed_at, result FROM events WHERE seq=?",
                 (seq,)
             )
             row = c.fetchone()
@@ -36,7 +36,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
     except Exception:
         pass
 
-    return {
+    result = {
         "seq": row[0],
         "repo_key": from_repo_key(row[1] or ""),
         "issue_id": row[2],
@@ -49,7 +49,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         "payload": payload,
         "status": row[10],
         "created_at": row[11],
-        "backend": row[12] or "",
+        "runtime": row[12] or "",
         "skill": row[13] or "",
         "exit_code": row[14],
         "duration": row[15],
@@ -58,6 +58,27 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         "completed_at": row[18] or "",
         "result": row[19] or "",
     }
+    # M4：附 event.json archive 对应 pipeline 段（结构化产出展示，见 §11.4）
+    try:
+        import re as _re
+        num = ""
+        if row[2]:
+            m = _re.search(r"(\d+)", str(row[2]))
+            if m:
+                num = m.group(1)
+        if num:
+            from src.api.event_archive import load_event_json
+            arch = load_event_json(row[1] or "", num)
+            if arch:
+                for seg in arch.get("pipeline", []):
+                    if seg.get("seq") == row[0]:
+                        result["archive"] = seg
+                        break
+                if "archive" not in result:
+                    result["archive"] = arch
+    except Exception:
+        pass
+    return result
 
 
 @router.get("/{owner}/{repo}")

@@ -3,7 +3,7 @@
     "name": "开发者声音分析",
     "agent_type": "vod",
     "path": "vod",
-    "description": "收集开发者反馈、聚类分析共性问题、提炼价值、自动创建 Issue"
+    "description": "开发者声音分析：构建项目知识基线，从 Issue/飞书收集反馈，多轮引导收敛为清晰需求并建 Issue；接管 issue_opened 审视，澄清后 A2A 交办 Issue Agent"
   },
   "issue": {
     "name": "Issue 管理",
@@ -87,6 +87,6 @@
     "name": "首次托管引导",
     "agent_type": "issue",
     "path": "repo-onboarding",
-    "description": "项目首次托管引导（通用）：分析功能特性与使用方式，创建「快速部署体验」与「二次开发方向」两个 Issue"
+    "description": "项目首次托管引导（通用）：分析功能特性与使用方式，创建「快速部署体验」与「探索方向引导」两个 Issue"
   }
 }

@@ -36,26 +36,26 @@ class TestEventRouting:
         assert get_domain_agent("unknown_event_type") == ""
 
     def test_known_routes(self):
-        """已知事件类型路由到正确 Agent"""
+        """已知事件类型路由到正确 Agent（静态映射 + 阶段矩阵默认）"""
         from src.api.routing import get_domain_agent
         self._seed()
-        assert get_domain_agent("issue_opened") == "issue"
+        assert get_domain_agent("issue_opened") == "vod"
         assert get_domain_agent("issue_comment") == "issue"
         assert get_domain_agent("issue_labeled") == "issue"
-        assert get_domain_agent("pull_request_opened") == "qa"
-        assert get_domain_agent("pull_request_updated") == "qa"
+        assert get_domain_agent("pull_request_opened") == ""
+        assert get_domain_agent("pull_request_updated") == ""
         assert get_domain_agent("build_failure") == "sre"
         assert get_domain_agent("deploy_start") == "sre"
         assert get_domain_agent("deploy_failure") == "sre"
         assert get_domain_agent("release_created") == "sre"
+        assert get_domain_agent("tag_created") == "sre"
         assert get_domain_agent("vod_signal") == "vod"
 
     def test_removed_events_not_in_routing(self):
-        """push / tag_created / build_success 等未订阅事件应回落到空"""
+        """push / build_success 等未覆盖事件应回落到空"""
         from src.api.routing import get_domain_agent
         self._seed()
         assert get_domain_agent("push") == ""
-        assert get_domain_agent("tag_created") == ""
         assert get_domain_agent("build_success") == ""
 
     def test_agent_skill_map(self):
@@ -63,7 +63,7 @@ class TestEventRouting:
         from src.api.routing import get_agent_skill_map
         self._seed()
         m = get_agent_skill_map()
-        assert m.get("issue_opened") == "issue"
+        assert m.get("issue_opened") == "vod"
         assert m.get("build_failure") == "sre"
         assert m.get("vod_signal") == "vod"
         assert "push" not in m

@@ -7,7 +7,7 @@
 import asyncio
 import os
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user
 from src.config import WORKSPACE_DIR, log
@@ -16,6 +16,25 @@ from src.session_manager import (
 )
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+
+def _require_bot_token(request: Request, repo_key: str):
+    """仓库级 bot token 鉴权（Agent 调用时带 Authorization: Bearer <BOT_GITCODE_TOKEN>）。
+
+    复用仓库级 bot token 机制（对齐 webhook 鉴权思路），支持远端 worker 调用。
+    仅当仓库配置了 bot token（managed_repos.bot_gitcode_token 或 devops_agent_session.repo_gitcode_token，
+    不含全局兜底）时严格校验；未配置 token 的仓库放行，交由后续托管校验返回 404。
+    """
+    from src.user.db import get_repo_bot_token_no_global
+    _expected = get_repo_bot_token_no_global(repo_key)
+    if not _expected:
+        return  # 仓库未配置 bot token → 交给后续校验
+    _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
+    if not _auth:
+        _auth = request.headers.get("X-Bot-Token", "") or ""
+    if _auth != _expected:
+        log.warning(f"Tasks {request.url.path}: unauthorized (token mismatch) for repo={repo_key}")
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid bot token"})
 
 
 class TaskNotifyBody(BaseModel):
@@ -176,7 +195,7 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
 
 async def _consume(prompt: str, cwd: str, cfg: dict, user_id: int, user_token: str, repo_key: str):
     """async 桥接 consume_stream_async（在线程池消费 stream_agent，不阻塞事件循环）"""
-    from src.agent.executor import consume_stream_async
+    from src.runtime.executor import consume_stream_async
     from src.repo_key import split_owner_repo
     backend = cfg.get("backend", "opencode")
     _owner, _repo = split_owner_repo(repo_key)
@@ -190,12 +209,13 @@ async def _consume(prompt: str, cwd: str, cfg: dict, user_id: int, user_token: s
 
 
 @router.post("/notify")
-async def notify_task(body: TaskNotifyBody):
+async def notify_task(body: TaskNotifyBody, request: Request):
     """issue agent 分配/换人后调用：建任务 + 换人刷新 + Web conversation + 后台 chat-agent + 飞书通知"""
     from src.repo_key import to_repo_key
     if not body.assignee or not body.repo_key or not body.issue_number:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "assignee / repo_key / issue_number 必填"})
     body.repo_key = to_repo_key(body.repo_key)
+    _require_bot_token(request, body.repo_key)
 
     # repo 已托管（repo_key 带前缀）
     from src.user.db import get_all_managed_repos
@@ -260,12 +280,13 @@ async def notify_task(body: TaskNotifyBody):
 
 
 @router.post("/close")
-async def close_tasks(body: TaskCloseBody):
+async def close_tasks(body: TaskCloseBody, request: Request):
     """issue agent 关闭 Issue 后调用：该 issue 全部 active 任务 → completed（issue_closed）"""
     from src.repo_key import to_repo_key
     if not body.repo_key or not body.issue_number:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key / issue_number 必填"})
     body.repo_key = to_repo_key(body.repo_key)
+    _require_bot_token(request, body.repo_key)
     with db_lock:
         c = db.cursor()
         c.execute(

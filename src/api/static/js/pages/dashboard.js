@@ -57,6 +57,7 @@ function renderDashboard(data) {
     const borderColor = meta.color || colors[at] || 'var(--t2)';
     const dotColor = meta.color || colors[at] || 'var(--t2)';
     const desc = meta.description || descs[at] || '';
+    const enabled = ag.enable !== false;   // 默认启用；仓库级 enable
 
     // 该 Agent 最近 2 个事件（替代假数据）
     const evs = (recentByAgent[at] || []).slice(0, 2);
@@ -74,14 +75,34 @@ function renderDashboard(data) {
       evHtml = '<div class="t2" style="font-size:9px">暂无事件</div>';
     }
 
-    html += `<div class="nd" style="border-top:3px solid ${borderColor}" onclick="app.nav('${at}')">
-      <div class="nh"><span class="n" style="background:${dotColor}"></span><h4>${meta.display_name || agentLabels[i]}</h4></div>
-      <div class="nds">${desc}</div>
+    // Agent 启用开关（仅 Maintainer 可切换）
+    const toggleBtn = `<button onclick="event.stopPropagation();toggleAgentEnable('${at}', ${!enabled})"
+      style="cursor:pointer;border:1px solid var(--b);border-radius:10px;padding:1px 8px;font-size:9px;
+             background:${enabled ? 'var(--g)' : 'var(--t3)'};color:#fff;margin-left:auto"
+      title="${enabled ? '点击停用' : '点击启用'}">${enabled ? '✓ 开启' : '○ 停用'}</button>`;
+
+    html += `<div class="nd" style="border-top:3px solid ${borderColor};${enabled ? '' : 'opacity:0.55'}" onclick="app.nav('${at}')">
+      <div class="nh"><span class="n" style="background:${dotColor}"></span><h4>${meta.display_name || agentLabels[i]}</h4>${toggleBtn}</div>
+      ${enabled ? `<div class="nds">${desc}</div>` : '<div class="t2" style="font-size:10px;margin:4px 0">已停用</div>'}
       <div class="nm"><span class="ml">Backend</span><span class="mv">${backend}</span></div>
       <div class="ns"><span class="d" style="background:${statusDot}"></span>${nsText}</div>
       <div class="nt ${ntCls}">${evHtml}</div>
     </div>`;
   });
+
+  // 开关交互
+  window.toggleAgentEnable = function(agentType, enable) {
+    const role = (data.role || '').toLowerCase();
+    if (role !== 'maintainer' && role !== 'admin') { app.showToast('仅 Maintainer 可切换 Agent 开关'); return; }
+    const repo = app.currentRepo();
+    if (!repo) { app.showToast('请先选择仓库'); return; }
+    const body = { enable: enable };
+    API.put('/agents/' + agentType + '/' + repo.owner + '/' + repo.name, body).then(() => {
+      app.showToast((enable ? '已启用 ' : '已停用 ') + (agentLabels[agentOrder.indexOf(agentType)] || agentType));
+      renderDashboard(data);   // 刷新卡片态（重新拉取）
+      API.get('/dashboard/' + repo.owner + '/' + repo.name).then(renderDashboard).catch(() => {});
+    }).catch(e => app.showToast('切换失败: ' + (e.detail?.message || e.message)));
+  };
 
   html += `</div>
     <div class="cl" onclick="app.nav('chat')">

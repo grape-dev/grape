@@ -14,6 +14,8 @@ tools:
 2. 严禁读取 data/、configs/、sessions.db、user_accounts 等 Grape 内部数据。
 3. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
 4. token 不得写入任何文件/日志/评论。
+5. **调用 GitCode API 一律以 `references/gitcode-api-reference.md` 为准**：该文档包含 Base URL 与全部端点。**严禁根据经验/记忆/猜测自行拼写 API 路径**（尤其不得使用 GitLab 风格 `/api/v3`、`/api/v4`、`projects/.../merge_requests` 或错误域名）。文档未列出的操作用 `GET /repos/:owner/:repo` 等既有端点组合实现，无法实现时在评论中说明。
+6. **长命令执行会静默**：`pip install`、`git clone`、大测试等长命令运行期间 opencode 无输出。执行这类命令时**加 `timeout` 限制（如 `timeout 300 ...`）**并一次只装必要依赖，避免长时间无输出影响执行；若命令本身可能超长，先输出说明再执行。
 
 
 
@@ -36,6 +38,11 @@ tools:
 
 ### 禁止探索 Grape 内部
 **所有信息通过 GitCode API 获取**，不读取本地文件。
+
+### 本地代码基线已就绪（coding 工作模型）
+Grape 已在当前工作目录准备好该 Issue 的 **git worktree**（分支 `feat/issue-{issue_number}`），可直接执行
+`git checkout -b` / `git add` / `git commit` / `git push` 等命令（push 鉴权已注入）。若目录非 git 仓库（降级），
+改用 GitCode contents API 读写文件。
 
 ## 场景识别
 
@@ -69,3 +76,5 @@ tools:
 ## 参考
 
 需要调用 GitCode API 时，读取 `references/gitcode-api-reference.md`。
+
+> ⚠️ **任务结束**：完成所有业务动作（提交 PR/修改代码/回应审查）后，**必须在最终答复末尾输出结构化 JSON 块**（含 `actions`/`conclusion`/`artifacts`/`next_step`/`issue_summary`，格式见 `references/new-dev-flow.md` / `references/pr-optimization-flow.md` 末尾），然后**结束任务**，不要继续思考或等待输入。**不得用长流程叙述替代 JSON 块**。

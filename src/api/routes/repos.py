@@ -327,7 +327,8 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
                 stats["tables"] += c.rowcount
             # 3. 直接按 repo_key 匹配的表
             for tbl in ("events", "event_skipped", "chat_conversations", "chat_agent_session",
-                        "repo_im_group_binding", "pipeline_instances", "devops_agent_session"):
+                        "repo_im_group_binding", "pipeline_instances", "devops_agent_session",
+                        "issue_agent_session"):
                 try:
                     c.execute(f"DELETE FROM {tbl} WHERE repo_key IN ({placeholders})", keys)
                     stats["tables"] += c.rowcount
@@ -458,3 +459,16 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
     # 同步清理：关联数据表 + 仓库 skill + workspace 目录（替代原 remove_agent_sessions）
     _cleanup_repo_data(body.full_name, owner, repo_name)
     return {"message": "已移除仓库"}
+
+
+@router.get("/{owner}/{repo}/project-info")
+async def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_current_user)):
+    """读取仓库的权威项目知识基线（repo 全局，多机共享，见 multi-issue-isolation-design.md §2.4）。
+
+    返回 files（全文）+ meta（commit/branches/updated/degraded）。无基线 → 空 files + meta。
+    """
+    from src.repo_key import to_repo_key
+    from src.runtime.service import load_project_info
+    repo_key = to_repo_key(f"{owner}/{repo}")
+    files, meta = load_project_info(repo_key)
+    return {"repo_key": repo_key, "files": files, "meta": meta}

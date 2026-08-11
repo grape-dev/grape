@@ -13,4 +13,8 @@ configs/login-whitelist.json
 skills/custom/
 skills/repo/
 DEPLOYMENT-REMOTE.md
+ADD-WHITELIST.md
 .huaweicloud/
+opencode-incident-*.md
+temp/
+.skills/

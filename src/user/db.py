@@ -1087,6 +1087,32 @@ def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
     return ""
 
 
+def get_repo_bot_token_no_global(repo_key: str) -> str:
+    """仓库级 bot token（不含全局兜底）：managed_repos.bot_gitcode_token / devops_agent_session.repo_gitcode_token。
+
+    用于服务端内部端点（A2A/tasks）鉴权——对齐 webhook token 思路但用 bot token，
+    避免全局兜底导致未托管仓库也拿到 token。
+    """
+    from src.repo_key import split_owner_repo
+    try:
+        owner, rname = split_owner_repo(repo_key)
+        _tok = get_bot_token_by_repo(owner, rname) or ""
+        if _tok:
+            return _tok
+    except Exception:
+        pass
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_gitcode_token FROM devops_agent_session WHERE repo_key=? AND repo_gitcode_token IS NOT NULL AND repo_gitcode_token!='' LIMIT 1", (repo_key,))
+            row = c.fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return ""
+
+
 def _get_global_bot_token() -> str:
     """读取全局 bot token（configs/global-bot-token.json）"""
     import json, os
@@ -1135,7 +1161,7 @@ def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
 
 
 def get_agent_bot_token(repo_key: str) -> str:
-    """获取 Agent 执行的 GitCode Bot Token（薄包装，统一走 get_gitcode_token）"""
+    """获取 Agent 执行的 GitCode Bot Token（兼容包装，统一走 get_gitcode_token）"""
     return get_gitcode_token(repo_key=repo_key)
 
 
@@ -1151,35 +1177,6 @@ def get_user_gitcode_token(user_id: int) -> str:
     except Exception as e:
         log.warning(f"get_user_gitcode_token failed for user={user_id}: {e}")
     return ""
-
-
-def update_managed_repo_webhook_token(repo_key: str, webhook_token: str) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE managed_repos SET gitcode_webhook_token=? WHERE repo_key=?", (webhook_token, repo_key))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Update managed repo webhook token failed: {e}")
-        return False
-
-
-def resolve_repo_by_webhook_token(token: str) -> str | None:
-    """通过 webhook token 查找仓库全名（owner/repo，无前缀）"""
-    from src.repo_key import from_repo_key
-    if not token:
-        return None
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("SELECT repo_key FROM managed_repos WHERE gitcode_webhook_token=? LIMIT 1", (token,))
-            row = c.fetchone()
-            if row:
-                return from_repo_key(row[0])
-        except Exception:
-            pass
-    return None
 
 
 def get_webhook_token_by_repo(full_name: str) -> str:
@@ -1342,6 +1339,28 @@ def set_meta_value(key: str, value: str):
             log.warning(f"set_meta_value failed: {key}: {e}")
 
 
+def get_server_base_url() -> str:
+    """返回服务端 API 基址（A2A/tasks 等协议端点用，不含 /webhook/gitcode 后缀）。
+
+    优先取 meta.server_base_url；无则从 meta.webhook_url 剥掉 /webhook/gitcode 后缀兜底；
+    再兜底 http://localhost:8080。
+    """
+    try:
+        base = get_meta_value("server_base_url") or ""
+        if base:
+            return base.rstrip("/")
+        wu = get_meta_value("webhook_url") or ""
+        if wu:
+            base = wu.rstrip("/")
+            for suffix in ("/webhook/gitcode", "/webhook"):
+                if base.endswith(suffix):
+                    return base[: -len(suffix)]
+            return base
+    except Exception:
+        pass
+    return "http://localhost:8080"
+
+
 def migrate_accounts_from_json():
     """首次运行加载配置：从 global-bot-token.json 将 GitCode OAuth 配置写入 meta 表（仅首次/幂等）。
 
@@ -1480,13 +1499,18 @@ def has_user_repos(user_id: int) -> bool:
 init_user_repos_table()
 
 
-# ====== Backend Runtimes 缓存表 ======
+# ====== Agent Runtimes 缓存表 ======
 
 def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = ""):
-    """批量写入 backend agents 缓存（scope: global/repo/user）
+    """[兼容别名] 见 save_agent_runtimes"""
+    return save_agent_runtimes(agents, scope, owner_id)
+
+
+def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = ""):
+    """批量写入 agent runtimes 缓存（scope: global/repo/user）
 
     幂等 upsert：按 name+scope+owner_id 匹配，存在则更新（保留 id），不存在才插入。
-    保证跨刷新 id 稳定，供各表 backend_id 引用。
+    保证跨刷新 id 稳定，供各表 runtime_id 引用。
     """
     with db_lock:
         c = db.cursor()
@@ -1494,77 +1518,149 @@ def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str
             name = (a.get("name", "") or "").strip().lower()
             if not name:
                 continue
-            c.execute("SELECT id FROM backend_agents WHERE name=? AND scope=? AND owner_id=?", (name, scope, owner_id))
+            # 仅操作本机未绑定凭据的行（credential_id=0）；凭据绑定行由边端 register 独占管理
+            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0", (name, scope, owner_id))
             row = c.fetchone()
             if row:
                 c.execute(
-                    "UPDATE backend_agents SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now') WHERE id=?",
+                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now') WHERE id=?",
                     (a.get("display_name", name),
                      1 if a.get("installed") else 0, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
                      a.get("pip_package", ""), row[0])
                 )
             else:
+                # 防再生：若该引擎名已有凭据绑定行（边端 register 承载），不再创建 credential_id=0 占位行
+                #（否则会再生出 `{name}-cred0` 的离线孤儿行，见 runtime-admin-two-view-design §6.2）
+                c.execute("SELECT 1 FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id>0 LIMIT 1",
+                          (name, scope, owner_id))
+                if c.fetchone():
+                    continue
                 c.execute(
-                    "INSERT INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
                     (name, a.get("display_name", name),
                      1 if a.get("installed") else 0, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
                      a.get("pip_package", ""), scope, owner_id)
                 )
-        # 清理本次 scope 中已不在列表里的 backend（忽略大小写）
+        # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）。
+        # 仅清理未绑定凭据的本机行（credential_id=0）；凭据绑定的远端/边端注册行一律保留
+        #（见 multi-runtime-instance-design §5.1 防误删）。
         current_names = [(a.get("name", "") or "").strip().lower() for a in agents if a.get("name")]
         if current_names:
             placeholders = ",".join("?" for _ in current_names)
-            c.execute(f"DELETE FROM backend_agents WHERE scope=? AND owner_id=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, *current_names))
+            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND lower(name) NOT IN ({placeholders})", (scope, owner_id, *current_names))
         db.commit()
 
 
 def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
-    """读取 backend agents 缓存"""
+    """[兼容别名] 见 get_agent_runtimes"""
+    return get_agent_runtimes(scope, owner_id)
+
+
+def get_agent_runtimes(scope: str = "global", owner_id: str = "") -> list[dict]:
+    """读取 agent runtimes 缓存（含 status/last_seen_at，供健康态派生）"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id FROM backend_agents WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+        c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
              "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
-             "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10]}
+             "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10],
+             "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13]}
             for r in c.fetchall()
         ]
 
 
 def get_backend_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
-    """按 name+scope+owner_id 查找 backend id"""
+    """[兼容别名] 见 get_runtime_id_by_name"""
+    return get_runtime_id_by_name(name, scope, owner_id)
+
+
+def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
+    """按 name+scope+owner_id 查找 runtime id（多实例：优先 online + 最近心跳，见 multi-runtime-instance-design §4.3 S2）"""
     if not name:
         return None
     name = name.strip().lower()
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id FROM backend_agents WHERE lower(name)=? AND scope=? AND owner_id=? LIMIT 1", (name, scope, owner_id))
+        c.execute("""
+            SELECT id FROM agent_runtimes
+            WHERE lower(name)=? AND scope=? AND owner_id=?
+            ORDER BY CASE WHEN status='online' THEN 0 ELSE 1 END, last_seen_at DESC
+            LIMIT 1
+        """, (name, scope, owner_id))
         row = c.fetchone()
         return row[0] if row else None
 
 
 def ensure_default_backend(name: str = "opencode", scope: str = "global"):
-    """确保默认 backend 存在（幂等），返回 id"""
+    """[兼容别名] 见 ensure_default_runtime"""
+    return ensure_default_runtime(name, scope)
+
+
+def is_known_engine_name(name: str) -> bool:
+    """是否为已知执行引擎类型名（discover_backends 白名单或已注册的自定义引擎）。
+
+    用于 ensure_default_runtime / get_chat_config 等路径防幽灵：拒绝任意字符串
+    （如历史遗留的 'default'）生成 `{name}-cred0` 的 credential_id=0 占位行
+    （见 runtime-admin-two-view-design §6.2 / 防 -cred0 孤儿）。
+    """
+    name = (name or "").strip().lower()
+    if not name:
+        return False
+    try:
+        from src.agent.executor import discover_backends
+        if any((b.get("name") or "").strip().lower() == name for b in discover_backends()):
+            return True
+    except Exception:
+        pass
+    try:
+        from src.agent.executor import _BACKENDS
+        if name in _BACKENDS:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
+    """确保默认 runtime 存在（幂等），返回 id（多实例：优先 online，见 multi-runtime-instance-design §4.3 S2）。
+
+    防幽灵：仅当 name 为已知引擎类型（is_known_engine_name）或已存在同名 runtime 时才创建/复用；
+    否则返回 None，不生成 credential_id=0 占位行。
+    """
     name = (name or "opencode").strip().lower() or "opencode"
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id FROM backend_agents WHERE lower(name)=? AND scope=? AND owner_id='' LIMIT 1", (name, scope))
+        c.execute("""
+            SELECT id FROM agent_runtimes
+            WHERE lower(name)=? AND scope=? AND owner_id=''
+            ORDER BY CASE WHEN status='online' THEN 0 ELSE 1 END, last_seen_at DESC
+            LIMIT 1
+        """, (name, scope))
         row = c.fetchone()
         if row:
             return row[0]
-        c.execute("INSERT INTO backend_agents (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
+        if not is_known_engine_name(name):
+            log.warning(f"ensure_default_runtime: 拒绝为未知引擎 '{name}' 创建占位行")
+            return None
+        c.execute("INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
                   (name, name.capitalize(), 1, "", "", 1, name, scope))
         db.commit()
         return c.lastrowid
 
 
 def get_backend_agents_age() -> float | None:
+    """[兼容别名] 见 get_agent_runtimes_age"""
+    return get_agent_runtimes_age()
+
+
+def get_agent_runtimes_age() -> float | None:
     """返回缓存数据的 age（秒），无缓存返回 None"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT MIN(updated_at) FROM backend_agents")
+        c.execute("SELECT MIN(updated_at) FROM agent_runtimes")
         row = c.fetchone()
         if not row or not row[0]:
             return None

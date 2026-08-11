@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','backends','event','repos','skill','tasks'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','runtimes','event','repos','skill','tasks'];
 
   function currentRepo() {
     try { return JSON.parse(localStorage.getItem('currentRepo')); } catch { return null; }
@@ -139,9 +139,8 @@ function loadAgentTypes() {
       const cur = currentRepo();
       const sel = $('repoSelect');
       if (cur) sel.value = cur.fullName;
-      // 显示仓库管理页（已托管 + 可加入列表）
-      $('pageTitle').textContent = '选择仓库';
-      renderRepos();
+      // 与点击 Grape Logo「返回仓库选择大堂」一致：进入全屏仓库选择大堂（隐藏侧边栏）
+      goToRepos();
       return;
     }
     const parts = val.split('/');
@@ -230,9 +229,9 @@ function loadAgentTypes() {
     } else if (view === 'skills') {
       title.textContent = 'DevOps Skills';
       renderSkills();
-    } else if (view === 'backends') {
-      title.textContent = 'Backend Runtimes';
-      API.get('/settings/backend-agents').then(renderBackends).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+    } else if (view === 'runtimes') {
+      title.textContent = 'Agent Runtimes';
+      API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (view === 'repos') {
       title.textContent = '选择仓库';
       loadRepos();

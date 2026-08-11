@@ -1,5 +1,12 @@
 # GitCode API 参考
 
+## 使用规则（必须遵守）
+
+1. **所有端点都必须以 Base URL 为前缀**：本文件下表的 Endpoint 均为相对路径，调用时必须拼上 `https://api.gitcode.com/api/v5`（例：`Create PR` → `POST https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls`）。
+2. **严禁凭经验/记忆/猜测拼接 API**：只使用本文件列出的端点与域名。**不得**使用 GitLab 风格（`/api/v3`、`/api/v4`、`projects/:id/merge_requests`）或其他域名（如 `gitcode.com/api/...`）。
+3. 遇到本文件未覆盖的 GitCode API 需求时，**不要臆造路径**：用 `GET /repos/{owner}/{repo}` 确认仓库信息，或在 Issue/PR 评论中说明"该操作无现成 API，需人工确认"。
+4. 错误响应（404/405/500 等）说明**路径或方法有误**：先核对本文件表格，再重试；连续失败停止，不要绕行。
+
 ## Base URL
 
 ```
@@ -36,7 +43,7 @@ Token 已在 prompt 中给出：`$BOT_GITCODE_TOKEN`
 
 | Action | Method | Endpoint |
 |--------|--------|----------|
-| Create issue | POST | `/repos/:owner/issues` (body: `repo`, `title`, `body`) |
+| Create issue | POST | `/repos/:owner/:repo/issues` (body: `title`, `body`) |
 | List issues | GET | `/repos/:owner/:repo/issues` |
 | Get issue | GET | `/repos/:owner/:repo/issues/:number` |
 | Update issue | PATCH | `/repos/:owner/:repo/issues/:number` (JSON body: `labels` string, `assignee_ids` array, `milestone_id` int) |
@@ -49,11 +56,27 @@ Token 已在 prompt 中给出：`$BOT_GITCODE_TOKEN`
 
 | Action | Method | Endpoint |
 |--------|--------|----------|
-| Create PR | POST | `/repos/:owner/:repo/pulls` (body: `title`, `head`, `base`) |
+| Create PR | POST | `/repos/:owner/:repo/pulls` |
 | List PRs | GET | `/repos/:owner/:repo/pulls` |
 | Get PR | GET | `/repos/:owner/:repo/pulls/:number` |
 | Merge PR | PUT | `/repos/:owner/:repo/pulls/:number/merge` |
 | PR comments | POST | `/repos/:owner/:repo/pulls/:number/comments` (body: `body`) |
+
+**Create PR body 字段**（JSON）：
+- `title`：PR 标题（如 `feat: #{issue} 标题`）
+- `head`：源分支（如 `feat/issue-{issue}`，即你 push 的分支）
+- `base`：目标分支（通常 `main` / `master`）
+- `inner_issue_nums`：关联 Issue（格式 `{owner}/{repo}#{issue}`，用于 PR 关联 Issue）
+- `close_related_issue`：`true` 表示 PR 合并后自动关闭关联 Issue
+
+> 完整调用示例：
+> ```bash
+> curl -sL -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
+>   -H "Content-Type: application/json" \
+>   -d '{"title": "feat: #7 标题", "head": "feat/issue-7", "base": "main",
+>        "inner_issue_nums": "Jason7602/gitcode-pr-assistant#7", "close_related_issue": true}' \
+>   https://api.gitcode.com/api/v5/repos/Jason7602/gitcode-pr-assistant/pulls
+> ```
 
 ### Repository
 

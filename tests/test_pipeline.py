@@ -7,7 +7,9 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 
 from unittest.mock import patch
-from src.api.routes.pipeline import _get_issue_pipeline, AGENT_ORDER, STAGE_STATUS_MAP
+import pytest
+from src.api.routes.pipeline import _get_issue_pipeline, _running_issue_ids, AGENT_ORDER, STAGE_STATUS_MAP
+from src.session_manager import db, db_lock
 
 
 def _ev(seq, issue_id, event_type, agent_type, title, status, actor, created_at="2026-08-04 10:00:00", payload=None):
@@ -167,3 +169,82 @@ class TestPipeline:
         with _mock_bots()[0], _mock_bots()[1]:
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "Issue Agent"
+
+
+class TestExecutingDerivation:
+    """前端 B：executing 由 agent_tasks 实时派生（见 multi-issue-isolation-design.md §4.4）"""
+
+    @pytest.fixture(autouse=True)
+    def _clean_tasks(self):
+        with db_lock:
+            db.cursor().execute("DELETE FROM agent_tasks WHERE repo_key='gitcode:org/pipeline-test'")
+            db.commit()
+        yield
+        with db_lock:
+            db.cursor().execute("DELETE FROM agent_tasks WHERE repo_key='gitcode:org/pipeline-test'")
+            db.commit()
+
+    def test_running_issue_detected(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO agent_tasks (id, agent_session_id, runtime_id, issue_id, repo_key, agent_type, status, prompt) "
+                      "VALUES ('t1', 's1', 1, '#5', 'gitcode:org/pipeline-test', 'coding', 'running', 'p')")
+            db.commit()
+        assert "#5" in _running_issue_ids("gitcode:org/pipeline-test")
+
+    def test_completed_issue_not_running(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO agent_tasks (id, agent_session_id, runtime_id, issue_id, repo_key, agent_type, status, prompt) "
+                      "VALUES ('t2', 's1', 1, '#6', 'gitcode:org/pipeline-test', 'coding', 'completed', 'p')")
+            db.commit()
+        assert "#6" not in _running_issue_ids("gitcode:org/pipeline-test")
+
+    def test_empty_repo(self):
+        assert _running_issue_ids("gitcode:org/pipeline-test") == set()
+
+    def test_pipeline_issues_sorted_latest_first(self):
+        """最新活动的 issue 排最前（原为 issue 首次出现顺序，最早 issue 恒在前）。"""
+        from fastapi.testclient import TestClient
+        from src.api.main import app
+        from src.api.deps import get_current_user
+
+        def _fake_user():
+            return {"id": 1, "username": "tester", "nickname": "T"}
+        app.dependency_overrides[get_current_user] = _fake_user
+
+        # 清空该 repo 的 events
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE repo_key='gitcode:org/pipeline-test'")
+            db.commit()
+
+        # 插入两个 issue 的事件：issue A 先出现（seq 1-2），issue B 后出现（seq 3）
+        # B 最新活动 seq=3 > A 最新活动 seq=2 → 排序后 B 应在前
+        rows = [
+            (1, "#A", "issue_opened", "vod", "tA", "completed", "alice"),
+            (2, "#A", "issue_comment", "vod", "tA", "completed", "alice"),
+            (3, "#B", "issue_opened", "vod", "tB", "completed", "alice"),
+        ]
+        with db_lock:
+            c = db.cursor()
+            for seq, iid, et, ag, title, status, actor in rows:
+                c.execute(
+                    "INSERT INTO events (seq, repo_key, issue_id, event_type, agent_type, title, summary, status, actor, source, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+                    (seq, "gitcode:org/pipeline-test", iid, et, ag, title, title, status, actor, "gitcode"))
+            db.commit()
+
+        client = TestClient(app)
+        r = client.get("/api/pipeline/org/pipeline-test")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        # active 应为最新活动的 issue（B，seq=3 最新）
+        assert data["active"]["issue_id"] == "#B", \
+            f"最新活动的 issue 应排最前(active), got {data['active']['issue_id']}"
+        # history 第一条应为 A（次新）
+        assert data["history"][0]["issue_id"] == "#A", \
+            f"history 第一条应为 A, got {[h['issue_id'] for h in data['history']]}"
+        app.dependency_overrides.clear()
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE repo_key='gitcode:org/pipeline-test'")
+            db.commit()

@@ -11,15 +11,22 @@ function loadCfgOptions() {
   const backendSelect = document.querySelector('.cfg-backend');
   const skillSelect = document.querySelector('.cfg-skill');
 
-  // Backend 下拉：仅未加载时加载
+  // Runtime 下拉：仅未加载时加载；DevOps Agent 仅可选 仓库/全局 引擎（个人引擎不出现，见 runtime-admin-two-view-design §5.1）
   if (backendSelect && !backendSelect.dataset.loaded) {
     backendSelect.dataset.loaded = '1';
-    API.get('/settings/backend-agents').then(d => {
-      const backends = d.backends || [];
+    API.get('/settings/agent-runtimes').then(d => {
+      const runtimes = d.runtimes || [];
       const current = backendSelect.dataset.current || 'opencode';
-      backendSelect.innerHTML = backends.map(b =>
-        `<option value="${b.name}" ${b.name === current ? 'selected' : ''}>${b.name}${b.healthy ? ' ✓' : ' ✗'}</option>`
-      ).join('');
+      const scopeLabel = sc => sc === 'global' ? '全局' : sc === 'repo' ? '仓库' : '个人';
+      const ok = runtimes.filter(r => r.scope === 'repo' || r.scope === 'global');
+      const online = ok.filter(r => r.health === 'online' || r.healthy);
+      const offline = ok.filter(r => !(r.health === 'online' || r.healthy));
+      const val = r => r.instance_name || r.name;
+      const opt = (r, sel) =>
+        `<option value="${val(r)}" ${(val(r) === current || r.name === current) ? 'selected' : ''}>${val(r)} · ${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${scopeLabel(r.scope)}${r.health === 'online' || r.healthy ? ' ✓' : ' ✗'}</option>`;
+      let html = online.map(r => opt(r, true)).join('') + offline.map(r => opt(r, false)).join('');
+      if (!html) html = '<option value="opencode">opencode</option>';
+      backendSelect.innerHTML = html;
     }).catch(() => {});
   }
 
@@ -66,6 +73,8 @@ function renderAgent(name, data) {
       <div class="t">${fmtLocalTime(ev.created_at).substring(11,16) || '--:--'}</div>
       <div class="ac">${ev.summary || ev.title || ev.event_type}
         ${ev.actor ? ` <span class="ts t2">@${ev.actor}</span>` : ''}
+        <span class="ts t3">Seq #${ev.seq || '?'}</span>
+        ${ev.issue_id ? ` <span class="tg tg-d">${ev.issue_id}</span>` : ''}
         ${ev.duration ? ` <span class="ts t3">${ev.duration}s</span>` : ''}
         ${ev.backend ? ` <span class="tg tg-d">${ev.backend}</span>` : ''}
         <span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}">${ev.status}</span>

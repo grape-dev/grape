@@ -10,16 +10,16 @@ if SRC_DIR not in sys.path:
 
 os.environ.setdefault("GITCODE_API_TOKEN", "test_token")  # 兼容旧测试；token 现经 prompt 注入
 
-from src.agent import (
-    OpencodeBackend, CodeArtsBackend, get_backend,
-    AgentBackend, stream_agent, stream_opencode
+from src.runtime import (
+    OpencodeRuntime, CodeArtsRuntime, get_runtime,
+    AgentRuntime, stream_runtime, stream_opencode
 )
-from src.agent.executor import _redact
+from src.runtime.executor import _redact, stream_agent
 
 
-class TestOpencodeBackend:
+class TestOpencodeRuntime:
     def setup_method(self):
-        self.backend = OpencodeBackend()
+        self.backend = OpencodeRuntime()
 
     def test_build_args_basic(self):
         args = self.backend.build_args("hello world")
@@ -43,9 +43,9 @@ class TestOpencodeBackend:
         assert self.backend.name == "opencode"
 
 
-class TestCodeArtsBackend:
+class TestCodeArtsRuntime:
     def setup_method(self):
-        self.backend = CodeArtsBackend()
+        self.backend = CodeArtsRuntime()
 
     def test_build_args_basic(self):
         args = self.backend.build_args("hello world")
@@ -72,24 +72,24 @@ class TestCodeArtsBackend:
 
 class TestGetBackend:
     def test_opencode(self):
-        b = get_backend("opencode")
-        assert isinstance(b, OpencodeBackend)
+        b = get_runtime("opencode")
+        assert isinstance(b, OpencodeRuntime)
 
     def test_codearts(self):
-        b = get_backend("codearts")
-        assert isinstance(b, CodeArtsBackend)
+        b = get_runtime("codearts")
+        assert isinstance(b, CodeArtsRuntime)
 
     def test_unknown_fallback_to_opencode(self):
-        b = get_backend("nonexistent")
-        assert isinstance(b, OpencodeBackend)
+        b = get_runtime("nonexistent")
+        assert isinstance(b, OpencodeRuntime)
 
     def test_case_sensitive(self):
-        b = get_backend("CodeArts")
-        assert isinstance(b, OpencodeBackend)  # case doesn't match, fallback
+        b = get_runtime("CodeArts")
+        assert isinstance(b, OpencodeRuntime)  # case doesn't match, fallback
 
 
 class TestBackendParseOutput:
-    @pytest.fixture(params=[OpencodeBackend(), CodeArtsBackend()])
+    @pytest.fixture(params=[OpencodeRuntime(), CodeArtsRuntime()])
     def backend(self, request):
         return request.param
 
@@ -188,7 +188,7 @@ class TestRedact:
         fake_proc = FakeStream()
         with patch("src.agent.executor.subprocess.Popen", return_value=fake_proc), \
              patch("src.agent.executor.shutil.which", return_value="/fake/opencode"):
-            events = list(stream_agent("prompt", os.getcwd(), "", "issue",
+            events = list(stream_runtime("prompt", os.getcwd(), "", "issue",
                                        bot_token="BOTTOK", user_token="USERTOK"))
         combined = " ".join(str(d) for _, d in events)
         assert "BOTTOK" not in combined
@@ -216,7 +216,7 @@ class TestConfigIntegration:
         assert get_agent_backend("unknown_skill") == "opencode"
 
 
-class _SleepBackend(AgentBackend):
+class _SleepBackend(AgentRuntime):
     """无输出的假 backend：spawn `python -c time.sleep(60)`，用于测超时终止。"""
     name = "sleepbackend"
     binary = "python"
@@ -396,7 +396,7 @@ class TestStreamAgentSessionAutoRetry:
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
              patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
-            events = list(stream_agent("p", os.getcwd(), session_id="ses_dead_old", backend_name="opencode"))
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead_old", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
         assert done["exit_code"] == 0, done
@@ -422,7 +422,7 @@ class TestStreamAgentSessionAutoRetry:
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
              patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
-            events = list(stream_agent("p", os.getcwd(), session_id="ses_dead", backend_name="opencode"))
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead", backend_name="opencode"))
 
         done_events = [et for et, d in events if et == "done"]
         assert len(done_events) == 1, f"expected exactly 1 done event, got {len(done_events)}"
@@ -441,7 +441,7 @@ class TestStreamAgentSessionAutoRetry:
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
              patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
-            events = list(stream_agent("p", os.getcwd(), session_id="ses_good", backend_name="opencode"))
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_good", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
         assert done["exit_code"] == 0
@@ -459,10 +459,110 @@ class TestStreamAgentSessionAutoRetry:
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
              patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
-            events = list(stream_agent("p", os.getcwd(), session_id="ses_any", backend_name="opencode"))
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_any", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
         assert done["exit_code"] == 1
         assert "something else" in (done.get("stderr") or "")
         assert FakePopen.call_count == 1, f"expected 1 Popen call (no retry), got {FakePopen.call_count}"
 
+    def test_retries_when_session_not_found_in_stdout_raw(self):
+        """远端 worker 场景：opencode 把 'Session not found' 打到 stdout 的 ANSI 原始行（非 NDJSON、非 stderr）。
+
+        回归：2026-08-09 远端 RuntimeAgent 接入后，旧检测只查 stderr/errors，
+        stdout 原始行被当作 raw 丢弃 → 不触发无 session 重跑 → 任务空回复。
+        修复点：executor 对含 'session not found' 的 raw 行计入 error_events。
+        """
+        from unittest.mock import patch
+        from src.agent import stream_agent
+
+        success_stdout = (
+            '{"type":"step_start","sessionID":"ses_new_xyz","part":{"type":"step-start"}}\n'
+            '{"type":"text","part":{"type":"text","text":"RAW_RECOVERED"}}\n'
+        )
+        calls = [
+            # stdout 为 ANSI 彩色原始错误行（opencode 1.18.x 实际输出形态）
+            {"returncode": 1, "stdout": "\x1b[91m\x1b[1mError: \x1b[0mSession not found\r\n", "stderr": ""},
+            {"returncode": 0, "stdout": success_stdout, "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_raw_dead", backend_name="opencode"))
+
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == 0, done
+        assert "RAW_RECOVERED" in done["text"]
+        assert done["oc_session_id"] == "ses_new_xyz"
+        assert FakePopen.call_count == 2, f"expected 2 Popen calls (stdout raw retry), got {FakePopen.call_count}"
+        second_args = FakePopen.last_args[0]
+        assert "--session" not in second_args, f"second run should drop --session, got {second_args}"
+
+    def test_no_retry_when_stdout_raw_unrelated_error(self):
+        """stdout 原始行不含 session not found（如权限错误）→ 不重跑，单次 Popen"""
+        from unittest.mock import patch
+        from src.agent import stream_agent
+
+        calls = [
+            {"returncode": 1, "stdout": "Error: permission denied\n", "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_raw_any", backend_name="opencode"))
+
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == 1
+        assert FakePopen.call_count == 1, f"expected 1 Popen call (no retry), got {FakePopen.call_count}"
+
+
+class TestExecutorPipeInvocation:
+    """守护：executor 用纯管道直接启动 agent 命令，不得引入 `script` 包装。
+
+    2026-08-09 复盘：曾误判「opencode 需控制终端」而加 script 包装，实为多余修复
+    （飞书一直走纯管道正常），且远端 worker 无 util-linux script 会退化。
+    见 docs/new-version2/web-chat-postmortem.md §四。
+    """
+
+    def test_popen_uses_direct_command_and_pipe(self):
+        from unittest.mock import patch
+        import subprocess as _subprocess
+
+        fake_lines = [
+            json.dumps({"type": "step_start", "sessionID": "s1", "part": {"step": 1}}),
+            json.dumps({"type": "text", "part": {"text": "ok", "type": "text"}}),
+            json.dumps({"type": "step_finish", "part": {"tokens": {"total": 1}}}),
+        ]
+
+        class FakeProc:
+            returncode = 0
+            def __init__(self, *a, **k):
+                self._lines = list(fake_lines)
+                self._i = 0
+                self.stdout = self
+                self.stderr = self
+            def readline(self):
+                if self._i < len(self._lines):
+                    line = self._lines[self._i]
+                    self._i += 1
+                    return line.encode() + b"\n"
+                return b""
+            def wait(self, timeout=None):
+                return 0
+            def read(self):
+                return b""
+
+        captured = {}
+        def fake_popen(cmd, *a, **k):
+            captured["cmd"] = cmd
+            captured["stdout"] = k.get("stdout")
+            return FakeProc(cmd, *a, **k)
+
+        with patch("src.agent.executor.subprocess.Popen", side_effect=fake_popen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            list(stream_runtime("p", os.getcwd(), "", "issue"))
+
+        assert captured["cmd"][0] == "/usr/bin/opencode", "命令应为直接 agent CLI，不得是 script 包装"
+        assert "script" not in captured["cmd"]
+        assert captured["cmd"][1] == "run"
+        assert captured["stdout"] == _subprocess.PIPE, "应为纯管道 stdout"

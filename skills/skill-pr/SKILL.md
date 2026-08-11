@@ -4,11 +4,6 @@ version: 1.0.0
 description: |
   Skill 仓库专有的 PR 审查：整体流程与 pr 技能一致，但审查标准参考 skill-review-and-quality.md。
   仅用于 huaweicloud-skills 等技能类仓库的 PR 审查。
-triggers:
-  - event_type: pull_request_opened
-  - event_type: pull_request_updated
-  - event_type: push
-  - event_type: note_hook_pr
 tools:
   - git
 ---
@@ -76,7 +71,7 @@ curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 从返回中提取每个文件的 `filename` 和 `status`（added / modified）。
 
 **2b. 推断正确的标题**：
-- 取第一个 `skills/` 开头的文件，提取路径中的 skill name（如 `skills/tokauthai/skillscan/...` → `tokauthai/skillscan`）
+- 取第一个 `skills/` 开头的文件，提取路径中的 skill name（如 `skills/qa/SKILL.md` → `qa`）
 - 判断 action：只要 `有 added 无 modified` → `add`；否则 → `update`
 - 拼出：`{action} skill: {skill-path}`
 
@@ -84,7 +79,7 @@ curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 ```bash
 curl -s -X PATCH -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"title": "add skill: tokauthai/skillscan"}' \
+  -d '{"title": "add skill: qa"}' \
   https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}
 ```
 

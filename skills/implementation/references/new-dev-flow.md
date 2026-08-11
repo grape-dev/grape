@@ -83,20 +83,20 @@ git push origin feat/issue-{number}
 
 所有 feature 开发都必须执行。
 
-读取 `skills/agent/spec-driven-development/SKILL.md`，编写 PRD 保存到 `docs/spec.md`，评论告知。
+读取 `references/spec-driven-development.md`，编写 PRD 保存到 `docs/spec.md`，评论告知。
 
 ### 能力五：方案设计
 
 所有 feature 开发都必须执行。
 
-读取 `skills/agent/planning-and-task-breakdown/SKILL.md`，输出任务到 `tasks/plan.md` 和 `tasks/todo.md`，评论告知。
+读取 `references/planning-and-task-breakdown.md`，输出任务到 `tasks/plan.md` 和 `tasks/todo.md`，评论告知。
 
 ### 能力六：代码实现
 
 所有开发任务都执行。
 
-1. 测试先行 — 读取 `skills/agent/test-driven-development/SKILL.md`（RED→GREEN→REFACTOR）
-2. 增量实现 — 读取 `skills/agent/incremental-implementation/SKILL.md`
+1. 测试先行 — 读取 `references/test-driven-development.md`（RED→GREEN→REFACTOR）
+2. 增量实现 — 读取 `references/incremental-implementation.md`
 
 ```bash
 git add -A && git commit -m "feat: #{number} 描述"
@@ -109,7 +109,7 @@ git push origin feat/issue-{number}
 
 创建 PR 前必须先执行，审查通过后才能创建 PR。
 
-读取 `skills/agent/code-review-and-quality/SKILL.md`，按五轴审查，修复发现的问题。
+读取 `references/code-review-and-quality.md`，按五轴审查，修复发现的问题。
 
 ### 能力八：创建 PR
 
@@ -145,14 +145,13 @@ Content-Type: application/json
 
 **跳过此步 = 事件未完成处理。**
 
-> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。
-
 ### 能力九：A2A 通知 QA Agent 代码审查
 
 ⚠️ 创建 PR 后必须执行，否则 QA Agent 不会收到审查请求。
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "qa",
@@ -182,3 +181,25 @@ context 应包含：
 - `$ISSUE_NUMBER` 来自原始 Issue 编号。
 
 **跳过此步 = 事件未完成处理。**
+
+---
+
+### ⚠️ 必须执行：任务结束输出结构化 JSON 块
+
+完成所有业务动作（提交代码、创建 PR、发 Issue 评论、A2A 通知 QA）后，**在最终答复末尾输出以下 JSON 块**（系统解析写入该 Issue 的 event.json 档案，供前端展示「Agent 处理记录」与下游 Agent 接力）：
+
+```json
+{
+  "actions": ["git push 分支 feat/issue-N", "创建 PR #N", "在 Issue #N 发评论告知", "A2A 通知 QA 审查 PR #N"],
+  "conclusion": "完成情况总结：改动内容、测试结果、PR 是否创建成功（失败原因）",
+  "artifacts": ["PR #N", "分支 feat/issue-N", "commit xxxxxx"],
+  "next_step": "QA Agent 审查 PR #N；或 PR 创建失败时说明需人工干预",
+  "issue_summary": "实现完成 | 改动摘要 | PR 状态 | 覆盖率结果"
+}
+```
+
+**注意：**
+- 该 JSON 块放在**最终答复末尾**，是任务结束的唯一标记；
+- **不得**用长流程叙述（场景识别→方案→实现过程）替代该 JSON 块；
+- 若 PR 创建失败或某动作未完成，`actions`/`conclusion` 中如实说明（如 `"PR 创建失败：GitCode API 返回 xxx"`），不要伪造；
+- `issue_summary` 覆盖 Issue 档案聚合结论，供下游 Agent 快速浏览。

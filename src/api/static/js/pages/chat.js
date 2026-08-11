@@ -1,6 +1,7 @@
 let _currentConvId = null;
 let _chatAbort = null;
 let _openConvId = null;
+const _NO_REPLY = '⚠️ 未收到回复，连接可能中断，请重试。';
 
 function renderChat(openConvId) {
   _currentConvId = null;
@@ -31,8 +32,8 @@ function loadSideConfig() {
     const backend = d.backend || {};
     const currentSkill = d.skill || '';
     const backendsOpts = (d._backends || []).map(b =>
-      `<option value="${b.name}" ${b.name === (backend.type || '').toLowerCase() ? 'selected' : ''}>${b.display_name || b.name}</option>`
-    ).join('') || '<option>Default</option>';
+      `<option value="${b.name}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${b.display_name || b.name}</option>`
+    ).join('') || '<option value="">Default</option>';
     const skillsOpts = (d._skills || []).map(s => {
       const scopeLabel = s.scope === 'official' ? '官方' : s.scope === 'repo' ? '仓库' : '个人';
       return `<option value="${s.scope}:${s.name}" ${(d.skill_scope + ':' + currentSkill) === (s.scope + ':' + s.name) ? 'selected' : ''}>${s.display_name || s.name} (${scopeLabel})</option>`;
@@ -208,6 +209,15 @@ function doSend(input, body) {
     signal: ac.signal,
   }).then(async resp => {
     const el = document.getElementById(tid);
+    // M4 D5：queue 模式下 send/stream 返回 {task_id}（非 SSE）→ 轮询任务状态（打字机近似）
+    const ctype = (resp.headers.get('content-type') || '');
+    if (ctype.includes('application/json')) {
+      const data = await resp.json().catch(() => ({}));
+      if (data && data.task_id) { pollTaskStatus(data.task_id, el, body, tid); return; }
+      if (el) el.innerHTML = renderMarkdown(data.reply || '') || _NO_REPLY;
+      loadConversations();
+      return;
+    }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       if (el) el.innerHTML = 'Error: ' + (err.detail?.message || resp.statusText);
@@ -225,7 +235,7 @@ function doSend(input, body) {
           }
         });
       } catch(e) {}
-      if (el) el.innerHTML = renderMarkdown(text) || 'Done';
+      if (el) el.innerHTML = renderMarkdown(text) || _NO_REPLY;
       loadConversations();
       return;
     }
@@ -235,7 +245,7 @@ function doSend(input, body) {
     function read() {
       reader.read().then(({done, value}) => {
         if (done) {
-          if (el) el.innerHTML = renderMarkdown(finalText) || 'Done';
+          if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
           body.scrollTop = body.scrollHeight;
           _chatAbort = null;
           loadConversations();
@@ -259,6 +269,31 @@ function doSend(input, body) {
     }
     read();
   }).catch(e => { const el = document.getElementById(tid); if (el) el.innerHTML = 'Request failed: ' + e.message; });
+}
+
+function pollTaskStatus(taskId, el, body, tid) {
+  if (el) el.innerHTML = '⏳ 任务执行中…';
+  const token = localStorage.getItem('token');
+  let attempts = 0;
+  const timer = setInterval(() => {
+    attempts++;
+    fetch('/api/runtime/tasks/' + taskId + '/status', {
+      headers: {'Authorization': 'Bearer ' + token},
+    }).then(r => r.json()).then(d => {
+      if (!d || !d.status) return;
+      if (d.status === 'completed' || d.status === 'failed' || d.status === 'cancelled') {
+        clearInterval(timer);
+        _chatAbort = null;
+        const text = d.result_text || (d.status === 'completed' ? 'Done' : '任务' + d.status);
+        if (el) el.innerHTML = renderMarkdown(text);
+        body.scrollTop = body.scrollHeight;
+        loadConversations();
+      } else if (d.status === 'running' || d.status === 'dispatched') {
+        if (el) el.innerHTML = '⏳ 任务执行中… (' + Math.round(attempts * 1) + 's)';
+      }
+    }).catch(() => {});
+    if (attempts > 180) { clearInterval(timer); _chatAbort = null; if (el) el.innerHTML = '⏱ 等待超时'; }
+  }, 1000);
 }
 
 function saveChatConfig() {

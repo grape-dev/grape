@@ -3,9 +3,8 @@ name: repo-onboarding
 version: 1.0.0
 description: |
   项目首次托管引导（通用）：分析项目功能特性、使用方式、技术栈，
-  创建「快速部署体验」与「二次开发方向」两个 Issue，帮助开发者快速上手模板项目。
+  创建「快速部署体验」与「探索方向引导」两个 Issue，帮助开发者快速上手模板项目。
   仅在模板一键创建并托管后异步触发一次。
-triggers: []
 tools:
   - codegraph
 ---
@@ -26,16 +25,17 @@ tools:
    - 内容：部署步骤摘要（启动命令/环境要求）、体验路径（如何跑通核心流程）、预期效果
    - assignee = 仓库 owner
 
-3. **Issue 2 · 二次开发方向**
-   - 基于知识基线，提炼 2-4 个「有意思、易理解、有真实价值」的二次开发方向
+3. **Issue 2 · 探索方向引导**
+   - 基于知识基线，提炼 2-4 个「有意思、易理解、有真实价值」的探索方向
    - 每个方向：一句话价值 + 期望能力 + 影响范围
-   - 汇总成一个 Issue，标题形如「【二次开发】值得探索的 N 个开发方向」
+   - 汇总成一个 Issue，标题形如「【探索方向】值得探索的 N 个方向」
    - assignee = 仓库 owner
 
 4. **生成任务**（对每个 Issue）
    - 调用 `POST /api/tasks/notify`，`assignee=owner`，`task_description` 简要描述
    ```bash
-   curl -X POST http://localhost:8080/api/tasks/notify \
+   curl -X POST {{SERVER_URL}}/api/tasks/notify \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{
        "assignee": "<owner 的 GitCode 用户名>",

@@ -101,25 +101,34 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
 
     involved_agents = [AGENT_LABELS[i] for i, s in enumerate(stage_statuses) if s > 0]
 
-    # 责任人：优先 Issue assignee（从事件 payload 解析，最新优先），回退 actor 推断
-    assignee = _get_latest_assignee(issue_events)
+    # 责任人：优先 Issue assignee（issue_state.assignee，GitCode 真实指派，可为 grape_bot 或用户），
+    # 回退从事件 actor 推断（_get_latest_assignee 已因 payload 不含 assignee 而基本失效，保留兜底）。
     current_owner = ""
-    if assignee:
-        current_owner = _resolve_feishu_name(assignee)
+    from src.api.session_store import get_issue_stage
+    _st = get_issue_stage(repo_key, issue_id)
+    if _st and _st.get("assignee"):
+        current_owner = _resolve_feishu_name(_st["assignee"])
     else:
-        for i in range(len(stage_statuses) - 1, -1, -1):
-            if stage_statuses[i] > 0:
-                agent = AGENT_ORDER[i]
-                latest = stages[i].get("latest_event") or {}
-                actor = latest.get("actor", "")
-                if actor:
-                    from src.user.db import get_all_bot_usernames
-                    if actor in get_all_bot_usernames():
-                        from src.api.event_pipeline import get_agent_display_name
-                        current_owner = get_agent_display_name(agent)
-                    else:
-                        current_owner = actor
-                break
+        assignee = _get_latest_assignee(issue_events)
+        if assignee:
+            current_owner = _resolve_feishu_name(assignee)
+        else:
+            for i in range(len(stage_statuses) - 1, -1, -1):
+                if stage_statuses[i] > 0:
+                    agent = AGENT_ORDER[i]
+                    latest = stages[i].get("latest_event") or {}
+                    actor = latest.get("actor", "")
+                    if actor:
+                        from src.user.db import get_all_bot_usernames
+                        if actor in get_all_bot_usernames():
+                            from src.api.event_pipeline import get_agent_display_name
+                            current_owner = get_agent_display_name(agent)
+                        else:
+                            current_owner = actor
+                    break
+
+    # 生命周期阶段（issue_state.stage）：vod/issue/coding/qa/sre/done；无记录默认 vod
+    stage = (_st.get("stage") if _st else "") or "vod"
 
     return {
         "issue_id": issue_id,
@@ -127,10 +136,26 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         "stages": stages,
         "statuses": stage_statuses,
         "result": result,
+        "stage": stage,
         "agents": involved_agents,
         "current_owner": current_owner,
         "event_count": len(issue_events),
     }
+
+
+def _running_issue_ids(repo_key: str) -> set[str]:
+    """按 repo 查 agent_tasks 中 queued/dispatched/running 的 issue_id 集合（前端 B 执行态派生）。"""
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT DISTINCT issue_id FROM agent_tasks WHERE repo_key=? AND status IN ('queued','dispatched','running') AND issue_id!=''",
+                (repo_key,)
+            )
+            return {r[0] for r in c.fetchall()}
+    except Exception:
+        return set()
 
 
 @router.get("/{owner}/{repo}")
@@ -159,6 +184,18 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
     issue_ids = list(dict.fromkeys(e["issue_id"] for e in events if e["issue_id"]))
     pipelines = [_get_issue_pipeline(repo_key, iid, events) for iid in issue_ids]
     pipelines = [p for p in pipelines if p is not None]
+
+    # 按 Issue 最新活动倒序：最新的 issue 排最前（原为 issue 首次出现顺序，最早 issue 恒在前）
+    # 用每个 issue 的最新 event seq 作为排序键（seq 单调递增，最新 seq = 最新活动）
+    def _latest_seq(p):
+        return max((e["seq"] for e in events if e["issue_id"] == p["issue_id"]), default=0)
+    pipelines.sort(key=_latest_seq, reverse=True)
+
+    # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，
+    # 不维护 issue_agent_session.status 双份记账，避免状态漂移
+    running_issues = _running_issue_ids(repo_key)
+    for p in pipelines:
+        p["executing"] = p["issue_id"] in running_issues
 
     active = pipelines[0] if pipelines else None
     history = pipelines[1:] if len(pipelines) > 1 else []

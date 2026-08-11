@@ -1,9 +1,9 @@
 """事件处理管道：归一化 → 路由 → 存储 → Agent 执行"""
 import json, os, time, uuid, threading
-from datetime import datetime
+from datetime import datetime, timezone
 from src.config import log, WORKSPACE_DIR
 from src.vcs.adapter import normalize_event, get_event_header
-from src.api.routing import get_domain_agent
+from src.api.routing import NON_ISSUE_EVENT_ROUTE, PR_DEFAULT_AGENT, ISSUE_EVENT_TYPES, PR_EVENT_TYPES
 from src.api.event_store import get_issue_summary
 from src.session_manager import db, db_lock
 
@@ -25,23 +25,41 @@ def get_agent_display_name(agent_type: str) -> str:
     return agent_type
 
 
+def _is_pr_payload(payload: dict) -> bool:
+    """判断是否为 PR 事件 payload（PR webhook 带 issues 关联列表 / pull_request 键）。"""
+    return ("issues" in payload) or bool(payload.get("pull_request")) or bool(payload.get("merge_request"))
+
+
 def resolve_issue_id(payload: dict) -> str:
-    """从事件 payload 提取 Issue/PR 编号"""
+    """从事件 payload 提取 Issue 编号。
+
+    注意：PR 事件不返回 PR 号（其 object_attributes.iid 是 PR 号，会误当 issue_id）；
+    PR 事件的真实关联 Issue 用 resolve_pr_issue_id（title/分支/issues 列表）。
+    """
     if not isinstance(payload, dict):
         return ""
     # A2A payload 用 issue_number 字段
     num = payload.get("issue_number", "")
     if num:
         return f"#{num}"
-    for key in ("issue", "pull_request", "merge_request"):
-        obj = payload.get(key, {})
-        if isinstance(obj, dict):
-            num = obj.get("number", obj.get("iid", ""))
-            if num:
-                return f"#{num}"
-    obj = payload.get("object_attributes", {})
+    # Issue 类事件（issue_comment 等）顶层 issue 对象
+    obj = payload.get("issue", {})
     if isinstance(obj, dict):
-        num = obj.get("number", obj.get("iid", obj.get("noteable_iid", obj.get("id", ""))))
+        num = obj.get("number", obj.get("iid", ""))
+        if num:
+            return f"#{num}"
+    # PR payload 中显式关联的 issues 列表（GitCode pull_request_*）
+    issues = payload.get("issues")
+    if isinstance(issues, list):
+        for it in issues:
+            if isinstance(it, dict):
+                num = it.get("number", it.get("iid", ""))
+                if num:
+                    return f"#{num}"
+    # Issue 类 webhook 的 object_attributes.iid（PR 事件的该字段是 PR 号，跳过）
+    obj = payload.get("object_attributes", {})
+    if isinstance(obj, dict) and not _is_pr_payload(payload):
+        num = obj.get("number", obj.get("iid", obj.get("noteable_iid", "")))
         if num:
             return f"#{num}"
     return ""
@@ -61,6 +79,15 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
     issue = _extract_issue_id_from_text(title)
     if issue:
         return issue
+
+    # 1.5 从 payload.issues 关联列表提取（GitCode pull_request_* 直接给出关联 Issue）
+    issues = payload.get("issues")
+    if isinstance(issues, list):
+        for it in issues:
+            if isinstance(it, dict):
+                _num = it.get("number", it.get("iid", ""))
+                if _num and str(_num) != "0":
+                    return f"#{_num}"
 
     # 2. 从分支名提取 issue-N
     branch = obj.get("source_branch", "") or obj.get("ref", "") or pr_obj.get("head", {}).get("ref", "") if isinstance(pr_obj.get("head"), dict) else (obj.get("source_branch", "") or obj.get("ref", ""))
@@ -92,6 +119,54 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
             except Exception:
                 return ""
     return ""
+
+
+def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
+                               default_agent: str) -> str:
+    """阶段矩阵路由（D9，见 vod-skill-upgrade-plan.md §3.0.3）。
+
+    关联 issue_id 的事件按 issue_state 阶段判定归属：
+    - issue_opened 恒给 vod（D8）
+    - Issue 类事件（issue_updated/comment/...）：vod→VOD；issue 及之后→Issue Agent
+    - PR 类事件：vod/issue→Issue Agent 审视；coding→Coding；qa→QA；sre→SRE；done→不分发
+    无 issue_state 记录 / 非关联事件 → 返回 default_agent（现状 get_domain_agent 结果）。
+    """
+    from src.api.session_store import get_issue_stage, get_issue_stage_name
+
+    if event_type == "issue_opened":
+        return "vod"
+
+    if event_type not in ISSUE_EVENT_TYPES and event_type not in PR_EVENT_TYPES:
+        return default_agent
+
+    # 解析关联 issue_id：PR 类事件优先用 title/分支提取（无需 token），Issue 类用 payload 字段
+    if event_type in PR_EVENT_TYPES:
+        issue_id = resolve_pr_issue_id(payload) or resolve_issue_id(payload) or ""
+    else:
+        issue_id = resolve_issue_id(payload) or ""
+    if not issue_id:
+        return default_agent
+
+    st = get_issue_stage(repo_key, issue_id)
+    if not st:
+        # 无记录：issue_opened 已由上面处理；其余关联事件默认 vod（新 Issue 先审视）
+        return "vod" if event_type in ISSUE_EVENT_TYPES else default_agent
+    stage = st["stage"]
+
+    if event_type in ISSUE_EVENT_TYPES:
+        # Issue 类事件：vod→VOD；issue 及之后→Issue Agent（coding/qa/sre 不直接处理）
+        if stage == "vod":
+            return "vod"
+        if stage == "done":
+            return ""  # 已结束不再分发
+        return "issue"
+    else:  # PR 类事件
+        if stage == "vod" or stage == "issue":
+            return "issue"  # Issue Agent 审视
+        if stage == "done":
+            return ""
+        return stage  # coding/qa/sre → 对应执行 Agent
+
 
 
 def resolve_actor(payload: dict, evt: dict) -> str:
@@ -157,17 +232,58 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         except Exception as e:
             log.warning(f"Pipeline: issue_updated label-only check failed: {e}")
 
-    # 3. 路由判定
-    agent_type = get_domain_agent(event_type)
-    log.info(f"Pipeline: routing result -> agent_type='{agent_type}'")
+    # 3. 路由判定（D9 阶段矩阵 + 非 Issue 静态映射，替代 agent_type.subscribe_events，见 vod-skill-upgrade-plan §3.0.4）
+    if event_type == "issue_opened":
+        agent_type = "vod"
+        log.info(f"Pipeline: issue_opened -> VOD (stage init)")
+        # project-info 后台刷新（服务端 codegraph 生成基线，不阻塞 webhook；见 codegraph-builder-plan.md）
+        try:
+            from src.project_info.builder import maybe_refresh_project_info
+            threading.Thread(target=maybe_refresh_project_info, args=(repo_key,), daemon=True).start()
+        except Exception as e:
+            log.warning(f"Pipeline: project-info refresh trigger failed: {e}")
+    else:
+        if event_type in PR_EVENT_TYPES:
+            _default = PR_DEFAULT_AGENT
+        elif event_type in ISSUE_EVENT_TYPES:
+            _default = "issue"          # Issue 类事件无关联 issue 时默认 Issue Agent（审视）
+        else:
+            _default = NON_ISSUE_EVENT_ROUTE.get(event_type, "")
+        agent_type = _resolve_issue_stage_agent(repo_key, event_type, evt.get("payload", {}) or {}, _default)
+        log.info(f"Pipeline: routing result -> agent_type='{agent_type}'")
     if not agent_type:
-        log.info(f"Pipeline: no route for type={event_type}, skip")
+        _reason = "issue_done" if (event_type in ISSUE_EVENT_TYPES or event_type in PR_EVENT_TYPES) else "no_route"
+        log.info(f"Pipeline: no route for type={event_type} ({_reason}), skip")
         from src.api.event_store import append_skipped_event
-        append_skipped_event(repo_key, event_type, "no_route")
+        append_skipped_event(repo_key, event_type, _reason)
+        return result
+
+    # 3.1 Issue 生命周期阶段初始化（D8/D9）：issue_opened 建 vod 阶段；其余命中 vod 且无记录时补建
+    from src.api.session_store import set_issue_stage
+    if event_type == "issue_opened":
+        _rid = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
+        if _rid:
+            _asg = _fetch_issue_assignee(repo_key, _rid)
+            set_issue_stage(repo_key, _rid, "vod", "vod", assignee=_asg)
+            log.info(f"Pipeline: issue_state init vod for {_rid} assignee={_asg or 'none'}")
+    elif agent_type == "vod":
+        from src.api.session_store import get_issue_stage
+        _rid2 = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+        if _rid2 and not get_issue_stage(repo_key, _rid2):
+            set_issue_stage(repo_key, _rid2, "vod", "vod")
+            log.info(f"Pipeline: issue_state init vod for {_rid2}")
+
+    # 3.3 Agent 启用检查（阶段路由后的最终 agent）
+    from src.api.session_store import is_agent_enabled
+    if not is_agent_enabled(repo_key, agent_type):
+        log.info(f"Pipeline: agent '{agent_type}' disabled for repo={repo_key}, skip")
+        from src.api.event_store import append_skipped_event
+        append_skipped_event(repo_key, event_type, "agent_disabled", agent_type)
         return result
 
     # 4. 查找 Agent 配置（backend + skill），找不到则不处理
     backend = None
+    runtime_id = 0
     skill_name = ""
     skill_id = 0
     skill_path = ""
@@ -175,12 +291,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT backend_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
+            c.execute("SELECT runtime_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
             row = c.fetchone()
             if row:
+                runtime_id = row[0] or 0
                 backend = "opencode"
                 if row[0]:
-                    c.execute("SELECT name FROM backend_agents WHERE id=?", (row[0],))
+                    c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
                     brow = c.fetchone()
                     if brow and brow[0]:
                         backend = brow[0]
@@ -301,8 +418,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                    "repo_key": from_repo_key(repo_key), "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
 
-    # 后台异步执行 Agent（执行完更新该 seq 的 result/status）
-    if backend and skill_name and seq > 0:
+    # 执行分派：direct（就地）/ queue_local·remote（入队 + RuntimeAgent，M2 见 implementation-plan §三）
+    from src.runtime.service import get_execution_mode, enqueue_task
+    mode = get_execution_mode()
+    if mode != "direct" and backend and skill_name and seq > 0:
+        _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
+                               skill_id, skill_path, runtime_id or 0, issue_id)
+    elif backend and skill_name and seq > 0:
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
         threading.Thread(target=_execute_agent, args=(
             repo_key, seq, agent_type, backend, skill_name, evt,
@@ -310,6 +432,152 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.info(f"Pipeline: started agent execution, seq={seq}, repo={repo_key}, agent={agent_type}")
 
     return result
+
+
+def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
+    """调 GitCode API 获取 Issue 责任人（assignee.login）。失败返回空。
+
+    用于 pipeline 责任人显示（issue_state.assignee），取代"从事件 payload 猜 assignee"。
+    """
+    num = _issue_num_from(issue_id)
+    if not num:
+        return ""
+    try:
+        from src.repo_key import split_owner_repo
+        owner, rname = split_owner_repo(repo_key)
+        import urllib.request
+        from src.user.db import get_gitcode_token
+        tok = get_gitcode_token(repo_key=repo_key) or ""
+        if not tok:
+            return ""
+        req = urllib.request.Request(
+            f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
+            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
+        import json as _json
+        d = _json.load(urllib.request.urlopen(req, timeout=15))
+        asg = d.get("assignee") or {}
+        login = asg.get("login", "") if isinstance(asg, dict) else ""
+        return login or ""
+    except Exception:
+        return ""
+
+
+def _issue_num_from(issue_id: str) -> str:
+    """"#5" / "5" → "5"；#0/空 → ''（无关联 Issue，按 repo 级兜底）。"""
+    s = (issue_id or "").strip().lstrip("#")
+    return s if s and s != "0" else ""
+
+
+def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str:
+    """Agent 工作目录（多 Issue 并行，见 multi-issue-isolation-design.md §3.4）。
+
+    - 有关联 Issue：#5 → {owner}/{repo}/{agent_type}/issues/5/
+    - 无关联 Issue（push/#0）→ {owner}/{repo}/{agent_type}-agent（兼容现状）
+    """
+    from src.repo_key import split_owner_repo
+    owner, rname = split_owner_repo(repo_key)
+    num = _issue_num_from(issue_id)
+    if num:
+        return os.path.join(WORKSPACE_DIR, owner, rname, agent_type, "issues", num)
+    return os.path.join(WORKSPACE_DIR, owner, rname, f"{agent_type}-agent")
+
+
+def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
+                           skill_id, skill_path, runtime_id, issue_id=""):
+    """触发点三连的入队侧（M2，见 agent-runtime-event-tech-impl.md §2.3）：
+    init_event_json → enqueue_task（确定路由 runtime_id）。本地 worker/远端 RuntimeAgent 消费。
+    """
+    from src.api.event_archive import init_event_json
+    from src.runtime.service import enqueue_task, get_execution_mode
+    from src.repo_key import from_repo_key
+    import os as _os
+
+    issue_id = issue_id or evt.get("issue_id", "") or "#0"
+    # 1) event.json 骨架（#0 跳过，见 event_archive._extract_num）
+    _evt_copy = dict(evt)
+    _evt_copy["issue_id"] = issue_id
+    init_event_json(repo_key, seq, _evt_copy, agent_type, runtime=backend or "", skill=skill_name)
+    # 2) 确定路由：绑定 runtime_id；未绑定时用默认 opencode runtime id
+    if not runtime_id:
+        try:
+            from src.user.db import ensure_default_runtime
+            runtime_id = ensure_default_runtime("opencode") or 0
+        except Exception:
+            runtime_id = 0
+    if not runtime_id:
+        log.warning(f"Pipeline enqueue: no runtime_id for repo={repo_key} agent={agent_type}, task skipped")
+        return
+
+    repository = evt.get("repository", from_repo_key(repo_key))
+    ws = get_agent_workdir(repo_key, agent_type, issue_id)
+    _os.makedirs(ws, exist_ok=True)
+
+    # 3) 会话：配置会话（repo+agent）+ 执行会话（Issue 级，串行粒度，见 multi-issue-isolation-design.md §3.3）
+    #    每 Issue 独立 session（见 vod-agent-hang-rootcause-fix.md 方案 A）：有关联 Issue 只用 Issue 会话；
+    #    repo 级会话仅用于无关联 Issue（push/#0）。
+    from src.api.session_store import get_or_create_agent_session, get_or_create_issue_session
+    from src.api.event_store import update_event_config
+    update_event_config(seq, backend or "opencode", skill_name, datetime.now(timezone.utc).isoformat())
+    session = get_or_create_agent_session(repo_key, agent_type, backend or "opencode")
+    oc_session_id = session.get("runtime_session_id") or ""
+    issue_session_id = ""
+    if _issue_num_from(issue_id):
+        _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
+        issue_session_id = _isess.get("id") or ""
+        oc_session_id = _isess.get("runtime_session_id") or ""
+
+    repo_gitcode_token = ""
+    try:
+        from src.user.db import get_gitcode_token
+        repo_gitcode_token = get_gitcode_token(repo_key=repo_key) or ""
+    except Exception:
+        pass
+
+    # 4) 构建 prompt（含技能占位符化，见 skill-delivery-remote.md）
+    try:
+        from src.prompt_builder import build_prompt
+        evt["_skill_path"] = skill_path
+        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
+                              skill_path=skill_path)
+    except Exception as e:
+        log.warning(f"Pipeline enqueue: prompt build failed: {e}")
+        return
+
+    env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
+    _issue_num = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
+    if _issue_num:
+        env_extra["ISSUE_NUMBER"] = str(_issue_num).lstrip("#")
+    _pr_num = evt.get("payload", {}).get("pr_number", "")
+    if _pr_num:
+        env_extra["PR_NUMBER"] = str(_pr_num)
+
+    # 方案 D 防御：有关联 Issue 时，Issue 级会话指针不得指向其他 Issue 的 workdir（防 cwd/session 错位回归）
+    try:
+        _num = _issue_num_from(issue_id)
+        if _num and oc_session_id:
+            from src.repo_key import split_owner_repo
+            _o, _r = split_owner_repo(repo_key)
+            _expected_ws = os.path.join(WORKSPACE_DIR, _o, _r, agent_type, "issues", _num)
+            if ws != _expected_ws:
+                log.warning(f"Pipeline enqueue: cwd/session mismatch, issue={issue_id} ws={ws} expected={_expected_ws}")
+    except Exception:
+        pass
+
+    tid = enqueue_task(
+        agent_session_id=session.get("id") or "",
+        runtime_id=runtime_id,
+        event_seq=seq, issue_id=issue_id,
+        repo_key=repo_key, agent_type=agent_type, skill=skill_name,
+        prompt=prompt, cwd=ws,
+        runtime_session_id=oc_session_id,
+        issue_session_id=issue_session_id,
+        event_type=evt.get("type", ""),
+        account=evt.get("account") or "",
+        repo_gitcode_token=repo_gitcode_token,
+        env_extra=env_extra,
+        skill_path=skill_path,
+    )
+    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
 
 
 def get_prompt_context(repo_key: str) -> str:
@@ -323,7 +591,7 @@ def get_prompt_context(repo_key: str) -> str:
 def _execute_agent(repo_key: str, seq: int, agent_type: str,
                    backend: str, skill_name: str, evt: dict):
     """后台执行 Agent：构建 prompt → stream_agent → 更新 event（result/status/agent_log）"""
-    from src.agent.executor import stream_agent
+    from src.runtime.executor import stream_agent
     from src.prompt_builder import build_prompt
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
@@ -331,19 +599,30 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     from src.repo_key import from_repo_key
     repository = evt.get("repository", from_repo_key(repo_key))
-    ws = os.path.join(WORKSPACE_DIR, repository, f"{agent_type}-agent")
+    issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
+    ws = get_agent_workdir(repo_key, agent_type, issue_id)
     os.makedirs(ws, exist_ok=True)
 
-    # 读取上次的 oc_session_id（用于延续对话上下文）——repo_key 带前缀查 DB
+    # 读取上次的 oc_session_id（用于延续对话上下文）——Issue 级执行会话优先，回退 repo 级
+    # 注意：有关联 Issue 时只用该 Issue 自己的会话（每 Issue 独立 session，见 vod-agent-hang-rootcause-fix.md 方案 A）；
+    #       repo 级 session 仅用于无关联 Issue（push/#0）。
     repo_name = repo_key
     oc_session_id = ""
+    issue_session_id = ""
+    _has_issue = bool(_issue_num_from(issue_id))
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT backend_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
-            row = c.fetchone()
-            if row and row[0]:
-                oc_session_id = row[0]
+        if _has_issue:
+            from src.api.session_store import get_or_create_issue_session
+            _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
+            issue_session_id = _isess.get("id") or ""
+            oc_session_id = _isess.get("runtime_session_id") or ""
+        if not _has_issue and not oc_session_id:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
+                row = c.fetchone()
+                if row and row[0]:
+                    oc_session_id = row[0]
     except Exception:
         pass
 
@@ -364,6 +643,14 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     try:
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                               skill_path=evt.get("_skill_path", ""))
+        # 直接模式（direct）：project-info 服务端本地可达，替换占位符为权威路径
+        try:
+            from src.repo_key import split_owner_repo
+            _o, _r = split_owner_repo(repo_name)
+            _pi_path = os.path.join(WORKSPACE_DIR, _o, _r, "project-info")
+            prompt = prompt.replace("{{PROJECT_INFO_DIR}}", _pi_path)
+        except Exception:
+            pass
         log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
@@ -393,6 +680,17 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     _pr_num = evt.get("payload", {}).get("pr_number", "")
     if _pr_num:
         env_extra["PR_NUMBER"] = str(_pr_num)
+
+    # git worktree（coding/qa/sre，direct 模式；见 multi-issue-isolation-design.md §3.4.1）
+    try:
+        from src.runtime import repogit
+        _gnum = repogit.issue_num_from(issue_id)
+        if repogit.is_git_agent(agent_type) and _gnum and issue_session_id:
+            _wt = repogit.ensure_issue_worktree(repo_key, agent_type, _gnum, token=repo_gitcode_token)
+            if _wt:
+                env_extra["GIT_ASKPASS"] = os.path.join(_wt, ".git-askpass.sh")
+    except Exception as e:
+        log.warning(f"Exec agent: git worktree ensure failed: {e}")
 
     try:
         for evt_type, data in stream_agent(
@@ -429,12 +727,15 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent failed: [Agent:{agent_type}|repo:{repo_name}] {e}")
 
-    # 更新 oc_session_id（持久化对话上下文）
+    # 更新 oc_session_id（持久化对话上下文）——Issue 级执行会话优先，回退 repo 级
     if new_oc_session_id and new_oc_session_id != oc_session_id:
         try:
+            if issue_session_id:
+                from src.api.session_store import update_issue_session
+                update_issue_session(issue_session_id, runtime_session_id=new_oc_session_id)
             with db_lock:
                 c = db.cursor()
-                c.execute("UPDATE devops_agent_session SET backend_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
+                c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
                           (new_oc_session_id, repo_name, agent_type))
                 db.commit()
         except Exception as e:

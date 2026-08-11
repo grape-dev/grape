@@ -4,12 +4,7 @@ version: 1.0.0
 description: |
   PR 全生命周期审查 + 工作流质量审查（Agent Work Loop 五维模型）。pr 技能的平替与增强：
   在代码审查基础上，增加对仓库 AI 编码工作流（AGENTS.md、spec、技能、Hook、CI 门禁、经验沉淀）的证据化审查，
-  输出带证据的优先级发现。与 pr 技能同一批触发事件，agent_type=qa，默认由 pr 流程按需 A2A 触发。
-triggers:
-  - event_type: pull_request_opened
-  - event_type: pull_request_updated
-  - event_type: push
-  - event_type: note_hook_pr
+  输出带证据的优先级发现。按 issue 生命周期阶段门控执行（issue 进入 qa 阶段才处理 PR；也可由 coding A2A 显式触发）。
 tools:
   - git
 ---
@@ -192,7 +187,8 @@ curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 如果 `review_comments` 中存在 Critical 或 Required 级别的问题（代码问题或工作流问题），说明需要修改代码或补齐工作流资产。此时调用 A2A API 将审查意见传递给 coding Agent（implementation）：
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "coding",

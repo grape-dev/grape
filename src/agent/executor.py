@@ -165,6 +165,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         _popen_kwargs = {}
         if hasattr(os, "getpgid"):  # POSIX：独立进程组，便于整组优雅终止
             _popen_kwargs["start_new_session"] = True
+
+        # 纯管道启动（与 main 一致；script 包装为临时对照，已按分析移除）
         proc = subprocess.Popen(
             [agent_cmd] + args,
             stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -179,6 +181,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         error_events = []
         step_count = 0
         _last_output = time.time()
+        _reader_total = 0
+        # 进程存活但无输出的累计延长时长（防长命令/长思考无上限；超硬上限仍强杀，见 #501 修复）
+        _silent_extend_total = 0.0
+        _silent_extend_cap = float(os.environ.get("AGENT_SILENT_EXTEND_CAP", str(max_exec_seconds * 3)))
 
         import threading
         _line_queue = []
@@ -186,19 +192,23 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         _reader_done = False
 
         def _stdout_reader():
-            nonlocal _reader_done
+            nonlocal _reader_done, _reader_total
             try:
                 for raw_line in iter(proc.stdout.readline, b""):
+                    _reader_total += 1
                     with _line_queue_lock:
                         _line_queue.append(raw_line)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"{label}{backend.name} reader exception: {e}")
             finally:
+                log.info(f"{label}{backend.name} reader EOF, total_lines={_reader_total}")
                 _reader_done = True
 
         _reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
         _reader_thread.start()
 
+        _raw_count = 0
+        _parsed_count = 0
         while True:
             with _line_queue_lock:
                 if _line_queue:
@@ -214,8 +224,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         continue
                     parsed = backend.parse_output(line)
                     if parsed is None:
-                        yield ("raw", _redact(line[:200], _tokens))
+                        _raw_count += 1
+                        # opencode 会话失效错误经 stdout 以 ANSI 原始行输出（非 NDJSON），
+                        # 计入 error_events 使下方 session_missing 检测能命中（重跑无 session）
+                        if "session not found" in line.lower():
+                            error_events.append(_redact(line, _tokens))
+                        yield ("raw", _redact(line, _tokens))
                         continue
+                    _parsed_count += 1
                     et = parsed["type"]
                     if et == "step_start":
                         step_count += 1
@@ -224,11 +240,15 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
                     elif et == "text":
                         collected_text.append(parsed["text"])
-                        yield ("text", _redact(parsed["text"][:150], _tokens).replace("\n", " "))
+                        yield ("text", _redact(parsed["text"], _tokens))
                     elif et == "reasoning":
-                        yield ("reasoning", _redact(parsed["text"][:200], _tokens))
+                        yield ("reasoning", _redact(parsed["text"], _tokens))
                     elif et == "tool_use":
-                        yield ("tool_use", _redact(f"Tool: {parsed['tool']} {json.dumps(parsed.get('input', {}))[:200]}", _tokens))
+                        # M1 结构化：yield dict（tool/input），供 evaluate 与档案记录使用
+                        yield ("tool_use", {
+                            "tool": parsed.get("tool", ""),
+                            "input": _redact(json.dumps(parsed.get("input", {}), ensure_ascii=False, default=str), _tokens),
+                        })
                     elif et == "step_finish":
                         yield ("step_finish", f"Step {step_count} done, tokens={parsed['tokens']}")
                     elif et == "error":
@@ -237,16 +257,60 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     else:
                         yield ("other", et)
             elif _reader_done:
+                log.info(f"{label}{backend.name} loop break on reader EOF: raw={_raw_count} parsed={_parsed_count} total_lines={_reader_total}")
                 break
             else:
                 elapsed_silent = time.time() - _last_output
                 if elapsed_silent > max_exec_seconds:
-                    log.warning(f"{label}{backend.name} no output for {max_exec_seconds}s, terminating")
+                    # 若 opencode 进程仍存活（长 bash 命令/长思考中，如 pip install），
+                    # 不立即判超时——重置静默计时继续等待，避免长命令被误杀（见 #501 修复）。
+                    # 但累计延长受硬上限约束（AGENT_SILENT_EXTEND_CAP，默认 3×max_exec_seconds），
+                    # 防止进程活着的死循环永久挂起。
+                    if proc.poll() is None and _silent_extend_total < _silent_extend_cap:
+                        _silent_extend_total += elapsed_silent
+                        log.info(f"{label}{backend.name} silent {elapsed_silent:.0f}s but process alive, "
+                                 f"extending window (long cmd/reasoning, total_extend={_silent_extend_total:.0f}s)")
+                        _last_output = time.time()
+                        time.sleep(0.1)
+                        continue
+                    log.warning(f"{label}{backend.name} no output for {max_exec_seconds}s"
+                                f"(extend_total={_silent_extend_total:.0f}s), terminating")
+                    # 先 SIGTERM 给 agent 收尾窗口（_terminate_proc 内部 grace_seconds=10 等待优雅退出）
                     _terminate_proc(proc, f"{label}{backend.name}")
+                    # 收尾窗口内尝试读取 SIGTERM 后 opencode 冲刷的最终输出（避免把已产出的收尾当卡死）
+                    _grace_tail = ""
+                    try:
+                        proc.stdout.settimeout(3)
+                        while True:
+                            try:
+                                line = proc.stdout.readline()
+                            except Exception:
+                                break
+                            if not line:
+                                break
+                            _grace_tail += line.decode("utf-8", errors="replace")
+                            _last_output = time.time()
+                    except Exception:
+                        pass
+                    for _gl in _grace_tail.strip().split("\n"):
+                        _gl = _gl.strip()
+                        if not _gl:
+                            continue
+                        _parsed = backend.parse_output(_gl)
+                        if _parsed:
+                            _parsed_count += 1
+                            if _parsed["type"] == "text":
+                                collected_text.append(_parsed["text"])
+                            elif _parsed["type"] == "tool_use":
+                                pass
+                    # 若收尾窗口内收到输出，视为 agent 已收尾（exit 以进程实际状态为准，不再强制 -9）
+                    _killed = "-9" if _grace_tail.strip() == "" else "grace"
+                    log.info(f"{label}{backend.name} hang fallback: tail_chars={len(_grace_tail)} outcome={_killed}")
                     yield ("done", {
-                        "exit_code": -9, "text": _redact("\n".join(collected_text), _tokens),
+                        "exit_code": -9 if _grace_tail.strip() == "" else (proc.returncode if proc.returncode is not None else -1),
+                        "text": _redact("\n".join(collected_text), _tokens),
                         "oc_session_id": new_session_id,
-                        "errors": error_events + [f"no output for {max_exec_seconds}s, killed"],
+                        "errors": error_events + ([f"no output for {max_exec_seconds}s, killed"] if _grace_tail.strip() == "" else []),
                         "stderr": "",
                     })
                     return
@@ -269,7 +333,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         stdout_remainder = ""
         try:
             stdout_remainder = proc.stdout.read().decode("utf-8", errors="replace")
-        except:
+        except Exception:
             pass
 
         if stdout_remainder:
@@ -285,8 +349,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         stderr_output = ""
         try:
             stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
-        except:
-            pass
+        except Exception as e:
+            log.warning(f"{label}{backend.name} stderr read err: {e}")
+
+        log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={stderr_output[:120]!r}")
 
         yield ("done", {
             "exit_code": proc.returncode, "text": _redact(full_text, _tokens),

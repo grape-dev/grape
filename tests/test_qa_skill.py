@@ -50,10 +50,12 @@ class TestQaSkillFile:
         assert "description:" in content
         assert content.split("---", 2)[1].strip() != ""
 
-    def test_front_matter_triggers_match_pr(self):
+    def test_front_matter_no_triggers(self):
+        # 路由由 Grape 阶段矩阵/静态映射决定（§3.0.4）；SKILL.md 不再声明 triggers
         content = _read_skill_md()
+        assert "triggers:" not in content
         for t in PR_TRIGGERS:
-            assert f"- event_type: {t}" in content, f"missing trigger {t}"
+            assert f"- event_type: {t}" not in content, f"triggers 已移除，不应含 {t}"
 
     def test_required_sections(self):
         content = _read_skill_md()
@@ -78,27 +80,79 @@ class TestQaSkillConfig:
         for scene, info in cfg["scenes"].items():
             assert info["mapping"]["qa"] == "pr", f"scene '{scene}' qa mapping mismatch"
 
-    def test_agent_description_qa_subscribes_pr_events(self):
+    def test_agent_description_qa_subscribes_pr_with_stage_gate(self):
+        # 生命周期矩阵（vod-skill-upgrade-plan.md §3.0.3）：PR 事件默认归属 qa（阶段矩阵兜底），
+        # 不再通过 subscribe_events 订阅（§3.0.4 已清空订阅）
         cfg = _load_json("agent-description.json")
-        qa = cfg["qa"]
-        for evt in PR_SUBSCRIBED_EVENTS:
-            assert evt in qa["subscribe_events"], f"qa missing subscribe event {evt}"
+        assert cfg["qa"]["subscribe_events"] == []
 
-    def test_coding_agent_not_subscribed_to_pr_events(self):
+    def test_agent_description_enable_defaults(self):
+        # enable 默认：sre=false，其余 true
+        cfg = _load_json("agent-description.json")
+        for at in ("vod", "issue", "coding", "qa"):
+            assert cfg[at].get("enable", True) is True, f"{at} enable should be true"
+        assert cfg["sre"].get("enable", True) is False, "sre enable should be false"
+
+    def test_coding_agent_does_not_subscribe_pr(self):
+        # coding 不订阅任何事件（通过 A2A 由 Issue/QA Agent 触发，不直接感知 PR 事件）
+        cfg = _load_json("agent-description.json")
+        assert cfg["coding"]["subscribe_events"] == []
+
+    def test_all_subscribe_events_cleared(self):
+        # 阶段矩阵 + 非 Issue 静态映射已接管路由（§3.0.4 彻底删除条件），subscribe_events 全部置空
+        cfg = _load_json("agent-description.json")
+        for at in ("vod", "issue", "coding", "qa", "sre"):
+            assert cfg[at].get("subscribe_events", []) == [], f"{at} subscribe_events should be empty"
+
+    def test_issue_opened_only_vod_subscribes(self):
+        # D8：issue_opened 恒给 VOD（静态映射，非订阅）
+        cfg = _load_json("agent-description.json")
+        assert cfg["vod"]["subscribe_events"] == []
+        assert cfg["issue"]["subscribe_events"] == []
+
+    def test_issue_subscribes_issue_events_not_pr(self):
+        # Issue 事件由阶段矩阵分发到 issue/vod；不订阅（subscribe_events 已清空）
+        cfg = _load_json("agent-description.json")
+        assert cfg["issue"]["subscribe_events"] == []
+
+    def test_vod_subscribes_issue_events(self):
+        # vod 处理 vod_signal + issue_opened + issue_updated/issue_comment（阶段矩阵/静态映射，非订阅）
+        cfg = _load_json("agent-description.json")
+        assert cfg["vod"]["subscribe_events"] == []
+
+    def test_pr_events_only_qa_subscribed_stage_gated(self):
+        # PR 事件默认归属 qa（阶段矩阵兜底）；subscribe_events 已清空，无 agent 静态订阅
         cfg = _load_json("agent-description.json")
         for evt in PR_SUBSCRIBED_EVENTS:
-            assert evt not in cfg["coding"]["subscribe_events"], f"coding still on {evt}"
+            subscribers = [a for a, info in cfg.items() if evt in info.get("subscribe_events", [])]
+            assert subscribers == [], f"{evt} should NOT be subscribed by any agent (stage matrix only): {subscribers}"
 
-    def test_no_routing_conflict_for_pr_events(self):
-        # 每个 PR 事件只被一个 agent 订阅，避免 get_domain_agent 首匹配产生非确定性
-        cfg = _load_json("agent-description.json")
-        subscribed = {evt: [] for evt in PR_SUBSCRIBED_EVENTS}
-        for agent, info in cfg.items():
-            for evt in info.get("subscribe_events", []):
-                if evt in subscribed:
-                    subscribed[evt].append(agent)
-        for evt, agents in subscribed.items():
-            assert len(agents) == 1, f"{evt} subscribed by {agents}"
+
+class TestResolveIssueIdPR:
+    """resolve_issue_id / resolve_pr_issue_id：PR 事件不得把 PR 号当 issue_id（见 event_pipeline.py）"""
+
+    def _pr_payload(self, pr_number=114, issues=None):
+        return {"object_attributes": {"iid": pr_number, "number": pr_number, "title": "feat: x", "source_branch": "feat/x"},
+                "issues": issues or []}
+
+    def test_pr_number_not_used_as_issue_id(self):
+        from src.api.event_pipeline import resolve_issue_id
+        p = self._pr_payload(pr_number=114)
+        assert resolve_issue_id(p) == "", "PR 事件不应把 PR 号当 issue_id"
+
+    def test_pr_linked_issues_extracted(self):
+        from src.api.event_pipeline import resolve_issue_id, resolve_pr_issue_id
+        p = self._pr_payload(pr_number=114, issues=[{"number": 23, "iid": 23}])
+        assert resolve_issue_id(p) == "#23", resolve_issue_id(p)
+        assert resolve_pr_issue_id(p) == "#23", resolve_pr_issue_id(p)
+
+    def test_issue_event_still_extracts_issue(self):
+        from src.api.event_pipeline import resolve_issue_id
+        assert resolve_issue_id({"issue": {"number": 21, "iid": 21}}) == "#21"
+        # Issue 类 webhook：object_attributes.iid = Issue 号（非 PR payload）
+        assert resolve_issue_id({"object_attributes": {"iid": 20, "number": 20}}) == "#20"
+        # A2A
+        assert resolve_issue_id({"issue_number": 5}) == "#5"
 
 
 class TestQaSkillPrompt:

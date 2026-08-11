@@ -1,12 +1,9 @@
 ---
 name: issue-advance
-version: 3.0.0
+version: 3.1.0
 description: |
   Issue 高级运营（增强版，独立于基础 issue 技能）：项目知识基线 → 深度可开发性分析 → 分类/标签/分配 → Spec 生成 → A2A 触发开发。
-  当收到 issue_opened 或 issue_comment 事件时，如用户配置本技能则使用此增强版。
-triggers:
-  - event_type: issue_opened
-  - event_type: issue_comment
+  处理进入 `issue` 生命周期阶段的 Issue（由 VOD Agent 审视交办后；`issue_opened` 由 VOD 接管）。
 tools:
   - codegraph
 ---
@@ -35,7 +32,8 @@ tools:
 > 调用时机：**处理结束时**（所有分类/标签/分配动作完成、责任人不再变化后），不要在处理开始时调用——处理过程中责任人可能被调整。
 
 ```bash
-curl -X POST http://localhost:8080/api/tasks/notify \
+curl -X POST {{SERVER_URL}}/api/tasks/notify \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "assignee": "<责任人GitCode用户名>",
@@ -48,18 +46,20 @@ curl -X POST http://localhost:8080/api/tasks/notify \
 若 notify 返回 `{ok:false}`（责任人未注册平台），在 Issue 评论说明即可。
 
 ### 超出能力范围时主动请求支援
-对于以下任务，issue 技能能力有限或无能力处理，应通过 A2A 协议调用更专业的 Agent：
+对于以下任务，issue 技能能力有限或无能力处理，应通过 A2A 协议调用更专业的 Agent（agent 名 = `configs/agent-description.json` 中的 agent_type）：
 
 | 任务 | 推荐 Agent |
 |------|-----------|
-| 代码实现、提交 PR | implementation |
-| PR 审查、代码质量检查 | pr |
-| 构建失败分析、编译调试 | build-debug |
-| 云部署、拉取代码、重启服务 | cloud-deploy |
+| 代码实现、提交 PR | coding |
+| PR 审查、代码质量检查 | qa |
+| 构建失败分析、编译调试 | sre |
+| 云部署、拉取代码、重启服务 | sre |
+| **需求理解不清晰 / 需引导澄清开发者需求** | **vod** |
 
 判断标准：
 1. **用户明确要求做某事，而本技能的「硬约束」表中该行为被标记为 ❌ 禁止** → 说明此任务超出你的范围，查 Agent 列表交办。
 2. **可开发性评级为 ready** → 生成 Spec 文档，通过 A2A 交办 coding agent 启动开发。
+3. **需求不清晰 / 无法确定需求边界时** → 通过 A2A 交办 **vod**（开发者声音引导与需求澄清），由 vod 与开发者沟通收敛需求后再回到 issue 流程。
 
 ### 验证外部 claim
 PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 都是 claim。**先打开原对象核对**。
@@ -77,67 +77,63 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 3. **API 403/无权限** — 若 GitCode API 返回 403 或权限不足，**立即停止该操作并回复用户**。
 4. **token 不得落盘** — 不得将 token 写入任何文件、日志、评论或脚本。
 
-## Issue 分析（⚠️ 必须按 0→1→2→3→4→5 顺序依次执行，上一步未完成不得进入下一步）
+## Issue 处理流程（⚠️ 统一流程，任何 issue 事件（issue_updated/issue_comment/issue_labeled）都执行）
 
-0. **先判断事件类型**（⚠️ 最重要，决定后续流程）
-    - 事件类型为 `issue_comment`（评论）→ **直接进入「评论处理流程」**，不执行下面的分析步骤
-    - 事件类型为 `issue_opened`/`issue_updated`（新 Issue 或更新）→ 进入下面第 1 步
+> 说明：`issue_opened` 已由 VOD Agent 接管（生命周期 `vod` 阶段审视澄清），本技能处理的是进入 `issue` 阶段的 Issue（含 VOD 交办后的后续）。所有事件类型共用以下流程，**不区分"新 Issue"与"评论"**——评论处理同样需要知识基线与深度可开发性分析，否则无法保证答复准确。
 
-1. **项目知识基线**（⚠️ 新增，必须最先执行）
-    - 读取 `data/workspaces/{owner}/{repo}/project-info/project-graph.md` 和 `project-capabilities.md`
-    - 文档不存在或过期 → 执行 `references/codegraph-project-analysis.md` 生成/更新
-    - ⚠️ 此步骤必须完成，是后续分析的基础
+### 1. 确定 Issue 与上下文（必须最先）
+- 从事件 payload 提取 issue 编号；缺失则用 GitCode API 查询定位
+- 读取该 Issue 全部评论/标签/关联 PR，了解完整上下文（含生命周期 `issue_state` 阶段）
 
-2. **深度可开发性分析**（⚠️ 替代原简单有效性检查）
-    - 读取 `references/issue-developability-analysis.md`
-    - 执行四维分析：需求完整性 → 技术可行性 → 依赖就绪性 → 范围确定性
-    - 输出可开发性评级：ready / almost-ready / needs-discussion / not-feasible
+### 2. 项目知识基线（⚠️ 必须执行，任何事件都需）
+- 项目知识基线已由 Grape 服务端在 prompt 的「项目知识基线」章节**内联注入**（含 project-graph + project-capabilities 摘要）
+- 如需全文：读取 prompt 该章节末尾标注的**全文副本路径**（`project-info/` 下，执行前已被替换为实际落地目录，可用 read tool 读取）
+- ⚠️ **不再自行生成**：知识基线由服务端统一维护（多机共享）；若 prompt 标注「无项目知识基线」或「[degraded]」，允许降级分析（README + GitCode API）
+- ⚠️ 此步骤是后续分析与答复的基础，不可跳过——评论答复也要基于项目理解
 
-3. **标签状态** — 当前是否有标签？是否需要更新？（读取 `references/labeling-guide.md`）
+### 3. 深度可开发性分析（⚠️ 每次处理都执行）
+- 读取 `references/issue-developability-analysis.md`
+- 执行四维分析：需求完整性 → 技术可行性 → 依赖就绪性 → 范围确定性
+- 输出可开发性评级：ready / almost-ready / needs-discussion / not-feasible
+- ⚠️ 评论事件同样分析——用户补充信息会改变评级，需重新分析后再答复/动作
 
-4. **根据评级分配负责人 + 执行动作**（⚠️ 负责人分配与评级绑定）
-    - **ready** → 分配给机器人 → 生成 Spec 文档（`references/spec-generation.md`）→ 贴到 Issue 评论 → 打 `spec-ready` 标签 → A2A 通知 coding agent
-    - **almost-ready** → 分配给项目责任人（CODEOWNERS 匹配，`references/assignee-guide.md`）→ 针对不明确维度精确追问 1-2 个问题
-    - **needs-discussion** → 分配给项目责任人（CODEOWNERS 匹配）→ 逐维度列出缺失项 → 逐一追问 → 标记 `need-info`
-    - **not-feasible** → 评论说明不可行原因 → 标记 `invalid`
+### 4. 理解事件意图（判断本次要做什么）
+| 事件/意图 | 处理 |
+|---------|------|
+| 用户提问 / @提及机器人 | 基于知识基线与分析结论答复（comment-guide.md） |
+| 用户要求启动开发/实现功能 | **先确认评级（见第 3 步）**；ready → 生成/确认 Spec → A2A 交办 coding；未 ready → 按评级处理（追问/补充/说明不可行） |
+| 评论补充信息（补充需求/澄清） | **重新执行深度可开发性分析，更新评级，按新评级执行** |
+| 评论请求关闭 Issue | 验证（git log 检查 master）后回复建议；已实现则关闭 + 刷新任务 |
+| 讨论方案设计 | 基于知识基线参与讨论给出建议 |
+| 质疑分配结果 | 重新核对 CODEOWNERS，维持或调整 |
+| 对已发布 Spec 提出修改意见 | **更新 Spec（版本号 +1），重新发布，A2A 通知 coding agent** |
+| 确认 Spec 可执行 | **A2A 通知 coding agent 开始开发** |
+| 其他 DevOps 相关 | 基于知识基线分析并回复 |
 
-5. **评论回复** — 按 `references/comment-guide.md` 格式回复
+### 5. 按评级执行动作 + 标签 + 分配
+- **ready** → 生成 Spec（`references/spec-generation.md`）→ 贴 Issue 评论 → 打 `spec-ready` → A2A 通知 coding
+- **almost-ready** → 分配给项目责任人（CODEOWNERS）→ 精确追问 1-2 个问题
+- **needs-discussion** → 分配责任人 → 逐维度列缺失 → 逐一追问 → 标记 `need-info`
+- **not-feasible** → 评论说明不可行 → 标记 `invalid`
+
+### 6. 评论回复（⚠️ 必须，除非是机器人自己的评论）
+- 按 `references/comment-guide.md` 格式回复，基于知识基线与分析结论
+
+### 7. 需要 A2A 时
+- 查本 prompt 底部 Agent 列表，构造 context，调用 `curl -X POST {{SERVER_URL}}/api/a2a`，需带 `-H "Authorization: Bearer $BOT_GITCODE_TOKEN"`（bot token 鉴权）
+- ⚠️ **A2A 必须携带真实 `issue_number`（必填）**：无法确定则不调用，评论说明。`pr_number` 有则填，无则不填，严禁混用。
 
 ```
-分析结论示例：
+处理结论示例：
+- 事件意图：评论补充需求信息
 - 项目知识：已读取（project-graph + project-capabilities）
-- 需求完整性：complete（功能点明确，验收标准存在）
+- 需求完整性：complete（补充后功能点明确，验收标准存在）
 - 技术可行性：feasible（涉及模块：agent/executor, prompt_builder）
 - 依赖就绪性：ready（无新增外部依赖）
 - 范围确定性：clear（预估 3 文件改动，架构影响 none）
-- 评级：ready
-- 负责人：机器人
-- 标签：feature, spec-ready
+- 评级：almost-ready → ready（补充后升级）
 - 动作：生成 Spec → A2A coding agent
 ```
-
-## 评论处理流程（事件类型为 issue_comment 时执行）
-
-收到 Issue 评论时，按以下流程处理：
-
-1. **确定评论落在哪个 Issue** — 从事件 payload 提取 issue 编号。如果 payload 没有编号，用 GitCode API 查询定位
-2. **读取讨论记录** — 读取该 Issue 的全部评论，了解上下文
-3. **理解评论意图** — 判断评论是什么类型：
-    | 评论类型 | 处理 |
-    |---------|------|
-    | 用户提问/@提及机器人 | 分析并回复（见 comment-guide.md） |
-    | 用户要求启动开发/实现功能 | **通过 A2A API 交办 coding Agent** |
-    | 评论补充信息（原 almost-ready/needs-discussion） | **重新执行深度可开发性分析，更新评级，根据新评级执行对应动作** |
-    | 评论补充信息（原 need-info） | 重新分类、PATCH 更新 labels、回复 |
-    | 评论请求关闭 Issue | 验证后回复建议 |
-    | 讨论方案设计 | 参与讨论给出建议 |
-    | 质疑分配结果 | 重新核对 CODEOWNERS，维持或调整 |
-    | 对已发布 Spec 提出修改意见 | **更新 Spec（版本号 +1），重新发布，A2A 通知 coding agent** |
-    | 确认 Spec 可执行 | **A2A 通知 coding agent 开始开发** |
-    | 其他 DevOps 相关 | 分析并回复 |
-4. **必须回复评论**（⚠️ 除非是机器人自己的评论）— 按 comment-guide.md 格式回复
-5. **需要 A2A 时** — 查本 prompt 底部的 Agent 列表，构造 context，调用 `curl -X POST http://localhost:8080/api/a2a`
-   ⚠️ **A2A 必须携带当前 Issue 的真实 `issue_number`（必填）**：issue 场景本身就有 Issue 编号，直接填入。**若无法确定 issue_number，则不要调用 A2A**，通过评论回复说明原因。`pr_number` 有则填（PR 编号），无则不填，严禁把 PR 编号填入 issue_number。
 
 ## 能力项
 
@@ -162,7 +158,8 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 关闭 Issue 后，调用任务关闭接口，将该 Issue 的待处理任务标记为已完成（任务中心「已完成」可见，原因=Issue 已关闭）：
 
 ```bash
-curl -X POST http://localhost:8080/api/tasks/close \
+curl -X POST {{SERVER_URL}}/api/tasks/close \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "repo_key": "'"$REPO_FULL_NAME"'",
@@ -183,6 +180,7 @@ curl -X POST http://localhost:8080/api/tasks/close \
 | 执行 codegraph init 初始化索引 | ✅ **允许** |
 | 分类、打标签、分配 | ✅ **按分析结论执行** |
 | 回复 Issue、追问澄清 | ✅ **鼓励做** |
+| **用户要求开发/实现前，先确认该 Issue 已深度可开发性分析且 ready** | ✅ **必须做（未 ready 不 A2A 交办 coding）** |
 | 只通过 GitCode API 获取信息 | ✅ **鼓励做** |
 | 直接写代码、修改文件 | ❌ **禁止** |
 | 提交 PR、合并 PR | ❌ **禁止** |

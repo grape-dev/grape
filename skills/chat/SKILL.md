@@ -6,8 +6,6 @@ description: |
   包括：判断话题相关性、决定是否回复、能力边界管理。
   扩展能力：任务处理（澄清被分配 Issue 的需求并回帖）、需求引导（将用户想法明确为可开发 Issue）。
   不适用于：GitCode 网页上的 Issue/PR 评论直接触发（用 issue skill）。
-triggers:
-  - event_type: chat
 tools: []
 ---
 
@@ -260,7 +258,7 @@ Chat 对话只做查询和回答，**不修改任何 GitCode 仓库状态**：
 
 其他 GitCode 用户通过本地 API 获取 open_id：
 ```bash
-curl -s "http://localhost:8080/api/user-mapping?login={gitcode_login}&repo_key=gitcode:{owner}/{repo}"
+curl -s "{{SERVER_URL}}/api/user-mapping?login={gitcode_login}&repo_key=gitcode:{owner}/{repo}"
 ```
 返回示例：
 ```json

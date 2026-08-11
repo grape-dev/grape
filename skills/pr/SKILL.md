@@ -4,11 +4,6 @@ version: 2.0.0
 description: |
   Pull Request 全生命周期管理：接收 → 关联 Issue → 代码审查 → 安全扫描 → 合并检查 → 评论回复。
    当收到 pull_request_opened、pull_request_updated、push 或 PR 上的评论事件时使用此技能。
-triggers:
-  - event_type: pull_request_opened
-  - event_type: pull_request_updated
-  - event_type: push
-  - event_type: note_hook_pr
 tools:
   - git
 ---
@@ -42,7 +37,8 @@ PR body / commit message 里的 `fixes #N`、`tests pass`、`small fix` 都是 c
 审查发现代码需要继续优化/修改（存在 Critical 或 Required 级别问题），**必须通过 A2A 调用 Coding Agent 进行优化实现**，不得由 QA 直接改代码。
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "coding",
@@ -144,7 +140,7 @@ GET /repos/{owner}/{repo}/pulls/{number}/files
 curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "body": "[$AGENT_NAME] 🔴 Critical: 硬编码密钥，建议使用环境变量",
+    "body": "[QA Agent] 🔴 Critical: 硬编码密钥，建议使用环境变量",
     "commit_id": "'"$HEAD_SHA"'",
     "path": "src/config.py",
     "position": 42
@@ -185,7 +181,8 @@ curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 如果 review_comments 中存在 Critical 或 Required 级别的问题，说明需要修改代码。此时调用 A2A API 将审查意见传递给 Coding Agent：
 
 ```bash
-curl -X POST http://localhost:8080/api/a2a \
+curl -X POST {{SERVER_URL}}/api/a2a \
+  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "coding",
@@ -214,12 +211,12 @@ A2A 返回后，将 Coding Agent 的优化结论合并进最终审查评论（�
 POST /repos/{owner}/{repo}/pulls/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "[$AGENT_NAME] 审查报告\n\n## 配置检查\n- ✅ Title：通过\n- ⚠️ Labels：缺少分类标签\n\n## 代码审查\n✅ 通过\n\n## 安全扫描\n✅ 安全\n\n## 合并检查\n⚠️ 测试未确认"}
+{"body": "[QA Agent] 审查报告\n\n## 配置检查\n- ✅ Title：通过\n- ⚠️ Labels：缺少分类标签\n\n## 代码审查\n✅ 通过\n\n## 安全扫描\n✅ 安全\n\n## 合并检查\n⚠️ 测试未确认"}
 ```
 
-- body **必须**以 `[$AGENT_NAME]` 开头
+- body **必须**以 `[QA Agent]` 开头
 - 汇总所有能力项的发现，按章节组织
-- 如果全部通过，评论：`[$AGENT_NAME] 审查通过，所有检查项均正常。`
+- 如果全部通过，评论：`[QA Agent] 审查通过，所有检查项均正常。`
 
 **跳过此步 = 事件未完成处理。**
 
@@ -270,4 +267,4 @@ Content-Type: application/json
 
 需要调用 GitCode API 时，读取 `references/gitcode-api-reference.md`。
 
-> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。
+> ⚠️ **任务结束**：完成所有业务动作（审查评论/A2A 交办）后，输出最终 JSON 块并**结束任务**，不要继续思考或等待输入。

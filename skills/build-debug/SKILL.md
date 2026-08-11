@@ -2,8 +2,6 @@
 name: build-debug
 version: 1.0.0
 description: 构建失败诊断方法论与常见模式
-triggers:
-  - event_type: build_failure
 tools:
   - git
   - docker
