@@ -314,8 +314,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     except Exception as e:
         log.warning(f"Pipeline: agent session lookup failed: {e}")
 
-    if not backend:
-        # 从默认映射配置文件加载 skill
+    if not backend or not skill_name:
+        # 从默认映射配置文件加载 skill（会话缺 skill 时回退默认映射，防事件卡 running）
         try:
             _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
             if os.path.exists(_defaults_path):

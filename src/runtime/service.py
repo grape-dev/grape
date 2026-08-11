@@ -215,33 +215,40 @@ def claim(runtime_id) -> dict | None:
     with db_lock:
         c = db.cursor()
         try:
+            # MySQL 兼容抢单：SQLite 的 UPDATE...RETURNING / UPDATE 目标表子查询(1093) 均不可用，
+            # 拆两步——先 SELECT 候选 id（含串行槽 NOT EXISTS），再 UPDATE 该 id 且 status='queued'，
+            # 并发时 UPDATE 影响行数 0 表示被其他 worker 抢走，原子性不变。
             c.execute("""
-                UPDATE agent_tasks SET status='dispatched', started_at=?
-                WHERE id = (
-                    SELECT id FROM agent_tasks
-                    WHERE runtime_id=? AND status='queued'
-                      AND NOT EXISTS (
-                        SELECT 1 FROM agent_tasks a2
-                        WHERE a2.status IN ('dispatched','running')
-                          AND (
-                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
-                            OR
-                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
-                          )
+                SELECT id FROM agent_tasks
+                WHERE runtime_id=? AND status='queued'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM agent_tasks a2
+                    WHERE a2.status IN ('dispatched','running')
+                      AND (
+                        (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                        OR
+                        (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
                       )
-                    ORDER BY created_at ASC LIMIT 1
-                ) AND status='queued'
-                RETURNING id
-            """, (datetime.now(timezone.utc).isoformat(), runtime_id))
+                  )
+                ORDER BY created_at ASC LIMIT 1
+            """, (runtime_id,))
             row = c.fetchone()
+            if not row:
+                db.commit()
+                return None
+            task_id = row[0]
+            c.execute(
+                "UPDATE agent_tasks SET status='dispatched', started_at=? WHERE id=? AND status='queued'",
+                (datetime.now(timezone.utc).isoformat(), task_id))
+            claimed = c.rowcount > 0
             db.commit()
         except Exception as e:
             log.warning(f"claim failed: {e}")
             db.rollback()
             return None
-        if not row:
+        if not claimed:
             return None
-        task = get_task(row[0])
+        task = get_task(task_id)
         if task:
             task["status"] = "dispatched"
         return task
