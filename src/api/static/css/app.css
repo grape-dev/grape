@@ -226,11 +226,3 @@
 .tsk-btn-ghost{background:var(--c);border:1px solid var(--b);color:var(--t2)}
 .tsk-btn-ghost:hover{border-color:var(--a);color:var(--a);background:#f4f7ff}
 @media(max-width:860px){.tsk-layout{grid-template-columns:1fr}.tsk-detail{position:static}.tsk-controls{margin-left:0;width:100%}.tsk-search{flex:1}.tsk-search input{flex:1}}
-
-/* ===== Tree sidebar menu ===== */
-.sb-nav .grp{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;transition:color .12s;padding:12px 8px 4px}
-.sb-nav .grp:hover{color:#fff}
-.sb-nav .grp .ct{font-size:9px;opacity:.8;transition:transform .15s;display:inline-block}
-.sb-nav .grp.open .ct{transform:rotate(90deg)}
-.sb-nav .grp-items{display:none}
-.sb-nav .grp-items.open{display:block}

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Grape — Multi-Agent DevOps</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static/css/app.css?v=23">
+<link rel="stylesheet" href="/static/css/app.css?v=22">
 </head>
 <body>
 
@@ -37,38 +37,28 @@
 </div>
 <div class="sb-sel"><select id="repoSelect" onchange="app.switchRepo(this.value)"><option value="">选择仓库...</option></select></div>
 <div class="sb-nav">
-<div class="grp open" onclick="app.toggleGroup('grp-ws')"><span class="ct">▸</span>Workspace</div>
-<div class="grp-items open" id="grp-ws">
+<div class="grp">Workspace</div>
 <a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span>Dashboard</a>
 <a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">▶</span>Pipeline</a>
-</div>
 
-<div class="grp" onclick="app.toggleGroup('grp-agents')"><span class="ct">▸</span>DevOps Agents</div>
-<div class="grp-items" id="grp-agents">
+<div class="grp">DevOps Agents</div>
 <a id="nav-vod" onclick="app.nav('vod')"><span class="ic" style="color:var(--pk)">●</span>VOD Agent</a>
 <a id="nav-issue" onclick="app.nav('issue')"><span class="ic" style="color:var(--r)">●</span>Issue Agent</a>
 <a id="nav-coding" onclick="app.nav('coding')"><span class="ic" style="color:var(--a)">●</span>Coding Agent</a>
 <a id="nav-qa" onclick="app.nav('qa')"><span class="ic" style="color:var(--pu)">●</span>QA Agent</a>
 <a id="nav-sre" onclick="app.nav('sre')"><span class="ic" style="color:var(--or)">●</span>SRE Agent</a>
-</div>
 
-<div class="grp" onclick="app.toggleGroup('grp-skills')"><span class="ct">▸</span>DevOps Skills</div>
-<div class="grp-items" id="grp-skills">
+<div class="grp">DevOps Skills</div>
 <a id="nav-skills" onclick="app.nav('skills')"><span class="ic">◈</span>Skills Library</a>
-</div>
 
-<div class="grp" onclick="app.toggleGroup('grp-account')"><span class="ct">▸</span>Account</div>
-<div class="grp-items" id="grp-account">
+<div class="grp">Account</div>
 <a id="nav-tasks" onclick="app.nav('tasks')"><span class="ic">📋</span>Task Center</a>
 <a id="nav-chat" onclick="app.nav('chat')"><span class="ic">☎</span>Chat Agent</a>
-</div>
 
-<div class="grp" onclick="app.toggleGroup('grp-settings')"><span class="ct">▸</span>Settings</div>
-<div class="grp-items" id="grp-settings">
+<div class="grp">Settings</div>
 <a id="nav-settings-credentials" onclick="app.nav('settings','credentials')"><span class="ic">⚙</span>General Settings</a>
 <a id="nav-settings-gitcode" onclick="app.nav('settings','gitcode')"><span class="ic">⎘</span>GitCode Repo</a>
 <a id="nav-runtimes" onclick="app.nav('runtimes')"><span class="ic">⚡</span>Agent Runtimes</a>
-</div>
 </div>
 <div class="sb-ft">
 <div class="av" id="userAvatar">U</div>
@@ -103,6 +93,6 @@
 <script src="/static/js/pages/settings.js?v=7"></script>
 <script src="/static/js/pages/skills.js?v=11"></script>
 <script src="/static/js/pages/runtimes.js?v=5"></script>
-<script src="/static/js/app.js?v=20"></script>
+<script src="/static/js/app.js?v=19"></script>
 </body>
 </html>

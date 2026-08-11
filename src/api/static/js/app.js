@@ -150,21 +150,11 @@ function loadAgentTypes() {
     document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));
     const navEl = $('nav-' + view);
     if (navEl) navEl.classList.add('act');
-    let _actEl = navEl;
     document.querySelectorAll('.sb-nav a').forEach(a => {
       const o = a.getAttribute('onclick') || '';
-      if (param && o.includes("'" + param + "'")) { a.classList.add('act'); _actEl = a; }
-      else if (!param && o === "nav('" + view + "')") { a.classList.add('act'); _actEl = a; }
+      if (param && o.includes("'" + param + "'")) a.classList.add('act');
+      else if (!param && o === "nav('" + view + "')") a.classList.add('act');
     });
-    // 树形菜单：自动展开当前页所在分组
-    if (_actEl) {
-      const _box = _actEl.closest('.grp-items');
-      if (_box && !_box.classList.contains('open')) {
-        _box.classList.add('open');
-        const _g = _box.previousElementSibling;
-        if (_g && _g.classList.contains('grp')) _g.classList.add('open');
-      }
-    }
 
     const title = $('pageTitle');
     const repoTitle = $('repoTitle');
@@ -226,14 +216,6 @@ function loadAgentTypes() {
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
       API.get('/skills/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     }
-  }
-
-  function toggleGroup(id) {
-    const box = $(id);
-    if (!box) return;
-    const isOpen = box.classList.toggle('open');
-    const grp = box.previousElementSibling;
-    if (grp && grp.classList.contains('grp')) grp.classList.toggle('open', isOpen);
   }
 
   function search(q) {
@@ -337,6 +319,6 @@ function loadAgentTypes() {
     else { showLogin(); }
   }
 
-  return {nav, toggleGroup, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile};
+  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile};
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
