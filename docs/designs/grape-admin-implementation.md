@@ -97,7 +97,7 @@ curl -s http://127.0.0.1:8081/api/admin/health
 **Files:**
 - Create: `admin/backend/src/main/resources/db/migration/V1__admin_schema.sql`
 
-**Step 1:** V1__admin_schema.sql
+**Step 1:** V1__admin_schema.sql（实体表/关联表统一含 created_at / updated_at / updated_by 三件套；updated_at 用 MySQL `ON UPDATE CURRENT_TIMESTAMP` 自动维护）
 
 ```sql
 CREATE TABLE admin_users (
@@ -106,13 +106,18 @@ CREATE TABLE admin_users (
   password_hash VARCHAR(100) NOT NULL,
   nickname VARCHAR(64) DEFAULT '',
   status TINYINT DEFAULT 1,              -- 1 启用 0 禁用
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by VARCHAR(64) DEFAULT ''      -- 最后更新人（admin 用户名）
 );
 CREATE TABLE admin_roles (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   code VARCHAR(64) NOT NULL UNIQUE,      -- SUPER_ADMIN / VIEWER / OPS / 自定义
   name VARCHAR(64) NOT NULL,
-  is_protected TINYINT DEFAULT 0
+  is_protected TINYINT DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by VARCHAR(64) DEFAULT ''
 );
 CREATE TABLE admin_permission_menus (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -120,16 +125,25 @@ CREATE TABLE admin_permission_menus (
   name VARCHAR(64) NOT NULL,
   path VARCHAR(128) NOT NULL,            -- /runtime/devices 等前端路由
   parent_id BIGINT DEFAULT 0,
-  sort INT DEFAULT 0
+  sort INT DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by VARCHAR(64) DEFAULT ''
 );
 CREATE TABLE admin_role_menu_rel (
   role_id BIGINT NOT NULL,
   menu_id BIGINT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by VARCHAR(64) DEFAULT '',     -- 最后一次改角色菜单绑定的操作人
   PRIMARY KEY (role_id, menu_id)
 );
 CREATE TABLE admin_user_role_rel (
   user_id BIGINT NOT NULL,
   role_id BIGINT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by VARCHAR(64) DEFAULT '',     -- 最后一次改用户角色绑定的操作人
   PRIMARY KEY (user_id, role_id)
 );
 CREATE TABLE admin_audit_log (
@@ -139,6 +153,9 @@ CREATE TABLE admin_audit_log (
   target VARCHAR(255), detail VARCHAR(1024),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+-- audit_log 保持 append-only：只有 created_at（事件日志无"更新"语义，不加 updated_at/updated_by）
+-- updated_by 维护规则：所有写操作在 Service 层从 JWT 上下文取当前 username 填充 updated_by，
+-- JPA 实体对应映射 created_at/updated_at/updated_by 三字段
 -- 种子：角色
 INSERT INTO admin_roles (code, name, is_protected) VALUES
  ('SUPER_ADMIN','超级管理员',1),('VIEWER','只读',1),('OPS','运营',0);

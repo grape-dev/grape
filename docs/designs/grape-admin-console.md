@@ -96,6 +96,7 @@ grape/
 - admin 登录只认 admin_users；grape 的 token 在 admin 无效，反之亦然
 - admin 后端启动时初始化 admin_* 表 + 种子数据（SUPER_ADMIN 初始账号 + 角色 + 菜单），不依赖 grape 的 db_setup
 - 密码哈希：独立实现（bcrypt/argon2 或与 VOD 一致的方案），不复用 grape 逻辑
+- admin_* 表统一含 created_at / updated_at / updated_by 三件套（updated_by=操作者 admin 用户名；audit_log 保持 append-only，仅 created_at）
 
 ## 5. 菜单结构（admin 内）
 
