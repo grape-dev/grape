@@ -47,6 +47,7 @@ function renderEventDetail(data) {
       <div class="cd" style="padding:16px">
         <h3 style="font-size:12px;font-weight:600;margin-bottom:10px">Event Info</h3>
         <div style="font-size:11px;color:var(--t2);line-height:1.8">
+          <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
           <div><span style="color:var(--t3)">Runtime:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b></div>
           <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
           <div><span style="color:var(--t3)">Issue:</span> ${data.issue_id || '—'}</div>

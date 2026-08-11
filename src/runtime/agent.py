@@ -112,21 +112,25 @@ async def _execute_task(client, task):
             if evt_type == "done":
                 done = data
                 continue
-            # 逐步日志（本地模式同款，供 worker 侧 journalctl 观察执行过程）
+            # 逐步日志（本地模式同款，供 worker 侧 journalctl 观察执行过程）；前缀含 seq/task 便于定位
+            _esq = f"seq={task.get('event_seq') or '?'}"
             if evt_type == "step_start":
-                log.info(f"  ▶ {data}")
+                log.info(f"  [{_esq}] ▶ {data}")
             elif evt_type == "text":
-                log.info(f"  💬 {str(data)[:120]}")
+                log.info(f"  [{_esq}] 💬 {str(data)[:120]}")
             elif evt_type == "reasoning":
-                log.info(f"  🤔 {str(data)[:120]}")
+                log.info(f"  [{_esq}] 🤔 {str(data)[:120]}")
             elif evt_type == "tool_use":
-                log.info(f"  🔧 {str(data)[:150]}")
+                log.info(f"  [{_esq}] 🔧 {str(data)[:150]}")
             elif evt_type == "step_finish":
-                log.info(f"  ✅ {data}")
+                log.info(f"  [{_esq}] ✅ {data}")
             batch.append({"type": evt_type, "data": data if not isinstance(data, str) else data})
             if len(batch) >= 50:
                 await client.report_messages(tid, batch)
                 batch = []
+            # 每次迭代让出事件循环，避免同步生成器迭代阻塞 claim/heartbeat
+            # （见 worker-event-loop-block-rootcause.md 方案 1）
+            await asyncio.sleep(0)
         if batch:
             await client.report_messages(tid, batch)
         if done:

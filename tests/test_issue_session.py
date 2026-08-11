@@ -43,7 +43,8 @@ class TestIssueSession:
         assert a2["runtime_session_id"] == "ses_A"
 
     def test_seed_from_repo_session(self):
-        # 迁移期读侧回退：repo 级存量 runtime_session_id 作为首会话初始指针
+        # 每 Issue 独立 session（vod-agent-hang-rootcause-fix.md 方案 A）：
+        # 新 Issue 首会话不继承 repo 级 runtime_session_id，避免多 Issue 共用同一 opencode session
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM devops_agent_session WHERE repo_key='gitcode:org/test' AND agent_type='issue'")
@@ -51,7 +52,7 @@ class TestIssueSession:
             db.commit()
         try:
             s = session_store.get_or_create_issue_session("gitcode:org/test", "issue", "#5")
-            assert s["runtime_session_id"] == "repo_ses_old", "首会话应沿用存量 repo 级续接指针"
+            assert s["runtime_session_id"] == "", f"新 Issue 首会话不应继承 repo 级指针, got {s['runtime_session_id']!r}"
         finally:
             with db_lock:
                 db.cursor().execute("DELETE FROM devops_agent_session WHERE id='legacy-1'")

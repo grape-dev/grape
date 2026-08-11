@@ -175,6 +175,12 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
     pipelines = [_get_issue_pipeline(repo_key, iid, events) for iid in issue_ids]
     pipelines = [p for p in pipelines if p is not None]
 
+    # 按 Issue 最新活动倒序：最新的 issue 排最前（原为 issue 首次出现顺序，最早 issue 恒在前）
+    # 用每个 issue 的最新 event seq 作为排序键（seq 单调递增，最新 seq = 最新活动）
+    def _latest_seq(p):
+        return max((e["seq"] for e in events if e["issue_id"] == p["issue_id"]), default=0)
+    pipelines.sort(key=_latest_seq, reverse=True)
+
     # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，
     # 不维护 issue_agent_session.status 双份记账，避免状态漂移
     running_issues = _running_issue_ids(repo_key)

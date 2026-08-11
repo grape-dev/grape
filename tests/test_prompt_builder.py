@@ -166,3 +166,33 @@ class TestBuildPrompt:
         assert "李四" in prompt
         assert "Auto Implementation" in prompt
         assert "ON" in prompt or "Status" in prompt
+
+
+class TestTaskEndInstruction:
+    """方案 B：prompt 含「任务结束」指令（见 vod-agent-hang-rootcause-fix.md 方案 B）。"""
+
+    @pytest.fixture
+    def base_evt(self):
+        return {
+            "type": "issue_opened",
+            "repository": "owner/repo",
+            "source": "gitcode",
+            "payload": {
+                "project": {"path_with_namespace": "owner/repo"},
+                "issue": {"number": 1, "title": "Bug: test", "body": "desc"}
+            }
+        }
+
+    def test_b1_prompt_has_end_instruction(self, pb, base_evt):
+        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
+        assert "任务结束" in prompt
+        assert "完成所有业务动作" in prompt
+        assert "结束任务" in prompt
+
+    def test_b2_json_contract_preserved(self, pb, base_evt):
+        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
+        # 既有「处理记录输出要求」JSON 块仍存在，且在「任务结束」指令之前
+        assert "处理记录输出要求" in prompt
+        assert '"actions"' in prompt
+        assert prompt.index("处理记录输出要求") < prompt.index("任务结束")
+

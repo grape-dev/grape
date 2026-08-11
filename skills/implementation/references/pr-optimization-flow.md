@@ -62,4 +62,20 @@ Content-Type: application/json
 {"body": "[Coding Agent] 已根据审查意见完成修改，请重新审查。"}
 ```
 
-> 注：`[$AGENT_NAME]` 中的 `$AGENT_NAME` 是当前 Agent 名称的环境变量（如 Issue Agent / QA Agent / Coding Agent），构造 curl body 时需用双引号包裹以触发 shell 展开（单引号内不展开）。
+> 注：评论 body 前缀固定为 `[Coding Agent]`。
+
+### 能力三：任务结束输出结构化 JSON 块
+
+完成所有业务动作（提交修改、push、PR 评论告知）后，**在最终答复末尾输出以下 JSON 块**（系统解析写入 event.json 档案）：
+
+```json
+{
+  "actions": ["修改代码修复审查意见", "git push 分支", "在 PR #N 评论告知重新审查"],
+  "conclusion": "已按审查意见完成哪些修复，测试结果，待 QA 重新审查",
+  "artifacts": ["PR #N 评论", "commit xxxxxx"],
+  "next_step": "QA Agent 重新审查 PR #N",
+  "issue_summary": "已按审查意见修复 | 修改摘要 | 待重新审查"
+}
+```
+
+> ⚠️ 该 JSON 块放在最终答复末尾，是任务结束的唯一标记；**不得**用长流程叙述替代。
