@@ -1,46 +1,47 @@
 <template>
-  <div class="page role-page">
-    <aside class="role-list">
-      <h4>角色列表</h4>
-      <div v-for="r in roles" :key="r.id" :class="['role-item', selected?.id === r.id ? 'active' : '']" @click="select(r)">
-        <div>{{ r.name }}</div>
-        <div class="sub">{{ r.code }}<span v-if="r.isProtected === 1" class="lock">🔒</span></div>
+  <div class="flex gap16" style="align-items:flex-start">
+    <div class="cd" style="width:280px;flex-shrink:0">
+      <h4 class="mb8">角色列表</h4>
+      <div v-for="r in roles" :key="r.id" :class="['flex', 'fc', 'jbtw', 'gap8', { act: selected?.id === r.id }]" class="role-item" @click="select(r)">
+        <div>
+          <div>{{ r.name }}</div>
+          <div class="t3" style="font-size:11px">{{ r.code }}<span v-if="r.isProtected === 1" class="tg tg-q" style="margin-left:4px">保护</span></div>
+        </div>
       </div>
-      <div class="role-actions">
-        <input v-model="newCode" placeholder="角色code" />
+      <div class="mt12" style="border-top:1px solid var(--b);padding-top:10px">
+        <input v-model="newCode" placeholder="角色 code" />
         <input v-model="newName" placeholder="角色名" />
-        <button @click="createRole">新增</button>
+        <button class="bt bt-p" @click="createRole">新增角色</button>
       </div>
-    </aside>
-    <section class="perm-panel">
-      <h4>
-        {{ selected ? `菜单权限：${selected.name}` : '请选择角色' }}
-        <button class="danger" v-if="selected && selected.isProtected !== 1" @click="deleteRole">删除角色</button>
-      </h4>
-      <div v-if="selected" class="tree">
-        <div v-for="group in menuTree" :key="group.code" class="group">
-          <div class="group-title">
-            <label>
-              <input type="checkbox" :checked="allChecked(group)" @change="toggleGroup(group, $event.target.checked)" />
-              {{ group.name }}
-            </label>
-          </div>
-          <div v-for="child in group.children" :key="child.code" class="child">
-            <label>
+    </div>
+
+    <div class="cd f1">
+      <div class="cd-h">
+        <h2>{{ selected ? `菜单权限：${selected.name}` : '请选择角色' }}</h2>
+        <button v-if="selected && selected.isProtected !== 1" class="bt bt-r" @click="deleteRole">删除角色</button>
+      </div>
+      <div v-if="selected" class="mt8">
+        <div v-for="group in menuTree" :key="group.code" class="mb8">
+          <label class="chk" style="font-weight:600">
+            <input type="checkbox" :checked="allChecked(group)" @change="toggleGroup(group, $event.target.checked)" />
+            {{ group.name }}
+          </label>
+          <div v-for="child in group.children" :key="child.code" style="padding-left:26px">
+            <label class="chk">
               <input type="checkbox" :value="child.code" v-model="checkedCodes" :disabled="selected.isProtected === 1" />
               {{ child.name }}
             </label>
           </div>
         </div>
+        <p v-if="selected.isProtected === 1" class="t3">保护角色的权限不可修改</p>
+        <button v-if="selected.isProtected !== 1" class="bt bt-p mt12" @click="savePerms">保存权限</button>
       </div>
-      <div v-if="selected && selected.isProtected === 1" class="tip">保护角色的权限不可修改</div>
-      <button v-if="selected && selected.isProtected !== 1" class="primary" @click="savePerms">保存权限</button>
-    </section>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import http from '../api'
 
 const roles = ref([])
@@ -62,12 +63,6 @@ async function loadMenus() {
   const { data } = await http.get('/menus')
   menuTree.value = data
 }
-function syncChecked() {
-  const allMenus = []
-  menuTree.value.forEach(g => allMenus.push(g.code, ...g.children.map(c => c.code)))
-  checkedCodes.value = allMenus.filter(code =>
-    selected.value.menuIds.includes(menuIdByCode(code)))
-}
 function menuIdByCode(code) {
   for (const g of menuTree.value) {
     if (g.code === code) return g.id
@@ -76,13 +71,10 @@ function menuIdByCode(code) {
   }
   return null
 }
-function codeById(id) {
-  for (const g of menuTree.value) {
-    if (g.id === id) return g.code
-    const c = g.children.find(x => x.id === id)
-    if (c) return c.code
-  }
-  return null
+function syncChecked() {
+  const allCodes = []
+  menuTree.value.forEach(g => allCodes.push(g.code, ...g.children.map(c => c.code)))
+  checkedCodes.value = allCodes.filter(code => selected.value.menuIds.includes(menuIdByCode(code)))
 }
 async function select(r) {
   selected.value = r
@@ -136,22 +128,7 @@ onMounted(() => { loadRoles(); loadMenus() })
 </script>
 
 <style scoped>
-.role-page { display: flex; gap: 16px; align-items: flex-start; }
-.role-list { width: 260px; background: #fff; border-radius: 6px; padding: 14px; }
-.role-item { padding: 10px; border-radius: 4px; cursor: pointer; }
-.role-item.active { background: #ecf5ff; }
-.sub { font-size: 12px; color: #999; }
-.lock { margin-left: 4px; }
-.role-actions input { width: 100%; padding: 6px 8px; margin-top: 6px; border: 1px solid #dcdfe6; border-radius: 4px; }
-.role-actions button { margin-top: 8px; }
-.perm-panel { flex: 1; background: #fff; border-radius: 6px; padding: 14px; }
-.tree { margin: 10px 0; }
-.group { margin-bottom: 12px; }
-.group-title { font-weight: 600; margin-bottom: 6px; }
-.child { padding-left: 24px; padding: 4px 0 4px 24px; }
-.tip { color: #999; font-size: 13px; margin: 8px 0; }
-button { padding: 6px 14px; border: 1px solid #dcdfe6; background: #fff; border-radius: 4px; cursor: pointer; }
-button.primary { background: #409eff; color: #fff; border-color: #409eff; }
-button.danger { float: right; background: #f56c6c; color: #fff; border-color: #f56c6c; }
-h4 { margin-bottom: 10px; }
+.role-item { padding: 10px; border-radius: 7px; cursor: pointer; }
+.role-item.act { background: #eef2ff; }
+.role-item:hover { background: var(--bg); }
 </style>

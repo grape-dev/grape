@@ -1,45 +1,41 @@
 <template>
-  <div class="login-box">
-    <h2>Grape 运营管理台</h2>
-    <p v-if="error" class="error">{{ error }}</p>
-    <input v-model="username" placeholder="用户名" />
-    <input v-model="password" type="password" placeholder="密码" @keyup.enter="submit" />
-    <button :disabled="loading" @click="submit">{{ loading ? '登录中...' : '登录' }}</button>
+  <div class="lbox">
+    <span class="logo">G</span>
+    <h1>Grape Admin</h1>
+    <p class="sub">运营管理台</p>
+    <p v-if="error" class="err" style="color:#fca5a5;margin-bottom:8px">{{ error }}</p>
+    <div class="inp">
+      <input v-model="username" placeholder="用户名" @keyup.enter="login" />
+      <input v-model="password" type="password" placeholder="密码" @keyup.enter="login" />
+      <button class="obtn" :disabled="busy" @click="login">{{ busy ? '登录中...' : '登 录' }}</button>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { login } from '../api'
+import http from '../api'
 import { setTokens } from '../utils/auth'
 
 const router = useRouter()
 const username = ref('')
 const password = ref('')
 const error = ref('')
-const loading = ref(false)
+const busy = ref(false)
 
-async function submit() {
+async function login() {
+  if (!username.value || !password.value || busy.value) return
+  busy.value = true
   error.value = ''
-  loading.value = true
   try {
-    const { data } = await login(username.value, password.value)
+    const { data } = await http.post('/auth/login', { username: username.value, password: password.value })
     setTokens(data.token, data.refreshToken)
-    localStorage.setItem('admin_username', data.username)
-    router.push('/')
+    router.push('/runtime/devices')
   } catch (e) {
-    error.value = e.response?.data?.message || '登录失败'
+    error.value = e.response?.data?.message || '登录失败，请检查账号密码'
   } finally {
-    loading.value = false
+    busy.value = false
   }
 }
 </script>
-
-<style scoped>
-.login-box { width: 340px; background: #fff; border-radius: 8px; padding: 32px; }
-h2 { text-align: center; margin-bottom: 20px; font-size: 18px; }
-input { width: 100%; padding: 10px 12px; margin-bottom: 12px; border: 1px solid #dcdfe6; border-radius: 4px; }
-button { width: 100%; padding: 10px; background: #409eff; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
-.error { color: #f56c6c; font-size: 13px; margin-bottom: 10px; }
-</style>
