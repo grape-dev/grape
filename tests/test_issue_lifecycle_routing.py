@@ -108,3 +108,42 @@ class TestNoIssueNoWork:
         pr_with_issue = {"pull_request": {"number": 10, "title": "feat: fix #5"}, "object_attributes": {"id": 10, "iid": 10, "title": "feat: fix #5"}}
         ss.set_issue_stage(RK, "#5", "qa", "qa")
         assert _resolve_issue_stage_agent(RK, "pull_request_opened", pr_with_issue, "") == "qa"
+
+
+class TestIssueAssigneeAndStage:
+    """Issue 责任人（assignee）落库/读取 + pipeline 阶段列（见 user-workflow-overview）。"""
+
+    def test_set_and_get_assignee(self):
+        ss.set_issue_stage(RK, "#5", "coding", "coding", assignee="grape_bot")
+        st = ss.get_issue_stage(RK, "#5")
+        assert st["assignee"] == "grape_bot"
+        assert ss.get_issue_assignee(RK, "#5") == "grape_bot"
+
+    def test_assignee_default_empty(self):
+        ss.set_issue_stage(RK, "#5", "vod", "vod")
+        st = ss.get_issue_stage(RK, "#5")
+        assert st["assignee"] == ""
+
+    def test_get_issue_assignee_no_record(self):
+        assert ss.get_issue_assignee(RK, "#999") == ""
+
+    def test_pipeline_stage_field(self):
+        """_get_issue_pipeline 返回 stage（来自 issue_state.stage）。"""
+        from src.api.routes.pipeline import _get_issue_pipeline
+        ss.set_issue_stage(RK, "#5", "qa", "qa", assignee="grape_bot")
+        events = [
+            {"seq": 1, "issue_id": "#5", "event_type": "issue_opened", "agent_type": "vod", "title": "T", "status": "completed", "actor": "alice"},
+            {"seq": 2, "issue_id": "#5", "event_type": "a2a_event", "agent_type": "coding", "title": "T", "status": "completed", "actor": ""},
+        ]
+        p = _get_issue_pipeline(RK, "#5", events)
+        assert p is not None
+        assert p["stage"] == "qa"
+        assert p["current_owner"] == "grape_bot"  # 优先 issue_state.assignee
+
+    def test_pipeline_stage_default_vod(self):
+        """无 issue_state 记录时 stage 默认 vod。"""
+        from src.api.routes.pipeline import _get_issue_pipeline
+        events = [{"seq": 1, "issue_id": "#5", "event_type": "issue_opened", "agent_type": "vod", "title": "T", "status": "completed", "actor": "alice"}]
+        p = _get_issue_pipeline(RK, "#5", events)
+        assert p is not None
+        assert p["stage"] == "vod"

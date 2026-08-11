@@ -263,8 +263,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if event_type == "issue_opened":
         _rid = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
         if _rid:
-            set_issue_stage(repo_key, _rid, "vod", "vod")
-            log.info(f"Pipeline: issue_state init vod for {_rid}")
+            _asg = _fetch_issue_assignee(repo_key, _rid)
+            set_issue_stage(repo_key, _rid, "vod", "vod", assignee=_asg)
+            log.info(f"Pipeline: issue_state init vod for {_rid} assignee={_asg or 'none'}")
     elif agent_type == "vod":
         from src.api.session_store import get_issue_stage
         _rid2 = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
@@ -431,6 +432,34 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.info(f"Pipeline: started agent execution, seq={seq}, repo={repo_key}, agent={agent_type}")
 
     return result
+
+
+def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
+    """调 GitCode API 获取 Issue 责任人（assignee.login）。失败返回空。
+
+    用于 pipeline 责任人显示（issue_state.assignee），取代"从事件 payload 猜 assignee"。
+    """
+    num = _issue_num_from(issue_id)
+    if not num:
+        return ""
+    try:
+        from src.repo_key import split_owner_repo
+        owner, rname = split_owner_repo(repo_key)
+        import urllib.request
+        from src.user.db import get_gitcode_token
+        tok = get_gitcode_token(repo_key=repo_key) or ""
+        if not tok:
+            return ""
+        req = urllib.request.Request(
+            f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
+            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
+        import json as _json
+        d = _json.load(urllib.request.urlopen(req, timeout=15))
+        asg = d.get("assignee") or {}
+        login = asg.get("login", "") if isinstance(asg, dict) else ""
+        return login or ""
+    except Exception:
+        return ""
 
 
 def _issue_num_from(issue_id: str) -> str:

@@ -101,25 +101,34 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
 
     involved_agents = [AGENT_LABELS[i] for i, s in enumerate(stage_statuses) if s > 0]
 
-    # 责任人：优先 Issue assignee（从事件 payload 解析，最新优先），回退 actor 推断
-    assignee = _get_latest_assignee(issue_events)
+    # 责任人：优先 Issue assignee（issue_state.assignee，GitCode 真实指派，可为 grape_bot 或用户），
+    # 回退从事件 actor 推断（_get_latest_assignee 已因 payload 不含 assignee 而基本失效，保留兜底）。
     current_owner = ""
-    if assignee:
-        current_owner = _resolve_feishu_name(assignee)
+    from src.api.session_store import get_issue_stage
+    _st = get_issue_stage(repo_key, issue_id)
+    if _st and _st.get("assignee"):
+        current_owner = _resolve_feishu_name(_st["assignee"])
     else:
-        for i in range(len(stage_statuses) - 1, -1, -1):
-            if stage_statuses[i] > 0:
-                agent = AGENT_ORDER[i]
-                latest = stages[i].get("latest_event") or {}
-                actor = latest.get("actor", "")
-                if actor:
-                    from src.user.db import get_all_bot_usernames
-                    if actor in get_all_bot_usernames():
-                        from src.api.event_pipeline import get_agent_display_name
-                        current_owner = get_agent_display_name(agent)
-                    else:
-                        current_owner = actor
-                break
+        assignee = _get_latest_assignee(issue_events)
+        if assignee:
+            current_owner = _resolve_feishu_name(assignee)
+        else:
+            for i in range(len(stage_statuses) - 1, -1, -1):
+                if stage_statuses[i] > 0:
+                    agent = AGENT_ORDER[i]
+                    latest = stages[i].get("latest_event") or {}
+                    actor = latest.get("actor", "")
+                    if actor:
+                        from src.user.db import get_all_bot_usernames
+                        if actor in get_all_bot_usernames():
+                            from src.api.event_pipeline import get_agent_display_name
+                            current_owner = get_agent_display_name(agent)
+                        else:
+                            current_owner = actor
+                    break
+
+    # 生命周期阶段（issue_state.stage）：vod/issue/coding/qa/sre/done；无记录默认 vod
+    stage = (_st.get("stage") if _st else "") or "vod"
 
     return {
         "issue_id": issue_id,
@@ -127,6 +136,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         "stages": stages,
         "statuses": stage_statuses,
         "result": result,
+        "stage": stage,
         "agents": involved_agents,
         "current_owner": current_owner,
         "event_count": len(issue_events),
