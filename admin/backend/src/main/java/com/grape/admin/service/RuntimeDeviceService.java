@@ -163,17 +163,20 @@ public class RuntimeDeviceService {
         return device;
     }
 
-    public Map<String, Object> engineList(String type, String device, String status, int page, int size) {
+    public Map<String, Object> engineList(String scope, String type, String device, String status, int page, int size) {
         List<AgentRuntimeRo> runtimes = runtimeRepository.findAll();
-        Map<Integer, String> deviceNameByCredential = credentialRepository.findAll().stream()
-                .collect(Collectors.toMap(RuntimeCredentialRo::getId,
-                        c -> c.getDeviceName() == null || c.getDeviceName().isBlank() ? c.getName() : c.getDeviceName()));
-
-        Map<String, Long> typeCounts = runtimes.stream()
-                .collect(Collectors.groupingBy(r -> r.getName() == null ? "(unknown)" : r.getName(), Collectors.counting()));
+        Map<Integer, RuntimeCredentialRo> credentialById = credentialRepository.findAll().stream()
+                .collect(Collectors.toMap(RuntimeCredentialRo::getId, c -> c));
+        Map<Integer, String> deviceNameByCredential = credentialById.entrySet().stream()
+                .collect(Collectors.toMap(Map.Entry::getKey,
+                        e -> e.getValue().getDeviceName() == null || e.getValue().getDeviceName().isBlank()
+                                ? e.getValue().getName() : e.getValue().getDeviceName()));
 
         List<Map<String, Object>> filtered = new ArrayList<>();
         for (AgentRuntimeRo r : runtimes) {
+            RuntimeCredentialRo cred = r.getCredentialId() == null ? null : credentialById.get(r.getCredentialId());
+            if (scope != null && !scope.isBlank()
+                    && (cred == null || !scope.equals(cred.getScope()))) continue;
             String health = healthService.engineHealth(r.getStatus(), r.getLastSeenAt());
             if (type != null && !type.isBlank() && !type.equals(r.getName())) continue;
             String devName = deviceNameByCredential.getOrDefault(r.getCredentialId(), "");
@@ -196,6 +199,10 @@ public class RuntimeDeviceService {
             m.put("ownerId", r.getOwnerId());
             filtered.add(m);
         }
+        // 页头统计随过滤结果变化（与列表保持一致）
+        Map<String, Long> typeCounts = filtered.stream()
+                .map(m -> (String) m.get("name"))
+                .collect(Collectors.groupingBy(n -> n == null ? "(unknown)" : n, Collectors.counting()));
         filtered.sort((a, b) -> Integer.compare((Integer) b.get("id"), (Integer) a.get("id")));
 
         int total = filtered.size();

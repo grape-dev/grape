@@ -17,6 +17,12 @@
         </div>
       </div>
       <div class="toolbar">
+        <select v-model="scope">
+          <option value="">全部范围</option>
+          <option value="global">全局</option>
+          <option value="repo">仓库</option>
+          <option value="user">个人</option>
+        </select>
         <select v-model="type">
           <option value="">全部类型</option>
           <option v-for="t in typeOptions" :key="t" :value="t">{{ t }}</option>
@@ -103,6 +109,7 @@ const totalElements = ref(0)
 const totalPages = ref(0)
 const page = ref(0)
 const type = ref('')
+const scope = ref('')
 const device = ref('')
 const status = ref('')
 const view = ref('list')
@@ -134,14 +141,14 @@ async function loadDevices() {
   deviceOptions.value = [...new Set(data.content.map(d => d.deviceName || d.name))]
 }
 async function load() {
-  const { data } = await http.get('/engines', { params: { type: type.value, device: device.value, status: status.value, page: page.value, size: 10 } })
+  const { data } = await http.get('/engines', { params: { scope: scope.value, type: type.value, device: device.value, status: status.value, page: page.value, size: 10 } })
   engines.value = data.content
   stats.value = data.stats
   totalElements.value = data.totalElements
   totalPages.value = data.totalPages
 }
 function search() { page.value = 0; load() }
-function reset() { type.value = ''; device.value = ''; status.value = ''; page.value = 0; load() }
+function reset() { scope.value = ''; type.value = ''; device.value = ''; status.value = ''; page.value = 0; load() }
 async function remove(e) {
   if (!confirm(`确认删除引擎 ${e.displayName || e.name}（id=${e.id}）？`)) return
   try {
