@@ -65,7 +65,7 @@ public class RuntimeDeviceService {
                 .collect(Collectors.toList());
     }
 
-    public List<Map<String, Object>> listDevices() {
+    public Map<String, Object> listDevices(String status, String name, int page, int size) {
         List<RuntimeCredentialRo> credentials = credentialRepository.findAll();
         List<AgentRuntimeRo> runtimes = runtimeRepository.findAll();
         Map<Integer, List<AgentRuntimeRo>> enginesByCredential = runtimes.stream()
@@ -75,8 +75,12 @@ public class RuntimeDeviceService {
                 .filter(t -> t.getRuntimeId() != null)
                 .collect(Collectors.groupingBy(AgentTaskRo::getRuntimeId, Collectors.counting()));
 
-        List<Map<String, Object>> devices = new ArrayList<>();
+        List<Map<String, Object>> filtered = new ArrayList<>();
         for (RuntimeCredentialRo c : credentials) {
+            if (status != null && !status.isBlank() && !status.equals(c.getStatus())) continue;
+            if (name != null && !name.isBlank()
+                    && !(c.getName() != null && c.getName().toLowerCase().contains(name.toLowerCase()))
+                    && !(c.getDeviceName() != null && c.getDeviceName().toLowerCase().contains(name.toLowerCase()))) continue;
             List<AgentRuntimeRo> engines = enginesByCredential.getOrDefault(c.getId(), List.of());
             long taskCount = engines.stream()
                     .mapToLong(e -> taskCountByRuntime.getOrDefault(e.getId(), 0L)).sum();
@@ -90,9 +94,19 @@ public class RuntimeDeviceService {
             d.put("lastIp", c.getLastIp());
             d.put("engineCount", engines.size());
             d.put("taskCount", taskCount);
-            devices.add(d);
+            filtered.add(d);
         }
-        return devices;
+
+        int total = filtered.size();
+        int from = Math.min(page * size, total);
+        int to = Math.min(from + size, total);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("content", filtered.subList(from, to));
+        result.put("totalElements", total);
+        result.put("totalPages", size > 0 ? (total + size - 1) / size : 0);
+        result.put("page", page);
+        result.put("size", size);
+        return result;
     }
 
     public Map<String, Object> deviceDetail(Integer credentialId) {

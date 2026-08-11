@@ -37,8 +37,11 @@ public class RuntimeController {
     }
 
     @GetMapping("/devices")
-    public List<Map<String, Object>> devices() {
-        return deviceService.listDevices();
+    public Map<String, Object> devices(@RequestParam(required = false) String status,
+                                       @RequestParam(required = false) String name,
+                                       @RequestParam(defaultValue = "0") int page,
+                                       @RequestParam(defaultValue = "10") int size) {
+        return deviceService.listDevices(status, name, page, size);
     }
 
     @GetMapping("/devices/{cid}")

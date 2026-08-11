@@ -71,7 +71,7 @@ grape/
 │   │   │   │   ├── AiAssistant.vue      (AI 菜单：AI 助手聊天页，流式+图表)
 │   │   │   │   ├── UserManage.vue       (系统管理)
 │   │   │   │   ├── RolePermissionConfig.vue  (系统管理)
-│   │   │   │   ├── DeviceManage.vue     (运行时管理：设备列表/详情/凭据)
+│   │   │   │   ├── DeviceManage.vue     (运行时管理：设备管理/详情/凭据)
 │   │   │   │   └── EngineOverview.vue   (运行时管理：引擎总览)
 │   │   │   ├── router/  api/  components/
 │   │   │   └── utils/auth.js            (JWT 存取)
@@ -104,7 +104,7 @@ grape/
 ```
 admin 运营管理台
 ├── 1. 运行时管理（设备）   ★ 核心业务
-│   ├── 设备列表        device 维度：状态/心跳/IP/凭据/引擎数/任务数；about_to_gc 一键回收
+│   ├── 设备管理        device 维度：状态/心跳/IP/凭据/引擎数/任务数；about_to_gc 一键回收
 │   ├── 设备详情        单设备：引擎表 + 任务表 + 恢复孤儿 + 吊销凭据 + 清理引擎/任务
 │   ├── 引擎总览        跨设备引擎视图：全部引擎分布/版本/健康度（opencode/codearts/...）
 │   └── 凭据管理        签发 rta_ token（一次性明文展示）、吊销
@@ -179,7 +179,7 @@ systemd: admin-backend.service (java -jar admin-backend-*.jar --server.port=8081
 |---|---|---|
 | P0 | admin 骨架：仓库目录 + Spring Boot 骨架（pom/启动类/JPA 连共享库）+ admin_* 表(Flyway) + JWT 登录 | 独立登录可用，与 grape 账号互不影响 |
 | P1 | 系统管理：用户管理 + 角色权限配置（对齐 VOD） | 角色/菜单/用户绑定闭环 |
-| P2 | 运行时管理：设备列表/详情/凭据签发吊销/任务（直读共享 DB） | 设备在线状态正确、签发 token 可被 worker 使用 |
+| P2 | 运行时管理：设备管理/详情/凭据签发吊销/任务（直读共享 DB） | 设备在线状态正确、签发 token 可被 worker 使用 |
 | P3 | AI 菜单：AI 助手（hermes CLI 代理 + 聊天页 + 会话续接） | 流式问答可用，会话可续接 |
 | P4 | 部署：nginx + systemd + 独立域名 + 文档 | 独立域名全链路可用 |
 

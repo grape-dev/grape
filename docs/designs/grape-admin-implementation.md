@@ -188,7 +188,7 @@ INSERT INTO admin_roles (code, name, is_protected) VALUES
 -- 种子：菜单（结构与设计文档 §5 一致）
 INSERT INTO admin_permission_menus (code,name,path,parent_id,sort) VALUES
  ('runtime','运行时管理','',0,1),
- ('runtime.devices','设备列表','/runtime/devices',(SELECT id FROM admin_permission_menus WHERE code='runtime'),1),
+ ('runtime.devices','设备管理','/runtime/devices',(SELECT id FROM admin_permission_menus WHERE code='runtime'),1),
  ('runtime.engines','引擎总览','/runtime/engines',(SELECT id FROM admin_permission_menus WHERE code='runtime'),2),
  ('runtime.credentials','凭据管理','/runtime/credentials',(SELECT id FROM admin_permission_menus WHERE code='runtime'),3),
  ('ai','AI','',0,2),

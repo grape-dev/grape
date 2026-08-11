@@ -1,23 +1,39 @@
 <template>
   <div class="cd">
     <div class="cd-h">
-      <h2>设备列表 <span class="c">{{ devices.length }} 台</span></h2>
-      <button class="bt bt-p" @click="openIssue">签发凭据</button>
+      <h2>设备管理 <span class="c">{{ total }} 台</span></h2>
+      <div class="flex gap8">
+        <button class="bt bt-o" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
+        <button class="bt bt-o" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
+        <button class="bt bt-p" @click="openIssue">签发凭据</button>
+      </div>
     </div>
-    <div class="tw">
+    <div class="toolbar">
+      <select v-model="status">
+        <option value="">全部状态</option>
+        <option value="active">active</option>
+        <option value="revoked">revoked</option>
+      </select>
+      <input v-model="name" placeholder="设备名搜索" style="width:200px" @keyup.enter="search" />
+      <button class="bt bt-p" @click="search">查询</button>
+      <button class="bt bt-o" @click="reset">重置</button>
+    </div>
+
+    <!-- 列表模式 -->
+    <div v-if="view === 'list'" class="tw">
       <table>
         <thead>
-          <tr><th>设备</th><th>健康</th><th>状态</th><th>最后心跳</th><th>IP</th><th>引擎</th><th>任务</th><th>操作</th></tr>
+          <tr><th>设备名</th><th>状态</th><th>健康</th><th>引擎</th><th>任务</th><th>最后心跳</th><th>IP</th><th>操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="d in devices" :key="d.id">
             <td>{{ d.deviceName || d.name }}</td>
+            <td><span :class="['tg', d.status === 'active' ? 'tg-g' : 'tg-d']">{{ d.status }}</span></td>
             <td><span :class="['tg', healthClass(d.health)]">{{ healthText(d.health) }}</span></td>
-            <td class="t2">{{ d.status }}</td>
-            <td class="t3">{{ d.lastSeenAt || '-' }}</td>
-            <td class="t3">{{ d.lastIp || '-' }}</td>
             <td>{{ d.engineCount }}</td>
             <td>{{ d.taskCount }}</td>
+            <td class="t3">{{ d.lastSeenAt || '-' }}</td>
+            <td class="t3">{{ d.lastIp || '-' }}</td>
             <td>
               <a class="bt bt-o bt-s" @click="openDetail(d)">详情</a>
               <a v-if="d.status === 'active'" class="bt bt-o bt-s" @click="revoke(d)">吊销</a>
@@ -27,7 +43,41 @@
         </tbody>
       </table>
     </div>
-    <p v-if="!devices.length" class="t3 mt12">暂无设备</p>
+
+    <!-- 卡片模式（对齐 Grape 设备卡片） -->
+    <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">
+      <div v-for="d in devices" :key="d.id"
+           style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+          <span :style="badgeStyle(d.health)">
+            <span :style="dotStyle(d.health)"></span>{{ healthText(d.health) }}
+          </span>
+          <span style="font-weight:600;font-size:14px">
+            {{ d.deviceName || d.name }}
+            <span style="font-weight:400;color:var(--t3);font-size:12px">{{ d.status }}</span>
+          </span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">引擎</span> {{ d.engineCount }} 个</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">任务</span> {{ d.taskCount }} 个</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">心跳</span> {{ d.lastSeenAt || '—' }}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">IP</span> {{ d.lastIp || '—' }}</div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:6px;padding-top:10px;border-top:1px solid var(--b);margin-top:10px">
+          <a class="bt bt-o bt-s" @click="openDetail(d)">详情</a>
+          <a v-if="d.status === 'active'" class="bt bt-o bt-s" @click="revoke(d)">吊销</a>
+          <a class="bt bt-o bt-s" @click="recycle(d)">回收</a>
+        </div>
+      </div>
+    </div>
+
+    <p v-if="!devices.length" class="ts t2" style="padding:12px">无匹配设备</p>
+
+    <div v-if="totalPages > 1" class="pager">
+      第 {{ page + 1 }} / {{ totalPages }} 页（共 {{ total }} 台）
+      <button class="bt bt-o bt-s" :disabled="page <= 0" @click="page--; load()">上一页</button>
+      <button class="bt bt-o bt-s" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
+    </div>
   </div>
 
   <div v-if="showIssue" class="modal">
@@ -87,19 +137,45 @@ import { onMounted, ref } from 'vue'
 import http from '../api'
 
 const devices = ref([])
+const total = ref(0)
+const totalPages = ref(0)
+const page = ref(0)
+const status = ref('')
+const name = ref('')
+const view = ref('list')
 const showIssue = ref(false)
 const deviceName = ref('')
 const issuedToken = ref('')
 const detail = ref(null)
+const activeTab = { background: 'var(--a)', color: '#fff', borderColor: 'var(--a)' }
 
-const HEALTH = { online: ['tg-g', '在线'], recently_lost: ['tg-s', '失联中'], offline: ['tg-d', '离线'], about_to_gc: ['tg-q', '待回收'], revoked: ['tg-i', '已吊销'] }
-function healthText(h) { return (HEALTH[h] || ['tg-d', h])[1] }
-function healthClass(h) { return (HEALTH[h] || ['tg-d', ''])[0] }
+const BADGE = {
+  online: { color: 'var(--g)', bg: '#dcfce7', label: '在线' },
+  recently_lost: { color: 'var(--or)', bg: '#fef3c7', label: '刚失联' },
+  offline: { color: 'var(--t3)', bg: '#eef0f3', label: '离线' },
+  about_to_gc: { color: 'var(--r)', bg: '#fee2e2', label: '待回收' },
+  revoked: { color: 'var(--t3)', bg: '#eef0f3', label: '已吊销' }
+}
+function healthText(h) { return (BADGE[h] || { label: h }).label }
+function healthClass(h) { return { online: 'tg-g', recently_lost: 'tg-s', offline: 'tg-d', about_to_gc: 'tg-i', revoked: 'tg-d' }[h] || 'tg-d' }
+function badgeStyle(h) {
+  const b = BADGE[h] || { color: 'var(--t3)', bg: '#eef0f3' }
+  return { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12px', fontWeight: 600, color: b.color, background: b.bg, padding: '3px 10px', borderRadius: '999px', whiteSpace: 'nowrap' }
+}
+function dotStyle(h) {
+  const b = BADGE[h] || { color: 'var(--t3)' }
+  return { width: '7px', height: '7px', borderRadius: '50%', background: b.color, display: 'inline-block' }
+}
 
 async function load() {
-  const { data } = await http.get('/devices')
-  devices.value = data
+  const { data } = await http.get('/devices', { params: { status: status.value, name: name.value, page: page.value, size: 10 } })
+  devices.value = data.content
+  total.value = data.totalElements
+  totalPages.value = data.totalPages
 }
+function search() { page.value = 0; load() }
+function reset() { status.value = ''; name.value = ''; page.value = 0; load() }
+
 function openIssue() { showIssue.value = true; issuedToken.value = ''; deviceName.value = '' }
 async function issue() {
   try {
