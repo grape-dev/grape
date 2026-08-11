@@ -79,29 +79,35 @@ log "使用 Python: $PY ($($PY --version 2>&1 | awk '{print $2}'))"
 
 # ===== 2. 稀疏拉取仓库 =====
 if [ -d "$INSTALL_DIR/.git" ]; then
-  log "仓库已存在，更新分支 $BRANCH"
+  log "仓库已存在，更新分支 $BRANCH（耗时取决于增量大小）"
   cd "$INSTALL_DIR"
-  git fetch origin "$BRANCH" >/dev/null 2>&1 || true
-  git checkout "$BRANCH" >/dev/null 2>&1 || true
-  git pull origin "$BRANCH" >/dev/null 2>&1 || true
+  git fetch origin "$BRANCH" --progress || true
+  git checkout "$BRANCH" || true
+  git pull origin "$BRANCH" --progress || true
 else
-  log "稀疏拉取仓库 $REPO (分支 $BRANCH)"
+  log "稀疏拉取仓库 $REPO (分支 $BRANCH，首次拉取需数分钟，请耐心等待)"
   mkdir -p "$(dirname "$INSTALL_DIR")"
-  git clone --filter=blob:none --sparse -b "$BRANCH" "$REPO" "$INSTALL_DIR" || fail "git clone 失败: $REPO"
+  git clone --filter=blob:none --sparse --progress -b "$BRANCH" "$REPO" "$INSTALL_DIR" || fail "git clone 失败: $REPO"
   cd "$INSTALL_DIR"
   # worker 运行 src.runtime.agent 需整个 src/ + skills + 最小依赖清单；configs/data/docs 等不拉取
-  git sparse-checkout set src skills requirements-worker.txt >/dev/null 2>&1 || true
+  log "设置稀疏拉取范围: src skills requirements-worker.txt"
+  git sparse-checkout set src skills requirements-worker.txt || true
 fi
 # data/ 是 gitignore 的运行时目录（sessions.db/workspaces/logs），稀疏拉取不产生，须先建好
-mkdir -p "$INSTALL_DIR/data"
+if [ ! -d "$INSTALL_DIR/data" ]; then
+  log "创建运行时目录 $INSTALL_DIR/data"
+  mkdir -p "$INSTALL_DIR/data"
+else
+  log "data 目录已存在，跳过创建"
+fi
 
 # ===== 3. 建 venv + 最小依赖 =====
 if [ ! -x "$VENV/bin/python" ]; then
   log "创建 venv ($PY)"
   "$PY" -m venv "$VENV"
 fi
-log "安装依赖 requirements-worker.txt"
-"$VENV/bin/pip" install --quiet -r "$INSTALL_DIR/requirements-worker.txt" || true
+log "安装依赖 requirements-worker.txt（首次安装需数分钟）"
+"$VENV/bin/pip" install -r "$INSTALL_DIR/requirements-worker.txt" || true
 
 # ===== 4. 检测/安装 opencode =====
 if ! command -v opencode >/dev/null 2>&1; then
