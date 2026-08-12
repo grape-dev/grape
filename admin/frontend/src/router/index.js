@@ -6,6 +6,7 @@ const routes = [
   { path: '/', redirect: '/overview' },
   { path: '/overview', name: 'overview', component: () => import('../views/Overview.vue'), meta: { title: '总览' } },
   { path: '/agent/manage', name: 'agent.manage', component: () => import('../views/AgentManage.vue'), meta: { title: '智能体管理' } },
+  { path: '/agent/manage/:type', name: 'agent.detail', component: () => import('../views/AgentDetail.vue'), meta: { title: '智能体详情' } },
   { path: '/runtime/devices', name: 'runtime.devices', component: () => import('../views/DeviceManage.vue'), meta: { title: '设备管理' } },
   { path: '/runtime/devices/:id', name: 'runtime.device-detail', component: () => import('../views/DeviceDetail.vue'), meta: { title: '设备详情' } },
   { path: '/runtime/engines', name: 'runtime.engines', component: () => import('../views/EngineManage.vue'), meta: { title: '引擎管理' } },

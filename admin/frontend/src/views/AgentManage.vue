@@ -8,41 +8,86 @@
     </div>
 
     <div style="padding:20px 28px">
-      <!-- 徽章筛选行（对齐设备页 dm-stats 风格） -->
+      <!-- 分类筛选徽章：全部 / 官方 / 仓库 / 个人 -->
       <div class="dm-stats">
-        <button class="dm-stat" :class="{ on: filter === '' }" @click="filter = ''">全部 <strong>{{ total }}</strong></button>
-        <button class="dm-stat" :class="{ on: filter === 1 }" @click="filter = 1"><span class="dm-dot" style="background:#52c41a"></span>已启用 <strong>{{ enabledCount }}</strong></button>
-        <button class="dm-stat" :class="{ on: filter === 0 }" @click="filter = 0"><span class="dm-dot" style="background:#fa8c16"></span>已禁用 <strong>{{ total - enabledCount }}</strong></button>
+        <button class="dm-stat" :class="{ on: filter === '' }" @click="filter = ''">全部</button>
+        <button class="dm-stat" :class="{ on: filter === 'official' }" @click="filter = 'official'"><span class="dm-dot" style="background:#006eff"></span>官方 <strong>{{ officialCount }}</strong></button>
+        <button class="dm-stat" :class="{ on: filter === 'repo' }" @click="filter = 'repo'"><span class="dm-dot" style="background:#52c41a"></span>仓库 <strong>{{ repoAgentCount }}</strong></button>
+        <button class="dm-stat" :class="{ on: filter === 'personal' }" @click="filter = 'personal'"><span class="dm-dot" style="background:#fa8c16"></span>个人 <strong>0</strong></button>
+        <span class="dm-hint" v-if="onlineRuntimes">负载口径：进行中任务 ÷ (在线引擎 {{ onlineRuntimes }} × {{ maxConcurrent }} 并发)</span>
       </div>
 
-      <!-- 智能体卡片墙 -->
-      <div class="agent-grid">
-        <div v-for="(a, i) in visibleAgents" :key="a.agentType" class="agent-card" :class="accents[i % accents.length]">
-          <div class="agent-head">
-            <div class="agent-icon" :style="iconStyle(i)">{{ a.icon || '🤖' }}</div>
-            <div class="agent-meta">
-              <div class="agent-name">{{ a.displayName }}<span class="code-tag">{{ a.agentType }}</span></div>
-              <div class="agent-sub">顺序 #{{ a.orderNum }} · 引擎 {{ a.defaultRuntimeId || '-' }}</div>
+      <!-- 官方：智能体卡片墙（点击卡片进入详情） -->
+      <template v-if="showOfficial">
+        <div class="section-label"><span class="section-dot" style="background:#006eff"></span>官方智能体 <span class="t3">（平台内置，点击卡片查看详情）</span></div>
+        <div class="agent-grid">
+          <div v-for="(a, i) in agents" :key="a.agentType" class="agent-card" :class="accents[i % accents.length]" @click="$router.push(`/agent/manage/${a.agentType}`)">
+            <div class="agent-head">
+              <div class="agent-icon" :style="iconStyle(i)">{{ a.icon || '🤖' }}</div>
+              <div class="agent-meta">
+                <div class="agent-name">{{ a.displayName }}<span class="code-tag">{{ a.agentType }}</span></div>
+                <div class="agent-sub">顺序 #{{ a.orderNum }} · 引擎 {{ a.defaultRuntimeId || '-' }}</div>
+              </div>
+              <label class="sw" :title="a.enable === 1 ? '点击禁用' : '点击启用'" @click.stop>
+                <input type="checkbox" :checked="a.enable === 1" :disabled="saving === a.agentType" @change="toggle(a, $event.target.checked)" />
+                <span class="sw-slider"></span>
+              </label>
             </div>
-            <label class="sw" :title="a.enable === 1 ? '点击禁用' : '点击启用'">
-              <input type="checkbox" :checked="a.enable === 1" :disabled="saving === a.agentType" @change="toggle(a, $event.target.checked)" />
-              <span class="sw-slider"></span>
-            </label>
-          </div>
-          <div class="agent-desc">{{ a.description }}</div>
-          <div class="agent-stats">
-            <div class="as-item"><strong>{{ a.taskCount || 0 }}</strong><span>任务</span></div>
-            <div class="as-item"><strong :style="{ color: a.enable === 1 ? '#52c41a' : '#fa8c16' }">{{ a.enable === 1 ? '启用' : '禁用' }}</strong><span>状态</span></div>
-            <div class="as-item"><strong>{{ eventCount(a) }}</strong><span>订阅事件</span></div>
-          </div>
-          <div class="sb-row" v-if="hasBreakdown(a)">
-            <span v-for="(n, st) in a.statusBreakdown" :key="st" class="sb-seg" :style="{ background: STATUS_COLOR[st] || '#8c8c8c' }">{{ st }} {{ n }}</span>
+            <div class="agent-desc">{{ a.description }}</div>
+            <div class="agent-stats">
+              <div class="as-item"><strong>{{ a.sessionCount || 0 }}</strong><span>会话</span></div>
+              <div class="as-item"><strong>{{ a.repoUsageCount || 0 }}</strong><span>使用仓库</span></div>
+              <div class="as-item">
+                <strong :style="{ color: loadColor(a) }">{{ fmtLoad(a) }}<span class="load-unit" v-if="a.loadRate != null">%</span></strong>
+                <span>负载率<template v-if="a.loadRate != null">（预警 {{ a.alertThresholdPct }}%）</template></span>
+              </div>
+              <div class="as-item"><strong>{{ a.taskCount || 0 }}</strong><span>任务</span></div>
+            </div>
+            <div class="sb-row" v-if="hasBreakdown(a)">
+              <span v-for="(n, st) in a.statusBreakdown" :key="st" class="sb-seg" :style="{ background: STATUS_COLOR[st] || '#8c8c8c' }">{{ st }} {{ n }}</span>
+            </div>
+            <div class="agent-foot">
+              <span class="cat-tag cat-official">官方</span>
+              <span class="detail-link">查看详情 →</span>
+            </div>
           </div>
         </div>
-      </div>
+      </template>
+
+      <!-- 仓库：仓库级智能体实例表格 -->
+      <template v-if="showRepo">
+        <div class="section-label"><span class="section-dot" style="background:#52c41a"></span>仓库智能体 <span class="t3">（devops_agent_session 按仓库 × 智能体的实例）</span></div>
+        <div class="card" style="overflow-x:auto">
+          <table class="vod-table" v-if="repoAgents.length">
+            <thead>
+              <tr><th>智能体</th><th>仓库</th><th>状态</th><th>启用</th><th>引擎 ID</th><th>最后活跃</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in repoAgents" :key="r.id">
+                <td><span class="code-tag">{{ r.agentType }}</span></td>
+                <td style="max-width:320px">{{ r.repoKey }}</td>
+                <td><span :class="['status-tag', r.status === 'idle' ? 'default' : 'success']">{{ r.status }}</span></td>
+                <td>{{ r.enable === 1 ? '✅' : '⛔' }}</td>
+                <td class="t3">{{ r.runtimeId || '-' }}</td>
+                <td class="t3">{{ fmtTime(r.lastActiveAt) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="t2" style="padding:20px;text-align:center">暂无仓库级智能体实例</p>
+        </div>
+      </template>
+
+      <!-- 个人：预留空态 -->
+      <template v-if="showPersonal">
+        <div class="section-label"><span class="section-dot" style="background:#fa8c16"></span>个人智能体 <span class="t3">（预留分类，暂未开放）</span></div>
+        <div class="empty-state">
+          <div class="empty-icon">👤</div>
+          <p>个人智能体功能尚未开放，此分类为预留占位</p>
+        </div>
+      </template>
 
       <!-- 任务分布图（对齐总览 chart-card 风格） -->
-      <div class="chart-card">
+      <div class="chart-card" style="margin-top:18px">
         <div class="chart-title">智能体任务分布（按状态堆叠）</div>
         <div class="chart-body" ref="distRef" style="height:280px"></div>
       </div>
@@ -67,27 +112,48 @@ const iconPalette = [
 ]
 
 const agents = ref([])
+const repoAgents = ref([])
 const loaded = ref(false)
 const filter = ref('')
 const saving = ref('')
+const onlineRuntimes = ref(0)
+const maxConcurrent = ref(20)
 const distRef = ref(null)
 let chart = null
 
 const total = computed(() => agents.value.length)
 const enabledCount = computed(() => agents.value.filter(a => a.enable === 1).length)
 const totalTasks = computed(() => agents.value.reduce((s, a) => s + (a.taskCount || 0), 0))
-const visibleAgents = computed(() => filter.value === '' ? agents.value : agents.value.filter(a => a.enable === filter.value))
+const officialCount = computed(() => agents.value.length)
+const repoAgentCount = computed(() => repoAgents.value.length)
+const showOfficial = computed(() => filter.value === '' || filter.value === 'official')
+const showRepo = computed(() => filter.value === '' || filter.value === 'repo')
+const showPersonal = computed(() => filter.value === '' || filter.value === 'personal')
 
 function iconStyle(i) { return iconPalette[i % iconPalette.length] }
-function eventCount(a) {
-  try { return (JSON.parse(a.subscribeEvents || '[]') || []).length } catch { return 0 }
-}
 function hasBreakdown(a) { return a.statusBreakdown && Object.keys(a.statusBreakdown).length }
+
+function fmtLoad(a) {
+  if (a.loadRate == null) return '—'
+  const v = Number(a.loadRate)
+  return Number.isInteger(v) ? v : v.toFixed(1)
+}
+function loadColor(a) {
+  if (a.loadRate == null) return 'var(--text-primary)'
+  return a.loadLevel === 'over' ? '#eb2f96' : '#52c41a'
+}
+function fmtTime(v) {
+  if (!v) return '—'
+  return String(v).replace('T', ' ').substring(0, 19)
+}
 
 async function load() {
   try {
     const { data } = await http.get('/agents')
     agents.value = (data.agents || []).map(a => ({ ...a, statusBreakdown: a.statusBreakdown || {} }))
+    repoAgents.value = data.repoAgents || []
+    onlineRuntimes.value = data.onlineRuntimes || 0
+    maxConcurrent.value = data.maxConcurrentPerRuntime || 20
     loaded.value = true
     await nextTick()
     renderChart(data.taskStatusBreakdown || {})
@@ -138,7 +204,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart &&
 </script>
 
 <style scoped>
-.dm-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.dm-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
 .dm-stat {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; padding: 3px 10px; border-radius: 12px;
@@ -148,12 +214,19 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart &&
 .dm-stat.on { background: #e6f4ff; color: #006eff; border-color: #91caff; }
 .dm-stat strong { font-size: 13px; }
 .dm-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.dm-hint { font-size: 11px; color: var(--text-tertiary); margin-left: auto; }
+
+.section-label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 14px; font-weight: 600; color: var(--text-primary); margin: 6px 0 12px;
+}
+.section-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 
 .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; margin-bottom: 18px; }
 .agent-card {
   background: #fff; border: 1px solid var(--border-color); border-radius: 10px;
   box-shadow: var(--card-shadow); padding: 14px 16px; border-left: 3px solid #006eff;
-  display: flex; flex-direction: column; gap: 10px;
+  display: flex; flex-direction: column; gap: 10px; cursor: pointer;
 }
 .agent-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .agent-card.kpi-blue { border-left-color: #006eff; }
@@ -174,10 +247,16 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart &&
 .agent-stats { display: flex; gap: 18px; border-top: 1px dashed var(--border-color); padding-top: 10px; }
 .as-item { display: flex; flex-direction: column; gap: 1px; }
 .as-item strong { font-size: 16px; font-weight: 700; color: var(--text-primary); }
+.load-unit { font-size: 11px; font-weight: 500; color: var(--text-tertiary); margin-left: 1px; }
 .as-item span { font-size: 11px; color: var(--text-tertiary); }
 
 .sb-row { display: flex; gap: 6px; flex-wrap: wrap; }
 .sb-seg { font-size: 11px; color: #fff; border-radius: 4px; padding: 1px 7px; }
+
+.agent-foot { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #f0f0f0; padding-top: 8px; }
+.cat-tag { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+.cat-official { background: #e6f4ff; color: #006eff; }
+.detail-link { font-size: 12px; color: var(--primary); }
 
 .sw { position: relative; display: inline-block; width: 38px; height: 21px; flex-shrink: 0; cursor: pointer; }
 .sw input { opacity: 0; width: 0; height: 0; }
@@ -193,6 +272,18 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart &&
 .sw input:checked + .sw-slider { background: #52c41a; border-color: #52c41a; }
 .sw input:checked + .sw-slider::before { transform: translateX(17px); }
 .sw input:disabled + .sw-slider { opacity: .5; cursor: not-allowed; }
+
+.card { background: #fff; border: 1px solid var(--border-color); border-radius: 10px; box-shadow: var(--card-shadow); padding: 14px 18px; margin-bottom: 18px; }
+.vod-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.vod-table th { text-align: left; padding: 8px 10px; background: #fafafa; font-weight: 600; color: var(--text-secondary); border-bottom: 1px solid var(--border-color); white-space: nowrap; }
+.vod-table td { padding: 8px 10px; border-bottom: 1px solid #f0f0f0; }
+.status-tag { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+.status-tag.success { background: #f6ffed; color: #52c41a; }
+.status-tag.default { background: #f5f7fa; color: var(--text-tertiary); }
+
+.empty-state { border: 1px dashed var(--border-color); border-radius: 10px; padding: 36px; text-align: center; background: #fff; margin-bottom: 18px; }
+.empty-icon { font-size: 32px; margin-bottom: 8px; }
+.empty-state p { font-size: 13px; color: var(--text-tertiary); }
 
 .chart-card { background: #fff; border-radius: 10px; border: 1px solid var(--border-color); box-shadow: var(--card-shadow); overflow: hidden; }
 .chart-title { padding: 14px 18px 0; font-size: 14px; font-weight: 600; color: var(--text-primary); }

@@ -28,6 +28,24 @@ public class AgentController {
         return agentService.list();
     }
 
+    /** 智能体详情（卡片点击进入）：基本 + 指标 + 仓库明细 + 任务分布 + 预警值 */
+    @GetMapping("/agents/{type}/detail")
+    public Map<String, Object> detail(@PathVariable String type) {
+        return agentService.detail(type);
+    }
+
+    /** 设置负载预警阈值：POST /api/admin/agents/{type}/alert  body: {"thresholdPct": 80} */
+    @PostMapping("/agents/{type}/alert")
+    public Map<String, Object> setAlert(@PathVariable String type,
+                                        @RequestBody Map<String, Object> body,
+                                        HttpServletRequest request) {
+        Object raw = body.get("thresholdPct");
+        int thresholdPct = raw instanceof Number ? ((Number) raw).intValue()
+                : Integer.parseInt(String.valueOf(raw));
+        int saved = agentService.setAlertThreshold(type, thresholdPct, AuthContext.username(request));
+        return Map.of("agentType", type, "alertThresholdPct", saved);
+    }
+
     /** 启用/禁用智能体：POST /api/admin/agents/{type}/enable  body: {"enable": true|false} */
     @PostMapping("/agents/{type}/enable")
     public Map<String, Object> toggleEnable(@PathVariable String type,

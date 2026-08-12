@@ -11,42 +11,16 @@
 
     <div v-else class="dashboard">
 
-      <!-- KPI 卡片行 -->
+      <!-- KPI 卡片行：用户 → 仓库 → 设备 → 任务 -->
       <div class="kpi-row">
-        <div class="kpi-card kpi-blue" title="在线设备数（status=online）" @click="$router.push('/runtime/devices')">
-          <div class="kpi-icon" style="background:#e8f0fe;color:#006eff;">🖥️</div>
+        <div class="kpi-card kpi-cyan" title="管理台用户数（admin_users）" @click="$router.push('/sys/users')">
+          <div class="kpi-icon" style="background:#e6fffb;color:#13c2c2;">👥</div>
           <div class="kpi-body">
-            <div class="kpi-value">{{ vc.onlineDevices || 0 }}<span class="kpi-unit">/{{ vc.totalDevices || 0 }}</span></div>
-            <div class="kpi-label">在线设备</div>
-            <div class="kpi-sub">共 {{ vc.totalDevices || 0 }} 台接入</div>
+            <div class="kpi-value">{{ vc.adminUserTotal || 0 }}</div>
+            <div class="kpi-label">用户</div>
+            <div class="kpi-sub">平台用户 {{ vc.platformUserTotal || 0 }}</div>
           </div>
-          <div class="kpi-action">设备管理 →</div>
-        </div>
-        <div class="kpi-card kpi-purple" title="Agent 引擎类型数（agent_type）" @click="$router.push('/runtime/engines')">
-          <div class="kpi-icon" style="background:#f0e6ff;color:#7222ed;">⚙️</div>
-          <div class="kpi-body">
-            <div class="kpi-value">{{ vc.engineTotal || 0 }}</div>
-            <div class="kpi-label">引擎</div>
-            <div class="kpi-sub">启用 {{ vc.engineEnabled || 0 }} 种</div>
-          </div>
-          <div class="kpi-action">引擎管理 →</div>
-        </div>
-        <div class="kpi-card kpi-pink" title="运行时凭据总数（runtime_credentials）" @click="$router.push('/runtime/credentials')">
-          <div class="kpi-icon" style="background:#fff0f6;color:#eb2f96;">🔑</div>
-          <div class="kpi-body">
-            <div class="kpi-value">{{ vc.credentialTotal || 0 }}</div>
-            <div class="kpi-label">凭据</div>
-            <div class="kpi-sub">有效 {{ vc.credentialActive || 0 }} 条</div>
-          </div>
-          <div class="kpi-action">凭据管理 →</div>
-        </div>
-        <div class="kpi-card kpi-orange" title="Agent 任务总数（agent_tasks）">
-          <div class="kpi-icon" style="background:#fff7e6;color:#fa8c16;">🤖</div>
-          <div class="kpi-body">
-            <div class="kpi-value">{{ vc.taskTotal || 0 }}</div>
-            <div class="kpi-label">Agent 任务</div>
-            <div class="kpi-sub">今日 +{{ vc.taskToday || 0 }} · 成功率 {{ vc.taskSuccessRate || '0.0%' }}</div>
-          </div>
+          <div class="kpi-action">用户管理 →</div>
         </div>
         <div class="kpi-card kpi-green" title="已托管仓库数（managed_repos）" @click="$router.push('/repos/manage')">
           <div class="kpi-icon" style="background:#f6ffed;color:#52c41a;">📦</div>
@@ -57,14 +31,22 @@
           </div>
           <div class="kpi-action">代码仓管理 →</div>
         </div>
-        <div class="kpi-card kpi-cyan" title="管理台用户数（admin_users）" @click="$router.push('/sys/users')">
-          <div class="kpi-icon" style="background:#e6fffb;color:#13c2c2;">👥</div>
+        <div class="kpi-card kpi-blue" title="在线设备数（status=online）" @click="$router.push('/runtime/devices')">
+          <div class="kpi-icon" style="background:#e8f0fe;color:#006eff;">🖥️</div>
           <div class="kpi-body">
-            <div class="kpi-value">{{ vc.adminUserTotal || 0 }}</div>
-            <div class="kpi-label">用户</div>
-            <div class="kpi-sub">平台用户 {{ vc.platformUserTotal || 0 }}</div>
+            <div class="kpi-value">{{ vc.onlineDevices || 0 }}<span class="kpi-unit">/{{ vc.totalDevices || 0 }}</span></div>
+            <div class="kpi-label">在线设备</div>
+            <div class="kpi-sub">共 {{ vc.totalDevices || 0 }} 台接入</div>
           </div>
-          <div class="kpi-action">用户管理 →</div>
+          <div class="kpi-action">设备管理 →</div>
+        </div>
+        <div class="kpi-card kpi-orange" title="Agent 任务总数（agent_tasks）">
+          <div class="kpi-icon" style="background:#fff7e6;color:#fa8c16;">🤖</div>
+          <div class="kpi-body">
+            <div class="kpi-value">{{ vc.taskTotal || 0 }}</div>
+            <div class="kpi-label">Agent 任务</div>
+            <div class="kpi-sub">今日 +{{ vc.taskToday || 0 }} · 成功率 {{ vc.taskSuccessRate || '0.0%' }}</div>
+          </div>
         </div>
       </div>
 
@@ -79,65 +61,37 @@
               <tr><th>指标</th><th>计算规则</th></tr>
             </thead>
             <tbody>
+              <tr><td>用户</td><td>管理台用户 admin_users；平台用户 user_accounts</td></tr>
+              <tr><td>托管仓库</td><td>managed_repos 已托管仓库数</td></tr>
               <tr><td>在线设备</td><td>agent_runtimes 表中 status=online 的设备数（在线 / 总数）</td></tr>
-              <tr><td>引擎</td><td>agent_type 引擎类型总数（启用 / 全部）</td></tr>
-              <tr><td>凭据</td><td>runtime_credentials 凭据总数（有效 status=active / 全部）</td></tr>
               <tr><td>Agent 任务</td><td>agent_tasks 任务总数；今日新增按创建日期（UTC）统计</td></tr>
               <tr><td>成功率</td><td>已完成任务 ÷ 任务总数</td></tr>
-              <tr><td>托管仓库</td><td>managed_repos 已托管仓库数</td></tr>
-              <tr><td>用户</td><td>管理台用户 admin_users；平台用户 user_accounts</td></tr>
               <tr><td>设备状态图</td><td>agent_runtimes 按 status 分组（在线/离线等）</td></tr>
-              <tr><td>引擎启停图</td><td>agent_type 按 enable 分组（启用/停用）</td></tr>
-              <tr><td>凭据状态图</td><td>runtime_credentials 按 status 分组（有效 active / 已吊销 revoked）</td></tr>
               <tr><td>任务状态图</td><td>agent_tasks 按 status 分组（completed/queued/dispatched 等）</td></tr>
               <tr><td>仓库事件图</td><td>events 表按 repo_key 聚合的事件量 Top 8（活跃仓库排行）</td></tr>
               <tr><td>用户构成图</td><td>管理台用户（admin_users）与平台用户（user_accounts）数量对比</td></tr>
-              <tr><td>事件趋势</td><td>events 表按天聚合的 Webhook 事件量（近 14 天）</td></tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      <!-- 图表区：6 卡对应 6 图（3×2） -->
-      <div class="chart-grid chart-grid-6">
+      <!-- 图表区：4 卡对应 4 图（2×2，对齐 KPI 卡顺序：用户/仓库/设备/任务） -->
+      <div class="chart-grid chart-grid-4">
         <div class="chart-card">
-          <div class="chart-title">在线设备 · 设备状态分布</div>
-          <div class="chart-body" ref="deviceStatusRef"></div>
-        </div>
-        <div class="chart-card">
-          <div class="chart-title">引擎 · 启停分布</div>
-          <div class="chart-body" ref="engineStatusRef"></div>
-        </div>
-        <div class="chart-card">
-          <div class="chart-title">凭据 · 状态分布</div>
-          <div class="chart-body" ref="credentialStatusRef"></div>
-        </div>
-        <div class="chart-card">
-          <div class="chart-title">Agent 任务 · 状态分布</div>
-          <div class="chart-body" ref="taskStatusRef"></div>
+          <div class="chart-title">用户 · 构成分布</div>
+          <div class="chart-body" ref="userCompositionRef"></div>
         </div>
         <div class="chart-card">
           <div class="chart-title">托管仓库 · 事件 Top8</div>
           <div class="chart-body" ref="repoEventRef"></div>
         </div>
         <div class="chart-card">
-          <div class="chart-title">用户 · 构成分布</div>
-          <div class="chart-body" ref="userCompositionRef"></div>
+          <div class="chart-title">在线设备 · 设备状态分布</div>
+          <div class="chart-body" ref="deviceStatusRef"></div>
         </div>
-      </div>
-
-      <!-- 事件监控附加区 -->
-      <div class="event-section">
-        <div class="section-title">事件监控</div>
-        <div class="chart-grid">
-          <div class="chart-card">
-            <div class="chart-title">事件类型分布</div>
-            <div class="chart-body" ref="eventTypeRef"></div>
-          </div>
-          <div class="chart-card">
-            <div class="chart-title">近 14 天事件趋势</div>
-            <div class="chart-body" ref="eventTrendRef"></div>
-          </div>
+        <div class="chart-card">
+          <div class="chart-title">Agent 任务 · 状态分布</div>
+          <div class="chart-body" ref="taskStatusRef"></div>
         </div>
       </div>
 
@@ -156,18 +110,13 @@ const vc = ref({})
 const showGlossary = ref(false)
 const charts = []
 const taskStatusRef = ref(null)
-const eventTypeRef = ref(null)
-const eventTrendRef = ref(null)
 const deviceStatusRef = ref(null)
-const engineStatusRef = ref(null)
-const credentialStatusRef = ref(null)
 const repoEventRef = ref(null)
 const userCompositionRef = ref(null)
 
 const COLOR_POOL = ['#006eff', '#52c41a', '#faad14', '#f5222d', '#722ed1', '#13c2c2', '#eb2f96', '#fa8c16']
 const TASK_STATUS_COLORS = { completed: '#52c41a', queued: '#faad14', dispatched: '#006eff' }
 const DEVICE_STATUS_COLORS = { online: '#52c41a', offline: '#d9d9d9' }
-const CREDENTIAL_STATUS_COLORS = { active: '#52c41a', revoked: '#faad14' }
 const USER_COMP_COLORS = { '管理台用户': '#006eff', '平台用户': '#13c2c2' }
 const STATUS_LABELS = { active: '有效', revoked: '已吊销', online: '在线', offline: '离线', completed: '已完成', queued: '排队中', dispatched: '已派发' }
 
@@ -210,14 +159,10 @@ async function load() {
 function renderCharts() {
   charts.forEach(c => c.dispose())
   charts.length = 0
-  renderDeviceStatus()
-  renderEngineStatus()
-  renderCredentialStatus()
-  renderTaskStatus()
-  renderRepoEvent()
   renderUserComposition()
-  renderEventType()
-  renderEventTrend()
+  renderRepoEvent()
+  renderDeviceStatus()
+  renderTaskStatus()
 }
 
 function handleResize() {
@@ -241,52 +186,6 @@ function renderDeviceStatus() {
     series: [{
       type: 'pie', radius: ['40%', '70%'], center: ['50%', '45%'],
       label: { show: true, formatter: '{b}\n{d}%', fontSize: 11 },
-      data: data.length ? data : [{ name: '暂无数据', value: 0, itemStyle: { color: '#f0f0f0' } }],
-      emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.2)' } }
-    }]
-  })
-}
-
-// 引擎启停分布 - 环形图（对应"引擎"卡片）
-function renderEngineStatus() {
-  if (!engineStatusRef.value) return
-  const chart = echarts.init(engineStatusRef.value)
-  charts.push(chart)
-  const dist = d.value.engineEnabledDistribution || {}
-  const data = Object.keys(dist).filter(k => dist[k]).map((k, i) => ({
-    name: k,
-    value: dist[k],
-    itemStyle: { color: k === '启用' ? '#7222ed' : (COLOR_POOL[i % COLOR_POOL.length]) }
-  }))
-  chart.setOption({
-    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-    legend: { bottom: 0, itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 11 } },
-    series: [{
-      type: 'pie', radius: ['40%', '70%'], center: ['50%', '45%'],
-      label: { show: true, formatter: '{b}\n{c}', fontSize: 11 },
-      data: data.length ? data : [{ name: '暂无数据', value: 0, itemStyle: { color: '#f0f0f0' } }],
-      emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.2)' } }
-    }]
-  })
-}
-
-// 凭据状态分布 - 环形图（对应"凭据"卡片）
-function renderCredentialStatus() {
-  if (!credentialStatusRef.value) return
-  const chart = echarts.init(credentialStatusRef.value)
-  charts.push(chart)
-  const dist = d.value.credentialStatusDistribution || {}
-  const data = Object.keys(dist).filter(k => dist[k]).map(k => ({
-    name: STATUS_LABELS[k] || k,
-    value: dist[k],
-    itemStyle: { color: CREDENTIAL_STATUS_COLORS[k] || '#d9d9d9' }
-  }))
-  chart.setOption({
-    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-    legend: { bottom: 0, itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 11 } },
-    series: [{
-      type: 'pie', radius: ['40%', '70%'], center: ['50%', '45%'],
-      label: { show: true, formatter: '{b}\n{c}', fontSize: 11 },
       data: data.length ? data : [{ name: '暂无数据', value: 0, itemStyle: { color: '#f0f0f0' } }],
       emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.2)' } }
     }]
@@ -375,50 +274,6 @@ function renderUserComposition() {
   })
 }
 
-// 事件类型分布 - 环形图（事件监控区）
-function renderEventType() {
-  if (!eventTypeRef.value) return
-  const chart = echarts.init(eventTypeRef.value)
-  charts.push(chart)
-  const dist = d.value.eventTypeDistribution || {}
-  const data = Object.keys(dist).filter(k => dist[k]).map((k, i) => ({
-    name: k, value: dist[k], itemStyle: { color: COLOR_POOL[i % COLOR_POOL.length] }
-  }))
-  chart.setOption({
-    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-    legend: { bottom: 0, itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 11 } },
-    series: [{
-      type: 'pie', radius: ['40%', '70%'], center: ['50%', '45%'],
-      label: { show: true, formatter: '{b}\n{c}', fontSize: 11 },
-      data: data.length ? data : [{ name: '暂无数据', value: 0, itemStyle: { color: '#f0f0f0' } }],
-      emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.2)' } }
-    }]
-  })
-}
-
-// 近 14 天事件趋势 - 折线图（事件监控区）
-function renderEventTrend() {
-  if (!eventTrendRef.value) return
-  const chart = echarts.init(eventTrendRef.value)
-  charts.push(chart)
-  const dist = d.value.eventTrend || {}
-  const entries = Object.entries(dist).sort(([a], [b]) => (a < b ? -1 : 1))
-  chart.setOption({
-    tooltip: { trigger: 'axis' },
-    grid: { left: 40, right: 16, top: 24, bottom: 32 },
-    xAxis: { type: 'category', data: entries.map(([k]) => k.substring(5)), axisLabel: { fontSize: 11 } },
-    yAxis: { type: 'value', minInterval: 1 },
-    series: [{
-      type: 'line', smooth: true, symbolSize: 6,
-      data: entries.map(([, v]) => v),
-      lineStyle: { color: '#006eff', width: 2 },
-      itemStyle: { color: '#006eff' },
-      areaStyle: { color: 'rgba(0,110,255,0.08)' },
-      label: { show: true, position: 'top', fontSize: 10 }
-    }]
-  })
-}
-
 onMounted(() => {
   load()
   window.addEventListener('resize', handleResize)
@@ -486,7 +341,7 @@ onBeforeUnmount(() => {
 
 /* ---- 图表区 ---- */
 .chart-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
-.chart-grid-6 { grid-template-columns: repeat(3, 1fr); }
+.chart-grid-4 { grid-template-columns: repeat(2, 1fr); }
 .chart-card {
   background: #fff; border-radius: 10px; border: 1px solid var(--border-color);
   box-shadow: var(--card-shadow); overflow: hidden;
@@ -494,15 +349,8 @@ onBeforeUnmount(() => {
 .chart-title { font-size: 14px; font-weight: 600; padding: 14px 18px 0; color: var(--text-primary); }
 .chart-body { width: 100%; height: 260px; padding: 8px; }
 
-/* ---- 事件监控附加区 ---- */
-.event-section { display: flex; flex-direction: column; gap: 12px; }
-.section-title {
-  font-size: 15px; font-weight: 600; color: var(--text-primary);
-  padding-left: 4px; border-left: 3px solid var(--primary); padding-left: 10px;
-}
-
 @media (max-width: 1024px) {
-  .chart-grid-6 { grid-template-columns: repeat(2, 1fr); }
+  .chart-grid-4 { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 768px) {
   .dashboard { padding: 12px; gap: 12px; }
@@ -511,7 +359,7 @@ onBeforeUnmount(() => {
   .chart-body { height: 200px; }
 }
 @media (max-width: 480px) {
-  .chart-grid, .chart-grid-6 { grid-template-columns: 1fr; }
+  .chart-grid, .chart-grid-4 { grid-template-columns: 1fr; }
   .kpi-row { gap: 6px; }
   .kpi-card { min-width: calc(50% - 6px); flex: none; gap: 8px; padding: 8px 10px; }
   .kpi-value { font-size: 16px; }
