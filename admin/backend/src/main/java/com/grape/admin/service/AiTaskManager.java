@@ -119,6 +119,20 @@ public class AiTaskManager {
         return task;
     }
 
+    /** 任务累积输出文本（token 事件拼接），供轮询模式实时显示部分结果 */
+    public String resultText(AiTask task) {
+        StringBuilder sb = new StringBuilder();
+        synchronized (task) {
+            for (String line : task.events) {
+                JsonNode node = parseJson(line);
+                if (node != null && "token".equals(node.path("type").asText())) {
+                    sb.append(node.path("data").asText(""));
+                }
+            }
+        }
+        return sb.toString();
+    }
+
     /** 订阅任务输出：先重放缓冲，再实时追加；终态后自动 complete */
     public void subscribe(String taskId, SseEmitter emitter) {
         AiTask task = tasks.get(taskId);

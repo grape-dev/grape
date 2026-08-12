@@ -14,7 +14,7 @@
               <option v-for="t in customTemplates" :key="t.id" :value="'custom-' + t.id">{{ t.name }}</option>
             </optgroup>
           </select>
-          <button class="btn btn-primary btn-sm" :disabled="busy || !queryText.trim()" @click="send">{{ busy ? '查询中...' : '发送' }}</button>
+          <button class="btn btn-primary btn-sm" :disabled="!queryText.trim() || isQuerying" @click="send">{{ isQuerying ? '查询中...' : '发送' }}</button>
         </div>
         <textarea
           v-model="queryText"
@@ -39,7 +39,7 @@
             </div>
           </div>
         </div>
-        <p class="aiq-hint">💡 Ctrl+Enter 发送 | 支持 ```chart 代码块自动渲染图表 | 多轮对话保持上下文</p>
+        <p class="aiq-hint">💡 Ctrl+Enter 发送 | 支持 ```chart 代码块自动渲染图表 | 多轮对话保持上下文 | 异步模式：查询中可切换会话不中断</p>
       </div>
 
       <div class="aiq-sessions">
@@ -49,14 +49,16 @@
         </div>
         <div class="aiq-slist">
           <div
-            v-for="s in sessions" :key="s.sessionId"
-            class="aiq-sitem" :class="{ act: s.sessionId === activeSessionId }"
+            v-for="s in sessions" :key="s.id"
+            class="aiq-sitem" :class="{ act: s.id === activeSessionId, running: isSessionRunning(s) }"
             @click="switchSession(s)">
-            <span v-if="editingId === s.sessionId">
+            <span v-if="editingId === s.id">
               <input v-model="editName" class="aiq-sinput" maxlength="50" @click.stop @keydown.enter="confirmRename" @keydown.esc="cancelRename" @blur="confirmRename" />
             </span>
             <span v-else class="aiq-sname" @dblclick.stop="startRename(s)">{{ s.name }}</span>
-            <span class="aiq-scnt">{{ s.messageCount }}条</span>
+            <span v-if="isSessionRunning(s)" class="aiq-srun" title="分析中">●</span>
+            <span class="aiq-stime">{{ formatSessionTime(s.lastAt || s.updatedAt) }}</span>
+            <a v-if="editingId !== s.id" class="aiq-sedit" @click.stop="startRename(s)" title="重命名">✎</a>
             <a class="aiq-sdel" @click.stop="delSession(s)" title="删除">✕</a>
           </div>
           <div v-if="!sessions.length" class="aiq-sempty">暂无会话</div>
@@ -69,17 +71,17 @@
       <div class="aiq-rt">
         <h3>{{ currentName || '对话记录' }}</h3>
         <div class="aiq-rta">
-          <button v-if="messages.length" class="btn btn-sm" @click="copyAll">{{ copyOk ? '已复制' : '复制全部' }}</button>
-          <button v-if="messages.length" class="btn btn-sm" @click="isFullscreen = !isFullscreen">{{ isFullscreen ? '还原' : '全屏' }}</button>
+          <button v-if="activeMsgs.length" class="btn btn-sm" @click="copyAll">{{ copyOk ? '已复制' : '复制全部' }}</button>
+          <button v-if="activeMsgs.length" class="btn btn-sm" @click="isFullscreen = !isFullscreen">{{ isFullscreen ? '还原' : '全屏' }}</button>
         </div>
       </div>
       <div class="aiq-result" ref="resultBox">
-        <div v-if="!messages.length && !busy" class="aiq-empty">
+        <div v-if="!activeMsgs.length && !isQuerying" class="aiq-empty">
           <div class="aiq-empty-icon">🤖</div>
           <p>AI 查询结果将显示在这里</p>
           <p class="aiq-empty-hint">输入查询内容并点击「发送」开始对话</p>
         </div>
-        <div v-for="(m, mi) in messages" :key="mi" class="aiq-msg" :class="m.role">
+        <div v-for="(m, mi) in activeMsgs" :key="mi" class="aiq-msg" :class="m.role">
           <div class="aiq-av">{{ m.role === 'user' ? '👤' : '🤖' }}</div>
           <div class="aiq-mb">
             <div class="aiq-role">{{ m.role === 'user' ? '我' : 'AI' }}</div>
@@ -117,11 +119,10 @@ import http from '../api'
 // ===== 状态 =====
 const queryText = ref('')
 const queryTemplate = ref('')
-const busy = ref(false)
-const sessions = ref([])
+const busy = ref(false)            // 同步轮询模式：查询中标志
+const asyncMode = ref(true)        // 默认异步订阅（对齐 VOD；复选框 UI 隐藏）
+const sessions = ref([])           // 会话对象：{ id, sessionId, name, lastAt, updatedAt, msgs, taskId, taskCompleted, local }
 const activeSessionId = ref(null)
-const messages = ref([])
-const currentName = ref('')
 const customTemplates = ref([])
 const templateMax = ref(50)
 const showSaveTpl = ref(false)
@@ -133,9 +134,21 @@ const editingId = ref(null)
 const editName = ref('')
 const resultBox = ref(null)
 const chartInstances = {}
-const TEMPLATE_MAX = 600
+// 同步模式轮询管理：{ [sessionId]: { taskId, aiMsg, pollTimer } }
+const sessionTaskMap = {}
 
-// ===== 内置模板（前端常量，对齐 VOD）=====
+const activeSession = computed(() => sessions.value.find(s => s.id === activeSessionId.value))
+const activeMsgs = computed(() => activeSession.value?.msgs || [])
+const currentName = computed(() => activeSession.value?.name || '')
+const isQuerying = computed(() => {
+  const s = activeSession.value
+  return s ? (!!s.taskId && !s.taskCompleted) : false
+})
+function isSessionRunning(s) {
+  return s && !!s.taskId && !s.taskCompleted
+}
+
+// ===== 内置模板（Grape 业务提示词，保留）=====
 const BUILTIN_TEMPLATES = {
   'device-health': { group: '设备巡检', label: '设备健康巡检', content: '请汇总当前所有设备的健康状态，列出离线、刚失联、待回收的设备，说明风险并给出处理建议' },
   'task-fail': { group: '任务分析', label: '任务失败原因分析', content: '请分析最近的任务执行情况，按失败原因分类统计，给出改进建议' },
@@ -152,56 +165,136 @@ const builtinGroups = computed(() => {
   return groups
 })
 
-// ===== 会话管理（对齐 VOD 分析报表）=====
+// ===== 任务状态持久化（sessionStorage，对齐 VOD）=====
+function getStoredTaskId(sessionId) {
+  try { return sessionStorage.getItem('aiquery_task_' + sessionId) || null } catch (e) { return null }
+}
+function setStoredTaskId(sessionId, taskId) {
+  try {
+    if (taskId) sessionStorage.setItem('aiquery_task_' + sessionId, taskId)
+    else sessionStorage.removeItem('aiquery_task_' + sessionId)
+  } catch (e) { /* ignore */ }
+}
+function clearStoredTaskId(sessionId) {
+  try { sessionStorage.removeItem('aiquery_task_' + sessionId) } catch (e) { /* ignore */ }
+}
+
+// ===== 会话管理 =====
+function generateSessionName(query) {
+  const t = (query || '').trim()
+  return t.length <= 20 ? t : t.substring(0, 20) + '...'
+}
+function formatSessionTime(ts) {
+  if (!ts) return ''
+  const time = typeof ts === 'number' ? ts : new Date(ts.replace(' ', 'T')).getTime()
+  if (!time || isNaN(time)) return ''
+  const diff = Date.now() - time
+  if (diff < 60000) return '刚刚'
+  if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前'
+  if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前'
+  const d = new Date(time)
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+function newSession() {
+  const s = {
+    id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+    sessionId: null,
+    name: '新对话',
+    msgs: [],
+    taskId: null,
+    taskCompleted: true,
+    updatedAt: Date.now(),
+    lastAt: null,
+    local: true
+  }
+  sessions.value.unshift(s)
+  activeSessionId.value = s.id
+  return s
+}
 async function loadSessions() {
   try {
     const { data } = await http.get('/ai/history/sessions')
-    sessions.value = data.sessions || []
-  } catch (e) { /* 忽略 */ }
+    const serverSessions = (data.sessions || []).map(s => {
+      const storedTask = getStoredTaskId(s.sessionId)
+      return {
+        id: s.sessionId,
+        sessionId: s.sessionId,
+        name: s.name,
+        messageCount: s.messageCount,
+        lastAt: s.lastAt,
+        updatedAt: null,
+        msgs: null,                       // 懒加载
+        taskId: storedTask,               // sessionStorage 恢复未完成任务
+        taskCompleted: !storedTask,
+        local: false
+      }
+    })
+    // 合并：已存在会话（本地新会话/内存态）保留运行时状态（msgs/taskId），仅更新服务端字段
+    const merged = serverSessions.map(ss => {
+      const existing = sessions.value.find(x => x.id === ss.id || (x.local && x.sessionId === ss.sessionId))
+      if (existing) {
+        return { ...existing, ...ss, msgs: existing.msgs, taskId: existing.taskId, taskCompleted: existing.taskCompleted, local: false }
+      }
+      return ss
+    })
+    // 保留本地未完成任务且后端尚未出现的会话（任务仍在跑）
+    const pendingLocal = sessions.value.filter(s => s.local && isSessionRunning(s) && !merged.some(m => m.sessionId === s.sessionId))
+    sessions.value = [...pendingLocal, ...merged]
+    if (sessions.value.length === 0) newSession()
+    if (!sessions.value.some(s => s.id === activeSessionId.value)) {
+      activeSessionId.value = sessions.value[0]?.id || null
+    }
+  } catch (e) {
+    sessions.value = []
+    newSession()
+  }
 }
-async function switchSession(s) {
-  activeSessionId.value = s.sessionId
-  currentName.value = s.name
+async function loadMsgs(s) {
+  if (!s.sessionId) return
   try {
     const { data } = await http.get(`/ai/history/session/${s.sessionId}/messages`)
-    messages.value = []
+    s.msgs = []
     for (const m of data) {
-      messages.value.push({ role: 'user', raw: m.query })
-      messages.value.push({ role: 'assistant', raw: m.answer })
+      s.msgs.push({ role: 'user', raw: m.query })
+      s.msgs.push({ role: 'assistant', raw: m.answer })
     }
-    await nextTick()
-    initCharts()
-    scrollToBottom()
-  } catch (e) { /* 忽略 */ }
+  } catch (e) { s.msgs = [] }
 }
-function newSession() {
-  activeSessionId.value = null
-  currentName.value = ''
-  messages.value = []
-  queryText.value = ''
+async function switchSession(s) {
+  if (!asyncMode.value && isQuerying.value) return   // 同步模式查询中禁切（VOD 规则）
+  activeSessionId.value = s.id
+  if (s.msgs === null) { s.msgs = []; await loadMsgs(s) }
+  await nextTick()
+  initCharts()
+  scrollToBottom()
+  if (asyncMode.value) reconnectActiveTask()          // 异步模式：切回未完成任务自动重连
 }
 function startRename(s) {
-  editingId.value = s.sessionId
+  editingId.value = s.id
   editName.value = s.name
 }
 async function confirmRename() {
   if (editingId.value && editName.value.trim()) {
-    try {
-      await http.put(`/ai/history/session/${editingId.value}/name`, { name: editName.value.trim() })
-      if (activeSessionId.value === editingId.value) currentName.value = editName.value.trim()
-      await loadSessions()
-    } catch (e) { /* 忽略 */ }
+    const s = sessions.value.find(x => x.id === editingId.value)
+    if (s && editName.value.trim() !== s.name) {
+      s.name = editName.value.trim()
+      if (s.sessionId) {
+        try { await http.put(`/ai/history/session/${s.sessionId}/name`, { name: s.name }) } catch (e) { /* ignore */ }
+      }
+    }
   }
   editingId.value = null
 }
 function cancelRename() { editingId.value = null }
 async function delSession(s) {
   if (!confirm(`确认删除会话「${s.name}」？`)) return
-  try {
-    await http.delete(`/ai/history/session/${s.sessionId}`)
-    if (activeSessionId.value === s.sessionId) newSession()
-    await loadSessions()
-  } catch (e) { alert(e.response?.data?.message || '删除失败') }
+  clearStoredTaskId(s.id)
+  if (s.sessionId) {
+    try { await http.delete(`/ai/history/session/${s.sessionId}`) } catch (e) { /* ignore */ }
+  }
+  sessions.value = sessions.value.filter(x => x.id !== s.id)
+  if (activeSessionId.value === s.id) activeSessionId.value = sessions.value[0]?.id || null
+  await nextTick()
 }
 
 // ===== 模板 =====
@@ -210,7 +303,7 @@ async function loadTemplates() {
     const { data } = await http.get('/ai/templates')
     customTemplates.value = data.templates || []
     templateMax.value = data.max || 50
-  } catch (e) { /* 忽略 */ }
+  } catch (e) { /* ignore */ }
 }
 function applyTemplate() {
   const v = queryTemplate.value
@@ -240,32 +333,53 @@ async function delTemplate(t) {
   } catch (e) { alert(e.response?.data?.message || '删除失败') }
 }
 
-// ===== 发送与流式 =====
-async function send() {
-  if (busy.value || !queryText.value.trim()) return
-  const q = queryText.value
+// ===== 发送（统一入口：异步订阅 / 同步轮询）=====
+function send() {
+  if (isQuerying.value || !queryText.value.trim()) return
+  if (asyncMode.value) runQueryAsync()
+  else runQuerySync()
+}
+
+/** 模式 A：异步订阅 —— submit 后 SSE 订阅，可切换会话/窗口不中断，支持断线重连 */
+async function runQueryAsync() {
+  const text = queryText.value.trim()
+  let session = activeSession.value
+  if (!session) session = newSession()
+  if (session.msgs === null) session.msgs = []
   queryText.value = ''
+  // 首次查询用问题命名会话
+  if (session.name === '新对话') session.name = generateSessionName(text)
+  session.msgs.push({ role: 'user', raw: text })
   const aiMsg = { role: 'assistant', raw: '', streaming: true }
-  messages.value.push({ role: 'user', raw: q }, aiMsg)
-  busy.value = true
+  session.msgs.push(aiMsg)
   scrollToBottom()
   try {
-    const { data } = await http.post('/ai/chat/submit', { query: q, sessionId: activeSessionId.value || null })
-    await streamTask(data.taskId, aiMsg)
+    const { data } = await http.post('/ai/chat/submit', { query: text, sessionId: session.sessionId || null })
+    session.taskId = data.taskId
+    session.taskCompleted = false
+    setStoredTaskId(session.id, data.taskId)
+    await streamTask(session, aiMsg)
     await loadSessions()
-    if (!activeSessionId.value) { /* 新会话的 sessionId 由流中 session 事件携带 */ }
   } catch (e) {
     aiMsg.raw = `[请求失败] ${e.response?.data?.message || e.message}`
-  } finally {
     aiMsg.streaming = false
-    busy.value = false
+    session.taskCompleted = true
+    clearStoredTaskId(session.id)
   }
 }
-async function streamTask(taskId, aiMsg) {
-  const resp = await fetch(`/api/admin/ai/chat/task/${taskId}/stream`, {
+
+/** SSE 订阅任务输出：token 追加 → session 事件 → 终态清理（后端重放缓冲，可重连） */
+async function streamTask(session, aiMsg) {
+  const resp = await fetch(`/api/admin/ai/chat/task/${session.taskId}/stream`, {
     headers: { Authorization: `Bearer ${getToken()}` }
   })
-  if (!resp.ok || !resp.body) throw new Error(resp.status === 502 ? '服务暂时不可用（可能正在部署/重启），请稍后重试' : `HTTP ${resp.status}`)
+  if (!resp.ok || !resp.body) {
+    aiMsg.raw += `\n[连接失败] ${resp.status === 502 ? '服务暂时不可用（可能正在部署/重启），请稍后重试' : 'HTTP ' + resp.status}`
+    aiMsg.streaming = false
+    session.taskCompleted = true
+    clearStoredTaskId(session.id)
+    return
+  }
   const reader = resp.body.getReader()
   const dec = new TextDecoder()
   let buf = ''
@@ -284,19 +398,95 @@ async function streamTask(taskId, aiMsg) {
       try { ev = JSON.parse(payload) } catch (e) { continue }
       if (ev.type === 'token') {
         aiMsg.raw += ev.data
-        scrollToBottom()
+        if (activeSessionId.value === session.id) scrollToBottom()
       } else if (ev.type === 'session') {
-        activeSessionId.value = ev.data
+        session.sessionId = ev.data
       } else if (ev.type === 'error') {
         aiMsg.raw += `\n[错误] ${ev.data}`
-      } else if (ev.type === 'done') {
-        // 完成
       }
     }
   }
+  aiMsg.streaming = false
+  session.taskCompleted = true
+  clearStoredTaskId(session.id)
   await nextTick()
   initCharts()
   scrollToBottom()
+}
+
+/** 断线/切回重连：未完成任务重新订阅（后端重放已缓冲内容，不丢不重） */
+async function reconnectActiveTask() {
+  const s = activeSession.value
+  if (!s || !s.taskId || s.taskCompleted) return
+  if (s.msgs === null) s.msgs = []
+  let aiMsg = [...s.msgs].reverse().find(m => m.role === 'assistant' && m.streaming)
+  if (!aiMsg) {
+    aiMsg = { role: 'assistant', raw: '', streaming: true }
+    s.msgs.push(aiMsg)
+  }
+  await streamTask(s, aiMsg)
+}
+
+/** 模式 B：同步轮询 —— submit 后每 1.5s 轮询 status，实时显示部分结果 */
+async function runQuerySync() {
+  const text = queryText.value.trim()
+  let session = activeSession.value
+  if (!session) session = newSession()
+  if (session.msgs === null) session.msgs = []
+  queryText.value = ''
+  if (session.name === '新对话') session.name = generateSessionName(text)
+  session.msgs.push({ role: 'user', raw: text })
+  const aiMsg = { role: 'assistant', raw: '' }
+  session.msgs.push(aiMsg)
+  busy.value = true
+  try {
+    const { data } = await http.post('/ai/chat/submit', { query: text, sessionId: session.sessionId || null })
+    session.taskId = data.taskId
+    session.taskCompleted = false
+    await pollTaskStatus(session, aiMsg)
+  } catch (e) {
+    aiMsg.raw = `[请求失败] ${e.response?.data?.message || e.message}`
+    session.taskCompleted = true
+  } finally {
+    busy.value = false
+  }
+}
+async function pollTaskStatus(session, aiMsg) {
+  const POLL_INTERVAL = 1500
+  const poll = async (retry) => {
+    try {
+      const { data } = await http.get(`/ai/chat/task/${session.taskId}/status`)
+      if (data.status === 'running') {
+        if (data.result) {
+          aiMsg.raw = data.result
+          if (activeSessionId.value === session.id) scrollToBottom()
+        }
+        setTimeout(() => poll(0), POLL_INTERVAL)
+      } else if (data.status === 'done') {
+        aiMsg.raw = data.result || '（无返回内容）'
+        session.taskCompleted = true
+        clearStoredTaskId(session.id)
+        if (data.sessionId) session.sessionId = data.sessionId
+        await nextTick()
+        initCharts()
+        scrollToBottom()
+        loadSessions()
+      } else if (data.status === 'error') {
+        aiMsg.raw = '查询失败: ' + (data.error || '未知错误')
+        session.taskCompleted = true
+        clearStoredTaskId(session.id)
+      }
+    } catch (e) {
+      if (retry < 3) {
+        setTimeout(() => poll(retry + 1), POLL_INTERVAL)
+      } else {
+        aiMsg.raw = '查询失败: 网络错误'
+        session.taskCompleted = true
+        clearStoredTaskId(session.id)
+      }
+    }
+  }
+  poll(0)
 }
 
 // ===== 渲染 =====
@@ -323,7 +513,7 @@ async function initCharts() {
     const key = el.getAttribute('data-chart')
     if (!key || chartInstances[key]) continue
     const [mi, si] = key.split('-').map(Number)
-    const seg = renderParts(messages.value[mi]?.raw || '')[si]
+    const seg = renderParts(activeMsgs.value[mi]?.raw || '')[si]
     if (!seg || seg.type !== 'chart') continue
     const inst = echarts.init(el)
     inst.setOption(seg.json)
@@ -334,19 +524,20 @@ function scrollToBottom() {
   nextTick(() => { if (resultBox.value) resultBox.value.scrollTop = resultBox.value.scrollHeight })
 }
 async function copyAll() {
-  const text = messages.value.map(m => (m.role === 'user' ? '我: ' : 'AI: ') + m.raw).join('\n\n')
+  const text = activeMsgs.value.map(m => (m.role === 'user' ? '我: ' : 'AI: ') + m.raw).join('\n\n')
   try {
     await navigator.clipboard.writeText(text)
     copyOk.value = true
     setTimeout(() => { copyOk.value = false }, 1500)
-  } catch (e) { /* 忽略 */ }
+  } catch (e) { /* ignore */ }
 }
-watch(messages, () => initCharts(), { deep: true })
+watch(activeMsgs, () => initCharts(), { deep: true })
 
 // ===== 挂载 =====
-onMounted(() => {
+onMounted(async () => {
   loadTemplates()
-  loadSessions()
+  await loadSessions()
+  if (asyncMode.value) reconnectActiveTask()
 })
 </script>
 
@@ -375,12 +566,16 @@ onMounted(() => {
 .aiq-sh { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .aiq-sh h4 { font-size: 13px; }
 .aiq-slist { overflow-y: auto; flex: 1; }
-.aiq-sitem { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 12px; }
+.aiq-sitem { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 12px; }
 .aiq-sitem:hover { background: var(--bg-body); }
 .aiq-sitem.act { background: var(--primary-bg); color: var(--primary); }
+.aiq-sitem.running .aiq-sname { color: var(--primary); }
 .aiq-sname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .aiq-sinput { width: 100%; padding: 2px 6px; font-size: 12px; border: 1px solid var(--primary); border-radius: 4px; outline: none; }
-.aiq-scnt { font-size: 10px; color: var(--text-tertiary); flex-shrink: 0; }
+.aiq-srun { color: var(--success); font-size: 9px; flex-shrink: 0; animation: aiqblink 1.2s infinite; }
+.aiq-stime { font-size: 10px; color: var(--text-tertiary); flex-shrink: 0; }
+.aiq-sedit { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
+.aiq-sedit:hover { color: var(--primary); }
 .aiq-sdel { color: var(--danger); font-weight: 700; flex-shrink: 0; }
 .aiq-sempty { font-size: 12px; color: var(--text-tertiary); text-align: center; padding: 16px 0; }
 .aiq-right { flex: 1; background: #fff; border: 1px solid var(--border-color); border-radius: var(--radius-lg); box-shadow: var(--card-shadow); display: flex; flex-direction: column; min-width: 0; height: 100%; }

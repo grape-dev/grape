@@ -53,7 +53,7 @@ public class AiController {
         return resp;
     }
 
-    /** 查询任务状态 */
+    /** 查询任务状态（含累积输出文本，支持同步轮询实时显示部分结果） */
     @GetMapping("/chat/task/{taskId}/status")
     public Map<String, Object> status(@PathVariable String taskId) {
         AiTaskManager.AiTask task = taskManager.get(taskId);
@@ -61,6 +61,7 @@ public class AiController {
         resp.put("taskId", task.taskId);
         resp.put("status", task.status);
         resp.put("error", task.error);
+        resp.put("result", taskManager.resultText(task));
         resp.put("sessionId", task.hermesSessionId);
         resp.put("elapsedMs", System.currentTimeMillis() - task.createdAt);
         return resp;
