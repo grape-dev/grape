@@ -36,17 +36,30 @@ public class RuntimeDeviceService {
         this.healthService = healthService;
     }
 
-    public List<Map<String, Object>> listCredentials(String scope, String owner) {
+    public Map<String, Object> listCredentials(String scope, String owner, String status, String health) {
         List<RuntimeCredentialRo> credentials = credentialRepository.findAll();
         List<AgentRuntimeRo> runtimes = runtimeRepository.findAll();
         Map<Integer, Long> engineCountByCredential = runtimes.stream()
                 .filter(r -> r.getCredentialId() != null)
                 .collect(Collectors.groupingBy(AgentRuntimeRo::getCredentialId, Collectors.counting()));
-        return credentials.stream()
-                .filter(c -> !"revoked".equals(c.getStatus()))   // 已吊销凭据不展示、不参与查询
+
+        // 全量健康/状态分布统计（不随过滤变化，供页头徽章行）
+        Map<String, Long> stats = new LinkedHashMap<>();
+        for (String h : new String[]{"online", "recently_lost", "offline", "about_to_gc", "revoked"}) {
+            stats.put(h, 0L);
+        }
+        for (RuntimeCredentialRo c : credentials) {
+            String h = healthService.deviceHealth(c.getStatus(), c.getLastSeenAt());
+            stats.merge(h, 1L, Long::sum);
+        }
+
+        List<Map<String, Object>> list = credentials.stream()
                 .filter(c -> scope == null || scope.isBlank() || scope.equals(c.getScope()))
                 .filter(c -> owner == null || owner.isBlank()
                         || (c.getOwnerName() != null && c.getOwnerName().toLowerCase().contains(owner.toLowerCase())))
+                .filter(c -> status == null || status.isBlank() || status.equals(c.getStatus()))
+                .filter(c -> health == null || health.isBlank()
+                        || health.equals(healthService.deviceHealth(c.getStatus(), c.getLastSeenAt())))
                 .map(c -> {
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("id", c.getId());
@@ -64,6 +77,22 @@ public class RuntimeDeviceService {
                     return m;
                 })
                 .collect(Collectors.toList());
+
+        // 默认按最后心跳降序（最近活跃优先，null 排最后）
+        list.sort((a, b) -> {
+            String sa = (String) a.get("lastSeenAt");
+            String sb = (String) b.get("lastSeenAt");
+            if (sa == null && sb == null) return 0;
+            if (sa == null) return 1;
+            if (sb == null) return -1;
+            return sb.compareTo(sa);
+        });
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("content", list);
+        result.put("totalElements", list.size());
+        result.put("stats", stats);
+        return result;
     }
 
     public Map<String, Object> listDevices(String scope, String status, String health, String name, int page, int size) {

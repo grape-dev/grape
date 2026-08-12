@@ -72,9 +72,11 @@ public class RuntimeController {
     }
 
     @GetMapping("/credentials")
-    public List<Map<String, Object>> credentials(@RequestParam(required = false) String scope,
-                                                 @RequestParam(required = false) String owner) {
-        return deviceService.listCredentials(scope, owner);
+    public Map<String, Object> credentials(@RequestParam(required = false) String scope,
+                                           @RequestParam(required = false) String owner,
+                                           @RequestParam(required = false) String status,
+                                           @RequestParam(required = false) String health) {
+        return deviceService.listCredentials(scope, owner, status, health);
     }
 
     @PostMapping("/credentials")
