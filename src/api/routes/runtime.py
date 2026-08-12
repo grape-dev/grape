@@ -136,7 +136,12 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
 
 @router.post("/heartbeat")
 async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
-    """更新 runtime 在线态 / last_seen_at。"""
+    """更新 runtime 在线态 / last_seen_at。
+
+    归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
+    防止已吊销设备的旧 runtime id 被其它 active 凭据的心跳刷回 online
+    （revoke 只置 offline，不删行；无校验则吊销的设备行会被残留 agent 复活）。
+    """
     now = datetime.now(timezone.utc).isoformat()
     client_ip = _client_ip(request)
     with db_lock:
@@ -144,7 +149,8 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
         c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=? WHERE id=?", (now, client_ip, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
-            c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph})", [now] + body.runtime_ids)
+            c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
+                      [now] + body.runtime_ids + [credential_id])
         db.commit()
     return {"status": "ok"}
 
