@@ -1,9 +1,10 @@
-# Grape 运营管理台设计方案（v2.2 — 已定稿）
+# Grape 运营管理台设计方案（v2.3 — 已定稿并同步实现）
 
-> 日期：2026-08-11
+> 日期：2026-08-11（v2.3 同步实现：2026-08-12）
 > 状态：已评审定稿（D3/D4/D5/D6 均已决策；D5 待 DBA 执行 GRANT 时最终确认，prod 域名待最终确认）
 > v2 变更：运营管理台（admin）前后端独立部署、独立域名；代码位于 grape 仓库 admin/ 目录；
 > 与 grape 服务共享数据库但账号体系完全隔离。
+> v2.3 变更：前端布局与样式对齐 VOD（顶部导航上下结构 + VOD 样式体系）；认证 401 自动续期。
 > 参考：VOD-Developer-skills/vod-system（Vue3 前端 + RBAC 权限模型）；Grape runtime 子系统
 
 ## 1. 需求理解（v2）
@@ -13,7 +14,7 @@
 3. 代码位置：grape 仓库内新增 admin/ 文件夹，内含独立前端 + 独立后端
 4. 数据库：与 grape 共享同一个 MySQL（dev/prod 同构；本地开发用 docker MySQL 或直连 dev 服务器库）
 5. 账号体系：admin 的账号体系与 grape 账号体系完全隔离（独立用户表、独立登录、独立会话）
-6. 菜单：运行时管理（设备，核心）+ 系统管理（用户/角色权限）+ AI 菜单（AI 助手），按业务主次排序；一级菜单支持展开/收起
+6. 菜单：运行时管理（设备，核心）+ 系统管理（用户/角色权限）+ AI 菜单（AI 助手/AI 历史），按业务主次排序；顶部导航下拉式（对齐 VOD）
 
 ## 2. 目标架构
 
@@ -64,22 +65,24 @@ grape/
 │   │   │   └── dto/
 │   │   ├── src/main/resources/application.yml  # 共享库连接 + 端口 8081
 │   │   └── ai_hermes_query.py #   AI 助手代理（移植 VOD：spawn hermes CLI，流式 JSON 事件）
-│   ├── frontend/             #   独立前端（Vue3 + Vite，对齐 VOD）
+│   ├── frontend/             #   独立前端（Vue3 + Vite，布局与样式对齐 VOD）
 │   │   ├── src/
 │   │   │   ├── views/
-│   │   │   │   ├── Login.vue / Register.vue
+│   │   │   │   ├── Login.vue
 │   │   │   │   ├── AiAssistant.vue      (AI 菜单：AI 助手聊天页，流式+图表)
+│   │   │   │   ├── ChatHistory.vue      (AI 菜单：AI 历史)
 │   │   │   │   ├── UserManage.vue       (系统管理)
 │   │   │   │   ├── RolePermissionConfig.vue  (系统管理)
-│   │   │   │   ├── DeviceManage.vue     (运行时管理：设备管理/详情/凭据)
-│   │   │   │   └── EngineOverview.vue   (运行时管理：引擎总览)
-│   │   │   ├── router/  api/  components/
-│   │   │   └── utils/auth.js            (JWT 存取)
+│   │   │   │   ├── DeviceManage.vue     (运行时管理：设备管理/详情抽屉/回收)
+│   │   │   │   ├── EngineManage.vue     (运行时管理：引擎管理/统计)
+│   │   │   │   └── CredentialManage.vue (运行时管理：凭据签发/吊销)
+│   │   │   ├── router/  api/  utils/
+│   │   │   └── utils/auth.js            (JWT/refresh token 存取)
 │   │   └── vite.config.js               (dev proxy → admin 后端)
 │   └── deploy/               #   独立部署
-│       ├── nginx-admin.conf  #   admin 域名 → 前端静态 + /api 反代 admin 后端
-│       ├── admin.service     #   systemd：admin 后端 java -jar（Spring Boot）
-│       └── Dockerfile        #   （可选）容器化
+│       ├── nginx-grape-admin.conf  # 80 端口 → 前端静态 + /api 反代 admin 后端
+│       ├── admin-backend.service   # systemd：admin 后端 java -jar（Spring Boot）
+│       └── deploy.sh               # 一键部署脚本
 └── docs/                     # 设计方案归档（可选）
 ```
 
@@ -101,23 +104,28 @@ grape/
 
 ## 5. 菜单结构（admin 内）
 
-```
+布局：顶部导航（上下结构，对齐 VOD：一级菜单 + 下拉二级 + 移动端汉堡抽屉）。
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│ 🍇 Grape Admin │ 🖥️ 运行时管理▾ │ 🤖 AI▾ │ ⚙️ 系统管理▾ │  👤 退出 │
+└──────────────────────────────────────────────────────────┘
 admin 运营管理台
 ├── 1. 运行时管理（设备）   ★ 核心业务
-│   ├── 设备管理        device 维度：状态/心跳/IP/凭据/引擎数/任务数；about_to_gc 一键回收
-│   ├── 设备详情        单设备：引擎表 + 任务表 + 恢复孤儿 + 吊销凭据 + 清理引擎/任务
-│   ├── 引擎总览        跨设备引擎视图：全部引擎分布/版本/健康度（opencode/codearts/...）
+│   ├── 设备管理        设备维度：状态/心跳/IP/凭据/引擎数/任务数；详情抽屉（引擎+任务）；about_to_gc 一键回收
+│   ├── 引擎管理        跨设备引擎视图：类型统计卡 + 列表/卡片 + 范围过滤
 │   └── 凭据管理        签发 rta_ token（一次性明文展示）、吊销
 ├── 2. AI                辅助能力
-│   └── AI 助手          对话式运营助手（移植 VOD：admin 后端 → hermes CLI 流式，会话续接）
+│   ├── AI 助手          对话式运营助手（admin 后端 → hermes CLI 流式，会话续接）
+│   └── AI 历史          历史问答检索/详情/继续对话/删除
 └── 3. 系统管理          配置类（惯例放最后）
     ├── 用户管理        admin_users CRUD + 绑角色
     └── 角色权限配置    角色 CRUD + 菜单权限树（保护角色 SUPER_ADMIN/VIEWER）
 ```
 
 设计说明：引擎（agent_runtimes）由设备注册产生，带 credential_id，本质是设备资产 →
-归属运行时管理（设备详情内嵌引擎表 + 引擎总览跨设备视图）；AI 菜单只保留 AI 助手
-（对话式运营能力，VOD 的 hermes CLI 模式，不需要模型管理/Provider 配置）。
+归属运行时管理（设备详情抽屉内嵌引擎/任务表 + 引擎管理跨设备视图）；设备详情为抽屉非独立页；
+AI 菜单含助手 + 历史两项；前端布局/样式对齐 VOD（顶部导航 + VOD 样式体系）。
 
 ## 6. 运行时管理（设备）数据链路
 
@@ -138,7 +146,8 @@ admin 运营管理台
 
 - 技术栈：Spring Boot 2.7.18 + Spring Web + Spring Data JPA + MySQL Connector + jjwt + BCrypt + Flyway（与 VOD pom 对齐）
 - 分层：controller → service → repository(JPA) → entity（对齐 VOD vod-system/backend 结构）
-- 认证：JWT（JwtAuthenticationFilter + JwtUtil + TokenBlacklist，对齐 VOD SecurityConfig）
+- 认证：JWT（JwtAuthInterceptor + JwtUtil + TokenBlacklist）；access 2h / refresh 7d；
+  前端 401 自动调 /auth/refresh 续期并重放原请求，refresh 失败才清登录态跳登录
 - 权限：RbacHandlerInterceptor + RbacPermissionLoader（对齐 VOD），菜单权限校验 403
 - 共享库连接：application.yml 配置同一 MySQL（VOD 式 jdbc:mysql://...vod_db）；JPA 实体映射
   共享表（agent_runtimes / agent_tasks / runtime_credentials / meta），只读实体 + 受控写服务
@@ -152,12 +161,19 @@ admin 运营管理台
 - dev 环境（D4 连带影响）：Spring Boot/JPA 对 SQLite 支持差 → dev 直接用同一 MySQL
   （本地 docker 起一个，或直连 dev 服务器 MySQL），弃用 SQLite 双进程方案
 
-## 8. admin 前端设计（Vue3 + Vite）
+## 8. admin 前端设计（Vue3 + Vite，对齐 VOD）
 
-- 直接借鉴 VOD：Login/Register/UserManage/RolePermissionConfig/AIAssistant 页面结构与权限树组件
-- 新增 DeviceManage.vue（设备管理）：设备卡片/表格 + 健康徽章（样式对齐 grape runtimes.js）+ 详情抽屉 + 凭据签发对话框
+- 布局：顶部导航上下结构（对齐 VOD App.vue：topnav 一级菜单 + 下拉二级 + 移动端汉堡抽屉）；
+  菜单数据动态来自 GET /api/admin/menus（按登录用户权限返回，前端映射为导航结构）
+- 样式体系：整体对齐 VOD main.css（--primary #006eff 设计令牌、浅色卡片风、.card/.vod-table/
+  .btn/.status-tag/.pagination-bar 通用组件类）；设备卡片/凭据 token/聊天流等 admin 特有组件
+  按 VOD 风格补充
+- 页面：Login / DeviceManage / EngineManage / CredentialManage / AiAssistant / ChatHistory /
+  UserManage / RolePermissionConfig（对齐 VOD 页面结构）
 - vite dev proxy：/api → admin 后端；生产构建产物由 nginx 静态托管
-- axios 封装：JWT 注入、401 跳登录、x-new-token 续期（对齐 VOD api/index.js）
+- axios 封装：JWT 注入；401 先调 /auth/refresh 续期并重放原请求（并发只 refresh 一次），
+  refresh 也失败才清 token 跳登录；登录后进入主页面时兜底补拉菜单（App 组件复用，
+  onMounted 不重触发）
 
 ## 9. 部署拓扑
 
