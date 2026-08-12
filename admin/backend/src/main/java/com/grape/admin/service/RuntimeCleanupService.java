@@ -88,16 +88,27 @@ public class RuntimeCleanupService {
                 "runtimes=" + runtimeIds.size() + ", 物理删除不可逆");
     }
 
+    /**
+     * 删除引擎（仅 offline 可删，防误删在线引擎）：
+     * 进行中任务护栏 → 清 agent_type 悬空引用 → 物理删除。
+     */
     public void deleteEngine(Integer runtimeId, String operator) {
+        String status = jdbc.query("SELECT status FROM agent_runtimes WHERE id = ?",
+                rs -> rs.next() ? rs.getString(1) : null, runtimeId);
+        if (status == null) {
+            throw new NotFoundException("引擎不存在: " + runtimeId);
+        }
+        if (!"offline".equals(status)) {
+            throw new BizException("仅离线（offline）引擎可删除");
+        }
         List<Integer> ids = List.of(runtimeId);
         if (countActiveTasks(ids) > 0) {
             throw new BizException("引擎存在进行中任务，拒绝删除");
         }
-        int n = jdbc.update("DELETE FROM agent_runtimes WHERE id = ?", runtimeId);
-        if (n == 0) {
-            throw new NotFoundException("引擎不存在: " + runtimeId);
-        }
-        auditService.record(null, operator, "engine.delete", "runtime:" + runtimeId, "");
+        // 悬空引用：智能体默认引擎指向被删引擎 → 置 0
+        jdbc.update("UPDATE agent_type SET default_runtime_id = 0 WHERE default_runtime_id = ?", runtimeId);
+        jdbc.update("DELETE FROM agent_runtimes WHERE id = ?", runtimeId);
+        auditService.record(null, operator, "engine.delete", "runtime:" + runtimeId, "offline 清理");
     }
 
     public void cleanupTasks(List<String> statuses, String before, String operator) {

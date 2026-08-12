@@ -69,7 +69,7 @@
               <td><span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
               <td class="t2">{{ e.status }}</td>
               <td class="t3">{{ formatTime(e.lastSeenAt) }}</td>
-              <td><button class="btn btn-sm" @click="remove(e)">删除</button></td>
+              <td><button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button></td>
             </tr>
           </tbody>
         </table>
@@ -94,7 +94,7 @@
             <div><span class="t3" style="display:inline-block;min-width:46px">归属/范围</span> {{ e.ownerId || '—' }} <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span></div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
-            <button class="btn btn-sm" @click="remove(e)">删除</button>
+            <button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button>
           </div>
         </div>
       </div>
@@ -108,6 +108,27 @@
         </select>
         <button class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
         <button class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
+      </div>
+    </div>
+
+    <!-- Toast 反馈 -->
+    <div v-if="toastVisible" class="toast-message" :class="toastType">{{ toastMessage }}</div>
+
+    <!-- 删除引擎确认弹窗 -->
+    <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <span class="modal-icon">🗑️</span>
+          <span class="modal-title">删除引擎</span>
+        </div>
+        <div class="modal-body">
+          确认删除离线引擎 <b>{{ deleteTarget.displayName || deleteTarget.name }}</b>（id={{ deleteTarget.id }}）？<br />
+          删除后若其 worker 重新上线会重新注册（新 id）。
+        </div>
+        <div class="modal-footer">
+          <button class="btn" @click="deleteTarget = null">取消</button>
+          <button class="btn btn-danger" @click="confirmDelete">确认删除</button>
+        </div>
       </div>
     </div>
   </div>
@@ -132,6 +153,12 @@ const deviceOptions = ref([])
 const sizeOptions = [10, 20, 50]
 const size = ref(10)
 const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
+// toast + 删除弹窗状态
+const toastVisible = ref(false)
+const toastMessage = ref('')
+const toastType = ref('success')
+let toastTimer = null
+const deleteTarget = ref(null)
 
 const BADGE = {
   online: { color: 'var(--success)', bg: '#dcfce7', label: '在线' },
@@ -190,12 +217,26 @@ async function load() {
 }
 function search() { page.value = 0; load() }
 function reset() { scope.value = ''; type.value = ''; device.value = ''; health.value = ''; page.value = 0; load() }
-async function remove(e) {
-  if (!confirm(`确认删除引擎 ${e.displayName || e.name}（id=${e.id}）？`)) return
+function showToast(msg, type = 'success') {
+  toastMessage.value = msg
+  toastType.value = type
+  toastVisible.value = true
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toastVisible.value = false }, 2500)
+}
+function openDelete(e) {
+  deleteTarget.value = e
+}
+async function confirmDelete() {
+  const e = deleteTarget.value
   try {
     await http.delete(`/engines/${e.id}`)
+    showToast(`引擎 ${e.displayName || e.name} 已删除`)
+    deleteTarget.value = null
     load()
-  } catch (err) { alert(err.response?.data?.message || '删除失败') }
+  } catch (err) {
+    showToast(err.response?.data?.message || '删除失败', 'error')
+  }
 }
 onMounted(() => { load(); loadDevices() })
 </script>
