@@ -173,7 +173,8 @@ public class RuntimeDeviceService {
         return result;
     }
 
-    public Map<String, Object> deviceDetail(Integer credentialId, int taskPage, int taskSize, Integer engineId) {
+    public Map<String, Object> deviceDetail(Integer credentialId, int taskPage, int taskSize, Integer engineId,
+                                            String taskStatus, String taskSkill, String taskType, String sortOrder) {
         RuntimeCredentialRo c = credentialRepository.findById(credentialId)
                 .orElseThrow(() -> new NotFoundException("设备不存在: " + credentialId));
         List<AgentRuntimeRo> engines = runtimeRepository.findByCredentialId(credentialId);
@@ -203,12 +204,28 @@ public class RuntimeDeviceService {
         }).collect(Collectors.toList());
 
         Set<Integer> runtimeIds = engines.stream().map(AgentRuntimeRo::getId).collect(Collectors.toSet());
-        List<AgentTaskRo> allTasks = runtimeIds.isEmpty() ? List.of()
+        List<AgentTaskRo> engineTasks = runtimeIds.isEmpty() ? List.of()
                 : taskRepository.findAll().stream()
                         .filter(t -> t.getRuntimeId() != null && runtimeIds.contains(t.getRuntimeId()))
                         .filter(t -> engineId == null || engineId.equals(t.getRuntimeId()))   // 按引擎过滤关联任务
-                        .sorted((a, b) -> String.valueOf(b.getCreatedAt()).compareTo(String.valueOf(a.getCreatedAt())))
                         .collect(Collectors.toList());
+
+        // 筛选选项统计（基于引擎过滤后的全量任务，不随筛选/分页变化，对齐 VOD 列头计数语义）
+        Map<String, Object> taskFilterOptions = new LinkedHashMap<>();
+        taskFilterOptions.put("status", countBy(engineTasks, AgentTaskRo::getStatus));
+        taskFilterOptions.put("skill", countBy(engineTasks, AgentTaskRo::getSkill));
+        taskFilterOptions.put("agentType", countBy(engineTasks, AgentTaskRo::getAgentType));
+
+        List<AgentTaskRo> allTasks = engineTasks.stream()
+                .filter(t -> taskStatus == null || taskStatus.isBlank() || taskStatus.equals(t.getStatus()))
+                .filter(t -> taskType == null || taskType.isBlank() || taskType.equals(t.getAgentType()))
+                .filter(t -> taskSkill == null || taskSkill.isBlank()
+                        || (t.getSkill() != null && t.getSkill().toLowerCase().contains(taskSkill.toLowerCase())))
+                .sorted((a, b) -> {
+                    int cmp = String.valueOf(b.getCreatedAt()).compareTo(String.valueOf(a.getCreatedAt()));
+                    return "asc".equalsIgnoreCase(sortOrder) ? -cmp : cmp;   // 默认 desc=最近在前
+                })
+                .collect(Collectors.toList());
         int total = allTasks.size();
         int from = Math.min(taskPage * taskSize, total);
         int to = Math.min(from + taskSize, total);
@@ -218,10 +235,18 @@ public class RuntimeDeviceService {
         taskPageObj.put("totalPages", taskSize > 0 ? (total + taskSize - 1) / taskSize : 0);
         taskPageObj.put("page", taskPage);
         taskPageObj.put("size", taskSize);
+        taskPageObj.put("filterOptions", taskFilterOptions);
 
         device.put("engines", engineList);
         device.put("tasks", taskPageObj);
         return device;
+    }
+
+    /** 按字段分组计数（null 归入空串），供列头筛选选项展示 */
+    private Map<String, Long> countBy(List<AgentTaskRo> tasks, java.util.function.Function<AgentTaskRo, String> f) {
+        return tasks.stream()
+                .map(t -> f.apply(t) == null ? "" : f.apply(t))
+                .collect(Collectors.groupingBy(s -> s, LinkedHashMap::new, Collectors.counting()));
     }
 
     public Map<String, Object> engineList(String scope, String type, String device, String status, int page, int size) {

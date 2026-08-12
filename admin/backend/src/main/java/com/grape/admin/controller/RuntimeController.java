@@ -50,8 +50,12 @@ public class RuntimeController {
     public Map<String, Object> deviceDetail(@PathVariable Integer cid,
                                             @RequestParam(defaultValue = "0") int taskPage,
                                             @RequestParam(defaultValue = "10") int taskSize,
-                                            @RequestParam(required = false) Integer engineId) {
-        return deviceService.deviceDetail(cid, taskPage, taskSize, engineId);
+                                            @RequestParam(required = false) Integer engineId,
+                                            @RequestParam(required = false) String taskStatus,
+                                            @RequestParam(required = false) String taskSkill,
+                                            @RequestParam(required = false) String taskType,
+                                            @RequestParam(required = false) String sortOrder) {
+        return deviceService.deviceDetail(cid, taskPage, taskSize, engineId, taskStatus, taskSkill, taskType, sortOrder);
     }
 
     @GetMapping("/engines")

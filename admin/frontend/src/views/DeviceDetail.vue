@@ -47,16 +47,53 @@
 
       <!-- 关联任务 -->
       <div class="card" style="margin-top:16px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
-          <h5 style="margin:0">关联任务（{{ detail.tasks?.totalElements ?? 0 }} 条）</h5>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap">
+          <h5 style="margin:0">关联任务（{{ detail.tasks?.totalElements ?? 0 }} 条）<span style="font-size:13px;color:#8896a7;font-weight:400" v-if="filterCount">（已筛选 {{ filterCount }} 条）</span></h5>
           <select v-model="selectedEngineId" class="page-size-select" style="max-width:260px;margin-left:auto" @change="onEngineChange">
             <option :value="null">全部引擎</option>
             <option v-for="e in detail.engines || []" :key="e.id" :value="e.id">{{ e.name }}</option>
           </select>
+          <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
         </div>
         <div style="overflow-x:auto">
           <table class="vod-table">
-            <thead><tr><th>ID</th><th>类型</th><th>技能</th><th>状态</th><th>创建时间</th></tr></thead>
+            <thead><tr>
+              <th style="width:70px">ID</th>
+              <th class="filterable-th">
+                <span class="th-content" @click="toggleFilter('agentType')">
+                  类型 <span class="filter-arrow" :class="{ active: taskType }">▼</span>
+                </span>
+                <div class="col-filter-drop" v-if="filterDropdown === 'agentType'" @click.stop>
+                  <div class="col-filter-opt" :class="{ active: !taskType }" @click="setFilter('agentType', '')">全部</div>
+                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('agentType')" :key="v" :class="{ active: taskType === v }" @click="setFilter('agentType', v)">{{ v || '(空)' }} ({{ cnt }})</div>
+                </div>
+              </th>
+              <th class="filterable-th">
+                <span class="th-content" @click="toggleFilter('skill')">
+                  技能 <span class="filter-arrow" :class="{ active: taskSkill }">▼</span>
+                </span>
+                <div class="col-filter-drop" v-if="filterDropdown === 'skill'" @click.stop>
+                  <div class="col-filter-opt" :class="{ active: !taskSkill }" @click="setFilter('skill', '')">全部</div>
+                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('skill')" :key="v" :class="{ active: taskSkill === v }" @click="setFilter('skill', v)">{{ v || '(空)' }} ({{ cnt }})</div>
+                </div>
+              </th>
+              <th class="filterable-th">
+                <span class="th-content" @click="toggleFilter('status')">
+                  状态 <span class="filter-arrow" :class="{ active: taskStatus }">▼</span>
+                </span>
+                <div class="col-filter-drop" v-if="filterDropdown === 'status'" @click.stop>
+                  <div class="col-filter-opt" :class="{ active: !taskStatus }" @click="setFilter('status', '')">全部</div>
+                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
+                </div>
+              </th>
+              <th class="sortable-th" @click="toggleSort">
+                创建时间
+                <span class="sort-arrows">
+                  <span class="sort-dir" :class="{ active: sortOrder === 'asc' }">▲</span>
+                  <span class="sort-dir" :class="{ active: sortOrder === 'desc' }">▼</span>
+                </span>
+              </th>
+            </tr></thead>
             <tbody>
               <tr v-for="t in detail.tasks?.content || []" :key="t.id">
                 <td class="t3">{{ t.id }}</td>
@@ -84,7 +121,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../api'
 
@@ -94,6 +131,14 @@ const selectedEngineId = ref(null)
 const taskPage = ref(0)
 const taskSize = ref(10)
 const sizeOptions = [10, 20, 50]
+// 列头筛选/排序状态（对齐 VOD 分析结果报表）
+const taskStatus = ref('')
+const taskSkill = ref('')
+const taskType = ref('')
+const sortOrder = ref('desc')
+const filterDropdown = ref('')
+const filterCount = ref(0)
+const hasAnyFilter = computed(() => !!(taskStatus.value || taskSkill.value || taskType.value))
 
 const BADGE = {
   online: { color: 'var(--success)', bg: '#dcfce7', label: '在线' },
@@ -122,14 +167,47 @@ function formatTime(ts) {
 }
 
 async function load() {
-  const params = { taskPage: taskPage.value, taskSize: taskSize.value }
+  const params = { taskPage: taskPage.value, taskSize: taskSize.value, sortOrder: sortOrder.value }
   if (selectedEngineId.value) params.engineId = selectedEngineId.value
+  if (taskStatus.value) params.taskStatus = taskStatus.value
+  if (taskSkill.value) params.taskSkill = taskSkill.value
+  if (taskType.value) params.taskType = taskType.value
   const { data } = await http.get(`/devices/${route.params.id}`, { params })
   detail.value = data
+  // 「已筛选 N 条」：有列头筛选时显示过滤后总数，无筛选不显示（对齐 VOD）
+  filterCount.value = (taskStatus.value || taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
 }
 function onEngineChange() {
   taskPage.value = 0
   load()
+}
+// 列头筛选（对齐 VOD）：展开下拉/切换筛选/清空
+function toggleFilter(col) {
+  filterDropdown.value = filterDropdown.value === col ? '' : col
+}
+function setFilter(col, v) {
+  if (col === 'status') taskStatus.value = v
+  else if (col === 'skill') taskSkill.value = v
+  else if (col === 'agentType') taskType.value = v
+  filterDropdown.value = ''
+  taskPage.value = 0
+  load()
+}
+function clearFilters() {
+  taskStatus.value = ''
+  taskSkill.value = ''
+  taskType.value = ''
+  taskPage.value = 0
+  load()
+}
+// 排序切换：desc → asc → desc
+function toggleSort() {
+  sortOrder.value = sortOrder.value === 'desc' ? 'asc' : 'desc'
+  taskPage.value = 0
+  load()
+}
+function filterOptions(col) {
+  return detail.value?.tasks?.filterOptions?.[col] || {}
 }
 load()
 </script>
@@ -148,4 +226,37 @@ load()
 @media (max-width: 900px) {
   .detail-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ===== 列头筛选/排序（对齐 VOD 分析结果报表） ===== */
+.filterable-th, .sortable-th { position: relative; cursor: pointer; user-select: none; }
+.th-content { display: inline-flex; align-items: center; gap: 4px; }
+.filter-arrow { font-size: 9px; color: var(--text-tertiary); }
+.filter-arrow.active { color: var(--primary); }
+.sort-arrows { display: inline-flex; flex-direction: column; line-height: 1; margin-left: 3px; vertical-align: middle; }
+.sort-dir { font-size: 8px; color: var(--text-tertiary); }
+.sort-dir.active { color: var(--primary); }
+.col-filter-drop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  min-width: 150px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+  padding: 6px;
+}
+.col-filter-opt {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.col-filter-opt:hover { background: #f5f7fa; }
+.col-filter-opt.active { background: var(--primary-bg); color: var(--primary); font-weight: 500; }
 </style>
