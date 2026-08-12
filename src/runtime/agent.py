@@ -165,29 +165,34 @@ async def _execute_task(client, task):
     batch = []
     try:
         from src.runtime.executor import stream_runtime
-        _agent_label = f"[Agent:{task.get('agent_type') or ''}|repo:{task.get('repo_key') or ''}{_engine_tag}]"
-        # 逐步日志前缀：seq + 非空的 issue/agent/repo/engine，便于在 journalctl 按事件/issue/仓库定位
-        _esq_parts = [f"seq={task.get('event_seq') or '?'}"]
-        _issue_num = (task.get("issue_id") or "").strip().lstrip("#")
-        if _issue_num and _issue_num != "0":
-            _esq_parts.append(f"issue:#{_issue_num}")
-        _agent_type = task.get("agent_type") or ""
-        if _agent_type:
-            _esq_parts.append(f"agent:{_agent_type}")
-        _repo_key = task.get("repo_key") or ""
-        if _repo_key:
-            _esq_parts.append(f"repo:{_repo_key}")
-        if engine_name:
-            _esq_parts.append(f"engine:{engine_name}")
-        _esq = "|".join(_esq_parts)
-        for evt_type, data in stream_runtime(
-            prompt, cwd, session_id=task.get("runtime_session_id") or "",
-            event_type=task.get("event_type") or "",
-            backend_name="opencode",
-            account=task.get("account") or "", user_id=task.get("user_id") or 0,
-            env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
-            agent_label=_agent_label,
-        ):
+
+        # 同步生成器在线程中消费，通过 asyncio.Queue 传递事件到异步侧，
+        # 避免同步 stream_runtime 阻塞事件循环（time.sleep / readline 等）导致 heartbeat 无法执行
+        _evt_queue = asyncio.Queue()
+
+        def _sync_consumer():
+            try:
+                for evt in stream_runtime(
+                    prompt, cwd, session_id=task.get("runtime_session_id") or "",
+                    event_type=task.get("event_type") or "",
+                    backend_name="opencode",
+                    account=task.get("account") or "", user_id=task.get("user_id") or 0,
+                    env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
+                ):
+                    _evt_queue.put_nowait(evt)
+            except Exception as e:
+                _evt_queue.put_nowait(("error", str(e)))
+            finally:
+                _evt_queue.put_nowait(None)  # sentinel: consumer finished
+
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _sync_consumer)
+
+        while True:
+            evt = await _evt_queue.get()
+            if evt is None:
+                break
+            evt_type, data = evt
             if evt_type == "done":
                 done = data
                 continue
@@ -206,9 +211,6 @@ async def _execute_task(client, task):
             if len(batch) >= 50:
                 await client.report_messages(tid, batch)
                 batch = []
-            # 每次迭代让出事件循环，避免同步生成器迭代阻塞 claim/heartbeat
-            # （见 worker-event-loop-block-rootcause.md 方案 1）
-            await asyncio.sleep(0)
         if batch:
             await client.report_messages(tid, batch)
         if done:
