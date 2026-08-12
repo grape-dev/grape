@@ -1,4 +1,5 @@
 """Agent 路由：详情、配置、类型元数据"""
+import json
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
@@ -80,7 +81,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, runtime_id, skill, skill_id, repo_gitcode_token, runtime_session_id, status, last_active_at, im_app_id, enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                "SELECT id, runtime_id, skill, skill_id, repo_gitcode_token, runtime_session_id, status, last_active_at, im_app_id, enable, subscribe_events FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
                 (repo_key, name)
             )
             row = c.fetchone()
@@ -99,10 +100,16 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
                             _dev = _d[0] if _d else ""
                         from src.runtime.instances import instance_name
                         instance_name_val = instance_name(brow[0], _dev or "", brow[1] or 0)
+                _sub_evts = []
+                try:
+                    _sub_evts = json.loads(row[10] or "[]") if row[10] else []
+                except Exception:
+                    _sub_evts = []
                 session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_gitcode_token": row[4] or "", "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
                                "im_app_id": row[8] or "",
                                "instance_name": instance_name_val,
-                               "enable": bool(row[9]) if row[9] is not None else True}
+                               "enable": bool(row[9]) if row[9] is not None else True,
+                               "subscribe_events": _sub_evts}
         except Exception:
             pass
 
@@ -181,6 +188,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         "skill_id": session_data.get("skill_id", 0),
         "skill_scope": skill_scope,
         "repo_gitcode_token": session_data.get("repo_gitcode_token", ""),
+        "subscribe_events": session_data.get("subscribe_events", []),
         "status": session_data.get("status", "idle"),
         "last_active": session_data.get("last_active_at", ""),
         "metrics": {
@@ -201,6 +209,7 @@ class AgentConfig(BaseModel):
     skill: str = ""
     skill_scope: str = ""  # official / repo（前端下拉回显同名技能时精确匹配）
     enable: bool | None = None  # Agent 启用开关（Dashboard 切换；None=不修改）
+    subscribe_events: list | None = None  # 仓库级事件订阅 [{"event_type","branch"}]；None=不修改
     # VOD IM 配置（仅在 name=="vod" 时生效）
     im_app_id: str = ""
     im_app_secret: str = ""
@@ -335,12 +344,13 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                 from src.api.session_store import get_agent_type_enable
                 _enable = get_agent_type_enable(name)
             c.execute(
-                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider, enable) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?)",
+                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider, enable, subscribe_events) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?,?)",
                 (session_id, repo_key, name, runtime_id, body.skill, skill_id, repo_token, "idle",
                  body.im_app_id if name == "vod" else "",
                  app_secret if name == "vod" and app_secret else "",
                  "feishu" if name == "vod" and body.im_app_id else "",
-                 _enable)
+                 _enable,
+                 json.dumps(body.subscribe_events, ensure_ascii=False) if body.subscribe_events is not None else "[]")
             )
             db.commit()
         except Exception as e:

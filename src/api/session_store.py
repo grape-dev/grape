@@ -242,11 +242,19 @@ def ensure_default_agent_sessions(repo_key: str):
                 from src.user.db import resolve_skill_id
                 _skill_id = resolve_skill_id(_sk)
                 _enable = get_agent_type_enable(_at)
+                # 保留已存在的订阅配置（INSERT OR REPLACE 会整体覆盖行，先读出旧值再回写）
+                _sub_evts = "[]"
+                try:
+                    _row0 = c.execute("SELECT subscribe_events FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, _at)).fetchone()
+                    if _row0 and _row0[0]:
+                        _sub_evts = _row0[0]
+                except Exception:
+                    pass
                 c.execute(
-                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider, enable) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?)",
+                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider, enable, subscribe_events) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?,?)",
                     (_sid, repo_key, _at, _default_runtime_id, _sk, _skill_id, _token, "idle",
                      _im_app_id if _at == "vod" else "", _im_app_secret if _at == "vod" else "",
-                     "feishu", _enable)
+                     "feishu", _enable, _sub_evts)
                 )
             except Exception as e:
                 log.warning(f"Failed to create session for {_at}: {e}")

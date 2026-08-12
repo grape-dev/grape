@@ -181,6 +181,61 @@ def resolve_actor(payload: dict, evt: dict) -> str:
     return "unknown"
 
 
+def resolve_pr_target_branch(evt: dict) -> str:
+    """从 PR 事件提取合入目标分支（GitCode object_attributes.target_branch / GitHub base.ref）。
+
+    归一化的 branch 仅 push 事件有值；PR 合入事件的目标分支需从 payload 补充。
+    见 agent-event-subscription-design.md §五。
+    """
+    branch = evt.get("branch") or ""
+    if branch:
+        return branch
+    payload = evt.get("payload", {}) or {}
+    obj = payload.get("object_attributes", {}) or {}
+    pr_obj = payload.get("pull_request", {}) or payload.get("merge_request", {}) or {}
+    _base = pr_obj.get("base", {}) or {}
+    _b = obj.get("target_branch", "") or _base.get("ref", "")
+    return str(_b or "").strip()
+
+
+def _match_repo_subscription(repo_key: str, event_type: str, branch: str) -> str:
+    """仓库级事件订阅兜底路由（agent-event-subscription-design.md §六）。
+
+    读取 devops_agent_session.subscribe_events（JSON 列表，元素 {event_type, branch}），
+    匹配 event_type 且（订阅 branch 为空=不限分支 / 等于事件分支）→ 返回 agent_type。
+    未命中返回空。仅当主路由结果为空时由 run_pipeline 调用。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT agent_type, subscribe_events FROM devops_agent_session WHERE repo_key=? AND subscribe_events IS NOT NULL AND subscribe_events!='' AND subscribe_events!='[]'",
+                (repo_key,)
+            )
+            for row in c.fetchall():
+                _agent, _raw = row[0], row[1]
+                try:
+                    subs = json.loads(_raw or "[]")
+                except Exception:
+                    continue
+                if not isinstance(subs, list):
+                    continue
+                for s in subs:
+                    if not isinstance(s, dict):
+                        continue
+                    if s.get("event_type") != event_type:
+                        continue
+                    # 分支：空=不限；逗号分隔多分支（前端输入），精确匹配任一
+                    _sb = str(s.get("branch", "") or "").replace("，", ",").strip()
+                    _subs = [b.strip() for b in _sb.split(",") if b.strip()] if _sb else []
+                    if _subs and branch not in _subs:
+                        continue
+                    return _agent
+    except Exception as e:
+        log.warning(f"Pipeline: repo subscription match failed: {e}")
+    return ""
+
+
 def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                  repo_key_override: str = "") -> dict:
     """事件处理管道入口：归一化 → 路由 → 存储 → 返回结果"""
@@ -251,6 +306,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _default = NON_ISSUE_EVENT_ROUTE.get(event_type, "")
         agent_type = _resolve_issue_stage_agent(repo_key, event_type, evt.get("payload", {}) or {}, _default)
         log.info(f"Pipeline: routing result -> agent_type='{agent_type}'")
+    if not agent_type:
+        # 仓库级事件订阅兜底（agent-event-subscription-design.md §六）：主路由为空时，
+        # 命中 devops_agent_session.subscribe_events（如 SRE 订阅 PR 合入 + 分支）才触发。
+        _pr_branch = resolve_pr_target_branch(evt)
+        if _pr_branch and not evt.get("branch"):
+            evt["branch"] = _pr_branch  # 回填，供摘要/event 展示（PR 合入目标分支）
+        _sub_agent = _match_repo_subscription(repo_key, event_type, _pr_branch)
+        if _sub_agent:
+            agent_type = _sub_agent
+            log.info(f"Pipeline: repo subscription matched -> agent_type='{_sub_agent}'")
     if not agent_type:
         _reason = "issue_done" if (event_type in ISSUE_EVENT_TYPES or event_type in PR_EVENT_TYPES) else "no_route"
         log.info(f"Pipeline: no route for type={event_type} ({_reason}), skip")
@@ -340,9 +405,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # 5. 提取 Issue ID
     payload = evt.get("payload", {})
-    issue_id = resolve_issue_id(payload) or evt.get("issue_id", "")
-    # PR 类事件：尝试解析关联的 Issue（title/branch 提取，必要时同步调 PR 详情 API）
     if event_type in ("note_hook_pr", "pull_request_opened", "pull_request_updated", "pull_request_merged"):
+        # PR 类事件：仅用 resolve_pr_issue_id（title/分支/issues 列表/PR 详情 API）。
+        # 不用 resolve_issue_id——GitCode MR payload 的 object_attributes.iid 是 PR 号，
+        # 会误当 issue_id（_is_pr_payload 只识别带 pull_request/issues 键的 payload）。
         try:
             from src.user.db import get_agent_bot_token
             _pr_api_token = get_agent_bot_token(repo_key) or ""
@@ -350,8 +416,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             if _pr_issue:
                 issue_id = _pr_issue
                 log.info(f"Pipeline: PR 关联 Issue -> {issue_id}")
+            else:
+                issue_id = evt.get("issue_id", "")
+                log.info(f"Pipeline: PR 无关联 Issue，issue_id={issue_id or '(none)'}")
         except Exception as e:
             log.warning(f"Pipeline: resolve PR issue failed: {e}")
+            issue_id = evt.get("issue_id", "")
+    else:
+        issue_id = resolve_issue_id(payload) or evt.get("issue_id", "")
     title = evt.get("title", "") or event_type
     log.info(f"Pipeline: issue_id={issue_id or '(none)'}, title={title}")
 
