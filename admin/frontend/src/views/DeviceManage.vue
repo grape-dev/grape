@@ -21,8 +21,8 @@
         </select>
         <select v-model="status">
           <option value="">全部状态</option>
-          <option value="active">active</option>
-          <option value="revoked">revoked</option>
+          <option value="active">有效</option>
+          <option value="revoked">已吊销</option>
         </select>
         <select v-model="health">
           <option value="">全部健康</option>

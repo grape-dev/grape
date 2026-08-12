@@ -55,17 +55,17 @@
       <div class="card" v-if="view === 'list'">
         <table class="vod-table">
           <thead>
-            <tr><th>实例名</th><th>类型</th><th>版本</th><th>二进制</th><th>提供方</th><th>设备</th><th>范围</th><th>健康</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
+            <tr><th>实例名</th><th>类型</th><th>版本</th><th>提供方</th><th>设备</th><th>范围</th><th>归属人</th><th>健康</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="e in engines" :key="e.id">
               <td>{{ e.displayName || e.name }}</td>
               <td>{{ e.name }}</td>
               <td class="t3" style="max-width:200px">{{ e.version || '-' }}</td>
-              <td class="t3">{{ e.binary || '-' }}</td>
               <td class="t3">{{ e.provider || '-' }}</td>
               <td>{{ e.device || '-' }}</td>
               <td><span class="status-tag info">{{ scopeText(e.scope) }}</span></td>
+              <td>{{ e.ownerName || '—' }}</td>
               <td><span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
               <td class="t3">{{ formatTime(e.lastSeenAt) }}</td>
               <td><button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button></td>
@@ -90,7 +90,7 @@
             <div class="ellipsis-cell" :title="e.device || '—'"><span class="t3" style="display:inline-block;min-width:46px">设备</span> {{ e.device || '—' }}</div>
             <div class="ellipsis-cell" :title="e.version || '-'"><span class="t3" style="display:inline-block;min-width:46px">版本</span> {{ e.version || '-' }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(e.lastSeenAt) }}</div>
-            <div><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ e.ownerId || '—' }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ e.ownerName || '—' }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
             <button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button>
