@@ -555,6 +555,25 @@ def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str
     return os.path.join(WORKSPACE_DIR, owner, rname, f"{agent_type}-agent")
 
 
+def _fail_event(seq: int, reason: str):
+    """事件入队/启动失败 → 立即置 failed 终态（防卡 running 僵尸）。
+
+    事件在 append_event 时即为 running，若后续入队/启动失败而不更新，
+    事件将永远 running（无任务支撑、无详细记录）。所有失败路径统一走这里收口。
+    """
+    if not seq:
+        return
+    try:
+        from datetime import datetime, timezone
+        from src.api.event_store import update_event_complete
+        update_event_complete(seq, "failed", exit_code=1,
+                              completed_at=datetime.now(timezone.utc).isoformat(),
+                              result=reason)
+        log.info(f"Pipeline: event {seq} -> failed ({reason[:80]})")
+    except Exception as e:
+        log.warning(f"Pipeline: _fail_event failed for seq={seq}: {e}")
+
+
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                            skill_id, skill_path, runtime_id, issue_id=""):
     """触发点三连的入队侧（M2，见 agent-runtime-event-tech-impl.md §2.3）：
@@ -580,6 +599,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             runtime_id = 0
     if not runtime_id:
         log.warning(f"Pipeline enqueue: no runtime_id for repo={repo_key} agent={agent_type}, task skipped")
+        _fail_event(seq, "入队失败：无可用 runtime（未配置引擎且不在引擎池）")
         return
 
     repository = evt.get("repository", from_repo_key(repo_key))
@@ -615,6 +635,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                               skill_path=skill_path, runtime_id=runtime_id)
     except Exception as e:
         log.warning(f"Pipeline enqueue: prompt build failed: {e}")
+        _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
         return
 
     env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
@@ -637,21 +658,27 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     except Exception:
         pass
 
-    tid = enqueue_task(
-        agent_session_id=session.get("id") or "",
-        runtime_id=runtime_id,
-        event_seq=seq, issue_id=issue_id,
-        repo_key=repo_key, agent_type=agent_type, skill=skill_name,
-        prompt=prompt, cwd=ws,
-        runtime_session_id=oc_session_id,
-        issue_session_id=issue_session_id,
-        event_type=evt.get("type", ""),
-        account=evt.get("account") or "",
-        repo_gitcode_token=repo_gitcode_token,
-        env_extra=env_extra,
-        skill_path=skill_path,
-    )
-    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
+    try:
+        tid = enqueue_task(
+            agent_session_id=session.get("id") or "",
+            runtime_id=runtime_id,
+            pool_agent_type=(agent_type if pool_mode else ""),
+            event_seq=seq, issue_id=issue_id,
+            repo_key=repo_key, agent_type=agent_type, skill=skill_name,
+            prompt=prompt, cwd=ws,
+            runtime_session_id=oc_session_id,
+            issue_session_id=issue_session_id,
+            event_type=evt.get("type", ""),
+            account=evt.get("account") or "",
+            repo_gitcode_token=repo_gitcode_token,
+            env_extra=env_extra,
+            skill_path=skill_path,
+        )
+    except Exception as e:
+        log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
+        _fail_event(seq, f"入队失败：enqueue_task 异常 {str(e)[:150]}")
+        return
+    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} pool={agent_type if pool_mode else '-'} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
 
 
 def get_prompt_context(repo_key: str) -> str:
@@ -741,6 +768,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
         append_skipped_event(repo_key, evt.get("type", ""), "prompt_build_failed", str(e))
+        _fail_event(seq, f"执行失败：prompt 构建异常 {str(e)[:150]}")
         return
 
     exec_account = evt.get("account") or repository

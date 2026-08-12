@@ -74,9 +74,73 @@ def _zombie_issue_dirs(ttl: float) -> list[str]:
     return out
 
 
+def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30) -> int:
+    """兜底回收：running 事件超时且无 agent_tasks 活跃任务支撑 → 置 failed（防卡 running 僵尸）。
+
+    事件在 append_event 时即 running，若入队/启动失败或执行中断且未更新终态，
+    事件永远 running（Agent 详情页显示"进行中"，但无任务/日志/结果）。两类僵尸：
+    - started_at 为空（从未开始）且 created_at 超过 no_start_minutes → 入队/启动从未成功
+    - started_at 非空但超过 stale_minutes 且无活跃任务 → 执行中断（任务记录已消失）
+    有 queued/dispatched/running 任务支撑的 running 事件一律跳过（真在执行）。
+    created_at 为 DB 本地时间（MySQL），started_at 为 UTC ISO 字符串，分开比较。
+    """
+    from datetime import datetime, timezone, timedelta
+    fixed = 0
+    try:
+        now_local = datetime.now()
+        no_start_cut = (now_local - timedelta(minutes=no_start_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        now_utc = datetime.now(timezone.utc)
+        stale_cut = (now_utc - timedelta(minutes=stale_minutes)).isoformat()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq FROM events WHERE status='running' AND "
+                "(started_at IS NULL OR started_at='') AND created_at < ?",
+                (no_start_cut,))
+            seqs = [r[0] for r in c.fetchall()]
+            c.execute(
+                "SELECT seq FROM events WHERE status='running' AND started_at != '' "
+                "AND started_at IS NOT NULL AND started_at < ?",
+                (stale_cut,))
+            seqs += [r[0] for r in c.fetchall()]
+        seqs = list(dict.fromkeys(seqs))
+        if not seqs:
+            return 0
+        ph = ",".join("?" * len(seqs))
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT DISTINCT event_seq FROM agent_tasks WHERE event_seq IN ({ph}) "
+                "AND status IN ('queued','dispatched','running')",
+                seqs)
+            live = {r[0] for r in c.fetchall()}
+        dead = [s for s in seqs if s not in live]
+        if dead:
+            ph2 = ",".join("?" * len(dead))
+            now_iso = now_utc.isoformat()
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    f"UPDATE events SET status='failed', exit_code=1, completed_at=?, "
+                    f"result='中断：running 超时无任务执行记录（sweeper 兜底回收）' WHERE seq IN ({ph2})",
+                    (now_iso, *dead))
+                fixed = c.rowcount
+                db.commit()
+            if fixed:
+                log.info(f"sweeper: recovered {fixed} stuck running event(s): {dead}")
+    except Exception as e:
+        log.warning(f"sweeper event recovery failed: {e}")
+    return fixed
+
+
 def sweep_once() -> int:
     cleaned = 0
     try:
+        # 兜底回收卡 running 僵尸事件（入队/执行失败未更新终态的历史遗留）
+        try:
+            cleaned += sweep_stuck_events_once()
+        except Exception as e:
+            log.warning(f"sweeper stuck-event sweep failed: {e}")
         from src.repo_key import split_owner_repo
         from src.runtime import repogit
         active = _active_issue_sessions()

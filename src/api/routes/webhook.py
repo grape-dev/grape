@@ -216,6 +216,13 @@ async def a2a_endpoint(request: Request):
             log.info(f"A2A: enqueued task for {agent_name}, seq={seq}, mode={kind}")
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")
+        # 事件已创建（running）但执行启动失败 → 立即置 failed，防卡 running 僵尸
+        if seq:
+            try:
+                from src.api.event_store import update_event_status
+                update_event_status(seq, "failed")
+            except Exception:
+                pass
         seq = 0
 
     return {"status": "ok", "seq": seq, "agent": agent_name}
