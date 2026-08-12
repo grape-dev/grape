@@ -66,7 +66,7 @@ body {
   margin-right: 32px;
   flex-shrink: 0;
 }
-.topnav-brand .brand-logo { width: 20px; height: 20px; display: block; }
+.topnav-brand .brand-logo { width: 26px; height: 26px; border-radius: 7px; display: block; }
 .topnav-brand .brand-text {
   font-size: 15px;
   font-weight: 700;
