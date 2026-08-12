@@ -12,16 +12,19 @@
 
     <div class="dashboard" style="padding:20px 28px" v-if="detail">
       <!-- 设备信息 -->
-      <div class="card">
+      <div class="card" style="padding:16px 20px">
         <div class="detail-grid">
-          <div class="detail-item"><span class="t3">状态</span>{{ detail.status }}</div>
+          <div class="detail-item" :style="{ borderLeftColor: detail.status === 'active' ? '#52c41a' : 'var(--text-tertiary)' }">
+            <span class="t3">状态</span>
+            <span :class="['status-tag', detail.status === 'active' ? 'success' : 'default']">{{ detail.status }}</span>
+          </div>
           <div class="detail-item"><span class="t3">范围</span>{{ scopeText(detail.scope) }}</div>
           <div class="detail-item"><span class="t3">归属</span>{{ detail.ownerName || '—' }}</div>
-          <div class="detail-item"><span class="t3">最后心跳</span>{{ formatTime(detail.lastSeenAt) }}</div>
+          <div class="detail-item" style="border-left-color:#006eff"><span class="t3">最后心跳</span>{{ formatTime(detail.lastSeenAt) }}</div>
           <div class="detail-item"><span class="t3">IP</span>{{ detail.lastIp || '—' }}</div>
           <div class="detail-item"><span class="t3">创建时间</span>{{ formatTime(detail.createdAt) }}</div>
-          <div class="detail-item"><span class="t3">引擎数</span>{{ detail.engines?.length ?? 0 }}</div>
-          <div class="detail-item"><span class="t3">任务数</span>{{ detail.tasks?.totalElements ?? 0 }}</div>
+          <div class="detail-item" style="border-left-color:#7222ed"><span class="t3">引擎数</span>{{ detail.engines?.length ?? 0 }}</div>
+          <div class="detail-item" style="border-left-color:#1890ff"><span class="t3">任务数</span>{{ detail.tasks?.totalElements ?? 0 }}</div>
         </div>
       </div>
 
@@ -304,13 +307,21 @@ load()
 .detail-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 14px 24px;
+  gap: 12px;
 }
 .detail-item {
-  font-size: 13px;
+  background: #fff;
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--border-color);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
   color: var(--text-primary);
+  transition: all 0.2s ease;
 }
-.detail-item .t3 { display: block; font-size: 11px; margin-bottom: 2px; }
+.detail-item:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
+.detail-item .t3 { display: block; font-size: 11px; font-weight: 400; color: var(--text-tertiary); margin-bottom: 3px; }
 @media (max-width: 900px) {
   .detail-grid { grid-template-columns: repeat(2, 1fr); }
 }
