@@ -28,7 +28,6 @@
               >{{ child.name }}</router-link>
             </div>
           </div>
-          <router-link v-else class="topnav-link topnav-direct" :class="{ active: route.path === item.path }" :to="item.path">{{ item.icon }} {{ item.name }}</router-link>
         </template>
       </nav>
       <div class="topnav-user" @click="logout">
