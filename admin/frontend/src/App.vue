@@ -9,7 +9,7 @@
         <span></span><span></span><span></span>
       </button>
       <div class="topnav-brand" @click="$router.push('/runtime/devices')">
-        <span class="brand-icon">🍇</span>
+        <img class="brand-logo" src="/logo-64.png" alt="Grape" />
         <span class="brand-text">Grape运营管理系统</span>
       </div>
       <nav class="topnav-links">
