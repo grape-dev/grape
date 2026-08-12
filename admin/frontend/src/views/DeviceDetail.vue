@@ -59,13 +59,13 @@
           <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
         </div>
 
-        <!-- 任务状态统计卡（对齐 VOD stat-cards） -->
+        <!-- 任务状态统计卡（kpi 色带卡片，对齐 AgentManage/Overview 体系） -->
         <div class="task-stat-cards">
-          <div class="task-stat-card">
+          <div class="task-stat-card kpi-primary">
             <div class="task-stat-num primary">{{ taskTotal }}</div>
             <div class="task-stat-label">任务总数</div>
           </div>
-          <div v-for="s in taskStatList" :key="s.key" class="task-stat-card">
+          <div v-for="s in taskStatList" :key="s.key" class="task-stat-card" :style="{ borderLeftColor: s.color }">
             <div class="task-stat-num" :style="{ color: s.color }">{{ s.count }}</div>
             <div class="task-stat-label">{{ s.label }}</div>
           </div>
@@ -336,7 +336,7 @@ load()
 .back-btn:active { transform: translateX(0); }
 .back-arrow { flex-shrink: 0; }
 
-/* ===== 任务状态统计卡（对齐 VOD stat-cards） ===== */
+/* ===== 任务状态统计卡（kpi 色带卡片，对齐 AgentManage/Overview 体系） ===== */
 .task-stat-cards {
   display: flex;
   gap: 12px;
@@ -347,12 +347,17 @@ load()
   flex: 1;
   min-width: 100px;
   max-width: 160px;
-  background: #f8f9fb;
+  background: #fff;
+  border: 1px solid var(--border-color);
   border-radius: 10px;
+  border-left: 3px solid #006eff;
   padding: 12px 16px;
   text-align: center;
+  transition: all 0.2s ease;
 }
-.task-stat-num { font-size: 22px; font-weight: 700; line-height: 1.2; }
+.task-stat-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
+.task-stat-card.kpi-primary { border-left-color: #006eff; }
+.task-stat-num { font-size: 20px; font-weight: 700; line-height: 1.2; }
 .task-stat-num.primary { color: var(--primary); }
 .task-stat-label { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
 
