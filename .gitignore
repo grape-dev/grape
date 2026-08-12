@@ -23,3 +23,5 @@ opencode-incident-*.md
 temp/
 .skills/
 .hermes/
+.venv/
+.project-info/

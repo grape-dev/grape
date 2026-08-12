@@ -222,7 +222,8 @@ async def _execute_task(client, task):
 
 
 async def _reregister(client, installed, device_name) -> list[int] | None:
-    """重新注册获取新 runtime id。成功返回 id 列表，失败返回 None。"""
+    """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。"""
+    await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
         ids = await client.register(installed, device_name=device_name)
@@ -309,9 +310,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             ok = await client.heartbeat(runtime_ids)
             if ok:
                 heartbeat_fail_streak = 0
+                log.debug(f"heartbeat ok, ids={runtime_ids}")
             else:
                 heartbeat_fail_streak += 1
-                log.warning(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD})")
+                log.warning(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}), resetting session")
+                await client.reset_session()
             last_heartbeat = now
 
             # ---- 连续失败触发重注册 ----
