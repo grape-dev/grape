@@ -56,7 +56,7 @@
               <td class="t3">{{ d.lastIp || '-' }}</td>
               <td class="t3">{{ formatTime(d.createdAt) }}</td>
               <td>
-                <button class="btn btn-sm" @click="openDetail(d)">详情</button>
+                <button class="btn btn-sm" @click="$router.push(`/runtime/devices/${d.id}`)">详情</button>
                 <button v-if="d.status === 'active'" class="btn btn-sm" @click="revoke(d)">吊销</button>
                 <button class="btn btn-sm" @click="recycle(d)">回收</button>
               </td>
@@ -84,7 +84,7 @@
             <div><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ d.lastIp || '—' }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
-            <button class="btn btn-sm" @click="openDetail(d)">详情</button>
+            <button class="btn btn-sm" @click="$router.push(`/runtime/devices/${d.id}`)">详情</button>
             <button v-if="d.status === 'active'" class="btn btn-sm" @click="revoke(d)">吊销</button>
             <button class="btn btn-sm" @click="recycle(d)">回收</button>
           </div>
@@ -100,43 +100,6 @@
         </select>
         <button class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
         <button class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
-      </div>
-    </div>
-
-    <div v-if="detail" class="modal wide" @click.self="detail = null">
-      <div class="modal-box">
-        <h4>设备详情：{{ detail.deviceName || detail.name }}</h4>
-        <p class="t2" style="font-size:12px">健康：{{ detail.health }} ｜ 最后心跳：{{ detail.lastSeenAt }} ｜ IP：{{ detail.lastIp }}</p>
-        <div style="margin:14px 0 4px">
-          <select v-model="selectedEngineId" class="page-size-select" style="max-width:260px" @change="onEngineChange">
-            <option :value="null">全部引擎</option>
-            <option v-for="e in detail.engines || []" :key="e.id" :value="e.id">{{ e.name }}</option>
-          </select>
-        </div>
-        <h5>关联任务（{{ detail.tasks?.totalElements ?? 0 }} 条）</h5>
-        <div style="overflow-x:auto">
-          <table class="vod-table">
-            <thead><tr><th>ID</th><th>类型</th><th>技能</th><th>状态</th><th>创建时间</th></tr></thead>
-            <tbody>
-              <tr v-for="t in detail.tasks?.content || []" :key="t.id">
-                <td class="t3">{{ t.id }}</td>
-                <td>{{ t.agentType }}</td>
-                <td>{{ t.skill }}</td>
-                <td><span class="status-tag default">{{ t.status }}</span></td>
-                <td class="t3">{{ t.createdAt }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div v-if="detail.tasks?.totalElements > 0" class="pagination-bar" style="border-top:none">
-          <span class="page-info">第 <strong>{{ taskPage + 1 }}</strong> / {{ detail.tasks?.totalPages ?? 1 }} 页（共 {{ detail.tasks?.totalElements ?? 0 }} 条）</span>
-          <select v-model="taskSize" class="page-size-select" @change="taskPage = 0; openDetail(detail)">
-            <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
-          </select>
-          <button class="page-btn" :disabled="taskPage <= 0" @click="taskPage--; openDetail(detail)">上一页</button>
-          <button class="page-btn" :disabled="taskPage >= (detail.tasks?.totalPages ?? 1) - 1" @click="taskPage++; openDetail(detail)">下一页</button>
-        </div>
-        <div class="modal-actions sticky"><button class="btn" @click="detail = null">关闭</button></div>
       </div>
     </div>
   </div>
@@ -156,13 +119,9 @@ const health = ref('')
 const name = ref('')
 const stats = ref({})
 const view = ref('list')
-const detail = ref(null)
-const selectedEngineId = ref(null)
 const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
 const sizeOptions = [10, 20, 50]
 const size = ref(10)
-const taskPage = ref(0)
-const taskSize = ref(10)
 
 const BADGE = {
   online: { label: '在线', color: 'var(--success)', bg: '#dcfce7' },
@@ -228,21 +187,6 @@ async function recycle(d) {
     await http.post(`/devices/${d.id}/cleanup`)
     load()
   } catch (e) { alert(e.response?.data?.message || '回收失败') }
-}
-async function openDetail(d) {
-  const isNewDevice = d !== detail.value
-  if (isNewDevice) {
-    selectedEngineId.value = null
-    taskPage.value = 0
-  }
-  const params = { taskPage: taskPage.value, taskSize: taskSize.value }
-  if (selectedEngineId.value) params.engineId = selectedEngineId.value
-  const { data } = await http.get(`/devices/${d.id}`, { params })
-  detail.value = data
-}
-function onEngineChange() {
-  taskPage.value = 0
-  openDetail(detail.value)
 }
 onMounted(load)
 </script>
