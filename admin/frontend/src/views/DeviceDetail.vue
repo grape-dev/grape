@@ -54,7 +54,7 @@
             </tr>
           </tbody>
         </table>
-        <p v-else class="t2" style="padding:12px;text-align:center">该设备暂无关联引擎</p>
+        <p v-else class="t2" style="padding:12px;text-align:center">暂无关联引擎</p>
         </div>
       </div>
 
@@ -70,7 +70,7 @@
             <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
           </div>
         </div>
-        <div style="padding:16px 20px">
+        <div style="padding:14px 20px">
 
         <!-- 任务状态统计卡（kpi 色带卡片，对齐 AgentManage/Overview 体系） -->
         <div class="task-stat-cards">
@@ -100,7 +100,7 @@
           <table class="vod-table">
             <thead><tr>
               <th style="width:70px">ID</th>
-              <th class="filterable-th">
+              <th style="width:110px" class="filterable-th">
                 <span class="th-content" @click="toggleFilter('agentType')">
                   类型 <span class="filter-arrow" :class="{ active: taskType }">▼</span>
                 </span>
@@ -109,7 +109,7 @@
                   <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('agentType')" :key="v" :class="{ active: taskType === v }" @click="setFilter('agentType', v)">{{ v || '(空)' }} ({{ cnt }})</div>
                 </div>
               </th>
-              <th class="filterable-th">
+              <th style="width:180px" class="filterable-th">
                 <span class="th-content" @click="toggleFilter('skill')">
                   技能 <span class="filter-arrow" :class="{ active: taskSkill }">▼</span>
                 </span>
@@ -136,12 +136,21 @@
               </th>
             </tr></thead>
             <tbody>
+              <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
+                <td :colspan="5" class="t2" style="padding:28px 0">
+                  <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
+                  <template v-else>
+                    无匹配任务
+                    <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6;margin-left:10px" @click="clearFilters">清除筛选</button>
+                  </template>
+                </td>
+              </tr>
               <tr v-for="t in detail.tasks?.content || []" :key="t.id">
                 <td class="t3">{{ t.id }}</td>
-                <td>{{ t.agentType }}</td>
-                <td>{{ t.skill }}</td>
+                <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
+                <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
                 <td><span class="status-tag default">{{ t.status }}</span></td>
-                <td class="t3">{{ t.createdAt }}</td>
+                <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
               </tr>
             </tbody>
           </table>
