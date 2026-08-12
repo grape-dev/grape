@@ -182,6 +182,8 @@ public class RuntimeDeviceService {
         device.put("id", c.getId());
         device.put("name", c.getName());
         device.put("deviceName", c.getDeviceName());
+        device.put("scope", c.getScope());
+        device.put("ownerName", c.getOwnerName());
         device.put("status", c.getStatus());
         device.put("health", healthService.deviceHealth(c.getStatus(), c.getLastSeenAt()));
         device.put("lastSeenAt", c.getLastSeenAt());
