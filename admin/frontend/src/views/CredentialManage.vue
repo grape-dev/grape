@@ -95,6 +95,7 @@
           <span class="modal-title">签发凭据</span>
         </div>
         <div class="modal-body">
+          <div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary)">范围：<span class="status-tag info" style="font-size:11px;padding:1px 6px">全局</span>（运营管理台仅签发全局凭据）</div>
           <input v-model="credentialName" placeholder="凭据名称（唯一，≤64字符）" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" @keyup.enter="issue" />
           <div v-if="issuedToken" class="mt12" style="border:1px dashed var(--warning);border-radius:8px;padding:12px">
             <p style="color:var(--warning);font-weight:600">⚠ 明文仅显示一次，请立即保存</p>

@@ -87,9 +87,9 @@ public class RuntimeController {
 
     @PostMapping("/credentials")
     public Map<String, String> issueCredential(@RequestBody Map<String, String> body, HttpServletRequest request) {
-        // 契约：凭据名称字段为 name（凭据=身份，名称即凭据名）
+        // 契约：凭据名称字段为 name（凭据=身份，名称即凭据名）；scope 可选（缺省默认全局）
         String name = body.get("name");
-        String token = credentialService.issue(name, AuthContext.username(request));
+        String token = credentialService.issue(name, body.get("scope"), AuthContext.username(request));
         return Map.of("token", token, "name", name == null ? "" : name);
     }
 

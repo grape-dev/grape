@@ -10,6 +10,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.Set;
 
 /**
  * 凭据签发/吊销——契约对齐 grape src/api/routes/runtime.py _auth_credential：
@@ -18,6 +19,9 @@ import java.util.Base64;
  */
 @Service
 public class RuntimeCredentialService {
+
+    /** 管理台可签发范围白名单（当前仅全局；扩展点：开放新范围 → 加项 + 对应校验逻辑） */
+    private static final Set<String> SUPPORTED_SCOPES = Set.of("global");
 
     private final JdbcTemplate jdbc;
     private final AdminAuditService auditService;
@@ -28,9 +32,14 @@ public class RuntimeCredentialService {
         this.auditService = auditService;
     }
 
-    public String issue(String credentialName, String operator) {
+    public String issue(String credentialName, String scope, String operator) {
         if (credentialName == null || credentialName.isBlank() || credentialName.length() > 64) {
             throw new BizException("凭据名称不能为空且不超过 64 字符");
+        }
+        // scope 归一化：缺省/空 → 默认全局（兼容旧契约）；白名单校验（当前仅 global）
+        String sc = (scope == null || scope.isBlank()) ? "global" : scope;
+        if (!SUPPORTED_SCOPES.contains(sc)) {
+            throw new BizException("管理台当前仅支持签发全局凭据，不支持范围: " + sc);
         }
         Integer exists = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM runtime_credentials WHERE name = ?", Integer.class, credentialName);
@@ -41,10 +50,11 @@ public class RuntimeCredentialService {
         secureRandom.nextBytes(raw);
         String token = "rta_" + Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
         String hash = sha256Hex(token);
-        jdbc.update("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, created_at) "
-                        + "VALUES (?, ?, ?, 'user', 'active', NOW())",
-                hash, credentialName, credentialName);
-        auditService.record(null, operator, "credential.issue", "credential:" + credentialName, "");
+        // scope 参数化（不写死），owner_name 回填签发人（审计追溯）
+        jdbc.update("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, owner_name, created_at) "
+                        + "VALUES (?, ?, ?, ?, 'active', ?, NOW())",
+                hash, credentialName, credentialName, sc, operator);
+        auditService.record(null, operator, "credential.issue", "credential:" + credentialName + ", scope:" + sc, "");
         return token;
     }
 
