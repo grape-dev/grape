@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PSEUDO_FSTYPES="proc sysfs devtmpfs cgroup cgroup2 tmpfs devpts mqueue hugetlbfs debugfs tracefs securityfs configfs pstore binfmt_misc efivarfs bpf fusectl ramfs overlay"
+PSEUDO_FSTYPES="proc sysfs devtmpfs cgroup cgroup2 tmpfs devpts mqueue hugetlbfs debugfs tracefs securityfs configfs pstore binfmt_misc efivarfs bpf fusectl ramfs overlay autofs rpc_pipefs"
 
 is_pseudo_fstype() {
     local fstype="$1"
@@ -58,52 +58,54 @@ collect_lsblk() {
     fi
 
     local has_used=0
-    if lsblk -l -n -o NAME,MOUNTPOINT,FSTYPE,SIZE,USED 2>/dev/null 1>/dev/null; then
+    if lsblk -l -n -b -o NAME,MOUNTPOINT,FSTYPE,SIZE,USED >/dev/null 2>&1; then
         has_used=1
     fi
 
     local lsblk_output
     if [ "$has_used" -eq 1 ]; then
-        lsblk_output=$(lsblk -l -n -o NAME,MOUNTPOINT,FSTYPE,SIZE,USED 2>/dev/null)
+        lsblk_output=$(lsblk -l -n -b -o NAME,MOUNTPOINT,FSTYPE,SIZE,USED 2>/dev/null)
     else
-        lsblk_output=$(lsblk -l -n -o NAME,MOUNTPOINT,FSTYPE,SIZE 2>/dev/null)
+        lsblk_output=$(lsblk -l -n -b -o NAME,MOUNTPOINT,FSTYPE,SIZE 2>/dev/null)
     fi
 
     echo "$lsblk_output" | while IFS= read -r line; do
         [ -z "$line" ] && continue
-        local name mountpoint fstype size used
+        local name mountpoint fstype size_bytes used_bytes size used
         if [ "$has_used" -eq 1 ]; then
             name=$(echo "$line" | awk '{print $1}')
             mountpoint=$(echo "$line" | awk '{print $2}')
             fstype=$(echo "$line" | awk '{print $3}')
-            size=$(echo "$line" | awk '{print $4}')
-            used=$(echo "$line" | awk '{print $5}')
+            size_bytes=$(echo "$line" | awk '{print $4}')
+            used_bytes=$(echo "$line" | awk '{print $5}')
         else
             name=$(echo "$line" | awk '{print $1}')
             mountpoint=$(echo "$line" | awk '{print $2}')
             fstype=$(echo "$line" | awk '{print $3}')
-            size=$(echo "$line" | awk '{print $4}')
-            used=""
+            size_bytes=$(echo "$line" | awk '{print $4}')
+            used_bytes=""
         fi
         [ -z "$mountpoint" ] && continue
         [ -z "$fstype" ] && continue
         if is_pseudo_fstype "$fstype"; then
             continue
         fi
-        if [ -z "$used" ]; then
+        size="N/A"
+        used="N/A"
+        if [ -n "$size_bytes" ] && [ "$size_bytes" -gt 0 ] 2>/dev/null; then
+            size=$(format_size "$size_bytes")
+        fi
+        if [ -n "$used_bytes" ] && [ "$used_bytes" -ge 0 ] 2>/dev/null; then
+            used=$(format_size "$used_bytes")
+        fi
+        if [ "$used" = "N/A" ] || [ "$size" = "N/A" ]; then
             local df_result
             df_result=$(get_df_info "$mountpoint")
             local df_size df_used
             df_size=$(echo "$df_result" | cut -d'|' -f1)
             df_used=$(echo "$df_result" | cut -d'|' -f2)
-            if [ -z "$size" ]; then
-                size="$df_size"
-            fi
-            if [ -n "$df_used" ] && [ "$df_used" != "N/A" ]; then
-                used="$df_used"
-            else
-                used="N/A"
-            fi
+            [ "$size" = "N/A" ] && [ "$df_size" != "N/A" ] && size="$df_size"
+            [ "$used" = "N/A" ] && [ "$df_used" != "N/A" ] && used="$df_used"
         fi
         local dev_name="/dev/$name"
         if echo "$name" | grep -q '^/dev/'; then
