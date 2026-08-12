@@ -68,7 +68,7 @@
             <div><span class="t3" style="display:inline-block;min-width:46px">引擎</span> {{ c.engineCount }} 个</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(c.lastSeenAt) }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ c.lastIp || '—' }}</div>
-            <div style="grid-column:1 / -1"><span class="t3">创建</span> {{ c.createdAt || '—' }}</div>
+            <div style="grid-column:1 / -1"><span class="t3">创建</span> {{ formatTime(c.createdAt) }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
             <button v-if="c.status === 'active'" class="btn btn-sm" @click="openRevoke(c)">吊销</button>
@@ -95,7 +95,7 @@
           <span class="modal-title">签发凭据</span>
         </div>
         <div class="modal-body">
-          <input v-model="deviceName" placeholder="凭据名称（唯一，≤64字符）" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" @keyup.enter="issue" />
+          <input v-model="credentialName" placeholder="凭据名称（唯一，≤64字符）" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" @keyup.enter="issue" />
           <div v-if="issuedToken" class="mt12" style="border:1px dashed var(--warning);border-radius:8px;padding:12px">
             <p style="color:var(--warning);font-weight:600">⚠ 明文仅显示一次，请立即保存</p>
             <code class="cred-token">{{ issuedToken }}</code>
@@ -163,7 +163,7 @@ const scope = ref('')
 const owner = ref('')
 const status = ref('')
 const showIssue = ref(false)
-const deviceName = ref('')
+const credentialName = ref('')
 const issuedToken = ref('')
 const issuing = ref(false)
 const revokeTarget = ref(null)
@@ -207,13 +207,13 @@ function reset() {
   page.value = 0
   load()
 }
-function openIssue() { showIssue.value = true; issuedToken.value = ''; deviceName.value = '' }
+function openIssue() { showIssue.value = true; issuedToken.value = ''; credentialName.value = '' }
 async function issue() {
   if (issuing.value) return
-  if (!deviceName.value.trim()) { showToast('请输入凭据名称', 'error'); return }
+  if (!credentialName.value.trim()) { showToast('请输入凭据名称', 'error'); return }
   issuing.value = true
   try {
-    const { data } = await http.post('/credentials', { name: deviceName.value })
+    const { data } = await http.post('/credentials', { name: credentialName.value })
     issuedToken.value = data.token
     showToast(`凭据 ${data.name} 签发成功`)
     load()   // 签发成功自动刷新列表
