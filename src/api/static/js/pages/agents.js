@@ -108,6 +108,7 @@ function renderAgent(name, data) {
       <option value="${data.skill || ''}" ${data.skill ? 'selected' : ''}>${data.skill ? '加载中...' : '默认官方技能（自动）'}</option>
     </select>
   </div>
+  ${_agentSubsSection(name, data)}
   ${name === 'vod' ? `
   <div style="margin:16px 0 12px;border-top:1px solid var(--b);padding-top:12px">
     <div class="flex fc jbtw" style="margin-bottom:8px">
@@ -116,6 +117,7 @@ function renderAgent(name, data) {
     </div>
     <div class="srow"><label>Bot App ID</label><input id="vodImAppId" value="${(data.im && data.im.im_app_id) || ''}" placeholder="cli_xxxxxxxx" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
     <div class="srow"><label>Bot Secret</label><input id="vodImSecret" type="password" value="${data.im && data.im.connected ? '********' : ''}" placeholder="留空不修改" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
+    <div class="srow"><label></label><button class="bt bt-o bt-s" onclick="startVodOnboard()" style="padding:7px 14px">扫码配置</button></div>
     ${data.im && data.im.conversations && data.im.conversations.length > 0 ? `
     <div style="margin-top:8px">
       <span class="ts t3">已绑定的群 (${data.im.conversations.length})</span>
@@ -140,6 +142,27 @@ function renderAgent(name, data) {
   loadCfgOptions();
 }
 
+function _agentSubsSection(name, data) {
+  const subs = data.subscribe_events || [];
+  const prMerged = subs.filter(s => s && s.event_type === 'pull_request_merged');
+  const prBranches = prMerged.map(s => (s.branch || '')).filter(b => b).join(', ');
+  const prChecked = prMerged.length > 0 ? 'checked' : '';
+  const displayName = (_AGENT_TYPES[name] && _AGENT_TYPES[name].display_name) || name;
+  return `<div style="margin:16px 0 12px;border-top:1px solid var(--b);padding-top:12px">
+    <div class="flex fc jbtw" style="margin-bottom:8px">
+      <h3 style="font-size:13px;font-weight:600">事件订阅</h3>
+      <span class="ts t3">默认不配置；勾选后触发即收到任务</span>
+    </div>
+    <div style="font-size:12px;margin-bottom:6px">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input id="subPrMerged" type="checkbox" ${prChecked} style="accent-color:var(--a)"> PR 合入（pull_request_merged）
+      </label>
+    </div>
+    <div class="srow"><label>合入分支</label><input id="subPrBranches" value="${prBranches}" placeholder="main, dev…（留空=不限分支）" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
+    <div class="ts t3" style="margin-top:6px">当 PR 合入到上述分支时，${displayName} 自动收到任务；留空则任意分支合入都触发。</div>
+  </div>`;
+}
+
 function saveAgentConfig(name) {
   const backend = document.querySelector('.cfg-backend')?.value || 'opencode';
   const skillVal = document.querySelector('.cfg-skill')?.value || '';
@@ -153,6 +176,14 @@ function saveAgentConfig(name) {
   if (!repo) return;
   const body = {backend, skill};
   if (skillScope) body.skill_scope = skillScope;
+  // 事件订阅：PR 合入（勾选）+ 合入分支（逗号分隔，留空=不限）
+  const subEvents = [];
+  const prCb = document.getElementById('subPrMerged');
+  if (prCb && prCb.checked) {
+    const rawBranches = (document.getElementById('subPrBranches')?.value || '').replace(/，/g, ',');
+    subEvents.push({event_type: 'pull_request_merged', branch: rawBranches.trim()});
+  }
+  body.subscribe_events = subEvents;
   if (name === 'vod') {
     const appId = document.getElementById('vodImAppId')?.value || '';
     const rawSecret = document.getElementById('vodImSecret')?.value || '';
@@ -172,4 +203,10 @@ function cleanAgentSession(name) {
   API.post('/agents/' + name + '/' + repo.owner + '/' + repo.name + '/clean').then(r => {
     app.showToast(r.message || '会话已清理');
   }).catch(e => app.showToast('清理失败: ' + e.message));
+}
+
+function startVodOnboard() {
+  const repo = app.currentRepo();
+  if (!repo) { app.showToast('请先选择仓库'); return; }
+  startFeishuOnboard('vod_bot', repo.fullName);
 }

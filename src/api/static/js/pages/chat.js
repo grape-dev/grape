@@ -60,6 +60,7 @@ function loadSideConfig() {
         <input id="cfgImAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:4px">
         <div style="margin-bottom:4px"><span class="t3">App Secret</span></div>
         <input id="cfgImSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
+        <button class="bt bt-o bt-s" onclick="startFeishuOnboard('chat_bot')" style="width:100%;margin-bottom:6px">扫码配置</button>
         <button class="bt bt-p bt-s" onclick="saveChatConfig()" style="width:100%">Save</button>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
@@ -328,4 +329,150 @@ function switchImProvider() {
   const provider = sel.value;
   // Try to load provider-specific config from the DOM or API
   // For now just update the section header
+}
+
+// ====== 飞书扫码配置（复用组件：Chat / VOD Agent）======
+
+let _onboardTimer = null;
+let _onboardTaskId = null;
+let _onboardExpireAt = 0;
+let _onboardBotType = 'chat_bot';
+let _onboardRepoKey = '';
+
+function startFeishuOnboard(botType, repoKey) {
+  _onboardBotType = botType || 'chat_bot';
+  _onboardRepoKey = repoKey || '';
+  const body = {bot_type: _onboardBotType};
+  if (_onboardRepoKey) body.repo_key = _onboardRepoKey;
+  API.post('/feishu/onboard/start', body).then(d => {
+    _onboardTaskId = d.task_id;
+    showOnboardModal();
+    pollOnboardStatus();
+  }).catch(e => {
+    // 409：已有进行中的任务
+    if (e.status === 409) app.showToast(e.message || '已有扫码配置正在进行，请稍候');
+    else app.showToast('启动扫码配置失败: ' + e.message);
+  });
+}
+
+function showOnboardModal() {
+  if (document.getElementById('onboardModal')) return;
+  const mask = document.createElement('div');
+  mask.id = 'onboardModal';
+  mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:998;display:flex;align-items:center;justify-content:center';
+  mask.innerHTML = `
+    <div style="width:340px;background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:20px;box-shadow:0 8px 32px rgba(0,0,0,.25);font-size:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <b style="font-size:14px">🔗 飞书扫码配置</b>
+        <span style="cursor:pointer;color:var(--t3)" onclick="cancelOnboard()">✕</span>
+      </div>
+      <div id="onboardBody" style="text-align:center;color:var(--t3);padding:30px 0">正在生成二维码…</div>
+    </div>`;
+  document.body.appendChild(mask);
+  mask.addEventListener('click', e => { if (e.target === mask) cancelOnboard(); });
+}
+
+function pollOnboardStatus() {
+  if (_onboardTimer) clearInterval(_onboardTimer);
+  _onboardTimer = setInterval(async () => {
+    if (!_onboardTaskId) { clearInterval(_onboardTimer); return; }
+    try {
+      const d = await API.get('/feishu/onboard/status?task_id=' + _onboardTaskId);
+      renderOnboardStatus(d);
+      if (d.status === 'connected' || d.status === 'failed') {
+        clearInterval(_onboardTimer);
+        _onboardTimer = null;
+      }
+    } catch (e) {
+      clearInterval(_onboardTimer);
+      _onboardTimer = null;
+    }
+  }, 2000);
+}
+
+function renderOnboardStatus(d) {
+  const body = document.getElementById('onboardBody');
+  if (!body) return;
+  const map = {
+    pending: () => { body.innerHTML = '⏳ 正在生成二维码…'; },
+    waiting_confirm: () => {
+      if (!d.qr_url) return;
+      _onboardExpireAt = d.expire_in ? Date.now() + d.expire_in * 1000 : 0;
+      body.innerHTML = `
+        <div style="background:#fff;border:1px solid var(--b);border-radius:8px;padding:12px;display:inline-block;margin-bottom:10px" id="onboardQr"></div>
+        <div style="color:var(--t);margin-bottom:4px">1. 打开飞书 App，扫描上方二维码</div>
+        <div style="color:var(--t3);margin-bottom:10px">2. 在飞书内确认「创建应用/授权」页面</div>
+        <div style="color:var(--pk);font-size:11px" id="onboardCountdown">等待确认…</div>`;
+      new QRCode(document.getElementById('onboardQr'), {text: d.qr_url, width: 200, height: 200});
+      startCountdown();
+    },
+    connected: () => {
+      body.innerHTML = `
+        <div style="font-size:34px;margin-bottom:8px">✅</div>
+        <div style="color:var(--t);font-weight:600;margin-bottom:8px">配置成功</div>
+        <div style="color:var(--t2);font-size:11px;margin-bottom:2px">App ID: <span style="font-family:monospace">${d.app_id || ''}</span></div>
+        <div style="color:var(--t2);font-size:11px;margin-bottom:4px">App Secret 已保存（回显为 ******）</div>
+        <div style="color:var(--pk);font-size:11px;margin-bottom:12px">Bot 已连接 · 🟢 在线</div>
+        <button class="bt bt-p bt-s" onclick="closeOnboardModal(true)" style="width:100%">关闭</button>`;
+    },
+    failed: () => {
+      const msg = onboardErrorText(d.error || '');
+      body.innerHTML = `
+        <div style="font-size:34px;margin-bottom:8px">❌</div>
+        <div style="color:var(--r);font-weight:600;margin-bottom:8px">配置失败</div>
+        <div style="color:var(--t2);font-size:11px;margin-bottom:12px">${msg}</div>
+        <div style="display:flex;gap:8px">
+          <button class="bt bt-o bt-s" onclick="restartOnboard()" style="flex:1">重新扫码</button>
+          <button class="bt bt-p bt-s" onclick="closeOnboardModal()" style="flex:1">取消</button>
+        </div>`;
+    },
+  };
+  const fn = map[d.status] || map.pending;
+  fn();
+}
+
+function onboardErrorText(err) {
+  const t = String(err || '');
+  if (t.includes('access_denied')) return '用户拒绝了授权请求';
+  if (t.includes('expired') || t.includes('timeout')) return '二维码已过期，请重新扫码';
+  if (t.includes('已被')) return t;
+  return t || '未知错误';
+}
+
+function startCountdown() {
+  const el = document.getElementById('onboardCountdown');
+  if (!el) return;
+  const tick = () => {
+    if (!_onboardExpireAt) return;
+    const remain = Math.max(0, Math.round((_onboardExpireAt - Date.now()) / 1000));
+    if (remain <= 0) {
+      el.textContent = '二维码已过期，请重新扫码';
+      return;
+    }
+    const mm = String(Math.floor(remain / 60)).padStart(2, '0');
+    const ss = String(remain % 60).padStart(2, '0');
+    el.textContent = `等待确认… 二维码将在 ${mm}:${ss} 后过期`;
+    setTimeout(tick, 1000);
+  };
+  tick();
+}
+
+function restartOnboard() {
+  const botType = _onboardBotType || 'chat_bot';
+  const repoKey = _onboardRepoKey || '';
+  _onboardTaskId = null;
+  startFeishuOnboard(botType, repoKey);
+}
+
+function cancelOnboard() {
+  if (_onboardTaskId) API.post('/feishu/onboard/cancel', {task_id: _onboardTaskId}).catch(() => {});
+  closeOnboardModal();
+}
+
+function closeOnboardModal(refresh) {
+  _onboardTaskId = null;
+  if (_onboardTimer) { clearInterval(_onboardTimer); _onboardTimer = null; }
+  const m = document.getElementById('onboardModal');
+  if (m) m.remove();
+  if (refresh) loadSideConfig();
 }

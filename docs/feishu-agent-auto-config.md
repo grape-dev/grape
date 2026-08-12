@@ -1,5 +1,10 @@
 # 飞书智能体扫码自动配置 — 设计文档
 
+> ⚠️ **已落地**：本文的 ISV/webhook 回调方案已作废，实际实现采用飞书 SDK 的
+> Device Authorization Grant 扫码流程（`lark_oapi.aregister_app`），
+> 详见 [`docs/new-version2/feishu-qr-app-onboarding-plan.md`](new-version2/feishu-qr-app-onboarding-plan.md)
+> 与实现代码 `src/api/routes/feishu_onboard.py`。本文保留作为背景参考。
+
 ## 概述
 
 通过飞书扫码创建智能体（AI Agent），自动获取 `app_id` 和 `app_secret`，实现飞书机器人与 DevOps Bot 的一键建连，无需管理员手动在飞书开发者后台创建应用并复制凭据。

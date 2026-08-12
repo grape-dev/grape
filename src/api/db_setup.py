@@ -216,6 +216,24 @@ CREATE TABLE IF NOT EXISTS vod_conversations (
 )
 """
 
+_FEISHU_ONBOARD_TASK_DDL = """
+CREATE TABLE IF NOT EXISTS feishu_onboard_task (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT UNIQUE NOT NULL,
+    bot_type TEXT NOT NULL,
+    repo_key TEXT DEFAULT '',
+    user_id INTEGER NOT NULL,
+    status TEXT DEFAULT 'pending',
+    app_id TEXT DEFAULT '',
+    app_secret TEXT DEFAULT '',
+    qr_url TEXT DEFAULT '',
+    expire_in INTEGER DEFAULT 0,
+    error TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    finished_at TEXT DEFAULT ''
+)
+"""
+
 _TASKS_DDL = """
 CREATE TABLE IF NOT EXISTS tasks (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -369,6 +387,7 @@ _NEW_TABLES = [
     ("agent_type", _AGENT_TYPE_DDL),
     ("skill", _SKILL_DDL),
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
+    ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
     ("tasks", _TASKS_DDL),
     ("event_thread", _EVENT_THREAD_DDL),
@@ -1257,6 +1276,15 @@ def _migrate_tables():
             log.info("Added enable column to agent_type / devops_agent_session")
     except Exception as e:
         log.warning(f"Add enable column failed: {e}")
+    # ===== new-version2：Agent 事件订阅（仓库级，见 agent-event-subscription-design.md）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "devops_agent_session", "subscribe_events", "TEXT DEFAULT '[]'")
+            db.commit()
+            log.info("Added subscribe_events column to devops_agent_session")
+    except Exception as e:
+        log.warning(f"Add subscribe_events column failed: {e}")
     # ===== new-version2 多 Issue 隔离（见 multi-issue-isolation-design.md）：agent_tasks 新列 + issue_agent_session 表 =====
     # 表由 _create_tables 建；此处仅幂等补列（老库升级）
     try:
