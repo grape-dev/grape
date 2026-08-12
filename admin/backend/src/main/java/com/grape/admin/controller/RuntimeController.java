@@ -103,6 +103,12 @@ public class RuntimeController {
         return Map.of("status", "ok");
     }
 
+    @DeleteMapping("/devices/{cid}")
+    public Map<String, String> deleteDevice(@PathVariable Integer cid, HttpServletRequest request) {
+        cleanupService.deleteDevice(cid, AuthContext.username(request));
+        return Map.of("status", "ok");
+    }
+
     @DeleteMapping("/engines/{id}")
     public Map<String, String> deleteEngine(@PathVariable Integer id, HttpServletRequest request) {
         cleanupService.deleteEngine(id, AuthContext.username(request));

@@ -54,6 +54,40 @@ public class RuntimeCleanupService {
                 "runtimes=" + runtimeIds.size() + ", tasks清理完成");
     }
 
+    /**
+     * 物理删除已吊销设备（仅 revoked 可删，防误删在线设备）：
+     * 清 agent_type 悬空引用 → 删终态任务 → 删引擎 → 删凭据，不可逆。
+     */
+    public void deleteDevice(Integer credentialId, String operator) {
+        String status = jdbc.query("SELECT status FROM runtime_credentials WHERE id = ?",
+                rs -> rs.next() ? rs.getString(1) : null, credentialId);
+        if (status == null) {
+            throw new NotFoundException("设备不存在: " + credentialId);
+        }
+        if (!"revoked".equals(status)) {
+            throw new BizException("仅已吊销（revoked）设备可删除，请先吊销或回收");
+        }
+        List<Integer> runtimeIds = jdbc.query(
+                "SELECT id FROM agent_runtimes WHERE credential_id = ?", (rs, i) -> rs.getInt(1), credentialId);
+        if (!runtimeIds.isEmpty()) {
+            long active = countActiveTasks(runtimeIds);
+            if (active > 0) {
+                throw new BizException("设备存在 " + active + " 个进行中任务，拒绝删除");
+            }
+            String in = inClause(runtimeIds);
+            // 悬空引用：智能体默认引擎指向被删引擎 → 置 0
+            jdbc.update("UPDATE agent_type SET default_runtime_id = 0 WHERE default_runtime_id IN (" + in + ")");
+            // 终态任务
+            jdbc.update("DELETE FROM agent_tasks WHERE runtime_id IN (" + in + ") AND status IN " + terminalIn());
+            // 引擎
+            jdbc.update("DELETE FROM agent_runtimes WHERE credential_id = ?", credentialId);
+        }
+        // 凭据（物理删除，释放设备名）
+        jdbc.update("DELETE FROM runtime_credentials WHERE id = ?", credentialId);
+        auditService.record(null, operator, "device.delete", "device:" + credentialId,
+                "runtimes=" + runtimeIds.size() + ", 物理删除不可逆");
+    }
+
     public void deleteEngine(Integer runtimeId, String operator) {
         List<Integer> ids = List.of(runtimeId);
         if (countActiveTasks(ids) > 0) {

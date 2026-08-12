@@ -58,7 +58,8 @@
               <td>
                 <button class="btn btn-sm" @click="$router.push(`/runtime/devices/${d.id}`)">详情</button>
                 <button v-if="d.status === 'active'" class="btn btn-sm" @click="revoke(d)">吊销</button>
-                <button class="btn btn-sm" @click="recycle(d)">回收</button>
+                <button v-if="d.status === 'active'" class="btn btn-sm" @click="recycle(d)">回收</button>
+                <button v-if="d.status === 'revoked'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(d)">删除</button>
               </td>
             </tr>
           </tbody>
@@ -86,7 +87,8 @@
           <div class="dc-actions" style="justify-content:flex-end">
             <button class="btn btn-sm" @click="$router.push(`/runtime/devices/${d.id}`)">详情</button>
             <button v-if="d.status === 'active'" class="btn btn-sm" @click="revoke(d)">吊销</button>
-            <button class="btn btn-sm" @click="recycle(d)">回收</button>
+            <button v-if="d.status === 'active'" class="btn btn-sm" @click="recycle(d)">回收</button>
+            <button v-if="d.status === 'revoked'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(d)">删除</button>
           </div>
         </div>
       </div>
@@ -141,6 +143,25 @@
         </div>
       </div>
     </div>
+    <!-- 删除设备确认弹窗（物理删除不可逆） -->
+    <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <span class="modal-icon">🗑️</span>
+          <span class="modal-title">删除设备</span>
+        </div>
+        <div class="modal-body">
+          <p style="margin:0 0 12px">将<b style="color:#e5484d">物理删除</b>设备 <b>{{ deleteTarget.deviceName || deleteTarget.name }}</b> 的全部记录（凭据/引擎/任务），<b style="color:#e5484d">不可恢复！</b><br />
+          设备名将释放，可重新签发同名设备。</p>
+          <p style="margin:0 0 6px">请输入设备名 <b>{{ deleteTarget.deviceName || deleteTarget.name }}</b> 确认：</p>
+          <input v-model="deleteWord" class="form-input" placeholder="输入设备名确认" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" />
+        </div>
+        <div class="modal-footer">
+          <button class="btn" @click="deleteTarget = null">取消</button>
+          <button class="btn btn-danger" :disabled="deleteWord !== (deleteTarget.deviceName || deleteTarget.name)" @click="confirmDeleteDevice">确认删除</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -169,6 +190,8 @@ let toastTimer = null
 const revokeTarget = ref(null)
 const recycleTarget = ref(null)
 const recycleWord = ref('')
+const deleteTarget = ref(null)
+const deleteWord = ref('')
 
 const BADGE = {
   online: { label: '在线', color: 'var(--success)', bg: '#dcfce7' },
@@ -256,6 +279,21 @@ async function confirmRecycle() {
     load()
   } catch (e) {
     showToast(e.response?.data?.message || '回收失败', 'error')
+  }
+}
+function openDelete(d) {
+  deleteWord.value = ''
+  deleteTarget.value = d
+}
+async function confirmDeleteDevice() {
+  const d = deleteTarget.value
+  try {
+    await http.delete(`/devices/${d.id}`)
+    showToast(`设备 ${d.deviceName || d.name} 已删除（不可恢复）`)
+    deleteTarget.value = null
+    load()
+  } catch (e) {
+    showToast(e.response?.data?.message || '删除失败', 'error')
   }
 }
 onMounted(load)
