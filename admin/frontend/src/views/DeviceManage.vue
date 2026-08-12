@@ -3,10 +3,6 @@
     <div class="page-header">
       <h1>设备管理</h1>
       <span class="badge">{{ total }} 台</span>
-      <div style="margin-left:auto;display:flex;gap:8px">
-        <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
-        <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
-      </div>
     </div>
     <div style="padding:20px 28px">
       <div class="toolbar">
@@ -24,6 +20,10 @@
         <input v-model="name" placeholder="设备名搜索" style="width:200px" @keyup.enter="search" />
         <button class="btn" @click="search">查询</button>
         <button class="btn" @click="reset">重置</button>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
+          <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
+        </div>
       </div>
 
       <!-- 列表模式 -->

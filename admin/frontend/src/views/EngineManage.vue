@@ -3,10 +3,6 @@
     <div class="page-header">
       <h1>引擎管理</h1>
       <span class="badge">{{ totalElements }} 条</span>
-      <div style="margin-left:auto;display:flex;gap:8px">
-        <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
-        <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
-      </div>
     </div>
     <div style="padding:20px 28px">
       <!-- 引擎类型统计 -->
@@ -41,6 +37,10 @@
         </select>
         <button class="btn" @click="search">查询</button>
         <button class="btn" @click="reset">重置</button>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
+          <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
+        </div>
       </div>
 
       <!-- 列表模式 -->

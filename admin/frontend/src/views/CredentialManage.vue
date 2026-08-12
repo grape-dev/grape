@@ -3,11 +3,6 @@
     <div class="page-header">
       <h1>凭据管理</h1>
       <span class="badge">{{ credentials.length }} 条</span>
-      <div style="margin-left:auto;display:flex;gap:8px">
-        <button class="btn btn-primary" @click="openIssue">签发凭据</button>
-        <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
-        <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
-      </div>
     </div>
     <div style="padding:20px 28px">
       <div class="toolbar">
@@ -20,6 +15,11 @@
         <input v-model="owner" placeholder="归属用户（GitCode 用户名）" style="width:200px" @keyup.enter="load" />
         <button class="btn" @click="load">查询</button>
         <button class="btn" @click="reset">重置</button>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn btn-primary" @click="openIssue">签发凭据</button>
+          <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
+          <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
+        </div>
       </div>
 
       <!-- 列表模式 -->

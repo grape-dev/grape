@@ -2,6 +2,7 @@
   <div class="page-container" style="padding:0">
     <div class="page-header">
       <h1>角色权限配置</h1>
+      <span class="badge">{{ roles.length }} 个角色</span>
     </div>
     <div style="padding:20px 28px;display:flex;gap:16px;align-items:flex-start">
       <div class="card" style="width:280px;flex-shrink:0;padding:14px">

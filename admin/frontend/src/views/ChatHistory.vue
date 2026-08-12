@@ -3,13 +3,13 @@
     <div class="page-header">
       <h1>AI 历史</h1>
       <span class="badge">{{ total }} 条</span>
-      <div style="margin-left:auto;display:flex;gap:8px">
-        <input v-model="keyword" placeholder="按问题搜索" style="width:180px" @keyup.enter="search" />
-        <button class="btn btn-sm" @click="search">搜索</button>
-        <button class="btn btn-sm" @click="reset">重置</button>
-      </div>
     </div>
     <div style="padding:20px 28px">
+      <div class="toolbar">
+        <input v-model="keyword" placeholder="按问题搜索" style="width:220px" @keyup.enter="search" />
+        <button class="btn" @click="search">搜索</button>
+        <button class="btn" @click="reset">重置</button>
+      </div>
       <div class="card">
         <table class="vod-table">
           <thead>
