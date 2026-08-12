@@ -31,7 +31,7 @@
       <div class="card" v-if="view === 'list'">
         <table class="vod-table">
           <thead>
-            <tr><th>设备名</th><th>归属用户</th><th>范围</th><th>状态</th><th>引擎</th><th>最后心跳</th><th>IP</th><th>创建时间</th><th style="width:90px">操作</th></tr>
+            <tr><th>凭据名称</th><th>归属用户</th><th>范围</th><th>状态</th><th>引擎</th><th>最后心跳</th><th>IP</th><th>创建时间</th><th style="width:90px">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="c in credentials" :key="c.id">
@@ -92,10 +92,10 @@
       <div class="modal-dialog">
         <div class="modal-header">
           <span class="modal-icon">🔑</span>
-          <span class="modal-title">签发设备凭据</span>
+          <span class="modal-title">签发凭据</span>
         </div>
         <div class="modal-body">
-          <input v-model="deviceName" placeholder="设备名（唯一，≤64字符）" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" @keyup.enter="issue" />
+          <input v-model="deviceName" placeholder="凭据名称（唯一，≤64字符）" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" @keyup.enter="issue" />
           <div v-if="issuedToken" class="mt12" style="border:1px dashed var(--warning);border-radius:8px;padding:12px">
             <p style="color:var(--warning);font-weight:600">⚠ 明文仅显示一次，请立即保存</p>
             <code class="cred-token">{{ issuedToken }}</code>
@@ -140,7 +140,7 @@
         </div>
         <div class="modal-body">
           <p style="margin:0 0 12px">将物理删除凭据 <b>{{ deleteTarget.name }}</b> 及其关联的引擎/任务记录（管理台数据，删除后不可恢复）。<br />
-          worker 机器不受影响——重新签发凭据并更新 worker 端 token 后，可重新注册上线。设备名将释放，可签发同名设备。</p>
+          worker 机器不受影响——重新签发凭据并更新 worker 端 token 后，可重新注册上线。凭据名称将释放，可签发同名凭据。</p>
           <p style="margin:0 0 6px">请输入凭据名 <b>{{ deleteTarget.name }}</b> 确认：</p>
           <input v-model="deleteWord" class="form-input" placeholder="输入凭据名确认" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" />
         </div>
@@ -210,7 +210,7 @@ function reset() {
 function openIssue() { showIssue.value = true; issuedToken.value = ''; deviceName.value = '' }
 async function issue() {
   if (issuing.value) return
-  if (!deviceName.value.trim()) { showToast('请输入设备名', 'error'); return }
+  if (!deviceName.value.trim()) { showToast('请输入凭据名称', 'error'); return }
   issuing.value = true
   try {
     const { data } = await http.post('/credentials', { name: deviceName.value })
