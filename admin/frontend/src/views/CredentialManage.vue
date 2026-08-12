@@ -57,8 +57,12 @@
         <div v-for="c in credentials" :key="c.id" class="device-card">
           <div class="dc-head" style="flex-wrap:wrap">
             <span :class="['status-tag', c.status === 'active' ? 'success' : 'default']">{{ c.status === 'active' ? '有效' : '已吊销' }}</span>
-            <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(c.scope) }}</span>
-            <span style="font-weight:600;font-size:14px">{{ c.name }}</span>
+            <span style="font-weight:600;font-size:14px">
+              {{ c.name }}
+              <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">
+                <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(c.scope) }}</span>
+              </span>
+            </span>
           </div>
           <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
             <div><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ c.ownerName || '—' }}</div>
