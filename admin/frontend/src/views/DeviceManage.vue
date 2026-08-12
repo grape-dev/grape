@@ -73,16 +73,19 @@
             <span :style="badgeStyle(d.health)">
               <span :style="dotStyle(d.health)"></span>{{ healthText(d.health) }}
             </span>
-            <span style="font-weight:600;font-size:14px">
+            <span style="flex:1;min-width:0;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="(d.deviceName || d.name) + ' · ' + scopeText(d.scope)">
               {{ d.deviceName || d.name }}
-              <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">{{ d.status }} <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(d.scope) }}</span></span>
+              <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">
+                <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(d.scope) }}</span>
+              </span>
             </span>
           </div>
           <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
+            <div class="ellipsis-cell" :title="d.ownerName || '—'"><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ d.ownerName || '—' }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">引擎</span> {{ d.engineCount }} 个</div>
-            <div><span class="t3" style="display:inline-block;min-width:46px">任务</span> {{ d.taskCount }} 个</div>
-            <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ d.lastSeenAt || '—' }}</div>
-            <div><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ d.lastIp || '—' }}</div>
+            <div class="ellipsis-cell" :title="formatTime(d.lastSeenAt)"><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(d.lastSeenAt) }}</div>
+            <div class="ellipsis-cell" :title="d.lastIp || '—'"><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ d.lastIp || '—' }}</div>
+            <div style="grid-column:1 / -1"><span class="t3" style="display:inline-block;min-width:46px">任务</span> {{ d.taskCount }} 个 · <span class="t3">创建</span> {{ formatTime(d.createdAt) }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
             <button class="btn btn-sm" @click="$router.push(`/runtime/devices/${d.id}`)">详情</button>
