@@ -51,10 +51,10 @@ def _resolve_server_url() -> str:
     return "http://localhost:8080"
 
 
-def _build_history_file_guide(repo_key: str, account: str = "") -> str:
+def _build_history_file_guide(repo_key: str, account: str = "", runtime_id: int = 0) -> str:
     """Build prompt section listing available history files."""
-    from src.runtime.service import get_execution_mode
-    if get_execution_mode() == "queue_remote":
+    from src.runtime.service import runtime_execution_kind, EXEC_MODE_REMOTE
+    if runtime_execution_kind(runtime_id) == EXEC_MODE_REMOTE:
         # 远端模式：本地历史文件不可达，历史上下文改由 event.json 档案承载
         #（见 multi-issue-isolation-design.md §4.2 / skill-delivery-remote.md §3.4）
         return ""
@@ -273,7 +273,7 @@ def extract_event_number(payload):
     return None
 
 
-def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path=""):
+def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0):
     number = extract_event_number(evt['payload'])
     repo = evt['repository']
     payload = evt['payload']
@@ -347,7 +347,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
 
     repo_key = f"{evt['source']}:{evt['repository']}"
     account = evt.get("account") or evt.get("repository", "")
-    parts.append(_build_history_file_guide(repo_key, account))
+    parts.append(_build_history_file_guide(repo_key, account, runtime_id))
     parts.append(_build_project_info_section(repo_key))
 
     if skills:
@@ -444,7 +444,8 @@ context 是传给下一个 Agent 的接力说明，应包含：
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url())
 
 
-def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "") -> str:
+def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "",
+                      runtime_id: int = 0) -> str:
     parts = [f"User asks about {repo_key}: {user_text}"]
     # Chat messages don't have `evt`, so A2A context is not injected here
     if history:
@@ -458,7 +459,7 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
     except Exception:
         pass
 
-    parts.append(_build_history_file_guide(repo_key, account))
+    parts.append(_build_history_file_guide(repo_key, account, runtime_id))
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
         skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")

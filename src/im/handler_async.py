@@ -14,7 +14,7 @@ from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import get_or_create_session, update_session, db
 from src.prompt_builder import build_chat_prompt, get_skill_capabilities
 from src.runtime.executor import consume_stream_async
-from src.runtime.service import get_execution_mode
+from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
 
 if TYPE_CHECKING:
@@ -446,7 +446,18 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         except Exception as e:
             log.warning(f"[Chat:{ctx.name}] resolve user gitcode token failed: {e}")
 
-        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, exec_account)
+        # 用户 chat 配置的引擎：IM Chat 默认本机 direct；配置个人 worker 引擎则入队给该 worker
+        chat_runtime_id = 0
+        try:
+            from src.session_manager import get_chat_config as _chat_cfg
+            _uid = get_user_id_by_app_id(ctx.app_id) or 0
+            if _uid > 0:
+                chat_runtime_id = (_chat_cfg(_uid) or {}).get("runtime_id") or 0
+        except Exception:
+            chat_runtime_id = 0
+
+        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, exec_account,
+                                                        runtime_id=chat_runtime_id)
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:2000]}")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])
@@ -460,13 +471,13 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         oc_sid = {"opencode": oc_sid, "cc_sid": cc_sid}.get(backend, "")
         new_oc_session_id = oc_sid
 
-        mode = get_execution_mode()
-        if mode != "direct":
+        kind = runtime_execution_kind(chat_runtime_id)
+        if kind != EXEC_MODE_DIRECT:
             # 入队 + 轮询：任务由 RuntimeAgent（本地/远端边端）claim 执行（见 multi-runtime-instance-design）
             import json as _json
             from src.runtime.service import enqueue_task, wait_task_terminal
             from src.user.db import get_runtime_id_by_name, ensure_default_runtime
-            runtime_id = get_runtime_id_by_name(backend) or ensure_default_runtime(backend) or 0
+            runtime_id = chat_runtime_id or (get_runtime_id_by_name(backend) or ensure_default_runtime(backend) or 0)
             if runtime_id:
                 uid = 0
                 try:
@@ -485,7 +496,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     repo_gitcode_token=user_token or "",
                     env_extra={"IM_CHAT_ID": chat_id},
                 )
-                log.info(f"[Chat:{ctx.name}] enqueued task={tid} mode={mode}")
+                log.info(f"[Chat:{ctx.name}] enqueued task={tid} mode={kind}")
                 task = await wait_task_terminal(tid)
                 final_text = task.get("result_text") or ""
                 exit_code = int(task.get("exit_code") or 0)

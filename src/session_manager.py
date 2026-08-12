@@ -165,6 +165,16 @@ try:
 except Exception as e:
     log.warning(f"Rebuild unified_user_mapping check failed: {e}")
 db.execute(UNIFIED_USER_MAPPING_TABLE_SQL)
+# 回填 unified_user_mapping：user_accounts 已有但未映射的用户（INSERT OR IGNORE 不覆盖已有飞书绑定）
+# 使 /api/tasks/notify 能解析 assignee→user_id（tasks.py:52）；幂等，每次启动执行
+try:
+    db.execute(
+        "INSERT OR IGNORE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname) "
+        "SELECT id, username, nickname FROM user_accounts WHERE id>0"
+    )
+    db.commit()
+except Exception as e:
+    log.warning(f"Backfill unified_user_mapping failed: {e}")
 # 兼容旧列迁移（幂等）
 try:
     db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")
@@ -558,7 +568,8 @@ def get_chat_config(user_id: int) -> dict:
         c.execute("SELECT runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (user_id,))
         row = c.fetchone()
         if not row:
-            return {"backend": "opencode", "skill": "", "skill_id": 0, "im_app_id": "", "im_app_secret": "", "im_provider": "", "updated_at": ""}
+            return {"backend": "opencode", "runtime_id": 0, "skill": "", "skill_id": 0,
+                    "im_app_id": "", "im_app_secret": "", "im_provider": "", "updated_at": ""}
         backend_name = "opencode"
         if row[0]:
             c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
@@ -571,7 +582,7 @@ def get_chat_config(user_id: int) -> dict:
                 else:
                     # 幽灵/未知引擎（如历史遗留 'default'）：回退 opencode，避免 chat 路由到不存在的引擎
                     log.warning(f"get_chat_config: runtime_id={row[0]} 指向未知引擎 '{brow[0]}'，回退 opencode")
-        return {"backend": backend_name, "skill": row[1] or "", "skill_id": row[2] or 0,
+        return {"backend": backend_name, "runtime_id": row[0] or 0, "skill": row[1] or "", "skill_id": row[2] or 0,
                 "im_app_id": row[3] or "", "im_app_secret": row[4] or "", "im_provider": row[5] or "", "updated_at": ""}
 
 

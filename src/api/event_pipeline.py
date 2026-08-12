@@ -418,10 +418,11 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                    "repo_key": from_repo_key(repo_key), "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
 
-    # 执行分派：direct（就地）/ queue_local·remote（入队 + RuntimeAgent，M2 见 implementation-plan §三）
-    from src.runtime.service import get_execution_mode, enqueue_task
-    mode = get_execution_mode()
-    if mode != "direct" and backend and skill_name and seq > 0:
+    # 执行分派：auto（按绑定引擎宿主自动推导，见 execution-mode-auto-routing-design.md）
+    # / direct（就地）/ queue_local·remote（入队 + RuntimeAgent，M2 见 implementation-plan §三）
+    from src.runtime.service import runtime_execution_kind, enqueue_task, EXEC_MODE_DIRECT
+    kind = runtime_execution_kind(runtime_id or 0)
+    if kind != EXEC_MODE_DIRECT and backend and skill_name and seq > 0:
         _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                                skill_id, skill_path, runtime_id or 0, issue_id)
     elif backend and skill_name and seq > 0:
@@ -541,7 +542,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         from src.prompt_builder import build_prompt
         evt["_skill_path"] = skill_path
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
-                              skill_path=skill_path)
+                              skill_path=skill_path, runtime_id=runtime_id)
     except Exception as e:
         log.warning(f"Pipeline enqueue: prompt build failed: {e}")
         return
@@ -649,7 +650,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     try:
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
-                              skill_path=evt.get("_skill_path", ""))
+                              skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id)
         # 直接模式（direct）：project-info 服务端本地可达，替换占位符为权威路径
         try:
             from src.repo_key import split_owner_repo

@@ -197,10 +197,11 @@ async def a2a_endpoint(request: Request):
         )
         log.info(f"A2A: event created, seq={seq}")
 
-        # 执行分派：与 run_pipeline 一致——direct 就地线程；queue 模式入队（A2A 也走 agent_tasks，
+        # 执行分派：与 run_pipeline 一致——auto/direct 就地线程；queue 模式入队（A2A 也走 agent_tasks，
         # 使 pipeline executing 派生/串行槽/可观测性与 webhook 事件一致，见 a2a-queue-refactor-design.md）
-        from src.runtime.service import get_execution_mode
-        if get_execution_mode() == "direct":
+        from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
+        kind = runtime_execution_kind(runtime_id or 0)
+        if kind == EXEC_MODE_DIRECT:
             import threading
             threading.Thread(target=_execute_agent, args=(
                 repo_key, seq, agent_name, backend, skill_name or agent_name, evt,
@@ -212,7 +213,7 @@ async def a2a_endpoint(request: Request):
                                    skill_name or agent_name, evt,
                                    skill_id, skill_path, runtime_id or 0,
                                    f"#{issue_number}" if issue_number else "")
-            log.info(f"A2A: enqueued task for {agent_name}, seq={seq}, mode={get_execution_mode()}")
+            log.info(f"A2A: enqueued task for {agent_name}, seq={seq}, mode={kind}")
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")
         seq = 0

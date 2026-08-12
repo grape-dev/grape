@@ -257,3 +257,70 @@ class TestMine:
         r_all = client.get("/api/tasks/mine", headers=_headers)
         assert all(t["repo_key"] in ("org/repoA", "org/repoB") for t in r_all.json()["tasks"])
         assert len(r_all.json()["tasks"]) == 2
+
+
+class TestUserMappingBackfill:
+    """方案 B：GitCode OAuth 登录写映射 + 存量回填（notify 的 assignee→user_id 解析依赖 unified_user_mapping）"""
+
+    def _clean(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('backfill_user_1','oauth_user_1')")
+            c.execute("DELETE FROM user_accounts WHERE username IN ('backfill_user_1','oauth_user_1')")
+            c.execute("DELETE FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number IN (91, 92)")
+            db.commit()
+
+    def _run_backfill(self):
+        """与 session_manager 启动回填同 SQL（幂等）"""
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR IGNORE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname) "
+                "SELECT id, username, nickname FROM user_accounts WHERE id>0"
+            )
+            db.commit()
+
+    def test_backfill_populates_mapping_for_existing_account(self):
+        """存量用户（仅 user_accounts、无映射）经回填后 notify 可解析 user_id"""
+        self._clean()
+        created = user_db.create_user("backfill_user_1", "pwd")
+        uid = created["id"]
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='backfill_user_1'")
+                db.commit()
+            self._run_backfill()
+            assert tasks_mod._get_user_id_by_gitcode("backfill_user_1") == uid
+        finally:
+            user_db.delete_user(uid)
+            self._clean()
+
+    def test_notify_creates_task_after_backfill(self):
+        """回填后 /api/tasks/notify 能成功建任务（此前因无映射返回 ok:false）"""
+        self._clean()
+        created = user_db.create_user("backfill_user_1", "pwd")
+        try:
+            self._run_backfill()
+
+            def _swallow(coro, *a, **k):
+                try:
+                    coro.close()
+                except Exception:
+                    pass
+                return None
+
+            with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
+                r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
+                    "assignee": "backfill_user_1", "repo_key": "org/test",
+                    "issue_number": 91, "task_description": "回填后建任务"})
+            assert r.status_code == 200
+            assert r.json().get("ok") is True, r.json()
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT COUNT(*) FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number=91 AND assignee='backfill_user_1'"
+                ).fetchone()
+            assert row[0] == 1, "回填后 notify 应成功创建任务"
+        finally:
+            user_db.delete_user(created["id"])
+            self._clean()
