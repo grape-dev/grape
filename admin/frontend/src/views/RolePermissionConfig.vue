@@ -1,40 +1,52 @@
 <template>
-  <div class="flex gap16" style="align-items:flex-start">
-    <div class="cd" style="width:280px;flex-shrink:0">
-      <h4 class="mb8">角色列表</h4>
-      <div v-for="r in roles" :key="r.id" :class="['flex', 'fc', 'jbtw', 'gap8', { act: selected?.id === r.id }]" class="role-item" @click="select(r)">
-        <div>
-          <div>{{ r.name }}</div>
-          <div class="t3" style="font-size:11px">{{ r.code }}<span v-if="r.isProtected === 1" class="tg tg-q" style="margin-left:4px">保护</span></div>
-        </div>
-      </div>
-      <div class="mt12" style="border-top:1px solid var(--b);padding-top:10px">
-        <input v-model="newCode" placeholder="角色 code" />
-        <input v-model="newName" placeholder="角色名" />
-        <button class="bt bt-p" @click="createRole">新增角色</button>
-      </div>
+  <div class="page-container" style="padding:0">
+    <div class="page-header">
+      <h1>角色权限配置</h1>
     </div>
-
-    <div class="cd f1">
-      <div class="cd-h">
-        <h2>{{ selected ? `菜单权限：${selected.name}` : '请选择角色' }}</h2>
-        <button v-if="selected && selected.isProtected !== 1" class="bt bt-r" @click="deleteRole">删除角色</button>
-      </div>
-      <div v-if="selected" class="mt8">
-        <div v-for="group in menuTree" :key="group.code" class="mb8">
-          <label class="chk" style="font-weight:600">
-            <input type="checkbox" :checked="allChecked(group)" @change="toggleGroup(group, $event.target.checked)" />
-            {{ group.name }}
-          </label>
-          <div v-for="child in group.children" :key="child.code" style="padding-left:26px">
-            <label class="chk">
-              <input type="checkbox" :value="child.code" v-model="checkedCodes" :disabled="selected.isProtected === 1" />
-              {{ child.name }}
-            </label>
+    <div style="padding:20px 28px;display:flex;gap:16px;align-items:flex-start">
+      <div class="card" style="width:280px;flex-shrink:0;padding:14px">
+        <h4 class="mb8" style="font-size:14px">角色列表</h4>
+        <div
+          v-for="r in roles"
+          :key="r.id"
+          :class="['role-item', { act: selected?.id === r.id }]"
+          @click="select(r)"
+        >
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <div>
+              <div>{{ r.name }}</div>
+              <div class="t3" style="font-size:11px">{{ r.code }}<span v-if="r.isProtected === 1" class="status-tag info" style="margin-left:4px">保护</span></div>
+            </div>
           </div>
         </div>
-        <p v-if="selected.isProtected === 1" class="t3">保护角色的权限不可修改</p>
-        <button v-if="selected.isProtected !== 1" class="bt bt-p mt12" @click="savePerms">保存权限</button>
+        <div class="mt12" style="border-top:1px solid var(--border-color);padding-top:12px">
+          <input v-model="newCode" placeholder="角色 code" style="width:100%;margin-bottom:8px" />
+          <input v-model="newName" placeholder="角色名" style="width:100%;margin-bottom:8px" />
+          <button class="btn btn-primary btn-sm" @click="createRole">+ 新增角色</button>
+        </div>
+      </div>
+
+      <div class="card f1" style="padding:16px 20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+          <h2 style="font-size:14px;font-weight:600">{{ selected ? `菜单权限：${selected.name}` : '请选择角色' }}</h2>
+          <button v-if="selected && selected.isProtected !== 1" class="btn btn-danger btn-sm" @click="deleteRole">删除角色</button>
+        </div>
+        <div v-if="selected" class="mt8">
+          <div v-for="group in menuTree" :key="group.code" class="mb8">
+            <label class="chk" style="font-weight:600">
+              <input type="checkbox" :checked="allChecked(group)" @change="toggleGroup(group, $event.target.checked)" />
+              {{ group.name }}
+            </label>
+            <div v-for="child in group.children" :key="child.code" style="padding-left:26px">
+              <label class="chk">
+                <input type="checkbox" :value="child.code" v-model="checkedCodes" :disabled="selected.isProtected === 1" />
+                {{ child.name }}
+              </label>
+            </div>
+          </div>
+          <p v-if="selected.isProtected === 1" class="t3">保护角色的权限不可修改</p>
+          <button v-if="selected.isProtected !== 1" class="btn btn-primary btn-sm mt12" @click="savePerms">保存权限</button>
+        </div>
       </div>
     </div>
   </div>
@@ -128,7 +140,7 @@ onMounted(() => { loadRoles(); loadMenus() })
 </script>
 
 <style scoped>
-.role-item { padding: 10px; border-radius: 7px; cursor: pointer; }
-.role-item.act { background: #eef2ff; }
-.role-item:hover { background: var(--bg); }
+.role-item { padding: 10px; border-radius: 8px; cursor: pointer; transition: background 0.12s; }
+.role-item.act { background: var(--primary-bg); }
+.role-item:hover { background: #f5f7fa; }
 </style>

@@ -1,21 +1,22 @@
 <template>
-  <div>
-    <!-- 页头：不同类型引擎总数 -->
-    <div class="stats mb12">
-      <div class="st"><span class="v">{{ total }}</span><span class="l">引擎总数</span></div>
-      <div v-for="(cnt, t) in stats" :key="t" class="st">
-        <span class="v">{{ cnt }}</span><span class="l">{{ t }}</span>
+  <div class="page-container" style="padding:0">
+    <div class="page-header">
+      <h1>引擎管理</h1>
+      <span class="badge">{{ totalElements }} 条</span>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
+        <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
       </div>
     </div>
-
-    <div class="cd">
-      <div class="cd-h">
-        <h2>引擎管理 <span class="c">{{ totalElements }} 条</span></h2>
-        <div class="flex gap8">
-          <button class="bt bt-o" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
-          <button class="bt bt-o" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
+    <div style="padding:20px 28px">
+      <!-- 引擎类型统计 -->
+      <div class="stats">
+        <div class="stat-card"><div class="stat-label">引擎总数</div><div class="stat-value">{{ total }}</div></div>
+        <div v-for="(cnt, t) in stats" :key="t" class="stat-card">
+          <div class="stat-label">{{ t }}</div><div class="stat-value small">{{ cnt }}</div>
         </div>
       </div>
+
       <div class="toolbar">
         <select v-model="scope">
           <option value="">全部范围</option>
@@ -38,15 +39,15 @@
           <option value="offline">离线</option>
           <option value="about_to_gc">待回收</option>
         </select>
-        <button class="bt bt-p" @click="search">查询</button>
-        <button class="bt bt-o" @click="reset">重置</button>
+        <button class="btn" @click="search">查询</button>
+        <button class="btn" @click="reset">重置</button>
       </div>
 
       <!-- 列表模式 -->
-      <div v-if="view === 'list'" class="tw">
-        <table>
+      <div class="card" v-if="view === 'list'">
+        <table class="vod-table">
           <thead>
-            <tr><th>实例名</th><th>类型</th><th>版本</th><th>设备</th><th>范围</th><th>健康</th><th>状态</th><th>最后心跳</th><th>操作</th></tr>
+            <tr><th>实例名</th><th>类型</th><th>版本</th><th>设备</th><th>范围</th><th>健康</th><th>状态</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="e in engines" :key="e.id">
@@ -54,47 +55,46 @@
               <td>{{ e.name }}</td>
               <td class="t3">{{ e.version || '-' }}</td>
               <td>{{ e.device || '-' }}</td>
-              <td><span class="tg tg-c">{{ scopeText(e.scope) }}</span></td>
-              <td><span :class="['tg', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
+              <td><span class="status-tag info">{{ scopeText(e.scope) }}</span></td>
+              <td><span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
               <td class="t2">{{ e.status }}</td>
               <td class="t3">{{ e.lastSeenAt || '-' }}</td>
-              <td><a class="bt bt-o bt-s" @click="remove(e)">删除</a></td>
+              <td><button class="btn btn-sm" @click="remove(e)">删除</button></td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <!-- 卡片模式（对齐 Grape 引擎卡片） -->
-      <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">
-        <div v-for="e in engines" :key="e.id"
-             style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+      <!-- 卡片模式 -->
+      <div v-else class="device-grid">
+        <div v-for="e in engines" :key="e.id" class="device-card">
+          <div class="dc-head" style="flex-wrap:wrap">
             <span :style="badgeStyle(e.health)">
               <span :style="dotStyle(e.health)"></span>{{ healthText(e.health) }}
             </span>
             <span style="font-weight:600;font-size:14px">
               {{ e.displayName || e.name }}
-              <span style="font-weight:400;color:var(--t3);font-size:12px">{{ e.name }} v{{ e.version || '' }}</span>
+              <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">{{ e.name }} v{{ e.version || '' }}</span>
             </span>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
-            <div><span style="color:var(--t3);display:inline-block;min-width:46px">设备</span> {{ e.device || '—' }}</div>
-            <div><span style="color:var(--t3);display:inline-block;min-width:46px">状态</span> {{ e.status }}</div>
-            <div><span style="color:var(--t3);display:inline-block;min-width:46px">心跳</span> {{ e.lastSeenAt || '—' }}</div>
-            <div><span style="color:var(--t3);display:inline-block;min-width:46px">归属/范围</span> {{ e.ownerId || '—' }} <span class="tg tg-c" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span></div>
+          <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
+            <div><span class="t3" style="display:inline-block;min-width:46px">设备</span> {{ e.device || '—' }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">状态</span> {{ e.status }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ e.lastSeenAt || '—' }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">归属/范围</span> {{ e.ownerId || '—' }} <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span></div>
           </div>
-          <div style="display:flex;justify-content:flex-end;padding-top:10px;border-top:1px solid var(--b);margin-top:10px">
-            <a class="bt bt-o bt-s" @click="remove(e)">删除</a>
+          <div class="dc-actions" style="justify-content:flex-end">
+            <button class="btn btn-sm" @click="remove(e)">删除</button>
           </div>
         </div>
       </div>
 
-      <p v-if="!engines.length" class="ts t2" style="padding:12px">无匹配引擎</p>
+      <p v-if="!engines.length" class="t2" style="padding:16px;text-align:center">无匹配引擎</p>
 
-      <div v-if="totalPages > 1" class="pager">
-        第 {{ page + 1 }} / {{ totalPages }} 页（共 {{ totalElements }} 条）
-        <button class="bt bt-o bt-s" :disabled="page <= 0" @click="page--; load()">上一页</button>
-        <button class="bt bt-o bt-s" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
+      <div v-if="totalPages > 1" class="pagination-bar">
+        <span class="page-info">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ totalElements }} 条）</span>
+        <button class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
+        <button class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
       </div>
     </div>
   </div>
@@ -115,24 +115,24 @@ const device = ref('')
 const status = ref('')
 const view = ref('list')
 const deviceOptions = ref([])
-const activeTab = { background: 'var(--a)', color: '#fff', borderColor: 'var(--a)' }
+const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
 
 const BADGE = {
-  online: { color: 'var(--g)', bg: '#dcfce7', label: '在线' },
-  recently_lost: { color: 'var(--or)', bg: '#fef3c7', label: '刚失联' },
-  offline: { color: 'var(--t3)', bg: '#eef0f3', label: '离线' },
-  about_to_gc: { color: 'var(--r)', bg: '#fee2e2', label: '待回收' }
+  online: { color: 'var(--success)', bg: '#dcfce7', label: '在线' },
+  recently_lost: { color: '#ea5a0c', bg: '#fef3c7', label: '刚失联' },
+  offline: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '离线' },
+  about_to_gc: { color: 'var(--danger)', bg: '#fee2e2', label: '待回收' }
 }
 const SCOPE_TEXT = { global: '全局', repo: '仓库', user: '个人' }
 function scopeText(s) { return SCOPE_TEXT[s] || s || '—' }
 function healthText(h) { return (BADGE[h] || { label: h }).label }
-function healthClass(h) { return { online: 'tg-g', recently_lost: 'tg-s', offline: 'tg-d', about_to_gc: 'tg-i' }[h] || 'tg-d' }
+function healthClass(h) { return { online: 'success', recently_lost: 'warning', offline: 'default', about_to_gc: 'danger' }[h] || 'default' }
 function badgeStyle(h) {
-  const b = BADGE[h] || { color: 'var(--t3)', bg: '#eef0f3' }
+  const b = BADGE[h] || { color: 'var(--text-tertiary)', bg: '#eef0f3' }
   return { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12px', fontWeight: 600, color: b.color, background: b.bg, padding: '3px 10px', borderRadius: '999px', whiteSpace: 'nowrap' }
 }
 function dotStyle(h) {
-  const b = BADGE[h] || { color: 'var(--t3)' }
+  const b = BADGE[h] || { color: 'var(--text-tertiary)' }
   return { width: '7px', height: '7px', borderRadius: '50%', background: b.color, display: 'inline-block' }
 }
 

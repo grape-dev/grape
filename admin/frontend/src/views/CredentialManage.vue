@@ -1,95 +1,97 @@
 <template>
-  <div class="cd">
-    <div class="cd-h">
-      <h2>凭据管理 <span class="c">{{ credentials.length }} 条</span></h2>
-      <div class="flex gap8">
-        <button class="bt bt-p" @click="openIssue">签发凭据</button>
-        <button class="bt bt-o" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
-        <button class="bt bt-o" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
+  <div class="page-container" style="padding:0">
+    <div class="page-header">
+      <h1>凭据管理</h1>
+      <span class="badge">{{ credentials.length }} 条</span>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn btn-primary" @click="openIssue">签发凭据</button>
+        <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
+        <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
       </div>
     </div>
-    <div class="toolbar">
-      <select v-model="scope">
-        <option value="">全部范围</option>
-        <option value="global">全局</option>
-        <option value="repo">仓库</option>
-        <option value="user">用户</option>
-      </select>
-      <input v-model="owner" placeholder="归属用户（GitCode 用户名）" style="width:200px" @keyup.enter="load" />
-      <button class="bt bt-p" @click="load">查询</button>
-      <button class="bt bt-o" @click="reset">重置</button>
-    </div>
+    <div style="padding:20px 28px">
+      <div class="toolbar">
+        <select v-model="scope">
+          <option value="">全部范围</option>
+          <option value="global">全局</option>
+          <option value="repo">仓库</option>
+          <option value="user">用户</option>
+        </select>
+        <input v-model="owner" placeholder="归属用户（GitCode 用户名）" style="width:200px" @keyup.enter="load" />
+        <button class="btn" @click="load">查询</button>
+        <button class="btn" @click="reset">重置</button>
+      </div>
 
-    <!-- 列表模式 -->
-    <div v-if="view === 'list'" class="tw">
-      <table>
-        <thead>
-          <tr><th>设备名</th><th>归属用户</th><th>范围</th><th>状态</th><th>健康</th><th>引擎</th><th>最后心跳</th><th>IP</th><th>创建时间</th><th>操作</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="c in credentials" :key="c.id">
-            <td>{{ c.name }}</td>
-            <td>{{ c.ownerName || '-' }}</td>
-            <td><span class="tg tg-c">{{ scopeText(c.scope) }}</span></td>
-            <td><span :class="['tg', c.status === 'active' ? 'tg-g' : 'tg-d']">{{ c.status }}</span></td>
-            <td><span :class="['tg', healthClass(c.health)]">{{ healthText(c.health) }}</span></td>
-            <td>{{ c.engineCount }}</td>
-            <td class="t3">{{ c.lastSeenAt || '-' }}</td>
-            <td class="t3">{{ c.lastIp || '-' }}</td>
-            <td class="t3">{{ c.createdAt || '-' }}</td>
-            <td>
-              <a v-if="c.status === 'active'" class="bt bt-o bt-s" @click="revoke(c)">吊销</a>
-              <span v-else class="t3">—</span>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+      <!-- 列表模式 -->
+      <div class="card" v-if="view === 'list'">
+        <table class="vod-table">
+          <thead>
+            <tr><th>设备名</th><th>归属用户</th><th>范围</th><th>状态</th><th>健康</th><th>引擎</th><th>最后心跳</th><th>IP</th><th>创建时间</th><th style="width:90px">操作</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="c in credentials" :key="c.id">
+              <td>{{ c.name }}</td>
+              <td>{{ c.ownerName || '-' }}</td>
+              <td><span class="status-tag info">{{ scopeText(c.scope) }}</span></td>
+              <td><span :class="['status-tag', c.status === 'active' ? 'success' : 'default']">{{ c.status }}</span></td>
+              <td><span :class="['status-tag', healthClass(c.health)]">{{ healthText(c.health) }}</span></td>
+              <td>{{ c.engineCount }}</td>
+              <td class="t3">{{ c.lastSeenAt || '-' }}</td>
+              <td class="t3">{{ c.lastIp || '-' }}</td>
+              <td class="t3">{{ c.createdAt || '-' }}</td>
+              <td>
+                <button v-if="c.status === 'active'" class="btn btn-sm" @click="revoke(c)">吊销</button>
+                <span v-else class="t3">—</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
-    <!-- 卡片模式（对齐 Grape 设备卡片） -->
-    <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">
-      <div v-for="c in credentials" :key="c.id"
-           style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
-          <span :style="badgeStyle(c.health)">
-            <span :style="dotStyle(c.health)"></span>{{ healthText(c.health) }}
-          </span>
-          <span style="font-weight:600;font-size:14px">
-            {{ c.name }}
-            <span style="font-weight:400;color:var(--t3);font-size:12px">
-              <span class="tg tg-c" style="font-size:11px;padding:1px 6px">{{ scopeText(c.scope) }}</span><span v-if="c.status !== 'active'" style="color:var(--t3)"> · {{ c.status }}</span>
+      <!-- 卡片模式 -->
+      <div v-else class="device-grid">
+        <div v-for="c in credentials" :key="c.id" class="device-card">
+          <div class="dc-head" style="flex-wrap:wrap">
+            <span :style="badgeStyle(c.health)">
+              <span :style="dotStyle(c.health)"></span>{{ healthText(c.health) }}
             </span>
-          </span>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">归属</span> {{ c.ownerName || '—' }}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">引擎</span> {{ c.engineCount }} 个</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">心跳</span> {{ c.lastSeenAt || '—' }}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">IP</span> {{ c.lastIp || '—' }}</div>
-          <div style="grid-column:1 / -1"><span style="color:var(--t3)">创建</span> {{ c.createdAt || '—' }}</div>
-        </div>
-        <div style="display:flex;justify-content:flex-end;padding-top:10px;border-top:1px solid var(--b);margin-top:10px">
-          <a v-if="c.status === 'active'" class="bt bt-o bt-s" @click="revoke(c)">吊销</a>
-          <span v-else class="t3" style="font-size:11px">已吊销</span>
+            <span style="font-weight:600;font-size:14px">
+              {{ c.name }}
+              <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">
+                <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(c.scope) }}</span><span v-if="c.status !== 'active'" class="t3"> · {{ c.status }}</span>
+              </span>
+            </span>
+          </div>
+          <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
+            <div><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ c.ownerName || '—' }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">引擎</span> {{ c.engineCount }} 个</div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ c.lastSeenAt || '—' }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ c.lastIp || '—' }}</div>
+            <div style="grid-column:1 / -1"><span class="t3">创建</span> {{ c.createdAt || '—' }}</div>
+          </div>
+          <div class="dc-actions" style="justify-content:flex-end">
+            <button v-if="c.status === 'active'" class="btn btn-sm" @click="revoke(c)">吊销</button>
+            <span v-else class="t3" style="font-size:11px">已吊销</span>
+          </div>
         </div>
       </div>
+      <p v-if="!credentials.length" class="t2" style="padding:16px;text-align:center">无匹配凭据</p>
     </div>
-    <p v-if="!credentials.length" class="ts t2" style="padding:12px">无匹配凭据</p>
-  </div>
 
-  <div v-if="showIssue" class="modal">
-    <div class="modal-box">
-      <h4>签发设备凭据</h4>
-      <input v-model="deviceName" placeholder="设备名（唯一，≤64字符）" />
-      <div class="modal-actions">
-        <button class="bt bt-o" @click="showIssue = false">取消</button>
-        <button class="bt bt-p" @click="issue">签发</button>
-      </div>
-      <div v-if="issuedToken" class="cd mt12" style="border:1px dashed var(--y)">
-        <p class="ty" style="font-weight:600">⚠ 明文仅显示一次，请立即保存</p>
-        <code style="word-break:break-all;font-size:12px;display:block;margin:8px 0">{{ issuedToken }}</code>
-        <p class="t3">将该 token 填入目标机器 /etc/grape/runtime.env 的 RUNTIME_TOKEN 并重启 runtime-agent</p>
-        <button class="bt bt-p mt8" @click="issuedToken = ''">我已保存</button>
+    <div v-if="showIssue" class="modal" @click.self="showIssue = false">
+      <div class="modal-box">
+        <h4>签发设备凭据</h4>
+        <input v-model="deviceName" placeholder="设备名（唯一，≤64字符）" />
+        <div class="modal-actions">
+          <button class="btn" @click="showIssue = false">取消</button>
+          <button class="btn btn-primary" @click="issue">签发</button>
+        </div>
+        <div v-if="issuedToken" class="mt12" style="border:1px dashed var(--warning);border-radius:8px;padding:12px">
+          <p style="color:var(--warning);font-weight:600">⚠ 明文仅显示一次，请立即保存</p>
+          <code class="cred-token">{{ issuedToken }}</code>
+          <p class="t3" style="font-size:12px">将该 token 填入目标机器 /etc/grape/runtime.env 的 RUNTIME_TOKEN 并重启 runtime-agent</p>
+          <button class="btn btn-primary btn-sm mt8" @click="issuedToken = ''">我已保存</button>
+        </div>
       </div>
     </div>
   </div>
@@ -106,27 +108,27 @@ const owner = ref('')
 const showIssue = ref(false)
 const deviceName = ref('')
 const issuedToken = ref('')
-const activeTab = { background: 'var(--a)', color: '#fff', borderColor: 'var(--a)' }
+const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
 
 const SCOPE_NAMES = { global: '全局', repo: '仓库', user: '用户' }
 function scopeText(s) { return SCOPE_NAMES[s] || s || '-' }
 
 // 对齐 Grape HEALTH_BADGE 配色
 const BADGE = {
-  online: { color: 'var(--g)', bg: '#dcfce7', label: '在线' },
-  recently_lost: { color: 'var(--or)', bg: '#fef3c7', label: '刚失联' },
-  offline: { color: 'var(--t3)', bg: '#eef0f3', label: '离线' },
-  about_to_gc: { color: 'var(--r)', bg: '#fee2e2', label: '待回收' },
-  revoked: { color: 'var(--t3)', bg: '#eef0f3', label: '已吊销' }
+  online: { color: 'var(--success)', bg: '#dcfce7', label: '在线' },
+  recently_lost: { color: '#ea5a0c', bg: '#fef3c7', label: '刚失联' },
+  offline: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '离线' },
+  about_to_gc: { color: 'var(--danger)', bg: '#fee2e2', label: '待回收' },
+  revoked: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '已吊销' }
 }
 function healthText(h) { return (BADGE[h] || { label: h }).label }
-function healthClass(h) { const b = BADGE[h] || {}; return { online: 'tg-g', recently_lost: 'tg-s', offline: 'tg-d', about_to_gc: 'tg-i', revoked: 'tg-d' }[h] || 'tg-d' }
+function healthClass(h) { return { online: 'success', recently_lost: 'warning', offline: 'default', about_to_gc: 'danger', revoked: 'default' }[h] || 'default' }
 function badgeStyle(h) {
-  const b = BADGE[h] || { color: 'var(--t3)', bg: '#eef0f3' }
+  const b = BADGE[h] || { color: 'var(--text-tertiary)', bg: '#eef0f3' }
   return { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12px', fontWeight: 600, color: b.color, background: b.bg, padding: '3px 10px', borderRadius: '999px', whiteSpace: 'nowrap' }
 }
 function dotStyle(h) {
-  const b = BADGE[h] || { color: 'var(--t3)' }
+  const b = BADGE[h] || { color: 'var(--text-tertiary)' }
   return { width: '7px', height: '7px', borderRadius: '50%', background: b.color, display: 'inline-block' }
 }
 

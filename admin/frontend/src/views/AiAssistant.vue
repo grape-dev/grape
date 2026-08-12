@@ -14,7 +14,7 @@
               <option v-for="t in customTemplates" :key="t.id" :value="'custom-' + t.id">{{ t.name }}</option>
             </optgroup>
           </select>
-          <button class="bt bt-p bt-s" :disabled="busy || !queryText.trim()" @click="send">{{ busy ? '查询中...' : '发送' }}</button>
+          <button class="btn btn-primary btn-sm" :disabled="busy || !queryText.trim()" @click="send">{{ busy ? '查询中...' : '发送' }}</button>
         </div>
         <textarea
           v-model="queryText"
@@ -26,9 +26,9 @@
         <div class="aiq-counter">{{ queryText.length }}/600</div>
         <div class="aiq-tplbar">
           <span class="aiq-tplcount">自定义模板 {{ customTemplates.length }}/{{ templateMax }}</span>
-          <button class="bt bt-o bt-s" :disabled="!queryText.trim()" @click="openSaveTpl">💾 保存为模板</button>
+          <button class="btn btn-sm" :disabled="!queryText.trim()" @click="openSaveTpl">💾 保存为模板</button>
           <div class="aiq-tplwrap">
-            <button class="bt bt-o bt-s" @click="showTplDrop = !showTplDrop">📋 自定义模板 <span class="aiq-arrow">▼</span></button>
+            <button class="btn btn-sm" @click="showTplDrop = !showTplDrop">📋 自定义模板 <span class="aiq-arrow">▼</span></button>
             <div v-if="showTplDrop" class="aiq-tpldrop">
               <div class="aiq-tpldrop-h">选择模板快速填充查询输入框</div>
               <div v-if="!customTemplates.length" class="aiq-tpldrop-empty">暂无自定义模板</div>
@@ -45,7 +45,7 @@
       <div class="aiq-sessions">
         <div class="aiq-sh">
           <h4>分析报表</h4>
-          <button class="bt bt-p bt-s" @click="newSession">+ 新建</button>
+          <button class="btn btn-primary btn-sm" @click="newSession">+ 新建</button>
         </div>
         <div class="aiq-slist">
           <div
@@ -69,8 +69,8 @@
       <div class="aiq-rt">
         <h3>{{ currentName || '对话记录' }}</h3>
         <div class="aiq-rta">
-          <button v-if="messages.length" class="bt bt-o bt-s" @click="copyAll">{{ copyOk ? '已复制' : '复制全部' }}</button>
-          <button v-if="messages.length" class="bt bt-o bt-s" @click="isFullscreen = !isFullscreen">{{ isFullscreen ? '还原' : '全屏' }}</button>
+          <button v-if="messages.length" class="btn btn-sm" @click="copyAll">{{ copyOk ? '已复制' : '复制全部' }}</button>
+          <button v-if="messages.length" class="btn btn-sm" @click="isFullscreen = !isFullscreen">{{ isFullscreen ? '还原' : '全屏' }}</button>
         </div>
       </div>
       <div class="aiq-result" ref="resultBox">
@@ -94,14 +94,14 @@
     </div>
 
     <!-- 保存模板弹窗 -->
-    <div v-if="showSaveTpl" class="modal">
+    <div v-if="showSaveTpl" class="modal" @click.self="showSaveTpl = false">
       <div class="modal-box">
         <h4>💾 保存为自定义模板</h4>
         <p class="t2" style="font-size:12px;margin:4px 0 10px">将当前提示词存为模板，下次可直接选用</p>
-        <input v-model="newTplName" placeholder="请输入模板名称（≤50字）" maxlength="50" style="width:100%;padding:8px 10px;border:1px solid var(--b);border-radius:8px;outline:none" />
+        <input v-model="newTplName" placeholder="请输入模板名称（≤50字）" maxlength="50" />
         <div class="modal-actions">
-          <button class="bt bt-o" @click="showSaveTpl = false">取消</button>
-          <button class="bt bt-p" :disabled="!newTplName.trim()" @click="saveTemplate">保存</button>
+          <button class="btn" @click="showSaveTpl = false">取消</button>
+          <button class="btn btn-primary" :disabled="!newTplName.trim()" @click="saveTemplate">保存</button>
         </div>
       </div>
     </div>
@@ -351,57 +351,57 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.aiq { display: flex; gap: 12px; height: calc(100vh - 130px); align-items: flex-start; }
+.aiq { display: flex; gap: 12px; height: calc(100vh - 100px); align-items: flex-start; }
 .aiq-left { width: 360px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
-.aiq-q { background: var(--c); border: 1px solid var(--b); border-radius: var(--r2); padding: 14px 16px; box-shadow: var(--sh); }
+.aiq-q { background: #fff; border: 1px solid var(--border-color); border-radius: var(--radius-lg); padding: 14px 16px; box-shadow: var(--card-shadow); }
 .aiq-q h3 { font-size: 13px; margin-bottom: 10px; }
 .aiq-actions { display: flex; gap: 8px; margin-bottom: 8px; }
-.aiq-tplselect { flex: 1; padding: 4px 8px; font-size: 12px; border: 1px solid var(--b); border-radius: 6px; background: var(--bg); outline: none; cursor: pointer; }
-.aiq-ta { width: 100%; padding: 8px 10px; font-size: 13px; border: 1px solid var(--b); border-radius: 8px; outline: none; resize: vertical; font-family: inherit; box-sizing: border-box; }
-.aiq-ta:focus { border-color: var(--a); }
-.aiq-counter { text-align: right; font-size: 11px; color: var(--t3); margin: 4px 0 8px; }
+.aiq-tplselect { flex: 1; padding: 4px 8px; font-size: 12px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-body); outline: none; cursor: pointer; }
+.aiq-ta { width: 100%; padding: 8px 10px; font-size: 13px; border: 1px solid var(--border-color); border-radius: 8px; outline: none; resize: vertical; font-family: inherit; box-sizing: border-box; }
+.aiq-ta:focus { border-color: var(--primary); }
+.aiq-counter { text-align: right; font-size: 11px; color: var(--text-tertiary); margin: 4px 0 8px; }
 .aiq-tplbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; position: relative; }
-.aiq-tplcount { font-size: 11px; color: var(--t3); margin-right: auto; }
+.aiq-tplcount { font-size: 11px; color: var(--text-tertiary); margin-right: auto; }
 .aiq-arrow { font-size: 9px; }
 .aiq-tplwrap { position: relative; }
-.aiq-tpldrop { position: absolute; left: 0; top: 30px; width: 240px; background: var(--c); border: 1px solid var(--b); border-radius: 8px; box-shadow: var(--sh); z-index: 20; max-height: 220px; overflow-y: auto; }
-.aiq-tpldrop-h { font-size: 11px; color: var(--t3); padding: 8px 10px; border-bottom: 1px solid var(--b); }
-.aiq-tpldrop-empty { font-size: 12px; color: var(--t3); padding: 12px; text-align: center; }
+.aiq-tpldrop { position: absolute; left: 0; top: 32px; width: 240px; background: #fff; border: 1px solid var(--border-color); border-radius: 8px; box-shadow: var(--card-shadow); z-index: 20; max-height: 220px; overflow-y: auto; }
+.aiq-tpldrop-h { font-size: 11px; color: var(--text-tertiary); padding: 8px 10px; border-bottom: 1px solid var(--border-color); }
+.aiq-tpldrop-empty { font-size: 12px; color: var(--text-tertiary); padding: 12px; text-align: center; }
 .aiq-tplitem { display: flex; justify-content: space-between; align-items: center; padding: 7px 10px; font-size: 12px; cursor: pointer; }
-.aiq-tplitem:hover { background: var(--bg); }
-.aiq-tpldel { color: var(--r); font-weight: 700; }
-.aiq-hint { font-size: 11px; color: var(--t3); margin-top: 10px; }
-.aiq-sessions { background: var(--c); border: 1px solid var(--b); border-radius: var(--r2); padding: 14px 16px; box-shadow: var(--sh); flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.aiq-tplitem:hover { background: var(--bg-body); }
+.aiq-tpldel { color: var(--danger); font-weight: 700; }
+.aiq-hint { font-size: 11px; color: var(--text-tertiary); margin-top: 10px; }
+.aiq-sessions { background: #fff; border: 1px solid var(--border-color); border-radius: var(--radius-lg); padding: 14px 16px; box-shadow: var(--card-shadow); flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 .aiq-sh { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .aiq-sh h4 { font-size: 13px; }
 .aiq-slist { overflow-y: auto; flex: 1; }
 .aiq-sitem { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 12px; }
-.aiq-sitem:hover { background: var(--bg); }
-.aiq-sitem.act { background: rgba(49,104,224,.08); color: var(--a); }
+.aiq-sitem:hover { background: var(--bg-body); }
+.aiq-sitem.act { background: var(--primary-bg); color: var(--primary); }
 .aiq-sname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.aiq-sinput { width: 100%; padding: 2px 6px; font-size: 12px; border: 1px solid var(--a); border-radius: 4px; outline: none; }
-.aiq-scnt { font-size: 10px; color: var(--t3); flex-shrink: 0; }
-.aiq-sdel { color: var(--r); font-weight: 700; flex-shrink: 0; }
-.aiq-sempty { font-size: 12px; color: var(--t3); text-align: center; padding: 16px 0; }
-.aiq-right { flex: 1; background: var(--c); border: 1px solid var(--b); border-radius: var(--r2); box-shadow: var(--sh); display: flex; flex-direction: column; min-width: 0; height: 100%; }
-.aiq-right.full { position: fixed; inset: 0; z-index: 100; border-radius: 0; }
-.aiq-rt { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--b); flex-shrink: 0; }
+.aiq-sinput { width: 100%; padding: 2px 6px; font-size: 12px; border: 1px solid var(--primary); border-radius: 4px; outline: none; }
+.aiq-scnt { font-size: 10px; color: var(--text-tertiary); flex-shrink: 0; }
+.aiq-sdel { color: var(--danger); font-weight: 700; flex-shrink: 0; }
+.aiq-sempty { font-size: 12px; color: var(--text-tertiary); text-align: center; padding: 16px 0; }
+.aiq-right { flex: 1; background: #fff; border: 1px solid var(--border-color); border-radius: var(--radius-lg); box-shadow: var(--card-shadow); display: flex; flex-direction: column; min-width: 0; height: 100%; }
+.aiq-right.full { position: fixed; inset: 0; z-index: 200; border-radius: 0; }
+.aiq-rt { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
 .aiq-rt h3 { font-size: 13px; }
 .aiq-rta { display: flex; gap: 6px; }
 .aiq-result { flex: 1; overflow-y: auto; padding: 16px; }
-.aiq-empty { text-align: center; margin-top: 18%; color: var(--t3); }
+.aiq-empty { text-align: center; margin-top: 18%; color: var(--text-tertiary); }
 .aiq-empty-icon { font-size: 32px; margin-bottom: 8px; }
 .aiq-empty-hint { font-size: 12px; margin-top: 4px; }
 .aiq-msg { display: flex; gap: 10px; margin-bottom: 16px; }
-.aiq-av { width: 30px; height: 30px; border-radius: 50%; background: var(--bg); border: 1px solid var(--b); display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
-.aiq-msg.user .aiq-av { background: rgba(49,104,224,.1); }
+.aiq-av { width: 30px; height: 30px; border-radius: 50%; background: var(--bg-body); border: 1px solid var(--border-color); display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+.aiq-msg.user .aiq-av { background: var(--primary-bg); }
 .aiq-mb { flex: 1; min-width: 0; }
-.aiq-role { font-size: 11px; color: var(--t3); margin-bottom: 4px; }
+.aiq-role { font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px; }
 .aiq-seg { margin-bottom: 8px; }
-.aiq-text { font-family: inherit; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; color: var(--t); margin: 0; }
+.aiq-text { font-family: inherit; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; color: var(--text-primary); margin: 0; }
 .aiq-chart { width: 100%; height: 320px; }
 .aiq-loading { display: inline-flex; gap: 4px; padding: 4px 0; }
-.aiq-loading span { width: 6px; height: 6px; border-radius: 50%; background: var(--a); animation: aiqblink 1.2s infinite; }
+.aiq-loading span { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); animation: aiqblink 1.2s infinite; }
 .aiq-loading span:nth-child(2) { animation-delay: .2s; }
 .aiq-loading span:nth-child(3) { animation-delay: .4s; }
 @keyframes aiqblink { 0%,80%,100% { opacity: .2 } 40% { opacity: 1 } }

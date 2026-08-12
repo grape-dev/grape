@@ -1,46 +1,65 @@
 <template>
-  <div v-if="isLoginPage" class="ln">
+  <div v-if="isLoginPage" class="auth-wrapper">
     <router-view />
   </div>
-  <div v-else class="layout">
-    <aside class="sb">
-      <div class="sb-h">
-        <div class="logo-s">
-          <span class="sq">G</span>
-          <h1>Grape Admin</h1>
-        </div>
-        <div class="tagline">Ops Console</div>
+  <div v-else class="app-layout">
+    <!-- Top Navigation（上下结构，对齐 VOD） -->
+    <header class="topnav">
+      <button class="topnav-hamburger" :class="{ open: mobileNavOpen }" @click="mobileNavOpen = !mobileNavOpen">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="topnav-brand" @click="$router.push('/runtime/devices')">
+        <span class="brand-icon">🍇</span>
+        <span class="brand-text">Grape Admin</span>
+        <span class="brand-ver">v{{ BUILD_TIME }}</span>
       </div>
-      <nav class="sb-nav">
-        <template v-for="group in menuTree" :key="group.code">
-          <div class="grp" @click="toggleGroup(group.code)">
-            <span class="chev">{{ expanded[group.code] ? '▾' : '▸' }}</span>{{ group.name }}
+      <nav class="topnav-links">
+        <template v-for="item in navItems" :key="item.code">
+          <div v-if="item.children" class="topnav-dropdown" :class="{ active: isDropdownActive(item) }">
+            <span class="topnav-link topnav-dropdown-trigger">{{ item.icon }} {{ item.name }}<span class="dd-arrow"></span></span>
+            <div class="topnav-dropdown-menu">
+              <router-link
+                v-for="child in item.children"
+                :key="child.code"
+                class="topnav-dropdown-item"
+                :to="child.route"
+              >{{ child.name }}</router-link>
+            </div>
           </div>
-          <router-link
-            v-for="child in group.children"
-            :key="child.code"
-            :to="child.path"
-            :class="{ act: route.name === child.code }"
-            v-show="expanded[group.code]"
-          >
-            <span class="ic">●</span>{{ child.name }}
-          </router-link>
         </template>
       </nav>
-      <div class="sb-ft" @click="logout">
-        <span class="av">{{ me.charAt(0).toUpperCase() }}</span>
-        <span class="by">{{ me }}<span>退出登录</span></span>
-        <span class="t3" style="font-size:10px;margin-left:6px" @click.stop>v{{ BUILD_TIME }}</span>
+      <div class="topnav-user" @click="logout">
+        <span class="user-icon">👤</span>
+        <span class="user-name">{{ me }}</span>
+        <span class="user-logout">退出</span>
       </div>
-    </aside>
-    <main class="mn">
-      <div class="tb">
-        <span class="bc">运营管理台 <b>/ {{ route.meta.title || '' }}</b></span>
-        <span class="sp"></span>
+    </header>
+
+    <!-- Mobile drawer -->
+    <div class="drawer-overlay" :class="{ open: mobileNavOpen }" @click="mobileNavOpen = false"></div>
+    <nav class="drawer" :class="{ open: mobileNavOpen }">
+      <div class="drawer-header">
+        <span class="drawer-title">导航菜单</span>
+        <button class="drawer-close" @click="mobileNavOpen = false">✕</button>
       </div>
-      <div class="ct">
-        <router-view />
+      <div class="drawer-body">
+        <template v-for="item in navItems" :key="item.code">
+          <div v-if="item.children" class="drawer-group">
+            <div class="drawer-group-title" @click.stop="toggleDrawerGroup(item.code)">
+              <span><span class="drawer-item-icon">{{ item.icon }}</span>{{ item.name }}</span>
+              <span class="drawer-group-arrow" :class="{ open: openDrawerGroups[item.code] }"></span>
+            </div>
+            <div class="drawer-sub" :class="{ open: openDrawerGroups[item.code] }">
+              <router-link v-for="child in item.children" :key="child.code" class="drawer-sub-item" :to="child.route" @click="mobileNavOpen = false; openDrawerGroups[item.code] = false">{{ child.name }}</router-link>
+            </div>
+          </div>
+        </template>
       </div>
+    </nav>
+
+    <!-- Page Content -->
+    <main class="topnav-content">
+      <router-view :key="$route.path" />
     </main>
   </div>
 </template>
@@ -53,22 +72,37 @@ import { getToken, clearTokens } from './utils/auth'
 
 const BUILD_TIME = __BUILD_TIME__
 
+// 分组图标（菜单 API 无 icon 字段，静态映射）
+const GROUP_ICONS = {
+  runtime: '🖥️',
+  ai: '🤖',
+  sys: '⚙️'
+}
+
 const route = useRoute()
 const router = useRouter()
 const menuTree = ref([])
-const expanded = ref({})
+const mobileNavOpen = ref(false)
+const openDrawerGroups = ref({})
 const me = ref(getToken() ? 'A' : '')
 const isLoginPage = computed(() => route.path === '/login')
 
-function toggleGroup(code) {
-  expanded.value = { ...expanded.value, [code]: !expanded.value[code] }
+// 后端菜单树 → VOD 式导航结构
+const navItems = computed(() => menuTree.value.map(g => ({
+  code: g.code,
+  name: g.name,
+  icon: GROUP_ICONS[g.code] || '📁',
+  children: (g.children || []).map(c => ({ code: c.code, name: c.name, route: c.path }))
+})))
+
+function isDropdownActive(item) {
+  if (!item.children) return false
+  return item.children.some(c => route.path === c.route)
 }
-// 默认展开当前路由所属分组
-function expandActiveGroup() {
-  const active = menuTree.value.find(g => g.children.some(c => route.name === c.code))
-  if (active) expanded.value = { ...expanded.value, [active.code]: true }
+
+function toggleDrawerGroup(code) {
+  openDrawerGroups.value = { ...openDrawerGroups.value, [code]: !openDrawerGroups.value[code] }
 }
-watch(() => route.name, () => expandActiveGroup())
 
 let menuLoading = false
 async function loadMenus() {
@@ -77,10 +111,13 @@ async function loadMenus() {
   try {
     const { data } = await http.get('/menus')
     menuTree.value = data
-    menuTree.value.forEach(g => { if (!(g.code in expanded.value)) expanded.value = { ...expanded.value, [g.code]: true } })
-    expandActiveGroup()
+    // 移动端默认展开当前分组
+    const active = data.find(g => (g.children || []).some(c => route.path === c.path))
+    if (active && !openDrawerGroups.value[active.code]) {
+      openDrawerGroups.value = { ...openDrawerGroups.value, [active.code]: true }
+    }
   } catch (e) {
-    // 失败不裸抛：侧边栏留空，下次路由变化/刷新自动重试
+    // 失败不裸抛：顶部导航留空，下次路由变化/刷新自动重试
     console.error('[menu] 加载菜单失败', e)
   } finally {
     menuLoading = false
@@ -91,9 +128,11 @@ async function loadMenus() {
 watch(() => route.path, (p) => {
   if (p !== '/login' && menuTree.value.length === 0) loadMenus()
 })
+
 function logout() {
   clearTokens()
   router.push('/login')
 }
+
 onMounted(() => { if (!isLoginPage.value) loadMenus() })
 </script>
