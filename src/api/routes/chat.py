@@ -234,13 +234,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         from src.api.session_store import get_or_create_agent_session
 
         session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
-        runtime_id = cfg.get("runtime_id") or 0
-        if not runtime_id:
-            try:
-                from src.user.db import ensure_default_runtime, get_runtime_id_by_name
-                runtime_id = get_runtime_id_by_name(backend_name) or ensure_default_runtime(backend_name) or 0
-            except Exception:
-                pass
+        runtime_id = _resolve_chat_runtime_id(user["id"], backend_name)
 
         async def event_stream():
             yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...', 'conversation_id': conv_id})}\n\n"
@@ -385,6 +379,31 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     )
 
 
+def _resolve_chat_runtime_id(user_id: int, backend_name: str) -> int:
+    """解析 chat 任务的 runtime_id：优先用户 Chat 配置中保存的绑定。
+
+    chat_agent_session.runtime_id 是用户在后端下拉里选中的实例（scope=user，
+    多实例下唯一，不随心跳漂移）；无绑定记录时再按引擎名回退到全局实例
+    （旧行为）。修复：配置了个人 worker 后聊天任务必须派给它，而不是按
+    name+心跳排序随机选一台同引擎 worker。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT runtime_id FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) AND runtime_id>0 LIMIT 1",
+                (user_id,),
+            )
+            row = c.fetchone()
+            if row and row[0]:
+                return row[0]
+    except Exception:
+        pass
+    from src.user.db import ensure_default_runtime, get_runtime_id_by_name
+    return get_runtime_id_by_name(backend_name) or ensure_default_runtime(backend_name) or 0
+
+
 def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token):
     """M2 D5：chat 入队 + 轮询任务状态（打字机效果降级，见 implementation-plan §三）。
 
@@ -399,14 +418,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     backend_name = cfg.get("backend", "opencode")
     # chat 会话：user_id + repo_key 绑定（chat_agent_session 是 chat 专用；此处用 devops_agent_session 保证 D9 串行）
     session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
-    # 优先用用户配置的 runtime_id（chat_agent_session），未配置再按名兜底
-    runtime_id = cfg.get("runtime_id") or 0
-    if not runtime_id:
-        try:
-            from src.user.db import ensure_default_runtime, get_runtime_id_by_name
-            runtime_id = get_runtime_id_by_name(backend_name) or ensure_default_runtime(backend_name) or 0
-        except Exception:
-            pass
+    runtime_id = _resolve_chat_runtime_id(user["id"], backend_name)
     if not runtime_id:
         return {"reply": "⚠️ 无可用 runtime，请先在 Agent Runtimes 页刷新", "conversation_id": conv_id}
 
