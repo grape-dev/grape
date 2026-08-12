@@ -179,12 +179,19 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart &&
 .sb-row { display: flex; gap: 6px; flex-wrap: wrap; }
 .sb-seg { font-size: 11px; color: #fff; border-radius: 4px; padding: 1px 7px; }
 
-.sw { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; cursor: pointer; }
+.sw { position: relative; display: inline-block; width: 38px; height: 21px; flex-shrink: 0; cursor: pointer; }
 .sw input { opacity: 0; width: 0; height: 0; }
-.sw-slider { position: absolute; inset: 0; background: #d9dde3; border-radius: 20px; transition: all .2s; }
-.sw-slider::before { content: ''; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: all .2s; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
-.sw input:checked + .sw-slider { background: var(--pk); }
-.sw input:checked + .sw-slider::before { transform: translateX(16px); }
+.sw-slider {
+  position: absolute; inset: 0; background: #c0c4cc;
+  border: 1px solid #a8adb5; border-radius: 20px; transition: all .2s;
+}
+.sw-slider::before {
+  content: ''; position: absolute; width: 15px; height: 15px; left: 2px; top: 2px;
+  background: #fff; border-radius: 50%; transition: all .2s;
+  box-shadow: 0 1px 2px rgba(0,0,0,.3); border: 1px solid #e2e2e2;
+}
+.sw input:checked + .sw-slider { background: #52c41a; border-color: #52c41a; }
+.sw input:checked + .sw-slider::before { transform: translateX(17px); }
 .sw input:disabled + .sw-slider { opacity: .5; cursor: not-allowed; }
 
 .chart-card { background: #fff; border-radius: 10px; border: 1px solid var(--border-color); box-shadow: var(--card-shadow); overflow: hidden; }
