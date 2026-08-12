@@ -10,7 +10,7 @@
           <option value="">全部范围</option>
           <option value="global">全局</option>
           <option value="repo">仓库</option>
-          <option value="user">用户</option>
+          <option value="user">个人</option>
         </select>
         <select v-model="status">
           <option value="">全部状态</option>
@@ -181,7 +181,7 @@ let toastTimer = null
 const deleteTarget = ref(null)
 const deleteWord = ref('')
 
-const SCOPE_NAMES = { global: '全局', repo: '仓库', user: '用户' }
+const SCOPE_NAMES = { global: '全局', repo: '仓库', user: '个人' }
 function scopeText(s) { return SCOPE_NAMES[s] || s || '-' }
 
 function formatTime(ts) {
