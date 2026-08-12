@@ -99,7 +99,12 @@ function renderTemplateCategory() {
       const uses = stats.uses || Math.max(1, Math.round(stars * 3.2));
       statsHtml = `<div class="tmpl-card-stats"><span class="tmpl-stat"><b>★</b>${stars}</span><span class="tmpl-stat"><b>⬡</b>${uses}</span></div>`;
     }
-    return `<div class="tmpl-card tmpl-${tSc}" onclick="createFromTemplate('${t.id}','${t.default_repo_name || t.id}')">
+    // 卡片本体：有 source_repo（GitCode 模板）点击跳转实际仓库；local 模板无可跳转，保持弹一键创建
+    const tplUrl = t.source_repo ? 'https://gitcode.com/' + t.source_repo : '';
+    const cardClick = tplUrl
+      ? `window.open('${tplUrl}','_blank')`
+      : `createFromTemplate('${t.id}','${t.default_repo_name || t.id}')`;
+    return `<div class="tmpl-card tmpl-${tSc}" onclick="${cardClick}">
       <span class="tmpl-card-glow"></span>
       <div class="tmpl-card-head">
         <span class="tmpl-card-ic">${t.icon || '📦'}<i></i></span>
@@ -164,7 +169,9 @@ function renderRandomExplorer(cat) {
   const t = tmpls[_tmplState.randIdx];
   const tSc = _sceneClass(t.scene_id || cat.scene_id);
   const tags = (t.tags || []).map(x => `<span class="tmpl-tag">${x}</span>`).join('');
-  return `<div class="tmpl-card tmpl-random tmpl-${tSc}" id="tmplRandomCard">
+  const rndUrl = t.source_repo ? 'https://gitcode.com/' + t.source_repo : '';
+  const rndClick = rndUrl ? `window.open('${rndUrl}','_blank')` : `createFromTemplate('${t.id}','${t.default_repo_name || t.id}')`;
+  return `<div class="tmpl-card tmpl-random tmpl-${tSc}" id="tmplRandomCard" onclick="${rndClick}">
     <span class="tmpl-card-glow"></span>
     <div class="tmpl-card-head">
       <span class="tmpl-card-ic">${t.icon || '📦'}<i></i></span>
