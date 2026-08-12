@@ -196,6 +196,7 @@ function formatSessionTime(ts) {
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 function newSession() {
+  disposeAllCharts()
   const s = {
     id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
     sessionId: null,
@@ -262,6 +263,7 @@ async function loadMsgs(s) {
 }
 async function switchSession(s) {
   if (!asyncMode.value && isQuerying.value) return   // 同步模式查询中禁切（VOD 规则）
+  disposeAllCharts()                                  // 对齐 VOD：切会话前销毁图表实例
   activeSessionId.value = s.id
   if (s.msgs === null) { s.msgs = []; await loadMsgs(s) }
   await nextTick()
@@ -288,6 +290,7 @@ async function confirmRename() {
 function cancelRename() { editingId.value = null }
 async function delSession(s) {
   if (!confirm(`确认删除会话「${s.name}」？`)) return
+  disposeAllCharts()
   clearStoredTaskId(s.id)
   if (s.sessionId) {
     try { await http.delete(`/ai/history/session/${s.sessionId}`) } catch (e) { /* ignore */ }
@@ -511,14 +514,24 @@ async function initCharts() {
   await nextTick()
   for (const el of document.querySelectorAll('.aiq-chart')) {
     const key = el.getAttribute('data-chart')
-    if (!key || chartInstances[key]) continue
+    if (!key) continue
     const [mi, si] = key.split('-').map(Number)
     const seg = renderParts(activeMsgs.value[mi]?.raw || '')[si]
     if (!seg || seg.type !== 'chart') continue
+    // 对齐 VOD：已有实例先销毁再重建（切换会话后 DOM 重建，旧实例绑定在已销毁节点上）
+    if (chartInstances[key]) {
+      chartInstances[key].dispose()
+      delete chartInstances[key]
+    }
     const inst = echarts.init(el)
     inst.setOption(seg.json)
     chartInstances[key] = inst
   }
+}
+/** 对齐 VOD：销毁并清空全部图表实例（切换/新建/删除会话时调用，防 key 缓存误命中） */
+function disposeAllCharts() {
+  Object.values(chartInstances).forEach(c => { try { c.dispose() } catch (e) { /* ignore */ } })
+  Object.keys(chartInstances).forEach(k => delete chartInstances[k])
 }
 function scrollToBottom() {
   nextTick(() => { if (resultBox.value) resultBox.value.scrollTop = resultBox.value.scrollHeight })
