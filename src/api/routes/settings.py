@@ -216,6 +216,10 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
                                      "owner_name": "", "owner_id": "", "last_ip": ""}
         if not _visible_credential(cid, cred["scope"], cred["owner_name"], cred["owner_id"]):
             continue
+        if cred.get("status") == "revoked":
+            # 设备已吊销 → 引擎不再展示（与 Workers 视图只列 active 一致）；
+            # DB 行保留 offline，避免历史会话/任务绑定的 runtime_id 悬空
+            continue
         rt["instance_name"] = instance_name(rt["name"], cred["device_name"], cid)
         rt["worker_name"] = cred["name"]
         rt["worker_ip"] = cred["last_ip"]
