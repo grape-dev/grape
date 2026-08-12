@@ -4,19 +4,21 @@
 执行路径：业务层 enqueue_task → agent_tasks(status=queued) → claim（原子抢单+D9）
 → 本地线程池 stream_runtime → report/complete/fail。
 """
-import os, json, threading, uuid
+import os, json, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from src.session_manager import db, db_lock
 from src.config import log
 
 # ===== 执行模式开关（M2，见 implementation-plan §三 / concurrency-design.md）=====
-# direct（就地 stream_agent）/ queue_local（入队 + 本地 worker）/ queue_remote（远端 RuntimeAgent）
+# auto（按绑定引擎宿主自动推导，见 execution-mode-auto-routing-design.md §3）
+# / direct（就地 stream_agent）/ queue_local（入队 + 本地 worker）/ queue_remote（远端 RuntimeAgent）
+EXEC_MODE_AUTO = "auto"
 EXEC_MODE_DIRECT = "direct"
 EXEC_MODE_LOCAL = "queue_local"
 EXEC_MODE_REMOTE = "queue_remote"
 
-_DEFAULT_MODE = os.environ.get("DEVOPS_EXECUTION_MODE", EXEC_MODE_DIRECT)
+_DEFAULT_MODE = EXEC_MODE_AUTO
 
 
 def get_execution_mode() -> str:
@@ -33,13 +35,92 @@ def get_execution_mode() -> str:
 
 
 def set_execution_mode(mode: str):
-    """设置执行模式（落 meta 表，运维可改键值 + 重启生效）。"""
+    """设置执行模式（落 meta 表，运维可改键值；读取实时生效，无需重启）。"""
     try:
         from src.user.db import set_meta_value
         set_meta_value("execution_mode", mode)
         log.info(f"execution_mode set to {mode}")
     except Exception as e:
         log.warning(f"set_execution_mode failed: {e}")
+
+
+# ===== 按绑定引擎宿主自动推导执行通道（execution-mode-auto-routing-design.md §3.1/§3.6）=====
+
+def runtime_credential_id(runtime_id: int):
+    """按 runtime_id 反查引擎宿主 credential_id；查不到返回 None。
+
+    credential_id=0 → 本机引擎（服务器装着该 CLI）；>0 → 远端 worker 承载的引擎。
+    """
+    if not runtime_id:
+        return None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
+            row = c.fetchone()
+        return (row[0] or 0) if row else None
+    except Exception:
+        return None
+
+
+_RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "300"))
+
+
+def _remote_runtime_ready(runtime_id: int) -> bool:
+    """远端引擎是否可用：引擎 status=online、last_seen 新鲜、凭据未吊销。
+
+    心跳间隔 15s，失联 > _RUNTIME_STALE_SECONDS 视为不可用（防 auto 模式任务卡 queued）。
+    """
+    try:
+        from src.runtime.health import parse_dt
+        now = time.time()
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT status, last_seen_at, credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
+            row = c.fetchone()
+        if not row:
+            return False
+        engine_status, last_seen_at, cid = row
+        if (engine_status or "") != "online":
+            return False
+        ts = parse_dt(last_seen_at)
+        if ts is not None and now - ts > _RUNTIME_STALE_SECONDS:
+            return False
+        if cid:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT status FROM runtime_credentials WHERE id=?", (cid,))
+                cred = c.fetchone()
+            if cred and cred[0] != "active":
+                return False
+        return True
+    except Exception as e:
+        log.warning(f"runtime_execution_kind: health check failed: {e}")
+        return False
+
+
+def runtime_execution_kind(runtime_id: int) -> str:
+    """返回该任务的有效执行通道（auto 语义下的推导 / 强制模式直接生效）：
+
+    - 全局显式 direct/queue_local/queue_remote → 直接返回该强制值（向后兼容）
+    - auto 下按绑定引擎宿主推导：
+      - credential_id == 0  → 本机引擎（服务器装着的 CLI）        → EXEC_MODE_DIRECT
+      - credential_id >  0  → 远端 worker 承载的引擎             → EXEC_MODE_REMOTE
+      - runtime_id=0 / 查不到（未绑定）→ EXEC_MODE_DIRECT（本机默认，见 §3.6）
+    - auto 下远端引擎失联/凭据吊销 → 降级本机 direct 兜底（避免任务卡 queued）
+    """
+    mode = get_execution_mode()
+    if mode != EXEC_MODE_AUTO:
+        return mode
+    cid = runtime_credential_id(runtime_id)
+    if cid is None:
+        return EXEC_MODE_DIRECT
+    if cid > 0:
+        if _remote_runtime_ready(runtime_id):
+            return EXEC_MODE_REMOTE
+        log.warning(f"runtime_execution_kind: runtime_id={runtime_id} 远端引擎不可用，降级本机 direct")
+        return EXEC_MODE_DIRECT
+    return EXEC_MODE_DIRECT
 
 # ===== 本地 worker 执行池（有界，替代无界 threading.Thread，见 concurrency-design.md §2.2）=====
 _DEFAULT_MAX_CONCURRENT = int(os.environ.get("RUNTIME_MAX_CONCURRENT_TASKS", "20"))

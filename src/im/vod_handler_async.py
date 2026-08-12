@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import db, db_lock
 from src.runtime.executor import consume_stream_async
-from src.runtime.service import get_execution_mode
+from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
 
 if TYPE_CHECKING:
     from src.im.feishu_async import BotContext, FeishuAsync
@@ -51,7 +51,7 @@ def _get_vod_session(repo_key: str) -> dict | None:
                 brow = c.fetchone()
                 if brow and brow[0]:
                     backend = brow[0]
-            return {"id": row[0], "repo_key": row[1], "backend": backend,
+            return {"id": row[0], "repo_key": row[1], "runtime_id": row[2] or 0, "backend": backend,
                     "skill": row[3] or "vod", "skill_id": row[4] or 0, "im_app_id": row[5] or "",
                     "repo_gitcode_token": row[6] or ""}
     except Exception:
@@ -206,12 +206,14 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     new_oc_sid = runtime_session_id
     exit_code = -1
     start_time = time.time()
-    mode = get_execution_mode()
-    if mode != "direct":
+    kind = runtime_execution_kind(agent_session.get("runtime_id") or 0)
+    if kind != EXEC_MODE_DIRECT:
         # 入队 + 轮询：任务由 RuntimeAgent（本地/远端边端）claim 执行（见 multi-runtime-instance-design）
         from src.runtime.service import enqueue_task, wait_task_terminal
         from src.user.db import get_runtime_id_by_name, ensure_default_runtime
-        runtime_id = get_runtime_id_by_name(backend) or ensure_default_runtime(backend) or 0
+        runtime_id = agent_session.get("runtime_id") or 0
+        if not runtime_id:
+            runtime_id = get_runtime_id_by_name(backend) or ensure_default_runtime(backend) or 0
         if runtime_id:
             tid = enqueue_task(
                 agent_session_id=f"vod:{repo_key}",
@@ -225,7 +227,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                 repo_gitcode_token=repo_token or "",
                 skill_path=skill_path or "",
             )
-            log.info(f"[VOD agent|repo:{repo_key}] enqueued task={tid} mode={mode}")
+            log.info(f"[VOD agent|repo:{repo_key}] enqueued task={tid} mode={kind}")
             task = await wait_task_terminal(tid)
             final_text = task.get("result_text") or ""
             exit_code = int(task.get("exit_code") or -1)

@@ -558,7 +558,8 @@ def get_chat_config(user_id: int) -> dict:
         c.execute("SELECT runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (user_id,))
         row = c.fetchone()
         if not row:
-            return {"backend": "opencode", "skill": "", "skill_id": 0, "im_app_id": "", "im_app_secret": "", "im_provider": "", "updated_at": ""}
+            return {"backend": "opencode", "runtime_id": 0, "skill": "", "skill_id": 0,
+                    "im_app_id": "", "im_app_secret": "", "im_provider": "", "updated_at": ""}
         backend_name = "opencode"
         if row[0]:
             c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
@@ -571,7 +572,7 @@ def get_chat_config(user_id: int) -> dict:
                 else:
                     # 幽灵/未知引擎（如历史遗留 'default'）：回退 opencode，避免 chat 路由到不存在的引擎
                     log.warning(f"get_chat_config: runtime_id={row[0]} 指向未知引擎 '{brow[0]}'，回退 opencode")
-        return {"backend": backend_name, "skill": row[1] or "", "skill_id": row[2] or 0,
+        return {"backend": backend_name, "runtime_id": row[0] or 0, "skill": row[1] or "", "skill_id": row[2] or 0,
                 "im_app_id": row[3] or "", "im_app_secret": row[4] or "", "im_provider": row[5] or "", "updated_at": ""}
 
 
