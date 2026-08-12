@@ -92,7 +92,7 @@
             <p style="color:var(--warning);font-weight:600">⚠ 明文仅显示一次，请立即保存</p>
             <code class="cred-token">{{ issuedToken }}</code>
             <p class="t3" style="font-size:12px">将该 token 填入目标机器 /etc/grape/runtime.env 的 RUNTIME_TOKEN 并重启 runtime-agent</p>
-            <button class="btn btn-primary btn-sm mt8" @click="issuedToken = ''">我已保存</button>
+            <button class="btn btn-primary btn-sm mt8" @click="saveAndClose">我已保存</button>
           </div>
         </div>
         <div class="modal-footer">
@@ -201,6 +201,8 @@ function reset() {
   load()
 }
 function openIssue() { showIssue.value = true; issuedToken.value = ''; credentialName.value = '' }
+// 「我已保存」= 清 token + 关闭签发弹窗（流程闭环，避免空白弹窗与页面重叠）
+function saveAndClose() { issuedToken.value = ''; showIssue.value = false }
 async function issue() {
   if (issuing.value) return
   if (!credentialName.value.trim()) { showToast('请输入凭据名称', 'error'); return }
