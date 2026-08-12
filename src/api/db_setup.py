@@ -258,6 +258,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     issue_session_id  TEXT DEFAULT '',      -- 外键 → issue_agent_session.id（Issue 级执行会话，串行粒度，见 multi-issue-isolation-design.md §3.3）
     project_info_files TEXT DEFAULT '{}',   -- JSON: {rel_path: content}，repo 全局 project-info 随任务交付（§2.4）
     project_info_meta  TEXT DEFAULT '{}',   -- JSON: {last_commit_sha, branches, last_updated, degraded}
+    knowledge_files    TEXT DEFAULT '{}',   -- JSON: {rel_path: content}，共享知识快照交付（event-conversation-design.md §3.1.1）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/completed/failed/cancelled
     exit_code         INTEGER DEFAULT NULL,
     result_text       TEXT DEFAULT '',
@@ -320,6 +321,38 @@ CREATE TABLE IF NOT EXISTS issue_agent_session (
 )
 """
 
+# new-version2 Event 对话（event-conversation-design.md）：以事件为锚点、与处理该事件的 agent 对话
+_EVENT_THREAD_DDL = """
+CREATE TABLE IF NOT EXISTS event_thread (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    anchor_seq  INTEGER NOT NULL,           -- 锚点事件 seq（对话对象 = 处理该事件的 agent）
+    repo_key    TEXT NOT NULL,
+    issue_id    TEXT DEFAULT '',            -- 关联 Issue（如 '#5'；无关联事件为 ''）
+    agent_type  TEXT NOT NULL,              -- vod/issue/coding/qa/sre
+    role        TEXT NOT NULL,              -- user / agent
+    content     TEXT NOT NULL,
+    created_by  TEXT DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now'))
+)
+"""
+
+# 共享知识索引：正文=工作区文件（project-info/knowledge.md、issues/{n}/knowledge.md、
+# {agent}/issues/{n}/knowledge.md），本表仅存索引/状态/审计（见 event-conversation-design.md §3.1.1）
+_AGENT_SHARED_KNOWLEDGE_DDL = """
+CREATE TABLE IF NOT EXISTS agent_shared_knowledge (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope       TEXT NOT NULL,              -- project / issue / issue_agent
+    repo_key    TEXT NOT NULL,
+    agent_type  TEXT DEFAULT '',            -- scope=issue_agent 时必填
+    issue_num   INTEGER DEFAULT 0,          -- scope=issue / issue_agent 时必填
+    file_path   TEXT NOT NULL,              -- 知识正文文件（相对 WORKSPACE_DIR）
+    status      TEXT DEFAULT 'accepted',    -- accepted / rejected
+    source_seq  INTEGER DEFAULT 0,
+    created_by  TEXT DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now'))
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
@@ -338,6 +371,8 @@ _NEW_TABLES = [
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
     ("tasks", _TASKS_DDL),
+    ("event_thread", _EVENT_THREAD_DDL),
+    ("agent_shared_knowledge", _AGENT_SHARED_KNOWLEDGE_DDL),
     ("bot_seen_messages", """
 CREATE TABLE IF NOT EXISTS bot_seen_messages (
     app_id TEXT NOT NULL,
@@ -1230,8 +1265,9 @@ def _migrate_tables():
             _ensure_column(c, "agent_tasks", "issue_session_id", "TEXT DEFAULT ''")
             _ensure_column(c, "agent_tasks", "project_info_files", "TEXT DEFAULT '{}'")
             _ensure_column(c, "agent_tasks", "project_info_meta", "TEXT DEFAULT '{}'")
+            _ensure_column(c, "agent_tasks", "knowledge_files", "TEXT DEFAULT '{}'")
             db.commit()
-            log.info("Added issue_session_id / project_info_* columns to agent_tasks")
+            log.info("Added issue_session_id / project_info_* / knowledge_files columns to agent_tasks")
     except Exception as e:
         log.warning(f"Add agent_tasks issue isolation columns failed: {e}")
     # ===== 修复 chat_agent_session 陈旧 UNIQUE(repo_key) 约束（多用户 chat 配置互斥顶掉，见 session_manager 注释）=====

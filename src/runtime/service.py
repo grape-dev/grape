@@ -4,7 +4,7 @@
 执行路径：业务层 enqueue_task → agent_tasks(status=queued) → claim（原子抢单+D9）
 → 本地线程池 stream_runtime → report/complete/fail。
 """
-import os, json, threading, time, uuid
+import os, json, re, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from src.session_manager import db, db_lock
@@ -129,7 +129,7 @@ _worker_pool = ThreadPoolExecutor(max_workers=_DEFAULT_MAX_CONCURRENT, thread_na
 _TASK_COLUMNS = (
     "id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
-    "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
+    "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, knowledge_files, "
     "status, exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
 )
@@ -143,9 +143,9 @@ def _row_to_dict(row):
         "account": row[12], "user_id": row[13], "repo_gitcode_token": row[14],
         "env_extra": row[15], "skill_files": row[16], "server_url": row[17],
         "issue_session_id": row[18], "project_info_files": row[19], "project_info_meta": row[20],
-        "status": row[21], "exit_code": row[22], "result_text": row[23], "errors": row[24],
-        "stderr": row[25], "usage_json": row[26], "started_at": row[27], "completed_at": row[28],
-        "created_at": row[29],
+        "knowledge_files": row[21], "status": row[22], "exit_code": row[23], "result_text": row[24],
+        "errors": row[25], "stderr": row[26], "usage_json": row[27], "started_at": row[28],
+        "completed_at": row[29], "created_at": row[30],
     }
 
 
@@ -241,8 +241,12 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  repo_gitcode_token="", env_extra=None,
                  event_seq=None, issue_id="", repo_key="", agent_type="",
                  skill="", skill_path="", server_url="", issue_session_id="",
-                 project_info_files=None, project_info_meta=None):
-    """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。"""
+                 project_info_files=None, project_info_meta=None, knowledge_files=None):
+    """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
+
+    knowledge_files：共享知识快照（event-conversation-design.md §3.1.1），None 时自动打包；
+    远端 worker 侧 materialize 到 cwd/.knowledge 并替换 {{KNOWLEDGE_DIR}}。
+    """
     if not agent_session_id or not runtime_id:
         raise ValueError("agent_session_id and runtime_id are required (确定路由 D3)")
     task_id = "t_" + uuid.uuid4().hex[:12]
@@ -260,6 +264,14 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         _pif, _pim = load_project_info(repo_key)
         project_info_files = _pif
         project_info_meta = _pim
+    # 共享知识快照（仅任务作用域：issue/issue_agent/project 三级，随任务交付远端 worker）
+    if knowledge_files is None:
+        try:
+            from src.api.knowledge import knowledge_files as _know_files
+            knowledge_files = _know_files(repo_key, agent_type=agent_type, issue_num=_issue_num(issue_id))
+        except Exception as e:
+            log.warning(f"enqueue: knowledge pack failed for {repo_key}: {e}")
+            knowledge_files = {}
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
@@ -274,12 +286,13 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         c = db.cursor()
         c.execute(
             f"INSERT INTO agent_tasks ({_TASK_COLUMNS}) VALUES "
-            f"({','.join(['?'] * 30)})",
+            f"({','.join(['?'] * 31)})",
             (task_id, agent_session_id, runtime_id, event_seq, issue_id or "", repo_key or "",
              agent_type or "", skill or "", prompt, cwd or "", runtime_session_id or "",
              event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
+             json.dumps(knowledge_files),
              "queued", None, "", "", "", "{}", None, None, datetime.now(timezone.utc).isoformat())
         )
         db.commit()
@@ -287,6 +300,14 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     _inst = runtime_instance_name(runtime_id)
     log.info(f"Task enqueued: {task_id} session={agent_session_id} runtime={runtime_id}({_inst}) skill={skill}")
     return task_id
+
+
+def _issue_num(issue_id) -> int:
+    """'#5' / '5' / 5 → 5；无法解析返回 0。"""
+    if not issue_id:
+        return 0
+    m = re.search(r"(\d+)", str(issue_id))
+    return int(m.group(1)) if m else 0
 
 
 def claim(runtime_id) -> dict | None:
@@ -519,6 +540,18 @@ def _run_task(task: dict):
         prompt = prompt.replace("{{PROJECT_INFO_DIR}}", proj_dir)
     except Exception as e:
         log.warning(f"project-info materialize failed: {e}")
+    # 共享知识落地（event-conversation-design.md §3.1.1；随任务交付远端 worker）
+    know_dir = _os.path.join(cwd, ".knowledge")
+    try:
+        know_files = json.loads(task.get("knowledge_files") or "{}")
+        for rel, content in (know_files or {}).items():
+            dest = _os.path.join(know_dir, rel)
+            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(content)
+        prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
+    except Exception as e:
+        log.warning(f"knowledge materialize failed: {e}")
     # git worktree（coding/qa/sre，X 工作模型，见 multi-issue-isolation-design.md §3.4.1）
     try:
         from src.runtime import repogit

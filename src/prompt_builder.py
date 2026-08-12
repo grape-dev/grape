@@ -469,3 +469,62 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
         )
     parts.append(build_chat_role_definition())
     return "\n".join(parts)
+
+
+# ====== Event 对话（event-conversation-design.md）======
+
+def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int = 0) -> str:
+    """共享知识段落：project + issue + issue_agent 三级 accepted 知识合并注入。"""
+    try:
+        from src.api.knowledge import read_knowledge
+        k = read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num)
+    except Exception:
+        k = {}
+    if not k:
+        return ""
+    lines = ["### 用户反馈沉淀的共享知识（仅 accepted）"]
+    for scope in ("project", "issue", "issue_agent"):
+        content = k.get(scope)
+        if content:
+            lines.append(f"[{scope} 级] {content}")
+    lines.append("后续任务应遵循以上知识，除非用户当前明确推翻。")
+    return "\n".join(lines)
+
+
+def build_conversation_prompt(evt: dict, user_message: str, thread: list,
+                              agent_type: str = "", issue_num: int = 0) -> str:
+    """Event 对话专用 prompt：对话 skill 指令 + 事件上下文 + 线程历史 + 共享知识。
+
+    对话 skill 为元技能（skills/event-dialogue/SKILL.md），约束解释/沉淀/流程控制行为。
+    """
+    parts = [f"# Event 对话（与 {agent_type or 'agent'} 就事件对话）"]
+
+    evt_ctx = (
+        f"## 事件上下文\n"
+        f"- Seq: #{evt.get('seq')}\n"
+        f"- 事件类型: {evt.get('event_type')}\n"
+        f"- 标题: {evt.get('title') or '（无）'}\n"
+        f"- 状态: {evt.get('status')}\n"
+        f"- Agent 结论: {evt.get('result') or '（无）'}"
+    )
+    parts.append(evt_ctx)
+
+    skill_md = os.path.join(SKILLS_DIR, "event-dialogue", "SKILL.md")
+    parts.append(
+        f"## Skill 指令\n"
+        f"Skill 文件：{skill_md}\n"
+        f"**必须先执行**：用 read tool 读取该 SKILL.md 并严格执行。"
+        f"只做对话 / 沉淀共享知识 / 流程控制；不修改代码、不创建 PR、不直接改动 Issue 状态。"
+    )
+
+    if thread:
+        hist = "\n".join(f"[{m.get('role')}] {m.get('content', '')}" for m in thread[-20:])
+        parts.append(f"## 对话历史\n{hist}")
+
+    knowledge = _build_knowledge_section(evt.get("repo_key", ""), agent_type=agent_type, issue_num=issue_num)
+    if knowledge:
+        parts.append(knowledge)
+
+    parts.append(f"## 用户消息\n{user_message}")
+    parts.append("请用中文简洁回复；如需沉淀共享知识或流程干预，调用对应端点（POST /api/events/{seq}/knowledge、/flow/reset，带 BOT_GITCODE_TOKEN）。")
+    return "\n\n".join(parts)

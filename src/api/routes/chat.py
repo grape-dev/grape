@@ -520,7 +520,8 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
     bot_token = get_bot_token_by_repo(_owner, _repo) if _owner and _repo else ""
 
     return {
-        "message": "反馈已提交给 VOD Agent",
+        "message": "反馈已提交（⚠️ 已废弃：请改用 Event 对话 POST /api/events/{seq}/chat）",
+        "deprecated": True,
         "a2a_event": a2a_event,
         "bot_token_available": bool(bot_token),
     }

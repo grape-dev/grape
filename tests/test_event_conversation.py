@@ -1,0 +1,313 @@
+"""Event 对话测试（event-conversation-design.md §5）
+
+覆盖：门禁（thread/chat）、对话写线程、共享知识（文件+索引+注入）、流程回退（取消任务+阶段）、
+bot token 鉴权、会话复用。
+"""
+import os, sys
+from unittest.mock import patch
+
+ROOT = os.path.join(os.path.dirname(__file__), "..")
+sys.path.insert(0, ROOT)
+os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
+
+from fastapi.testclient import TestClient
+from src.api.main import app
+from src.session_manager import db, db_lock
+from src.user import db as user_db
+from src.runtime import service
+
+client = TestClient(app)
+_uid = None
+_headers = {}
+_BOT_TOKEN = "bot_conv_token"
+_REPO_KEY = "gitcode:org/test"
+_issue_seq = None
+
+
+def setup_module():
+    global _uid, _headers
+    from src.api.db_setup import init_database
+    init_database()
+    _uid = user_db.create_user("conv_user", "pwd")
+    if not _uid:
+        _uid = user_db.get_user_by_username("conv_user")
+    _headers = {"Authorization": "Bearer " + user_db.create_session_token(_uid["id"])}
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token) VALUES (?,?,?,?,?,?)",
+                  (_REPO_KEY, "org", "test", "org/test", 1, _BOT_TOKEN))
+        db.commit()
+
+
+def teardown_module():
+    _clean()
+    if _uid:
+        user_db.delete_user(_uid["id"])
+
+
+def _clean():
+    global _issue_seq
+    _issue_seq = None
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM event_thread")
+        c.execute("DELETE FROM agent_shared_knowledge")
+        c.execute("DELETE FROM events WHERE repo_key=?", (_REPO_KEY,))
+        c.execute("DELETE FROM issue_state WHERE repo_key=?", (_REPO_KEY,))
+        c.execute("DELETE FROM agent_tasks WHERE repo_key=?", (_REPO_KEY,))
+        c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (_REPO_KEY,))
+        c.execute("DELETE FROM issue_agent_session WHERE repo_key=?", (_REPO_KEY,))
+        db.commit()
+
+
+def _seed_event(agent_type="vod", issue_id="#5", status="completed"):
+    global _issue_seq
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, status, result) VALUES (?,?,?,?,?,?,?,?)",
+                  (_REPO_KEY, "issue_opened", agent_type, "test event", issue_id, "{}", status, "已分析"))
+        _issue_seq = c.lastrowid
+        db.commit()
+    return _issue_seq
+
+
+def _seed_issue_state(stage="coding"):
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO issue_state (repo_key, issue_id, stage, owner_agent) VALUES (?,?,?,?)",
+                  (_REPO_KEY, "#5", stage, "vod"))
+        db.commit()
+
+
+def _bot_headers():
+    return {"Authorization": f"Bearer {_BOT_TOKEN}"}
+
+
+def _fake_stream(prompt="", cwd="", session_id="", event_type="", backend_name="", account="",
+                 user_id=0, env_extra=None, bot_token="", user_token="", agent_name="", agent_label=""):
+    """伪 agent 执行：yield 一个 done 事件，避免依赖真实 opencode。"""
+    async def _gen():
+        yield "done", {"text": "模拟 agent 回复", "exit_code": 0, "oc_session_id": "ses_conv_1"}
+    return _gen()
+
+
+class TestThreadGate:
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def test_gate_open_when_pipeline_running(self):
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        r = client.get(f"/api/events/{seq}/thread", headers=_headers)
+        assert r.status_code == 200
+        assert r.json()["gate"]["open"] is True
+
+    def test_gate_closed_when_done(self):
+        seq = _seed_event()
+        _seed_issue_state("done")
+        r = client.get(f"/api/events/{seq}/thread", headers=_headers)
+        assert r.json()["gate"]["open"] is False
+
+    def test_chat_rejected_when_done(self):
+        seq = _seed_event()
+        _seed_issue_state("done")
+        r = client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
+        assert r.status_code == 409
+
+    def test_thread_404(self):
+        r = client.get("/api/events/999999/thread", headers=_headers)
+        assert r.status_code == 404
+
+
+class TestConversation:
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def test_chat_writes_thread_and_reuses_issue_session(self):
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        with patch("src.runtime.executor.consume_stream_async", side_effect=_fake_stream):
+            r = client.post(f"/api/events/{seq}/chat", json={"message": "为什么这样处理？"}, headers=_headers)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["reply"] == "模拟 agent 回复"
+        roles = [m["role"] for m in body["messages"]]
+        assert "user" in roles and "agent" in roles
+        assert any(m["content"] == "为什么这样处理？" for m in body["messages"] if m["role"] == "user")
+        # 会话复用：issue_agent_session 已建且回写了新 oc_session_id
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT runtime_session_id FROM issue_agent_session WHERE repo_key=? AND agent_type=? AND issue_id=?",
+                (_REPO_KEY, "vod", "#5")).fetchone()
+        assert row and row[0] == "ses_conv_1"
+
+    def test_thread_get_returns_messages(self):
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        with patch("src.runtime.executor.consume_stream_async", side_effect=_fake_stream):
+            client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
+        r = client.get(f"/api/events/{seq}/thread", headers=_headers)
+        assert len(r.json()["messages"]) == 2
+
+
+class TestKnowledge:
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def test_knowledge_write_issue_scope(self):
+        seq = _seed_event(issue_id="#5")
+        r = client.post(f"/api/events/{seq}/knowledge", json={"scope": "issue", "content": "该 issue 验收标准 = 接口可跑通"}, headers=_bot_headers())
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+        with db_lock:
+            row = db.cursor().execute("SELECT scope, issue_num, status, file_path FROM agent_shared_knowledge WHERE source_seq=?", (seq,)).fetchone()
+        assert row and row[0] == "issue" and row[1] == 5 and row[2] == "accepted"
+        import os as _os
+        from src.config import WORKSPACE_DIR
+        assert _os.path.isfile(_os.path.join(WORKSPACE_DIR, row[3]))
+
+    def test_knowledge_scope_file_locations(self):
+        seq = _seed_event(issue_id="#5")
+        from src.api.knowledge import knowledge_path
+        for scope, agent in (("project", ""), ("issue", ""), ("issue_agent", "vod")):
+            r = client.post(f"/api/events/{seq}/knowledge", json={"scope": scope, "content": f"知识-{scope}"}, headers=_bot_headers())
+            assert r.status_code == 200, r.text
+            fp = knowledge_path(_REPO_KEY, scope, agent_type=agent, issue_num=5)
+            import os as _os
+            assert _os.path.isfile(fp), fp
+
+    def test_knowledge_requires_bot_token(self):
+        seq = _seed_event()
+        r = client.post(f"/api/events/{seq}/knowledge", json={"scope": "issue", "content": "x"}, headers=_headers)
+        assert r.status_code == 403
+
+    def test_knowledge_injected_into_prompt(self):
+        seq = _seed_event(issue_id="#5")
+        client.post(f"/api/events/{seq}/knowledge", json={"scope": "project", "content": "此仓库 PR 走内部评审"}, headers=_bot_headers())
+        from src.prompt_builder import build_conversation_prompt
+        evt = {"seq": seq, "repo_key": _REPO_KEY, "issue_id": "#5", "agent_type": "vod",
+               "event_type": "issue_opened", "title": "t", "status": "completed", "result": "r"}
+        prompt = build_conversation_prompt(evt, "你好", [], "vod", 5)
+        assert "此仓库 PR 走内部评审" in prompt
+
+
+class TestFlowReset:
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def test_flow_reset_cancels_and_rewinds(self):
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        tid = service.enqueue_task(agent_session_id="sess-1", runtime_id=1, prompt="p",
+                                   repo_key=_REPO_KEY, agent_type="coding", issue_id="#5")
+        r = client.post(f"/api/events/{seq}/flow/reset", json={"to_stage": "vod"}, headers=_bot_headers())
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+        assert r.json()["stage"] == "vod"
+        from src.api.session_store import get_issue_stage
+        assert get_issue_stage(_REPO_KEY, "#5")["stage"] == "vod"
+        task = service.get_task(tid)
+        assert task and task["status"] == "cancelled"
+
+    def test_flow_reset_requires_bot_token(self):
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        r = client.post(f"/api/events/{seq}/flow/reset", json={"to_stage": "vod"}, headers=_headers)
+        assert r.status_code == 403
+
+    def test_flow_reset_rejects_forward(self):
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        r = client.post(f"/api/events/{seq}/flow/reset", json={"to_stage": "coding"}, headers=_bot_headers())
+        assert r.status_code == 400
+
+
+class TestOutcomeRecords:
+    """对话产出留痕：knowledge / flow 写入线程 system 消息（📌/🔄）"""
+
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def test_knowledge_and_flow_write_system_messages(self):
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        client.post(f"/api/events/{seq}/knowledge", json={"scope": "issue", "content": "验收标准 = 接口可跑通"}, headers=_bot_headers())
+        client.post(f"/api/events/{seq}/flow/reset", json={"to_stage": "vod"}, headers=_bot_headers())
+        r = client.get(f"/api/events/{seq}/thread", headers=_headers)
+        msgs = r.json()["messages"]
+        system = [m["content"] for m in msgs if m["role"] == "system"]
+        assert any(c.startswith("📌") and "issue" in c for c in system)
+        assert any(c.startswith("🔄") and "vod" in c for c in system)
+
+
+class TestSseStream:
+    """SSE 流式对话端点 /chat/stream"""
+
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def test_stream_returns_sse_events(self):
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        with patch("src.runtime.executor.consume_stream_async", side_effect=_fake_stream):
+            r = client.post(f"/api/events/{seq}/chat/stream", json={"message": "hi"}, headers=_headers)
+        assert r.status_code == 200
+        assert "text/event-stream" in (r.headers.get("content-type") or "")
+        import json as _json
+        done_found = False
+        for line in r.text.split("\n"):
+            if line.startswith("data: "):
+                evt = _json.loads(line[6:])
+                if evt.get("type") == "done":
+                    done_found = True
+                    assert evt["reply"] == "模拟 agent 回复"
+        assert done_found
+        # 线程已写入 user + agent 两行
+        t = client.get(f"/api/events/{seq}/thread", headers=_headers).json()
+        assert len(t["messages"]) == 2
+
+    def test_stream_rejected_when_done(self):
+        seq = _seed_event()
+        _seed_issue_state("done")
+        r = client.post(f"/api/events/{seq}/chat/stream", json={"message": "hi"}, headers=_headers)
+        assert r.status_code == 409
+
+
+class TestKnowledgeFilesDelivery:
+    """enqueue_task 打包共享知识快照（knowledge_files）"""
+
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def test_enqueue_packs_knowledge_files(self):
+        seq = _seed_event(issue_id="#5")
+        client.post(f"/api/events/{seq}/knowledge", json={"scope": "issue", "content": "验收标准 = 接口可跑通"}, headers=_bot_headers())
+        from src.runtime.service import enqueue_task
+        tid = enqueue_task(agent_session_id="sess-2", runtime_id=1, prompt="p",
+                           repo_key=_REPO_KEY, agent_type="vod", issue_id="#5")
+        task = service.get_task(tid)
+        assert task and task.get("knowledge_files")
+        import json
+        kf = json.loads(task["knowledge_files"])
+        assert kf and any("knowledge.md" in rel for rel in kf)

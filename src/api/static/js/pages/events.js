@@ -1,9 +1,15 @@
+// Event Detail：结构化产出 + Event Info + 与事件所属 agent 的对话（event-conversation-design.md）
+let _convSeq = null;
+let _convAgent = '';
+
 function renderEventDetail(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   const agent = data.agent_type || 'vod';
   const agentName = (_AGENT_TYPES[agent] && _AGENT_TYPES[agent].display_name) || agent;
   const result = data.result || data.summary || '';
+  _convSeq = data.seq;
+  _convAgent = agent;
 
   // M4：结构化产出（event.json archive 对应段，见 §11.4）
   let structuredHtml = '';
@@ -22,8 +28,8 @@ function renderEventDetail(data) {
     </div>`;
   }
 
-  let html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← 返回 ${agentName}</button>
-  <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;height:calc(100vh - 160px);overflow:hidden">
+  const html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← 返回 ${agentName}</button>
+  <div style="display:grid;grid-template-columns:1fr 320px;gap:14px;height:calc(100vh - 160px);overflow:hidden">
     <div class="cd" style="padding:16px 20px;display:flex;flex-direction:column;overflow:hidden">
       <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Event Context</h3>
       <div class="tx t2" style="margin-bottom:12px;line-height:1.6;flex-shrink:0">
@@ -38,10 +44,7 @@ function renderEventDetail(data) {
       <div style="flex:1;overflow-y:auto;background:var(--s);color:#c2cad6;border-radius:8px;padding:12px;font-size:12px;font-family:monospace;line-height:1.7;white-space:pre-wrap">
         ${result || '<div style="color:var(--t3)">（无结论）</div>'}
       </div>
-      <div class="cd mt12" style="padding:10px;background:#eef2ff;font-size:11px;flex-shrink:0">
-        <div style="color:var(--a);font-weight:600;margin-bottom:4px">💡 Have a question about this result?</div>
-        <div style="color:var(--t2)">Use the Feedback form on the right to submit your feedback.</div>
-      </div>
+      <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
     <div style="display:flex;flex-direction:column;gap:12px;overflow-y:auto">
       <div class="cd" style="padding:16px">
@@ -55,27 +58,127 @@ function renderEventDetail(data) {
           <div><span style="color:var(--t3)">Agent:</span> ${agent}</div>
           <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
           <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span></div>
+          <div id="convGate" style="margin-top:6px"><span style="color:var(--t3)">门禁:</span> <span class="tgx">…</span></div>
         </div>
       </div>
-      <div class="cd" style="padding:16px">
-        <h3 style="font-size:12px;font-weight:600;margin-bottom:10px">💬 Feedback</h3>
-        <div class="tx t2" style="margin-bottom:6px">Noticed an issue with this event?</div>
-        <input type="text" placeholder="Issue title..." id="fbTitle" style="width:100%;padding:6px 8px;margin-bottom:6px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--bg)">
-        <textarea placeholder="Describe the problem or suggestion..." id="fbBody" style="width:100%;height:60px;padding:6px 8px;margin-bottom:8px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--bg);resize:vertical"></textarea>
-        <button class="bt bt-p bt-s" style="width:100%" onclick="submitFeedback(${data.seq})">Submit Feedback</button>
+      <div class="cd" style="padding:16px;display:flex;flex-direction:column;gap:8px">
+        <h3 style="font-size:12px;font-weight:600">💬 与 ${agentName} 对话</h3>
+        <div id="convMessages" style="flex:1;min-height:180px;max-height:46vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
+        <div id="convInputRow" style="display:none;gap:6px">
+          <input id="convInput" placeholder="问一问 agent 为什么这样处理…" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+          <button class="bt bt-p bt-s" onclick="sendConversation()">发送</button>
+        </div>
       </div>
     </div>
   </div>`;
 
   el.innerHTML = html;
+  loadConversation();
 }
 
-function submitFeedback(seq) {
-  const title = document.getElementById('fbTitle');
-  const body = document.getElementById('fbBody');
-  API.post('/chat/feedback', {seq, feedback_type: 'create_issue', comment: (title ? title.value : '') + '\n' + (body ? body.value : '')}).then(r => {
-    app.showToast('反馈已提交');
-    if (title) title.value = '';
-    if (body) body.value = '';
-  }).catch(e => app.showToast('提交失败: ' + e.message));
+function _convBubble(role, content, time, by) {
+  if (role === 'system') {
+    return `<div style="display:flex;justify-content:center"><div style="max-width:92%;padding:5px 10px;border-radius:8px;font-size:11px;color:var(--t2);background:#f1f5f9;text-align:center;line-height:1.4">${content || ''}</div></div>`;
+  }
+  const mine = role === 'user';
+  return `<div style="display:flex;${mine ? 'justify-content:flex-end' : 'justify-content:flex-start'}">
+    <div style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;${mine
+      ? 'background:var(--a);color:#fff'
+      : 'background:var(--s);color:#e2e8f0'}">
+      ${content || ''}
+      <div style="font-size:10px;opacity:.7;margin-top:3px">${mine ? (by || '我') : (by || 'agent')}${time ? ' · ' + fmtLocalTime(time).substring(11,16) : ''}</div>
+    </div>
+  </div>`;
+}
+
+function loadConversation() {
+  if (!_convSeq) return;
+  API.get('/events/' + _convSeq + '/thread').then(d => {
+    const gate = d.gate || {};
+    const gateEl = document.getElementById('convGate');
+    if (gateEl) gateEl.innerHTML = gate.open
+      ? `<span class="tgx">✔ 评论开放中</span>`
+      : `<span class="tr">✖ 评论已关闭</span>`;
+    const messagesEl = document.getElementById('convMessages');
+    if (messagesEl) {
+      const msgs = (d.messages || []).map(m => _convBubble(m.role, m.content, m.created_at, m.created_by)).join('');
+      messagesEl.innerHTML = msgs || '<div style="color:var(--t3);font-size:11px">开始与 ' + _convAgent + ' 对话，了解这次处理。</div>';
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+    const inputRow = document.getElementById('convInputRow');
+    if (inputRow) inputRow.style.display = gate.open ? 'flex' : 'none';
+    // 左栏：对话产出（知识沉淀 + 流程操作 + 结论）
+    renderOutcome(d.knowledge || {}, d.messages || []);
+  }).catch(e => {
+    const messagesEl = document.getElementById('convMessages');
+    if (messagesEl) messagesEl.innerHTML = '<div class="tr" style="font-size:11px">加载对话失败: ' + e.message + '</div>';
+  });
+}
+
+function renderOutcome(knowledge, messages) {
+  const el = document.getElementById('convOutcome');
+  if (!el) return;
+  const kRows = Object.keys(knowledge || {}).map(scope =>
+    `<div style="padding:3px 0;border-bottom:1px dashed var(--b)"><b>${scope === 'project' ? '仓库级' : scope === 'issue' ? 'Issue 级' : 'Agent 级'}</b> · ${knowledge[scope]}</div>`
+  ).join('');
+  const flowRows = (messages || []).filter(m => m.role === 'system' && (m.content || '').indexOf('🔄') === 0)
+    .map(m => `<div style="padding:3px 0;border-bottom:1px dashed var(--b)">${m.content}</div>`).join('');
+  if (!kRows && !flowRows) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML = `<h3 style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--a)">💬 对话产出</h3>`
+    + (kRows ? `<div style="margin-top:2px"><b>知识沉淀</b>${kRows}</div>` : '')
+    + (flowRows ? `<div style="margin-top:4px"><b>流程操作</b>${flowRows}</div>` : '');
+}
+
+function sendConversation() {
+  const input = document.getElementById('convInput');
+  if (!input || !_convSeq) return;
+  const msg = (input.value || '').trim();
+  if (!msg) return;
+  input.value = '';
+  const messagesEl = document.getElementById('convMessages');
+  if (messagesEl) messagesEl.insertAdjacentHTML('beforeend', _convBubble('user', msg));
+  const token = localStorage.getItem('token') || '';
+  const replyId = 'convReply' + Date.now();
+  const holder = document.createElement('div');
+  holder.style.display = 'flex';
+  holder.style.justifyContent = 'flex-start';
+  holder.innerHTML = `<div id="${replyId}" style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;background:var(--s);color:#e2e8f0">⏳ 思考中…</div>`;
+  if (messagesEl) messagesEl.appendChild(holder);
+  const replyEl = document.getElementById(replyId);
+  if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+  let acc = '';
+  fetch('/api/events/' + _convSeq + '/chat/stream', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token},
+    body: JSON.stringify({message: msg}),
+  }).then(resp => {
+    if (!resp.ok) {
+      resp.json().then(d => app.showToast(((d.detail && d.detail.message) || '发送失败'))).catch(() => app.showToast('发送失败'));
+      if (replyEl) replyEl.textContent = '（发送失败）';
+      return;
+    }
+    if (!resp.body) return loadConversation();
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    function read() {
+      return reader.read().then(({done, value}) => {
+        if (done) { loadConversation(); return; }
+        buf += dec.decode(value, {stream: true});
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const part of parts) {
+          if (!part.startsWith('data: ')) continue;
+          let evt;
+          try { evt = JSON.parse(part.slice(6)); } catch (e) { continue; }
+          if (evt.type === 'text') { acc += evt.text; if (replyEl) replyEl.textContent = acc; }
+          else if (evt.type === 'done') { if (replyEl) replyEl.textContent = evt.reply || acc; loadConversation(); return; }
+        }
+        if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+        return read();
+      });
+    }
+    return read().catch(() => loadConversation());
+  }).catch(() => loadConversation());
 }

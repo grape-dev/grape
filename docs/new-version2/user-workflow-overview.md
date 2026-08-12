@@ -349,41 +349,60 @@ Agent 详情说明：
 
 ---
 
-### 2.7 Event Detail 页面
+### 2.7 Event Detail 页面（含与 Agent 对话）
+
+> 本页的「💬 对话」为 **Event 对话窗口设计**（详见 `event-conversation-design.md`），是对原「Feedback 表单」的重构，**待实施**；其余（结构化产出、Event Info）为现状。
 
 点击任意 Event（Dashboard 活动流、Agent 详情事件、全局搜索）进入事件详情：
 
 ```
-┌─ Top Bar ────────────────────────────────────────────┐
-│  Event Detail · VOD Agent · team/backend-service      │
-├───────────────────────────────────────────────────────┤
-│  [← 返回 VOD Agent]                                   │
-│                                                        │
-│  ┌─ Event Context ───────────┐  ┌─ Event Info ────┐  │
-│  │  Trigger: issue_opened    │  │ Seq: #1234      │  │
-│  │  Repository: team/backend-│  │ Runtime: opencode│  │
-│  │  Issue: #345              │  │ Skill: vod       │  │
-│  │  Actor: @alice            │  │ Issue: #345      │  │
-│  │  Time: ...                │  │ Actor: @alice    │  │
-│  │                            │  │ Agent: vod       │  │
-│  │  ┌─ Agent 处理记录（结构化）─┐  │ Duration: 12s    │  │
-│  │  │ 结论: 已确认该反馈为...   │  │ Status: ✅Success│  │
-│  │  │ 动作: • 分析 · 聚类      │  │                  │  │
-│  │  │ 产出: [artifact-1]       │  │ ──────────────   │  │
-│  │  │ 下一步: A2A 交办 Issue   │  │  💬 Feedback     │  │
-│  │  └────────────────────────┘  │  Issue title...   │  │
-│  │  ┌─ Agent 答复结论 ─────────┐ │  Description...    │  │
-│  │  │（Agent 结论文本，等宽）   │  │ [Submit Feedback]│  │
-│  │  └────────────────────────┘  │  └────────────────┘  │
-│  │  💡 Have a question about    │                    │
-│  │  these logs? Submit to →     │                    │
-│  └──────────────────────────────┘                    │
-└─────────────────────────────────────────────────────────┘
+┌─ Top Bar ─────────────────────────────────────────────────┐
+│  Event Detail · VOD Agent · team/backend-service           │
+├────────────────────────────────────────────────────────────┤
+│  [← 返回 VOD Agent]                                        │
+│                                                             │
+│  ┌─ Event Context ──────────────┐  ┌─ Event Info ────────┐ │
+│  │  Trigger: issue_opened       │  │ Seq: #1234          │ │
+│  │  Repository: team/backend-   │  │ Runtime: opencode   │ │
+│  │  Issue: #345                 │  │ Skill: vod          │ │
+│  │  Actor: @alice               │  │ Issue: #345         │ │
+│  │  Time: ...                   │  │ Actor: @alice       │ │
+│  │                              │  │ Agent: vod          │ │
+│  │  ┌─ Agent 处理记录（结构化）─┐  │ Duration: 12s       │ │
+│  │  │ 结论: 已确认该反馈为...   │  │ Status: ✅ Success  │ │
+│  │  │ 动作: • 分析 · 聚类      │  │ ────────────────     │ │
+│  │  │ 产出: [artifact-1]       │  │ 门禁: ✔ 评论开放中   │ │
+│  │  │ 下一步: A2A 交办 Issue   │  │                      │ │
+│  │  └─────────────────────────┘  │  ┌─ 💬 与 VOD 对话 ──┐ │
+│  │  ┌─ Agent 答复结论 ──────────┐ │  │ ┌──────────────┐ │ │
+│  │  │（Agent 结论文本，等宽）    │  │  │ 用户          │ │ │
+│  │  └─────────────────────────┘  │  │ 为什么这样处理？ │ │ │
+│  │  ┌─ 💬 对话产出（结果摘要）───┐ │  │ ────────────── │ │ │
+│  │  │ 知识沉淀:                  │  │  │ agent         │ │ │
+│  │  │  · 仓库级: VOD 不删原文    │  │  │ 该 issue 描述  │ │ │
+│  │  │ 流程操作:                  │  │  │ 缺验收标准，故  │ │ │
+│  │  │  · 回退 vod · 暂停 coding  │  │  │ 先澄清…       │ │ │
+│  │  │ 结论: 已与用户澄清验收标准  │  │  └──────────────┘ │ │
+│  │  └─────────────────────────┘  │  ├────────────────┤ │ │
+│  │                                │  │ [输入消息...]   │ │ │
+│  │                                │  │      [发送]      │ │ │
+│  │                                │  └────────────────┘ │ │
+│  └────────────────────────────────┘  └───────────────────┘ │
+└────────────────────────────────────────────────────────────┘
 ```
 
 - **结构化产出卡片（new-version2 新增）**：读取该 Issue 的 `event.json` 事件档案对应 pipeline 段，展示 Agent 处理记录的 `actions / conclusion / artifacts / next_step / issue_summary` 五字段。
-- **Event Info**：事件元信息（Runtime 引擎、Skill、Issue、Actor、Agent、耗时、状态）。
-- **Feedback**：对执行结果有疑问时填写标题 + 描述，提交给 VOD Agent 处理（A2A `user_feedback`）。
+- **Event Info**：事件元信息（Runtime 引擎、Skill、Issue、Actor、Agent、耗时、状态），并标注对话门禁状态。
+- **💬 与 VOD 对话（右栏 · 会话本体/过程）**：以该事件为锚点、与**处理该事件的 agent** 的完整消息线程——用户/agent 每一轮消息 + 输入框 + 发送 + 流式回复。**所有原始对话消息都在这里**，取代原 Feedback 表单。支持：
+  1. **解释**：问"为什么这样处理 / 思考过程"，agent 基于事件上下文作答；
+  2. **建议沉淀**：用户提出建议，agent 判断是否沉淀为 **agent 级 / repo 级共享知识**（`agent_shared_knowledge`），后续任务自动参考；
+  3. **流程干预**：用户指出需求理解有误（如 pipeline 已在 coding 但 VOD 理解仍偏差）→ agent 确认后执行 **暂停下游 → 回退阶段（重置回 vod）→ 重新澄清 → 重新派发（A2A 交办 issue）**，回到正常流程；
+  4. 对话**复用该 agent 的 issue 级会话**（`issue_agent_session`，上下文跨事件延续），由 `event-dialogue` 对话 skill 约束行为。
+- **💬 对话产出（左栏 · 结果摘要）**：与右栏**不重复**——右栏是对话"过程"（每一条消息），左栏是对话"结果"摘要，随对话实时更新：
+  - **知识沉淀**：本次对话新增的共享知识（scope agent/repo + 内容 + 采纳状态）；
+  - **流程操作**：对话触发的 `flow/reset` 回退、任务取消（暂停 coding）、A2A 重新派发等动作留痕；
+  - **结论**：agent 在对话中与用户达成的明确结论。
+- **门禁**：关联 Issue 的 pipeline 结束（`issue_state.stage='done'` 或 Issue 关闭）后，**关闭评论**——右栏输入框隐藏、后端拒绝（409）；左栏对话产出保留可查。
 
 ---
 

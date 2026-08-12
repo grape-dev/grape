@@ -100,6 +100,18 @@ async def _execute_task(client, task, engine_name: str = ""):
         prompt = prompt.replace("{{PROJECT_INFO_DIR}}", proj_dir)
     except Exception as e:
         log.warning(f"project-info materialize failed: {e}")
+    # 共享知识落地（event-conversation-design.md §3.1.1；随任务交付远端 worker）
+    know_dir = _os.path.join(cwd, ".knowledge")
+    try:
+        know_files = json.loads(task.get("knowledge_files") or "{}")
+        for rel, content in (know_files or {}).items():
+            dest = _os.path.join(know_dir, rel)
+            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(content)
+        prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
+    except Exception as e:
+        log.warning(f"knowledge materialize failed: {e}")
     try:
         from src.runtime import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
