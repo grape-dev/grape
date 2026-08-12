@@ -53,15 +53,43 @@ def _discover_local_runtimes() -> list[dict]:
     return out
 
 
-async def _execute_task(client, task, engine_name: str = ""):
-    """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。
+def _remap_cwd(path: str) -> str:
+    """将服务端下发的 cwd 路径映射到本地用户 home 目录。
 
-    engine_name 为该任务所属引擎实例名（如 opencode-worker-123249），用于日志区分。
+    服务端以 /home/grape 为基准生成 workspaces 路径，但各接入机器的用户不同
+    （lvjuntao、zhangsan 等）。通过 RUNTIME_CWD_PREFIX_MAP 环境变量配置映射：
+      RUNTIME_CWD_PREFIX_MAP=/home/grape=/home/lvjuntao
+    支持多组映射，用逗号分隔：
+      RUNTIME_CWD_PREFIX_MAP=/home/grape=/home/lvjuntao,/opt/data=/data
+    未配置时默认将 /home/grape 映射到当前用户的 home 目录。
     """
+    if not path:
+        return path
+    import os as _os
+    mapping = _os.environ.get("RUNTIME_CWD_PREFIX_MAP", "")
+    if not mapping:
+        # 默认映射：/home/grape → 当前用户 home
+        default_src = "/home/grape"
+        local_home = _os.path.expanduser("~")
+        if path.startswith(default_src) and local_home != default_src:
+            return local_home + path[len(default_src):]
+        return path
+    for pair in mapping.split(","):
+        pair = pair.strip()
+        if "=" not in pair:
+            continue
+        src, dst = pair.split("=", 1)
+        src, dst = src.strip(), dst.strip()
+        if src and path.startswith(src):
+            return dst + path[len(src):]
+    return path
+
+
+async def _execute_task(client, task):
+    """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。"""
     import os as _os
     tid = task.get("id", "")
-    cwd = task.get("cwd") or _os.getcwd()
-    _engine_tag = f"|engine:{engine_name}" if engine_name else ""
+    cwd = _remap_cwd(task.get("cwd") or _os.getcwd())
     try:
         _os.makedirs(cwd, exist_ok=True)
     except Exception:
@@ -184,18 +212,56 @@ async def _execute_task(client, task, engine_name: str = ""):
         await client.fail(tid, str(e))
 
 
+async def _reregister(client, installed, device_name) -> list[int] | None:
+    """重新注册获取新 runtime id。成功返回 id 列表，失败返回 None。"""
+    log.warning("re-registering with server to refresh runtime ids...")
+    try:
+        ids = await client.register(installed, device_name=device_name)
+        if ids:
+            for rid in ids:
+                await client.recover_orphans(rid)
+            log.info(f"re-registered successfully, new runtime ids: {ids}")
+            return ids
+        log.warning("re-register returned empty ids")
+    except Exception as e:
+        log.warning(f"re-register failed: {e}")
+    return None
+
+
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
-                    engine_by_rid: dict | None = None,
-                    _test_execute=None, _test_active=None):
-    active_sessions = _test_active if _test_active is not None else set()
+                    installed, device_name):
+    """主循环：claim → 执行 → 回报，含心跳 + 自动重连自修复。
+
+    自修复机制（三层防护）：
+    1. 心跳失败计数：连续 N 次 heartbeat 失败 → 重注册
+    2. 定期重注册：每 RE_REGISTER_INTERVAL 秒主动刷新 runtime id，
+       防止服务端重启后 id 静默失效（服务端对旧 id 仍返回 200 ok）
+    3. 网络中断恢复：连接错误计入心跳失败，触发重注册
+    """
+    active_sessions = set()
     last_heartbeat = 0.0
-    engine_by_rid = engine_by_rid or {}
+    heartbeat_fail_streak = 0          # 连续心跳失败计数
+    HEARTBEAT_FAIL_THRESHOLD = 3       # 连续失败 N 次触发重注册
+    RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))  # 默认 5 分钟定期重注册
+    last_reregister = asyncio.get_running_loop().time()
+
     while True:
+        # ---- 定期重注册（防 id 静默失效）----
+        now = asyncio.get_running_loop().time()
+        if now - last_reregister >= RE_REGISTER_INTERVAL:
+            new_ids = await _reregister(client, installed, device_name)
+            if new_ids:
+                runtime_ids = new_ids
+                heartbeat_fail_streak = 0
+            last_reregister = asyncio.get_running_loop().time()
+
+        # ---- claim 任务 ----
         for rid in runtime_ids:
             try:
                 task = await client.claim(rid)
             except Exception as e:
                 log.warning(f"claim rid={rid} failed: {e}")
+                heartbeat_fail_streak += 1
                 continue
             if not task:
                 continue
@@ -227,10 +293,32 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     active_sessions.discard(s)
 
             asyncio.create_task(_wrap())
+
+        # ---- 心跳 + 失败检测 ----
         now = asyncio.get_running_loop().time()
         if now - last_heartbeat >= heartbeat_interval:
-            await client.heartbeat(runtime_ids)
+            ok = await client.heartbeat(runtime_ids)
+            if ok:
+                heartbeat_fail_streak = 0
+            else:
+                heartbeat_fail_streak += 1
+                log.warning(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD})")
             last_heartbeat = now
+
+            # ---- 连续失败触发重注册 ----
+            if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
+                log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
+                new_ids = await _reregister(client, installed, device_name)
+                if new_ids:
+                    runtime_ids = new_ids
+                    heartbeat_fail_streak = 0
+                    last_reregister = asyncio.get_running_loop().time()
+                else:
+                    # 重注册也失败，退避后重试
+                    backoff = min(30 * (2 ** (heartbeat_fail_streak - HEARTBEAT_FAIL_THRESHOLD)), 300)
+                    log.warning(f"re-register failed, backing off {backoff:.0f}s")
+                    await asyncio.sleep(backoff)
+
         await asyncio.sleep(poll_interval + random.uniform(0, poll_interval * 0.3))
 
 
@@ -287,7 +375,7 @@ def main():
         for rid in ids:
             await client.recover_orphans(rid)
         try:
-            await _run_loop(client, ids, poll, heartbeat, max_concurrent, engine_by_rid)
+            await _run_loop(client, ids, poll, heartbeat, max_concurrent, installed, device)
         finally:
             await client.close()
 
