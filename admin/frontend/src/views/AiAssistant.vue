@@ -1,107 +1,164 @@
 <template>
-  <div class="aiq">
-    <!-- 左栏：查询输入 + 分析报表（会话列表） -->
-    <div class="aiq-left">
-      <div class="aiq-q">
-        <h3>查询输入</h3>
-        <div class="aiq-actions">
-          <select v-model="queryTemplate" @change="applyTemplate" class="aiq-tplselect">
-            <option value="">-- 选择模板 --</option>
-            <optgroup v-for="(tpls, g) in builtinGroups" :key="g" :label="g">
-              <option v-for="(t, k) in tpls" :key="k" :value="k">{{ t.label }}</option>
-            </optgroup>
-            <optgroup label="自定义模板 ✨" v-if="customTemplates.length">
-              <option v-for="t in customTemplates" :key="t.id" :value="'custom-' + t.id">{{ t.name }}</option>
-            </optgroup>
-          </select>
-          <button class="btn btn-primary btn-sm" :disabled="!queryText.trim() || isQuerying" @click="send">{{ isQuerying ? '查询中...' : '发送' }}</button>
+  <div class="page-container">
+    <div v-if="toastVisible" class="toast-message" :class="toastType">{{ toastMessage }}</div>
+
+    <div class="ai-query-header">
+      <h2>AI分析</h2>
+      <p class="ai-query-desc">基于 Hermes Agent 能力，支持多轮对话，输入自然语言查询，AI 自动分析并以图表展示结果</p>
+    </div>
+
+    <div class="ai-query-layout">
+      <!-- 左侧：查询输入 + 分析报表 -->
+      <div class="ai-query-input-panel">
+        <!-- 查询输入 -->
+        <div class="query-toolbar">
+          <h3>查询输入</h3>
+          <div class="query-actions">
+            <select v-model="queryTemplate" @change="applyTemplate" class="template-select">
+              <option value="">-- 选择模板 --</option>
+              <optgroup v-for="(tpls, g) in builtinGroups" :key="g" :label="g">
+                <option v-for="(t, k) in tpls" :key="k" :value="k">{{ t.label }}</option>
+              </optgroup>
+              <optgroup label="自定义模板 ✨" v-if="customTemplates.length">
+                <option v-for="t in customTemplates" :key="t.id" :value="'custom-' + t.id">{{ t.name }}</option>
+              </optgroup>
+            </select>
+            <button class="btn btn-primary btn-sm" @click="send" :disabled="!queryText.trim() || isQuerying">
+              {{ isQuerying ? '查询中...' : '发送' }}
+            </button>
+          </div>
         </div>
         <textarea
           v-model="queryText"
-          class="aiq-ta"
-          rows="4"
+          class="query-textarea"
           placeholder="请输入自然语言查询，支持多轮对话&#10;例如：统计各设备在线状态并用图表展示"
+          rows="4"
           @keydown.ctrl.enter="send"
         ></textarea>
-        <div class="aiq-counter">{{ queryText.length }}/600</div>
-        <div class="aiq-tplbar">
-          <span class="aiq-tplcount">自定义模板 {{ customTemplates.length }}/{{ templateMax }}</span>
-          <button class="btn btn-sm" :disabled="!queryText.trim()" @click="openSaveTpl">💾 保存为模板</button>
-          <div class="aiq-tplwrap">
-            <button class="btn btn-sm" @click="showTplDrop = !showTplDrop">📋 自定义模板 <span class="aiq-arrow">▼</span></button>
-            <div v-if="showTplDrop" class="aiq-tpldrop">
-              <div class="aiq-tpldrop-h">选择模板快速填充查询输入框</div>
-              <div v-if="!customTemplates.length" class="aiq-tpldrop-empty">暂无自定义模板</div>
-              <div v-for="t in customTemplates" :key="t.id" class="aiq-tplitem" @click="fillCustom(t)">
-                <span>{{ t.name }}</span>
-                <a class="aiq-tpldel" @click.stop="delTemplate(t)" title="删除">✕</a>
+        <div class="char-counter-row">
+          <span class="char-counter" :class="{ 'near-limit': queryText.length >= 540 && queryText.length <= 600, 'at-limit': queryText.length > 600 }">{{ queryText.length }}/600</span>
+        </div>
+        <div class="template-bar">
+          <span class="template-count-hint">自定义模板 {{ customTemplates.length }}/{{ templateMax }}</span>
+          <button class="btn-save-template" :disabled="!queryText.trim()" @click="openSaveTpl">
+            <span>💾</span><span>保存为模板</span>
+          </button>
+          <div class="custom-template-wrapper" ref="tplWrapRef">
+            <button class="custom-template-btn" :class="{ open: showTplDrop }" @click="showTplDrop = !showTplDrop">
+              <span>📋</span><span>自定义模板</span><span class="arrow">▼</span>
+            </button>
+            <div class="custom-template-dropdown" v-if="showTplDrop">
+              <div class="custom-template-dropdown-header">选择模板快速填充查询输入框</div>
+              <div class="custom-template-dropdown-body">
+                <div v-if="customTemplates.length === 0" class="custom-template-empty">暂无自定义模板</div>
+                <div v-for="t in customTemplates" :key="t.id" class="custom-template-item" @click="fillCustom(t)">
+                  <span class="template-name">{{ t.name }}</span>
+                  <button class="template-delete" @click.stop="delTemplate(t)" title="删除">✕</button>
+                </div>
               </div>
             </div>
           </div>
         </div>
-        <p class="aiq-hint">💡 Ctrl+Enter 发送 | 支持 ```chart 代码块自动渲染图表 | 多轮对话保持上下文 | 异步模式：查询中可切换会话不中断</p>
+        <div class="query-hint">
+          <p>💡 Ctrl+Enter 发送 | 支持 ```chart 代码块自动渲染图表 | 多轮对话保持上下文 | 异步模式：查询中可切换会话不中断</p>
+        </div>
+
+        <!-- 分析报表 -->
+        <div class="session-list-section">
+          <div class="session-list-header">
+            <h4>分析报表</h4>
+            <button class="btn btn-sm btn-primary" @click="newSession" title="新建会话">+ 新建</button>
+          </div>
+          <div class="session-list">
+            <div
+              v-for="s in sessions" :key="s.id"
+              class="session-item" :class="{ active: s.id === activeSessionId, editing: editingId === s.id, running: isSessionRunning(s) }"
+              @click="switchSession(s)">
+              <input
+                v-if="editingId === s.id"
+                v-model="editName"
+                class="session-name-input"
+                maxlength="50"
+                @click.stop
+                @keydown.enter="confirmRename"
+                @keydown.esc="cancelRename"
+                @blur="confirmRename"
+              />
+              <span v-else class="session-name" @dblclick.stop="startRename(s)">{{ s.name }}</span>
+              <span v-if="isSessionRunning(s)" class="session-running-indicator" title="分析中">●</span>
+              <span class="session-time">{{ formatSessionTime(s.lastAt || s.updatedAt) }}</span>
+              <button v-if="editingId !== s.id" class="session-edit" @click.stop="startRename(s)" title="重命名">✎</button>
+              <button class="session-del" @click.stop="delSession(s)" title="删除">✕</button>
+            </div>
+            <div v-if="sessions.length === 0" class="session-empty">暂无会话</div>
+          </div>
+        </div>
       </div>
 
-      <div class="aiq-sessions">
-        <div class="aiq-sh">
-          <h4>分析报表</h4>
-          <button class="btn btn-primary btn-sm" @click="newSession">+ 新建</button>
-        </div>
-        <div class="aiq-slist">
-          <div
-            v-for="s in sessions" :key="s.id"
-            class="aiq-sitem" :class="{ act: s.id === activeSessionId, running: isSessionRunning(s) }"
-            @click="switchSession(s)">
-            <span v-if="editingId === s.id">
-              <input v-model="editName" class="aiq-sinput" maxlength="50" @click.stop @keydown.enter="confirmRename" @keydown.esc="cancelRename" @blur="confirmRename" />
-            </span>
-            <span v-else class="aiq-sname" @dblclick.stop="startRename(s)">{{ s.name }}</span>
-            <span v-if="isSessionRunning(s)" class="aiq-srun" title="分析中">●</span>
-            <span class="aiq-stime">{{ formatSessionTime(s.lastAt || s.updatedAt) }}</span>
-            <a v-if="editingId !== s.id" class="aiq-sedit" @click.stop="startRename(s)" title="重命名">✎</a>
-            <a class="aiq-sdel" @click.stop="delSession(s)" title="删除">✕</a>
+      <!-- 右侧：对话结果 -->
+      <div class="ai-query-result-panel" :class="{ 'fullscreen-mode': isFullscreen }">
+        <div class="result-toolbar">
+          <h3>{{ currentName || '对话记录' }}</h3>
+          <div class="result-toolbar-actions">
+            <button v-if="activeMsgs.length" class="btn btn-sm" :class="{ 'btn-success': copyOk }" @click="copyAll">{{ copyOk ? '已复制' : '复制全部' }}</button>
+            <button v-if="activeMsgs.length" class="btn btn-sm" @click="isFullscreen = !isFullscreen">{{ isFullscreen ? '还原' : '全屏' }}</button>
           </div>
-          <div v-if="!sessions.length" class="aiq-sempty">暂无会话</div>
+        </div>
+        <div class="result-content" ref="resultBox">
+          <div class="result-empty" v-if="activeMsgs.length === 0 && !isQuerying">
+            <div class="empty-icon">🤖</div>
+            <p>AI 查询结果将显示在这里</p>
+            <p class="empty-hint">输入查询内容并点击「发送」开始对话</p>
+          </div>
+          <div v-for="(m, mi) in activeMsgs" :key="mi" class="dialog-message" :class="m.role">
+            <div class="msg-avatar">{{ m.role === 'user' ? '👤' : '🤖' }}</div>
+            <div class="msg-body">
+              <div class="msg-role">{{ m.role === 'user' ? '我' : 'AI' }}</div>
+              <div v-for="(seg, si) in renderParts(m.raw)" :key="si" class="result-segment">
+                <pre v-if="seg.type === 'text'" class="result-text">{{ seg.text }}</pre>
+                <div v-else :data-chart="mi + '-' + si" class="chart-container"></div>
+              </div>
+              <div v-if="m.streaming" class="loading-dots-container">
+                <div class="loading-dots"><span></span><span></span><span></span></div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- 右栏：对话结果 -->
-    <div class="aiq-right" :class="{ full: isFullscreen }">
-      <div class="aiq-rt">
-        <h3>{{ currentName || '对话记录' }}</h3>
-        <div class="aiq-rta">
-          <button v-if="activeMsgs.length" class="btn btn-sm" @click="copyAll">{{ copyOk ? '已复制' : '复制全部' }}</button>
-          <button v-if="activeMsgs.length" class="btn btn-sm" @click="isFullscreen = !isFullscreen">{{ isFullscreen ? '还原' : '全屏' }}</button>
+    <!-- 字数超限弹窗 -->
+    <div v-if="showOverLimitModal" class="modal-overlay" @click.self="closeOverLimitModal">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <span class="modal-icon">⚠️</span>
+          <span class="modal-title">字数超限</span>
         </div>
-      </div>
-      <div class="aiq-result" ref="resultBox">
-        <div v-if="!activeMsgs.length && !isQuerying" class="aiq-empty">
-          <div class="aiq-empty-icon">🤖</div>
-          <p>AI 查询结果将显示在这里</p>
-          <p class="aiq-empty-hint">输入查询内容并点击「发送」开始对话</p>
+        <div class="modal-body">
+          自定义模板字数不能超过 {{ TEMPLATE_MAX_LENGTH }} 字，当前已输入 {{ overLimitCount }} 字。
         </div>
-        <div v-for="(m, mi) in activeMsgs" :key="mi" class="aiq-msg" :class="m.role">
-          <div class="aiq-av">{{ m.role === 'user' ? '👤' : '🤖' }}</div>
-          <div class="aiq-mb">
-            <div class="aiq-role">{{ m.role === 'user' ? '我' : 'AI' }}</div>
-            <div v-for="(seg, si) in renderParts(m.raw)" :key="si" class="aiq-seg">
-              <pre v-if="seg.type === 'text'" class="aiq-text">{{ seg.text }}</pre>
-              <div v-else :data-chart="mi + '-' + si" class="aiq-chart"></div>
-            </div>
-            <div v-if="m.streaming" class="aiq-loading"><span></span><span></span><span></span></div>
-          </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm" @click="closeOverLimitModal">我知道了</button>
         </div>
       </div>
     </div>
 
     <!-- 保存模板弹窗 -->
-    <div v-if="showSaveTpl" class="modal" @click.self="showSaveTpl = false">
-      <div class="modal-box">
-        <h4>💾 保存为自定义模板</h4>
-        <p class="t2" style="font-size:12px;margin:4px 0 10px">将当前提示词存为模板，下次可直接选用</p>
-        <input v-model="newTplName" placeholder="请输入模板名称（≤50字）" maxlength="50" />
-        <div class="modal-actions">
+    <div class="dialog-overlay" v-if="showSaveTpl" @click.self="showSaveTpl = false">
+      <div class="save-template-dialog">
+        <div class="dialog-header">
+          <div>
+            <h4>💾 保存为自定义模板</h4>
+            <p class="dialog-subtitle">将当前提示词存为模板，下次可直接选用</p>
+          </div>
+          <button class="dialog-close" @click="showSaveTpl = false">✕</button>
+        </div>
+        <div class="dialog-body">
+          <label class="dialog-label">模板名称</label>
+          <input v-model="newTplName" class="dialog-input" placeholder="请输入模板名称" maxlength="50" />
+          <div class="char-counter" style="text-align:right;margin-top:6px" :class="{ 'near-limit': newTplName.length >= 45 && newTplName.length <= 50, 'at-limit': newTplName.length > 50 }">{{ newTplName.length }}/50</div>
+        </div>
+        <div class="dialog-footer">
           <button class="btn" @click="showSaveTpl = false">取消</button>
           <button class="btn btn-primary" :disabled="!newTplName.trim()" @click="saveTemplate">保存</button>
         </div>
@@ -111,7 +168,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import { getToken } from '../utils/auth'
 import http from '../api'
@@ -133,9 +190,19 @@ const copyOk = ref(false)
 const editingId = ref(null)
 const editName = ref('')
 const resultBox = ref(null)
+const tplWrapRef = ref(null)
 const chartInstances = {}
 // 同步模式轮询管理：{ [sessionId]: { taskId, aiMsg, pollTimer } }
 const sessionTaskMap = {}
+// toast 与字数超限（对齐 VOD）
+const toastMessage = ref('')
+const toastVisible = ref(false)
+const toastType = ref('success')
+let toastTimer = null
+const TEMPLATE_MAX_LENGTH = 600
+const TEMPLATE_NAME_MAX_LENGTH = 50
+const showOverLimitModal = ref(false)
+const overLimitCount = ref(0)
 
 const activeSession = computed(() => sessions.value.find(s => s.id === activeSessionId.value))
 const activeMsgs = computed(() => activeSession.value?.msgs || [])
@@ -147,6 +214,14 @@ const isQuerying = computed(() => {
 function isSessionRunning(s) {
   return s && !!s.taskId && !s.taskCompleted
 }
+function showToast(msg, type = 'success') {
+  toastMessage.value = msg
+  toastType.value = type
+  toastVisible.value = true
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toastVisible.value = false }, 2500)
+}
+function closeOverLimitModal() { showOverLimitModal.value = false }
 
 // ===== 内置模板（Grape 业务提示词，含 VOD 式 ```chart 硬性格式指令）=====
 const BUILTIN_TEMPLATES = {
@@ -320,20 +395,33 @@ function applyTemplate() {
   queryTemplate.value = ''
 }
 function fillCustom(t) { queryText.value = t.content; showTplDrop.value = false }
-function openSaveTpl() { newTplName.value = ''; showSaveTpl.value = true }
+function openSaveTpl() {
+  if (queryText.value.length > TEMPLATE_MAX_LENGTH) {
+    overLimitCount.value = queryText.value.length
+    showOverLimitModal.value = true
+    return
+  }
+  newTplName.value = ''
+  showSaveTpl.value = true
+}
 async function saveTemplate() {
   try {
     await http.post('/ai/templates', { name: newTplName.value.trim(), content: queryText.value })
     showSaveTpl.value = false
     await loadTemplates()
-  } catch (e) { alert(e.response?.data?.message || '保存失败') }
+    showToast('模板保存成功')
+  } catch (e) {
+    showToast(e.response?.data?.message || '保存失败', 'error')
+  }
 }
 async function delTemplate(t) {
-  if (!confirm(`确认删除模板「${t.name}」？`)) return
   try {
     await http.delete(`/ai/templates/${t.id}`)
     await loadTemplates()
-  } catch (e) { alert(e.response?.data?.message || '删除失败') }
+    showToast('模板已删除')
+  } catch (e) {
+    showToast(e.response?.data?.message || '删除失败', 'error')
+  }
 }
 
 // ===== 发送（统一入口：异步订阅 / 同步轮询）=====
@@ -719,7 +807,7 @@ function removeExtraBrackets(s) {
 }
 async function initCharts() {
   await nextTick()
-  for (const el of document.querySelectorAll('.aiq-chart')) {
+  for (const el of document.querySelectorAll('.chart-container')) {
     const key = el.getAttribute('data-chart')
     if (!key) continue
     const [mi, si] = key.split('-').map(Number)
@@ -754,70 +842,158 @@ async function copyAll() {
 watch(activeMsgs, () => initCharts(), { deep: true })
 
 // ===== 挂载 =====
+function onDocClick(e) {
+  if (tplWrapRef.value && !tplWrapRef.value.contains(e.target)) showTplDrop.value = false
+}
 onMounted(async () => {
   loadTemplates()
   await loadSessions()
   if (asyncMode.value) reconnectActiveTask()
+  document.addEventListener('click', onDocClick)
+})
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick)
+  disposeAllCharts()
 })
 </script>
 
 <style scoped>
-.aiq { display: flex; gap: 12px; height: calc(100vh - 100px); align-items: flex-start; }
-.aiq-left { width: 360px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
-.aiq-q { background: #fff; border: 1px solid var(--border-color); border-radius: var(--radius-lg); padding: 14px 16px; box-shadow: var(--card-shadow); }
-.aiq-q h3 { font-size: 13px; margin-bottom: 10px; }
-.aiq-actions { display: flex; gap: 8px; margin-bottom: 8px; }
-.aiq-tplselect { flex: 1; padding: 4px 8px; font-size: 12px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-body); outline: none; cursor: pointer; }
-.aiq-ta { width: 100%; padding: 8px 10px; font-size: 13px; border: 1px solid var(--border-color); border-radius: 8px; outline: none; resize: vertical; font-family: inherit; box-sizing: border-box; }
-.aiq-ta:focus { border-color: var(--primary); }
-.aiq-counter { text-align: right; font-size: 11px; color: var(--text-tertiary); margin: 4px 0 8px; }
-.aiq-tplbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; position: relative; }
-.aiq-tplcount { font-size: 11px; color: var(--text-tertiary); margin-right: auto; }
-.aiq-arrow { font-size: 9px; }
-.aiq-tplwrap { position: relative; }
-.aiq-tpldrop { position: absolute; left: 0; top: 32px; width: 240px; background: #fff; border: 1px solid var(--border-color); border-radius: 8px; box-shadow: var(--card-shadow); z-index: 20; max-height: 220px; overflow-y: auto; }
-.aiq-tpldrop-h { font-size: 11px; color: var(--text-tertiary); padding: 8px 10px; border-bottom: 1px solid var(--border-color); }
-.aiq-tpldrop-empty { font-size: 12px; color: var(--text-tertiary); padding: 12px; text-align: center; }
-.aiq-tplitem { display: flex; justify-content: space-between; align-items: center; padding: 7px 10px; font-size: 12px; cursor: pointer; }
-.aiq-tplitem:hover { background: var(--bg-body); }
-.aiq-tpldel { color: var(--danger); font-weight: 700; }
-.aiq-hint { font-size: 11px; color: var(--text-tertiary); margin-top: 10px; }
-.aiq-sessions { background: #fff; border: 1px solid var(--border-color); border-radius: var(--radius-lg); padding: 14px 16px; box-shadow: var(--card-shadow); flex: 1; overflow: hidden; display: flex; flex-direction: column; }
-.aiq-sh { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-.aiq-sh h4 { font-size: 13px; }
-.aiq-slist { overflow-y: auto; flex: 1; }
-.aiq-sitem { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 12px; }
-.aiq-sitem:hover { background: var(--bg-body); }
-.aiq-sitem.act { background: var(--primary-bg); color: var(--primary); }
-.aiq-sitem.running .aiq-sname { color: var(--primary); }
-.aiq-sname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.aiq-sinput { width: 100%; padding: 2px 6px; font-size: 12px; border: 1px solid var(--primary); border-radius: 4px; outline: none; }
-.aiq-srun { color: var(--success); font-size: 9px; flex-shrink: 0; animation: aiqblink 1.2s infinite; }
-.aiq-stime { font-size: 10px; color: var(--text-tertiary); flex-shrink: 0; }
-.aiq-sedit { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
-.aiq-sedit:hover { color: var(--primary); }
-.aiq-sdel { color: var(--danger); font-weight: 700; flex-shrink: 0; }
-.aiq-sempty { font-size: 12px; color: var(--text-tertiary); text-align: center; padding: 16px 0; }
-.aiq-right { flex: 1; background: #fff; border: 1px solid var(--border-color); border-radius: var(--radius-lg); box-shadow: var(--card-shadow); display: flex; flex-direction: column; min-width: 0; height: 100%; }
-.aiq-right.full { position: fixed; inset: 0; z-index: 200; border-radius: 0; }
-.aiq-rt { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
-.aiq-rt h3 { font-size: 13px; }
-.aiq-rta { display: flex; gap: 6px; }
-.aiq-result { flex: 1; overflow-y: auto; padding: 16px; }
-.aiq-empty { text-align: center; margin-top: 18%; color: var(--text-tertiary); }
-.aiq-empty-icon { font-size: 32px; margin-bottom: 8px; }
-.aiq-empty-hint { font-size: 12px; margin-top: 4px; }
-.aiq-msg { display: flex; gap: 10px; margin-bottom: 16px; }
-.aiq-av { width: 30px; height: 30px; border-radius: 50%; background: var(--bg-body); border: 1px solid var(--border-color); display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
-.aiq-msg.user .aiq-av { background: var(--primary-bg); }
-.aiq-mb { flex: 1; min-width: 0; }
-.aiq-role { font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px; }
-.aiq-seg { margin-bottom: 8px; }
-.aiq-text { font-family: inherit; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; color: var(--text-primary); margin: 0; }
-.aiq-chart { width: 100%; height: 320px; }
-.aiq-loading { display: inline-flex; gap: 4px; padding: 4px 0; }
-.aiq-loading span { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); animation: aiqblink 1.2s infinite; }
-.aiq-loading span:nth-child(2) { animation-delay: .2s; }
-.aiq-loading span:nth-child(3) { animation-delay: .4s; }
-@keyframes aiqblink { 0%,80%,100% { opacity: .2 } 40% { opacity: 1 } }
+/* ===== 对齐 VOD AiQuery.vue 样式体系 ===== */
+.ai-query-header { margin-bottom: 20px; }
+.ai-query-header h2 { font-size: 20px; font-weight: 600; }
+.ai-query-desc { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+.ai-query-layout { display: flex; gap: 20px; height: calc(100vh - 200px); }
+.ai-query-input-panel { width: 38%; flex-shrink: 0; background: #fff; border-radius: 12px; border: 1px solid var(--border-color); padding: 20px; display: flex; flex-direction: column; }
+.ai-query-result-panel { flex: 1; background: #fff; border-radius: 12px; border: 1px solid var(--border-color); padding: 20px; display: flex; flex-direction: column; overflow: hidden; transition: all 0.3s ease; }
+.ai-query-result-panel.fullscreen-mode { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 9999; border-radius: 0; border: none; padding: 24px; transition: all 0.3s ease; }
+
+.session-list-section { margin-top: 16px; border-top: 1px solid var(--border-color); padding-top: 12px; }
+.session-list-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.session-list-header h4 { font-size: 13px; color: var(--text-secondary); }
+.session-list { max-height: 180px; overflow-y: auto; }
+.session-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.15s; }
+.session-item:hover { background: #f5f7fa; }
+.session-item.active { background: #e8f5ff; color: var(--primary); font-weight: 500; }
+.session-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-time { font-size: 11px; color: var(--text-tertiary); flex-shrink: 0; }
+.session-del { width: 18px; height: 18px; border: none; background: transparent; cursor: pointer; border-radius: 4px; color: var(--text-tertiary); font-size: 11px; flex-shrink: 0; }
+.session-del:hover { background: #ffeee6; color: #f5222d; }
+.session-edit { width: 18px; height: 18px; border: none; background: transparent; cursor: pointer; border-radius: 4px; color: var(--text-tertiary); font-size: 11px; flex-shrink: 0; opacity: 0; transition: opacity 0.15s; }
+.session-item:hover .session-edit { opacity: 1; }
+.session-edit:hover { background: #e8f5ff; color: var(--primary); }
+.session-name-input { flex: 1; font-size: 13px; border: 1px solid var(--primary); border-radius: 4px; padding: 2px 6px; outline: none; background: #fff; }
+.session-item.editing { background: #f0f7ff; }
+.session-item.running .session-name { color: var(--primary); }
+.session-running-indicator { color: #52c41a; font-size: 10px; animation: pulse 1.5s infinite; flex-shrink: 0; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.session-empty { font-size: 12px; color: var(--text-tertiary); text-align: center; padding: 12px; }
+
+.query-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.query-toolbar h3 { font-size: 16px; font-weight: 600; }
+.query-actions { display: flex; gap: 8px; align-items: center; }
+.async-toggle { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-secondary); cursor: pointer; user-select: none; white-space: nowrap; }
+.async-toggle input { margin: 0; cursor: pointer; }
+.async-toggle:hover { color: var(--primary); }
+.template-select { padding: 6px 10px; border: 1px solid var(--border-color); border-radius: 6px; font-size: 13px; outline: none; }
+.query-textarea { width: 100%; flex: 1; padding: 12px; border: 1px solid var(--border-color); border-radius: 8px; font-size: 14px; font-family: inherit; resize: none; line-height: 1.6; outline: none; box-sizing: border-box; }
+.query-textarea:focus { border-color: var(--primary); }
+.query-hint { margin-top: 8px; padding: 8px 12px; background: #f0f7ff; border-radius: 6px; font-size: 12px; color: var(--text-secondary); }
+.query-hint p { margin: 0; }
+
+.result-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.result-toolbar h3 { font-size: 16px; font-weight: 600; }
+.result-toolbar-actions { display: flex; gap: 8px; align-items: center; }
+.result-content { flex: 1; overflow-y: auto; }
+.result-empty { text-align: center; color: var(--text-tertiary); padding: 60px 20px; }
+.empty-icon { font-size: 48px; margin-bottom: 12px; }
+.empty-hint { font-size: 12px; margin-top: 4px; }
+
+.dialog-message { display: flex; gap: 12px; margin-bottom: 20px; }
+.dialog-message.user { flex-direction: row-reverse; }
+.msg-avatar { width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 20px; background: #f5f7fa; overflow: hidden; }
+.msg-body { flex: 1; min-width: 0; }
+.dialog-message.user .msg-body { display: flex; flex-direction: column; align-items: flex-end; }
+.msg-role { font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px; }
+.result-segment { margin-bottom: 8px; }
+.dialog-message.user .result-segment { max-width: 90%; }
+.result-text { font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; font-family: 'Courier New', monospace; color: var(--text-primary); padding: 12px; background: #f8f9fb; border-radius: 8px; margin: 0; }
+.dialog-message.user .result-text { background: #e8f5ff; }
+.chart-container { width: 100%; height: 400px; border-radius: 8px; border: 1px solid #f0f0f0; }
+.loading-dots-container { display: inline-flex; align-items: center; gap: 8px; }
+.loading-dots { display: inline-flex; gap: 6px; padding: 8px; }
+.loading-dots span { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); animation: query-bounce 1.2s infinite; }
+.loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+.loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes query-bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
+.btn-success { background: #52c41a !important; color: #fff !important; border-color: #52c41a !important; }
+
+/* 自定义模板管理区 */
+.char-counter-row { display: flex; justify-content: flex-end; align-items: center; margin-top: 4px; padding: 0 2px; }
+.char-counter { font-size: 12px; color: var(--text-tertiary); transition: color 0.2s; }
+.char-counter.near-limit { color: #fa8c16; font-weight: 600; }
+.char-counter.at-limit { color: #f5222d; font-weight: 600; }
+.template-bar { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 8px; }
+.template-count-hint { font-size: 12px; color: var(--text-tertiary); margin-right: auto; }
+.btn-save-template { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border: 1px dashed var(--primary); border-radius: 6px; font-size: 13px; color: var(--primary); background: #f0f7ff; cursor: pointer; transition: all 0.15s; }
+.btn-save-template:hover:not(:disabled) { background: #e8f5ff; border-style: solid; }
+.btn-save-template:disabled { color: var(--text-tertiary); border-color: var(--border-color); background: #f5f5f5; cursor: not-allowed; }
+.custom-template-wrapper { position: relative; }
+.custom-template-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid var(--border-color); border-radius: 6px; font-size: 13px; background: #fff; color: var(--text-primary); cursor: pointer; transition: all 0.15s; }
+.custom-template-btn:hover { border-color: var(--primary); }
+.custom-template-btn .arrow { margin-left: 4px; font-size: 10px; transition: transform 0.2s; }
+.custom-template-btn.open .arrow { transform: rotate(180deg); }
+.custom-template-dropdown { position: absolute; top: calc(100% + 4px); right: 0; width: 280px; background: #fff; border: 1px solid var(--border-color); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); z-index: 100; overflow: hidden; }
+.custom-template-dropdown-header { padding: 10px 14px; font-size: 12px; color: var(--text-tertiary); font-weight: 500; border-bottom: 1px solid #f0f0f0; }
+.custom-template-dropdown-body { max-height: 280px; overflow-y: auto; }
+.custom-template-empty { padding: 20px 14px; text-align: center; color: var(--text-tertiary); font-size: 13px; }
+.custom-template-item { display: flex; align-items: center; padding: 9px 14px; cursor: pointer; transition: background 0.1s; font-size: 13px; gap: 8px; }
+.custom-template-item:hover { background: #f0f7ff; }
+.custom-template-item .template-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.custom-template-item .template-delete { width: 22px; height: 22px; border: none; background: transparent; cursor: pointer; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: var(--text-tertiary); font-size: 14px; flex-shrink: 0; opacity: 0; transition: opacity 0.15s; }
+.custom-template-item:hover .template-delete { opacity: 1; }
+.custom-template-item .template-delete:hover { background: #ffeee6; color: #f5222d; }
+
+/* 保存模板弹窗 */
+.dialog-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.35); z-index: 10000; display: flex; align-items: center; justify-content: center; }
+.save-template-dialog { background: #fff; border-radius: 12px; width: 420px; max-width: 90vw; box-shadow: 0 8px 32px rgba(0,0,0,0.2); }
+.dialog-header { padding: 20px 20px 0; position: relative; }
+.dialog-header h4 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+.dialog-subtitle { font-size: 12px; color: var(--text-secondary); margin: 0; }
+.dialog-close { position: absolute; top: 16px; right: 16px; border: none; background: transparent; cursor: pointer; font-size: 18px; color: var(--text-tertiary); padding: 4px; border-radius: 4px; }
+.dialog-close:hover { background: #f5f5f5; color: var(--text-primary); }
+.dialog-body { padding: 16px 20px; }
+.dialog-label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+.dialog-input { width: 100%; padding: 8px 12px; border: 1px solid var(--border-color); border-radius: 6px; font-size: 14px; outline: none; box-sizing: border-box; }
+.dialog-input:focus { border-color: var(--primary); }
+.dialog-footer { padding: 12px 20px 20px; display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Toast */
+.toast-message { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); padding: 8px 20px; border-radius: 6px; font-size: 14px; z-index: 10000; box-shadow: 0 2px 8px rgba(0,0,0,0.15); color: #fff; transition: opacity 0.3s ease; }
+.toast-message.success { background: #52c41a; }
+.toast-message.warning { background: #faad14; }
+.toast-message.error { background: #f5222d; }
+@keyframes toast-fade-in { from { opacity: 0; transform: translateX(-50%) translateY(-8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+
+/* 字数超限弹窗 */
+.modal-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; animation: fadeIn 0.2s ease; }
+.modal-dialog { width: 400px; max-width: 90vw; background: #fff; border-radius: 12px; padding: 24px 28px 20px; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12); animation: slideDown 0.25s ease; }
+.modal-header { display: flex; align-items: center; margin-bottom: 16px; }
+.modal-icon { font-size: 18px; margin-right: 6px; }
+.modal-title { font-size: 16px; font-weight: 600; color: #262626; }
+.modal-body { font-size: 14px; color: #595959; line-height: 1.6; margin-bottom: 24px; }
+.modal-footer { display: flex; justify-content: center; gap: 12px; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideDown { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: translateY(0); } }
+
+/* 响应式（对齐 VOD） */
+@media (max-width: 768px) {
+  .ai-query-layout { flex-direction: column; height: auto; }
+  .ai-query-input-panel { width: 100%; max-height: 40vh; }
+  .chart-container { height: 280px; }
+}
+@media (max-width: 480px) {
+  .chart-container { height: 220px; }
+  .query-toolbar { flex-wrap: wrap; gap: 8px; }
+  .result-toolbar { flex-wrap: wrap; gap: 8px; }
+}
 </style>
