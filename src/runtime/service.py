@@ -6,7 +6,7 @@
 """
 import os, json, re, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from src.session_manager import db, db_lock
 from src.config import log
 
@@ -304,19 +304,69 @@ def claim(runtime_id) -> dict | None:
     with db_lock:
         c = db.cursor()
         try:
-            # MySQL 兼容抢单：SQLite 的 UPDATE...RETURNING / UPDATE 目标表子查询(1093) 均不可用，
-            # 拆两步——先 SELECT 候选 id（含串行槽 NOT EXISTS），再 UPDATE 该 id 且 status='queued'，
-            # 并发时 UPDATE 影响行数 0 表示被其他 worker 抢走，原子性不变。
-            c.execute("""
-                SELECT id FROM agent_tasks
-                WHERE runtime_id=? AND status='queued'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM agent_tasks a2
-                    WHERE a2.status IN ('dispatched','running')
-                      AND (
-                        (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
-                        OR
-                        (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+            # ---- 兜底回收（M1：dispatched 超时自动重排，防 worker 丢弃任务死循环）----
+            # worker 端 max_concurrent 满时 claim 后可能丢弃任务（不 start 不释放），
+            # 导致 dispatched 任务永久卡死、busy_slots 泄漏。这里在每次 claim 前
+            # 将超时(120s)未 start 的任务回池重排；attempts>=3 直接置 failed。
+            try:
+                _stale = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+                c.execute(
+                    "SELECT id, runtime_id, event_seq FROM agent_tasks "
+                    "WHERE status='dispatched' AND started_at < ? AND started_at IS NOT NULL",
+                    (_stale,))
+                _stale_rows = c.fetchall()
+                for _tid, _rid, _seq in _stale_rows:
+                    c.execute(
+                        "UPDATE agent_tasks SET attempts=attempts+1, "
+                        "status=CASE WHEN attempts+1 >= 3 THEN 'failed' ELSE 'queued' END, "
+                        "runtime_id=CASE WHEN attempts+1 >= 3 THEN runtime_id ELSE 0 END, "
+                        "started_at=NULL, "
+                        "result_text=CASE WHEN attempts+1 >= 3 THEN '回收超限(dispatched 超时 3 次)' ELSE result_text END "
+                        "WHERE id=? AND status='dispatched'",
+                        (_tid,))
+                    if c.rowcount and _rid:
+                        c.execute(
+                            "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
+                            (_rid,))
+                    # 回收置 failed（attempts 超限）→ 同步事件终态，避免事件永远 running
+                    if c.rowcount and _seq:
+                        c.execute("SELECT status FROM agent_tasks WHERE id=?", (_tid,))
+                        _after = c.fetchone()
+                        if _after and _after[0] == "failed":
+                            try:
+                                from src.api.event_store import update_event_status
+                                update_event_status(_seq, "failed")
+                            except Exception:
+                                pass
+                if _stale_rows:
+                    log.info(f"recover stale dispatched: {len(_stale_rows)} tasks")
+            except Exception as _e:
+                log.warning(f"recover stale dispatched failed: {_e}")
+
+            # 该 runtime 所属引擎池（enabled 才参与）
+            pools = []
+            try:
+                c.execute(
+                    "SELECT agent_type FROM agent_type_runtime_pool WHERE runtime_id=? AND enabled=1",
+                    (runtime_id,))
+                pools = [r[0] for r in c.fetchall()]
+            except Exception:
+                pass
+            if pools:
+                # MySQL 兼容抢单：拆两步——先 SELECT 候选（含串行槽 NOT EXISTS），再 UPDATE 该 id
+                ph = ",".join(["?"] * len(pools))
+                c.execute(f"""
+                    SELECT id FROM agent_tasks
+                    WHERE status='queued'
+                      AND (runtime_id=? OR (runtime_id=0 AND pool_agent_type IN ({ph})))
+                      AND NOT EXISTS (
+                        SELECT 1 FROM agent_tasks a2
+                        WHERE a2.status IN ('dispatched','running')
+                          AND (
+                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                            OR
+                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                          )
                       )
                   )
                 ORDER BY created_at ASC LIMIT 1
