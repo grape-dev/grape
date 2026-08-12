@@ -95,17 +95,7 @@
       </div>
 
       <p v-if="!devices.length" class="t2" style="padding:16px;text-align:center">无匹配设备</p>
-      <div v-if="total > 0" class="pagination-bar">
-        <span class="page-info">
-          <template v-if="totalPages > 1">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ total }} 台）</template>
-          <template v-else>共 {{ total }} 台</template>
-        </span>
-        <select v-model="size" class="page-size-select" @change="page = 0; load()">
-          <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
-        </select>
-        <button v-if="totalPages > 1" class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
-        <button v-if="totalPages > 1" class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
-      </div>
+      <PaginationBar v-if="total > 0" v-model:page="page" v-model:size="size" :total="total" :total-pages="totalPages" :size-options="sizeOptions" unit="台" @change="load" />
     </div>
 
     <!-- Toast 反馈（对齐 AI 分析页） -->
@@ -172,6 +162,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import http from '../api'
+import PaginationBar from '../components/PaginationBar.vue'
 
 const devices = ref([])
 const total = ref(0)
