@@ -62,29 +62,28 @@
       </div>
     </div>
 
-    <!-- 新增 / 编辑单弹窗（对齐 VOD） -->
+    <!-- 新增 / 编辑单弹窗（对齐 VOD：form-item 布局 + 角色单选 select） -->
     <div v-if="showModal" class="modal" @click.self="showModal = false">
-      <div class="modal-box" style="max-width:440px">
+      <div class="modal-box" style="max-width:420px">
         <h4>{{ isEditing ? '编辑用户' : '新增用户' }}</h4>
-        <div class="form-row">
+        <div class="form-item">
           <label>用户名</label>
           <input v-model="form.username" :disabled="isEditing" placeholder="请输入用户名" />
         </div>
-        <div class="form-row" v-if="!isEditing">
+        <div class="form-item" v-if="!isEditing">
           <label>密码</label>
           <input v-model="form.password" type="password" placeholder="请输入密码（至少8位）" />
         </div>
-        <div class="form-row">
+        <div class="form-item">
           <label>昵称</label>
           <input v-model="form.nickname" placeholder="昵称（可选）" />
         </div>
-        <div class="form-row" style="align-items:flex-start">
+        <div class="form-item">
           <label>角色</label>
-          <div style="flex:1">
-            <label v-for="r in roles" :key="r.id" class="chk">
-              <input type="checkbox" :value="r.id" v-model="form.roleIds" /> {{ r.name }}（{{ r.code }}）
-            </label>
-          </div>
+          <select v-model="form.roleId">
+            <option :value="null" disabled>请选择角色</option>
+            <option v-for="r in roles" :key="r.id" :value="r.id">{{ r.name }}（{{ r.code }}）</option>
+          </select>
         </div>
         <p v-if="modalError" class="err">{{ modalError }}</p>
         <div class="modal-actions">
@@ -94,13 +93,17 @@
       </div>
     </div>
 
-    <!-- 分配角色弹窗（保留，操作列「角色」入口） -->
+    <!-- 分配角色弹窗（单选 select，与编辑弹窗行为一致） -->
     <div v-if="showRoles" class="modal" @click.self="showRoles = false">
-      <div class="modal-box">
+      <div class="modal-box" style="max-width:420px">
         <h4>分配角色：{{ current.username }}</h4>
-        <label v-for="r in roles" :key="r.id" class="chk">
-          <input type="checkbox" :value="r.id" v-model="form.roleIds" /> {{ r.name }}（{{ r.code }}）
-        </label>
+        <div class="form-item">
+          <label>角色</label>
+          <select v-model="form.roleId">
+            <option :value="null" disabled>请选择角色</option>
+            <option v-for="r in roles" :key="r.id" :value="r.id">{{ r.name }}（{{ r.code }}）</option>
+          </select>
+        </div>
         <div class="modal-actions">
           <button class="btn" @click="showRoles = false">取消</button>
           <button class="btn btn-primary" @click="saveRoles">保存</button>
@@ -125,7 +128,7 @@ const total = ref(0)
 const showModal = ref(false)
 const isEditing = ref(false)
 const editingId = ref(null)
-const form = ref({ username: '', password: '', nickname: '', roleIds: [] })
+const form = ref({ username: '', password: '', nickname: '', roleId: null })
 const modalError = ref('')
 const submitting = ref(false)
 const showRoles = ref(false)
@@ -152,7 +155,7 @@ function reset() { keyword.value = ''; page.value = 0; load() }
 function openCreate() {
   isEditing.value = false
   editingId.value = null
-  form.value = { username: '', password: '', nickname: '', roleIds: [] }
+  form.value = { username: '', password: '', nickname: '', roleId: roles.value[0]?.id ?? null }
   modalError.value = ''
   showModal.value = true
 }
@@ -163,7 +166,7 @@ function openEdit(u) {
     username: u.username,
     password: '',
     nickname: u.nickname || '',
-    roleIds: [...(u.roleIds || [])]
+    roleId: u.roleIds?.[0] ?? null
   }
   modalError.value = ''
   showModal.value = true
@@ -174,7 +177,7 @@ async function submitForm() {
   if (!isEditing.value && (!form.value.password || form.value.password.length < 8)) {
     modalError.value = '密码至少 8 位'; return
   }
-  if (!form.value.roleIds.length) { modalError.value = '请至少选择一个角色'; return }
+  if (!form.value.roleId) { modalError.value = '请选择角色'; return }
   submitting.value = true
   try {
     let userId = editingId.value
@@ -186,7 +189,7 @@ async function submitForm() {
       })
       userId = data.id
     }
-    await http.put(`/users/${userId}/roles`, { roleIds: form.value.roleIds })
+    await http.put(`/users/${userId}/roles`, { roleIds: [form.value.roleId] })
     showModal.value = false
     load(); loadRoleStats()
   } catch (e) {
@@ -215,12 +218,13 @@ async function resetPwd(u) {
 }
 function openRoles(u) {
   current.value = u
-  form.value.roleIds = [...(u.roleIds || [])]
+  form.value.roleId = u.roleIds?.[0] ?? null
   showRoles.value = true
 }
 async function saveRoles() {
+  if (!form.value.roleId) { alert('请选择角色'); return }
   try {
-    await http.put(`/users/${current.value.id}/roles`, { roleIds: form.value.roleIds })
+    await http.put(`/users/${current.value.id}/roles`, { roleIds: [form.value.roleId] })
     showRoles.value = false
     load(); loadRoleStats()
   } catch (e) {
@@ -251,4 +255,14 @@ onMounted(() => { load(); loadRoles(); loadRoleStats() })
 .um-pagination-controls button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
 .um-pagination-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
 .um-page-current { font-size: 13px; color: var(--text-secondary); min-width: 60px; text-align: center; }
+/* 对齐 VOD form-item 弹窗布局 */
+.form-item { margin-bottom: 14px; }
+.form-item label { display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 5px; }
+.form-item input, .form-item select {
+  width: 100%; padding: 8px 12px; border: 1px solid var(--border-color);
+  border-radius: 6px; font-size: 14px; outline: none; color: var(--text-primary);
+  background: #fff;
+}
+.form-item input:focus, .form-item select:focus { border-color: var(--primary); }
+.form-item input:disabled { background: var(--bg-body); color: var(--text-tertiary); cursor: not-allowed; }
 </style>
