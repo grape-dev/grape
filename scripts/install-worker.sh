@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Grape Worker 一键安装脚本（见 docs/new-version2/worker-install-optimization-plan.md）
+# Grape Worker 一键安装脚本（见 docs/new-version2/worker-server-delivery-design.md）
 #
 # 用法：
 #   curl -sSL https://grape.example.com/api/runtime/install | bash -s \
 #     --token <rta_...> \
 #     [--server https://grape.example.com] \
 #     [--device worker-dev1] \
-#     [--repo https://gitcode.com/Jason7602/grape.git]
+#     [--repo https://gitcode.com/Jason7602/grape.git] \
+#     [--branch new-version2]
 #
+# 默认从 grape server 下发运行包（rta_ 鉴权），不再 git clone 代码仓库；
+# 显式传 --repo 时回退到 git 稀疏拉取方式。
+# 不安装任何执行引擎（opencode 等由用户自行安装，见方案 §2.3）。
 # 幂等：重复执行安全（已存在目录/venv/service 则复用）。
 set -euo pipefail
 
@@ -15,7 +19,7 @@ set -euo pipefail
 TOKEN=""
 SERVER="https://grape.example.com"
 DEVICE=""
-REPO="https://gitcode.com/Jason7602/grape.git"
+REPO=""
 BRANCH="new-version2"
 
 while [ $# -gt 0 ]; do
@@ -41,6 +45,7 @@ INSTALL_DIR="/opt/grape"
 VENV="$INSTALL_DIR/.venv"
 SERVICE_FILE="/etc/systemd/system/runtime-agent.service"
 ENV_FILE="/etc/grape/runtime.env"
+WORKER_VERSION_FILE="/etc/grape/worker.version"
 
 # ===== 工具函数 =====
 log() { echo "[install-worker] $*"; }
@@ -77,28 +82,60 @@ if [ -z "$PY" ]; then
 fi
 log "使用 Python: $PY ($($PY --version 2>&1 | awk '{print $2}'))"
 
-# ===== 2. 稀疏拉取仓库 =====
-if [ -d "$INSTALL_DIR/.git" ]; then
-  log "仓库已存在，更新分支 $BRANCH（耗时取决于增量大小）"
-  cd "$INSTALL_DIR"
-  git fetch origin "$BRANCH" --progress || true
-  git checkout "$BRANCH" || true
-  git pull origin "$BRANCH" --progress || true
+# ===== 2. 获取运行代码：服务端下发运行包（默认）或 git 回退 =====
+if [ -n "$REPO" ]; then
+  log "检测到 --repo，回退 git 稀疏拉取方式（$REPO，分支 $BRANCH）"
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    log "仓库已存在，更新分支 $BRANCH"
+    cd "$INSTALL_DIR"
+    git fetch origin "$BRANCH" --progress || true
+    git checkout "$BRANCH" || true
+    git pull origin "$BRANCH" --progress || true
+  else
+    log "稀疏拉取仓库 $REPO (分支 $BRANCH，首次拉取需数分钟，请耐心等待)"
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    git clone --filter=blob:none --sparse --progress -b "$BRANCH" "$REPO" "$INSTALL_DIR" || fail "git clone 失败: $REPO"
+    cd "$INSTALL_DIR"
+    git sparse-checkout set src skills requirements-worker.txt || true
+  fi
 else
-  log "稀疏拉取仓库 $REPO (分支 $BRANCH，首次拉取需数分钟，请耐心等待)"
-  mkdir -p "$(dirname "$INSTALL_DIR")"
-  git clone --filter=blob:none --sparse --progress -b "$BRANCH" "$REPO" "$INSTALL_DIR" || fail "git clone 失败: $REPO"
-  cd "$INSTALL_DIR"
-  # worker 运行 src.runtime.agent 需整个 src/ + skills + 最小依赖清单；configs/data/docs 等不拉取
-  log "设置稀疏拉取范围: src skills requirements-worker.txt"
-  git sparse-checkout set src skills requirements-worker.txt || true
+  log "从 grape server 下载运行包: $SERVER/api/runtime/install/package"
+  TMP_PKG="/tmp/grape-worker-$$.tar.gz"
+  if ! curl -fsSL -H "Authorization: Bearer $TOKEN" -o "$TMP_PKG" "$SERVER/api/runtime/install/package"; then
+    rm -f "$TMP_PKG"
+    fail "下载运行包失败: $SERVER/api/runtime/install/package（请确认 token 有效 / server 地址正确）"
+  fi
+
+  # 校验 tar.gz 完整性
+  if ! gzip -t "$TMP_PKG" 2>/dev/null; then
+    rm -f "$TMP_PKG"
+    fail "下载的运行包损坏（gzip 校验失败）"
+  fi
+
+  # 解压到安装目录（沿用 /opt/grape，非 git 仓库）
+  mkdir -p "$INSTALL_DIR"
+  log "解压运行包到 $INSTALL_DIR"
+  tar -xzf "$TMP_PKG" -C "$INSTALL_DIR" --strip-components=1 || fail "解压运行包失败"
+  rm -f "$TMP_PKG"
+
+  # 校验包内 SHA256SUMS（存在则校验；缺失仅告警，不阻断）
+  if [ -f "$INSTALL_DIR/SHA256SUMS" ]; then
+    log "校验运行包内容（SHA256SUMS）..."
+    ( cd "$INSTALL_DIR" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ) || log "警告: 运行包内容校验未通过，请确认来源可信"
+  fi
+
+  # 记录版本号
+  mkdir -p "$(dirname "$WORKER_VERSION_FILE")"
+  if [ -f "$INSTALL_DIR/VERSION" ]; then
+    cp "$INSTALL_DIR/VERSION" "$WORKER_VERSION_FILE"
+    log "Worker 版本: $(cat "$WORKER_VERSION_FILE")"
+  fi
 fi
-# data/ 是 gitignore 的运行时目录（sessions.db/workspaces/logs），稀疏拉取不产生，须先建好
+
+# data/ 是运行时目录（sessions.db/workspaces/logs），gitignore，需先建好
 if [ ! -d "$INSTALL_DIR/data" ]; then
   log "创建运行时目录 $INSTALL_DIR/data"
   mkdir -p "$INSTALL_DIR/data"
-else
-  log "data 目录已存在，跳过创建"
 fi
 
 # ===== 3. 建 venv + 最小依赖 =====
@@ -106,18 +143,17 @@ if [ ! -x "$VENV/bin/python" ]; then
   log "创建 venv ($PY)"
   "$PY" -m venv "$VENV"
 fi
-log "安装依赖 requirements-worker.txt（首次安装需数分钟）"
-"$VENV/bin/pip" install -r "$INSTALL_DIR/requirements-worker.txt" || true
-
-# ===== 4. 检测/安装 opencode =====
-if ! command -v opencode >/dev/null 2>&1; then
-  log "未检测到 opencode，尝试安装..."
-  if command -v npm >/dev/null 2>&1; then
-    npm install -g opencode-ai >/dev/null 2>&1 || true
-  fi
+if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
+  log "安装依赖 requirements-worker.txt（首次安装需数分钟）"
+  "$VENV/bin/pip" install -r "$INSTALL_DIR/requirements-worker.txt" || true
 fi
+
+# ===== 4. 执行引擎提示（不自动安装，见方案 §2.3）=====
 if ! command -v opencode >/dev/null 2>&1; then
-  log "警告: opencode 未安装或不在 PATH。请手动安装后重试（npm install -g opencode-ai）"
+  log "未检测到执行引擎（opencode 等）。请自行安装后重启 worker，例如："
+  log "  npm install -g opencode-ai"
+  log "  systemctl restart runtime-agent"
+  log "（引擎类型不限定 opencode，按需选用；worker 启动时会自动发现本机已装引擎）"
 fi
 
 # ===== 5. 生成 systemd（token 隔离到 EnvironmentFile）=====

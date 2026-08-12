@@ -313,7 +313,7 @@ def _server_url() -> str:
 async def runtime_install_script():
     """返回 Worker 一键安装脚本（只读，无敏感信息；token 由调用方以 --token 注入）。
 
-    见 worker-install-optimization-plan.md 方案 B。用法：
+    见 worker-server-delivery-design.md。用法：
       curl -sSL <server>/api/runtime/install | bash -s -- --token <rta_...>
     """
     from fastapi.responses import PlainTextResponse
@@ -327,3 +327,31 @@ async def runtime_install_script():
     except Exception:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "read install script failed"})
     return PlainTextResponse(content, media_type="text/plain")
+
+
+@router.get("/install/latest")
+async def runtime_install_latest(credential_id: int = Depends(_require_credential)):
+    """返回当前 Worker 安装包版本号（rta_ 鉴权）。
+
+    供 worker 启动自检（见 worker-server-delivery-design.md §2.4）。
+    """
+    from src.worker_package import package_version
+    return {"version": package_version()}
+
+
+@router.get("/install/package")
+async def runtime_install_package(credential_id: int = Depends(_require_credential)):
+    """下发 Worker 安装包 tar.gz（rta_ 鉴权，首次请求动态打包 + 缓存）。
+
+    见 worker-server-delivery-design.md §2.1。用法（安装脚本内部调用）：
+      curl -fsSL -H "Authorization: Bearer <rta_...>" <server>/api/runtime/install/package
+    """
+    from fastapi.responses import FileResponse
+    from src.worker_package import build_package
+    try:
+        pkg = build_package()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": f"build worker package failed: {e}"})
+    if not pkg or not os.path.isfile(pkg):
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "worker package not found"})
+    return FileResponse(pkg, media_type="application/gzip", filename="grape-worker.tar.gz")

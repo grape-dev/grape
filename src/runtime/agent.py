@@ -208,6 +208,15 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         await asyncio.sleep(poll_interval + random.uniform(0, poll_interval * 0.3))
 
 
+def _read_local_worker_version() -> str:
+    """读取本机 Worker 安装包版本（/etc/grape/worker.version，安装脚本写入）。"""
+    try:
+        with open("/etc/grape/worker.version", "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
 def main():
     token = os.environ.get("RUNTIME_TOKEN", "")
     server = os.environ.get("RUNTIME_SERVER_URL", "http://localhost:3000")
@@ -223,6 +232,17 @@ def main():
 
     async def _amain():
         client = RuntimeClient(server, token)
+
+        # 版本自检（worker-server-delivery-design.md §2.4）：服务端包版本不一致时提示升级
+        try:
+            latest = await client.latest_version()
+            local = _read_local_worker_version()
+            if latest and local and latest != local:
+                log.warning(f"Worker 包版本不一致: 本地={local} 服务端={latest}，"
+                            f"请重新执行一键安装命令升级: curl -sSL {server}/api/runtime/install | bash -s -- --token <token>")
+        except Exception as e:
+            log.warning(f"Worker 版本自检失败: {e}")
+
         runtimes = _discover_local_runtimes()
         installed = [r for r in runtimes if r.get("installed")]
         if not installed:
