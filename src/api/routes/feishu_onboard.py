@@ -29,9 +29,10 @@ _STATUS_FAILED = "failed"
 _TASKS: dict[str, asyncio.Task] = {}
 
 # 预填权限/事件订阅：与 src/im/feishu_async.py 实际调用对齐
-# （preset=True 保留平台基础模板；敏感配置如事件 URL/security 不走 addons）
+# 注意：addons 仅允许 scopes/events/callbacks 三个顶层键（lark-oapi 1.7.0 实测
+# _normalize_addons 会拒绝 preset 等额外键并抛 ValueError）。平台默认即为基础模板，
+# 因此不传 preset 等价于保留平台基础模板；敏感配置（事件 URL/security）不走 addons。
 _ADDONS = {
-    "preset": True,
     "scopes": {
         "tenant": [
             "im:message:send_as_bot",  # 发送消息（reply_text / reply_card / send_card_to_user）

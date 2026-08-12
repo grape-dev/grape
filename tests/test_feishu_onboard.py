@@ -332,3 +332,51 @@ class TestCancel:
     def test_cancel_not_found(self):
         r = client.post("/api/feishu/onboard/cancel", json={"task_id": "no_such"}, headers=_headers)
         assert r.status_code == 404
+
+
+# ===================== E. addons schema 看护 =====================
+class TestAddonsSchema:
+    """看护 _ADDONS 结构，防止引入 SDK 不支持的键（如 preset）导致扫码必失败。
+
+    背景：lark-oapi 1.7.0 的 _normalize_addons 仅允许顶层 scopes/events/callbacks，
+    文档中的 addons.preset 在实测中抛 ValueError('addons.preset is not allowed')，
+    曾导致所有扫码任务直接 failed（见 feishu-qr-app-onboarding-plan.md 修复记录）。
+    """
+
+    def test_addons_top_level_keys_allowed(self):
+        """_ADDONS 顶层键必须 ⊆ SDK 允许集 {scopes, events, callbacks}。"""
+        from src.api.routes.feishu_onboard import _ADDONS
+        allowed = {"scopes", "events", "callbacks"}
+        unknown = set(_ADDONS) - allowed
+        assert not unknown, f"addons 含 SDK 不支持的键: {unknown}"
+
+    def test_addons_sdk_normalize_accepts(self):
+        """_ADDONS 必须能被 SDK 的 _normalize_addons 校验通过（不抛 ValueError）。
+
+        直接调用 SDK 校验函数，等于模拟 aregister_app 内部首个校验步骤；
+        若校验抛错则说明 schema 与 SDK 版本不兼容，扫码必失败。
+        """
+        from src.api.routes.feishu_onboard import _ADDONS
+        from lark_oapi.scene.registration import _normalize_addons
+        normalized = _normalize_addons(_ADDONS)
+        assert "scopes" in normalized
+        assert "tenant" in normalized["scopes"]
+        assert "im:message:send_as_bot" in normalized["scopes"]["tenant"]
+        assert "events" in normalized
+        assert "im.message.receive_v1" in normalized["events"]["items"]["tenant"]
+
+    def test_addons_encode_addons_no_error(self):
+        """_ADDONS 必须能通过 SDK 完整编码（gzip+base64），模拟真实调用路径。"""
+        from src.api.routes.feishu_onboard import _ADDONS
+        from lark_oapi.scene.registration import _encode_addons
+        encoded = _encode_addons(_ADDONS)
+        assert encoded, "addons 编码结果不应为空"
+
+    def test_addons_has_required_scopes_and_event(self):
+        """关键依赖：发送消息 scope + im.message.receive_v1 事件不可缺失。"""
+        from src.api.routes.feishu_onboard import _ADDONS
+        tenant_scopes = _ADDONS["scopes"]["tenant"]
+        assert "im:message:send_as_bot" in tenant_scopes
+        assert "im:chat:readonly" in tenant_scopes
+        events = _ADDONS["events"]["items"]["tenant"]
+        assert "im.message.receive_v1" in events
