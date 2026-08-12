@@ -5,12 +5,12 @@
       <span class="badge">{{ totalElements }} 条</span>
     </div>
     <div style="padding:20px 28px">
-      <!-- 技能范围统计 -->
-      <div class="stats">
-        <div v-for="(cnt, s) in stats" :key="s" class="stat-card">
-          <div class="stat-label">{{ SCOPE_TEXT[s] || s || '未知' }}</div>
-          <div class="stat-value small">{{ cnt }}</div>
-        </div>
+      <!-- 范围分类徽章行（点击联动筛选，对齐设备页 dm-stats 风格） -->
+      <div class="dm-stats">
+        <button class="dm-stat" :class="{ on: !scope }" @click="setScope('')">全部 <strong>{{ scopeStatsTotal }}</strong></button>
+        <button v-for="(label, key) in SCOPE_STATS" :key="key" class="dm-stat" :class="{ on: scope === key }" @click="setScope(key)">
+          <span class="dm-dot" :style="{ background: SCOPE_COLORS[key] }"></span>{{ label }} <strong>{{ scopeStats[key] ?? 0 }}</strong>
+        </button>
       </div>
 
       <div class="toolbar">
@@ -28,11 +28,36 @@
         <button class="btn" @click="search">查询</button>
         <button class="btn" @click="reset">重置</button>
         <!-- 仓库/个人范围下提供新增技能入口（与主项目看板一致） -->
-        <button v-if="scope === 'repo' || scope === 'user'" class="btn btn-primary" style="margin-left:auto" @click="openUpload">＋ 新增技能</button>
+        <button v-if="scope === 'repo' || scope === 'user'" class="btn btn-primary" @click="openUpload">＋ 新增技能</button>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
+          <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
+        </div>
       </div>
 
-      <!-- 卡片网格 -->
-      <div class="device-grid">
+      <!-- 列表模式 -->
+      <div class="card" v-if="view === 'list'">
+        <table class="vod-table">
+          <thead>
+            <tr><th>技能名</th><th>显示名</th><th>描述</th><th>Agent</th><th>范围</th><th>路径</th><th>状态</th><th>更新时间</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="s in skills" :key="s.id" style="cursor:pointer" @click="openDetail(s)">
+              <td><code class="skill-name">{{ s.skillName }}</code></td>
+              <td>{{ s.displayName || '—' }}</td>
+              <td class="t3" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.description || '—' }}</td>
+              <td>{{ s.agentType || '—' }}</td>
+              <td><span class="status-tag info">{{ scopeText(s.scope) }}</span></td>
+              <td class="t3">{{ s.skillPath || '—' }}</td>
+              <td><span :class="['status-tag', s.isActive === 1 ? 'success' : 'danger']">{{ s.isActive === 1 ? '启用' : '停用' }}</span></td>
+              <td class="t3">{{ s.updatedAt || '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 卡片模式 -->
+      <div v-else class="device-grid">
         <div v-for="s in skills" :key="s.id" class="device-card skill-card" @click="openDetail(s)">
           <div class="dc-head">
             <span class="dc-name">
@@ -143,6 +168,7 @@ import http from '../api'
 const skills = ref([])
 const stats = ref({})
 const agentStats = ref({})
+const scopeStats = ref({})
 const totalElements = ref(0)
 const totalPages = ref(0)
 const page = ref(0)
@@ -151,6 +177,8 @@ const sizeOptions = [10, 20, 50]
 const keyword = ref('')
 const agentType = ref('')
 const scope = ref('')
+const view = ref('card')
+const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
 const detail = ref(null)
 const mdLoading = ref(false)
 const mdError = ref('')
@@ -166,6 +194,15 @@ const AGENT_TYPE_OPTIONS = ['vod', 'issue', 'coding', 'qa', 'sre', 'chat']
 
 const SCOPE_TEXT = { official: '官方', repo: '仓库', user: '个人' }
 function scopeText(s) { return SCOPE_TEXT[s] || s || '—' }
+const SCOPE_STATS = { official: '官方', repo: '仓库', user: '个人' }
+const SCOPE_COLORS = { official: '#4f6ef2', repo: '#fa8c16', user: '#13c2c2' }
+const scopeStatsTotal = computed(() => Object.values(scopeStats.value).reduce((a, b) => a + (Number(b) || 0), 0))
+
+function setScope(s) {
+  scope.value = s
+  page.value = 0
+  load()
+}
 
 // Agent 类型选项：来自后端全量统计（过滤后）
 const agentTypeOptions = computed(() => Object.keys(agentStats.value).filter(t => t))
@@ -177,6 +214,7 @@ async function load() {
   skills.value = data.content
   stats.value = data.stats || {}
   agentStats.value = data.agentStats || {}
+  scopeStats.value = data.scopeStats || {}
   totalElements.value = data.totalElements
   totalPages.value = data.totalPages
 }
@@ -287,6 +325,19 @@ onMounted(load)
   min-height: 38px;
 }
 .skill-more { font-size: 11px; }
+/* 范围分类徽章行（对齐设备页 dm-stats 风格） */
+.dm-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.dm-stat {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 3px 10px; border-radius: 12px;
+  background: #f5f7fa; color: var(--text-secondary); border: 1px solid transparent;
+  cursor: pointer; transition: all 0.15s;
+}
+.dm-stat strong { font-weight: 600; color: var(--text-primary); }
+.dm-stat:hover { border-color: var(--border-color); }
+.dm-stat.on { background: var(--primary-bg); color: var(--primary); border-color: var(--primary); }
+.dm-stat.on strong { color: var(--primary); }
+.dm-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 .upload-row {
   display: flex;
   align-items: center;

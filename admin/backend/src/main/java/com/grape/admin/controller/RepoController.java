@@ -23,8 +23,9 @@ public class RepoController {
 
     @GetMapping
     public Map<String, Object> list(@RequestParam(required = false) String keyword,
+                                    @RequestParam(required = false) String scene,
                                     @RequestParam(defaultValue = "0") int page,
                                     @RequestParam(defaultValue = "10") int size) {
-        return repoService.listRepos(keyword, page, size);
+        return repoService.listRepos(keyword, scene, page, size);
     }
 }

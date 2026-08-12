@@ -82,6 +82,9 @@ public class SkillService {
         // Agent 类型选项基于全量数据统计（不随当前筛选收窄，避免下拉选项越选越少）
         Map<String, Long> agentStats = skillRepository.findAll().stream()
                 .collect(Collectors.groupingBy(s -> s.getAgentType() == null ? "" : s.getAgentType(), Collectors.counting()));
+        // 范围分类徽章：全量范围分布（不随筛选收窄）
+        Map<String, Long> scopeStats = skillRepository.findAll().stream()
+                .collect(Collectors.groupingBy(s -> s.getScope() == null ? "" : s.getScope(), Collectors.counting()));
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("content", content);
@@ -89,6 +92,7 @@ public class SkillService {
         result.put("totalPages", totalPages);
         result.put("stats", stats);
         result.put("agentStats", agentStats);
+        result.put("scopeStats", scopeStats);
         return result;
     }
 

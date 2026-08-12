@@ -27,7 +27,7 @@ public class RepoService {
         this.jdbcTemplate = jdbcTemplate;
     }
 
-    public Map<String, Object> listRepos(String keyword, int page, int size) {
+    public Map<String, Object> listRepos(String keyword, String scene, int page, int size) {
         int safeSize = size <= 0 ? 10 : size;
         int safePage = Math.max(page, 0);
         List<ManagedRepoRo> all = repoRepository.findAll().stream()
@@ -36,6 +36,8 @@ public class RepoService {
                         || containsIgnoreCase(r.getFullName(), keyword)
                         || containsIgnoreCase(r.getRepoOwner(), keyword)
                         || containsIgnoreCase(r.getRepoName(), keyword))
+                .filter(r -> scene == null || scene.isBlank()
+                        || (r.getDevScene() == null ? "default" : r.getDevScene()).equals(scene))
                 .sorted(Comparator.comparing(ManagedRepoRo::getRepoKey, String.CASE_INSENSITIVE_ORDER))
                 .collect(Collectors.toList());
 
