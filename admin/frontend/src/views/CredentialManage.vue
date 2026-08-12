@@ -88,16 +88,28 @@
         <div class="modal-body">
           <div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary)">范围：<span class="status-tag info" style="font-size:11px;padding:1px 6px">全局</span>（运营管理台仅签发全局凭据）</div>
           <input v-model="credentialName" placeholder="凭据名称（唯一，≤64字符）" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" @keyup.enter="issue" />
-          <div v-if="issuedToken" class="mt12" style="border:1px dashed var(--warning);border-radius:8px;padding:12px">
-            <p style="color:var(--warning);font-weight:600">⚠ 明文仅显示一次，请立即保存</p>
-            <code class="cred-token">{{ issuedToken }}</code>
-            <p class="t3" style="font-size:12px">将该 token 填入目标机器 /etc/grape/runtime.env 的 RUNTIME_TOKEN 并重启 runtime-agent</p>
-            <button class="btn btn-primary btn-sm mt8" @click="saveAndClose">我已保存</button>
-          </div>
         </div>
         <div class="modal-footer">
           <button class="btn" @click="showIssue = false">取消</button>
           <button class="btn btn-primary" :disabled="issuing" @click="issue">{{ issuing ? '签发中…' : '签发' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 签发成功 token 展示弹窗（独立弹窗：签发后展示明文，复制完点关闭） -->
+    <div v-if="showToken" class="modal-overlay" @click.self="showToken = false">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <span class="modal-icon">🔑</span>
+          <span class="modal-title">签发成功</span>
+        </div>
+        <div class="modal-body">
+          <p style="color:var(--warning);font-weight:600">⚠ 明文仅显示一次，请立即复制保存</p>
+          <code class="cred-token">{{ issuedToken }}</code>
+          <p class="t3" style="font-size:12px">将该 token 填入目标机器 /etc/grape/runtime.env 的 RUNTIME_TOKEN 并重启 runtime-agent</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-primary" @click="showToken = false">关闭</button>
         </div>
       </div>
     </div>
@@ -156,6 +168,7 @@ const scope = ref('')
 const owner = ref('')
 const status = ref('')
 const showIssue = ref(false)
+const showToken = ref(false)
 const credentialName = ref('')
 const issuedToken = ref('')
 const issuing = ref(false)
@@ -201,15 +214,15 @@ function reset() {
   load()
 }
 function openIssue() { showIssue.value = true; issuedToken.value = ''; credentialName.value = '' }
-// 「我已保存」= 清 token + 关闭签发弹窗（流程闭环，避免空白弹窗与页面重叠）
-function saveAndClose() { issuedToken.value = ''; showIssue.value = false }
 async function issue() {
   if (issuing.value) return
   if (!credentialName.value.trim()) { showToast('请输入凭据名称', 'error'); return }
   issuing.value = true
+  showIssue.value = false   // 点击签发：输入弹窗立即关闭
   try {
     const { data } = await http.post('/credentials', { name: credentialName.value })
     issuedToken.value = data.token
+    showToken.value = true  // 签发成功：独立弹窗展示 token（复制后点关闭）
     showToast(`凭据 ${data.name} 签发成功`)
     load()   // 签发成功自动刷新列表
   } catch (e) {
