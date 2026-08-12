@@ -48,7 +48,7 @@
               <td>{{ d.deviceName || d.name }}</td>
               <td><span class="status-tag info">{{ scopeText(d.scope) }}</span></td>
               <td>{{ d.ownerName || '—' }}</td>
-              <td><span :class="['status-tag', d.status === 'active' ? 'success' : 'default']">{{ d.status }}</span></td>
+              <td><span :class="['status-tag', d.status === 'active' ? 'success' : 'default']">{{ d.status === 'active' ? '有效' : '已吊销' }}</span></td>
               <td><span :class="['status-tag', healthClass(d.health)]">{{ healthText(d.health) }}</span></td>
               <td>{{ d.engineCount }}</td>
               <td>{{ d.taskCount }}</td>
