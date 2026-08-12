@@ -48,13 +48,14 @@
             <div class="kpi-sub">今日 +{{ vc.taskToday || 0 }} · 成功率 {{ vc.taskSuccessRate || '0.0%' }}</div>
           </div>
         </div>
-        <div class="kpi-card kpi-green" title="已托管仓库数（managed_repos）">
+        <div class="kpi-card kpi-green" title="已托管仓库数（managed_repos）" @click="$router.push('/repos/manage')">
           <div class="kpi-icon" style="background:#f6ffed;color:#52c41a;">📦</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ vc.repoTotal || 0 }}</div>
             <div class="kpi-label">托管仓库</div>
             <div class="kpi-sub">已接入 AI 工作流</div>
           </div>
+          <div class="kpi-action">代码仓管理 →</div>
         </div>
         <div class="kpi-card kpi-cyan" title="管理台用户数（admin_users）" @click="$router.push('/sys/users')">
           <div class="kpi-icon" style="background:#e6fffb;color:#13c2c2;">👥</div>
