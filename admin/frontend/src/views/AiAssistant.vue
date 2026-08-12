@@ -967,23 +967,7 @@ onUnmounted(() => {
 .dialog-input:focus { border-color: var(--primary); }
 .dialog-footer { padding: 12px 20px 20px; display: flex; justify-content: flex-end; gap: 8px; }
 
-/* Toast */
-.toast-message { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); padding: 8px 20px; border-radius: 6px; font-size: 14px; z-index: 10000; box-shadow: 0 2px 8px rgba(0,0,0,0.15); color: #fff; transition: opacity 0.3s ease; }
-.toast-message.success { background: #52c41a; }
-.toast-message.warning { background: #faad14; }
-.toast-message.error { background: #f5222d; }
-@keyframes toast-fade-in { from { opacity: 0; transform: translateX(-50%) translateY(-8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
-
-/* 字数超限弹窗 */
-.modal-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; animation: fadeIn 0.2s ease; }
-.modal-dialog { width: 400px; max-width: 90vw; background: #fff; border-radius: 12px; padding: 24px 28px 20px; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12); animation: slideDown 0.25s ease; }
-.modal-header { display: flex; align-items: center; margin-bottom: 16px; }
-.modal-icon { font-size: 18px; margin-right: 6px; }
-.modal-title { font-size: 16px; font-weight: 600; color: #262626; }
-.modal-body { font-size: 14px; color: #595959; line-height: 1.6; margin-bottom: 24px; }
-.modal-footer { display: flex; justify-content: center; gap: 12px; }
-@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-@keyframes slideDown { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: translateY(0); } }
+/* Toast 与弹窗样式已提升至全局 style.css（modal-overlay/modal-dialog/toast-message） */
 
 /* 响应式（对齐 VOD） */
 @media (max-width: 768px) {

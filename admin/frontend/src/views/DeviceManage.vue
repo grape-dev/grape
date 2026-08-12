@@ -92,7 +92,6 @@
       </div>
 
       <p v-if="!devices.length" class="t2" style="padding:16px;text-align:center">无匹配设备</p>
-
       <div v-if="total > 0" class="pagination-bar">
         <span class="page-info">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ total }} 台）</span>
         <select v-model="size" class="page-size-select" @change="page = 0; load()">
@@ -100,6 +99,46 @@
         </select>
         <button class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
         <button class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
+      </div>
+    </div>
+
+    <!-- Toast 反馈（对齐 AI 分析页） -->
+    <div v-if="toastVisible" class="toast-message" :class="toastType">{{ toastMessage }}</div>
+
+    <!-- 吊销确认弹窗（对齐 AI 分析页 modal） -->
+    <div v-if="revokeTarget" class="modal-overlay" @click.self="revokeTarget = null">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <span class="modal-icon">⚠️</span>
+          <span class="modal-title">吊销设备凭据</span>
+        </div>
+        <div class="modal-body">
+          确认吊销 <b>{{ revokeTarget.deviceName || revokeTarget.name }}</b> 的凭据？<br />
+          其 worker 将立即失效（401），且不可逆。
+        </div>
+        <div class="modal-footer">
+          <button class="btn" @click="revokeTarget = null">取消</button>
+          <button class="btn btn-danger" @click="confirmRevoke">确认吊销</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 回收确认弹窗（对齐 AI 分析页 modal） -->
+    <div v-if="recycleTarget" class="modal-overlay" @click.self="recycleTarget = null">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <span class="modal-icon">⚠️</span>
+          <span class="modal-title">回收设备</span>
+        </div>
+        <div class="modal-body">
+          <p style="margin:0 0 12px">回收将执行：吊销凭据 → 删除引擎记录 → 清理终态任务。<b style="color:#e5484d">不可逆！</b></p>
+          <p style="margin:0 0 6px">请输入设备名 <b>{{ recycleTarget.deviceName || recycleTarget.name }}</b> 确认：</p>
+          <input v-model="recycleWord" class="form-input" placeholder="输入设备名确认" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" />
+        </div>
+        <div class="modal-footer">
+          <button class="btn" @click="recycleTarget = null">取消</button>
+          <button class="btn btn-danger" :disabled="recycleWord !== (recycleTarget.deviceName || recycleTarget.name)" @click="confirmRecycle">确认回收</button>
+        </div>
       </div>
     </div>
   </div>
@@ -122,6 +161,14 @@ const view = ref('list')
 const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
 const sizeOptions = [10, 20, 50]
 const size = ref(10)
+// toast + 确认弹窗状态（对齐 AI 分析页）
+const toastVisible = ref(false)
+const toastMessage = ref('')
+const toastType = ref('success')
+let toastTimer = null
+const revokeTarget = ref(null)
+const recycleTarget = ref(null)
+const recycleWord = ref('')
 
 const BADGE = {
   online: { label: '在线', color: 'var(--success)', bg: '#dcfce7' },
@@ -175,18 +222,41 @@ async function load() {
 function search() { page.value = 0; load() }
 function reset() { scope.value = ''; status.value = ''; health.value = ''; name.value = ''; page.value = 0; load() }
 
-async function revoke(d) {
-  if (!confirm(`确认吊销设备 ${d.deviceName || d.name} 的凭据？其 worker 将立即失效（401）`)) return
-  await http.post(`/devices/${d.id}/revoke`)
-  load()
+function showToast(msg, type = 'success') {
+  toastMessage.value = msg
+  toastType.value = type
+  toastVisible.value = true
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toastVisible.value = false }, 2500)
 }
-async function recycle(d) {
-  const word = prompt(`设备回收将：吊销凭据 → 删除引擎记录 → 清理终态任务。不可逆！\n输入设备名 ${d.deviceName || d.name} 确认：`)
-  if (word !== (d.deviceName || d.name)) { alert('确认词不匹配，已取消'); return }
+function revoke(d) {
+  revokeTarget.value = d
+}
+async function confirmRevoke() {
+  const d = revokeTarget.value
+  try {
+    await http.post(`/devices/${d.id}/revoke`)
+    showToast(`设备 ${d.deviceName || d.name} 凭据已吊销`)
+    revokeTarget.value = null
+    load()
+  } catch (e) {
+    showToast(e.response?.data?.message || '吊销失败', 'error')
+  }
+}
+function recycle(d) {
+  recycleWord.value = ''
+  recycleTarget.value = d
+}
+async function confirmRecycle() {
+  const d = recycleTarget.value
   try {
     await http.post(`/devices/${d.id}/cleanup`)
+    showToast(`设备 ${d.deviceName || d.name} 已回收`)
+    recycleTarget.value = null
     load()
-  } catch (e) { alert(e.response?.data?.message || '回收失败') }
+  } catch (e) {
+    showToast(e.response?.data?.message || '回收失败', 'error')
+  }
 }
 onMounted(load)
 </script>
