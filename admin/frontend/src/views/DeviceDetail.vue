@@ -33,17 +33,20 @@
         <h5 style="margin:0 0 10px">关联引擎（{{ detail.engines?.length ?? 0 }}）</h5>
         <table class="vod-table" v-if="detail.engines?.length">
           <thead>
-            <tr><th>实例名</th><th>类型</th><th>版本</th><th>二进制</th><th>健康</th><th>状态</th><th>CLI 路径</th><th>最后心跳</th></tr>
+            <tr>
+              <th style="width:120px">实例名</th>
+              <th style="width:220px">版本</th>
+              <th style="width:90px">健康</th>
+              <th style="width:240px">CLI 路径</th>
+              <th style="width:140px">最后心跳</th>
+            </tr>
           </thead>
           <tbody>
             <tr v-for="e in detail.engines" :key="e.id">
               <td>{{ e.name }}</td>
-              <td>{{ e.name }}</td>
-              <td class="t3" style="max-width:200px">{{ e.version || '-' }}</td>
-              <td class="t3">{{ e.binary || '-' }}</td>
+              <td class="ellipsis-cell t3" :title="e.version || '-'">{{ e.version || '-' }}</td>
               <td><span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
-              <td class="t2">{{ e.status }}</td>
-              <td class="t3" style="max-width:180px">{{ e.cliPath || '-' }}</td>
+              <td class="ellipsis-cell t3" :title="e.cliPath || '-'">{{ e.cliPath || '-' }}</td>
               <td class="t3">{{ formatTime(e.lastSeenAt) }}</td>
             </tr>
           </tbody>
