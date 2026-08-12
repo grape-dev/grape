@@ -7,7 +7,8 @@ function renderSelectionShell(tab, innerHtml) {
   if (!d) return;
   const active = tab || localStorage.getItem('sidebarTab') || 'projects';
   const tabCls = t => 'rs-tab' + (active === t ? ' rs-tab-act' : '');
-  const user = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).username : 'User';
+  const _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
+  const user = (_lu && (_lu.nickname || _lu.username)) || 'User';
   const avatar = (user || 'U')[0].toUpperCase();
   const html = `<div class="lobby">
     <header class="lobby-head">
@@ -54,12 +55,19 @@ function renderRepoSelection(repos) {
   const d = document.getElementById('pageContent');
   if (!d) return;
   _projectsRepos = repos || [];
-  const user = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).username : 'User';
+  const _lu2 = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
+  const user = (_lu2 && (_lu2.nickname || _lu2.username)) || 'User';
   const hostedCount = (repos || []).filter(r => r.is_hosted).length;
   const joinedCount = (repos || []).filter(r => r.is_joined && !r.is_hosted).length;
   const name = (user || '朋友').split('@')[0];
 
-  const allRepos = repos || [];
+  // 已托管 > 已加入 > 未加入 排序（同等级按 full_name 稳定排序，保证分页不跳动）
+  const allRepos = (repos || []).slice().sort((a, b) => {
+    const pa = a.is_hosted ? 2 : a.is_joined ? 1 : 0;
+    const pb = b.is_hosted ? 2 : b.is_joined ? 1 : 0;
+    if (pa !== pb) return pb - pa;
+    return (a.full_name || '').localeCompare(b.full_name || '');
+  });
   const total = allRepos.length;
   const pages = Math.max(1, Math.ceil(total / _REPO_PAGE_SIZE));
   if (_repoPage >= pages) _repoPage = 0;
@@ -111,14 +119,13 @@ function goRepoPage(dir) {
 function _buildLobbyCard(r) {
   const isAdmin = r.role === 'Admin' || r.role === 'Maintainer';
   const enter = r.is_joined || r.is_hosted;
-  const clickAction = enter
-    ? `selectRepo('${r.full_name}','${r.owner}','${r.name}')`
-    : `event.stopPropagation();${isAdmin ? 'hostAndSelect' : 'joinAndSelect'}('${r.full_name}','${r.owner}','${r.name}')`;
+  // 卡片本体：点击跳转项目实际代码仓库（GitCode），不直接进入 Grape 工作区
+  const repoUrl = 'https://gitcode.com/' + (r.full_name || '');
   const btnTxt = r.is_hosted ? '进入项目' : r.is_joined ? '进入项目' : isAdmin ? '加入并托管' : '加入';
   const statusTxt = r.is_hosted ? '已托管' : r.is_joined ? '已加入' : '未加入';
   const initials = (r.name || '?').substring(0, 2).toUpperCase();
 
-  return `<div class="lobby-card" onclick="${clickAction}">
+  return `<div class="lobby-card" onclick="window.open('${repoUrl}','_blank')">
     <span class="lobby-card-glow"></span>
     <div class="lobby-card-head">
       <span class="lobby-card-ic">${initials}<i></i></span>
