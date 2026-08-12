@@ -73,7 +73,7 @@
             <span :style="badgeStyle(d.health)">
               <span :style="dotStyle(d.health)"></span>{{ healthText(d.health) }}
             </span>
-            <span style="flex:1;min-width:0;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="(d.deviceName || d.name) + ' · ' + scopeText(d.scope)">
+            <span style="max-width:220px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="(d.deviceName || d.name) + ' · ' + scopeText(d.scope)">
               {{ d.deviceName || d.name }}
               <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">
                 <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(d.scope) }}</span>
@@ -85,7 +85,7 @@
             <div><span class="t3" style="display:inline-block;min-width:46px">引擎</span> {{ d.engineCount }} 个</div>
             <div class="ellipsis-cell" :title="formatTime(d.lastSeenAt)"><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(d.lastSeenAt) }}</div>
             <div class="ellipsis-cell" :title="d.lastIp || '—'"><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ d.lastIp || '—' }}</div>
-            <div style="grid-column:1 / -1"><span class="t3" style="display:inline-block;min-width:46px">任务</span> {{ d.taskCount }} 个 · <span class="t3">创建</span> {{ formatTime(d.createdAt) }}</div>
+            <div style="grid-column:1 / -1"><span class="t3" style="display:inline-block;min-width:46px">任务</span> {{ d.taskCount }} 个 · <span class="t3" style="display:inline-block;min-width:46px">创建</span> {{ formatTime(d.createdAt) }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
             <button class="btn btn-sm" @click="$router.push(`/runtime/devices/${d.id}`)">详情</button>
