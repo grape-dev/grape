@@ -297,6 +297,26 @@ body {
   cursor: help;
 }
 
+/* 全局截断提示气泡（ellipsisTip.js） */
+#ellipsis-tip {
+  position: fixed;
+  z-index: 99999;
+  pointer-events: none;
+  max-width: 420px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(17, 24, 39, 0.92);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+  white-space: pre-wrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+  display: none;
+}
+
 /* ===== 标签 ===== */
 .status-tag {
   display: inline-block;

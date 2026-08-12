@@ -61,7 +61,7 @@
             <tr v-for="e in engines" :key="e.id">
               <td>{{ e.displayName || e.name }}</td>
               <td>{{ e.name }}</td>
-              <td class="t3">{{ e.version || '-' }}</td>
+              <td class="t3" style="max-width:200px">{{ e.version || '-' }}</td>
               <td class="t3">{{ e.binary || '-' }}</td>
               <td class="t3">{{ e.provider || '-' }}</td>
               <td>{{ e.device || '-' }}</td>
