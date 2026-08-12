@@ -250,7 +250,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
        防止服务端重启后 id 静默失效（服务端对旧 id 仍返回 200 ok）
     3. 网络中断恢复：连接错误计入心跳失败，触发重注册
     """
-    active_sessions = set()
+    active_tasks = set()
     last_heartbeat = 0.0
     heartbeat_fail_streak = 0          # 连续心跳失败计数
     HEARTBEAT_FAIL_THRESHOLD = 3       # 连续失败 N 次触发重注册
@@ -277,32 +277,22 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             if not task:
                 continue
-            # 并发槽 key 与服务端 claim 串行粒度一致（multi-issue-isolation-design.md §3.3）：
-            # 有关联 Issue → 按 issue_session_id（跨 Issue 并行）；无（#0/旧任务）→ 回退 agent_session_id。
-            # 修复：此前一律用 agent_session_id，导致不同 Issue 的任务在客户端被误判冲突拒收
-            #       （服务端已放行并标记 dispatched，客户端却 skip → 任务悬空卡死，见 seq#622）。
-            sid = task.get("issue_session_id") or task.get("agent_session_id") or ""
-            if sid in active_sessions:
-                # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）。
-                # 回滚任务为 queued，避免 dispatched 悬空（skip 后无人执行也不重新排队）。
-                log.warning(f"claim conflict: session {sid} busy, requeue task {task.get('id')}")
-                try:
-                    await client.requeue(task.get("id") or "")
-                except Exception as _e:
-                    log.warning(f"requeue task {task.get('id')} failed: {_e}")
+            tid = task.get("id") or ""
+            if tid in active_tasks:
+                log.warning(f"duplicate task {tid}, skip")
                 continue
-            if len(active_sessions) >= max_concurrent:
+            if len(active_tasks) >= max_concurrent:
                 continue
-            active_sessions.add(sid)
+            active_tasks.add(tid)
 
-            async def _wrap(t=task, s=sid, e=engine_by_rid.get(rid, "")):
+            async def _wrap(t=task, tid=tid):
                 try:
                     if _test_execute is not None:
                         await _test_execute(client, t, e)
                     else:
                         await _execute_task(client, t, e)
                 finally:
-                    active_sessions.discard(s)
+                    active_tasks.discard(tid)
 
             asyncio.create_task(_wrap())
 
