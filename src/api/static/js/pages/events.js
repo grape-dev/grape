@@ -52,6 +52,7 @@ function renderEventDetail(data) {
         <div style="font-size:11px;color:var(--t2);line-height:1.8">
           <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
           <div><span style="color:var(--t3)">Runtime:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b></div>
+          ${data.engine_instance ? `<div><span style="color:var(--t3)">Engine:</span> <b>${data.engine_instance}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>` : ''}
           <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
           <div><span style="color:var(--t3)">Issue:</span> ${data.issue_id || '—'}</div>
           <div><span style="color:var(--t3)">Actor:</span> @${data.actor || '—'}</div>

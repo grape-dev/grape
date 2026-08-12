@@ -12,6 +12,8 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 # 测试强制 SQLite 后端：即使 configs/db-backend.json 配了 mysql，测试也绝不连 RDS
 # （可用环境变量 DEVOPS_DB_BACKEND 显式覆盖，用于 MySQL 后端专项测试）
 os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
+# 测试隔离工作区（config.WORKSPACE_DIR 解析优先级 env > 家目录 > 代码目录）
+os.environ.setdefault("DEVOPS_WORKSPACE_DIR", os.path.join(ROOT, "data", "test_workspaces"))
 
 
 @pytest.fixture(scope="session", autouse=True)

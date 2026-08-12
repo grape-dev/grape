@@ -176,6 +176,17 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         except Exception:
             pass
 
+    # 当前引擎池绑定（agent-cluster-design.md §4.1，前端回显多选）
+    pool = []
+    try:
+        from src.runtime.service import get_agent_pool
+        from src.runtime.instances import instance_name
+        pool = get_agent_pool(name)
+        for _p in pool:
+            _p["instance_name"] = instance_name(_p.get("name") or "engine", _p.get("device_name") or "", _p.get("credential_id") or 0)
+    except Exception:
+        pass
+
     return {
         "agent_type": name,
         "display_name": meta["display_name"],
@@ -184,6 +195,8 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         "color": COLORS.get(name, "var(--t2)"),
         "bg": BGS.get(name, "var(--bg)"),
         "backend": session_data.get("instance_name") or session_data.get("backend", meta.get("default_backend", "opencode")),
+        "backends": [p.get("instance_name") or p.get("name") for p in pool],  # 引擎池（多选回显）
+        "pool": pool,  # 完整池信息（含 busy_slots/status 等）
         "skill": session_data.get("skill", ""),
         "skill_id": session_data.get("skill_id", 0),
         "skill_scope": skill_scope,
@@ -206,6 +219,8 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
 
 class AgentConfig(BaseModel):
     backend: str = "opencode"
+    backends: list[str] | None = None  # 引擎池（1..N 引擎实例名，agent-cluster-design.md §4.1）
+    # None=未传（单 backend 兼容）；[]=显式清空池；非空=替换池绑定
     skill: str = ""
     skill_scope: str = ""  # official / repo（前端下拉回显同名技能时精确匹配）
     enable: bool | None = None  # Agent 启用开关（Dashboard 切换；None=不修改）
@@ -298,20 +313,47 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                 )
                 db.commit()
 
+    # ---- 引擎池（多引擎选择，agent-cluster-design.md §4.1）----
+    # backends 显式提供（含空数组=清空池）→ 替换该 Agent 的引擎池绑定，runtime_id 置 0（池调度/兜底链）。
+    # 解析在 db_lock 外执行（set_agent_pool 内部自行加锁，避免嵌套死锁）。
+    pool_mode = False
+    if body.backends is not None:
+        from src.runtime.instances import resolve_instance_id, scope_of_runtime
+        from src.user.db import get_runtime_id_by_name
+        from src.runtime import service as _rt_service
+        rids = []
+        for bn in body.backends:
+            _rid = resolve_instance_id(bn)
+            if _rid is None:
+                _rid = get_runtime_id_by_name(bn)
+            if not _rid:
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"未知引擎: {bn}"})
+            _scope = scope_of_runtime(_rid)
+            if _scope == "user":
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"DevOps Agent 只能绑定仓库/全局引擎，所选为个人引擎: {bn}"})
+            rids.append(_rid)
+        _rt_service.set_agent_pool(name, rids)
+        pool_mode = True
+        log.info(f"Agent pool configured: {name} -> {rids}")
+
     with db_lock:
         c = db.cursor()
         try:
             from src.user.db import ensure_default_backend, get_runtime_id_by_name
             from src.runtime.instances import resolve_instance_id, scope_of_runtime
-            # 优先按唯一引擎名（engine name / instance_name）解析；否则按类型名（S2 健康选择）兜底
-            runtime_id = resolve_instance_id(body.backend)
-            if runtime_id is not None:
-                _scope = scope_of_runtime(runtime_id)
-                # DevOps Agent 只能绑定 仓库/全局 引擎（个人引擎仅 Chat 可用，见 runtime-admin-two-view-design §5.1）
-                if _scope == "user":
-                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"DevOps Agent 只能绑定仓库/全局引擎，所选为个人引擎: {body.backend}"})
+            # 池模式：runtime_id=0（入队时按 pool_agent_type 调度）；否则按单引擎解析（兼容旧行为）
+            if pool_mode:
+                runtime_id = 0
             else:
-                runtime_id = get_runtime_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
+                # 优先按唯一引擎名（engine name / instance_name）解析；否则按类型名（S2 健康选择）兜底
+                runtime_id = resolve_instance_id(body.backend)
+                if runtime_id is not None:
+                    _scope = scope_of_runtime(runtime_id)
+                    # DevOps Agent 只能绑定 仓库/全局 引擎（个人引擎仅 Chat 可用，见 runtime-admin-two-view-design §5.1）
+                    if _scope == "user":
+                        raise HTTPException(status_code=400, detail={"code": 400, "message": f"DevOps Agent 只能绑定仓库/全局引擎，所选为个人引擎: {body.backend}"})
+                else:
+                    runtime_id = get_runtime_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
             # 精确按 scope(+owner) 解析 skill_id，避免同名时官方优先误命中
             skill_id = 0
             if body.skill:

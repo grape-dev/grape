@@ -289,6 +289,21 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
 )
 """
 
+# ===== agent-cluster-design.md §4.1：Agent 类型 → 引擎池绑定（1..N）=====
+_AGENT_TYPE_RUNTIME_POOL_DDL = """
+CREATE TABLE IF NOT EXISTS agent_type_runtime_pool (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_type   TEXT NOT NULL,              -- vod / issue / coding / qa / sre
+    runtime_id   INTEGER NOT NULL,           -- agent_runtimes.id（Worker 上的引擎实例）
+    weight       INTEGER NOT NULL DEFAULT 1, -- 调度权重（≥1）
+    priority     INTEGER NOT NULL DEFAULT 5, -- 池内优先级（1 高）
+    enabled      INTEGER NOT NULL DEFAULT 1, -- 软摘除（保留绑定但不参与调度）
+    remark       TEXT DEFAULT '',
+    created_at   TEXT DEFAULT (datetime('now')),
+    UNIQUE (agent_type, runtime_id)
+)
+"""
+
 # ===== new-version2 M3：runtime_credentials 独立凭据（rta_ token，见 agent-runtime-event-full-design.md §4.1）=====
 _RUNTIME_CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS runtime_credentials (
@@ -375,6 +390,7 @@ _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
+    ("agent_type_runtime_pool", _AGENT_TYPE_RUNTIME_POOL_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
     ("issue_state", _ISSUE_STATE_DDL),
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
@@ -1308,6 +1324,20 @@ def _migrate_tables():
             log.info("Added issue_session_id / project_info_* / knowledge_files columns to agent_tasks")
     except Exception as e:
         log.warning(f"Add agent_tasks issue isolation columns failed: {e}")
+    # ===== agent-cluster-design.md §4.1/§4.2：引擎池数据面（池表 + 槽位列 + 任务池标记）=====
+    # 老库升级：agent_runtimes 补 busy_slots/max_concurrent；agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "agent_runtimes", "busy_slots", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(c, "agent_runtimes", "max_concurrent", "INTEGER NOT NULL DEFAULT 4")
+            _ensure_column(c, "agent_tasks", "attempts", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(c, "agent_tasks", "pool_agent_type", "TEXT DEFAULT ''")
+            _ensure_column(c, "agent_tasks", "affinity_runtime_id", "INTEGER DEFAULT 0")
+            db.commit()
+            log.info("Added cluster columns: agent_runtimes.busy_slots/max_concurrent, agent_tasks.attempts/pool_agent_type/affinity_runtime_id")
+    except Exception as e:
+        log.warning(f"Add cluster columns failed: {e}")
     # ===== 修复 chat_agent_session 陈旧 UNIQUE(repo_key) 约束（多用户 chat 配置互斥顶掉，见 session_manager 注释）=====
     try:
         with db_lock:
