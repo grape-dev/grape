@@ -3,8 +3,8 @@
   "mysql": {
     "host": "127.0.0.1",
     "port": 3306,
-    "user": "grape",
-    "password": "REDACTED",
-    "database": "grape_db"
+    "user": "your_mysql_user",
+    "password": "your_mysql_password",
+    "database": "your_mysql_database"
   }
 }
