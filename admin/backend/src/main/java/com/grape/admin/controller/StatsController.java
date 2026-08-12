@@ -86,6 +86,22 @@ public class StatsController {
         data.put("deviceStatusDistribution", groupCount(
                 "SELECT COALESCE(status,'未知'), COUNT(*) FROM agent_runtimes GROUP BY status"));
 
+        // 凭据状态分布（饼图）
+        data.put("credentialStatusDistribution", groupCount(
+                "SELECT COALESCE(status,'未知'), COUNT(*) FROM runtime_credentials GROUP BY status"));
+
+        // 仓库事件分布 Top 8（横向条形图，对应"托管仓库"卡片）
+        data.put("repoEventDistribution", groupCount(
+                "SELECT COALESCE(repo_key,'未知'), COUNT(*) FROM events " +
+                "WHERE repo_key IS NOT NULL AND repo_key<>'' " +
+                "GROUP BY repo_key ORDER BY 2 DESC LIMIT 8"));
+
+        // 用户构成分布（管理台用户 vs 平台用户，对应"用户"卡片）
+        LinkedHashMap<String, Object> userComp = new LinkedHashMap<>();
+        userComp.put("管理台用户", count("SELECT COUNT(*) FROM admin_users"));
+        userComp.put("平台用户", count("SELECT COUNT(*) FROM user_accounts"));
+        data.put("userCompositionDistribution", userComp);
+
         // 引擎启停分布
         data.put("engineEnabledDistribution", groupCount(
                 "SELECT CASE WHEN enable=1 THEN '启用' ELSE '停用' END, COUNT(*) FROM agent_type GROUP BY enable"));
