@@ -81,6 +81,7 @@ const BUILD_TIME = __BUILD_TIME__
 // 分组图标（菜单 API 无 icon 字段，静态映射）
 const GROUP_ICONS = {
   overview: '📊',
+  agent: '🧠',
   runtime: '🖥️',
   skill: '🧩',
   ai: '🤖',
