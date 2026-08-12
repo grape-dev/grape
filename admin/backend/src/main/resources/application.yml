@@ -24,6 +24,8 @@ spring:
     # grape_test_db 是存量库（已有 grape 业务表），Flyway 需基线化后只应用 admin_* 迁移
     baseline-on-migrate: true
     baseline-version: 0
+    # 忽略"已应用但代码缺失"的迁移（feat 分支开发中 V10 尚未入库时避免校验失败）
+    ignore-migration-patterns: '*:missing'
 
 app:
   jwt-secret: ${ADMIN_JWT_SECRET:}

@@ -15,7 +15,9 @@
       </div>
       <nav class="topnav-links">
         <template v-for="item in navItems" :key="item.code">
-          <div v-if="item.children && item.children.length" class="topnav-dropdown" :class="{ active: isDropdownActive(item) }">
+          <!-- 顶级带 path（AI分析/总览）→ 直接跳转；无 path 有子菜单 → 下拉 -->
+          <router-link v-if="item.route" class="topnav-link" :to="item.route">{{ item.icon }} {{ item.name }}</router-link>
+          <div v-else-if="item.children && item.children.length" class="topnav-dropdown" :class="{ active: isDropdownActive(item) }">
             <span class="topnav-link topnav-dropdown-trigger">{{ item.icon }} {{ item.name }}<span class="dd-arrow"></span></span>
             <div class="topnav-dropdown-menu">
               <router-link
@@ -45,7 +47,10 @@
       </div>
       <div class="drawer-body">
         <template v-for="item in navItems" :key="item.code">
-          <div v-if="item.children && item.children.length" class="drawer-group">
+          <router-link v-if="item.route" class="drawer-group-title" :to="item.route" @click="mobileNavOpen = false">
+            <span class="drawer-item-icon">{{ item.icon }}</span>{{ item.name }}
+          </router-link>
+          <div v-else-if="item.children && item.children.length" class="drawer-group">
             <div class="drawer-group-title" @click.stop="toggleDrawerGroup(item.code)">
               <span><span class="drawer-item-icon">{{ item.icon }}</span>{{ item.name }}</span>
               <span class="drawer-group-arrow" :class="{ open: openDrawerGroups[item.code] }"></span>
@@ -90,12 +95,12 @@ const openDrawerGroups = ref({})
 const me = ref(getToken() ? 'A' : '')
 const isLoginPage = computed(() => route.path === '/login')
 
-// 后端菜单树 → VOD 式导航结构
+// 后端菜单树 → VOD 式导航结构（顶级菜单带 path 且无 children 时直接跳转）
 const navItems = computed(() => menuTree.value.map(g => ({
   code: g.code,
   name: g.name,
   icon: GROUP_ICONS[g.code] || '📁',
-  path: g.path,
+  route: g.path || '',
   children: (g.children || []).map(c => ({ code: c.code, name: c.name, route: c.path }))
 })))
 
