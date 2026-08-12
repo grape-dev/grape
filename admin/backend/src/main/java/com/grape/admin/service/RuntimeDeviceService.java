@@ -66,7 +66,7 @@ public class RuntimeDeviceService {
                 .collect(Collectors.toList());
     }
 
-    public Map<String, Object> listDevices(String scope, String status, String name, int page, int size) {
+    public Map<String, Object> listDevices(String scope, String status, String health, String name, int page, int size) {
         List<RuntimeCredentialRo> credentials = credentialRepository.findAll();
         List<AgentRuntimeRo> runtimes = runtimeRepository.findAll();
         Map<Integer, List<AgentRuntimeRo>> enginesByCredential = runtimes.stream()
@@ -76,10 +76,22 @@ public class RuntimeDeviceService {
                 .filter(t -> t.getRuntimeId() != null)
                 .collect(Collectors.groupingBy(AgentTaskRo::getRuntimeId, Collectors.counting()));
 
+        // 全量健康分布统计（不随过滤/分页变化，供页头徽章行）
+        Map<String, Long> stats = new LinkedHashMap<>();
+        for (String h : new String[]{"online", "recently_lost", "offline", "about_to_gc", "revoked"}) {
+            stats.put(h, 0L);
+        }
+        for (RuntimeCredentialRo c : credentials) {
+            String h = healthService.deviceHealth(c.getStatus(), c.getLastSeenAt());
+            stats.merge(h, 1L, Long::sum);
+        }
+
         List<Map<String, Object>> filtered = new ArrayList<>();
         for (RuntimeCredentialRo c : credentials) {
             if (scope != null && !scope.isBlank() && !scope.equals(c.getScope())) continue;
             if (status != null && !status.isBlank() && !status.equals(c.getStatus())) continue;
+            if (health != null && !health.isBlank()
+                    && !health.equals(healthService.deviceHealth(c.getStatus(), c.getLastSeenAt()))) continue;
             if (name != null && !name.isBlank()
                     && !(c.getName() != null && c.getName().toLowerCase().contains(name.toLowerCase()))
                     && !(c.getDeviceName() != null && c.getDeviceName().toLowerCase().contains(name.toLowerCase()))) continue;
@@ -92,13 +104,26 @@ public class RuntimeDeviceService {
             d.put("deviceName", c.getDeviceName());
             d.put("status", c.getStatus());
             d.put("scope", c.getScope());
+            d.put("ownerId", c.getOwnerId());
+            d.put("ownerName", c.getOwnerName());
             d.put("health", healthService.deviceHealth(c.getStatus(), c.getLastSeenAt()));
             d.put("lastSeenAt", c.getLastSeenAt());
             d.put("lastIp", c.getLastIp());
+            d.put("createdAt", c.getCreatedAt());
             d.put("engineCount", engines.size());
             d.put("taskCount", taskCount);
             filtered.add(d);
         }
+
+        // 默认按最后心跳降序（最近活跃优先，null 排最后）
+        filtered.sort((a, b) -> {
+            String sa = (String) a.get("lastSeenAt");
+            String sb = (String) b.get("lastSeenAt");
+            if (sa == null && sb == null) return 0;
+            if (sa == null) return 1;
+            if (sb == null) return -1;
+            return sb.compareTo(sa);
+        });
 
         int total = filtered.size();
         int from = Math.min(page * size, total);
@@ -109,6 +134,7 @@ public class RuntimeDeviceService {
         result.put("totalPages", size > 0 ? (total + size - 1) / size : 0);
         result.put("page", page);
         result.put("size", size);
+        result.put("stats", stats);
         return result;
     }
 

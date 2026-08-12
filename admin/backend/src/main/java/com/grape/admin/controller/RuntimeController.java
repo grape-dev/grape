@@ -39,10 +39,11 @@ public class RuntimeController {
     @GetMapping("/devices")
     public Map<String, Object> devices(@RequestParam(required = false) String scope,
                                        @RequestParam(required = false) String status,
+                                       @RequestParam(required = false) String health,
                                        @RequestParam(required = false) String name,
                                        @RequestParam(defaultValue = "0") int page,
                                        @RequestParam(defaultValue = "10") int size) {
-        return deviceService.listDevices(scope, status, name, page, size);
+        return deviceService.listDevices(scope, status, health, name, page, size);
     }
 
     @GetMapping("/devices/{cid}")

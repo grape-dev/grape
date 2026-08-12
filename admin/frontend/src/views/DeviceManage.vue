@@ -5,6 +5,13 @@
       <span class="badge">{{ total }} 台</span>
     </div>
     <div style="padding:20px 28px">
+      <!-- 健康分布徽章行（点击联动筛选，对齐 VOD 统计头风格） -->
+      <div class="dm-stats">
+        <button class="dm-stat" :class="{ on: !health }" @click="setHealth('')">全部 <strong>{{ total }}</strong></button>
+        <button v-for="(label, key) in STATS" :key="key" class="dm-stat" :class="{ on: health === key }" @click="setHealth(key)">
+          <span class="dm-dot" :style="{ background: (BADGE[key] || {}).color }"></span>{{ label }} <strong>{{ stats[key] ?? 0 }}</strong>
+        </button>
+      </div>
       <div class="toolbar">
         <select v-model="scope">
           <option value="">全部范围</option>
@@ -16,6 +23,10 @@
           <option value="">全部状态</option>
           <option value="active">active</option>
           <option value="revoked">revoked</option>
+        </select>
+        <select v-model="health">
+          <option value="">全部健康</option>
+          <option v-for="(label, key) in STATS" :key="key" :value="key">{{ label }}</option>
         </select>
         <input v-model="name" placeholder="设备名搜索" style="width:200px" @keyup.enter="search" />
         <button class="btn" @click="search">查询</button>
@@ -30,18 +41,20 @@
       <div class="card" v-if="view === 'list'">
         <table class="vod-table">
           <thead>
-            <tr><th>设备名</th><th>范围</th><th>状态</th><th>健康</th><th>引擎</th><th>任务</th><th>最后心跳</th><th>IP</th><th style="width:180px">操作</th></tr>
+            <tr><th>设备名</th><th>范围</th><th>归属人</th><th>状态</th><th>健康</th><th>引擎</th><th>任务</th><th>最后心跳</th><th>IP</th><th>注册时间</th><th style="width:180px">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="d in devices" :key="d.id">
               <td>{{ d.deviceName || d.name }}</td>
               <td><span class="status-tag info">{{ scopeText(d.scope) }}</span></td>
+              <td>{{ d.ownerName || '—' }}</td>
               <td><span :class="['status-tag', d.status === 'active' ? 'success' : 'default']">{{ d.status }}</span></td>
               <td><span :class="['status-tag', healthClass(d.health)]">{{ healthText(d.health) }}</span></td>
               <td>{{ d.engineCount }}</td>
               <td>{{ d.taskCount }}</td>
-              <td class="t3">{{ d.lastSeenAt || '-' }}</td>
+              <td class="t3">{{ formatTime(d.lastSeenAt) }}</td>
               <td class="t3">{{ d.lastIp || '-' }}</td>
+              <td class="t3">{{ formatTime(d.createdAt) }}</td>
               <td>
                 <button class="btn btn-sm" @click="openDetail(d)">详情</button>
                 <button v-if="d.status === 'active'" class="btn btn-sm" @click="revoke(d)">吊销</button>
@@ -139,7 +152,9 @@ const totalPages = ref(0)
 const page = ref(0)
 const status = ref('')
 const scope = ref('')
+const health = ref('')
 const name = ref('')
+const stats = ref({})
 const view = ref('list')
 const detail = ref(null)
 const selectedEngineId = ref(null)
@@ -156,10 +171,32 @@ const BADGE = {
   about_to_gc: { label: '待回收', color: 'var(--danger)', bg: '#fee2e2' },
   revoked: { label: '已吊销', color: 'var(--text-tertiary)', bg: '#eef0f3' }
 }
+const STATS = {
+  online: '在线',
+  recently_lost: '刚失联',
+  offline: '离线',
+  about_to_gc: '待回收',
+  revoked: '已吊销'
+}
 const SCOPE_TEXT = { global: '全局', repo: '仓库', user: '个人' }
 function scopeText(s) { return SCOPE_TEXT[s] || s || '—' }
 function healthText(h) { return (BADGE[h] || { label: h }).label }
 function healthClass(h) { return { online: 'success', recently_lost: 'warning', offline: 'default', about_to_gc: 'danger', revoked: 'default' }[h] || 'default' }
+function formatTime(ts) {
+  if (!ts) return '—'
+  const time = new Date(ts.replace(' ', 'T')).getTime()
+  if (isNaN(time)) return ts
+  const diff = Date.now() - time
+  if (diff < 60000) return '刚刚'
+  if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前'
+  if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前'
+  return ts.slice(0, 16)
+}
+function setHealth(h) {
+  health.value = h
+  page.value = 0
+  load()
+}
 function badgeStyle(h) {
   const b = BADGE[h] || { color: 'var(--text-tertiary)', bg: '#eef0f3' }
   return { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12px', fontWeight: 600, color: b.color, background: b.bg, padding: '3px 10px', borderRadius: '999px', whiteSpace: 'nowrap' }
@@ -170,13 +207,14 @@ function dotStyle(h) {
 }
 
 async function load() {
-  const { data } = await http.get('/devices', { params: { scope: scope.value, status: status.value, name: name.value, page: page.value, size: size.value } })
+  const { data } = await http.get('/devices', { params: { scope: scope.value, status: status.value, health: health.value, name: name.value, page: page.value, size: size.value } })
   devices.value = data.content
   total.value = data.totalElements
   totalPages.value = data.totalPages
+  stats.value = data.stats || {}
 }
 function search() { page.value = 0; load() }
-function reset() { scope.value = ''; status.value = ''; name.value = ''; page.value = 0; load() }
+function reset() { scope.value = ''; status.value = ''; health.value = ''; name.value = ''; page.value = 0; load() }
 
 async function revoke(d) {
   if (!confirm(`确认吊销设备 ${d.deviceName || d.name} 的凭据？其 worker 将立即失效（401）`)) return
@@ -208,3 +246,19 @@ function onEngineChange() {
 }
 onMounted(load)
 </script>
+
+<style scoped>
+/* 健康分布徽章行（对齐 UserManage 角色徽章行风格） */
+.dm-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.dm-stat {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 3px 10px; border-radius: 12px;
+  background: #f5f7fa; color: var(--text-secondary); border: 1px solid transparent;
+  cursor: pointer; transition: all 0.15s;
+}
+.dm-stat strong { font-weight: 600; color: var(--text-primary); }
+.dm-stat:hover { border-color: var(--border-color); }
+.dm-stat.on { background: var(--primary-bg); color: var(--primary); border-color: var(--primary); }
+.dm-stat.on strong { color: var(--primary); }
+.dm-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+</style>
