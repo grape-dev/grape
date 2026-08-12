@@ -84,7 +84,7 @@ function _convBubble(role, content, time, by) {
   return `<div style="display:flex;${mine ? 'justify-content:flex-end' : 'justify-content:flex-start'}">
     <div style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;${mine
       ? 'background:var(--a);color:#fff'
-      : 'background:var(--s);color:#e2e8f0'}">
+      : 'background:var(--bg);color:var(--t);border:1px solid var(--b)'}">
       ${content || ''}
       <div style="font-size:10px;opacity:.7;margin-top:3px">${mine ? (by || '我') : (by || 'agent')}${time ? ' · ' + fmtLocalTime(time).substring(11,16) : ''}</div>
     </div>
@@ -143,7 +143,7 @@ function sendConversation() {
   const holder = document.createElement('div');
   holder.style.display = 'flex';
   holder.style.justifyContent = 'flex-start';
-  holder.innerHTML = `<div id="${replyId}" style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;background:var(--s);color:#e2e8f0">⏳ 思考中…</div>`;
+  holder.innerHTML = `<div id="${replyId}" style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;background:var(--bg);color:var(--t);border:1px solid var(--b)">⏳ 思考中…</div>`;
   if (messagesEl) messagesEl.appendChild(holder);
   const replyEl = document.getElementById(replyId);
   if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
