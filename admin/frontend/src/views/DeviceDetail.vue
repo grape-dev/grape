@@ -1,10 +1,13 @@
 <template>
   <div class="page-container" style="padding:0">
     <div class="page-header">
+      <span class="back-btn" @click="goBack">
+        <svg class="back-arrow" viewBox="0 0 24 24" width="16" height="16"><path d="M15 18l-6-6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        返回
+      </span>
       <h1>设备详情</h1>
       <span class="badge" :style="badgeStyle(detail?.health)">{{ healthText(detail?.health) }}</span>
       <span class="t3" style="font-size:12px">{{ detail?.deviceName || detail?.name || '' }}</span>
-      <button class="btn btn-sm" style="margin-left:auto" @click="$router.back()">← 返回列表</button>
     </div>
 
     <div class="dashboard" style="padding:20px 28px" v-if="detail">
@@ -145,11 +148,17 @@
 
 <script setup>
 import { computed, nextTick, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import http from '../api'
 
 const route = useRoute()
+const router = useRouter()
+// 智能返回：历史可回则回退，否则回设备列表（防直接访问 URL 时 back 跳出系统）
+function goBack() {
+  if (window.history.length > 1) router.back()
+  else router.push('/runtime/devices')
+}
 const detail = ref(null)
 const selectedEngineId = ref(null)
 const taskPage = ref(0)
@@ -305,6 +314,27 @@ load()
 @media (max-width: 900px) {
   .detail-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ===== 页头返回按钮（对齐 VOD 分析结果报表 back-btn） ===== */
+.back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding: 6px 14px;
+  border-radius: 8px;
+  background: #f5f5f5;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s ease;
+  line-height: 1;
+}
+.back-btn:hover { color: var(--primary); background: #e6f4ff; border-color: #91caff; transform: translateX(-2px); }
+.back-btn:active { transform: translateX(0); }
+.back-arrow { flex-shrink: 0; }
 
 /* ===== 任务状态统计卡（对齐 VOD stat-cards） ===== */
 .task-stat-cards {
