@@ -190,9 +190,10 @@ async def _execute_task(client, task):
     try:
         from src.runtime.executor import stream_runtime
 
-        # 同步生成器在线程中消费，通过 asyncio.Queue 传递事件到异步侧，
-        # 避免同步 stream_runtime 阻塞事件循环（time.sleep / readline 等）导致 heartbeat 无法执行
-        _evt_queue = asyncio.Queue()
+        # 同步生成器在线程中消费，通过 asyncio.Queue 传递事件到 async 侧
+        # 防止 time.sleep(0.1) / readline 阻塞事件循环（心跳/claim 无法执行）
+        queue: asyncio.Queue = asyncio.Queue()
+        _stream_sentinel = object()
 
         def _sync_consumer():
             try:
@@ -203,24 +204,27 @@ async def _execute_task(client, task):
                     account=task.get("account") or "", user_id=task.get("user_id") or 0,
                     env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
                 ):
-                    _evt_queue.put_nowait(evt)
+                    queue.put_nowait(evt)
             except Exception as e:
-                _evt_queue.put_nowait(("error", str(e)))
+                queue.put_nowait(("error", e))
             finally:
-                _evt_queue.put_nowait(None)  # sentinel: consumer finished
+                queue.put_nowait(_stream_sentinel)
 
         loop = asyncio.get_running_loop()
         loop.run_in_executor(None, _sync_consumer)
 
         while True:
-            evt = await _evt_queue.get()
-            if evt is None:
+            evt = await queue.get()
+            if evt is _stream_sentinel:
                 break
             evt_type, data = evt
+            if evt_type == "error":
+                raise data
             if evt_type == "done":
                 done = data
                 continue
-            # 逐步日志（本地模式同款，供 worker 侧 journalctl 观察执行过程）；前缀含 seq 便于定位
+            # 逐步日志
+            _esq = f"seq={task.get('event_seq') or '?'}"
             if evt_type == "step_start":
                 log.info(f"  [{_esq}] ▶ {data}")
             elif evt_type == "text":
@@ -235,6 +239,7 @@ async def _execute_task(client, task):
             if len(batch) >= 50:
                 await client.report_messages(tid, batch)
                 batch = []
+
         if batch:
             await client.report_messages(tid, batch)
         if done:
