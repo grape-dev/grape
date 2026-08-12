@@ -55,7 +55,7 @@
       <div class="card" v-if="view === 'list'">
         <table class="vod-table">
           <thead>
-            <tr><th>实例名</th><th>类型</th><th>版本</th><th>二进制</th><th>提供方</th><th>设备</th><th>范围</th><th>健康</th><th>状态</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
+            <tr><th>实例名</th><th>类型</th><th>版本</th><th>二进制</th><th>提供方</th><th>设备</th><th>范围</th><th>健康</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="e in engines" :key="e.id">
@@ -67,7 +67,6 @@
               <td>{{ e.device || '-' }}</td>
               <td><span class="status-tag info">{{ scopeText(e.scope) }}</span></td>
               <td><span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
-              <td class="t2">{{ e.status }}</td>
               <td class="t3">{{ formatTime(e.lastSeenAt) }}</td>
               <td><button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button></td>
             </tr>
@@ -89,8 +88,8 @@
           </div>
           <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
             <div><span class="t3" style="display:inline-block;min-width:46px">设备</span> {{ e.device || '—' }}</div>
-            <div><span class="t3" style="display:inline-block;min-width:46px">状态</span> {{ e.status }}</div>
-            <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ e.lastSeenAt || '—' }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">健康</span> <span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(e.lastSeenAt) }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">归属/范围</span> {{ e.ownerId || '—' }} <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span></div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
