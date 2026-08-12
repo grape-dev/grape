@@ -15,8 +15,8 @@
       </div>
       <nav class="topnav-links">
         <template v-for="item in navItems" :key="item.code">
-          <!-- 顶级带 path（AI分析/总览）→ 直接跳转；无 path 有子菜单 → 下拉 -->
-          <router-link v-if="item.route" class="topnav-link" :to="item.route">{{ item.icon }} {{ item.name }}</router-link>
+          <!-- 顶级带 path（AI分析/总览/Skill 管理）→ 直接跳转；无 path 有子菜单 → 下拉 -->
+          <router-link v-if="item.route" class="topnav-link topnav-direct" :class="{ active: route.path === item.route }" :to="item.route">{{ item.icon }} {{ item.name }}</router-link>
           <div v-else-if="item.children && item.children.length" class="topnav-dropdown" :class="{ active: isDropdownActive(item) }">
             <span class="topnav-link topnav-dropdown-trigger">{{ item.icon }} {{ item.name }}<span class="dd-arrow"></span></span>
             <div class="topnav-dropdown-menu">
@@ -83,6 +83,7 @@ const BUILD_TIME = __BUILD_TIME__
 const GROUP_ICONS = {
   overview: '📊',
   runtime: '🖥️',
+  skill: '🧩',
   ai: '🤖',
   sys: '⚙️'
 }

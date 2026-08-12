@@ -30,6 +30,7 @@ public class RbacHandlerInterceptor implements HandlerInterceptor {
             "runtime.credentials", List.of("/api/admin/credentials"),
             "ai.assistant", List.of("/api/admin/ai/chat", "/api/admin/ai/templates"),
             "ai.history", List.of("/api/admin/ai/history"),
+            "skill", List.of("/api/admin/skills"),
             "sys.users", List.of("/api/admin/users"),
             "sys.roles", List.of("/api/admin/roles")
     );
