@@ -659,6 +659,14 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             prompt = prompt.replace("{{PROJECT_INFO_DIR}}", _pi_path)
         except Exception:
             pass
+        # 直接模式（direct）：技能路径占位符按真实 skill 目录替换
+        # （官方技能在 SKILLS_DIR 下，executor 会兜底替换；repo/个人技能用真实路径）
+        try:
+            _real_skill_dir = os.path.dirname(evt.get("_skill_path", "")) if evt.get("_skill_path") else ""
+            if _real_skill_dir:
+                prompt = prompt.replace("{{SKILL_DIR}}", _real_skill_dir)
+        except Exception:
+            pass
         log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")

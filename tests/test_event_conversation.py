@@ -311,3 +311,72 @@ class TestKnowledgeFilesDelivery:
         import json
         kf = json.loads(task["knowledge_files"])
         assert kf and any("knowledge.md" in rel for rel in kf)
+
+
+class TestPromptSkillPlaceholder:
+    """Fix B：prompt 技能路径用 {{SKILL_DIR}} 占位符，不再硬编码服务端路径"""
+
+    def test_conversation_prompt_uses_placeholder(self):
+        from src.prompt_builder import build_conversation_prompt
+        evt = {"seq": 1, "repo_key": _REPO_KEY, "issue_id": "#5", "agent_type": "vod",
+               "event_type": "issue_opened", "title": "t", "status": "completed", "result": "r"}
+        prompt = build_conversation_prompt(evt, "hi", [], "vod", 5)
+        assert "{{SKILL_DIR}}/event-dialogue/SKILL.md" in prompt
+        assert "/opt/grape/skills" not in prompt
+
+
+class TestConversationQueueMode:
+    """Fix A/C/E：对话队列任务下发技能 + 超时回显/取消 + 串行槽绑定"""
+
+    def setup_method(self):
+        _clean()
+        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_local"
+
+    def teardown_method(self):
+        _clean()
+        os.environ["DEVOPS_EXECUTION_MODE"] = "direct"
+
+    def _seed_agent_session(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status) "
+                      "VALUES ('conv-sess',?,?,1,'idle')", (_REPO_KEY, "vod"))
+            db.commit()
+
+    async def _fake_done(self, *a, **k):
+        return {"result_text": "模拟回复", "usage_json": "{}", "status": "completed"}
+
+    def test_queue_task_packs_event_dialogue_skill(self):
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        self._seed_agent_session()
+        with patch("src.runtime.service.wait_task_terminal", side_effect=self._fake_done):
+            r = client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["reply"] == "模拟回复"
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT skill_files, issue_session_id FROM agent_tasks WHERE event_type='event_conversation' ORDER BY created_at DESC LIMIT 1").fetchone()
+        assert row and row[0]
+        import json
+        sf = json.loads(row[0])
+        assert "event-dialogue" in sf and "SKILL.md" in sf["event-dialogue"]
+
+    def test_queue_timeout_writes_failure_and_cancels(self):
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        self._seed_agent_session()
+
+        async def _raise(*a, **k):
+            raise TimeoutError("timeout")
+
+        with patch("src.runtime.service.wait_task_terminal", side_effect=_raise):
+            r = client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
+        assert r.status_code == 200, r.text
+        assert "超时" in r.json()["reply"]
+        t = client.get(f"/api/events/{seq}/thread", headers=_headers).json()
+        msgs = [m["content"] for m in t["messages"] if m["role"] == "agent"]
+        assert any("超时" in c for c in msgs)
+        with db_lock:
+            row = db.cursor().execute("SELECT status FROM agent_tasks WHERE event_type='event_conversation' ORDER BY created_at DESC LIMIT 1").fetchone()
+        assert row and row[0] == "cancelled"

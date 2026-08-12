@@ -351,7 +351,8 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
     parts.append(_build_project_info_section(repo_key))
 
     if skills:
-        _sp = skill_path or os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
+        # 技能路径占位符：worker 替换为随任务下发的物化目录；direct 由 executor 替换为服务端 SKILLS_DIR
+        _sp = f"{{{{SKILL_DIR}}}}/{skills[0]}/SKILL.md"
         parts.append(
             f"## Skill: {skills[0]}\n"
             f"Skill 文件：{_sp}\n"
@@ -462,9 +463,9 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
     parts.append(_build_history_file_guide(repo_key, account, runtime_id))
     if skills:
         parts.append(f"Skills: {', '.join(skills)}")
-        skill_path = os.path.join(SKILLS_DIR, skills[0], "SKILL.md")
+        _sp = f"{{{{SKILL_DIR}}}}/{skills[0]}/SKILL.md"
         parts.append(
-            f"Skill 文件：{skill_path}\n"
+            f"Skill 文件：{_sp}\n"
             f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令（不得跳过读取或凭名称猜测）。"
         )
     parts.append(build_chat_role_definition())
@@ -509,7 +510,7 @@ def build_conversation_prompt(evt: dict, user_message: str, thread: list,
     )
     parts.append(evt_ctx)
 
-    skill_md = os.path.join(SKILLS_DIR, "event-dialogue", "SKILL.md")
+    skill_md = "{{SKILL_DIR}}/event-dialogue/SKILL.md"
     parts.append(
         f"## Skill 指令\n"
         f"Skill 文件：{skill_md}\n"

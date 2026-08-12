@@ -133,6 +133,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     if env_extra:
         env.update(env_extra)
 
+    # 技能路径占位符：worker 侧已在物化时把 {{SKILL_DIR}} 替换为随任务下发的目录；
+    # direct（服务端本地）执行在此替换为服务端 SKILLS_DIR，使 read tool 能找到技能文件。
+    try:
+        from src.config import SKILLS_DIR
+        prompt = prompt.replace("{{SKILL_DIR}}", SKILLS_DIR)
+    except Exception:
+        pass
+
     # 注入用户凭据
     if user_id > 0:
         try:
@@ -182,9 +190,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         step_count = 0
         _last_output = time.time()
         _reader_total = 0
-        # 进程存活但无输出的累计延长时长（防长命令/长思考无上限；超硬上限仍强杀，见 #501 修复）
+        # 进程存活但无输出的累计延长上限（防长命令/长思考无上限；超硬上限仍强杀，见 #501 修复）
+        # 默认 = max_exec_seconds（首个静默窗口 + 1 次续期 ≈ 20min），可用 AGENT_SILENT_LIMIT 调整；
+        # 兼容旧变量 AGENT_SILENT_EXTEND_CAP。
         _silent_extend_total = 0.0
-        _silent_extend_cap = float(os.environ.get("AGENT_SILENT_EXTEND_CAP", str(max_exec_seconds * 3)))
+        _silent_extend_cap = float(os.environ.get("AGENT_SILENT_LIMIT",
+                                                   os.environ.get("AGENT_SILENT_EXTEND_CAP", str(max_exec_seconds))))
 
         import threading
         _line_queue = []

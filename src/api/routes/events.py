@@ -228,6 +228,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
 
     if get_execution_mode() != EXEC_MODE_DIRECT:
         # 队列模式：入队 + 轮询（打字机效果降级，任务终态一次返回）
+        # 技能随任务下发（Fix A）：event-dialogue 打包进 skill_files → worker 物化到 DEVOPS_SKILLS_DIR
         yield ("thinking", "任务已入队，等待 worker 执行...")
         runtime_id = 0
         agent_sid = ""
@@ -241,23 +242,39 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
             agent_sid = row[0] or ""
             runtime_id = row[1] or 0
         if agent_sid and runtime_id:
+            from src.config import SKILLS_DIR
+            from src.runtime.service import cancel_task
             ws = os.path.join(WORKSPACE_DIR, repository, "event-conv")
             os.makedirs(ws, exist_ok=True)
             tid = enqueue_task(
                 agent_session_id=agent_sid, runtime_id=runtime_id, prompt=prompt, cwd=ws,
-                runtime_session_id=oc_session_id, event_type="event_conversation",
-                repo_key=repo_key, agent_type=agent_type, skill="",
+                runtime_session_id=oc_session_id,
+                issue_session_id=issue_sess_id,        # Fix E：串行槽绑定本 issue 会话
+                event_type="event_conversation",
+                repo_key=repo_key, agent_type=agent_type,
+                skill="event-dialogue",                 # Fix A：打包下发对话技能
+                skill_path=os.path.join(SKILLS_DIR, "event-dialogue", "SKILL.md"),
                 account=repository, repo_gitcode_token=bot_token,
                 issue_id=issue_id or "#0",
             )
-            task = await wait_task_terminal(tid)
-            final_text = task.get("result_text") or ""
+            # Fix C：超时/失败要有回显与清理，不再 30 分钟静默
+            task = None
             try:
-                import json as _json
-                usage = _json.loads(task.get("usage_json") or "{}") or {}
-                new_oc = usage.get("session_id") or oc_session_id
-            except Exception:
-                pass
+                task = await wait_task_terminal(tid, timeout=300.0)
+            except TimeoutError:
+                cancel_task(tid)
+                final_text = "（对话执行超时，请稍后重试）"
+            except Exception as e:
+                cancel_task(tid)
+                final_text = f"（对话执行失败：{e}）"
+            if task and not final_text:
+                final_text = task.get("result_text") or ""
+                try:
+                    import json as _json
+                    usage = _json.loads(task.get("usage_json") or "{}") or {}
+                    new_oc = usage.get("session_id") or oc_session_id
+                except Exception:
+                    pass
         else:
             final_text = "（对话执行失败：无可用 runtime/会话）"
     else:
