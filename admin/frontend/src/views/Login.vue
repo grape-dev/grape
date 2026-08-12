@@ -41,7 +41,7 @@ async function login() {
   try {
     const { data } = await http.post('/auth/login', { username: username.value, password: password.value })
     setTokens(data.token, data.refreshToken)
-    router.push('/runtime/devices')
+    router.push('/')
   } catch (e) {
     error.value = e.response?.data?.message || '登录失败，请检查账号密码'
   } finally {

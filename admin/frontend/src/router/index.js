@@ -3,7 +3,8 @@ import { getToken } from '../utils/auth'
 
 const routes = [
   { path: '/login', name: 'login', component: () => import('../views/Login.vue'), meta: { public: true } },
-  { path: '/', redirect: '/runtime/devices' },
+  { path: '/', redirect: '/overview' },
+  { path: '/overview', name: 'overview', component: () => import('../views/Overview.vue'), meta: { title: '总览' } },
   { path: '/runtime/devices', name: 'runtime.devices', component: () => import('../views/DeviceManage.vue'), meta: { title: '设备管理' } },
   { path: '/runtime/engines', name: 'runtime.engines', component: () => import('../views/EngineManage.vue'), meta: { title: '引擎管理' } },
   { path: '/runtime/credentials', name: 'runtime.credentials', component: () => import('../views/CredentialManage.vue'), meta: { title: '凭据管理' } },

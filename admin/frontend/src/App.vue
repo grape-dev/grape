@@ -15,7 +15,7 @@
       </div>
       <nav class="topnav-links">
         <template v-for="item in navItems" :key="item.code">
-          <div v-if="item.children" class="topnav-dropdown" :class="{ active: isDropdownActive(item) }">
+          <div v-if="item.children && item.children.length" class="topnav-dropdown" :class="{ active: isDropdownActive(item) }">
             <span class="topnav-link topnav-dropdown-trigger">{{ item.icon }} {{ item.name }}<span class="dd-arrow"></span></span>
             <div class="topnav-dropdown-menu">
               <router-link
@@ -26,6 +26,7 @@
               >{{ child.name }}</router-link>
             </div>
           </div>
+          <router-link v-else class="topnav-link topnav-direct" :class="{ active: route.path === item.path }" :to="item.path">{{ item.icon }} {{ item.name }}</router-link>
         </template>
       </nav>
       <div class="topnav-user" @click="logout">
@@ -44,7 +45,7 @@
       </div>
       <div class="drawer-body">
         <template v-for="item in navItems" :key="item.code">
-          <div v-if="item.children" class="drawer-group">
+          <div v-if="item.children && item.children.length" class="drawer-group">
             <div class="drawer-group-title" @click.stop="toggleDrawerGroup(item.code)">
               <span><span class="drawer-item-icon">{{ item.icon }}</span>{{ item.name }}</span>
               <span class="drawer-group-arrow" :class="{ open: openDrawerGroups[item.code] }"></span>
@@ -53,6 +54,7 @@
               <router-link v-for="child in item.children" :key="child.code" class="drawer-sub-item" :to="child.route" @click="mobileNavOpen = false; openDrawerGroups[item.code] = false">{{ child.name }}</router-link>
             </div>
           </div>
+          <router-link v-else class="drawer-sub-item" :to="item.path" @click="mobileNavOpen = false">{{ item.name }}</router-link>
         </template>
       </div>
     </nav>
@@ -74,6 +76,7 @@ const BUILD_TIME = __BUILD_TIME__
 
 // 分组图标（菜单 API 无 icon 字段，静态映射）
 const GROUP_ICONS = {
+  overview: '📊',
   runtime: '🖥️',
   ai: '🤖',
   sys: '⚙️'
@@ -92,6 +95,7 @@ const navItems = computed(() => menuTree.value.map(g => ({
   code: g.code,
   name: g.name,
   icon: GROUP_ICONS[g.code] || '📁',
+  path: g.path,
   children: (g.children || []).map(c => ({ code: c.code, name: c.name, route: c.path }))
 })))
 
@@ -124,9 +128,9 @@ async function loadMenus() {
   }
 }
 // 登录页与主页面共用本组件：从 /login 跳入时 onMounted 不会再次触发，
-// 必须在路由切换时兜底补拉菜单（菜单为空才加载，避免重复请求）
+// 必须在路由切换时兜底补拉菜单（菜单为空才加载，避免重复请求；未登录不请求）
 watch(() => route.path, (p) => {
-  if (p !== '/login' && menuTree.value.length === 0) loadMenus()
+  if (p !== '/login' && getToken() && menuTree.value.length === 0) loadMenus()
 })
 
 function logout() {
@@ -134,5 +138,5 @@ function logout() {
   router.push('/login')
 }
 
-onMounted(() => { if (!isLoginPage.value) loadMenus() })
+onMounted(() => { if (!isLoginPage.value && getToken()) loadMenus() })
 </script>
