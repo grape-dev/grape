@@ -571,20 +571,14 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     _evt_copy = dict(evt)
     _evt_copy["issue_id"] = issue_id
     init_event_json(repo_key, seq, _evt_copy, agent_type, runtime=backend or "", skill=skill_name)
-    # 2) 确定路由：绑定 runtime_id；引擎池模式（agent-cluster-design.md §4.1）→ runtime_id=0 + pool_agent_type
-    #    该 Agent 配置了引擎池时，任务由池内任意空闲引擎领取（claim 池调度）；否则按默认 runtime 兜底
-    pool_mode = False
+    # 2) 确定路由：绑定 runtime_id；未绑定时用默认 opencode runtime id
     if not runtime_id:
         try:
-            from src.runtime.service import pool_runtime_ids
-            if pool_runtime_ids(agent_type):
-                pool_mode = True
-            else:
-                from src.user.db import ensure_default_runtime
-                runtime_id = ensure_default_runtime("opencode") or 0
+            from src.user.db import ensure_default_runtime
+            runtime_id = ensure_default_runtime("opencode") or 0
         except Exception:
             runtime_id = 0
-    if not runtime_id and not pool_mode:
+    if not runtime_id:
         log.warning(f"Pipeline enqueue: no runtime_id for repo={repo_key} agent={agent_type}, task skipped")
         return
 
@@ -646,7 +640,6 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     tid = enqueue_task(
         agent_session_id=session.get("id") or "",
         runtime_id=runtime_id,
-        pool_agent_type=(agent_type if pool_mode else ""),
         event_seq=seq, issue_id=issue_id,
         repo_key=repo_key, agent_type=agent_type, skill=skill_name,
         prompt=prompt, cwd=ws,
@@ -658,7 +651,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         env_extra=env_extra,
         skill_path=skill_path,
     )
-    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} pool={agent_type if pool_mode else '-'} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
+    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
 
 
 def get_prompt_context(repo_key: str) -> str:

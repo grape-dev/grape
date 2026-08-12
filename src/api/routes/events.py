@@ -81,61 +81,6 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
                     result["archive"] = arch
     except Exception:
         pass
-    # 引擎实例名（events.runtime 是引擎类型名；具体实例多级回退解析，见 agent-cluster-design.md）
-    # 1) agent_tasks.runtime_id（queue/池模式实际执行引擎）
-    # 2) devops_agent_session.runtime_id（direct 模式绑定实例）
-    # 3) events.runtime 类型名 → 本机/在线实例
-    engine_instance = ""
-    engine_device = ""
-    engine_ip = ""
-    try:
-        from src.runtime.instances import instance_name
-        runtime_id = 0
-        with db_lock:
-            c2 = db.cursor()
-            c2.execute(
-                "SELECT runtime_id FROM agent_tasks WHERE event_seq=? AND runtime_id IS NOT NULL AND runtime_id>0 "
-                "ORDER BY created_at DESC LIMIT 1",
-                (seq,))
-            tr = c2.fetchone()
-            if tr:
-                runtime_id = tr[0]
-            else:
-                # direct 模式：查该 repo+agent 会话绑定的实例
-                c2.execute(
-                    "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=? AND runtime_id>0 LIMIT 1",
-                    (row[1] or "", row[5] or ""))
-                sr = c2.fetchone()
-                if sr:
-                    runtime_id = sr[0]
-            if runtime_id:
-                c2.execute(
-                    "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
-                    "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=?",
-                    (runtime_id,))
-                ar = c2.fetchone()
-                if ar:
-                    engine_instance = instance_name(ar[0] or "engine", ar[2] or "", ar[1] or 0)
-                    engine_device = ar[2] or ""
-                    engine_ip = ar[3] or ""
-            if not engine_instance and row[12]:
-                # 兜底：按类型名找本机（credential_id=0）优先、其次在线实例
-                c2.execute(
-                    "SELECT ar.id, ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
-                    "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
-                    "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
-                    (row[12],))
-                ar2 = c2.fetchone()
-                if ar2:
-                    engine_instance = instance_name(ar2[1] or "engine", ar2[3] or "", ar2[2] or 0)
-                    engine_device = ar2[3] or ""
-                    engine_ip = ar2[4] or ""
-    except Exception:
-        pass
-    result["engine_instance"] = engine_instance
-    result["engine_device"] = engine_device
-    result["engine_ip"] = engine_ip
-
     return result
 
 

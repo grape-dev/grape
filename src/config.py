@@ -16,28 +16,7 @@ log = logging.getLogger("devops-bot")
 SKILLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills"))
 CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs"))
 EXAMPLE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples"))
-
-
-def _resolve_workspace_dir() -> str:
-    """工作区根目录解析（用户要求 2026-08-12：worker 应写入自己家目录，而非共享代码目录）。
-
-    优先级：
-    1. 环境变量 DEVOPS_WORKSPACE_DIR（运维/测试显式指定，最优先）
-    2. 运行用户家目录 ~/grape-workspaces —— 远程 Worker 部署在共享代码目录时，
-       工作区跟随运行用户（如 /home/lvjuntao/grape-workspaces），无需与代码目录属主
-       共享写权限（修复远程 Worker Permission denied 问题）
-    3. 兜底：代码目录 data/workspaces（无家目录的系统服务场景）
-    """
-    env = os.environ.get("DEVOPS_WORKSPACE_DIR", "").strip()
-    if env:
-        return os.path.abspath(env)
-    home = os.path.expanduser("~")
-    if home and os.path.isdir(home):
-        return os.path.join(home, "grape-workspaces")
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/workspaces"))
-
-
-WORKSPACE_DIR = _resolve_workspace_dir()
+WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/workspaces"))
 LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/logs"))
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)

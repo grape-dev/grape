@@ -35,6 +35,14 @@ def _env_int(name, default):
 def _discover_local_runtimes() -> list[dict]:
     """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。"""
     from src.runtime.registry import discover_runtimes
+    # RUNTIME_NAME_MAP 将本地 CLI name 映射为服务端期望的 runtime name
+    # 例如：RUNTIME_NAME_MAP=opencode=coding-worker,hermes=devops-bot
+    name_map = {}
+    for pair in os.environ.get("RUNTIME_NAME_MAP", "").split(","):
+        pair = pair.strip()
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            name_map[k.strip()] = v.strip()
     out = []
     for r in discover_runtimes():
         version = ""
@@ -49,7 +57,8 @@ def _discover_local_runtimes() -> list[dict]:
                     version = (res.stdout or "").strip().split("\n")[0][:60]
             except Exception:
                 pass
-        out.append({"name": r["name"], "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
+        name = name_map.get(r["name"], r["name"])
+        out.append({"name": name, "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
     return out
 
 

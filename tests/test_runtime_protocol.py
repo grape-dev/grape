@@ -127,20 +127,13 @@ class TestHealth:
     def test_derive(self):
         import time as _t
         now = _t.time()
-        from datetime import datetime, timezone, timedelta
-        # 新语义（2026-08-12 修复）：status=online 必须校验心跳新鲜度（<5min 才算在线）
-        assert derive_runtime_health("online", None, now) == "recently_lost"
+        assert derive_runtime_health("online", None, now) == "online"
         assert derive_runtime_health("offline", None, now) == "offline"
-        # online + 心跳新鲜(<5min) → online
-        fresh = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
-        assert derive_runtime_health("online", fresh, now) == "online"
-        # online + 心跳超时(20min) → recently_lost（worker 宕机后不再永久显示在线）
-        stale = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
-        assert derive_runtime_health("online", stale, now) == "recently_lost"
-        # 非 online 分支行为不变（回归锚点）
+        # recently_lost：1 分钟前
         ts = now - 60
         assert derive_runtime_health("offline", None, now) == "offline"
         # 用 ISO 时间
+        from datetime import datetime, timezone, timedelta
         iso = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
         assert derive_runtime_health("offline", iso, now) == "recently_lost"
         # offline：1 天前

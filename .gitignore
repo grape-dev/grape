@@ -8,10 +8,6 @@ tunnel-*.log
 __pycache__/
 *.pyc
 .pytest_cache/
-.venv/
-data/test_*
-data/backups/
-node_modules/
 configs/global-bot-token.json
 configs/login-whitelist.json
 configs/db-backend.json
