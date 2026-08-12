@@ -78,15 +78,13 @@
       <div v-else class="device-grid">
         <div v-for="e in engines" :key="e.id" class="device-card">
           <div class="dc-head" style="flex-wrap:wrap">
-            <span :style="badgeStyle(e.health)">
-              <span :style="dotStyle(e.health)"></span>{{ healthText(e.health) }}
-            </span>
-            <span style="font-weight:600;font-size:14px">
-              {{ e.displayName || e.name }}
-              <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">
-                <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span>
+            <span style="display:inline-flex;align-items:center;gap:8px;min-width:0">
+              <span :style="badgeStyle(e.health)">
+                <span :style="dotStyle(e.health)"></span>{{ healthText(e.health) }}
               </span>
+              <span style="max-width:180px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="e.displayName || e.name">{{ e.displayName || e.name }}</span>
             </span>
+            <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span>
           </div>
           <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
             <div class="ellipsis-cell" :title="e.device || '—'"><span class="t3" style="display:inline-block;min-width:46px">设备</span> {{ e.device || '—' }}</div>

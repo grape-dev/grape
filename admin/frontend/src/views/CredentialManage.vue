@@ -56,20 +56,17 @@
       <div v-else class="device-grid">
         <div v-for="c in credentials" :key="c.id" class="device-card">
           <div class="dc-head" style="flex-wrap:wrap">
-            <span :class="['status-tag', c.status === 'active' ? 'success' : 'default']">{{ c.status === 'active' ? '有效' : '已吊销' }}</span>
-            <span style="font-weight:600;font-size:14px">
-              {{ c.name }}
-              <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">
-                <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(c.scope) }}</span>
-              </span>
+            <span style="display:inline-flex;align-items:center;gap:8px;min-width:0">
+              <span :class="['status-tag', c.status === 'active' ? 'success' : 'default']">{{ c.status === 'active' ? '有效' : '已吊销' }}</span>
+              <span style="max-width:180px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="c.name">{{ c.name }}</span>
             </span>
+            <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(c.scope) }}</span>
           </div>
           <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
-            <div><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ c.ownerName || '—' }}</div>
+            <div class="ellipsis-cell" :title="c.ownerName || '—'"><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ c.ownerName || '—' }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">引擎</span> {{ c.engineCount }} 个</div>
-            <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(c.lastSeenAt) }}</div>
-            <div><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ c.lastIp || '—' }}</div>
-            <div style="grid-column:1 / -1"><span class="t3">创建</span> {{ formatTime(c.createdAt) }}</div>
+            <div class="ellipsis-cell" :title="formatTime(c.lastSeenAt)"><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(c.lastSeenAt) }}</div>
+            <div class="ellipsis-cell" :title="c.lastIp || '—'"><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ c.lastIp || '—' }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
             <button v-if="c.status === 'active'" class="btn btn-sm" @click="openRevoke(c)">吊销</button>

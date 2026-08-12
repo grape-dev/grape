@@ -70,15 +70,13 @@
       <div v-else class="device-grid">
         <div v-for="d in devices" :key="d.id" class="device-card">
           <div class="dc-head" style="flex-wrap:wrap">
-            <span :style="badgeStyle(d.health)">
-              <span :style="dotStyle(d.health)"></span>{{ healthText(d.health) }}
-            </span>
-            <span style="max-width:220px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="(d.deviceName || d.name) + ' · ' + scopeText(d.scope)">
-              {{ d.deviceName || d.name }}
-              <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">
-                <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(d.scope) }}</span>
+            <span style="display:inline-flex;align-items:center;gap:8px;min-width:0">
+              <span :style="badgeStyle(d.health)">
+                <span :style="dotStyle(d.health)"></span>{{ healthText(d.health) }}
               </span>
+              <span style="max-width:180px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="d.deviceName || d.name">{{ d.deviceName || d.name }}</span>
             </span>
+            <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(d.scope) }}</span>
           </div>
           <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
             <div class="ellipsis-cell" :title="d.ownerName || '—'"><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ d.ownerName || '—' }}</div>
