@@ -335,6 +335,20 @@ body {
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes slideDown { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: translateY(0); } }
 
+/* ===== 区块标题头（对齐 VOD dc-list-header：标题+计数左，操作区右） ===== */
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border-color);
+}
+.section-header .sh-title { font-size: 15px; font-weight: 600; margin: 0; }
+.section-header .sh-count { font-size: 13px; color: var(--text-tertiary); font-weight: 400; }
+.section-header .sh-actions { display: flex; align-items: center; gap: 8px; }
+
 /* ===== 标签 ===== */
 .status-tag {
   display: inline-block;

@@ -29,8 +29,11 @@
       </div>
 
       <!-- 引擎列表 -->
-      <div class="card" style="margin-top:16px">
-        <h5 style="margin:0 0 10px">关联引擎（{{ detail.engines?.length ?? 0 }}）</h5>
+      <div class="card" style="margin-top:16px;padding:0">
+        <div class="section-header">
+          <h5 class="sh-title">关联引擎 <span class="sh-count">共 {{ detail.engines?.length ?? 0 }} 条</span></h5>
+        </div>
+        <div style="padding:14px 20px">
         <table class="vod-table" v-if="detail.engines?.length">
           <thead>
             <tr>
@@ -52,18 +55,22 @@
           </tbody>
         </table>
         <p v-else class="t2" style="padding:12px;text-align:center">该设备暂无关联引擎</p>
+        </div>
       </div>
 
       <!-- 关联任务 -->
-      <div class="card" style="margin-top:16px;padding:16px 20px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
-          <h5 style="margin:0">关联任务（{{ detail.tasks?.totalElements ?? 0 }} 条）<span style="font-size:13px;color:#8896a7;font-weight:400" v-if="filterCount">（已筛选 {{ filterCount }} 条）</span></h5>
-          <select v-model="selectedEngineId" class="page-size-select" style="max-width:260px;margin-left:auto" @change="onEngineChange">
-            <option :value="null">全部引擎</option>
-            <option v-for="e in detail.engines || []" :key="e.id" :value="e.id">{{ e.name }}</option>
-          </select>
-          <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
+      <div class="card" style="margin-top:16px;padding:0">
+        <div class="section-header">
+          <h5 class="sh-title">关联任务 <span class="sh-count">共 {{ detail.tasks?.totalElements ?? 0 }} 条<span v-if="filterCount">（已筛选 {{ filterCount }} 条）</span></span></h5>
+          <div class="sh-actions">
+            <select v-model="selectedEngineId" class="page-size-select" style="max-width:260px" @change="onEngineChange">
+              <option :value="null">全部引擎</option>
+              <option v-for="e in detail.engines || []" :key="e.id" :value="e.id">{{ e.name }}</option>
+            </select>
+            <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
+          </div>
         </div>
+        <div style="padding:16px 20px">
 
         <!-- 任务状态统计卡（kpi 色带卡片，对齐 AgentManage/Overview 体系） -->
         <div class="task-stat-cards">
@@ -79,7 +86,10 @@
 
         <!-- 任务状态分布图（对齐 VOD chart-row） -->
         <div class="task-chart-row">
-          <div class="card chart-card"><h5 style="margin-bottom:8px">任务状态分布</h5><div ref="taskChartEl" style="height:220px"></div></div>
+          <div class="card chart-card">
+            <div class="section-header"><h5 class="sh-title">任务状态分布</h5></div>
+            <div ref="taskChartEl" style="height:220px;padding:14px 20px"></div>
+          </div>
         </div>
 
         <div class="table-loading-wrapper">
@@ -144,6 +154,7 @@
           </select>
           <button class="page-btn" :disabled="taskPage <= 0" @click="taskPage--; load()">上一页</button>
           <button class="page-btn" :disabled="taskPage >= (detail.tasks?.totalPages ?? 1) - 1" @click="taskPage++; load()">下一页</button>
+        </div>
         </div>
       </div>
     </div>
