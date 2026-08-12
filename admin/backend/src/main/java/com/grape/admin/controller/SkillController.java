@@ -40,6 +40,11 @@ public class SkillController {
         return skillService.listSkills(keyword, agentType, scope, page, size);
     }
 
+    @PostMapping("/{id}/promote")
+    public Map<String, Object> promote(@PathVariable Integer id) {
+        return skillService.promoteToOfficial(id);
+    }
+
     @GetMapping("/{id}/content")
     public Map<String, Object> content(@PathVariable Integer id) {
         return skillService.getSkillContent(id);

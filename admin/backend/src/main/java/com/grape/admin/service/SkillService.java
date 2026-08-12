@@ -59,8 +59,43 @@ public class SkillService {
                         @Value("${app.skills-dir:../../skills}") String skillsDir,
                         JdbcTemplate jdbcTemplate) {
         this.skillRepository = skillRepository;
-        this.skillsDir = Paths.get(skillsDir).toAbsolutePath().normalize();
+        this.skillsDir = resolveSkillsDir(skillsDir);
         this.jdbcTemplate = jdbcTemplate;
+    }
+
+    /**
+     * 技能目录解析：优先使用配置/环境变量指定目录；
+     * 若不存在则从 jar 位置推导仓库根（<repo>/admin/backend/target/*.jar → <repo>/skills），
+     * 保证完整 clone 部署时无论从哪个目录启动都能读到技能文件。
+     */
+    private Path resolveSkillsDir(String configured) {
+        Path p = Paths.get(configured == null ? "../../skills" : configured).toAbsolutePath().normalize();
+        if (Files.isDirectory(p)) {
+            return p;
+        }
+        try {
+            String loc = SkillService.class.getProtectionDomain().getCodeSource().getLocation().getPath();
+            if (loc.startsWith("file:")) {
+                loc = loc.substring("file:".length());
+            }
+            int bang = loc.indexOf("!/");
+            if (bang >= 0) {
+                loc = loc.substring(0, bang);
+            }
+            Path jarPath = Paths.get(loc).toAbsolutePath().normalize();
+            if (!Files.isDirectory(jarPath)) {
+                jarPath = jarPath.getParent(); // jar 文件 → target/ 目录
+            }
+            // jarPath 为 <repo>/admin/backend/target：target → backend → admin → 仓库根
+            Path repoRoot = jarPath.getParent().getParent().getParent();
+            Path candidate = repoRoot.resolve("skills");
+            if (Files.isDirectory(candidate)) {
+                return candidate.normalize();
+            }
+        } catch (Exception ignored) {
+            // 保持配置值
+        }
+        return p;
     }
 
     public Map<String, Object> listSkills(String keyword, String agentType, String scope, int page, int size) {
@@ -140,6 +175,59 @@ public class SkillService {
         return m;
     }
 
+    /**
+     * 仓库/个人技能一键转为官方技能：DB 记录转 official + 文件移动到官方目录。
+     * 文件不在本机时仍完成 DB 转换并返回 warning（需在文件所在机器同步）。
+     */
+    public Map<String, Object> promoteToOfficial(Integer id) {
+        SkillRo skill = skillRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("技能不存在: id=" + id));
+        String scope = skill.getScope();
+        if (!"repo".equals(scope) && !"user".equals(scope)) {
+            throw new BizException("仅仓库/个人技能可转为官方技能");
+        }
+        String skillName = skill.getSkillName();
+        String ownerId = skill.getOwnerId() == null ? "" : skill.getOwnerId();
+
+        // 唯一键冲突检查：(skill_name, official, '')
+        Integer dup = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM skill WHERE skill_name = ? AND scope = 'official' AND owner_id = ''",
+                Integer.class, skillName);
+        if (dup != null && dup > 0) {
+            throw new BizException("官方技能已存在同名技能「" + skillName + "」，无法转换");
+        }
+
+        // 文件移动：源目录（repo/user）→ 官方目录 skills/<skill_name>
+        Path targetDir = skillsDir.resolve(skillName).normalize();
+        if (Files.exists(targetDir)) {
+            throw new BizException("官方技能目录已存在: skills/" + skillName + "，无法转换");
+        }
+        Path srcDir = "repo".equals(scope)
+                ? skillsDir.resolve("repo").resolve(ownerId).resolve(skillName).normalize()
+                : skillsDir.resolve("custom").resolve(ownerId).resolve(skillName).normalize();
+        String warning = null;
+        if (Files.isDirectory(srcDir)) {
+            try {
+                copyRecursively(srcDir, targetDir);
+                deleteRecursively(srcDir);
+            } catch (IOException e) {
+                throw new BizException("技能文件移动失败: " + e.getMessage());
+            }
+        } else {
+            warning = "技能文件不在当前服务器（" + srcDir + "），已转换记录；请在该文件所在机器同步到官方目录 skills/" + skillName;
+        }
+
+        // DB 转换
+        jdbcTemplate.update("UPDATE skill SET scope = 'official', owner_id = '' WHERE id = ?", id);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("message", "技能「" + skillName + "」已转为官方技能");
+        if (warning != null) {
+            result.put("warning", warning);
+        }
+        return result;
+    }
+
     public Map<String, Object> getSkillContent(Integer id) {
         SkillRo skill = skillRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("技能不存在: id=" + id));
@@ -168,9 +256,9 @@ public class SkillService {
 
     public Map<String, Object> uploadSkill(InputStream zipStream, long size, String filename,
                                            String scope, String repo, String agentType, String username) {
-        // 参数校验（与主项目 grape upload 一致）
-        if (scope == null || !(scope.equals("user") || scope.equals("repo"))) {
-            throw new BizException("scope 必须为 user 或 repo");
+        // 参数校验（与主项目 grape upload 一致；official 供系统总看板维护官方技能库）
+        if (scope == null || !(scope.equals("user") || scope.equals("repo") || scope.equals("official"))) {
+            throw new BizException("scope 必须为 official、user 或 repo");
         }
         if (scope.equals("repo") && (repo == null || repo.isBlank())) {
             throw new BizException("仓库技能必须指定 repo");
@@ -250,10 +338,13 @@ public class SkillService {
             Map<String, Object> fm = parseFrontmatter(skillDir);
             String description = String.valueOf(fm.getOrDefault("description", "")).trim();
 
-            // 落盘：repo → skills/repo/<repo_key>/<skill_name>；user → skills/custom/<username>/<skill_name>
+            // 落盘：official → skills/<skill_name>；repo → skills/repo/<repo_key>/<skill_name>；user → skills/custom/<username>/<skill_name>
             Path targetDir;
             String ownerId;
-            if (scope.equals("repo")) {
+            if (scope.equals("official")) {
+                ownerId = "";
+                targetDir = skillsDir.resolve(skillName).normalize();
+            } else if (scope.equals("repo")) {
                 ownerId = repo.trim();
                 targetDir = skillsDir.resolve("repo").resolve(ownerId).resolve(skillName).normalize();
             } else {

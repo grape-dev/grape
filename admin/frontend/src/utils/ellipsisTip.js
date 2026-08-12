@@ -25,9 +25,11 @@ function isOverflowing(el) {
 }
 
 // 从目标元素向上找第一个截断的文本容器（td/span/div 等）
+// 排除顶部导航分组（其 textContent 含隐藏的下拉子菜单，且绝对定位子菜单会虚增 scrollWidth 造成误判）
 function findOverflowTarget(el) {
   let p = el
   while (p && p !== document.body) {
+    if (p.classList && p.classList.contains('topnav-dropdown')) return null
     if (p.textContent && p.textContent.trim() && isOverflowing(p)) return p
     p = p.parentElement
   }

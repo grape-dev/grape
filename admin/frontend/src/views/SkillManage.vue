@@ -27,8 +27,8 @@
         </select>
         <button class="btn" @click="search">查询</button>
         <button class="btn" @click="reset">重置</button>
-        <!-- 仓库/个人范围下提供新增技能入口（与主项目看板一致） -->
-        <button v-if="scope === 'repo' || scope === 'user'" class="btn btn-primary" @click="openUpload">＋ 新增技能</button>
+        <!-- 官方范围下提供新增技能入口（系统总看板维护官方技能库） -->
+        <button v-if="scope === 'official'" class="btn btn-primary" @click="openUpload">＋ 新增技能</button>
         <div style="margin-left:auto;display:flex;gap:8px">
           <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
           <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
@@ -45,7 +45,7 @@
             <tr v-for="s in skills" :key="s.id" style="cursor:pointer" @click="openDetail(s)">
               <td><code class="skill-name">{{ s.skillName }}</code></td>
               <td>{{ s.displayName || '—' }}</td>
-              <td class="t3" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.description || '—' }}</td>
+              <td class="t3" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.description || '—' }}</td>
               <td>{{ s.agentType || '—' }}</td>
               <td><span class="status-tag info">{{ scopeText(s.scope) }}</span></td>
               <td class="t3">{{ s.skillPath || '—' }}</td>
@@ -98,11 +98,7 @@
         <h4>新增技能</h4>
         <div class="upload-row">
           <label>类型</label>
-          <span>{{ uploadScope === 'repo' ? '仓库技能' : '个人技能' }}</span>
-        </div>
-        <div v-if="uploadScope === 'repo'" class="upload-row">
-          <label>仓库</label>
-          <input v-model="uploadRepo" class="upload-input" placeholder="如 owner/repo（repo_key）" />
+          <span>官方技能</span>
         </div>
         <div class="upload-row">
           <label>技能类型</label>
@@ -154,6 +150,7 @@
         <pre v-else class="md-raw">{{ mdContent }}</pre>
 
         <div class="modal-actions">
+          <button v-if="detail.scope !== 'official'" class="btn btn-primary" @click="promoteOfficial(detail)">转为官方技能</button>
           <button class="btn" @click="detail = null">关闭</button>
         </div>
       </div>
@@ -238,7 +235,7 @@ async function openDetail(s) {
 
 // ===== 新增技能（上传，逻辑与主项目看板一致）=====
 function openUpload() {
-  uploadScope.value = scope.value === 'repo' ? 'repo' : 'user'
+  uploadScope.value = 'official'
   uploadRepo.value = ''
   uploadAgentType.value = ''
   uploadFile.value = null
@@ -266,12 +263,10 @@ async function downloadTemplate() {
 async function submitUpload() {
   if (!uploadFile.value) { alert('请选择 ZIP 文件'); return }
   if (!uploadAgentType.value) { alert('请选择技能类型'); return }
-  if (uploadScope.value === 'repo' && !uploadRepo.value.trim()) { alert('仓库技能必须填写仓库'); return }
   const fd = new FormData()
   fd.append('file', uploadFile.value)
   fd.append('scope', uploadScope.value)
   fd.append('agentType', uploadAgentType.value)
-  if (uploadScope.value === 'repo') fd.append('repo', uploadRepo.value.trim())
   uploading.value = true
   try {
     const { data } = await http.post('/skills/upload', fd)
@@ -282,6 +277,19 @@ async function submitUpload() {
     alert(err.response?.data?.message || '上传失败')
   } finally {
     uploading.value = false
+  }
+}
+
+// ===== 转官方 =====
+async function promoteOfficial(s) {
+  if (!confirm(`确认将技能「${s.skillName}」转为官方技能？\n转换后所有部署可见。`)) return
+  try {
+    const { data } = await http.post(`/skills/${s.id}/promote`)
+    alert(data.warning ? data.message + '\n\n注意：' + data.warning : data.message)
+    detail.value = null
+    load()
+  } catch (err) {
+    alert(err.response?.data?.message || '转换失败')
   }
 }
 

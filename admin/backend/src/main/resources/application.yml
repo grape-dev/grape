@@ -31,6 +31,8 @@ spring:
 app:
   jwt-secret: ${ADMIN_JWT_SECRET:}
   jwt-expire-minutes: 120
+  # 技能库目录：可用 SKILLS_DIR 环境变量显式指定（不依赖启动目录）；默认相对 admin/backend 启动时的 ../../skills
+  skills-dir: ${SKILLS_DIR:../../skills}
   # AI 助手（P3 使用）
   hermes-bin: ${HERMES_BIN:}
   hermes-query-script: ${HERMES_QUERY_SCRIPT:ai_hermes_query.py}
