@@ -109,6 +109,13 @@ public class RuntimeController {
         return Map.of("status", "ok");
     }
 
+    @DeleteMapping("/credentials/{cid}")
+    public Map<String, String> deleteCredential(@PathVariable Integer cid, HttpServletRequest request) {
+        // 凭据=设备（1:1 共享主键），复用同一删除逻辑（仅 revoked 可删 + 物理清理）
+        cleanupService.deleteDevice(cid, AuthContext.username(request));
+        return Map.of("status", "ok");
+    }
+
     @DeleteMapping("/engines/{id}")
     public Map<String, String> deleteEngine(@PathVariable Integer id, HttpServletRequest request) {
         cleanupService.deleteEngine(id, AuthContext.username(request));

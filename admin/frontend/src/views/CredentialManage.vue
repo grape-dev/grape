@@ -260,7 +260,7 @@ function openDelete(c) {
 async function confirmDeleteCredential() {
   const c = deleteTarget.value
   try {
-    await http.delete(`/devices/${c.id}`)
+    await http.delete(`/credentials/${c.id}`)
     showToast(`凭据 ${c.name} 已删除（管理台记录清除）`)
     deleteTarget.value = null
     load()
