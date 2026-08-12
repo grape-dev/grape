@@ -3,7 +3,7 @@
     <div class="auth-card">
       <div class="auth-brand">
         <span class="auth-logo">🍇</span>
-        <h1>Grape Admin</h1>
+        <h1>Grape运营管理系统</h1>
         <p class="auth-sub">运营管理台</p>
       </div>
       <div class="auth-form">
@@ -26,7 +26,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import http from '../api'
-import { setTokens } from '../utils/auth'
+import { setTokens, setUser } from '../utils/auth'
 
 const router = useRouter()
 const username = ref('')
@@ -41,6 +41,7 @@ async function login() {
   try {
     const { data } = await http.post('/auth/login', { username: username.value, password: password.value })
     setTokens(data.token, data.refreshToken)
+    setUser({ username: data.username, nickname: data.nickname, roles: data.roles || [] })
     router.push('/')
   } catch (e) {
     error.value = e.response?.data?.message || '登录失败，请检查账号密码'

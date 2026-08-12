@@ -10,8 +10,7 @@
       </button>
       <div class="topnav-brand" @click="$router.push('/runtime/devices')">
         <span class="brand-icon">🍇</span>
-        <span class="brand-text">Grape Admin</span>
-        <span class="brand-ver">v{{ BUILD_TIME }}</span>
+        <span class="brand-text">Grape运营管理系统</span>
       </div>
       <nav class="topnav-links">
         <template v-for="item in navItems" :key="item.code">
@@ -33,6 +32,7 @@
       <div class="topnav-user" @click="logout">
         <span class="user-icon">👤</span>
         <span class="user-name">{{ me }}</span>
+        <span class="user-role" v-if="roleText">{{ roleText }}</span>
         <span class="user-logout">退出</span>
       </div>
     </header>
@@ -74,7 +74,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import http from './api'
-import { getToken, clearTokens } from './utils/auth'
+import { getToken, getUser, clearTokens } from './utils/auth'
 
 const BUILD_TIME = __BUILD_TIME__
 
@@ -92,7 +92,13 @@ const router = useRouter()
 const menuTree = ref([])
 const mobileNavOpen = ref(false)
 const openDrawerGroups = ref({})
-const me = ref(getToken() ? 'A' : '')
+const me = ref(getUser().nickname || getUser().username || '管理员')
+const roleText = ref((getUser().roles || []).join(' / '))
+function refreshUser() {
+  const u = getUser()
+  me.value = u.nickname || u.username || '管理员'
+  roleText.value = (u.roles || []).join(' / ')
+}
 const isLoginPage = computed(() => route.path === '/login')
 
 // 后端菜单树 → VOD 式导航结构（顶级菜单带 path 且无 children 时直接跳转）
@@ -135,6 +141,7 @@ async function loadMenus() {
 // 登录页与主页面共用本组件：从 /login 跳入时 onMounted 不会再次触发，
 // 必须在路由切换时兜底补拉菜单（菜单为空才加载，避免重复请求；未登录不请求）
 watch(() => route.path, (p) => {
+  refreshUser()   // 登录/路由切换时刷新用户显示（localStorage 非响应式）
   if (p !== '/login' && getToken() && menuTree.value.length === 0) loadMenus()
 })
 
@@ -143,5 +150,5 @@ function logout() {
   router.push('/login')
 }
 
-onMounted(() => { if (!isLoginPage.value && getToken()) loadMenus() })
+onMounted(() => { refreshUser(); if (!isLoginPage.value && getToken()) loadMenus() })
 </script>

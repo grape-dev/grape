@@ -12,6 +12,8 @@ public interface AdminUserRoleRelRepository extends JpaRepository<AdminUserRoleR
 
     List<AdminUserRoleRel> findByUserId(Long userId);
 
+    List<AdminUserRoleRel> findByUserIdAndDeleted(Long userId, Integer deleted);
+
     List<AdminUserRoleRel> findByUserIdIn(java.util.Collection<Long> userIds);
 
     boolean existsByRoleId(Long roleId);

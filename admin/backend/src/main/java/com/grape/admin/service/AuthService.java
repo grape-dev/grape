@@ -4,7 +4,9 @@ import com.grape.admin.config.JwtUtil;
 import com.grape.admin.config.TokenBlacklist;
 import com.grape.admin.dto.LoginResponse;
 import com.grape.admin.entity.AdminUser;
+import com.grape.admin.repository.AdminRoleRepository;
 import com.grape.admin.repository.AdminUserRepository;
+import com.grape.admin.repository.AdminUserRoleRelRepository;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -21,12 +23,17 @@ public class AuthService {
     private final AdminUserRepository userRepository;
     private final JwtUtil jwtUtil;
     private final TokenBlacklist blacklist;
+    private final AdminUserRoleRelRepository roleRelRepository;
+    private final AdminRoleRepository roleRepository;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
-    public AuthService(AdminUserRepository userRepository, JwtUtil jwtUtil, TokenBlacklist blacklist) {
+    public AuthService(AdminUserRepository userRepository, JwtUtil jwtUtil, TokenBlacklist blacklist,
+                       AdminUserRoleRelRepository roleRelRepository, AdminRoleRepository roleRepository) {
         this.userRepository = userRepository;
         this.jwtUtil = jwtUtil;
         this.blacklist = blacklist;
+        this.roleRelRepository = roleRelRepository;
+        this.roleRepository = roleRepository;
     }
 
     public LoginResponse login(String username, String password) {
@@ -72,6 +79,11 @@ public class AuthService {
         resp.setUserId(user.getId());
         resp.setUsername(user.getUsername());
         resp.setNickname(user.getNickname());
+        resp.setRoles(roleRelRepository.findByUserIdAndDeleted(user.getId(), 0).stream()
+                .map(rel -> roleRepository.findById(rel.getRoleId()))
+                .filter(java.util.Optional::isPresent)
+                .map(r -> r.get().getName())
+                .collect(java.util.stream.Collectors.toList()));
         resp.setToken(jwtUtil.generateToken(user.getId(), user.getUsername()));
         resp.setRefreshToken(jwtUtil.generateToken(user.getId(), user.getUsername(), "refresh", REFRESH_EXPIRE_MINUTES));
         return resp;
