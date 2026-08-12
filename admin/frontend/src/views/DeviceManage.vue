@@ -83,7 +83,7 @@
             <div><span class="t3" style="display:inline-block;min-width:46px">引擎</span> {{ d.engineCount }} 个</div>
             <div class="ellipsis-cell" :title="formatTime(d.lastSeenAt)"><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(d.lastSeenAt) }}</div>
             <div class="ellipsis-cell" :title="d.lastIp || '—'"><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ d.lastIp || '—' }}</div>
-            <div style="grid-column:1 / -1"><span class="t3" style="display:inline-block;min-width:46px">任务</span> {{ d.taskCount }} 个 · <span class="t3" style="display:inline-block;min-width:46px">创建</span> {{ formatTime(d.createdAt) }}</div>
+            <div style="grid-column:1 / -1"><span class="t3" style="display:inline-block;min-width:46px">任务</span> {{ d.taskCount }} 个</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
             <button class="btn btn-sm" @click="$router.push(`/runtime/devices/${d.id}`)">详情</button>
