@@ -89,7 +89,7 @@
           <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
             <div><span class="t3" style="display:inline-block;min-width:46px">设备</span> {{ e.device || '—' }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(e.lastSeenAt) }}</div>
-            <div><span class="t3" style="display:inline-block;min-width:46px">归属/范围</span> {{ e.ownerId || '—' }} <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span></div>
+            <div style="grid-column:1 / -1"><span class="t3" style="display:inline-block;min-width:46px">归属/范围</span> {{ e.ownerId || '—' }} <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span></div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
             <button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button>
