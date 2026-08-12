@@ -70,12 +70,27 @@ function expandActiveGroup() {
 }
 watch(() => route.name, () => expandActiveGroup())
 
+let menuLoading = false
 async function loadMenus() {
-  const { data } = await http.get('/menus')
-  menuTree.value = data
-  menuTree.value.forEach(g => { if (!(g.code in expanded.value)) expanded.value = { ...expanded.value, [g.code]: true } })
-  expandActiveGroup()
+  if (menuLoading) return
+  menuLoading = true
+  try {
+    const { data } = await http.get('/menus')
+    menuTree.value = data
+    menuTree.value.forEach(g => { if (!(g.code in expanded.value)) expanded.value = { ...expanded.value, [g.code]: true } })
+    expandActiveGroup()
+  } catch (e) {
+    // 失败不裸抛：侧边栏留空，下次路由变化/刷新自动重试
+    console.error('[menu] 加载菜单失败', e)
+  } finally {
+    menuLoading = false
+  }
 }
+// 登录页与主页面共用本组件：从 /login 跳入时 onMounted 不会再次触发，
+// 必须在路由切换时兜底补拉菜单（菜单为空才加载，避免重复请求）
+watch(() => route.path, (p) => {
+  if (p !== '/login' && menuTree.value.length === 0) loadMenus()
+})
 function logout() {
   clearTokens()
   router.push('/login')

@@ -5,6 +5,10 @@ export function getToken() {
   return localStorage.getItem(TOKEN_KEY)
 }
 
+export function getRefreshToken() {
+  return localStorage.getItem(REFRESH_KEY)
+}
+
 export function setTokens(token, refreshToken) {
   localStorage.setItem(TOKEN_KEY, token)
   localStorage.setItem(REFRESH_KEY, refreshToken)
