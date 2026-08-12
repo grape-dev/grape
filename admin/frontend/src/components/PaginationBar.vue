@@ -1,14 +1,11 @@
 <template>
   <div v-if="total > 0" class="pagination-bar">
-    <span class="page-info">
-      <template v-if="totalPages > 1">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ total }} {{ unit }}）</template>
-      <template v-else>共 {{ total }} {{ unit }}</template>
-    </span>
+    <span class="page-info">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ total }} {{ unit }}）</span>
     <select class="page-size-select" :value="size" @change="onSizeChange">
       <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
     </select>
-    <button v-if="totalPages > 1" class="page-btn" :disabled="page <= 0" @click="go(page - 1)">上一页</button>
-    <button v-if="totalPages > 1" class="page-btn" :disabled="page >= totalPages - 1" @click="go(page + 1)">下一页</button>
+    <button class="page-btn" :disabled="page <= 0" @click="go(page - 1)">上一页</button>
+    <button class="page-btn" :disabled="page >= totalPages - 1" @click="go(page + 1)">下一页</button>
   </div>
 </template>
 
