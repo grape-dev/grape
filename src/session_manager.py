@@ -165,6 +165,16 @@ try:
 except Exception as e:
     log.warning(f"Rebuild unified_user_mapping check failed: {e}")
 db.execute(UNIFIED_USER_MAPPING_TABLE_SQL)
+# 回填 unified_user_mapping：user_accounts 已有但未映射的用户（INSERT OR IGNORE 不覆盖已有飞书绑定）
+# 使 /api/tasks/notify 能解析 assignee→user_id（tasks.py:52）；幂等，每次启动执行
+try:
+    db.execute(
+        "INSERT OR IGNORE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname) "
+        "SELECT id, username, nickname FROM user_accounts WHERE id>0"
+    )
+    db.commit()
+except Exception as e:
+    log.warning(f"Backfill unified_user_mapping failed: {e}")
 # 兼容旧列迁移（幂等）
 try:
     db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")

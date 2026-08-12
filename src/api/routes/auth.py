@@ -4,6 +4,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import get_current_user
+from src.config import log
 import hashlib, os, time
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -131,6 +132,14 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
     if gitcode_nickname:
         user_acc["nickname"] = gitcode_nickname
     user_db.save_user_account(local_user["username"], user_acc)
+
+    # 登录成功即建立 GitCode↔平台 user 映射（unified_user_mapping），
+    # 使 /api/tasks/notify 能解析 assignee→user_id（tasks.py:52）；幂等，每次登录刷新
+    try:
+        from src.session_manager import set_feishu_open_id
+        set_feishu_open_id("", gitcode_login, "", "", gitcode_nickname)
+    except Exception as e:
+        log.warning(f"OAuth login: write user mapping failed: {e}")
 
     token = user_db.create_session_token(local_user["id"])
     # 仅真正首次登录（无任何托管仓库）才 first_login=1（前端清 currentRepo 进仓库选择页）；
