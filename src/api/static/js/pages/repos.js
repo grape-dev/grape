@@ -1,6 +1,5 @@
 // ====== 仓库选择页：宏观大堂（Lobby）风格 ======
-let _projectsContent = '';     // 仓库管理页（Hosted/Available 表格）缓存
-let _workspaceContent = '';    // 工作项目大堂（Lobby 卡片）缓存
+let _projectsContent = '';
 let _projectsRepos = [];
 
 function renderSelectionShell(tab, innerHtml) {
@@ -8,13 +7,12 @@ function renderSelectionShell(tab, innerHtml) {
   if (!d) return;
   const active = tab || localStorage.getItem('sidebarTab') || 'projects';
   const tabCls = t => 'rs-tab' + (active === t ? ' rs-tab-act' : '');
-  const _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
-  const user = (_lu && (_lu.nickname || _lu.username)) || 'User';
+  const user = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).username : 'User';
   const avatar = (user || 'U')[0].toUpperCase();
   const html = `<div class="lobby">
     <header class="lobby-head">
       <div class="lobby-brand">
-        <img class="lobby-logo" src="/static/logo-128.png" alt="Grape">
+        <img class="lobby-logo" src="/static/logo.png" alt="Grape">
         <span class="lobby-brand-name">Grape</span>
         <span class="lobby-brand-sub">Agentic DevOps</span>
       </div>
@@ -40,56 +38,58 @@ function switchSidebarTab(tab) {
   if (tab === 'templates') {
     renderTemplates();
   } else {
-    // 工作项目大堂：先秒开缓存，再后台强制 sync 拉最新（含新创建项目）
-    if (_workspaceContent) {
-      renderSelectionShell('projects', _workspaceContent);
+    if (_projectsContent) {
+      renderSelectionShell('projects', _projectsContent);
+    } else {
+      renderRepos();
     }
-    refreshWorkspace();
   }
 }
 
-// 拉取最新仓库并渲染「工作项目」大堂（强制 sync 刷新 user_repos 缓存）
-function refreshWorkspace() {
-  API.post('/repos/sync').then(d => {
-    renderRepoSelection(d.repos || []);
-  }).catch(() => {
-    // sync 失败回退读缓存
-    API.get('/repos/member').then(d => {
-      renderRepoSelection(d.repos || []);
-    }).catch(() => {});
-  });
-}
-
 // ====== 仓库选择主内容 ======
+let _repoPage = 0;
+const _REPO_PAGE_SIZE = 9;
+
 function renderRepoSelection(repos) {
   const d = document.getElementById('pageContent');
   if (!d) return;
   _projectsRepos = repos || [];
-  const _lu2 = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
-  const user = (_lu2 && (_lu2.nickname || _lu2.username)) || 'User';
+  const user = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')).username : 'User';
   const hostedCount = (repos || []).filter(r => r.is_hosted).length;
   const joinedCount = (repos || []).filter(r => r.is_joined && !r.is_hosted).length;
   const name = (user || '朋友').split('@')[0];
 
-  let inner = `<div class="lobby-hero">
+  const allRepos = repos || [];
+  const total = allRepos.length;
+  const pages = Math.max(1, Math.ceil(total / _REPO_PAGE_SIZE));
+  if (_repoPage >= pages) _repoPage = 0;
+  const pageRepos = allRepos.slice(_repoPage * _REPO_PAGE_SIZE, (_repoPage + 1) * _REPO_PAGE_SIZE);
+
+  let pagerHtml = '';
+  if (pages > 1) {
+    pagerHtml = `<div class="tmpl-pager">
+      <button class="tmpl-page-btn" ${_repoPage === 0 ? 'disabled' : ''} onclick="goRepoPage(-1)">‹</button>
+      <span class="tmpl-page-info">${_repoPage + 1} / ${pages}</span>
+      <button class="tmpl-page-btn" ${_repoPage >= pages - 1 ? 'disabled' : ''} onclick="goRepoPage(1)">›</button>
+    </div>`;
+  }
+
+  let inner = `<button class="lobby-refresh-btn" onclick="refreshRepos(this)" title="从 GitCode 刷新仓库列表">↻ 刷新</button>
+  <div class="lobby-hero">
     <div class="lobby-eyebrow"><i></i>WELCOME TO GRAPE<i></i></div>
     <h1 class="lobby-title">你好，<span>${name}</span><span class="lobby-hello">👋</span></h1>
-    <p class="lobby-sub">选择一个工作项目，开启您的 AI for AI DevOps 之旅。</p>
+    <p class="lobby-sub">选择一个工作项目，开启由 Agent 驱动的自动化 DevOps 之旅。</p>
     <div class="lobby-stats-inline">
-      <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${repos ? repos.length : 0}</b><span>工作项目</span></div>
+      <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${total}</b><span>工作项目</span></div>
       <div class="lobby-stat"><span class="lobby-stat-ic">✓</span><b>${hostedCount}</b><span>已托管</span></div>
       <div class="lobby-stat"><span class="lobby-stat-ic">◇</span><b>${joinedCount}</b><span>已加入</span></div>
     </div>
   </div>
 
   <div class="lobby-grid">
-    <div class="lobby-card lobby-card-add" onclick="window.open('https://gitcode.com/create','_blank')">
-      <div class="lobby-card-plus">＋</div>
-      <h3>创建新项目</h3>
-      <p>在 GitCode 上新建项目，从零开始搭建你的 AI 开发工作流。</p>
-    </div>
-    ${[...(repos || [])].sort((a, b) => (b.is_hosted ? 1 : 0) - (a.is_hosted ? 1 : 0) || (b.is_joined ? 1 : 0) - (a.is_joined ? 1 : 0)).map(r => _buildLobbyCard(r)).join('')}
+    ${pageRepos.map(r => _buildLobbyCard(r)).join('')}
   </div>
+  ${pagerHtml}
 
   <div class="lobby-empty" id="rsEmpty" style="display:none">
     <div class="lobby-empty-ic">🔭</div>
@@ -97,8 +97,15 @@ function renderRepoSelection(repos) {
     <p>试试更换关键词或筛选条件。</p>
   </div>`;
 
-  _workspaceContent = inner;
+  _projectsContent = inner;
   renderSelectionShell('projects', inner);
+}
+
+function goRepoPage(dir) {
+  const total = (_projectsRepos || []).length;
+  const pages = Math.max(1, Math.ceil(total / _REPO_PAGE_SIZE));
+  _repoPage = (_repoPage + dir + pages) % pages;
+  renderRepoSelection(_projectsRepos);
 }
 
 function _buildLobbyCard(r) {
@@ -127,14 +134,10 @@ function _buildLobbyCard(r) {
 }
 
 // ====== 仓库管理页（侧边栏「＋ 新增仓库托管」）======
-function renderRepos(opts) {
-  opts = opts || {};
+function renderRepos() {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  // 静默模式：不先渲染 loading（保留当前缓存画面），fetch 完成后原地更新
-  if (!opts.silent) {
-    renderSelectionShell('projects', '<div class="loading">加载中...</div>');
-  }
+  renderSelectionShell('projects', '<div class="loading">加载中...</div>');
 
   API.get('/repos/member').then(d => {
     const allRepos = d.repos || [];
@@ -187,8 +190,6 @@ function renderRepos(opts) {
     const pc = document.getElementById('ptContent');
     if (pc) pc.innerHTML = html;
   }).catch(() => {
-    // 静默模式失败：保留已有缓存画面，不覆盖
-    if (opts.silent) return;
     const pc = document.getElementById('ptContent');
     if (pc) pc.innerHTML = '<div class="error">加载失败</div>';
   });
@@ -200,6 +201,19 @@ function syncRepos() {
     app.showToast('同步成功');
     renderRepos();
   }).catch(e => app.showToast('同步失败: ' + e.message));
+}
+
+function refreshRepos(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '↻ 同步中…'; }
+  API.post('/repos/sync').then(d => {
+    const repos = (d.repos || []);
+    _repoPage = 0;
+    renderRepoSelection(repos);
+    app.showToast('刷新成功');
+  }).catch(e => {
+    app.showToast('刷新失败: ' + (e.message || e));
+    if (btn) { btn.disabled = false; btn.textContent = '↻ 刷新'; }
+  });
 }
 
 function hostAndSelect(fullName, owner, name) {
@@ -266,4 +280,117 @@ function unhostRepo(fullName) {
       });
     });
   }).catch(e => app.showToast('解除托管失败: ' + e.message));
+}
+
+// ====== 创建新项目弹窗 ======
+function openCreateRepoModal() {
+  closeCreateRepoModal();
+  const modal = document.createElement('div');
+  modal.id = 'createRepoModal';
+  modal.className = 'create-repo-overlay';
+  modal.innerHTML = `<div class="create-repo-modal">
+    <div class="create-repo-head">
+      <div class="create-repo-title">
+        <span class="create-repo-ic">＋</span>
+        <div>
+          <h3>创建新项目</h3>
+          <p>在 GitCode 上新建仓库，创建后可立即进入托管工作流。</p>
+        </div>
+      </div>
+      <button class="create-repo-x" onclick="closeCreateRepoModal()">✕</button>
+    </div>
+    <form class="create-repo-form" onsubmit="submitCreateRepo(event)">
+      <div class="create-repo-field">
+        <label for="crName">仓库名称 <span class="cr-req">*</span></label>
+        <input id="crName" type="text" placeholder="例如：my-project" autocomplete="off" maxlength="64" required>
+        <p class="cr-hint">仅限字母、数字、下划线、连字符和点，将以你的账号命名空间创建。</p>
+      </div>
+      <div class="create-repo-field">
+        <label for="crDesc">项目描述</label>
+        <textarea id="crDesc" rows="3" placeholder="简要描述这个项目的用途（可选）" maxlength="255"></textarea>
+      </div>
+      <div class="create-repo-field">
+        <label>可见性</label>
+        <div class="create-repo-vis">
+          <button type="button" class="cr-vis-btn cr-vis-act" data-vis="private" onclick="selectVisibility(this)"><span class="cr-vis-ic">🔒</span><div><b>私有</b><em>仅自己和授权协作者可见</em></div></button>
+          <button type="button" class="cr-vis-btn" data-vis="public" onclick="selectVisibility(this)"><span class="cr-vis-ic">🌐</span><div><b>公开</b><em>所有人可见，可克隆</em></div></button>
+        </div>
+      </div>
+      <div class="create-repo-actions">
+        <button type="button" class="cr-btn cr-btn-ghost" onclick="closeCreateRepoModal()">取消</button>
+        <button type="submit" class="cr-btn cr-btn-primary" id="crSubmit">
+          <span class="cr-btn-txt">创建项目</span>
+          <span class="cr-btn-loading" style="display:none">创建中…</span>
+        </button>
+      </div>
+    </form>
+  </div>`;
+  document.body.appendChild(modal);
+  document.body.style.overflow = 'hidden';
+  const input = document.getElementById('crName');
+  if (input) setTimeout(() => input.focus(), 60);
+}
+
+function closeCreateRepoModal() {
+  const m = document.getElementById('createRepoModal');
+  if (m) m.remove();
+  document.body.style.overflow = '';
+}
+
+function selectVisibility(btn) {
+  document.querySelectorAll('.cr-vis-btn').forEach(b => b.classList.remove('cr-vis-act'));
+  btn.classList.add('cr-vis-act');
+}
+
+function submitCreateRepo(e) {
+  e.preventDefault();
+  const name = (document.getElementById('crName').value || '').trim();
+  if (!name) return app.showToast('请输入仓库名称');
+  const desc = document.getElementById('crDesc').value.trim();
+  const visBtn = document.querySelector('.cr-vis-btn.cr-vis-act');
+  const visibility = visBtn ? visBtn.getAttribute('data-vis') : 'private';
+
+  const btn = document.getElementById('crSubmit');
+  const txt = btn.querySelector('.cr-btn-txt');
+  const ld = btn.querySelector('.cr-btn-loading');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  if (txt) txt.style.display = 'none';
+  if (ld) ld.style.display = '';
+
+  API.get('/repos/check-name?name=' + encodeURIComponent(name))
+    .then(check => {
+      if (check.exists) {
+        btn.disabled = false;
+        if (txt) txt.style.display = '';
+        if (ld) ld.style.display = 'none';
+        app.showToast('仓库 ' + check.full_name + ' 已存在，请更换名称');
+        return;
+      }
+      API.post('/repos/create', {name, description: desc, visibility})
+        .then(r => {
+          app.showToast('项目创建成功: ' + (r.full_name || name));
+          closeCreateRepoModal();
+          if (typeof _projectsRepos !== 'undefined') {
+            API.get('/repos/member').then(d => {
+              const repos = d.repos || [];
+              renderRepoSelection(repos);
+            }).catch(() => renderRepos());
+          } else {
+            renderRepos();
+          }
+        })
+        .catch(err => {
+          app.showToast('创建失败: ' + (err.message || err));
+          btn.disabled = false;
+          if (txt) txt.style.display = '';
+          if (ld) ld.style.display = 'none';
+        });
+    })
+    .catch(err => {
+      btn.disabled = false;
+      if (txt) txt.style.display = '';
+      if (ld) ld.style.display = 'none';
+      app.showToast('检查失败: ' + (err.message || err));
+    });
 }

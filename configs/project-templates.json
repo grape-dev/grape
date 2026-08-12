@@ -1,102 +1,183 @@
 {
   "categories": [
     {
-      "id": "cloud-native",
-      "name": "云原生项目模板",
-      "icon": "☁️",
-      "description": "容器化 / 微服务 / 云原生部署项目起点",
-      "scene_id": "cloud-native",
+      "id": "hello-world",
+      "name": "Hello World 新手模板",
+      "icon": "👋",
+      "description": "面向新手的极简小项目：随机挑一个试试，几分钟就能跑通并创建自己的代码仓，快速上手我们的系统",
+      "scene_id": "default",
+      "random_mode": true,
       "templates": [
         {
-          "id": "730harmony-ecommerce",
-          "name": "Harmony 电商应用",
-          "description": "基于 HarmonyOS ArkTS 的分布式电商应用：跨设备协同购物，多端购物车同步、商品详情流转，含首页推荐、商品详情、订单管理，展示华为云码道 730 新特性",
-          "icon": "🛍️",
-          "source": "git",
-          "source_repo": "Lingxi-HandsOn/730harmony-ecommerce",
-          "default_repo_name": "730harmony-ecommerce",
-          "tags": [
-            "harmonyos",
-            "arkts",
-            "ecommerce",
-            "distributed"
-          ],
-          "scene_id": "cloud-native",
-          "video_url": "https://weixin.qq.com/sph/AGelTzuCcf"
+          "id": "hello-flask",
+          "name": "Hello Flask",
+          "description": "极简 Flask Web 应用：一个路由返回 Hello World 页面，适合新手学习 Web 服务基础",
+          "icon": "🌶️",
+          "source": "local",
+          "default_repo_name": "hello-flask",
+          "tags": ["python", "web", "starter"],
+          "scene_id": "default",
+          "stats": {"show": false}
         },
         {
-          "id": "bp-gateway",
-          "name": "Best Practice Gateway",
-          "description": "最佳实践网关服务：Go 微服务网关，含 Dockerfile 与 Kubernetes 部署清单（configmap/service/secret）",
-          "icon": "🚪",
-          "source": "git",
-          "source_repo": "Lingxi-HandsOn/bp-gateway",
-          "default_repo_name": "bp-gateway",
-          "tags": [
-            "golang",
-            "gateway",
-            "k8s",
-            "docker"
-          ],
-          "scene_id": "cloud-native",
-          "video_url": ""
+          "id": "hello-fastapi",
+          "name": "Hello FastAPI",
+          "description": "极简 FastAPI 服务：提供 / 和 /health 接口，含启动说明，适合学习现代 Python API",
+          "icon": "⚡",
+          "source": "local",
+          "default_repo_name": "hello-fastapi",
+          "tags": ["python", "api", "fastapi"],
+          "scene_id": "default",
+          "stats": {"show": false}
         },
         {
-          "id": "codearts-mcp",
-          "name": "CodeArts MCP 服务",
-          "description": "码道对接 CodeArts 的 MCP 服务：Dockerfile + docker-compose + deploy 运维脚本，云原生部署形态",
-          "icon": "🔌",
-          "source": "git",
-          "source_repo": "Lingxi-HandsOn/codearts-mcp",
-          "default_repo_name": "codearts-mcp",
-          "tags": [
-            "node",
-            "mcp",
-            "docker",
-            "compose"
-          ],
-          "scene_id": "cloud-native",
-          "video_url": ""
+          "id": "hello-todo",
+          "name": "Hello Todo CLI",
+          "description": "命令行待办清单：添加、列出、完成待办事项，理解简单的 Python 交互程序",
+          "icon": "📝",
+          "source": "local",
+          "default_repo_name": "hello-todo",
+          "tags": ["python", "cli", "todo"],
+          "scene_id": "default",
+          "stats": {"show": false}
         },
         {
-          "id": "gallery",
-          "name": "作品陈列馆 Gallery",
-          "description": "华为云高校训练营作品展示平台：全栈应用 + Dockerfile + deploy/frontend 容器化部署",
-          "icon": "🖼️",
-          "source": "git",
-          "source_repo": "Lingxi-HandsOn/gallery",
-          "default_repo_name": "gallery",
-          "tags": [
-            "web",
-            "fullstack",
-            "docker"
-          ],
-          "scene_id": "cloud-native",
-          "video_url": ""
+          "id": "hello-calculator",
+          "name": "Hello Calculator",
+          "description": "简单计算器：Python 实现的加减乘除，附带单元测试，学习测试驱动开发基础",
+          "icon": "🧮",
+          "source": "local",
+          "default_repo_name": "hello-calculator",
+          "tags": ["python", "cli", "test"],
+          "scene_id": "default",
+          "stats": {"show": false}
         },
         {
-          "id": "practice-hub",
-          "name": "PracticeHub 实操平台",
-          "description": "知行 AI 实操实验室：开发者 AI 技能在线实践平台（Vue+TS），含 docs/deployment 部署文档",
-          "icon": "🧪",
+          "id": "hello-html",
+          "name": "Hello Static Site",
+          "description": "静态网页模板：HTML + CSS + JavaScript，含交互按钮，学习前端三件套",
+          "icon": "🖥️",
+          "source": "local",
+          "default_repo_name": "hello-html",
+          "tags": ["html", "css", "js", "frontend"],
+          "scene_id": "default",
+          "stats": {"show": false}
+        },
+        {
+          "id": "hello-blog",
+          "name": "Hello Mini Blog",
+          "description": "极简博客：Flask 多页面博客骨架，含首页与文章页，学习路由与模板渲染",
+          "icon": "📚",
+          "source": "local",
+          "default_repo_name": "hello-blog",
+          "tags": ["python", "flask", "blog"],
+          "scene_id": "default",
+          "stats": {"show": false}
+        },
+        {
+          "id": "games",
+          "name": "Python 小游戏合集",
+          "description": "GitCode 热门项目（⭐123）：多款 Python 小游戏合集，下载收藏量高，适合新手玩转 Python",
+          "icon": "🎮",
           "source": "git",
-          "source_repo": "Lingxi-HandsOn/PracticeHub",
-          "default_repo_name": "PracticeHub",
-          "tags": [
-            "vue",
-            "ai",
-            "platform"
-          ],
-          "scene_id": "cloud-native",
-          "video_url": ""
+          "source_repo": "stormsha1/games",
+          "default_repo_name": "python-games",
+          "tags": ["python", "game", "popular"],
+          "scene_id": "default",
+          "stats": {"show": true, "stars": 123}
+        },
+        {
+          "id": "spider-xhs",
+          "name": "小红书数据采集",
+          "description": "GitCode 热门项目（⭐19）：小红书爬虫数据采集工具，学习 Python 爬虫与数据提取",
+          "icon": "🕷️",
+          "source": "git",
+          "source_repo": "cv-cat/Spider_XHS",
+          "default_repo_name": "spider-xhs",
+          "tags": ["python", "spider", "crawler"],
+          "scene_id": "default",
+          "stats": {"show": true, "stars": 19}
+        },
+        {
+          "id": "markitdown",
+          "name": "文档转 Markdown",
+          "description": "GitCode 热门项目（⭐7）：将文件与办公文档转换为 Markdown 的 Python 工具",
+          "icon": "📄",
+          "source": "git",
+          "source_repo": "daily_hot/markitdown",
+          "default_repo_name": "markitdown",
+          "tags": ["python", "tool", "markdown"],
+          "scene_id": "default",
+          "stats": {"show": true, "stars": 7}
+        },
+        {
+          "id": "snake-game",
+          "name": "贪吃蛇游戏",
+          "description": "GitCode 热门项目（⭐6）：经典贪吃蛇小游戏，学习游戏逻辑、键盘控制与渲染",
+          "icon": "🐍",
+          "source": "git",
+          "source_repo": "sanchong/SnakeGame",
+          "default_repo_name": "snake-game",
+          "tags": ["python", "game", "snake"],
+          "scene_id": "default",
+          "stats": {"show": true, "stars": 6}
+        },
+        {
+          "id": "zwdzjs-demo",
+          "name": "植物大战僵尸 Demo",
+          "description": "GitCode 项目（⭐5）：用 pygame 实现的植物大战僵尸 demo，学习游戏开发",
+          "icon": "🌻",
+          "source": "git",
+          "source_repo": "oaoss-cup/ZWDZJS_demo",
+          "default_repo_name": "pvs-zombies-demo",
+          "tags": ["python", "pygame", "game"],
+          "scene_id": "default",
+          "stats": {"show": true, "stars": 5}
+        },
+        {
+          "id": "flask-blog",
+          "name": "Flask 个人博客",
+          "description": "GitCode 项目（⭐2）：基于 Flask 框架的个人博客网站，学习前后端与数据库",
+          "icon": "📖",
+          "source": "git",
+          "source_repo": "program-code/Python_Flask_Blog",
+          "default_repo_name": "flask-blog",
+          "tags": ["python", "flask", "blog"],
+          "scene_id": "default",
+          "stats": {"show": true, "stars": 2}
+        },
+        {
+          "id": "alien-invasion",
+          "name": "外星人入侵游戏",
+          "description": "GitCode 项目（⭐1）：经典 pygame 外星人入侵射击游戏，学习游戏循环与事件处理",
+          "icon": "👾",
+          "source": "git",
+          "source_repo": "tjip/alien_invasion",
+          "default_repo_name": "alien-invasion",
+          "tags": ["python", "pygame", "game"],
+          "scene_id": "default",
+          "stats": {"show": true, "stars": 1}
+        },
+        {
+          "id": "alien-game",
+          "name": "外星人小游戏",
+          "description": "GitCode 项目（⭐1）：简单好玩的外星人小游戏，适合初学者上手 pygame",
+          "icon": "🛸",
+          "source": "git",
+          "source_repo": "LannyQLT/Alien",
+          "default_repo_name": "alien-game",
+          "tags": ["python", "pygame", "game"],
+          "scene_id": "default",
+          "stats": {"show": true, "stars": 1}
         }
-      ]
+      ],
+      "page_size": 9
     },
     {
       "id": "agent-best-practices",
-      "name": "AI Office 项目模板",
-      "icon": "🤖",
-      "description": "AI 办公场景应用模板",
+      "name": "Agent 最佳实践",
+      "icon": "🚀",
+      "description": "agent-best-practices 组织沉淀的 AI Agent 落地实战项目模板",
       "scene_id": "default",
       "templates": [
         {
@@ -107,13 +188,8 @@
           "source": "git",
           "source_repo": "agent-best-practices/redbook-operate",
           "default_repo_name": "redbook-operate",
-          "tags": [
-            "agent",
-            "automation",
-            "content"
-          ],
-          "scene_id": "default",
-          "video_url": ""
+          "tags": ["agent", "automation", "content"],
+          "scene_id": "default"
         },
         {
           "id": "ai-interview-swarm",
@@ -123,13 +199,8 @@
           "source": "git",
           "source_repo": "agent-best-practices/ai-interview-swarm",
           "default_repo_name": "ai-interview-swarm",
-          "tags": [
-            "agent",
-            "multi-agent",
-            "interview"
-          ],
-          "scene_id": "default",
-          "video_url": ""
+          "tags": ["agent", "multi-agent", "interview"],
+          "scene_id": "default"
         },
         {
           "id": "get-together",
@@ -139,13 +210,8 @@
           "source": "git",
           "source_repo": "agent-best-practices/get-together",
           "default_repo_name": "get-together",
-          "tags": [
-            "agent",
-            "social",
-            "travel"
-          ],
-          "scene_id": "default",
-          "video_url": ""
+          "tags": ["agent", "social", "travel"],
+          "scene_id": "default"
         },
         {
           "id": "prompt-to-premiere",
@@ -155,13 +221,8 @@
           "source": "git",
           "source_repo": "agent-best-practices/Prompt_to_Premiere",
           "default_repo_name": "Prompt-to-Premiere",
-          "tags": [
-            "agent",
-            "video",
-            "content"
-          ],
-          "scene_id": "default",
-          "video_url": ""
+          "tags": ["agent", "video", "content"],
+          "scene_id": "default"
         },
         {
           "id": "ai-campus-event-planner",
@@ -171,13 +232,8 @@
           "source": "git",
           "source_repo": "agent-best-practices/ai-campus-event-planner",
           "default_repo_name": "ai-campus-event-planner",
-          "tags": [
-            "agent",
-            "multi-agent",
-            "campus"
-          ],
-          "scene_id": "default",
-          "video_url": ""
+          "tags": ["agent", "multi-agent", "campus"],
+          "scene_id": "default"
         },
         {
           "id": "powered-by-jiuwen",
@@ -187,13 +243,8 @@
           "source": "git",
           "source_repo": "agent-best-practices/powered-by-jiuwen",
           "default_repo_name": "powered-by-jiuwen",
-          "tags": [
-            "agent",
-            "jiuwen",
-            "incubator"
-          ],
-          "scene_id": "default",
-          "video_url": ""
+          "tags": ["agent", "jiuwen", "incubator"],
+          "scene_id": "default"
         },
         {
           "id": "xhs-cross-platform-rewrite",
@@ -203,13 +254,8 @@
           "source": "git",
           "source_repo": "agent-best-practices/xhs-cross-platform-rewrite",
           "default_repo_name": "xhs-cross-platform-rewrite",
-          "tags": [
-            "skill",
-            "content",
-            "xhs"
-          ],
-          "scene_id": "default",
-          "video_url": ""
+          "tags": ["skill", "content", "xhs"],
+          "scene_id": "default"
         }
       ]
     },
@@ -227,12 +273,48 @@
           "icon": "🧩",
           "source": "local",
           "default_repo_name": "hello-skill",
-          "tags": [
-            "skill",
-            "starter"
-          ],
-          "scene_id": "skill-dev",
-          "video_url": ""
+          "tags": ["skill", "starter"],
+          "scene_id": "skill-dev"
+        }
+      ]
+    },
+    {
+      "id": "ai-office",
+      "name": "AI office 项目模板",
+      "icon": "🤖",
+      "description": "AI 办公场景应用模板",
+      "scene_id": "default",
+      "templates": [
+        {
+          "id": "ai-assistant",
+          "name": "AI Assistant",
+          "description": "基于大模型的办公助手项目骨架",
+          "icon": "🤖",
+          "source": "git",
+          "source_repo": "devops-bot/ai-office-assistant",
+          "default_repo_name": "ai-assistant",
+          "tags": ["ai", "office"],
+          "scene_id": "default"
+        }
+      ]
+    },
+    {
+      "id": "cloud-native",
+      "name": "云原生项目模板",
+      "icon": "☁️",
+      "description": "容器化 / 微服务项目起点",
+      "scene_id": "cloud-native",
+      "templates": [
+        {
+          "id": "micro-svc",
+          "name": "Micro Service",
+          "description": "Go + Docker + Kubernetes 微服务骨架",
+          "icon": "☁️",
+          "source": "git",
+          "source_repo": "devops-bot/cloud-native-microsvc",
+          "default_repo_name": "micro-svc",
+          "tags": ["golang", "k8s", "docker"],
+          "scene_id": "cloud-native"
         }
       ]
     },
@@ -251,12 +333,8 @@
           "source": "git",
           "source_repo": "devops-bot/terraform-infra",
           "default_repo_name": "tf-infra",
-          "tags": [
-            "terraform",
-            "iac"
-          ],
-          "scene_id": "iac",
-          "video_url": ""
+          "tags": ["terraform", "iac"],
+          "scene_id": "iac"
         }
       ]
     }
