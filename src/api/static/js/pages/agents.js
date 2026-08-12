@@ -108,7 +108,7 @@ function renderAgent(name, data) {
       <option value="${data.skill || ''}" ${data.skill ? 'selected' : ''}>${data.skill ? '加载中...' : '默认官方技能（自动）'}</option>
     </select>
   </div>
-  ${_agentSubsSection(name, data)}
+  ${name === 'sre' ? _agentSubsSection(name, data) : ''}
   ${name === 'vod' ? `
   <div style="margin:16px 0 12px;border-top:1px solid var(--b);padding-top:12px">
     <div class="flex fc jbtw" style="margin-bottom:8px">
@@ -176,12 +176,14 @@ function saveAgentConfig(name) {
   if (!repo) return;
   const body = {backend, skill};
   if (skillScope) body.skill_scope = skillScope;
-  // 事件订阅：PR 合入（勾选）+ 合入分支（逗号分隔，留空=不限）
+  // 事件订阅：PR 合入（勾选）+ 合入分支（逗号分隔，留空=不限）；仅 SRE Agent 开放
   const subEvents = [];
-  const prCb = document.getElementById('subPrMerged');
-  if (prCb && prCb.checked) {
-    const rawBranches = (document.getElementById('subPrBranches')?.value || '').replace(/，/g, ',');
-    subEvents.push({event_type: 'pull_request_merged', branch: rawBranches.trim()});
+  if (name === 'sre') {
+    const prCb = document.getElementById('subPrMerged');
+    if (prCb && prCb.checked) {
+      const rawBranches = (document.getElementById('subPrBranches')?.value || '').replace(/，/g, ',');
+      subEvents.push({event_type: 'pull_request_merged', branch: rawBranches.trim()});
+    }
   }
   body.subscribe_events = subEvents;
   if (name === 'vod') {
