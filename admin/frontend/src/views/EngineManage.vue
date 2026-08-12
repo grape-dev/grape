@@ -83,13 +83,16 @@
             </span>
             <span style="font-weight:600;font-size:14px">
               {{ e.displayName || e.name }}
-              <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">{{ e.name }} v{{ e.version || '' }}</span>
+              <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">
+                <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span>
+              </span>
             </span>
           </div>
           <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
-            <div><span class="t3" style="display:inline-block;min-width:46px">设备</span> {{ e.device || '—' }}</div>
+            <div class="ellipsis-cell" :title="e.device || '—'"><span class="t3" style="display:inline-block;min-width:46px">设备</span> {{ e.device || '—' }}</div>
+            <div class="ellipsis-cell" :title="e.version || '-'"><span class="t3" style="display:inline-block;min-width:46px">版本</span> {{ e.version || '-' }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(e.lastSeenAt) }}</div>
-            <div style="grid-column:1 / -1"><span class="t3" style="display:inline-block;min-width:46px">归属/范围</span> {{ e.ownerId || '—' }} <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span></div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ e.ownerId || '—' }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
             <button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button>
