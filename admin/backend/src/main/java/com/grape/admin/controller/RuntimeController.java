@@ -87,12 +87,21 @@ public class RuntimeController {
 
     @PostMapping("/credentials")
     public Map<String, String> issueCredential(@RequestBody Map<String, String> body, HttpServletRequest request) {
-        String token = credentialService.issue(body.get("deviceName"), AuthContext.username(request));
-        return Map.of("token", token, "deviceName", body.get("deviceName") == null ? "" : body.get("deviceName"));
+        // 契约：凭据名称字段为 name（凭据=身份，名称即凭据名）
+        String name = body.get("name");
+        String token = credentialService.issue(name, AuthContext.username(request));
+        return Map.of("token", token, "name", name == null ? "" : name);
     }
 
     @PostMapping("/devices/{cid}/revoke")
     public Map<String, String> revoke(@PathVariable Integer cid, HttpServletRequest request) {
+        credentialService.revoke(cid, AuthContext.username(request));
+        return Map.of("status", "ok");
+    }
+
+    @PostMapping("/credentials/{cid}/revoke")
+    public Map<String, String> revokeCredential(@PathVariable Integer cid, HttpServletRequest request) {
+        // 凭据=设备（1:1 共享主键），凭据吊销走凭据路径（设备页仍用 /devices/{cid}/revoke）
         credentialService.revoke(cid, AuthContext.username(request));
         return Map.of("status", "ok");
     }

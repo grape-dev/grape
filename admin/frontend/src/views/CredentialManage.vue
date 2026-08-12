@@ -213,9 +213,9 @@ async function issue() {
   if (!deviceName.value.trim()) { showToast('请输入设备名', 'error'); return }
   issuing.value = true
   try {
-    const { data } = await http.post('/credentials', { deviceName: deviceName.value })
+    const { data } = await http.post('/credentials', { name: deviceName.value })
     issuedToken.value = data.token
-    showToast(`凭据 ${data.deviceName} 签发成功`)
+    showToast(`凭据 ${data.name} 签发成功`)
     load()   // 签发成功自动刷新列表
   } catch (e) {
     showToast(e.response?.data?.message || '签发失败', 'error')
@@ -229,7 +229,7 @@ function openRevoke(c) {
 async function confirmRevoke() {
   const c = revokeTarget.value
   try {
-    await http.post(`/devices/${c.id}/revoke`)
+    await http.post(`/credentials/${c.id}/revoke`)
     showToast(`凭据 ${c.name} 已吊销，其 worker 已失效`)
     revokeTarget.value = null
     load()
