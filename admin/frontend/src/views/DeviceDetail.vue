@@ -16,7 +16,7 @@
         <div class="detail-grid">
           <div class="detail-item" :style="{ borderLeftColor: detail.status === 'active' ? '#52c41a' : 'var(--text-tertiary)' }">
             <span class="t3">状态</span>
-            <span :class="['status-tag', detail.status === 'active' ? 'success' : 'default']">{{ detail.status }}</span>
+            <span :class="['status-tag', detail.status === 'active' ? 'success' : 'default']">{{ detail.status === 'active' ? '有效' : '已吊销' }}</span>
           </div>
           <div class="detail-item"><span class="t3">范围</span>{{ scopeText(detail.scope) }}</div>
           <div class="detail-item"><span class="t3">归属</span>{{ detail.ownerName || '—' }}</div>
