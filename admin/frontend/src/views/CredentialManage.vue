@@ -77,12 +77,15 @@
       <p v-if="!credentials.length" class="t2" style="padding:16px;text-align:center">无匹配凭据</p>
 
       <div v-if="total > 0" class="pagination-bar">
-        <span class="page-info">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ total }} 条）</span>
+        <span class="page-info">
+          <template v-if="totalPages > 1">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ total }} 条）</template>
+          <template v-else>共 {{ total }} 条</template>
+        </span>
         <select v-model="size" class="page-size-select" @change="page = 0; load()">
           <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
         </select>
-        <button class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
-        <button class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
+        <button v-if="totalPages > 1" class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
+        <button v-if="totalPages > 1" class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
       </div>
     </div>
 
