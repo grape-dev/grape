@@ -199,6 +199,15 @@ public class RuntimeDeviceService {
                                 ? e.getValue().getName() : e.getValue().getDeviceName()));
 
         List<Map<String, Object>> filtered = new ArrayList<>();
+        // 全量健康分布统计（不随过滤/分页变化，供页头徽章行）
+        Map<String, Long> healthStats = new LinkedHashMap<>();
+        for (String h : new String[]{"online", "recently_lost", "offline", "about_to_gc"}) {
+            healthStats.put(h, 0L);
+        }
+        for (AgentRuntimeRo r : runtimes) {
+            String h = healthService.engineHealth(r.getStatus(), r.getLastSeenAt());
+            healthStats.merge(h, 1L, Long::sum);
+        }
         for (AgentRuntimeRo r : runtimes) {
             RuntimeCredentialRo cred = r.getCredentialId() == null ? null : credentialById.get(r.getCredentialId());
             if (scope != null && !scope.isBlank()
@@ -229,13 +238,22 @@ public class RuntimeDeviceService {
         Map<String, Long> typeCounts = filtered.stream()
                 .map(m -> (String) m.get("name"))
                 .collect(Collectors.groupingBy(n -> n == null ? "(unknown)" : n, Collectors.counting()));
-        filtered.sort((a, b) -> Integer.compare((Integer) b.get("id"), (Integer) a.get("id")));
+        // 默认按最后心跳降序（最近活跃优先，null 排最后）
+        filtered.sort((a, b) -> {
+            String sa = (String) a.get("lastSeenAt");
+            String sb = (String) b.get("lastSeenAt");
+            if (sa == null && sb == null) return 0;
+            if (sa == null) return 1;
+            if (sb == null) return -1;
+            return sb.compareTo(sa);
+        });
 
         int total = filtered.size();
         int from = Math.min(page * size, total);
         int to = Math.min(from + size, total);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("stats", typeCounts);
+        result.put("healthStats", healthStats);
         result.put("content", filtered.subList(from, to));
         result.put("totalElements", total);
         result.put("totalPages", size > 0 ? (total + size - 1) / size : 0);

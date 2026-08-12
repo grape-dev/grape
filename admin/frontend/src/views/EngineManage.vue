@@ -13,6 +13,14 @@
         </div>
       </div>
 
+      <!-- 健康分布徽章行（点击联动筛选，对齐设备管理页） -->
+      <div class="em-stats">
+        <button class="em-stat" :class="{ on: !health }" @click="setHealth('')">全部 <strong>{{ totalElements }}</strong></button>
+        <button v-for="(label, key) in HEALTH_STATS" :key="key" class="em-stat" :class="{ on: health === key }" @click="setHealth(key)">
+          <span class="em-dot" :style="{ background: (BADGE[key] || {}).color }"></span>{{ label }} <strong>{{ healthStats[key] ?? 0 }}</strong>
+        </button>
+      </div>
+
       <div class="toolbar">
         <select v-model="scope">
           <option value="">全部范围</option>
@@ -28,7 +36,7 @@
           <option value="">全部设备</option>
           <option v-for="d in deviceOptions" :key="d" :value="d">{{ d }}</option>
         </select>
-        <select v-model="status">
+        <select v-model="health">
           <option value="">全部状态</option>
           <option value="online">在线</option>
           <option value="recently_lost">刚失联</option>
@@ -47,18 +55,20 @@
       <div class="card" v-if="view === 'list'">
         <table class="vod-table">
           <thead>
-            <tr><th>实例名</th><th>类型</th><th>版本</th><th>设备</th><th>范围</th><th>健康</th><th>状态</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
+            <tr><th>实例名</th><th>类型</th><th>版本</th><th>二进制</th><th>提供方</th><th>设备</th><th>范围</th><th>健康</th><th>状态</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="e in engines" :key="e.id">
               <td>{{ e.displayName || e.name }}</td>
               <td>{{ e.name }}</td>
               <td class="t3">{{ e.version || '-' }}</td>
+              <td class="t3">{{ e.binary || '-' }}</td>
+              <td class="t3">{{ e.provider || '-' }}</td>
               <td>{{ e.device || '-' }}</td>
               <td><span class="status-tag info">{{ scopeText(e.scope) }}</span></td>
               <td><span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
               <td class="t2">{{ e.status }}</td>
-              <td class="t3">{{ e.lastSeenAt || '-' }}</td>
+              <td class="t3">{{ formatTime(e.lastSeenAt) }}</td>
               <td><button class="btn btn-sm" @click="remove(e)">删除</button></td>
             </tr>
           </tbody>
@@ -93,6 +103,9 @@
 
       <div v-if="totalPages > 1" class="pagination-bar">
         <span class="page-info">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ totalElements }} 条）</span>
+        <select v-model="size" class="page-size-select" @change="page = 0; load()">
+          <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
+        </select>
         <button class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
         <button class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
       </div>
@@ -106,15 +119,18 @@ import http from '../api'
 
 const engines = ref([])
 const stats = ref({})
+const healthStats = ref({})
 const totalElements = ref(0)
 const totalPages = ref(0)
 const page = ref(0)
 const type = ref('')
 const scope = ref('')
 const device = ref('')
-const status = ref('')
+const health = ref('')
 const view = ref('list')
 const deviceOptions = ref([])
+const sizeOptions = [5, 10, 20, 50]
+const size = ref(10)
 const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
 
 const BADGE = {
@@ -123,10 +139,31 @@ const BADGE = {
   offline: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '离线' },
   about_to_gc: { color: 'var(--danger)', bg: '#fee2e2', label: '待回收' }
 }
+const HEALTH_STATS = {
+  online: '在线',
+  recently_lost: '刚失联',
+  offline: '离线',
+  about_to_gc: '待回收'
+}
 const SCOPE_TEXT = { global: '全局', repo: '仓库', user: '个人' }
 function scopeText(s) { return SCOPE_TEXT[s] || s || '—' }
 function healthText(h) { return (BADGE[h] || { label: h }).label }
 function healthClass(h) { return { online: 'success', recently_lost: 'warning', offline: 'default', about_to_gc: 'danger' }[h] || 'default' }
+function formatTime(ts) {
+  if (!ts) return '—'
+  const time = new Date(ts.replace(' ', 'T')).getTime()
+  if (isNaN(time)) return ts
+  const diff = Date.now() - time
+  if (diff < 60000) return '刚刚'
+  if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前'
+  if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前'
+  return ts.slice(0, 16)
+}
+function setHealth(h) {
+  health.value = h
+  page.value = 0
+  load()
+}
 function badgeStyle(h) {
   const b = BADGE[h] || { color: 'var(--text-tertiary)', bg: '#eef0f3' }
   return { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12px', fontWeight: 600, color: b.color, background: b.bg, padding: '3px 10px', borderRadius: '999px', whiteSpace: 'nowrap' }
@@ -144,14 +181,15 @@ async function loadDevices() {
   deviceOptions.value = [...new Set(data.content.map(d => d.deviceName || d.name))]
 }
 async function load() {
-  const { data } = await http.get('/engines', { params: { scope: scope.value, type: type.value, device: device.value, status: status.value, page: page.value, size: 10 } })
+  const { data } = await http.get('/engines', { params: { scope: scope.value, type: type.value, device: device.value, status: health.value, page: page.value, size: size.value } })
   engines.value = data.content
   stats.value = data.stats
+  healthStats.value = data.healthStats || {}
   totalElements.value = data.totalElements
   totalPages.value = data.totalPages
 }
 function search() { page.value = 0; load() }
-function reset() { scope.value = ''; type.value = ''; device.value = ''; status.value = ''; page.value = 0; load() }
+function reset() { scope.value = ''; type.value = ''; device.value = ''; health.value = ''; page.value = 0; load() }
 async function remove(e) {
   if (!confirm(`确认删除引擎 ${e.displayName || e.name}（id=${e.id}）？`)) return
   try {
@@ -161,3 +199,19 @@ async function remove(e) {
 }
 onMounted(() => { load(); loadDevices() })
 </script>
+
+<style scoped>
+/* 健康分布徽章行（对齐设备管理页） */
+.em-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.em-stat {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 3px 10px; border-radius: 12px;
+  background: #f5f7fa; color: var(--text-secondary); border: 1px solid transparent;
+  cursor: pointer; transition: all 0.15s;
+}
+.em-stat strong { font-weight: 600; color: var(--text-primary); }
+.em-stat:hover { border-color: var(--border-color); }
+.em-stat.on { background: var(--primary-bg); color: var(--primary); border-color: var(--primary); }
+.em-stat.on strong { color: var(--primary); }
+.em-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+</style>
