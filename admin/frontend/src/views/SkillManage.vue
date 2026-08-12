@@ -27,6 +27,8 @@
         </select>
         <button class="btn" @click="search">查询</button>
         <button class="btn" @click="reset">重置</button>
+        <!-- 仓库/个人范围下提供新增技能入口（与主项目看板一致） -->
+        <button v-if="scope === 'repo' || scope === 'user'" class="btn btn-primary" style="margin-left:auto" @click="openUpload">＋ 新增技能</button>
       </div>
 
       <!-- 卡片网格 -->
@@ -55,10 +57,48 @@
 
       <p v-if="!skills.length" class="t2" style="padding:16px;text-align:center">无匹配技能</p>
 
-      <div v-if="totalPages > 1" class="pagination-bar">
+      <div v-if="totalElements > 0" class="pagination-bar">
         <span class="page-info">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ totalElements }} 条）</span>
+        <select v-model="size" class="page-size-select" @change="page = 0; load()">
+          <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
+        </select>
         <button class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
         <button class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
+      </div>
+    </div>
+
+    <!-- 上传弹窗 -->
+    <div v-if="showUpload" class="modal" @click.self="showUpload = false">
+      <div class="modal-box" style="width:520px">
+        <h4>新增技能</h4>
+        <div class="upload-row">
+          <label>类型</label>
+          <span>{{ uploadScope === 'repo' ? '仓库技能' : '个人技能' }}</span>
+        </div>
+        <div v-if="uploadScope === 'repo'" class="upload-row">
+          <label>仓库</label>
+          <input v-model="uploadRepo" class="upload-input" placeholder="如 owner/repo（repo_key）" />
+        </div>
+        <div class="upload-row">
+          <label>技能类型</label>
+          <select v-model="uploadAgentType" class="upload-input">
+            <option value="">请选择</option>
+            <option v-for="t in AGENT_TYPE_OPTIONS" :key="t" :value="t">{{ t }}</option>
+          </select>
+        </div>
+        <div class="upload-row">
+          <label>ZIP 文件</label>
+          <input type="file" accept=".zip" class="upload-input" @change="onFileChange" />
+        </div>
+        <p class="t3" style="margin:6px 0 14px">
+          ZIP 内需包含技能目录（含 SKILL.md，Front Matter 必填 name/version/description），
+          不支持可执行文件。
+          <a href="#" @click.prevent="downloadTemplate">下载模板</a>
+        </p>
+        <div class="modal-actions">
+          <button class="btn" @click="showUpload = false">取消</button>
+          <button class="btn btn-primary" :disabled="uploading" @click="submitUpload">{{ uploading ? '上传中...' : '上传' }}</button>
+        </div>
       </div>
     </div>
 
@@ -106,6 +146,8 @@ const agentStats = ref({})
 const totalElements = ref(0)
 const totalPages = ref(0)
 const page = ref(0)
+const size = ref(10)
+const sizeOptions = [10, 20, 50]
 const keyword = ref('')
 const agentType = ref('')
 const scope = ref('')
@@ -113,6 +155,14 @@ const detail = ref(null)
 const mdLoading = ref(false)
 const mdError = ref('')
 const mdContent = ref('')
+const showUpload = ref(false)
+const uploadScope = ref('user')
+const uploadRepo = ref('')
+const uploadAgentType = ref('')
+const uploadFile = ref(null)
+const uploading = ref(false)
+
+const AGENT_TYPE_OPTIONS = ['vod', 'issue', 'coding', 'qa', 'sre', 'chat']
 
 const SCOPE_TEXT = { official: '官方', repo: '仓库', user: '个人' }
 function scopeText(s) { return SCOPE_TEXT[s] || s || '—' }
@@ -122,7 +172,7 @@ const agentTypeOptions = computed(() => Object.keys(agentStats.value).filter(t =
 
 async function load() {
   const { data } = await http.get('/skills', {
-    params: { keyword: keyword.value, agentType: agentType.value, scope: scope.value, page: page.value, size: 12 }
+    params: { keyword: keyword.value, agentType: agentType.value, scope: scope.value, page: page.value, size: size.value }
   })
   skills.value = data.content
   stats.value = data.stats || {}
@@ -145,6 +195,55 @@ async function openDetail(s) {
     mdError.value = err.response?.data?.message || 'SKILL.md 加载失败'
   } finally {
     mdLoading.value = false
+  }
+}
+
+// ===== 新增技能（上传，逻辑与主项目看板一致）=====
+function openUpload() {
+  uploadScope.value = scope.value === 'repo' ? 'repo' : 'user'
+  uploadRepo.value = ''
+  uploadAgentType.value = ''
+  uploadFile.value = null
+  showUpload.value = true
+}
+
+function onFileChange(e) {
+  uploadFile.value = e.target.files[0] || null
+}
+
+async function downloadTemplate() {
+  try {
+    const resp = await http.get('/skills/template', { responseType: 'blob' })
+    const url = URL.createObjectURL(resp.data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'skill-template.zip'
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (err) {
+    alert(err.response?.data?.message || '模板下载失败')
+  }
+}
+
+async function submitUpload() {
+  if (!uploadFile.value) { alert('请选择 ZIP 文件'); return }
+  if (!uploadAgentType.value) { alert('请选择技能类型'); return }
+  if (uploadScope.value === 'repo' && !uploadRepo.value.trim()) { alert('仓库技能必须填写仓库'); return }
+  const fd = new FormData()
+  fd.append('file', uploadFile.value)
+  fd.append('scope', uploadScope.value)
+  fd.append('agentType', uploadAgentType.value)
+  if (uploadScope.value === 'repo') fd.append('repo', uploadRepo.value.trim())
+  uploading.value = true
+  try {
+    const { data } = await http.post('/skills/upload', fd)
+    alert(data.message || '上传成功')
+    showUpload.value = false
+    load()
+  } catch (err) {
+    alert(err.response?.data?.message || '上传失败')
+  } finally {
+    uploading.value = false
   }
 }
 
@@ -188,6 +287,25 @@ onMounted(load)
   min-height: 38px;
 }
 .skill-more { font-size: 11px; }
+.upload-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.upload-row label {
+  min-width: 72px;
+  color: var(--text-secondary, #5f6672);
+}
+.upload-input {
+  flex: 1;
+  padding: 7px 12px;
+  border: 1px solid var(--border, #e2e6ea);
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
+}
 .detail-desc {
   font-size: 13px;
   color: var(--text-secondary, #5f6672);

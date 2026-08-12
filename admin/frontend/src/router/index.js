@@ -10,6 +10,7 @@ const routes = [
   { path: '/runtime/engines', name: 'runtime.engines', component: () => import('../views/EngineManage.vue'), meta: { title: '引擎管理' } },
   { path: '/runtime/credentials', name: 'runtime.credentials', component: () => import('../views/CredentialManage.vue'), meta: { title: '凭据管理' } },
   { path: '/skill/manage', name: 'skill.manage', component: () => import('../views/SkillManage.vue'), meta: { title: 'Skill 管理' } },
+  { path: '/repos/manage', name: 'repos.manage', component: () => import('../views/ReposManage.vue'), meta: { title: '代码仓管理' } },
   { path: '/ai/assistant', name: 'ai.assistant', component: () => import('../views/AiAssistant.vue'), meta: { title: 'AI 助手' } },
   { path: '/ai/history', name: 'ai.history', component: () => import('../views/ChatHistory.vue'), meta: { title: 'AI 历史' } },
   { path: '/sys/users', name: 'sys.users', component: () => import('../views/UserManage.vue'), meta: { title: '用户管理' } },

@@ -24,8 +24,9 @@ spring:
     # grape_test_db 是存量库（已有 grape 业务表），Flyway 需基线化后只应用 admin_* 迁移
     baseline-on-migrate: true
     baseline-version: 0
-    # 共享库上其他部署（远程服务器）可能已应用本地没有的迁移文件（如 V10/V11），忽略而非报错
-    ignore-migration-patterns: '*:missing'
+    # 共享库上其他部署（远程服务器）可能已应用本地没有的迁移文件（如 V14），忽略而非报错
+    # 注：Spring Boot 2.7 只绑定 ignore-missing-migrations（ignore-migration-patterns 是 Boot 3.x 的属性，2.7 无效）
+    ignore-missing-migrations: true
 
 app:
   jwt-secret: ${ADMIN_JWT_SECRET:}
