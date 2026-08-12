@@ -116,6 +116,52 @@ public class UserService {
         }
     }
 
+    /** 编辑用户信息（当前仅昵称） */
+    @Transactional
+    public UserDto updateUser(Long userId, String nickname, HttpServletRequest request) {
+        String operator = AuthContext.username(request);
+        AdminUser user = requireUser(userId);
+        if (nickname != null) {
+            user.setNickname(nickname);
+        }
+        user.setUpdatedBy(operator);
+        userRepository.save(user);
+        List<AdminRole> roles = loadRolesByUser(List.of(user)).getOrDefault(user.getId(), List.of());
+        return toDto(user, roles);
+    }
+
+    /** 重置密码：生成随机 12 位密码，返回明文一次性展示 */
+    @Transactional
+    public String resetPassword(Long userId, HttpServletRequest request) {
+        String operator = AuthContext.username(request);
+        AdminUser user = requireUser(userId);
+        String newPwd = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        user.setPasswordHash(PASSWORD_ENCODER.encode(newPwd));
+        user.setUpdatedBy(operator);
+        userRepository.save(user);
+        return newPwd;
+    }
+
+    /** 角色分布统计（全量有效绑定） */
+    public List<Map<String, Object>> roleStats() {
+        Map<Long, AdminRole> rolesById = roleRepository.findAll().stream()
+                .collect(Collectors.toMap(AdminRole::getId, Function.identity()));
+        List<Map<String, Object>> stats = userRoleRelRepository.countActiveByRoleId().stream()
+                .map(row -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    Long roleId = (Long) row[0];
+                    AdminRole role = rolesById.get(roleId);
+                    m.put("roleId", roleId);
+                    m.put("name", role == null ? String.valueOf(roleId) : role.getName());
+                    m.put("code", role == null ? "" : role.getCode());
+                    m.put("count", ((Number) row[1]).intValue());
+                    return m;
+                })
+                .collect(Collectors.toList());
+        stats.sort(java.util.Comparator.<Map<String, Object>>comparingInt(a -> ((Number) a.get("count")).intValue()).reversed());
+        return stats;
+    }
+
     private Map<Long, List<AdminRole>> loadRolesByUser(List<AdminUser> users) {
         List<Long> userIds = users.stream().map(AdminUser::getId).collect(Collectors.toList());
         if (userIds.isEmpty()) {

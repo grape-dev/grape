@@ -19,4 +19,8 @@ public interface AdminUserRoleRelRepository extends JpaRepository<AdminUserRoleR
     @Modifying
     @Query("update AdminUserRoleRel r set r.deleted = 1, r.updatedBy = :updatedBy where r.userId = :userId and r.deleted = 0")
     int softDeleteByUserId(@Param("userId") Long userId, @Param("updatedBy") String updatedBy);
+
+    /** 有效绑定按角色统计用户数（角色分布徽章） */
+    @Query("select rel.roleId, count(rel) from AdminUserRoleRel rel where rel.deleted = 0 group by rel.roleId")
+    List<Object[]> countActiveByRoleId();
 }

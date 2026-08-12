@@ -18,6 +18,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.validation.Valid;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -62,6 +63,26 @@ public class UserController {
             return null;
         });
         return Map.of("status", "ok");
+    }
+
+    /** 编辑用户信息（昵称）——对齐 VOD 编辑用户 */
+    @PutMapping("/{id}")
+    public UserDto updateUser(@PathVariable Long id,
+                              @RequestBody Map<String, String> body,
+                              HttpServletRequest request) {
+        return wrap(() -> userService.updateUser(id, body.get("nickname"), request));
+    }
+
+    /** 重置密码：随机 12 位，返回明文一次性展示——对齐 VOD 重置密码 */
+    @PutMapping("/{id}/reset-password")
+    public Map<String, String> resetPassword(@PathVariable Long id, HttpServletRequest request) {
+        return wrap(() -> Map.of("password", userService.resetPassword(id, request)));
+    }
+
+    /** 角色分布统计（全量有效绑定）——对齐 VOD 角色分布徽章 */
+    @GetMapping("/role-stats")
+    public List<Map<String, Object>> roleStats() {
+        return userService.roleStats();
     }
 
     private <T> T wrap(java.util.function.Supplier<T> supplier) {
