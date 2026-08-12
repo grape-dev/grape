@@ -38,13 +38,13 @@
               <td>{{ c.name }}</td>
               <td>{{ c.ownerName || '-' }}</td>
               <td><span class="status-tag info">{{ scopeText(c.scope) }}</span></td>
-              <td><span :class="['status-tag', c.status === 'active' ? 'success' : 'default']">{{ c.status }}</span></td>
+              <td><span :class="['status-tag', c.status === 'active' ? 'success' : 'default']">{{ c.status === 'active' ? '有效' : '已吊销' }}</span></td>
               <td>{{ c.engineCount }}</td>
               <td class="t3">{{ formatTime(c.lastSeenAt) }}</td>
               <td class="t3">{{ c.lastIp || '-' }}</td>
               <td class="t3">{{ formatTime(c.createdAt) }}</td>
               <td>
-                <button v-if="c.status === 'active'" class="btn btn-sm" @click="revoke(c)">吊销</button>
+                <button v-if="c.status === 'active'" class="btn btn-sm" @click="openRevoke(c)">吊销</button>
                 <button v-if="c.status === 'revoked'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(c)">删除</button>
               </td>
             </tr>
@@ -59,19 +59,19 @@
             <span style="font-weight:600;font-size:14px">
               {{ c.name }}
               <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">
-                <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(c.scope) }}</span><span v-if="c.status !== 'active'" class="t3"> · {{ c.status }}</span>
+                <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(c.scope) }}</span><span v-if="c.status !== 'active'" class="t3"> · 已吊销</span>
               </span>
             </span>
           </div>
           <div class="dc-meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
             <div><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ c.ownerName || '—' }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">引擎</span> {{ c.engineCount }} 个</div>
-            <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ c.lastSeenAt || '—' }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(c.lastSeenAt) }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ c.lastIp || '—' }}</div>
             <div style="grid-column:1 / -1"><span class="t3">创建</span> {{ c.createdAt || '—' }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
-            <button v-if="c.status === 'active'" class="btn btn-sm" @click="revoke(c)">吊销</button>
+            <button v-if="c.status === 'active'" class="btn btn-sm" @click="openRevoke(c)">吊销</button>
             <button v-if="c.status === 'revoked'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(c)">删除</button>
           </div>
         </div>
@@ -88,19 +88,42 @@
       </div>
     </div>
 
-    <div v-if="showIssue" class="modal" @click.self="showIssue = false">
-      <div class="modal-box">
-        <h4>签发设备凭据</h4>
-        <input v-model="deviceName" placeholder="设备名（唯一，≤64字符）" />
-        <div class="modal-actions">
-          <button class="btn" @click="showIssue = false">取消</button>
-          <button class="btn btn-primary" @click="issue">签发</button>
+    <div v-if="showIssue" class="modal-overlay" @click.self="showIssue = false">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <span class="modal-icon">🔑</span>
+          <span class="modal-title">签发设备凭据</span>
         </div>
-        <div v-if="issuedToken" class="mt12" style="border:1px dashed var(--warning);border-radius:8px;padding:12px">
-          <p style="color:var(--warning);font-weight:600">⚠ 明文仅显示一次，请立即保存</p>
-          <code class="cred-token">{{ issuedToken }}</code>
-          <p class="t3" style="font-size:12px">将该 token 填入目标机器 /etc/grape/runtime.env 的 RUNTIME_TOKEN 并重启 runtime-agent</p>
-          <button class="btn btn-primary btn-sm mt8" @click="issuedToken = ''">我已保存</button>
+        <div class="modal-body">
+          <input v-model="deviceName" placeholder="设备名（唯一，≤64字符）" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" @keyup.enter="issue" />
+          <div v-if="issuedToken" class="mt12" style="border:1px dashed var(--warning);border-radius:8px;padding:12px">
+            <p style="color:var(--warning);font-weight:600">⚠ 明文仅显示一次，请立即保存</p>
+            <code class="cred-token">{{ issuedToken }}</code>
+            <p class="t3" style="font-size:12px">将该 token 填入目标机器 /etc/grape/runtime.env 的 RUNTIME_TOKEN 并重启 runtime-agent</p>
+            <button class="btn btn-primary btn-sm mt8" @click="issuedToken = ''">我已保存</button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" @click="showIssue = false">取消</button>
+          <button class="btn btn-primary" :disabled="issuing" @click="issue">{{ issuing ? '签发中…' : '签发' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 吊销确认弹窗（对齐设备页 modal） -->
+    <div v-if="revokeTarget" class="modal-overlay" @click.self="revokeTarget = null">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <span class="modal-icon">⛔</span>
+          <span class="modal-title">吊销凭据</span>
+        </div>
+        <div class="modal-body">
+          确认吊销凭据 <b>{{ revokeTarget.name }}</b>（归属 {{ revokeTarget.ownerName || '-' }}）？<br />
+          其 worker 将立即失效（401）。
+        </div>
+        <div class="modal-footer">
+          <button class="btn" @click="revokeTarget = null">取消</button>
+          <button class="btn btn-danger" @click="confirmRevoke">确认吊销</button>
         </div>
       </div>
     </div>
@@ -142,6 +165,8 @@ const status = ref('')
 const showIssue = ref(false)
 const deviceName = ref('')
 const issuedToken = ref('')
+const issuing = ref(false)
+const revokeTarget = ref(null)
 const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
 const total = ref(0)
 const totalPages = ref(0)
@@ -184,19 +209,32 @@ function reset() {
 }
 function openIssue() { showIssue.value = true; issuedToken.value = ''; deviceName.value = '' }
 async function issue() {
+  if (issuing.value) return
+  if (!deviceName.value.trim()) { showToast('请输入设备名', 'error'); return }
+  issuing.value = true
   try {
     const { data } = await http.post('/credentials', { deviceName: deviceName.value })
     issuedToken.value = data.token
+    showToast(`凭据 ${data.deviceName} 签发成功`)
     load()   // 签发成功自动刷新列表
-  } catch (e) { alert(e.response?.data?.message || '签发失败') }
+  } catch (e) {
+    showToast(e.response?.data?.message || '签发失败', 'error')
+  } finally {
+    issuing.value = false
+  }
 }
-async function revoke(c) {
-  if (!confirm(`确认吊销凭据 ${c.name}（归属 ${c.ownerName || '-'}）？其 worker 将立即失效（401）`)) return
+function openRevoke(c) {
+  revokeTarget.value = c
+}
+async function confirmRevoke() {
+  const c = revokeTarget.value
   try {
     await http.post(`/devices/${c.id}/revoke`)
+    showToast(`凭据 ${c.name} 已吊销，其 worker 已失效`)
+    revokeTarget.value = null
     load()
   } catch (e) {
-    alert(e.response?.data?.message || '吊销失败')
+    showToast(e.response?.data?.message || '吊销失败', 'error')
   }
 }
 function showToast(msg, type = 'success') {
