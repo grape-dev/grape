@@ -36,7 +36,7 @@ public class RuntimeDeviceService {
         this.healthService = healthService;
     }
 
-    public Map<String, Object> listCredentials(String scope, String owner, String status, String health) {
+    public Map<String, Object> listCredentials(String scope, String owner, String status, String health, int page, int size) {
         List<RuntimeCredentialRo> credentials = credentialRepository.findAll();
         List<AgentRuntimeRo> runtimes = runtimeRepository.findAll();
         Map<Integer, Long> engineCountByCredential = runtimes.stream()
@@ -88,9 +88,15 @@ public class RuntimeDeviceService {
             return sb.compareTo(sa);
         });
 
+        int total = list.size();
+        int from = Math.min(page * size, total);
+        int to = Math.min(from + size, total);
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("content", list);
-        result.put("totalElements", list.size());
+        result.put("content", list.subList(from, to));
+        result.put("totalElements", total);
+        result.put("totalPages", size > 0 ? (total + size - 1) / size : 0);
+        result.put("page", page);
+        result.put("size", size);
         result.put("stats", stats);
         return result;
     }

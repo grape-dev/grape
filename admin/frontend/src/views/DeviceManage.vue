@@ -159,8 +159,8 @@ const view = ref('list')
 const detail = ref(null)
 const selectedEngineId = ref(null)
 const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
-const sizeOptions = [5, 10, 20, 50]
-const size = ref(5)
+const sizeOptions = [10, 20, 50]
+const size = ref(10)
 const taskPage = ref(0)
 const taskSize = ref(10)
 

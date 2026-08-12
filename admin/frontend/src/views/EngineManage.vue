@@ -129,7 +129,7 @@ const device = ref('')
 const health = ref('')
 const view = ref('list')
 const deviceOptions = ref([])
-const sizeOptions = [5, 10, 20, 50]
+const sizeOptions = [10, 20, 50]
 const size = ref(10)
 const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
 

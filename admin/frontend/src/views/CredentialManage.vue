@@ -2,7 +2,7 @@
   <div class="page-container" style="padding:0">
     <div class="page-header">
       <h1>凭据管理</h1>
-      <span class="badge">{{ credentials.length }} 条</span>
+      <span class="badge">{{ total }} 条</span>
     </div>
     <div style="padding:20px 28px">
       <!-- 健康分布徽章行（点击联动筛选，对齐设备/引擎页） -->
@@ -88,6 +88,15 @@
         </div>
       </div>
       <p v-if="!credentials.length" class="t2" style="padding:16px;text-align:center">无匹配凭据</p>
+
+      <div v-if="total > 0" class="pagination-bar">
+        <span class="page-info">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ total }} 条）</span>
+        <select v-model="size" class="page-size-select" @change="page = 0; load()">
+          <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
+        </select>
+        <button class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
+        <button class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
+      </div>
     </div>
 
     <div v-if="showIssue" class="modal" @click.self="showIssue = false">
@@ -125,6 +134,10 @@ const deviceName = ref('')
 const issuedToken = ref('')
 const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
 const total = ref(0)
+const totalPages = ref(0)
+const page = ref(0)
+const sizeOptions = [10, 20, 50]
+const size = ref(10)
 
 const SCOPE_NAMES = { global: '全局', repo: '仓库', user: '用户' }
 function scopeText(s) { return SCOPE_NAMES[s] || s || '-' }
@@ -159,6 +172,7 @@ function formatTime(ts) {
 function setFilter(h, s) {
   health.value = h
   status.value = s
+  page.value = 0
   load()
 }
 function badgeStyle(h) {
@@ -171,9 +185,10 @@ function dotStyle(h) {
 }
 
 async function load() {
-  const { data } = await http.get('/credentials', { params: { scope: scope.value, owner: owner.value, status: status.value, health: health.value } })
+  const { data } = await http.get('/credentials', { params: { scope: scope.value, owner: owner.value, status: status.value, health: health.value, page: page.value, size: size.value } })
   credentials.value = data.content
   total.value = data.totalElements || data.content.length
+  totalPages.value = data.totalPages || 1
   stats.value = data.stats || {}
 }
 function reset() {
@@ -181,6 +196,7 @@ function reset() {
   owner.value = ''
   status.value = ''
   health.value = ''
+  page.value = 0
   load()
 }
 function openIssue() { showIssue.value = true; issuedToken.value = ''; deviceName.value = '' }
