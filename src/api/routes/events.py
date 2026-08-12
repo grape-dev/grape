@@ -1,4 +1,5 @@
 """Events 路由：事件列表、详情、Event 对话（event-conversation-design.md）"""
+import asyncio
 import os
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
@@ -182,6 +183,56 @@ def _cancel_issue_tasks(repo_key: str, issue_id: str) -> int:
     return cancelled
 
 
+# Fix 2：直接执行的无输出超时（每次收到事件重置计时；超过则判定疑似挂起）
+_CONV_NO_OUTPUT_TIMEOUT = float(os.environ.get("CONVERSATION_NO_OUTPUT_TIMEOUT", "300"))
+
+
+class _ConvStuck(Exception):
+    """对话执行无输出超时（疑似挂起）。"""
+
+
+async def _iter_with_timeout(aiter, timeout: float):
+    """逐事件等待；无事件到达超时 → 抛 _ConvStuck（每次事件重置计时）。"""
+    while True:
+        try:
+            item = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise _ConvStuck() from None
+        if item is None:
+            return
+        yield item
+
+
+async def _direct_attempt(prompt, ws, session_id, repository, bot_token, anchor_seq, repo_key, agent_type):
+    """直接模式单次执行：yield (text/thinking) 事件；以 sentinel 结束（_stuck / _done）。"""
+    from src.runtime.executor import consume_stream_async
+    acc = ""
+    new_oc = ""
+    gen = consume_stream_async(
+        prompt, ws, session_id=session_id, event_type="event_conversation",
+        backend_name="opencode", account=repository, bot_token=bot_token,
+        agent_name="Event Dialogue Agent",
+        agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",
+    )
+    try:
+        async for evt_type, data in _iter_with_timeout(gen, _CONV_NO_OUTPUT_TIMEOUT):
+            if evt_type == "text":
+                t = data.get("text") if isinstance(data, dict) else str(data)
+                if t:
+                    acc += t
+                yield ("text", t)
+            elif evt_type == "reasoning":
+                yield ("thinking", data.get("text") if isinstance(data, dict) else str(data))
+            elif evt_type == "done" and isinstance(data, dict):
+                acc = data.get("text", "") or acc
+                new_oc = data.get("oc_session_id", "") or new_oc
+                break
+    except _ConvStuck:
+        yield ("_stuck", "")
+        return
+    yield ("_done", {"final_text": acc, "new_oc": new_oc})
+
+
 async def _run_conversation(evt: dict, user_message: str, username: str):
     """门禁已通过：写用户消息 → 复用 issue 会话运行 agent → 回写 agent 回复。
 
@@ -244,7 +295,9 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
         if agent_sid and runtime_id:
             from src.config import SKILLS_DIR
             from src.runtime.service import cancel_task
-            ws = os.path.join(WORKSPACE_DIR, repository, "event-conv")
+            from src.api.event_pipeline import get_agent_workdir
+            # Fix 1：cwd 用该 issue 的 agent 目录（与 issue 会话项目一致）
+            ws = get_agent_workdir(repo_key, agent_type, issue_id)
             os.makedirs(ws, exist_ok=True)
             tid = enqueue_task(
                 agent_session_id=agent_sid, runtime_id=runtime_id, prompt=prompt, cwd=ws,
@@ -259,14 +312,21 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
             )
             # Fix C：超时/失败要有回显与清理，不再 30 分钟静默
             task = None
+            failed = False
             try:
                 task = await wait_task_terminal(tid, timeout=300.0)
             except TimeoutError:
+                failed = True
                 cancel_task(tid)
                 final_text = "（对话执行超时，请稍后重试）"
             except Exception as e:
+                failed = True
                 cancel_task(tid)
                 final_text = f"（对话执行失败：{e}）"
+            # Fix 2：超时/失败后清空 issue 会话，避免下轮复用挂起会话
+            if failed and issue_sess_id:
+                from src.api.session_store import update_issue_session
+                update_issue_session(issue_sess_id, runtime_session_id="")
             if task and not final_text:
                 final_text = task.get("result_text") or ""
                 try:
@@ -278,32 +338,34 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
         else:
             final_text = "（对话执行失败：无可用 runtime/会话）"
     else:
-        # direct：SSE 流式
-        ws = os.path.join(WORKSPACE_DIR, repository, "event-conv")
+        # direct：SSE 流式；cwd 用该 issue 的 agent 目录（Fix 1）；无输出超时则重置会话重试一次（Fix 2）
+        from src.api.event_pipeline import get_agent_workdir
+        ws = get_agent_workdir(repo_key, agent_type, issue_id)
         os.makedirs(ws, exist_ok=True)
-        from src.runtime.executor import consume_stream_async
-        acc = ""
-        try:
-            async for evt_type, data in consume_stream_async(
-                prompt, ws, session_id=oc_session_id, event_type="event_conversation",
-                backend_name="opencode", account=repository, bot_token=bot_token,
-                agent_name="Event Dialogue Agent",
-                agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",
-            ):
-                if evt_type == "text":
-                    t = data.get("text") if isinstance(data, dict) else str(data)
-                    if t:
-                        acc += t
-                        yield ("text", t)
-                elif evt_type == "reasoning":
-                    yield ("thinking", data.get("text") if isinstance(data, dict) else str(data))
-                elif evt_type == "done" and isinstance(data, dict):
-                    final_text = data.get("text", "") or acc
-                    new_oc = data.get("oc_session_id", "") or new_oc
-        except Exception as e:
-            final_text = f"（对话执行失败：{e}）"
-        if not final_text and acc:
-            final_text = acc
+        result = None
+        async for kind, data in _direct_attempt(prompt, ws, oc_session_id, repository,
+                                                bot_token, anchor_seq, repo_key, agent_type):
+            if kind == "_stuck":
+                yield ("thinking", "对话执行异常，正在重置会话重试...")
+            elif kind == "_done":
+                result = data
+            else:
+                yield (kind, data)
+        if result is None and oc_session_id:
+            # Fix 2：复用的 issue 会话疑似挂起 → 重置会话后以全新会话重试一次
+            from src.api.session_store import update_issue_session
+            if issue_sess_id:
+                update_issue_session(issue_sess_id, runtime_session_id="")
+            oc_session_id = ""
+            async for kind, data in _direct_attempt(prompt, ws, "", repository,
+                                                    bot_token, anchor_seq, repo_key, agent_type):
+                if kind == "_done":
+                    result = data
+                elif kind != "_stuck":
+                    yield (kind, data)
+        if result:
+            final_text = result.get("final_text") or ""
+            new_oc = result.get("new_oc") or ""
 
     if new_oc and new_oc != oc_session_id and issue_sess_id:
         from src.api.session_store import update_issue_session

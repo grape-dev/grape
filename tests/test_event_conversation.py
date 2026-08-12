@@ -3,7 +3,7 @@
 覆盖：门禁（thread/chat）、对话写线程、共享知识（文件+索引+注入）、流程回退（取消任务+阶段）、
 bot token 鉴权、会话复用。
 """
-import os, sys
+import asyncio, os, sys
 from unittest.mock import patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -125,9 +125,11 @@ class TestThreadGate:
 class TestConversation:
     def setup_method(self):
         _clean()
+        os.environ["DEVOPS_EXECUTION_MODE"] = "direct"
 
     def teardown_method(self):
         _clean()
+        os.environ.pop("DEVOPS_EXECUTION_MODE", None)
 
     def test_chat_writes_thread_and_reuses_issue_session(self):
         seq = _seed_event()
@@ -154,6 +156,52 @@ class TestConversation:
             client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
         r = client.get(f"/api/events/{seq}/thread", headers=_headers)
         assert len(r.json()["messages"]) == 2
+
+    def test_direct_uses_issue_agent_workdir(self):
+        """Fix 1：直接执行 cwd = 该 issue 的 agent 目录（而非 event-conv）"""
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        captured = {}
+
+        def _capture(prompt="", cwd="", **k):
+            captured["cwd"] = cwd
+            return _fake_stream(prompt=prompt, cwd=cwd, **k)
+
+        with patch("src.runtime.executor.consume_stream_async", side_effect=_capture):
+            r = client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
+        assert r.status_code == 200, r.text
+        from src.api.event_pipeline import get_agent_workdir
+        assert captured["cwd"] == get_agent_workdir(_REPO_KEY, "vod", "#5")
+
+    def test_direct_stuck_resets_session_and_retries(self):
+        """Fix 2：复用会话挂起（无输出超时）→ 重置 issue 会话 → 全新会话重试一次"""
+        seq = _seed_event()
+        _seed_issue_state("coding")
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, status) "
+                      "VALUES ('iss-1',?,?,?,?,'idle')", (_REPO_KEY, "vod", "#5", "ses_bad"))
+            db.commit()
+        calls = {"n": 0}
+
+        def _stuck_then_ok(prompt="", cwd="", session_id="", **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                async def _stuck():
+                    await asyncio.sleep(10)  # 超过超时(0.2s) → 挂起判定
+                    yield "done", {}
+                return _stuck()
+            return _fake_stream(prompt=prompt, cwd=cwd, **k)
+
+        with patch("src.runtime.executor.consume_stream_async", side_effect=_stuck_then_ok), \
+             patch("src.api.routes.events._CONV_NO_OUTPUT_TIMEOUT", 0.2):
+            r = client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["reply"] == "模拟 agent 回复"
+        assert calls["n"] == 2
+        with db_lock:
+            row = db.cursor().execute("SELECT runtime_session_id FROM issue_agent_session WHERE id='iss-1'").fetchone()
+        assert row and row[0] == "ses_conv_1"
 
 
 class TestKnowledge:
@@ -260,9 +308,11 @@ class TestSseStream:
 
     def setup_method(self):
         _clean()
+        os.environ["DEVOPS_EXECUTION_MODE"] = "direct"
 
     def teardown_method(self):
         _clean()
+        os.environ.pop("DEVOPS_EXECUTION_MODE", None)
 
     def test_stream_returns_sse_events(self):
         seq = _seed_event()
