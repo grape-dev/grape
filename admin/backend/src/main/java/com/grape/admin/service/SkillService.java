@@ -5,6 +5,7 @@ import com.grape.admin.common.NotFoundException;
 import com.grape.admin.entity.readonly.SkillRo;
 import com.grape.admin.repository.readonly.SkillRoRepository;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.yaml.snakeyaml.Yaml;
 
@@ -19,6 +20,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,11 +53,14 @@ public class SkillService {
 
     private final SkillRoRepository skillRepository;
     private final Path skillsDir;
+    private final JdbcTemplate jdbcTemplate;
 
     public SkillService(SkillRoRepository skillRepository,
-                        @Value("${app.skills-dir:../../skills}") String skillsDir) {
+                        @Value("${app.skills-dir:../../skills}") String skillsDir,
+                        JdbcTemplate jdbcTemplate) {
         this.skillRepository = skillRepository;
         this.skillsDir = Paths.get(skillsDir).toAbsolutePath().normalize();
+        this.jdbcTemplate = jdbcTemplate;
     }
 
     public Map<String, Object> listSkills(String keyword, String agentType, String scope, int page, int size) {
@@ -74,7 +79,9 @@ public class SkillService {
         int totalPages = (int) Math.ceil((double) totalElements / safeSize);
         int from = Math.min(page * safeSize, totalElements);
         int to = Math.min(from + safeSize, totalElements);
-        List<Map<String, Object>> content = all.subList(from, to).stream().map(this::toMap)
+        Map<String, String> ownerNames = loadOwnerNames(all);
+        List<Map<String, Object>> content = all.subList(from, to).stream()
+                .map(s -> toMap(s, ownerNames))
                 .collect(Collectors.toList());
 
         Map<String, Long> stats = all.stream()
@@ -96,6 +103,43 @@ public class SkillService {
         return result;
     }
 
+    private Map<String, String> loadOwnerNames(List<SkillRo> skills) {
+        Set<String> userIds = skills.stream()
+                .filter(s -> "user".equals(s.getScope()))
+                .map(SkillRo::getOwnerId)
+                .filter(o -> o != null && o.matches("\\d+"))
+                .collect(Collectors.toSet());
+        Map<String, String> names = new HashMap<>();
+        if (userIds.isEmpty()) {
+            return names;
+        }
+        String inClause = String.join(",", userIds);
+        try {
+            jdbcTemplate.queryForList("SELECT id, username FROM user_accounts WHERE id IN (" + inClause + ")")
+                    .forEach(row -> names.put(String.valueOf(row.get("id")), String.valueOf(row.get("username"))));
+        } catch (Exception ignored) {
+            // 共享库中 user_accounts 不可用时保持原样（显示数字 id）
+        }
+        return names;
+    }
+
+    private Map<String, Object> toMap(SkillRo s, Map<String, String> ownerNames) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", s.getId());
+        m.put("skillName", s.getSkillName());
+        m.put("displayName", s.getDisplayName());
+        m.put("description", s.getDescription());
+        m.put("agentType", s.getAgentType());
+        m.put("skillPath", s.getSkillPath());
+        m.put("scope", s.getScope());
+        m.put("ownerId", s.getOwnerId());
+        // 个人技能：数字 owner_id 映射为用户名（查不到保持原样）
+        m.put("ownerName", "user".equals(s.getScope()) ? ownerNames.get(s.getOwnerId()) : null);
+        m.put("isActive", s.getIsActive());
+        m.put("updatedAt", s.getUpdatedAt());
+        return m;
+    }
+
     public Map<String, Object> getSkillContent(Integer id) {
         SkillRo skill = skillRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("技能不存在: id=" + id));
@@ -105,7 +149,7 @@ public class SkillService {
         }
         Path md = skillsDir.resolve(skillPath).resolve("SKILL.md").normalize();
         if (!md.startsWith(skillsDir) || !Files.isRegularFile(md)) {
-            throw new NotFoundException("未找到 SKILL.md: " + skillPath);
+            throw new NotFoundException("SKILL.md 文件不存在：技能文件可能存储于上传者所在服务器，本环境不可读（" + skillPath + "）");
         }
         String content;
         try {

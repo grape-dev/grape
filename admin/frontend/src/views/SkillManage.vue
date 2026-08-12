@@ -141,7 +141,7 @@
         <div class="detail-grid" style="margin-bottom:16px">
           <div><span class="t3">Agent 类型</span><b>{{ detail.agentType || '—' }}</b></div>
           <div><span class="t3">Skill 路径</span><b>{{ detail.skillPath || '—' }}</b></div>
-          <div><span class="t3">归属人</span><b>{{ detail.ownerId || '—' }}</b></div>
+          <div><span class="t3">归属人</span><b>{{ detail.ownerName || detail.ownerId || '—' }}</b></div>
           <div><span class="t3">技能 ID</span><b>{{ detail.id }}</b></div>
           <div><span class="t3">创建时间</span><b>{{ detail.createdAt || '—' }}</b></div>
           <div><span class="t3">更新时间</span><b>{{ detail.updatedAt || '—' }}</b></div>
