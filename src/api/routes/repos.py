@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.config import log
 from src.user import db as user_db
-from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook
+from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
 from src.api.deps import get_current_user, get_bot_token, get_user_token
 from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
 
@@ -15,6 +15,17 @@ REPOS_CACHE_TTL = 1800  # 30 分钟（避免频繁触发 GitCode N+1 权限查�
 
 class RepoAction(BaseModel):
     full_name: str
+
+
+class CreateRepoBody(BaseModel):
+    name: str
+    description: str = ""
+    private: bool = False
+    visibility: str = ""
+    auto_init: bool = True
+    default_branch: str = "main"
+    org: str = ""
+    host_after_create: bool = False
 
 
 def _fetch_and_cache(user_id: int, api_token: str) -> list[dict]:
@@ -113,6 +124,94 @@ async def sync_repos(user: dict = Depends(get_current_user)):
     return {"repos": _filter_repos(user["id"], repos), "message": "同步成功"}
 
 
+@router.get("/check-name")
+async def check_repo_name(name: str, user: dict = Depends(get_current_user)):
+    """检查当前用户名下是否已存在同名仓库"""
+    from src.user.repo_manager import _req, get_user_gitcode_login
+    api_token = get_user_token(user["username"])
+    if not api_token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+    try:
+        login = get_user_gitcode_login(api_token)
+        if not login:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
+        _req("GET", f"https://api.gitcode.com/api/v5/repos/{login}/{name}", api_token)
+        return {"exists": True, "full_name": f"{login}/{name}"}
+    except RuntimeError as e:
+        if "404" in str(e) or "Not Found" in str(e):
+            return {"exists": False}
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
+
+
+@router.post("/create")
+async def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)):
+    """通过 GitCode API 新建仓库，可选创建后自动托管"""
+    import re as _re
+    from src.repo_key import to_repo_key
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名称不能为空"})
+    if not _re.match(r'^[\w\-\.]+$', name):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名称只能包含字母、数字、下划线、连字符和点"})
+
+    if body.visibility in ("private", "public"):
+        private = (body.visibility == "private")
+    else:
+        private = body.private
+
+    api_token = get_user_token(user["username"])
+    if not api_token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
+
+    try:
+        repo_info = create_repo(api_token=api_token, name=name, description=body.description, private=private)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {e}"})
+
+    full_name = repo_info.get("full_name") or ""
+    owner = repo_info.get("owner") or ""
+    if isinstance(owner, dict):
+        owner = owner.get("login", "")
+    repo_name = repo_info.get("name") or name
+
+    try:
+        _fetch_and_cache(user["id"], api_token)
+    except Exception:
+        pass
+
+    if body.host_after_create:
+        from src.user.db import get_meta_value
+        webhook_url = get_meta_value("webhook_url")
+        if not webhook_url:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "webhook_url 未配置，无法托管"})
+        try:
+            existing_id = find_existing_webhook(api_token, owner, repo_name, webhook_url)
+            repo_key = to_repo_key(full_name)
+            if existing_id:
+                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=api_token)
+                user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
+            else:
+                hook_id = setup_webhook(api_token, owner, repo_name, webhook_url, webhook_password=api_token)
+                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=api_token)
+                user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
+            from src.api.session_store import ensure_default_agent_sessions
+            ensure_default_agent_sessions(repo_key)
+        except Exception as e:
+            return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": False, "message": f"仓库已创建，但托管失败: {e}"}
+
+        try:
+            _fetch_and_cache(user["id"], api_token)
+        except Exception:
+            pass
+        return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": True, "message": "仓库创建并托管成功"}
+
+    return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": False, "message": "仓库创建成功"}
+
+
 @router.post("/join")
 async def join_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
@@ -165,16 +264,6 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，无法创建 webhook"})
 
     from src.user.repo_manager import _check_collaborator_admin, _req
-    # 全局 bot 真实登录名：优先用 bot token 自解析（configs 可能存显示名，GitCode API 只认 login）
-    if global_bot_token:
-        try:
-            _bot_me = _req("GET", "https://api.gitcode.com/api/v5/user", global_bot_token)
-            _login = (_bot_me or {}).get("login", "") or ""
-            if _login:
-                global_bot_username = _login
-                log.info(f"host: global bot login resolved from token: {_login}")
-        except Exception as _e:
-            log.warning(f"host: resolve bot login from token failed: {_e}")
     try:
         user_data = _req("GET", f"https://api.gitcode.com/api/v5/user", api_token)
         current_user = user_data.get("login", "")
@@ -201,12 +290,7 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         if api_token and global_bot_username:
             ok = add_collaborator(api_token, owner, repo_name, global_bot_username, "maintainer")
             if not ok:
-                # 兜底：bot 可能已是维护者（GitCode 对已存在成员/已邀请的报错文案不固定，未命中幂等关键字时走到这里）
-                bot_perm = get_member_permission(api_token, owner, repo_name, global_bot_username)
-                if ((bot_perm or {}).get("access_level", 0) or 0) >= 40:
-                    log.info(f"host: {global_bot_username} already maintainer of {owner}/{repo_name}, treat as ok")
-                else:
-                    raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 无法将全局 Bot（{global_bot_username}）加入仓库维护者"})
+                raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 无法将全局 Bot（{global_bot_username}）加入仓库维护者"})
 
             # 用全局 bot token 自动接受项目邀请（invite 定制接口仅 grape_bot 可用）
             if global_bot_token:

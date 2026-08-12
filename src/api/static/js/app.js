@@ -26,46 +26,53 @@ function loadAgentTypes() {
 
   function loadProfile() {
     return API.get('/auth/profile').then(d => {
-      const displayName = d.nickname || d.username || 'User';
-      $('userName').textContent = displayName;
-      $('userAvatar').textContent = (displayName || 'U')[0].toUpperCase();
+      $('userName').textContent = d.username || 'User';
+      $('userAvatar').textContent = (d.username || 'U')[0].toUpperCase();
       $('userRole').textContent = (d.managed_repos && d.managed_repos.length > 0) ? 'Admin' : 'Member';
       localStorage.setItem('user', JSON.stringify(d));
       // 如果当前在仓库选择页，更新 Welcome 消息
       const welcomeEl = document.getElementById('welcomeUser');
-      if (welcomeEl) welcomeEl.textContent = displayName;
+      if (welcomeEl) welcomeEl.textContent = d.username || 'User';
     }).catch(() => {});
   }
 
-  const REPO_CACHE_KEY = 'repo_member_cache';
-
-  function loadRepos(forceRefresh) {
+  function loadRepos() {
     console.log("[loadRepos] start");
-    // 先用 localStorage 缓存的仓库列表立即渲染（避免白屏），后台再刷新
-    let cachedRepos = null;
-    try {
-      const c = JSON.parse(localStorage.getItem(REPO_CACHE_KEY) || 'null');
-      if (c && c.repos && Array.isArray(c.repos)) cachedRepos = c.repos;
-    } catch (e) { cachedRepos = null; }
-
-    if (cachedRepos && !forceRefresh) {
-      renderReposFromData(cachedRepos);
-    }
-
     API.get('/repos/member').then(d => {
       const repos = d.repos || [];
-      // 更新 localStorage 缓存（记录时间）
-      try {
-        localStorage.setItem(REPO_CACHE_KEY, JSON.stringify({repos, ts: Date.now()}));
-      } catch (e) {}
-      if (cachedRepos && !forceRefresh) {
-        // 后台刷新后若数据变化，轻量更新侧边栏
-        initSidebarRepos();
-      } else {
-        renderReposFromData(repos);
+      const managedRepos = repos.filter(r => r.is_joined || r.is_hosted);
+      console.log("[loadRepos] repos", JSON.stringify({total: repos.length, managed: managedRepos.length}));
+      // 侧边栏使用后端接口 GET /api/repos/managed（仅已托管的仓库）
+      initSidebarRepos();
+      const current = currentRepo();
+
+      if (managedRepos.length === 0) {
+        $('sidebar').style.display = 'none';
+        $('tb').style.display = 'none';
+        $('mainView').style.display = 'flex';
+        $('mainView').style.position = 'fixed';
+        $('mainView').style.inset = '0';
+        $('mainView').style.zIndex = '100';
+        $('pageTitle').textContent = '选择仓库';
+        renderRepoSelection(repos);
+        return;
       }
+
+      $('sidebar').style.display = 'flex';
+      $('tb').style.display = 'flex';
+      $('mainView').style.display = 'flex';
+      $('mainView').style.position = '';
+      $('mainView').style.inset = '';
+      $('mainView').style.zIndex = '';
+      $('pageTitle').textContent = 'Dashboard';
+
+      if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
+        const r = managedRepos[0];
+        if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
+        else localStorage.removeItem('currentRepo');
+      }
+      nav('dash');
     }).catch(() => {
-      if (cachedRepos) return; // 有缓存时静默，避免覆盖已渲染内容
       console.error("[loadRepos] FAILED");
       $('sidebar').style.display = 'none';
       $('tb').style.display = 'none';
@@ -76,40 +83,6 @@ function loadAgentTypes() {
       const el = $('pageContent');
       if (el) el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">无法加载仓库列表，请确认 GitCode Token 是否有效</div></div>';
     });
-  }
-
-  function renderReposFromData(repos) {
-    const managedRepos = repos.filter(r => r.is_joined || r.is_hosted);
-    console.log("[loadRepos] repos", JSON.stringify({total: repos.length, managed: managedRepos.length}));
-    initSidebarRepos();
-    const current = currentRepo();
-
-    if (managedRepos.length === 0) {
-      $('sidebar').style.display = 'none';
-      $('tb').style.display = 'none';
-      $('mainView').style.display = 'flex';
-      $('mainView').style.position = 'fixed';
-      $('mainView').style.inset = '0';
-      $('mainView').style.zIndex = '100';
-      $('pageTitle').textContent = '选择仓库';
-      renderRepoSelection(repos);
-      return;
-    }
-
-    $('sidebar').style.display = 'flex';
-    $('tb').style.display = 'flex';
-    $('mainView').style.display = 'flex';
-    $('mainView').style.position = '';
-    $('mainView').style.inset = '';
-    $('mainView').style.zIndex = '';
-    $('pageTitle').textContent = 'Dashboard';
-
-    if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
-      const r = managedRepos[0];
-      if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
-      else localStorage.removeItem('currentRepo');
-    }
-    nav('dash');
   }
 
   function initSidebarRepos() {
@@ -139,8 +112,9 @@ function loadAgentTypes() {
       const cur = currentRepo();
       const sel = $('repoSelect');
       if (cur) sel.value = cur.fullName;
-      // 与点击 Grape Logo「返回仓库选择大堂」一致：进入全屏仓库选择大堂（隐藏侧边栏）
-      goToRepos();
+      // 显示仓库管理页（已托管 + 可加入列表）
+      $('pageTitle').textContent = '选择仓库';
+      renderRepos();
       return;
     }
     const parts = val.split('/');
@@ -189,11 +163,7 @@ function loadAgentTypes() {
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
 
-    if (repo) {
-      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.owner}/${repo.name}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
-    } else {
-      repoTitle.textContent = '';
-    }
+    repoTitle.textContent = repo ? repo.fullName : '';
 
     if (view === 'dash') {
       title.textContent = 'Dashboard';
@@ -289,7 +259,7 @@ function loadAgentTypes() {
 
   function showToast(msg) {
     const t = document.createElement('div');
-    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#101724;color:#fff;padding:10px 20px;border-radius:8px;font-size:12px;z-index:999;box-shadow:0 4px 16px rgba(0,0,0,.2);white-space:pre-line;max-width:80vw';
+    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#101724;color:#fff;padding:10px 20px;border-radius:8px;font-size:12px;z-index:10000;box-shadow:0 4px 16px rgba(0,0,0,.2);white-space:pre-line;max-width:80vw';
     t.textContent = msg;
     document.body.appendChild(t);
     setTimeout(() => t.remove(), 3000);
@@ -307,7 +277,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '4');
+      localStorage.setItem('app_cache_ver', '5');
       if (p.get('first_login') === '1') {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
@@ -328,7 +298,7 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '4') {
+    if (localStorage.getItem('app_cache_ver') !== '5') {
       const oldRepo = localStorage.getItem('currentRepo');
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
@@ -336,7 +306,7 @@ function loadAgentTypes() {
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
       if (oldRepo) localStorage.setItem('currentRepo', oldRepo);
-      localStorage.setItem('app_cache_ver', '4');
+      localStorage.setItem('app_cache_ver', '5');
     }
 
     const token = localStorage.getItem('token');
