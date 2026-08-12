@@ -46,8 +46,8 @@
       </div>
 
       <!-- 关联任务 -->
-      <div class="card" style="margin-top:16px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap">
+      <div class="card" style="margin-top:16px;padding:16px 20px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
           <h5 style="margin:0">关联任务（{{ detail.tasks?.totalElements ?? 0 }} 条）<span style="font-size:13px;color:#8896a7;font-weight:400" v-if="filterCount">（已筛选 {{ filterCount }} 条）</span></h5>
           <select v-model="selectedEngineId" class="page-size-select" style="max-width:260px;margin-left:auto" @change="onEngineChange">
             <option :value="null">全部引擎</option>
@@ -55,7 +55,29 @@
           </select>
           <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
         </div>
-        <div style="overflow-x:auto">
+
+        <!-- 任务状态统计卡（对齐 VOD stat-cards） -->
+        <div class="task-stat-cards">
+          <div class="task-stat-card">
+            <div class="task-stat-num primary">{{ taskTotal }}</div>
+            <div class="task-stat-label">任务总数</div>
+          </div>
+          <div v-for="s in taskStatList" :key="s.key" class="task-stat-card">
+            <div class="task-stat-num" :style="{ color: s.color }">{{ s.count }}</div>
+            <div class="task-stat-label">{{ s.label }}</div>
+          </div>
+        </div>
+
+        <!-- 任务状态分布图（对齐 VOD chart-row） -->
+        <div class="task-chart-row">
+          <div class="card chart-card"><h5 style="margin-bottom:8px">任务状态分布</h5><div ref="taskChartEl" style="height:220px"></div></div>
+        </div>
+
+        <div class="table-loading-wrapper">
+          <div class="table-loading-overlay" v-if="taskLoading">
+            <span class="table-loading-text">加载中...</span>
+          </div>
+          <div style="overflow-x:auto">
           <table class="vod-table">
             <thead><tr>
               <th style="width:70px">ID</th>
@@ -77,7 +99,7 @@
                   <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('skill')" :key="v" :class="{ active: taskSkill === v }" @click="setFilter('skill', v)">{{ v || '(空)' }} ({{ cnt }})</div>
                 </div>
               </th>
-              <th class="filterable-th">
+              <th style="width:90px" class="filterable-th">
                 <span class="th-content" @click="toggleFilter('status')">
                   状态 <span class="filter-arrow" :class="{ active: taskStatus }">▼</span>
                 </span>
@@ -86,7 +108,7 @@
                   <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
                 </div>
               </th>
-              <th class="sortable-th" @click="toggleSort">
+              <th style="width:150px" class="sortable-th" @click="toggleSort">
                 创建时间
                 <span class="sort-arrows">
                   <span class="sort-dir" :class="{ active: sortOrder === 'asc' }">▲</span>
@@ -104,6 +126,7 @@
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
         <div v-if="detail.tasks?.totalElements > 0" class="pagination-bar" style="border-top:none">
           <span class="page-info">第 <strong>{{ taskPage + 1 }}</strong> / {{ detail.tasks?.totalPages ?? 1 }} 页（共 {{ detail.tasks?.totalElements ?? 0 }} 条）</span>
@@ -121,8 +144,9 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import * as echarts from 'echarts'
 import http from '../api'
 
 const route = useRoute()
@@ -139,6 +163,29 @@ const sortOrder = ref('desc')
 const filterDropdown = ref('')
 const filterCount = ref(0)
 const hasAnyFilter = computed(() => !!(taskStatus.value || taskSkill.value || taskType.value))
+// 加载遮罩 + 统计卡 + 图表
+const taskLoading = ref(false)
+const taskChartEl = ref(null)
+let taskChart = null
+// 任务状态展示映射（未知状态原样显示）
+const STATUS_META = {
+  completed: { label: '完成', color: 'var(--success)' },
+  success: { label: '完成', color: 'var(--success)' },
+  failed: { label: '失败', color: '#e5484d' },
+  running: { label: '运行中', color: '#1890ff' },
+  pending: { label: '等待', color: '#ea5a0c' }
+}
+const taskTotal = computed(() => {
+  const st = detail.value?.tasks?.filterOptions?.status || {}
+  return Object.values(st).reduce((s, n) => s + n, 0)
+})
+const taskStatList = computed(() => {
+  const st = detail.value?.tasks?.filterOptions?.status || {}
+  return Object.entries(st).map(([key, count]) => {
+    const meta = STATUS_META[key] || { label: key, color: 'var(--text-secondary)' }
+    return { key, label: meta.label, color: meta.color, count }
+  })
+})
 
 const BADGE = {
   online: { color: 'var(--success)', bg: '#dcfce7', label: '在线' },
@@ -167,15 +214,47 @@ function formatTime(ts) {
 }
 
 async function load() {
+  taskLoading.value = true
   const params = { taskPage: taskPage.value, taskSize: taskSize.value, sortOrder: sortOrder.value }
   if (selectedEngineId.value) params.engineId = selectedEngineId.value
   if (taskStatus.value) params.taskStatus = taskStatus.value
   if (taskSkill.value) params.taskSkill = taskSkill.value
   if (taskType.value) params.taskType = taskType.value
-  const { data } = await http.get(`/devices/${route.params.id}`, { params })
-  detail.value = data
-  // 「已筛选 N 条」：有列头筛选时显示过滤后总数，无筛选不显示（对齐 VOD）
-  filterCount.value = (taskStatus.value || taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
+  try {
+    const { data } = await http.get(`/devices/${route.params.id}`, { params })
+    detail.value = data
+    // 「已筛选 N 条」：有列头筛选时显示过滤后总数，无筛选不显示（对齐 VOD）
+    filterCount.value = (taskStatus.value || taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
+    nextTick(renderTaskChart)
+  } finally {
+    taskLoading.value = false
+  }
+}
+// 任务状态分布饼图（对齐 VOD chart-row）
+function renderTaskChart() {
+  const el = taskChartEl.value
+  if (!el) return
+  const st = detail.value?.tasks?.filterOptions?.status || {}
+  const data = Object.entries(st).map(([key, count]) => {
+    const meta = STATUS_META[key] || { label: key }
+    return { name: meta.label, value: count }
+  })
+  if (!data.length) return
+  if (!taskChart) taskChart = echarts.init(el)
+  taskChart.setOption({
+    tooltip: { trigger: 'item' },
+    legend: { bottom: 0, textStyle: { fontSize: 12 } },
+    series: [{
+      type: 'pie',
+      radius: ['40%', '68%'],
+      center: ['50%', '44%'],
+      avoidLabelOverlap: true,
+      itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
+      label: { show: true, formatter: '{b}: {c}' },
+      data
+    }],
+    color: ['#52c41a', '#e5484d', '#1890ff', '#ea5a0c', '#8896a7', '#7222ed']
+  })
 }
 function onEngineChange() {
   taskPage.value = 0
@@ -225,6 +304,50 @@ load()
 .detail-item .t3 { display: block; font-size: 11px; margin-bottom: 2px; }
 @media (max-width: 900px) {
   .detail-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ===== 任务状态统计卡（对齐 VOD stat-cards） ===== */
+.task-stat-cards {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.task-stat-card {
+  flex: 1;
+  min-width: 100px;
+  max-width: 160px;
+  background: #f8f9fb;
+  border-radius: 10px;
+  padding: 12px 16px;
+  text-align: center;
+}
+.task-stat-num { font-size: 22px; font-weight: 700; line-height: 1.2; }
+.task-stat-num.primary { color: var(--primary); }
+.task-stat-label { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+
+/* ===== 任务状态分布图（对齐 VOD chart-row） ===== */
+.task-chart-row { margin-bottom: 14px; }
+.task-chart-row .chart-card { padding: 14px 16px; }
+
+/* ===== 表格加载遮罩（对齐 VOD table-loading-wrapper） ===== */
+.table-loading-wrapper { position: relative; }
+.table-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: rgba(255, 255, 255, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.table-loading-text {
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: #fff;
+  padding: 6px 14px;
+  border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
 /* ===== 列头筛选/排序（对齐 VOD 分析结果报表） ===== */
