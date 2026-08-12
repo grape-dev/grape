@@ -61,7 +61,7 @@ def teardown_module():
             c = db.cursor()
             c.execute("DELETE FROM feishu_onboard_task WHERE user_id=?", (_uid["id"],))
             c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (_uid["id"],))
-            c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (f"repo_{_uid['id']}",))
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE ? OR repo_key LIKE ?", (f"repo_{_uid['id']}", f"gitcode:owner{_uid['id']}%"))
             c.execute("DELETE FROM user_accounts WHERE id=?", (_uid["id"],))
             c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id LIKE 'cli_onboard_%' OR bot_app_id LIKE 'cli_vod_%'")
             db.commit()
@@ -72,6 +72,9 @@ def _clean_tasks():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM feishu_onboard_task WHERE user_id=?", (_uid["id"],))
+        # 清理 VOD 用例产生的 devops_agent_session 行（UNIQUE(repo_key, agent_type)）
+        c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE ? OR repo_key LIKE ?", (f"gitcode:repo_{_uid['id']}%", f"gitcode:owner{_uid['id']}%"))
+        c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id LIKE 'cli_onboard_%'")
         db.commit()
 
 
@@ -181,7 +184,8 @@ class TestStatusFlow:
     def test_vod_connected_persists_devops_session(self):
         """扫码成功 vod_bot → devops_agent_session + global_im_bot_config 落库。"""
         _clean_tasks()
-        repo_key = f"repo_{_uid['id']}"
+        from src.repo_key import to_repo_key
+        repo_key = to_repo_key(f"repo_{_uid['id']}")  # 与 _apply_vod_credentials 归一化后一致
         from src.api.routes import feishu_onboard as f
         # 预建 devops_agent_session 行（vod）
         import datetime
@@ -213,6 +217,73 @@ class TestStatusFlow:
         assert row and row[0].startswith("cli_onboard_")
         assert row[1].startswith("sec_onboard_")
         assert reg and reg[0] == "vod_bot"
+        _clean_tasks()
+
+    def test_vod_no_existing_row_creates_with_prefix(self):
+        """前端传无前缀 repo_key（owner/repo）且 devops_agent_session 无既有 vod 行时，
+        应归一化为 gitcode:owner/repo 并 INSERT 建行——否则凭据丢失（历史 bug）。"""
+        _clean_tasks()
+        repo_key = f"owner{_uid['id']}/sample-repo"
+        from src.repo_key import to_repo_key
+        with _patch_register(_fake_success) as patched:
+            from src.api.routes import feishu_onboard as f
+            async def _fake_vod(**kwargs):
+                kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
+                return _result()
+            patched.side_effect = _fake_vod
+            task_id = _await_run("vod_bot", repo_key, patched=patched)
+        from src.session_manager import db as _db
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT repo_key, im_app_id, im_app_secret, im_provider FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                (to_repo_key(repo_key),),
+            ).fetchone()
+            reg = c.execute(
+                "SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1",
+                (row[1],) if row else ("",),
+            ).fetchone()
+        assert row, "无既有 vod 行时扫码应自动 INSERT 建行"
+        assert row[0] == to_repo_key(repo_key), f"repo_key 应归一化带前缀，实际 {row[0]!r}"
+        assert row[1].startswith("cli_onboard_")
+        assert row[2].startswith("sec_onboard_")
+        assert row[3] == "feishu"
+        assert reg and reg[0] == "vod_bot"
+        _clean_tasks()
+
+    def test_vod_update_existing_row_preserves_session(self):
+        """已有 vod 行时 UPDATE 凭据，且 session id 不变（不重建）。"""
+        _clean_tasks()
+        repo_key = f"owner{_uid['id']}/sample-repo"
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(repo_key)
+        import uuid as _uuid
+        sess_id = str(_uuid.uuid4())
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at, im_provider) VALUES (?,?,?,?,datetime('now'),'feishu')",
+                (sess_id, rk, "vod", "idle"),
+            )
+            db.commit()
+        with _patch_register(_fake_success) as patched:
+            from src.api.routes import feishu_onboard as f
+            async def _fake_vod(**kwargs):
+                kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
+                return _result()
+            patched.side_effect = _fake_vod
+            task_id = _await_run("vod_bot", repo_key, patched=patched)
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT id, im_app_id, im_app_secret, im_provider FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                (rk,),
+            ).fetchone()
+        assert row, "vod 行应存在"
+        assert row[0] == sess_id, "UPDATE 不应改变 session id"
+        assert row[1].startswith("cli_onboard_")
+        assert row[2].startswith("sec_onboard_")
+        assert row[3] == "feishu"
         _clean_tasks()
 
     def test_access_denied_fails(self):

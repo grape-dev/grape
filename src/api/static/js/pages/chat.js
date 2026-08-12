@@ -336,6 +336,7 @@ function switchImProvider() {
 let _onboardTimer = null;
 let _onboardTaskId = null;
 let _onboardExpireAt = 0;
+let _onboardQrRendered = false;
 let _onboardBotType = 'chat_bot';
 let _onboardRepoKey = '';
 
@@ -397,14 +398,19 @@ function renderOnboardStatus(d) {
     pending: () => { body.innerHTML = '⏳ 正在生成二维码…'; },
     waiting_confirm: () => {
       if (!d.qr_url) return;
-      _onboardExpireAt = d.expire_in ? Date.now() + d.expire_in * 1000 : 0;
-      body.innerHTML = `
-        <div style="background:#fff;border:1px solid var(--b);border-radius:8px;padding:12px;display:inline-block;margin-bottom:10px" id="onboardQr"></div>
-        <div style="color:var(--t);margin-bottom:4px">1. 打开飞书 App，扫描上方二维码</div>
-        <div style="color:var(--t3);margin-bottom:10px">2. 在飞书内确认「创建应用/授权」页面</div>
-        <div style="color:var(--pk);font-size:11px" id="onboardCountdown">等待确认…</div>`;
-      new QRCode(document.getElementById('onboardQr'), {text: d.qr_url, width: 200, height: 200});
-      startCountdown();
+      // 仅在二维码首次就绪时初始化过期时间与渲染二维码；
+      // 后续轮询（每 2s）不得重置 _onboardExpireAt，否则倒计时被反复拉回满值。
+      if (!_onboardQrRendered) {
+        _onboardQrRendered = true;
+        _onboardExpireAt = d.expire_in ? Date.now() + d.expire_in * 1000 : 0;
+        body.innerHTML = `
+          <div style="background:#fff;border:1px solid var(--b);border-radius:8px;padding:12px;display:inline-block;margin-bottom:10px" id="onboardQr"></div>
+          <div style="color:var(--t);margin-bottom:4px">1. 打开飞书 App，扫描上方二维码</div>
+          <div style="color:var(--t3);margin-bottom:10px">2. 在飞书内确认「创建应用/授权」页面</div>
+          <div style="color:var(--pk);font-size:11px" id="onboardCountdown">等待确认…</div>`;
+        new QRCode(document.getElementById('onboardQr'), {text: d.qr_url, width: 200, height: 200});
+        startCountdown();
+      }
     },
     connected: () => {
       body.innerHTML = `
@@ -461,6 +467,8 @@ function restartOnboard() {
   const botType = _onboardBotType || 'chat_bot';
   const repoKey = _onboardRepoKey || '';
   _onboardTaskId = null;
+  _onboardExpireAt = 0;
+  _onboardQrRendered = false;
   startFeishuOnboard(botType, repoKey);
 }
 
@@ -471,6 +479,8 @@ function cancelOnboard() {
 
 function closeOnboardModal(refresh) {
   _onboardTaskId = null;
+  _onboardExpireAt = 0;
+  _onboardQrRendered = false;
   if (_onboardTimer) { clearInterval(_onboardTimer); _onboardTimer = null; }
   const m = document.getElementById('onboardModal');
   if (m) m.remove();

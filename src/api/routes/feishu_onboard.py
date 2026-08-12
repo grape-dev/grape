@@ -148,8 +148,13 @@ def _apply_chat_credentials(user_id: int, app_id: str, app_secret: str) -> tuple
 def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple[str, str]:
     """VOD Agent 落库：devops_agent_session + global_im_bot_config + 换绑清理。
 
+    repo_key 统一经 to_repo_key 归一化（前端传 owner/repo，DB 存 gitcode:owner/repo）；
+    若无该 repo 的 vod 配置行则 INSERT 新建（否则 UPDATE 匹配不到行，凭据丢失）。
     返回 (error_msg, old_app_id)。
     """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    import uuid
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -158,27 +163,34 @@ def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple
         if row and row[0] == "chat_bot":
             return "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent", ""
         # 换绑清理（对齐 agents.py update_agent_config）
-        c.execute("SELECT im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'", (repo_key,))
+        c.execute("SELECT id, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'", (repo_key,))
         old_row = c.fetchone()
-        old_app_id = old_row[0] if old_row else ""
+        old_session_id = old_row[0] if old_row else ""
+        old_app_id = old_row[1] if old_row else ""
         if old_app_id and old_app_id != app_id:
             c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE im_app_id=? AND repo_key!=?", (old_app_id, repo_key))
             other_refs = c.fetchone()[0]
             if other_refs == 0:
                 c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (old_app_id,))
             c.execute(
-                "DELETE FROM vod_conversations WHERE agent_session_id IN (SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod')",
-                (repo_key,),
+                "DELETE FROM vod_conversations WHERE agent_session_id=?",
+                (old_session_id,),
             )
             log.info(f"Feishu onboard: replaced vod app_id={old_app_id[:20]} with {app_id[:20]}")
         c.execute(
             "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?,?)",
             (app_id, "vod_bot"),
         )
-        c.execute(
-            "UPDATE devops_agent_session SET im_app_id=?, im_app_secret=?, im_provider='feishu' WHERE repo_key=? AND agent_type='vod'",
-            (app_id, app_secret, repo_key),
-        )
+        if old_session_id:
+            c.execute(
+                "UPDATE devops_agent_session SET im_app_id=?, im_app_secret=?, im_provider='feishu' WHERE id=?",
+                (app_id, app_secret, old_session_id),
+            )
+        else:
+            c.execute(
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,datetime('now'),?,?,?)",
+                (str(uuid.uuid4()), repo_key, "vod", "idle", app_id, app_secret, "feishu"),
+            )
         db.commit()
     return "", old_app_id
 
