@@ -13,8 +13,8 @@ import subprocess
 import re
 
 CHART_HINT = (
-    "\n\n[输出要求] 如果查询结果包含统计数据或分布信息，"
-    "请在回答中使用 ```chart 代码块包裹 echarts 配置 JSON 来生成图表。"
+    "\n\n[输出要求] 查询结果涉及统计数据或分布信息时，必须使用 ```chart 代码块包裹 echarts 配置 JSON 输出图表，"
+    "禁止只用文字描述统计结果（文字分析可保留，但图表必须输出）。"
     "JSON 必须是完整的 echarts option 对象，包含 title/tooltip/xAxis/yAxis/series 等字段。"
     "可以同时输出文字分析和多个图表。示例格式:\n"
     "```chart\n"

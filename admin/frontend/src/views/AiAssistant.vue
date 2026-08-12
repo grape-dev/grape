@@ -148,14 +148,14 @@ function isSessionRunning(s) {
   return s && !!s.taskId && !s.taskCompleted
 }
 
-// ===== 内置模板（Grape 业务提示词，保留）=====
+// ===== 内置模板（Grape 业务提示词，含 VOD 式 ```chart 硬性格式指令）=====
 const BUILTIN_TEMPLATES = {
-  'device-health': { group: '设备巡检', label: '设备健康巡检', content: '请汇总当前所有设备的健康状态，列出离线、刚失联、待回收的设备，说明风险并给出处理建议' },
-  'task-fail': { group: '任务分析', label: '任务失败原因分析', content: '请分析最近的任务执行情况，按失败原因分类统计，给出改进建议' },
-  'engine-overview': { group: '数据概览', label: '引擎分布总览(多图)', content: '请统计各类型引擎的数量、版本和健康状态分布，输出图表' },
-  'credential-audit': { group: '安全审计', label: '凭据安全审计', content: '请检查当前所有有效凭据的归属用户、范围和最近心跳，列出可疑设备' },
-  'chart-pie': { group: '图表示例', label: '在线状态占比(饼图)', content: '请统计设备在线/离线状态占比，输出饼图' },
-  'chart-bar': { group: '图表示例', label: '引擎数量分布(柱状图)', content: '请统计各引擎类型数量，输出柱状图' }
+  'device-health': { group: '设备巡检', label: '设备健康巡检', content: '请汇总当前所有设备的健康状态，列出离线、刚失联、待回收的设备，说明风险并给出处理建议，统计结果用```chart代码块返回echarts配置JSON' },
+  'task-fail': { group: '任务分析', label: '任务失败原因分析', content: '请分析最近的任务执行情况，按失败原因分类统计，给出改进建议，统计结果用```chart代码块返回echarts配置JSON' },
+  'engine-overview': { group: '数据概览', label: '引擎分布总览(多图)', content: '请统计各类型引擎的数量、版本和健康状态分布，用```chart代码块返回echarts配置JSON（可多图）' },
+  'credential-audit': { group: '安全审计', label: '凭据安全审计', content: '请检查当前所有有效凭据的归属用户、范围和最近心跳，列出可疑设备，统计结果用```chart代码块返回echarts配置JSON' },
+  'chart-pie': { group: '图表示例', label: '在线状态占比(饼图)', content: '请统计设备在线/离线状态占比，用```chart代码块返回echarts饼图配置JSON' },
+  'chart-bar': { group: '图表示例', label: '引擎数量分布(柱状图)', content: '请统计各引擎类型数量，用```chart代码块返回echarts柱状图配置JSON' }
 }
 const builtinGroups = computed(() => {
   const groups = {}
@@ -495,20 +495,227 @@ async function pollTaskStatus(session, aiMsg) {
 // ===== 渲染 =====
 function renderParts(raw) {
   const parts = []
-  const re = /```chart\s*\n?([\s\S]*?)```/g
+  // 对齐 VOD：识别 ```chart 与 ```echarts 两种代码块标识
+  const re = /```\s*(?:chart|echarts?)\s*?\n?\s*([\s\S]*?)```/g
   let last = 0
   let m
   while ((m = re.exec(raw)) !== null) {
-    if (m.index > last) parts.push({ type: 'text', text: raw.slice(last, m.index) })
+    if (m.index > last) {
+      const text = raw.slice(last, m.index).trim()
+      if (text) parts.push({ type: 'text', text })
+    }
     try {
-      parts.push({ type: 'chart', json: JSON.parse(m[1]) })
+      const chartJson = tryParseChartJson(m[1].trim())
+      parts.push({ type: 'chart', json: chartJson })
     } catch (e) {
-      parts.push({ type: 'text', text: m[0] })
+      parts.push({ type: 'text', text: '[图表配置解析失败]\n' + m[1] })
     }
     last = re.lastIndex
   }
-  if (last < raw.length) parts.push({ type: 'text', text: raw.slice(last) })
+  if (last < raw.length) {
+    const remaining = raw.slice(last).trim()
+    if (remaining) parts.push({ type: 'text', text: remaining })
+  }
   return parts.length ? parts : [{ type: 'text', text: raw }]
+}
+
+// ===== 图表 JSON 容错解析（移植 VOD tryParseChartJson 7 阶段修复）=====
+function tryParseChartJson(raw) {
+  const funcs = []
+  let funcProcessed = raw
+  let funcId = 0
+  let result = ''
+  for (let i = 0; i < raw.length; i++) {
+    if (raw.substring(i, i + 8) === 'function') {
+      const precededByQuote = (i > 0 && raw[i - 1] === '"')
+      let j = i + 8
+      while (j < raw.length && raw[j] !== '{') j++
+      if (j < raw.length) {
+        let depth = 1
+        let k = j + 1
+        while (k < raw.length && depth > 0) {
+          if (raw[k] === '{') depth++
+          else if (raw[k] === '}') depth--
+          k++
+        }
+        const funcBody = raw.substring(i, k)
+        funcs.push(funcBody)
+        if (precededByQuote) {
+          result = result.slice(0, -1)
+          result += `"__FUNC_${funcId}__"`
+          if (k < raw.length && raw[k] === '"') k++
+        } else {
+          result += `"__FUNC_${funcId}__"`
+        }
+        funcId++
+        i = k - 1
+        continue
+      }
+    }
+    result += raw[i]
+  }
+  funcProcessed = result
+
+  // Stage 0: 直接解析
+  try { return restoreFuncs(JSON.parse(funcProcessed), funcs) } catch (e) { /* fallthrough */ }
+  // Stage 1: 修复换行符
+  const fixed = fixNewlines(funcProcessed)
+  try { return restoreFuncs(JSON.parse(fixed), funcs) } catch (e) { /* fallthrough */ }
+  // Stage 2: 修复换行 + 插入缺失逗号
+  let s = insertMissingCommas(fixed)
+  try { return restoreFuncs(JSON.parse(s), funcs) } catch (e) { /* fallthrough */ }
+  // Stage 3: 修复换行 + 逗号 + 自动补全
+  s = autoCompleteJson(s)
+  try { return restoreFuncs(JSON.parse(s), funcs) } catch (e) { /* fallthrough */ }
+  // Stage 4: 修复换行 + 截断(字符串内遇{[) + 逗号 + 补全
+  s = fixTruncation(fixed)
+  s = insertMissingCommas(s)
+  s = autoCompleteJson(s)
+  try { return restoreFuncs(JSON.parse(s), funcs) } catch (e) { /* fallthrough */ }
+  // Stage 5: 压缩 + 全部修复
+  const compressed = funcProcessed.replace(/\n\s*/g, ' ')
+  s = insertMissingCommas(compressed)
+  s = autoCompleteJson(s)
+  try { return restoreFuncs(JSON.parse(s), funcs) } catch (e) { /* fallthrough */ }
+  // Stage 6: 移除多余闭合括号
+  const trimmed = removeExtraBrackets(funcProcessed)
+  try { return restoreFuncs(JSON.parse(trimmed), funcs) } catch (e) { /* fallthrough */ }
+  let s6 = insertMissingCommas(trimmed)
+  s6 = autoCompleteJson(s6)
+  try { return restoreFuncs(JSON.parse(s6), funcs) } catch (e) { /* fallthrough */ }
+
+  throw new Error('JSON parse failed after all repair attempts')
+}
+function restoreFuncs(obj, funcs) {
+  if (typeof obj === 'string') {
+    const mm = obj.match(/^__FUNC_(\d+)__$/)
+    if (mm) {
+      try { return new Function('return ' + funcs[parseInt(mm[1])])() } catch (e) { return obj }
+    }
+    return obj
+  }
+  if (Array.isArray(obj)) return obj.map(v => restoreFuncs(v, funcs))
+  if (obj && typeof obj === 'object') {
+    const r = {}
+    for (const k in obj) r[k] = restoreFuncs(obj[k], funcs)
+    return r
+  }
+  return obj
+}
+function fixNewlines(raw) {
+  let inStr = false, esc = false, fixed = ''
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (esc) {
+      if (ch === '\n') { fixed += 'n' }
+      else if (ch === '\r') { /* skip */ }
+      else { fixed += ch }
+      esc = false; continue
+    }
+    if (ch === '\\') { fixed += ch; esc = true; continue }
+    if (ch === '"') { fixed += ch; inStr = !inStr; continue }
+    if (ch === '\n' && inStr) { fixed += '\\n'; continue }
+    if (ch === '\r' && inStr) { continue }
+    fixed += ch
+  }
+  return fixed
+}
+function fixTruncation(s) {
+  let inStr = false, esc = false, fixed = ''
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (esc) { fixed += ch; esc = false; continue }
+    if (ch === '\\') { fixed += ch; esc = true; continue }
+    if (ch === '"') { fixed += ch; inStr = !inStr; continue }
+    if (inStr && (ch === '{' || ch === '[')) {
+      fixed += '"}'  // 闭合字符串+对象
+      inStr = false
+    }
+    fixed += ch
+  }
+  return fixed
+}
+function insertMissingCommas(s) {
+  let inStr = false, esc = false, out = ''
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    out += ch
+    if (esc) { esc = false; continue }
+    if (ch === '\\') { esc = true; continue }
+    if (ch === '"') {
+      inStr = !inStr
+      if (!inStr) {
+        let j = i + 1
+        while (j < s.length && /\s/.test(s[j])) j++
+        if (j < s.length) {
+          const next = s[j]
+          let k = out.length - 1
+          while (k > 0 && /\s/.test(out[k - 1])) k--
+          const prev = out[k - 1]
+          if (next === '"') {
+            if (prev !== ',' && prev !== '{' && prev !== '[') out += ','
+          } else if (/[a-zA-Z_]/.test(next)) {
+            if (prev !== ',' && prev !== '{' && prev !== '[') out += ',"'
+          }
+        }
+      }
+    }
+    if (!inStr && ch === '}') {
+      let j = i + 1
+      while (j < s.length && /\s/.test(s[j])) j++
+      if (j < s.length && (s[j] === '{' || s[j] === '"')) out += ','
+    }
+  }
+  return out
+}
+function autoCompleteJson(s) {
+  let inStr = false, esc = false, braces = 0, brackets = 0
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (esc) { esc = false; continue }
+    if (ch === '\\') { esc = true; continue }
+    if (ch === '"') { inStr = !inStr; continue }
+    if (!inStr) {
+      if (ch === '{') braces++
+      else if (ch === '}') braces--
+      else if (ch === '[') brackets++
+      else if (ch === ']') brackets--
+    }
+  }
+  let repaired = s
+  if (inStr) repaired += '"'
+  repaired = repaired.replace(/,\s*$/, '')
+  for (let i = 0; i < brackets; i++) repaired += ']'
+  for (let i = 0; i < braces; i++) repaired += '}'
+  return repaired
+}
+function removeExtraBrackets(s) {
+  let result = s
+  for (let iter = 0; iter < 10; iter++) {
+    try {
+      JSON.parse(result)
+      return result
+    } catch (e) {
+      if (!e.message.includes('after JSON')) break
+      let inStr = false, esc = false, depth = 0, rootClose = -1
+      for (let i = 0; i < result.length; i++) {
+        const ch = result[i]
+        if (esc) { esc = false; continue }
+        if (ch === '\\') { esc = true; continue }
+        if (ch === '"') { inStr = !inStr; continue }
+        if (!inStr) {
+          if (ch === '{' || ch === '[') depth++
+          else if (ch === '}' || ch === ']') {
+            depth--
+            if (depth === 0) { rootClose = i; break }
+          }
+        }
+      }
+      if (rootClose >= 0) result = result.substring(0, rootClose) + result.substring(rootClose + 1)
+      else break
+    }
+  }
+  return result
 }
 async function initCharts() {
   await nextTick()
