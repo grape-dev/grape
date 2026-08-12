@@ -43,22 +43,8 @@
             </tr>
           </tbody>
         </table>
-        <!-- 分页（对齐 VOD um-pagination） -->
-        <div class="um-pagination" v-if="total > 0">
-          <div class="um-pagination-info">
-            共 {{ total }} 条
-            <select v-model="size" class="page-size-select" @change="page = 0; load()">
-              <option :value="10">10条/页</option>
-              <option :value="20">20条/页</option>
-              <option :value="50">50条/页</option>
-            </select>
-          </div>
-          <div class="um-pagination-controls">
-            <button :disabled="page <= 0" @click="page--; load()">上一页</button>
-            <span class="um-page-current">{{ page + 1 }} / {{ totalPages }}</span>
-            <button :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
-          </div>
-        </div>
+        <!-- 分页（公共组件 PaginationBar，对齐 Skill 管理页效果） -->
+        <PaginationBar v-if="total > 0" v-model:page="page" v-model:size="size" :total="total" :total-pages="totalPages" :size-options="sizeOptions" @change="load" />
       </div>
     </div>
 
@@ -116,6 +102,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import http from '../api'
+import PaginationBar from '../components/PaginationBar.vue'
 
 const users = ref([])
 const roles = ref([])
@@ -123,6 +110,7 @@ const roleStats = ref([])
 const keyword = ref('')
 const page = ref(0)
 const size = ref(10)
+const sizeOptions = [10, 20, 50]
 const totalPages = ref(0)
 const total = ref(0)
 const showModal = ref(false)
