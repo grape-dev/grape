@@ -94,6 +94,30 @@ def _remap_cwd(path: str) -> str:
     return path
 
 
+def _kill_stale_opencode(task: dict):
+    """超时后杀掉对应 opencode 子进程。按 cwd 匹配，避免误杀其他任务。"""
+    import subprocess, signal
+    cwd = _remap_cwd(task.get("cwd") or os.getcwd())
+    try:
+        # 找 cwd 匹配的 opencode 进程
+        out = subprocess.run(
+            ["pgrep", "-u", os.environ.get("USER", "lvjuntao"), "-f", "opencode run"],
+            capture_output=True, text=True, timeout=5
+        )
+        for pid_str in out.stdout.strip().split():
+            pid = int(pid_str)
+            try:
+                proc_cwd = os.readlink(f"/proc/{pid}/cwd")
+                if proc_cwd.startswith(cwd):
+                    pgid = os.getpgid(pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                    log.info(f"killed opencode pid={pid} pgid={pgid} cwd={proc_cwd}")
+            except Exception as e:
+                log.debug(f"skip pid={pid}: {e}")
+    except Exception as e:
+        log.warning(f"_kill_stale_opencode failed: {e}")
+
+
 async def _execute_task(client, task):
     """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。"""
     import os as _os
@@ -250,7 +274,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
        防止服务端重启后 id 静默失效（服务端对旧 id 仍返回 200 ok）
     3. 网络中断恢复：连接错误计入心跳失败，触发重注册
     """
-    active_tasks = set()
+    active_tasks = set()  # task_id 去重（替代 session_id，防止同 session 不同 task 被误拒）
     last_heartbeat = 0.0
     heartbeat_fail_streak = 0          # 连续心跳失败计数
     HEARTBEAT_FAIL_THRESHOLD = 3       # 连续失败 N 次触发重注册
@@ -277,22 +301,28 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             if not task:
                 continue
-            tid = task.get("id") or ""
+            tid = task.get("id", "")
             if tid in active_tasks:
-                log.warning(f"duplicate task {tid}, skip")
+                log.debug(f"task {tid} already active, skip")
                 continue
             if len(active_tasks) >= max_concurrent:
                 continue
             active_tasks.add(tid)
 
-            async def _wrap(t=task, tid=tid):
+            async def _wrap(t=task, _tid=tid):
+                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 600)
                 try:
-                    if _test_execute is not None:
-                        await _test_execute(client, t, e)
-                    else:
-                        await _execute_task(client, t, e)
+                    await asyncio.wait_for(_execute_task(client, t), timeout=task_timeout)
+                except asyncio.TimeoutError:
+                    log.warning(f"task {_tid} timed out after {task_timeout}s, killing child processes and failing")
+                    # 杀掉超时任务的 opencode 子进程（按 cwd 匹配，避免误杀其他任务）
+                    _kill_stale_opencode(t)
+                    try:
+                        await client.fail(_tid, f"task timed out after {task_timeout}s")
+                    except Exception:
+                        pass
                 finally:
-                    active_tasks.discard(tid)
+                    active_tasks.discard(_tid)
 
             asyncio.create_task(_wrap())
 
