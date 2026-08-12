@@ -28,14 +28,14 @@ public class RuntimeCredentialService {
         this.auditService = auditService;
     }
 
-    public String issue(String deviceName, String operator) {
-        if (deviceName == null || deviceName.isBlank() || deviceName.length() > 64) {
-            throw new BizException("设备名不能为空且不超过 64 字符");
+    public String issue(String credentialName, String operator) {
+        if (credentialName == null || credentialName.isBlank() || credentialName.length() > 64) {
+            throw new BizException("凭据名称不能为空且不超过 64 字符");
         }
         Integer exists = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM runtime_credentials WHERE name = ?", Integer.class, deviceName);
+                "SELECT COUNT(*) FROM runtime_credentials WHERE name = ?", Integer.class, credentialName);
         if (exists != null && exists > 0) {
-            throw new BizException("设备名已存在: " + deviceName);
+            throw new BizException("凭据名称已存在: " + credentialName);
         }
         byte[] raw = new byte[32];
         secureRandom.nextBytes(raw);
@@ -43,8 +43,8 @@ public class RuntimeCredentialService {
         String hash = sha256Hex(token);
         jdbc.update("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, created_at) "
                         + "VALUES (?, ?, ?, 'user', 'active', NOW())",
-                hash, deviceName, deviceName);
-        auditService.record(null, operator, "credential.issue", "device:" + deviceName, "");
+                hash, credentialName, credentialName);
+        auditService.record(null, operator, "credential.issue", "credential:" + credentialName, "");
         return token;
     }
 
@@ -52,9 +52,9 @@ public class RuntimeCredentialService {
         int n = jdbc.update("UPDATE runtime_credentials SET status = 'revoked' WHERE id = ? AND status = 'active'",
                 credentialId);
         if (n == 0) {
-            throw new NotFoundException("设备不存在或已吊销: " + credentialId);
+            throw new NotFoundException("凭据不存在或已吊销: " + credentialId);
         }
-        auditService.record(null, operator, "credential.revoke", "device:" + credentialId, "");
+        auditService.record(null, operator, "credential.revoke", "credential:" + credentialId, "");
     }
 
     static String sha256Hex(String token) {

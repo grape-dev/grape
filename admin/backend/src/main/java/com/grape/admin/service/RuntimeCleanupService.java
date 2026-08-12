@@ -36,13 +36,13 @@ public class RuntimeCleanupService {
         if (!runtimeIds.isEmpty()) {
             long active = countActiveTasks(runtimeIds);
             if (active > 0) {
-                throw new BizException("设备存在 " + active + " 个进行中任务，拒绝回收");
+                throw new BizException("凭据存在 " + active + " 个进行中任务，拒绝回收");
             }
         }
         int revoked = jdbc.update("UPDATE runtime_credentials SET status = 'revoked' WHERE id = ? AND status = 'active'",
                 credentialId);
         if (revoked == 0) {
-            throw new NotFoundException("设备不存在或已吊销: " + credentialId);
+            throw new NotFoundException("凭据不存在或已吊销: " + credentialId);
         }
         jdbc.update("DELETE FROM agent_runtimes WHERE credential_id = ?", credentialId);
         if (!runtimeIds.isEmpty()) {
@@ -62,17 +62,17 @@ public class RuntimeCleanupService {
         String status = jdbc.query("SELECT status FROM runtime_credentials WHERE id = ?",
                 rs -> rs.next() ? rs.getString(1) : null, credentialId);
         if (status == null) {
-            throw new NotFoundException("设备不存在: " + credentialId);
+            throw new NotFoundException("凭据不存在: " + credentialId);
         }
         if (!"revoked".equals(status)) {
-            throw new BizException("仅已吊销（revoked）设备可删除，请先吊销或回收");
+            throw new BizException("仅已吊销（revoked）凭据可删除，请先吊销或回收");
         }
         List<Integer> runtimeIds = jdbc.query(
                 "SELECT id FROM agent_runtimes WHERE credential_id = ?", (rs, i) -> rs.getInt(1), credentialId);
         if (!runtimeIds.isEmpty()) {
             long active = countActiveTasks(runtimeIds);
             if (active > 0) {
-                throw new BizException("设备存在 " + active + " 个进行中任务，拒绝删除");
+                throw new BizException("凭据存在 " + active + " 个进行中任务，拒绝删除");
             }
             String in = inClause(runtimeIds);
             // 悬空引用：智能体默认引擎指向被删引擎 → 置 0
