@@ -58,23 +58,19 @@ collect_lsblk() {
     fi
 
     local has_used=0
-    if lsblk -n -o NAME,MOUNTPOINT,FSTYPE,SIZE,USED 2>/dev/null | head -1 | grep -q '|' 2>/dev/null; then
+    if lsblk -l -n -o NAME,MOUNTPOINT,FSTYPE,SIZE,USED 2>/dev/null 1>/dev/null; then
         has_used=1
-    fi
-    if ! lsblk -n -o NAME,MOUNTPOINT,FSTYPE,SIZE,USED 2>/dev/null 1>/dev/null; then
-        has_used=0
     fi
 
     local lsblk_output
     if [ "$has_used" -eq 1 ]; then
-        lsblk_output=$(lsblk -n -o NAME,MOUNTPOINT,FSTYPE,SIZE,USED 2>/dev/null)
+        lsblk_output=$(lsblk -l -n -o NAME,MOUNTPOINT,FSTYPE,SIZE,USED 2>/dev/null)
     else
-        lsblk_output=$(lsblk -n -o NAME,MOUNTPOINT,FSTYPE,SIZE 2>/dev/null)
+        lsblk_output=$(lsblk -l -n -o NAME,MOUNTPOINT,FSTYPE,SIZE 2>/dev/null)
     fi
 
     echo "$lsblk_output" | while IFS= read -r line; do
         [ -z "$line" ] && continue
-        line=$(echo "$line" | sed 's/^[├└│─┬ ]*//')
         local name mountpoint fstype size used
         if [ "$has_used" -eq 1 ]; then
             name=$(echo "$line" | awk '{print $1}')
@@ -94,11 +90,20 @@ collect_lsblk() {
         if is_pseudo_fstype "$fstype"; then
             continue
         fi
-        if [ -z "$used" ] || [ "$used" = "" ]; then
+        if [ -z "$used" ]; then
             local df_result
             df_result=$(get_df_info "$mountpoint")
-            size=$(echo "$df_result" | cut -d'|' -f1)
-            used=$(echo "$df_result" | cut -d'|' -f2)
+            local df_size df_used
+            df_size=$(echo "$df_result" | cut -d'|' -f1)
+            df_used=$(echo "$df_result" | cut -d'|' -f2)
+            if [ -z "$size" ]; then
+                size="$df_size"
+            fi
+            if [ -n "$df_used" ] && [ "$df_used" != "N/A" ]; then
+                used="$df_used"
+            else
+                used="N/A"
+            fi
         fi
         local dev_name="/dev/$name"
         if echo "$name" | grep -q '^/dev/'; then
