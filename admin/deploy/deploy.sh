@@ -29,7 +29,8 @@ systemctl daemon-reload
 NEW_SHA=$(sha256sum "$BACKEND_DIR/target/admin-backend-0.1.0.jar" | awk '{print $1}')
 if [ "$NEW_SHA" != "$(cat "$DEST/backend/.jar_sha" 2>/dev/null || true)" ]; then
   echo "  jar 有变化 → 重启 admin-backend"
-  systemctl enable --now admin-backend >/dev/null 2>&1 || systemctl restart admin-backend
+  systemctl enable admin-backend >/dev/null 2>&1 || true
+  systemctl restart admin-backend
   echo "$NEW_SHA" > "$DEST/backend/.jar_sha"
 else
   echo "  jar 无变化 → 跳过后端重启（无 502 窗口）"
