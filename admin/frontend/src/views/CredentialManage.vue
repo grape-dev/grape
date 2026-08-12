@@ -53,7 +53,7 @@
               <td class="t3">{{ formatTime(c.createdAt) }}</td>
               <td>
                 <button v-if="c.status === 'active'" class="btn btn-sm" @click="revoke(c)">吊销</button>
-                <span v-else class="t3">—</span>
+                <button v-if="c.status === 'revoked'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(c)">删除</button>
               </td>
             </tr>
           </tbody>
@@ -83,7 +83,7 @@
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
             <button v-if="c.status === 'active'" class="btn btn-sm" @click="revoke(c)">吊销</button>
-            <span v-else class="t3" style="font-size:11px">已吊销</span>
+            <button v-if="c.status === 'revoked'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(c)">删除</button>
           </div>
         </div>
       </div>
@@ -115,6 +115,29 @@
         </div>
       </div>
     </div>
+
+    <!-- Toast 反馈 -->
+    <div v-if="toastVisible" class="toast-message" :class="toastType">{{ toastMessage }}</div>
+
+    <!-- 删除凭据确认弹窗（物理删除管理台记录，worker 可重新注册） -->
+    <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <span class="modal-icon">🗑️</span>
+          <span class="modal-title">删除凭据</span>
+        </div>
+        <div class="modal-body">
+          <p style="margin:0 0 12px">将物理删除凭据 <b>{{ deleteTarget.name }}</b> 及其关联的引擎/任务记录（管理台数据，删除后不可恢复）。<br />
+          worker 机器不受影响——重新签发凭据并更新 worker 端 token 后，可重新注册上线。设备名将释放，可签发同名设备。</p>
+          <p style="margin:0 0 6px">请输入凭据名 <b>{{ deleteTarget.name }}</b> 确认：</p>
+          <input v-model="deleteWord" class="form-input" placeholder="输入凭据名确认" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" />
+        </div>
+        <div class="modal-footer">
+          <button class="btn" @click="deleteTarget = null">取消</button>
+          <button class="btn btn-danger" :disabled="deleteWord !== deleteTarget.name" @click="confirmDeleteCredential">确认删除</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -138,6 +161,13 @@ const totalPages = ref(0)
 const page = ref(0)
 const sizeOptions = [10, 20, 50]
 const size = ref(10)
+// toast + 删除弹窗状态
+const toastVisible = ref(false)
+const toastMessage = ref('')
+const toastType = ref('success')
+let toastTimer = null
+const deleteTarget = ref(null)
+const deleteWord = ref('')
 
 const SCOPE_NAMES = { global: '全局', repo: '仓库', user: '用户' }
 function scopeText(s) { return SCOPE_NAMES[s] || s || '-' }
@@ -214,6 +244,28 @@ async function revoke(c) {
     load()
   } catch (e) {
     alert(e.response?.data?.message || '吊销失败')
+  }
+}
+function showToast(msg, type = 'success') {
+  toastMessage.value = msg
+  toastType.value = type
+  toastVisible.value = true
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toastVisible.value = false }, 2500)
+}
+function openDelete(c) {
+  deleteWord.value = ''
+  deleteTarget.value = c
+}
+async function confirmDeleteCredential() {
+  const c = deleteTarget.value
+  try {
+    await http.delete(`/devices/${c.id}`)
+    showToast(`凭据 ${c.name} 已删除（管理台记录清除）`)
+    deleteTarget.value = null
+    load()
+  } catch (e) {
+    showToast(e.response?.data?.message || '删除失败', 'error')
   }
 }
 onMounted(load)
