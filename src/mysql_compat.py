@@ -269,6 +269,14 @@ def translate_sql(sql: str) -> str:
     # agent_runtimes.binary 列是 MySQL 保留字 → 反引号（仅 CREATE/ALTER 语句中的列定义）
     if re.match(r"^\s*(CREATE\s+TABLE|ALTER\s+TABLE)", sql, re.I):
         sql = re.sub(r"(?<![`\w])binary(?![`\w])", "`binary`", sql, flags=re.I)
+    # ALTER TABLE ... ADD COLUMN <col> TEXT [NOT NULL] DEFAULT '<lit>' → DEFAULT ('<lit>')
+    # （MySQL 8.0.13 前 TEXT 列不允许 DEFAULT 字面量，报 1101；CREATE TABLE 已在
+    #   _translate_create_table 处理，ADD COLUMN 走不到那里——实测 db_setup _ensure_column
+    #   补列 knowledge_files/subscribe_events 时 1101 失败被 except 吞掉，列缺失）
+    if re.match(r"^\s*ALTER\s+TABLE", sql, re.I):
+        sql = re.sub(
+            r"(\bADD\s+COLUMN\s+[`\"\w]+\s+TEXT(?:\s+NOT\s+NULL)?\s+DEFAULT\s+)'((?:[^'\\]|\\.)*)'",
+            lambda mm: f"{mm.group(1)}('{mm.group(2)}')", sql, flags=re.I)
     # MySQL 1093：DELETE/UPDATE 目标表不能出现在子查询的 FROM 中 → 用派生表包装
     # 模式：DELETE FROM <tbl> WHERE ... NOT IN (SELECT ... FROM <tbl> ...)
     m = re.match(r"^\s*DELETE\s+FROM\s+([`\"\w]+)\b([\s\S]*)$", sql, re.I)
