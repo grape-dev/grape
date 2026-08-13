@@ -134,15 +134,6 @@
                   <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('skill')" :key="v" :class="{ active: taskSkill === v }" @click="setFilter('skill', v)">{{ v || '(空)' }} ({{ cnt }})</div>
                 </div>
               </th>
-              <th style="width:90px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('status')">
-                  状态 <span class="filter-arrow" :class="{ active: taskStatus }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'status'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskStatus }" @click="setFilter('status', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
               <th style="width:150px" class="sortable-th" @click="toggleSort">
                 创建时间
                 <span class="sort-arrows">
@@ -153,7 +144,7 @@
             </tr></thead>
             <tbody>
               <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
-                <td :colspan="5" class="t2" style="padding:28px 0">
+                <td :colspan="4" class="t2" style="padding:28px 0">
                   <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
                   <template v-else>
                     无匹配任务
@@ -165,7 +156,6 @@
                 <td class="t3">{{ t.id }}</td>
                 <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
                 <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
-                <td><span class="status-tag default">{{ t.status }}</span></td>
                 <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
               </tr>
             </tbody>
@@ -207,13 +197,12 @@ const taskPage = ref(0)
 const taskSize = ref(10)
 const sizeOptions = [10, 20, 50]
 // 列头筛选/排序状态（对齐 VOD 分析结果报表）
-const taskStatus = ref('')
 const taskSkill = ref('')
 const taskType = ref('')
 const sortOrder = ref('desc')
 const filterDropdown = ref('')
 const filterCount = ref(0)
-const hasAnyFilter = computed(() => !!(taskStatus.value || taskSkill.value || taskType.value))
+const hasAnyFilter = computed(() => !!(taskSkill.value || taskType.value))
 // 加载遮罩 + 统计卡 + 图表
 const taskLoading = ref(false)
 const taskChartEl = ref(null)
@@ -304,7 +293,6 @@ async function toggle(a, checked) {
 async function load() {
   taskLoading.value = true
   const params = { taskPage: taskPage.value, taskSize: taskSize.value, sortOrder: sortOrder.value }
-  if (taskStatus.value) params.taskStatus = taskStatus.value
   if (taskSkill.value) params.taskSkill = taskSkill.value
   if (taskType.value) params.taskType = taskType.value
   try {
@@ -312,7 +300,7 @@ async function load() {
     detail.value = data
     agents.value = data.agents || []
     // 「已筛选 N 条」：有列头筛选时显示过滤后总数，无筛选不显示（对齐 VOD）
-    filterCount.value = (taskStatus.value || taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
+    filterCount.value = (taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
     nextTick(renderTaskChart)
   } finally {
     taskLoading.value = false
@@ -349,15 +337,13 @@ function toggleFilter(col) {
   filterDropdown.value = filterDropdown.value === col ? '' : col
 }
 function setFilter(col, v) {
-  if (col === 'status') taskStatus.value = v
-  else if (col === 'skill') taskSkill.value = v
+  if (col === 'skill') taskSkill.value = v
   else if (col === 'agentType') taskType.value = v
   filterDropdown.value = ''
   taskPage.value = 0
   load()
 }
 function clearFilters() {
-  taskStatus.value = ''
   taskSkill.value = ''
   taskType.value = ''
   taskPage.value = 0
