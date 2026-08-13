@@ -141,8 +141,12 @@ def test_trigger_creates_two_master_events():
             ).fetchall()
         types = [r[0] for r in rows]
         assert "onboarding_exp" in types and "onboarding_explore" in types
+        by_type = {r[0]: r for r in rows}
+        # 主事件 issue_id 预分配：experience→#1, explore→#2（方案 A）
+        assert by_type["onboarding_exp"][1] == "#1"
+        assert by_type["onboarding_explore"][1] == "#2"
         for r in rows:
-            assert r[1] == "#0" and r[2] == "vod" and r[3] == "running"
+            assert r[2] == "vod" and r[3] == "running"
     _clean()
 
 
@@ -153,12 +157,26 @@ def test_finalize_creates_stage_and_event(tmp_path):
     rp = os.path.join(str(tmp_path), "onboarding-result-experience.json")
     with open(rp, "w", encoding="utf-8") as f:
         json.dump({"number": 1, "title": "体验", "assignee": "owner", "target": "experience"}, f)
-    ob_mod._finalize_onboarding("gitcode:owner/repo", 99, "owner", rp)
+    # 预置一个主事件（issue_id=#0），校验 _finalize 会校准回实际 Issue 号
+    with db_lock:
+        db.cursor().execute(
+            "INSERT INTO events (repo_key, issue_id, event_type, agent_type, title, status) VALUES (?,?,?,?,?,?)",
+            ("gitcode:owner/repo", "#0", "onboarding_exp", "vod", "引导·快速部署体验", "running"))
+        db.commit()
+        _master_seq = db.cursor().execute(
+            "SELECT seq FROM events WHERE repo_key='gitcode:owner/repo' AND event_type='onboarding_exp'"
+        ).fetchone()[0]
+    ob_mod._finalize_onboarding("gitcode:owner/repo", _master_seq, "owner", rp)
     st = get_issue_stage("gitcode:owner/repo", "#1")
     assert st and st["stage"] == "vod" and st["owner_agent"] == "vod" and st["assignee"] == "owner"
     with db_lock:
+        # 主事件 issue_id 被校准为 #1
+        master = db.cursor().execute(
+            "SELECT issue_id FROM events WHERE repo_key='gitcode:owner/repo' AND event_type='onboarding_exp'"
+        ).fetchone()
+        assert master and master[0] == "#1"
         row = db.cursor().execute(
-            "SELECT event_type, issue_id, agent_type, status FROM events WHERE repo_key='gitcode:owner/repo'"
+            "SELECT event_type, issue_id, agent_type, status FROM events WHERE repo_key='gitcode:owner/repo' AND event_type='onboarding_issue'"
         ).fetchone()
     assert row and row[0] == "onboarding_issue" and row[1] == "#1" and row[2] == "vod" and row[3] == "completed"
     _clean()

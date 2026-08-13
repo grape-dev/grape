@@ -100,9 +100,10 @@ onboarding 缺落库两步且执行端游离；chat 任务对话缺显式场景�
   → trigger_onboarding(repo_key, owner)
     ├─ 幂等门禁（onboarded 标记）
     ├─ 查 VOD 会话：backend / runtime_id / skill（devops_agent_session WHERE agent_type='vod'）
-    ├─ 落库 2 个主事件（agent_type=vod, issue_id=#0, status=running）：
-    │    seq_exp = append_event(event_type=onboarding_exp,  title="引导·快速部署体验")
-    │    seq_exl = append_event(event_type=onboarding_explore, title="引导·探索方向")
+    ├─ 落库 2 个主事件（agent_type=vod, status=running），issue_id 预分配：
+    │    新模板仓库 Issue 从 1 递增 → experience 预分配 #1、explore 预分配 #2
+    │    seq_exp = append_event(event_type=onboarding_exp,  title="引导·快速部署体验", issue_id="#1")
+    │    seq_exl = append_event(event_type=onboarding_explore, title="引导·探索方向",     issue_id="#2")
     └─ 两次引导执行（可并行，各自 _execute_agent）：
         │ 执行模式跟随 VOD Agent 会话（与 vod_handler_async.py:209 一致）：
         │   kind = runtime_execution_kind(vod 会话的 runtime_id)
@@ -125,14 +126,16 @@ onboarding 缺落库两步且执行端游离；chat 任务对话缺显式场景�
 
   └─ 各自引导完成后（_finalize_onboarding 线程末尾触发，各一次）：
        ├─ 读对应 result 文件 → 该次引导创建的 1 个新 Issue（#01 / #02）：
+       │    【校准】若实际 Issue 号 ≠ 主事件预分配号 → update_event_issue_id(seq, 实际号)
+       │      （创建失败/仓库非空导致偏移时回写纠正，保证主事件归属准确）
        │    set_issue_stage(repo, #N, "vod", "vod", assignee=owner)
        │      → 新 Issue 处 vod 阶段：VOD Agent 先收敛用户需求（阶段矩阵 D8）
        │    append_event(issue_id=#N, event_type=onboarding_issue, agent_type=vod, status=completed)
        │      → 每个引导 Issue 一条独立事件 → pipeline 按 Issue 聚类呈现两个 Issue
-       └─ （主事件已由 _execute_agent 收尾，_finalize 仅补充 Issue 阶段与各 Issue 事件）
+       └─ （主事件已由 _execute_agent 收尾，_finalize 仅补充 Issue 阶段、各 Issue 事件与编号校准）
 ```
 
-> **编号 #01/#02**：新模板仓库为空仓库，GitCode Issue 从 1 递增。引导 A（体验）先创建得 #1，引导 B（探索）后创建得 #2。以技能回传实际编号为准。
+> **主事件 issue_id 预分配（方案 A）**：新模板仓库为空仓库，GitCode Issue 从 1 递增 → 引导 A（体验）预分配 `#1`、引导 B（探索）预分配 `#2`。主事件触发即归属对应 Issue，pipeline 立即呈现两条独立引导（不再聚成 `#0` 一个组）。完成后 `_finalize_onboarding` 读实际号并**校准**（新增 `update_event_issue_id`），消除预分配偏差。
 
 ### 3.2 代码改动（`src/api/onboarding.py`）
 
@@ -174,14 +177,20 @@ def trigger_onboarding(repo_key: str, owner: str):
 
     # 2. 落库两个主事件 + 两次引导分派（各 target 一次）
     #    执行模式跟随 VOD 会话（kind = runtime_execution_kind(vod runtime_id)，与 vod_handler_async 一致）
+    #    主事件 issue_id 预分配：新仓库 Issue 从 1 递增 → experience=#1, explore=#2
     from src.api.event_store import append_event
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
     kind = runtime_execution_kind(runtime_id or 0)
     for target in ONBOARDING_TARGETS:
         _title = "引导·快速部署体验" if target == "experience" else "引导·探索方向"
         _event_type = "onboarding_exp" if target == "experience" else "onboarding_explore"
+        _expected_issue = ONBOARDING_TARGETS.index(target) + 1  # experience→#1, explore→#2
         seq = append_event(
             repo_key=repo_key, event_type=_event_type, title=_title,
+            issue_id=f"#{_expected_issue}", agent_type="vod", source="template",
+            actor=owner or "", summary=f"{_title}（VOD Agent）：创建对应类型的引导 Issue",
+            status="running",
+        )
             issue_id="#0", agent_type="vod", source="template",
             actor=owner or "", summary=f"{_title}（VOD Agent）：创建对应类型的引导 Issue",
             status="running",
@@ -221,8 +230,11 @@ def _execute_agent_wrapper(repo_key, seq, owner, skill, backend, runtime_id, evt
 
 ```python
 def _finalize_onboarding(repo_key, seq, owner, result_path=""):
-    """单次引导完成补库：读技能产出 → 该次引导创建的 1 个 Issue 建 vod 阶段 + 独立事件。"""
-    from src.api.event_store import append_event
+    """单次引导完成补库：读技能产出 → 该次引导创建的 1 个 Issue 建 vod 阶段 + 独立事件。
+
+    含主事件 issue_id 校准：若实际 Issue 号与主事件预分配号不符，回写主事件归属。
+    """
+    from src.api.event_store import append_event, update_event_issue_id
     from src.api.session_store import set_issue_stage
     if not (result_path and os.path.exists(result_path)):
         log.warning(f"[Onboarding|repo:{repo_key}] result not found: {result_path}")
@@ -239,6 +251,12 @@ def _finalize_onboarding(repo_key, seq, owner, result_path=""):
     if not num or num in ("0",):
         log.warning(f"[Onboarding|repo:{repo_key}] invalid issue number in result: {data}")
         return
+    # 【校准】主事件 issue_id 预分配（#1/#2）可能与实际不符 → 回写纠正
+    try:
+        update_event_issue_id(seq, f"#{num}")
+        log.info(f"[Onboarding|repo:{repo_key}] master event seq={seq} issue_id calibrated to #{num}")
+    except Exception as e:
+        log.warning(f"[Onboarding|repo:{repo_key}] master event issue_id calibration failed: {e}")
     # 新 Issue 处于 vod 阶段：VOD 需先收敛用户需求（阶段矩阵 D8），收敛后 A2A 再推进
     set_issue_stage(repo_key, f"#{num}", "vod", "vod",
                     assignee=(data.get("assignee") or owner or ""))
@@ -558,12 +576,13 @@ def build_task_chat_prompt(user_text, repo_key, history, conv, account="", runti
 
 | 用例 | 断言 |
 |---|---|
-| `trigger_onboarding` 落库两个主事件 | `onboarding_exp` + `onboarding_explore` 各一条，status=running，issue_id=#0，agent_type=vod |
+| `trigger_onboarding` 落库两个主事件 | `onboarding_exp` 的 issue_id=#1、`onboarding_explore` 的 issue_id=#2（预分配），status=running，agent_type=vod |
 | 两次引导分派 | `experience`/`explore` 各触发一次执行（direct 线程 / queue 入队） |
 | `_execute_agent` 合并 `_env_extra` | ONBOARDING_RESULT / ONBOARDING_TARGET 注入子进程环境 |
 | SKILL 按 target 分支 | target=experience 走体验分支；target=explore 走探索分支 |
 | `_finalize_onboarding` 建阶段 | `issue_state.stage=='vod'` 且 `owner_agent=='vod'`、assignee 正确 |
 | `_finalize_onboarding` 建事件 | 每条 `onboarding_issue` 事件，issue_id=#1/#2，agent_type=vod，completed |
+| 主事件 issue_id 校准 | 实际 Issue 号与预分配不符时，`update_event_issue_id` 回写主事件归属 |
 | `notify_task` 任务会话 | 新会话 `conv_type=task`、`issue_number` 正确；存量 Issue #N 会话补标记 |
 | `send_message` 任务会话 | 走 `build_task_chat_prompt`，prompt 含 `场景: task` + Issue 上下文 |
 | `send_message` 一般会话 | 走 `build_chat_prompt`，prompt 无 `场景: task` |

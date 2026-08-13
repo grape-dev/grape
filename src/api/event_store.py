@@ -219,6 +219,17 @@ def update_event_status(seq: int, status: str):
             log.warning(f"Failed to update event {seq}: {e}")
 
 
+def update_event_issue_id(seq: int, issue_id: str):
+    """回写事件归属 Issue（用于引导主事件 issue_id 预分配后的实际号校准）"""
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute("UPDATE events SET issue_id=? WHERE seq=?", (issue_id, seq))
+            db.commit()
+        except Exception as e:
+            log.warning(f"Failed to update event issue_id {seq}: {e}")
+
+
 def update_event_config(seq: int, runtime: str, skill: str, started_at: str):
     """写入执行配置（runtime, skill, started_at）"""
     with db_lock:

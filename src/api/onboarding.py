@@ -80,9 +80,10 @@ def _load_vod_session(repo_key: str) -> tuple[str, int, str]:
 def _finalize_onboarding(repo_key: str, seq: int, owner: str, result_path: str = ""):
     """单次引导完成补库：读技能产出 → 该次引导创建的 1 个 Issue 建 vod 阶段 + 独立事件。
 
-    主事件（onboarding_exp/explore）已由 _execute_agent 收尾；本函数仅补充 Issue 阶段与子事件。
+    主事件（onboarding_exp/explore）已由 _execute_agent 收尾；本函数补充：
+    主事件 issue_id 校准 + Issue 阶段 + 子事件。
     """
-    from src.api.event_store import append_event
+    from src.api.event_store import append_event, update_event_issue_id
     from src.api.session_store import set_issue_stage
     if not (result_path and os.path.exists(result_path)):
         log.warning(f"[Onboarding|repo:{repo_key}] result not found: {result_path}")
@@ -99,6 +100,12 @@ def _finalize_onboarding(repo_key: str, seq: int, owner: str, result_path: str =
     if not num or num in ("0",):
         log.warning(f"[Onboarding|repo:{repo_key}] invalid issue number in result: {data}")
         return
+    # 【校准】主事件 issue_id 预分配（#1/#2）可能与实际不符 → 回写纠正
+    try:
+        update_event_issue_id(seq, f"#{num}")
+        log.info(f"[Onboarding|repo:{repo_key}] master event seq={seq} issue_id calibrated to #{num}")
+    except Exception as e:
+        log.warning(f"[Onboarding|repo:{repo_key}] master event issue_id calibration failed: {e}")
     # 新 Issue 处于 vod 阶段：VOD 需先收敛用户需求（阶段矩阵 D8），收敛后 A2A 再推进
     set_issue_stage(repo_key, f"#{num}", "vod", "vod",
                     assignee=(data.get("assignee") or owner or ""))
@@ -193,6 +200,7 @@ def trigger_onboarding(repo_key: str, owner: str):
 
         # 2. 落库两个主事件 + 两次引导分派（各 target 一次）
         #    执行模式跟随 VOD 会话（kind = runtime_execution_kind(vod runtime_id)，与 vod_handler_async 一致）
+        #    主事件 issue_id 预分配：新仓库 Issue 从 1 递增 → experience=#1, explore=#2
         from src.repo_key import from_repo_key
         from src.api.event_store import append_event
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
@@ -200,9 +208,10 @@ def trigger_onboarding(repo_key: str, owner: str):
         for target in ONBOARDING_TARGETS:
             _title = "引导·快速部署体验" if target == "experience" else "引导·探索方向"
             _event_type = "onboarding_exp" if target == "experience" else "onboarding_explore"
+            _expected_issue = ONBOARDING_TARGETS.index(target) + 1  # experience→#1, explore→#2
             seq = append_event(
                 repo_key=repo_key, event_type=_event_type, title=_title,
-                issue_id="#0", agent_type="vod", source="template",
+                issue_id=f"#{_expected_issue}", agent_type="vod", source="template",
                 actor=owner or "", summary=f"{_title}（VOD Agent）：创建对应类型的引导 Issue",
                 status="running",
             )
