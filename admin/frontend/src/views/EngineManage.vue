@@ -43,7 +43,7 @@
           <option value="offline">离线</option>
           <option value="about_to_gc">待回收</option>
         </select>
-        <input v-model="keyword" placeholder="名称/版本/提供方" style="padding:6px 10px;border:1px solid var(--bd,#d0d7de);border-radius:var(--rd,6px);font-size:12px;width:150px" @keyup.enter="search" />
+        <input v-model="keyword" class="search-input" placeholder="名称/版本/提供方" @keyup.enter="search" />
         <button class="btn" @click="search">查询</button>
         <button class="btn" @click="reset">重置</button>
         <button class="btn" @click="load" title="刷新当前列表">刷新</button>
@@ -238,6 +238,15 @@ onMounted(() => { load(); loadDevices() })
 </script>
 
 <style scoped>
+/* 搜索输入框（对齐 SkillManage 页样式） */
+.search-input {
+  padding: 7px 12px;
+  border: 1px solid var(--border, #e2e6ea);
+  border-radius: 6px;
+  font-size: 13px;
+  min-width: 240px;
+  background: #fff;
+}
 /* 健康分布徽章行（对齐设备管理页） */
 .em-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
 .em-stat {
