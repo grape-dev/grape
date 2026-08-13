@@ -48,7 +48,7 @@
                 <div class="agent-icon" :style="iconStyle(i)">{{ a.icon || '🤖' }}</div>
                 <div class="agent-meta">
                   <div class="agent-name">{{ a.displayName }}<span class="code-tag">{{ a.agentType }}</span></div>
-                  <div class="agent-sub">{{ a.enable === 1 ? '已启用' : '已禁用' }}</div>
+                  <div class="agent-sub">顺序 #{{ a.orderNum }} · 引擎 {{ a.defaultRuntimeId || '-' }}</div>
                 </div>
               </div>
               <div class="agent-desc">{{ a.description }}</div>

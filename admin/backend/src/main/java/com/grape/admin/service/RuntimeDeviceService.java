@@ -429,8 +429,13 @@ public class RuntimeDeviceService {
         taskPageObj.put("size", taskSize);
         taskPageObj.put("filterOptions", taskFilterOptions);
 
-        // 绑定智能体：该引擎上运行的智能体（devops_agent_session 按 agent_type 聚合）
-        // + agent_type 基础信息（displayName/icon/description/orderNum/enable）
+        // 关联智能体：基于 Agent Configuration（agent_type.default_runtime_id = 本引擎）——
+        // 只有把引擎配置到智能体里才算存在关联；会话统计（devops_agent_session）作为补充展示
+        List<com.grape.admin.entity.readonly.AgentTypeRo> typeList = agentTypeRepository.findAll().stream()
+                .filter(t -> t.getDefaultRuntimeId() != null && runtimeId.equals(t.getDefaultRuntimeId()))
+                .sorted(Comparator.comparingInt(t -> t.getOrderNum() == null ? 0 : t.getOrderNum()))
+                .collect(Collectors.toList());
+        // 该引擎上各智能体的会话/状态统计（补充信息，无实例则为空）
         Map<String, Map<String, Long>> statusByType = new LinkedHashMap<>();
         String aggSql = "SELECT agent_type, status, COUNT(*) c FROM devops_agent_session WHERE runtime_id = ? GROUP BY agent_type, status";
         grapeJdbc.query(aggSql, rs -> {
@@ -438,25 +443,21 @@ public class RuntimeDeviceService {
             statusByType.computeIfAbsent(type, k -> new LinkedHashMap<>())
                     .merge(rs.getString("status"), rs.getLong("c"), Long::sum);
         }, runtimeId);
-        Map<String, com.grape.admin.entity.readonly.AgentTypeRo> typeMeta = agentTypeRepository.findAll().stream()
-                .collect(Collectors.toMap(com.grape.admin.entity.readonly.AgentTypeRo::getAgentType, t -> t, (a, b) -> a));
-        List<Map<String, Object>> agents = statusByType.entrySet().stream()
-                .map(en -> {
-                    String type = en.getKey();
-                    Map<String, Long> statuses = en.getValue();
-                    com.grape.admin.entity.readonly.AgentTypeRo meta = typeMeta.get(type);
+        List<Map<String, Object>> agents = typeList.stream()
+                .map(t -> {
                     Map<String, Object> a = new LinkedHashMap<>();
-                    a.put("agentType", type);
-                    a.put("displayName", meta == null ? type : meta.getDisplayName());
-                    a.put("icon", meta == null ? "🤖" : meta.getIcon());
-                    a.put("description", meta == null ? "" : meta.getDescription());
-                    a.put("orderNum", meta == null ? 0 : meta.getOrderNum());
-                    a.put("enable", meta == null ? 0 : meta.getEnable());
+                    a.put("agentType", t.getAgentType());
+                    a.put("displayName", t.getDisplayName());
+                    a.put("icon", t.getIcon());
+                    a.put("description", t.getDescription());
+                    a.put("orderNum", t.getOrderNum());
+                    a.put("enable", t.getEnable());
+                    a.put("defaultRuntimeId", t.getDefaultRuntimeId());
+                    Map<String, Long> statuses = statusByType.getOrDefault(t.getAgentType(), Map.of());
                     a.put("sessionCount", statuses.values().stream().mapToLong(Long::longValue).sum());
                     a.put("statusBreakdown", statuses);
                     return a;
                 })
-                .sorted(Comparator.comparingInt((Map<String, Object> a) -> ((Number) a.get("orderNum")).intValue()))
                 .collect(Collectors.toList());
 
         engine.put("tasks", taskPageObj);
