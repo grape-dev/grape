@@ -251,7 +251,8 @@ public class RuntimeDeviceService {
                 .collect(Collectors.groupingBy(s -> s, LinkedHashMap::new, Collectors.counting()));
     }
 
-    public Map<String, Object> engineList(String scope, String type, String device, String status, int page, int size) {
+    public Map<String, Object> engineList(String scope, String type, String device, String status,
+                                          String keyword, int page, int size) {
         List<AgentRuntimeRo> runtimes = runtimeRepository.findAll();
         Map<Integer, RuntimeCredentialRo> credentialById = credentialRepository.findAll().stream()
                 .collect(Collectors.toMap(RuntimeCredentialRo::getId, c -> c));
@@ -278,6 +279,15 @@ public class RuntimeDeviceService {
             if (type != null && !type.isBlank() && !type.equals(r.getName())) continue;
             String devName = deviceNameByCredential.getOrDefault(r.getCredentialId(), "");
             if (device != null && !device.isBlank() && !devName.toLowerCase().contains(device.toLowerCase())) continue;
+            // 关键字模糊搜索：实例名(displayName/name)/版本/提供方，忽略大小写
+            if (keyword != null && !keyword.isBlank()) {
+                String kw = keyword.toLowerCase();
+                boolean hit = (r.getDisplayName() != null && r.getDisplayName().toLowerCase().contains(kw))
+                        || (r.getName() != null && r.getName().toLowerCase().contains(kw))
+                        || (r.getVersion() != null && r.getVersion().toLowerCase().contains(kw))
+                        || (r.getProvider() != null && r.getProvider().toLowerCase().contains(kw));
+                if (!hit) continue;
+            }
             if (status != null && !status.isBlank() && !status.equals(health)) continue;
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", r.getId());

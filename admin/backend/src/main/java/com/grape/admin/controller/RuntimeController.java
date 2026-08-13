@@ -63,9 +63,10 @@ public class RuntimeController {
                                        @RequestParam(required = false) String type,
                                        @RequestParam(required = false) String device,
                                        @RequestParam(required = false) String status,
+                                       @RequestParam(required = false) String keyword,
                                        @RequestParam(defaultValue = "0") int page,
                                        @RequestParam(defaultValue = "10") int size) {
-        return deviceService.engineList(scope, type, device, status, page, size);
+        return deviceService.engineList(scope, type, device, status, keyword, page, size);
     }
 
     @GetMapping("/tasks")

@@ -43,8 +43,10 @@
           <option value="offline">离线</option>
           <option value="about_to_gc">待回收</option>
         </select>
+        <input v-model="keyword" placeholder="名称/版本/提供方" style="padding:6px 10px;border:1px solid var(--bd,#d0d7de);border-radius:var(--rd,6px);font-size:12px;width:150px" @keyup.enter="search" />
         <button class="btn" @click="search">查询</button>
         <button class="btn" @click="reset">重置</button>
+        <button class="btn" @click="load" title="刷新当前列表">刷新</button>
         <div style="margin-left:auto;display:flex;gap:8px">
           <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
           <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
@@ -140,6 +142,7 @@ const page = ref(0)
 const type = ref('')
 const scope = ref('')
 const device = ref('')
+const keyword = ref('')
 const health = ref('')
 const view = ref('list')
 const deviceOptions = ref([])
@@ -201,7 +204,7 @@ async function loadDevices() {
   deviceOptions.value = [...new Set(data.content.map(d => d.deviceName || d.name))]
 }
 async function load() {
-  const { data } = await http.get('/engines', { params: { scope: scope.value, type: type.value, device: device.value, status: health.value, page: page.value, size: size.value } })
+  const { data } = await http.get('/engines', { params: { scope: scope.value, type: type.value, device: device.value, status: health.value, keyword: keyword.value, page: page.value, size: size.value } })
   engines.value = data.content
   stats.value = data.stats
   healthStats.value = data.healthStats || {}
@@ -209,7 +212,7 @@ async function load() {
   totalPages.value = data.totalPages
 }
 function search() { page.value = 0; load() }
-function reset() { scope.value = ''; type.value = ''; device.value = ''; health.value = ''; page.value = 0; load() }
+function reset() { scope.value = ''; type.value = ''; device.value = ''; keyword.value = ''; health.value = ''; page.value = 0; load() }
 function showToast(msg, type = 'success') {
   toastMessage.value = msg
   toastType.value = type
