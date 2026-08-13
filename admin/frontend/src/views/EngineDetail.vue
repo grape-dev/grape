@@ -11,31 +11,6 @@
     </div>
 
     <div class="dashboard" style="padding:20px 28px" v-if="detail">
-      <!-- 引擎信息 -->
-      <div class="card" style="padding:16px 20px">
-        <div class="detail-grid">
-          <div class="detail-item" :style="{ borderLeftColor: detail.health === 'online' ? '#52c41a' : 'var(--text-tertiary)' }">
-            <span class="t3">状态</span>
-            <span :class="['status-tag', healthClass(detail.health)]">{{ healthText(detail.health) }}</span>
-          </div>
-          <div class="detail-item"><span class="t3">类型</span>{{ detail.name || '—' }}</div>
-          <div class="detail-item"><span class="t3">显示名</span>{{ detail.displayName || '—' }}</div>
-          <div class="detail-item"><span class="t3">版本</span>{{ detail.version || '—' }}</div>
-          <div class="detail-item"><span class="t3">提供方</span>{{ detail.provider || '—' }}</div>
-          <div class="detail-item"><span class="t3">二进制</span><span class="ellipsis-cell" :title="detail.binary || '—'">{{ detail.binary || '—' }}</span></div>
-          <div class="detail-item"><span class="t3">CLI 路径</span><span class="ellipsis-cell" :title="detail.cliPath || '—'">{{ detail.cliPath || '—' }}</span></div>
-          <div class="detail-item"><span class="t3">Pip 包</span>{{ detail.pipPackage || '—' }}</div>
-          <div class="detail-item"><span class="t3">安装状态</span>{{ installedText(detail.installed) }}</div>
-          <div class="detail-item"><span class="t3">健康标志</span>{{ healthyText(detail.healthy) }}</div>
-          <div class="detail-item" style="border-left-color:#006eff"><span class="t3">最后心跳</span>{{ formatTime(detail.lastSeenAt) }}</div>
-          <div class="detail-item"><span class="t3">范围</span>{{ scopeText(detail.scope) }}</div>
-          <div class="detail-item"><span class="t3">归属</span>{{ detail.ownerName || '—' }}</div>
-          <div class="detail-item"><span class="t3">设备状态</span>{{ deviceStatusText(detail.deviceStatus) }}</div>
-          <div class="detail-item"><span class="t3">凭据 ID</span>{{ detail.credentialId ?? '—' }}</div>
-          <div class="detail-item"><span class="t3">更新时间</span>{{ formatTime(detail.updatedAt) }}</div>
-        </div>
-      </div>
-
       <!-- 关联智能体 -->
       <div class="card" style="margin-top:16px;padding:0">
         <div class="section-header">
@@ -237,7 +212,6 @@ const BADGE = {
 const SCOPE_TEXT = { global: '全局', repo: '仓库', user: '个人' }
 function scopeText(s) { return SCOPE_TEXT[s] || s || '—' }
 function healthText(h) { return (BADGE[h] || { label: h }).label }
-function healthClass(h) { return { online: 'success', recently_lost: 'warning', offline: 'default', about_to_gc: 'danger', revoked: 'default' }[h] || 'default' }
 function badgeStyle(h) {
   const b = BADGE[h] || { color: 'var(--text-tertiary)', bg: '#eef0f3' }
   return { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', fontWeight: 500, color: b.color, background: b.bg, padding: '2px 10px', borderRadius: '10px', whiteSpace: 'nowrap' }
