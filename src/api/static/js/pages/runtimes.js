@@ -170,15 +170,15 @@ function doCreateCredential() {
   API.post('/settings/runtime-credentials', { name, scope, repo_key }).then(d => {
     const token = d.token || '';
     const runCmd = `RUNTIME_TOKEN=${token} python -m runtime.agent`;
-    const oneCmd = `curl -sSL ${window.location.origin}/api/runtime/install | bash -s -- --token ${token}`;
+    const oneCmd = `curl -fsSL ${window.location.origin}/api/runtime/install | bash -s -- --token ${token} --server ${window.location.origin}`;
     closeGenCredential();
     const box = `<div class="cd" style="margin-top:12px;padding:16px">
       <div style="font-size:13px;margin-bottom:8px">⚠️ token 仅展示一次，请立即保存（凭据名: ${name}，范围: ${_scopeLabel(scope)}）：</div>
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px">${token}</code>
-      <div style="margin-top:10px;font-size:12px">📦 在 Worker 机器上一键安装（推荐）：</div>
+      <div style="margin-top:10px;font-size:12px">📦 在 Worker 机器（普通用户）一键安装接入：</div>
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-top:4px">${oneCmd}</code>
       <button class="bt bt-p bt-s" style="margin-top:8px" onclick="copyText('${oneCmd.replace(/'/g, "\\'")}')">📋 复制一键命令</button>
-      <div style="margin-top:8px;font-size:11px;color:var(--t2)">⚠️ 一键安装不包含执行引擎（opencode 等），请在 Worker 上自行安装后重启：npm install -g opencode-ai</div>
+      <div style="margin-top:8px;font-size:11px;color:var(--t2)">该命令从主控下载运行包（grape-worker.tar.gz）解压到用户家目录，自动写入凭据与主控地址并后台启动注册；免 root。重复执行可升级。</div>
       <div style="margin-top:10px;font-size:12px">或手动启动 RuntimeAgent：</div>
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-top:4px">${runCmd}</code>
       <button class="bt bt-o bt-s" style="margin-top:8px" onclick="copyText('${token}')">📋 复制 token</button>

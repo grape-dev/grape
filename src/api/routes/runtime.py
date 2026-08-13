@@ -355,6 +355,26 @@ async def runtime_install_latest(credential_id: int = Depends(_require_credentia
     return {"version": package_version()}
 
 
+@router.get("/grape-worker.tar.gz")
+async def runtime_worker_package_public():
+    """公开下发 Worker 绿色安装包 tar.gz（无需鉴权）。
+
+    包内仅含 worker 运行代码（无任何敏感信息，凭据由安装命令 --token 注入），
+    供「凭据申请页一键安装命令」直接 curl 下载：
+      curl -fsSL <server>/api/runtime/grape-worker.tar.gz -o grape-worker.tar.gz
+    首次请求动态打包 + 缓存（代码变更自动重建，见 src/worker_package.py）。
+    """
+    from fastapi.responses import FileResponse
+    from src.worker_package import build_package
+    try:
+        pkg = build_package()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": f"build worker package failed: {e}"})
+    if not pkg or not os.path.isfile(pkg):
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "worker package not found"})
+    return FileResponse(pkg, media_type="application/gzip", filename="grape-worker.tar.gz")
+
+
 @router.get("/install/package")
 async def runtime_install_package(credential_id: int = Depends(_require_credential)):
     """下发 Worker 安装包 tar.gz（rta_ 鉴权，首次请求动态打包 + 缓存）。
