@@ -90,21 +90,23 @@ def _python_subset_entries(py_root: str) -> list[str]:
         dirs[:] = [d for d in dirs if d != "__pycache__"]
         rel = os.path.relpath(base, py_root)
         if rel == ".":
-            # 只保留 bin/ 与 lib/（lib 下再收 libpython*.so* + python3.12 stdlib）
+            # 只保留 bin/ 与 lib/（lib 下再收 libpython*.so* + python3.X stdlib）
             dirs[:] = [d for d in dirs if d in ("bin", "lib")]
             files[:] = []
             continue
         parts = rel.split(os.sep)
         if parts[0] == "bin":
-            # bin 只留 python 可执行（含 python/python3/python3.12 软链）
+            # bin 只留 python 可执行（含 python/python3/python3.X 软链）
             files = [f for f in files if f.startswith("python")]
         elif parts[0] == "lib":
             if len(parts) == 1:
                 # lib 根：只留 libpython*.so*，去掉 tcl/tk/pkgconfig
                 files = [f for f in files if f.startswith("libpython")]
-                dirs[:] = [d for d in dirs if d == "python3.12"]
+                # 保留实际存在的 python3.X stdlib 目录（3.10/3.11/3.12…，不写死版本）
+                dirs[:] = [d for d in dirs
+                           if d.startswith("python3.") and d[len("python3."):].isdigit()]
             else:
-                # lib/python3.12 整目录保留
+                # lib/python3.X 整目录保留
                 pass
         else:
             dirs[:] = []
@@ -184,16 +186,17 @@ def _python_fingerprint(py_root: str | None) -> str:
     return h.hexdigest()[:8]
 
 
-def _ensure_wheels() -> str:
+def _ensure_wheels(py_version: str = "") -> str:
     """下载 worker 依赖 wheels 到缓存目录（离线安装用），返回目录。
 
-    - 按当前解释器平台下载（Linux x86_64 + cp312 等），纯 python 包为通用 wheel；
-    - requirements 变更或目录无 whl 时重新下载；
+    - py_version 指定目标 Python 版本（如 "3.11"）：与包内 bundle python 匹配，
+      保证离线安装可用；为空则按当前解释器（构建机）平台下载；
+    - requirements 变更或 py_version 变更时重新下载；
     - 目标机器平台/Python 版本不匹配时离线安装会回退在线（见 install-worker.sh）。
     """
     os.makedirs(WHEELS_DIR, exist_ok=True)
     marker = os.path.join(WHEELS_DIR, ".req-hash")
-    cur = _requirements_hash()
+    cur = f"{py_version}:{_requirements_hash()}"
     old = ""
     try:
         old = open(marker, encoding="utf-8").read().strip()
@@ -202,7 +205,7 @@ def _ensure_wheels() -> str:
     has_whl = any(f.endswith(".whl") for f in os.listdir(WHEELS_DIR))
     if cur == old and has_whl:
         return WHEELS_DIR
-    log.info(f"worker_package: downloading wheels for {REQUIREMENTS_PATH} (index={PIP_INDEX})")
+    log.info(f"worker_package: downloading wheels (py={py_version or 'build-host'}, index={PIP_INDEX})")
     for f in os.listdir(WHEELS_DIR):
         if f.endswith(".whl"):
             try:
@@ -210,13 +213,13 @@ def _ensure_wheels() -> str:
             except Exception:
                 pass
     try:
-        r = subprocess.run(
-            [sys.executable, "-m", "pip", "download",
-             "-r", REQUIREMENTS_PATH, "-d", WHEELS_DIR,
-             "--only-binary=:all:", "--retries", "3", "--timeout", "30",
-             "-i", PIP_INDEX],
-            capture_output=True, text=True, timeout=300,
-        )
+        cmd = [sys.executable, "-m", "pip", "download",
+               "-r", REQUIREMENTS_PATH, "-d", WHEELS_DIR,
+               "--only-binary=:all:", "--retries", "3", "--timeout", "30",
+               "-i", PIP_INDEX]
+        if py_version:
+            cmd += ["--python-version", py_version]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if r.returncode != 0:
             log.warning(f"worker_package: pip download wheels failed: {r.stderr[-400:]}")
     except Exception as e:
@@ -319,11 +322,17 @@ def build_package() -> str:
             return PKG_PATH
 
         tmp = PKG_PATH + ".tmp"
-        members: list[tuple[str, bytes]] = []
-        # 依赖 wheels（离线安装用；下载失败时包内不含 wheels，安装回退在线）
-        whl_dir = _ensure_wheels()
+        members: list = []  # ("arc", bytes) 小文件 / ("arc", path, "path") 大文件流式
         # 内置 Python>=3.10 standalone（离线装 worker 时解释器缺失的兜底；无则靠系统 Python）
         py_root = _find_python()
+        # 依赖 wheels：按 bundle python 版本下载（匹配离线安装）；无 bundle 时按构建机
+        py_ver = ""
+        if py_root:
+            import re as _re
+            _m = _re.search(r"(\d+\.\d+)", os.path.basename(os.path.normpath(py_root)) or "")
+            if _m:
+                py_ver = _m.group(1)
+        whl_dir = _ensure_wheels(py_ver)
         if py_root:
             log.info(f"worker_package: bundling python {os.path.basename(py_root)}")
         else:

@@ -30,8 +30,10 @@ class TestWorkerPackage:
         assert "grape-worker/src/runtime/agent.py" in names
         assert "grape-worker/src/agent/executor.py" in names
         assert "grape-worker/requirements-worker.txt" in names
-        # 不应泄漏服务端代码 / 配置 / 静态资源
+        # 不应泄漏服务端代码 / 配置 / 静态资源（内置 Python stdlib 含 statistics.py 等，跳过）
         for n in names:
+            if n.startswith("grape-worker/python/"):
+                continue
             assert "api/main.py" not in n
             assert "api/routes" not in n
             assert "static" not in n
@@ -58,7 +60,7 @@ class TestWorkerPackage:
         assert len(sums) >= 28                       # 原闭包文件数（28）
         assert any(k.endswith(".whl") for k in sums) # wheels 已随包下发（离线安装依赖）
         assert any(k.startswith("grape-worker/python/") for k in sums)  # 内置 Python>=3.10 已随包下发
-        assert "grape-worker/python/bin/python3.12" in sums             # 解释器本体（真实二进制）在包内
+        assert any(k.startswith("grape-worker/python/bin/python3.") for k in sums)  # 解释器本体在包内
 
     def test_version_cache_hit_reuse(self):
         import src.worker_package as wp
