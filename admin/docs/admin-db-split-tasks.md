@@ -140,6 +140,40 @@ T5.1 稳定期观察（建议 1 周）：无回滚需求后，评估清理 grape
   验收：清理后管理台功能仍正常
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+附录：现网首次部署清单（全新环境，无旧库数据）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+前提：现网 MySQL 实例（复用 grape 业务库所在实例，无需新购；grape_admin_db 是新 schema）
+
+1. 建库（空库即可，表由 Flyway 自动建）：
+   CREATE DATABASE grape_admin_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+   （建议另建最小权限账号：管理台读写账号 + AI 只读账号）
+
+2. /etc/grape/admin.env 配置：
+   ADMIN_DB_URL=jdbc:mysql://<host>:3306/grape_admin_db?...   # 管理台表
+   ADMIN_DB_USER / ADMIN_DB_PASSWORD
+   GRAPE_DB_URL=jdbc:mysql://<host>:3306/<现网业务库>?...     # 业务表
+   GRAPE_DB_USER / GRAPE_DB_PASSWORD
+   ADMIN_JWT_SECRET（随机长串）
+   ADMIN_SEED_PASSWORD（初始 admin 密码，≥8 位，必配——缺配启动失败）
+   HERMES_BIN
+   SPRING_FLYWAY_ENABLED=true
+   FLYWAY_BASELINE_VERSION=0   # ★ 首次部署必须设 0：Flyway 全量应用 V1-V16 建表（含菜单种子）
+                               #    （迁移场景不设，默认 16 不重放）
+
+3. 部署：cd /opt/grape/admin/deploy && bash deploy.sh
+   首次启动自动完成：Flyway 应用 16 个迁移（建 9 表 + 菜单种子）→
+   AdminSeedInitializer 创建 admin 超级管理员（密码 = ADMIN_SEED_PASSWORD）
+
+4. 验证：
+   - 日志：Successfully applied 16 migrations（不是 baseline）+ 种子管理员已创建
+   - 双 HikariPool 启动成功、健康检查 ok
+   - admin / ADMIN_SEED_PASSWORD 登录管理台，菜单/设备/凭据接口 200
+
+已实测验证（2026-08-13）：FLYWAY_BASELINE_VERSION=0 + 空库 + ADMIN_SEED_PASSWORD
+→ 全量建表 + 种子管理员 + 登录成功。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 git 提交策略（Grape 开发流程硬性约定）
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - 所有改动在 feat/admin-console 分支
