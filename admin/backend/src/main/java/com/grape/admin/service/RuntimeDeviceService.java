@@ -27,21 +27,21 @@ public class RuntimeDeviceService {
     private final AgentRuntimeRoRepository runtimeRepository;
     private final AgentTaskRoRepository taskRepository;
     private final HealthService healthService;
-    private final AgentTypeRoRepository agentTypeRepository;
+    private final AgentService agentService;
     private final org.springframework.jdbc.core.JdbcTemplate grapeJdbc;
 
     public RuntimeDeviceService(RuntimeCredentialRoRepository credentialRepository,
                                 AgentRuntimeRoRepository runtimeRepository,
                                 AgentTaskRoRepository taskRepository,
                                 HealthService healthService,
-                                AgentTypeRoRepository agentTypeRepository,
+                                AgentService agentService,
                                 @org.springframework.beans.factory.annotation.Qualifier("grapeJdbcTemplate")
                                 org.springframework.jdbc.core.JdbcTemplate grapeJdbc) {
         this.credentialRepository = credentialRepository;
         this.runtimeRepository = runtimeRepository;
         this.taskRepository = taskRepository;
         this.healthService = healthService;
-        this.agentTypeRepository = agentTypeRepository;
+        this.agentService = agentService;
         this.grapeJdbc = grapeJdbc;
     }
 
@@ -430,33 +430,17 @@ public class RuntimeDeviceService {
         taskPageObj.put("filterOptions", taskFilterOptions);
 
         // 关联智能体：基于 Agent Configuration（agent_type.default_runtime_id = 本引擎）——
-        // 只有把引擎配置到智能体里才算存在关联；会话统计（devops_agent_session）作为补充展示
-        List<com.grape.admin.entity.readonly.AgentTypeRo> typeList = agentTypeRepository.findAll().stream()
-                .filter(t -> t.getDefaultRuntimeId() != null && runtimeId.equals(t.getDefaultRuntimeId()))
-                .sorted(Comparator.comparingInt(t -> t.getOrderNum() == null ? 0 : t.getOrderNum()))
-                .collect(Collectors.toList());
-        // 该引擎上各智能体的会话/状态统计（补充信息，无实例则为空）
-        Map<String, Map<String, Long>> statusByType = new LinkedHashMap<>();
-        String aggSql = "SELECT agent_type, status, COUNT(*) c FROM devops_agent_session WHERE runtime_id = ? GROUP BY agent_type, status";
-        grapeJdbc.query(aggSql, rs -> {
-            String type = rs.getString("agent_type");
-            statusByType.computeIfAbsent(type, k -> new LinkedHashMap<>())
-                    .merge(rs.getString("status"), rs.getLong("c"), Long::sum);
-        }, runtimeId);
-        List<Map<String, Object>> agents = typeList.stream()
-                .map(t -> {
-                    Map<String, Object> a = new LinkedHashMap<>();
-                    a.put("agentType", t.getAgentType());
-                    a.put("displayName", t.getDisplayName());
-                    a.put("icon", t.getIcon());
-                    a.put("description", t.getDescription());
-                    a.put("orderNum", t.getOrderNum());
-                    a.put("enable", t.getEnable());
-                    a.put("defaultRuntimeId", t.getDefaultRuntimeId());
-                    Map<String, Long> statuses = statusByType.getOrDefault(t.getAgentType(), Map.of());
-                    a.put("sessionCount", statuses.values().stream().mapToLong(Long::longValue).sum());
-                    a.put("statusBreakdown", statuses);
-                    return a;
+        // 只有把引擎配置到智能体里才算存在关联。
+        // 卡片信息与智能体管理页（AgentManage）完全一致：复用 AgentService.list() 的完整统计
+        // （taskCount/statusBreakdown(任务)/sessionCount/repoUsageCount/inFlightTasks/loadRate/
+        //  loadLevel/alertThresholdPct/category/enable），按 defaultRuntimeId 过滤本引擎
+        Map<String, Object> agentListResult = agentService.list();
+        List<Map<String, Object>> allAgents = agentListResult.get("agents") == null ? List.of()
+                : (List<Map<String, Object>>) agentListResult.get("agents");
+        List<Map<String, Object>> agents = allAgents.stream()
+                .filter(a -> {
+                    Object dr = a.get("defaultRuntimeId");
+                    return dr != null && runtimeId.equals(dr);
                 })
                 .collect(Collectors.toList());
 
