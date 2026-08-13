@@ -60,7 +60,7 @@
           </thead>
           <tbody>
             <tr v-for="e in engines" :key="e.id">
-              <td>{{ e.displayName || e.name }}</td>
+              <td :title="e.displayName || e.name">{{ e.name }}{{ e.device ? '-' + e.device : '' }}</td>
               <td>{{ e.name }}</td>
               <td class="t3" style="max-width:200px">{{ e.version || '-' }}</td>
               <td class="t3">{{ e.provider || '-' }}</td>
@@ -86,7 +86,7 @@
               <span :style="badgeStyle(e.health)">
                 <span :style="dotStyle(e.health)"></span>{{ healthText(e.health) }}
               </span>
-              <span style="max-width:180px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="e.displayName || e.name">{{ e.displayName || e.name }}</span>
+              <span style="max-width:180px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="e.name + (e.device ? '-' + e.device : '')">{{ e.name }}{{ e.device ? '-' + e.device : '' }}</span>
             </span>
             <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span>
           </div>
