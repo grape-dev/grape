@@ -53,8 +53,9 @@ if [ -z "$SERVER" ]; then
   log "未指定 --server，使用默认 $SERVER（如不对请加 --server https://<你的主控域名>）"
 fi
 SERVER="${SERVER%/}"
+# 设备名：hostname 小写，非字母数字替换为 -，清理首尾 -（hostname 输出含换行会产生尾随 -）
 if [ -z "$DEVICE" ]; then
-  DEVICE="worker-$(hostname | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '-')"
+  DEVICE="worker-$(hostname | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]/-/g; s/^-*//; s/-*$//')"
 fi
 
 # 安装目录：普通用户家目录（默认 ~/grape），root 模式默认 /opt/grape
@@ -115,9 +116,14 @@ log "解压运行包到 $INSTALL_DIR"
 tar -xzf "$TMP_PKG" -C "$INSTALL_DIR" --strip-components=1 || fail "解压运行包失败"
 rm -f "$TMP_PKG"
 
-# 校验包内 SHA256SUMS（存在则校验；缺失仅告警）
+# 校验包内 SHA256SUMS：包内路径带 grape-worker/ 前缀，解压 --strip-components=1 后
+# 实际文件在安装目录根，校验时去掉前缀（存在则校验；缺失仅告警）
 if [ -f "$INSTALL_DIR/SHA256SUMS" ]; then
-  ( cd "$INSTALL_DIR" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ) || log "警告: 运行包内容校验未通过，请确认来源可信"
+  if ( cd "$INSTALL_DIR" && sed 's|  grape-worker/|  |' SHA256SUMS | sha256sum -c >/dev/null 2>&1 ); then
+    log "运行包内容校验通过（SHA256SUMS）"
+  else
+    log "警告: 运行包内容校验未通过，请确认来源可信"
+  fi
 fi
 mkdir -p "$CFG_DIR"
 if [ -f "$INSTALL_DIR/VERSION" ]; then
@@ -134,8 +140,15 @@ if [ ! -x "$VENV/bin/python" ]; then
   "$PY" -m venv "$VENV"
 fi
 if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
-  log "安装依赖 requirements-worker.txt（首次需数分钟）"
-  "$VENV/bin/pip" install --quiet -r "$INSTALL_DIR/requirements-worker.txt" || log "警告: 依赖安装未完全成功，请检查网络/镜像"
+  # pip 镜像：默认清华（国内网络 pypi.org 直连常超时），可用 PIP_INDEX_URL 或 --pip-index 覆盖
+  PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+  log "安装依赖 requirements-worker.txt（镜像: $PIP_INDEX，首次需数分钟）"
+  if ! "$VENV/bin/pip" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
+      -r "$INSTALL_DIR/requirements-worker.txt"; then
+    log "依赖安装失败。请检查网络后重试，或指定可用镜像："
+    log "  PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple $START_SCRIPT 重新安装"
+    fail "依赖安装失败（aiohttp 未装好 worker 无法启动）：请重试本安装命令，或设置 PIP_INDEX_URL 环境变量指定可用 pip 镜像"
+  fi
 fi
 
 # ===== 5. 写入接入配置（凭据 + 主系统地址，权限 600）=====
