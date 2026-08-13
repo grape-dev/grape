@@ -1342,14 +1342,21 @@ def set_meta_value(key: str, value: str):
 def get_server_base_url() -> str:
     """返回服务端 API 基址（A2A/tasks 等协议端点用，不含 /webhook/gitcode 后缀）。
 
-    优先取 meta.server_base_url；无则从 meta.webhook_url 剥掉 /webhook/gitcode 后缀兜底；
-    再兜底 http://localhost:8080。
+    优先取 configs/server-config.json 显式配置；无则 meta.server_base_url；
+    再兜底从 webhook_url 剥掉 /webhook/gitcode 后缀；最后 http://localhost:8080。
     """
+    try:
+        from src.config import read_server_config
+        _sb = (read_server_config().get("server_base_url") or "").strip().rstrip("/")
+        if _sb:
+            return _sb
+    except Exception:
+        pass
     try:
         base = get_meta_value("server_base_url") or ""
         if base:
             return base.rstrip("/")
-        wu = get_meta_value("webhook_url") or ""
+        wu = get_webhook_url() or ""
         if wu:
             base = wu.rstrip("/")
             for suffix in ("/webhook/gitcode", "/webhook"):
@@ -1359,6 +1366,25 @@ def get_server_base_url() -> str:
     except Exception:
         pass
     return "http://localhost:8080"
+
+
+def get_webhook_url() -> str:
+    """返回服务端 webhook 地址（GitCode 事件回调注册用，含 /webhook/gitcode 后缀）。
+
+    优先取 configs/server-config.json 显式配置；无则 meta.webhook_url；再兜底空串
+    （不设 localhost 兜底，让 repos.py「webhook_url 未配置即拒」守卫生效）。
+    """
+    try:
+        from src.config import read_server_config
+        _wh = (read_server_config().get("webhook_url") or "").strip()
+        if _wh:
+            return _wh
+    except Exception:
+        pass
+    try:
+        return (get_meta_value("webhook_url") or "").strip()
+    except Exception:
+        return ""
 
 
 def migrate_accounts_from_json():

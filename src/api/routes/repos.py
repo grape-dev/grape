@@ -184,8 +184,8 @@ async def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current
         pass
 
     if body.host_after_create:
-        from src.user.db import get_meta_value
-        webhook_url = get_meta_value("webhook_url")
+        from src.user.db import get_webhook_url
+        webhook_url = get_webhook_url()
         if not webhook_url:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "webhook_url 未配置，无法托管"})
         try:
@@ -236,8 +236,8 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     owner, repo_name = parts
 
     api_token = get_user_token(user["username"])
-    from src.user.db import get_meta_value
-    webhook_url = get_meta_value("webhook_url")
+    from src.user.db import get_webhook_url
+    webhook_url = get_webhook_url()
 
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})

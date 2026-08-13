@@ -113,7 +113,7 @@ async def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(ge
 
     return {
         "devops_bot_token_exists": bool(bot_token),
-        "webhook_url": user_db.get_meta_value("webhook_url") or "http://localhost:8080/webhook/gitcode",
+        "webhook_url": user_db.get_webhook_url() or "http://localhost:8080/webhook/gitcode",
         "bot_username": bot_username,
     }
 

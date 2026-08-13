@@ -68,18 +68,29 @@ def _load_accounts():
             return ""
         try:
             from src.user.db import get_meta_value, set_meta_value
-            # webhook_url（GitCode 回调注册用）：基址 + /webhook/gitcode
+            _cfg = read_server_config()
+            # webhook_url（GitCode 回调注册用）：configs/server-config.json 显式配置 > 自动检测
             if not get_meta_value("webhook_url"):
-                base = _detect_server_base()
-                if base:
-                    set_meta_value("webhook_url", base + "/webhook/gitcode")
-                    log.info(f"Auto-detected webhook URL: {base}/webhook/gitcode")
-            # server_base_url（A2A/tasks 等协议端点基址）：仅基址，不含 /webhook/gitcode
+                _wh = (_cfg.get("webhook_url") or "").strip()
+                if _wh:
+                    set_meta_value("webhook_url", _wh)
+                    log.info(f"Configured webhook URL from server-config.json: {_wh}")
+                else:
+                    base = _detect_server_base()
+                    if base:
+                        set_meta_value("webhook_url", base + "/webhook/gitcode")
+                        log.info(f"Auto-detected webhook URL: {base}/webhook/gitcode")
+            # server_base_url（A2A/tasks 等协议端点基址）：配置文件 > 自动检测
             if not get_meta_value("server_base_url"):
-                base = _detect_server_base()
-                if base:
-                    set_meta_value("server_base_url", base)
-                    log.info(f"Auto-detected server base URL: {base}")
+                _sb = (_cfg.get("server_base_url") or "").strip().rstrip("/")
+                if _sb:
+                    set_meta_value("server_base_url", _sb)
+                    log.info(f"Configured server base URL from server-config.json: {_sb}")
+                else:
+                    base = _detect_server_base()
+                    if base:
+                        set_meta_value("server_base_url", base)
+                        log.info(f"Auto-detected server base URL: {base}")
         except Exception:
             pass
         log.info(f"Loaded {len(ACCOUNTS)} accounts from DB")
@@ -121,6 +132,24 @@ def get_agent_backend(skill_name: str = "") -> str:
 # ====== 登录白名单 ======
 
 LOGIN_WHITELIST_PATH = os.path.join(CONFIG_DIR, "login-whitelist.json")
+
+# server-config.json（gitignored）：server_base_url / webhook_url 显式配置，见 DEPLOYMENT-REMOTE.md §4
+SERVER_CONFIG_PATH = os.path.join(CONFIG_DIR, "server-config.json")
+
+
+def read_server_config() -> dict:
+    """读取 configs/server-config.json（gitignored，动态读，改后无需重启）。
+
+    返回 {"server_base_url": "...", "webhook_url": "..."}；文件缺失/损坏返回 {}。
+    """
+    try:
+        if os.path.exists(SERVER_CONFIG_PATH):
+            with open(SERVER_CONFIG_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
 
 
 def is_gitcode_user_allowed(gitcode_login: str) -> bool:
