@@ -811,7 +811,7 @@ Settings 包含 **Credentials** 与 **Notifications** 两个页签：
 | **关键能力** | 构建项目知识基线（project-info）→ 需求引导漏斗（模糊→多轮澄清→清晰）→ 结构化建 Issue → A2A 交办 Issue Agent |
 | **工作流** | 收集/接管 Issue → 分析（知识基线 + 历史反馈去重）→ 与开发者澄清 → 收敛为清晰需求（含验收标准）→ 建/总结 Issue → A2A 交办 Issue Agent |
 | **工作流位置** | 工作流最上游，所有新 Issue 的审视入口 |
-| **预制 Skill** | `skills/vod/`（开发者声音分析） |
+| **预制 Skill** | `skills/vod/`（开发者声音分析）、`skills/repo-onboarding/`（首次托管引导） |
 
 ### 3.2 Issue Agent
 
@@ -820,7 +820,7 @@ Settings 包含 **Credentials** 与 **Notifications** 两个页签：
 | **职责** | 清晰需求 → 可开发任务（spec 设计、打标签、排里程碑、分配责任人、任务分派） |
 | **触发方式** | VOD A2A 交办（主要）/ `issue_updated`/`issue_comment`（阶段在 issue 及之后）/ 用户主动 |
 | **关键能力** | 分类与打标签、责任人指派、任务创建（`/api/tasks/notify` + 飞书通知）、Issue 关闭（`/api/tasks/close`）、A2A 触发 Coding |
-| **预制 Skill** | `skills/issue/`、`skills/issue-advance/`、`skills/repo-onboarding/`（首次托管引导） |
+| **预制 Skill** | `skills/issue/`、`skills/issue-advance/` |
 
 ### 3.3 Coding Agent
 
@@ -993,8 +993,8 @@ issue_opened ──► vod ──A2A──► issue ──A2A──► coding �
 
 | Agent | 预制 Skill 目录 | 说明 |
 |-------|----------------|------|
-| VOD Agent | `skills/vod/` | 声音分析 + 需求引导 + Issue 审视 |
-| Issue Agent | `skills/issue/`、`skills/issue-advance/`、`skills/repo-onboarding/` | 分类、标签、指派、spec、引导 |
+| VOD Agent | `skills/vod/`、`skills/repo-onboarding/` | 声音分析 + 需求引导 + Issue 审视 + 首次托管引导 |
+| Issue Agent | `skills/issue/`、`skills/issue-advance/` | 分类、标签、指派、spec |
 | Coding Agent | `skills/implementation/` | 需求分析→编码→自测→PR |
 | QA Agent | `skills/pr/`、`skills/qa/`、`skills/skill-pr/` | PR 审查、质量审查 |
 | SRE Agent | `skills/changelog-gen/`、`skills/cloud-deploy/`、`skills/deploy-guard/`、`skills/build-debug/`、`skills/incident-triage/` | 发布、运维、监控、故障 |

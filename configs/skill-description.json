@@ -85,8 +85,8 @@
   },
   "repo-onboarding": {
     "name": "首次托管引导",
-    "agent_type": "issue",
+    "agent_type": "vod",
     "path": "repo-onboarding",
-    "description": "项目首次托管引导（通用）：分析功能特性与使用方式，创建「快速部署体验」与「探索方向引导」两个 Issue"
+    "description": "首次托管引导（VOD Agent 执行）：建立项目知识基线，按引导目标创建「快速部署体验」或「探索方向引导」单个 Issue"
   }
 }
