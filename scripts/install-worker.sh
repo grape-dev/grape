@@ -142,12 +142,27 @@ fi
 if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   # pip 镜像：默认清华（国内网络 pypi.org 直连常超时），可用 PIP_INDEX_URL 或 --pip-index 覆盖
   PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-  log "安装依赖 requirements-worker.txt（镜像: $PIP_INDEX，首次需数分钟）"
-  if ! "$VENV/bin/pip" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
-      -r "$INSTALL_DIR/requirements-worker.txt"; then
-    log "依赖安装失败。请检查网络后重试，或指定可用镜像："
-    log "  PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple $START_SCRIPT 重新安装"
-    fail "依赖安装失败（aiohttp 未装好 worker 无法启动）：请重试本安装命令，或设置 PIP_INDEX_URL 环境变量指定可用 pip 镜像"
+  # 优先离线安装：包内已带依赖 wheels（grape-worker/wheels/），免网络下载
+  if [ -d "$INSTALL_DIR/wheels" ] && ls "$INSTALL_DIR/wheels"/*.whl >/dev/null 2>&1; then
+    log "离线安装依赖（包内 wheels: $(ls "$INSTALL_DIR/wheels"/*.whl | wc -l) 个，免网络）"
+    if "$VENV/bin/pip" install --quiet --no-index --find-links "$INSTALL_DIR/wheels" \
+        -r "$INSTALL_DIR/requirements-worker.txt"; then
+      log "依赖离线安装完成"
+    else
+      log "离线安装失败（可能平台/Python 版本不匹配），回退在线安装..."
+      if ! "$VENV/bin/pip" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
+          -r "$INSTALL_DIR/requirements-worker.txt"; then
+        log "依赖安装失败。请检查网络后重试，或指定可用镜像："
+        log "  PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple bash -c 'curl -fsSL $SERVER/api/runtime/install | bash -s -- --token <token> --server $SERVER'"
+        fail "依赖安装失败（aiohttp 未装好 worker 无法启动）：请重试本安装命令，或设置 PIP_INDEX_URL 环境变量指定可用 pip 镜像"
+      fi
+    fi
+  else
+    log "包内无离线 wheels，在线安装依赖（镜像: $PIP_INDEX，首次需数分钟）"
+    if ! "$VENV/bin/pip" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
+        -r "$INSTALL_DIR/requirements-worker.txt"; then
+      fail "依赖安装失败（aiohttp 未装好 worker 无法启动）：请重试本安装命令，或设置 PIP_INDEX_URL 环境变量指定可用 pip 镜像"
+    fi
   fi
 fi
 
