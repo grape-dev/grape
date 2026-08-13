@@ -5,10 +5,12 @@ import com.grape.admin.entity.readonly.AgentTaskRo;
 import com.grape.admin.entity.readonly.RuntimeCredentialRo;
 import com.grape.admin.repository.readonly.AgentRuntimeRoRepository;
 import com.grape.admin.repository.readonly.AgentTaskRoRepository;
+import com.grape.admin.repository.readonly.AgentTypeRoRepository;
 import com.grape.admin.repository.readonly.RuntimeCredentialRoRepository;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,18 +27,21 @@ public class RuntimeDeviceService {
     private final AgentRuntimeRoRepository runtimeRepository;
     private final AgentTaskRoRepository taskRepository;
     private final HealthService healthService;
+    private final AgentTypeRoRepository agentTypeRepository;
     private final org.springframework.jdbc.core.JdbcTemplate grapeJdbc;
 
     public RuntimeDeviceService(RuntimeCredentialRoRepository credentialRepository,
                                 AgentRuntimeRoRepository runtimeRepository,
                                 AgentTaskRoRepository taskRepository,
                                 HealthService healthService,
+                                AgentTypeRoRepository agentTypeRepository,
                                 @org.springframework.beans.factory.annotation.Qualifier("grapeJdbcTemplate")
                                 org.springframework.jdbc.core.JdbcTemplate grapeJdbc) {
         this.credentialRepository = credentialRepository;
         this.runtimeRepository = runtimeRepository;
         this.taskRepository = taskRepository;
         this.healthService = healthService;
+        this.agentTypeRepository = agentTypeRepository;
         this.grapeJdbc = grapeJdbc;
     }
 
@@ -424,25 +429,38 @@ public class RuntimeDeviceService {
         taskPageObj.put("size", taskSize);
         taskPageObj.put("filterOptions", taskFilterOptions);
 
-        // 会话列表：devops_agent_session 按 runtime_id（grape 库）；issue_agent_session 无 runtime_id
-        // 关联键，不做按引擎会话查询（AgentService 仅按 agent_type 统计）
-        List<Map<String, Object>> sessions = new ArrayList<>();
-        String devopsSql = "SELECT 'devops' AS src, id, repo_key, agent_type, status, enable, last_active_at "
-                + "FROM devops_agent_session WHERE runtime_id = ? ORDER BY last_active_at DESC";
-        grapeJdbc.query(devopsSql, rs -> {
-            Map<String, Object> s = new LinkedHashMap<>();
-            s.put("src", rs.getString("src"));
-            s.put("id", rs.getString("id"));
-            s.put("repoKey", rs.getString("repo_key"));
-            s.put("agentType", rs.getString("agent_type"));
-            s.put("status", rs.getString("status"));
-            s.put("enable", rs.getInt("enable"));
-            s.put("lastActiveAt", rs.getString("last_active_at"));
-            sessions.add(s);
+        // 绑定智能体：该引擎上运行的智能体（devops_agent_session 按 agent_type 聚合）
+        // + agent_type 基础信息（displayName/icon/description/orderNum/enable）
+        Map<String, Map<String, Long>> statusByType = new LinkedHashMap<>();
+        String aggSql = "SELECT agent_type, status, COUNT(*) c FROM devops_agent_session WHERE runtime_id = ? GROUP BY agent_type, status";
+        grapeJdbc.query(aggSql, rs -> {
+            String type = rs.getString("agent_type");
+            statusByType.computeIfAbsent(type, k -> new LinkedHashMap<>())
+                    .merge(rs.getString("status"), rs.getLong("c"), Long::sum);
         }, runtimeId);
+        Map<String, com.grape.admin.entity.readonly.AgentTypeRo> typeMeta = agentTypeRepository.findAll().stream()
+                .collect(Collectors.toMap(com.grape.admin.entity.readonly.AgentTypeRo::getAgentType, t -> t, (a, b) -> a));
+        List<Map<String, Object>> agents = statusByType.entrySet().stream()
+                .map(en -> {
+                    String type = en.getKey();
+                    Map<String, Long> statuses = en.getValue();
+                    com.grape.admin.entity.readonly.AgentTypeRo meta = typeMeta.get(type);
+                    Map<String, Object> a = new LinkedHashMap<>();
+                    a.put("agentType", type);
+                    a.put("displayName", meta == null ? type : meta.getDisplayName());
+                    a.put("icon", meta == null ? "🤖" : meta.getIcon());
+                    a.put("description", meta == null ? "" : meta.getDescription());
+                    a.put("orderNum", meta == null ? 0 : meta.getOrderNum());
+                    a.put("enable", meta == null ? 0 : meta.getEnable());
+                    a.put("sessionCount", statuses.values().stream().mapToLong(Long::longValue).sum());
+                    a.put("statusBreakdown", statuses);
+                    return a;
+                })
+                .sorted(Comparator.comparingInt((Map<String, Object> a) -> ((Number) a.get("orderNum")).intValue()))
+                .collect(Collectors.toList());
 
         engine.put("tasks", taskPageObj);
-        engine.put("sessions", sessions);
+        engine.put("agents", agents);
         return engine;
     }
 
