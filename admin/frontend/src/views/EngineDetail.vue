@@ -16,13 +16,15 @@
         <div class="section-header">
           <h5 class="sh-title">关联智能体 <span class="sh-count">共 {{ agents.length }} 个</span></h5>
           <div class="sh-actions">
-            <button class="btn btn-sm" :disabled="refreshing" @click="refresh" title="刷新智能体与任务数据">
-              <span v-if="refreshing" class="spinner"></span>{{ refreshing ? '刷新中...' : '刷新' }}
-            </button>
+            <button class="btn btn-sm" :disabled="refreshing" @click="refresh" title="刷新智能体与任务数据">刷新</button>
           </div>
         </div>
         <div style="padding:14px 20px">
-          <div class="agent-grid" v-if="agents.length">
+          <div style="position:relative">
+            <div class="table-loading-overlay" v-if="refreshing">
+              <span class="table-loading-text"><span class="spinner"></span>刷新中...</span>
+            </div>
+            <div class="agent-grid" v-if="agents.length">
             <div v-for="(a, i) in agents" :key="a.agentType" class="agent-card" :class="accents[i % accents.length]" @click="$router.push(`/agent/manage/${a.agentType}`)">
               <div class="agent-head">
                 <div class="agent-icon" :style="iconStyle(i)">{{ a.icon || '🤖' }}</div>
@@ -51,6 +53,7 @@
             </div>
           </div>
           <p v-else class="t2" style="padding:12px;text-align:center">暂无关联智能体</p>
+          </div>
         </div>
       </div>
 
