@@ -2,6 +2,7 @@ package com.grape.admin.service;
 
 import com.grape.admin.common.BizException;
 import com.grape.admin.common.NotFoundException;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -25,7 +26,7 @@ public class RuntimeCleanupService {
     private final JdbcTemplate jdbc;
     private final AdminAuditService auditService;
 
-    public RuntimeCleanupService(JdbcTemplate jdbc, AdminAuditService auditService) {
+    public RuntimeCleanupService(@Qualifier("grapeJdbcTemplate") JdbcTemplate jdbc, AdminAuditService auditService) {
         this.jdbc = jdbc;
         this.auditService = auditService;
     }

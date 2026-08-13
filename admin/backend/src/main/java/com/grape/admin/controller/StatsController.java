@@ -1,5 +1,6 @@
 package com.grape.admin.controller;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -13,15 +14,19 @@ import java.util.Map;
 
 /**
  * 运营总览统计接口。直读共享库（agent_runtimes / agent_tasks / events 等）聚合 KPI 与图表分布。
+ * 双数据源（admin-db-split v1.0）：grape 业务表走 grapeJdbcTemplate，admin_users 走 adminJdbcTemplate。
  */
 @RestController
 @RequestMapping("/api/admin/stats")
 public class StatsController {
 
-    private final JdbcTemplate jdbc;
+    private final JdbcTemplate grapeJdbc;
+    private final JdbcTemplate adminJdbc;
 
-    public StatsController(JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
+    public StatsController(@Qualifier("grapeJdbcTemplate") JdbcTemplate grapeJdbc,
+                           @Qualifier("adminJdbcTemplate") JdbcTemplate adminJdbc) {
+        this.grapeJdbc = grapeJdbc;
+        this.adminJdbc = adminJdbc;
     }
 
     /** KPI 汇总卡片数据 */
@@ -50,14 +55,14 @@ public class StatsController {
         long completed = count("SELECT COUNT(*) FROM agent_tasks WHERE status='completed'");
         data.put("taskCompleted", completed);
         data.put("taskSuccessRate", taskTotal > 0 ? String.format("%.1f%%", completed * 100.0 / taskTotal) : "0.0%");
-        data.put("lastTaskAt", jdbc.query("SELECT MAX(completed_at) FROM agent_tasks WHERE completed_at IS NOT NULL AND completed_at<>''",
+        data.put("lastTaskAt", grapeJdbc.query("SELECT MAX(completed_at) FROM agent_tasks WHERE completed_at IS NOT NULL AND completed_at<>''",
                 rs -> rs.next() ? rs.getString(1) : null));
 
         // 托管仓库
         data.put("repoTotal", count("SELECT COUNT(*) FROM managed_repos"));
 
-        // 用户：管理台用户 / 平台用户
-        data.put("adminUserTotal", count("SELECT COUNT(*) FROM admin_users"));
+        // 用户：管理台用户（admin 库）/ 平台用户（grape 库）
+        data.put("adminUserTotal", adminJdbc.queryForObject("SELECT COUNT(*) FROM admin_users", Long.class));
         data.put("platformUserTotal", count("SELECT COUNT(*) FROM user_accounts"));
 
         return data;
@@ -98,7 +103,7 @@ public class StatsController {
 
         // 用户构成分布（管理台用户 vs 平台用户，对应"用户"卡片）
         LinkedHashMap<String, Object> userComp = new LinkedHashMap<>();
-        userComp.put("管理台用户", count("SELECT COUNT(*) FROM admin_users"));
+        userComp.put("管理台用户", adminJdbc.queryForObject("SELECT COUNT(*) FROM admin_users", Long.class));
         userComp.put("平台用户", count("SELECT COUNT(*) FROM user_accounts"));
         data.put("userCompositionDistribution", userComp);
 
@@ -110,13 +115,13 @@ public class StatsController {
     }
 
     private long count(String sql) {
-        Long v = jdbc.queryForObject(sql, Long.class);
+        Long v = grapeJdbc.queryForObject(sql, Long.class);
         return v != null ? v : 0L;
     }
 
     private Map<String, Object> groupCount(String sql) {
         Map<String, Object> m = new LinkedHashMap<>();
-        jdbc.query(sql, new RowCallbackHandler() {
+        grapeJdbc.query(sql, new RowCallbackHandler() {
             @Override
             public void processRow(ResultSet rs) throws SQLException {
                 m.put(rs.getString(1), rs.getLong(2));

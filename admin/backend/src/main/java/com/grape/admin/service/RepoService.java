@@ -2,6 +2,7 @@ package com.grape.admin.service;
 
 import com.grape.admin.entity.readonly.ManagedRepoRo;
 import com.grape.admin.repository.readonly.ManagedRepoRoRepository;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -22,7 +23,7 @@ public class RepoService {
     private final ManagedRepoRoRepository repoRepository;
     private final JdbcTemplate jdbcTemplate;
 
-    public RepoService(ManagedRepoRoRepository repoRepository, JdbcTemplate jdbcTemplate) {
+    public RepoService(ManagedRepoRoRepository repoRepository, @Qualifier("grapeJdbcTemplate") JdbcTemplate jdbcTemplate) {
         this.repoRepository = repoRepository;
         this.jdbcTemplate = jdbcTemplate;
     }

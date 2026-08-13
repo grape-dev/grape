@@ -5,6 +5,7 @@ import com.grape.admin.common.NotFoundException;
 import com.grape.admin.entity.readonly.SkillRo;
 import com.grape.admin.repository.readonly.SkillRoRepository;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.yaml.snakeyaml.Yaml;
@@ -57,7 +58,7 @@ public class SkillService {
 
     public SkillService(SkillRoRepository skillRepository,
                         @Value("${app.skills-dir:../../skills}") String skillsDir,
-                        JdbcTemplate jdbcTemplate) {
+                        @Qualifier("grapeJdbcTemplate") JdbcTemplate jdbcTemplate) {
         this.skillRepository = skillRepository;
         this.skillsDir = resolveSkillsDir(skillsDir);
         this.jdbcTemplate = jdbcTemplate;

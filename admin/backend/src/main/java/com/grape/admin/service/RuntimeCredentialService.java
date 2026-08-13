@@ -2,6 +2,7 @@ package com.grape.admin.service;
 
 import com.grape.admin.common.BizException;
 import com.grape.admin.common.NotFoundException;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -27,7 +28,7 @@ public class RuntimeCredentialService {
     private final AdminAuditService auditService;
     private final SecureRandom secureRandom = new SecureRandom();
 
-    public RuntimeCredentialService(JdbcTemplate jdbc, AdminAuditService auditService) {
+    public RuntimeCredentialService(@Qualifier("grapeJdbcTemplate") JdbcTemplate jdbc, AdminAuditService auditService) {
         this.jdbc = jdbc;
         this.auditService = auditService;
     }

@@ -3,6 +3,7 @@ package com.grape.admin.service;
 import com.grape.admin.util.RepoPaths;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -29,7 +30,7 @@ public class TemplatesService {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public TemplatesService(@Value("${app.skills-dir:../../skills}") String skillsDir,
-                            JdbcTemplate jdbcTemplate) {
+                            @Qualifier("grapeJdbcTemplate") JdbcTemplate jdbcTemplate) {
         this.repoRoot = RepoPaths.resolveRepoRoot(skillsDir);
         this.jdbcTemplate = jdbcTemplate;
     }

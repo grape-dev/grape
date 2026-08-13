@@ -6,6 +6,7 @@ import com.grape.admin.entity.readonly.AgentTaskRo;
 import com.grape.admin.entity.readonly.AgentTypeRo;
 import com.grape.admin.repository.readonly.AgentTaskRoRepository;
 import com.grape.admin.repository.readonly.AgentTypeRoRepository;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.stereotype.Service;
@@ -35,16 +36,19 @@ public class AgentService {
 
     private final AgentTypeRoRepository agentTypeRepository;
     private final AgentTaskRoRepository taskRepository;
-    private final JdbcTemplate jdbc;
+    private final JdbcTemplate grapeJdbc;
+    private final JdbcTemplate adminJdbc;
     private final AdminAuditService auditService;
 
     public AgentService(AgentTypeRoRepository agentTypeRepository,
                         AgentTaskRoRepository taskRepository,
-                        JdbcTemplate jdbc,
+                        @Qualifier("grapeJdbcTemplate") JdbcTemplate grapeJdbc,
+                        @Qualifier("adminJdbcTemplate") JdbcTemplate adminJdbc,
                         AdminAuditService auditService) {
         this.agentTypeRepository = agentTypeRepository;
         this.taskRepository = taskRepository;
-        this.jdbc = jdbc;
+        this.grapeJdbc = grapeJdbc;
+        this.adminJdbc = adminJdbc;
         this.auditService = auditService;
     }
 
@@ -158,7 +162,7 @@ public class AgentService {
         if (thresholdPct < 1 || thresholdPct > 100) {
             throw new BizException("预警阈值必须在 1-100 之间");
         }
-        jdbc.update("INSERT INTO admin_agent_alert (agent_type, alert_threshold_pct, updated_by) VALUES (?, ?, ?) " +
+        adminJdbc.update("INSERT INTO admin_agent_alert (agent_type, alert_threshold_pct, updated_by) VALUES (?, ?, ?) " +
                         "ON DUPLICATE KEY UPDATE alert_threshold_pct = VALUES(alert_threshold_pct), updated_by = VALUES(updated_by), updated_at = NOW()",
                 agentType, thresholdPct, operator);
         auditService.record(null, operator, "agent.alert", "agent:" + agentType, "threshold_pct=" + thresholdPct);
@@ -167,7 +171,7 @@ public class AgentService {
 
     /** 切换智能体启用状态，返回切换后的 enable（1/0）。 */
     public Integer toggleEnable(String agentType, boolean enable, String operator) {
-        int n = jdbc.update("UPDATE agent_type SET enable = ? WHERE agent_type = ?", enable ? 1 : 0, agentType);
+        int n = grapeJdbc.update("UPDATE agent_type SET enable = ? WHERE agent_type = ?", enable ? 1 : 0, agentType);
         if (n == 0) {
             throw new NotFoundException("智能体不存在: " + agentType);
         }
@@ -203,7 +207,7 @@ public class AgentService {
 
     /** devops_agent_session 仓库级实例（全部 agent_type） */
     private List<Map<String, Object>> listRepoAgents() {
-        return jdbc.query(
+        return grapeJdbc.query(
                 "SELECT id, repo_key, agent_type, status, enable, runtime_id, last_active_at " +
                         "FROM devops_agent_session ORDER BY agent_type, repo_key",
                 (rs, rowNum) -> {
@@ -221,7 +225,7 @@ public class AgentService {
 
     /** 某 agent 的仓库级实例（详情页仓库使用明细） */
     private List<Map<String, Object>> listRepoAgents(String agentType) {
-        return jdbc.query(
+        return grapeJdbc.query(
                 "SELECT id, repo_key, status, enable, runtime_id, last_active_at " +
                         "FROM devops_agent_session WHERE agent_type = ? ORDER BY repo_key",
                 (rs, rowNum) -> {
@@ -239,7 +243,7 @@ public class AgentService {
     private Map<String, Integer> loadAlertThresholds() {
         Map<String, Integer> m = new LinkedHashMap<>();
         try {
-            jdbc.query("SELECT agent_type, alert_threshold_pct FROM admin_agent_alert",
+            adminJdbc.query("SELECT agent_type, alert_threshold_pct FROM admin_agent_alert",
                     (RowCallbackHandler) rs -> m.put(rs.getString(1), rs.getInt(2)));
         } catch (Exception e) {
             // 表未迁移（老部署）时静默降级为默认阈值，不让智能体页挂掉
@@ -252,27 +256,27 @@ public class AgentService {
         String in = IN_FLIGHT_STATUSES.stream()
                 .map(s -> "'" + s + "'")
                 .collect(java.util.stream.Collectors.joining(","));
-        jdbc.query("SELECT COALESCE(agent_type,''), COUNT(*) FROM agent_tasks WHERE status IN (" + in + ") GROUP BY agent_type",
+        grapeJdbc.query("SELECT COALESCE(agent_type,''), COUNT(*) FROM agent_tasks WHERE status IN (" + in + ") GROUP BY agent_type",
                 (RowCallbackHandler) rs -> m.put(rs.getString(1), rs.getLong(2)));
         return m;
     }
 
     private Map<String, Long> distinctRepoCountByAgentType() {
         Map<String, Long> m = new LinkedHashMap<>();
-        jdbc.query("SELECT agent_type, COUNT(DISTINCT repo_key) FROM devops_agent_session GROUP BY agent_type",
+        grapeJdbc.query("SELECT agent_type, COUNT(DISTINCT repo_key) FROM devops_agent_session GROUP BY agent_type",
                 (RowCallbackHandler) rs -> m.put(rs.getString(1), rs.getLong(2)));
         return m;
     }
 
     private Map<String, Long> countByColumn(String table, String column) {
         Map<String, Long> m = new LinkedHashMap<>();
-        jdbc.query("SELECT " + column + ", COUNT(*) FROM " + table + " GROUP BY " + column,
+        grapeJdbc.query("SELECT " + column + ", COUNT(*) FROM " + table + " GROUP BY " + column,
                 (RowCallbackHandler) rs -> m.put(rs.getString(1), rs.getLong(2)));
         return m;
     }
 
     private long count(String sql) {
-        Long v = jdbc.queryForObject(sql, Long.class);
+        Long v = grapeJdbc.queryForObject(sql, Long.class);
         return v != null ? v : 0L;
     }
 }
