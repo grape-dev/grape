@@ -25,15 +25,19 @@ public class RuntimeDeviceService {
     private final AgentRuntimeRoRepository runtimeRepository;
     private final AgentTaskRoRepository taskRepository;
     private final HealthService healthService;
+    private final org.springframework.jdbc.core.JdbcTemplate grapeJdbc;
 
     public RuntimeDeviceService(RuntimeCredentialRoRepository credentialRepository,
                                 AgentRuntimeRoRepository runtimeRepository,
                                 AgentTaskRoRepository taskRepository,
-                                HealthService healthService) {
+                                HealthService healthService,
+                                @org.springframework.beans.factory.annotation.Qualifier("grapeJdbcTemplate")
+                                org.springframework.jdbc.core.JdbcTemplate grapeJdbc) {
         this.credentialRepository = credentialRepository;
         this.runtimeRepository = runtimeRepository;
         this.taskRepository = taskRepository;
         this.healthService = healthService;
+        this.grapeJdbc = grapeJdbc;
     }
 
     public Map<String, Object> listCredentials(String scope, String owner, String status, String health, int page, int size) {
@@ -352,6 +356,94 @@ public class RuntimeDeviceService {
                 .limit(Math.min(limit, 200))
                 .map(this::toTaskMap)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * 引擎详情（对齐设备详情聚合模式）：基本信息 + 关联设备 + 任务列表（筛选/分页）+ 会话列表
+     * 数据源：agent_runtimes / runtime_credentials / agent_tasks（grape 库 Ro 实体）+
+     * devops_agent_session / issue_agent_session（grape 库 JdbcTemplate）
+     */
+    public Map<String, Object> engineDetail(Integer runtimeId, int taskPage, int taskSize,
+                                            String taskStatus, String taskType, String taskSkill, String sortOrder) {
+        AgentRuntimeRo e = runtimeRepository.findById(runtimeId)
+                .orElseThrow(() -> new NotFoundException("引擎不存在: " + runtimeId));
+        RuntimeCredentialRo cred = e.getCredentialId() == null ? null
+                : credentialRepository.findById(e.getCredentialId()).orElse(null);
+
+        Map<String, Object> engine = new LinkedHashMap<>();
+        engine.put("id", e.getId());
+        engine.put("name", e.getName());
+        engine.put("displayName", e.getDisplayName());
+        engine.put("version", e.getVersion());
+        engine.put("binary", e.getBinary());
+        engine.put("provider", e.getProvider());
+        engine.put("cliPath", e.getCliPath());
+        engine.put("pipPackage", e.getPipPackage());
+        engine.put("installed", e.getInstalled());
+        engine.put("status", e.getStatus());
+        engine.put("healthy", e.getHealthy());
+        engine.put("health", healthService.engineHealth(e.getStatus(), e.getLastSeenAt()));
+        engine.put("lastSeenAt", e.getLastSeenAt());
+        engine.put("scope", e.getScope());
+        engine.put("ownerId", e.getOwnerId());
+        engine.put("updatedAt", e.getUpdatedAt());
+        // 关联设备（凭据维度）
+        engine.put("credentialId", e.getCredentialId());
+        engine.put("device", cred == null ? null
+                : (cred.getDeviceName() == null || cred.getDeviceName().isBlank() ? cred.getName() : cred.getDeviceName()));
+        engine.put("deviceStatus", cred == null ? null : cred.getStatus());
+        engine.put("ownerName", cred == null ? null : cred.getOwnerName());
+
+        // 关联任务：按 runtime_id，筛选/排序/分页（对齐 deviceDetail 模式）
+        List<AgentTaskRo> engineTasks = taskRepository.findAll().stream()
+                .filter(t -> t.getRuntimeId() != null && runtimeId.equals(t.getRuntimeId()))
+                .collect(Collectors.toList());
+        Map<String, Object> taskFilterOptions = new LinkedHashMap<>();
+        taskFilterOptions.put("status", countBy(engineTasks, AgentTaskRo::getStatus));
+        taskFilterOptions.put("skill", countBy(engineTasks, AgentTaskRo::getSkill));
+        taskFilterOptions.put("agentType", countBy(engineTasks, AgentTaskRo::getAgentType));
+
+        List<AgentTaskRo> allTasks = engineTasks.stream()
+                .filter(t -> taskStatus == null || taskStatus.isBlank() || taskStatus.equals(t.getStatus()))
+                .filter(t -> taskType == null || taskType.isBlank() || taskType.equals(t.getAgentType()))
+                .filter(t -> taskSkill == null || taskSkill.isBlank()
+                        || (t.getSkill() != null && t.getSkill().toLowerCase().contains(taskSkill.toLowerCase())))
+                .sorted((a, b) -> {
+                    int cmp = String.valueOf(b.getCreatedAt()).compareTo(String.valueOf(a.getCreatedAt()));
+                    return "asc".equalsIgnoreCase(sortOrder) ? -cmp : cmp;
+                })
+                .collect(Collectors.toList());
+        int total = allTasks.size();
+        int from = Math.min(taskPage * taskSize, total);
+        int to = Math.min(from + taskSize, total);
+        Map<String, Object> taskPageObj = new LinkedHashMap<>();
+        taskPageObj.put("content", allTasks.subList(from, to).stream().map(this::toTaskMap).collect(Collectors.toList()));
+        taskPageObj.put("totalElements", total);
+        taskPageObj.put("totalPages", taskSize > 0 ? (total + taskSize - 1) / taskSize : 0);
+        taskPageObj.put("page", taskPage);
+        taskPageObj.put("size", taskSize);
+        taskPageObj.put("filterOptions", taskFilterOptions);
+
+        // 会话列表：devops_agent_session 按 runtime_id（grape 库）；issue_agent_session 无 runtime_id
+        // 关联键，不做按引擎会话查询（AgentService 仅按 agent_type 统计）
+        List<Map<String, Object>> sessions = new ArrayList<>();
+        String devopsSql = "SELECT 'devops' AS src, id, repo_key, agent_type, status, enable, last_active_at "
+                + "FROM devops_agent_session WHERE runtime_id = ? ORDER BY last_active_at DESC";
+        grapeJdbc.query(devopsSql, rs -> {
+            Map<String, Object> s = new LinkedHashMap<>();
+            s.put("src", rs.getString("src"));
+            s.put("id", rs.getString("id"));
+            s.put("repoKey", rs.getString("repo_key"));
+            s.put("agentType", rs.getString("agent_type"));
+            s.put("status", rs.getString("status"));
+            s.put("enable", rs.getInt("enable"));
+            s.put("lastActiveAt", rs.getString("last_active_at"));
+            sessions.add(s);
+        }, runtimeId);
+
+        engine.put("tasks", taskPageObj);
+        engine.put("sessions", sessions);
+        return engine;
     }
 
     private Map<String, Object> toTaskMap(AgentTaskRo t) {

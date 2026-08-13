@@ -60,7 +60,7 @@
           </thead>
           <tbody>
             <tr v-for="e in engines" :key="e.id">
-              <td>{{ e.displayName || e.name }}</td>
+              <td><a class="link-like" @click="openDetail(e)">{{ e.displayName || e.name }}</a></td>
               <td>{{ e.name }}</td>
               <td class="t3" style="max-width:200px">{{ e.version || '-' }}</td>
               <td class="t3">{{ e.provider || '-' }}</td>
@@ -83,7 +83,7 @@
               <span :style="badgeStyle(e.health)">
                 <span :style="dotStyle(e.health)"></span>{{ healthText(e.health) }}
               </span>
-              <span style="max-width:180px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="e.displayName || e.name">{{ e.displayName || e.name }}</span>
+              <span style="max-width:180px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="e.displayName || e.name"><a class="link-like" @click="openDetail(e)">{{ e.displayName || e.name }}</a></span>
             </span>
             <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span>
           </div>
@@ -129,9 +129,11 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import http from '../api'
 import PaginationBar from '../components/PaginationBar.vue'
 
+const router = useRouter()
 const engines = ref([])
 const stats = ref({})
 const healthStats = ref({})
@@ -212,6 +214,7 @@ async function load() {
 }
 function search() { page.value = 0; load() }
 function reset() { scope.value = ''; type.value = ''; device.value = ''; keyword.value = ''; health.value = ''; page.value = 0; load() }
+function openDetail(e) { router.push(`/runtime/engines/${e.id}`) }
 function showToast(msg, type = 'success') {
   toastMessage.value = msg
   toastType.value = type
@@ -246,6 +249,13 @@ onMounted(() => { load(); loadDevices() })
   min-width: 240px;
   background: #fff;
 }
+/* 实例名点击跳转详情（对齐 Skill 页技能名样式） */
+.link-like {
+  color: var(--a, #006eff);
+  cursor: pointer;
+  text-decoration: none;
+}
+.link-like:hover { text-decoration: underline; }
 /* 健康分布徽章行（对齐设备管理页） */
 .em-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
 .em-stat {

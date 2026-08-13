@@ -69,6 +69,18 @@ public class RuntimeController {
         return deviceService.engineList(scope, type, device, status, keyword, page, size);
     }
 
+    /** 引擎详情：基本信息 + 关联设备 + 任务列表（筛选/分页）+ 会话列表 */
+    @GetMapping("/engines/{id}")
+    public Map<String, Object> engineDetail(@PathVariable Integer id,
+                                            @RequestParam(defaultValue = "0") int taskPage,
+                                            @RequestParam(defaultValue = "10") int taskSize,
+                                            @RequestParam(required = false) String taskStatus,
+                                            @RequestParam(required = false) String taskType,
+                                            @RequestParam(required = false) String taskSkill,
+                                            @RequestParam(required = false) String sortOrder) {
+        return deviceService.engineDetail(id, taskPage, taskSize, taskStatus, taskType, taskSkill, sortOrder);
+    }
+
     @GetMapping("/tasks")
     public List<Map<String, Object>> tasks(@RequestParam(required = false) Integer device,
                                            @RequestParam(required = false) String status,

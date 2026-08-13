@@ -10,6 +10,7 @@ const routes = [
   { path: '/runtime/devices', name: 'runtime.devices', component: () => import('../views/DeviceManage.vue'), meta: { title: '设备管理' } },
   { path: '/runtime/devices/:id', name: 'runtime.device-detail', component: () => import('../views/DeviceDetail.vue'), meta: { title: '设备详情' } },
   { path: '/runtime/engines', name: 'runtime.engines', component: () => import('../views/EngineManage.vue'), meta: { title: '引擎管理' } },
+  { path: '/runtime/engines/:id', name: 'runtime.engine-detail', component: () => import('../views/EngineDetail.vue'), meta: { title: '引擎详情' } },
   { path: '/runtime/credentials', name: 'runtime.credentials', component: () => import('../views/CredentialManage.vue'), meta: { title: '凭据管理' } },
   { path: '/skill/manage', name: 'skill.manage', component: () => import('../views/SkillManage.vue'), meta: { title: 'Skill 管理' } },
   { path: '/repos/manage', name: 'repos.manage', component: () => import('../views/ReposManage.vue'), meta: { title: '托管代码仓' } },
