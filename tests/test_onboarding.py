@@ -126,6 +126,31 @@ def test_trigger_launches_two_guides_queue():
     _clean()
 
 
+def test_enqueue_task_uses_issue_session_per_target():
+    """方案 B：queue 入队按预分配 Issue 会话隔离——两个引导任务 issue_session_id 不同且按 #1/#2。"""
+    _clean()
+    user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=1)
+    captured = []
+
+    def _fake_enqueue(**kwargs):
+        captured.append(kwargs)
+        return "t_" + kwargs.get("target", "")
+
+    with patch("src.runtime.service.enqueue_task", side_effect=_fake_enqueue), \
+         patch("src.prompt_builder.build_prompt", return_value="prompt"):
+        ob_mod._enqueue_onboarding_task("gitcode:owner/repo", 1, "opencode", 7, "owner", "repo-onboarding", "experience")
+        ob_mod._enqueue_onboarding_task("gitcode:owner/repo", 2, "opencode", 7, "owner", "repo-onboarding", "explore")
+    assert len(captured) == 2
+    by_issue = {k["issue_id"]: k for k in captured}
+    # experience→#1, explore→#2，各自独立 issue_session_id（并行串行槽隔离）
+    assert set(by_issue.keys()) == {"#1", "#2"}
+    assert by_issue["#1"]["issue_session_id"]
+    assert by_issue["#2"]["issue_session_id"]
+    assert by_issue["#1"]["issue_session_id"] != by_issue["#2"]["issue_session_id"]
+    assert "ONBOARDING_TARGET" in by_issue["#1"]["env_extra"]
+    _clean()
+
+
 def test_trigger_creates_two_master_events():
     _clean()
     user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=1)

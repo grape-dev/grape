@@ -131,15 +131,25 @@ def _execute_agent_wrapper(repo_key, seq, owner, skill, backend, runtime_id, evt
 
 
 def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target):
-    """queue 模式：入队由本地/远端 worker 执行（本地无 opencode 也可运行）。"""
+    """queue 模式：入队由本地/远端 worker 执行（本地无 opencode 也可运行）。
+
+    方案 B：按预分配 issue 号（experience→#1, explore→#2）建 Issue 级会话，传 issue_session_id，
+    使两个引导任务按不同 Issue 会话并行（claim 串行槽隔离，见 multi-issue-isolation-design.md §3.3）。
+    """
     from src.runtime.service import enqueue_task
     from src.repo_key import from_repo_key
     repository = from_repo_key(repo_key)
     ws = _onboarding_workdir(repo_key)
     result_path = os.path.join(ws, f"onboarding-result-{target}.json")
     from src.prompt_builder import build_prompt
+    from src.api.session_store import get_or_create_issue_session
+    # 预分配 issue 号（与主事件 issue_id 预分配一致）：experience→#1, explore→#2
+    expected_issue = ONBOARDING_TARGETS.index(target) + 1
+    issue_id = f"#{expected_issue}"
+    _isess = get_or_create_issue_session(repo_key, "vod", issue_id)
+    issue_session_id = _isess.get("id") or ""
     evt = {"type": "onboarding", "repository": repository, "source": "template",
-           "actor": owner or "", "account": repository, "issue_id": "#0",
+           "actor": owner or "", "account": repository, "issue_id": issue_id,
            "payload": {"repository": repository, "owner": owner, "onboarding_target": target}}
     try:
         prompt = build_prompt(evt, [], "", [skill], skill_path=os.path.join(SKILLS_DIR, skill, "SKILL.md"),
@@ -149,15 +159,16 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
         return
     tid = enqueue_task(
         agent_session_id=f"vod:{repo_key}", runtime_id=runtime_id,
-        event_seq=seq, issue_id="#0", repo_key=repo_key, agent_type="vod",
+        event_seq=seq, issue_id=issue_id, repo_key=repo_key, agent_type="vod",
         skill=skill, prompt=prompt, cwd=ws,
         runtime_session_id="", event_type="onboarding",
         account=repository, repo_gitcode_token="",
         skill_path=os.path.join(SKILLS_DIR, skill, "SKILL.md"),
+        issue_session_id=issue_session_id,
         env_extra={"REPO_FULL_NAME": repository, "REPO_OWNER": owner,
                    "ONBOARDING_RESULT": result_path, "ONBOARDING_TARGET": target},
     )
-    log.info(f"[Onboarding|repo:{repo_key}] enqueued task={tid} seq={seq} target={target}")
+    log.info(f"[Onboarding|repo:{repo_key}] enqueued task={tid} seq={seq} target={target} issue={issue_id} issue_session={issue_session_id}")
     # queue 模式终态后补库：轮询任务终态，触发 _finalize_onboarding
     try:
         from src.runtime.service import wait_task_terminal
@@ -216,7 +227,7 @@ def trigger_onboarding(repo_key: str, owner: str):
                 status="running",
             )
             evt = {"type": _event_type, "repository": from_repo_key(repo_key), "source": "template",
-                   "actor": owner or "", "account": from_repo_key(repo_key), "issue_id": "#0",
+                   "actor": owner or "", "account": from_repo_key(repo_key), "issue_id": f"#{_expected_issue}",
                    "payload": {"repository": from_repo_key(repo_key), "owner": owner, "onboarding_target": target}}
             if kind != EXEC_MODE_DIRECT:
                 _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target)

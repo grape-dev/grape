@@ -274,7 +274,11 @@ def _finalize_onboarding(repo_key, seq, owner, result_path=""):
 
 ```python
 def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target):
-    """queue 模式：入队由本地/远端 worker 执行（本地无 opencode 也可运行）。"""
+    """queue 模式：入队由本地/远端 worker 执行（本地无 opencode 也可运行）。
+
+    方案 B：按预分配 issue 号（experience→#1, explore→#2）建 Issue 级会话，传 issue_session_id，
+    使两个引导任务按不同 Issue 会话并行（claim 串行槽隔离，见 multi-issue-isolation-design.md §3.3）。
+    """
     from src.runtime.service import enqueue_task
     from src.repo_key import from_repo_key
     from src.config import WORKSPACE_DIR, SKILLS_DIR
@@ -284,8 +288,14 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
     os.makedirs(ws, exist_ok=True)
     result_path = os.path.join(ws, f"onboarding-result-{target}.json")
     from src.prompt_builder import build_prompt
+    from src.api.session_store import get_or_create_issue_session
+    # 预分配 issue 号（与主事件 issue_id 预分配一致）：experience→#1, explore→#2
+    expected_issue = ONBOARDING_TARGETS.index(target) + 1
+    issue_id = f"#{expected_issue}"
+    _isess = get_or_create_issue_session(repo_key, "vod", issue_id)
+    issue_session_id = _isess.get("id") or ""
     evt = {"type": "onboarding", "repository": repository, "source": "template",
-           "actor": owner or "", "account": repository, "issue_id": "#0",
+           "actor": owner or "", "account": repository, "issue_id": issue_id,
            "payload": {"repository": repository, "owner": owner, "onboarding_target": target}}
     try:
         prompt = build_prompt(evt, [], "", [skill], skill_path=os.path.join(SKILLS_DIR, skill, "SKILL.md"),
@@ -295,16 +305,19 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
         return
     tid = enqueue_task(
         agent_session_id=f"vod:{repo_key}", runtime_id=runtime_id,
-        event_seq=seq, issue_id="#0", repo_key=repo_key, agent_type="vod",
+        event_seq=seq, issue_id=issue_id, repo_key=repo_key, agent_type="vod",
         skill=skill, prompt=prompt, cwd=ws,
         runtime_session_id="", event_type="onboarding",
         account=repository, repo_gitcode_token="",
         skill_path=os.path.join(SKILLS_DIR, skill, "SKILL.md"),
+        issue_session_id=issue_session_id,
         env_extra={"REPO_FULL_NAME": repository, "REPO_OWNER": owner,
                    "ONBOARDING_RESULT": result_path, "ONBOARDING_TARGET": target},
     )
-    log.info(f"[Onboarding|repo:{repo_key}] enqueued task={tid} seq={seq} target={target}")
+    log.info(f"[Onboarding|repo:{repo_key}] enqueued task={tid} seq={seq} target={target} issue={issue_id} issue_session={issue_session_id}")
 ```
+
+> **方案 B：两个引导任务并行**——queue 入队按预分配 Issue 号建独立 Issue 会话（`issue_session_id`），claim 串行槽按 `issue_session_id` 隔离，两个引导任务可并行执行（跨 Issue），不再因相同 `agent_session_id` 串行。
 
 > worker 端执行完成后回写 event；`_finalize_onboarding` 需在任务终态后触发（实施期按现有 worker 回写机制对接）。
 
@@ -583,6 +596,7 @@ def build_task_chat_prompt(user_text, repo_key, history, conv, account="", runti
 | `_finalize_onboarding` 建阶段 | `issue_state.stage=='vod'` 且 `owner_agent=='vod'`、assignee 正确 |
 | `_finalize_onboarding` 建事件 | 每条 `onboarding_issue` 事件，issue_id=#1/#2，agent_type=vod，completed |
 | 主事件 issue_id 校准 | 实际 Issue 号与预分配不符时，`update_event_issue_id` 回写主事件归属 |
+| 方案 B：queue 入队 Issue 会话隔离 | `_enqueue_onboarding_task` 按预分配 #1/#2 建 issue_session，两任务 `issue_session_id` 不同（可并行，不串行） |
 | `notify_task` 任务会话 | 新会话 `conv_type=task`、`issue_number` 正确；存量 Issue #N 会话补标记 |
 | `send_message` 任务会话 | 走 `build_task_chat_prompt`，prompt 含 `场景: task` + Issue 上下文 |
 | `send_message` 一般会话 | 走 `build_chat_prompt`，prompt 无 `场景: task` |
