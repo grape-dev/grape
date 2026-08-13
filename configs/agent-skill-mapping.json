@@ -4,7 +4,7 @@
    "name": "通用开发",
    "mapping": {
     "vod": "vod",
-    "issue": "issue",
+    "issue": "issue-advance",
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
@@ -15,7 +15,7 @@
    "name": "云原生开发",
    "mapping": {
     "vod": "vod",
-    "issue": "issue",
+    "issue": "issue-advance",
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
@@ -26,7 +26,7 @@
    "name": "IaC开发",
    "mapping": {
     "vod": "vod",
-    "issue": "issue",
+    "issue": "issue-advance",
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
@@ -37,7 +37,7 @@
    "name": "Agent开发",
    "mapping": {
     "vod": "vod",
-    "issue": "issue",
+    "issue": "issue-advance",
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
@@ -48,7 +48,7 @@
    "name": "Skill开发",
    "mapping": {
     "vod": "vod",
-    "issue": "issue",
+    "issue": "issue-advance",
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
