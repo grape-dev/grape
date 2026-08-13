@@ -74,11 +74,13 @@ public class AiTaskManager {
     private String queryScript;
     @Value("${app.ai-timeout-seconds:120}")
     private long timeoutSeconds;
-    @Value("${spring.datasource.url:}")
+    // 双数据源（admin-db-split v1.0）：AI 助手查 grape 业务数据（grape_test_db），
+    // 由 GRAPE_DB_* 注入；旧 spring.datasource.* 键已随单数据源配置移除
+    @Value("${GRAPE_DB_URL:}")
     private String dbUrl;
-    @Value("${spring.datasource.username:}")
+    @Value("${GRAPE_DB_USER:}")
     private String dbUser;
-    @Value("${spring.datasource.password:}")
+    @Value("${GRAPE_DB_PASSWORD:}")
     private String dbPassword;
 
     public AiTaskManager(AdminAiHistoryRepository historyRepository) {
