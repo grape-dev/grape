@@ -46,7 +46,6 @@
         <input v-model="keyword" class="search-input" placeholder="名称/版本/提供方" @keyup.enter="search" />
         <button class="btn" @click="search">查询</button>
         <button class="btn" @click="reset">重置</button>
-        <button class="btn" @click="load" title="刷新当前列表">刷新</button>
         <div style="margin-left:auto;display:flex;gap:8px">
           <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
           <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
