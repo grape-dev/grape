@@ -1584,11 +1584,18 @@ def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
     return get_agent_runtimes(scope, owner_id)
 
 
-def get_agent_runtimes(scope: str = "global", owner_id: str = "") -> list[dict]:
-    """读取 agent runtimes 缓存（含 status/last_seen_at，供健康态派生）"""
+def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list[dict]:
+    """读取 agent runtimes 缓存（含 status/last_seen_at，供健康态派生）。
+
+    scope=None 时返回全量（含 user/repo 个人行，供视图层自行按可见性过滤，
+    如 settings.get_agent_runtimes 的 Engines 列表）。
+    """
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+        if scope is None:
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at FROM agent_runtimes ORDER BY name")
+        else:
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
              "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),

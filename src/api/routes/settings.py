@@ -207,7 +207,7 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
             return cowner_name == uname or cowner_id in user_repos
         return False
 
-    cached = user_db.get_agent_runtimes()
+    cached = user_db.get_agent_runtimes(scope=None)
     now = __import__("time").time()
     visible_runtimes = []
     for rt in cached:
