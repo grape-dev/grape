@@ -137,7 +137,8 @@ def test_enqueue_task_uses_issue_session_per_target():
         return "t_" + kwargs.get("target", "")
 
     with patch("src.runtime.service.enqueue_task", side_effect=_fake_enqueue), \
-         patch("src.prompt_builder.build_prompt", return_value="prompt"):
+         patch("src.prompt_builder.build_prompt", return_value="prompt"), \
+         patch("src.user.db.get_gitcode_token", return_value="bot_token_xyz"):
         ob_mod._enqueue_onboarding_task("gitcode:owner/repo", 1, "opencode", 7, "owner", "repo-onboarding", "experience")
         ob_mod._enqueue_onboarding_task("gitcode:owner/repo", 2, "opencode", 7, "owner", "repo-onboarding", "explore")
     assert len(captured) == 2
@@ -148,6 +149,9 @@ def test_enqueue_task_uses_issue_session_per_target():
     assert by_issue["#2"]["issue_session_id"]
     assert by_issue["#1"]["issue_session_id"] != by_issue["#2"]["issue_session_id"]
     assert "ONBOARDING_TARGET" in by_issue["#1"]["env_extra"]
+    # bot token 注入（queue 模式必须有 BOT_GITCODE_TOKEN，修复硬编码空串）
+    assert by_issue["#1"]["repo_gitcode_token"] == "bot_token_xyz"
+    assert by_issue["#2"]["repo_gitcode_token"] == "bot_token_xyz"
     _clean()
 
 

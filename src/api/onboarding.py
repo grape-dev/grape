@@ -138,6 +138,7 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
     """
     from src.runtime.service import enqueue_task
     from src.repo_key import from_repo_key
+    from src.user.db import get_gitcode_token
     repository = from_repo_key(repo_key)
     ws = _onboarding_workdir(repo_key)
     result_path = os.path.join(ws, f"onboarding-result-{target}.json")
@@ -162,7 +163,8 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
         event_seq=seq, issue_id=issue_id, repo_key=repo_key, agent_type="vod",
         skill=skill, prompt=prompt, cwd=ws,
         runtime_session_id="", event_type="onboarding",
-        account=repository, repo_gitcode_token="",
+        account=repository,
+        repo_gitcode_token=get_gitcode_token(repo_key=repo_key) or "",
         skill_path=os.path.join(SKILLS_DIR, skill, "SKILL.md"),
         issue_session_id=issue_session_id,
         env_extra={"REPO_FULL_NAME": repository, "REPO_OWNER": owner,
