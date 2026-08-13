@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import get_current_user, get_user_token
+from src.config import log
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -407,6 +408,13 @@ async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(
             if "UNIQUE" in msg and "runtime_credentials.name" in msg:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
+    # 预构建 worker 安装包（异步）：凭据生成后即可一键安装，避免首次下载才打包
+    # （首次构建含依赖 wheels 下载，耗时数秒至数分钟，放后台不阻塞响应）
+    try:
+        from src.worker_package import ensure_package_ready
+        ensure_package_ready()
+    except Exception as _e:
+        log.warning(f"预构建 worker 安装包失败: {_e}")
     return {"token": token, "name": name, "scope": scope, "owner": owner, "message": "token 仅展示一次，请立即保存"}
 
 

@@ -166,6 +166,36 @@ def _write_sha256sums(tar: tarfile.TarFile, members: list[tuple[str, bytes]]):
     tar.addfile(info, io.BytesIO(content))
 
 
+def _build_async():
+    """后台构建安装包（daemon 线程，异常仅告警）。"""
+    try:
+        build_package()
+        log.info(f"worker_package: async prebuild done -> {PKG_PATH}")
+    except Exception as e:
+        log.warning(f"worker_package: async prebuild failed: {e}")
+
+
+def ensure_package_ready():
+    """确保安装包缓存就绪：缺失或过期时异步后台构建，不阻塞调用方。
+
+    凭据生成/安装包下载等入口调用：用户生成凭据后立即有一键安装包可用，
+    避免首次下载时才同步打包（耗时数秒至数分钟，含 wheels 下载）。
+    幂等：缓存有效（VERSION 与当前版本一致）时直接返回。
+    """
+    if os.path.isfile(PKG_PATH):
+        try:
+            with open(VERSION_PATH, encoding="utf-8") as f:
+                cur = f.read().strip()
+        except Exception:
+            cur = ""
+        try:
+            if cur == package_version():
+                return  # 已就绪
+        except Exception:
+            pass
+    threading.Thread(target=_build_async, daemon=True, name="worker-pkg-prebuild").start()
+
+
 def build_package() -> str:
     """构建安装包并返回路径。缓存命中直接返回；代码变更后重建（原子替换）。"""
     with _build_lock:
