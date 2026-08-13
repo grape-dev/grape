@@ -762,6 +762,10 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         "REPO_FULL_NAME": repository,
         "ACCOUNT": exec_account,
     }
+    # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT / ONBOARDING_TARGET）
+    _ext = evt.get("_env_extra") or {}
+    if isinstance(_ext, dict):
+        env_extra.update(_ext)
     _issue_num = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
     if _issue_num:
         env_extra["ISSUE_NUMBER"] = str(_issue_num).lstrip("#")

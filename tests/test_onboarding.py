@@ -1,8 +1,9 @@
-"""Onboarding 首次托管引导测试：场景技能解析、幂等触发、dev_scene 读写。"""
+"""Onboarding 首次托管引导测试：场景技能解析、幂等触发、落库、分派、_finalize 补库。"""
 import os
 import sys
 import asyncio
-from unittest.mock import patch, MagicMock
+import json
+from unittest.mock import patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
@@ -11,6 +12,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 from src.session_manager import db, db_lock
 from src.user import db as user_db
 from src.api import onboarding as ob_mod
+from src.api.session_store import get_issue_stage
 
 
 def _clean():
@@ -18,6 +20,8 @@ def _clean():
         c = db.cursor()
         c.execute("DELETE FROM managed_repos")
         c.execute("DELETE FROM meta WHERE key LIKE 'onboarded:%'")
+        c.execute("DELETE FROM events")
+        c.execute("DELETE FROM issue_state")
         db.commit()
 
 
@@ -69,15 +73,11 @@ def test_onboarded_mark_idempotent():
 
 def test_trigger_skips_when_no_skill():
     _clean()
-    # 未托管 → get_repo_scene 返回 default → default 有技能，但未托管无 dev_scene
-    # 用 patch 模拟场景无技能
     with patch.object(ob_mod, "_scene_onboarding_skill", return_value=""), \
          patch.object(ob_mod, "_is_onboarded", return_value=False), \
-         patch.object(ob_mod, "_mark_onboarding_started") as mock_mark, \
-         patch.object(ob_mod.asyncio, "create_task") as mock_ct:
+         patch.object(ob_mod, "_mark_onboarding_started") as mock_mark:
         ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
         mock_mark.assert_not_called()
-        mock_ct.assert_not_called()
     _clean()
 
 
@@ -85,46 +85,90 @@ def test_trigger_skips_when_already_onboarded():
     _clean()
     with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding"), \
          patch.object(ob_mod, "_is_onboarded", return_value=True), \
-         patch.object(ob_mod, "_mark_onboarding_started") as mock_mark, \
-         patch.object(ob_mod.asyncio, "create_task") as mock_ct:
+         patch.object(ob_mod, "_mark_onboarding_started") as mock_mark:
         ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
         mock_mark.assert_not_called()
-        mock_ct.assert_not_called()
     _clean()
 
 
-def test_trigger_launches_background_task():
+def test_trigger_launches_two_guides_direct():
     _clean()
     user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=1)
     user_db.set_repo_scene("gitcode:owner/repo", "cloud-native")
     with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding") as mock_skill, \
          patch.object(ob_mod, "_is_onboarded", return_value=False), \
          patch.object(ob_mod, "_mark_onboarding_started") as mock_mark, \
-         patch.object(ob_mod.asyncio, "create_task") as mock_ct:
+         patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 0, "")), \
+         patch.object(ob_mod, "_execute_agent_wrapper") as mock_wrap:
         ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
-        # 场景解析应按 dev_scene=cloud-native 查
         mock_skill.assert_called_with("cloud-native")
         mock_mark.assert_called_once()
-        mock_ct.assert_called_once()
+        # 两次引导（experience / explore）各触发一次 direct 线程
+        assert mock_wrap.call_count == 2
+        targets = [c.args[8] for c in mock_wrap.call_args_list]
+        assert sorted(targets) == ["experience", "explore"]
     _clean()
 
 
-# ===================== _run_onboarding 后台执行 =====================
-
-def test_run_onboarding_consumes_agent():
+def test_trigger_launches_two_guides_queue():
     _clean()
-    async def _fake_consume(*args, **kwargs):
-        yield ("text", "分析中...")
-        yield ("done", {"text": "已创建 2 个 Issue", "exit_code": 0})
-        yield (None, None)
+    user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=1)
+    with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding"), \
+         patch.object(ob_mod, "_is_onboarded", return_value=False), \
+         patch.object(ob_mod, "_mark_onboarding_started"), \
+         patch.object(ob_mod, "_load_vod_session", return_value=("worker", 7, "")), \
+         patch("src.runtime.service.runtime_execution_kind", return_value="queue_local"), \
+         patch.object(ob_mod, "_enqueue_onboarding_task") as mock_enq:
+        ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
+        assert mock_enq.call_count == 2
+        targets = [c.args[6] for c in mock_enq.call_args_list]
+        assert sorted(targets) == ["experience", "explore"]
+    _clean()
 
-    async def _main():
-        with patch("src.runtime.executor.consume_stream_async", side_effect=_fake_consume) as mock_cs:
-            await ob_mod._run_onboarding("gitcode:owner/repo", "owner", "repo-onboarding")
-            mock_cs.assert_called_once()
-            args, kwargs = mock_cs.call_args
-            # env_extra 含 REPO_FULL_NAME / REPO_OWNER
-            assert kwargs.get("env_extra", {}).get("REPO_OWNER") == "owner"
 
-    asyncio.run(_main())
+def test_trigger_creates_two_master_events():
+    _clean()
+    user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=1)
+    with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding"), \
+         patch.object(ob_mod, "_is_onboarded", return_value=False), \
+         patch.object(ob_mod, "_mark_onboarding_started"), \
+         patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 0, "")), \
+         patch.object(ob_mod, "_execute_agent_wrapper"):
+        ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT event_type, issue_id, agent_type, status FROM events WHERE repo_key='gitcode:owner/repo' ORDER BY event_type"
+            ).fetchall()
+        types = [r[0] for r in rows]
+        assert "onboarding_exp" in types and "onboarding_explore" in types
+        for r in rows:
+            assert r[1] == "#0" and r[2] == "vod" and r[3] == "running"
+    _clean()
+
+
+# ===================== _finalize_onboarding =====================
+
+def test_finalize_creates_stage_and_event(tmp_path):
+    _clean()
+    rp = os.path.join(str(tmp_path), "onboarding-result-experience.json")
+    with open(rp, "w", encoding="utf-8") as f:
+        json.dump({"number": 1, "title": "体验", "assignee": "owner", "target": "experience"}, f)
+    ob_mod._finalize_onboarding("gitcode:owner/repo", 99, "owner", rp)
+    st = get_issue_stage("gitcode:owner/repo", "#1")
+    assert st and st["stage"] == "vod" and st["owner_agent"] == "vod" and st["assignee"] == "owner"
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT event_type, issue_id, agent_type, status FROM events WHERE repo_key='gitcode:owner/repo'"
+        ).fetchone()
+    assert row and row[0] == "onboarding_issue" and row[1] == "#1" and row[2] == "vod" and row[3] == "completed"
+    _clean()
+
+
+def test_finalize_missing_result_noop():
+    _clean()
+    ob_mod._finalize_onboarding("gitcode:owner/repo", 99, "owner", "/nonexistent/x.json")
+    assert get_issue_stage("gitcode:owner/repo", "#1") is None
+    with db_lock:
+        cnt = db.cursor().execute("SELECT COUNT(*) FROM events WHERE repo_key='gitcode:owner/repo'").fetchone()[0]
+    assert cnt == 0
     _clean()

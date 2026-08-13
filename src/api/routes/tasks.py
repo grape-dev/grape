@@ -251,7 +251,12 @@ async def notify_task(body: TaskNotifyBody, request: Request):
                 conv_id = c["id"]
                 break
         if not conv_id:
-            conv_id = create_conversation(user_id, body.repo_key, title=f"Issue #{body.issue_number}")
+            conv_id = create_conversation(user_id, body.repo_key, title=f"Issue #{body.issue_number}",
+                                          conv_type="task", issue_number=body.issue_number)
+        else:
+            # 复用存量「Issue #N」会话时补任务标记（conv_type/issue_number）
+            from src.session_manager import update_conversation
+            update_conversation(conv_id, conv_type="task", issue_number=body.issue_number)
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE tasks SET conversation_id=? WHERE id=?", (conv_id, task_id))

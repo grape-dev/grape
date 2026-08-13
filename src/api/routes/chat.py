@@ -114,7 +114,12 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
-    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id)
+    # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
+    if conv and conv.get("conv_type") == "task":
+        from src.prompt_builder import build_task_chat_prompt
+        prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"])
+    else:
+        prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""

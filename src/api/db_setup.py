@@ -1285,6 +1285,16 @@ def _migrate_tables():
             log.info("Added subscribe_events column to devops_agent_session")
     except Exception as e:
         log.warning(f"Add subscribe_events column failed: {e}")
+    # ===== new-version2：Chat 任务对话场景（见 template-onboarding-task-full-chain-design.md §5.4）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "chat_conversations", "conv_type", "TEXT DEFAULT 'general'")
+            _ensure_column(c, "chat_conversations", "issue_number", "INTEGER DEFAULT 0")
+            db.commit()
+            log.info("Added conv_type / issue_number to chat_conversations")
+    except Exception as e:
+        log.warning(f"Add chat conversation type failed: {e}")
     # ===== new-version2 多 Issue 隔离（见 multi-issue-isolation-design.md）：agent_tasks 新列 + issue_agent_session 表 =====
     # 表由 _create_tables 建；此处仅幂等补列（老库升级）
     try:

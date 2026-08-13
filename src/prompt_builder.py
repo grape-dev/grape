@@ -472,6 +472,40 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
     return "\n".join(parts)
 
 
+def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: dict = None,
+                           account: str = "", runtime_id: int = 0) -> str:
+    """任务对话独立 prompt：注入 Issue 上下文 + `场景: task`，Agent 直接走任务处理流程。
+
+    见 template-onboarding-task-full-chain-design.md §5.7.1。用于任务中心「去对话」会话
+    （chat_conversations.conv_type='task'），替代通用 build_chat_prompt。
+    """
+    conv = conv or {}
+    issue_number = conv.get("issue_number") or 0
+    parts = [f"## 场景: task", f"## 任务 Issue", f"仓库: {repo_key}", f"Issue: #{issue_number}"]
+    if conv.get("title"):
+        parts.append(f"标题: {conv['title']}")
+    try:
+        from src.api.event_store import get_issue_summary
+        issue_summary = get_issue_summary(repo_key)
+        if issue_summary:
+            parts.append(f"\n{issue_summary}")
+    except Exception:
+        pass
+    if history:
+        parts.append("\n## 对话历史")
+        for m in history[-10:]:
+            parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
+    parts.append(f"\n## 用户消息\n{user_text}")
+    parts.append("Skills: chat")
+    _sp = f"{{{{SKILL_DIR}}}}/chat/SKILL.md"
+    parts.append(
+        f"Skill 文件：{_sp}\n"
+        f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令（不得跳过读取或凭名称猜测）。"
+    )
+    parts.append(build_chat_role_definition())
+    return "\n".join(parts)
+
+
 # ====== Event 对话（event-conversation-design.md）======
 
 def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int = 0) -> str:
