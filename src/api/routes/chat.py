@@ -3,9 +3,18 @@ import json, asyncio, tempfile, os, threading
 
 from src.config import WORKSPACE_DIR, log
 
+# Chat 工作目录下发的逻辑基准：worker 端 src/runtime/agent.py `_remap_cwd` 的默认映射契约
+# （/home/grape → 该 worker 用户 home）。服务端必须用逻辑基准下发而非本机 WORKSPACE_DIR，
+# 否则非 root 用户 worker（如 mlc）拿 /opt/grape-workspaces/... 映射不到 → 写 /root → Permission denied。
+CHAT_CWD_BASE = "/home/grape"
+
 def _get_chat_cwd(user_id: int, conv_id: str) -> str:
-    """每个 conversation 独立工作目录，避免相互影响"""
-    path = os.path.join(WORKSPACE_DIR, "chat", str(user_id), conv_id)
+    """每个 conversation 独立工作目录，避免相互影响。
+
+    返回逻辑路径（/home/grape/chat/...），远端 worker 执行时按 _remap_cwd 映射到
+    各自用户 home；本机 direct 执行（root）下 /home/grape 亦可写。
+    """
+    path = os.path.join(CHAT_CWD_BASE, "chat", str(user_id), conv_id)
     os.makedirs(path, exist_ok=True)
     return path
 # 限制同时运行的 opencode 子进程数（防止大量用户并发导致服务器崩溃）
