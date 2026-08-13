@@ -16,7 +16,9 @@
         <div class="section-header">
           <h5 class="sh-title">关联智能体 <span class="sh-count">共 {{ agents.length }} 个</span></h5>
           <div class="sh-actions">
-            <button class="btn btn-sm" @click="load" title="刷新智能体与任务数据">刷新</button>
+            <button class="btn btn-sm" :disabled="refreshing" @click="refresh" title="刷新智能体与任务数据">
+              <span v-if="refreshing" class="spinner"></span>{{ refreshing ? '刷新中...' : '刷新' }}
+            </button>
           </div>
         </div>
         <div style="padding:14px 20px">
@@ -108,6 +110,15 @@
                   <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('skill')" :key="v" :class="{ active: taskSkill === v }" @click="setFilter('skill', v)">{{ v || '(空)' }} ({{ cnt }})</div>
                 </div>
               </th>
+              <th style="width:90px" class="filterable-th">
+                <span class="th-content" @click="toggleFilter('status')">
+                  状态 <span class="filter-arrow" :class="{ active: taskStatus }">▼</span>
+                </span>
+                <div class="col-filter-drop" v-if="filterDropdown === 'status'" @click.stop>
+                  <div class="col-filter-opt" :class="{ active: !taskStatus }" @click="setFilter('status', '')">全部</div>
+                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
+                </div>
+              </th>
               <th style="width:150px" class="sortable-th" @click="toggleSort">
                 创建时间
                 <span class="sort-arrows">
@@ -118,7 +129,7 @@
             </tr></thead>
             <tbody>
               <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
-                <td :colspan="4" class="t2" style="padding:28px 0">
+                <td :colspan="5" class="t2" style="padding:28px 0">
                   <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
                   <template v-else>
                     无匹配任务
@@ -130,6 +141,7 @@
                 <td class="t3">{{ t.id }}</td>
                 <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
                 <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
+                <td><span class="status-tag default">{{ t.status }}</span></td>
                 <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
               </tr>
             </tbody>
@@ -171,14 +183,16 @@ const taskPage = ref(0)
 const taskSize = ref(10)
 const sizeOptions = [10, 20, 50]
 // 列头筛选/排序状态（对齐 VOD 分析结果报表）
+const taskStatus = ref('')
 const taskSkill = ref('')
 const taskType = ref('')
 const sortOrder = ref('desc')
 const filterDropdown = ref('')
 const filterCount = ref(0)
-const hasAnyFilter = computed(() => !!(taskSkill.value || taskType.value))
+const hasAnyFilter = computed(() => !!(taskStatus.value || taskSkill.value || taskType.value))
 // 加载遮罩 + 统计卡 + 图表
 const taskLoading = ref(false)
+const refreshing = ref(false)
 const taskChartEl = ref(null)
 let taskChart = null
 // 任务状态展示映射（未知状态原样显示）
@@ -250,9 +264,14 @@ function loadColor(a) {
   return a.loadLevel === 'over' ? '#eb2f96' : '#52c41a'
 }
 
+async function refresh() {
+  refreshing.value = true
+  try { await load() } finally { refreshing.value = false }
+}
 async function load() {
   taskLoading.value = true
   const params = { taskPage: taskPage.value, taskSize: taskSize.value, sortOrder: sortOrder.value }
+  if (taskStatus.value) params.taskStatus = taskStatus.value
   if (taskSkill.value) params.taskSkill = taskSkill.value
   if (taskType.value) params.taskType = taskType.value
   try {
@@ -260,7 +279,7 @@ async function load() {
     detail.value = data
     agents.value = data.agents || []
     // 「已筛选 N 条」：有列头筛选时显示过滤后总数，无筛选不显示（对齐 VOD）
-    filterCount.value = (taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
+    filterCount.value = (taskStatus.value || taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
     nextTick(renderTaskChart)
   } finally {
     taskLoading.value = false
@@ -297,13 +316,15 @@ function toggleFilter(col) {
   filterDropdown.value = filterDropdown.value === col ? '' : col
 }
 function setFilter(col, v) {
-  if (col === 'skill') taskSkill.value = v
+  if (col === 'status') taskStatus.value = v
+  else if (col === 'skill') taskSkill.value = v
   else if (col === 'agentType') taskType.value = v
   filterDropdown.value = ''
   taskPage.value = 0
   load()
 }
 function clearFilters() {
+  taskStatus.value = ''
   taskSkill.value = ''
   taskType.value = ''
   taskPage.value = 0
@@ -485,4 +506,17 @@ load()
 .cat-tag { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
 .cat-official { background: #e6f4ff; color: #006eff; }
 .detail-link { font-size: 12px; color: var(--primary); }
+/* 刷新按钮加载动画 */
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(0, 0, 0, 0.15);
+  border-top-color: var(--primary, #006eff);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: -2px;
+  margin-right: 4px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>
