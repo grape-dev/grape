@@ -4,13 +4,7 @@ server:
 spring:
   application:
     name: grape-admin-backend
-  datasource:
-    # dev：grape 测试库（与 grape 服务共享）；prod 由 ADMIN_DB_URL 注入切换
-    url: ${ADMIN_DB_URL:jdbc:mysql://127.0.0.1:3306/grape_test_db?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&characterEncoding=utf8}
-    username: ${ADMIN_DB_USER:root}
-    password: ${ADMIN_DB_PASSWORD:}
-    hikari:
-      maximum-pool-size: 10
+  # 双数据源（admin-db-split v1.0）：地址由环境变量注入（ADMIN_DB_* / GRAPE_DB_*），代码不写死
   jpa:
     hibernate:
       ddl-auto: none
@@ -19,14 +13,17 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.MySQL8Dialect
   flyway:
-    enabled: true
+    # dev 共享库阶段曾禁用（SPRING_FLYWAY_ENABLED=false）；切 grape_admin_db 独立库后恢复启用
+    enabled: ${SPRING_FLYWAY_ENABLED:true}
     locations: classpath:db/migration
-    # grape_test_db 是存量库（已有 grape 业务表），Flyway 需基线化后只应用 admin_* 迁移
+    # 基线方式（P11）：grape_admin_db 结构+数据已从旧库全量迁移，V1-V16 标记已应用不重放
+    # （V10/V16 含固定 id 菜单种子 INSERT，重放会与已迁数据主键冲突）；V17+ 正常应用
     baseline-on-migrate: true
-    baseline-version: 0
-    # 共享库上其他部署（远程服务器）可能已应用本地没有的迁移文件（如 V14），忽略而非报错
-    # 注：Spring Boot 2.7 只绑定 ignore-missing-migrations（ignore-migration-patterns 是 Boot 3.x 的属性，2.7 无效）
-    ignore-missing-migrations: true
+    baseline-version: 16
+
+# 双数据源（admin-db-split v1.0）：连接地址/账号/密码全部由 admin.env 的 ADMIN_DB_*/GRAPE_DB_*
+# 环境变量注入（DataSourceConfig @Value 读取），代码与配置文件均不写死；
+# 未配置时 Hikari 启动即失败（fail-fast，防漏配）
 
 app:
   jwt-secret: ${ADMIN_JWT_SECRET:}
