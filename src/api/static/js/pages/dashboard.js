@@ -20,8 +20,16 @@ function renderDashboard(data) {
     <div class="flex fc gap12">
       <div style="font-size:26px">■</div>
       <div class="f1">
-        <div style="font-size:14px;font-weight:600">${repo} <span class="tg tg-c" style="font-size:9px;vertical-align:middle">${role}</span></div>
+        <div style="font-size:14px;font-weight:600">
+          <a href="https://gitcode.com/${owner}/${name}" target="_blank" title="打开 GitCode 仓库" style="color:var(--a);text-decoration:none">${owner}/${name}</a>
+          <span class="tg tg-c" style="font-size:9px;vertical-align:middle">${role}</span>
+        </div>
         <div class="ts t2">${role === 'Maintainer' ? 'Maintainer' : 'Member'} · ★ main · Webhook OK</div>
+        <div style="margin-top:6px;display:flex;gap:10px;font-size:11px">
+          <a href="https://gitcode.com/${owner}/${name}/commits" target="_blank" title="查看过往 Commit" style="color:var(--t2);text-decoration:none">↗ 查看 Commit</a>
+          <a href="https://gitcode.com/${owner}/${name}/issues" target="_blank" title="查看 Issues" style="color:var(--t2);text-decoration:none">↗ Issues</a>
+          <a href="https://gitcode.com/${owner}/${name}/pull_requests" target="_blank" title="查看 PRs" style="color:var(--t2);text-decoration:none">↗ PRs</a>
+        </div>
       </div>
       <div class="stats">
         <div class="st"><div class="v" style="color:var(--g)">${m.auto_resolution || '98.5'}%</div><div class="l">Auto-Resolution</div></div>
@@ -113,7 +121,7 @@ function renderDashboard(data) {
   </div>`;
 
   if (act.length > 0) {
-    html += `<div class="cd"><div class="cd-h"><h2>Recent Activity</h2><span class="ts t3">${repo} · Last 24h</span></div>`;
+    html += `<div class="cd"><div class="cd-h"><h2>Recent Activity</h2><span class="ts t3">${owner}/${name} · Last 24h</span></div>`;
     act.forEach(ev => {
       const colorClass = ev.agent_type === 'vod' ? 'tg-v' : ev.agent_type === 'issue' ? 'tg-i' : ev.agent_type === 'coding' ? 'tg-c' : ev.agent_type === 'qa' ? 'tg-q' : ev.agent_type === 'sre' ? 'tg-s' : 'tg-d';
       html += `<div class="ai" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">

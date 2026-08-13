@@ -27,7 +27,7 @@
 │  DevOps Skills                                │
 │    ◈ Skills Library                           │
 │  Account                                      │
-│    ☎ Chat Agent · 📋 Task Center              │
+│    📋 Task Center · ☎ Chat Agent              │
 │  Settings                                     │
 │    ⚙ General · ⎘ GitCode Repo · ⚡ Runtimes   │
 │  ── Admin（新增，按权限可见）────────────────── │
