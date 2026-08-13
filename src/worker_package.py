@@ -4,7 +4,7 @@
 写入临时文件缓存，代码变更后失效重建。产物由 GET /api/runtime/install/package
 （rta_ 鉴权）下发。
 """
-import hashlib, io, os, subprocess, sys, tarfile, threading
+import hashlib, io, os, shutil, subprocess, sys, tarfile, threading
 
 from src.config import log
 
@@ -15,6 +15,9 @@ VERSION_PATH = os.path.join(CACHE_DIR, "VERSION")
 WHEELS_DIR = os.path.join(CACHE_DIR, "wheels")
 REQUIREMENTS_PATH = os.path.join(ROOT, "requirements-worker.txt")
 PIP_INDEX = os.environ.get("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple")
+# 打包进安装包的 Python 解释器来源：uv 的 standalone 构建（python-build-standalone，
+# 免编译、自包含）。worker 端 install-worker.sh 在系统无 Python>=3.10 时用包内解释器建 venv。
+UV_PYTHON_DIR = os.path.expanduser(os.environ.get("UV_PYTHON_DIR", "~/.local/share/uv/python"))
 
 # worker 运行闭包清单（整目录粒度，含运行时懒加载模块）。
 # 依据：src.runtime.agent 的 import 闭包（含 repogit/cleanup 等运行时 import）。
@@ -77,6 +80,110 @@ def _requirements_hash() -> str:
     return h.hexdigest()[:16]
 
 
+# 打包进包的 Python 精简子集：bin/python3.12 + lib/python3.12(stdlib) + libpython*.so。
+# 剔除 include(编译扩展用)/share(文档)/tcl/tk/itcl/thread(GUI 与调试，worker 不需要)，
+# 每项约省 10MB+。
+def _python_subset_entries(py_root: str) -> list[str]:
+    """返回要打包的 python 目录内相对路径清单（保留 symlink）。"""
+    out: list[str] = []
+    for base, dirs, files in os.walk(py_root):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        rel = os.path.relpath(base, py_root)
+        if rel == ".":
+            # 只保留 bin/ 与 lib/（lib 下再收 libpython*.so* + python3.12 stdlib）
+            dirs[:] = [d for d in dirs if d in ("bin", "lib")]
+            files[:] = []
+            continue
+        parts = rel.split(os.sep)
+        if parts[0] == "bin":
+            # bin 只留 python 可执行（含 python/python3/python3.12 软链）
+            files = [f for f in files if f.startswith("python")]
+        elif parts[0] == "lib":
+            if len(parts) == 1:
+                # lib 根：只留 libpython*.so*，去掉 tcl/tk/pkgconfig
+                files = [f for f in files if f.startswith("libpython")]
+                dirs[:] = [d for d in dirs if d == "python3.12"]
+            else:
+                # lib/python3.12 整目录保留
+                pass
+        else:
+            dirs[:] = []
+            files[:] = []
+            continue
+        for f in sorted(files):
+            if f.endswith(".pyc"):
+                continue
+            fp = os.path.join(base, f)
+            r = os.path.relpath(fp, py_root)
+            # 只收文件或软链（跳过其他特殊文件）
+            if os.path.isfile(fp) or os.path.islink(fp):
+                out.append(r)
+    return sorted(out)
+
+
+def _find_python() -> str | None:
+    """定位可打包的 Python 3.10+ standalone 构建目录；找不到返回 None。"""
+    def _scan() -> list[str]:
+        found: list[str] = []
+        try:
+            if os.path.isdir(UV_PYTHON_DIR):
+                for d in os.listdir(UV_PYTHON_DIR):
+                    full = os.path.join(UV_PYTHON_DIR, d)
+                    if not os.path.isdir(full) or not d.startswith("cpython-"):
+                        continue
+                    try:
+                        ver = tuple(int(x) for x in d.split("-")[1].split(".")[:2])
+                    except Exception:
+                        continue
+                    if ver >= (3, 10) and os.path.isfile(os.path.join(full, "bin", "python3")):
+                        found.append(full)
+        except Exception as e:
+            log.warning(f"worker_package: scan python dir failed: {e}")
+        return found
+
+    candidates = _scan()
+    if not candidates:
+        # 尝试现场用 uv 装一个（幂等，装过即跳过）
+        uv = shutil.which("uv")
+        if uv:
+            try:
+                subprocess.run([uv, "python", "install", "3.12"],
+                               capture_output=True, text=True, timeout=300)
+                candidates = _scan()
+            except Exception as e:
+                log.warning(f"worker_package: uv python install failed: {e}")
+    if not candidates:
+        log.warning("worker_package: no bundled Python found; package will rely on system Python>=3.10")
+        return None
+    # 版本最高者优先
+    def _key(p: str):
+        try:
+            return tuple(int(x) for x in os.path.basename(p).split("-")[1].split("."))
+        except Exception:
+            return (0, 0, 0)
+    return max(candidates, key=_key)
+
+
+def _python_fingerprint(py_root: str | None) -> str:
+    """python 目录内容指纹（相对路径+size+mtime），变更即触发包重建。"""
+    h = hashlib.sha256()
+    if not py_root:
+        return "none"
+    try:
+        for r in _python_subset_entries(py_root):
+            fp = os.path.join(py_root, r)
+            try:
+                st = os.lstat(fp)
+            except Exception:
+                continue
+            h.update(r.encode("utf-8"))
+            h.update(str(st.st_size).encode())
+            h.update(str(st.st_mtime).encode())
+    except Exception:
+        pass
+    return h.hexdigest()[:8]
+
+
 def _ensure_wheels() -> str:
     """下载 worker 依赖 wheels 到缓存目录（离线安装用），返回目录。
 
@@ -136,7 +243,7 @@ def _wheels_fingerprint() -> str:
 
 
 def package_version() -> str:
-    """当前包版本：优先部署 git commit（有 .git 时），否则 manifest 指纹；附 wheels 指纹。"""
+    """当前包版本：git commit/manifest 指纹 + wheels 指纹 + 内置 python 指纹。"""
     base = ""
     try:
         if os.path.isdir(os.path.join(ROOT, ".git")) or os.path.isfile(os.path.join(ROOT, ".git")):
@@ -150,7 +257,8 @@ def package_version() -> str:
         pass
     if not base:
         base = "h-" + _manifest_version()
-    return f"{base}-w{_wheels_fingerprint()}"
+    py = _python_fingerprint(_find_python())
+    return f"{base}-w{_wheels_fingerprint()}-p{py}"
 
 
 def _write_sha256sums(tar: tarfile.TarFile, members: list[tuple[str, bytes]]):
@@ -214,6 +322,12 @@ def build_package() -> str:
         members: list[tuple[str, bytes]] = []
         # 依赖 wheels（离线安装用；下载失败时包内不含 wheels，安装回退在线）
         whl_dir = _ensure_wheels()
+        # 内置 Python>=3.10 standalone（离线装 worker 时解释器缺失的兜底；无则靠系统 Python）
+        py_root = _find_python()
+        if py_root:
+            log.info(f"worker_package: bundling python {os.path.basename(py_root)}")
+        else:
+            log.warning("worker_package: no python to bundle (system python required on worker)")
         with tarfile.open(tmp, "w:gz") as tar:
             for item in MANIFEST:
                 path = os.path.join(ROOT, item)
@@ -251,6 +365,18 @@ def build_package() -> str:
                             members.append((f"grape-worker/wheels/{f}", fh.read()))
                     except Exception as e:
                         log.warning(f"worker_package: add wheel {f} failed: {e}")
+            # 内置 Python 解释器（python/ 目录，standalone 免编译；含 python 可执行 + stdlib + libpython.so）
+            if py_root:
+                for r in _python_subset_entries(py_root):
+                    fp = os.path.join(py_root, r)
+                    arc = f"grape-worker/python/{r}"
+                    try:
+                        tar.add(fp, arcname=arc, filter=_tar_filter)
+                        if os.path.isfile(fp) and not os.path.islink(fp):
+                            with open(fp, "rb") as fh:
+                                members.append((arc, fh.read()))
+                    except Exception as e:
+                        log.warning(f"worker_package: add python {r} failed: {e}")
             _write_sha256sums(tar, members)
         os.replace(tmp, PKG_PATH)
         with open(VERSION_PATH, "w", encoding="utf-8") as f:

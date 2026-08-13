@@ -83,6 +83,8 @@ VERSION_FILE="$CFG_DIR/worker.version"
 log "安装目录: $INSTALL_DIR | 设备名: $DEVICE | 主控: $SERVER | 模式: $([ "$ROOT_MODE" = 1 ] && echo root/systemd || echo 用户/nohup)"
 
 # ===== 1. 准备 Python >= 3.10 =====
+# 优先级：系统 python3.12/3.11/3.10/python3 → 包内自带解释器（python/ 目录，standalone 免编译）
+# 注意：包内解释器要等第 3 步解压后才可用，故此处只探测系统 python，第 3 步后再补探测包内。
 pick_python() {
   for py in python3.12 python3.11 python3.10 python3; do
     if command -v "$py" >/dev/null 2>&1 && "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
@@ -93,9 +95,8 @@ pick_python() {
 }
 PY="$(pick_python || true)"
 if [ -z "$PY" ]; then
-  fail "未找到 Python>=3.10，请先安装（apt/yum install python3.12 python3.12-venv）后重试"
+  log "未找到系统 Python>=3.10，将尝试使用包内自带解释器（解压后自动探测）"
 fi
-log "使用 Python: $PY ($($PY --version 2>&1 | awk '{print $2}'))"
 
 # ===== 2. 下载运行包（公开端点，无需鉴权）=====
 PKG_URL="$SERVER/api/runtime/grape-worker.tar.gz"
@@ -133,6 +134,18 @@ fi
 
 # data/ 运行时目录
 mkdir -p "$INSTALL_DIR/data"
+
+# ===== 3.5 包内解释器补探测（解压后）=====
+if [ -z "$PY" ]; then
+  if [ -x "$INSTALL_DIR/python/bin/python3" ]; then
+    PY="$INSTALL_DIR/python/bin/python3"
+    log "使用包内自带 Python（standalone，免系统安装）"
+  fi
+fi
+if [ -z "$PY" ]; then
+  fail "未找到 Python>=3.10，请先安装（apt/yum install python3.12 python3.12-venv）后重试，或重新下载安装包（应含 python/ 目录）"
+fi
+log "使用 Python: $PY ($($PY --version 2>&1 | awk '{print $2}'))"
 
 # ===== 4. 建 venv + 最小依赖 =====
 if [ ! -x "$VENV/bin/python" ]; then
