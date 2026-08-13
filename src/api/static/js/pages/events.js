@@ -65,7 +65,7 @@ function renderEventDetail(data) {
         <h3 style="font-size:12px;font-weight:600">💬 与 ${agentName} 对话</h3>
         <div id="convMessages" style="flex:1;min-height:180px;max-height:46vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
         <div id="convInputRow" style="display:none;gap:6px">
-          <input id="convInput" placeholder="问一问 agent 为什么这样处理…" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+          <input id="convInput" placeholder="问一问 agent 为什么这样处理…（Enter 发送）" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
           <button class="bt bt-p bt-s" onclick="sendConversation()">发送</button>
         </div>
       </div>
