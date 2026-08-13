@@ -247,8 +247,6 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
-    import uuid
-    session_id = str(uuid.uuid4())
 
     app_secret = ""
     from src.user.db import get_bot_token_by_repo
@@ -343,14 +341,18 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             else:
                 from src.api.session_store import get_agent_type_enable
                 _enable = get_agent_type_enable(name)
-            c.execute(
-                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider, enable, subscribe_events) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?,?)",
-                (session_id, repo_key, name, runtime_id, body.skill, skill_id, repo_token, "idle",
-                 body.im_app_id if name == "vod" else "",
-                 app_secret if name == "vod" and app_secret else "",
-                 "feishu" if name == "vod" and body.im_app_id else "",
-                 _enable,
-                 json.dumps(body.subscribe_events, ensure_ascii=False) if body.subscribe_events is not None else "[]")
+            # 保留既有主键 id（防 devops_agent_session.id 换新导致 vod_conversations 悬空，
+            # 见 session_store.upsert_agent_session 背景注释）；im 三字段仅 VOD 显式传值时写
+            from src.api.session_store import upsert_agent_session
+            session_id = upsert_agent_session(
+                repo_key=repo_key, agent_type=name,
+                runtime_id=runtime_id, skill=body.skill, skill_id=skill_id,
+                repo_gitcode_token=repo_token, status="idle",
+                enable=_enable,
+                subscribe_events=json.dumps(body.subscribe_events, ensure_ascii=False) if body.subscribe_events is not None else "[]",
+                im_app_id=body.im_app_id if name == "vod" and body.im_app_id else None,
+                im_app_secret=app_secret if name == "vod" and body.im_app_id and app_secret else None,
+                im_provider="feishu" if name == "vod" and body.im_app_id else None,
             )
             db.commit()
         except Exception as e:

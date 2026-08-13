@@ -149,6 +149,59 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
                 "repo_key": repo_key, "agent_type": agent_type}
 
 
+def upsert_agent_session(*, repo_key: str, agent_type: str,
+                         runtime_id: int = 0, skill: str = "", skill_id: int = 0,
+                         repo_gitcode_token: str = "", status: str = "idle",
+                         enable: int | None = None, subscribe_events: str | None = None,
+                         im_app_id: str | None = None, im_app_secret: str | None = None,
+                         im_provider: str | None = None) -> str:
+    """创建或更新 Agent 会话，保留既有主键 id。
+
+    背景（2026-08 事故）：id 是 TEXT 主键 + UNIQUE(repo_key, agent_type)。旧实现每次用
+    新 uuid + INSERT OR REPLACE，REPLACE 遇 UNIQUE 冲突会删旧行插新行 → id 变化，
+    导致 vod_conversations.agent_session_id 悬空（"agent_session_id not found, auto-rebind"）。
+    修复：已存在 → UPDATE 保留 id；不存在 → INSERT。
+
+    enable/subscribe_events/im_* 传 None = 保留既有值（UPDATE 不改；INSERT 用默认）；
+    传具体值 = 覆盖（im 三字段仅显式传值才写，防 apply_scene/ensure_default 误清飞书绑定）。
+    返回会话 id。
+    """
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+            (repo_key, agent_type)).fetchone()
+        if row:
+            sid = row[0]
+            sets = ["runtime_id=?", "skill=?", "skill_id=?", "repo_gitcode_token=?",
+                    "status=?", "last_active_at=datetime('now')"]
+            params = [runtime_id, skill, skill_id, repo_gitcode_token, status]
+            if enable is not None:
+                sets.append("enable=?")
+                params.append(enable)
+            if subscribe_events is not None:
+                sets.append("subscribe_events=?")
+                params.append(subscribe_events)
+            for col, val in (("im_app_id", im_app_id), ("im_app_secret", im_app_secret),
+                             ("im_provider", im_provider)):
+                if val is not None:
+                    sets.append(f"{col}=?")
+                    params.append(val)
+            params.append(sid)
+            c.execute(f"UPDATE devops_agent_session SET {', '.join(sets)} WHERE id=?", params)
+            db.commit()
+            return sid
+        sid = str(uuid.uuid4())
+        _enable = enable if enable is not None else get_agent_type_enable(agent_type)
+        _sub = subscribe_events if subscribe_events is not None else "[]"
+        c.execute(
+            "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, im_app_id, im_app_secret, im_provider, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+            (sid, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token,
+             status, _enable, _sub, im_app_id or "", im_app_secret or "", im_provider or ""))
+        db.commit()
+        return sid
+
+
 def update_agent_session(session_id: str, status: str = "idle",
                          oc_session_id: str = None):
     """更新 Agent 会话状态"""
@@ -228,33 +281,22 @@ def ensure_default_agent_sessions(repo_key: str):
     from src.user.db import get_bot_token_by_repo
     _token = get_bot_token_by_repo(_owner, _rname)
 
-    # VOD IM 配置：不自动注入。VOD 助手无全局 bot 概念，同一 vod bot 由用户在多个 repo 中显式配置。
-    _im_app_id = ""
-    _im_app_secret = ""
-
     with db_lock:
         c = db.cursor()
         from src.user.db import ensure_default_backend
         _default_runtime_id = ensure_default_backend("opencode") or 0
         for _at, _sk in _mapping.items():
-            _sid = str(uuid.uuid4())
             try:
                 from src.user.db import resolve_skill_id
                 _skill_id = resolve_skill_id(_sk)
-                _enable = get_agent_type_enable(_at)
-                # 保留已存在的订阅配置（INSERT OR REPLACE 会整体覆盖行，先读出旧值再回写）
-                _sub_evts = "[]"
-                try:
-                    _row0 = c.execute("SELECT subscribe_events FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, _at)).fetchone()
-                    if _row0 and _row0[0]:
-                        _sub_evts = _row0[0]
-                except Exception:
-                    pass
-                c.execute(
-                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, im_app_id, im_app_secret, im_provider, enable, subscribe_events) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?,?)",
-                    (_sid, repo_key, _at, _default_runtime_id, _sk, _skill_id, _token, "idle",
-                     _im_app_id if _at == "vod" else "", _im_app_secret if _at == "vod" else "",
-                     "feishu", _enable, _sub_evts)
+                # 保留既有主键 id 与用户配置（enable/订阅/飞书绑定），不因重建换 uuid
+                #（见 upsert_agent_session 背景注释：INSERT OR REPLACE 新 uuid 会悬空 vod_conversations）
+                upsert_agent_session(
+                    repo_key=repo_key, agent_type=_at,
+                    runtime_id=_default_runtime_id, skill=_sk, skill_id=_skill_id,
+                    repo_gitcode_token=_token, status="idle",
+                    enable=None, subscribe_events=None,
+                    im_app_id=None, im_app_secret=None, im_provider=None,
                 )
             except Exception as e:
                 log.warning(f"Failed to create session for {_at}: {e}")

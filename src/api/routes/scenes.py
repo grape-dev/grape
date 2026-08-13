@@ -1,5 +1,5 @@
 """Scenes 路由：场景列表获取与应用"""
-import json, os, uuid
+import json, os
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.api.deps import get_current_user
@@ -47,25 +47,27 @@ async def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     repo_key = to_repo_key(f"{owner}/{repo}")
     from src.session_manager import db, db_lock
     from src.user.db import get_bot_token_by_repo
+    from src.api.session_store import upsert_agent_session
     repo_token = get_bot_token_by_repo(owner, repo)
 
     updated = 0
     with db_lock:
         c = db.cursor()
         for agent_type, skill in mapping.items():
-            sid = str(uuid.uuid4())
             try:
                 from src.user.db import resolve_skill_id, ensure_default_runtime
                 from src.api.session_store import get_agent_type_enable
                 skill_id = resolve_skill_id(skill)
                 runtime_id = ensure_default_runtime("opencode") or 0
-                # 场景只改 skill 映射，不动仓库级 enable：已有会话保留原 enable（用户 Dashboard 开关为准），
-                # 仅新建会话才继承 agent_type 全局默认（sre 默认关），避免 INSERT OR REPLACE 落到列默认 1 误开启
-                _row = c.execute("SELECT enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_type)).fetchone()
-                _enable = _row[0] if _row and _row[0] is not None else get_agent_type_enable(agent_type)
-                c.execute(
-                    "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, last_active_at, enable) VALUES (?,?,?,?,?,?,?,?,datetime('now'),?)",
-                    (sid, repo_key, agent_type, runtime_id, skill, skill_id, repo_token, "idle", _enable)
+                # 场景只改 skill 映射，不动仓库级 enable / 订阅 / 飞书绑定：
+                # 已存在会话保留（enable 以用户 Dashboard 开关为准；sre 默认关见 get_agent_type_enable），
+                # 仅新建会话继承 agent_type 全局默认。
+                upsert_agent_session(
+                    repo_key=repo_key, agent_type=agent_type,
+                    runtime_id=runtime_id, skill=skill, skill_id=skill_id,
+                    repo_gitcode_token=repo_token, status="idle",
+                    enable=None, subscribe_events=None,
+                    im_app_id=None, im_app_secret=None, im_provider=None,
                 )
                 updated += 1
             except Exception as e:
