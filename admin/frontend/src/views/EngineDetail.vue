@@ -266,7 +266,12 @@ function loadColor(a) {
 
 async function refresh() {
   refreshing.value = true
-  try { await load() } finally { refreshing.value = false }
+  const start = Date.now()
+  try { await load() } finally {
+    // 保证加载动画至少显示 300ms（本地响应过快时避免一闪而过）
+    const wait = Math.max(0, 300 - (Date.now() - start))
+    setTimeout(() => { refreshing.value = false }, wait)
+  }
 }
 async function load() {
   taskLoading.value = true
