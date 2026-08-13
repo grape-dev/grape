@@ -129,6 +129,20 @@ async def _execute_task(client, task, engine_name: str = ""):
     try:
         from src.runtime.executor import stream_runtime
         _agent_label = f"[Agent:{task.get('agent_type') or ''}|repo:{task.get('repo_key') or ''}{_engine_tag}]"
+        # 逐步日志前缀：seq + 非空的 issue/agent/repo/engine，便于在 journalctl 按事件/issue/仓库定位
+        _esq_parts = [f"seq={task.get('event_seq') or '?'}"]
+        _issue_num = (task.get("issue_id") or "").strip().lstrip("#")
+        if _issue_num and _issue_num != "0":
+            _esq_parts.append(f"issue:#{_issue_num}")
+        _agent_type = task.get("agent_type") or ""
+        if _agent_type:
+            _esq_parts.append(f"agent:{_agent_type}")
+        _repo_key = task.get("repo_key") or ""
+        if _repo_key:
+            _esq_parts.append(f"repo:{_repo_key}")
+        if engine_name:
+            _esq_parts.append(f"engine:{engine_name}")
+        _esq = "|".join(_esq_parts)
         for evt_type, data in stream_runtime(
             prompt, cwd, session_id=task.get("runtime_session_id") or "",
             event_type=task.get("event_type") or "",
@@ -140,8 +154,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             if evt_type == "done":
                 done = data
                 continue
-            # 逐步日志（本地模式同款，供 worker 侧 journalctl 观察执行过程）；前缀含 seq/task 便于定位
-            _esq = f"seq={task.get('event_seq') or '?'}{_engine_tag}"
+            # 逐步日志（本地模式同款，供 worker 侧 journalctl 观察执行过程）；前缀含 seq 便于定位
             if evt_type == "step_start":
                 log.info(f"  [{_esq}] ▶ {data}")
             elif evt_type == "text":
