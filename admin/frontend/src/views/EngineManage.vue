@@ -60,7 +60,7 @@
           </thead>
           <tbody>
             <tr v-for="e in engines" :key="e.id">
-              <td><a class="link-like" @click="openDetail(e)">{{ e.displayName || e.name }}</a></td>
+              <td>{{ e.displayName || e.name }}</td>
               <td>{{ e.name }}</td>
               <td class="t3" style="max-width:200px">{{ e.version || '-' }}</td>
               <td class="t3">{{ e.provider || '-' }}</td>
@@ -69,7 +69,10 @@
               <td>{{ e.ownerName || '—' }}</td>
               <td><span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
               <td class="t3">{{ formatTime(e.lastSeenAt) }}</td>
-              <td><button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button></td>
+              <td>
+                <button class="btn btn-sm" @click="openDetail(e)">详情</button>
+                <button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -83,7 +86,7 @@
               <span :style="badgeStyle(e.health)">
                 <span :style="dotStyle(e.health)"></span>{{ healthText(e.health) }}
               </span>
-              <span style="max-width:180px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="e.displayName || e.name"><a class="link-like" @click="openDetail(e)">{{ e.displayName || e.name }}</a></span>
+              <span style="max-width:180px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="e.displayName || e.name">{{ e.displayName || e.name }}</span>
             </span>
             <span class="status-tag info" style="font-size:11px;padding:1px 6px">{{ scopeText(e.scope) }}</span>
           </div>
@@ -94,6 +97,7 @@
             <div><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ e.ownerName || '—' }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
+            <button class="btn btn-sm" @click="openDetail(e)">详情</button>
             <button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button>
           </div>
         </div>
@@ -249,13 +253,6 @@ onMounted(() => { load(); loadDevices() })
   min-width: 240px;
   background: #fff;
 }
-/* 实例名点击跳转详情（对齐 Skill 页技能名样式） */
-.link-like {
-  color: var(--a, #006eff);
-  cursor: pointer;
-  text-decoration: none;
-}
-.link-like:hover { text-decoration: underline; }
 /* 健康分布徽章行（对齐设备管理页） */
 .em-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
 .em-stat {
