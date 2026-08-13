@@ -52,6 +52,6 @@
     "backend": "opencode",
     "order_num": 5,
     "subscribe_events": [],
-    "enable": false
+    "enable": true
   }
 }

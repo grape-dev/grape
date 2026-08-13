@@ -87,11 +87,10 @@ class TestQaSkillConfig:
         assert cfg["qa"]["subscribe_events"] == []
 
     def test_agent_description_enable_defaults(self):
-        # enable 默认：sre=false，其余 true
+        # enable 默认：全部 true（sre 是否处理由仓库级订阅事件控制，非全局开关）
         cfg = _load_json("agent-description.json")
-        for at in ("vod", "issue", "coding", "qa"):
+        for at in ("vod", "issue", "coding", "qa", "sre"):
             assert cfg[at].get("enable", True) is True, f"{at} enable should be true"
-        assert cfg["sre"].get("enable", True) is False, "sre enable should be false"
 
     def test_coding_agent_does_not_subscribe_pr(self):
         # coding 不订阅任何事件（通过 A2A 由 Issue/QA Agent 触发，不直接感知 PR 事件）

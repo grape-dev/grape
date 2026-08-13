@@ -59,8 +59,8 @@ def _cleanup(repo_key: str):
 
 
 class TestApplySceneKeepsEnable:
-    def test_fresh_repo_sre_inherits_default_disabled(self):
-        """新建仓库应用场景：sre 会话 enable 继承 agent_type 全局默认（0），不被列默认 1 误开启"""
+    def test_fresh_repo_sre_inherits_default_enabled(self):
+        """新建仓库应用场景：sre 会话 enable 继承 agent_type 全局默认（1，SRE 启用由订阅事件控制）"""
         owner, repo = "sceneowner", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
         try:
@@ -71,21 +71,21 @@ class TestApplySceneKeepsEnable:
             default_enable = get_agent_type_enable("sre")
             assert sre_enable == default_enable, (
                 f"sre enable 应继承 agent_type 默认（{default_enable}），实际 {sre_enable}")
-            assert sre_enable == 0, "agent-description.json 中 sre enable=false，默认应为关"
-            assert is_agent_enabled(repo_key, "sre") is False, "sre 全局默认关，应不可用"
+            assert sre_enable == 1, "agent-description.json 中 sre enable=true，默认应为开"
+            assert is_agent_enabled(repo_key, "sre") is True, "sre 全局默认开，应可用（是否处理由订阅事件控制）"
         finally:
             _cleanup(repo_key)
 
-    def test_preserves_user_enabled_sre(self):
-        """仓库级手动开启 sre 后应用场景：enable 保持 1，不被全局默认覆盖"""
+    def test_preserves_user_disabled_sre(self):
+        """仓库级手动关闭 sre 后应用场景：enable 保持 0，不被全局默认覆盖"""
         owner, repo = "sceneowner", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
         try:
             get_or_create_agent_session(repo_key, "sre", "opencode")
-            _set_session_enable(repo_key, "sre", 1)
+            _set_session_enable(repo_key, "sre", 0)
             _apply(owner, repo)
-            assert _session_enable(repo_key, "sre") == 1, "仓库级已开启的 sre 不应被场景覆盖"
-            assert is_agent_enabled(repo_key, "sre") is True
+            assert _session_enable(repo_key, "sre") == 0, "仓库级已关闭的 sre 不应被场景重置"
+            assert is_agent_enabled(repo_key, "sre") is False
         finally:
             _cleanup(repo_key)
 
@@ -103,12 +103,12 @@ class TestApplySceneKeepsEnable:
             _cleanup(repo_key)
 
     def test_other_agents_stay_enabled_on_fresh_repo(self):
-        """新建仓库应用场景：vod/issue/coding/qa 仍为启用态（仅 sre 全局默认关）"""
+        """新建仓库应用场景：所有 Agent（含 sre）默认启用，sre 是否处理由订阅事件控制"""
         owner, repo = "sceneowner", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
         try:
             _apply(owner, repo)
-            for at in ("vod", "issue", "coding", "qa"):
+            for at in ("vod", "issue", "coding", "qa", "sre"):
                 assert _session_enable(repo_key, at) == 1, f"{at} 默认应启用"
                 assert is_agent_enabled(repo_key, at) is True
         finally:

@@ -319,6 +319,16 @@ Pipeline 按 **Issue** 维度聚合展示工作流进展：
 │  │      - 开发者声音分析 (官方)                      │  │
 │  │      - 自定义技能 (仓库) / (个人)                 │  │
 │  │  ──────────────────────────                    │  │
+│  │  事件订阅  〔仅 SRE Agent〕                      │  │
+│  │  ☑ PR 合入（pull_request_merged）               │  │
+│  │  合入分支 [main, dev…（留空=不限）]               │  │
+│  │     当 PR 合入到上述分支时，SRE Agent 自动收到任务  │  │
+│  │  ──────────────────────────                    │  │
+│  │  IM 配置  〔仅 VOD Agent〕                       │  │
+│  │  Bot App ID [cli_xxxxxxxx       ]               │  │
+│  │  Bot Secret [********          ]               │  │
+│  │  [扫码配置]                                     │  │
+│  │  ──────────────────────────                    │  │
 │  │  [Save] [Cancel]                               │  │
 │  │  ──────────────────────────                    │  │
 │  │  🧹 Clean Session                               │  │
@@ -342,6 +352,7 @@ Agent 详情说明：
 | **Agent Header** | 图标、显示名、描述、[Configure] 和 [Events] 按钮 |
 | **Backend Engine（运行时引擎）** | 下拉直接选**引擎实例唯一名**（如 `opencode-worker-23249`，格式 `{引擎类型}-{设备短名}`）；**DevOps Agent（vod/issue/coding/qa/sre）仅可选 仓库/全局 范围引擎**（个人引擎仅供 Chat Agent，见 Agent Runtimes 一节）；在线实例优先、离线置灰；保存即绑定该实例的 `runtime_id` |
 | **Skill** | 下拉按 `scope:name` 精确匹配（官方/仓库/个人），"默认官方技能（自动）"表示由 Agent-Skill 映射自动决定 |
+| **SRE Agent 专属：事件订阅** | PR 合入（`pull_request_merged`）勾选 + 合入分支（逗号分隔，留空=不限）；命中订阅即触发任务（`devops_agent_session.subscribe_events`，见 `agent-event-subscription-design.md`）；**仅 SRE Agent 展示** |
 | **VOD Agent 专属：IM 配置** | 绑定飞书 Bot App ID / Secret，展示已绑定群列表；类型独占（同一凭证不可同时用于 VOD 与 Chat） |
 | **🧹 Clean Session** | 将 `runtime_session_id` 置空，下一次事件到来时创建全新会话上下文（不延续历史对话） |
 | **指标卡** | 事件总量 / 已完成 / 进行中（来自 events 表统计） |
@@ -1002,7 +1013,8 @@ issue_opened ──► vod ──A2A──► issue ──A2A──► coding �
   → run_pipeline():
      ├── 1. 归一化（vcs/adapter.py — gitcode/github 事件转统一格式）
      ├── 2. 反循环过滤（actor 为任一 bot 用户名 → 跳过；纯标签变更回声 → 跳过）
-     ├── 3. 领域路由（routing.get_domain_agent → agent_type.subscribe_events）
+     ├── 3. 领域路由：issue_opened → vod；Issue/PR 事件按 issue_state 阶段矩阵（D9）判定；
+     │     非 Issue 事件走静态映射；主路由为空时回退仓库级 subscribe_events（SRE PR 订阅）
      ├── 3.1 Agent 启用检查（devops_agent_session.enable / agent_type.enable）
      ├── 3.2 Issue 生命周期状态机路由（issue_state 阶段 → vod/issue/coding/qa/sre）
      ├── 4. Agent 会话查找（devops_agent_session → runtime_id + skill）
