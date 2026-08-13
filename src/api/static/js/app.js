@@ -163,7 +163,12 @@ function loadAgentTypes() {
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
 
-    repoTitle.textContent = repo ? repo.fullName : '';
+    if (repo) {
+      // Top Bar 仓库名 → GitCode 项目链接（查看仓库/Commit/Issues/PRs）
+      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.owner}/${repo.name}" target="_blank" title="打开 GitCode 仓库" style="color:var(--a);font-weight:500;text-decoration:none">${repo.fullName} ↗</a>`;
+    } else {
+      repoTitle.textContent = '';
+    }
 
     if (view === 'dash') {
       title.textContent = 'Dashboard';
