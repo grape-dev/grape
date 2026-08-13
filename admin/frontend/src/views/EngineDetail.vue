@@ -15,6 +15,9 @@
       <div class="card" style="margin-top:16px;padding:0">
         <div class="section-header">
           <h5 class="sh-title">关联智能体 <span class="sh-count">共 {{ agents.length }} 个</span></h5>
+          <div class="sh-actions">
+            <button class="btn btn-sm" @click="load" title="刷新智能体与任务数据">刷新</button>
+          </div>
         </div>
         <div style="padding:14px 20px">
           <div class="agent-grid" v-if="agents.length">
@@ -25,10 +28,6 @@
                   <div class="agent-name">{{ a.displayName }}<span class="code-tag">{{ a.agentType }}</span></div>
                   <div class="agent-sub">顺序 #{{ a.orderNum }} · 引擎 {{ a.defaultRuntimeId || '-' }}</div>
                 </div>
-                <label class="sw" :title="a.enable === 1 ? '点击禁用' : '点击启用'" @click.stop>
-                  <input type="checkbox" :checked="a.enable === 1" :disabled="saving === a.agentType" @change="toggle(a, $event.target.checked)" />
-                  <span class="sw-slider"></span>
-                </label>
               </div>
               <div class="agent-desc">{{ a.description }}</div>
               <div class="agent-stats">
@@ -250,19 +249,6 @@ function loadColor(a) {
   if (a.loadRate == null) return 'var(--text-primary)'
   return a.loadLevel === 'over' ? '#eb2f96' : '#52c41a'
 }
-const saving = ref('')
-async function toggle(a, checked) {
-  saving.value = a.agentType
-  try {
-    const { data } = await http.post(`/agents/${a.agentType}/enable`, { enable: checked })
-    a.enable = data.enable
-  } catch (e) {
-    console.error('切换失败:', e)
-    alert('切换失败，请重试')
-  } finally {
-    saving.value = ''
-  }
-}
 
 async function load() {
   taskLoading.value = true
@@ -465,7 +451,6 @@ load()
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  display: inline-block;
   max-width: 100%;
   vertical-align: bottom;
 }
@@ -500,18 +485,4 @@ load()
 .cat-tag { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
 .cat-official { background: #e6f4ff; color: #006eff; }
 .detail-link { font-size: 12px; color: var(--primary); }
-.sw { position: relative; display: inline-block; width: 38px; height: 21px; flex-shrink: 0; cursor: pointer; }
-.sw input { opacity: 0; width: 0; height: 0; }
-.sw-slider {
-  position: absolute; inset: 0; background: #c0c4cc;
-  border: 1px solid #a8adb5; border-radius: 20px; transition: all .2s;
-}
-.sw-slider::before {
-  content: ''; position: absolute; width: 15px; height: 15px; left: 2px; top: 2px;
-  background: #fff; border-radius: 50%; transition: all .2s;
-  box-shadow: 0 1px 2px rgba(0,0,0,.3); border: 1px solid #e2e2e2;
-}
-.sw input:checked + .sw-slider { background: #52c41a; border-color: #52c41a; }
-.sw input:checked + .sw-slider::before { transform: translateX(17px); }
-.sw input:disabled + .sw-slider { opacity: .5; cursor: not-allowed; }
 </style>
