@@ -207,6 +207,16 @@ async def runtime_task_fail(task_id: str, body: FailBody, credential_id: int = D
     return {"status": "failed"}
 
 
+@router.post("/tasks/{task_id}/requeue")
+async def runtime_task_requeue(task_id: str, credential_id: int = Depends(_require_credential)):
+    """客户端并发冲突跳过时回滚任务为 queued（避免 dispatched 悬空卡死，见 seq#622 教训）。"""
+    task = service.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
+    ok = service.requeue_task(task_id)
+    return {"status": "requeued", "recycled": ok}
+
+
 @router.post("/runtimes/{runtime_id}/recover-orphans")
 async def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_require_credential)):
     """启动时清理该 runtime 遗留的 dispatched/running 任务（置回 queued）。"""

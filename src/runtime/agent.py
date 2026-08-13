@@ -185,8 +185,9 @@ async def _execute_task(client, task, engine_name: str = ""):
 
 
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
-                    engine_by_rid: dict | None = None):
-    active_sessions = set()
+                    engine_by_rid: dict | None = None,
+                    _test_execute=None, _test_active=None):
+    active_sessions = _test_active if _test_active is not None else set()
     last_heartbeat = 0.0
     engine_by_rid = engine_by_rid or {}
     while True:
@@ -198,10 +199,19 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             if not task:
                 continue
-            sid = task.get("agent_session_id") or ""
+            # 并发槽 key 与服务端 claim 串行粒度一致（multi-issue-isolation-design.md §3.3）：
+            # 有关联 Issue → 按 issue_session_id（跨 Issue 并行）；无（#0/旧任务）→ 回退 agent_session_id。
+            # 修复：此前一律用 agent_session_id，导致不同 Issue 的任务在客户端被误判冲突拒收
+            #       （服务端已放行并标记 dispatched，客户端却 skip → 任务悬空卡死，见 seq#622）。
+            sid = task.get("issue_session_id") or task.get("agent_session_id") or ""
             if sid in active_sessions:
-                # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
-                log.warning(f"claim conflict: session {sid} busy, skip task {task.get('id')}")
+                # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）。
+                # 回滚任务为 queued，避免 dispatched 悬空（skip 后无人执行也不重新排队）。
+                log.warning(f"claim conflict: session {sid} busy, requeue task {task.get('id')}")
+                try:
+                    await client.requeue(task.get("id") or "")
+                except Exception as _e:
+                    log.warning(f"requeue task {task.get('id')} failed: {_e}")
                 continue
             if len(active_sessions) >= max_concurrent:
                 continue
@@ -209,7 +219,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             async def _wrap(t=task, s=sid, e=engine_by_rid.get(rid, "")):
                 try:
-                    await _execute_task(client, t, e)
+                    if _test_execute is not None:
+                        await _test_execute(client, t, e)
+                    else:
+                        await _execute_task(client, t, e)
                 finally:
                     active_sessions.discard(s)
 

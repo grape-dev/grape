@@ -119,6 +119,10 @@ class RuntimeClient:
         await self._request("POST", f"/api/runtime/tasks/{task_id}/fail",
                             {"error": error}, retries=4)
 
+    async def requeue(self, task_id: str):
+        """并发冲突跳过时回滚任务为 queued（避免 dispatched 悬空，见 seq#622 教训）。"""
+        await self._request("POST", f"/api/runtime/tasks/{task_id}/requeue", {}, retries=2)
+
     async def recover_orphans(self, runtime_id: int):
         await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/recover-orphans", {}, retries=2)
 

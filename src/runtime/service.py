@@ -392,11 +392,37 @@ def cancel_task(task_id):
     update_task_status(task_id, "cancelled")
 
 
+def requeue_task(task_id):
+    """将 dispatched/running 任务重置回 queued（客户端并发冲突跳过时回滚，避免任务悬空卡死）。
+
+    见 seq#622 教训：客户端 _run_loop 因并发槽冲突 skip 任务后，服务端任务仍停留 dispatched，
+    既不被执行也不重新排队 → 永久卡死。客户端冲突时应调本函数回滚。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE id=? AND status IN ('dispatched','running')",
+                  (task_id,))
+        db.commit()
+        return c.rowcount > 0
+
+
 def report_messages(task_id, messages):
     """批量执行消息 → append_event_archive_log（M1 落档，脱敏）"""
     task = get_task(task_id)
     if not task:
         return
+    # 逐步日志前缀：task + 非空的 seq/issue/agent/repo，与 worker 侧（agent.py _esq）对齐便于定位
+    _esq_parts = [f"seq={task.get('event_seq') or '?'}"]
+    _issue_id = (task.get("issue_id") or "").strip().lstrip("#")
+    if _issue_id and _issue_id != "0":
+        _esq_parts.append(f"issue:#{_issue_id}")
+    _agent_type = task.get("agent_type") or ""
+    if _agent_type:
+        _esq_parts.append(f"agent:{_agent_type}")
+    _repo_key = task.get("repo_key") or ""
+    if _repo_key:
+        _esq_parts.append(f"repo:{_repo_key}")
+    _esq = "|".join(_esq_parts)
     # 逐步日志（服务端观察：step_start/step_finish 等；远端执行时 step 详情在 worker 日志）
     for m in (messages or []):
         if not isinstance(m, dict):
@@ -404,7 +430,7 @@ def report_messages(task_id, messages):
         _t = m.get("type")
         if _t in ("step_start", "step_finish", "text", "reasoning", "tool_use", "error"):
             _d = m.get("data")
-            log.info(f"[task {task_id}] [seq={task.get('event_seq') or '?'}] {_t}: {str(_d)[:120]}")
+            log.info(f"[task {task_id}] [{_esq}] {_t}: {str(_d)[:120]}")
     if task.get("event_seq"):
         try:
             from src.api.event_archive import append_event_archive_log
