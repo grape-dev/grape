@@ -318,7 +318,7 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
     template: 配置中的模板对象（含 source / source_repo / id）
     target_repo: 目标仓库名（不含 owner）
     来源:
-      - source="local" → 复制 configs/project-templates/{template_id}/ 到临时目录
+      - source="local" → 复制 examples/{template_id}/（或旧路径 configs/project-templates/{id} 兜底）到临时目录
       - source="git"   → git clone source_repo（用 bot_token 拉取）
     目标: 设置 remote 为个人新仓库（https://{user_token}@gitcode.com/{login}/{repo}.git）
           并 git push -u origin HEAD:main。成功返回 True。
@@ -326,7 +326,7 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
     import os
     import shutil
     import tempfile
-    from src.config import CONFIG_DIR
+    from src.config import EXAMPLE_DIR, CONFIG_DIR
 
     if not user_token or not gitcode_login or not target_repo:
         raise RuntimeError("缺少用户 token 或目标仓库信息")
@@ -337,7 +337,11 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
     tmp = tempfile.mkdtemp(prefix="ptmpl_")
     try:
         if source == "local":
-            src_dir = os.path.join(CONFIG_DIR, "project-templates", template.get("id", ""))
+            template_id = template.get("id", "")
+            src_dir = os.path.join(EXAMPLE_DIR, template_id)
+            if not os.path.isdir(src_dir):
+                # 旧路径兜底（兼容历史部署/自建镜像）
+                src_dir = os.path.join(CONFIG_DIR, "project-templates", template_id)
             if not os.path.isdir(src_dir):
                 raise RuntimeError(f"本地模板目录不存在: {src_dir}")
             workdir = os.path.join(tmp, "repo")

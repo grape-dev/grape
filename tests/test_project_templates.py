@@ -80,7 +80,7 @@ class TestConfig:
         for cat in data.get("categories", []):
             for t in cat.get("templates", []):
                 if t.get("source") == "local":
-                    d = os.path.join(ROOT, "configs", "project-templates", t["id"])
+                    d = os.path.join(ROOT, "examples", t["id"])
                     assert os.path.isdir(d), f"local 模板目录不存在: {d}"
 
     def test_video_url_field_valid(self):

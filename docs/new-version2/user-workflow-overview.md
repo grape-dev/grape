@@ -122,7 +122,7 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 │  ☁️ 云原生项目模板                                        │
 │  选择一个模板，快速创建你的 DevOps 项目。                    │
 │  ◧ 总数  ◇ 当前分类  ◧ 分类数                              │
-│  [☁️ 云原生项目模板 12] [🤖 AI Office 7] [🧩 Skills 1] [🏗️ IaC 1] │
+│  [☁️ 云原生项目模板 5] [🤖 AI Office 7] [🧩 Skills 1] [🏗️ IaC 1] │
 │                                                          │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
 │  │ 🛍️          │  │ 🚪          │  │ 🔌          │   │
@@ -136,7 +136,7 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 
 - 模板按分类组织（云原生 / AI Office / Skills / IaC），每张卡片含图标、名称、描述、标签、统计与操作按钮。
 - **一键创建**：弹窗输入仓库名 → 自动「建仓（GitCode 个人账号下）→ 写入模板代码 → 自动托管（复用 `/repos/host` 全链路）→ 应用开发场景」；创建成功后直接进入该仓库。首次由模板创建的项目还会异步触发「首次托管引导」（Onboarding），由 issue agent 生成「快速部署体验」与「探索方向引导」两个 Issue。
-- 模板数据源：`configs/project-templates.json`（git 模板克隆自 `source_repo`；local 模板复制本地目录）。
+- 模板数据源：`configs/project-templates.json`（git 模板克隆自 `source_repo`；local 模板复制 `examples/{template_id}/` 本地目录）。
 
 ---
 
@@ -207,6 +207,7 @@ Dashboard 以**单个已托管仓库**为维度，每 30 秒自动刷新：
 │  ┌─ Repo Header ──────────────────────────────────┐  │
 │  │  ■ team/backend-service [Maintainer]           │  │
 │  │  Maintainer · ★ main · Webhook OK              │  │
+│  │  ↗ 查看 Commit · ↗ Issues · ↗ PRs              │  │
 │  │  98.5% Auto-Resolution│ 47 Events/Week│ 12s Avg │  │
 │  └────────────────────────────────────────────────┘  │
 │                                                        │
@@ -242,7 +243,7 @@ Dashboard 区域说明：
 
 | 区域 | 内容 |
 |------|------|
-| **Repo Header** | 仓库名 + 角色徽标 + 分支（★ main）+ Webhook 状态；指标：自动解决率 / 周事件量 / 平均响应 |
+| **Repo Header** | 仓库名（点击跳转 GitCode 项目页）+ 角色徽标 + 分支（★ main）+ Webhook 状态；**仓库外链**：查看 Commit / Issues / PRs（跳转 GitCode 对应页）；指标：自动解决率 / 周事件量 / 平均响应 |
 | **Agent Workflow** | 5 个 Agent 流水线卡片，每张显示：图标+名称、**启用开关**、Backend 引擎名、状态点、**最近 2 条真实事件**（title + status，来自 events 表，非假数据）；右上角**开发场景选择器**（切换 Agent-Skill 映射） |
 | **Chat Lane** | 个人 Chat Agent 横贯连接条，点击进入 Chat 页面 |
 | **Recent Activity** | 最近 24 小时事件流（最近 5 条），点击事件跳转 Event Detail |
