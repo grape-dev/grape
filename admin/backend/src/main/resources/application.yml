@@ -13,13 +13,15 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.MySQL8Dialect
   flyway:
-    # dev 共享库阶段曾禁用（SPRING_FLYWAY_ENABLED=false）；切 grape_admin_db 独立库后恢复启用
+    # dev 共享库阶段曾禁用（SPRING_FLYWAY_ENABLED=false）；双库独立后恢复启用
     enabled: ${SPRING_FLYWAY_ENABLED:true}
     locations: classpath:db/migration
     # 基线方式（P11）：grape_admin_db 结构+数据已从旧库全量迁移，V1-V16 标记已应用不重放
     # （V10/V16 含固定 id 菜单种子 INSERT，重放会与已迁数据主键冲突）；V17+ 正常应用
+    # 环境变量可切换：存量迁移场景默认 16（不重放）；现网首次部署（全新空库）设
+    # FLYWAY_BASELINE_VERSION=0 → Flyway 全量应用 V1-V16 建表（含菜单种子）
     baseline-on-migrate: true
-    baseline-version: 16
+    baseline-version: ${FLYWAY_BASELINE_VERSION:16}
 
 # 双数据源（admin-db-split v1.0）：连接地址/账号/密码全部由 admin.env 的 ADMIN_DB_*/GRAPE_DB_*
 # 环境变量注入（DataSourceConfig @Value 读取），代码与配置文件均不写死；
