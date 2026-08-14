@@ -384,11 +384,20 @@ def get_agent_pool(agent_type: str) -> list[dict]:
 
 
 def pool_runtime_ids(agent_type: str) -> list[int]:
-    """池内 enabled 的引擎 id 列表（claim 池调度用）。"""
+    """池内 enabled 且在线（心跳在线）的引擎 id 列表（claim 池调度用）。
+
+    只返回在线引擎：池内引擎全离线/不存在时返回空 → 调用方（入队/对话）回退
+    默认 runtime，避免任务下发到 offline worker 后无人领取而永久 queued
+    （issue #41 卡住根因：池绑定 runtime 9/12/18 全部 offline，任务挂起）。
+    """
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT runtime_id FROM agent_type_runtime_pool WHERE agent_type=? AND enabled=1", (agent_type,))
+            c.execute(
+                "SELECT p.runtime_id FROM agent_type_runtime_pool p "
+                "JOIN agent_runtimes r ON r.id = p.runtime_id "
+                "WHERE p.agent_type=? AND p.enabled=1 AND r.status='online'",
+                (agent_type,))
             return [r[0] for r in c.fetchall()]
         except Exception:
             return []
