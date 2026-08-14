@@ -527,6 +527,18 @@ def claim(runtime_id) -> dict | None:
         task = get_task(task_id)
         if task:
             task["status"] = "dispatched"
+            # 回填事件 runtime 为真实引擎实例名（pool 模式入队显示 pool:<type>，
+            # claim 后展示实际执行引擎，见 #44：vod 池 hermes 执行但事件显示 opencode）
+            if task.get("event_seq"):
+                try:
+                    from src.runtime.instances import runtime_instance_name as _rin
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("UPDATE events SET runtime=? WHERE seq=?",
+                                  (_rin(runtime_id), task["event_seq"]))
+                        db.commit()
+                except Exception as e:
+                    log.warning(f"claim backfill event runtime failed: {e}")
         from src.runtime.instances import runtime_instance_name
         log.info(f"claim: runtime_id={runtime_id}({runtime_instance_name(runtime_id)}) task={task_id}")
         return task

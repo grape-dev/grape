@@ -603,8 +603,14 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         log.warning(f"Pipeline enqueue: no runtime_id for repo={repo_key} agent={agent_type}, task skipped")
         _fail_event(seq, "入队失败：无可用 runtime（未配置引擎且不在引擎池）")
         return
-    # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名
-    inst_name = runtime_instance_name(runtime_id) or backend or "opencode"
+    # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名。
+    # pool 模式（runtime_id=0，任务由池内在线引擎领取）不兜底 "opencode"——
+    # 否则事件列表/Event Detail 误导显示 opencode（实际可能 hermes，见 #44）。
+    # 显示为 pool:<agent_type>，任务被 claim 后由 claim 侧回填真实引擎实例名。
+    if pool_mode:
+        inst_name = f"pool:{agent_type}"
+    else:
+        inst_name = runtime_instance_name(runtime_id) or backend or "opencode"
     # 2) event.json 骨架（#0 跳过，见 event_archive._extract_num）
     _evt_copy = dict(evt)
     _evt_copy["issue_id"] = issue_id
