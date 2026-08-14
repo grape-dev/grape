@@ -447,6 +447,16 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
                 stats["tables"] += c.rowcount
             except Exception as e:
                 log.warning(f"Cleanup skill records failed: {e}")
+            # 4.5 onboarding 幂等标记（删仓库即作废，重建同名仓库应重新引导）
+            #     标记 key 形如 `onboarded:{repo_key}`（repo_key 可能带/不带 gitcode: 前缀）
+            try:
+                _ob_keys = [f"onboarded:{k}" for k in keys]
+                _ob_ph = ",".join("?" for _ in _ob_keys)
+                c.execute(f"DELETE FROM meta WHERE `key` IN ({_ob_ph})", _ob_keys)
+                if c.rowcount:
+                    log.info(f"Cleanup onboarding marks: {c.rowcount} removed ({_ob_keys})")
+            except Exception as e:
+                log.warning(f"Cleanup onboarding marks failed: {e}")
             db.commit()
         except Exception as e:
             log.warning(f"Cleanup DB failed: {e}")
