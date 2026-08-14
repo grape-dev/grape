@@ -2,7 +2,7 @@
   <div class="auth-page">
     <div class="auth-card">
       <div class="auth-brand">
-        <span class="auth-logo">🍇</span>
+        <img class="auth-logo-img" :src="logo128" alt="Grape" />
         <h1>Grape运营管理系统</h1>
         <p class="auth-sub">运营管理台</p>
       </div>
@@ -27,6 +27,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import http from '../api'
 import { setTokens, setUser } from '../utils/auth'
+import logo128 from '../assets/logo-128.png'
 
 const router = useRouter()
 const username = ref('')
@@ -57,22 +58,20 @@ async function login() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #f1f3f5 0%, #e8f0fe 100%);
+  background: #f1f3f5;
 }
 .auth-card {
   width: 380px;
-  background: #fff;
+  background: var(--bg-white);
   border-radius: var(--radius-lg);
   border: 1px solid var(--border-color);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.08);
+  box-shadow: 0 8px 32px rgba(30,60,140,0.10);
   padding: 36px 32px 32px;
 }
 .auth-brand { text-align: center; margin-bottom: 28px; }
-.auth-logo {
-  display: inline-flex; width: 56px; height: 56px; border-radius: 14px;
-  background: linear-gradient(135deg, var(--primary), #4f46e5);
-  align-items: center; justify-content: center;
-  font-size: 26px; margin-bottom: 12px;
+.auth-logo-img {
+  width: 96px; height: 96px; border-radius: 24px;
+  object-fit: cover; margin-bottom: 24px;
 }
 .auth-brand h1 { font-size: 20px; font-weight: 700; color: var(--text-primary); }
 .auth-sub { font-size: 13px; color: var(--text-tertiary); margin-top: 4px; }
@@ -81,10 +80,11 @@ async function login() {
 .form-item input {
   width: 100%; padding: 10px 12px;
   border: 1px solid var(--border-color); border-radius: var(--radius);
+  background: #fff;
   font-size: 14px; outline: none; color: var(--text-primary);
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
-.form-item input:focus { border-color: var(--primary); }
+.form-item input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(0,110,255,0.12); }
 .auth-error {
   font-size: 13px; color: var(--danger);
   background: #fff1f0; border: 1px solid #ffa39e;
@@ -97,6 +97,6 @@ async function login() {
   font-size: 14px; font-weight: 600; cursor: pointer;
   transition: all 0.2s;
 }
-.auth-btn:hover { background: var(--primary-hover); }
+.auth-btn:hover { background: var(--primary-hover); box-shadow: 0 4px 16px rgba(0,110,255,0.25); }
 .auth-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 </style>
