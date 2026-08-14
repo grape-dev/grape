@@ -144,3 +144,19 @@ def test_example_template_default_sqlite():
         cfg = json.load(f)
     assert cfg["backend"] == "sqlite"
     assert "mysql" in cfg
+
+
+def test_translate_alter_modify_text_default():
+    """ALTER MODIFY TEXT/MEDIUMTEXT DEFAULT 字面量 → 表达式默认值（MySQL 8 TEXT 系列列限制）。
+
+    覆盖 obs-skill-storage-design.md §4：skill_files 升 MEDIUMTEXT 的迁移语句。
+    """
+    sql = "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT DEFAULT '{}'"
+    out = mc.translate_sql(sql)
+    assert "DEFAULT ('{}')" in out, out
+    # ADD COLUMN 的 TEXT 默认值转换保持原有行为
+    out2 = mc.translate_sql("ALTER TABLE skill ADD COLUMN current_version INTEGER DEFAULT 1")
+    assert out2 == "ALTER TABLE skill ADD COLUMN current_version INTEGER DEFAULT 1"
+    # 无默认值的 MODIFY 不受影响
+    out3 = mc.translate_sql("ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT NOT NULL")
+    assert "DEFAULT" not in out3

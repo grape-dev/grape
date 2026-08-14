@@ -827,14 +827,15 @@ def get_skill_by_id(skill_id) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, skill_name, display_name, description, agent_type, skill_path, scope, owner_id FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
+            c.execute("SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
             row = c.fetchone()
             if not row:
                 return None
             return {
                 "id": row[0], "skill_name": row[1], "display_name": row[2] or row[1],
                 "description": row[3] or "", "agent_type": row[4] or "",
-                "skill_path": row[5] or row[1], "scope": row[6] or "official", "owner_id": row[7] or "",
+                "skill_path": row[5] or row[1], "file_path": row[6] or "",
+                "scope": row[7] or "official", "owner_id": row[8] or "",
             }
     except Exception as e:
         log.warning(f"get_skill_by_id failed: {e}")
@@ -876,18 +877,81 @@ def get_skill_path(skill_id) -> str:
     return os.path.join(SKILLS_DIR, sp, "SKILL.md")
 
 
+# ====== OBS 技能库辅助（obs-skill-storage-design.md §3 N9）======
 
-def create_skill(user_id: int, skill_name: str, agent_type: str = "", description: str = "",
-                 parent_agent_type: str = "", scope: str = "user", owner_id: str = "") -> bool:
+def get_skill_object_key(skill_id) -> str:
+    """按 skill_id 返回 OBS 对象键（v2.5：读 file_path——真实存储路径；无则空串）。"""
+    skill = get_skill_by_id(skill_id)
+    if not skill:
+        return ""
+    fp = (skill.get("file_path") or "").strip()
+    # v2.5 字段职责分离：file_path 非空即 OBS 模式（不再特征判断 skill_path）
+    if fp:
+        return fp
+    # 兼容 v2.4 存量（skill_path 曾存对象键）
+    sp = (skill.get("skill_path") or "").strip()
+    if "/skills/" in sp and sp.endswith(".zip"):
+        return sp
+    return ""
+
+
+def get_skill_current_version(skill_id) -> int:
+    """（v2.4 废弃保留：固定 key 模型无版本概念，返回 0 兼容旧调用。）"""
+    return 0
+
+
+def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
+                     description: str, object_key: str, created_by: str = "") -> bool:
+    """OBS 模式技能记录 upsert（存在则更新固定 key，不存在则插入；v2.5 file_path + by 字段）。
+
+    scope: user/repo；owner: user_id 或 repo_key。返回是否成功。
+    """
     try:
         with db_lock:
             c = db.cursor()
             if scope == "repo":
-                c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'repo',?)",
-                          (skill_name, skill_name, description, agent_type, skill_name, owner_id or str(user_id)))
+                c.execute(
+                    "SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
+                    (skill_name, owner))
             else:
-                c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'user',?)",
-                          (skill_name, skill_name, description, agent_type, skill_name, str(user_id)))
+                c.execute(
+                    "SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?",
+                    (skill_name, owner))
+            row = c.fetchone()
+            if row:
+                c.execute(
+                    "UPDATE skill SET file_path=?, display_name=?, "
+                    "agent_type=?, description=?, updated_by=?, is_active=1, updated_at=datetime('now') WHERE id=?",
+                    (object_key, skill_name, agent_type or "", description or "",
+                     created_by or "", row[0]))
+            else:
+                c.execute(
+                    "INSERT INTO skill (skill_name, display_name, description, agent_type, "
+                    "file_path, scope, owner_id, created_by, updated_by, is_active) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,1)",
+                    (skill_name, skill_name, description or "", agent_type or "",
+                     object_key, scope, owner, created_by or "", created_by or ""))
+            db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"upsert_skill_obs failed: {e}")
+        return False
+
+
+
+def create_skill(user_id: int, skill_name: str, agent_type: str = "", description: str = "",
+                 parent_agent_type: str = "", scope: str = "user", owner_id: str = "",
+                 created_by: str = "") -> bool:
+    try:
+        with db_lock:
+            c = db.cursor()
+            cb = created_by or str(user_id)
+            if scope == "repo":
+                c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,'repo',?,?,?)",
+                          (skill_name, skill_name, description, agent_type, skill_name, owner_id or str(user_id), cb, cb))
+            else:
+                c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,'user',?,?,?)",
+                          (skill_name, skill_name, description, agent_type, skill_name, str(user_id), cb, cb))
             db.commit()
             if scope == "repo":
                 ensure_repo_skill_dir(owner_id or str(user_id), skill_name)
@@ -928,8 +992,8 @@ def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: s
 def list_skills(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, skill_name, agent_type, description, scope, owner_id FROM skill WHERE scope='user' AND owner_id=? ORDER BY id", (str(user_id),))
-        return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "scope": r[4], "owner_id": r[5], "created_at": ""} for r in c.fetchall()]
+        c.execute("SELECT id, skill_name, agent_type, description, scope, owner_id, file_path FROM skill WHERE scope='user' AND owner_id=? ORDER BY id", (str(user_id),))
+        return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "scope": r[4], "owner_id": r[5], "file_path": r[6] or "", "created_at": ""} for r in c.fetchall()]
 
 
 def save_skill_md(user_id: int, skill_name: str, content: str) -> bool:

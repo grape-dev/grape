@@ -1,7 +1,17 @@
-"""自定义技能校验 — YAML Front Matter、Markdown 章节、文件名检查"""
+"""自定义技能校验 — YAML Front Matter、Markdown 章节、文件名检查
+
+安全策略（2026-08 调整，见 obs-skill-storage-design.md §6.1）：
+- 官方技能规范（阿里云/Anthropic/OpenAI）支持 scripts/ 文本脚本；
+  opencode agent 本身具备执行 shell 命令能力，文本脚本不扩大风险边界。
+- 因此放开文本脚本（.py/.sh/.js/.ts 等），仅禁止二进制可执行/平台原生
+  文件（.exe/.so/.dll/.bin/.jar/.class/.bat），防原生代码注入。
+"""
 import re, os, yaml
 
-FORBIDDEN_EXTS = {".py", ".sh", ".bat", ".exe", ".jar", ".class", ".so", ".dll", ".bin"}
+# 二进制可执行/平台原生 —— 禁止上传（防原生代码注入）
+FORBIDDEN_EXTS = {".exe", ".bat", ".jar", ".class", ".so", ".dll", ".bin", ".msi", ".apk"}
+# 文本脚本（官方规范 scripts/ 目录支持，zip 化保留权限位 + worker 物化恢复）
+SCRIPT_EXTS = {".py", ".sh", ".js", ".ts", ".pl", ".rb", ".go", ".rs"}
 ALLOWED_REF_EXTS = {".md", ".txt", ".json", ".yaml", ".yml"}
 REQUIRED_SECTIONS = ["## 场景", "## 知识", "## 步骤"]
 PROJECT_SKILLS = {"pr", "issue", "implementation", "build-debug", "deploy-guard",
@@ -68,27 +78,29 @@ def validate_skill(upload_dir: str, skill_name: str) -> list[str]:
     if name_val != skill_name:
         errors.append(f"name（{name_val}）与目录名（{skill_name}）不一致")
 
-    version = str(fm.get("version", ""))
-    if not re.match(r"^\d+\.\d+\.\d+$", version):
+    version = str(fm.get("version", "")).strip()
+    # version 为可选字段（官方 Agent Skills 规范未强制，如阿里云技能无 version）：
+    # 缺失时默认 1.0.0 不报错；有则要求语义化版本号（x.y.z，兼容 x.y 与 v 前缀）
+    if version and not re.match(r"^v?\d+\.\d+(\.\d+)?$", version):
         errors.append("version 字段必须符合语义化版本号格式（x.y.z）")
 
     desc = str(fm.get("description", "")).strip()
     if not desc:
         errors.append("description 字段不能为空")
-    elif len(desc) > 200:
-        errors.append("description 字段不超过 200 字")
+    elif len(desc) > 500:
+        errors.append("description 字段不超过 500 字")
 
     if name_val in PROJECT_SKILLS:
         errors.append(f"技能名「{name_val}」与项目级技能冲突，请换一个名称")
 
-    # 3. 检查禁止文件
+    # 3. 检查禁止文件（仅禁二进制可执行；文本脚本 .py/.sh 等放行——官方规范 scripts/ 支持）
     for root, dirs, files in os.walk(upload_dir):
         for f in files:
             ext = os.path.splitext(f)[1].lower()
             if ext in FORBIDDEN_EXTS:
                 errors.append(f"不允许上传可执行文件: {f}")
                 return errors
-            if ext not in ALLOWED_REF_EXTS and ext not in ("", ".md", ".yaml", ".yml", ".json", ".txt"):
+            if ext not in ALLOWED_REF_EXTS and ext not in SCRIPT_EXTS and ext not in ("", ".md", ".yaml", ".yml", ".json", ".txt"):
                 errors.append(f"不支持的文件类型: {f}")
 
     return errors

@@ -42,6 +42,18 @@ LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/lo
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
+# ====== 对象存储（OBS）配置（见 docs/new-version2/obs-storage/obs-skill-storage-design.md §3 N1）======
+# AK/SK 仅经环境变量注入（gitignored），不入配置文件、不入日志。
+OBS_ENABLED = os.environ.get("OBS_ENABLED", "false").lower() in ("1", "true", "yes")
+OBS_ENDPOINT = os.environ.get("OBS_ENDPOINT", "https://obs.cn-north-4.myhuaweicloud.com")
+OBS_BUCKET = os.environ.get("OBS_BUCKET", "")
+OBS_ACCESS_KEY = os.environ.get("OBS_ACCESS_KEY", "")
+OBS_SECRET_KEY = os.environ.get("OBS_SECRET_KEY", "")
+OBS_PREFIX = os.environ.get("OBS_PREFIX", "grape/prod")
+OBS_URL_EXPIRES = int(os.environ.get("OBS_URL_EXPIRES", "300"))
+# 本地缓存根（磁盘 LRU zip 缓存；默认 data/cache/storage）
+OBS_LOCAL_CACHE = os.environ.get("OBS_LOCAL_CACHE", "")
+
 # ====== 数据库路径（可通过环境变量指向独立测试库，防止测试污染生产库）======
 DB_PATH = os.environ.get("DEVOPS_DB_PATH", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/sessions.db")))
 

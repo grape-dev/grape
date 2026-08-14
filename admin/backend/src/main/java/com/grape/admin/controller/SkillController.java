@@ -5,6 +5,7 @@ import com.grape.admin.service.SkillService;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -41,8 +42,35 @@ public class SkillController {
     }
 
     @PostMapping("/{id}/promote")
-    public Map<String, Object> promote(@PathVariable Integer id) {
-        return skillService.promoteToOfficial(id);
+    public Map<String, Object> promote(@PathVariable Integer id, HttpServletRequest request) throws IOException {
+        return skillService.promoteToOfficial(id, AuthContext.username(request));
+    }
+
+    @PostMapping("/{id}/to-cluster")
+    public Map<String, Object> toCluster(@PathVariable Integer id, HttpServletRequest request) throws IOException {
+        return skillService.toClusterMode(id, AuthContext.username(request));
+    }
+
+    @DeleteMapping("/{id}")
+    public Map<String, Object> delete(@PathVariable Integer id, HttpServletRequest request) {
+        return skillService.deleteSkill(id, AuthContext.username(request), AuthContext.userId(request));
+    }
+
+    /** 官方技能更新（v2.5 独立接口：超管 OR 创建者本人；校验 zip 目录名 == 技能名） */
+    @PostMapping(value = "/{id}/update", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Map<String, Object> update(@PathVariable Integer id,
+                                      @RequestPart("file") MultipartFile file,
+                                      @RequestParam("agentType") String agentType,
+                                      HttpServletRequest request) throws IOException {
+        try (var in = file.getInputStream()) {
+            return skillService.updateSkill(id, in, file.getSize(),
+                    agentType, AuthContext.username(request), AuthContext.userId(request));
+        }
+    }
+
+    @GetMapping("/{id}/download")
+    public Map<String, Object> download(@PathVariable Integer id) {
+        return skillService.downloadUrl(id);
     }
 
     @GetMapping("/{id}/content")

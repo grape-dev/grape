@@ -161,6 +161,35 @@ def _pack_skill_dir(skill_name, skill_path):
     return {skill_name: files}
 
 
+def _skill_files_from_zip(zip_bytes: bytes, skill_name: str) -> dict:
+    """OBS 模式双写（老 worker 过渡期兼容）：从技能 zip 提取可文本化文件，
+    生成与 _pack_skill_dir 相同结构的 skill_files。二进制文件跳过（老 worker 能力边界）。
+
+    （merge 修复：feat/obs-storage 合并 dev 时此函数丢失，补回——老 worker
+    兼容通道；OBS 技能本地无目录，skill_files 须从 zip 提取）
+    """
+    import io as _io
+    import zipfile as _zf
+    files = {}
+    try:
+        with _zf.ZipFile(_io.BytesIO(zip_bytes)) as zf:
+            sub = {}
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                parts = info.filename.split("/", 1)
+                inner = parts[1] if len(parts) == 2 and parts[0] == skill_name else info.filename
+                try:
+                    sub[inner] = zf.read(info.filename).decode("utf-8")
+                except Exception:
+                    continue  # 二进制/非 UTF-8：老 worker 不支持，跳过
+            if sub:
+                files[skill_name] = sub
+    except Exception as e:
+        log.warning(f"_skill_files_from_zip failed: {e}")
+    return files
+
+
 def _collect_server_env(user_id, account):
     """服务端 DB 系凭据注入（user credentials / 账户 AK-SK），远端 worker 无本地 DB 也生效。"""
     env = {}
@@ -253,10 +282,17 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     skill_files = {}
     if skill:
         try:
-            from src.user.db import resolve_skill_id, get_skill_path
+            from src.user.db import resolve_skill_id, get_skill_path, get_skill_object_key
             _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
             _path = get_skill_path(_sid) if _sid else (skill_path or "")
             skill_files = _pack_skill_dir(skill, _path or (skill_path or ""))
+            # v3.0：OBS 技能（本地无目录）→ 从 OBS zip 提取文本（老 worker 兼容通道）
+            _okey = get_skill_object_key(_sid) if _sid else ""
+            if _okey:
+                from src.storage import get_skill_zip_bytes
+                _zip = get_skill_zip_bytes(_okey)
+                if _zip:
+                    skill_files = _skill_files_from_zip(_zip, skill)
         except Exception as e:
             log.warning(f"enqueue: skill pack failed for {skill}: {e}")
     # project-info 随任务（服务端权威，多 VM 共享，见 multi-issue-isolation-design.md §2.4）

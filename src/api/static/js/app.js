@@ -190,8 +190,7 @@ function loadAgentTypes() {
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
 
     if (repo) {
-      // Top Bar 仓库名 → GitCode 项目链接（查看仓库/Commit/Issues/PRs）
-      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.owner}/${repo.name}" target="_blank" rel="noopener" title="在 GitCode 打开 ${repo.fullName}" style="color:var(--a);font-weight:500;text-decoration:none">${repo.fullName} ↗</a>`;
+      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.owner}/${repo.name}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
     } else {
       repoTitle.textContent = '';
     }
@@ -240,7 +239,7 @@ function loadAgentTypes() {
       title.textContent = 'Skill Detail';
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
-      API.get('/skills/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     }
   }
 

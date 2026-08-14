@@ -4,6 +4,8 @@ import com.grape.admin.common.BizException;
 import com.grape.admin.common.NotFoundException;
 import com.grape.admin.entity.readonly.SkillRo;
 import com.grape.admin.repository.readonly.SkillRoRepository;
+import com.grape.admin.repository.AdminRoleRepository;
+import com.grape.admin.repository.AdminUserRoleRelRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -44,10 +46,11 @@ public class SkillService {
     /** skill_path 白名单：仅允许字母数字/下划线/中划线/点（防路径穿越，只读技能目录内文件） */
     private static final Pattern SAFE_SKILL_PATH = Pattern.compile("^[\\w\\-.]+$");
     private static final Pattern SAFE_SKILL_NAME = Pattern.compile("^[a-z0-9-]+$");
-    private static final Pattern SEMVER = Pattern.compile("^\\d+\\.\\d+\\.\\d+$");
+    private static final Pattern SEMVER = Pattern.compile("^v?\\d+\\.\\d+(\\.\\d+)?$");
     private static final Set<String> VALID_AGENT_TYPES = Set.of("vod", "issue", "coding", "qa", "sre", "chat");
-    private static final Set<String> FORBIDDEN_EXTS = Set.of(".py", ".sh", ".bat", ".exe", ".jar", ".class", ".so", ".dll", ".bin");
-    private static final Set<String> ALLOWED_EXTS = Set.of(".md", ".txt", ".json", ".yaml", ".yml");
+    // 仅禁二进制可执行/平台原生；文本脚本（.py/.sh 等）放行——官方 Agent Skills 规范 scripts/ 支持（与主项目 validator.py 对齐）
+    private static final Set<String> FORBIDDEN_EXTS = Set.of(".bat", ".exe", ".jar", ".class", ".so", ".dll", ".bin");
+    private static final Set<String> ALLOWED_EXTS = Set.of(".md", ".txt", ".json", ".yaml", ".yml", ".py", ".sh", ".js", ".ts");
     private static final Set<String> PROJECT_SKILLS = Set.of("pr", "issue", "implementation", "build-debug", "deploy-guard",
             "incident-triage", "changelog-gen", "chat", "cloud-deploy", "im-notify", "agent");
     private static final long MAX_ZIP_BYTES = 10L * 1024 * 1024;
@@ -55,13 +58,38 @@ public class SkillService {
     private final SkillRoRepository skillRepository;
     private final Path skillsDir;
     private final JdbcTemplate jdbcTemplate;
+    private final ObsStorageClient obs;
+    private final AdminUserRoleRelRepository roleRelRepository;
+    private final AdminRoleRepository roleRepository;
 
     public SkillService(SkillRoRepository skillRepository,
                         @Value("${app.skills-dir:../../skills}") String skillsDir,
-                        @Qualifier("grapeJdbcTemplate") JdbcTemplate jdbcTemplate) {
+                        @Qualifier("grapeJdbcTemplate") JdbcTemplate jdbcTemplate,
+                        ObsStorageClient obs,
+                        AdminUserRoleRelRepository roleRelRepository,
+                        AdminRoleRepository roleRepository) {
         this.skillRepository = skillRepository;
         this.skillsDir = resolveSkillsDir(skillsDir);
         this.jdbcTemplate = jdbcTemplate;
+        this.obs = obs;
+        this.roleRelRepository = roleRelRepository;
+        this.roleRepository = roleRepository;
+    }
+
+    /** 超管判定：当前用户角色含 SUPER_ADMIN（v2.5 更新/删除官方技能权限） */
+    private boolean isSuperAdmin(Long userId) {
+        if (userId == null) {
+            return false;
+        }
+        try {
+            return roleRelRepository.findByUserIdAndDeleted(userId, 0).stream()
+                    .map(rel -> roleRepository.findById(rel.getRoleId()))
+                    .filter(Optional::isPresent)
+                    .map(Optional::get)
+                    .anyMatch(r -> "SUPER_ADMIN".equals(r.getCode()));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**
@@ -167,12 +195,17 @@ public class SkillService {
         m.put("description", s.getDescription());
         m.put("agentType", s.getAgentType());
         m.put("skillPath", s.getSkillPath());
+        m.put("filePath", s.getFilePath());
+        m.put("createdBy", s.getCreatedBy());
+        m.put("updatedBy", s.getUpdatedBy());
         m.put("scope", s.getScope());
         m.put("ownerId", s.getOwnerId());
         // 个人技能：数字 owner_id 映射为用户名（查不到保持原样）
         m.put("ownerName", "user".equals(s.getScope()) ? ownerNames.get(s.getOwnerId()) : null);
         m.put("isActive", s.getIsActive());
         m.put("updatedAt", s.getUpdatedAt());
+        // v2.5：OBS 模式 = file_path 非空（真实存储路径）；兼容存量 skill_path 对象键
+        m.put("obsMode", obs.isObjectKey(s.getFilePath()) || obs.isObjectKey(s.getSkillPath()));
         return m;
     }
 
@@ -180,7 +213,7 @@ public class SkillService {
      * 仓库/个人技能一键转为官方技能：DB 记录转 official + 文件移动到官方目录。
      * 文件不在本机时仍完成 DB 转换并返回 warning（需在文件所在机器同步）。
      */
-    public Map<String, Object> promoteToOfficial(Integer id) {
+    public Map<String, Object> promoteToOfficial(Integer id, String username) throws IOException {
         SkillRo skill = skillRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("技能不存在: id=" + id));
         String scope = skill.getScope();
@@ -198,6 +231,21 @@ public class SkillService {
             throw new BizException("官方技能已存在同名技能「" + skillName + "」，无法转换");
         }
 
+        // ===== OBS 分支（N13）：源为 OBS 对象 → copyObject 到 official 固定 key =====
+        String srcKey = obs.isObjectKey(skill.getFilePath()) ? skill.getFilePath()
+                : obs.isObjectKey(skill.getSkillPath()) ? skill.getSkillPath() : "";
+        if (obs.enabled() && !srcKey.isEmpty()) {
+            String dstKey = obs.skillKey("official", "", skillName, 1);
+            if (!obs.copyObject(srcKey, dstKey)) {
+                throw new BizException("OBS 复制技能失败: " + srcKey + " -> " + dstKey);
+            }
+            // v2.5：file_path=目标对象键（真实存储路径）；updated_by=操作者；created_by 保留
+            jdbcTemplate.update("UPDATE skill SET scope='official', owner_id='', file_path=?, updated_by=? WHERE id=?",
+                    dstKey, username, id);
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("message", "技能「" + skillName + "」已转为官方技能");
+            return result;
+        }
         // 文件移动：源目录（repo/user）→ 官方目录 skills/<skill_name>
         Path targetDir = skillsDir.resolve(skillName).normalize();
         if (Files.exists(targetDir)) {
@@ -218,8 +266,17 @@ public class SkillService {
             warning = "技能文件不在当前服务器（" + srcDir + "），已转换记录；请在该文件所在机器同步到官方目录 skills/" + skillName;
         }
 
-        // DB 转换
-        jdbcTemplate.update("UPDATE skill SET scope = 'official', owner_id = '' WHERE id = ?", id);
+        // DB 转换 + 自动转存（B 方案一致）：本地技能转官方后打包上传 OBS official 固定 key；
+        // 文件不在本机（warning）→ 跳过转存（file_path 留空，提示人工同步）
+        String newFilePath = "";
+        if (obs.enabled() && warning == null) {
+            String objectKey = obs.skillKey("official", "", skillName, 1);
+            byte[] zipBytes = obs.normalizeSkillZip(targetDir, skillName);
+            obs.saveBytes(objectKey, zipBytes);
+            newFilePath = objectKey;
+        }
+        jdbcTemplate.update("UPDATE skill SET scope = 'official', owner_id = '', file_path = ?, updated_by = ? WHERE id = ?",
+                newFilePath, username, id);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("message", "技能「" + skillName + "」已转为官方技能");
@@ -229,10 +286,247 @@ public class SkillService {
         return result;
     }
 
+    /**
+     * 官方技能转集群模式：本地目录打包上传 OBS + DB skill_path 回写。
+     * 仅官方技能；幂等（已转返回现状）；不可回退。
+     * 与主服务 POST /api/skills/{name}/to-cluster 同机制（对象键规范一致，共享库同步可见）。
+     */
+    public Map<String, Object> toClusterMode(Integer id, String username) throws IOException {
+        SkillRo skill = skillRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("技能不存在: id=" + id));
+        if (!"official".equals(skill.getScope())) {
+            throw new BizException("仅官方技能支持转集群模式");
+        }
+        if (obs.isObjectKey(skill.getFilePath()) || obs.isObjectKey(skill.getSkillPath())) {
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("message", "技能 " + skill.getSkillName() + " 已是集群模式");
+            r.put("obsMode", true);
+            return r;
+        }
+        // 本地官方技能目录（uploadSkill 落盘处 skillsDir/{skillName}）
+        String rel = (skill.getSkillPath() == null || skill.getSkillPath().isBlank())
+                ? skill.getSkillName() : skill.getSkillPath();
+        Path skillDir = skillsDir.resolve(rel).normalize();
+        if (!skillDir.startsWith(skillsDir) || !Files.isDirectory(skillDir)) {
+            throw new NotFoundException("官方技能目录不存在: " + skillDir);
+        }
+        String objectKey = obs.skillKey("official", "", skill.getSkillName(), 1);
+        byte[] zipBytes = obs.normalizeSkillZip(skillDir, skill.getSkillName());
+        obs.saveBytes(objectKey, zipBytes);
+        // v2.5：file_path=对象键（真实存储路径）；updated_by=操作者（created_by 保留）
+        jdbcTemplate.update("UPDATE skill SET file_path = ?, updated_by = ? WHERE id = ?",
+                objectKey, username, id);
+
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("message", "技能 " + skill.getSkillName() + " 已转存至 OBS");
+        r.put("obsMode", true);
+        r.put("objectKey", objectKey);
+        return r;
+    }
+
+    /**
+     * 官方技能更新（v2.5：独立接口，超管 OR 创建者本人）：
+     * 校验 zip 包内目录名 == 技能名；内容落盘覆盖 + OBS 同步（file_path 保留）。
+     */
+    public Map<String, Object> updateSkill(Integer id, InputStream zipStream, long size,
+                                           String agentType, String username, Long userId) {
+        SkillRo skill = skillRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("技能不存在: id=" + id));
+        if (!"official".equals(skill.getScope())) {
+            throw new BizException("仅官方技能支持更新");
+        }
+        // 权限：超管 OR 创建者本人
+        String createdBy = skill.getCreatedBy() == null ? "" : skill.getCreatedBy();
+        if (!isSuperAdmin(userId) && (createdBy.isEmpty() || !createdBy.equals(username))) {
+            throw new BizException("无更新权限：仅超级管理员或创建者本人可更新该官方技能");
+        }
+        if (agentType == null || agentType.isBlank()) {
+            throw new BizException("必须选择技能类型（agent_type）");
+        }
+        if (!VALID_AGENT_TYPES.contains(agentType)) {
+            throw new BizException("技能类型不合法，可选: " + VALID_AGENT_TYPES.stream().sorted().collect(Collectors.joining(", ")));
+        }
+        if (size > MAX_ZIP_BYTES) {
+            throw new BizException("Skill 文件不能超过 10MB");
+        }
+
+        Path tmpDir;
+        try {
+            tmpDir = Files.createTempDirectory("skill-update-");
+        } catch (IOException e) {
+            throw new BizException("更新失败: " + e.getMessage());
+        }
+        try {
+            // 解压 ZIP 到临时目录（与 uploadSkill 同逻辑）
+            Path extractDir = tmpDir.resolve("extracted");
+            Files.createDirectories(extractDir);
+            boolean anyEntry = false;
+            try (ZipInputStream zis = new ZipInputStream(zipStream)) {
+                ZipEntry entry;
+                while ((entry = zis.getNextEntry()) != null) {
+                    anyEntry = true;
+                    Path target = extractDir.resolve(entry.getName()).normalize();
+                    if (!target.startsWith(extractDir)) {
+                        throw new BizException("ZIP 包含非法路径: " + entry.getName());
+                    }
+                    if (entry.isDirectory()) {
+                        Files.createDirectories(target);
+                    } else {
+                        Files.createDirectories(target.getParent());
+                        Files.copy(zis, target, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                }
+            } catch (IOException e) {
+                throw new BizException("不是有效的 ZIP 文件，请上传 .zip 格式");
+            }
+            if (!anyEntry) {
+                throw new BizException("ZIP 文件为空");
+            }
+            List<Path> entries;
+            try (Stream<Path> s = Files.list(extractDir)) {
+                entries = s.collect(Collectors.toList());
+            } catch (IOException e) {
+                throw new BizException("读取 ZIP 内容失败");
+            }
+            List<Path> realEntries = entries.stream()
+                    .filter(p -> {
+                        String n = p.getFileName().toString();
+                        return !n.equals("__MACOSX") && !n.equals(".DS_Store") && !n.equals(".git") && !n.startsWith(".");
+                    })
+                    .collect(Collectors.toList());
+            if (realEntries.isEmpty()) {
+                throw new BizException("ZIP 中未找到技能目录");
+            }
+            Path skillDir = realEntries.get(0);
+            if (!Files.isDirectory(skillDir)) {
+                skillDir = extractDir;
+            }
+            String skillName = Files.isDirectory(skillDir)
+                    ? skillDir.getFileName().toString()
+                    : realEntries.get(0).getFileName().toString();
+
+            // 目录名校验：包内目录名必须与技能名一致
+            if (!skillName.equals(skill.getSkillName())) {
+                throw new BizException("技能包内目录名与技能名不匹配：包内目录「" + skillName
+                        + "」≠ 技能名「" + skill.getSkillName() + "」");
+            }
+            // SKILL.md 校验（与主项目 validator.py 规则一致）
+            List<String> errors = validateCustomSkill(skillDir, skillName);
+            if (!errors.isEmpty()) {
+                throw new BizException("Skill 校验失败: " + String.join("; ", errors));
+            }
+            // 落盘覆盖 skills/{skillName}/
+            Path targetDir = skillsDir.resolve(skillName).normalize();
+            if (!targetDir.startsWith(skillsDir)) {
+                throw new BizException("技能路径非法");
+            }
+            Files.createDirectories(targetDir.getParent());
+            if (Files.exists(targetDir)) {
+                deleteRecursively(targetDir);
+            }
+            copyRecursively(skillDir, targetDir);
+            // OBS 同步（v2.5 B 方案）：官方技能更新【始终上传 OBS】——
+            // 已转存（file_path 对象键）覆盖对象；未转存自动转存（file_path 回写对象键）
+            String filePath = skill.getFilePath();
+            String newFilePath = filePath;
+            if (obs.enabled()) {
+                String objectKey = obs.isObjectKey(filePath) ? filePath
+                        : obs.skillKey("official", "", skillName, 1);
+                byte[] zipBytes = obs.normalizeSkillZip(skillDir, skillName);
+                obs.saveBytes(objectKey, zipBytes);
+                if (!obs.isObjectKey(filePath)) {
+                    newFilePath = objectKey;  // 未转存 → 自动转存
+                }
+            }
+            // DB：updated_by=操作者（created_by 保留）；自动转存时回写 file_path
+            if (!newFilePath.equals(filePath)) {
+                jdbcTemplate.update("UPDATE skill SET file_path=?, updated_by=?, updated_at=NOW() WHERE id=?",
+                        newFilePath, username, id);
+            } else {
+                jdbcTemplate.update("UPDATE skill SET updated_by=?, updated_at=NOW() WHERE id=?",
+                        username, id);
+            }
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("message", "技能「" + skillName + "」更新成功");
+            r.put("skillName", skillName);
+            return r;
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new BizException("更新失败: " + e.getMessage());
+        } finally {
+            deleteRecursively(tmpDir);
+        }
+    }
+
+    /**
+     * 官方技能删除（v2.5）：超管 OR 创建者本人可删；系统内置（created_by=''）永不可删。
+     * 动作：OBS 对象（file_path 非空时）单对象删除 + DB 记录删除。
+     */
+    public Map<String, Object> deleteSkill(Integer id, String username, Long userId) {
+        SkillRo skill = skillRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("技能不存在: id=" + id));
+        if (!"official".equals(skill.getScope())) {
+            throw new BizException("仅官方技能支持在管理台删除（个人/仓库技能请在主服务侧管理）");
+        }
+        String createdBy = skill.getCreatedBy() == null ? "" : skill.getCreatedBy();
+        if (createdBy.isEmpty()) {
+            throw new BizException("系统内置技能不可删除（部署资产）");
+        }
+        if (!isSuperAdmin(userId) && !createdBy.equals(username)) {
+            throw new BizException("无删除权限：仅超级管理员或创建者本人可删除该官方技能");
+        }
+        // OBS 对象删除（file_path 真实存储路径；兼容存量 skill_path 对象键）
+        String objectKey = obs.isObjectKey(skill.getFilePath()) ? skill.getFilePath()
+                : obs.isObjectKey(skill.getSkillPath()) ? skill.getSkillPath() : "";
+        if (!objectKey.isEmpty() && obs.enabled()) {
+            obs.deleteObject(objectKey);
+        }
+        skillRepository.deleteById(id);
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("message", "技能「" + skill.getSkillName() + "」已删除");
+        return r;
+    }
+
+    /**
+     * 技能包下载临时地址：OBS 对象 → 临时签名 URL；未转官方技能 → 400。
+     */
+    public Map<String, Object> downloadUrl(Integer id) {
+        SkillRo skill = skillRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("技能不存在: id=" + id));
+        if (obs.isObjectKey(skill.getFilePath()) || obs.isObjectKey(skill.getSkillPath())) {
+            String objectKey = obs.isObjectKey(skill.getFilePath()) ? skill.getFilePath() : skill.getSkillPath();
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("url", obs.temporaryUrl(objectKey));
+            r.put("expires_in", obs.urlExpires());
+            return r;
+        }
+        if ("official".equals(skill.getScope())) {
+            throw new BizException("官方技能为部署内置，未转集群模式不提供下载");
+        }
+        throw new BizException("技能对象不存在（历史数据请先迁移）");
+    }
+
     public Map<String, Object> getSkillContent(Integer id) {
         SkillRo skill = skillRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("技能不存在: id=" + id));
         String skillPath = skill.getSkillPath();
+        // ===== OBS 分支（N14）：file_path 为 OBS 对象键（v2.5 真实存储路径）；
+        // 兼容存量 skill_path 对象键 → 下载 zip 提取 SKILL.md =====
+        String filePath = skill.getFilePath();
+        String objectKey = obs.isObjectKey(filePath) ? filePath
+                : obs.isObjectKey(skillPath) ? skillPath : "";
+        if (obs.enabled() && !objectKey.isEmpty()) {
+            byte[] zip = obs.readBytes(objectKey);
+            String content = obs.extractSkillMd(zip, skill.getSkillName());
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("id", skill.getId());
+            result.put("skillName", skill.getSkillName());
+            result.put("displayName", skill.getDisplayName());
+            result.put("scope", skill.getScope());
+            result.put("content", content);
+            return result;
+        }
         if (skillPath == null || skillPath.isBlank() || !SAFE_SKILL_PATH.matcher(skillPath).matches()) {
             throw new NotFoundException("技能路径不合法: " + skillPath);
         }
@@ -331,6 +625,17 @@ public class SkillService {
                     ? skillDir.getFileName().toString()
                     : realEntries.get(0).getFileName().toString();
 
+            // v2.5 R1：官方技能同名禁止上传（scope='official' 已存在同名 → 400）
+            // 更新走独立接口 POST /{id}/update（超管/创建者权限 + 目录名校验）
+            if ("official".equals(scope)) {
+                Integer dup = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM skill WHERE skill_name = ? AND scope = 'official'",
+                        Integer.class, skillName);
+                if (dup != null && dup > 0) {
+                    throw new BizException("官方技能已存在同名「" + skillName + "」，请使用更新功能修改");
+                }
+            }
+
             // SKILL.md 校验（与主项目 validator.py 规则一致）
             List<String> errors = validateCustomSkill(skillDir, skillName);
             if (!errors.isEmpty()) {
@@ -339,6 +644,33 @@ public class SkillService {
             Map<String, Object> fm = parseFrontmatter(skillDir);
             String description = String.valueOf(fm.getOrDefault("description", "")).trim();
 
+            // ===== OBS 分支（N12）：OBS 启用 → 规范化重打包上传 OBS =====
+            // v2.7 A 方案：official 也走 OBS（上传即转存——file_path=对象键，
+            // obsMode=True）；与 user/repo 一致；落盘分支仅 OBS 未启用时使用
+            if (obs.enabled()) {
+                String ownerId;
+                if (scope.equals("repo")) {
+                    ownerId = repo.trim();
+                } else if (scope.equals("official")) {
+                    ownerId = "";   // official owner_id=''
+                } else {
+                    ownerId = username;
+                }
+                // v2.4 固定 key 覆盖模型：无版本概念，putObject 同 key 原子覆盖
+                // v2.5：file_path=对象键（真实存储路径）+ created_by/updated_by=当前用户
+                String objectKey = obs.skillKey(scope, ownerId, skillName, 1);
+                byte[] zipBytes = obs.normalizeSkillZip(skillDir, skillName);
+                obs.saveBytes(objectKey, zipBytes);
+                skillRepository.deleteBySkillNameAndScopeAndOwnerId(skillName, scope, ownerId);
+                skillRepository.flush();
+                jdbcTemplate.update(
+                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id, created_by, updated_by, is_active) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+                        skillName, skillName, description, agentType, skillName, objectKey, scope, ownerId, username, username);
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("message", "技能 " + skillName + " 上传成功");
+                result.put("skillName", skillName);
+                return result;
+            }
             // 落盘：official → skills/<skill_name>；repo → skills/repo/<repo_key>/<skill_name>；user → skills/custom/<username>/<skill_name>
             Path targetDir;
             String ownerId;
@@ -362,9 +694,12 @@ public class SkillService {
             copyRecursively(skillDir, targetDir);
 
             // 入库：先删同键旧记录再插入（与主项目一致）
+            // v2.5：upload 仅新增（官方同名已在上方 400 拒绝，不存在覆盖场景）；
+            // created_by/updated_by=当前登录用户
             skillRepository.deleteBySkillNameAndScopeAndOwnerId(skillName, scope, ownerId);
             skillRepository.flush();
-            skillRepository.insertSkill(skillName, skillName, description, agentType, skillName, scope, ownerId);
+            skillRepository.insertSkill(skillName, skillName, description, agentType,
+                    skillName, "", scope, ownerId, username, username);
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("message", "技能 " + skillName + " 上传成功");
@@ -444,15 +779,16 @@ public class SkillService {
         if (!nameVal.equals(skillName)) {
             errors.add("name（" + nameVal + "）与目录名（" + skillName + "）不一致");
         }
-        String version = String.valueOf(fm.getOrDefault("version", ""));
-        if (!SEMVER.matcher(version).matches()) {
+        String version = String.valueOf(fm.getOrDefault("version", "")).trim();
+        // version 为可选字段（官方 Agent Skills 规范未强制）：缺失/空不报错，有则校验语义化版本号
+        if (!version.isEmpty() && !SEMVER.matcher(version).matches()) {
             errors.add("version 字段必须符合语义化版本号格式（x.y.z）");
         }
         String desc = String.valueOf(fm.getOrDefault("description", "")).trim();
         if (desc.isEmpty()) {
             errors.add("description 字段不能为空");
-        } else if (desc.length() > 200) {
-            errors.add("description 字段不超过 200 字");
+        } else if (desc.length() > 500) {
+            errors.add("description 字段不超过 500 字");
         }
         if (PROJECT_SKILLS.contains(nameVal)) {
             errors.add("技能名「" + nameVal + "」与项目级技能冲突，请换一个名称");
@@ -545,6 +881,7 @@ public class SkillService {
         m.put("isActive", s.getIsActive());
         m.put("createdAt", s.getCreatedAt());
         m.put("updatedAt", s.getUpdatedAt());
+        m.put("obsMode", obs.isObjectKey(s.getSkillPath()));
         return m;
     }
 

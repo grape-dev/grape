@@ -14,8 +14,17 @@ if sys.version_info < (3, 10):
     sys.exit(1)
 
 import asyncio, json, os, random
+import base64 as _b64
+import zipfile as _zf
+import urllib.request as _urllib
 
 from src.config import log
+
+# v3.0：OBS 直连能力 + 自适应降级状态（运行时能力反馈 C）
+_OBS_SUPPORT = False      # 启动探测结果（supports_obs_url）
+_OBS_FALLBACK = False     # 直连不稳 → claim 声明 prefer_fallback
+_OBS_FAIL_STREAK = 0      # 连续 URL/代拉失败计数（≥3 降级）
+_OBS_OK_STREAK = 0        # 连续成功计数（≥3 恢复）
 
 
 def _env_float(name, default):
@@ -108,6 +117,43 @@ def _kill_stale_opencode(task: dict):
         log.warning(f"_kill_stale_opencode failed: {e}")
 
 
+def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
+    """v3.0 技能 zip 获取降级链：① URL 直连 OBS（重试）→ ② 服务端代拉（复用 zip_cache）。
+
+    返回 zip 字节；两条路都失败返回 None（调用方降级 skill_files 或回池）。
+    """
+    timeout = float(os.environ.get("RUNTIME_OBS_FETCH_TIMEOUT", "10"))
+    retries = int(os.environ.get("RUNTIME_OBS_FETCH_RETRIES", "3"))
+    # ① URL 直连 OBS（预签名 URL，重试）
+    for i in range(retries):
+        try:
+            with _urllib.urlopen(skill_obs_url, timeout=timeout) as resp:
+                data = resp.read()
+            if data:
+                return data
+            log.warning(f"[skill] OBS URL 直连返回空({i + 1}/{retries})")
+        except Exception as e:
+            log.warning(f"[skill] OBS URL 直连失败({i + 1}/{retries}): {type(e).__name__}")
+    # ② 服务端代拉（服务端现查 file_path → zip_cache → base64）
+    server = os.environ.get("RUNTIME_SERVER_URL", "http://localhost:3000")
+    token = os.environ.get("RUNTIME_TOKEN", "")
+    if task_id and token:
+        try:
+            req = _urllib.Request(
+                f"{server}/api/runtime/tasks/{task_id}/skill-zip",
+                headers={"Authorization": f"Bearer {token}"})
+            with _urllib.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read())
+            b64 = (payload or {}).get("zip_base64") or ""
+            if b64:
+                log.info(f"[skill] 服务端代拉成功 task={task_id}")
+                return _b64.b64decode(b64)
+            log.warning(f"[skill] 代拉返回空 task={task_id}")
+        except Exception as e:
+            log.warning(f"[skill] 服务端代拉失败: {type(e).__name__}")
+    return None
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。
 
@@ -130,15 +176,66 @@ async def _execute_task(client, task, engine_name: str = ""):
     prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
                                        .replace("{{SERVER_URL}}", task.get("server_url") or "")
     try:
-        skill_files = json.loads(task.get("skill_files") or "{}")
-        for _sn, files in skill_files.items():
-            for rel, content in (files or {}).items():
-                dest = _os.path.join(skill_dir, _sn, rel)
-                _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-                with open(dest, "w", encoding="utf-8") as f:
-                    f.write(content)
-        if skill_files:
+        # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
+        # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
+        # ② 失败 → 服务端代拉（POST /tasks/{id}/skill-zip，复用 zip_cache）
+        # ③ 无 URL（老任务/无 OBS 技能）→ skill_files 文本物化（既有）
+        skill_obs_url = task.get("skill_obs_url") or ""
+        skill_zip_b64 = None
+        if skill_obs_url:
+            raw = _fetch_skill_zip(skill_obs_url, task_id=task.get("id", ""))
+            if raw:
+                skill_zip_b64 = _b64.b64encode(raw).decode()
+                # v3.0 能力反馈：直连/代拉成功 → 计数恢复
+                global _OBS_FAIL_STREAK, _OBS_OK_STREAK, _OBS_FALLBACK
+                _OBS_FAIL_STREAK = 0
+                _OBS_OK_STREAK += 1
+                if _OBS_OK_STREAK >= 3 and _OBS_FALLBACK:
+                    _OBS_FALLBACK = False
+                    _OBS_OK_STREAK = 0
+                    log.info("[skill] OBS 直连恢复（连续 3 次成功）")
+            else:
+                log.warning(f"[skill] OBS 直连+代拉均失败, task={task.get('id')} url={skill_obs_url[:60]}...")
+                # v3.0 能力反馈：连续失败 → 声明 prefer_fallback（服务端直接代拉模式）
+                _OBS_FAIL_STREAK += 1
+                _OBS_OK_STREAK = 0
+                if _OBS_FAIL_STREAK >= 3 and not _OBS_FALLBACK:
+                    _OBS_FALLBACK = True
+                    _OBS_FAIL_STREAK = 0
+                    log.warning("[skill] OBS 直连不稳定，降级为服务端代拉（prefer_fallback）")
+        if skill_zip_b64:
+            # ===== zip 物化（直连/代拉获取的 zip → 解压 → 恢复权限）=====
+            # 见 obs-skill-storage-design.md §5.7（Python 3.12+ zipfile 不再自动恢复
+            # Unix 权限位，手动按 external_attr 恢复；剥离 setuid/setgid/sticky 防提权）
+            raw = _b64.b64decode(skill_zip_b64)
+            tmp_zip = _os.path.join(skill_dir, "_skill_delivery.zip")
+            _os.makedirs(skill_dir, exist_ok=True)
+            with open(tmp_zip, "wb") as f:
+                f.write(raw)
+            with _zf.ZipFile(tmp_zip, "r") as zf:
+                zf.extractall(skill_dir)  # zip 根 = {skill_name}/，落地 .skills/{skill_name}/
+                for info in zf.infolist():
+                    mode = info.external_attr >> 16
+                    if mode and not info.is_dir():
+                        p = _os.path.join(skill_dir, info.filename)
+                        if _os.path.isfile(p):
+                            _os.chmod(p, mode & 0o777)
+            try:
+                _os.remove(tmp_zip)
+            except Exception:
+                pass
             env["DEVOPS_SKILLS_DIR"] = skill_dir
+        else:
+            # ===== 旧格式：skill_files 文本物化（老任务/老 worker 兼容）=====
+            skill_files = json.loads(task.get("skill_files") or "{}")
+            for _sn, files in skill_files.items():
+                for rel, content in (files or {}).items():
+                    dest = _os.path.join(skill_dir, _sn, rel)
+                    _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+                    with open(dest, "w", encoding="utf-8") as f:
+                        f.write(content)
+            if skill_files:
+                env["DEVOPS_SKILLS_DIR"] = skill_dir
     except Exception as e:
         log.warning(f"skill materialize failed: {e}")
     # project-info 落地 + git worktree（coding/qa/sre，X 工作模型，见 multi-issue-isolation-design.md §3.4.1）
@@ -288,7 +385,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
         for rid in runtime_ids:
             try:
-                task = await client.claim(rid)
+                task = await client.claim(rid, supports_obs_url=_OBS_SUPPORT,
+                                          prefer_fallback=_OBS_FALLBACK)
             except Exception as e:
                 log.warning(f"claim rid={rid} failed: {e}")
                 heartbeat_fail_streak += 1
@@ -407,10 +505,19 @@ def main():
         if not installed:
             log.warning("No runtimes installed locally, registering empty")
         device = os.environ.get("RUNTIME_DEVICE_NAME", os.uname().nodename if hasattr(os, "uname") else "host")
-        ids = await client.register(installed, device_name=device)
+        ids, probe_url = await client.register(installed, device_name=device)
         if not ids:
             log.error("Register failed (check RUNTIME_TOKEN / server URL)")
             return
+        # v3.0 启动探测（B）：GET probe_url 验证完整链路（网络+签名+读取）
+        global _OBS_SUPPORT
+        if probe_url:
+            try:
+                with _urllib.urlopen(probe_url, timeout=5) as _r:
+                    _OBS_SUPPORT = bool(_r.read())
+            except Exception as e:
+                log.warning(f"[skill] 启动探测失败（走 skill_files 兜底）: {type(e).__name__}")
+        log.info(f"OBS 直连能力探测: supports_obs_url={_OBS_SUPPORT}")
         # rid → 引擎实例名（`{type}-{device}`，register 返回顺序与 installed 一致）
         from src.runtime.instances import instance_name
         engine_by_rid = {rid: instance_name(r.get("name", ""), device, 0)

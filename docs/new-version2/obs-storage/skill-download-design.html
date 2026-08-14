@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>技能详情页「下载技能」按钮 — 效果预览</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --cd: #ffffff; --t1: #1f2430; --t2: #6b7280;
+    --t3: #9ca3af; --t4: #d1d5db; --bd: #e5e7eb; --rd: 8px;
+    --accent: #4f6ef7; --accent-h: #3d5ce5;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: var(--t1); padding: 32px; }
+  .page-title { font-size: 14px; color: var(--t2); margin-bottom: 20px; }
+  .page-title b { color: var(--t1); }
+  .mock { max-width: 900px; margin: 0 auto; }
+  /* ===== 模拟详情页卡片 ===== */
+  .cd { background: var(--cd); border: 1px solid var(--bd); border-radius: var(--rd); padding: 16px 20px; }
+  .back-btn { display: inline-block; font-size: 12px; color: var(--accent); border: 1px solid var(--bd); border-radius: 6px; padding: 5px 12px; background: #fff; cursor: pointer; margin-bottom: 12px; }
+  /* 头部行：名称靠左，下载按钮靠右 */
+  .skill-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .skill-left { display: flex; align-items: center; gap: 8px; }
+  .skill-ico { width: 30px; height: 30px; border-radius: 7px; background: #eef2ff; color: #4f6ef7; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+  .skill-name { font-size: 15px; font-weight: 600; line-height: 1.3; }
+  .tg { display: inline-block; font-size: 9px; padding: 1px 6px; border-radius: 4px; margin-top: 3px; }
+  .tg-d { background: #eef2ff; color: #4f6ef7; }  /* 个人技能 */
+  /* 下载按钮（新增，靠右） */
+  .dl-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 500; color: #fff;
+    background: var(--accent); border: none; border-radius: 6px;
+    padding: 7px 14px; cursor: pointer; transition: background .15s;
+    flex-shrink: 0;
+  }
+  .dl-btn:hover { background: var(--accent-h); }
+  .dl-btn:active { transform: translateY(1px); }
+  .desc { font-size: 12px; color: var(--t2); margin-bottom: 14px; line-height: 1.6; }
+  .sec-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  pre { background: var(--bg); padding: 14px; border-radius: var(--rd); font-size: 11px; font-family: monospace; line-height: 1.6; white-space: pre-wrap; color: var(--t2); }
+  /* 提示条（交互说明） */
+  .note { margin-top: 24px; background: #fefce8; border: 1px solid #fde68a; border-radius: 8px; padding: 14px 16px; font-size: 12px; color: #92400e; line-height: 1.8; }
+  .note b { color: #78350f; }
+  code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+  .step { margin-top: 24px; }
+  .step h4 { font-size: 13px; margin-bottom: 10px; }
+  .step ol { padding-left: 18px; font-size: 12px; color: var(--t2); line-height: 2; }
+</style>
+</head>
+<body>
+<div class="mock">
+  <div class="page-title">效果预览 — 技能详情页头部（<b>新增「下载技能」按钮</b>，靠右对齐）</div>
+
+  <div class="cd">
+    <button class="back-btn">← 返回 Skills Library</button>
+
+    <!-- 头部行：改造后 -->
+    <div class="skill-header">
+      <div class="skill-left">
+        <div class="skill-ico">◈</div>
+        <div>
+          <div class="skill-name">simple-text-analyzer</div>
+          <span class="tg tg-d">个人技能</span>
+        </div>
+      </div>
+      <!-- ↓ 新增：下载技能按钮（点击 → 动态获取临时 URL → 下载 zip） -->
+      <button class="dl-btn" onclick="alert('点击后：调 GET /api/skills/simple-text-analyzer/download → 拿 {url} → 浏览器直连 OBS 下载 zip')">
+        ⬇ 下载技能
+      </button>
+    </div>
+
+    <div class="desc">文本分析工具：统计字符数、单词数、行数、高频词。纯 Python 标准库实现，无外部依赖，本地执行。</div>
+    <div class="sec-title">SKILL.md</div>
+    <pre>---
+name: simple-text-analyzer
+description: 文本分析工具...
+---
+
+# Simple Text Analyzer
+
+## 场景
+用户需要对文本进行统计分析时使用本技能。</pre>
+  </div>
+
+  <div class="note">
+    <b>交互逻辑（与模板下载同一模式）：</b><br>
+    ① 点击「下载技能」→ 前端调 <code>GET /api/skills/{name}/download</code>（点击时动态签发）<br>
+    ② 接口返回 <code>{"url": "https://obs.../xxx.zip?签名参数", "expires_in": 300}</code>（OBS 临时签名 URL，300s 有效）<br>
+    ③ 前端 <code>window.open(url)</code> → 浏览器直连 OBS 下载 zip，不经过服务端<br>
+    ④ OBS 未启用（local 模式）→ 接口返回文件流，前端回退原路径下载（与模板下载适配一致）
+  </div>
+
+  <div class="step">
+    <h4>实现改动点（3 处）</h4>
+    <ol>
+      <li><b>后端接口</b>：skills.py 新增 <code>GET /api/skills/{name}/download</code>
+          —— OBS 分支：查 DB 记录 → 拿对象键 → 签发临时 URL → {url, expires_in}；
+          local 分支：本地技能目录打包 FileResponse 流式返回</li>
+      <li><b>前端按钮</b>：renderSkillDetail 头部行（display:flex 加 justify-content:space-between）
+          → 右侧加「⬇ 下载技能」按钮（.bt 样式，onclick 调 downloadSkillZip）</li>
+      <li><b>前端下载函数</b>：skills.js 新增 <code>downloadSkillZip(name, scope, repo)</code>
+          —— fetch 接口拿 {url} → window.open(url)；local 模式回退原路径</li>
+    </ol>
+  </div>
+</div>
+</body>
+</html>

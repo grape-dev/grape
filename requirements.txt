@@ -11,3 +11,4 @@ python-multipart>=0.0.9
 aiohttp>=3.9
 websockets>=12.0
 pymysql>=1.1
+esdk-obs-python>=3.26

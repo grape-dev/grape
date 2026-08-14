@@ -92,8 +92,11 @@ CREATE TABLE IF NOT EXISTS skill (
     description TEXT DEFAULT '',
     agent_type TEXT DEFAULT '',
     skill_path TEXT DEFAULT '',
+    file_path VARCHAR(512) DEFAULT '',
     scope TEXT DEFAULT 'official',
     owner_id TEXT DEFAULT '',
+    created_by VARCHAR(64) DEFAULT '',
+    updated_by VARCHAR(64) DEFAULT '',
     is_active INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
@@ -271,7 +274,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     user_id           INTEGER DEFAULT 0,
     repo_gitcode_token TEXT DEFAULT '',
     env_extra         TEXT DEFAULT '{}',    -- JSON（含服务端已注入的账号/用户凭据，见 skill-delivery-remote.md）
-    skill_files       TEXT DEFAULT '{}',    -- JSON: {skill_name: {rel_path: content}}，远端交付技能包
+    skill_files       MEDIUMTEXT DEFAULT '{}',    -- JSON: {skill_name: {rel_path: content}}，远端交付技能包（旧格式，过渡期双写）
     server_url        TEXT DEFAULT '',      -- A2A 外呼地址，worker 替换 {{SERVER_URL}}
     issue_session_id  TEXT DEFAULT '',      -- 外键 → issue_agent_session.id（Issue 级执行会话，串行粒度，见 multi-issue-isolation-design.md §3.3）
     project_info_files TEXT DEFAULT '{}',   -- JSON: {rel_path: content}，repo 全局 project-info 随任务交付（§2.4）
@@ -798,6 +801,16 @@ def _migrate_tables():
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
         "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
+        # ===== OBS 技能库（obs-skill-storage-design.md §4）=====
+        # v2.4 去版本化：DROP current_version（本期新增列，无历史依赖；列不存在时 SQLite 忽略报错）
+        "ALTER TABLE skill DROP COLUMN current_version",
+        # v2.5：file_path（真实存储路径 OBS 对象键，VARCHAR(512)）+ created_by/updated_by（审计/删除权限，VARCHAR(64)）
+        "ALTER TABLE skill ADD COLUMN file_path VARCHAR(512) DEFAULT ''",
+        "ALTER TABLE skill ADD COLUMN created_by VARCHAR(64) DEFAULT ''",
+        "ALTER TABLE skill ADD COLUMN updated_by VARCHAR(64) DEFAULT ''",
+        # skill_zip 已移除（本次需求新增、未上线，无包袱直砍——见 obs-skill-storage-design.md §5.7 v3 决策）
+        # MySQL 下 skill_files 升级（SQLite 无长度限制，MODIFY 语句报错被忽略无害）
+        "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT DEFAULT '{}'",
     ]
     for sql in migrations:
         try:

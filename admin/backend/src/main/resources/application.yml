@@ -32,6 +32,15 @@ app:
   jwt-expire-minutes: 120
   # 技能库目录：可用 SKILLS_DIR 环境变量显式指定（不依赖启动目录）；默认相对 admin/backend 启动时的 ../../skills
   skills-dir: ${SKILLS_DIR:../../skills}
+  # 对象存储 OBS（obs-skill-storage-design.md §3 N15）：AK/SK 仅环境变量注入
+  obs:
+    enabled: ${OBS_ENABLED:false}
+    endpoint: ${OBS_ENDPOINT:https://obs.cn-north-4.myhuaweicloud.com}
+    bucket: ${OBS_BUCKET:}
+    access-key: ${OBS_ACCESS_KEY:}
+    secret-key: ${OBS_SECRET_KEY:}
+    prefix: ${OBS_PREFIX:grape/prod}
+    url-expires: ${OBS_URL_EXPIRES:300}
   # AI 助手（P3 使用）
   hermes-bin: ${HERMES_BIN:}
   hermes-query-script: ${HERMES_QUERY_SCRIPT:ai_hermes_query.py}

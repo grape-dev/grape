@@ -35,6 +35,12 @@ public class SkillRo {
 
     @Column(name = "skill_path")
     private String skillPath;
+    @Column(name = "file_path")
+    private String filePath;
+    @Column(name = "created_by")
+    private String createdBy;
+    @Column(name = "updated_by")
+    private String updatedBy;
 
     private String scope;
 
