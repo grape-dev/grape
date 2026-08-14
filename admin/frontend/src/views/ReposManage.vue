@@ -1,0 +1,215 @@
+<template>
+  <div class="page-container" style="padding:0">
+    <div class="page-header">
+      <h1>代码仓管理</h1>
+      <span class="badge">{{ totalElements }} 个</span>
+    </div>
+    <div style="padding:20px 28px">
+      <!-- 场景分类徽章行（点击联动筛选，对齐设备页 dm-stats 风格） -->
+      <div class="dm-stats">
+        <button class="dm-stat" :class="{ on: !scene }" @click="setScene('')">全部 <strong>{{ totalElements }}</strong></button>
+        <button v-for="(cnt, s) in sceneStats" :key="s" class="dm-stat" :class="{ on: scene === s }" @click="setScene(s)">
+          <span class="dm-dot" style="background:var(--text-tertiary)"></span>{{ s || 'default' }} <strong>{{ cnt }}</strong>
+        </button>
+      </div>
+
+      <div class="toolbar">
+        <input v-model="keyword" class="search-input" placeholder="搜索仓库名 / owner / repo_key" @keyup.enter="load" />
+        <button class="btn" @click="load">查询</button>
+        <button class="btn" @click="reset">重置</button>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn" :style="view === 'list' ? activeTab : {}" @click="view = 'list'">列表</button>
+          <button class="btn" :style="view === 'card' ? activeTab : {}" @click="view = 'card'">卡片</button>
+        </div>
+      </div>
+
+      <!-- 列表模式 -->
+      <div class="card" v-if="view === 'list'">
+        <table class="vod-table">
+          <thead>
+            <tr><th>仓库</th><th>Owner</th><th>Webhook</th><th>场景</th><th>Bot</th><th>注册时间</th><th>活跃度</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in repos" :key="r.repoKey">
+              <td>
+                <strong>{{ r.repoName || r.fullName }}</strong>
+                <div class="t3" style="font-size:11px">{{ r.repoKey }}</div>
+              </td>
+              <td>{{ r.repoOwner || '—' }}</td>
+              <td class="t3">{{ r.webhookId ? '#' + r.webhookId : '—' }}</td>
+              <td><span class="status-tag info" :title="sceneHint(r.devScene)">{{ r.devScene || 'default' }}</span></td>
+              <td>{{ r.botUsername || '—' }}</td>
+              <td class="t3">{{ r.createdAt || '—' }}</td>
+              <td>
+                <span :class="['status-tag', activityClass(r)]" :title="activityTitle(r)">
+                  {{ r.eventCount || 0 }} 个事件<template v-if="r.eventCount"> · 失败率 {{ failRate(r) }}%</template>
+                </span>
+              </td>
+              <td><a class="repo-link" :href="repoUrl(r)" target="_blank" rel="noopener">打开仓库 ↗</a></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 卡片模式 -->
+      <div v-else class="device-grid">
+        <div v-for="r in repos" :key="r.repoKey" class="device-card repo-card">
+          <div class="dc-head">
+            <span class="repo-icon">📦</span>
+            <span class="dc-name repo-name">{{ r.repoName || r.fullName }}</span>
+            <span v-if="r.isAdmin === 1" class="status-tag success">管理员</span>
+          </div>
+          <div class="repo-key">{{ r.repoKey }}</div>
+          <div class="dc-meta">
+            <div><span class="t3" style="display:inline-block;min-width:60px">Owner</span> {{ r.repoOwner || '—' }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:60px">Webhook</span> {{ r.webhookId ? '#' + r.webhookId : '—' }}</div>
+            <div>
+              <span class="t3" style="display:inline-block;min-width:60px">场景</span>
+              <span class="status-tag info" :title="sceneHint(r.devScene)">{{ r.devScene || 'default' }}</span>
+            </div>
+            <div><span class="t3" style="display:inline-block;min-width:60px">Bot</span> {{ r.botUsername || '—' }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:60px">注册时间</span> {{ r.createdAt || '—' }}</div>
+            <div>
+              <span class="t3" style="display:inline-block;min-width:60px">活跃度</span>
+              <span :class="['status-tag', activityClass(r)]" :title="activityTitle(r)">
+                {{ r.eventCount || 0 }} 个事件<template v-if="r.eventCount"> · 失败率 {{ failRate(r) }}%</template>
+              </span>
+            </div>
+          </div>
+          <div class="dc-actions">
+            <a class="repo-link" :href="repoUrl(r)" target="_blank" rel="noopener">打开仓库 ↗</a>
+          </div>
+        </div>
+      </div>
+
+      <p v-if="!repos.length" class="t2" style="padding:16px;text-align:center">无匹配代码仓</p>
+
+      <div v-if="totalElements > 0" class="pagination-bar">
+        <span class="page-info">第 <strong>{{ page + 1 }}</strong> / {{ totalPages }} 页（共 {{ totalElements }} 个）</span>
+        <select v-model="size" class="page-size-select" @change="page = 0; load()">
+          <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
+        </select>
+        <button class="page-btn" :disabled="page <= 0" @click="page--; load()">上一页</button>
+        <button class="page-btn" :disabled="page >= totalPages - 1" @click="page++; load()">下一页</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { onMounted, ref } from 'vue'
+import http from '../api'
+
+const repos = ref([])
+const sceneStats = ref({})
+const totalElements = ref(0)
+const totalPages = ref(0)
+const page = ref(0)
+const size = ref(10)
+const sizeOptions = [10, 20, 50]
+const keyword = ref('')
+const scene = ref('')
+const view = ref('card')
+const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
+
+async function load() {
+  const { data } = await http.get('/repos', { params: { keyword: keyword.value, scene: scene.value, page: page.value, size: size.value } })
+  repos.value = data.content
+  sceneStats.value = data.sceneStats || {}
+  totalElements.value = data.totalElements
+  totalPages.value = data.totalPages
+}
+function reset() { keyword.value = ''; scene.value = ''; page.value = 0; load() }
+function setScene(s) {
+  scene.value = s
+  page.value = 0
+  load()
+}
+
+const SCENE_HINTS = {
+  default: '默认开发场景',
+  main: '主场景',
+  quick: '快速迭代场景',
+  stable: '稳定发布场景'
+}
+
+function sceneHint(scene) { return SCENE_HINTS[scene] || '开发场景（agent-skill-mapping 配置）' }
+function repoUrl(r) {
+  const full = r.fullName || (r.repoKey || '').replace(/^gitcode:/, '')
+  return 'https://gitcode.com/' + full
+}
+function failRate(r) {
+  if (!r.eventCount) return 0
+  return Math.round((r.failedCount || 0) / r.eventCount * 100)
+}
+function activityClass(r) {
+  if (!r.eventCount || r.eventCount === 0) return 'danger'
+  if (failRate(r) > 10) return 'warning'
+  if (!r.lastEventAt) return 'warning'
+  const days = (Date.now() - new Date(r.lastEventAt.replace(' ', 'T')).getTime()) / 86400000
+  if (days > 7) return 'warning'
+  return 'success'
+}
+function activityTitle(r) {
+  const parts = []
+  if (r.lastEventAt) parts.push('最近事件: ' + r.lastEventAt)
+  else parts.push('托管后暂无事件（webhook 可能异常）')
+  if (r.eventCount && r.failedCount) parts.push('失败 ' + r.failedCount + '/' + r.eventCount)
+  return parts.join('\n')
+}
+
+onMounted(load)
+</script>
+
+<style scoped>
+.search-input {
+  padding: 7px 12px;
+  border: 1px solid var(--border, #e2e6ea);
+  border-radius: 6px;
+  font-size: 13px;
+  min-width: 240px;
+  background: #fff;
+}
+.repo-card { cursor: default; }
+.repo-icon { font-size: 20px; }
+.repo-name {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-key {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--text-tertiary, #8a919c);
+  background: #f4f6f8;
+  padding: 2px 8px;
+  border-radius: 4px;
+  display: inline-block;
+  margin-bottom: 8px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-link {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--primary, #4f6ef2);
+  text-decoration: none;
+}
+.repo-link:hover { text-decoration: underline; }
+/* 场景分类徽章行（对齐设备页 dm-stats 风格） */
+.dm-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.dm-stat {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 3px 10px; border-radius: 12px;
+  background: #f5f7fa; color: var(--text-secondary); border: 1px solid transparent;
+  cursor: pointer; transition: all 0.15s;
+}
+.dm-stat strong { font-weight: 600; color: var(--text-primary); }
+.dm-stat:hover { border-color: var(--border-color); }
+.dm-stat.on { background: var(--primary-bg); color: var(--primary); border-color: var(--primary); }
+.dm-stat.on strong { color: var(--primary); }
+.dm-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+</style>

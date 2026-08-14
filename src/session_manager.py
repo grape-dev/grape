@@ -603,7 +603,7 @@ def set_chat_config(user_id: int, **kwargs):
     if data.get("backend"):
         from src.user.db import ensure_default_backend, get_runtime_id_by_name
         from src.runtime.instances import resolve_instance_id, scope_of_runtime
-        _rid = resolve_instance_id(data["backend"])
+        _rid = resolve_instance_id(data["backend"], scope="user")
         if _rid is not None and scope_of_runtime(_rid) == "user":
             runtime_id = _rid
         else:

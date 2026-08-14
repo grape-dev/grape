@@ -15,9 +15,15 @@
           "icon": "🌶️",
           "source": "local",
           "default_repo_name": "hello-flask",
-          "tags": ["python", "web", "starter"],
+          "tags": [
+            "python",
+            "web",
+            "starter"
+          ],
           "scene_id": "default",
-          "stats": {"show": false}
+          "stats": {
+            "show": false
+          }
         },
         {
           "id": "hello-fastapi",
@@ -26,9 +32,15 @@
           "icon": "⚡",
           "source": "local",
           "default_repo_name": "hello-fastapi",
-          "tags": ["python", "api", "fastapi"],
+          "tags": [
+            "python",
+            "api",
+            "fastapi"
+          ],
           "scene_id": "default",
-          "stats": {"show": false}
+          "stats": {
+            "show": false
+          }
         },
         {
           "id": "hello-todo",
@@ -37,9 +49,15 @@
           "icon": "📝",
           "source": "local",
           "default_repo_name": "hello-todo",
-          "tags": ["python", "cli", "todo"],
+          "tags": [
+            "python",
+            "cli",
+            "todo"
+          ],
           "scene_id": "default",
-          "stats": {"show": false}
+          "stats": {
+            "show": false
+          }
         },
         {
           "id": "hello-calculator",
@@ -48,9 +66,15 @@
           "icon": "🧮",
           "source": "local",
           "default_repo_name": "hello-calculator",
-          "tags": ["python", "cli", "test"],
+          "tags": [
+            "python",
+            "cli",
+            "test"
+          ],
           "scene_id": "default",
-          "stats": {"show": false}
+          "stats": {
+            "show": false
+          }
         },
         {
           "id": "hello-html",
@@ -59,9 +83,16 @@
           "icon": "🖥️",
           "source": "local",
           "default_repo_name": "hello-html",
-          "tags": ["html", "css", "js", "frontend"],
+          "tags": [
+            "html",
+            "css",
+            "js",
+            "frontend"
+          ],
           "scene_id": "default",
-          "stats": {"show": false}
+          "stats": {
+            "show": false
+          }
         },
         {
           "id": "hello-blog",
@@ -70,9 +101,15 @@
           "icon": "📚",
           "source": "local",
           "default_repo_name": "hello-blog",
-          "tags": ["python", "flask", "blog"],
+          "tags": [
+            "python",
+            "flask",
+            "blog"
+          ],
           "scene_id": "default",
-          "stats": {"show": false}
+          "stats": {
+            "show": false
+          }
         },
         {
           "id": "games",
@@ -82,9 +119,16 @@
           "source": "git",
           "source_repo": "stormsha1/games",
           "default_repo_name": "python-games",
-          "tags": ["python", "game", "popular"],
+          "tags": [
+            "python",
+            "game",
+            "popular"
+          ],
           "scene_id": "default",
-          "stats": {"show": true, "stars": 123}
+          "stats": {
+            "show": true,
+            "stars": 123
+          }
         },
         {
           "id": "spider-xhs",
@@ -94,9 +138,16 @@
           "source": "git",
           "source_repo": "cv-cat/Spider_XHS",
           "default_repo_name": "spider-xhs",
-          "tags": ["python", "spider", "crawler"],
+          "tags": [
+            "python",
+            "spider",
+            "crawler"
+          ],
           "scene_id": "default",
-          "stats": {"show": true, "stars": 19}
+          "stats": {
+            "show": true,
+            "stars": 19
+          }
         },
         {
           "id": "markitdown",
@@ -106,9 +157,16 @@
           "source": "git",
           "source_repo": "daily_hot/markitdown",
           "default_repo_name": "markitdown",
-          "tags": ["python", "tool", "markdown"],
+          "tags": [
+            "python",
+            "tool",
+            "markdown"
+          ],
           "scene_id": "default",
-          "stats": {"show": true, "stars": 7}
+          "stats": {
+            "show": true,
+            "stars": 7
+          }
         },
         {
           "id": "snake-game",
@@ -118,9 +176,16 @@
           "source": "git",
           "source_repo": "sanchong/SnakeGame",
           "default_repo_name": "snake-game",
-          "tags": ["python", "game", "snake"],
+          "tags": [
+            "python",
+            "game",
+            "snake"
+          ],
           "scene_id": "default",
-          "stats": {"show": true, "stars": 6}
+          "stats": {
+            "show": true,
+            "stars": 6
+          }
         },
         {
           "id": "zwdzjs-demo",
@@ -130,9 +195,16 @@
           "source": "git",
           "source_repo": "oaoss-cup/ZWDZJS_demo",
           "default_repo_name": "pvs-zombies-demo",
-          "tags": ["python", "pygame", "game"],
+          "tags": [
+            "python",
+            "pygame",
+            "game"
+          ],
           "scene_id": "default",
-          "stats": {"show": true, "stars": 5}
+          "stats": {
+            "show": true,
+            "stars": 5
+          }
         },
         {
           "id": "flask-blog",
@@ -142,9 +214,16 @@
           "source": "git",
           "source_repo": "program-code/Python_Flask_Blog",
           "default_repo_name": "flask-blog",
-          "tags": ["python", "flask", "blog"],
+          "tags": [
+            "python",
+            "flask",
+            "blog"
+          ],
           "scene_id": "default",
-          "stats": {"show": true, "stars": 2}
+          "stats": {
+            "show": true,
+            "stars": 2
+          }
         },
         {
           "id": "alien-invasion",
@@ -154,9 +233,16 @@
           "source": "git",
           "source_repo": "tjip/alien_invasion",
           "default_repo_name": "alien-invasion",
-          "tags": ["python", "pygame", "game"],
+          "tags": [
+            "python",
+            "pygame",
+            "game"
+          ],
           "scene_id": "default",
-          "stats": {"show": true, "stars": 1}
+          "stats": {
+            "show": true,
+            "stars": 1
+          }
         },
         {
           "id": "alien-game",
@@ -166,18 +252,25 @@
           "source": "git",
           "source_repo": "LannyQLT/Alien",
           "default_repo_name": "alien-game",
-          "tags": ["python", "pygame", "game"],
+          "tags": [
+            "python",
+            "pygame",
+            "game"
+          ],
           "scene_id": "default",
-          "stats": {"show": true, "stars": 1}
+          "stats": {
+            "show": true,
+            "stars": 1
+          }
         }
       ],
       "page_size": 9
     },
     {
       "id": "agent-best-practices",
-      "name": "AI Office 项目模板",
-      "icon": "🤖",
-      "description": "AI 办公场景应用模板",
+      "name": "Agent 最佳实践",
+      "icon": "🚀",
+      "description": "agent-best-practices 组织沉淀的 AI Agent 落地实战项目模板",
       "scene_id": "default",
       "templates": [
         {
@@ -188,7 +281,11 @@
           "source": "git",
           "source_repo": "agent-best-practices/redbook-operate",
           "default_repo_name": "redbook-operate",
-          "tags": ["agent", "automation", "content"],
+          "tags": [
+            "agent",
+            "automation",
+            "content"
+          ],
           "scene_id": "default"
         },
         {
@@ -199,7 +296,11 @@
           "source": "git",
           "source_repo": "agent-best-practices/ai-interview-swarm",
           "default_repo_name": "ai-interview-swarm",
-          "tags": ["agent", "multi-agent", "interview"],
+          "tags": [
+            "agent",
+            "multi-agent",
+            "interview"
+          ],
           "scene_id": "default"
         },
         {
@@ -210,7 +311,11 @@
           "source": "git",
           "source_repo": "agent-best-practices/get-together",
           "default_repo_name": "get-together",
-          "tags": ["agent", "social", "travel"],
+          "tags": [
+            "agent",
+            "social",
+            "travel"
+          ],
           "scene_id": "default"
         },
         {
@@ -221,7 +326,11 @@
           "source": "git",
           "source_repo": "agent-best-practices/Prompt_to_Premiere",
           "default_repo_name": "Prompt-to-Premiere",
-          "tags": ["agent", "video", "content"],
+          "tags": [
+            "agent",
+            "video",
+            "content"
+          ],
           "scene_id": "default"
         },
         {
@@ -232,7 +341,11 @@
           "source": "git",
           "source_repo": "agent-best-practices/ai-campus-event-planner",
           "default_repo_name": "ai-campus-event-planner",
-          "tags": ["agent", "multi-agent", "campus"],
+          "tags": [
+            "agent",
+            "multi-agent",
+            "campus"
+          ],
           "scene_id": "default"
         },
         {
@@ -243,7 +356,11 @@
           "source": "git",
           "source_repo": "agent-best-practices/powered-by-jiuwen",
           "default_repo_name": "powered-by-jiuwen",
-          "tags": ["agent", "jiuwen", "incubator"],
+          "tags": [
+            "agent",
+            "jiuwen",
+            "incubator"
+          ],
           "scene_id": "default"
         },
         {
@@ -254,7 +371,11 @@
           "source": "git",
           "source_repo": "agent-best-practices/xhs-cross-platform-rewrite",
           "default_repo_name": "xhs-cross-platform-rewrite",
-          "tags": ["skill", "content", "xhs"],
+          "tags": [
+            "skill",
+            "content",
+            "xhs"
+          ],
           "scene_id": "default"
         }
       ]
@@ -273,8 +394,34 @@
           "icon": "🧩",
           "source": "local",
           "default_repo_name": "hello-skill",
-          "tags": ["skill", "starter"],
+          "tags": [
+            "skill",
+            "starter"
+          ],
           "scene_id": "skill-dev"
+        }
+      ]
+    },
+    {
+      "id": "ai-office",
+      "name": "AI office 项目模板",
+      "icon": "🤖",
+      "description": "AI 办公场景应用模板",
+      "scene_id": "default",
+      "templates": [
+        {
+          "id": "ai-assistant",
+          "name": "AI Assistant",
+          "description": "基于大模型的办公助手项目骨架",
+          "icon": "🤖",
+          "source": "git",
+          "source_repo": "devops-bot/ai-office-assistant",
+          "default_repo_name": "ai-assistant",
+          "tags": [
+            "ai",
+            "office"
+          ],
+          "scene_id": "default"
         }
       ]
     },
@@ -282,9 +429,24 @@
       "id": "cloud-native",
       "name": "云原生项目模板",
       "icon": "☁️",
-      "description": "容器化 / 微服务 / 云原生部署项目起点",
+      "description": "容器化 / 微服务项目起点",
       "scene_id": "cloud-native",
       "templates": [
+        {
+          "id": "micro-svc",
+          "name": "Micro Service",
+          "description": "Go + Docker + Kubernetes 微服务骨架",
+          "icon": "☁️",
+          "source": "git",
+          "source_repo": "devops-bot/cloud-native-microsvc",
+          "default_repo_name": "micro-svc",
+          "tags": [
+            "golang",
+            "k8s",
+            "docker"
+          ],
+          "scene_id": "cloud-native"
+        },
         {
           "id": "730harmony-ecommerce",
           "name": "Harmony 电商应用",
@@ -293,7 +455,12 @@
           "source": "git",
           "source_repo": "Lingxi-HandsOn/730harmony-ecommerce",
           "default_repo_name": "730harmony-ecommerce",
-          "tags": ["harmonyos", "arkts", "ecommerce", "distributed"],
+          "tags": [
+            "harmonyos",
+            "arkts",
+            "ecommerce",
+            "distributed"
+          ],
           "scene_id": "cloud-native",
           "video_url": "https://weixin.qq.com/sph/AGelTzuCcf"
         },
@@ -305,7 +472,12 @@
           "source": "git",
           "source_repo": "Lingxi-HandsOn/bp-gateway",
           "default_repo_name": "bp-gateway",
-          "tags": ["golang", "gateway", "k8s", "docker"],
+          "tags": [
+            "golang",
+            "gateway",
+            "k8s",
+            "docker"
+          ],
           "scene_id": "cloud-native",
           "video_url": ""
         },
@@ -317,7 +489,12 @@
           "source": "git",
           "source_repo": "Lingxi-HandsOn/codearts-mcp",
           "default_repo_name": "codearts-mcp",
-          "tags": ["node", "mcp", "docker", "compose"],
+          "tags": [
+            "node",
+            "mcp",
+            "docker",
+            "compose"
+          ],
           "scene_id": "cloud-native",
           "video_url": ""
         },
@@ -329,7 +506,11 @@
           "source": "git",
           "source_repo": "Lingxi-HandsOn/gallery",
           "default_repo_name": "gallery",
-          "tags": ["web", "fullstack", "docker"],
+          "tags": [
+            "web",
+            "fullstack",
+            "docker"
+          ],
           "scene_id": "cloud-native",
           "video_url": ""
         },
@@ -341,7 +522,11 @@
           "source": "git",
           "source_repo": "Lingxi-HandsOn/PracticeHub",
           "default_repo_name": "PracticeHub",
-          "tags": ["vue", "ai", "platform"],
+          "tags": [
+            "vue",
+            "ai",
+            "platform"
+          ],
           "scene_id": "cloud-native",
           "video_url": ""
         }
@@ -362,7 +547,10 @@
           "source": "git",
           "source_repo": "devops-bot/terraform-infra",
           "default_repo_name": "tf-infra",
-          "tags": ["terraform", "iac"],
+          "tags": [
+            "terraform",
+            "iac"
+          ],
           "scene_id": "iac"
         }
       ]

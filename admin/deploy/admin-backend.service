@@ -1,0 +1,17 @@
+[Unit]
+Description=Grape Admin Backend (运营管理台)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/grape-admin/backend
+EnvironmentFile=/etc/grape/admin.env
+ExecStart=/usr/bin/java -jar /opt/grape-admin/backend/admin-backend-0.1.0.jar --server.port=8081
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/grape-admin/logs/backend.log
+StandardError=append:/opt/grape-admin/logs/backend.log
+
+[Install]
+WantedBy=multi-user.target

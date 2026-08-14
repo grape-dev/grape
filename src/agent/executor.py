@@ -169,7 +169,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         log.info(f"{label}{backend.name} args: {' '.join(args)[:2000]}...")
         log.info(f"{label}{backend.name} cwd: {cwd}")
 
-        stdin_pipe = subprocess.PIPE if backend.prompt_via_stdin else None
+        stdin_pipe = subprocess.PIPE if backend.prompt_via_stdin else subprocess.DEVNULL
         _popen_kwargs = {}
         if hasattr(os, "getpgid"):  # POSIX：独立进程组，便于整组优雅终止
             _popen_kwargs["start_new_session"] = True

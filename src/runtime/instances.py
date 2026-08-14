@@ -22,21 +22,31 @@ def instance_name(engine_type: str, device_name: str, credential_id) -> str:
     return f"{et}-{suffix}"
 
 
-def resolve_instance_id(engine_name: str) -> int | None:
+def resolve_instance_id(engine_name: str, scope: str | None = None) -> int | None:
     """按唯一引擎名解析 agent_runtimes.id（逐个匹配派生名）。
 
     调用方传入的 engine_name 是"当前派生名"；这里对每行重算并精确匹配。
+    scope 非空时仅在该作用域内匹配（如 Chat 配置只匹配 user 个人引擎，
+    避免 device_name 截断同名时误中 global 实例）。
     """
     if not engine_name:
         return None
     target = engine_name.strip().lower()
     with _lock():
         c = _db().cursor()
-        c.execute("""
-            SELECT ar.id, ar.name, ar.credential_id, rc.device_name
-            FROM agent_runtimes ar
-            LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-        """)
+        if scope:
+            c.execute("""
+                SELECT ar.id, ar.name, ar.credential_id, rc.device_name
+                FROM agent_runtimes ar
+                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
+                WHERE ar.scope = ?
+            """, (scope,))
+        else:
+            c.execute("""
+                SELECT ar.id, ar.name, ar.credential_id, rc.device_name
+                FROM agent_runtimes ar
+                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
+            """)
         for rid, et, cid, dev in c.fetchall():
             if instance_name(et, dev or "", cid) == target:
                 return rid

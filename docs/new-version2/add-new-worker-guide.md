@@ -140,6 +140,8 @@ Environment=RUNTIME_DEVICE_NAME=worker-<短名>
 Environment=RUNTIME_MAX_CONCURRENT_TASKS=20
 Environment=RUNTIME_POLL_INTERVAL=3
 Environment=RUNTIME_HEARTBEAT_INTERVAL=15
+# ⚠️ 必填：opencode 的 provider apiKey 引用此环境变量（见 §4.5），缺失 → 所有任务 3 秒内 401 "Authorization Required"
+Environment=HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY=<从服务器 /etc/grape/grape.env 取同值>
 
 [Install]
 WantedBy=multi-user.target
@@ -203,6 +205,7 @@ RUNTIME_DEVICE_NAME=worker-<短名> \
 | `RUNTIME_MAX_CONCURRENT_TASKS` | 20 | 本机并发执行 Agent 数上限 |
 | `RUNTIME_POLL_INTERVAL` | 3 | claim 轮询间隔（秒） |
 | `RUNTIME_HEARTBEAT_INTERVAL` | 15 | 心跳间隔（秒） |
+| `HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY` | 无（**必填**） | opencode provider `hermes-deepseek` 的 `apiKey: "{env:HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY}"` 引用（`~/.config/opencode/opencode.json`）。**缺失或为空时所有任务 3 秒内失败，worker 回报 `Authorization Required`（401）**——执行链路照常 claim，但 opencode 调 DeepSeek API 无 key。取同源：服务器 `/etc/grape/grape.env`（单点维护，勿另造 key） |
 
 > 💡 **`RUNTIME_DEVICE_NAME` 与凭据名（`rta_` 名称）是两个独立字段，不必一致，但建议相关以便辨识**：
 > - **凭据名**（WebUI 生成时填的 `worker-<短名>`）：`runtime_credentials.name`，**全局唯一**，用于 Workers 页识别该凭据/worker；

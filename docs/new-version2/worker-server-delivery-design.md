@@ -56,9 +56,28 @@ curl -sSL <server>/api/runtime/install | bash -s -- --token <rta_...>
 
 ```
 GET /api/runtime/install/package
-鉴权：Authorization: Bearer rta_<token>（复用 _auth_credential，与 register/claim 一致）
+鉴权：Authorization: Bearer <rta_凭据>（与 register/claim 一致）
 响应：application/gzip 的 tar.gz 包
 ```
+
+**公开端点（凭据申请页一键安装用，无需鉴权）**：
+
+```
+GET /api/runtime/grape-worker.tar.gz
+鉴权：无（包内仅运行代码，无任何敏感信息；凭据由安装命令 --token 注入）
+响应：application/gzip 的 tar.gz 包（filename=grape-worker.tar.gz）
+```
+
+一键安装命令（凭据申请页展示，普通用户免 root）：
+
+```bash
+curl -fsSL https://<grape主控>/api/runtime/install | bash -s -- \
+  --token <rta_...> --server https://<grape主控>
+```
+
+安装脚本从公开端点下载运行包，解压到普通用户家目录（默认 `~/grape`），
+写入接入配置（`~/.grape/runtime.env`：token + 主控地址 + 设备名，权限 600），
+nohup/setsid 后台启动 runtime-agent 自动注册；root 环境自动降级 systemd。
 
 包内容：
 

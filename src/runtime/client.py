@@ -29,8 +29,16 @@ class RuntimeClient:
     async def _ensure_session(self):
         if self._session is None or self._session.closed:
             import aiohttp
-            self._connector = aiohttp.TCPConnector(limit=self._max_connections)
+            # force_close=True: 服务端用短连接，不复用避免 CLOSE-WAIT 僵尸连接
+            self._connector = aiohttp.TCPConnector(limit=self._max_connections, force_close=True)
             self._session = aiohttp.ClientSession(connector=self._connector)
+
+    async def reset_session(self):
+        """强制关闭并重建连接池（处理 CLOSE-WAIT 死连接）。"""
+        log.warning("resetting aiohttp session (clearing stale connections)")
+        await self.close()
+        self._connector = None
+        self._session = None
 
     async def _request(self, method: str, path: str, body=None, retries: int = 4) -> dict | None:
         """HTTP 请求 + 指数退避。404 且含 runtime → RuntimeGone。返回 JSON 或 None。"""
@@ -88,8 +96,10 @@ class RuntimeClient:
         data = await self._request("GET", "/api/runtime/install/latest", retries=1)
         return (data or {}).get("version", "")
 
-    async def heartbeat(self, runtime_ids: list[int]):
-        await self._request("POST", "/api/runtime/heartbeat", {"runtime_ids": runtime_ids}, retries=2)
+    async def heartbeat(self, runtime_ids: list[int]) -> bool:
+        """发送心跳。返回 True 表示成功，False 表示失败（网络错误/服务端不可达）。"""
+        result = await self._request("POST", "/api/runtime/heartbeat", {"runtime_ids": runtime_ids}, retries=2)
+        return result is not None
 
     async def claim(self, runtime_id: int) -> dict | None:
         data = await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/tasks/claim", retries=1)

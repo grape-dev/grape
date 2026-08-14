@@ -81,6 +81,61 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
                     result["archive"] = arch
     except Exception:
         pass
+    # 引擎实例名（events.runtime 是引擎类型名；具体实例多级回退解析，见 agent-cluster-design.md）
+    # 1) agent_tasks.runtime_id（queue/池模式实际执行引擎）
+    # 2) devops_agent_session.runtime_id（direct 模式绑定实例）
+    # 3) events.runtime 类型名 → 本机/在线实例
+    engine_instance = ""
+    engine_device = ""
+    engine_ip = ""
+    try:
+        from src.runtime.instances import instance_name
+        runtime_id = 0
+        with db_lock:
+            c2 = db.cursor()
+            c2.execute(
+                "SELECT runtime_id FROM agent_tasks WHERE event_seq=? AND runtime_id IS NOT NULL AND runtime_id>0 "
+                "ORDER BY created_at DESC LIMIT 1",
+                (seq,))
+            tr = c2.fetchone()
+            if tr:
+                runtime_id = tr[0]
+            else:
+                # direct 模式：查该 repo+agent 会话绑定的实例
+                c2.execute(
+                    "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=? AND runtime_id>0 LIMIT 1",
+                    (row[1] or "", row[5] or ""))
+                sr = c2.fetchone()
+                if sr:
+                    runtime_id = sr[0]
+            if runtime_id:
+                c2.execute(
+                    "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                    "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=?",
+                    (runtime_id,))
+                ar = c2.fetchone()
+                if ar:
+                    engine_instance = instance_name(ar[0] or "engine", ar[2] or "", ar[1] or 0)
+                    engine_device = ar[2] or ""
+                    engine_ip = ar[3] or ""
+            if not engine_instance and row[12]:
+                # 兜底：按类型名找本机（credential_id=0）优先、其次在线实例
+                c2.execute(
+                    "SELECT ar.id, ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                    "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
+                    "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
+                    (row[12],))
+                ar2 = c2.fetchone()
+                if ar2:
+                    engine_instance = instance_name(ar2[1] or "engine", ar2[3] or "", ar2[2] or 0)
+                    engine_device = ar2[3] or ""
+                    engine_ip = ar2[4] or ""
+    except Exception:
+        pass
+    result["engine_instance"] = engine_instance
+    result["engine_device"] = engine_device
+    result["engine_ip"] = engine_ip
+
     return result
 
 
@@ -292,49 +347,64 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
         if row:
             agent_sid = row[0] or ""
             runtime_id = row[1] or 0
-        if agent_sid and runtime_id:
+        if agent_sid:
             from src.config import SKILLS_DIR
-            from src.runtime.service import cancel_task
+            from src.runtime.service import cancel_task, pool_runtime_ids
             from src.api.event_pipeline import get_agent_workdir
             # Fix 1：cwd 用该 issue 的 agent 目录（与 issue 会话项目一致）
             ws = get_agent_workdir(repo_key, agent_type, issue_id)
             os.makedirs(ws, exist_ok=True)
-            tid = enqueue_task(
-                agent_session_id=agent_sid, runtime_id=runtime_id, prompt=prompt, cwd=ws,
-                runtime_session_id=oc_session_id,
-                issue_session_id=issue_sess_id,        # Fix E：串行槽绑定本 issue 会话
-                event_type="event_conversation",
-                repo_key=repo_key, agent_type=agent_type,
-                skill="event-dialogue",                 # Fix A：打包下发对话技能
-                skill_path=os.path.join(SKILLS_DIR, "event-dialogue", "SKILL.md"),
-                account=repository, repo_gitcode_token=bot_token,
-                issue_id=issue_id or "#0",
-            )
-            # Fix C：超时/失败要有回显与清理，不再 30 分钟静默
-            task = None
-            failed = False
+            # 路由对齐 _enqueue_pipeline_task：会话未绑固定引擎(runtime_id=0)时，
+            # 引擎池模式优先（pool_agent_type 入队，池内引擎 claim），其次默认 runtime 兜底
+            pool_mode = False
             try:
-                task = await wait_task_terminal(tid, timeout=300.0)
-            except TimeoutError:
-                failed = True
-                cancel_task(tid)
-                final_text = "（对话执行超时，请稍后重试）"
-            except Exception as e:
-                failed = True
-                cancel_task(tid)
-                final_text = f"（对话执行失败：{e}）"
-            # Fix 2：超时/失败后清空 issue 会话，避免下轮复用挂起会话
-            if failed and issue_sess_id:
-                from src.api.session_store import update_issue_session
-                update_issue_session(issue_sess_id, runtime_session_id="")
-            if task and not final_text:
-                final_text = task.get("result_text") or ""
+                if pool_runtime_ids(agent_type):
+                    pool_mode = True
+                else:
+                    from src.user.db import ensure_default_runtime
+                    runtime_id = ensure_default_runtime("opencode") or 0
+            except Exception:
+                runtime_id = 0
+            if not runtime_id and not pool_mode:
+                final_text = "（对话执行失败：无可用 runtime/会话）"
+            else:
+                tid = enqueue_task(
+                    agent_session_id=agent_sid, runtime_id=runtime_id, prompt=prompt, cwd=ws,
+                    runtime_session_id=oc_session_id,
+                    issue_session_id=issue_sess_id,        # Fix E：串行槽绑定本 issue 会话
+                    pool_agent_type=(agent_type if pool_mode else ""),
+                    event_type="event_conversation",
+                    repo_key=repo_key, agent_type=agent_type,
+                    skill="event-dialogue",                 # Fix A：打包下发对话技能
+                    skill_path=os.path.join(SKILLS_DIR, "event-dialogue", "SKILL.md"),
+                    account=repository, repo_gitcode_token=bot_token,
+                    issue_id=issue_id or "#0",
+                )
+                # Fix C：超时/失败要有回显与清理，不再 30 分钟静默
+                task = None
+                failed = False
                 try:
-                    import json as _json
-                    usage = _json.loads(task.get("usage_json") or "{}") or {}
-                    new_oc = usage.get("session_id") or oc_session_id
-                except Exception:
-                    pass
+                    task = await wait_task_terminal(tid, timeout=300.0)
+                except TimeoutError:
+                    failed = True
+                    cancel_task(tid)
+                    final_text = "（对话执行超时，请稍后重试）"
+                except Exception as e:
+                    failed = True
+                    cancel_task(tid)
+                    final_text = f"（对话执行失败：{e}）"
+                # Fix 2：超时/失败后清空 issue 会话，避免下轮复用挂起会话
+                if failed and issue_sess_id:
+                    from src.api.session_store import update_issue_session
+                    update_issue_session(issue_sess_id, runtime_session_id="")
+                if task and not final_text:
+                    final_text = task.get("result_text") or ""
+                    try:
+                        import json as _json
+                        usage = _json.loads(task.get("usage_json") or "{}") or {}
+                        new_oc = usage.get("session_id") or oc_session_id
+                    except Exception:
+                        pass
         else:
             final_text = "（对话执行失败：无可用 runtime/会话）"
     else:

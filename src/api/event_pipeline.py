@@ -555,6 +555,25 @@ def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str
     return os.path.join(WORKSPACE_DIR, owner, rname, f"{agent_type}-agent")
 
 
+def _fail_event(seq: int, reason: str):
+    """事件入队/启动失败 → 立即置 failed 终态（防卡 running 僵尸）。
+
+    事件在 append_event 时即为 running，若后续入队/启动失败而不更新，
+    事件将永远 running（无任务支撑、无详细记录）。所有失败路径统一走这里收口。
+    """
+    if not seq:
+        return
+    try:
+        from datetime import datetime, timezone
+        from src.api.event_store import update_event_complete
+        update_event_complete(seq, "failed", exit_code=1,
+                              completed_at=datetime.now(timezone.utc).isoformat(),
+                              result=reason)
+        log.info(f"Pipeline: event {seq} -> failed ({reason[:80]})")
+    except Exception as e:
+        log.warning(f"Pipeline: _fail_event failed for seq={seq}: {e}")
+
+
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                            skill_id, skill_path, runtime_id, issue_id=""):
     """触发点三连的入队侧（M2，见 agent-runtime-event-tech-impl.md §2.3）：
@@ -567,22 +586,29 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     import os as _os
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
-    # 1) 确定路由：绑定 runtime_id；未绑定时用默认 opencode runtime id
+    # 1) 确定路由：绑定 runtime_id；引擎池模式（agent-cluster-design.md §4.1）→ runtime_id=0 + pool_agent_type
+    #    该 Agent 配置了引擎池时，任务由池内任意空闲引擎领取（claim 池调度）；否则按默认 runtime 兜底
+    pool_mode = False
     if not runtime_id:
         try:
-            from src.user.db import ensure_default_runtime
-            runtime_id = ensure_default_runtime("opencode") or 0
+            from src.runtime.service import pool_runtime_ids
+            if pool_runtime_ids(agent_type):
+                pool_mode = True
+            else:
+                from src.user.db import ensure_default_runtime
+                runtime_id = ensure_default_runtime("opencode") or 0
         except Exception:
             runtime_id = 0
+    if not runtime_id and not pool_mode:
+        log.warning(f"Pipeline enqueue: no runtime_id for repo={repo_key} agent={agent_type}, task skipped")
+        _fail_event(seq, "入队失败：无可用 runtime（未配置引擎且不在引擎池）")
+        return
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名
     inst_name = runtime_instance_name(runtime_id) or backend or "opencode"
     # 2) event.json 骨架（#0 跳过，见 event_archive._extract_num）
     _evt_copy = dict(evt)
     _evt_copy["issue_id"] = issue_id
     init_event_json(repo_key, seq, _evt_copy, agent_type, runtime=inst_name, skill=skill_name)
-    if not runtime_id:
-        log.warning(f"Pipeline enqueue: no runtime_id for repo={repo_key} agent={agent_type}, task skipped")
-        return
 
     repository = evt.get("repository", from_repo_key(repo_key))
     ws = get_agent_workdir(repo_key, agent_type, issue_id)
@@ -617,6 +643,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                               skill_path=skill_path, runtime_id=runtime_id)
     except Exception as e:
         log.warning(f"Pipeline enqueue: prompt build failed: {e}")
+        _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
         return
 
     env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
@@ -639,21 +666,27 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     except Exception:
         pass
 
-    tid = enqueue_task(
-        agent_session_id=session.get("id") or "",
-        runtime_id=runtime_id,
-        event_seq=seq, issue_id=issue_id,
-        repo_key=repo_key, agent_type=agent_type, skill=skill_name,
-        prompt=prompt, cwd=ws,
-        runtime_session_id=oc_session_id,
-        issue_session_id=issue_session_id,
-        event_type=evt.get("type", ""),
-        account=evt.get("account") or "",
-        repo_gitcode_token=repo_gitcode_token,
-        env_extra=env_extra,
-        skill_path=skill_path,
-    )
-    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
+    try:
+        tid = enqueue_task(
+            agent_session_id=session.get("id") or "",
+            runtime_id=runtime_id,
+            pool_agent_type=(agent_type if pool_mode else ""),
+            event_seq=seq, issue_id=issue_id,
+            repo_key=repo_key, agent_type=agent_type, skill=skill_name,
+            prompt=prompt, cwd=ws,
+            runtime_session_id=oc_session_id,
+            issue_session_id=issue_session_id,
+            event_type=evt.get("type", ""),
+            account=evt.get("account") or "",
+            repo_gitcode_token=repo_gitcode_token,
+            env_extra=env_extra,
+            skill_path=skill_path,
+        )
+    except Exception as e:
+        log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
+        _fail_event(seq, f"入队失败：enqueue_task 异常 {str(e)[:150]}")
+        return
+    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} pool={agent_type if pool_mode else '-'} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
 
 
 def get_prompt_context(repo_key: str) -> str:
@@ -671,6 +704,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     from src.prompt_builder import build_prompt
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
+        append_skipped_event,
     )
     from src.runtime.instances import runtime_instance_name
 
@@ -743,6 +777,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
         append_skipped_event(repo_key, evt.get("type", ""), "prompt_build_failed", str(e))
+        _fail_event(seq, f"执行失败：prompt 构建异常 {str(e)[:150]}")
         return
 
     exec_account = evt.get("account") or repository

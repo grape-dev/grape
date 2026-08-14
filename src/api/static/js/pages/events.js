@@ -52,6 +52,7 @@ function renderEventDetail(data) {
         <div style="font-size:11px;color:var(--t2);line-height:1.8">
           <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
           <div><span style="color:var(--t3)">Runtime:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b></div>
+          ${data.engine_instance ? `<div><span style="color:var(--t3)">Engine:</span> <b>${data.engine_instance}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>` : ''}
           <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
           <div><span style="color:var(--t3)">Issue:</span> ${data.issue_id || '—'}</div>
           <div><span style="color:var(--t3)">Actor:</span> @${data.actor || '—'}</div>
@@ -65,7 +66,7 @@ function renderEventDetail(data) {
         <h3 style="font-size:12px;font-weight:600">💬 与 ${agentName} 对话</h3>
         <div id="convMessages" style="flex:1;min-height:180px;max-height:46vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
         <div id="convInputRow" style="display:none;gap:6px">
-          <input id="convInput" placeholder="问一问 agent 为什么这样处理…" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+          <input id="convInput" placeholder="问一问 agent 为什么这样处理…（Enter 发送）" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
           <button class="bt bt-p bt-s" onclick="sendConversation()">发送</button>
         </div>
       </div>
