@@ -91,6 +91,11 @@ class RuntimeClient:
             return []
         return [r["id"] for r in (data.get("runtimes") or [])]
 
+    async def latest_version(self) -> str:
+        """查询服务端当前 Worker 安装包版本（worker-server-delivery-design.md §2.4）。"""
+        data = await self._request("GET", "/api/runtime/install/latest", retries=1)
+        return (data or {}).get("version", "")
+
     async def heartbeat(self, runtime_ids: list[int]) -> bool:
         """发送心跳。返回 True 表示成功，False 表示失败（网络错误/服务端不可达）。"""
         result = await self._request("POST", "/api/runtime/heartbeat", {"runtime_ids": runtime_ids}, retries=2)

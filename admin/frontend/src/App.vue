@@ -46,7 +46,7 @@
       </div>
       <div class="drawer-body">
         <template v-for="item in navItems" :key="item.code">
-          <router-link v-if="item.route" class="drawer-group-title" :to="item.route" @click="mobileNavOpen = false">
+          <router-link v-if="item.route" class="drawer-sub-item" :to="item.route" @click="mobileNavOpen = false">
             <span class="drawer-item-icon">{{ item.icon }}</span>{{ item.name }}
           </router-link>
           <div v-else-if="item.children && item.children.length" class="drawer-group">

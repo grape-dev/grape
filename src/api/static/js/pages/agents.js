@@ -7,27 +7,113 @@ function toggleAgentCfg() {
   if (_agentCfgVisible) loadCfgOptions();
 }
 
+// ===== Backend Engines 下拉多选（引擎池，agent-cluster-design.md §4.1）=====
+const _BE_COLORS = ['#4f8cff', '#22b573', '#a05ce6', '#f0a020', '#e65c8c', '#12a8c8', '#8a7cf0', '#d4752a'];
+const _beColor = idx => _BE_COLORS[idx % _BE_COLORS.length];
+
+function _beRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+}
+
+function renderBackendsTrigger() {
+  const box = document.querySelector('.cfg-backends');
+  if (!box) return;
+  const trigger = box.querySelector('.cfg-backends-trigger');
+  const ph = box.querySelector('.cfg-backends-ph');
+  const checked = Array.from(box.querySelectorAll('.cfg-backend-cb:checked'));
+  if (ph) ph.style.display = checked.length ? 'none' : '';
+  // 选中项渲染为彩色标签（不同颜色标识）
+  checked.forEach(cb => {
+    const color = cb.dataset.color || '#4f8cff';
+    const key = 'be-chip-' + cb.value.replace(/[^a-z0-9]/gi, '-');
+    if (trigger.querySelector('.' + key)) return;
+    const chip = document.createElement('span');
+    chip.className = key;
+    chip.textContent = cb.value;
+    chip.style.cssText = `display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;color:#fff;background:${color};line-height:18px`;
+    trigger.appendChild(chip);
+  });
+  // 移除已取消勾选的标签
+  const vals = new Set(checked.map(cb => cb.value));
+  trigger.querySelectorAll('[class^="be-chip-"]').forEach(ch => {
+    const v = ch.textContent;
+    if (!vals.has(v)) ch.remove();
+  });
+}
+
+function toggleBackendsDropdown(ev) {
+  if (ev) ev.stopPropagation();
+  const box = document.querySelector('.cfg-backends');
+  if (!box) return;
+  const panel = box.querySelector('.cfg-backends-panel');
+  if (panel) panel.classList.toggle('hidden');
+}
+
+function closeBackendsDropdown() {
+  const box = document.querySelector('.cfg-backends');
+  if (!box) return;
+  const panel = box.querySelector('.cfg-backends-panel');
+  if (panel) panel.classList.add('hidden');
+}
+
+function refreshBackendsPanel() {
+  // 触发区彩色标签 + 面板行选中高亮同步（勾选/取消实时更新）
+  renderBackendsTrigger();
+  const panel = document.querySelector('.cfg-backends-panel');
+  if (!panel) return;
+  panel.querySelectorAll('label').forEach(l => {
+    const cb = l.querySelector('.cfg-backend-cb');
+    if (!cb) return;
+    const color = cb.dataset.color || '#4f8cff';
+    const rgb = _beRgb(color);
+    const on = cb.checked;
+    l.style.background = on ? `rgba(${rgb},.12)` : 'transparent';
+    l.style.boxShadow = on ? `inset 2px 0 0 ${color}` : '';
+    const nameSpan = l.querySelectorAll('span')[1];  // 色点之后为引擎名
+    if (nameSpan) {
+      nameSpan.style.fontWeight = on ? 600 : 400;
+      nameSpan.style.color = on ? color : 'var(--t2)';
+    }
+  });
+}
+
 function loadCfgOptions() {
-  const backendSelect = document.querySelector('.cfg-backend');
+  const backendBox = document.querySelector('.cfg-backends');
   const skillSelect = document.querySelector('.cfg-skill');
 
-  // Runtime 下拉：仅未加载时加载；DevOps Agent 仅可选 仓库/全局 引擎（个人引擎不出现，见 runtime-admin-two-view-design §5.1）
-  if (backendSelect && !backendSelect.dataset.loaded) {
-    backendSelect.dataset.loaded = '1';
+  // Runtime 下拉多选（引擎池）：仅未加载时加载；DevOps Agent 仅可选 仓库/全局 引擎（个人引擎不出现，见 runtime-admin-two-view-design §5.1）
+  if (backendBox && !backendBox.dataset.loaded) {
+    backendBox.dataset.loaded = '1';
+    const panel = backendBox.querySelector('.cfg-backends-panel');
+    const current = (backendBox.dataset.backends || '').split(',').map(s => s.trim()).filter(Boolean);
     API.get('/settings/agent-runtimes').then(d => {
       const runtimes = d.runtimes || [];
-      const current = backendSelect.dataset.current || 'opencode';
       const scopeLabel = sc => sc === 'global' ? '全局' : sc === 'repo' ? '仓库' : '个人';
       const ok = runtimes.filter(r => r.scope === 'repo' || r.scope === 'global');
-      const online = ok.filter(r => r.health === 'online' || r.healthy);
-      const offline = ok.filter(r => !(r.health === 'online' || r.healthy));
       const val = r => r.instance_name || r.name;
-      const opt = (r, sel) =>
-        `<option value="${val(r)}" ${(val(r) === current || r.name === current) ? 'selected' : ''}>${val(r)} · ${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${scopeLabel(r.scope)}${r.health === 'online' || r.healthy ? ' ✓' : ' ✗'}</option>`;
-      let html = online.map(r => opt(r, true)).join('') + offline.map(r => opt(r, false)).join('');
-      if (!html) html = '<option value="opencode">opencode</option>';
-      backendSelect.innerHTML = html;
-    }).catch(() => {});
+      const cb = (r, i) => {
+        const v = val(r);
+        const online = r.health === 'online' || r.healthy;
+        const color = _beColor(i);
+        const checked = current.includes(v) || current.includes(r.name) ? 'checked' : '';
+        const rgb = _beRgb(color);
+        return `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap;width:100%;flex-shrink:1;background:${checked ? `rgba(${rgb},.12)` : 'transparent'};${checked ? `box-shadow:inset 2px 0 0 ${color}` : ''};transition:background .12s">
+          <input type="checkbox" class="cfg-backend-cb" value="${v}" data-color="${color}" ${checked} style="accent-color:${color};flex:0 0 auto;width:14px;height:14px;margin:0">
+          <span style="width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0"></span>
+          <span style="font-weight:600;color:${checked ? color : 'var(--t2)'};min-width:110px">${v}</span>
+          <span class="ts t3" style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${scopeLabel(r.scope)}${online ? ' ✓' : ' ✗'}</span>
+        </label>`;
+      };
+      panel.innerHTML = ok.map(cb).join('') || '<span class="ts t2">无可选引擎（仓库/全局范围）</span>';
+      // 面板内点击不冒泡到 document（避免勾选时触发外部关闭）
+      panel.addEventListener('click', e => e.stopPropagation());
+      // 初始回显 + 勾选/取消 → 同步触发区彩色标签 + 面板行高亮
+      refreshBackendsPanel();
+      panel.addEventListener('change', refreshBackendsPanel);
+    }).catch(() => {
+      panel.innerHTML = '<span class="ts t2">引擎列表加载失败</span>';
+    });
   }
 
   // Skill 下拉：仅未加载时加载（幂等），预加载后点 Configure 不再重复请求
@@ -86,8 +172,6 @@ function renderAgent(name, data) {
   const er = es.running || 0;
   const et = m.total_events || 0;
 
-  const currentBackend = data.backend || meta.default_backend || 'opencode';
-
   let html = `
 <div class="cd" style="background:${meta.bg || 'var(--bg)'};border-color:${meta.color || 'var(--b)'}33">
   <div class="flex fc gap12">
@@ -98,10 +182,15 @@ function renderAgent(name, data) {
 </div>
 <div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">
   <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Agent Configuration</h3>
-  <div class="srow"><label>Backend Engine</label>
-    <select class="cfg-backend" data-current="${currentBackend}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
-      <option value="${currentBackend}" selected>${currentBackend} ...</option>
-    </select>
+  <div class="srow" style="align-items:flex-start"><label>Backend Engines<br><span class="ts t3" style="font-weight:400">下拉多选，任务将分配到空闲引擎</span></label>
+    <div class="cfg-backends" data-backends="${(data.backends || []).join(',')}" style="flex:1;position:relative">
+      <div class="cfg-backends-trigger" onclick="toggleBackendsDropdown(event)" style="min-height:34px;padding:5px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);cursor:pointer;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+        <span class="cfg-backends-ph ts t2" style="color:var(--t2)">选择引擎...</span>
+      </div>
+      <div class="cfg-backends-panel hidden" style="position:absolute;left:0;top:calc(100% + 4px);width:max(100%,360px);max-width:calc(100vw - 24px);background:var(--bg);border:1px solid var(--b);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.18);z-index:50;max-height:240px;overflow:auto;padding:6px">
+        <span class="ts t2">加载中...</span>
+      </div>
+    </div>
   </div>
     <div class="srow"><label>Skill</label>
     <select class="cfg-skill" data-agent="${name}" data-current="${(data.skill || '')}" data-scope="${(data.skill_scope || '')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
@@ -140,6 +229,11 @@ function renderAgent(name, data) {
   el.innerHTML = html;
   // 预加载配置下拉（即使面板隐藏），确保首次打开 Configure 立即显示 skill/backend，不显示"加载中..."
   loadCfgOptions();
+  // 点击面板外部关闭引擎下拉（只注册一次）
+  if (!document._beOutsideCloseBound) {
+    document._beOutsideCloseBound = true;
+    document.addEventListener('click', closeBackendsDropdown);
+  }
 }
 
 function _agentSubsSection(name, data) {
@@ -164,7 +258,7 @@ function _agentSubsSection(name, data) {
 }
 
 function saveAgentConfig(name) {
-  const backend = document.querySelector('.cfg-backend')?.value || 'opencode';
+  const backends = Array.from(document.querySelectorAll('.cfg-backend-cb:checked')).map(cb => cb.value);
   const skillVal = document.querySelector('.cfg-skill')?.value || '';
   let skill = skillVal, skillScope = '';
   if (skillVal.indexOf(':') > 0) {
@@ -174,7 +268,8 @@ function saveAgentConfig(name) {
   }
   const repo = app.currentRepo();
   if (!repo) return;
-  const body = {backend, skill};
+  // 引擎池：始终显式提交 backends（数组；全不勾选 = 清空池，走默认引擎兜底）
+  const body = {backends, skill};
   if (skillScope) body.skill_scope = skillScope;
   // 事件订阅：PR 合入（勾选）+ 合入分支（逗号分隔，留空=不限）；仅 SRE Agent 开放
   const subEvents = [];

@@ -35,14 +35,6 @@ def _env_int(name, default):
 def _discover_local_runtimes() -> list[dict]:
     """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。"""
     from src.runtime.registry import discover_runtimes
-    # RUNTIME_NAME_MAP 将本地 CLI name 映射为服务端期望的 runtime name
-    # 例如：RUNTIME_NAME_MAP=opencode=coding-worker,hermes=devops-bot
-    name_map = {}
-    for pair in os.environ.get("RUNTIME_NAME_MAP", "").split(","):
-        pair = pair.strip()
-        if "=" in pair:
-            k, v = pair.split("=", 1)
-            name_map[k.strip()] = v.strip()
     out = []
     for r in discover_runtimes():
         version = ""
@@ -57,8 +49,7 @@ def _discover_local_runtimes() -> list[dict]:
                     version = (res.stdout or "").strip().split("\n")[0][:60]
             except Exception:
                 pass
-        name = name_map.get(r["name"], r["name"])
-        out.append({"name": name, "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
+        out.append({"name": r["name"], "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
     return out
 
 
@@ -99,9 +90,8 @@ def _kill_stale_opencode(task: dict):
     import subprocess, signal
     cwd = _remap_cwd(task.get("cwd") or os.getcwd())
     try:
-        # 找 cwd 匹配的 opencode 进程
         out = subprocess.run(
-            ["pgrep", "-u", os.environ.get("USER", "lvjuntao"), "-f", "opencode run"],
+            ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", "opencode run"],
             capture_output=True, text=True, timeout=5
         )
         for pid_str in out.stdout.strip().split():
@@ -118,11 +108,15 @@ def _kill_stale_opencode(task: dict):
         log.warning(f"_kill_stale_opencode failed: {e}")
 
 
-async def _execute_task(client, task):
-    """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。"""
+async def _execute_task(client, task, engine_name: str = ""):
+    """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。
+
+    engine_name 为该任务所属引擎实例名（如 opencode-worker-123249），用于日志区分。
+    """
     import os as _os
     tid = task.get("id", "")
     cwd = _remap_cwd(task.get("cwd") or _os.getcwd())
+    _engine_tag = f"|engine:{engine_name}" if engine_name else ""
     try:
         _os.makedirs(cwd, exist_ok=True)
     except Exception:
@@ -189,42 +183,33 @@ async def _execute_task(client, task):
     batch = []
     try:
         from src.runtime.executor import stream_runtime
-
-        # 同步生成器在线程中消费，通过 asyncio.Queue 传递事件到 async 侧
-        # 防止 time.sleep(0.1) / readline 阻塞事件循环（心跳/claim 无法执行）
-        queue: asyncio.Queue = asyncio.Queue()
-        _stream_sentinel = object()
-
-        def _sync_consumer():
-            try:
-                for evt in stream_runtime(
-                    prompt, cwd, session_id=task.get("runtime_session_id") or "",
-                    event_type=task.get("event_type") or "",
-                    backend_name="opencode",
-                    account=task.get("account") or "", user_id=task.get("user_id") or 0,
-                    env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
-                ):
-                    queue.put_nowait(evt)
-            except Exception as e:
-                queue.put_nowait(("error", e))
-            finally:
-                queue.put_nowait(_stream_sentinel)
-
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, _sync_consumer)
-
-        while True:
-            evt = await queue.get()
-            if evt is _stream_sentinel:
-                break
-            evt_type, data = evt
-            if evt_type == "error":
-                raise data
+        _agent_label = f"[Agent:{task.get('agent_type') or ''}|repo:{task.get('repo_key') or ''}{_engine_tag}]"
+        # 逐步日志前缀：seq + 非空的 issue/agent/repo/engine，便于在 journalctl 按事件/issue/仓库定位
+        _esq_parts = [f"seq={task.get('event_seq') or '?'}"]
+        _issue_num = (task.get("issue_id") or "").strip().lstrip("#")
+        if _issue_num and _issue_num != "0":
+            _esq_parts.append(f"issue:#{_issue_num}")
+        _agent_type = task.get("agent_type") or ""
+        if _agent_type:
+            _esq_parts.append(f"agent:{_agent_type}")
+        _repo_key = task.get("repo_key") or ""
+        if _repo_key:
+            _esq_parts.append(f"repo:{_repo_key}")
+        if engine_name:
+            _esq_parts.append(f"engine:{engine_name}")
+        _esq = "|".join(_esq_parts)
+        for evt_type, data in stream_runtime(
+            prompt, cwd, session_id=task.get("runtime_session_id") or "",
+            event_type=task.get("event_type") or "",
+            backend_name="opencode",
+            account=task.get("account") or "", user_id=task.get("user_id") or 0,
+            env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
+            agent_label=_agent_label,
+        ):
             if evt_type == "done":
                 done = data
                 continue
-            # 逐步日志
-            _esq = f"seq={task.get('event_seq') or '?'}"
+            # 逐步日志（本地模式同款，供 worker 侧 journalctl 观察执行过程）；前缀含 seq 便于定位
             if evt_type == "step_start":
                 log.info(f"  [{_esq}] ▶ {data}")
             elif evt_type == "text":
@@ -239,7 +224,9 @@ async def _execute_task(client, task):
             if len(batch) >= 50:
                 await client.report_messages(tid, batch)
                 batch = []
-
+            # 每次迭代让出事件循环，避免同步生成器迭代阻塞 claim/heartbeat
+            # （见 worker-event-loop-block-rootcause.md 方案 1）
+            await asyncio.sleep(0)
         if batch:
             await client.report_messages(tid, batch)
         if done:
@@ -270,21 +257,24 @@ async def _reregister(client, installed, device_name) -> list[int] | None:
 
 
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
-                    installed, device_name):
+                    engine_by_rid: dict | None = None, installed=None, device_name="",
+                    _test_execute=None, _test_active=None):
     """主循环：claim → 执行 → 回报，含心跳 + 自动重连自修复。
 
-    自修复机制（三层防护）：
+    自修复机制（三层防护，见 worker 自修复重连设计）：
     1. 心跳失败计数：连续 N 次 heartbeat 失败 → 重注册
     2. 定期重注册：每 RE_REGISTER_INTERVAL 秒主动刷新 runtime id，
        防止服务端重启后 id 静默失效（服务端对旧 id 仍返回 200 ok）
     3. 网络中断恢复：连接错误计入心跳失败，触发重注册
     """
-    active_tasks = set()  # task_id 去重（替代 session_id，防止同 session 不同 task 被误拒）
+    active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
+    active_tasks = set()      # task_id 去重（防止同 task 被重复 claim 并发执行）
     last_heartbeat = 0.0
-    heartbeat_fail_streak = 0          # 连续心跳失败计数
-    HEARTBEAT_FAIL_THRESHOLD = 3       # 连续失败 N 次触发重注册
-    RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))  # 默认 5 分钟定期重注册
+    heartbeat_fail_streak = 0
+    HEARTBEAT_FAIL_THRESHOLD = 3
+    RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
     last_reregister = asyncio.get_running_loop().time()
+    engine_by_rid = engine_by_rid or {}
 
     while True:
         # ---- 定期重注册（防 id 静默失效）----
@@ -296,7 +286,6 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 heartbeat_fail_streak = 0
             last_reregister = asyncio.get_running_loop().time()
 
-        # ---- claim 任务 ----
         for rid in runtime_ids:
             try:
                 task = await client.claim(rid)
@@ -307,17 +296,35 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             if not task:
                 continue
             tid = task.get("id", "")
+            # 并发槽 key 与服务端 claim 串行粒度一致（multi-issue-isolation-design.md §3.3）：
+            # 有关联 Issue → 按 issue_session_id（跨 Issue 并行）；无（#0/旧任务）→ 回退 agent_session_id。
+            # 修复：此前一律用 agent_session_id，导致不同 Issue 的任务在客户端被误判冲突拒收
+            #       （服务端已放行并标记 dispatched，客户端却 skip → 任务悬空卡死，见 seq#622）。
+            sid = task.get("issue_session_id") or task.get("agent_session_id") or ""
+            if sid in active_sessions:
+                # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）。
+                # 回滚任务为 queued，避免 dispatched 悬空（skip 后无人执行也不重新排队）。
+                log.warning(f"claim conflict: session {sid} busy, requeue task {tid}")
+                try:
+                    await client.requeue(tid)
+                except Exception as _e:
+                    log.warning(f"requeue task {tid} failed: {_e}")
+                continue
             if tid in active_tasks:
                 log.debug(f"task {tid} already active, skip")
                 continue
-            if len(active_tasks) >= max_concurrent:
+            if len(active_sessions) >= max_concurrent:
                 continue
+            active_sessions.add(sid)
             active_tasks.add(tid)
 
-            async def _wrap(t=task, _tid=tid):
+            async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 600)
                 try:
-                    await asyncio.wait_for(_execute_task(client, t), timeout=task_timeout)
+                    if _test_execute is not None:
+                        await _test_execute(client, t, e)
+                    else:
+                        await asyncio.wait_for(_execute_task(client, t, e), timeout=task_timeout)
                 except asyncio.TimeoutError:
                     log.warning(f"task {_tid} timed out after {task_timeout}s, killing child processes and failing")
                     # 杀掉超时任务的 opencode 子进程（按 cwd 匹配，避免误杀其他任务）
@@ -327,6 +334,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     except Exception:
                         pass
                 finally:
+                    active_sessions.discard(s)
                     active_tasks.discard(_tid)
 
             asyncio.create_task(_wrap())
@@ -344,7 +352,6 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 await client.reset_session()
             last_heartbeat = now
 
-            # ---- 连续失败触发重注册 ----
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
                 new_ids = await _reregister(client, installed, device_name)
@@ -353,7 +360,6 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     heartbeat_fail_streak = 0
                     last_reregister = asyncio.get_running_loop().time()
                 else:
-                    # 重注册也失败，退避后重试
                     backoff = min(30 * (2 ** (heartbeat_fail_streak - HEARTBEAT_FAIL_THRESHOLD)), 300)
                     log.warning(f"re-register failed, backing off {backoff:.0f}s")
                     await asyncio.sleep(backoff)
@@ -414,7 +420,8 @@ def main():
         for rid in ids:
             await client.recover_orphans(rid)
         try:
-            await _run_loop(client, ids, poll, heartbeat, max_concurrent, installed, device)
+            await _run_loop(client, ids, poll, heartbeat, max_concurrent, engine_by_rid,
+                            installed=installed, device_name=device)
         finally:
             await client.close()
 

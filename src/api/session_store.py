@@ -56,7 +56,7 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
 
 def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                     a2a_seq: int | None = None, assignee: str = ""):
-    """写入/更新 Issue 阶段（幂等 upsert，兼容 SQLite/MySQL）。
+    """写入/更新 Issue 阶段（幂等 upsert，兼容 SQLite/MySQL）。assignee 为 Issue 责任人（GitCode 用户名）。
 
     原实现 INSERT OR REPLACE ... VALUES ((SELECT id FROM issue_state ...)) 在
     MySQL 下报 1093（自引用子查询），改为先查后改/插。
@@ -66,21 +66,15 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
         c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
         row = c.fetchone()
         if row:
-            if assignee:
-                c.execute(
-                    "UPDATE issue_state SET stage=?, owner_agent=?, a2a_seq=?, assignee=?, updated_at=datetime('now') WHERE id=?",
-                    (stage, owner_agent, a2a_seq, assignee, row[0]),
-                )
-            else:
-                c.execute(
-                    "UPDATE issue_state SET stage=?, owner_agent=?, a2a_seq=?, updated_at=datetime('now') WHERE id=?",
-                    (stage, owner_agent, a2a_seq, row[0]),
-                )
+            c.execute(
+                "UPDATE issue_state SET stage=?, owner_agent=?, assignee=?, a2a_seq=?, updated_at=datetime('now') WHERE id=?",
+                (stage, owner_agent, assignee, a2a_seq, row[0]),
+            )
         else:
             c.execute(
-                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, a2a_seq, assignee, updated_at) "
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-                (repo_key, issue_id, stage, owner_agent, a2a_seq, assignee),
+                (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq),
             )
         db.commit()
     from src.config import log

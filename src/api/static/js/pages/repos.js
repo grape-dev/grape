@@ -55,8 +55,8 @@ function renderRepoSelection(repos) {
   const d = document.getElementById('pageContent');
   if (!d) return;
   _projectsRepos = repos || [];
-  const _lu2 = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
-  const user = (_lu2 && (_lu2.nickname || _lu2.username)) || 'User';
+  const _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
+  const user = (_lu && (_lu.nickname || _lu.username)) || 'User';
   const hostedCount = (repos || []).filter(r => r.is_hosted).length;
   const joinedCount = (repos || []).filter(r => r.is_joined && !r.is_hosted).length;
   const name = (user || '朋友').split('@')[0];

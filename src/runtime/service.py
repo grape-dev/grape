@@ -130,23 +130,16 @@ _TASK_COLUMNS = (
     "id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
+    "knowledge_files, attempts, pool_agent_type, affinity_runtime_id, "
     "status, exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
 )
 
+_TASK_COLUMNS_LIST = [c.strip() for c in _TASK_COLUMNS.split(",")]
+
 
 def _row_to_dict(row):
-    return {
-        "id": row[0], "agent_session_id": row[1], "runtime_id": row[2], "event_seq": row[3],
-        "issue_id": row[4], "repo_key": row[5], "agent_type": row[6], "skill": row[7],
-        "prompt": row[8], "cwd": row[9], "runtime_session_id": row[10], "event_type": row[11],
-        "account": row[12], "user_id": row[13], "repo_gitcode_token": row[14],
-        "env_extra": row[15], "skill_files": row[16], "server_url": row[17],
-        "issue_session_id": row[18], "project_info_files": row[19], "project_info_meta": row[20],
-        "status": row[21], "exit_code": row[22], "result_text": row[23], "errors": row[24],
-        "stderr": row[25], "usage_json": row[26], "started_at": row[27], "completed_at": row[28],
-        "created_at": row[29],
-    }
+    return dict(zip(_TASK_COLUMNS_LIST, row))
 
 
 def _pack_skill_dir(skill_name, skill_path):
@@ -241,10 +234,21 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  repo_gitcode_token="", env_extra=None,
                  event_seq=None, issue_id="", repo_key="", agent_type="",
                  skill="", skill_path="", server_url="", issue_session_id="",
-                 project_info_files=None, project_info_meta=None):
-    """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。"""
-    if not agent_session_id or not runtime_id:
-        raise ValueError("agent_session_id and runtime_id are required (确定路由 D3)")
+                 project_info_files=None, project_info_meta=None, knowledge_files=None,
+                 pool_agent_type="", affinity_runtime_id=0):
+    """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
+
+    引擎池（agent-cluster-design.md §4.1/§4.2）：runtime_id=0 + pool_agent_type 非空
+    → 池调度任务，由池内任意空闲引擎 claim 时领取（claim 会把 runtime_id 定为实际引擎）。
+    显式 runtime_id（>0）→ 确定路由，行为与现状一致。
+
+    knowledge_files：共享知识快照（event-conversation-design.md §3.1.1），None 时自动打包；
+    远端 worker 侧 materialize 到 cwd/.knowledge 并替换 {{KNOWLEDGE_DIR}}。
+    """
+    if not agent_session_id:
+        raise ValueError("agent_session_id is required")
+    if not runtime_id and not pool_agent_type:
+        raise ValueError("runtime_id or pool_agent_type is required (确定路由 D3)")
     task_id = "t_" + uuid.uuid4().hex[:12]
     skill_files = {}
     if skill:
@@ -282,17 +286,84 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         c = db.cursor()
         c.execute(
             f"INSERT INTO agent_tasks ({_TASK_COLUMNS}) VALUES "
-            f"({','.join(['?'] * 30)})",
+            f"({','.join(['?'] * 34)})",
             (task_id, agent_session_id, runtime_id, event_seq, issue_id or "", repo_key or "",
              agent_type or "", skill or "", prompt, cwd or "", runtime_session_id or "",
              event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
+             json.dumps(knowledge_files),
+             0, pool_agent_type or "", affinity_runtime_id or 0,
              "queued", None, "", "", "", "{}", None, None, datetime.now(timezone.utc).isoformat())
         )
         db.commit()
-    log.info(f"Task enqueued: {task_id} session={agent_session_id} runtime={runtime_id} skill={skill}")
+    from src.runtime.instances import runtime_instance_name
+    _inst = runtime_instance_name(runtime_id)
+    log.info(f"Task enqueued: {task_id} session={agent_session_id} runtime={runtime_id}({_inst}) skill={skill}")
     return task_id
+
+
+# ===== 引擎池绑定（agent-cluster-design.md §4.1）=====
+
+def set_agent_pool(agent_type: str, runtime_ids: list[int], weight: int = 1, priority: int = 5):
+    """替换某 Agent 类型的引擎池绑定（先删后插，单事务）。runtime_ids 为空列表 → 清空池（回到兜底链）。"""
+    if not agent_type:
+        raise ValueError("agent_type is required")
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM agent_type_runtime_pool WHERE agent_type=?", (agent_type,))
+        for rid in (runtime_ids or []):
+            c.execute(
+                "INSERT OR IGNORE INTO agent_type_runtime_pool (agent_type, runtime_id, weight, priority) VALUES (?,?,?,?)",
+                (agent_type, int(rid), int(weight), int(priority)))
+        db.commit()
+    log.info(f"Agent pool set: {agent_type} -> {runtime_ids or []} (weight={weight}, priority={priority})")
+
+
+def get_agent_pool(agent_type: str) -> list[dict]:
+    """返回某 Agent 类型的引擎池绑定（含引擎实时状态，供管理端/调度展示）。"""
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT p.runtime_id, p.weight, p.priority, p.enabled, p.remark, "
+                "       r.name, r.status, r.healthy, r.busy_slots, r.max_concurrent, r.version, "
+                "       r.credential_id, COALESCE(rc.device_name, ''), COALESCE(rc.last_ip, '') "
+                "FROM agent_type_runtime_pool p "
+                "LEFT JOIN agent_runtimes r ON r.id = p.runtime_id "
+                "LEFT JOIN runtime_credentials rc ON rc.id = r.credential_id "
+                "WHERE p.agent_type=? ORDER BY p.priority ASC, p.id ASC",
+                (agent_type,))
+            rows = c.fetchall()
+        except Exception as e:
+            log.warning(f"get_agent_pool failed: {e}")
+            return []
+    return [{
+        "runtime_id": r[0], "weight": r[1], "priority": r[2], "enabled": bool(r[3]),
+        "remark": r[4] or "", "name": r[5] or "", "status": r[6] or "offline",
+        "healthy": bool(r[7]), "busy_slots": r[8] or 0, "max_concurrent": r[9] or 0,
+        "version": r[10] or "", "credential_id": r[11] or 0,
+        "device_name": r[12] or "", "last_ip": r[13] or "",
+    } for r in rows]
+
+
+def pool_runtime_ids(agent_type: str) -> list[int]:
+    """池内 enabled 的引擎 id 列表（claim 池调度用）。"""
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT runtime_id FROM agent_type_runtime_pool WHERE agent_type=? AND enabled=1", (agent_type,))
+            return [r[0] for r in c.fetchall()]
+        except Exception:
+            return []
+
+
+def _issue_num(issue_id) -> int:
+    """'#5' / '5' / 5 → 5；无法解析返回 0。"""
+    if not issue_id:
+        return 0
+    m = re.search(r"(\d+)", str(issue_id))
+    return int(m.group(1)) if m else 0
 
 
 def claim(runtime_id) -> dict | None:
@@ -300,6 +371,10 @@ def claim(runtime_id) -> dict | None:
 
     串行粒度（M2）：任务带 issue_session_id → 同 Issue 严格串行（跨 Issue 并行）；
     issue_session_id 为空（旧任务/#0 事件）→ 回退按 agent_session_id 串行（现状语义）。
+
+    引擎池（agent-cluster-design.md §4.2）：本引擎属于某 Agent 池时，除自己的队列外，
+    还可领取该池的未定任务（runtime_id=0 + pool_agent_type 匹配，领取后 runtime_id 定为
+    本引擎）。affinity_runtime_id 命中本引擎的任务优先（会话亲和，§4.5）。
     """
     with db_lock:
         c = db.cursor()
@@ -368,18 +443,35 @@ def claim(runtime_id) -> dict | None:
                             (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
                           )
                       )
-                  )
-                ORDER BY created_at ASC LIMIT 1
-            """, (runtime_id,))
+                    ORDER BY CASE WHEN affinity_runtime_id = ? THEN 0 ELSE 1 END, created_at ASC LIMIT 1
+                """, (runtime_id, *pools, runtime_id))
+            else:
+                c.execute("""
+                    SELECT id FROM agent_tasks
+                    WHERE runtime_id=? AND status='queued'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM agent_tasks a2
+                        WHERE a2.status IN ('dispatched','running')
+                          AND (
+                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                            OR
+                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                          )
+                      )
+                    ORDER BY created_at ASC LIMIT 1
+                """, (runtime_id,))
             row = c.fetchone()
             if not row:
                 db.commit()
                 return None
             task_id = row[0]
             c.execute(
-                "UPDATE agent_tasks SET status='dispatched', started_at=? WHERE id=? AND status='queued'",
-                (datetime.now(timezone.utc).isoformat(), task_id))
+                "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
+                (runtime_id, datetime.now(timezone.utc).isoformat(), task_id))
             claimed = c.rowcount > 0
+            if claimed:
+                # 槽位 +1（观测/池调度排序用；不硬限流，边端 RUNTIME_MAX_CONCURRENT_TASKS 仍控制执行并发）
+                c.execute("UPDATE agent_runtimes SET busy_slots=busy_slots+1 WHERE id=?", (runtime_id,))
             db.commit()
         except Exception as e:
             log.warning(f"claim failed: {e}")
@@ -407,7 +499,7 @@ def update_task_status(task_id, status, **kw):
     """终态幂等（重放安全）：已终态则不再更新（见 tech-impl §2.2）。"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT status FROM agent_tasks WHERE id=?", (task_id,))
+        c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
         if not row:
             return
@@ -420,6 +512,11 @@ def update_task_status(task_id, status, **kw):
                 sets.append(f"{col}=?")
                 params.append(kw[col])
         c.execute(f"UPDATE agent_tasks SET {', '.join(sets)} WHERE id=?", params + [task_id])
+        # 槽位释放（agent-cluster-design.md §4.2.1）：非终态 → 终态，且任务已绑定引擎 → busy_slots-1
+        if status in ("completed", "failed", "cancelled") and row[1] and row[1] > 0:
+            c.execute(
+                "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
+                (row[1],))
         db.commit()
 
 

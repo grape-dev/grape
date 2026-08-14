@@ -71,11 +71,17 @@ class FakeClient:
             return self.queue.pop(0)
         return None
 
-    async def requeue(self, task_id):
-        self.requeued.append(task_id)
-
     async def heartbeat(self, runtime_ids):
         pass
+
+    async def reset_session(self):
+        pass
+
+    async def fail(self, task_id, reason):
+        pass
+
+    async def requeue(self, task_id):
+        self.requeued.append(task_id)
 
 
 def _drive_loop(client, execute_fn, active_prefill=set()):

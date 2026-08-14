@@ -586,21 +586,29 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     import os as _os
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
-    # 1) event.json 骨架（#0 跳过，见 event_archive._extract_num）
-    _evt_copy = dict(evt)
-    _evt_copy["issue_id"] = issue_id
-    init_event_json(repo_key, seq, _evt_copy, agent_type, runtime=backend or "", skill=skill_name)
-    # 2) 确定路由：绑定 runtime_id；未绑定时用默认 opencode runtime id
+    # 1) 确定路由：绑定 runtime_id；引擎池模式（agent-cluster-design.md §4.1）→ runtime_id=0 + pool_agent_type
+    #    该 Agent 配置了引擎池时，任务由池内任意空闲引擎领取（claim 池调度）；否则按默认 runtime 兜底
+    pool_mode = False
     if not runtime_id:
         try:
-            from src.user.db import ensure_default_runtime
-            runtime_id = ensure_default_runtime("opencode") or 0
+            from src.runtime.service import pool_runtime_ids
+            if pool_runtime_ids(agent_type):
+                pool_mode = True
+            else:
+                from src.user.db import ensure_default_runtime
+                runtime_id = ensure_default_runtime("opencode") or 0
         except Exception:
             runtime_id = 0
-    if not runtime_id:
+    if not runtime_id and not pool_mode:
         log.warning(f"Pipeline enqueue: no runtime_id for repo={repo_key} agent={agent_type}, task skipped")
         _fail_event(seq, "入队失败：无可用 runtime（未配置引擎且不在引擎池）")
         return
+    # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名
+    inst_name = runtime_instance_name(runtime_id) or backend or "opencode"
+    # 2) event.json 骨架（#0 跳过，见 event_archive._extract_num）
+    _evt_copy = dict(evt)
+    _evt_copy["issue_id"] = issue_id
+    init_event_json(repo_key, seq, _evt_copy, agent_type, runtime=inst_name, skill=skill_name)
 
     repository = evt.get("repository", from_repo_key(repo_key))
     ws = get_agent_workdir(repo_key, agent_type, issue_id)
@@ -696,6 +704,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     from src.prompt_builder import build_prompt
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
+        append_skipped_event,
     )
     from src.runtime.instances import runtime_instance_name
 
