@@ -317,7 +317,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
             parts.append(f"  查询仓库 {repo} 最近的 Issue 评论（GET /repos/{repo.split('/')[0]}/{repo.split('/')[-1]}/issues/{{n}}/comments），")
             parts.append("  用评论内容匹配确认 Issue 编号，然后对用户评论进行回复。")
             parts.append("  注意：即使缺少编号，也必须对用户评论作出回复，不得静默跳过。")
-        parts.append("\n必须回复该评论：使用 POST /repos/{owner}/{repo}/issues/{n}/comments，body 以 [$AGENT_NAME] 开头并引用用户评论原文。")
+        parts.append("\n必须回复该评论：使用 POST /repos/{owner}/{repo}/issues/{n}/comments，body 按你的技能规定的评论前缀开头，并引用用户评论原文。")
     elif evt_type == "vod_signal":
         user_msg = payload.get("user_message", "")
         user_name = evt.get("actor", "未知用户")
