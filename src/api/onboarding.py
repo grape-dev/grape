@@ -41,6 +41,29 @@ def _mark_onboarding_started(repo_key: str):
     set_meta_value(f"onboarded:{repo_key}", "1")
 
 
+def clear_onboarding_mark(repo_key: str):
+    """清除 onboarding 幂等标记（带/不带 gitcode: 前缀两种 key）。
+
+    用于模板一键创建新仓库场景：仓库是全新创建的（GitCode 上此前不存在），
+    残留的 onboarded 标记必然来自被删除的旧仓库（如用户直接在 GitCode 网页
+    删除，未走解除托管流程，标记残留）——作废它，使新仓库重新触发引导。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        keys = [f"onboarded:{repo_key}"]
+        if repo_key.startswith("gitcode:"):
+            keys.append(f"onboarded:{repo_key[8:]}")
+        with db_lock:
+            c = db.cursor()
+            ph = ",".join("?" for _ in keys)
+            c.execute(f"DELETE FROM meta WHERE `key` IN ({ph})", keys)
+            if c.rowcount:
+                log.info(f"onboarding: cleared stale mark(s) for new repo {repo_key}: {c.rowcount}")
+            db.commit()
+    except Exception as e:
+        log.warning(f"onboarding: clear mark failed for {repo_key}: {e}")
+
+
 def _onboarding_workdir(repo_key: str) -> str:
     """引导工作目录（技能写结果文件位置）。"""
     from src.repo_key import from_repo_key
