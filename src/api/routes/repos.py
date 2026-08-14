@@ -290,7 +290,15 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         if api_token and global_bot_username:
             ok = add_collaborator(api_token, owner, repo_name, global_bot_username, "maintainer")
             if not ok:
-                raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 无法将全局 Bot（{global_bot_username}）加入仓库维护者"})
+                # 兜底：add_collaborator 失败可能是 GitCode 返回了未纳入幂等列表的错误
+                # （如 400"组织不存在"），此时 bot 可能早已是维护者——查实际权限确认
+                bot_perm = get_member_permission(api_token, owner, repo_name, global_bot_username)
+                access_level = (bot_perm or {}).get("access_level", 0) or 0
+                if access_level >= 40:
+                    log.info(f"host: add_collaborator failed but bot {global_bot_username} already maintainer "
+                             f"(access_level={access_level}) in {owner}/{repo_name}, continue")
+                else:
+                    raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 无法将全局 Bot（{global_bot_username}）加入仓库维护者"})
 
             # 用全局 bot token 自动接受项目邀请（invite 定制接口仅 grape_bot 可用）
             if global_bot_token:
