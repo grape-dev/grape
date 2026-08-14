@@ -57,11 +57,40 @@ cd /path/to/repo
 
 ### 3. 部署
 
-使用 `hcloud` CLI 部署到华为云。确认 hcloud 可用：
+使用 `hcloud` CLI 部署到华为云。**部署前先确认 hcloud 可用，缺失则自动安装**：
 
 ```bash
-hcloud version || echo "hcloud not installed"
+# 3.0 确保 hcloud 已安装（worker 无 hcloud 时自动动态安装）
+if ! command -v hcloud >/dev/null 2>&1; then
+  echo "hcloud not installed, trying to install..."
+  # 步骤 1：查询华为云官方 CLI 文档页，提取当前真实的下载地址
+  #   （官方下载地址会随版本/文档更新变化，禁止臆造 URL）
+  DOC_URL="https://support.huaweicloud.com/cli/index.html"
+  DL_URL=""
+  for cand in \
+    "$(curl -fsSL --max-time 20 "$DOC_URL" 2>/dev/null | grep -oE 'https://[^"'"'"' ]*(hcloud|cli)[^"'"'"' ]*\.(tar\.gz|zip)' | head -1)" \
+    "$(curl -fsSL --max-time 20 "https://support.huaweicloud.com/cli/cli_install.html" 2>/dev/null | grep -oE 'https://[^"'"'"' ]*\.(tar\.gz|zip)' | head -1)"; do
+    [ -n "$cand" ] && DL_URL="$cand" && break
+  done
+  if [ -n "$DL_URL" ]; then
+    # 步骤 2：下载并安装（自动适配 linux 架构）
+    curl -fsSL --max-time 180 -o /tmp/hcloud-install.bin "$DL_URL"
+    mkdir -p /tmp/hcloud-extract && tar -xzf /tmp/hcloud-install.bin -C /tmp/hcloud-extract 2>/dev/null \
+      || unzip -o /tmp/hcloud-install.bin -d /tmp/hcloud-extract >/dev/null 2>&1 \
+      || chmod +x /tmp/hcloud-install.bin
+    BIN=$(find /tmp/hcloud-extract -type f -name 'hcloud' -o -type f -name 'hcloud*' 2>/dev/null | head -1)
+    [ -n "$BIN" ] && install -m 0755 "$BIN" /usr/local/bin/hcloud
+  fi
+  # 步骤 3：兜底——若文档解析失败，按华为云 CLI 官方文档提示的渠道安装
+  if ! command -v hcloud >/dev/null 2>&1; then
+    echo "WARN: 自动安装 hcloud 失败，请按官方文档 https://support.huaweicloud.com/cli/index.html 手动安装，或联系管理员在 worker 预装 hcloud"
+  fi
+fi
+hcloud version || echo "hcloud still not installed — deployment cannot proceed, report clearly to user"
 ```
+
+> 硬约束：**禁止臆造 hcloud 下载 URL**。官方下载地址以文档页实时内容为准；解析失败时如实报告，
+> 不得用猜测的链接代替（防供应链风险）。
 
 通过环境变量 `HUAWEICLOUD_SDK_AK` 和 `HUAWEICLOUD_SDK_SK` 获取华为云凭证。根据项目类型选择部署目标并执行部署。
 

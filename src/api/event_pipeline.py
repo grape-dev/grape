@@ -647,6 +647,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         return
 
     env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
+    _inject_cloud_credentials(env_extra, repo_key)
     _issue_num = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
     if _issue_num:
         env_extra["ISSUE_NUMBER"] = str(_issue_num).lstrip("#")
@@ -687,6 +688,36 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _fail_event(seq, f"入队失败：enqueue_task 异常 {str(e)[:150]}")
         return
     log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} pool={agent_type if pool_mode else '-'} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
+
+
+def _inject_cloud_credentials(env_extra: dict, repo_key: str) -> dict:
+    """按仓库 owner 注入华为云 AK/SK 到任务环境变量（多用户隔离）。
+
+    cloud-deploy 技能读取 HUAWEICLOUD_SDK_AK / HUAWEICLOUD_SDK_SK 环境变量；
+    AK/SK 按 user_accounts.username（=GitCode login）分别存储，
+    仓库归谁所有就用谁的凭证（repo_owner → user_accounts）。
+    owner 未配置时注入空值，由技能侧报"请仓库 owner 配置华为云凭证"。
+    """
+    try:
+        from src.repo_key import split_owner_repo
+        owner, _repo = split_owner_repo(repo_key)
+        if not owner:
+            env_extra.setdefault("HUAWEICLOUD_SDK_AK", "")
+            env_extra.setdefault("HUAWEICLOUD_SDK_SK", "")
+            return env_extra
+        from src.user.db import get_user_account
+        acc = get_user_account(owner) or {}
+        ak = (acc.get("huawei_cloud_ak") or "").strip()
+        sk = (acc.get("huawei_cloud_sk") or "").strip()
+        env_extra["HUAWEICLOUD_SDK_AK"] = ak
+        env_extra["HUAWEICLOUD_SDK_SK"] = sk
+        if not (ak and sk):
+            log.warning(f"cloud credentials: repo owner '{owner}' has no Huawei Cloud AK/SK configured, injected empty")
+    except Exception as e:
+        log.warning(f"cloud credentials injection failed for {repo_key}: {e}")
+        env_extra.setdefault("HUAWEICLOUD_SDK_AK", "")
+        env_extra.setdefault("HUAWEICLOUD_SDK_SK", "")
+    return env_extra
 
 
 def get_prompt_context(repo_key: str) -> str:
@@ -797,6 +828,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         "REPO_FULL_NAME": repository,
         "ACCOUNT": exec_account,
     }
+    _inject_cloud_credentials(env_extra, repo_key)
     # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT / ONBOARDING_TARGET）
     _ext = evt.get("_env_extra") or {}
     if isinstance(_ext, dict):
