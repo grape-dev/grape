@@ -344,4 +344,98 @@ def test_onboarding_notify_reuses_same_endpoint_role(self):
 
 ---
 
+## 9. 扫码绑定个人飞书身份（补 open_id 缺失根因）
+
+> 背景：任务/onboarding 的飞书通知依赖 `unified_user_mapping.feishu_open_id`。
+> 但「扫码创建 bot」只落库 app_id/app_secret，**丢弃了 SDK 返回的扫码者 user_info（含 open_id）**，
+> 导致即便配置了 Chat Agent，个人 open_id 仍为空 → 通知静默跳过。
+
+### 9.1 根因
+
+`lark.aregister_app` 成功返回结构（SDK 测试 `test_app_preset.py` 实证）：
+
+```python
+result = {
+    "client_id": "cli_a",
+    "client_secret": "sec_a",
+    "user_info": {
+        "open_id": "ou_x",          # ← 扫码授权用户（个人）的飞书 open_id
+        "tenant_brand": "feishu",
+    },
+}
+```
+
+SDK `begin` 请求声明 `request_user_info: "open_id"`（`registration/__init__.py:341`），
+即飞书服务端会在授权成功时返回扫码者的 open_id。但 `feishu_onboard.py:_run_registration`
+**只取 client_id/client_secret，丢弃 user_info**：
+
+```python
+result = await lark.aregister_app(...)
+app_id = result.get("client_id", "")
+app_secret = result.get("client_secret", "")
+# user_info（含扫码者 open_id）未读取、未落库 ← 问题所在
+```
+
+### 9.2 修复方案
+
+`feishu_onboard.py:_run_registration`（`line 216-222`）补读 user_info 并回填 mapping：
+
+```python
+result = await lark.aregister_app(...)
+app_id = result.get("client_id", "")
+app_secret = result.get("client_secret", "")
+open_id = (result.get("user_info") or {}).get("open_id", "")   # ← 新增
+
+if bot_type == "vod_bot":
+    err, old_app_id = _apply_vod_credentials(repo_key, app_id, app_secret)
+else:
+    err, old_app_id = _apply_chat_credentials(user_id, app_id, app_secret)
+
+# 新增：扫码即绑定个人飞书身份（open_id → unified_user_mapping）
+# chat_bot / vod_bot 统一用扫码者（当前登录用户）的 gitcode_login 关联
+if open_id and not err:
+    try:
+        from src.session_manager import set_feishu_open_id
+        set_feishu_open_id(repo_key or "", user["username"], open_id,
+                           gitcode_nickname=user["username"])
+        log.info(f"Feishu onboard: bound open_id for {user['username']}")
+    except Exception as e:
+        log.warning(f"Feishu onboard: bind open_id failed: {e}")
+```
+
+### 9.3 关联策略（谁与 open_id 关联）
+
+| bot_type | 关联目标 | 说明 |
+|---|---|---|
+| chat_bot | **扫码者**（当前登录用户 `user["username"]`） | 扫码者即配置该 bot 的用户，直接用其 gitcode_login 关联 mapping |
+| vod_bot | **扫码者**（当前登录用户 `user["username"]`） | 与 chat_bot 一致；暂未发现 vod_bot 单独使用个人 open_id 的场景，统一关联扫码者，后续有需求再调整 |
+
+> 设计取舍：chat_bot 与 vod_bot **统一用扫码者（当前登录用户）的 gitcode_login** 关联，
+> 无需解析 repo owner。`set_feishu_open_id` 内部对未注册（无 `user_accounts`）的
+> gitcode_login 会跳过并记日志。
+> （`set_feishu_open_id` 对无 user_id 记录会跳过）。
+
+### 9.4 与任务通知的联动
+
+- 回填后，`_get_feishu_open_id(assignee)`（`tasks.py:64`）能查到 open_id → `_run_notify`
+  飞书通知生效。
+- onboarding 任务（assignee=owner）：owner 扫码绑定后即收通知；owner 未扫码仍静默
+  （可配合 §5.3 的降级说明）。
+
+### 9.5 涉及改动
+
+| 文件 | 改动 |
+|---|---|
+| `src/api/routes/feishu_onboard.py` | `_run_registration` 补读 user_info.open_id + 回填 mapping（chat_bot / vod_bot 统一用扫码者当前登录用户关联） |
+| 测试（可选） | 补用例：mock `aregister_app` 返回含 user_info，断言 `unified_user_mapping` 回填 open_id |
+| 本文档 | 本 §9 |
+
+### 9.6 风险
+
+- `user_info` 可能为空（服务端未返回）：`open_id` 兜底 `""`，不阻塞扫码成功（bot 照常创建）。
+- 扫码者（当前登录用户）若未注册平台：`set_feishu_open_id` 内部跳过（现有逻辑），仅日志提示。
+- 不迁移存量用户：仅新扫码用户生效；存量未绑定用户仍靠群昵称匹配回填。
+
+---
+
 *本文为设计文档，纳入 git（docs/new-version2/task-conversation-role-fix.md）。*

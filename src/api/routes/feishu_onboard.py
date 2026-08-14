@@ -209,7 +209,7 @@ async def _connect_bot(bot_type: str, repo_key: str, app_id: str, app_secret: st
         log.warning(f"Feishu onboard add_bot failed: {e}")
 
 
-async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id: int):
+async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id: int, username: str = ""):
     """后台运行 aregister_app 全流程。"""
     try:
         import lark_oapi as lark
@@ -220,6 +220,10 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
         )
         app_id = result.get("client_id", "")
         app_secret = result.get("client_secret", "")
+        # 扫码者（授权用户）的个人飞书 open_id：SDK 在 request_user_info=open_id 时返回，
+        # 用于回填 unified_user_mapping.feishu_open_id，使任务/onboarding 飞书通知可用
+        #（见 task-conversation-role-fix.md §9）
+        open_id = (result.get("user_info") or {}).get("open_id", "")
 
         if bot_type == "vod_bot":
             err, old_app_id = _apply_vod_credentials(repo_key, app_id, app_secret)
@@ -231,6 +235,16 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
                          finished_at=datetime.now().isoformat())
             log.warning(f"Feishu onboard failed: task={task_id} err={err}")
             return
+
+        # 扫码即绑定个人飞书身份（chat_bot / vod_bot 统一用扫码者 username 关联）
+        if open_id and username:
+            try:
+                from src.session_manager import set_feishu_open_id
+                set_feishu_open_id(repo_key or "", username, open_id,
+                                   gitcode_nickname=username)
+                log.info(f"Feishu onboard: bound open_id for {username} (task={task_id[:8]})")
+            except Exception as e:
+                log.warning(f"Feishu onboard: bind open_id failed: {e}")
 
         _update_task(task_id, status=_STATUS_CONNECTED, app_id=app_id, app_secret=app_secret,
                      finished_at=datetime.now().isoformat())
@@ -265,7 +279,8 @@ async def start_onboard(body: StartBody, user: dict = Depends(get_current_user))
 
     task_id = uuid.uuid4().hex
     _create_task(task_id, body.bot_type, body.repo_key, user["id"])
-    task = asyncio.create_task(_run_registration(task_id, body.bot_type, body.repo_key, user["id"]))
+    task = asyncio.create_task(_run_registration(task_id, body.bot_type, body.repo_key,
+                                                 user["id"], user.get("username", "")))
     _TASKS[task_id] = task
     log.info(f"Feishu onboard start: task={task_id} bot_type={body.bot_type} user={user['id']}")
     return {"task_id": task_id, "status": _STATUS_PENDING}
