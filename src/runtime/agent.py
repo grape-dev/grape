@@ -354,7 +354,7 @@ async def _reregister(client, installed, device_name) -> list[int] | None:
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
-        ids = await client.register(installed, device_name=device_name)
+        ids, _ = await client.register(installed, device_name=device_name)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
