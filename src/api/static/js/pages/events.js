@@ -11,6 +11,13 @@ function renderEventDetail(data) {
   _convSeq = data.seq;
   _convAgent = agent;
 
+  // Issue 编号 → GitCode 超链接（repo_key 已去前缀为 owner/repo，issue_id 为 #N）
+  const _issNum = String(data.issue_id || '').replace(/^#/, '');
+  const _repoParts = (data.repo_key || '').split('/');
+  const _issueLink = (_issNum && _repoParts.length === 2)
+    ? `<a href="https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issNum}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${data.issue_id}</a>`
+    : `Issue ${data.issue_id || '—'}`;
+
   // M4：结构化产出（event.json archive 对应段，见 §11.4）
   let structuredHtml = '';
   const arch = data.archive || null;
@@ -35,7 +42,7 @@ function renderEventDetail(data) {
       <div class="tx t2" style="margin-bottom:12px;line-height:1.6;flex-shrink:0">
         <div>Trigger: ${data.event_type || '—'}</div>
         <div>Repository: ${data.repo_key || ''}</div>
-        <div>Issue: ${data.issue_id || '—'}</div>
+        <div>Issue: ${_issueLink}</div>
         <div>Actor: ${data.actor || '—'}</div>
         <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
       </div>
@@ -54,7 +61,7 @@ function renderEventDetail(data) {
           <div><span style="color:var(--t3)">Runtime:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b></div>
           ${data.engine_instance ? `<div><span style="color:var(--t3)">Engine:</span> <b>${data.engine_instance}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>` : ''}
           <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
-          <div><span style="color:var(--t3)">Issue:</span> ${data.issue_id || '—'}</div>
+          <div><span style="color:var(--t3)">Issue:</span> ${_issueLink}</div>
           <div><span style="color:var(--t3)">Actor:</span> @${data.actor || '—'}</div>
           <div><span style="color:var(--t3)">Agent:</span> ${agent}</div>
           <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
