@@ -244,11 +244,18 @@ EOF
 fi
 
 # ===== 7. 执行引擎提示 =====
+_engine_hint=""
 if ! command -v opencode >/dev/null 2>&1; then
-  log "未检测到执行引擎（opencode 等）。请自行安装后重启 worker："
-  log "  npm install -g opencode-ai"
+  _engine_hint="  npm install -g opencode-ai（opencode 引擎）"
+fi
+if ! command -v hermes >/dev/null 2>&1; then
+  _engine_hint="${_engine_hint:+$_engine_hint\n}  pip install hermes（hermes 引擎）"
+fi
+if [ -n "$_engine_hint" ]; then
+  log "未检测到执行引擎。请自行安装后重启 worker："
+  printf "%b\n" "$_engine_hint"
   if [ "$ROOT_MODE" = "1" ]; then log "  systemctl restart runtime-agent"; else log "  $START_SCRIPT"; fi
-  log "（引擎类型不限定 opencode，worker 启动会自动发现本机已装引擎）"
+  log "（引擎类型不限定，worker 启动会自动发现本机已装引擎并注册）"
 fi
 
 log "安装完成！验证注册："

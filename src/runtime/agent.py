@@ -96,13 +96,24 @@ def _remap_cwd(path: str) -> str:
     return path
 
 
-def _kill_stale_opencode(task: dict):
-    """超时后杀掉对应 opencode 子进程。按 cwd 匹配，避免误杀其他任务。"""
+def _backend_for_engine(engine_name: str | None = "") -> str:
+    """由引擎实例名推导执行后端（hermes-xxx → hermes；codearts-xxx → codearts；其余默认 opencode）。"""
+    name = (engine_name or "").lower()
+    if name.startswith("hermes"):
+        return "hermes"
+    if name.startswith("codearts"):
+        return "codearts"
+    return "opencode"
+
+
+def _kill_stale_engine(task: dict, backend: str = "opencode"):
+    """超时后杀掉对应引擎子进程（opencode run / hermes -z / codearts run）。按 cwd 匹配，避免误杀其他任务。"""
     import subprocess, signal
     cwd = _remap_cwd(task.get("cwd") or os.getcwd())
+    pattern = {"hermes": "hermes -z", "codearts": "codearts run"}.get(backend, "opencode run")
     try:
         out = subprocess.run(
-            ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", "opencode run"],
+            ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", pattern],
             capture_output=True, text=True, timeout=5
         )
         for pid_str in out.stdout.strip().split():
@@ -112,11 +123,11 @@ def _kill_stale_opencode(task: dict):
                 if proc_cwd.startswith(cwd):
                     pgid = os.getpgid(pid)
                     os.killpg(pgid, signal.SIGTERM)
-                    log.info(f"killed opencode pid={pid} pgid={pgid} cwd={proc_cwd}")
+                    log.info(f"killed {backend} pid={pid} pgid={pgid} cwd={proc_cwd}")
             except Exception as e:
                 log.debug(f"skip pid={pid}: {e}")
     except Exception as e:
-        log.warning(f"_kill_stale_opencode failed: {e}")
+        log.warning(f"_kill_stale_engine({backend}) failed: {e}")
 
 
 def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
@@ -300,7 +311,7 @@ async def _execute_task(client, task, engine_name: str = ""):
         for evt_type, data in stream_runtime(
             prompt, cwd, session_id=task.get("runtime_session_id") or "",
             event_type=task.get("event_type") or "",
-            backend_name="opencode",
+            backend_name=_backend_for_engine(engine_name),
             account=task.get("account") or "", user_id=task.get("user_id") or 0,
             env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
             agent_label=_agent_label,
@@ -427,8 +438,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         await asyncio.wait_for(_execute_task(client, t, e), timeout=task_timeout)
                 except asyncio.TimeoutError:
                     log.warning(f"task {_tid} timed out after {task_timeout}s, killing child processes and failing")
-                    # 杀掉超时任务的 opencode 子进程（按 cwd 匹配，避免误杀其他任务）
-                    _kill_stale_opencode(t)
+                    # 杀掉超时任务的引擎子进程（按 cwd 匹配，避免误杀其他任务；backend 按引擎名推导）
+                    _kill_stale_engine(t, _backend_for_engine(e))
                     try:
                         await client.fail(_tid, f"task timed out after {task_timeout}s")
                     except Exception:
