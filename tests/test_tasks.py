@@ -176,6 +176,84 @@ class TestNotify:
             ).fetchall()
         assert len(rows) == 1, rows
 
+    def test_notify_prewrite_role_is_agent(self):
+        """任务分配预写入消息应为 agent（bot 下发），而非 user；任务描述只出现一次。
+
+        回归看护：task-conversation-role-fix.md §7.1
+        """
+        _clean_tasks()
+
+        def _swallow(coro, *a, **k):
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
+
+        with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
+                "assignee": "younger_eric", "repo_key": "org/test",
+                "issue_number": 12, "task_description": "处理登录超时"})
+        assert r.status_code == 200
+        conv_id = r.json()["conversation_id"]
+        assert conv_id
+
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT role, content FROM chat_messages WHERE conversation_id=? ORDER BY id",
+                (conv_id,)).fetchall()
+        assert rows, "会话应有消息"
+        first_role, first_content = rows[0]
+        assert first_role == "agent", f"预写入消息 role 应为 agent，实际 {first_role}"
+        assert "任务分配" in first_content
+        # 任务描述在整个会话中只出现一次（无 _run_notify 重复写入）
+        desc_count = sum(1 for _, content in rows if "处理登录超时" in content)
+        assert desc_count == 1, f"任务描述应只出现一次，实际 {desc_count}"
+
+    def test_notify_message_roles_order(self):
+        """会话消息顺序：agent(任务分配) 开头，后续出现用户答复。"""
+        _clean_tasks()
+
+        def _swallow(coro, *a, **k):
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
+
+        with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
+                "assignee": "younger_eric", "repo_key": "org/test",
+                "issue_number": 13, "task_description": "描述B"})
+        assert r.status_code == 200
+        conv_id = r.json()["conversation_id"]
+        assert conv_id
+
+        from src.session_manager import add_message
+        add_message(conv_id, "user", "好的，我开始处理")
+
+        with db_lock:
+            c = db.cursor()
+            roles = [row[0] for row in c.execute(
+                "SELECT role FROM chat_messages WHERE conversation_id=? ORDER BY id",
+                (conv_id,)).fetchall()]
+        assert roles and roles[0] == "agent", f"首条必须是 agent，实际 {roles}"
+        assert "user" in roles, "后续应有用户答复"
+
+    def test_build_task_context_message_content(self):
+        """任务上下文消息内容：含 Issue 号/仓库/标题/任务描述，结尾为下发询问语气。"""
+        msg = tasks_mod._build_task_context_message(
+            title="登录超时", task_description="处理登录超时",
+            repo_key="org/test", issue_number=5)
+        assert "任务分配" in msg
+        assert "#5" in msg
+        assert "org/test" in msg
+        assert "登录超时" in msg
+        assert "处理登录超时" in msg
+        # 结尾为 bot 下发询问（等待用户确认），而非用户自述
+        assert "沟通" in msg or "确认" in msg or "疑问" in msg
+
 
 class TestClose:
     def test_close_marks_completed(self):

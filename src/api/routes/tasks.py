@@ -174,7 +174,8 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
             if evt_type == "done":
                 final_text = data.get("text", "") if isinstance(data, dict) else ""
 
-        add_message(conv_id, "user", task_description)
+        # 预写入已含完整任务上下文（含 task_description），此处仅追加 agent 回复，
+        # 不再重复写 user 任务描述（见 task-conversation-role-fix.md §3.2）
         if final_text:
             add_message(conv_id, "agent", final_text)
 
@@ -262,9 +263,11 @@ async def notify_task(body: TaskNotifyBody, request: Request):
             c.execute("UPDATE tasks SET conversation_id=? WHERE id=?", (conv_id, task_id))
             db.commit()
         # 立即写入任务上下文消息（不等后台 agent，保证会话非空、去对话可见上下文）
+        # role=agent：任务由 grape_bot 下发，UI 显示在 agent 侧，等待用户答复确认
+        #（见 task-conversation-role-fix.md §3.1）
         try:
             ctx_msg = _build_task_context_message(title, body.task_description, body.repo_key, body.issue_number)
-            add_message(conv_id, "user", ctx_msg)
+            add_message(conv_id, "agent", ctx_msg)
         except Exception as e:
             log.warning(f"Task notify write context message failed: {e}")
     except Exception as e:
