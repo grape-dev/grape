@@ -53,7 +53,9 @@ public class SkillService {
     private static final Set<String> ALLOWED_EXTS = Set.of(".md", ".txt", ".json", ".yaml", ".yml", ".py", ".sh", ".js", ".ts");
     private static final Set<String> PROJECT_SKILLS = Set.of("pr", "issue", "implementation", "build-debug", "deploy-guard",
             "incident-triage", "changelog-gen", "chat", "cloud-deploy", "im-notify", "agent");
-    private static final long MAX_ZIP_BYTES = 10L * 1024 * 1024;
+    // 上传大小上限（可配 app.max-zip-bytes，默认 10MB）
+    @Value("${app.max-zip-bytes:10485760}")
+    private long maxZipBytes;
 
     private final SkillRoRepository skillRepository;
     private final Path skillsDir;
@@ -346,7 +348,7 @@ public class SkillService {
         if (!VALID_AGENT_TYPES.contains(agentType)) {
             throw new BizException("技能类型不合法，可选: " + VALID_AGENT_TYPES.stream().sorted().collect(Collectors.joining(", ")));
         }
-        if (size > MAX_ZIP_BYTES) {
+        if (size > maxZipBytes) {
             throw new BizException("Skill 文件不能超过 10MB");
         }
 
@@ -564,7 +566,7 @@ public class SkillService {
         if (!VALID_AGENT_TYPES.contains(agentType)) {
             throw new BizException("技能类型不合法，可选: " + VALID_AGENT_TYPES.stream().sorted().collect(Collectors.joining(", ")));
         }
-        if (size > MAX_ZIP_BYTES) {
+        if (size > maxZipBytes) {
             throw new BizException("Skill 文件不能超过 10MB");
         }
 

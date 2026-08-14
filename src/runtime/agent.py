@@ -23,8 +23,10 @@ from src.config import log
 # v3.0：OBS 直连能力 + 自适应降级状态（运行时能力反馈 C）
 _OBS_SUPPORT = False      # 启动探测结果（supports_obs_url）
 _OBS_FALLBACK = False     # 直连不稳 → claim 声明 prefer_fallback
-_OBS_FAIL_STREAK = 0      # 连续 URL/代拉失败计数（≥3 降级）
-_OBS_OK_STREAK = 0        # 连续成功计数（≥3 恢复）
+_OBS_FAIL_STREAK = 0      # 连续 URL/代拉失败计数（≥阈值降级）
+_OBS_OK_STREAK = 0        # 连续成功计数（≥阈值恢复）
+# 降级/恢复阈值（可配 env RUNTIME_OBS_FALLBACK_THRESHOLD，默认 3）
+_OBS_FALLBACK_THRESHOLD = int(os.environ.get("RUNTIME_OBS_FALLBACK_THRESHOLD", "3"))
 
 
 def _env_float(name, default):
@@ -190,7 +192,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                 global _OBS_FAIL_STREAK, _OBS_OK_STREAK, _OBS_FALLBACK
                 _OBS_FAIL_STREAK = 0
                 _OBS_OK_STREAK += 1
-                if _OBS_OK_STREAK >= 3 and _OBS_FALLBACK:
+                if _OBS_OK_STREAK >= _OBS_FALLBACK_THRESHOLD and _OBS_FALLBACK:
                     _OBS_FALLBACK = False
                     _OBS_OK_STREAK = 0
                     log.info("[skill] OBS 直连恢复（连续 3 次成功）")
@@ -199,7 +201,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                 # v3.0 能力反馈：连续失败 → 声明 prefer_fallback（服务端直接代拉模式）
                 _OBS_FAIL_STREAK += 1
                 _OBS_OK_STREAK = 0
-                if _OBS_FAIL_STREAK >= 3 and not _OBS_FALLBACK:
+                if _OBS_FAIL_STREAK >= _OBS_FALLBACK_THRESHOLD and not _OBS_FALLBACK:
                     _OBS_FALLBACK = True
                     _OBS_FAIL_STREAK = 0
                     log.warning("[skill] OBS 直连不稳定，降级为服务端代拉（prefer_fallback）")

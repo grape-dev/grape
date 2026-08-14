@@ -159,8 +159,8 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
                 _c = db.cursor()
                 _row = _c.execute(
                     "SELECT file_path FROM skill WHERE file_path != '' AND is_active=1 LIMIT 1").fetchone()
-            if _row and _row[0]:
-                probe_url = _storage.temporary_url(_row[0], expires=300)
+            if (_row and _row[0]):
+                probe_url = _storage.temporary_url(_row[0], expires=int(os.environ.get("RUNTIME_PROBE_URL_TTL", "300")))
     except Exception:
         pass
     return {"runtimes": registered, "server_url": _server_url(), "probe_url": probe_url}
