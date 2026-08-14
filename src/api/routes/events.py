@@ -4,6 +4,7 @@ import os
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user
+from src.config import log
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
@@ -136,7 +137,124 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
     result["engine_device"] = engine_device
     result["engine_ip"] = engine_ip
 
+    # 关联任务（重派按钮展示/判定用，见 event-redispatch-design.md §4.1.1）
+    task_info = {"task_id": "", "task_status": "", "runtime_id": 0,
+                 "runtime_session_id": "", "task_created_at": "", "task_started_at": ""}
+    try:
+        with db_lock:
+            c4 = db.cursor()
+            c4.execute(
+                "SELECT id, status, runtime_id, runtime_session_id, created_at, started_at "
+                "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                (seq,))
+            tr3 = c4.fetchone()
+            if tr3:
+                task_info = {
+                    "task_id": tr3[0], "task_status": tr3[1], "runtime_id": tr3[2] or 0,
+                    "runtime_session_id": tr3[3] or "", "task_created_at": tr3[4] or "",
+                    "task_started_at": tr3[5] or "",
+                }
+    except Exception:
+        pass
+    result["task"] = task_info
+
     return result
+
+
+@router.post("/{seq}/redispatch")
+async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
+    """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
+
+    见 event-redispatch-design.md §4.1.2：
+    - 关联任务非终态（dispatched/running）→ requeue 置回 queued；
+    - 关联任务终态/缺失（含事件 failed）→ 复用原 task 快照参数重新 enqueue_task；
+    - 事件状态回写 running。30s 内重复调用幂等拒绝。
+    """
+    import json as _json
+    from src.session_manager import db, db_lock
+    from src.runtime.service import requeue_task, get_task, enqueue_task
+    from src.api.event_store import update_event_status
+
+    # 1) 幂等：30s 内已重派过则拒绝
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        _last = get_meta_value(f"redispatch:{seq}") or ""
+        if _last:
+            import time as _time
+            try:
+                if _time.time() - float(_last) < 30:
+                    raise HTTPException(status_code=409, detail={"code": 409, "message": "已重新派发过，请 30s 后再试"})
+            except ValueError:
+                pass
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    evt = _load_event(seq)
+
+    # 2) 查关联任务
+    task_id = ""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, status FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (seq,))
+        tr = c.fetchone()
+        if tr:
+            task_id, task_status = tr[0], tr[1] or ""
+
+    # 3) 分支处理
+    if task_id and task_status in ("dispatched", "running"):
+        # 非终态 → requeue 置回 queued，worker 重新 claim
+        requeue_task(task_id)
+    else:
+        # 终态/缺失 → 复用原 task 快照参数新建任务（新 task_id，清空 runtime_session_id）
+        if task_id:
+            old = get_task(task_id)
+            if old:
+                _sid = old.get("issue_session_id") or ""
+                _env = {}
+                try:
+                    _env = _json.loads(old.get("env_extra") or "{}")
+                except Exception:
+                    _env = {}
+                enqueue_task(
+                    agent_session_id=old.get("agent_session_id") or "",
+                    runtime_id=old.get("runtime_id") or 0,
+                    event_seq=old.get("event_seq"),
+                    issue_id=old.get("issue_id") or "#0",
+                    repo_key=old.get("repo_key") or "",
+                    agent_type=old.get("agent_type") or "",
+                    skill=old.get("skill") or "",
+                    prompt=old.get("prompt") or "",
+                    cwd=old.get("cwd") or "",
+                    runtime_session_id="",  # 全新上下文，避免复用坏会话
+                    event_type=old.get("event_type") or "",
+                    account=old.get("account") or "",
+                    user_id=old.get("user_id") or 0,
+                    repo_gitcode_token=old.get("repo_gitcode_token") or "",
+                    env_extra=_env,
+                    # skill_files / project_info / knowledge 不传 → enqueue 内部重新打包
+                    server_url=old.get("server_url") or "",
+                    issue_session_id=_sid,
+                )
+            else:
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
+        else:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "该事件无关联任务，无法重派"})
+
+    # 4) 事件状态回写 running
+    update_event_status(seq, "running")
+
+    # 5) 记录幂等时间戳
+    try:
+        from src.user.db import set_meta_value
+        import time as _time
+        set_meta_value(f"redispatch:{seq}", str(_time.time()))
+    except Exception:
+        pass
+
+    log.info(f"[redispatch] seq={seq} repo={evt['repo_key']} agent={evt['agent_type']} task={task_id or '(new)'} by={user.get('username','')}")
+    return {"status": "redispatched", "task_id": task_id or "(new)", "event_seq": seq}
 
 
 # ====== Event 对话（event-conversation-design.md）======

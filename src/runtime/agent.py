@@ -178,9 +178,9 @@ async def _execute_task(client, task, engine_name: str = ""):
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
 
-    await client.task_start(tid)
     done = None
     batch = []
+    started = False
     try:
         from src.runtime.executor import stream_runtime
         _agent_label = f"[Agent:{task.get('agent_type') or ''}|repo:{task.get('repo_key') or ''}{_engine_tag}]"
@@ -209,6 +209,11 @@ async def _execute_task(client, task, engine_name: str = ""):
             if evt_type == "done":
                 done = data
                 continue
+            # 引擎确已开始执行（opencode 已 Popen 并产出首个执行事件）→ 才置 running。
+            # 此前任务保持 dispatched（引擎启动失败/未执行不误标 running，见 event-redispatch-design.md §2.2）
+            if not started and evt_type in ("step_start", "text", "tool_use"):
+                await client.task_start(tid)
+                started = True
             # 逐步日志（本地模式同款，供 worker 侧 journalctl 观察执行过程）；前缀含 seq 便于定位
             if evt_type == "step_start":
                 log.info(f"  [{_esq}] ▶ {data}")
@@ -229,7 +234,10 @@ async def _execute_task(client, task, engine_name: str = ""):
             await asyncio.sleep(0)
         if batch:
             await client.report_messages(tid, batch)
-        if done:
+        # 引擎从未产出执行事件即结束 → 直接 fail（任务保持 dispatched→failed，跳过 running）
+        if not started and not done:
+            await client.fail(tid, "engine did not start / no output")
+        elif done:
             await client.complete(tid, done.get("text", ""), done.get("exit_code", 0),
                                   session_id=done.get("oc_session_id", ""), work_dir=cwd)
         else:
