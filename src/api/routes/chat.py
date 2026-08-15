@@ -588,12 +588,24 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
 @router.get("/config")
 async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
     cfg = _get_chat_config(user["id"])
-    # Chat Agent 仅可选个人引擎（scope=user，见 runtime-admin-two-view-design §5.1）
+    # Chat 后端可选面：本机直连（默认兜底，engine-selection-design.md §8.2）+ 个人引擎（scope=user，显式选择）
     from src.runtime.instances import instance_name
+    from src.user.db import is_known_engine_name
     from src.session_manager import db, db_lock
     backends = []
     with db_lock:
         c = db.cursor()
+        # 本机直连引擎（credential_id=0，已知类型且已装）
+        try:
+            c.execute("SELECT id, name, version FROM agent_runtimes WHERE credential_id=0 AND installed=1 ORDER BY id")
+            for r in c.fetchall():
+                _rid, ename, ver = r
+                if not is_known_engine_name(ename or ""):
+                    continue
+                backends.append({"name": ename, "display_name": f"{ename} v{ver or ''}（本机直连）", "scope": "local", "owner": ""})
+        except Exception:
+            pass
+        # 个人引擎（scope=user）
         try:
             c.execute("""
                 SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id
