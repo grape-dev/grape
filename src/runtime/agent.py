@@ -108,6 +108,48 @@ def _kill_stale_opencode(task: dict):
         log.warning(f"_kill_stale_opencode failed: {e}")
 
 
+async def _stream_runtime_async(*args, **kwargs):
+    """把同步生成器 stream_runtime 放到后台线程迭代，事件循环不被 readline() 阻塞。
+
+    见 worker-event-loop-block-rootcause.md §8：方案 1（await sleep(0)）只在生成器每次 yield 时
+    让出；当 opencode 执行长命令静默无输出（readline 阻塞）时事件循环仍被占住。本函数把
+    同步迭代移入线程，通过线程安全 queue.Queue 桥接事件，彻底消除阻塞。
+    """
+    import queue as _queue
+    from src.runtime.executor import stream_runtime
+    q: _queue.Queue = _queue.Queue(maxsize=256)
+    sentinel = object()
+
+    def _produce():
+        try:
+            for evt in stream_runtime(*args, **kwargs):
+                while True:
+                    try:
+                        q.put_nowait(evt)
+                        break
+                    except _queue.Full:
+                        # 队列满：短暂让出，等消费者消费；sleep 在子线程安全
+                        import time as _t
+                        _t.sleep(0.001)
+        except Exception as e:
+            log.warning(f"stream_runtime producer error: {e}")
+        finally:
+            q.put(sentinel)
+
+    import threading
+    _t = threading.Thread(target=_produce, daemon=True)
+    _t.start()
+    while True:
+        try:
+            evt = q.get_nowait()
+        except _queue.Empty:
+            await asyncio.sleep(0.001)  # 轮询间隔，同时让出事件循环
+            continue
+        if evt is sentinel:
+            break
+        yield evt
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。
 
@@ -198,7 +240,10 @@ async def _execute_task(client, task, engine_name: str = ""):
         if engine_name:
             _esq_parts.append(f"engine:{engine_name}")
         _esq = "|".join(_esq_parts)
-        for evt_type, data in stream_runtime(
+        # 方案 2：线程化迭代 stream_runtime（worker-event-loop-block-rootcause.md §8.5）——
+        # 同步生成器的 readline() 阻塞移到后台线程，事件循环持续调度 claim/heartbeat，
+        # 根治「长命令静默无输出」期间的事件循环停摆（替代方案 1 的 await sleep(0)）。
+        async for evt_type, data in _stream_runtime_async(
             prompt, cwd, session_id=task.get("runtime_session_id") or "",
             event_type=task.get("event_type") or "",
             backend_name="opencode",
@@ -229,9 +274,6 @@ async def _execute_task(client, task, engine_name: str = ""):
             if len(batch) >= 50:
                 await client.report_messages(tid, batch)
                 batch = []
-            # 每次迭代让出事件循环，避免同步生成器迭代阻塞 claim/heartbeat
-            # （见 worker-event-loop-block-rootcause.md 方案 1）
-            await asyncio.sleep(0)
         if batch:
             await client.report_messages(tid, batch)
         # 引擎从未产出执行事件即结束 → 直接 fail（任务保持 dispatched→failed，跳过 running）

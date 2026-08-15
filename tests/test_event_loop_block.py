@@ -47,6 +47,18 @@ def _slow_stream_runtime(*args, **kwargs):
     yield ("done", {"exit_code": 0, "text": "done", "oc_session_id": ""})
 
 
+def _silent_long_stream_runtime(*args, **kwargs):
+    """模拟「长命令静默无输出」：生成器长时间 sleep 阻塞（readline 卡住），期间无任何 yield。
+
+    对应 worker-event-loop-block-rootcause.md §8.3：方案 1（await sleep(0)）在此场景下失效，
+    因为生成器停在 readline() 上、没有 yield 就没有让出点。
+    """
+    for i in range(3):
+        time.sleep(0.2)          # 0.2s 长静默（模拟 opencode 长命令无输出）
+        yield ("step_start", f"Step {i+1}")
+    yield ("done", {"exit_code": 0, "text": "done", "oc_session_id": ""})
+
+
 class TestEventLoopBlock:
     def _build_task(self, monkeypatch):
         """构造最小 task dict，供 _execute_task 使用。"""
@@ -114,3 +126,43 @@ class TestEventLoopBlock:
         asyncio.run(runtime_agent._execute_task(client, task))
         assert "t_slow_1" in client.started
         assert any(tid == "t_slow_1" for tid, _ in client.completed), "慢任务完成后应 complete"
+
+    def test_heartbeat_scheduled_during_silent_long_command(self, monkeypatch):
+        """「长命令静默无输出」场景下事件循环不得被阻塞（worker-event-loop-block-rootcause.md §8.3/8.5）。
+
+        方案 1（await sleep(0)）在生成器停在 readline 上时失效（无 yield 无让出点）；
+        方案 2（线程化 _stream_runtime_async）把 readline() 阻塞移到后台线程，事件循环保持调度。
+        """
+        monkeypatch.setattr("src.runtime.executor.stream_runtime", _silent_long_stream_runtime)
+        client = _SlowClient()
+        task = self._build_task(monkeypatch)
+
+        async def _run():
+            heartbeats = {"n": 0}
+
+            async def _heartbeat():
+                while True:
+                    heartbeats["n"] += 1
+                    await asyncio.sleep(0.005)
+
+            hb_task = asyncio.create_task(_heartbeat())
+            exec_task = asyncio.create_task(runtime_agent._execute_task(client, task))
+            await exec_task
+            hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
+            return heartbeats["n"], client
+
+        hb_count, client = asyncio.run(_run())
+
+        # 3 个静默段 × 0.2s = 0.6s 执行窗口；heartbeat 每 0.005s → 期望约 120 次
+        # 方案 1（sleep(0)）下 0.2s 静默无 yield → heartbeat 被冻结，计数远低于期望；
+        # 方案 2（线程化）下生成器阻塞在线程中，事件循环持续调度 heartbeat。
+        assert hb_count >= 10, (
+            f"长命令静默期间事件循环被阻塞：heartbeat 仅调度 {hb_count} 次（期望持续调度）。"
+            f"修复：_stream_runtime_async 线程化迭代 stream_runtime，readline() 阻塞不占事件循环。"
+        )
+        assert "t_slow_1" in client.started
+        assert any(tid == "t_slow_1" for tid, _ in client.completed), "静默长任务完成后应 complete"
