@@ -418,8 +418,9 @@ class TestRuntimeAdminViews:
         app_a.dependency_overrides.clear()
         app_b.dependency_overrides.clear()
 
-    def test_refresh_no_cred0_placeholder_when_bound_exists(self):
-        """save_agent_runtimes：已有凭据绑定行时，不再创建 credential_id=0 占位行（防 -cred0 孤儿）"""
+    def test_refresh_creates_local_direct_even_when_bound_exists(self):
+        """save_agent_runtimes（refresh，engine-selection-design.md §4.3 方案1）：
+        真实安装的本机 CLI 生成本机直连行（credential_id=0），即使同名已有凭据绑定行；未安装不建行（防 -cred0 幽灵）。"""
         app = self._admin_user("zoe")
         c = TestClient(app)
         r = c.post("/api/settings/runtime-credentials", json={"name": "zoe-w", "scope": "global"})
@@ -427,12 +428,18 @@ class TestRuntimeAdminViews:
         c.post("/api/runtime/register", json={"device_name": "zoe-dev", "runtimes": [{"name": "opencode"}]},
                headers={"Authorization": f"Bearer {token}"})
         from src.user.db import save_agent_runtimes
+        # 真实安装（installed=True）→ 生成 credential_id=0 本机直连行
         save_agent_runtimes([{"name": "opencode", "installed": True, "cli_path": "/local", "version": "9", "healthy": True}])
         from src.session_manager import db, db_lock
         with db_lock:
             rows = db.cursor().execute("SELECT credential_id FROM agent_runtimes WHERE name='opencode'").fetchall()
-        # 仅凭据绑定行（credential_id>0），不得再生 credential_id=0 占位行
-        assert rows and all(rr[0] > 0 for rr in rows), f"不应再生 credential_id=0 占位行: {rows}"
+        assert any(rr[0] > 0 for rr in rows), "凭据绑定行应保留"
+        assert any(rr[0] == 0 for rr in rows), "本机直连行（credential_id=0）应生成"
+        # 未安装 → 不建 credential_id=0 占位行（防 -cred0 幽灵）
+        save_agent_runtimes([{"name": "hermes", "installed": False, "cli_path": "", "version": "", "healthy": False}])
+        with db_lock:
+            cnt = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE name='hermes' AND credential_id=0").fetchone()[0]
+        assert cnt == 0, "未安装引擎不得生成 credential_id=0 占位行"
         app.dependency_overrides.clear()
 
 

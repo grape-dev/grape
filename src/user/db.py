@@ -1556,16 +1556,16 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                      a.get("pip_package", ""), row[0])
                 )
             else:
-                # 防再生：若该引擎名已有凭据绑定行（边端 register 承载），不再创建 credential_id=0 占位行
-                #（否则会再生出 `{name}-cred0` 的离线孤儿行，见 runtime-admin-two-view-design §6.2）
-                c.execute("SELECT 1 FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id>0 LIMIT 1",
-                          (name, scope, owner_id))
-                if c.fetchone():
+                # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。
+                # refresh 仅持久化"真实安装"的本机 CLI（settings.py 已过滤 installed），即使同名已有
+                # 凭据绑定行（远端 worker），也创建本机直连行；未安装则跳过（防 -cred0 幽灵占位，
+                # 见 runtime-admin-two-view-design §6.2）。
+                if not a.get("installed"):
                     continue
                 c.execute(
                     "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
                     (name, a.get("display_name", name),
-                     1 if a.get("installed") else 0, a.get("cli_path", ""),
+                     1, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
                      a.get("pip_package", ""), scope, owner_id)
                 )
