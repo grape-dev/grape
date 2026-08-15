@@ -154,6 +154,17 @@ class TestResolveDefaultEngine:
         assert es.resolve_default_engine("owner/repo") is None
 
 
+class TestResolveLocalEngine:
+    def test_resolve_local_engine_returns_healthy_local(self):
+        loc_eng = _mk_engine("opencode-l", credential_id=0)
+        assert es.resolve_local_engine() == loc_eng
+
+    def test_resolve_local_engine_ignores_remote_and_unhealthy(self):
+        _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))          # 远端全局不参与
+        _mk_engine("opencode-l-bad", credential_id=0, healthy=0)          # 本机不健康
+        assert es.resolve_local_engine() is None
+
+
 class TestQueryEngines:
     def test_query_scopes(self):
         repo_cid = _mk_cred("c-repo", scope="repo", owner_id="owner/repo")

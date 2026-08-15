@@ -226,6 +226,7 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
         rt["worker_ip"] = cred["last_ip"]
         rt["owner"] = cred["owner_name"]
         rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
+        rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
         visible_runtimes.append(rt)
 
     # 设备级视图（按 credential_id 分组：worker_name + 承载 CLI + 心跳）

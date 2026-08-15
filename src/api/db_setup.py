@@ -621,20 +621,18 @@ def _insert_seed_data(table: str, data: dict):
 
         elif table == "agent_type":
             # agent-description.json: {"agent_type": {"name": "...", ...}}
+            # default_runtime_id 不再写死 opencode（engine-selection-design.md v2 §8.2）：
+            # 绑定一律由 pick_engine 按 (仓库, agent) 引擎集合运行时解析，种子只留 0（未绑定）。
             for agent_type, info in data.items():
                 display_name = info.get("name", agent_type)
                 description = info.get("description", "")
-                default_runtime_name = info.get("backend", "opencode")
-                # 预置 runtime（幂等），拿 id
-                from src.user.db import ensure_default_runtime
-                default_runtime_id = ensure_default_runtime(default_runtime_name) or 0
                 icon = info.get("icon", "")
                 order_num = info.get("order_num", 0)
                 subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
                 enable = 1 if info.get("enable", True) else 0
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events, enable) VALUES (?,?,?,?,?,?,?,?)",
-                    (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events, enable)
+                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events, enable) VALUES (?,?,?,0,?,?,?,?)",
+                    (agent_type, display_name, description, icon, order_num, subscribe_events, enable)
                 )
 
         elif table == "skill_official":
@@ -1352,6 +1350,15 @@ def _migrate_tables():
             log.info("Added cluster columns: agent_runtimes.busy_slots/max_concurrent, agent_tasks.attempts/pool_agent_type/affinity_runtime_id")
     except Exception as e:
         log.warning(f"Add cluster columns failed: {e}")
+    # ===== engine-selection-design.md §4.4：绑定表索引（repo, agent 前缀查询加速）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("CREATE INDEX IF NOT EXISTS idx_binding_repo_agent ON devops_agent_runtime_binding(repo_key, agent_type)")
+            db.commit()
+            log.info("Binding index idx_binding_repo_agent ready")
+    except Exception as e:
+        log.warning(f"Create binding index failed: {e}")
     # ===== 修复 chat_agent_session 陈旧 UNIQUE(repo_key) 约束（多用户 chat 配置互斥顶掉，见 session_manager 注释）=====
     try:
         with db_lock:

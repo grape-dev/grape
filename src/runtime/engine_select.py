@@ -204,6 +204,18 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) ->
     return None
 
 
+def resolve_local_engine() -> int | None:
+    """返回一个健康的本机直连引擎（credential_id=0 且 installed+healthy）；无则 None。
+
+    用于 chat 等未显式绑定时的本机兜底（engine-selection-design.md §8.2）。
+    """
+    cand = query_engines("", "local")
+    cand = _apply_filters([dict(m, scope="local") for m in cand], load_engine_selection())
+    if not cand:
+        return None
+    return min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
+
+
 def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
     """托管默认选择：按 专属→全局→本机直连 优先级从仓库可选引擎中选一个（用于种子绑定集合）。
 

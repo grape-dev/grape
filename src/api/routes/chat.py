@@ -240,21 +240,24 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     log.info(f"Chat send/stream: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
-    kind = runtime_execution_kind(cfg.get("runtime_id") or 0)
+    # chat 默认兜底本机直连（engine-selection-design.md §8.2）：未显式配置引擎时
+    # 选健康本机引擎（credential_id=0），恒走 direct；不再按名现挑/建 opencode 默认。
+    rid = cfg.get("runtime_id") or 0
+    if not rid:
+        try:
+            from src.runtime.engine_select import resolve_local_engine
+            rid = resolve_local_engine() or 0
+        except Exception:
+            rid = 0
+    kind = runtime_execution_kind(rid)
     if kind != EXEC_MODE_DIRECT:
-        # M2 D5 入队 + 轮询：任务由 RuntimeAgent（本地/远端边端）claim 执行，SSE 以终态结果返回
+        # M2 D5 入队 + 轮询：任务由远端 RuntimeAgent claim 执行，SSE 以终态结果返回
         import json as _json
         from src.runtime.service import enqueue_task, wait_task_terminal
         from src.api.session_store import get_or_create_agent_session
 
         session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
-        runtime_id = cfg.get("runtime_id") or 0
-        if not runtime_id:
-            try:
-                from src.user.db import ensure_default_runtime, get_runtime_id_by_name
-                runtime_id = get_runtime_id_by_name(backend_name) or ensure_default_runtime(backend_name) or 0
-            except Exception:
-                pass
+        runtime_id = rid  # 已由本机直连兜底解析（§8.2）；远端引擎才走队列
 
         async def event_stream():
             yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...', 'conversation_id': conv_id})}\n\n"
@@ -413,16 +416,20 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     backend_name = cfg.get("backend", "opencode")
     # chat 会话：user_id + repo_key 绑定（chat_agent_session 是 chat 专用；此处用 devops_agent_session 保证 D9 串行）
     session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
-    # 优先用用户配置的 runtime_id（chat_agent_session），未配置再按名兜底
+    # 优先用用户配置的 runtime_id（chat_agent_session），未配置按本机直连兜底（engine-selection-design.md §8.2）
     runtime_id = cfg.get("runtime_id") or 0
     if not runtime_id:
         try:
-            from src.user.db import ensure_default_runtime, get_runtime_id_by_name
-            runtime_id = get_runtime_id_by_name(backend_name) or ensure_default_runtime(backend_name) or 0
+            from src.runtime.engine_select import resolve_local_engine
+            runtime_id = resolve_local_engine() or 0
         except Exception:
-            pass
+            runtime_id = 0
     if not runtime_id:
         return {"reply": "⚠️ 无可用 runtime，请先在 Agent Runtimes 页刷新", "conversation_id": conv_id}
+    # 本机直连（credential_id=0）无 claim 方：队列任务端点不能投递到本机，需走 direct 会话
+    from src.runtime.service import runtime_credential_id
+    if (runtime_credential_id(runtime_id) or 0) == 0:
+        return {"reply": "⚠️ 未配置远端引擎，任务会话需先在 Agent 配置中绑定远端引擎", "conversation_id": conv_id}
 
     cwd = _get_chat_cwd(user["id"], conv_id)
     _os.makedirs(cwd, exist_ok=True)

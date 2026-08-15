@@ -38,7 +38,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
                 (repo_key,)
             )
             agent_sessions = [
-                {"agent_type": r[0], "runtime": r[1] or "", "status": r[2], "last_active_at": r[3],
+                {"agent_type": r[0], "backend": r[1] or "", "status": r[2], "last_active_at": r[3],
                  "enable": bool(r[4]) if r[4] is not None else True}
                 for r in c.fetchall()
             ]
@@ -68,7 +68,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
             from src.api.session_store import get_agent_type_enable
             agent_sessions.append({
                 "agent_type": atype,
-                "backend": "opencode",
+                "backend": "",  # 无绑定/未建会话：不写硬编码默认（engine-selection-design.md v2）
                 "status": "",
                 "last_active_at": "",
                 "enable": bool(get_agent_type_enable(atype)),

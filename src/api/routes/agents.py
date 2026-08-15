@@ -24,7 +24,7 @@ def _get_agent_type_meta(agent_type: str) -> dict | None:
             row = c.fetchone()
             if row:
                 return {"agent_type": row[0], "display_name": row[1], "description": row[2],
-                        "default_backend": row[3] or "opencode", "icon": row[4] or "", "order_num": row[5] or 0,
+                        "default_backend": row[3] or "", "icon": row[4] or "", "order_num": row[5] or 0,
                         "enable": bool(row[6]) if row[6] is not None else True}
         except Exception:
             pass
@@ -50,7 +50,7 @@ async def list_agent_types():
 
     return {"types": [{
         "agent_type": r[0], "display_name": r[1], "description": r[2] or "",
-        "default_backend": r[3] or "opencode", "icon": r[4] or "",
+        "default_backend": r[3] or "", "icon": r[4] or "",
         "order_num": r[5] or 0,
         "enable": bool(r[6]) if r[6] is not None else True,
         "color": COLORS.get(r[0], "var(--t2)"),
@@ -218,9 +218,9 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
 
 
 class AgentConfig(BaseModel):
-    backend: str = "opencode"
-    backends: list[str] | None = None  # 引擎池（1..N 引擎实例名，agent-cluster-design.md §4.1）
-    # None=未传（单 backend 兼容）；[]=显式清空池；非空=替换池绑定
+    backend: str = ""  # 无字面默认（engine-selection-design.md v2）：单引擎由 backends 集合派发解析
+    backends: list[str] | None = None  # 引擎集合（1..N 引擎实例名）
+    # None=未传（单 backend 兼容）；[]=显式清空集合；非空=替换集合绑定
     skill: str = ""
     skill_scope: str = ""  # official / repo（前端下拉回显同名技能时精确匹配）
     enable: bool | None = None  # Agent 启用开关（Dashboard 切换；None=不修改）
