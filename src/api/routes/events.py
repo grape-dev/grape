@@ -217,16 +217,39 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                     _env = _json.loads(old.get("env_extra") or "{}")
                 except Exception:
                     _env = {}
+                # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物，
+                # 触发 enqueue_task D3 校验失败）。复用 pipeline 同款路由逻辑（引擎池优先，默认 runtime 兜底）。
+                _rid = old.get("runtime_id") or 0
+                _pool_type = ""
+                if not _rid:
+                    try:
+                        from src.runtime.service import pool_runtime_ids
+                        if pool_runtime_ids(old.get("agent_type") or ""):
+                            _pool_type = old.get("agent_type") or ""
+                        else:
+                            from src.user.db import ensure_default_runtime
+                            _rid = ensure_default_runtime("opencode") or 0
+                    except Exception:
+                        _rid = 0
+                if not _rid and not _pool_type:
+                    raise HTTPException(status_code=409, detail={"code": 409, "message": "无可用 runtime（未配置引擎且不在引擎池），无法重派"})
+                # cwd 按 Issue 统一隔离重算（workdir-issue-centric-design.md §二），走新结构路径
+                try:
+                    from src.api.event_pipeline import get_agent_workdir
+                    _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
+                                            old.get("issue_id") or "")
+                except Exception:
+                    _cwd = old.get("cwd") or ""
                 enqueue_task(
                     agent_session_id=old.get("agent_session_id") or "",
-                    runtime_id=old.get("runtime_id") or 0,
+                    runtime_id=_rid,
                     event_seq=old.get("event_seq"),
                     issue_id=old.get("issue_id") or "#0",
                     repo_key=old.get("repo_key") or "",
                     agent_type=old.get("agent_type") or "",
                     skill=old.get("skill") or "",
                     prompt=old.get("prompt") or "",
-                    cwd=old.get("cwd") or "",
+                    cwd=_cwd,
                     runtime_session_id="",  # 全新上下文，避免复用坏会话
                     event_type=old.get("event_type") or "",
                     account=old.get("account") or "",
@@ -236,6 +259,7 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                     # skill_files / project_info / knowledge 不传 → enqueue 内部重新打包
                     server_url=old.get("server_url") or "",
                     issue_session_id=_sid,
+                    pool_agent_type=_pool_type,
                 )
             else:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})

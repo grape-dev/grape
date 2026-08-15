@@ -430,3 +430,52 @@ class TestConversationQueueMode:
         with db_lock:
             row = db.cursor().execute("SELECT status FROM agent_tasks WHERE event_type='event_conversation' ORDER BY created_at DESC LIMIT 1").fetchone()
         assert row and row[0] == "cancelled"
+
+
+class TestRedispatchRuntimeZero:
+    """重派终态任务修复：旧 task runtime_id=0 时重新解析路由 + cwd 走新结构（workdir-issue-centric-design.md）。"""
+
+    def test_redispatch_resolves_runtime_and_new_cwd(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_tasks WHERE event_seq=? OR repo_key=?", (999901, _REPO_KEY))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, status, result) VALUES (?,?,?,?,?,?,?,?)",
+                      (_REPO_KEY, "issue_comment", "vod", "re", "#5", "{}", "failed", "x"))
+            seq = c.lastrowid
+            c.execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, knowledge_files, affinity_runtime_id, pool_agent_type) "
+                "VALUES ('t_redispatch0', 'vod:'||?, 0, ?, '#5', ?, 'vod', 'repo-onboarding', 'p', '/old/vod/issues/5', 'ses_old', 'issue_comment', 'acct', 0, '', '{}', '{}', '', 'iss-redis', '{}', '{}', '{}', 0, '')",
+                (_REPO_KEY, seq, _REPO_KEY))
+            c.execute("INSERT OR IGNORE INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, status) VALUES ('iss-redis',?, 'vod', '#5', '', 'idle')", (_REPO_KEY,))
+            db.commit()
+            # 保证默认 runtime 存在（路由解析兜底）
+            from src.user.db import ensure_default_runtime
+            ensure_default_runtime("opencode")
+
+        from src.api.event_pipeline import get_agent_workdir
+        expected_cwd = get_agent_workdir(_REPO_KEY, "vod", "#5")
+
+        # 覆盖 30s 幂等：直接调内部逻辑不方便，改用真实端点但清掉幂等 meta
+        from src.user.db import get_meta_value, set_meta_value
+        set_meta_value(f"redispatch:{seq}", "")
+
+        r = client.post(f"/api/events/{seq}/redispatch", headers=_headers)
+        assert r.status_code == 200, r.text
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT runtime_id, cwd, runtime_session_id, issue_session_id, pool_agent_type FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                (seq,)).fetchone()
+        assert row, "应创建新任务"
+        assert row[0] and row[0] != 0, f"runtime_id 应重新解析非 0，实际 {row[0]}"
+        assert row[1] == expected_cwd, f"cwd 应走新结构，实际 {row[1]} 期望 {expected_cwd}"
+        assert row[2] == "", "runtime_session_id 应清空（不复用坏会话）"
+        assert row[3] == "iss-redis", "issue_session_id 应复用"
+        # 事件状态回写 running
+        with db_lock:
+            st = db.cursor().execute("SELECT status FROM events WHERE seq=?", (seq,)).fetchone()
+        assert st and st[0] == "running"
+        # 清理（幂等 meta 残留避免影响其他用例）
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE seq=?", (seq,))
+            db.cursor().execute("DELETE FROM agent_tasks WHERE event_seq=?", (seq,))
+            db.commit()
