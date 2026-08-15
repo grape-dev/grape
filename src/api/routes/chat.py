@@ -226,7 +226,12 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
-    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id)
+    # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
+    if conv and conv.get("conv_type") == "task":
+        from src.prompt_builder import build_task_chat_prompt
+        prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"])
+    else:
+        prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
@@ -421,7 +426,16 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
 
     cwd = _get_chat_cwd(user["id"], conv_id)
     _os.makedirs(cwd, exist_ok=True)
-    prompt = _build_chat_prompt(message, repo_key, [], skill_name, skill_id)
+    # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task + 任务描述 + 历史）；
+    # 一般会话走通用 prompt（queue 模式也带最近历史，与 direct 一致）
+    #（见 task-conversation-prompt-align-design.md §3.2）
+    conv = get_conversation(conv_id) if conv_id else None
+    history = get_messages(conv_id, limit=10) if conv_id else []
+    if conv and conv.get("conv_type") == "task":
+        from src.prompt_builder import build_task_chat_prompt
+        prompt = build_task_chat_prompt(message, repo_key, history, conv, account=user.get("username") or "")
+    else:
+        prompt = _build_chat_prompt(message, repo_key, history, skill_name, skill_id)
     tid = enqueue_task(
         agent_session_id=session.get("id") or "",
         runtime_id=runtime_id,
