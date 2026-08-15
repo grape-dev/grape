@@ -155,16 +155,16 @@ function _detailHtml(t) {
 }
 
 function openTaskConversation(t) {
-  // 点「去对话」开始处理：active → processing（后端幂等，本地乐观更新）
+  // 点「去对话」：active → processing（后端幂等，本地乐观更新），随后跳转 chat。
+  // 跳转放 API 回调内，且不调 _render() 覆盖 pageContent（避免覆盖导航结果，见
+  // task-lifecycle-design.md §4.1 修正）。
+  const go = () => app.nav('chat', t && t.conversation_id ? t.conversation_id : undefined);
   if (t && t.id && t.status === 'active') {
     API.post('/tasks/' + t.id + '/start').then(d => {
       if (window._tasksById[t.id]) { window._tasksById[t.id].status = d.status || 'processing'; }
-      _render();
-    }).catch(() => {});
-  }
-  if (t && t.conversation_id) {
-    app.nav('chat', t.conversation_id);
+      go();
+    }).catch(() => go());
   } else {
-    app.nav('chat');
+    go();
   }
 }
