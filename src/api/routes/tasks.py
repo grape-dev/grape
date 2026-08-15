@@ -94,14 +94,30 @@ def _create_task(user_id: int, assignee: str, repo_key: str, issue_number: int,
 
 
 def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee: str) -> int:
-    """换人：将同 issue 其他 assignee 的 active 任务置为 completed（reassigned）"""
+    """换人：将同 issue 其他 assignee 的 active/processing 任务置为 completed（reassigned）"""
     with db_lock:
         c = db.cursor()
         c.execute(
             "UPDATE tasks SET status='completed', completed_reason='reassigned', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status='active' AND assignee<>?",
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing') AND assignee<>?",
             (repo_key, issue_number, keep_assignee)
         )
+        db.commit()
+        return c.rowcount
+
+
+def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
+    """bot 接管：将同 issue 所有 active/processing 任务置 completed（bot_takeover）。
+
+    见 task-lifecycle-design.md §2.3：issue agent 将 assignee 刷为 grape_bot 表示自己接管，
+    用户任务无需再处理，全部关闭。不建 bot 任务。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE tasks SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+            (repo_key, issue_number))
         db.commit()
         return c.rowcount
 
@@ -224,10 +240,13 @@ async def notify_task(body: TaskNotifyBody, request: Request):
     if body.repo_key not in managed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未托管"})
 
-    # 责任人必须是"人"而非 bot 账号（避免给 gitcode_bot 建任务）
+    # 责任人若是 bot（grape_bot）→ 视为"接管"：关闭该 issue 用户 active/processing 任务（bot_takeover），
+    # 不建 bot 任务。见 task-lifecycle-design.md §2.3/§3.1。
     from src.user.db import get_all_bot_usernames
     if body.assignee in get_all_bot_usernames():
-        return {"ok": False, "code": 400, "message": f"责任人 {body.assignee} 是 bot 账号，不创建任务"}
+        closed = _close_issue_tasks_bot_takeover(body.repo_key, body.issue_number)
+        return {"ok": True, "task_id": 0, "conversation_id": "",
+                "message": f"任务已由 {body.assignee} 接管" + (f"（关闭 {closed} 条待处理任务）" if closed else "（无待处理任务）")}
 
     # 解析 user_id
     user_id = _get_user_id_by_gitcode(body.assignee)
@@ -287,6 +306,27 @@ async def notify_task(body: TaskNotifyBody, request: Request):
             "message": "任务已创建并通知责任人"}
 
 
+@router.post("/{task_id}/start")
+async def start_task(task_id: int, user: dict = Depends(get_current_user)):
+    """用户点「去对话」开始处理：任务 active → processing（幂等，仅本人可调）。
+
+    见 task-lifecycle-design.md §3.2。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT user_id, status FROM tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        if row[0] != user["id"]:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该任务"})
+        if row[1] == "active":
+            c.execute("UPDATE tasks SET status='processing' WHERE id=?", (task_id,))
+            db.commit()
+            return {"status": "processing"}
+        return {"status": row[1]}
+
+
 @router.post("/close")
 async def close_tasks(body: TaskCloseBody, request: Request):
     """issue agent 关闭 Issue 后调用：该 issue 全部 active 任务 → completed（issue_closed）"""
@@ -299,7 +339,7 @@ async def close_tasks(body: TaskCloseBody, request: Request):
         c = db.cursor()
         c.execute(
             "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status='active'",
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
             (body.repo_key, body.issue_number)
         )
         db.commit()
