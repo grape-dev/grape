@@ -467,61 +467,68 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
 
         final_text = ""
         exit_code = 0
-        backend = "opencode"
-        oc_sid = {"opencode": oc_sid, "cc_sid": cc_sid}.get(backend, "")
-        new_oc_session_id = oc_sid
-
-        kind = runtime_execution_kind(chat_runtime_id)
-        if kind != EXEC_MODE_DIRECT:
-            # 入队 + 轮询：任务由 RuntimeAgent（本地/远端边端）claim 执行（见 multi-runtime-instance-design）
-            import json as _json
-            from src.runtime.service import enqueue_task, wait_task_terminal
-            from src.user.db import get_runtime_id_by_name, ensure_default_runtime
-            runtime_id = chat_runtime_id or (get_runtime_id_by_name(backend) or ensure_default_runtime(backend) or 0)
-            if runtime_id:
-                uid = 0
-                try:
-                    uid = get_user_id_by_app_id(ctx.app_id) or 0
-                except Exception:
-                    pass
-                tid = enqueue_task(
-                    agent_session_id=sess,
-                    runtime_id=runtime_id,
-                    event_seq=None, issue_id="",
-                    repo_key=repo_key, agent_type="chat", skill="chat",
-                    prompt=prompt, cwd=wsd,
-                    runtime_session_id=oc_sid,
-                    event_type="chat",
-                    account=exec_account, user_id=uid,
-                    repo_gitcode_token=user_token or "",
-                    env_extra={"IM_CHAT_ID": chat_id},
-                )
-                log.info(f"[Chat:{ctx.name}] enqueued task={tid} mode={kind}")
-                task = await wait_task_terminal(tid)
-                final_text = task.get("result_text") or ""
-                exit_code = int(task.get("exit_code") or 0)
-                try:
-                    usage = _json.loads(task.get("usage_json") or "{}") or {}
-                    new_oc_session_id = usage.get("session_id") or oc_sid
-                except Exception:
-                    new_oc_session_id = oc_sid
-                log.info(f"[Chat:{ctx.name}] task done: exit={exit_code}, text_len={len(final_text)}")
-            else:
-                log.warning(f"[Chat:{ctx.name}] no runtime for backend={backend}, task skipped")
-                final_text = ""
-                exit_code = -1
+        backend = ""
+        # engine-selection-design.md v2：无引擎（本机直连/远端均未配置）→ 明确不可用，不隐式 opencode
+        from src.runtime.engine_select import resolve_local_engine, engine_name
+        _rid = chat_runtime_id or (resolve_local_engine() or 0)
+        if not _rid:
+            log.warning(f"[Chat:{ctx.name}] no available engine for user, task skipped")
+            final_text = "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎"
+            exit_code = -1
         else:
-            async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
-                                                               backend_name=backend, account=exec_account,
-                                                               user_token=user_token, agent_name="Chat Agent",
-                                                               agent_label=f"[Agent:chat|repo:{repository}]"):
-                if event_type == "done":
-                    d = data
-                    final_text = d["text"]
-                    exit_code = d.get("exit_code", 0)
-                    if exit_code == 0 and d.get("oc_session_id"):
-                        new_oc_session_id = d["oc_session_id"]
-                    log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
+            backend = engine_name(_rid) or ""
+            oc_sid = {"opencode": oc_sid, "cc_sid": cc_sid}.get(backend, "")
+            new_oc_session_id = oc_sid
+            kind = runtime_execution_kind(_rid)
+            if kind != EXEC_MODE_DIRECT:
+                # 入队 + 轮询：任务由远端 RuntimeAgent claim 执行（见 multi-runtime-instance-design）
+                import json as _json
+                from src.runtime.service import enqueue_task, wait_task_terminal
+                runtime_id = _rid
+                if runtime_id:
+                    uid = 0
+                    try:
+                        uid = get_user_id_by_app_id(ctx.app_id) or 0
+                    except Exception:
+                        pass
+                    tid = enqueue_task(
+                        agent_session_id=sess,
+                        runtime_id=runtime_id,
+                        event_seq=None, issue_id="",
+                        repo_key=repo_key, agent_type="chat", skill="chat",
+                        prompt=prompt, cwd=wsd,
+                        runtime_session_id=oc_sid,
+                        event_type="chat",
+                        account=exec_account, user_id=uid,
+                        repo_gitcode_token=user_token or "",
+                        env_extra={"IM_CHAT_ID": chat_id},
+                    )
+                    log.info(f"[Chat:{ctx.name}] enqueued task={tid} mode={kind}")
+                    task = await wait_task_terminal(tid)
+                    final_text = task.get("result_text") or ""
+                    exit_code = int(task.get("exit_code") or 0)
+                    try:
+                        usage = _json.loads(task.get("usage_json") or "{}") or {}
+                        new_oc_session_id = usage.get("session_id") or oc_sid
+                    except Exception:
+                        new_oc_session_id = oc_sid
+                    log.info(f"[Chat:{ctx.name}] task done: exit={exit_code}, text_len={len(final_text)}")
+                else:
+                    log.warning(f"[Chat:{ctx.name}] no runtime for backend={backend}, task skipped")
+                    final_text = ""
+                    exit_code = -1
+            else:
+                async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
+                                                                   backend_name=backend, account=exec_account,
+                                                                   user_token=user_token, agent_name="Chat Agent",
+                                                                   agent_label=f"[Agent:chat|repo:{repository}]"):
+                    if event_type == "done":
+                        d = data
+                        final_text = d["text"]
+                        exit_code = d.get("exit_code", 0)
+                        if exit_code == 0 and d.get("oc_session_id"):
+                            new_oc_session_id = d["oc_session_id"]
+                        log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
 
         record = {
             "type": "chat", "time": datetime.utcnow().isoformat(),

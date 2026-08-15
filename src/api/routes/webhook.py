@@ -122,7 +122,7 @@ async def a2a_endpoint(request: Request):
     try:
         from src.api.event_pipeline import _execute_agent
         from src.session_manager import db, db_lock
-        backend = "opencode"
+        backend = ""
         runtime_id = 0
         skill_name = ""
         skill_id = 0
@@ -135,7 +135,7 @@ async def a2a_endpoint(request: Request):
                 row = c.fetchone()
                 if row:
                     runtime_id = row[0] or 0
-                    backend = "opencode"
+                    backend = ""
                     if row[0]:
                         c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
                         brow = c.fetchone()
@@ -199,7 +199,7 @@ async def a2a_endpoint(request: Request):
 
         # 执行分派：与 run_pipeline 一致——从引擎集合选引擎（专属→全局→本机）；
         # 选中 remote → 入队该引擎；选中本机 → direct 就地线程（见 engine-selection-design.md v2）
-        from src.runtime.engine_select import pick_engine
+        from src.runtime.engine_select import pick_engine, engine_name
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
         engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0)
         if not engine_id:
@@ -210,16 +210,18 @@ async def a2a_endpoint(request: Request):
             except Exception:
                 pass
             return {"status": "ok", "seq": 0, "agent": agent_name}
+        # backend 取已注册引擎的类型名（不沿用字面默认，engine-selection-design.md v2）
+        _be = engine_name(engine_id) or backend
         kind = runtime_execution_kind(engine_id)
         if kind == EXEC_MODE_DIRECT:
             from src.api.event_pipeline import start_direct_agent
             start_direct_agent(_execute_agent, (
-                repo_key, seq, agent_name, backend, skill_name or agent_name, evt, engine_id,
+                repo_key, seq, agent_name, _be, skill_name or agent_name, evt, engine_id,
             ), name=f"a2a-{agent_name}-{seq}")
             log.info(f"A2A: started agent execution for {agent_name} (direct, engine={engine_id})")
         else:
             from src.api.event_pipeline import _enqueue_pipeline_task
-            _enqueue_pipeline_task(repo_key, seq, agent_name, backend,
+            _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                    skill_name or agent_name, evt,
                                    skill_id, skill_path, engine_id,
                                    f"#{issue_number}" if issue_number else "")

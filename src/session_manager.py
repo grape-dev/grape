@@ -235,7 +235,7 @@ db.commit()
 MAX_HISTORY = 100
 
 
-def get_or_create_session(repo_key, source, repository, backend="opencode"):
+def get_or_create_session(repo_key, source, repository, backend=""):
     """获取或创建 repo 级 Chat 会话（chat_agent_session，飞书 Chat 用）"""
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
@@ -260,7 +260,7 @@ def get_or_create_session(repo_key, source, repository, backend="opencode"):
         return sid, [], "", "", True
 
 
-def update_session(sid, history, status, oc_session_id=None, backend="opencode"):
+def update_session(sid, history, status, oc_session_id=None, backend=""):
     """更新 Chat 会话（runtime_session_id 存当前 backend 会话）"""
     with db_lock:
         c = db.cursor()
@@ -567,15 +567,20 @@ def delete_conversation(conv_id: str):
 # ====== chat_config CRUD（合并进 chat_agent_session）======
 
 def get_chat_config(user_id: int) -> dict:
-    """获取用户全局 Chat 配置（repo_key='' 表示全局配置行）"""
+    """获取用户全局 Chat 配置（repo_key='' 表示全局配置行）。
+
+    engine-selection-design.md v2：不再写死 backend='opencode' 默认。
+    无配置/未知引擎时，backend 从已注册引擎派生——优先本机直连（resolve_local_engine），
+    无任何引擎则 backend=''（前端/执行侧显示"无 engine，不可用"，绝不隐式跑 opencode）。
+    """
     with db_lock:
         c = db.cursor()
         c.execute("SELECT runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (user_id,))
         row = c.fetchone()
         if not row:
-            return {"backend": "opencode", "runtime_id": 0, "skill": "", "skill_id": 0,
-                    "im_app_id": "", "im_app_secret": "", "im_provider": "", "updated_at": ""}
-        backend_name = "opencode"
+            # 无配置：本机直连兜底，无则空（不回落 opencode 字符串）
+            return _chat_config_with_local_backend("", 0, "", 0, "", "", "", "")
+        backend_name = ""
         if row[0]:
             c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
             brow = c.fetchone()
@@ -585,10 +590,30 @@ def get_chat_config(user_id: int) -> dict:
                 if is_known_engine_name(_n):
                     backend_name = brow[0]
                 else:
-                    # 幽灵/未知引擎（如历史遗留 'default'）：回退 opencode，避免 chat 路由到不存在的引擎
-                    log.warning(f"get_chat_config: runtime_id={row[0]} 指向未知引擎 '{brow[0]}'，回退 opencode")
-        return {"backend": backend_name, "runtime_id": row[0] or 0, "skill": row[1] or "", "skill_id": row[2] or 0,
-                "im_app_id": row[3] or "", "im_app_secret": row[4] or "", "im_provider": row[5] or "", "updated_at": ""}
+                    # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
+                    log.warning(f"get_chat_config: runtime_id={row[0]} 指向未知引擎 '{brow[0]}'，按未配置处理")
+        return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
+                                               row[3] or "", row[4] or "", row[5] or "", "")
+
+
+def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
+                                    im_app_id, im_app_secret, im_provider, updated_at) -> dict:
+    """backend 为空的配置行：尝试本机直连引擎兜底（engine-selection-design.md §8.2）。
+
+    有本机直连引擎 → backend=其类型名、runtime_id=其 id（恒 direct）；
+    无 → backend=''、runtime_id=0（前端"无 engine，不可用"）。
+    """
+    if not backend:
+        try:
+            from src.runtime.engine_select import resolve_local_engine, engine_name
+            _rid = resolve_local_engine() or 0
+            if _rid:
+                backend = engine_name(_rid) or ""
+                runtime_id = _rid
+        except Exception:
+            pass
+    return {"backend": backend, "runtime_id": runtime_id, "skill": skill, "skill_id": skill_id,
+            "im_app_id": im_app_id, "im_app_secret": im_app_secret, "im_provider": im_provider, "updated_at": updated_at}
 
 
 def set_chat_config(user_id: int, **kwargs):

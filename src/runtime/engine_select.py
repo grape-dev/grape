@@ -48,6 +48,25 @@ def _norm_repo(repo_key: str) -> str:
     return (from_repo_key(repo_key or "") or "").strip()
 
 
+def engine_name(runtime_id: int) -> str:
+    """按已注册引擎 id 反查类型名（agent_runtimes.name）；查不到返回空串。
+
+    派发选中引擎后，执行 backend 必须取该已注册引擎的类型名（engine-selection-design.md v2），
+    而非会话/调用方传来的字面默认。
+    """
+    if not runtime_id:
+        return ""
+    db, lock = _db()
+    with lock:
+        try:
+            c = db.cursor()
+            c.execute("SELECT name FROM agent_runtimes WHERE id=?", (runtime_id,))
+            row = c.fetchone()
+        except Exception:
+            return ""
+    return row[0] or "" if row else ""
+
+
 def _db():
     from src.session_manager import db, db_lock
     return db, db_lock
@@ -86,6 +105,11 @@ def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
             continue
         if f.get("only_online") and not _health_ok(m):
             continue
+        # 本机直连引擎（credential_id=0）必须为已知引擎类型（防幽灵 `default-cred0` 占位，见 engine-selection-design.md §7.3）
+        if (m.get("credential_id") or 0) == 0:
+            from src.user.db import is_known_engine_name
+            if not is_known_engine_name(m.get("name") or ""):
+                continue
         out.append(m)
     return out
 

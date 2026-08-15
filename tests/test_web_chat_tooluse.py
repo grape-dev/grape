@@ -23,6 +23,17 @@ def _fake_stream_agent(prompt, cwd, session_id="", **kw):
     yield ("done", {"exit_code": 0, "text": "联通成功", "oc_session_id": "ses_x"})
 
 
+def _seed_local_engine():
+    """本机直连引擎（credential_id=0，已知类型 opencode），供 direct 用例按 engine-selection-design.md v2 解析。"""
+    with db_lock:
+        c = db.cursor()
+        # 清掉历史残留的 opencode-cred0 行（可能由 ensure_default_runtime 等创建），再插健康本机行
+        c.execute("DELETE FROM agent_runtimes WHERE name='opencode' AND credential_id=0 AND scope='global' AND owner_id=''")
+        c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope, owner_id) "
+                  "VALUES ('opencode','test-local',0,1,1,'online','global','')")
+        db.commit()
+
+
 @pytest.fixture
 def client():
     def _fake_user():
@@ -33,6 +44,7 @@ def client():
     app.dependency_overrides.clear()
     with db_lock:
         c2 = db.cursor()
+        c2.execute("DELETE FROM agent_runtimes WHERE display_name='test-local'")
         convs = c2.execute("SELECT id FROM chat_conversations WHERE user_id=99901").fetchall()
         for (cid,) in convs:
             c2.execute("DELETE FROM chat_messages WHERE conversation_id=?", (cid,))
@@ -43,6 +55,7 @@ def client():
 class TestWebChatToolUseRegression:
     def test_send_stream_handles_dict_tool_use(self, client):
         """send/stream：agent 产出 dict tool_use 时不应崩溃，回复应送达。"""
+        _seed_local_engine()
         with patch("src.runtime.executor.stream_agent", side_effect=_fake_stream_agent):
             r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
         assert r.status_code == 200
@@ -52,6 +65,7 @@ class TestWebChatToolUseRegression:
 
     def test_send_handles_dict_tool_use(self, client):
         """send（非流式）：同样不应因 dict tool_use 崩溃，reply 应返回。"""
+        _seed_local_engine()
         with patch("src.runtime.executor.stream_agent", side_effect=_fake_stream_agent):
             r = client.post("/api/chat/send", json={"message": "测试", "repo_key": ""})
         assert r.status_code == 200
@@ -125,6 +139,7 @@ class TestWebChatToolUseRegression:
             return ""
 
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
+        _seed_local_engine()
         with patch("src.runtime.executor.stream_agent", side_effect=_fake_stream_agent):
             r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
         assert r.status_code == 200

@@ -117,7 +117,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     add_message(conv_id, "user", body.message)
 
     cfg = _get_chat_config(user["id"])
-    backend_name = cfg.get("backend", "opencode")
+    backend_name = cfg.get("backend", "")
     skill_name = cfg.get("skill", "") or "chat"
     skill_id = cfg.get("skill_id", 0) or 0
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
@@ -134,7 +134,12 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         runtime_session_id = ""
 
     from src.config import log
-    log.info(f"Chat send: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
+    log.info(f"Chat send: backend={backend_name or '(none)'}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
+
+    # 无任何引擎（未配置本机直连/远端）→ 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
+    if not backend_name:
+        add_message(conv_id, "agent", "⚠️ 无可用引擎（未配置本机直连或远端引擎）")
+        return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
 
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
     kind = runtime_execution_kind(cfg.get("runtime_id") or 0)
@@ -220,7 +225,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     add_message(conv_id, "user", body.message)
 
     cfg = _get_chat_config(user["id"])
-    backend_name = cfg.get("backend", "opencode")
+    backend_name = cfg.get("backend", "")
     skill_name = cfg.get("skill", "") or "chat"
     skill_id = cfg.get("skill_id", 0) or 0
     history = get_messages(conv_id, limit=20)
@@ -237,7 +242,17 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         runtime_session_id = ""
 
     from src.config import log
-    log.info(f"Chat send/stream: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
+    log.info(f"Chat send/stream: backend={backend_name or '(none)'}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
+
+    # 无引擎 → 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
+    if not backend_name:
+        _reply = "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎"
+        add_message(conv_id, "agent", _reply)
+        return StreamingResponse(
+            iter([f"data: {json.dumps({'type': 'done', 'text': _reply, 'conversation_id': conv_id})}\n\n"]),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
     # chat 默认兜底本机直连（engine-selection-design.md §8.2）：未显式配置引擎时
@@ -413,9 +428,12 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     import os as _os
 
     cfg = _get_chat_config(user["id"])
-    backend_name = cfg.get("backend", "opencode")
+    backend_name = cfg.get("backend", "")
     # chat 会话：user_id + repo_key 绑定（chat_agent_session 是 chat 专用；此处用 devops_agent_session 保证 D9 串行）
     session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
+    # 无引擎 → 明确不可用（engine-selection-design.md v2），不隐式跑 opencode
+    if not backend_name:
+        return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
     # 优先用用户配置的 runtime_id（chat_agent_session），未配置按本机直连兜底（engine-selection-design.md §8.2）
     runtime_id = cfg.get("runtime_id") or 0
     if not runtime_id:
@@ -625,7 +643,7 @@ async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""
 
     return {
         "backend": {
-            "type": cfg.get("backend", "opencode"),
+            "type": cfg.get("backend", ""),
         },
         "skill": cfg.get("skill", ""),
         "skill_id": cfg.get("skill_id", 0) or 0,

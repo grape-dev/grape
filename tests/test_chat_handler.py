@@ -116,7 +116,8 @@ class TestChatHandlerQueueMode:
                    new=AsyncMock(return_value={"status": "completed", "exit_code": 0,
                                                "result_text": "HELLO_QUEUE",
                                                "usage_json": '{"session_id": "ses_q"}'})) as m_wait, \
-             patch("src.user.db.get_runtime_id_by_name", return_value=1), \
+             patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
              patch("src.im.handler_async.consume_stream_async") as m_consume:
             api = _run_inner_execute()
 
@@ -138,6 +139,8 @@ class TestChatHandlerQueueMode:
             yield ("done", {"exit_code": 0, "text": "LOCAL_OK", "oc_session_id": "ses_new"})
 
         with patch("src.runtime.service.enqueue_task") as m_enq, \
+             patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
              patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume):
             api = _run_inner_execute()
 

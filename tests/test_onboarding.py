@@ -99,6 +99,9 @@ def test_trigger_launches_two_guides_direct():
          patch.object(ob_mod, "_is_onboarded", return_value=False), \
          patch.object(ob_mod, "_mark_onboarding_started") as mock_mark, \
          patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 0, "")), \
+         patch("src.runtime.engine_select.pick_engine", return_value=1), \
+         patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
+         patch("src.runtime.service.runtime_execution_kind", return_value="direct"), \
          patch.object(ob_mod, "_execute_agent_wrapper") as mock_wrap:
         ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
         mock_skill.assert_called_with("cloud-native")
@@ -168,6 +171,9 @@ def test_trigger_creates_two_master_events():
          patch.object(ob_mod, "_is_onboarded", return_value=False), \
          patch.object(ob_mod, "_mark_onboarding_started"), \
          patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 0, "")), \
+         patch("src.runtime.engine_select.pick_engine", return_value=1), \
+         patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
+         patch("src.runtime.service.runtime_execution_kind", return_value="direct"), \
          patch.object(ob_mod, "_execute_agent_wrapper"):
         ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
         with db_lock:

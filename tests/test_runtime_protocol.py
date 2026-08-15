@@ -466,12 +466,12 @@ class TestGhostEnginePrevention:
         assert rid is not None, "已知引擎名应正常创建/复用"
 
     def test_set_chat_config_default_backend_no_ghost(self):
-        """set_chat_config(backend='Default') 不得创建幽灵行，且 get_chat_config 回退 opencode。"""
+        """set_chat_config(backend='Default') 不得创建幽灵行；get_chat_config 回退空（无引擎，不隐式 opencode）。"""
         from src.session_manager import set_chat_config, get_chat_config
         from src.user.db import is_known_engine_name
         set_chat_config(9999, backend="Default")
         cfg = get_chat_config(9999)
-        assert cfg["backend"] == "opencode"
+        assert cfg["backend"] == "", "未配置已知引擎时 backend 应为空（engine-selection-design.md v2）"
         with db_lock:
             cnt = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE name='default'").fetchone()[0]
             db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=9999")
@@ -479,7 +479,7 @@ class TestGhostEnginePrevention:
         assert cnt == 0, "backend='Default' 不应创建 default-cred0 占位行"
 
     def test_get_chat_config_fallback_on_ghost_reference(self):
-        """历史配置 runtime_id 指向幽灵引擎（credential_id=0 name='default'）时回退 opencode。"""
+        """历史配置 runtime_id 指向幽灵引擎（credential_id=0 name='default'）时按未配置处理（backend=''）。"""
         from src.session_manager import get_chat_config
         with db_lock:
             c = db.cursor()
@@ -489,7 +489,7 @@ class TestGhostEnginePrevention:
             db.commit()
         try:
             cfg = get_chat_config(8888)
-            assert cfg["backend"] == "opencode", "指向幽灵引擎应回退 opencode"
+            assert cfg["backend"] == "", "指向幽灵引擎应按未配置处理（backend=''，不隐式 opencode）"
         finally:
             with db_lock:
                 db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=8888")

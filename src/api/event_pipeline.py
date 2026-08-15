@@ -372,7 +372,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             row = c.fetchone()
             if row:
                 runtime_id = row[0] or 0
-                backend = "opencode"
+                backend = ""
                 if row[0]:
                     c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
                     brow = c.fetchone()
@@ -402,7 +402,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
                 _default_skill = _mapping.get(agent_type, "")
                 if _default_skill:
-                    backend = "opencode"
+                    backend = ""
                     skill_name = _default_skill
                     log.info(f"Pipeline: using default skill for {agent_type}={_default_skill}")
                 else:
@@ -504,21 +504,23 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
     # 选中 remote → 入队该引擎（queue_remote）；选中本机 → direct 就地执行。
-    from src.runtime.engine_select import pick_engine
+    from src.runtime.engine_select import pick_engine, engine_name
     from src.runtime.service import runtime_execution_kind, enqueue_task, EXEC_MODE_DIRECT
     engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0)
     if not engine_id:
         log.info(f"Pipeline: no available engine for repo={repo_key} agent={agent_type}, seq={seq}, skip")
         _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
         return result
+    # backend 必须取已注册引擎的类型名（不沿用会话/字面默认），确保执行 CLI 与选中引擎一致
+    _be = engine_name(engine_id) or backend
     kind = runtime_execution_kind(engine_id)
-    if kind != EXEC_MODE_DIRECT and backend and skill_name and seq > 0:
-        _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
+    if kind != EXEC_MODE_DIRECT and _be and skill_name and seq > 0:
+        _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
                                skill_id, skill_path, engine_id, issue_id)
-    elif backend and skill_name and seq > 0:
+    elif _be and skill_name and seq > 0:
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
         start_direct_agent(_execute_agent, (
-            repo_key, seq, agent_type, backend, skill_name, evt, engine_id,
+            repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
         ), name=f"ag-{agent_type}-{seq}")
         log.info(f"Pipeline: started agent execution, seq={seq}, repo={repo_key}, agent={agent_type}")
 
@@ -610,7 +612,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
         return
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名
-    inst_name = runtime_instance_name(runtime_id) or backend or "opencode"
+    inst_name = runtime_instance_name(runtime_id) or backend or ""
     # 2) event.json 骨架（#0 跳过，见 event_archive._extract_num）
     _evt_copy = dict(evt)
     _evt_copy["issue_id"] = issue_id
@@ -626,7 +628,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     from src.api.session_store import get_or_create_agent_session, get_or_create_issue_session
     from src.api.event_store import update_event_config
     update_event_config(seq, inst_name, skill_name, datetime.now(timezone.utc).isoformat())
-    session = get_or_create_agent_session(repo_key, agent_type, backend or "opencode")
+    session = get_or_create_agent_session(repo_key, agent_type, backend or "")
     oc_session_id = session.get("runtime_session_id") or ""
     issue_session_id = ""
     if _issue_num_from(issue_id):
@@ -714,7 +716,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     from src.runtime.instances import runtime_instance_name
 
     # 引擎实例名（`{type}-{device}`，与 UI 同源）；查不到回退类型名
-    inst_name = runtime_instance_name(runtime_id) or backend or "opencode"
+    inst_name = runtime_instance_name(runtime_id) or backend or ""
 
     from src.repo_key import from_repo_key
     repository = evt.get("repository", from_repo_key(repo_key))

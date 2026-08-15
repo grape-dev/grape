@@ -100,8 +100,8 @@ def get_issue_assignee(repo_key: str, issue_id: str) -> str:
 
 
 def get_or_create_agent_session(repo_key: str, agent_type: str,
-                                 backend: str = "opencode") -> dict:
-    """获取或创建 Agent 会话，每个 (repo_key, agent_type) 独立"""
+                                 backend: str = "") -> dict:
+    """获取或创建 Agent 会话，每个 (repo_key, agent_type) 独立（backend 无字面默认，见 engine-selection-design.md v2）"""
     with db_lock:
         c = db.cursor()
         try:

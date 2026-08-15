@@ -80,7 +80,7 @@ class TestBinding:
         repo_cid = _mk_cred("c-repo", scope="repo", owner_id="owner/repo")
         repo_eng = _mk_engine("opencode-r", credential_id=repo_cid, scope="repo", owner_id="owner/repo")
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
-        loc_eng = _mk_engine("opencode-l", credential_id=0)   # 本机直连
+        loc_eng = _mk_engine("opencode", credential_id=0)   # 本机直连
         es.set_binding("owner/repo", "coding", [loc_eng, glob_eng, repo_eng])
         by_id = {m["runtime_id"]: m["priority"] for m in es.get_binding("owner/repo", "coding")}
         assert by_id[repo_eng] == 10    # 仓库级专属优先
@@ -105,7 +105,7 @@ class TestPickEngine:
 
     def test_global_offline_falls_to_local(self):
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"), status="offline")
-        loc_eng = _mk_engine("opencode-l", credential_id=0)
+        loc_eng = _mk_engine("opencode", credential_id=0)
         es.set_binding("owner/repo", "vod", [glob_eng, loc_eng])
         assert es.pick_engine("owner/repo", "vod") == loc_eng    # 本机最后兜底
 
@@ -146,7 +146,7 @@ class TestResolveDefaultEngine:
         assert es.resolve_default_engine("owner/repo") == glob_eng
 
     def test_only_local_healthy(self):
-        loc_eng = _mk_engine("opencode-l", credential_id=0)
+        loc_eng = _mk_engine("opencode", credential_id=0)
         assert es.resolve_default_engine("owner/repo") == loc_eng
 
     def test_local_unhealthy_not_selected(self):
@@ -156,12 +156,12 @@ class TestResolveDefaultEngine:
 
 class TestResolveLocalEngine:
     def test_resolve_local_engine_returns_healthy_local(self):
-        loc_eng = _mk_engine("opencode-l", credential_id=0)
+        loc_eng = _mk_engine("opencode", credential_id=0)
         assert es.resolve_local_engine() == loc_eng
 
     def test_resolve_local_engine_ignores_remote_and_unhealthy(self):
         _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))          # 远端全局不参与
-        _mk_engine("opencode-l-bad", credential_id=0, healthy=0)          # 本机不健康
+        _mk_engine("opencode", credential_id=0, healthy=0)          # 本机不健康
         assert es.resolve_local_engine() is None
 
 
@@ -170,7 +170,7 @@ class TestQueryEngines:
         repo_cid = _mk_cred("c-repo", scope="repo", owner_id="owner/repo")
         _mk_engine("opencode-r", credential_id=repo_cid, scope="repo", owner_id="owner/repo")
         _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
-        _mk_engine("opencode-l", credential_id=0)
+        _mk_engine("opencode", credential_id=0)
         assert len(es.query_engines("owner/repo", "repo")) == 1
         assert len(es.query_engines("owner/repo", "global")) == 1
         assert len(es.query_engines("owner/repo", "local")) == 1

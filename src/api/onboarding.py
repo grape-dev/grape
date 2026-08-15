@@ -60,8 +60,8 @@ def _onboarding_workdir(repo_key: str, target: str) -> str:
 
 
 def _load_vod_session(repo_key: str) -> tuple[str, int, str]:
-    """查 VOD 会话配置，返回 (backend, runtime_id, skill_path)。缺失回退 opencode。"""
-    backend, runtime_id, skill_path = "opencode", 0, ""
+    """查 VOD 会话配置，返回 (backend, runtime_id, skill_path)。缺失时 backend=''（无硬编码默认，见 engine-selection-design.md v2）。"""
+    backend, runtime_id, skill_path = "", 0, ""
     try:
         from src.session_manager import db, db_lock
         with db_lock:
@@ -222,9 +222,17 @@ def trigger_onboarding(repo_key: str, owner: str):
 
         # 1. 查 VOD 会话配置（backend/runtime_id/skill_path，走 VOD Agent）
         backend, runtime_id, skill_path = _load_vod_session(repo_key)
+        # engine-selection-design.md v2：按引擎集合/会话主引擎选引擎；无引擎 → 跳过引导（不隐式 opencode）
+        from src.runtime.engine_select import pick_engine, engine_name
+        engine_id = pick_engine(repo_key, "vod", fallback_runtime_id=runtime_id) or 0
+        if not engine_id:
+            log.warning(f"[Onboarding|repo:{repo_key}] no available engine, skip onboarding")
+            return
+        backend = engine_name(engine_id) or backend
+        runtime_id = engine_id
 
         # 2. 落库两个主事件 + 两次引导分派（各 target 一次）
-        #    执行模式跟随 VOD 会话（kind = runtime_execution_kind(vod runtime_id)，与 vod_handler_async 一致）
+        #    执行模式跟随选中引擎（kind = runtime_execution_kind(engine_id)，与 vod_handler_async 一致）
         #    主事件 issue_id 预分配：新仓库 Issue 从 1 递增 → experience=#1, explore=#2
         from src.repo_key import from_repo_key
         from src.api.event_store import append_event
