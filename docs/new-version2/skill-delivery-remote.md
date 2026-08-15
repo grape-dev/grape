@@ -89,7 +89,7 @@ ALTER TABLE agent_tasks ADD COLUMN server_url TEXT DEFAULT '';      -- 服务端
 
 - 远端模式（`queue_remote`）：**不注入** `WORKSPACE_DIR/history/...` 绝对路径指引。
 - 会话上下文改用 event.json 档案（M1 的 `build_issue_context` 富上下文）注入 prompt——服务端构建时已内联为文本，无文件依赖。
-- 本地模式（`direct`/`queue_local`）保持现状，渐进迁移。
+- 本地模式（`direct`，`queue_local` 已废除）保持现状，渐进迁移。
 
 ### 3.5 worker 执行流程（`src/runtime/agent.py` 内 `_run_task` 前置）
 
@@ -135,4 +135,4 @@ ALTER TABLE agent_tasks ADD COLUMN server_url TEXT DEFAULT '';      -- 服务端
 | SD-4 | 同技能重复任务 | 命中 content_hash 缓存，不重复传输 |
 | SD-5 | A2A 外呼 | prompt 中 `{{SERVER_URL}}` 替换为服务端可达地址，远端可调 `/api/a2a` |
 | SD-6 | 凭据 | worker 无本地 DB 时，CodeArts AK/SK 与 user credentials 仍注入成功 |
-| SD-7 | 本地模式回归 | `direct`/`queue_local` 下行为与现状一致（占位符在本地也被替换或保持绝对路径） |
+| SD-7 | 本地模式回归 | `direct`（本机引擎）下行为与现状一致（占位符在本地也被替换或保持绝对路径） |

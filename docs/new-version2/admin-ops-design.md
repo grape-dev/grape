@@ -339,7 +339,7 @@ CREATE TABLE IF NOT EXISTS login_whitelist (
 |---|---|
 | OAuth 配置 | 复用 `PUT /api/settings/oauth`（仅 super_admin） |
 | Webhook URL | `meta.webhook_url` |
-| 执行模式 | `meta.execution_mode`（direct/queue_local/queue_remote，对齐 implementation-plan §三） |
+| 执行模式 | `meta.execution_mode`（auto/direct/queue_remote，`queue_local` 已废除，见 engine-default-selection-design.md §9） |
 | 白名单开关 | `meta.whitelist_enabled` |
 | 公告/banner | 与 Notices 打通 |
 

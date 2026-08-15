@@ -91,8 +91,11 @@ class TestRuntimeExecutionKind:
     def test_forced_mode_overrides_auto(self):
         cid = _seed_credential("__auto_w_force")
         rid = _seed_runtime("__auto_force", cid, last_seen_at=_now_iso())
+        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
+        assert runtime_execution_kind(rid) == EXEC_MODE_REMOTE
+        # queue_local 已废除：历史强制值按本机 direct 处理（engine-selection-design.md v2）
         os.environ["DEVOPS_EXECUTION_MODE"] = "queue_local"
-        assert runtime_execution_kind(rid) == "queue_local"
+        assert runtime_execution_kind(rid) == EXEC_MODE_DIRECT
 
 
 def _evt_body(issue_id="#5", etype="issue_opened"):

@@ -30,11 +30,11 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 
 | 模式 | 含义 | 说明 |
 |------|------|------|
-| `direct`（默认） | 事件/chat 直接就地执行 | 线程 `stream_agent` 在 bot 进程内执行 |
-| `queue_local` | 事件/chat 入队，bot 进程内本地 worker 消费 | 任务队列 `agent_tasks` + 本地线程池 |
-| `queue_remote` | 入队后由远端（或本机独立进程）RuntimeAgent 边端 claim 执行 | 通过 `/api/runtime/*` 协议 |
+| `auto`（默认） | 按绑定引擎宿主自动推导 | 本机引擎（`credential_id=0`）→ `direct`；远端 worker（`credential_id>0`）→ `queue_remote` |
+| `direct` | 事件/chat 直接就地执行 | 线程 `stream_agent` 在 bot 进程内执行（本机引擎） |
+| `queue_remote` | 入队后由远端 RuntimeAgent 边端 claim 执行 | 通过 `/api/runtime/*` 协议 |
 
-> 运维可在 Agent Runtimes 页切换执行模式；`direct` 一键回退。三种模式共用同一条任务队列。
+> 运维可在 Agent Runtimes 页切换执行模式；`queue_local` 已废除（见 `engine-default-selection-design.md` §9）。
 
 **一句话定位：** 从开发者声音收集到代码发布的全流程自动化，通过多 Agent 协作 + 可插拔执行引擎（本地/远端 Worker）降低开发者的重复劳动。
 
@@ -591,7 +591,7 @@ IM 区域在 App ID / Secret 输入框下新增 **[扫码配置]** 按钮，点�
 
 **发送交互（new-version2 变更）：**
 - `direct` 模式：走 SSE 流式（`POST /api/chat/send/stream`），打字机实时输出。
-- 队列模式（`queue_local` / `queue_remote`）：`send/stream` 返回 `{task_id}` → 前端以 1s 间隔轮询 `GET /api/runtime/tasks/{id}/status`，显示「⏳ 任务执行中… (Ns)」，终态展示 `result_text`（打字机效果降级）。
+- 队列模式（`queue_remote`）：`send/stream` 返回 `{task_id}` → 前端以 1s 间隔轮询 `GET /api/runtime/tasks/{id}/status`，显示「⏳ 任务执行中… (Ns)」，终态展示 `result_text`（打字机效果降级）。
 
 > Chat Agent 不完全属于 DevOps 工程循环的关键一环，它是每个用户接入工作流的个人对话入口。核心工作流仍为 VOD → Issue → Coding → QA → SRE。Chat Agent 可代表用户在 GitCode 上操作（提交 Issue、查询状态、任务对话等），并使用**用户的个人 GitCode Token**（与 DevOps Agents 使用的 Bot Token 隔离）。
 
@@ -794,7 +794,7 @@ Settings 包含 **Credentials** 与 **Notifications** 两个页签：
 - 生成的 `rta_` token 明文**仅展示一次**，DB 只存 sha256；复制按钮 + 启动命令。
 - **吊销**后凭据立即失效，其引擎行级联置 `offline`，该设备从在线分组消失。
 - **⟳ Refresh**：重新发现本地引擎（`discover_runtimes` + `--version` 探测）并落库。
-- 管理员可在该页查看/切换**执行模式**（direct / queue_local / queue_remote）。
+- 管理员可在该页查看/切换**执行模式**（auto / direct / queue_remote）。
 
 > **RuntimeAgent 边端**：远端/本机独立进程通过 `python -m runtime.agent`（环境变量 `RUNTIME_TOKEN` / `RUNTIME_SERVER_URL` / `RUNTIME_POLL_INTERVAL` 等）注册 → 心跳 → claim 任务 → 执行 → 回报。多实例键 `(credential_id, name, scope, owner_id)` 保证多 worker 同名引擎并存、互不覆盖。
 
@@ -983,7 +983,7 @@ issue_opened ──► vod ──A2A──► issue ──A2A──► coding �
 | **通知偏好** | 哪些事件需要推送 IM | Settings → Notifications |
 | **IM 配置** | Chat Agent 绑定飞书/企微/钉钉（App ID + Secret） | Chat Agent 页右栏 Config |
 | **技能上传/转换** | 上传官方/仓库/个人技能 ZIP；个人技能可转仓库技能 | Skills Library |
-| **执行模式** | direct / queue_local / queue_remote | Agent Runtimes 页（管理员） |
+| **执行模式** | auto / direct / queue_remote | Agent Runtimes 页（管理员） |
 
 ---
 
@@ -1086,7 +1086,7 @@ issue_opened ──► vod ──A2A──► issue ──A2A──► coding �
 | **agent_runtimes** | 引擎实例表（`opencode/codearts/cursor/codex`…），多实例键 `(credential_id, name, scope, owner_id)` |
 | **runtime_credentials** | Worker 凭据表（`rta_` token，sha256 存储），name 全局唯一，scope 个人/仓库/全局 |
 | **agent_tasks** | 任务队列（确定路由 runtime_id + 事件档案快照 + 技能交付 skill_files） |
-| **执行模式** | `direct` / `queue_local` / `queue_remote`（`meta.execution_mode`） |
+| **执行模式** | `auto` / `direct` / `queue_remote`（`meta.execution_mode`） |
 | **RuntimeAgent 边端** | `python -m runtime.agent`，独立进程注册/心跳/claim/执行/回报 |
 
 ### 7.3 数据存储

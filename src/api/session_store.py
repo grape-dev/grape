@@ -129,8 +129,12 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
         now = datetime.now().isoformat()
         runtime_id = 0
         if backend:
-            from src.user.db import ensure_default_backend, get_runtime_id_by_name
-            runtime_id = get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
+            # 引擎集合优先（engine-selection-design.md v2）；无集合回退按类型名解析（legacy）
+            from src.runtime.engine_select import pick_engine
+            runtime_id = pick_engine(repo_key, agent_type, fallback_runtime_id=0) or 0
+            if not runtime_id:
+                from src.user.db import get_runtime_id_by_name, ensure_default_backend
+                runtime_id = get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
         _enable = get_agent_type_enable(agent_type)
         try:
             c.execute(
@@ -283,17 +287,20 @@ def ensure_default_agent_sessions(repo_key: str):
 
     with db_lock:
         c = db.cursor()
-        from src.user.db import ensure_default_backend
-        _default_runtime_id = ensure_default_backend("opencode") or 0
+        from src.runtime.engine_select import resolve_default_engine, set_binding
         for _at, _sk in _mapping.items():
             try:
                 from src.user.db import resolve_skill_id
                 _skill_id = resolve_skill_id(_sk)
+                # 默认引擎：按 专属→全局→本机 选择，写入该 (仓库, agent) 引擎集合；
+                # 无候选则集合留空（agent 标识"无 engine，不可用"，见 engine-selection-design.md v2）
+                _rid = resolve_default_engine(repo_key, _at) or 0
+                set_binding(repo_key, _at, [_rid] if _rid else [])
                 # 保留既有主键 id 与用户配置（enable/订阅/飞书绑定），不因重建换 uuid
                 #（见 upsert_agent_session 背景注释：INSERT OR REPLACE 新 uuid 会悬空 vod_conversations）
                 upsert_agent_session(
                     repo_key=repo_key, agent_type=_at,
-                    runtime_id=_default_runtime_id, skill=_sk, skill_id=_skill_id,
+                    runtime_id=_rid, skill=_sk, skill_id=_skill_id,
                     repo_gitcode_token=_token, status="idle",
                     enable=None, subscribe_events=None,
                     im_app_id=None, im_app_secret=None, im_provider=None,

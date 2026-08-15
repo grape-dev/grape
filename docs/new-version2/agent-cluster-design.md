@@ -27,7 +27,7 @@
 | 服务端协议端点 | 已实施：`/api/runtime/register|heartbeat|claim|report|complete|fail`，`rta_` token 认证（sha256 存哈希） | `src/api/routes/runtime.py` |
 | 任务队列 | 已实施：`agent_tasks` 30 列快照（prompt/cwd/token/env/skill_files/project_info/server_url/issue_session_id） | `src/runtime/service.py` |
 | 原子抢单 + 串行槽 | 已实施：`claim()` 两步（SELECT 候选 + UPDATE 影响行数判定），按 `issue_session_id` 严格串行、跨 Issue 并行 | `src/runtime/service.py:209` |
-| 执行模式 | 已实施：`direct / queue_local / queue_remote`（env `DEVOPS_EXECUTION_MODE` 或 meta `execution_mode`） | `src/runtime/service.py:13-42` |
+| 执行模式 | 已实施：`auto / direct / queue_remote`（env `DEVOPS_EXECUTION_MODE` 或 meta `execution_mode`；`queue_local` 已废除，见 `engine-default-selection-design.md` §9） | `src/runtime/service.py:13-42` |
 | 技能远程交付 | 已实施：服务端 `_pack_skill_dir` 打包 → worker 落地 `.skills/` + 占位符替换 | `src/runtime/service.py:71` / `agent.py:74` |
 | project-info 交付 | 已实施：服务端权威基线 → worker 落地 `.project-info/`（多 VM 一致） | `service.py:116` / `agent.py:88` |
 | git worktree（coding/qa/sre） | 已实施：按 Issue 建 worktree + `GIT_ASKPASS` | `service.py:438` / `repogit.py` |
@@ -59,7 +59,7 @@
 2. **空闲调度**：任务入队后由调度器从池中选**健康 + 有空闲槽位 + 满足串行约束**的引擎执行；优先"最空闲"。
 3. **容错**：引擎心跳超时 → 自动摘除；其上 dispatched/running 任务自动回收重排；单引擎/单 Worker 故障不中断 Agent 服务。
 4. **多 Agent 差异化**：vod/issue（短任务、分析型）与 coding/qa（长任务、需 worktree）可配不同池与并发策略。
-5. **兼容演进**：现有 `direct / queue_local / queue_remote` 模式、`rta_` 协议、`agent_tasks` 队列全部保留，集群化是"调度层的增强"而非推翻。
+5. **兼容演进**：现有 `auto / direct / queue_remote` 模式（`queue_local` 已废除）、`rta_` 协议、`agent_tasks` 队列全部保留，集群化是"调度层的增强"而非推翻。
 
 ### 2.2 非目标（本期不做）
 

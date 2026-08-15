@@ -218,21 +218,16 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                 except Exception:
                     _env = {}
                 # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物，
-                # 触发 enqueue_task D3 校验失败）。复用 pipeline 同款路由逻辑（引擎池优先，默认 runtime 兜底）。
+                # 触发 enqueue_task D3 校验失败）。复用 pipeline 同款路由逻辑（pick_engine：
+                # 引擎集合 → 专属/全局/本机；无则回退旧快照 runtime_id，仍无则拒派）。
                 _rid = old.get("runtime_id") or 0
-                _pool_type = ""
+                try:
+                    from src.runtime.engine_select import pick_engine
+                    _rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "", fallback_runtime_id=_rid) or 0
+                except Exception:
+                    _rid = 0
                 if not _rid:
-                    try:
-                        from src.runtime.service import pool_runtime_ids
-                        if pool_runtime_ids(old.get("agent_type") or ""):
-                            _pool_type = old.get("agent_type") or ""
-                        else:
-                            from src.user.db import ensure_default_runtime
-                            _rid = ensure_default_runtime("opencode") or 0
-                    except Exception:
-                        _rid = 0
-                if not _rid and not _pool_type:
-                    raise HTTPException(status_code=409, detail={"code": 409, "message": "无可用 runtime（未配置引擎且不在引擎池），无法重派"})
+                    raise HTTPException(status_code=409, detail={"code": 409, "message": "无可用引擎，无法重派"})
                 # cwd 按 Issue 统一隔离重算（workdir-issue-centric-design.md §二），走新结构路径
                 try:
                     from src.api.event_pipeline import get_agent_workdir
@@ -259,7 +254,6 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                     # skill_files / project_info / knowledge 不传 → enqueue 内部重新打包
                     server_url=old.get("server_url") or "",
                     issue_session_id=_sid,
-                    pool_agent_type=_pool_type,
                 )
             else:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
@@ -470,7 +464,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
     bot_token = get_gitcode_token(repo_key=repo_key) or ""
     repository = from_repo_key(repo_key)
 
-    from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal
+    from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task
     final_text = ""
     new_oc = oc_session_id
 
@@ -491,30 +485,24 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
             runtime_id = row[1] or 0
         if agent_sid:
             from src.config import SKILLS_DIR
-            from src.runtime.service import cancel_task, pool_runtime_ids
             from src.api.event_pipeline import get_agent_workdir
             # Fix 1：cwd 用该 issue 的 agent 目录（与 issue 会话项目一致）
             ws = get_agent_workdir(repo_key, agent_type, issue_id)
             os.makedirs(ws, exist_ok=True)
-            # 路由对齐 _enqueue_pipeline_task：会话未绑固定引擎(runtime_id=0)时，
-            # 引擎池模式优先（pool_agent_type 入队，池内引擎 claim），其次默认 runtime 兜底
-            pool_mode = False
+            # 路由对齐 _enqueue_pipeline_task：pick_engine 按引擎集合/会话主引擎选引擎
+            # （专属→全局→本机；无则跳过，不再回落硬编码默认）
             try:
-                if pool_runtime_ids(agent_type):
-                    pool_mode = True
-                else:
-                    from src.user.db import ensure_default_runtime
-                    runtime_id = ensure_default_runtime("opencode") or 0
+                from src.runtime.engine_select import pick_engine
+                runtime_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0) or 0
             except Exception:
                 runtime_id = 0
-            if not runtime_id and not pool_mode:
-                final_text = "（对话执行失败：无可用 runtime/会话）"
+            if not runtime_id:
+                final_text = "（对话执行失败：无可用引擎/会话）"
             else:
                 tid = enqueue_task(
                     agent_session_id=agent_sid, runtime_id=runtime_id, prompt=prompt, cwd=ws,
                     runtime_session_id=oc_session_id,
                     issue_session_id=issue_sess_id,        # Fix E：串行槽绑定本 issue 会话
-                    pool_agent_type=(agent_type if pool_mode else ""),
                     event_type="event_conversation",
                     repo_key=repo_key, agent_type=agent_type,
                     skill="event-dialogue",                 # Fix A：打包下发对话技能

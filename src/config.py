@@ -146,10 +146,6 @@ def get_domain_agent(evt_type: str, repo_key: str = "", user_id: int = 0) -> str
         return ""
 
 
-def get_agent_backend(skill_name: str = "") -> str:
-    return "opencode"
-
-
 # ====== 登录白名单 ======
 
 LOGIN_WHITELIST_PATH = os.path.join(CONFIG_DIR, "login-whitelist.json")

@@ -1657,11 +1657,25 @@ def is_known_engine_name(name: str) -> bool:
     return False
 
 
+def _local_engine_info(name: str) -> tuple[bool, str]:
+    """按引擎类型名返回本机是否已安装 + cli_path（discover_backends 真实探测，见 engine-selection §7.3）。"""
+    try:
+        from src.agent.executor import discover_backends
+        for b in discover_backends():
+            if (b.get("name") or "").strip().lower() == (name or "").strip().lower():
+                return bool(b.get("installed")), (b.get("cli_path") or "")
+    except Exception:
+        pass
+    return False, ""
+
+
 def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
     """确保默认 runtime 存在（幂等），返回 id（多实例：优先 online，见 multi-runtime-instance-design §4.3 S2）。
 
     防幽灵：仅当 name 为已知引擎类型（is_known_engine_name）或已存在同名 runtime 时才创建/复用；
     否则返回 None，不生成 credential_id=0 占位行。
+    建行时 installed/healthy 按真实发现结果写入（不再硬编码 installed=1/healthy=1，
+    见 engine-selection §7.3），使未安装引擎不会被 `only_installed/only_healthy` 过滤误选。
     """
     name = (name or "opencode").strip().lower() or "opencode"
     with db_lock:
@@ -1678,8 +1692,9 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
         if not is_known_engine_name(name):
             log.warning(f"ensure_default_runtime: 拒绝为未知引擎 '{name}' 创建占位行")
             return None
+        installed, cli_path = _local_engine_info(name)
         c.execute("INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
-                  (name, name.capitalize(), 1, "", "", 1, name, scope))
+                  (name, name.capitalize(), 1 if installed else 0, cli_path, "", 0, name, scope))
         db.commit()
         return c.lastrowid
 

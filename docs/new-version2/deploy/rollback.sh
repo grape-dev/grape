@@ -8,7 +8,7 @@
 #   bash rollback.sh db-list                # 列出可用数据库备份
 #   bash rollback.sh all  <backup-file.db> [commit|branch]
 #                                           # 一键回滚：数据库 + 代码 同时还原（推荐）
-#   bash rollback.sh mode  direct|queue_local|queue_remote
+#   bash rollback.sh mode  direct|queue_remote
 #                                           # 仅切回执行模式（不碰代码/数据库）
 #
 # ⚠️ 重要注意事项：
@@ -32,7 +32,7 @@ ARG="${2:-}"
 ARG2="${3:-}"
 
 if [ -z "$CMD" ]; then
-  echo "用法: $0 code <commit|branch> | db <backup.db> | db-list | all <backup.db> [commit|branch] | mode <direct|queue_local|queue_remote>"
+  echo "用法: $0 code <commit|branch> | db <backup.db> | db-list | all <backup.db> [commit|branch] | mode <direct|queue_remote>"
   exit 1
 fi
 
@@ -125,8 +125,8 @@ case "$CMD" in
 
   mode)
     if [ -z "$ARG" ]; then echo "❌ 缺少 mode"; exit 1; fi
-    if [ "$ARG" != "direct" ] && [ "$ARG" != "queue_local" ] && [ "$ARG" != "queue_remote" ]; then
-      echo "❌ mode 必须是 direct/queue_local/queue_remote"; exit 1
+    if [ "$ARG" != "direct" ] && [ "$ARG" != "queue_remote" ]; then
+      echo "❌ mode 必须是 direct/queue_remote（queue_local 已废除）"; exit 1
     fi
     echo "=== 切换执行模式 -> $ARG ==="
     DROP="/etc/systemd/system/grape.service.d"

@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "scopes": ["repo", "global", "local"],
+  "rule": "order",
+  "filters": {
+    "only_online": true,
+    "only_healthy": true,
+    "only_installed": true
+  },
+  "local_priority": 90
+}

@@ -486,7 +486,7 @@ async def get_execution_mode_api(user: dict = Depends(get_current_user)):
 @router.put("/execution-mode")
 async def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_current_user)):
     from src.runtime.service import set_execution_mode
-    if body.mode not in ("auto", "direct", "queue_local", "queue_remote"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 auto/direct/queue_local/queue_remote"})
+    if body.mode not in ("auto", "direct", "queue_remote"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 auto/direct/queue_remote（queue_local 已废除）"})
     set_execution_mode(body.mode)
     return {"message": f"执行模式已切换为 {body.mode}", "mode": body.mode}

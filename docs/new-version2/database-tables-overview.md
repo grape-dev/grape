@@ -18,7 +18,7 @@
 | `backend` → `runtime` | `chat_agent_session`（TEXT）/ `events`（TEXT） | M0 |
 | 新增 `agent_tasks` | 任务队列（确定路由 + 事件档案快照 + 技能交付字段） | M1 |
 | 新增 `runtime_credentials` | RuntimeAgent 独立凭据（`rta_` token，D2） | M3 |
-| `meta` 新增 `execution_mode` 键 | 执行模式开关 direct/queue_local/queue_remote | M2 |
+| `meta` 新增 `execution_mode` 键 | 执行模式开关 auto/direct/queue_remote（`queue_local` 已废除） | M2 |
 | `agent_type` / `devops_agent_session` 新增 `enable` 列 | Agent 启用开关（全局默认 + 仓库级覆盖，sre 默认关） | 后续小版本 |
 | SQLite WAL + busy_timeout | 跨进程写安全（`session_manager.py` PRAGMA） | M0 |
 
@@ -301,7 +301,7 @@ created_at TEXT DEFAULT (datetime('now'))
 ```sql
 key TEXT PRIMARY KEY, value TEXT NOT NULL
 ```
-> 存储：`seeded_keys`、`execution_mode`（★ M2 新增，direct/queue_local/queue_remote）、`oauth_gitcode_*`、`webhook_url` 等全局配置。
+> 存储：`seeded_keys`、`execution_mode`（★ M2 新增，auto/direct/queue_remote，`queue_local` 已废除）、`oauth_gitcode_*`、`webhook_url` 等全局配置。
 
 ### 2.6 IM / 飞书
 
@@ -600,8 +600,7 @@ webhook 事件 → routing.get_domain_agent(event_type)
               → enqueue_task() 写 agent_tasks（runtime_id=devops_agent_session.runtime_id，确定路由）
                       │
                  execution_mode:
-                  ┌── direct ──────────► 就地 stream_agent 执行（原逻辑）
-                  ├── queue_local ─────► 本地 worker 线程池 claim → 执行 → complete
+                  ├── direct ──────────► 就地 stream_agent 执行（本机引擎，原逻辑）
                   └── queue_remote ────► RuntimeAgent 边端 claim（/api/runtime/*）→ 执行 → complete
                       │
                  complete → parse_agent_output_json → finalize_event_archive（event.json）

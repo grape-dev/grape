@@ -1,6 +1,6 @@
 # 执行模式按绑定引擎宿主自动推导改造设计（Direct / Queue 自动识别）
 
-> 版本：v1.0
+> 版本：v1.1（评审修订：废除 queue_local，取值域收敛为 auto/direct/queue_remote，见 engine-default-selection-design.md §9）
 > 日期：2026-08-11
 > 状态：待评审
 > 前置：`agent-runtime-event-design.md`（M2 执行模式）、`multi-runtime-instance-design.md`（多实例/确定路由 §3-§4）、`concurrency-design.md`（队列/串行槽）、`runtime-admin-two-view-design.md`（Engines/Workers 双视图）
@@ -23,7 +23,7 @@
 
 | 维度 | 绑定引擎（配置） | 实际执行通道（运行） |
 |---|---|---|
-| 决策依据 | `devops_agent_session.runtime_id` → `agent_runtimes` 行 → 宿主 worker | **全局** `meta.execution_mode`（direct/queue_local/queue_remote） |
+| 决策依据 | `devops_agent_session.runtime_id` → `agent_runtimes` 行 → 宿主 worker | **全局** `meta.execution_mode`（auto/direct/queue_remote） |
 | 数据来源 | 用户在 Agent 配置页选的 engine | 与绑定**无关**，一刀切 |
 
 - **direct 模式在架构上无法执行到远端 worker**：`_execute_agent`（`event_pipeline.py:702`）→ `stream_agent(..., backend_name=backend)` 按**引擎类型名**解析本机 `AgentRuntime`（opencode/hermes）并用**服务器本机 CLI** 跑；远端 worker 唯一的消费通道是 `enqueue_task(runtime_id)` → RuntimeAgent `claim(runtime_id)`（`runtime/agent.py:168-171`、`runtime/service.py:211`）。
@@ -76,7 +76,7 @@
 | `src/api/routes/webhook.py:202-215` | A2A：`get_execution_mode() == "direct"` → 线程；否则入队 |
 | `src/prompt_builder.py:54-60` | `_build_history_file_guide`：`get_execution_mode()=="queue_remote"` 时远端历史不可达 |
 | `src/runtime/agent.py:162-196` | RuntimeAgent `_run_loop`：对每个已注册 runtime_id 轮询 claim |
-| `src/api/routes/settings.py:477` | PUT `/execution-mode` 校验白名单只有 direct/queue_local/queue_remote |
+| `src/api/routes/settings.py:477` | PUT `/execution-mode` 校验白名单只有 auto/direct/queue_remote（`queue_local` 已废除） |
 
 ---
 
@@ -118,23 +118,23 @@ def runtime_execution_kind(runtime_id: int) -> str:
 
 ### 3.2 全局开关语义调整：新增 `auto`（默认），旧值仍为强制覆盖
 
-- `get_execution_mode()` 取值域扩展为：`auto` / `direct` / `queue_local` / `queue_remote`；
+- `get_execution_mode()` 取值域扩展为：`auto` / `direct` / `queue_remote`（`queue_local` 已废除，见 `engine-default-selection-design.md` §9）；
 - `_DEFAULT_MODE` 改为 `"auto"`（`service.py:19`），**开箱即用**：绑定了远端 worker 的 Agent 自动入队，绑定本机引擎的自动本地执行；
-- 显式配置 `direct/queue_local/queue_remote` 时仍为**强制模式**（向后兼容，运维可锁定全局行为）；
-- `PUT /execution-mode` 校验白名单加入 `"auto"`（`settings.py:477`）。
+- 显式配置 `direct/queue_remote` 时仍为**强制模式**（向后兼容，运维可锁定全局行为）；
+- `PUT /execution-mode` 校验白名单加入 `"auto"`（`settings.py:477`），同时移除 `queue_local`。
 
 **统一分发写法（所有分发点复用）**：
 
 ```python
 mode = get_execution_mode()
 kind = runtime_execution_kind(runtime_id) if mode == "auto" else mode
-if kind in (EXEC_MODE_LOCAL, EXEC_MODE_REMOTE) and backend and skill_name and seq > 0:
-    _enqueue_pipeline_task(...)   # 入队：本地 worker / 远端 worker 按 runtime_id claim
+if kind == EXEC_MODE_REMOTE and backend and skill_name and seq > 0:
+    _enqueue_pipeline_task(...)   # 入队：远端 worker 按 runtime_id claim
 elif backend and skill_name and seq > 0:
     threading.Thread(target=_execute_agent, ...)   # direct：本机进程内执行
 ```
 
-> 说明：auto 只产出 `direct`（本地引擎）与 `queue_remote`（远端 worker）两态；`queue_local` 保留为显式强制值（需本机常驻 RuntimeAgent）。若后续希望「auto 下本地引擎也走 queue_local（并发受控）」，需本地 worker 进程常驻，另行评估。未绑定的兜底见 3.6。
+> 说明：auto 只产出 `direct`（本地引擎）与 `queue_remote`（远端 worker）两态；`queue_local` 已废除（现状为无消费者的空壳，强制选择即卡 queued）。本机引擎一律 `direct`（并发控制见 `engine-default-selection-design.md` §9）。未绑定的兜底见 3.6。
 
 ### 3.3 各分发点改造
 
@@ -255,7 +255,7 @@ auto 模式下绑定引擎若在远端 worker 且该 worker 离线/凭据吊销�
 ### 5.3 回归范围
 
 - 既有 `tests/test_m2_execution_mode.py`、`test_runtime.py`、`test_runtime_protocol.py`、`test_pipeline.py`、`test_a2a_queue.py` 全量通过；
-- 确认显式 `direct` / `queue_local` / `queue_remote` 强制模式行为与改造前一致。
+- 确认显式 `direct` / `queue_remote` 强制模式行为与改造前一致。
 
 ---
 
@@ -265,7 +265,7 @@ auto 模式下绑定引擎若在远端 worker 且该 worker 离线/凭据吊销�
 |---|---|
 | 行为变化 | 默认 mode 从 `direct` 变为 `auto`：绑定远端 worker 的 Agent 由「本机直跑」改为「入队 + worker claim」（引入 ~3s 轮询延迟，可接受）；绑定本机引擎的 Agent 行为不变 |
 | Chat 默认语义 | Chat 未配置默认**本机 direct 执行**（与现状一致）；仅当用户配置了个人 worker 引擎时才走队列——对既有 Chat 用户行为不回归，并修复「配了 worker 引擎却本机执行」的错位 |
-| 向后兼容 | 已有显式 `execution_mode` 配置（direct/queue_local/queue_remote）仍为强制值，不感知变化；仅「未显式配置」的环境默认值变化 |
+| 向后兼容 | 已有显式 `execution_mode` 配置（direct/queue_remote）仍为强制值，不感知变化；仅「未显式配置」的环境默认值变化 |
 | 派错 worker | 收敛 runtime_id 后，任务严格按会话绑定 worker 派发；`get_runtime_id_by_name` 仅保留为未绑定兜底 |
 | 任务卡死 | auto 模式下远端引擎离线时任务拒入队 + 告警；避免 queued 永久积压 |
 | 回滚 | 核心改动集中在 service.py helper + 各分发点分支条件；回滚即恢复 `get_execution_mode()` 判断 |
@@ -275,7 +275,7 @@ auto 模式下绑定引擎若在远端 worker 且该 worker 离线/凭据吊销�
 
 ## 七、附带观察（非本次改动范围）
 
-- **`queue_local` 与 auto 的关系**：auto 只区分「本地引擎→direct / 远端引擎→queue_remote」；若希望本地引擎也走独立本地 worker（并发受控），需本地 RuntimeAgent 常驻后，再评估「auto 下 credential_id=0 → queue_local」映射。
+- **`queue_local` 已废除**：auto 只区分「本地引擎→direct / 远端引擎→queue_remote」，不再有本地入队模式（详见 `engine-default-selection-design.md` §9）。
 - **`set_execution_mode` 注释「改键值 + 重启生效」不准确**：`get_execution_mode()` 每次调用实时读 meta，无需重启；本文档沿此语义（运维改 meta 即生效）。
 - **任务级超时/重投**：`agent_tasks.queued` 长时间未 claim 的检测与重投机制（超出本次离线校验范围），可作为独立能力规划（`concurrency-design.md` 语境）。
 - **引擎健康与自动迁移**：绑定引擎持续 offline 时，是否自动迁移到同类型在线引擎（S2 健康选择），建议结合 `runtime-admin-two-view-design.md` 的告警做产品级决策，本文不改。

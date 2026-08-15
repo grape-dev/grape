@@ -251,8 +251,8 @@ if not started:
 ```
 
 > 该改动与 `stream_agent` 的 `done` 产出兼容：引擎启动失败会在首次迭代即产出
-> `done`/抛异常，此时不置 running，直接 fail。worker 侧 `service._run_task`（本地
-> queue_local 模式）同样按此原则调整（`service.py` 的 `_run_task` 内同步调用 `task_start`）。
+> `done`/抛异常，此时不置 running，直接 fail。远端 worker 侧（`src/runtime/agent.py` 的
+> `_execute_task`）同样按此原则调整（`queue_local` 已废除，本地一律 direct，不涉及本地 worker）。
 
 ### 4.2 前端（`src/api/static/js/pages/events.js`）
 
@@ -297,7 +297,7 @@ function redispatchEvent(seq) {
 |---|---|
 | `src/api/routes/events.py` | `get_event_detail` 附 task 信息；新增 `POST /{seq}/redispatch` |
 | `src/runtime/agent.py` | `task_start` 延迟到引擎首事件后触发（§2.2/§4.1.4 running 语义修正） |
-| `src/runtime/service.py` | `_run_task`（queue_local）同步 `task_start` 延迟（若本地 worker 采用） |
+| `src/runtime/service.py` | `_run_task`（`queue_local` 已废除；本地执行见 direct 路径，remote 见 `agent.py` `_execute_task`）同步 `task_start` 延迟 |
 | `src/api/static/js/pages/events.js` | Status 行加按钮 + `redispatchEvent()` |
 | `src/api/static/index.html` | events.js 版本号 +1 |
 | 本文档 | `docs/new-version2/event-redispatch-design.md` |

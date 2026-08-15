@@ -304,6 +304,19 @@ CREATE TABLE IF NOT EXISTS agent_type_runtime_pool (
 )
 """
 
+# ===== engine-selection-design.md §4.4：每 (仓库, agent) 引擎集合绑定 =====
+_DEVOPS_AGENT_RUNTIME_BINDING_DDL = """
+CREATE TABLE IF NOT EXISTS devops_agent_runtime_binding (
+    repo_key    TEXT NOT NULL,              -- 仓库全名（owner/repo，归一化）
+    agent_type  TEXT NOT NULL,              -- vod / issue / coding / qa / sre / chat
+    runtime_id  INTEGER NOT NULL,           -- agent_runtimes.id（本机直连或远端引擎）
+    priority    INTEGER NOT NULL DEFAULT 50, -- 小=高优先；默认按 scope：repo=10 / global=50 / local=90
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (repo_key, agent_type, runtime_id)
+)
+"""
+
 # ===== new-version2 M3：runtime_credentials 独立凭据（rta_ token，见 agent-runtime-event-full-design.md §4.1）=====
 _RUNTIME_CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS runtime_credentials (
@@ -391,6 +404,7 @@ _NEW_TABLES = [
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
     ("agent_type_runtime_pool", _AGENT_TYPE_RUNTIME_POOL_DDL),
+    ("devops_agent_runtime_binding", _DEVOPS_AGENT_RUNTIME_BINDING_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
     ("issue_state", _ISSUE_STATE_DDL),
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),

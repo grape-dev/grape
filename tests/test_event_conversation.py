@@ -447,10 +447,18 @@ class TestRedispatchRuntimeZero:
                 "VALUES ('t_redispatch0', 'vod:'||?, 0, ?, '#5', ?, 'vod', 'repo-onboarding', 'p', '/old/vod/issues/5', 'ses_old', 'issue_comment', 'acct', 0, '', '{}', '{}', '', 'iss-redis', '{}', '{}', '{}', 0, '')",
                 (_REPO_KEY, seq, _REPO_KEY))
             c.execute("INSERT OR IGNORE INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, status) VALUES ('iss-redis',?, 'vod', '#5', '', 'idle')", (_REPO_KEY,))
+            # 新模型（engine-selection-design.md v2）：seed 远端引擎 + 绑定，供重派 pick_engine 解析
+            c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'redis-cred%'")
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) VALUES ('hredis','redis-cred','redis-dev','global','tester','active')")
+            _cid = c.lastrowid
+            c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
+                      "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'global', '', 1, 1)", (_cid,))
+            _rid = c.lastrowid
+            from src.repo_key import from_repo_key
+            _repo_norm = from_repo_key(_REPO_KEY)
+            c.execute("DELETE FROM devops_agent_runtime_binding WHERE repo_key=? AND agent_type='vod'", (_repo_norm,))
+            c.execute("INSERT INTO devops_agent_runtime_binding (repo_key, agent_type, runtime_id, priority, enabled, created_at) VALUES (?, 'vod', ?, 50, 1, datetime('now'))", (_repo_norm, _rid))
             db.commit()
-            # 保证默认 runtime 存在（路由解析兜底）
-            from src.user.db import ensure_default_runtime
-            ensure_default_runtime("opencode")
 
         from src.api.event_pipeline import get_agent_workdir
         expected_cwd = get_agent_workdir(_REPO_KEY, "vod", "#5")
@@ -478,4 +486,7 @@ class TestRedispatchRuntimeZero:
         with db_lock:
             db.cursor().execute("DELETE FROM events WHERE seq=?", (seq,))
             db.cursor().execute("DELETE FROM agent_tasks WHERE event_seq=?", (seq,))
+            db.cursor().execute("DELETE FROM devops_agent_runtime_binding WHERE repo_key='org/test' AND agent_type='vod'")
+            db.cursor().execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'redis-cred%')")
+            db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'redis-cred%'")
             db.commit()

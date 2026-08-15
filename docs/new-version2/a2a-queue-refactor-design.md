@@ -163,20 +163,20 @@ def _a2a_body(agent="coding", issue_number="5"):
 
 | # | 用例 | 前置（mode） | 步骤 | 断言 |
 |---|---|---|---|---|
-| T1 | **queue 模式 A2A 入队** | `queue_local` | 直接调用 `a2a_endpoint` 对应 handler（或 POST `/api/a2a`） | `agent_tasks` 新增行：`status='queued'`、`event_seq` 对应新 event、`issue_id='#5'`、`agent_type='coding'`；`events` 新增 `a2a_event` 且 `status='running'` |
+| T1 | **queue 模式 A2A 入队** | `queue_remote` | 直接调用 `a2a_endpoint` 对应 handler（或 POST `/api/a2a`） | `agent_tasks` 新增行：`status='queued'`、`event_seq` 对应新 event、`issue_id='#5'`、`agent_type='coding'`；`events` 新增 `a2a_event` 且 `status='running'` |
 | T2 | **direct 模式 A2A 不建任务** | `direct` | 同 T1 | `agent_tasks` **不新增行**（仍走 `_execute_agent` 线程）；`events` 新增 `a2a_event` |
-| T3 | **入队后 task 与 event 关联** | `queue_local` | 发起 A2A → 查 `agent_tasks` | `agent_tasks.event_seq == events.seq`，`issue_id` 一致；`server_url` 非空（= `get_server_base_url()`） |
-| T4 | **串行槽生效** | `queue_local` | 同一 issue 已有 running/dispatched task 时再 A2A | 新任务不 claim（`service.claim` 返回 None 或仍 queued），同 `issue_session_id` 串行 |
-| T5 | **A2A 任务被 worker 消费后回写** | `queue_local` | 入队 → 模拟 `_run_task`/claim → complete | `events.status` 变为 `completed`，task 终态；pipeline `executing` 字段先 true 后 false |
-| T6 | **queue_remote 同样入队** | `queue_remote` | 同 T1 | 与 T1 一致（不因 remote 而改走线程） |
-| T7 | **pipeline executing 派生** | `queue_local` | A2A 入队后调 `GET /api/pipeline/{owner}/{repo}` | `active.executing == true`；任务完成后 `executing == false`（覆盖 §四 改动点 1 的前端预期） |
-| T8 | **webhook 事件路径不回归** | `queue_local` | `run_pipeline(issue_comment)`（复用 `test_m2_execution_mode` 的 `_evt_body`） | 行为与改造前一致：入队 + 不直接执行 |
+| T3 | **入队后 task 与 event 关联** | `queue_remote` | 发起 A2A → 查 `agent_tasks` | `agent_tasks.event_seq == events.seq`，`issue_id` 一致；`server_url` 非空（= `get_server_base_url()`） |
+| T4 | **串行槽生效** | `queue_remote` | 同一 issue 已有 running/dispatched task 时再 A2A | 新任务不 claim（`service.claim` 返回 None 或仍 queued），同 `issue_session_id` 串行 |
+| T5 | **A2A 任务被 worker 消费后回写** | `queue_remote` | 入队 → 模拟远端 worker claim → complete | `events.status` 变为 `completed`，task 终态；pipeline `executing` 字段先 true 后 false |
+| T6 | **队列入口统一** | `queue_remote` | 同 T1 | 与 T1 一致（队列仅 `queue_remote`，`queue_local` 已废除） |
+| T7 | **pipeline executing 派生** | `queue_remote` | A2A 入队后调 `GET /api/pipeline/{owner}/{repo}` | `active.executing == true`；任务完成后 `executing == false`（覆盖 §四 改动点 1 的前端预期） |
+| T8 | **webhook 事件路径不回归** | `queue_remote` | `run_pipeline(issue_comment)`（复用 `test_m2_execution_mode` 的 `_evt_body`） | 行为与改造前一致：入队 + 不直接执行 |
 
 ### 5.1.3 关键断言点
 
 1. **入队判定**：改造后 `a2a_endpoint` 内 `get_execution_mode() != "direct"` 分支调用 `_enqueue_pipeline_task`，断言 `agent_tasks` 计数 +1 且字段齐全；
 2. **direct 不变**：`mode == "direct"` 分支仍 `threading.Thread(_execute_agent)`，断言 `agent_tasks` 计数不变；
-3. **pipeline 徽章**：T7 通过 `_running_issue_ids` 覆盖 —— A2A 入队后 task 为 `queued`（T1 用 `queue_local` 时 claim 可能立即消费，需在断言前**冻结任务**或断言 `dispatched/running/queued` 任一），建议 T1/T7 用「入队后不立即 claim」的窗口断言，或直接断言 `_running_issue_ids` 返回集合含 `#5`。
+3. **pipeline 徽章**：T7 通过 `_running_issue_ids` 覆盖 —— A2A 入队后 task 为 `queued`（T1 用 `queue_remote` 时 claim 可能立即消费，需在断言前**冻结任务**或断言 `dispatched/running/queued` 任一），建议 T1/T7 用「入队后不立即 claim」的窗口断言，或直接断言 `_running_issue_ids` 返回集合含 `#5`。
 
 ### 5.1.4 回归范围
 

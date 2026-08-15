@@ -197,23 +197,33 @@ async def a2a_endpoint(request: Request):
         )
         log.info(f"A2A: event created, seq={seq}")
 
-        # 执行分派：与 run_pipeline 一致——auto/direct 就地线程；queue 模式入队（A2A 也走 agent_tasks，
-        # 使 pipeline executing 派生/串行槽/可观测性与 webhook 事件一致，见 a2a-queue-refactor-design.md）
+        # 执行分派：与 run_pipeline 一致——从引擎集合选引擎（专属→全局→本机）；
+        # 选中 remote → 入队该引擎；选中本机 → direct 就地线程（见 engine-selection-design.md v2）
+        from src.runtime.engine_select import pick_engine
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
-        kind = runtime_execution_kind(runtime_id or 0)
+        engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0)
+        if not engine_id:
+            log.info(f"A2A: no available engine for repo={repo_key} agent={agent_name}, seq={seq}, skip")
+            try:
+                from src.api.event_store import update_event_status
+                update_event_status(seq, "failed")
+            except Exception:
+                pass
+            return {"status": "ok", "seq": 0, "agent": agent_name}
+        kind = runtime_execution_kind(engine_id)
         if kind == EXEC_MODE_DIRECT:
-            import threading
-            threading.Thread(target=_execute_agent, args=(
-                repo_key, seq, agent_name, backend, skill_name or agent_name, evt,
-            ), daemon=True, name=f"a2a-{agent_name}-{seq}").start()
-            log.info(f"A2A: started agent execution for {agent_name} (direct)")
+            from src.api.event_pipeline import start_direct_agent
+            start_direct_agent(_execute_agent, (
+                repo_key, seq, agent_name, backend, skill_name or agent_name, evt, engine_id,
+            ), name=f"a2a-{agent_name}-{seq}")
+            log.info(f"A2A: started agent execution for {agent_name} (direct, engine={engine_id})")
         else:
             from src.api.event_pipeline import _enqueue_pipeline_task
             _enqueue_pipeline_task(repo_key, seq, agent_name, backend,
                                    skill_name or agent_name, evt,
-                                   skill_id, skill_path, runtime_id or 0,
+                                   skill_id, skill_path, engine_id,
                                    f"#{issue_number}" if issue_number else "")
-            log.info(f"A2A: enqueued task for {agent_name}, seq={seq}, mode={kind}")
+            log.info(f"A2A: enqueued task for {agent_name}, seq={seq}, engine={engine_id}, mode={kind}")
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")
         # 事件已创建（running）但执行启动失败 → 立即置 failed，防卡 running 僵尸

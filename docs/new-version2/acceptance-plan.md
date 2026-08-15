@@ -90,26 +90,26 @@
 | M1-R4 | UT | claim 串行槽 D9 | 同 session 已有 running | `NOT EXISTS` 过滤，不返回该 session 任务 |
 | M1-R5 | UT | claim 空队 | 无 queued 任务 | 返回 null |
 | M1-R6 | UT | 终态幂等 | `complete` 后再 `complete` | 第二次不重复 finalize/update（`update_task_status` 已终态重放安全） |
-| M1-R7 | UT | 本地 worker 闭环 | 入队 1 任务 → worker 消费 | claim→执行→complete；task 终态 + 档案 finalize（进程内，不经 HTTP） |
+| M1-R7 | UT | 本地执行闭环（direct） | 触发事件（本机引擎） | `_execute_agent` 就地 `stream_agent` → 终态；events 表正确（不经队列，`queue_local` 已废除） |
 
 ---
 
-## 四、M2 回报协议驱动 event.json + 执行切换（queue_local）
+## 四、M2 回报协议驱动 event.json + 执行通道收敛（direct | queue_remote）
 
-> 验收标准：`execution_mode=queue_local` 下事件/chat/IM 三入口 E2E 全通；`direct` 一键回退通过。
+> 验收标准：`execution_mode=queue_remote`（绑远端引擎）/ 本机 `direct` 下事件/chat/IM 三入口 E2E 全通；`direct` 一键回退通过。`queue_local` 已废除（见 `engine-default-selection-design.md` §9）。
 
 | ID | 层级 | 场景 | 前置 | 步骤 | 预期 |
 |---|---|---|---|---|---|
-| M2-01 | IT | 事件入队三连 | `queue_local` | 注入 GitCode webhook（`POST /webhook/gitcode`） | 依次 `append_event`→`init_event_json`→`enqueue_task`；events 有行、event.json 建段、agent_tasks 有 queued 行 |
+| M2-01 | IT | 事件入队三连 | `queue_remote`（绑远端引擎） | 注入 GitCode webhook（`POST /webhook/gitcode`） | 依次 `append_event`→`init_event_json`→`enqueue_task`；events 有行、event.json 建段、agent_tasks 有 queued 行 |
 | M2-02 | E2E | 任务完成写档案 | worker 在线 | 事件走完 claim→执行→complete | event.json pipeline 段 output 写入（actions/conclusion/...）；events 表 `result` 为结论文本；整链 status=completed |
 | M2-03 | E2E | 任务失败写档案 | worker 在线 | 注入 exit_code≠0 场景 | pipeline 段 status=failed；整链 failed；events 表同步失败态 |
 | M2-04 | E2E | `#0` 不建档案 | push 无 Issue | 触发无 Issue 事件 | 只写 events，不建 event.json、不入队 |
 | M2-05 | E2E | 结构化产出解析 | 执行完成 | 检查 result_text 含 JSON 块 | `parse_agent_output_json` 提取五字段写入档案；summary 覆盖 |
-| M2-06 | IT | chat 入队 + 轮询 | `queue_local` | `POST /api/chat/send` | 返回 `task_id`；`GET /api/runtime/tasks/{id}/status` 轮询终态；完成返回 `result_text` |
+| M2-06 | IT | chat 入队 + 轮询 | `queue_remote` | `POST /api/chat/send` | 返回 `task_id`；`GET /api/runtime/tasks/{id}/status` 轮询终态；完成返回 `result_text` |
 | M2-07 | IT | chat SSE 分支保留 | `direct` | `POST /api/chat/send/stream` | SSE 流式照常（未回归） |
 | M2-08 | E2E | IM 事件入队 | 飞书模拟 | 走 `process_chat_async`/`process_vod_async` | 同 M2-01 三连 + 轮询展示 |
 | M2-09 | IT | 取消任务 | running 中 | `cancel_task(task_id)` | 置 `cancelled`；执行侧 kill 子进程；档案段不 finalize 为 completed |
-| M2-10 | E2E | 回退验证 | `queue_local` | 切 `execution_mode=direct` 重启 | 事件/chat 回到就地 `stream_agent`，无档案副作用 |
+| M2-10 | E2E | 回退验证 | `queue_remote` | 切 `execution_mode=direct` 重启 | 事件/chat 回到就地 `stream_agent`，无档案副作用 |
 | M2-11 | MIG | 滞留任务处理 | 升级中遗留 queued | 手工重入队 / 置 cancelled | 队列可清理，不阻塞后续任务 |
 
 ---
@@ -163,7 +163,7 @@
 | SD-4 | IT | 技能缓存命中 | 同技能重复任务 | content_hash 命中，不重复传输/写盘 |
 | SD-5 | E2E | A2A 外呼 | 远端执行含 A2A 调用 | prompt `{{SERVER_URL}}` 替换为服务端可达地址，可调通 `/api/a2a` |
 | SD-6 | E2E | 凭据随任务 | worker 无本地 DB | CodeArts AK/SK 与 user credentials 经 `env_extra` 注入成功 |
-| SD-7 | UT | 本地模式回归 | `direct`/`queue_local` | 占位符本地也被替换（或保持绝对路径），行为与现状一致 |
+| SD-7 | UT | 本地模式回归 | `direct`（本机引擎） | 占位符本地也被替换（或保持绝对路径），行为与现状一致 |
 | SD-8 | SEC | 技能包脱敏 | 技能内容含敏感串 | 写入 `skill_files` 前统一 `[REDACTED]` 脱敏 |
 
 ---
