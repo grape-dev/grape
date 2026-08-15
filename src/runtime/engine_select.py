@@ -202,6 +202,61 @@ def clear_binding(repo_key: str, agent_type: str):
     set_binding(repo_key, agent_type, [])
 
 
+def backfill_existing_bindings() -> int:
+    """把存量 `devops_agent_session.runtime_id>0` 的会话回填为绑定集合（单成员），幂等。
+
+    engine-selection-design.md §4.4/§12：新模型上线前托管的存量仓库没有 `devops_agent_runtime_binding`
+    行，导致 Configure/展示读不到引擎。仅作**一次性迁移**（meta 标志 `bindings_backfilled` 防重跑，
+    避免覆盖用户后续改动）；priority 按引擎 scope 派生（repo=10/global=50/local=90）。
+    """
+    from src.repo_key import from_repo_key
+    from src.user.db import get_meta_value, set_meta_value
+    if get_meta_value(_BACKFILL_FLAG) == "1":
+        return 0
+    db, lock = _db()
+    cfg = load_engine_selection()
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    added = 0
+    with lock:
+        c = db.cursor()
+        try:
+            rows = c.execute(
+                "SELECT repo_key, agent_type, runtime_id FROM devops_agent_session WHERE runtime_id IS NOT NULL AND runtime_id>0"
+            ).fetchall()
+        except Exception as e:
+            log.warning(f"backfill_existing_bindings: query failed: {e}")
+            return 0
+        for repo_key, agent_type, runtime_id in rows:
+            repo = from_repo_key(repo_key or "")
+            if not repo or not agent_type:
+                continue
+            try:
+                exists = c.execute(
+                    "SELECT 1 FROM devops_agent_runtime_binding WHERE repo_key=? AND agent_type=? LIMIT 1",
+                    (repo, agent_type)).fetchone()
+                if exists:
+                    continue
+                pr = _default_priority(runtime_id, repo, cfg)
+                c.execute(
+                    "INSERT OR IGNORE INTO devops_agent_runtime_binding (repo_key, agent_type, runtime_id, priority, enabled, created_at) VALUES (?,?,?,?,1,?)",
+                    (repo, agent_type, runtime_id, pr, now))
+                added += 1
+            except Exception as e:
+                log.warning(f"backfill_existing_bindings: insert {repo}:{agent_type} failed: {e}")
+        db.commit()
+    try:
+        set_meta_value(_BACKFILL_FLAG, "1")
+    except Exception as e:
+        log.warning(f"backfill_existing_bindings: mark flag failed: {e}")
+    if added:
+        log.info(f"backfill_existing_bindings: added {added} binding rows from existing sessions")
+    return added
+
+
+_BACKFILL_FLAG = "bindings_backfilled"
+
+
 # ===== 派发选择 =====
 
 def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) -> int | None:

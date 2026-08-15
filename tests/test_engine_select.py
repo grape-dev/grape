@@ -17,8 +17,10 @@ def _clean_tables():
         c.execute("DELETE FROM devops_agent_runtime_binding")
         c.execute("DELETE FROM agent_tasks")
         c.execute("DELETE FROM events")
+        c.execute("DELETE FROM devops_agent_session")
         c.execute("DELETE FROM agent_runtimes")
         c.execute("DELETE FROM runtime_credentials")
+        c.execute("DELETE FROM meta WHERE key='bindings_backfilled'")
         db.commit()
     yield
     with db_lock:
@@ -26,8 +28,10 @@ def _clean_tables():
         c.execute("DELETE FROM devops_agent_runtime_binding")
         c.execute("DELETE FROM agent_tasks")
         c.execute("DELETE FROM events")
+        c.execute("DELETE FROM devops_agent_session")
         c.execute("DELETE FROM agent_runtimes")
         c.execute("DELETE FROM runtime_credentials")
+        c.execute("DELETE FROM meta WHERE key='bindings_backfilled'")
         db.commit()
 
 
@@ -163,6 +167,42 @@ class TestResolveLocalEngine:
         _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))          # 远端全局不参与
         _mk_engine("opencode", credential_id=0, healthy=0)          # 本机不健康
         assert es.resolve_local_engine() is None
+
+
+class TestBackfillExistingBindings:
+    def test_backfill_creates_single_member_bindings(self):
+        glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
+        with db_lock:
+            c = db.cursor()
+            for at in ("vod", "issue"):
+                c.execute(
+                    "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status, enable) "
+                    "VALUES (?, 'gitcode:owner/repo', ?, ?, 'idle', 1)",
+                    ("bf-" + at, at, glob_eng))
+            db.commit()
+        added = es.backfill_existing_bindings()
+        assert added >= 2
+        got = es.get_binding("owner/repo", "vod")
+        assert [m["runtime_id"] for m in got] == [glob_eng]
+        # 幂等：再跑不重复
+        assert es.backfill_existing_bindings() == 0
+        # 不覆盖已有绑定（用户改动优先）
+        es.set_binding("owner/repo", "issue", [])
+        assert es.backfill_existing_bindings() == 0
+        assert es.get_binding("owner/repo", "issue") == []
+
+    def test_backfill_priority_by_scope(self):
+        repo_cid = _mk_cred("c-repo", scope="repo", owner_id="owner/repo")
+        repo_eng = _mk_engine("opencode-r", credential_id=repo_cid, scope="repo", owner_id="owner/repo")
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status, enable) "
+                "VALUES ('bf-r', 'gitcode:owner/repo', 'qa', ?, 'idle', 1)", (repo_eng,))
+            db.commit()
+        es.backfill_existing_bindings()
+        got = es.get_binding("owner/repo", "qa")
+        assert got and got[0]["priority"] == 10   # 仓库级专属优先
 
 
 class TestQueryEngines:

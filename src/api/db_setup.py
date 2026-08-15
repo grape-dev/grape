@@ -661,6 +661,12 @@ def init_database():
     _create_indexes()
     _seed_from_json()
     _align_agent_enable()
+    # engine-selection-design.md §4.4/§12：存量会话 runtime_id>0 → 回填绑定集合（单成员，幂等）
+    try:
+        from src.runtime.engine_select import backfill_existing_bindings
+        backfill_existing_bindings()
+    except Exception as e:
+        log.warning(f"Backfill existing runtime bindings failed: {e}")
 
 
 def _align_agent_enable():

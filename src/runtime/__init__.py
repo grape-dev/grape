@@ -18,4 +18,5 @@ from .service import (
 from .engine_select import (
     load_engine_selection, get_binding, set_binding, clear_binding,
     pick_engine, resolve_default_engine, query_engines,
+    resolve_local_engine, engine_name, backfill_existing_bindings,
 )
