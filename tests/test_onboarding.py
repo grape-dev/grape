@@ -149,6 +149,12 @@ def test_enqueue_task_uses_issue_session_per_target():
     assert by_issue["#2"]["issue_session_id"]
     assert by_issue["#1"]["issue_session_id"] != by_issue["#2"]["issue_session_id"]
     assert "ONBOARDING_TARGET" in by_issue["#1"]["env_extra"]
+    # cwd 按 Issue 统一隔离：experience→ {repo}/issues/1/vod/，explore→ {repo}/issues/2/vod/
+    assert by_issue["#1"]["cwd"] == ob_mod._onboarding_workdir("gitcode:owner/repo", "experience")
+    assert by_issue["#2"]["cwd"] == ob_mod._onboarding_workdir("gitcode:owner/repo", "explore")
+    assert by_issue["#1"]["cwd"].endswith(os.path.join("issues", "1", "vod"))
+    assert by_issue["#2"]["cwd"].endswith(os.path.join("issues", "2", "vod"))
+    assert "onboarding-agent" not in by_issue["#1"]["cwd"]
     # bot token 注入（queue 模式必须有 BOT_GITCODE_TOKEN，修复硬编码空串）
     assert by_issue["#1"]["repo_gitcode_token"] == "bot_token_xyz"
     assert by_issue["#2"]["repo_gitcode_token"] == "bot_token_xyz"

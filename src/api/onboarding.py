@@ -13,7 +13,7 @@ import os
 import json
 import threading
 
-from src.config import log, WORKSPACE_DIR, SKILLS_DIR, CONFIG_DIR
+from src.config import log, SKILLS_DIR, CONFIG_DIR
 
 # 引导目标类型：experience（快速部署体验）/ explore（探索方向引导），各执行一次
 ONBOARDING_TARGETS = ("experience", "explore")
@@ -41,12 +41,22 @@ def _mark_onboarding_started(repo_key: str):
     set_meta_value(f"onboarded:{repo_key}", "1")
 
 
-def _onboarding_workdir(repo_key: str) -> str:
-    """引导工作目录（技能写结果文件位置）。"""
-    from src.repo_key import from_repo_key
-    ws = os.path.join(WORKSPACE_DIR, from_repo_key(repo_key), "onboarding-agent")
-    os.makedirs(ws, exist_ok=True)
-    return ws
+def _onboarding_issue_id(target: str) -> str:
+    """引导预分配 Issue 号（与主事件 issue_id 预分配一致）：experience→#1, explore→#2。"""
+    try:
+        return f"#{ONBOARDING_TARGETS.index(target) + 1}"
+    except ValueError:
+        return ""
+
+
+def _onboarding_workdir(repo_key: str, target: str) -> str:
+    """引导工作目录（按 Issue 统一隔离，见 workdir-issue-centric-design.md §2.1）。
+
+    onboarding 是 vod agent 的特殊执行，cwd 与真实 Issue 共用：
+    experience→ {repo}/issues/1/vod/，explore→ {repo}/issues/2/vod/
+    """
+    from src.api.event_pipeline import get_agent_workdir
+    return get_agent_workdir(repo_key, "vod", _onboarding_issue_id(target))
 
 
 def _load_vod_session(repo_key: str) -> tuple[str, int, str]:
@@ -122,7 +132,8 @@ def _finalize_onboarding(repo_key: str, seq: int, owner: str, result_path: str =
 def _execute_agent_wrapper(repo_key, seq, owner, skill, backend, runtime_id, evt, skill_path, target):
     """direct 模式：复用 _execute_agent 执行 repo-onboarding 技能，注入 ONBOARDING_RESULT/TARGET。"""
     from src.api.event_pipeline import _execute_agent
-    _ws = _onboarding_workdir(repo_key)
+    _ws = _onboarding_workdir(repo_key, target)
+    os.makedirs(_ws, exist_ok=True)
     _result_path = os.path.join(_ws, f"onboarding-result-{target}.json")
     evt.setdefault("_env_extra", {})["ONBOARDING_RESULT"] = _result_path
     evt.setdefault("_env_extra", {})["ONBOARDING_TARGET"] = target
@@ -140,7 +151,8 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
     from src.repo_key import from_repo_key
     from src.user.db import get_gitcode_token
     repository = from_repo_key(repo_key)
-    ws = _onboarding_workdir(repo_key)
+    ws = _onboarding_workdir(repo_key, target)
+    os.makedirs(ws, exist_ok=True)
     result_path = os.path.join(ws, f"onboarding-result-{target}.json")
     from src.prompt_builder import build_prompt
     from src.api.session_store import get_or_create_issue_session

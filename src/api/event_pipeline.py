@@ -542,16 +542,16 @@ def _issue_num_from(issue_id: str) -> str:
 
 
 def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str:
-    """Agent 工作目录（多 Issue 并行，见 multi-issue-isolation-design.md §3.4）。
+    """Agent 工作目录（按 Issue 统一隔离，见 workdir-issue-centric-design.md §二）。
 
-    - 有关联 Issue：#5 → {owner}/{repo}/{agent_type}/issues/5/
+    - 有关联 Issue：#5 → {owner}/{repo}/issues/5/{agent_type}/
     - 无关联 Issue（push/#0）→ {owner}/{repo}/{agent_type}-agent（兼容现状）
     """
     from src.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
     num = _issue_num_from(issue_id)
     if num:
-        return os.path.join(WORKSPACE_DIR, owner, rname, agent_type, "issues", num)
+        return os.path.join(WORKSPACE_DIR, owner, rname, "issues", num, agent_type)
     return os.path.join(WORKSPACE_DIR, owner, rname, f"{agent_type}-agent")
 
 
@@ -660,7 +660,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         if _num and oc_session_id:
             from src.repo_key import split_owner_repo
             _o, _r = split_owner_repo(repo_key)
-            _expected_ws = os.path.join(WORKSPACE_DIR, _o, _r, agent_type, "issues", _num)
+            _expected_ws = os.path.join(WORKSPACE_DIR, _o, _r, "issues", _num, agent_type)
             if ws != _expected_ws:
                 log.warning(f"Pipeline enqueue: cwd/session mismatch, issue={issue_id} ws={ws} expected={_expected_ws}")
     except Exception:

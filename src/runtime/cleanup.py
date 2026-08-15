@@ -42,9 +42,24 @@ def _active_issue_sessions() -> set[tuple[str, str, str]]:
 
 
 def _zombie_issue_dirs(ttl: float) -> list[str]:
-    """超 TTL 未活跃的 issue workdir（仅限 {owner}/{repo}/{agent}/{issues}/{n} 结构）。"""
+    """超 TTL 未活跃的 issue workdir。
+
+    主结构：{owner}/{repo}/issues/{n}/{agent}/（按 Issue 统一隔离，见 workdir-issue-centric-design.md）。
+    过渡期兼容旧结构 {owner}/{repo}/{agent}/issues/{n}/，新代码不再写入、仅扫描兜底清理。
+    """
     out = []
     now = time.time()
+
+    def _check(p: str):
+        if not os.path.isdir(p):
+            return
+        try:
+            mtime = os.path.getmtime(p)
+        except Exception:
+            return
+        if now - mtime > ttl:
+            out.append(p)
+
     try:
         owners = os.listdir(config.WORKSPACE_DIR) if os.path.isdir(config.WORKSPACE_DIR) else []
         for owner in owners:
@@ -55,20 +70,22 @@ def _zombie_issue_dirs(ttl: float) -> list[str]:
                 repo_dir = os.path.join(owner_dir, rname)
                 if not os.path.isdir(repo_dir):
                     continue
+                # 新结构：{repo}/issues/{n}/{agent}/
+                issues_root = os.path.join(repo_dir, "issues")
+                if os.path.isdir(issues_root):
+                    for num in os.listdir(issues_root):
+                        issue_dir = os.path.join(issues_root, num)
+                        if not os.path.isdir(issue_dir):
+                            continue
+                        for agent in _GIT_AGENTS:
+                            _check(os.path.join(issue_dir, agent))
+                # 过渡期旧结构：{repo}/{agent}/issues/{n}/（仅兜底，新代码不写入）
                 for agent in _GIT_AGENTS:
                     issues = os.path.join(repo_dir, agent, "issues")
                     if not os.path.isdir(issues):
                         continue
                     for num in os.listdir(issues):
-                        p = os.path.join(issues, num)
-                        if not os.path.isdir(p):
-                            continue
-                        try:
-                            mtime = os.path.getmtime(p)
-                        except Exception:
-                            continue
-                        if now - mtime > ttl:
-                            out.append(p)
+                        _check(os.path.join(issues, num))
     except Exception as e:
         log.warning(f"sweeper zombie scan failed: {e}")
     return out
