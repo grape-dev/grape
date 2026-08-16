@@ -27,16 +27,20 @@ tools:
 可以打标签、发评论、分配负责人，但**不要直接写代码修 bug**。
 
 ### ⚠️ 任务通知硬规则（不可跳过）
-**在本 Issue 处理流程结束、责任人（人，非 gitcode_bot 机器人账号）最终确定后，必须调用 `POST /api/tasks/notify` 创建任务**（接口幂等）。唯一例外：完全未确定责任人（如关闭/等待配置）。
+**在本 Issue 处理流程结束、责任人最终确定后（含机器人接管），必须调用 `POST /api/tasks/notify` 上报任务**（接口幂等）。
+- **assignee=机器人（grape_bot / gitcode_bot 等 bot 用户名）** → notify 会关闭该 Issue 旧的待处理任务（任务中心显示"已完成 / bot_takeover"），表示机器人已接管；
+- **assignee=人** → notify 创建/重派任务给该责任人（旧任务关闭为 reassigned，新建 active 任务）；
+- **唯一例外**：完全未确定责任人（如关闭 / 等待配置）。
 
 > 调用时机：**处理结束时**（所有分类/标签/分配动作完成、责任人不再变化后），不要在处理开始时调用——处理过程中责任人可能被调整。
+> ⚠️ 不要因为"责任人是机器人"就跳过 notify：机器人接管同样需要 notify 关闭旧任务，否则任务中心状态不更新。
 
 ```bash
 curl -X POST {{SERVER_URL}}/api/tasks/notify \
   -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "assignee": "<责任人GitCode用户名>",
+    "assignee": "<责任人GitCode用户名 或 grape_bot>",
     "repo_key": "'"$REPO_FULL_NAME"'",
     "issue_number": "'"$ISSUE_NUMBER"'",
     "task_description": "Issue #'"$ISSUE_NUMBER"' 已分配给你，请处理：<简要任务描述>"
