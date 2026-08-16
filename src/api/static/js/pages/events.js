@@ -97,11 +97,13 @@ function _convBubble(role, content, time, by) {
     return `<div style="display:flex;justify-content:center"><div style="max-width:92%;padding:5px 10px;border-radius:8px;font-size:11px;color:var(--t2);background:#f1f5f9;text-align:center;line-height:1.4">${content || ''}</div></div>`;
   }
   const mine = role === 'user';
+  // markdown 渲染（含 HTML 转义防 XSS，见 api.js renderMarkdown），与 chat 对话框对齐
+  const rendered = renderMarkdown(content || '');
   return `<div style="display:flex;${mine ? 'justify-content:flex-end' : 'justify-content:flex-start'}">
-    <div style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;${mine
+    <div style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;${mine
       ? 'background:var(--a);color:#fff'
       : 'background:var(--bg);color:var(--t);border:1px solid var(--b)'}">
-      ${content || ''}
+      ${rendered}
       <div style="font-size:10px;opacity:.7;margin-top:3px">${mine ? (by || '我') : (by || 'agent')}${time ? ' · ' + fmtLocalTime(time).substring(11,16) : ''}</div>
     </div>
   </div>`;
@@ -188,8 +190,8 @@ function sendConversation() {
           if (!part.startsWith('data: ')) continue;
           let evt;
           try { evt = JSON.parse(part.slice(6)); } catch (e) { continue; }
-          if (evt.type === 'text') { acc += evt.text; if (replyEl) replyEl.textContent = acc; }
-          else if (evt.type === 'done') { if (replyEl) replyEl.textContent = evt.reply || acc; loadConversation(); return; }
+          if (evt.type === 'text') { acc += evt.text; if (replyEl) replyEl.innerHTML = renderMarkdown(acc); }
+          else if (evt.type === 'done') { if (replyEl) replyEl.innerHTML = renderMarkdown(evt.reply || acc); loadConversation(); return; }
         }
         if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
         return read();
