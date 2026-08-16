@@ -2,7 +2,7 @@
 import os
 import sys
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
@@ -237,4 +237,58 @@ def test_reply_zero_cancels():
     api = _run_msg("0")
     assert _pending() is None
     assert "取消" in _card_text(api)
+    _clean()
+
+
+# ---- 绑定/会话发散修复（2026-08-16）----
+
+def test_rebind_clears_stale_conversation_pointer():
+    """绑定新仓库 → 旧会话 im_channel_id 被清空（下次消息在新仓库新建会话）"""
+    _seed()
+    old = create_conversation(1, "gitcode:navuser/repo-a", title="旧会话")
+    join_feishu_chat("nav_chat", old, 1)
+    assert get_conversation_by_im("nav_chat", 1) is not None
+    _run_cmd("/repo")
+    _run_msg("2")   # 绑 repo-b
+    with db_lock:
+        row = db.cursor().execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id='nav_chat'").fetchone()
+    assert row and "repo-b" in row[0]
+    assert get_conversation(old)["im_channel_id"] == ""      # 旧指针已清
+    assert get_conversation_by_im("nav_chat", 1) is None
+    _clean()
+
+
+def test_bind_intent_clears_stale_pointer():
+    """自然语言"绑定到 X" → 旧会话指针清空"""
+    _seed()
+    old = create_conversation(1, "gitcode:navuser/repo-a", title="旧会话")
+    join_feishu_chat("nav_chat", old, 1)
+    from src.im.handler_async import detect_bind_intent
+    with patch("src.im.handler_async.detect_bind_intent", return_value="navuser/repo-b"):
+        _run_msg("绑定到 navuser/repo-b")
+    assert get_conversation(old)["im_channel_id"] == ""
+    assert get_conversation_by_im("nav_chat", 1) is None
+    _clean()
+
+
+def test_where_warns_on_repo_mismatch():
+    """群绑定仓库 ≠ 会话所属仓库 → /where 卡片提示不一致"""
+    _seed()
+    # 群绑定 repo-a（seed 已绑），但加入一个 repo-b 的会话 → 制造不一致
+    cid = create_conversation(1, "gitcode:navuser/repo-b", title="repo-b 会话")
+    join_feishu_chat("nav_chat", cid, 1)
+    api = _run_cmd("/where")
+    text = _card_text(api)
+    assert "不一致" in text
+    assert "repo-a" in text and "repo-b" in text
+    _clean()
+
+
+def test_where_no_warning_when_consistent():
+    _seed()
+    cid = create_conversation(1, "gitcode:navuser/repo-a", title="repo-a 会话")
+    join_feishu_chat("nav_chat", cid, 1)
+    api = _run_cmd("/where")
+    text = _card_text(api)
+    assert "不一致" not in text
     _clean()

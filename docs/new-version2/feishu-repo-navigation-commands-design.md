@@ -50,6 +50,8 @@
 
 > `/chat` 取代旧 `/对话 /convs /list`；`/repo` 取代旧 `/bind`；`/where` 承担旧 `/status` 的定位职能。旧 `/bind /unbind /status /refresh /autodev /notify` 及 `/对话 /加入 /leave` **一律删除**，不再兼容保留。
 >
+> **绑定即重置会话位置**：`/repo` 编号绑定与自然语言"绑定到 X"在写入 `repo_im_group_binding` 的同时，**清空当前 chat 旧会话的 `im_channel_id` 指针**，下次消息在新仓库下新建会话。修复"群绑定仓库 ≠ 会话所属仓库"发散 bug（2026-08-16，见 §5.8）。
+>
 > **关于 `/leave`（不采用）**：`/new` 的 `join_feishu_chat` "清旧设新"会原子清空旧会话的 im_channel_id，等于"离开旧会话 + 进入新会话"一步完成；若只要"离开不加入"，下一次消息也会自动新建 general 会话。故 `/leave` 与 `/new` 功能几乎等同、价值极低，不单设。
 
 ### 3.1 翻页
@@ -99,6 +101,7 @@
 5. **任务无会话**：任务未建 conversation 时，`/task` 选择后按 `issue_number` 查找/创建 `Issue #N` 会话再 join（复用 tasks.py 的会话创建逻辑）。
 6. **命令收敛**：`/repo` 取代 `/bind`、`/chat` 取代 `/对话 /convs /list`、`/where` 承担 `/status` 定位职能；旧 `/bind /unbind /status /refresh /autodev /notify /加入 /leave` **全部删除**（设计只保留 `/repo /chat /task /new /where /cancel /clean /help`）。`/repo` 的「绑定中」标记沿用 `repo_im_group_binding`/`im_channel_id` 判定，无新状态。
 7. **`/new` 会话标题**：新建会话默认无标题（与 Web 一致），卡片确认时提示"已加入新对话"；首次消息触发 `_auto_title`。
+8. **绑定/会话发散（已修复）**：`repo_im_group_binding`（群绑仓库）与 `chat_conversations.im_channel_id`（加入的会话）是两个独立状态，改绑不自动清指针会导致消息落错仓库会话（2026-08-16 事故：群绑 hello-calculator3 但会话 f96c72a7 属 gitcode-pr-assistant）。修复：**`/repo` 绑定与自然语言绑定时清空当前 chat 旧会话指针**；`/where` 对"群绑定仓库 ≠ 会话所属仓库"给出 ⚠️ 提示。
 
 ## 6. 测试用例设计
 
@@ -118,6 +121,10 @@
 | C12 | `/where` 显示当前位置 | 已绑定 + 已加入会话 | 卡片含仓库 + 会话标题/Issue#；未加入时提示"未加入会话" |
 | C13 | `/cancel` 清除 pending | 有 pending | pending 清除 + 卡片确认 |
 | C14 | 回复 `0` 取消选择 | 有 pending | 等效 `/cancel`：pending 清除，不执行任何绑定/加入 |
+| C15 | 重绑清旧会话指针 | 已绑 repo-a + 已 join 其会话 | `/repo` 选 repo-b → binding 更新 + 旧会话 im_channel_id 清空 + get_conversation_by_im 返回 None |
+| C16 | 自然语言绑定清旧指针 | 已 join 旧会话 | "绑定到 X" → 旧会话指针清空 |
+| C17 | `/where` 仓库不一致提示 | 群绑 repo-a + 会话属 repo-b | 卡片含 ⚠️ 不一致提示 |
+| C18 | `/where` 一致不提示 | 群绑与会话同仓库 | 无 ⚠️ 提示 |
 
 ## 7. 实施步骤（每步独立可测）
 

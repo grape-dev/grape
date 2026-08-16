@@ -258,6 +258,13 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
             if conv.get("issue_number"):
                 title += f"（Issue #{conv['issue_number']}）"
             lines.append(f"会话：[{tag}] {title}")
+            # 对账：群绑定仓库 ≠ 当前会话所属仓库 → 提示不一致（2026-08-16 发散 bug 兜底提示）
+            try:
+                from src.repo_key import from_repo_key
+                if bound and conv.get("repo_key") and from_repo_key(bound) != conv["repo_key"]:
+                    lines.append(f"⚠️ 群绑定 `{from_repo_key(bound)}` 与当前会话仓库 `{conv['repo_key']}` 不一致，建议 `/repo` 重绑或 `/new` 新建。")
+            except Exception:
+                pass
         else:
             lines.append("会话：未加入（新消息将新建会话）")
         await api.reply_card(ctx, msg_id, "\n".join(lines))
@@ -316,6 +323,9 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
             c = db.cursor()
             c.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
                       (chat_id, repo_key, "gitcode", str(uid), ctx.app_id))
+            # 绑定即重置会话位置：清掉旧会话指针，下次消息在新仓库下新建会话
+            #（修复 2026-08-16 "群绑定仓库 ≠ 会话所属仓库" 发散 bug）
+            c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
             db.commit()
             _clear_pending_selection(chat_id)
             await api.reply_card(ctx, msg_id, f"**✅ 已绑定 `{repo_key}`**\n使用 `/chat` 选择会话，或直接开始提问。")
@@ -525,6 +535,8 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 c = db.cursor()
                 c.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
                           (chat_id, repo_key, "gitcode", parsed.get("sender_id", ""), account))
+                # 绑定即重置会话位置（修复 2026-08-16 绑定/会话发散 bug）
+                c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
                 db.commit()
             except Exception as e:
                 log.warning(f"Feishu: auto-bind failed: {e}")
