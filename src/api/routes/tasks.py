@@ -296,6 +296,8 @@ async def notify_task(body: TaskNotifyBody, request: Request):
 
     # 后台执行 chat-agent（立即返回）
     open_id = _get_feishu_open_id(body.assignee)
+    if not open_id:
+        log.warning(f"Task notify: assignee={body.assignee} 无飞书 open_id（unified_user_mapping.feishu_open_id 为空），跳过飞书通知 task_id={task_id} issue=#{body.issue_number}")
     cfg = get_chat_config(user_id) if user_id else {"backend": "opencode"}
     from src.api import main as api_main
     bm = api_main.bot_manager
