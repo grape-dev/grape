@@ -344,6 +344,10 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_
     gitcode_nickname 优先取传入值，否则从 user_accounts.nickname 获取。
     user_id 始终为真实 user_accounts.id：若该 gitcode_user 未在 user_accounts 中，
     则尝试按已有记录更新；两者都不可得时跳过（不写入负数占位）。
+
+    ★ 防覆盖：open_id 传空（如 gitcode OAuth 登录只带昵称，auth.py）时，**保留已有
+    feishu_open_id/feishu_name**——避免用空值覆盖飞书确认过的绑定（曾导致 confirmed
+    绑定被后续登录清空，系统反复要求重新确认）。见 2026-08-16 修复。
     """
     from src.user import db as user_db
     user_id = 0
@@ -358,8 +362,16 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_
 
     with db_lock:
         c = db.cursor()
+        # 空 open_id 时读取已有绑定，避免覆盖
+        if not open_id:
+            _existing = c.execute(
+                "SELECT feishu_open_id, feishu_name FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,)).fetchone()
+            if _existing and _existing[0]:
+                open_id = _existing[0]
+                if not feishu_name:
+                    feishu_name = _existing[1] or ""
         if user_id:
-            # 有真实 user_id：直接以 user_id 为主键写入/覆盖
+            # 有真实 user_id：直接以 user_id 为主键写入/覆盖（open_id 已保留非空值）
             c.execute(
                 "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?,?)",
                 (user_id, gitcode_user, gitcode_nickname, open_id, feishu_name, datetime.now().isoformat())
