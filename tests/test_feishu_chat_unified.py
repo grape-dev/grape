@@ -248,3 +248,39 @@ def test_push_sends_card_to_feishu():
     assert open_id == "ou_111"
     assert text.startswith("[来自Web]")
     _clean()
+
+
+# ---- token 刷新：会话缓存旧 token 导致 401（2026-08-16 修复）----
+
+def _import_resolve():
+    from src.api.routes.chat import _resolve_gitcode_token
+    return _resolve_gitcode_token
+
+
+def test_resolve_prefers_current_user_token_and_refreshes_cache():
+    """会话缓存旧 token + 用户有当前 token → 用当前 token 且刷新会话缓存"""
+    _clean()
+    cid = _mk_conv(1, title="A")
+    update_conversation(cid, user_gitcode_token="STALE_OLD_TOKEN")
+    conv = get_conversation(cid)
+    tok = _import_resolve()(conv, cid, "FRESH_NEW_TOKEN")
+    assert tok == "FRESH_NEW_TOKEN"
+    assert get_conversation(cid)["user_gitcode_token"] == "FRESH_NEW_TOKEN"
+    _clean()
+
+
+def test_resolve_falls_back_to_cached_when_no_user_token():
+    _clean()
+    cid = _mk_conv(1, title="A")
+    update_conversation(cid, user_gitcode_token="CACHED_TOKEN")
+    conv = get_conversation(cid)
+    tok = _import_resolve()(conv, cid, "")
+    assert tok == "CACHED_TOKEN"
+    _clean()
+
+
+def test_resolve_returns_user_token_when_conv_none():
+    _clean()
+    tok = _import_resolve()(None, "", "USER_TOKEN")
+    assert tok == "USER_TOKEN"
+    _clean()
