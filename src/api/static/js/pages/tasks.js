@@ -37,6 +37,7 @@ function _filteredTasks() {
   if (_taskQuery) {
     const q = _taskQuery.toLowerCase();
     list = list.filter(t =>
+      String(t.id).includes(q) ||
       (t.title || '').toLowerCase().includes(q) ||
       (t.task_description || '').toLowerCase().includes(q) ||
       String(t.issue_number).includes(q) ||
@@ -81,7 +82,7 @@ function _render() {
     return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()">
       <div class="tsk-r-ic ${rIc}">${icon}</div>
       <div class="tsk-r-main">
-        <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
+        <div class="tsk-r-title">任务 #${t.id} · Issue #${t.issue_number} · ${t.title || ''}</div>
         <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key}</div>
       </div>
       <span class="tsk-tag ${tagCls}">${tagText}</span>
@@ -139,7 +140,7 @@ function _detailHtml(t) {
   const icon = isDone ? '✓' : isProc ? '⏳' : '#';
   return `
     <div class="tsk-det-ic ${detIc}">${icon}</div>
-    <div class="tsk-det-label">Issue #${t.issue_number}</div>
+    <div class="tsk-det-label">任务 #${t.id} · Issue #${t.issue_number}</div>
     <div class="tsk-det-title">${t.title || ''}</div>
     <div class="tsk-det-meta">
       <div class="tsk-m"><span>状态</span><b class="${tagCls}">${tagText}</b></div>

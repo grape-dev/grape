@@ -245,6 +245,7 @@ async def notify_task(body: TaskNotifyBody, request: Request):
     from src.user.db import get_all_bot_usernames
     if body.assignee in get_all_bot_usernames():
         closed = _close_issue_tasks_bot_takeover(body.repo_key, body.issue_number)
+        log.info(f"Task notify: bot_takeover assignee={body.assignee} repo={body.repo_key} issue=#{body.issue_number} closed={closed} (task_id=0)")
         return {"ok": True, "task_id": 0, "conversation_id": "",
                 "message": f"任务已由 {body.assignee} 接管" + (f"（关闭 {closed} 条待处理任务）" if closed else "（无待处理任务）")}
 
@@ -260,6 +261,7 @@ async def notify_task(body: TaskNotifyBody, request: Request):
                            title, body.task_description)
     if not task_id:
         return {"ok": False, "code": 500, "message": "任务创建失败"}
+    log.info(f"Task notify: assignee={body.assignee} repo={body.repo_key} issue=#{body.issue_number} task_id={task_id}")
 
     # 创建/复用 Web conversation（不带 im_channel_id，Chat Agent 页可见）
     from src.session_manager import get_user_conversations
