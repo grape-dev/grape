@@ -61,8 +61,8 @@ function renderEventDetail(data) {
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
-    <div style="display:flex;flex-direction:column;gap:12px;overflow-y:auto">
-      <div class="cd" style="padding:16px">
+    <div style="display:flex;flex-direction:column;gap:12px;height:100%;overflow:hidden">
+      <div class="cd" style="padding:16px;flex-shrink:0">
         <h3 style="font-size:12px;font-weight:600;margin-bottom:10px">Event Info</h3>
         <div style="font-size:11px;color:var(--t2);line-height:1.8">
           <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
@@ -77,10 +77,10 @@ function renderEventDetail(data) {
           <div id="convGate" style="margin-top:6px"><span style="color:var(--t3)">门禁:</span> <span class="tgx">…</span></div>
         </div>
       </div>
-      <div class="cd" style="padding:16px;display:flex;flex-direction:column;gap:8px">
-        <h3 style="font-size:12px;font-weight:600">💬 与 ${agentName} 对话</h3>
-        <div id="convMessages" style="flex:1;min-height:180px;max-height:46vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
-        <div id="convInputRow" style="display:none;gap:6px">
+      <div class="cd" style="padding:16px;display:flex;flex-direction:column;gap:8px;flex:1;min-height:0">
+        <h3 style="font-size:12px;font-weight:600;flex-shrink:0">💬 与 ${agentName} 对话</h3>
+        <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
+        <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
           <input id="convInput" placeholder="问一问 agent 为什么这样处理…（Enter 发送）" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
           <button class="bt bt-p bt-s" onclick="sendConversation()">发送</button>
         </div>
