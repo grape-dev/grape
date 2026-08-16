@@ -514,7 +514,7 @@ def get_conversation_by_im(im_channel_id: str, user_id: int = 0) -> dict | None:
 
 def update_conversation(conv_id: str, **kwargs):
     allowed = {"title", "status", "runtime_session_id", "agent_session_id", "user_gitcode_token",
-               "conv_type", "issue_number"}
+               "conv_type", "issue_number", "im_channel_id"}
     sets = []
     vals = []
     for k, v in kwargs.items():
@@ -535,6 +535,28 @@ def touch_conversation(conv_id: str):
         c = db.cursor()
         c.execute("UPDATE chat_conversations SET updated_at=datetime('now') WHERE id=?", (conv_id,))
         db.commit()
+
+
+def join_feishu_chat(chat_id: str, conv_id: str, user_id: int) -> bool:
+    """原子切换飞书接入指针（feishu-web-chat-unified-design.md §3.1）。
+
+    im_channel_id 从"永久绑定"降级为"当前飞书接入指针"：任一时刻一个飞书接入点
+    （chat_id）只能指向一条 conversation。把 chat_id 从旧 conversation 移到 conv_id，
+    清旧设新在 db_lock 内同事务执行，防竞态。
+    """
+    with db_lock:
+        c = db.cursor()
+        # 新目标必须存在且属于该用户
+        c.execute("SELECT user_id FROM chat_conversations WHERE id=?", (conv_id,))
+        row = c.fetchone()
+        if not row or row[0] != user_id:
+            return False
+        # 清旧：清空当前持有该 chat_id 的其它 conversation
+        c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=? AND id!=?", (chat_id, conv_id))
+        # 设新
+        c.execute("UPDATE chat_conversations SET im_channel_id=? WHERE id=?", (chat_id, conv_id))
+        db.commit()
+        return True
 
 
 # ====== chat_messages CRUD ======

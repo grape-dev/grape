@@ -144,6 +144,62 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
             return "📋 未绑定任何仓库。使用 `/bind owner/repo` 绑定"
         except Exception as e:
             return f"❌ 查询失败: {e}"
+    if cmd in ("/对话", "/convs", "/list"):
+        # 列出该用户参与仓库下的对话，支持 `/对话 <仓库>` 过滤（feishu-web-chat-unified-design.md §3.3）
+        try:
+            from src.session_manager import get_user_conversations, db_lock
+            uid = get_user_id_by_app_id(account)
+            if not uid:
+                return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
+            from src.user.db import get_user_repos
+            repos = get_user_repos(uid)
+            if not repos:
+                return "📋 你没有已同步的仓库。"
+            repo_filter = parts[1] if len(parts) >= 2 else ""
+            lines = ["📋 你的对话（输入 `/加入 <conversation_id>` 切换当前飞书对话）："]
+            for r in repos:
+                if repo_filter and repo_filter not in r["full_name"]:
+                    continue
+                convs = get_user_conversations(uid, repo_key=r["full_name"], limit=10)
+                if not convs:
+                    continue
+                lines.append(f"\n**{r['full_name']}**")
+                for cv in convs:
+                    tag = "任务" if cv.get("conv_type") == "task" else "一般"
+                    cur = " 👈当前" if cv.get("im_channel_id") == chat_id else ""
+                    lines.append(f"  `{cv['id'][:8]}` [{tag}] {cv.get('title') or '新对话'}{cur}")
+            if len(lines) == 1:
+                return "📋 没有可切换的对话。"
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ 查询失败: {e}"
+    if cmd == "/加入" and len(parts) >= 2:
+        # 切换当前飞书对话：清旧 im_channel_id，新 conversation 写入当前 chat_id
+        #（feishu-web-chat-unified-design.md §3.1/§3.3）
+        try:
+            from src.session_manager import join_feishu_chat, get_conversation, db_lock
+            uid = get_user_id_by_app_id(account)
+            if not uid:
+                return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
+            cid = parts[1]
+            full = cid
+            if len(cid) < 36:
+                with db_lock:
+                    c = db.cursor()
+                    row = c.execute("SELECT id FROM chat_conversations WHERE id LIKE ? AND user_id=? LIMIT 1", (cid + "%", uid)).fetchone()
+                    if row:
+                        full = row[0]
+                    else:
+                        return f"❌ 未找到以 `{cid}` 开头的对话（用 `/对话` 查看列表）。"
+            conv = get_conversation(full)
+            if not conv or conv.get("user_id") != uid:
+                return "❌ 对话不存在或无权限。"
+            if join_feishu_chat(chat_id, full, uid):
+                tag = "任务" if conv.get("conv_type") == "task" else "一般"
+                return f"✅ 已加入对话「{conv.get('title') or '新对话'}」([{tag}] {conv.get('repo_key') or ''})。后续飞书消息将进入该对话。"
+            return "❌ 加入失败。"
+        except Exception as e:
+            return f"❌ 加入失败: {e}"
     if cmd == "/refresh":
         try:
             c = db.cursor()
@@ -430,19 +486,28 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         skills = ["chat"]
 
         # 获取 IM 用户 token（chat_conversations 持久化，幂等创建）
+        # im_channel_id 为"当前飞书接入指针"：get_conversation_by_im 返回当前绑定的对话
+        #（可被 `/加入` 切换），飞书用户消息写入该对话的 chat_messages，Web 侧可见
+        #（feishu-web-chat-unified-design.md §3.2）。
         user_token = ""
+        conv_id = ""
         try:
             from src.user.db import get_user_gitcode_token
-            from src.session_manager import create_conversation, get_conversation_by_im, update_conversation
+            from src.session_manager import create_conversation, get_conversation_by_im, update_conversation, add_message
             user_id = get_user_id_by_app_id(ctx.app_id) or 0
             if user_id > 0:
                 user_token = get_user_gitcode_token(user_id) or ""
                 conv = get_conversation_by_im(chat_id, user_id)
                 if not conv:
                     cid = create_conversation(user_id, repo_key, im_channel_id=chat_id, user_gitcode_token=user_token)
+                    conv_id = cid
                     log.info(f"[Chat:{ctx.name}] created chat_conversation {cid} for user={user_id} chat={chat_id[:20]}")
-                elif user_token and not conv.get("user_gitcode_token"):
-                    update_conversation(conv["id"], user_gitcode_token=user_token)
+                else:
+                    conv_id = conv["id"]
+                    if user_token and not conv.get("user_gitcode_token"):
+                        update_conversation(conv["id"], user_gitcode_token=user_token)
+                if conv_id:
+                    add_message(conv_id, "user", text)
         except Exception as e:
             log.warning(f"[Chat:{ctx.name}] resolve user gitcode token failed: {e}")
 
@@ -550,6 +615,14 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             log.info("Agent decided to SKIP (no reply needed)")
         elif output:
             await api.reply_card(ctx, msg_id, output[:2000])
+            # 共享消息存储：agent 答复回写当前 conversation，Web Chat Agent 页可见
+            #（feishu-web-chat-unified-design.md §3.2）
+            if conv_id:
+                try:
+                    from src.session_manager import add_message
+                    add_message(conv_id, "agent", output)
+                except Exception as _we:
+                    log.warning(f"[Chat:{ctx.name}] write agent message failed: {_we}")
 
     except Exception as e:
         import traceback

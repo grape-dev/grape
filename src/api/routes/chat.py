@@ -97,6 +97,46 @@ def _auto_title(conv: dict, message: str):
         update_conversation(conv["id"], title=title)
 
 
+async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
+    """web 答复推送到飞书（feishu-web-chat-unified-design.md §3.2）。
+
+    conversation 已被飞书接入（im_channel_id 非空）时，用该用户配置的 chat_bot
+    主动推送答复给其飞书 open_id。P2P 场景 im_channel_id 即用户 open_id。
+    """
+    try:
+        im_channel_id = (conv or {}).get("im_channel_id", "")
+        if not im_channel_id:
+            return
+        from src.session_manager import db, db_lock
+        from src.api.routes.tasks import _get_feishu_open_id
+        open_id = _get_feishu_open_id(user.get("username", ""))
+        if not open_id and im_channel_id.startswith("ou_"):
+            open_id = im_channel_id
+        if not open_id:
+            return
+        from src.api import main as api_main
+        bm = api_main.bot_manager
+        if not bm or not bm.api:
+            return
+        app_id = ""
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND im_app_id!='' LIMIT 1", (user.get("id") or 0,)).fetchone()
+            if row:
+                app_id = row[0]
+        if not app_id:
+            return
+        ctx = bm.get_bot(app_id)
+        if not ctx:
+            return
+        await bm.api.send_card_to_user(ctx, open_id, f"[来自Web] {text[:1800]}", title="Chat Agent")
+        from src.config import log
+        log.info(f"Chat web->feishu push: conv={(conv or {}).get('id')} open_id={open_id[:20]} text_len={len(text)}")
+    except Exception as e:
+        from src.config import log
+        log.warning(f"Chat web->feishu push failed: {e}")
+
+
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
@@ -138,7 +178,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 
     # 无任何引擎（未配置本机直连/远端）→ 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
     if not backend_name:
-        add_message(conv_id, "agent", "⚠️ 无可用引擎（未配置本机直连或远端引擎）")
+        _warn = "⚠️ 无可用引擎（未配置本机直连或远端引擎）"
+        add_message(conv_id, "agent", _warn)
+        await _push_reply_to_feishu(conv, user, _warn)
         return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
 
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
@@ -198,6 +240,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 
     add_message(conv_id, "agent", reply)
     touch_conversation(conv_id)
+    # web→飞书推送：该对话已被飞书接入时推送给用户（feishu-web-chat-unified-design.md §3.2）
+    await _push_reply_to_feishu(conv, user, reply)
     # Save opencode session ID for continuity
     if new_runtime_session_id and not runtime_session_id:
         update_conversation(conv_id, runtime_session_id=new_runtime_session_id)
@@ -248,6 +292,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     if not backend_name:
         _reply = "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎"
         add_message(conv_id, "agent", _reply)
+        await _push_reply_to_feishu(conv, user, _reply)
         return StreamingResponse(
             iter([f"data: {json.dumps({'type': 'done', 'text': _reply, 'conversation_id': conv_id})}\n\n"]),
             media_type="text/event-stream",
@@ -309,6 +354,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 final_text = f"收到您的消息：「{body.message}」\n\n当前使用 {backend_name} 后端处理。"
             add_message(conv_id, "agent", final_text)
             touch_conversation(conv_id)
+            # web→飞书推送（feishu-web-chat-unified-design.md §3.2）
+            await _push_reply_to_feishu(conv, user, final_text)
             if new_sid and not runtime_session_id:
                 update_conversation(conv_id, runtime_session_id=new_sid)
             yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
@@ -405,6 +452,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
         add_message(conv_id, "agent", final_text)
         touch_conversation(conv_id)
+        # web→飞书推送（feishu-web-chat-unified-design.md §3.2）
+        await _push_reply_to_feishu(conv, user, final_text)
         # Save opencode session ID for continuity
         if captured_session and not runtime_session_id:
             update_conversation(conv_id, runtime_session_id=captured_session)
