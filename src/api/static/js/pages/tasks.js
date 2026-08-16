@@ -82,7 +82,7 @@ function _render() {
     return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()">
       <div class="tsk-r-ic ${rIc}">${icon}</div>
       <div class="tsk-r-main">
-        <div class="tsk-r-title">任务 #${t.id} · Issue #${t.issue_number} · ${t.title || ''}</div>
+        <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
         <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key}</div>
       </div>
       <span class="tsk-tag ${tagCls}">${tagText}</span>
@@ -140,10 +140,11 @@ function _detailHtml(t) {
   const icon = isDone ? '✓' : isProc ? '⏳' : '#';
   return `
     <div class="tsk-det-ic ${detIc}">${icon}</div>
-    <div class="tsk-det-label">任务 #${t.id} · Issue #${t.issue_number}</div>
+    <div class="tsk-det-label">Issue #${t.issue_number}</div>
     <div class="tsk-det-title">${t.title || ''}</div>
     <div class="tsk-det-meta">
       <div class="tsk-m"><span>状态</span><b class="${tagCls}">${tagText}</b></div>
+      <div class="tsk-m"><span>任务编号</span><b>#${t.id}</b></div>
       <div class="tsk-m"><span>仓库</span><b>${t.repo_key}</b></div>
       <div class="tsk-m"><span>创建时间</span><b>${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
       ${t.completed_at ? `<div class="tsk-m"><span>完成时间</span><b>${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
