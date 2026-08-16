@@ -371,9 +371,13 @@ title TEXT DEFAULT '',
 status TEXT DEFAULT 'active',
 created_at TEXT DEFAULT (datetime('now')),
 updated_at TEXT DEFAULT (datetime('now')),
+conv_type TEXT DEFAULT 'general',      -- ★ 会话类型：general（一般对话）/ task（任务对话）
+issue_number INTEGER DEFAULT 0,        -- ★ conv_type='task' 时对应的 Issue 号
 session_id TEXT DEFAULT ''             -- 历史遗留列（迁移残留，未使用）
 ```
 > ⚠️ `session_id` 为旧迁移残留列（代码已用 `runtime_session_id`），可清理。
+>
+> **会话类型判定**：`conv_type='task'` 为任务类型对话（由 `/api/tasks/notify` 创建或复用存量「Issue #N」会话时打标，`tasks.py:277/281`），其余（飞书对话 `handler_async.py:442`、Web 对话）默认为 `general`；`issue_number>0`、title 形如 `Issue #N` 为 `task` 辅证。代码侧 `chat.py:127/235/459` 按 `conv_type=='task'` 走任务场景（`build_task_chat_prompt`）。
 
 #### `chat_messages` — Chat 消息
 ```sql
