@@ -59,6 +59,20 @@ def test_build_task_chat_prompt_contains_scene_and_context():
     assert "Skills: chat" in prompt
 
 
+def test_build_task_chat_prompt_injects_task_boundary():
+    """任务会话 prompt 必须含「任务边界」：仅澄清+回帖，禁止部署/写代码（chat 越权部署修复）。"""
+    conv = {"conv_type": "task", "issue_number": 7, "title": "Issue #7", "repo_key": "owner/repo"}
+    history = [{"role": "user", "content": "📋 任务分配 · Issue #7"}]
+    prompt = build_task_chat_prompt("方式2", "owner/repo", history, conv)
+    assert "任务边界" in prompt
+    assert "澄清" in prompt and "回帖" in prompt
+    assert "不是实施/部署/写代码" in prompt or "不是实施/部署" in prompt
+    assert "pipeline" in prompt and "coding" in prompt
+    assert "严禁" in prompt and "clone" in prompt
+    # 边界提示应在场景声明之后（强位置）
+    assert prompt.index("任务边界") > prompt.index("## 场景: task")
+
+
 def test_build_task_chat_prompt_no_conv_defaults():
     prompt = build_task_chat_prompt("hi", "owner/repo", [], None)
     assert "## 场景: task" in prompt

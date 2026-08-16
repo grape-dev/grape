@@ -513,6 +513,14 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     conv = conv or {}
     issue_number = conv.get("issue_number") or 0
     parts = [f"## 场景: task", f"## 任务 Issue", f"仓库: {repo_key}", f"Issue: #{issue_number}"]
+    # 任务边界（最高优先级，随每轮 prompt 强注入）：澄清+回帖，绝不亲自执行任务。
+    # 见 skills/chat/references/task-handling.md §0 与 coding-worktree-skill-collision.md §4.5。
+    parts.append(
+        "## 任务边界（最高优先级）\n"
+        "本对话的职责是【澄清被分配 Issue 的需求并回帖】，不是实施/部署/写代码。\n"
+        "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\n"
+        "严禁 clone/部署/起服务/修改文件/执行 git 命令。"
+    )
     if conv.get("title"):
         parts.append(f"标题: {conv['title']}")
     # 显式注入任务描述（结构化，随每轮 prompt 携带，不随历史裁剪）
