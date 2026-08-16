@@ -19,6 +19,7 @@ from lark_oapi.ws.pb.pbbp2_pb2 import Frame
 from lark_oapi.ws.enum import FrameType, MessageType
 
 from src.config import log
+from src.im.lark_md import to_lark_md
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 WS_ENDPOINT_URL = "https://open.feishu.cn/callback/ws/endpoint"
@@ -276,7 +277,7 @@ class FeishuAsync:
         session = await self._get_session()
         url = f"{FEISHU_BASE}/im/v1/messages/{message_id}/reply"
         card = {
-            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": text[:2000]}}],
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": to_lark_md(text, 2000)}}],
             "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
         }
         payload = {
@@ -305,7 +306,7 @@ class FeishuAsync:
         session = await self._get_session()
         url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=open_id"
         card = {
-            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": text[:2000]}}],
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": to_lark_md(text, 2000)}}],
             "header": {"title": {"tag": "plain_text", "content": title}, "template": "blue"},
         }
         payload = {
@@ -333,7 +334,7 @@ class FeishuAsync:
         session = await self._get_session()
         url = f"{FEISHU_BASE}/im/v1/messages/{message_id}"
         card = {
-            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": text[:2000]}}],
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": to_lark_md(text, 2000)}}],
             "header": {"title": {"tag": "plain_text", "content": "DevOps Bot"}, "template": "blue"},
         }
         payload = {"content": json.dumps(card, ensure_ascii=False)}
