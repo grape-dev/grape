@@ -67,12 +67,23 @@ class TestProcessChatAsync:
         assert "绑定" in args[2] or "未绑定" in args[2]
 
     def test_bind_intent_detected(self):
-        """Natural language bind intent should trigger /bind."""
+        """Natural language bind intent should bind repo directly (no /bind cmd) + card confirm."""
         import asyncio
+        from src.im.handler_async import db
+        from src.session_manager import db_lock
+        with db_lock:
+            db.cursor().execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='chat_1'")
+            db.commit()
         with patch("src.im.handler_async.detect_bind_intent", return_value="owner/repo"):
-            with patch("src.im.handler_async.process_command_async", new=AsyncMock(return_value="✅ 已绑定")) as mock_pc:
-                asyncio.run(_run("绑定到 owner/repo"))
-                mock_pc.assert_called_once()
+            api = asyncio.run(_run("绑定到 owner/repo"))
+        api.reply_card.assert_called_once()
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id='chat_1'").fetchone()
+        assert row and "owner/repo" in row[0]
+        with db_lock:
+            db.cursor().execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='chat_1'")
+            db.commit()
 
     def test_clean_intent_called(self):
         """'清除会话缓存' should route to /clean command."""
