@@ -284,3 +284,105 @@ def test_resolve_returns_user_token_when_conv_none():
     tok = _import_resolve()(None, "", "USER_TOKEN")
     assert tok == "USER_TOKEN"
     _clean()
+
+
+# ---- asyncio.Lock 死锁修复（feishu-chat-event-loop-deadlock-fix.md §5.1 D01-D08）----
+
+def test_repo_lock_is_async_singleton_per_repo():
+    """D01/D02：acquire_repo_lock 返回 asyncio.Lock；同仓库同一实例，不同仓库不同实例"""
+    from src.api.event_store import acquire_repo_lock
+    l1 = acquire_repo_lock("dl-r1")
+    l2 = acquire_repo_lock("dl-r1")
+    l3 = acquire_repo_lock("dl-r2")
+    assert isinstance(l1, asyncio.Lock)
+    assert l1 is l2
+    assert l1 is not l3
+
+
+def test_same_repo_serialized_concurrent():
+    """D03：同仓库两任务持锁串行，执行区间不重叠"""
+    from src.api.event_store import acquire_repo_lock
+    lock = acquire_repo_lock("dl-serial")
+    seq = []
+
+    async def work(name, delay):
+        async with lock:
+            seq.append(("start", name))
+            await asyncio.sleep(delay)
+            seq.append(("end", name))
+
+    async def main():
+        await asyncio.gather(work("A", 0.05), work("B", 0.05))
+
+    asyncio.run(main())
+    order = [x[0] for x in seq]
+    assert order == ["start", "end", "start", "end"]
+
+
+def test_event_loop_stays_responsive_while_contended():
+    """D04：同仓库持锁期间事件循环不被阻塞（心跳持续），等锁协程最终进入——事故最小复现"""
+    from src.api.event_store import acquire_repo_lock
+    lock = acquire_repo_lock("dl-resp")
+    ticks = []
+
+    async def heartbeat():
+        for _ in range(30):
+            ticks.append(1)
+            await asyncio.sleep(0.01)
+
+    async def holder():
+        async with lock:
+            await asyncio.sleep(0.2)
+
+    async def waiter():
+        async with lock:
+            ticks.append(999)
+
+    async def main():
+        await asyncio.gather(holder(), heartbeat(), waiter())
+
+    asyncio.run(main())
+    assert len(ticks) > 15          # 心跳在等锁期间持续递增 → 循环未被占死
+    assert 999 in ticks             # 等锁协程最终拿到锁并执行
+
+
+def test_different_repos_parallel():
+    """D05：不同仓库并行不互斥"""
+    import time as _t
+    from src.api.event_store import acquire_repo_lock
+    l1 = acquire_repo_lock("dl-para-a")
+    l2 = acquire_repo_lock("dl-para-b")
+
+    async def work(lock):
+        async with lock:
+            await asyncio.sleep(0.1)
+
+    async def main():
+        t0 = _t.monotonic()
+        await asyncio.gather(work(l1), work(l2))
+        return _t.monotonic() - t0
+
+    el = asyncio.run(main())
+    assert el < 0.19  # 并行 ≈0.1s，而非串行 0.2s
+
+
+def test_lock_released_on_cancel():
+    """D06：协程取消后锁可被后续任务获取（无泄漏）"""
+    from src.api.event_store import acquire_repo_lock
+    lock = acquire_repo_lock("dl-cancel")
+    got = []
+
+    async def canceller():
+        async with lock:
+            raise asyncio.CancelledError
+
+    async def main():
+        c = asyncio.create_task(canceller())
+        await asyncio.sleep(0.01)
+        c.cancel()
+        await asyncio.gather(c, return_exceptions=True)
+        async with lock:
+            got.append(True)
+
+    asyncio.run(main())
+    assert got == [True]

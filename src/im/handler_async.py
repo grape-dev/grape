@@ -422,14 +422,14 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         sess, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
+        # 同仓库串行（asyncio.Lock，async with 不阻塞事件循环）。
+        # 旧实现同步 threading.Lock.acquire() 在事件循环里阻塞，同仓库并发消息会死锁整机
+        #（2026-08-16 事故，见 docs/new-version2/feishu-chat-event-loop-deadlock-fix.md）。
         lock = _acquire_repo_lock(repo_key)
-        lock.acquire()
-        try:
+        async with lock:
             await _process_chat_inner_async(ctx, api, parsed, text, repo_key, repository,
                                             msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
                                             bind_account=account, exec_account=repo_key)
-        finally:
-            lock.release()
 
     except Exception as e:
         import traceback
