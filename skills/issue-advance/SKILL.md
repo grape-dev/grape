@@ -54,6 +54,7 @@ curl -X POST {{SERVER_URL}}/api/tasks/notify \
 | PR 审查、代码质量检查 | qa |
 | 构建失败分析、编译调试 | sre |
 | 云部署、拉取代码、重启服务 | sre |
+| **体验验证 / 运行时验证（起本地服务看效果，如 http.server）** | **sre**（或 coding 用一次性验证命令，见 coding-worktree-skill-collision.md §4.5） |
 | **需求理解不清晰 / 需引导澄清开发者需求** | **vod** |
 
 判断标准：

@@ -16,6 +16,14 @@ tools:
 4. token 不得写入任何文件/日志/评论。
 5. **调用 GitCode API 一律以 `references/gitcode-api-reference.md` 为准**：该文档包含 Base URL 与全部端点。**严禁根据经验/记忆/猜测自行拼写 API 路径**（尤其不得使用 GitLab 风格 `/api/v3`、`/api/v4`、`projects/.../merge_requests` 或错误域名）。文档未列出的操作用 `GET /repos/:owner/:repo` 等既有端点组合实现，无法实现时在评论中说明。
 6. **长命令执行会静默**：`pip install`、`git clone`、大测试等长命令运行期间 opencode 无输出。执行这类命令时**加 `timeout` 限制（如 `timeout 300 ...`）**并一次只装必要依赖，避免长时间无输出影响执行；若命令本身可能超长，先输出说明再执行。
+7. **禁止前台运行长驻/服务类命令**：`python -m http.server`、`npm run dev`、`vite` 等会**阻塞不退出**的命令，严禁在前台直接执行（opencode 会等待命令退出导致超时失败）。**改用一次性验证模式**：
+   ```bash
+   python3 -m http.server 8080 >/tmp/httpd.log 2>&1 &   # 后台启动
+   sleep 1
+   curl -s http://localhost:8080/ | head -20              # 验证
+   kill %1                                               # 关闭，不留残留
+   ```
+   或对验证类需求，交由 sre Agent（构建部署/运行验证）执行。
 
 
 
