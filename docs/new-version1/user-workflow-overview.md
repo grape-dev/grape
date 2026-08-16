@@ -1,8 +1,8 @@
-# Grape — Multi-Agent DevOps 使用场景与工作流设计（new-version2）
+# Grape — Multi-Agent DevOps 使用场景与工作流设计（new-version1）
 
-> 版本：v2.0（对齐 `new-version2` 分支最新实现）
-> 日期：2026-08-10
-> 说明：本文基于 `new-version2` 分支的**实际代码实现**重新梳理（前端 `src/api/static/`、后端 `src/api/routes/`、`event_pipeline.py`、`runtime/service.py` 等），对 v1 文档（`docs/new-version/user-workflow-overview.md`）做整体更新。只描述现状，不含未落地设计。
+> 版本：v2.1（对齐 `new-version1` 分支最新实现）
+> 日期：2026-08-16
+> 说明：本文基于 `new-version1` 分支的**实际代码实现**重新梳理（前端 `src/api/static/`、后端 `src/api/routes/`、`event_pipeline.py`、`runtime/service.py` 等）。v2.1 修正 workdir/event.json 新结构、Event 对话已上线、SRE 默认启用、Chat 本机直连引擎、engine-selection v2、onboarding 归并、执行分派等与最新代码不一致处。只描述现状，不含未落地设计。
 
 ---
 
@@ -135,7 +135,7 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 ```
 
 - 模板按分类组织（云原生 / AI Office / Skills / IaC），每张卡片含图标、名称、描述、标签、统计与操作按钮。
-- **一键创建**：弹窗输入仓库名 → 自动「建仓（GitCode 个人账号下）→ 写入模板代码 → 自动托管（复用 `/repos/host` 全链路）→ 应用开发场景」；创建成功后直接进入该仓库。首次由模板创建的项目还会异步触发「首次托管引导」（Onboarding），由 issue agent 生成「快速部署体验」与「探索方向引导」两个 Issue。
+- **一键创建**：弹窗输入仓库名 → 自动「建仓（GitCode 个人账号下）→ 写入模板代码 → 自动托管（复用 `/repos/host` 全链路）→ 应用开发场景」；创建成功后直接进入该仓库。首次由模板创建的项目还会异步触发「首次托管引导」（Onboarding），由 **VOD Agent** 执行 `repo-onboarding` 技能生成「快速部署体验」与「探索方向引导」两个 Issue（工作目录归并 `issues/{n}/vod/`）。
 - 模板数据源：`configs/project-templates.json`（git 模板克隆自 `source_repo`；local 模板复制 `examples/{template_id}/` 本地目录）。
 
 ---
@@ -215,11 +215,11 @@ Dashboard 以**单个已托管仓库**为维度，每 30 秒自动刷新：
 │  │   ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐│
 │  │   │● VOD │→│● Issue│→│● Code │→│● QA  │→│● SRE ││
 │  │   │🔍 VOD │  │📋 Issue│  │💻 Code │  │🧪 QA  │  │⚙ SRE ││
-│  │   │✓ 开启 │  │✓ 开启 │  │✓ 开启 │  │✓ 开启 │  │○ 停用││
+│  │   │✓ 开启 │  │✓ 开启 │  │✓ 开启 │  │✓ 开启 │  │✓ 开启 ││
 │  │   │Backend │  │Backend │  │Backend │  │Backend │  │Backend ││
 │  │   │opencode│  │opencode│  │opencode│  │opencode│  │opencode││
-│  │   │● Active│  │● Active│  │● Idle  │  │● Active│  │已停用  ││
-│  │   │最近事件...│  │最近事件...│  │最近事件...│  │最近事件...│  │      ││
+│  │   │● Active│  │● Active│  │● Idle  │  │● Active│  │● Idle  ││
+│  │   │最近事件...│  │最近事件...│  │最近事件...│  │最近事件...│  │最近事件...││
 │  │   └──────┘  └──────┘  └──────┘  └──────┘  └──────┘│
 │  │                                                    │
 │  │  ☎ Chat Agent · Personal Assistant                │
@@ -250,7 +250,7 @@ Dashboard 区域说明：
 
 **Agent 启用开关（new-version2 新增）：**
 - 每个 Agent 卡片头部有开关按钮（`✓ 开启` / `○ 停用`），**仅 Maintainer/Admin 可切换**，写入仓库级 `devops_agent_session.enable`。
-- 全局默认来自 `configs/agent-description.json` 的 `enable` 字段：**SRE 默认关闭**，其余默认开启。
+- 全局默认来自 `configs/agent-description.json` 的 `enable` 字段：**五个 Agent 全局默认均开启**；SRE 是否处理由**仓库级事件订阅**（`subscribe_events`，如 PR 合入订阅）控制。
 - 关闭效果：该 Agent 不再被事件路由触发（跳过并记录 `event_skipped(agent_disabled)`）；A2A 调用也被拒绝；已排队的任务不受影响。
 - 停用态卡片整体降透明度并显示「已停用」。
 
@@ -295,7 +295,7 @@ Pipeline 按 **Issue** 维度聚合展示工作流进展：
 - **Agent 卡片**：每阶段展示该 Agent 对该 Issue 最新一条 Event 的 title、状态（✅ Done / 🔄 In Progress / ❌ Failed / ⏳ Pending）与 actor（@用户名）；**未涉及任务的阶段（Pending）卡片整体调暗**（灰色背景 + 降饱和 + 弱化文字 + 降低透明度）。
 - **责任人判定**：优先取 **`issue_state.assignee`**（GitCode Issue 真实指派，可为 `grape_bot` 或项目成员用户名）；缺失时回退取当前阶段 Agent 最新 Event 的 `actor`，若为 bot 则显示 Agent 显示名，若为项目成员则显示其用户名。
 
-> new-version2 说明：事件按 **Issue 生命周期状态机**路由（`issue_state` 表，阶段 `vod→issue→coding→qa→sre→done`）。`issue_opened` 恒进 VOD 审视；Issue 类事件按阶段归 VOD 或 Issue Agent；PR 类事件按阶段归 coding/qa/sre。同时执行采用 **Issue 级会话/工作目录隔离**（`{workspace}/{owner}/{repo}/{agent}/issues/{n}/` + issue 级执行会话），支持同仓库多 Issue 并行，同 Issue 内串行。
+> new-version2 说明：事件按 **Issue 生命周期状态机**路由（`issue_state` 表，阶段 `vod→issue→coding→qa→sre→done`）。`issue_opened` 恒进 VOD 审视；Issue 类事件按阶段归 VOD 或 Issue Agent；PR 类事件按阶段归 coding/qa/sre。同时执行采用 **Issue 级会话/工作目录隔离**（`{workspace}/{owner}/{repo}/issues/{n}/{agent}/`，按 Issue 统一隔离，见 `workdir-issue-centric-design.md` + issue 级执行会话），支持同仓库多 Issue 并行，同 Issue 内串行。coding/qa/sre 的任务 cwd 为 git worktree（分支 `feat/issue-{n}`），**先建 worktree 再落地技能**（见 `coding-worktree-skill-collision.md`）。
 
 ---
 
@@ -351,7 +351,7 @@ Agent 详情说明：
 | 区域 | 内容 |
 |------|------|
 | **Agent Header** | 图标、显示名、描述、[Configure] 和 [Events] 按钮 |
-| **Backend Engine（运行时引擎）** | 下拉直接选**引擎实例唯一名**（如 `opencode-worker-23249`，格式 `{引擎类型}-{设备短名}`）；**DevOps Agent（vod/issue/coding/qa/sre）仅可选 仓库/全局 范围引擎**（个人引擎仅供 Chat Agent，见 Agent Runtimes 一节）；在线实例优先、离线置灰；保存即绑定该实例的 `runtime_id` |
+| **Backend Engines（运行时引擎）** | 下拉**多选引擎集合**（engine-selection v2，`devops_agent_runtime_binding`），每行含实例名（如 `opencode-worker-23249`，格式 `{引擎类型}-{设备短名}`）、版本、worker、范围与在线状态；**DevOps Agent（vod/issue/coding/qa/sre）仅可选 仓库/全局 范围引擎**（个人引擎仅供 Chat Agent，见 Agent Runtimes 一节）；在线实例优先、离线置灰；保存即写入绑定集合，派发由 `pick_engine` 按专属→全局→本机选择 |
 | **Skill** | 下拉按 `scope:name` 精确匹配（官方/仓库/个人），"默认官方技能（自动）"表示由 Agent-Skill 映射自动决定 |
 | **SRE Agent 专属：事件订阅** | PR 合入（`pull_request_merged`）勾选 + 合入分支（逗号分隔，留空=不限）；命中订阅即触发任务（`devops_agent_session.subscribe_events`，见 `agent-event-subscription-design.md`）；**仅 SRE Agent 展示** |
 | **VOD Agent 专属：IM 配置** | 绑定飞书 Bot App ID / Secret，展示已绑定群列表；类型独占（同一凭证不可同时用于 VOD 与 Chat） |
@@ -363,7 +363,7 @@ Agent 详情说明：
 
 ### 2.7 Event Detail 页面（含与 Agent 对话）
 
-> 本页的「💬 对话」为 **Event 对话窗口设计**（详见 `event-conversation-design.md`），是对原「Feedback 表单」的重构，**待实施**；其余（结构化产出、Event Info）为现状。
+> 本页的「💬 对话」为 **Event 对话窗口**（详见 `event-conversation-design.md`），已上线；支持 markdown 渲染与右栏独立滚动、输入框固定。
 
 点击任意 Event（Dashboard 活动流、Agent 详情事件、全局搜索）进入事件详情：
 
@@ -527,7 +527,7 @@ Chat Agent 为**三栏布局**：左栏对话列表、中栏对话区、右栏�
 |------|------|
 | **Conversations（左栏）** | 用户所有对话列表，「＋ 新对话」、切换、删除；首次输入自动创建对话并生成标题（取消息前 30 字） |
 | **Main Chat（中栏）** | 消息历史（Markdown 渲染）+ 输入框 + Send |
-| **Config（右栏）** | Backend（**仅个人范围引擎**，Chat Agent 不可选仓库/全局引擎）、Skill（chat 官方/个人/仓库技能）、IM（飞书/企业微信/钉钉，App ID + Secret + [扫码配置] + Save）、5 个 DevOps Agent 事件统计 |
+| **Config（右栏）** | Backend（**本机直连引擎 + 个人范围引擎**；未显式配置时本机直连为默认兜底，不走仓库/全局引擎）、Skill（chat 官方/个人/仓库技能）、IM（飞书/企业微信/钉钉，App ID + Secret + [扫码配置] + Save）、5 个 DevOps Agent 事件统计 |
 
 **IM 飞书扫码配置弹窗（规划中，对应 `feishu-qr-app-onboarding-plan.md`）：**
 
@@ -594,6 +594,10 @@ IM 区域在 App ID / Secret 输入框下新增 **[扫码配置]** 按钮，点�
 - 队列模式（`queue_remote`）：`send/stream` 返回 `{task_id}` → 前端以 1s 间隔轮询 `GET /api/runtime/tasks/{id}/status`，显示「⏳ 任务执行中… (Ns)」，终态展示 `result_text`（打字机效果降级）。
 
 > Chat Agent 不完全属于 DevOps 工程循环的关键一环，它是每个用户接入工作流的个人对话入口。核心工作流仍为 VOD → Issue → Coding → QA → SRE。Chat Agent 可代表用户在 GitCode 上操作（提交 Issue、查询状态、任务对话等），并使用**用户的个人 GitCode Token**（与 DevOps Agents 使用的 Bot Token 隔离）。
+
+**任务对话（Task Conversation，`conv_type='task'`）：**
+- 从任务中心「去对话」进入的会话为任务类型（`chat_conversations.conv_type='task'` + `issue_number`），使用独立 prompt（`build_task_chat_prompt`，含 `场景: task` + 任务描述 + **任务边界**）。
+- **任务边界强约束**：该会话的职责是**澄清被分配 Issue 的需求并回帖**，不是实施/部署/写代码；严禁 clone/部署/起服务/修改文件/执行 git 命令；用户选部署方式属需求澄清，回帖后由 pipeline（coding/sre）执行（见 `skills/chat/references/task-handling.md` §0）。
 
 ---
 
@@ -849,7 +853,7 @@ Settings 包含 **Credentials** 与 **Notifications** 两个页签：
 | **职责** | 发布管理 + 应用运维 |
 | **触发方式** | A2A（QA 通过后）/ `pull_request_merged` / `build_failure` / `deploy_start|failure` / `release_created` |
 | **关键能力** | 变更日志生成、构建打包、发布部署、健康检查、故障诊断、合规检查、构建调试 |
-| **注意** | **全局默认关闭**（`agent-description.json` `enable:false`），需在仓库 Dashboard 手动开启后才会接收事件 |
+| **注意** | **全局默认开启**；是否处理由**仓库级事件订阅**（`subscribe_events`，如 PR 合入）控制 |
 | **预制 Skill** | `skills/changelog-gen/`、`skills/cloud-deploy/`、`skills/deploy-guard/`、`skills/build-debug/`、`skills/incident-triage/` |
 
 ### 3.6 Agent 对比总览
@@ -869,7 +873,7 @@ Settings 包含 **Credentials** 与 **Notifications** 两个页签：
 | **职责** | 每个用户的个人对话助手，与整个工作流交互 |
 | **触发方式** | 用户消息（Web 面板 / 飞书 IM） |
 | **关键能力** | 对话理解、查询工作流状态、提交 Issue、任务对话、跨 Agent 交互 |
-| **执行引擎** | **仅可选个人范围引擎**（`scope=user`）；`direct` 模式 SSE 流式，队列模式任务轮询 |
+| **执行引擎** | **本机直连引擎（默认兜底）+ 个人范围引擎**；`direct` 模式 SSE 流式，队列模式任务轮询 |
 | **预制 Skill** | `skills/chat/`、`skills/im-notify/` |
 
 ---
@@ -941,7 +945,7 @@ issue_opened ──► vod ──A2A──► issue ──A2A──► coding �
 
 ### 4.4 事件档案（event.json，new-version2）
 
-每个关联 Issue 在 `data/workspaces/{repo_key}/issues/{n}/event.json` 维护一份事件档案，由任务生命周期驱动（`init → append_log → finalize`）：
+每个关联 Issue 在 `data/workspaces/{owner}/{repo}/issues/{n}/event.json` 维护一份事件档案（路径去 repo_key 前缀，与 agent 工作区统一；历史带前缀目录仅供兼容读取），由任务生命周期驱动（`init → append_log → finalize`）：
 
 ```json
 {
@@ -972,8 +976,8 @@ issue_opened ──► vod ──A2A──► issue ──A2A──► coding �
 | 配置项 | 说明 | 配置入口 |
 |--------|------|---------|
 | **开发场景** | 选择场景（通用/云原生/IaC/Agent/Skill 开发），一键刷新 Agent-Skill 映射 | Dashboard → Agent Workflow 右上角场景选择器 |
-| **Agent 启用开关** | 按仓库开启/关闭某个 Agent（SRE 默认关）；关闭后不再路由事件 | Dashboard → Agent 卡片开关（仅 Maintainer） |
-| **Agent 运行时引擎** | 绑定具体引擎实例（DevOps Agent 仅仓库/全局；Chat Agent 仅个人） | Agent 详情 → Configure → Backend Engine |
+| **Agent 启用开关** | 按仓库开启/关闭某个 Agent（五个默认均开启）；关闭后不再路由事件 | Dashboard → Agent 卡片开关（仅 Maintainer） |
+| **Agent 运行时引擎** | 每 (仓库, Agent) 绑定**引擎集合**（`devops_agent_runtime_binding`，可多选；DevOps Agent 仅仓库/全局，Chat Agent 本机直连+个人）；派发由 `pick_engine` 按专属→全局→本机选择 | Agent 详情 → Configure → Backend Engines |
 | **Agent 技能** | 为仓库的每个 Agent 指定官方/仓库/个人技能 | Agent 详情 → Configure → Skill |
 | **已加入/已托管 Repo** | 查看与操作参与/托管的仓库 | 仓库选择大堂（工作项目页签） |
 | **项目模板** | 从模板一键创建项目（建仓+托管+应用场景+首次引导） | 仓库选择大堂 → 项目模板 |
@@ -1022,12 +1026,12 @@ issue_opened ──► vod ──A2A──► issue ──A2A──► coding �
      │     无会话 → 从 agent-skill-mapping.json 读默认 skill
      ├── 5. append_event（events 表，status=running）
      └── 6. 执行分派：
-            direct ──► 线程就地 stream_agent 执行 → update_event_complete
-            queue_* ──► init_event_json（建档案）→ enqueue_task（agent_tasks，确定路由 runtime_id）
-                          └─► 本地 worker / 远端 RuntimeAgent claim → 执行
-                                └─► messages/complete/fail 回报
-                                      └─► parse_agent_output_json → finalize_event_archive
-                                          → update_event_complete（events 表 result）
+            direct ──► 有界线程池 `_execute_agent` 就地执行（先 ensure_issue_worktree 再落地技能/知识）→ update_event_complete
+            queue_remote ──► init_event_json（建档案）→ enqueue_task（agent_tasks，确定路由 runtime_id）
+                              └─► 远端 RuntimeAgent（python -m runtime.agent）claim → 执行
+                                    └─► messages/complete/fail 回报
+                                          └─► parse_agent_output_json → finalize_event_archive
+                                              → update_event_complete（events 表 result）
 ```
 
 ---
@@ -1064,9 +1068,11 @@ issue_opened ──► vod ──A2A──► issue ──A2A──► coding �
 │     任务队列 + RuntimeAgent（new-version2 核心）          │
 │                                                         │
 │  agent_tasks 表（queued→dispatched→running→终态）        │
-│    ├─ 本地 worker：进程内线程池 claim + stream_runtime    │
+│    ├─ 本机执行：direct `_execute_agent`（有界线程池，      │
+│    │   不经过队列，含 git worktree 前置 + 技能落地）       │
 │    └─ 远端 RuntimeAgent：/api/runtime/* claim + 执行     │
-│        （rta_ 凭据认证、心跳、健康四态、多实例键隔离队列）   │
+│        （rta_ 凭据认证、心跳、健康四态、多实例键隔离队列；   │
+│          stream_runtime 线程化，事件循环不被 readline 阻塞）│
 │                                                         │
 │  回报驱动 event.json 档案 + events 表终态                 │
 └─────────────────────────────────────────────────────────┘
@@ -1084,19 +1090,20 @@ issue_opened ──► vod ──A2A──► issue ──A2A──► coding �
 | 组件 | 说明 |
 |------|------|
 | **agent_runtimes** | 引擎实例表（`opencode/codearts/cursor/codex`…），多实例键 `(credential_id, name, scope, owner_id)` |
+| **devops_agent_runtime_binding** | 每 (仓库, Agent) 的**引擎集合绑定**（engine-selection v2）：`pick_engine` 按专属→全局→本机直连派发，健康过滤；存量会话回填 |
 | **runtime_credentials** | Worker 凭据表（`rta_` token，sha256 存储），name 全局唯一，scope 个人/仓库/全局 |
 | **agent_tasks** | 任务队列（确定路由 runtime_id + 事件档案快照 + 技能交付 skill_files） |
-| **执行模式** | `auto` / `direct` / `queue_remote`（`meta.execution_mode`） |
+| **执行模式** | `auto` / `direct` / `queue_remote`（`meta.execution_mode`，`queue_local` 已废除归本机 direct） |
 | **RuntimeAgent 边端** | `python -m runtime.agent`，独立进程注册/心跳/claim/执行/回报 |
 
 ### 7.3 数据存储
 
 | 存储 | 内容 | 说明 |
 |------|------|------|
-| `data/sessions.db` | 25 张业务表（用户、仓库、Agent、事件、任务、聊天、技能、运行时等） | SQLite 单库，WAL + busy_timeout |
-| `data/workspaces/` | Agent 执行工作目录、event.json 事件档案、project-info 项目知识基线 | 文件系统 |
+| `data/sessions.db` | 30+ 张业务表（用户、仓库、Agent、引擎绑定、事件、任务、聊天、技能、运行时等） | SQLite 单库，WAL + busy_timeout |
+| `data/workspaces/` | Agent 执行工作目录（`{owner}/{repo}/issues/{n}/{agent}/`，coding/qa/sre 为 git worktree）、event.json 事件档案（`{owner}/{repo}/issues/{n}/`）、project-info 项目知识基线 | 文件系统 |
 | `skills/` | 官方技能 + 个人技能（`custom/{uid}/`）+ 仓库技能（`repo/{repo_key}/`） | 文件系统 |
-| `configs/` | 事件路由、场景映射（`agent-skill-mapping.json`）、Agent 描述（`agent-description.json`）、官方技能（`skill-description.json`）、项目模板（`project-templates.json`） | JSON 文件 |
+| `configs/` | 事件路由、场景映射（`agent-skill-mapping.json`）、Agent 描述（`agent-description.json`）、官方技能（`skill-description.json`）、项目模板（`project-templates.json`）、引擎选择（`engine-selection.json`） | JSON 文件 |
 
 ---
 
