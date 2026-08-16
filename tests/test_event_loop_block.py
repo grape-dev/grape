@@ -12,6 +12,7 @@
 - 断言 heartbeat 能被持续调度（修复方向：迭代中 `await asyncio.sleep(0)` 让出事件循环）。
 """
 import asyncio
+import os
 import time
 import pytest
 
@@ -166,3 +167,46 @@ class TestEventLoopBlock:
         )
         assert "t_slow_1" in client.started
         assert any(tid == "t_slow_1" for tid, _ in client.completed), "静默长任务完成后应 complete"
+
+    def test_worktree_created_before_skill_materialize(self, monkeypatch, tmp_path):
+        """方案 A 顺序看护（coding-worktree-skill-collision.md §5.2）：
+        _execute_task 必须「先建 git worktree、再物化技能」，否则 cwd 被 .skills 占住会触发
+        `git worktree add` "already exists"（#711 根因）。本用例断言 ensure_issue_worktree
+        调用时 cwd 的 .skills 尚未被写入。
+        """
+        import json as _json
+        from src.runtime import agent as ra
+
+        # 构造 coding 任务（git agent + 有关联 issue + issue_session_id）
+        task = self._build_task(monkeypatch)
+        task.update({
+            "id": "t_wt_order",
+            "agent_type": "coding",
+            "issue_id": "#7",
+            "issue_session_id": "sess-7",
+            "cwd": str(tmp_path / "issues" / "7" / "coding"),
+            "skill_files": _json.dumps({"implementation": {"SKILL.md": "# impl\n", "ref.md": "ref\n"}}),
+        })
+
+        # 记录 ensure_issue_worktree 调用时 .skills 是否已存在
+        seen = {"skills_existed_at_worktree_call": None, "wt_called": False}
+
+        def _fake_ensure_worktree(*a, **k):
+            seen["wt_called"] = True
+            cwd = task["cwd"]
+            seen["skills_existed_at_worktree_call"] = os.path.isdir(os.path.join(cwd, ".skills"))
+            return os.path.join(cwd, ".worktree")  # 假 worktree 路径
+
+        monkeypatch.setattr("src.runtime.repogit.ensure_issue_worktree", _fake_ensure_worktree)
+        monkeypatch.setattr("src.runtime.executor.stream_runtime", _slow_stream_runtime)
+
+        client = _SlowClient()
+        asyncio.run(runtime_agent._execute_task(client, task))
+
+        assert seen["wt_called"], "coding 任务应触发 ensure_issue_worktree"
+        assert seen["skills_existed_at_worktree_call"] is False, (
+            "修复要求先建 worktree 再物化技能：ensure_issue_worktree 调用时 .skills 不应已存在。"
+            "若为 True（先技能后 worktree）→ 触发 #711 already-exists 冲突。"
+        )
+        # 技能应已物化（在 worktree 之后）
+        assert os.path.isfile(os.path.join(task["cwd"], ".skills", "implementation", "SKILL.md"))

@@ -151,7 +151,7 @@ async def _stream_runtime_async(*args, **kwargs):
 
 
 async def _execute_task(client, task, engine_name: str = ""):
-    """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。
+    """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
     engine_name 为该任务所属引擎实例名（如 opencode-worker-123249），用于日志区分。
     """
@@ -168,6 +168,20 @@ async def _execute_task(client, task, engine_name: str = ""):
         env = json.loads(task.get("env_extra") or "{}")
     except Exception:
         pass
+    # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
+    # 否则 cwd 被 .skills 物化占住（目录存在但无 .git）会导致 `git worktree add` 报
+    # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
+    # 见 coding-worktree-skill-collision.md §4.1（方案 A）。
+    try:
+        from src.runtime import repogit
+        _num = repogit.issue_num_from(task.get("issue_id") or "")
+        if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
+            _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
+                                                _num, token=task.get("repo_gitcode_token") or "")
+            if _wt:
+                env["GIT_ASKPASS"] = _os.path.join(_wt, ".git-askpass.sh")
+    except Exception as e:
+        log.warning(f"git worktree ensure failed: {e}")
     skill_dir = _os.path.join(cwd, ".skills")
     prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
                                        .replace("{{SERVER_URL}}", task.get("server_url") or "")
@@ -183,7 +197,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             env["DEVOPS_SKILLS_DIR"] = skill_dir
     except Exception as e:
         log.warning(f"skill materialize failed: {e}")
-    # project-info 落地 + git worktree（coding/qa/sre，X 工作模型，见 multi-issue-isolation-design.md §3.4.1）
+    # project-info 落地（repo 全局共享，见 multi-issue-isolation-design.md §2.4）
     proj_dir = _os.path.join(cwd, ".project-info")
     try:
         proj_files = json.loads(task.get("project_info_files") or "{}")
@@ -209,16 +223,6 @@ async def _execute_task(client, task, engine_name: str = ""):
         prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
     except Exception as e:
         log.warning(f"knowledge materialize failed: {e}")
-    try:
-        from src.runtime import repogit
-        _num = repogit.issue_num_from(task.get("issue_id") or "")
-        if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
-            _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                                _num, token=task.get("repo_gitcode_token") or "")
-            if _wt:
-                env["GIT_ASKPASS"] = _os.path.join(_wt, ".git-askpass.sh")
-    except Exception as e:
-        log.warning(f"git worktree ensure failed: {e}")
 
     done = None
     batch = []
