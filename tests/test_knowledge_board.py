@@ -90,9 +90,17 @@ class TestKnowledgeList:
         assert r.status_code == 200, r.text
         d = r.json()
         names = [f["name"] for f in d["project"]["files"]]
-        assert "project-graph.md" in names and "project-capabilities.md" in names and ".metadata.json" in names
+        assert "project-info/project-graph.md" in names
+        assert "project-info/project-capabilities.md" in names
+        assert "project-info/.metadata.json" in names
         assert d["project"]["meta"]["degraded"] is False
         assert any("内部评审" in k["content"] for k in d["project"]["knowledge"])
+        # §5.5 修复：知识沉淀条目的 path 为相对仓库根，content 接口可直接读
+        pentry = next(k for k in d["project"]["knowledge"] if "内部评审" in k["content"])
+        assert pentry["path"] == "project-info/knowledge.md"
+        r2 = client.get(f"/api/knowledge/content?repo={_REPO}&file={pentry['path']}", headers=_headers)
+        assert r2.status_code == 200, r2.text
+        assert "内部评审" in r2.json()["content"]
 
     def test_list_agent_dimension(self):
         _seed_knowledge(agent="vod")
@@ -103,6 +111,18 @@ class TestKnowledgeList:
         assert "vod" in d["agents"] and "coding" in d["agents"]
         assert d["agents"]["vod"][0]["issue_num"] == 5
         assert d["agents"]["vod"][0]["scope"] == "issue_agent"
+
+    def test_entry_path_is_repo_root_relative_and_readable(self):
+        """知识条目 path 为「相对仓库根」，content 接口可直接读取（§5.5 修复）。"""
+        _seed_knowledge(agent="vod")
+        r = client.get(f"/api/knowledge?repo={_REPO}", headers=_headers)
+        assert r.status_code == 200, r.text
+        entry = r.json()["agents"]["vod"][0]
+        assert entry["path"] == "issues/5/vod/knowledge.md"  # 剥掉 owner/repo 前缀
+        # content 接口用该 path 可直接读到正文
+        r2 = client.get(f"/api/knowledge/content?repo={_REPO}&file={entry['path']}", headers=_headers)
+        assert r2.status_code == 200, r2.text
+        assert "验收标准 = 接口可跑通" in r2.json()["content"]
 
     def test_list_repo_isolation(self):
         _seed_knowledge(agent="vod")

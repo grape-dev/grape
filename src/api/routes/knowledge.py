@@ -41,6 +41,20 @@ def _safe_rel(rel: str) -> str:
     return rel
 
 
+def _repo_root_rel(ws_rel: str, repo_key: str) -> str:
+    """WORKSPACE_DIR 相对路径 → 仓库根相对路径（剥掉 {owner}/{repo}/ 前缀）。
+
+    agent_shared_knowledge.file_path 存 WORKSPACE 相对（如 owner/repo/project-info/knowledge.md），
+    看板统一用「相对仓库根」语义（与 content 接口 / 成员文档 path 一致）。
+    """
+    rel = (ws_rel or "").replace("\\", "/").lstrip("/")
+    owner, rname = _owner_repo(repo_key)
+    prefix = f"{owner}/{rname}/"
+    if owner and rname and rel.startswith(prefix):
+        rel = rel[len(prefix):]
+    return rel
+
+
 def _read_file(repo_key: str, rel: str) -> str:
     base = _repo_base(repo_key)
     rel = _safe_rel(rel)
@@ -138,7 +152,8 @@ def _project_knowledge_entries(repo_key: str) -> list[dict]:
                 content = ""
         out.append({
             "scope": r[0], "agent_type": r[1] or "", "issue_num": r[2] or 0,
-            "file_path": r[3] or "", "status": r[4] or "", "source_seq": r[5] or 0,
+            "file_path": r[3] or "", "path": _repo_root_rel(r[3], repo_key),
+            "status": r[4] or "", "source_seq": r[5] or 0,
             "created_by": r[6] or "", "created_at": r[7] or "", "content": content,
         })
     return out
@@ -170,7 +185,8 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
                 content = ""
         groups.setdefault(at, []).append({
             "scope": r[0], "agent_type": at, "issue_num": r[2] or 0,
-            "file_path": r[3] or "", "status": r[4] or "", "source_seq": r[5] or 0,
+            "file_path": r[3] or "", "path": _repo_root_rel(r[3], repo_key),
+            "status": r[4] or "", "source_seq": r[5] or 0,
             "created_by": r[6] or "", "created_at": r[7] or "", "content": content,
         })
     return groups
@@ -194,14 +210,14 @@ async def list_knowledge(user: dict = Depends(get_current_user),
     except Exception:
         files, meta = {}, {}
     project_files = [
-        {"name": n, "label": "Project Graph", "updated": meta.get("last_updated", "")}
+        {"name": "project-info/project-graph.md", "label": "Project Graph", "updated": meta.get("last_updated", "")}
         for n in ("project-graph.md",) if n in files
     ] + [
-        {"name": n, "label": "Project Capabilities", "updated": meta.get("last_updated", "")}
+        {"name": "project-info/project-capabilities.md", "label": "Project Capabilities", "updated": meta.get("last_updated", "")}
         for n in ("project-capabilities.md",) if n in files
     ]
     if ".metadata.json" in files:
-        project_files.append({"name": ".metadata.json", "label": "metadata",
+        project_files.append({"name": "project-info/.metadata.json", "label": "metadata",
                               "updated": meta.get("last_updated", "")})
 
     return {
