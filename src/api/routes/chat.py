@@ -30,6 +30,7 @@ from src.session_manager import (
     delete_messages_by_conv, delete_conversation,
     get_chat_config as _get_chat_config,
     set_chat_config as _set_chat_config,
+    mark_task_processing_by_conversation,
 )
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -173,6 +174,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         conv = get_conversation(conv_id)
 
     add_message(conv_id, "user", body.message)
+    # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
+    mark_task_processing_by_conversation(conv_id)
 
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "")
@@ -285,6 +288,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     _auto_title(conv, body.message)
 
     add_message(conv_id, "user", body.message)
+    # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
+    mark_task_processing_by_conversation(conv_id)
 
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "")

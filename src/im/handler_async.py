@@ -661,6 +661,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         update_conversation(conv["id"], user_gitcode_token=user_token)
                 if conv_id:
                     add_message(conv_id, "user", text)
+                    # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
+                    from src.session_manager import mark_task_processing_by_conversation
+                    mark_task_processing_by_conversation(conv_id)
         except Exception as e:
             log.warning(f"[Chat:{ctx.name}] resolve user gitcode token failed: {e}")
 

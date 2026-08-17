@@ -537,6 +537,32 @@ def touch_conversation(conv_id: str):
         db.commit()
 
 
+def mark_task_processing_by_conversation(conv_id: str):
+    """任务会话收到真实用户消息 → tasks.active → processing（task-status-processing-trigger-fix.md §3.1）。
+
+    幂等、仅 active→processing、限定 conv 属主本人任务、不回翻终态。
+    优先按 conversation_id 匹配，无则按 repo_key+issue_number 回退。
+    """
+    if not conv_id:
+        return
+    from src.repo_key import to_repo_key
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT user_id, repo_key, conv_type, issue_number FROM chat_conversations WHERE id=?", (conv_id,))
+        row = c.fetchone()
+        if not row or row[2] != "task" or not row[3]:
+            return
+        conv_user_id, repo_key, _ct, issue_number = row
+        repo_key = to_repo_key(repo_key)
+        c.execute("UPDATE tasks SET status='processing' WHERE conversation_id=? AND user_id=? AND status='active'",
+                  (conv_id, conv_user_id))
+        if c.rowcount == 0:
+            c.execute(
+                "UPDATE tasks SET status='processing' WHERE repo_key=? AND issue_number=? AND user_id=? AND status='active'",
+                (repo_key, issue_number, conv_user_id))
+        db.commit()
+
+
 def join_feishu_chat(chat_id: str, conv_id: str, user_id: int) -> bool:
     """原子切换飞书接入指针（feishu-web-chat-unified-design.md §3.1）。
 

@@ -96,20 +96,20 @@ class TestWebChatToolUseRegression:
         """
         from unittest.mock import AsyncMock, patch
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
-        # seed 远端引擎 + chat 配置指向它
+        # seed 个人（scope=user）远端引擎 + chat 配置按实例名指向它（新语义：chat 仅本机直连+个人 worker）
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE user_id=99901")
             c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'wt_%'")
-            c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) "
-                      "VALUES ('hwt','wt-cred','wt-dev','global','tester','active')")
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status) "
+                      "VALUES ('hwt','wt-cred','wt-dev','user','99901','tester','active')")
             _cid = c.lastrowid
             c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
-                      "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'global', '', 1, 1)", (_cid,))
+                      "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'user', '99901', 1, 1)", (_cid,))
             _rid = c.lastrowid
             db.commit()
         from src.session_manager import set_chat_config
-        set_chat_config(99901, backend="opencode")
+        set_chat_config(99901, backend="opencode-wt-dev")
         with patch("src.runtime.service.enqueue_task", return_value="t_q") as m_enq, \
              patch("src.runtime.service.wait_task_terminal",
                    new=AsyncMock(return_value={"status": "completed", "exit_code": 0,
