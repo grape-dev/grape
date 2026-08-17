@@ -160,3 +160,52 @@ CREATE TABLE IF NOT EXISTS feishu_chat_bind (
 | `ba3a8580` docs 目录重组 | `docs/new-version2/`→`docs/new-version1/`、根目录→`docs/new-version/`；database-tables-overview 补 conv_type/issue_number | ✅ 本文档重建至 `docs/new-version2/`；DDL 文档已含 `conv_type`/`issue_number`，与本方案 §3.1/§3.3 引用一致 |
 | `4470352a`/`2eb18bae` 刷新 database-tables / user-workflow 并拷贝至 docs/new-version2 | DDL 与工作流文档对齐最新实现 | ✅ 无冲突；后续实现可对照 `docs/new-version2/database-tables-overview.md` |
 | `d068cd3a` feat(ui) Event 对话框 markdown | events.js 消息用 renderMarkdown（对齐 chat 对话框） | ✅ 纯前端，无影响 |
+
+## 10. 事故修复：未绑定仓库兜底误用全局 `ws_feishu_app_id`（2026-08-17）
+
+### 10.1 事故现象
+用户 `gcw_7pdiBkYp`（uid70，已配置个人飞书、已绑定 open_id `ou_d417...`）在 P2P 私聊自己的 bot（`cli_aa08d82d`）发首条"你好"时：
+1. bot 没有询问"你是谁"；
+2. 却把 **Jason7602 所绑定的仓库列表**发给了 gcw 的飞书用户。
+
+### 10.2 根因
+1. **未询问"你是谁"（非 bug）**：
+   - P2P 身份确认流程（`handler_async.py:237`）只跑 `chat_type=='p2p'`；本消息确为 P2P（Feishu API 拒绝把 `oc_d1f176...` 当群聊查询 → 私聊会话 id 也是 `oc_` 前缀，`chat_type` 字段才是权威）；
+   - 且 gcw **已绑定**（`unified_user_mapping.feishu_open_id` 有值）→ 确认被跳过。设计正确。
+2. **发 Jason7602 仓库（真 bug）**：该聊天无 `repo_im_group_binding` → `resolve_repo` 返回空 → 走"未绑定仓库"兜底（`handler_async.py:493`）：
+   ```python
+   meta.ws_feishu_app_id  = cli_aae1bb5fb3b81bde   # Jason7602 的 bot（冻结历史值）
+   user_id = get_user_id_by_app_id(ws_feishu_app_id)  # → 7 = Jason7602
+   repos = get_managed_repos(7)                       # → Jason7602 的全部托管仓库
+   ```
+   → 用**全局 `ws_feishu_app_id` 的属主（Jason7602）**列仓库，而非当前聊天 bot 的属主（gcw, uid70）。
+
+### 10.3 `ws_feishu_app_id` 来源（遗留单 bot hack）
+- 历史上由**旧 WebSocket 启动流程**写入（`im-ws-async-redesign.md` / `im-ws-multi-boot-fix.md`）：
+  ```python
+  INSERT OR REPLACE INTO meta (key, value) VALUES ('ws_feishu_app_id', <单 bot app_id>)
+  ```
+- 单用户/单 bot 时代，"WS 的 bot"即系统主用户（Jason7602）的 bot，未绑定兜底用它反推"当前用户"。
+- **多 bot 重构（BotManager 时代）已删除写入逻辑，仅剩 `handler_async.py:493` 这一处死读取**，meta 值冻结为 Jason7602 的 bot。**当前设计没有"全局飞书属主"，业务流程也不需要**。
+
+### 10.4 修复方案（待实施）
+1. **未绑定兜底改用当前 bot 属主**（与 `/repo` 一致）：
+   - `uid = get_user_id_by_app_id(account)`（account = 当前聊天 bot app_id，P2P/群均可）；
+   - `repos = get_user_repos(uid)`（或 `get_managed_repos(uid)`），不再读 `meta.ws_feishu_app_id`；
+   - 空则提示"无已同步仓库，先 `/repo` 或网页加入"。
+2. **数据清理**：删除 `meta.ws_feishu_app_id` 残留行（可选，随代码一起）。
+3. **群聊未绑定引导**：回复 `未绑定仓库，发送 /repo 选择并绑定`（替换现有"列仓库列表"文案，避免把别家仓库当候选）。
+
+### 10.5 测试用例设计
+
+| # | 用例 | 前置 | 断言 |
+|---|---|---|---|
+| W01 | 未绑定兜底用当前 bot 属主仓库 | bot 属主 uid=70 有仓库；`ws_feishu_app_id`=Jason7602 | 兜底列出 **uid70 的仓库**，不出现 Jason7602 仓库 |
+| W02 | 无 meta.ws_feishu_app_id 也能工作 | meta 无该 key | 兜底仍按当前 bot 属主正常返回 |
+| W03 | 未绑定引导文案 | 无任何仓库 | 回复含 `/repo` 引导，不列仓库列表 |
+| W04 | P2P 已绑定不询问（回归） | gcw 已绑定 | 首条消息不进确认流程、正常进入 chat |
+
+### 10.6 实施步骤
+1. `handler_async.py` 未绑定兜底：`ws_feishu_app_id` → `get_user_id_by_app_id(account)` + `get_user_repos(uid)`，文案改 `/repo` 引导。
+2. 删除 meta `ws_feishu_app_id` 残留行（可选）。
+3. 测试 W01-W04 + 回归 → 部署。

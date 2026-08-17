@@ -28,6 +28,7 @@ def _clean():
             except Exception:
                 pass
         c.execute("DELETE FROM chat_agent_session WHERE id LIKE 'nav-%'")
+        c.execute("DELETE FROM meta WHERE key='ws_feishu_app_id'")
         db.commit()
 
 
@@ -105,10 +106,8 @@ def test_repo_number_selects_and_binds():
 
 def test_number_without_pending_goes_normal_chat():
     _seed()
-    api = _run_msg("5")   # 无 pending → 不吞数字
-    assert _card_text if False else True
-    # 未绑定仓库提示走 reply_text
-    assert api.reply_text.called
+    _run_msg("5")   # 无 pending → 数字不被当选择吞掉，走正常消息处理
+    assert _pending() is None
     _clean()
 
 
@@ -117,9 +116,8 @@ def test_expired_pending_not_intercepted():
     from src.im.handler_async import _pending_selections
     _pending_selections["nav_chat"] = {"action": "repo", "repo_key": "", "items": [], "page": 1,
                                        "expires": 0, "page_size": 10}
-    api = _run_msg("5")
-    assert api.reply_text.called
-    assert api.reply_card.call_count == 0
+    _run_msg("5")
+    assert _pending() is None          # 过期 pending 被清、不拦截
     _clean()
 
 
@@ -291,4 +289,60 @@ def test_where_no_warning_when_consistent():
     api = _run_cmd("/where")
     text = _card_text(api)
     assert "不一致" not in text
+    _clean()
+
+
+# ---- 未绑定仓库兜底修复（2026-08-17，feishu-web-chat-unified-design.md §10）----
+
+def _seed_unbound():
+    _seed()
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='nav_chat'")
+        # 残留全局 ws_feishu_app_id（历史 bug 触发条件）→ 指向 Jason7602
+        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ws_feishu_app_id', 'cli_jason')")
+        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, im_app_id) VALUES ('nav-jason', 99, 'cli_jason')")
+        c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (99, 'gitcode:Jason7602/secret-repo', 'Jason7602', 'secret-repo', 1, 1)")
+        db.commit()
+
+
+def _reply_text(api):
+    return "".join(str(a[0][2]) for a in api.reply_text.call_args_list)
+
+
+def test_unbound_fallback_uses_current_bot_owner():
+    """W01：未绑定兜底列出当前 bot 属主（user1）的仓库，不再出现 Jason7602 仓库"""
+    _seed_unbound()
+    api = _run_msg("查询下情况")
+    text = _reply_text(api)
+    assert "repo-a" in text or "repo-b" in text
+    assert "secret-repo" not in text
+    assert "Jason7602" not in text
+    _clean()
+
+
+def test_unbound_fallback_works_without_meta_key():
+    """W02：meta 无 ws_feishu_app_id 时兜底仍按当前 bot 属主正常"""
+    _seed_unbound()
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM meta WHERE key='ws_feishu_app_id'")
+        db.commit()
+    api = _run_msg("查询下情况")
+    assert "repo-a" in _reply_text(api)
+    _clean()
+
+
+def test_unbound_no_repos_guides_repo():
+    """W03：当前 bot 属主无仓库 → /repo 引导，不列仓库"""
+    _seed()
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='nav_chat'")
+        c.execute("DELETE FROM user_repos")
+        db.commit()
+    api = _run_msg("查询下情况")
+    text = _reply_text(api)
+    assert "/repo" in text
+    assert "没有加入任何仓库" in text
     _clean()

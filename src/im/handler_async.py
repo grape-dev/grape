@@ -485,19 +485,14 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         repo_key = resolve_repo(text, chat_id, parsed.get("sender_id", ""), db, account)
         if not repo_key:
-            reply_parts = ["当前未绑定任何仓库至本群。"]
+            # 未绑定仓库：用当前聊天 bot 的属主列仓库（修复 2026-08-17 误用全局
+            # meta.ws_feishu_app_id 把 Jason7602 的仓库发给其它用户，见 feishu-web-chat-unified-design.md §10）
+            reply_parts = ["当前未绑定任何仓库至本聊天。"]
+            uid = get_user_id_by_app_id(account) or 0
             try:
-                user_id = None
-                app_id = ""
-                c = db.cursor()
-                c.execute("SELECT value FROM meta WHERE key='ws_feishu_app_id'")
-                row = c.fetchone()
-                if row:
-                    app_id = row[0]
-                    user_id = get_user_id_by_app_id(app_id)
-                if user_id:
-                    from src.user import db as user_db
-                    repos = user_db.get_managed_repos(user_id)
+                if uid:
+                    from src.user.db import get_user_repos
+                    repos = get_user_repos(uid)
                     if repos:
                         reply_parts.append("你已加入以下仓库，请选择绑定的仓库：")
                         for i, r in enumerate(repos, 1):
@@ -508,6 +503,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                         reply_parts.append("你可能还没有加入任何仓库。")
                         reply_parts.append("请先在网页端加入仓库，然后发送 `/repo` 选择绑定。")
                 else:
+                    c = db.cursor()
                     c.execute("SELECT DISTINCT repo_key, repository, source FROM chat_agent_session ORDER BY last_active_at DESC LIMIT 10")
                     rows = c.fetchall()
                     if rows:

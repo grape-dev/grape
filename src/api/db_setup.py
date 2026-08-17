@@ -661,12 +661,28 @@ def init_database():
     _create_indexes()
     _seed_from_json()
     _align_agent_enable()
+    _cleanup_stale_meta()
     # engine-selection-design.md §4.4/§12：存量会话 runtime_id>0 → 回填绑定集合（单成员，幂等）
     try:
         from src.runtime.engine_select import backfill_existing_bindings
         backfill_existing_bindings()
     except Exception as e:
         log.warning(f"Backfill existing runtime bindings failed: {e}")
+
+
+def _cleanup_stale_meta():
+    """删除单 bot 时代遗留的全局 meta.ws_feishu_app_id。
+
+    该 key 由旧 WebSocket 启动流程写入，多 bot 化后已无写入方、无业务用途；曾被未绑定仓库
+    兜底误用导致把 Jason7602 的仓库发给其它用户（2026-08-17，见 feishu-web-chat-unified-design.md §10）。
+    """
+    try:
+        c = db.cursor()
+        c.execute("DELETE FROM meta WHERE key='ws_feishu_app_id'")
+        db.commit()
+        log.info("Cleaned stale meta key: ws_feishu_app_id")
+    except Exception as e:
+        log.warning(f"Cleanup stale meta ws_feishu_app_id failed: {e}")
 
 
 def _align_agent_enable():
