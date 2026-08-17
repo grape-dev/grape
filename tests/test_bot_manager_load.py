@@ -3,7 +3,6 @@ import pytest, asyncio, os, sys, unittest
 from unittest.mock import AsyncMock, patch
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..")
-sys.path.insert(0, SRC_DIR)
 os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 

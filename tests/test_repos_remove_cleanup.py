@@ -1,6 +1,5 @@
 """测试：解除托管同步清理（_cleanup_repo_data）"""
 import sys, os, sqlite3
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 

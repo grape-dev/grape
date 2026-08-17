@@ -5,8 +5,6 @@ import sys
 import json
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
-if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)
 
 os.environ["DEVOPS_DB_PATH"] = os.path.join(os.path.dirname(__file__), "..", "data", "test_sessions.db")
 

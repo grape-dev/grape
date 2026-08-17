@@ -5,7 +5,6 @@ import asyncio
 from unittest.mock import patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
-sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from fastapi.testclient import TestClient

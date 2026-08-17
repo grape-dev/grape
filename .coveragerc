@@ -1,0 +1,9 @@
+[run]
+source = src
+
+[report]
+# 第一档门槛：整体行覆盖率 ≥ 70%（P1-C 已达标 71.08%；稳定后再上调至 85%）。
+# 分支覆盖率（branch=True）属第二档，稳定后再启用。
+# 本地执行：pytest -m "not e2e_ui" --cov
+fail_under = 70
+skip_covered = True

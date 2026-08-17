@@ -153,17 +153,16 @@
 
 ### 4.2 P1 测试基础设施：把质量变成门禁
 
-1. **建立 CI**（GitHub Actions 或自建流水线）：
-   - 每次 PR / push 跑 `pytest -m "not e2e_ui" --cov=src --cov-fail-under=<阈值>`。
-   - 分 Job：快速单测（单元层）与集成层分开；`e2e_ui` 单独 job（带浏览器 + `DEVOPS_UI_TEST=1`）。
+1. ~~**建立 CI**（GitHub Actions 或自建流水线）~~ — **暂缓（2026-08-17 决定）**：仓库托管在 GitCode、暂无 GitHub 计划，GitHub Actions 不适用。CI 延后到接入 GitCode CI 或迁移平台后再执行。本节其余项可在本地先行生效，CI 只是"自动触发"载体。
+   - 届时：每次 PR / push 跑 `pytest -m "not e2e_ui" --cov=src --cov-fail-under=<阈值>`；分 Job（单元/集成/e2e_ui 带浏览器 + `DEVOPS_UI_TEST=1`）。
 2. **引入 pytest 插件**（`requirements-dev.txt`）：
    - `pytest-asyncio`（`asyncio_mode = auto`，替换 73 处 `asyncio.run`，支持 async fixture）
    - `pytest-cov` + `--cov-fail-under`（分支覆盖率 `--cov-branch`）
-   - `pytest-randomly`（随机化用例/模块顺序，暴露顺序依赖）
+   - `pytest-randomly`（随机化用例/模块顺序，暴露顺序依赖；**需在 4.3 隔离完成后启用**）
    - `pytest-timeout`（兜底防 hang，如 60s/用例）
    - `pytest-xdist`（`-n auto` 提速；前提是 4.3 隔离完成）
    - `pytest-rerunfailures`（过渡期标记已知 flaky，但**禁止长期依赖**）
-3. **覆盖率门禁分档**：
+3. **覆盖率门禁分档**（门槛值先在 `pytest.ini` 本地生效，CI 接入后强制）：
    - 第一档：总行覆盖率 ≥ 70%，核心模块（runtime/client、api/routes/auth、im/feishu_async、runtime/agent、user/db）≥ 75%。
    - 第二档（稳定后）：核心模块 ≥ 85%，启用分支覆盖率。
    - 新增功能 PR 要求"改动行覆盖率"≥ 80%（`--cov` 增量覆盖，可用 diff 工具如 `diff-cover`）。
@@ -261,9 +260,10 @@ tests/
 
 | 阶段 | 内容 | 预计耗时 | 完成标准 |
 | --- | --- | --- | --- |
-| **Phase 0（安全）** | 删除泄漏脚本、轮换 token、收编调试脚本 | 0.5 天 | 无 token 泄漏、tests/ 无脚本 |
-| **Phase 1（转绿）** | 陈旧用例删/改、环境依赖用例 mock 化、UI 守卫改 marker | 2~3 天 | 默认 `pytest` 全绿（排除 e2e_ui） |
-| **Phase 2（基设）** | requirements-dev、pytest 插件、conftest 统一、覆盖率门禁、CI 接入 | 2~3 天 | CI 每次提交自动跑 + 覆盖率门禁生效 |
+| **Phase 0（安全）** | 删除泄漏脚本、轮换 token、收编调试脚本 | 0.5 天 | 无 token 泄漏、tests/ 无脚本（已实施，见附录 E；token 轮换待办） |
+| **Phase 1（转绿）** | 陈旧用例删/改、环境依赖用例 mock 化、UI 守卫改 marker | 2~3 天 | 默认 `pytest` 全绿（排除 e2e_ui）（已实施，见附录 E） |
+| **Phase 2（基设，不含 CI）** | requirements-dev、pytest 插件、conftest 统一、覆盖率门槛本地生效 | 2~3 天 | 插件就位、conftest 收口、`--cov-fail-under` 本地生效 |
+| **Phase 2b（CI，暂缓）** | GitCode CI 或迁移后接入门禁；届时自动跑 + 覆盖率强制 | — | 每次提交自动回归（待托管平台确定） |
 | **Phase 3（隔离）** | DB 逐用例隔离、env 隔离、网络封闭、随机顺序验证 | 2~3 天 | 随机顺序全绿、可并行 |
 | **Phase 4（补覆盖）** | 按 4.4 优先级补 P0 盲区（runtime/client、auth、mysql_compat） | 1~2 周 | 核心模块 ≥ 75% |
 | **Phase 5（提质）** | 分层重构（unit/integration/e2e）、参数化、mutation、契约 | 持续 | 核心模块 ≥ 85%，变异击杀率达标 |
@@ -357,6 +357,97 @@ class TestXxxBehavior:
 - **必须轮换已泄漏 Token**（`XmMqZP6LJ89XpPkAL2YYm8yY`，在 GitCode 后台撤销；git 历史中仍含旧文件内容）。
 - `ui_test_playwright.py` 文件名不匹配 pytest 默认收集规则（`test_*.py` / `*_test.py`），默认不被收集（现状如此，非本次引入）；其 `pytestmark` 已标记 `e2e_ui`，后续如纳入 e2e 轨可重命名为 `ui_playwright_test.py`。
 - 本阶段仅做 P0 止血；§4.2~§4.5（CI、pytest 插件、DB 逐用例隔离、分层）属 P1，尚未实施。
+
+---
+
+## 附录 F：P1 调整说明（2026-08-17）
+
+> 决策：仓库托管在 GitCode、暂无 GitHub 计划，**CI 暂缓**（GitHub Actions 不适用）。P1 其余项先在本地生效，CI 仅作为"自动触发"载体延后。
+
+### 调整后的 P1 执行顺序
+
+**P1-A 基础设施（不含 CI）**
+1. `requirements-dev.txt` + pytest 插件：`pytest-asyncio` / `pytest-timeout` / `pytest-randomly` / `pytest-cov` / `pytest-xdist`
+2. conftest 统一：收口 40 处 `sys.path.insert` / env 样板，提供共享 fixture
+3. 覆盖率门槛本地生效：`pytest.ini` 加 `--cov` + `fail_under`（CI 接入后强制）
+
+**P1-B 隔离与确定性（§4.3）**
+4. DB 逐用例隔离（fixture 独立临时库）
+5. env 隔离（monkeypatch 化）、网络封闭（mock urllib/aiohttp/lark、响应录播）
+6. `pytest-randomly` 随机顺序验证（**隔离完成后才启用**）
+
+**P1-C 补覆盖（§4.4，按风险优先级）**
+7. `runtime/client.py` 0% → `auth.py` 39% → `mysql_compat.py` 16% → `feishu_async.py` 45% → `agent.py` 50% → `agents.py` 43% → `user/db.py` 60% → `chat.py` 63%
+
+### 风险提示
+
+- P1-B 的 DB 隔离是**大改造**（89 处直连 `db` + 手工 DELETE），会动大量测试文件，建议最后集中做。
+- P1-C 补覆盖是**纯新增**，无回归风险，可随时并行。
+- 建议执行顺序：P1-A → P1-C → P1-B；CI 待托管平台确定后接入（Phase 2b）。
+
+---
+
+## 附录 G：实施约定（2026-08-17）
+
+> **涉及 `src/` 业务源码修改时的处理原则**：P1 及后续实施过程中，若发现需要改动业务源码
+> （真实缺陷修复、测试缝、行为变更等），**一律不直接修改**。先将问题完整记录到下方
+> 「待确认的源码修改」清单，交由负责人整体评估后再决定是否实施。测试侧工作不受影响、照常进行。
+
+### 待确认的源码修改清单
+
+| 编号 | 日期 | 触发场景（测试/模块） | 问题描述 | 建议改动点 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| （暂无） | — | — | — | — | 待评估 |
+
+> 新增记录时填写一行；"状态"取：待评估 / 已确认实施 / 已否决 / 已按测试侧绕过。
+
+---
+
+## 附录 H：P1-A 基础设施 + P1-C 补覆盖实施记录（2026-08-17）
+
+> 按附录 F 的调整顺序执行了 **P1-A（基础设施，不含 CI）** 与 **P1-C（补覆盖）**。
+> 全程未改任何 `src/` 业务源码（无新增待确认源码修改项，附录 G 清单仍为空）。
+
+### 达成基线（实测，默认 `pytest` 确定性顺序 + `--cov`）
+
+| 指标 | 实施前 | 实施后 |
+| --- | --- | --- |
+| 默认套件结果 | 830 passed | **1025 passed / 5 skipped / 21 deselected，0 failed / 0 errors** |
+| 整体行覆盖率 | 65% | **71.08%**（门禁已上调至 70%） |
+| pytest 插件 | 无 | asyncio/cov/randomly/timeout/xdist/rerunfailures 已装（`requirements-dev.txt`） |
+
+### 模块覆盖率变化（P1-C）
+
+| 模块 | 实施前 | 实施后 |
+| --- | --- | --- |
+| runtime/client.py | 0% | **100%** |
+| api/routes/auth.py | 39% | **100%** |
+| mysql_compat.py | 16% | **93%** |
+| im/feishu_async.py | 45% | **71%** |
+| runtime/agent.py | 50% | **70%** |
+
+### P1-A 变更
+
+1. 新增 `requirements-dev.txt`（pytest + 6 插件）。
+2. `pytest.ini`：加 `timeout = 120`、`asyncio_mode = auto`、`-p no:randomly`（P1-B 隔离完成前临时禁用随机顺序，防止暴露顺序依赖红）。
+3. 新增 `.coveragerc`：`source = src`、`fail_under = 70`（第一档门槛，本地 `pytest --cov` 即强制）。
+4. conftest 统一：移除 36 处冗余模块级 `sys.path.insert`，统一由 `tests/conftest.py` 引导（保留 conftest 权威行、test_session_manager 功能行、ui_test_playwright 子进程行）。
+
+### P1-C 变更（全部新增测试文件，纯新增、无回归）
+
+| 文件 | 覆盖目标 | 用例数 |
+| --- | --- | --- |
+| tests/test_runtime_client.py | RuntimeClient 全状态码/退避/异常/连接池 | 35 |
+| tests/test_auth_routes.py | OAuth 发起/回调全流程/错误分支/白名单/资料登出 | 16 |
+| tests/test_mysql_compat.py | SQL 方言翻译/配置读取/Cursor 与 DB 类(mock pymysql) | 66 |
+| tests/test_feishu_async.py | seen 去重/解析函数/BotManager/HTTP 层(mock aiohttp) | 55 |
+| tests/test_runtime_agent.py | 主循环/辅助函数/重注册/流桥接(POSIX 项按平台跳过) | 25 |
+
+### 遗留
+
+- **P1-B（隔离与确定性）尚未实施**：DB 逐用例隔离、env/网络封闭、`pytest-randomly` 启用。
+- `im/feishu_async.py`(71%)、`runtime/agent.py`(70%) 距核心模块 75% 目标尚有差距（剩余为 WS 长连接主循环与 `_execute_task` 执行链，复杂度高，建议 P1-B 后补）。
+- `user/db.py`(60%，1093 行) 未在本轮补覆盖（体量大，建议单独一轮）。
 
 ---
 

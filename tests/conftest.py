@@ -3,7 +3,7 @@ import pytest
 import os
 import sys
 
-# Ensure src/ is in path
+# Ensure src/ is in path（唯一权威路径引导；pytest.ini pythonpath=src 兜底）
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 

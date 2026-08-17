@@ -1,6 +1,5 @@
 """Issue 级工作目录测试（见 multi-issue-isolation-design.md §7.3 / §3.4）"""
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 

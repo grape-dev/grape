@@ -1,6 +1,5 @@
 """Playwright UI automation tests"""
 import sys, os, time, subprocess
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest, requests
 
 # 端到端 UI 测试：需 Playwright 浏览器 + 拉起本地 uvicorn 服务。

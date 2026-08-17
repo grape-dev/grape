@@ -11,7 +11,6 @@ import os
 import sys
 import uuid
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db")
 

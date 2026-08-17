@@ -15,8 +15,6 @@ import uuid
 from unittest.mock import patch, AsyncMock
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..")
-if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)
 os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
 

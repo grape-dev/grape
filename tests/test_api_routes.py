@@ -1,6 +1,5 @@
 """API 路由集成测试 — 覆盖所有 13 个路由模块"""
 import sys, os, json, io
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # 强制使用独立测试库，防止 TestClient 误连生产库（双保险，即使 conftest 未加载）
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
