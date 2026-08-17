@@ -48,9 +48,14 @@ public class AiTemplateService {
         if (templateRepository.existsByCreatedByAndTemplateNameAndDeleted(username, cleanName, 0)) {
             throw new BizException("已存在同名模板：" + cleanName);
         }
+        // 内容查重（对齐 VOD——防绕过前端存重复内容）
+        String cleanContent = content.trim();
+        if (templateRepository.existsByCreatedByAndTemplateContentAndDeleted(username, cleanContent, 0)) {
+            throw new BizException("已存在相同内容的模板");
+        }
         AdminAiTemplate t = new AdminAiTemplate();
         t.setTemplateName(cleanName);
-        t.setTemplateContent(content.trim());
+        t.setTemplateContent(cleanContent);
         t.setCreatedBy(username);
         templateRepository.save(t);
         return toMap(t);

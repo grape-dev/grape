@@ -1,10 +1,10 @@
 <template>
-  <div class="page-container">
+  <div class="page-container" style="padding:0; display:flex; flex-direction:column; height:100vh; overflow-y:auto">
     <div v-if="toastVisible" class="toast-message" :class="toastType">{{ toastMessage }}</div>
 
     <div class="ai-query-header">
-      <h2>AI分析</h2>
-      <p class="ai-query-desc">基于 Hermes Agent 能力，支持多轮对话，输入自然语言查询，AI 自动分析并以图表展示结果</p>
+      <h2>AI分析 <span class="desc-icon" @click.stop="toggleDesc" title="功能介绍">?</span></h2>
+      <div v-if="descVisible" class="desc-bubble" @click.stop>基于 Hermes Agent 能力，支持多轮对话，输入自然语言查询，AI 自动分析并以图表展示结果</div>
     </div>
 
     <div class="ai-query-layout">
@@ -12,7 +12,15 @@
       <div class="ai-query-input-panel">
         <!-- 查询输入 -->
         <div class="query-toolbar">
-          <h3>查询输入</h3>
+          <h3 style="position:relative">查询输入
+            <button class="hint-btn" @click.stop="toggleHint" title="使用帮助">💡</button>
+            <div v-if="hintVisible" class="hint-bubble" @click.stop>
+              <p>· Ctrl+Enter 发送</p>
+              <p>· 支持 ```chart 代码块自动渲染图表</p>
+              <p>· 多轮对话保持上下文</p>
+              <p>· 异步模式：查询中可切换会话不中断</p>
+            </div>
+          </h3>
           <div class="query-actions">
             <select v-model="queryTemplate" @change="applyTemplate" class="template-select">
               <option value="">-- 选择模板 --</option>
@@ -23,20 +31,24 @@
                 <option v-for="t in customTemplates" :key="t.id" :value="'custom-' + t.id">{{ t.name }}</option>
               </optgroup>
             </select>
-            <button class="btn btn-primary btn-sm" @click="send" :disabled="!queryText.trim() || isQuerying">
-              {{ isQuerying ? '查询中...' : '发送' }}
+            <button class="btn btn-primary btn-sm" @click="send" :disabled="!queryText.trim() || isQuerying || !canSend">
+              {{ isQuerying ? '查询中...' : (!canSend ? '处理中...' : '发送') }}
             </button>
           </div>
         </div>
-        <textarea
-          v-model="queryText"
-          class="query-textarea"
-          placeholder="请输入自然语言查询，支持多轮对话&#10;例如：统计各设备在线状态并用图表展示"
-          rows="4"
-          @keydown.ctrl.enter="send"
-        ></textarea>
-        <div class="char-counter-row">
-          <span class="char-counter" :class="{ 'near-limit': queryText.length >= 540 && queryText.length <= 600, 'at-limit': queryText.length > 600 }">{{ queryText.length }}/600</span>
+        <div class="query-input-wrap">
+          <div class="query-textarea-box">
+            <textarea
+              v-model="queryText"
+              ref="queryInputRef"
+              class="query-textarea"
+              :disabled="!canSend"
+              :placeholder="canSend ? '请输入自然语言查询，支持多轮对话\n例如：统计各设备在线状态并用图表展示' : '当前会话正在处理中，请等待完成...'"
+              rows="4"
+              @keydown.ctrl.enter="send"
+            ></textarea>
+            <span class="char-counter" :class="{ 'near-limit': queryText.length >= 540 && queryText.length <= 600, 'at-limit': queryText.length > 600 }">{{ queryText.length }}/600</span>
+          </div>
         </div>
         <div class="template-bar">
           <span class="template-count-hint">自定义模板 {{ customTemplates.length }}/{{ templateMax }}</span>
@@ -59,17 +71,13 @@
             </div>
           </div>
         </div>
-        <div class="query-hint">
-          <p>💡 Ctrl+Enter 发送 | 支持 ```chart 代码块自动渲染图表 | 多轮对话保持上下文 | 异步模式：查询中可切换会话不中断</p>
-        </div>
-
         <!-- 分析报表 -->
         <div class="session-list-section">
           <div class="session-list-header">
             <h4>分析报表</h4>
             <button class="btn btn-sm btn-primary" @click="newSession" title="新建会话">+ 新建</button>
           </div>
-          <div class="session-list">
+          <div class="session-list" @scroll.passive="onSessionScroll">
             <div
               v-for="s in sessions" :key="s.id"
               class="session-item" :class="{ active: s.id === activeSessionId, editing: editingId === s.id, running: isSessionRunning(s) }"
@@ -84,11 +92,11 @@
                 @keydown.esc="cancelRename"
                 @blur="confirmRename"
               />
-              <span v-else class="session-name" @dblclick.stop="startRename(s)">{{ s.name }}</span>
+              <span v-else class="session-name" @dblclick.stop="startRename(s)">{{ formatSessionName(s.name) }}</span>
               <span v-if="isSessionRunning(s)" class="session-running-indicator" title="分析中">●</span>
               <span class="session-time">{{ formatSessionTime(s.lastAt || s.updatedAt) }}</span>
-              <button v-if="editingId !== s.id" class="session-edit" @click.stop="startRename(s)" title="重命名">✎</button>
-              <button class="session-del" @click.stop="delSession(s)" title="删除">✕</button>
+              <button v-if="editingId !== s.id && !s.id.startsWith('new_')" class="session-edit" @click.stop="startRename(s)" title="重命名">✎</button>
+              <button v-if="!s.id.startsWith('new_')" class="session-del" @click.stop="askDelSession(s)" title="删除">✕</button>
             </div>
             <div v-if="sessions.length === 0" class="session-empty">暂无会话</div>
           </div>
@@ -98,13 +106,16 @@
       <!-- 右侧：对话结果 -->
       <div class="ai-query-result-panel" :class="{ 'fullscreen-mode': isFullscreen }">
         <div class="result-toolbar">
-          <h3>{{ currentName || '对话记录' }}</h3>
+          <h3>{{ formatSessionName(currentName) || '对话记录' }}</h3>
           <div class="result-toolbar-actions">
             <button v-if="activeMsgs.length" class="btn btn-sm" :class="{ 'btn-success': copyOk }" @click="copyAll">{{ copyOk ? '已复制' : '复制全部' }}</button>
-            <button v-if="activeMsgs.length" class="btn btn-sm" @click="isFullscreen = !isFullscreen">{{ isFullscreen ? '还原' : '全屏' }}</button>
+            <button v-if="activeMsgs.length" class="btn btn-sm" @click="toggleFullscreen">{{ isFullscreen ? '还原' : '全屏' }}</button>
           </div>
         </div>
         <div class="result-content" ref="resultBox">
+          <div v-if="activeMsgs.length && activeSession && activeSession.hasMore" class="load-more-wrap">
+            <button class="btn btn-sm" @click="loadOlder">{{ activeSession.loadingOlder ? '加载中...' : '加载更早历史' }}</button>
+          </div>
           <div class="result-empty" v-if="activeMsgs.length === 0 && !isQuerying">
             <div class="empty-icon">🤖</div>
             <p>AI 查询结果将显示在这里</p>
@@ -114,12 +125,15 @@
             <div class="msg-avatar">{{ m.role === 'user' ? '👤' : '🤖' }}</div>
             <div class="msg-body">
               <div class="msg-role">{{ m.role === 'user' ? '我' : 'AI' }}</div>
-              <div v-for="(seg, si) in renderParts(m.raw)" :key="si" class="result-segment">
+              <div v-for="(seg, si) in segFor(m)" :key="si" class="result-segment">
                 <pre v-if="seg.type === 'text'" class="result-text">{{ seg.text }}</pre>
                 <div v-else :data-chart="mi + '-' + si" class="chart-container"></div>
               </div>
               <div v-if="m.streaming" class="loading-dots-container">
                 <div class="loading-dots"><span></span><span></span><span></span></div>
+              </div>
+              <div v-if="m.role === 'assistant' && m.raw === '（查询失败，可重试）'" class="retry-wrap">
+                <button class="btn btn-sm" @click="retryQuery(m)">重试</button>
               </div>
             </div>
           </div>
@@ -138,6 +152,7 @@
           自定义模板字数不能超过 {{ TEMPLATE_MAX_LENGTH }} 字，当前已输入 {{ overLimitCount }} 字。
         </div>
         <div class="modal-footer">
+          <button class="btn btn-primary btn-sm" @click="goRefineQuery">去精简</button>
           <button class="btn btn-sm" @click="closeOverLimitModal">我知道了</button>
         </div>
       </div>
@@ -155,12 +170,29 @@
         </div>
         <div class="dialog-body">
           <label class="dialog-label">模板名称</label>
-          <input v-model="newTplName" class="dialog-input" placeholder="请输入模板名称" maxlength="50" />
+          <input v-model="newTplName" ref="newTplNameInput" class="dialog-input" placeholder="请输入模板名称" maxlength="50" />
           <div class="char-counter" style="text-align:right;margin-top:6px" :class="{ 'near-limit': newTplName.length >= 45 && newTplName.length <= 50, 'at-limit': newTplName.length > 50 }">{{ newTplName.length }}/50</div>
         </div>
         <div class="dialog-footer">
           <button class="btn" @click="showSaveTpl = false">取消</button>
           <button class="btn btn-primary" :disabled="!newTplName.trim()" @click="saveTemplate">保存</button>
+        </div>
+      </div>
+    </div>
+    <!-- 删除会话确认弹窗（对齐设备管理 modal 样式） -->
+    <div v-if="delTarget" class="modal-overlay" @click.self="delTarget = null">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <span class="modal-icon">⚠️</span>
+          <span class="modal-title">删除会话</span>
+        </div>
+        <div class="modal-body">
+          <p style="margin:0 0 12px">确认删除会话「<b>{{ delTarget.name }}</b>」？</p>
+          <p style="margin:0">删除后<b>不可恢复</b>。</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" :disabled="delBusy" @click="delTarget = null">取消</button>
+          <button class="btn btn-danger" :disabled="delBusy" @click="confirmDelSession">{{ delBusy ? '删除中...' : '确认删除' }}</button>
         </div>
       </div>
     </div>
@@ -180,9 +212,23 @@ const busy = ref(false)            // 同步轮询模式：查询中标志
 const asyncMode = ref(true)        // 默认异步订阅（对齐 VOD；复选框 UI 隐藏）
 const sessions = ref([])           // 会话对象：{ id, sessionId, name, lastAt, updatedAt, msgs, taskId, taskCompleted, local }
 const activeSessionId = ref(null)
+// 会话列表游标分页（滚动加载——首屏 20——触底加载更多）
+const sessionCursorTime = ref('')
+const sessionCursorId = ref('')
+const sessionHasMore = ref(false)
+const sessionsLoadingMore = ref(false)
+// 头部功能介绍气泡（？图标点击展示——点外部关闭）
+const descVisible = ref(false)
+function toggleDesc() { descVisible.value = !descVisible.value }
+// 使用帮助气泡（💡 按钮点击展示——点外部关闭）
+const hintVisible = ref(false)
+function toggleHint() { hintVisible.value = !hintVisible.value }
+const pollTimers = new Set()        // N5b：轮询定时器集合（卸载时统一清理）
 const customTemplates = ref([])
 const templateMax = ref(50)
 const showSaveTpl = ref(false)
+const newTplNameInput = ref(null)   // 保存模板弹窗输入框（#5 聚焦）
+const queryInputRef = ref(null)     // 查询输入框（#4 去精简聚焦）
 const newTplName = ref('')
 const showTplDrop = ref(false)
 const isFullscreen = ref(false)
@@ -204,7 +250,14 @@ const TEMPLATE_NAME_MAX_LENGTH = 50
 const showOverLimitModal = ref(false)
 const overLimitCount = ref(0)
 
-const activeSession = computed(() => sessions.value.find(s => s.id === activeSessionId.value))
+const activeSession = computed(() => sessions.value.find(s => s.id === activeSessionId.value) || null)
+
+// 会话级禁发：当前会话处理中（taskId 有且未完成）→ 禁发
+// （避免同会话并发提交——hermes --continue 同名并发——卡/乱）
+const canSend = computed(() => {
+  const s = activeSession.value
+  return !(s && s.taskId && !s.taskCompleted)
+})
 const activeMsgs = computed(() => activeSession.value?.msgs || [])
 const currentName = computed(() => activeSession.value?.name || '')
 const isQuerying = computed(() => {
@@ -213,6 +266,54 @@ const isQuerying = computed(() => {
 })
 function isSessionRunning(s) {
   return s && !!s.taskId && !s.taskCompleted
+}
+
+/** 加载更早历史（游标分页——每次 20——拼头部） */
+async function loadOlder() {
+  const s = activeSession.value
+  if (!s || s.msgs === null || !s.hasMore || s.loadingOlder) return
+  s.loadingOlder = true
+  await loadMsgs(s, true)
+  s.loadingOlder = false
+  await nextTick()
+  initCharts()
+}
+
+/** 重试失败查询（复用失败消息的 task_id——后端 UPDATE 覆盖——一轮一条 assistant） */
+async function retryQuery(failedMsg) {
+  const s = activeSession.value
+  if (!s) return
+  // 用 taskId 精确匹配对应 user（不依赖相邻位置——乱序/多轮
+  // 时前一条可能是 assistant——导致静默不响应）
+  const userMsg = (s.msgs || []).find(m => m.role === 'user' && m.taskId === failedMsg.taskId) || null
+  if (!userMsg) return
+  if (isQuerying.value) return
+  const text = userMsg.raw
+  // 失败消息就地转为 streaming 占位（重试结果覆盖）
+  failedMsg.raw = ''
+  failedMsg.streaming = true
+  failedMsg.segments = null
+  scrollToBottom()
+  try {
+    const { data } = await http.post('/ai/chat/submit', { query: text, sessionId: s.id, taskId: failedMsg.taskId })
+    s.taskId = data.taskId
+    s.taskCompleted = false
+    setStoredTaskId(s.id, data.taskId)
+    await streamTask(s, failedMsg)
+    await loadSessions()
+    // 重试后重新拉消息（服务端已覆盖失败消息——显示与服务端一致——
+    // 避免旧 msgs 残留/顺序错乱）
+    if (s.msgs !== null) {
+      await loadMsgs(s)
+      await nextTick()
+      initCharts()
+    }
+  } catch (e) {
+    failedMsg.raw = `[请求失败] ${e.response?.data?.message || e.message}`
+    failedMsg.streaming = false
+    s.taskCompleted = true
+    clearTaskKeys(s)
+  }
 }
 function showToast(msg, type = 'success') {
   toastMessage.value = msg
@@ -253,6 +354,11 @@ function setStoredTaskId(sessionId, taskId) {
 function clearStoredTaskId(sessionId) {
   try { sessionStorage.removeItem('aiquery_task_' + sessionId) } catch (e) { /* ignore */ }
 }
+// H1：双键清理助手（local id + 已换绑的 hermesSessionId——防 stale 残留/幻影会话）
+function clearTaskKeys(session) {
+  clearStoredTaskId(session.id)
+  if (session.sessionId) clearStoredTaskId(session.sessionId)
+}
 
 // ===== 会话管理 =====
 function generateSessionName(query) {
@@ -271,16 +377,22 @@ function formatSessionTime(ts) {
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 function newSession() {
+  // 已有未发送的空会话（new_）→ 切换回去（不重复创建——列表不污染——
+  // 同一时间最多一个"新建空会话"）
+  const existingNew = sessions.value.find(s => s.id.startsWith('new_'))
+  if (existingNew) {
+    activeSessionId.value = existingNew.id
+    return existingNew
+  }
   disposeAllCharts()
   const s = {
-    id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
-    sessionId: null,
+    id: 'new_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),   // 临时 id——提交后换后端会话 UUID
     name: '新对话',
     msgs: [],
+    minSeq: 0,
+    hasMore: false,
     taskId: null,
     taskCompleted: true,
-    updatedAt: Date.now(),
-    lastAt: null,
     local: true
   }
   sessions.value.unshift(s)
@@ -289,52 +401,109 @@ function newSession() {
 }
 async function loadSessions() {
   try {
-    const { data } = await http.get('/ai/history/sessions')
-    const serverSessions = (data.sessions || []).map(s => {
-      const storedTask = getStoredTaskId(s.sessionId)
+    // 新表会话列表（游标分页——首屏 20 条——滚动触底加载更多——不截断）
+    const { data } = await http.get('/ai/chat/sessions?limit=20')
+    sessions.value = (data.sessions || []).map(s => {
+      const existing = sessions.value.find(x => x.id === s.sessionId)
+      const storedTask = getStoredTaskId(s.sessionId)   // sessionStorage 恢复未完成任务
       return {
         id: s.sessionId,
-        sessionId: s.sessionId,
         name: s.name,
-        messageCount: s.messageCount,
-        lastAt: s.lastAt,
-        updatedAt: null,
-        msgs: null,                       // 懒加载
-        taskId: storedTask,               // sessionStorage 恢复未完成任务
-        taskCompleted: !storedTask,
+        updatedAt: s.updatedAt || '',
+        msgs: existing ? existing.msgs : null,   // 已加载的保留（当前会话不空——防页面空白）——未加载的懒加载
+        minSeq: existing?.minSeq || 0,
+        hasMore: existing?.hasMore ?? true,
+        taskId: existing?.taskId || storedTask,
+        taskCompleted: existing?.taskCompleted ?? !storedTask,
         local: false
       }
     })
-    // 合并：已存在会话（本地新会话/内存态）保留运行时状态（msgs/taskId），仅更新服务端字段
-    const merged = serverSessions.map(ss => {
-      const existing = sessions.value.find(x => x.id === ss.id || (x.local && x.sessionId === ss.sessionId))
-      if (existing) {
-        return { ...existing, ...ss, msgs: existing.msgs, taskId: existing.taskId, taskCompleted: existing.taskCompleted, local: false }
-      }
-      return ss
-    })
-    // 保留本地未完成任务且后端尚未出现的会话（任务仍在跑）
-    const pendingLocal = sessions.value.filter(s => s.local && isSessionRunning(s) && !merged.some(m => m.sessionId === s.sessionId))
-    sessions.value = [...pendingLocal, ...merged]
+    // 游标（下一页用——最后一条的 updated_at + sessionId）
+    const last = sessions.value[sessions.value.length - 1]
+    sessionCursorTime.value = last ? last.updatedAt || '' : ''
+    sessionCursorId.value = last ? last.id || '' : ''
+    sessionHasMore.value = !!data.hasMore
+    sessionsLoadingMore.value = false
     if (sessions.value.length === 0) newSession()
     if (!sessions.value.some(s => s.id === activeSessionId.value)) {
       activeSessionId.value = sessions.value[0]?.id || null
     }
+    // 进入页面自动加载第一个会话（对齐 VOD）
+    const first = sessions.value[0]
+    if (first && first.msgs === null && activeSessionId.value === first.id) {
+      first.msgs = []
+      await loadMsgs(first)
+      await nextTick()
+      initCharts()
+      scrollToBottom()
+    }
   } catch (e) {
-    sessions.value = []
-    newSession()
+    // 加载失败不清空已有会话（弱网保留内存态）
+    if (sessions.value.length === 0) newSession()
   }
 }
-async function loadMsgs(s) {
-  if (!s.sessionId) return
+
+// 会话列表滚动触底——加载更多
+function onSessionScroll(e) {
+  const el = e.target
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 24) {
+    loadMoreSessions()
+  }
+}
+
+// 会话列表滚动触底——加载更多（游标分页——追加——不截断）
+async function loadMoreSessions() {
+  if (!sessionHasMore.value || sessionsLoadingMore.value) return
+  sessionsLoadingMore.value = true
   try {
-    const { data } = await http.get(`/ai/history/session/${s.sessionId}/messages`)
-    s.msgs = []
-    for (const m of data) {
-      s.msgs.push({ role: 'user', raw: m.query })
-      s.msgs.push({ role: 'assistant', raw: m.answer })
-    }
-  } catch (e) { s.msgs = [] }
+    const params = new URLSearchParams({ limit: '20' })
+    if (sessionCursorTime.value) params.set('cursorTime', sessionCursorTime.value)
+    if (sessionCursorId.value) params.set('cursorId', sessionCursorId.value)
+    const { data } = await http.get(`/ai/chat/sessions?${params.toString()}`)
+    const more = (data.sessions || []).map(s => {
+      const existing = sessions.value.find(x => x.id === s.sessionId)
+      const storedTask = getStoredTaskId(s.sessionId)
+      return {
+        id: s.sessionId,
+        name: s.name,
+        updatedAt: s.updatedAt || '',
+        msgs: existing ? existing.msgs : null,
+        minSeq: existing?.minSeq || 0,
+        hasMore: existing?.hasMore ?? true,
+        taskId: existing?.taskId || storedTask,
+        taskCompleted: existing?.taskCompleted ?? !storedTask,
+        local: false
+      }
+    })
+    // 追加（去重——滚动触底可能重复触发）
+    const known = new Set(sessions.value.map(x => x.id))
+    sessions.value.push(...more.filter(x => !known.has(x.id)))
+    const last = more[more.length - 1]
+    sessionCursorTime.value = last ? last.updatedAt || '' : ''
+    sessionCursorId.value = last ? last.id || '' : ''
+    sessionHasMore.value = !!data.hasMore
+  } catch (e) {
+    console.warn('加载更多会话失败', e)
+  } finally {
+    sessionsLoadingMore.value = false
+  }
+}
+async function loadMsgs(s, older = false) {
+  try {
+    // 新表消息（游标分页——首次最新 40——滚动更早 20——seq 升序返回）
+    const { data } = await http.get(`/ai/chat/session/${s.id}/messages?cursorSeq=${older ? s.minSeq : ''}&limit=${older ? 20 : 40}`)
+    const msgs = (data.messages || []).map(m => ({
+      msgId: m.msgId,
+      role: m.role,
+      raw: m.content,
+      seq: m.seq,
+      taskId: m.taskId,
+      segments: m.role === 'assistant' ? renderParts(m.content) : null   // 对齐 VOD：加载即结构化
+    }))
+    s.msgs = older ? [...msgs, ...(s.msgs || [])] : msgs
+    s.minSeq = data.minSeq || 0
+    s.hasMore = !!data.hasMore
+  } catch (e) { /* ignore */ }
 }
 async function switchSession(s) {
   if (!asyncMode.value && isQuerying.value) return   // 同步模式查询中禁切（VOD 规则）
@@ -349,30 +518,58 @@ async function switchSession(s) {
 function startRename(s) {
   editingId.value = s.id
   editName.value = s.name
+  // A：重命名聚焦 + 全选（对齐 VOD——双击后直接可输入）
+  nextTick(() => {
+    const inp = document.querySelector('.session-name-input')
+    if (inp) { inp.focus(); inp.select() }
+  })
 }
 async function confirmRename() {
   if (editingId.value && editName.value.trim()) {
     const s = sessions.value.find(x => x.id === editingId.value)
     if (s && editName.value.trim() !== s.name) {
       s.name = editName.value.trim()
-      if (s.sessionId) {
-        try { await http.put(`/ai/history/session/${s.sessionId}/name`, { name: s.name }) } catch (e) { /* ignore */ }
+      if (!s.id.startsWith('new_')) {
+        try { await http.put(`/ai/chat/session/${s.id}/name`, { name: s.name }) } catch (e) { /* ignore */ }
       }
     }
   }
   editingId.value = null
 }
 function cancelRename() { editingId.value = null }
-async function delSession(s) {
-  if (!confirm(`确认删除会话「${s.name}」？`)) return
-  disposeAllCharts()
-  clearStoredTaskId(s.id)
-  if (s.sessionId) {
-    try { await http.delete(`/ai/history/session/${s.sessionId}`) } catch (e) { /* ignore */ }
+// ===== 删除会话（设备管理 modal 弹窗——对齐项目统一弹窗样式）=====
+const delTarget = ref(null)   // 删除确认目标会话
+const delBusy = ref(false)
+function askDelSession(s) { delTarget.value = s }
+async function confirmDelSession() {
+  const s = delTarget.value
+  if (!s || delBusy.value) return
+  delBusy.value = true
+  try {
+    disposeAllCharts()
+    // #3：同时清两个 key（local id + 已换绑的 hermesSessionId——防 stale 残留）
+    clearStoredTaskId(s.id)
+    if (!s.id.startsWith('new_')) {
+      try { await http.delete(`/ai/chat/session/${s.id}`) } catch (e) { /* ignore */ }
+    }
+    sessions.value = sessions.value.filter(x => x.id !== s.id)
+    delTarget.value = null
+    // N5d：删光所有会话 → 自动新建（对齐 VOD——列表不空态无引导）
+    if (sessions.value.length === 0) { newSession(); return }
+    // 删除活跃会话 → 自动加载下一个（对齐 VOD：删除后显示下一个会话信息）
+    if (activeSessionId.value === s.id) {
+      const next = sessions.value[0]
+      activeSessionId.value = next?.id || null
+      if (next && next.msgs === null) { next.msgs = []; await loadMsgs(next) }
+      await nextTick()
+      initCharts()
+      scrollToBottom()
+    } else {
+      await nextTick()
+    }
+  } finally {
+    delBusy.value = false
   }
-  sessions.value = sessions.value.filter(x => x.id !== s.id)
-  if (activeSessionId.value === s.id) activeSessionId.value = sessions.value[0]?.id || null
-  await nextTick()
 }
 
 // ===== 模板 =====
@@ -381,7 +578,10 @@ async function loadTemplates() {
     const { data } = await http.get('/ai/templates')
     customTemplates.value = data.templates || []
     templateMax.value = data.max || 50
-  } catch (e) { /* ignore */ }
+  } catch (e) {
+    // ④：加载失败提示（对齐 VOD——toast error）
+    showToast('模板加载失败，请稍后重试', 'error')
+  }
 }
 function applyTemplate() {
   const v = queryTemplate.value
@@ -401,8 +601,26 @@ function openSaveTpl() {
     showOverLimitModal.value = true
     return
   }
+  if (templateMax.value <= customTemplates.value.length) { showToast(`模板数量已达上限 ${templateMax.value}`, 'error'); return }
+  // #6：内容查重（对齐 VOD——开弹窗前拦截——内容重复拒绝）
+  const q = queryText.value.trim()
+  if (q && customTemplates.value.some(t => t.content === q)) { showToast('模板已存在', 'error'); return }
   newTplName.value = ''
   showSaveTpl.value = true
+  // #5：打开弹窗聚焦输入框（对齐 VOD）
+  nextTick(() => { newTplNameInput.value?.focus() })
+}
+// #4：超限弹窗「去精简」——聚焦 textarea 尾部（对齐 VOD goRefineQuery）
+function goRefineQuery() {
+  showOverLimitModal.value = false
+  nextTick(() => {
+    const ta = queryInputRef.value
+    if (ta) {
+      ta.focus()
+      ta.setSelectionRange(ta.value.length, ta.value.length)
+      ta.scrollIntoView({ block: 'center' })
+    }
+  })
 }
 async function saveTemplate() {
   try {
@@ -426,6 +644,7 @@ async function delTemplate(t) {
 
 // ===== 发送（统一入口：异步订阅 / 同步轮询）=====
 function send() {
+  if (!canSend.value) return   // 会话级禁发防御（处理中会话不可发——模板 disabled 之外的双保险）
   if (isQuerying.value || !queryText.value.trim()) return
   if (asyncMode.value) runQueryAsync()
   else runQuerySync()
@@ -445,37 +664,71 @@ async function runQueryAsync() {
   session.msgs.push(aiMsg)
   scrollToBottom()
   try {
-    const { data } = await http.post('/ai/chat/submit', { query: text, sessionId: session.sessionId || null })
+    const isNew = session.id.startsWith('new_')
+    const { data } = await http.post('/ai/chat/submit', { query: text, sessionId: isNew ? null : session.id })
+    if (isNew) {
+      session.id = data.sessionId    // 新会话：换后端会话 UUID（新表——绑定 hermes）
+      activeSessionId.value = data.sessionId   // 换绑立即同步（否则 activeSession=null——右侧空白/标题"对话记录"）
+    }
     session.taskId = data.taskId
     session.taskCompleted = false
     setStoredTaskId(session.id, data.taskId)
     await streamTask(session, aiMsg)
     await loadSessions()
+    if (isNew) activeSessionId.value = session.id    // 完成后保持当前会话
   } catch (e) {
     aiMsg.raw = `[请求失败] ${e.response?.data?.message || e.message}`
     aiMsg.streaming = false
     session.taskCompleted = true
-    clearStoredTaskId(session.id)
+    clearTaskKeys(session)
   }
 }
 
 /** SSE 订阅任务输出：token 追加 → session 事件 → 终态清理（后端重放缓冲，可重连） */
+let currentStreamAbort = null   // 当前 SSE 连接的 AbortController（组件卸载/重连时中断旧连接）
 async function streamTask(session, aiMsg) {
-  const resp = await fetch(`/api/admin/ai/chat/task/${session.taskId}/stream`, {
-    headers: { Authorization: `Bearer ${getToken()}` }
-  })
-  if (!resp.ok || !resp.body) {
-    aiMsg.raw += `\n[连接失败] ${resp.status === 502 ? '服务暂时不可用（可能正在部署/重启），请稍后重试' : 'HTTP ' + resp.status}`
+  // #2：新订阅先中断旧 SSE 连接（对齐 VOD——防双 reader 同时 append 文本重复）
+  if (currentStreamAbort) { currentStreamAbort.abort(); currentStreamAbort = null }
+  const ac = new AbortController()
+  currentStreamAbort = ac
+  // #3：fetch + 自动重试（502/网络瞬断——重试一次——2s 后——
+  //   nginx keepalive 之外的前端兜底——用户无感）
+  let resp = null
+  let lastErr = ''
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      resp = await fetch(`/api/admin/ai/chat/task/${session.taskId}/stream`, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+        signal: ac.signal
+      })
+      if (resp.ok && resp.body) break
+      lastErr = resp.status === 502 ? '服务暂时不可用（可能正在部署/重启），请稍后重试' : 'HTTP ' + resp.status
+      if (resp.status !== 502 && resp.status !== 499) break   // 502/499（nginx 瞬断/客户端断）重试一次——其他不重试
+    } catch (e) {
+      if (e.name === 'AbortError') return
+      lastErr = e.message
+    }
+    if (attempt === 1) await new Promise(r => setTimeout(r, 2000))
+  }
+  if (!resp || !resp.ok || !resp.body) {
+    aiMsg.raw += `\n[连接失败] ${lastErr}`
     aiMsg.streaming = false
     session.taskCompleted = true
-    clearStoredTaskId(session.id)
+    clearTaskKeys(session)
     return
   }
   const reader = resp.body.getReader()
   const dec = new TextDecoder()
   let buf = ''
   while (true) {
-    const { done, value } = await reader.read()
+    let chunk
+    try {
+      chunk = await reader.read()
+    } catch (e) {
+      if (e.name === 'AbortError') return   // 中断——静默退出
+      throw e
+    }
+    const { done, value } = chunk
     if (done) break
     buf += dec.decode(value, { stream: true })
     const lines = buf.split('\n')
@@ -490,8 +743,6 @@ async function streamTask(session, aiMsg) {
       if (ev.type === 'token') {
         aiMsg.raw += ev.data
         if (activeSessionId.value === session.id) scrollToBottom()
-      } else if (ev.type === 'session') {
-        session.sessionId = ev.data
       } else if (ev.type === 'error') {
         aiMsg.raw += `\n[错误] ${ev.data}`
       }
@@ -499,7 +750,10 @@ async function streamTask(session, aiMsg) {
   }
   aiMsg.streaming = false
   session.taskCompleted = true
-  clearStoredTaskId(session.id)
+  clearTaskKeys(session)
+  // #2b：异步空结果兜底（对齐 VOD——AI 返回空时提示而非空白）
+  if (!aiMsg.raw.trim()) aiMsg.raw = '（无返回内容）'
+  aiMsg.segments = renderParts(aiMsg.raw)   // 对齐 VOD：完成后一次性结构化缓存
   await nextTick()
   initCharts()
   scrollToBottom()
@@ -508,7 +762,57 @@ async function streamTask(session, aiMsg) {
 /** 断线/切回重连：未完成任务重新订阅（后端重放已缓冲内容，不丢不重） */
 async function reconnectActiveTask() {
   const s = activeSession.value
-  if (!s || !s.taskId || s.taskCompleted) return
+  if (!s) return
+  // taskId 恢复：优先内存/sessionStorage——兜底最后一条 user 消息的 taskId
+  // （DB 权威——不依赖浏览器 sessionStorage——新标签页/时序都可靠）
+  let taskId = s.taskId || getStoredTaskId(s.id)
+  if (!taskId && s.msgs && s.msgs.length) {
+    // 兜底候选：优先【失败消息】的 taskId（重试中的任务——
+    // 重试不写新 user——失败消息仍在——taskId 指向重试任务）；
+    // 其次最后一条 user（正常任务）
+    const lastFailed = [...s.msgs].reverse().find(m => m.role === 'assistant' && m.raw === '（查询失败，可重试）' && m.taskId)
+    const lastUser = [...s.msgs].reverse().find(m => m.role === 'user' && m.taskId)
+    taskId = (lastFailed ? lastFailed.taskId : null) || (lastUser ? lastUser.taskId : null)
+  }
+  if (!taskId) { s.taskCompleted = true; return }
+  s.taskId = taskId
+  s.taskCompleted = false   // 发现任务——视为运行中（禁发）——预检终态再解锁
+  // #3：重连前预检任务状态（对齐 VOD——任务已不存在/已完成 → 静默收尾）
+  try {
+    const { data } = await http.get(`/ai/chat/task/${taskId}/status`)
+    if (!data || data.status === 'done' || data.status === 'error' || data.status === 'not_found') {
+      s.taskCompleted = true
+      // N1：终态收尾——streaming 占位消息置 false（防 loading dots 永远转圈）
+      const pending = [...(s.msgs || [])].reverse().find(m => m.role === 'assistant' && m.streaming)
+      if (pending) {
+        pending.streaming = false
+        if (!pending.raw?.trim()) pending.raw = '（无返回内容）'
+      }
+      clearStoredTaskId(s.id)
+      // 运行中刷新修复：终态时重新拉取完整消息（assistant 可能已写入 DB——
+      // 旧逻辑不拉→只有 user→看不到响应；重拉后立即显示）
+      if (s.msgs !== null) {
+        await loadMsgs(s)
+        await nextTick()
+        initCharts()
+        scrollToBottom()
+      }
+      return
+    }
+  } catch (e) {
+    if (e.response?.status === 404) {
+      s.taskCompleted = true
+      clearStoredTaskId(s.id)
+      // 404：任务不存在——消息可能已写入（任务清理后）——兜底拉取防缺失
+      if (s.msgs !== null) {
+        await loadMsgs(s)
+        await nextTick()
+        initCharts()
+      }
+      return
+    }
+    return   // 网络异常——静默（保持状态——下次再试）
+  }
   if (s.msgs === null) s.msgs = []
   let aiMsg = [...s.msgs].reverse().find(m => m.role === 'assistant' && m.streaming)
   if (!aiMsg) {
@@ -531,9 +835,15 @@ async function runQuerySync() {
   session.msgs.push(aiMsg)
   busy.value = true
   try {
-    const { data } = await http.post('/ai/chat/submit', { query: text, sessionId: session.sessionId || null })
+    const isNew = session.id.startsWith('new_')
+    const { data } = await http.post('/ai/chat/submit', { query: text, sessionId: isNew ? null : session.id })
+    if (isNew) {
+      session.id = data.sessionId    // 新会话：换后端会话 UUID
+      activeSessionId.value = data.sessionId   // 换绑立即同步
+    }
     session.taskId = data.taskId
     session.taskCompleted = false
+    setStoredTaskId(session.id, data.taskId)
     await pollTaskStatus(session, aiMsg)
   } catch (e) {
     aiMsg.raw = `[请求失败] ${e.response?.data?.message || e.message}`
@@ -545,6 +855,8 @@ async function runQuerySync() {
 async function pollTaskStatus(session, aiMsg) {
   const POLL_INTERVAL = 1500
   const poll = async (retry) => {
+    // N5a：会话已删除 → 停止轮询（对齐 VOD：会话不存在即停止）
+    if (!sessions.value.some(x => x.id === session.id)) return
     try {
       const { data } = await http.get(`/ai/chat/task/${session.taskId}/status`)
       if (data.status === 'running') {
@@ -552,11 +864,12 @@ async function pollTaskStatus(session, aiMsg) {
           aiMsg.raw = data.result
           if (activeSessionId.value === session.id) scrollToBottom()
         }
-        setTimeout(() => poll(0), POLL_INTERVAL)
+        const t = setTimeout(() => poll(0), POLL_INTERVAL)
+        pollTimers.add(t)
       } else if (data.status === 'done') {
         aiMsg.raw = data.result || '（无返回内容）'
         session.taskCompleted = true
-        clearStoredTaskId(session.id)
+        clearTaskKeys(session)
         if (data.sessionId) session.sessionId = data.sessionId
         await nextTick()
         initCharts()
@@ -565,15 +878,23 @@ async function pollTaskStatus(session, aiMsg) {
       } else if (data.status === 'error') {
         aiMsg.raw = '查询失败: ' + (data.error || '未知错误')
         session.taskCompleted = true
-        clearStoredTaskId(session.id)
+        clearTaskKeys(session)
       }
     } catch (e) {
+      // N5c：任务不存在（Map 已清理/后端清理）——明确提示（对齐 VOD not_found）
+      if (e.response?.status === 404) {
+        aiMsg.raw = '任务不存在或已过期'
+        session.taskCompleted = true
+        clearTaskKeys(session)
+        return
+      }
       if (retry < 3) {
-        setTimeout(() => poll(retry + 1), POLL_INTERVAL)
+        const t = setTimeout(() => poll(retry + 1), POLL_INTERVAL)
+        pollTimers.add(t)
       } else {
         aiMsg.raw = '查询失败: 网络错误'
         session.taskCompleted = true
-        clearStoredTaskId(session.id)
+        clearTaskKeys(session)
       }
     }
   }
@@ -581,6 +902,24 @@ async function pollTaskStatus(session, aiMsg) {
 }
 
 // ===== 渲染 =====
+/** 规范化 echarts 配置（hermes 输出宽容——title 可能是字符串——
+ *  echarts 期望 {text}——字符串会抛 "Cannot use 'in' operator"） */
+function normalizeChartOption(opt) {
+  if (opt && typeof opt === 'object') {
+    if (typeof opt.title === 'string') opt.title = { text: opt.title }
+    else if (Array.isArray(opt.title)) {
+      opt.title = opt.title.map(t => (typeof t === 'string' ? { text: t } : t))
+    }
+  }
+  return opt
+}
+// 对齐 VOD：消息带 segments（结构化——text/chart 分离）——一次性解析缓存——直接渲染
+function segFor(m) {
+  if (!m) return []
+  if (m.segments) return m.segments
+  if (m.raw) return renderParts(m.raw)
+  return []
+}
 function renderParts(raw) {
   const parts = []
   // 对齐 VOD：识别 ```chart 与 ```echarts 两种代码块标识
@@ -594,7 +933,16 @@ function renderParts(raw) {
     }
     try {
       const chartJson = tryParseChartJson(m[1].trim())
-      parts.push({ type: 'chart', json: chartJson })
+      if (Array.isArray(chartJson)) {
+        // hermes 多图表包装（[{title,type,option}]）→ 拆多个 chart 段
+        // （直接 setOption 数组会抛 "r.split is not a function"）
+        for (const item of chartJson) {
+          const opt = item && typeof item === 'object' && item.option ? item.option : item
+          if (opt && typeof opt === 'object') parts.push({ type: 'chart', json: opt })
+        }
+      } else {
+        parts.push({ type: 'chart', json: chartJson })
+      }
     } catch (e) {
       parts.push({ type: 'text', text: '[图表配置解析失败]\n' + m[1] })
     }
@@ -609,6 +957,9 @@ function renderParts(raw) {
 
 // ===== 图表 JSON 容错解析（移植 VOD tryParseChartJson 7 阶段修复）=====
 function tryParseChartJson(raw) {
+  // hermes 可能在 JSON 前输出 "echarts" 前缀（```chart echarts{...}）——容错去掉
+  raw = (raw || '').trim()
+  if (raw.startsWith('echarts')) raw = raw.slice(7).trim()
   const funcs = []
   let funcProcessed = raw
   let funcId = 0
@@ -811,16 +1162,32 @@ async function initCharts() {
     const key = el.getAttribute('data-chart')
     if (!key) continue
     const [mi, si] = key.split('-').map(Number)
-    const seg = renderParts(activeMsgs.value[mi]?.raw || '')[si]
+    const seg = segFor(activeMsgs.value[mi])[si]
     if (!seg || seg.type !== 'chart') continue
     // 对齐 VOD：已有实例先销毁再重建（切换会话后 DOM 重建，旧实例绑定在已销毁节点上）
     if (chartInstances[key]) {
       chartInstances[key].dispose()
       delete chartInstances[key]
     }
-    const inst = echarts.init(el)
-    inst.setOption(seg.json)
-    chartInstances[key] = inst
+    try {
+      const inst = echarts.init(el)
+      // 规范化配置（hermes 可能输出 title 字符串——echarts 期望 {text}——
+      // 否则 "Cannot use 'in' operator" 抛错）
+      inst.setOption(normalizeChartOption(seg.json))
+      chartInstances[key] = inst
+    } catch (e) {
+      // 单图表失败不崩整体——记录具体错误 + 延迟重试一次（容器就绪）
+      console.error('图表渲染失败 key=' + key, e)
+      try {
+        await new Promise(r => setTimeout(r, 100))
+        const retry = echarts.init(el)
+        retry.setOption(seg.json)
+        chartInstances[key] = retry
+      } catch (e2) {
+        console.error('图表渲染重试仍失败 key=' + key, e2)
+        el.innerHTML = '<div class="chart-error">图表渲染失败</div>'
+      }
+    }
   }
 }
 /** 对齐 VOD：销毁并清空全部图表实例（切换/新建/删除会话时调用，防 key 缓存误命中） */
@@ -828,49 +1195,105 @@ function disposeAllCharts() {
   Object.values(chartInstances).forEach(c => { try { c.dispose() } catch (e) { /* ignore */ } })
   Object.keys(chartInstances).forEach(k => delete chartInstances[k])
 }
+// N2：全屏切换后图表 resize（对齐 VOD——立即 + 350ms 二次适配过渡动画）
+function resizeAllCharts() {
+  Object.values(chartInstances).forEach(c => { try { c.resize() } catch (e) { /* ignore */ } })
+}
+function toggleFullscreen() {
+  isFullscreen.value = !isFullscreen.value
+  nextTick(() => {
+    resizeAllCharts()
+    setTimeout(resizeAllCharts, 350)
+  })
+}
+function formatSessionName(name) {
+  // 显示层统一截断（对齐 VOD 20 字显示——后端可存更长——刷新前后一致）
+  const t = (name || '').trim()
+  return t.length <= 20 ? t : t.substring(0, 20) + '...'
+}
 function scrollToBottom() {
   nextTick(() => { if (resultBox.value) resultBox.value.scrollTop = resultBox.value.scrollHeight })
 }
+// N4：复制结果净化（图表段替换 [图表]——对齐 VOD）+ 剪贴板降级（http 环境 execCommand）
 async function copyAll() {
-  const text = activeMsgs.value.map(m => (m.role === 'user' ? '我: ' : 'AI: ') + m.raw).join('\n\n')
+  const text = activeMsgs.value.map(m => {
+    const prefix = m.role === 'user' ? '我: ' : 'AI: '
+    const parts = renderParts(m.raw || '')
+    const content = parts.map(p => (p.type === 'chart' ? '[图表]' : p.text)).join('\n')
+    return prefix + content
+  }).join('\n\n')
   try {
     await navigator.clipboard.writeText(text)
-    copyOk.value = true
-    setTimeout(() => { copyOk.value = false }, 1500)
-  } catch (e) { /* ignore */ }
+  } catch (e) {
+    // 降级：非安全上下文（内网 http）——execCommand
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    try { document.execCommand('copy') } catch (e2) { /* ignore */ }
+    document.body.removeChild(ta)
+  }
+  copyOk.value = true
+  setTimeout(() => { copyOk.value = false }, 1500)
 }
-watch(activeMsgs, () => initCharts(), { deep: true })
+// N3：流式图表防抖（对齐 VOD——流式期间不每 token 重建图表——停顿后渲染）
+let chartsTimer = null
+watch(activeMsgs, () => {
+  if (chartsTimer) clearTimeout(chartsTimer)
+  chartsTimer = setTimeout(() => initCharts(), 500)
+}, { deep: true })
 
 // ===== 挂载 =====
 function onDocClick(e) {
   if (tplWrapRef.value && !tplWrapRef.value.contains(e.target)) showTplDrop.value = false
+  if (descVisible.value && !e.target.closest('.desc-icon') && !e.target.closest('.desc-bubble')) descVisible.value = false
+  if (hintVisible.value && !e.target.closest('.hint-btn') && !e.target.closest('.hint-bubble')) hintVisible.value = false
+}
+// N1：Escape 快捷键（对齐 VOD——优先级：超限弹窗 > 全屏 > 保存模板 > 模板下拉）
+function onKeydown(e) {
+  if (e.key !== 'Escape') return
+  if (showOverLimitModal.value) closeOverLimitModal()
+  else if (isFullscreen.value) toggleFullscreen()   // #4：退全屏走 toggle（触发图表 resize）
+  else if (showSaveTpl.value) showSaveTpl.value = false
+  else if (showTplDrop.value) showTplDrop.value = false
 }
 onMounted(async () => {
   loadTemplates()
   await loadSessions()
   if (asyncMode.value) reconnectActiveTask()
   document.addEventListener('click', onDocClick)
+  window.addEventListener('keydown', onKeydown)
 })
 onUnmounted(() => {
+  // 中断当前 SSE 订阅（后端任务继续运行——切页面不中断分析）
+  if (currentStreamAbort) { currentStreamAbort.abort(); currentStreamAbort = null }
+  // N5b：清理全部轮询定时器（对齐 VOD——卸载后无残留 1.5s 轮询）
+  pollTimers.forEach(t => clearTimeout(t))
+  pollTimers.clear()
+  if (chartsTimer) clearTimeout(chartsTimer)
   document.removeEventListener('click', onDocClick)
+  window.removeEventListener('keydown', onKeydown)
   disposeAllCharts()
 })
 </script>
 
 <style scoped>
 /* ===== 对齐 VOD AiQuery.vue 样式体系 ===== */
-.ai-query-header { margin-bottom: 20px; }
-.ai-query-header h2 { font-size: 20px; font-weight: 600; }
-.ai-query-desc { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
-.ai-query-layout { display: flex; gap: 20px; height: calc(100vh - 200px); }
-.ai-query-input-panel { width: 38%; flex-shrink: 0; background: #fff; border-radius: 12px; border: 1px solid var(--border-color); padding: 20px; display: flex; flex-direction: column; }
+.ai-query-header { background: #fff; border-bottom: 1px solid var(--border-color); padding: 16px 32px; flex-shrink: 0; position: relative; }
+.ai-query-header h2 { font-size: 18px; font-weight: 600; }
+.desc-icon { display: inline-block; width: 16px; height: 16px; line-height: 14px; text-align: center; border: 1px solid var(--text-secondary); border-radius: 50%; font-size: 11px; color: var(--text-secondary); cursor: pointer; vertical-align: 2px; margin-left: 6px; user-select: none; }
+.desc-bubble { position: absolute; top: 50px; left: 32px; background: #fff; border: 1px solid var(--border-color); border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); padding: 10px 14px; font-size: 12px; color: var(--text-secondary); max-width: 400px; line-height: 1.6; z-index: 20; }
+.ai-query-layout { display: flex; gap: 20px; height: calc(100vh - 140px); padding: 20px 28px; }
+.ai-query-input-panel { width: 38%; flex-shrink: 0; background: #fff; border-radius: 12px; border: 1px solid var(--border-color); padding: 20px; display: flex; flex-direction: column; overflow-y: auto; }
 .ai-query-result-panel { flex: 1; background: #fff; border-radius: 12px; border: 1px solid var(--border-color); padding: 20px; display: flex; flex-direction: column; overflow: hidden; transition: all 0.3s ease; }
 .ai-query-result-panel.fullscreen-mode { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 9999; border-radius: 0; border: none; padding: 24px; transition: all 0.3s ease; }
 
-.session-list-section { margin-top: 16px; border-top: 1px solid var(--border-color); padding-top: 12px; }
+.session-list-section { margin-top: 16px; border-top: 1px solid var(--border-color); padding-top: 12px; display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .session-list-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .session-list-header h4 { font-size: 13px; color: var(--text-secondary); }
-.session-list { max-height: 180px; overflow-y: auto; }
+.session-list { flex: 1; overflow-y: auto; min-height: 80px; }
 .session-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.15s; }
 .session-item:hover { background: #f5f7fa; }
 .session-item.active { background: #e8f5ff; color: var(--primary); font-weight: 500; }
@@ -895,10 +1318,15 @@ onUnmounted(() => {
 .async-toggle input { margin: 0; cursor: pointer; }
 .async-toggle:hover { color: var(--primary); }
 .template-select { padding: 6px 10px; border: 1px solid var(--border-color); border-radius: 6px; font-size: 13px; outline: none; }
-.query-textarea { width: 100%; flex: 1; padding: 12px; border: 1px solid var(--border-color); border-radius: 8px; font-size: 14px; font-family: inherit; resize: none; line-height: 1.6; outline: none; box-sizing: border-box; }
+.query-textarea { width: 100%; flex: 1; flex-shrink: 0; min-height: 120px; max-height: 140px; padding: 12px; border: 1px solid var(--border-color); border-radius: 8px; font-size: 14px; font-family: inherit; resize: none; outline: none; box-sizing: border-box; }[truncated]
 .query-textarea:focus { border-color: var(--primary); }
-.query-hint { margin-top: 8px; padding: 8px 12px; background: #f0f7ff; border-radius: 6px; font-size: 12px; color: var(--text-secondary); }
-.query-hint p { margin: 0; }
+.query-input-wrap { display: flex; flex-grow: 0; }
+.query-textarea-box { position: relative; display: flex; align-self: flex-start; width: 100%; }
+.query-textarea-box .char-counter { position: absolute; bottom: 6px; right: 10px; font-size: 11px; color: var(--text-tertiary); pointer-events: none; }
+.hint-btn { display: inline-block; width: 20px; height: 20px; line-height: 18px; text-align: center; border: 1px solid var(--border-color); border-radius: 50%; background: #fff; font-size: 12px; cursor: pointer; margin-left: 6px; vertical-align: 2px; color: var(--text-secondary); }
+.hint-btn:hover { border-color: var(--primary); color: var(--primary); }
+.hint-bubble { position: absolute; top: 28px; left: 0; background: #fff; border: 1px solid var(--border-color); border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); padding: 10px 14px; font-size: 12px; color: var(--text-secondary); line-height: 1.8; z-index: 20; white-space: nowrap; }
+.hint-bubble p { margin: 0; }
 
 .result-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .result-toolbar h3 { font-size: 16px; font-weight: 600; }

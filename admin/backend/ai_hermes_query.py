@@ -66,21 +66,21 @@ def main():
         full_query = args.query + CHART_HINT + db_hint()
 
     try:
-        cmd = [hermes_bin, "-z", full_query, "--yolo", "--pass-session-id"]
-        if session_id:
-            cmd.extend(["--resume", session_id])
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   env=os.environ.copy(), text=True)
+        # AI 助手专属工作区（固定目录——会话 workspace 隔离——不与其他服务混）
+        WORKSPACE_DIR = "/tmp/ai-hermes-ws"
+        os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
-        new_session_id = None
+        # 会话绑定：--continue <前端会话 id>——hermes 按名称创建/续接会话——
+        # 前端不感知 hermes 内部 sessionId（只管历史记录——同名续接自动绑定）
+        cmd = [hermes_bin, "-z", full_query, "--yolo", "--continue", session_id] if session_id else \
+              [hermes_bin, "-z", full_query, "--yolo"]
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   cwd=WORKSPACE_DIR, env=os.environ.copy(), text=True)
+
+        new_session_id = session_id   # 绑定名 = 前端会话 id（--continue 创建/续接同一会话）
         for line in process.stdout:
             line = line.rstrip("\n")
             if not line:
-                continue
-            m = re.match(r"Session\s*ID\s*[:：\s]\s*(\S+)", line, re.IGNORECASE)
-            if m:
-                new_session_id = m.group(1)
-                emit({"type": "session", "data": new_session_id})
                 continue
             emit({"type": "token", "data": line})
 
@@ -88,22 +88,6 @@ def main():
         err = process.stderr.read()
         if process.returncode != 0 and err:
             emit({"type": "error", "data": err.strip()[:1000]})
-
-        if not new_session_id:
-            try:
-                r = subprocess.run([hermes_bin, "sessions", "list", "--source", "cli", "--limit", "1"],
-                                   capture_output=True, text=True, timeout=10)
-                for line in r.stdout.strip().split("\n"):
-                    line = line.strip()
-                    if not line or line.startswith("Title") or line.startswith("─") or line.startswith("Preview"):
-                        continue
-                    parts = line.split()
-                    if parts:
-                        new_session_id = parts[-1]
-                        emit({"type": "session", "data": new_session_id})
-                        break
-            except Exception:
-                pass
 
         emit({"type": "done", "data": ""})
     except Exception as e:

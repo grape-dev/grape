@@ -436,14 +436,28 @@ def claim(runtime_id) -> dict | None:
                     (_stale,))
                 _stale_rows = c.fetchall()
                 for _tid, _rid, _seq in _stale_rows:
+                    # 定向任务（pool_agent_type=''）回收归零 runtime_id 后变无主：
+                    # claim 池匹配不命中、定向(runtime_id)也失配 → 永久死任务
+                    # （实测 seq#264 issue#4 卡死 71 分钟）。归零时回填 agent_type
+                    # 转为池任务，池内任意引擎可再领。
+                    _pool_fill = ""
+                    try:
+                        c.execute("SELECT agent_type FROM agent_tasks WHERE id=?", (_tid,))
+                        _row = c.fetchone()
+                        if _row and _row[0]:
+                            _pool_fill = _row[0]
+                    except Exception:
+                        pass
                     c.execute(
                         "UPDATE agent_tasks SET attempts=attempts+1, "
                         "status=CASE WHEN attempts+1 >= 3 THEN 'failed' ELSE 'queued' END, "
                         "runtime_id=CASE WHEN attempts+1 >= 3 THEN runtime_id ELSE 0 END, "
+                        "pool_agent_type=CASE WHEN attempts+1 < 3 AND pool_agent_type='' "
+                        "THEN ? ELSE pool_agent_type END, "
                         "started_at=NULL, "
                         "result_text=CASE WHEN attempts+1 >= 3 THEN '回收超限(dispatched 超时 3 次)' ELSE result_text END "
                         "WHERE id=? AND status='dispatched'",
-                        (_tid,))
+                        (_pool_fill, _tid))
                     if c.rowcount and _rid:
                         c.execute(
                             "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",

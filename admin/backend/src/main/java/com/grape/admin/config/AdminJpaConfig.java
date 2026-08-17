@@ -49,6 +49,8 @@ public class AdminJpaConfig {
             "com.grape.admin.entity.AdminAuditLog",
             "com.grape.admin.entity.AdminAiHistory",
             "com.grape.admin.entity.AdminAiTemplate",
+            "com.grape.admin.entity.AdminAiChatSession",
+            "com.grape.admin.entity.AdminAiChatMessage",
     };
 
     @Bean
