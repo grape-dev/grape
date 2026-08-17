@@ -47,11 +47,10 @@ def test_resolve_uses_user_own_bot():
     _clean(9001)
 
 
-def test_resolve_fallback_first_chat_bot():
-    """用户无 chat 配置 → 回落第一个 chat_bot（向后兼容）"""
+def test_resolve_no_own_bot_returns_none():
+    """用户无本人 chat bot 配置 → 返回 None（不通知，不回落其它 bot）"""
     bm = _FakeBM({"cli_first": _mk_bot("cli_first"), "cli_own": _mk_bot("cli_own")})
-    ctx = _resolve_user_chat_bot(bm, 9999)
-    assert ctx.app_id == "cli_first"
+    assert _resolve_user_chat_bot(bm, 9999) is None
     _clean(9999)
 
 
