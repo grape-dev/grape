@@ -117,7 +117,7 @@ function renderWorkers(data, devices) {
       const credColor = d.credential_status === 'revoked' ? 'var(--r)' : 'var(--g)';
       html += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-          ${_healthBadge(d.health, relTime(d.last_seen_at))}
+          ${_healthBadge(d.health, d.last_seen_at ? relTime(d.last_seen_at) : '')}
           <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'} <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span></span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">

@@ -1,11 +1,12 @@
 """GitHub Webhook 事件归一化单元测试"""
-import sys, os, json
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import json
+
+import pytest
 
 from src.vcs.github import GitHubBackend
 
 
-def make_payload(event_type: str, overrides: dict = None) -> tuple[bytes, dict]:
+def _make_payload(event_type: str, overrides: dict = None) -> tuple[bytes, dict]:
     """构造模拟 GitHub Webhook 请求"""
     base = {
         "push": {
@@ -48,45 +49,30 @@ def make_payload(event_type: str, overrides: dict = None) -> tuple[bytes, dict]:
     return json.dumps(body).encode(), body
 
 
-backend = GitHubBackend()
+@pytest.fixture(scope="module")
+def backend():
+    return GitHubBackend()
 
-tests = [
-    ("push", "push", "org/repo", "main", "alice"),
-    ("issues", "issue_opened", "org/repo", "", "bob"),
-    ("pull_request", "pull_request_opened", "org/repo", "main", "alice"),
-    ("release", "release_created", "org/repo", "", "alice"),
-    ("issue_comment", "issue_comment", "org/repo", "", "bob"),
-]
 
-passed = 0
-for header, expected_type, expected_repo, expected_branch, expected_actor in tests:
-    raw, _ = make_payload(header)
+@pytest.mark.parametrize("header,expected_type,expected_branch,expected_actor", [
+    ("push", "push", "main", "alice"),
+    ("issues", "issue_opened", "", "bob"),
+    ("pull_request", "pull_request_opened", "main", "alice"),
+    ("release", "release_created", "", "alice"),
+    ("issue_comment", "issue_comment", "", "bob"),
+])
+def test_normalize_fields(backend, header, expected_type, expected_branch, expected_actor):
+    raw, _ = _make_payload(header)
     result = backend.normalize(raw, header)
-    ok = True
-    errors = []
-    if result["type"] != expected_type:
-        errors.append(f"type: got={result['type']}, expected={expected_type}")
-        ok = False
-    if result["repository"] != expected_repo:
-        errors.append(f"repo: got={result['repository']}, expected={expected_repo}")
-        ok = False
-    if result["branch"] != expected_branch:
-        errors.append(f"branch: got={result['branch']}, expected={expected_branch}")
-        ok = False
-    if result["actor"] != expected_actor:
-        errors.append(f"actor: got={result['actor']}, expected={expected_actor}")
-        ok = False
-    if result["source"] != "github":
-        errors.append(f"source: got={result['source']}, expected=github")
-        ok = False
+    assert result["type"] == expected_type
+    assert result["repository"] == "org/repo"
+    assert result["branch"] == expected_branch
+    assert result["actor"] == expected_actor
+    assert result["source"] == "github"
 
-    if ok:
-        print(f"  PASS {header} -> {expected_type}")
-        passed += 1
-    else:
-        print(f"  FAIL {header}: {', '.join(errors)}")
 
-total = len(tests)
-print(f"\nGitHub normalization: {passed}/{total} passed")
-assert passed == total, f"Only {passed}/{total} passed"
-print("All GitHub tests OK")
+def test_unknown_event_type_falls_back(backend):
+    raw, _ = _make_payload("some_future_event")
+    result = backend.normalize(raw, "some_future_event")
+    assert result["repository"] == "org/repo"
+    assert result["source"] == "github"

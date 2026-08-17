@@ -19,8 +19,8 @@ def _evt_body(issue_id="#5", etype="issue_opened"):
 
 class TestExecutionModeSwitch:
     def teardown_method(self):
-        # 恢复 direct，避免污染其他测试
-        os.environ["DEVOPS_EXECUTION_MODE"] = "direct"
+        # 移除残留执行模式环境变量，避免污染其他测试文件（默认态 = 未设置，走 auto）
+        os.environ.pop("DEVOPS_EXECUTION_MODE", None)
 
     def _clean(self):
         with db_lock:
@@ -33,12 +33,16 @@ class TestExecutionModeSwitch:
             db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'm2-%'")
             db.commit()
 
-    def test_mode_getter_meta(self):
+    def test_mode_getter_meta(self, monkeypatch):
+        # get_execution_mode 优先读 env；先清掉可能的残留，再验证 meta 落库生效
+        monkeypatch.delenv("DEVOPS_EXECUTION_MODE", raising=False)
         self._clean()
         service.set_execution_mode("queue_remote")
         assert service.get_execution_mode() == "queue_remote"
         service.set_execution_mode("direct")
         assert service.get_execution_mode() == "direct"
+        # 清理 meta，恢复默认态（避免影响其他文件对 auto 默认的依赖）
+        service.set_execution_mode("")
 
     def test_queue_mode_enqueues_not_executes(self):
         """queue_remote：run_pipeline 应入队 agent_tasks，不 spawn 线程就地执行（queue_local 已废除）。"""

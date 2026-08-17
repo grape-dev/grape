@@ -157,13 +157,12 @@ function _detailHtml(t) {
 }
 
 function openTaskConversation(t) {
-  // 点「去对话」：active → processing（后端幂等，本地乐观更新），随后跳转 chat。
-  // 跳转放 API 回调内，且不调 _render() 覆盖 pageContent（避免覆盖导航结果，见
-  // task-lifecycle-design.md §4.1 修正）。
+  // 点「去对话」仅跳转 chat；任务状态以"真实对话消息"为准（task-status-processing-trigger-fix.md §3.3，
+  // /tasks/{id}/start 已不再翻转状态，仅返回当前状态）。跳转放 API 回调内，避免覆盖导航结果。
   const go = () => app.nav('chat', t && t.conversation_id ? t.conversation_id : undefined);
   if (t && t.id && t.status === 'active') {
     API.post('/tasks/' + t.id + '/start').then(d => {
-      if (window._tasksById[t.id]) { window._tasksById[t.id].status = d.status || 'processing'; }
+      if (window._tasksById[t.id] && d && d.status) { window._tasksById[t.id].status = d.status; }
       go();
     }).catch(() => go());
   } else {

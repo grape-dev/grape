@@ -32,7 +32,7 @@ function loadSideConfig() {
     const backend = d.backend || {};
     const currentSkill = d.skill || '';
     const backendsOpts = (d._backends || []).map(b =>
-      `<option value="${b.name}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${b.display_name || b.name}</option>`
+      `<option value="${b.name}" data-rid="${b.runtime_id || ''}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${b.display_name || b.name}</option>`
     ).join('') || '<option value="">Default</option>';
     const skillsOpts = (d._skills || []).map(s => {
       const scopeLabel = s.scope === 'official' ? '官方' : s.scope === 'repo' ? '仓库' : '个人';
@@ -298,7 +298,9 @@ function pollTaskStatus(taskId, el, body, tid) {
 }
 
 function saveChatConfig() {
-  const backend = document.getElementById('cfgBackend')?.value || '';
+  const _bkSel = document.getElementById('cfgBackend');
+  const backend = _bkSel?.value || '';
+  const rid = _bkSel?.selectedOptions?.[0]?.dataset?.rid || '';
   const skillVal = document.getElementById('cfgSkill')?.value || '';
   // 下拉 value 格式 "scope:name"（如 "repo:chat-advance"），拆出 scope 与 name
   let skill = skillVal, skillScope = '';
@@ -317,6 +319,7 @@ function saveChatConfig() {
   const _repo = app.currentRepo();
   const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
   const _body = {backend, skill, im};
+  if (rid) _body.runtime_id = parseInt(rid, 10);
   if (skillScope) _body.skill_scope = skillScope;
   API.put('/chat/config' + _qs, _body).then(() => {
     app.showToast('配置已保存');

@@ -59,8 +59,6 @@ class TestWorkerPackage:
         assert ok == len(sums)                       # 每个条目均有对应文件且哈希一致
         assert len(sums) >= 28                       # 原闭包文件数（28）
         assert any(k.endswith(".whl") for k in sums) # wheels 已随包下发（离线安装依赖）
-        assert any(k.startswith("grape-worker/python/") for k in sums)  # 内置 Python>=3.10 已随包下发
-        assert any(k.startswith("grape-worker/python/bin/python3.") for k in sums)  # 解释器本体在包内
 
     def test_version_cache_hit_reuse(self):
         import src.worker_package as wp

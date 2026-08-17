@@ -312,9 +312,10 @@ async def notify_task(body: TaskNotifyBody, request: Request):
 
 @router.post("/{task_id}/start")
 async def start_task(task_id: int, user: dict = Depends(get_current_user)):
-    """用户点「去对话」开始处理：任务 active → processing（幂等，仅本人可调）。
+    """打开任务会话（"去对话"）——不再翻转状态。
 
-    见 task-lifecycle-design.md §3.2。
+    task-status-processing-trigger-fix.md §3.3：状态变更以"任务会话收到真实用户消息"为准
+    （mark_task_processing_by_conversation），本端点仅校验归属并返回当前状态。
     """
     with db_lock:
         c = db.cursor()
@@ -324,10 +325,6 @@ async def start_task(task_id: int, user: dict = Depends(get_current_user)):
             raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
         if row[0] != user["id"]:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该任务"})
-        if row[1] == "active":
-            c.execute("UPDATE tasks SET status='processing' WHERE id=?", (task_id,))
-            db.commit()
-            return {"status": "processing"}
         return {"status": row[1]}
 
 

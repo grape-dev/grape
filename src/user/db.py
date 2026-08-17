@@ -1674,6 +1674,23 @@ def get_backend_id_by_name(name: str, scope: str = "global", owner_id: str = "")
     return get_runtime_id_by_name(name, scope, owner_id)
 
 
+def get_local_direct_runtime_id(name: str) -> int | None:
+    """按引擎名查本机直连（credential_id=0 且已装）runtime id。
+
+    Chat backend 名解析专用：裸引擎名（如 'opencode'）可能同时存在本机直连与共享 worker，
+    必须显式优先本机直连（chat-agent-backend-resolution-fix.md §方案A）。
+    """
+    if not name:
+        return None
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id FROM agent_runtimes WHERE lower(name)=? AND credential_id=0 AND installed=1 ORDER BY id LIMIT 1",
+            (name.strip().lower(),))
+        row = c.fetchone()
+        return row[0] if row else None
+
+
 def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
     """按 name+scope+owner_id 查找 runtime id（多实例：优先 online + 最近心跳，见 multi-runtime-instance-design §4.3 S2）。
 

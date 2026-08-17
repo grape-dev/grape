@@ -300,6 +300,34 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
     return ""
 
 
+def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_account: str,
+                              chat_runtime_id: int, conv_id: str, user_info: str = "") -> str:
+    """按当前加入会话的 conv_type 分支构建 Feishu chat prompt（feishu-web-chat-unified-design.md §11）。
+
+    task 会话 → build_task_chat_prompt（会话消息 get_messages 作历史，与 web chat 一致）；
+    否则 general → build_chat_prompt（事件 history）。
+    """
+    conv_obj = None
+    if conv_id:
+        try:
+            from src.session_manager import get_conversation
+            conv_obj = get_conversation(conv_id)
+        except Exception as e:
+            log.warning(f"Feishu: get conversation failed: {e}")
+    if conv_obj and conv_obj.get("conv_type") == "task":
+        from src.prompt_builder import build_task_chat_prompt
+        from src.repo_key import from_repo_key
+        try:
+            from src.session_manager import get_messages
+            conv_history = get_messages(conv_id, limit=20)
+        except Exception:
+            conv_history = []
+        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account)
+    else:
+        body = build_chat_prompt(text, repo_key, history, skills, exec_account, runtime_id=chat_runtime_id)
+    return (user_info + "\n\n" + body) if user_info else body
+
+
 async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str,
                             num: str, pending: dict):
     """卡片命令编号选择执行（feishu-repo-navigation-commands-design.md §3.2）。"""
@@ -485,19 +513,14 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         repo_key = resolve_repo(text, chat_id, parsed.get("sender_id", ""), db, account)
         if not repo_key:
-            reply_parts = ["当前未绑定任何仓库至本群。"]
+            # 未绑定仓库：用当前聊天 bot 的属主列仓库（修复 2026-08-17 误用全局
+            # meta.ws_feishu_app_id 把 Jason7602 的仓库发给其它用户，见 feishu-web-chat-unified-design.md §10）
+            reply_parts = ["当前未绑定任何仓库至本聊天。"]
+            uid = get_user_id_by_app_id(account) or 0
             try:
-                user_id = None
-                app_id = ""
-                c = db.cursor()
-                c.execute("SELECT value FROM meta WHERE key='ws_feishu_app_id'")
-                row = c.fetchone()
-                if row:
-                    app_id = row[0]
-                    user_id = get_user_id_by_app_id(app_id)
-                if user_id:
-                    from src.user import db as user_db
-                    repos = user_db.get_managed_repos(user_id)
+                if uid:
+                    from src.user.db import get_user_repos
+                    repos = get_user_repos(uid)
                     if repos:
                         reply_parts.append("你已加入以下仓库，请选择绑定的仓库：")
                         for i, r in enumerate(repos, 1):
@@ -508,6 +531,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                         reply_parts.append("你可能还没有加入任何仓库。")
                         reply_parts.append("请先在网页端加入仓库，然后发送 `/repo` 选择绑定。")
                 else:
+                    c = db.cursor()
                     c.execute("SELECT DISTINCT repo_key, repository, source FROM chat_agent_session ORDER BY last_active_at DESC LIMIT 10")
                     rows = c.fetchall()
                     if rows:
@@ -637,6 +661,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         update_conversation(conv["id"], user_gitcode_token=user_token)
                 if conv_id:
                     add_message(conv_id, "user", text)
+                    # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
+                    from src.session_manager import mark_task_processing_by_conversation
+                    mark_task_processing_by_conversation(conv_id)
         except Exception as e:
             log.warning(f"[Chat:{ctx.name}] resolve user gitcode token failed: {e}")
 
@@ -650,8 +677,8 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         except Exception:
             chat_runtime_id = 0
 
-        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, exec_account,
-                                                        runtime_id=chat_runtime_id)
+        prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
+                                           chat_runtime_id, conv_id, user_info=user_info)
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:2000]}")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])

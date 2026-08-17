@@ -444,8 +444,8 @@ class TestTaskLifecycle:
         assert r.status_code == 200
         assert r.json()["ok"] is True
 
-    def test_start_task_active_to_processing(self):
-        """用户点「去对话」：active → processing"""
+    def test_start_task_no_longer_flips_status(self):
+        """点「去对话」不再翻转状态：active 保持；真实对话消息才置 processing（task-status-processing-trigger-fix.md）"""
         self._clean()
         with db_lock:
             c = db.cursor()
@@ -455,11 +455,11 @@ class TestTaskLifecycle:
             tid = c.lastrowid
         r = client.post(f"/api/tasks/{tid}/start", headers=_headers)
         assert r.status_code == 200
-        assert r.json()["status"] == "processing"
+        assert r.json()["status"] == "active"
         with db_lock:
             c = db.cursor()
             row = c.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
-        assert row and row[0] == "processing"
+        assert row and row[0] == "active"
 
     def test_start_task_not_owner_rejected(self):
         """非本人任务调 start 返回 403"""

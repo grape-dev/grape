@@ -27,10 +27,17 @@ def _seed_local_engine():
     """本机直连引擎（credential_id=0，已知类型 opencode），供 direct 用例按 engine-selection-design.md v2 解析。"""
     with db_lock:
         c = db.cursor()
-        # 清掉历史残留的 opencode-cred0 行（可能由 ensure_default_runtime 等创建），再插健康本机行
-        c.execute("DELETE FROM agent_runtimes WHERE name='opencode' AND credential_id=0 AND scope='global' AND owner_id=''")
-        c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope, owner_id) "
-                  "VALUES ('opencode','test-local',0,1,1,'online','global','')")
+        # 隔离：清掉其他测试遗留的非 opencode 本机直连候选（如幽灵 'default'），保证 resolve_local_engine
+        # 命中本测试引擎；同时清掉用户 99901 的 chat 配置残留，避免 get_chat_config 命中幽灵 runtime_id。
+        c.execute("DELETE FROM agent_runtimes WHERE credential_id=0 AND lower(name) != 'opencode'")
+        c.execute("DELETE FROM chat_agent_session WHERE user_id=99901")
+        # 复用/恢复健康的 opencode 本机行（其他用例也依赖其做兜底），缺失则插入
+        row = c.execute("SELECT id FROM agent_runtimes WHERE credential_id=0 AND lower(name)='opencode'").fetchone()
+        if row:
+            c.execute("UPDATE agent_runtimes SET installed=1, healthy=1, status='online' WHERE id=?", (row[0],))
+        else:
+            c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope, owner_id) "
+                      "VALUES ('opencode','test-local',0,1,1,'online','global','')")
         db.commit()
 
 
@@ -45,6 +52,7 @@ def client():
     with db_lock:
         c2 = db.cursor()
         c2.execute("DELETE FROM agent_runtimes WHERE display_name='test-local'")
+        c2.execute("DELETE FROM chat_agent_session WHERE user_id=99901")
         convs = c2.execute("SELECT id FROM chat_conversations WHERE user_id=99901").fetchall()
         for (cid,) in convs:
             c2.execute("DELETE FROM chat_messages WHERE conversation_id=?", (cid,))
@@ -88,20 +96,20 @@ class TestWebChatToolUseRegression:
         """
         from unittest.mock import AsyncMock, patch
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
-        # seed 远端引擎 + chat 配置指向它
+        # seed 个人（scope=user）远端引擎 + chat 配置按实例名指向它（新语义：chat 仅本机直连+个人 worker）
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE user_id=99901")
             c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'wt_%'")
-            c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) "
-                      "VALUES ('hwt','wt-cred','wt-dev','global','tester','active')")
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status) "
+                      "VALUES ('hwt','wt-cred','wt-dev','user','99901','tester','active')")
             _cid = c.lastrowid
             c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
-                      "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'global', '', 1, 1)", (_cid,))
+                      "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'user', '99901', 1, 1)", (_cid,))
             _rid = c.lastrowid
             db.commit()
         from src.session_manager import set_chat_config
-        set_chat_config(99901, backend="opencode")
+        set_chat_config(99901, backend="opencode-wt-dev")
         with patch("src.runtime.service.enqueue_task", return_value="t_q") as m_enq, \
              patch("src.runtime.service.wait_task_terminal",
                    new=AsyncMock(return_value={"status": "completed", "exit_code": 0,

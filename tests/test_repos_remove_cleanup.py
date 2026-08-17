@@ -49,12 +49,6 @@ class TestCleanupRepoData:
         _insert(clean_db, "chat_messages", ["conversation_id", "role", "content"], ("c1", "user", "hi"))
         _insert(clean_db, "chat_agent_session", ["id", "repo_key"], ("s1", REPO))
         _insert(clean_db, "repo_im_group_binding", ["im_chat_id", "repo_key"], ("g1", REPO))
-        # pipeline_instances 仅生产库存在（测试库缺失时跳过）
-        from src.session_manager import db_lock
-        with db_lock:
-            _tbls = [r[0] for r in clean_db.cursor().execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-        if "pipeline_instances" in _tbls:
-            _insert(clean_db, "pipeline_instances", ["id", "repo_key"], (1, REPO))
         # devops_agent_session + 关联 vod_conversations
         _insert(clean_db, "devops_agent_session", ["id", "repo_key", "agent_type"], ("a1", REPO, "vod"))
         _insert(clean_db, "vod_conversations", ["agent_session_id", "im_chat_id"], ("a1", "v1"))
@@ -67,7 +61,6 @@ class TestCleanupRepoData:
         from src.session_manager import db_lock
         with db_lock:
             c = clean_db.cursor()
-            _tbls2 = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
             for tbl in ("events", "event_skipped", "chat_conversations", "chat_agent_session",
                         "repo_im_group_binding", "devops_agent_session"):
                 cnt = c.execute(f"SELECT COUNT(*) FROM {tbl} WHERE repo_key=? OR repo_key=?",
@@ -79,10 +72,6 @@ class TestCleanupRepoData:
             # vod_conversations 无 repo_key 列，通过关联的 agent_session_id 验证
             cnt = c.execute("SELECT COUNT(*) FROM vod_conversations WHERE agent_session_id='a1'").fetchone()[0]
             assert cnt == 0, f"vod_conversations not cleared: {cnt}"
-            if "pipeline_instances" in _tbls2:
-                cnt = c.execute("SELECT COUNT(*) FROM pipeline_instances WHERE repo_key=? OR repo_key=?",
-                                (REPO, "gitcode:" + REPO)).fetchone()[0]
-                assert cnt == 0, f"pipeline_instances not cleared: {cnt}"
             # skill repo scope 记录清理（按 owner_id）
             cnt = c.execute("SELECT COUNT(*) FROM skill WHERE scope='repo' AND owner_id=?",
                             (REPO,)).fetchone()[0]

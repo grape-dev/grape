@@ -24,11 +24,13 @@ def test_install_endpoint_returns_script():
 
 
 def test_install_script_exists_on_disk():
-    """脚本文件应存在于仓库 scripts/ 目录。"""
+    """脚本文件应存在于仓库 scripts/ 目录，且包含当前安装流程关键要素。"""
     p = os.path.join(os.path.dirname(__file__), "..", "scripts", "install-worker.sh")
     assert os.path.isfile(p), "scripts/install-worker.sh 应存在"
     content = open(p, encoding="utf-8").read()
-    # 核心要素
-    assert "git sparse-checkout" in content
+    # 核心要素：安装入口标记 / 系统 Python 检测（>=3.10，含 3.12）/ token 占位 / 服务注册
+    assert "install-worker" in content
     assert "python3.12" in content or "python3.11" in content
-    assert "EnvironmentFile" in content
+    assert "RUNTIME_TOKEN=$TOKEN" in content
+    assert "RUNTIME_SERVER_URL=$SERVER" in content
+    assert "runtime-agent" in content

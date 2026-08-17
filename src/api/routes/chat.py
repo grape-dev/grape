@@ -30,6 +30,7 @@ from src.session_manager import (
     delete_messages_by_conv, delete_conversation,
     get_chat_config as _get_chat_config,
     set_chat_config as _set_chat_config,
+    mark_task_processing_by_conversation,
 )
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -173,6 +174,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         conv = get_conversation(conv_id)
 
     add_message(conv_id, "user", body.message)
+    # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
+    mark_task_processing_by_conversation(conv_id)
 
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "")
@@ -285,6 +288,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     _auto_title(conv, body.message)
 
     add_message(conv_id, "user", body.message)
+    # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
+    mark_task_processing_by_conversation(conv_id)
 
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "")
@@ -669,7 +674,7 @@ async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""
                 _rid, ename, ver = r
                 if not is_known_engine_name(ename or ""):
                     continue
-                backends.append({"name": ename, "display_name": f"{ename} v{ver or ''}（本机直连）", "scope": "local", "owner": ""})
+                backends.append({"name": ename, "display_name": f"{ename} v{ver or ''}（本机直连）", "scope": "local", "owner": "", "runtime_id": _rid})
         except Exception:
             pass
         # 个人引擎（scope=user）
@@ -682,7 +687,7 @@ async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""
             for r in c.fetchall():
                 _rid, ename, ver, dev, owner, cid = r
                 ins = instance_name(ename, dev or "", cid or 0)
-                backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}", "scope": "user", "owner": owner or ""})
+                backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}", "scope": "user", "owner": owner or "", "runtime_id": _rid})
         except Exception:
             pass
     # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
@@ -794,6 +799,8 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user),
         kwargs["im_app_secret"] = feishu["app_secret"]
     if body.get("backend"):
         kwargs["backend"] = body["backend"]
+    if body.get("runtime_id") is not None:
+        kwargs["runtime_id"] = body["runtime_id"]
     if body.get("skill") is not None:
         kwargs["skill"] = body["skill"]
         # 解析 skill_id：若前端带 skill_scope 则精确匹配该作用域；否则 repo → user → official

@@ -512,7 +512,7 @@ user_id INTEGER DEFAULT 0,
 repo_key TEXT DEFAULT '',
 source TEXT, repository TEXT,          -- 历史迁移残留
 status TEXT,
-runtime TEXT DEFAULT 'opencode',       -- ★ runtime 名（原 backend）
+runtime TEXT DEFAULT 'opencode',       -- ⚠️ 死列（原 backend 名）：update_session 已不写、get_or_create_session 不读，引擎决策一律走 runtime_id；可清理移除
 skill TEXT DEFAULT '',
 skill_id INTEGER DEFAULT 0,
 im_provider TEXT DEFAULT '',
@@ -520,9 +520,10 @@ im_app_id TEXT DEFAULT '',
 im_app_secret TEXT DEFAULT '',
 event_history TEXT DEFAULT '[]',
 created_at TEXT, last_active_at TEXT,
-runtime_session_id TEXT DEFAULT '',    -- ★（原 backend_session_id）
-runtime_id INTEGER DEFAULT 0           -- ★ 引用 agent_runtimes.id（原 backend_id）
+runtime_session_id TEXT DEFAULT '',    -- ★ 保留：opencode 会话延续（update_session 写 / get_or_create_session 读，Feishu 续上下文）
+runtime_id INTEGER DEFAULT 0           -- ★ 引用 agent_runtimes.id（原 backend_id），引擎选择权威列
 ```
+> ⚠️ `runtime`（字符串）为历史遗留死列：当前 `update_session(sid, history, status, oc_session_id, backend)` 的 `backend` 参数已被忽略、不再写入该列；`get_or_create_session` 也不读取。仅 `/clean` 重置与迁移 DDL 触碰。**有了 `runtime_id`，`runtime` 字符串列不再需要**，可清理移除。
 > ⚠️ `source/repository/status` 为旧 `sessions` 迁移残留列，可清理。
 
 ### 2.8 任务中心

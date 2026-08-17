@@ -220,43 +220,30 @@ class TestRepos:
         assert r.status_code == 400
 
     def test_host_strict_mode_check(self):
-        """验证 backend 的权限检查逻辑与 frontend 一致：
-        1) 项目所有者 → 通过
-        2) 非所有者 → 调用 _check_collaborator_admin
-        3) 结果与 fetch_repos_with_role 的 is_admin 一致
+        """验证 backend 的权限检查逻辑与 frontend 一致（mock GitCode API，不依赖真实账号 token）：
+        1) 项目所有者 → 直接通过（无需网络）
+        2) 非所有者 → 按 /collaborators/{user}/permission 的 admin 权限判定
         """
-        from src.user.repo_manager import _check_collaborator_admin, _req, API_BASE
+        from src.user.repo_manager import _check_collaborator_admin
+        from unittest.mock import patch
 
-        # 获取当前用户身份
-        r = client.post("/api/auth/login",
-            json={"username": "test", "password": "test123"}, headers=_headers)
-        # 用 default 账户的 token
-        from src.config import get_account
-        acc = get_account("default")
-        bot_token = acc.get("gitcode_api_token", "")
-        assert bot_token, "Need bot token for this test"
+        # 1) 所有者直接通过，不触发网络调用
+        with patch("src.user.repo_manager._req") as mock_req:
+            assert _check_collaborator_admin("tok", "owner_user", "repo1", "owner_user") is True
+            mock_req.assert_not_called()
 
-        user_data = _req("GET", f"{API_BASE}/user", bot_token)
-        current_user = user_data.get("login", "")
-        assert current_user, "Need current user identity"
+        # 2) 非所有者：permission.admin=True → 通过
+        with patch("src.user.repo_manager._req", return_value={"permissions": {"admin": True}}):
+            assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is True
 
-        # 测试 1：项目所有者通过
-        owner_repos = [r for r in _req("GET", f"{API_BASE}/user/repos?type=all&per_page=50", bot_token)
-                       if isinstance(r, dict) and r.get("owner", {}).get("login") == current_user]
-        if owner_repos:
-            test_repo = owner_repos[0]
-            repo_name = test_repo.get("name", "")
-            assert _check_collaborator_admin(bot_token, current_user, repo_name, current_user), \
-                "Owner should pass permission check"
-            print(f"  [OK] Owner permission check passed for {current_user}/{repo_name}")
-        else:
-            print("  [SKIP] No owner repos found")
+        # 3) 非所有者：permission.admin=False → 拒绝
+        with patch("src.user.repo_manager._req", return_value={"permissions": {"admin": False}}):
+            assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is False
 
-        # 测试 2：非所有者不通过
-        non_owner = "nonexistent_user_xyz"
-        result = _check_collaborator_admin(bot_token, "someorg", "somerepo", non_owner)
-        assert result == False, "Non-owner should fail permission check"
-        print("  [OK] Non-owner permission check correctly rejected")
+        # 4) 空用户 / API 异常 → 拒绝
+        assert _check_collaborator_admin("tok", "owner_user", "repo1", "") is False
+        with patch("src.user.repo_manager._req", side_effect=RuntimeError("boom")):
+            assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is False
 
     def test_sync_endpoint(self):
         """POST /api/repos/sync 应返回仓库列表且标记同步成功"""
@@ -511,6 +498,17 @@ class TestChat:
         """前端回退 '<option>Default</option>' 提交 backend='Default'：不得创建 default-cred0 幽灵 runtime，
         GET /chat/config 应回退 opencode（见 TestGhostEnginePrevention 根因说明）。"""
         import uuid as _uuid
+        # 自给自足：确保存在健康本机 opencode 引擎（回退目标），避免依赖共享库残留状态
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_runtimes WHERE credential_id=0 AND lower(name) != 'opencode'")
+            row = c.execute("SELECT id FROM agent_runtimes WHERE credential_id=0 AND lower(name)='opencode'").fetchone()
+            if row:
+                c.execute("UPDATE agent_runtimes SET installed=1, healthy=1, status='online' WHERE id=?", (row[0],))
+            else:
+                c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope, owner_id) "
+                          "VALUES ('opencode','opencode',0,1,1,'online','global','')")
+            db.commit()
         user = user_db.create_user("chat_def_" + _uuid.uuid4().hex[:6], "pw123")
         assert user
         tok = user_db.create_session_token(user["id"])
