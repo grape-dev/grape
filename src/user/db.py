@@ -1675,16 +1675,22 @@ def get_backend_id_by_name(name: str, scope: str = "global", owner_id: str = "")
 
 
 def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
-    """按 name+scope+owner_id 查找 runtime id（多实例：优先 online + 最近心跳，见 multi-runtime-instance-design §4.3 S2）"""
+    """按 name+scope+owner_id 查找 runtime id（多实例：优先 online + 最近心跳，见 multi-runtime-instance-design §4.3 S2）。
+
+    凭据已吊销（revoked）的行排除（2026-08-17 修复）：revoke 后旧 agent_runtimes 行
+    保留但不可用，不参与解析，避免配置落到已注销的引擎上。
+    """
     if not name:
         return None
     name = name.strip().lower()
     with db_lock:
         c = db.cursor()
         c.execute("""
-            SELECT id FROM agent_runtimes
-            WHERE lower(name)=? AND scope=? AND owner_id=?
-            ORDER BY CASE WHEN status='online' THEN 0 ELSE 1 END, last_seen_at DESC
+            SELECT ar.id FROM agent_runtimes ar
+            LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
+            WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id=?
+              AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active')
+            ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC
             LIMIT 1
         """, (name, scope, owner_id))
         row = c.fetchone()
@@ -1745,9 +1751,11 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
     with db_lock:
         c = db.cursor()
         c.execute("""
-            SELECT id FROM agent_runtimes
-            WHERE lower(name)=? AND scope=? AND owner_id=''
-            ORDER BY CASE WHEN status='online' THEN 0 ELSE 1 END, last_seen_at DESC
+            SELECT ar.id FROM agent_runtimes ar
+            LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
+            WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id=''
+              AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active')
+            ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC
             LIMIT 1
         """, (name, scope))
         row = c.fetchone()

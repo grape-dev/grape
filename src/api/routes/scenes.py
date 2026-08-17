@@ -55,10 +55,28 @@ async def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
         c = db.cursor()
         for agent_type, skill in mapping.items():
             try:
-                from src.user.db import resolve_skill_id, ensure_default_runtime
+                from src.user.db import resolve_skill_id
                 from src.api.session_store import get_agent_type_enable
                 skill_id = resolve_skill_id(skill)
-                runtime_id = ensure_default_runtime("opencode") or 0
+                # 引擎绑定：保留会话现有 runtime_id（场景只改 skill 映射，不覆盖用户引擎配置）；
+                # 会话无绑定 → 用默认引擎选择 + 写引擎集合（与 ensure_default_agent_sessions 同源，
+                # 保证 config 页（binding 表）与 dashboard（session.runtime_id）一致）。
+                # 旧实现无条件 ensure_default_runtime("opencode") 会绕过 binding 直接写
+                # session.runtime_id → config 未配置但 dashboard 显示有引擎（2026-08-17 修复）。
+                runtime_id = 0
+                try:
+                    _cur = c.execute(
+                        "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                        (repo_key, agent_type)).fetchone()
+                    if _cur and _cur[0]:
+                        runtime_id = _cur[0]
+                except Exception:
+                    runtime_id = 0
+                if not runtime_id:
+                    from src.runtime.engine_select import resolve_default_engine, set_binding
+                    _rid = resolve_default_engine(repo_key, agent_type) or 0
+                    set_binding(repo_key, agent_type, [_rid] if _rid else [])
+                    runtime_id = _rid
                 # 场景只改 skill 映射，不动仓库级 enable / 订阅 / 飞书绑定：
                 # 已存在会话保留（enable 以用户 Dashboard 开关为准；sre 默认关见 get_agent_type_enable），
                 # 仅新建会话继承 agent_type 全局默认。

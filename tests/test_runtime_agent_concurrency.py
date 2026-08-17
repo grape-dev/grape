@@ -142,3 +142,45 @@ def test_same_issue_conflict_requeued():
     client = FakeClient([task])
     _drive_loop(client, _fake_execute, active_prefill={"isess-A"})
     assert client.requeued == [tid], "同 Issue 冲突应 requeue 回滚，避免 dispatched 悬空"
+
+
+# ===================== _reregister 解包回归看护（e5c09544 引入的 bug） =====================
+
+class FakeRegClient:
+    """模拟 RuntimeClient：register 返回 (ids, probe_url) 元组，recover_orphans 记录收到的 runtime_id。"""
+
+    def __init__(self, ids):
+        self.ids = ids
+        self.recovered = []
+        self.resets = 0
+
+    async def reset_session(self):
+        self.resets += 1
+
+    async def register(self, runtimes, device_name=""):
+        return self.ids, "probe-url"
+
+    async def recover_orphans(self, runtime_id):
+        self.recovered.append(runtime_id)
+
+
+def test_reregister_unpacks_register_tuple():
+    """_reregister 必须解包 register() 返回的 (ids, probe_url) 元组。
+
+    回归看护 e5c09544（OBS 改造把 register 签名从 list 改为 tuple）漏改 _reregister：
+    `ids = await client.register(...)` 会把整个元组当 ids，for rid in ids 时 rid 是
+    [54, 55] 列表 → recover_orphans([54, 55]) → URL /runtimes/[54, 55]/... → 422
+    （worker 全离线事故，2026-08-17 实测）。
+    """
+    client = FakeRegClient([54, 55])
+    result = asyncio.run(agent_mod._reregister(client, installed=[], device_name="test"))
+    assert result == [54, 55], "应返回真正的 ids 列表，而非 (ids, probe_url) 元组"
+    assert client.recovered == [54, 55], "recover_orphans 应逐个收到单值 id，不能收到 [54, 55] 列表"
+
+
+def test_reregister_handles_empty_ids():
+    """register 返回 ([], '') 时 _reregister 应返回 None（无 id 可恢复）。"""
+    client = FakeRegClient([])
+    result = asyncio.run(agent_mod._reregister(client, installed=[], device_name="test"))
+    assert result is None
+    assert client.recovered == []
