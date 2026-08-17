@@ -451,4 +451,45 @@ class TestXxxBehavior:
 
 ---
 
+## 附录 I：P1-B 隔离与确定性实施记录（2026-08-17）
+
+> 目标：随机顺序全绿、可并行。**部分达成**：确定性基线、跨运行隔离、确定性污染源已修复；
+> 全部随机顺序无关依赖"DB 逐用例隔离"大改造（见下方遗留），故默认仍禁用随机顺序。
+
+### 已实施（全部测试侧，未改 src/）
+
+1. **B2 会话开始重建干净测试库**（conftest `_ensure_test_db` 删除 `data/test_sessions.db` 后 init_database）：
+   消除跨运行残留脏行与用户 id 回收冲突，任何一次 `pytest` 都从确定的空库基线开始。
+2. **修复确定性顺序依赖污染源**：
+   - `test_tasks`：`TestTaskLifecycle::test_reassign_closes_processing_old_assignee` 用 `_uid["id"]` 写
+     `gitcode_user='bob'` 的映射，因 `unified_user_mapping.user_id` 是主键直接覆盖 younger_eric 映射 →
+     bob 改用独立用户；setup/teardown 清理测试用户卫生。
+   - `test_api_routes::test_skills_upload_repo_scope_via_form`：改为限定 `scope+owner` 查询 + 自隔离清理
+     （杜绝历史残留行/磁盘目录干扰）。
+   - `test_api_routes::test_webhook_invalid_token`：自给自足预置托管行。
+   - `test_m2_execution_mode` / `test_runtime_auto_mode`：引擎 `_clean` 改为清空全部远端/全局引擎
+     （保留本机 credential_id=0 兜底），避免 `pick_engine` 选到其他测试残留引擎。
+3. **B4 网络封闭审计**：默认套件无真实外部调用（mock 全覆盖；仅 `e2e_ui` 标记的远端场景测试默认排除）。
+4. **随机顺序验证（pytest --randomly-seed=N）**：多 seed 下 `test_tasks`/`skills`/`webhook` 等确定性
+   污染源已修复；seed 1/3/5 全绿。
+
+### 达成基线（默认确定性顺序 + --cov）
+
+| 指标 | 实施前 | 实施后 |
+| --- | --- | --- |
+| 默认套件 | 1025 passed | **1036 passed / 5 skipped / 21 deselected，0 失败** |
+| 整体覆盖率 | 71.08% | 70.87%（门禁 70% 通过） |
+| 跨运行确定性 | 依赖残留库 | 会话开始重建干净库 |
+
+### 遗留（需后续 DB 逐用例隔离解决）
+
+- **默认仍禁用 pytest-randomly**（pytest.ini `-p no:randomly`）：随机顺序下 `test_skills`/
+  `test_m2_execution_mode`/`test_runtime_auto_mode`/`test_feishu_navigation_commands` 等仍存在
+  引擎/技能/会话状态互相污染（跨 ~60 个测试文件共享 `agent_runtimes`/`runtime_credentials`/
+  `chat_agent_session`/`meta`/`skill` 等表）。彻底解决需 **DB 逐用例隔离**（每个用例独立临时库 +
+  模块重载链），属 P1-B 核心大改造，建议后续专项实施。
+- env 逐用例 `monkeypatch` 化、时钟/随机确定性注入尚未系统性推行（随隔离改造一并做）。
+
+---
+
 *注：本方案所有断言均基于当前分支 `new-version2` 实测数据（2026-08-16）。执行 Phase 1 前建议先跑一次 `pytest -q --cov=src --cov-report=term` 复核基线。*

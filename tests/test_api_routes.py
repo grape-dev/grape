@@ -931,6 +931,16 @@ class TestSkills:
         import tempfile, zipfile, os, shutil
         from src.session_manager import db, db_lock
         from src.user import db as user_db
+        # 自隔离：清除历史残留（含 gitcode: 前缀变体行 + 磁盘目录），保证本用例独占
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE skill_name='skill-repoupload'")
+            db.commit()
+        _repo_dir_root = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo")
+        for _sub in ("owner/repo-x", "gitcode:owner/repo-x"):
+            _t = os.path.join(_repo_dir_root, _sub, "skill-repoupload")
+            if os.path.exists(_t):
+                shutil.rmtree(_t, ignore_errors=True)
         tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         with zipfile.ZipFile(tmp.name, "w") as zf:
             zf.writestr("skill-repoupload/SKILL.md", "---\nname: skill-repoupload\nversion: 1.0.0\ndescription: repo skill\n---\n\n## 场景\n## 知识\n## 步骤\n- step")
@@ -942,7 +952,8 @@ class TestSkills:
         assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT agent_type, scope, owner_id, description FROM skill WHERE skill_name='skill-repoupload'").fetchone()
+            row = c.execute("SELECT agent_type, scope, owner_id, description FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
+                            ("skill-repoupload", "owner/repo-x")).fetchone()
         assert row, "repo skill should be created"
         assert row[0] == "sre" and row[1] == "repo" and row[2] == "owner/repo-x", f"got {row}"
         assert row[3] == "repo skill", f"description should be parsed from front matter, got {row}"
@@ -1095,6 +1106,12 @@ class TestWebhook:
         assert r.json()["status"] == "ok"
 
     def test_webhook_invalid_token(self):
+        # 自给自足：预置托管行，保证任何执行顺序下 token 校验路径一致（不依赖 test_webhook_push 先跑）
+        from src.session_manager import db, db_lock
+        with db_lock:
+            db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, gitcode_webhook_token) VALUES (?,?,?,?,?)",
+                       ("gitcode:org/repo", "org", "repo", "org/repo", "test_webhook_token_123"))
+            db.commit()
         payload = '{"project": {"path_with_namespace": "org/repo"}, "ref": "refs/heads/main"}'
         r = client.post("/webhook/gitcode", content=payload.encode(),
                         headers={"X-GitCode-Event": "push", "X-GitCode-Token": "wrong_token"})

@@ -18,7 +18,20 @@ os.environ.setdefault("DEVOPS_WORKSPACE_DIR", os.path.join(ROOT, "data", "test_w
 
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_test_db():
-    """确保测试库存在且已初始化（创建表）。"""
+    """确保测试库存在且已初始化（创建表）。
+
+    会话开始重建干净测试库：删除历史残留的 data/test_sessions.db，
+    保证每次 pytest 从确定的空库基线开始（消除跨运行残留脏行/回收 id 冲突，
+    是随机顺序确定性的前提之一）。
+    """
+    import sqlite3 as _sqlite3
+    _db_path = os.environ.get("DEVOPS_DB_PATH")
+    if _db_path and os.path.exists(_db_path):
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(_db_path + suffix)
+            except OSError:
+                pass
     from src.api.db_setup import init_database
     init_database()
     yield
