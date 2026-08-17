@@ -71,10 +71,15 @@ def _to_payload(m: dict) -> dict | None:
     """worker 消息 {type, data} → 前端 SSE payload（seq 由 DB 权威生成，此处不带）。
 
     返回 None 表示无需推送（done 等终态事件由事件轮询兜底）。
+    created_at 取服务端接收时刻（UTC ISO）：worker 消息不带时间戳，落库与 fanout
+    同在 report_messages 内执行，与 task_messages.created_at 同源（时间本地化见
+    docs/event-time-localization-design.md）。
     """
     t = m.get("type", "log")
     if t == "done":
         return None
+    from datetime import datetime, timezone
+    _now = datetime.now(timezone.utc).isoformat()
     d = m.get("data")
     if isinstance(d, dict):
         tool = str(d.get("tool") or "")
@@ -83,10 +88,10 @@ def _to_payload(m: dict) -> dict | None:
                 inp = json.loads(d.get("input") or "{}") if isinstance(d.get("input"), str) else (d.get("input") or {})
             except Exception:
                 inp = {}
-            return {"type": t, "tool": tool, "content": "", "input": inp, "output": "", "created_at": ""}
+            return {"type": t, "tool": tool, "content": "", "input": inp, "output": "", "created_at": _now}
         content = str(d.get("text") or d.get("content") or "")
-        return {"type": t, "tool": tool, "content": content, "input": {}, "output": "", "created_at": ""}
-    return {"type": t, "tool": "", "content": str(d or ""), "input": {}, "output": "", "created_at": ""}
+        return {"type": t, "tool": tool, "content": content, "input": {}, "output": "", "created_at": _now}
+    return {"type": t, "tool": "", "content": str(d or ""), "input": {}, "output": "", "created_at": _now}
 
 
 def sse_frame(payload: dict) -> str:

@@ -734,7 +734,7 @@ def list_task_messages(task_id, since: int = 0, limit: int = 5000) -> list[dict]
             pass
         out.append({"seq": r[0], "type": r[1], "tool": r[2] or "",
                     "content": r[3] or "", "input": inp, "output": r[5] or "",
-                    "created_at": r[6] or ""})
+                    "created_at": normalize_event_time(r[6] or "")})
     return out
 
 
