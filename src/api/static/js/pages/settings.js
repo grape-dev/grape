@@ -20,8 +20,8 @@ function renderSettings(tab) {
           <div class="srow"><label>Account</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account + ' · 登录时自动填充' : '—'}" disabled style="background:#f1f5f9;font-size:10px"></div>
         </div>
         <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Huawei Cloud</h3>
-          <div class="srow"><label>Access Key</label><input type="password" id="huaweiAk" value="${d.huawei_cloud && d.huawei_cloud.ak_exists ? 'AK-demo-access-key-xxxx' : ''}" placeholder="Access Key"></div>
-          <div class="srow"><label>Secret Key</label><input type="password" id="huaweiSk" value="${d.huawei_cloud && d.huawei_cloud.sk_exists ? 'SK-demo-secret-key-xxxx' : ''}" placeholder="Secret Key"></div>
+          <div class="srow"><label>Access Key</label><input type="password" id="huaweiAk" value="" placeholder="${d.huawei_cloud && d.huawei_cloud.ak_exists ? '已配置，留空保持不变' : 'Access Key'}">${d.huawei_cloud && d.huawei_cloud.ak_exists ? '<span class="ts" style="color:var(--g);font-size:10px">✓ 已配置</span>' : ''}</div>
+          <div class="srow"><label>Secret Key</label><input type="password" id="huaweiSk" value="" placeholder="${d.huawei_cloud && d.huawei_cloud.sk_exists ? '已配置，留空保持不变' : 'Secret Key'}">${d.huawei_cloud && d.huawei_cloud.sk_exists ? '<span class="ts" style="color:var(--g);font-size:10px">✓ 已配置</span>' : ''}</div>
           <p class="tx t2 mt8">Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.</p>
           <button class="bt bt-p mt8" onclick="saveCredentials()">Save</button>
         </div>`;
@@ -49,7 +49,7 @@ function renderSettings(tab) {
     API.get('/settings/gitcode-repo/' + repo.owner + '/' + repo.name).then(d => {
         document.getElementById('sGitcode').innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">DevOps Bot Token</h3>
-          <div class="srow"><label>Bot Token</label><input type="password" id="gitcodeBotToken" value="${d.devops_bot_token_exists ? 'ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx' : ''}" placeholder="不设置，将默认使用Grape官方机器人"></div>
+          <div class="srow"><label>Bot Token</label><input type="password" id="gitcodeBotToken" value="" placeholder="${d.devops_bot_token_exists ? '已配置，留空保持不变' : '不设置，将默认使用Grape官方机器人'}">${d.devops_bot_token_exists ? '<span class="ts" style="color:var(--g);font-size:10px">✓ 已配置</span>' : ''}</div>
           <div class="srow"><label>Scope</label><input type="text" value="read_repo, write_repo, manage_webhook" disabled style="background:#f1f5f9;font-size:10px"></div>
           <button class="bt bt-p mt8" onclick="saveGitcodeRepoConfig()">Save</button>
         </div>
@@ -65,22 +65,34 @@ function renderSettings(tab) {
   }
 }
 
+// 占位符常量（与后端 _is_placeholder 同步；前端双保险：旧缓存页面也可能带占位符值）
+const _CRED_PLACEHOLDERS = ['AK-demo-access-key-xxxx', 'SK-demo-secret-key-xxxx', 'ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx'];
+function _isCredPlaceholder(v) {
+  v = (v || '').trim();
+  if (!v) return true;                       // 空 = 无值
+  if (_CRED_PLACEHOLDERS.indexOf(v) >= 0) return true;
+  return /^(AK-demo-|SK-demo-|ghp_devopsbot_)/.test(v);  // 任何 demo/占位前缀一律拒绝
+}
+
 function saveCredentials() {
   const ak = document.getElementById('huaweiAk');
   const sk = document.getElementById('huaweiSk');
-  API.put('/settings/credentials', {
-    huawei_cloud_ak: ak && ak.value ? ak.value : undefined,
-    huawei_cloud_sk: sk && sk.value ? sk.value : undefined,
-  }).then(r => app.showToast('凭据已更新')).catch(e => app.showToast('更新失败'));
+  const body = {};
+  const akVal = ak && ak.value ? ak.value.trim() : '';
+  const skVal = sk && sk.value ? sk.value.trim() : '';
+  if (akVal && !_isCredPlaceholder(akVal)) body.huawei_cloud_ak = akVal;
+  if (skVal && !_isCredPlaceholder(skVal)) body.huawei_cloud_sk = skVal;
+  API.put('/settings/credentials', body).then(r => app.showToast('凭据已更新')).catch(e => app.showToast('更新失败'));
 }
 
 function saveGitcodeRepoConfig() {
   const repo = app.currentRepo();
   if (!repo) return;
   const botEl = document.getElementById('gitcodeBotToken');
-  API.put('/settings/gitcode-repo/' + repo.owner + '/' + repo.name, {
-    bot_token: botEl && botEl.value ? botEl.value : undefined,
-  }).then(r => app.showToast('GitCode Repo 配置已更新')).catch(e => app.showToast('更新失败'));
+  const body = {};
+  const botVal = botEl && botEl.value ? botEl.value.trim() : '';
+  if (botVal && !_isCredPlaceholder(botVal)) body.bot_token = botVal;
+  API.put('/settings/gitcode-repo/' + repo.owner + '/' + repo.name, body).then(r => app.showToast('GitCode Repo 配置已更新')).catch(e => app.showToast('更新失败'));
 }
 
 function unhostFromSettings(fullName) {

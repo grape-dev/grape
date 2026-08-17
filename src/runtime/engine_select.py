@@ -329,7 +329,7 @@ def query_engines(repo_key: str, scope: str) -> list[dict]:
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                     " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,'') "
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.credential_id>0 AND rc.scope='repo' ORDER BY r.id")
+                    "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
                 c.execute(
                     "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '' "
@@ -339,7 +339,7 @@ def query_engines(repo_key: str, scope: str) -> list[dict]:
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                     " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,'') "
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.credential_id>0 AND rc.scope='global' ORDER BY r.id")
+                    "WHERE r.credential_id>0 AND rc.scope='global' AND rc.status='active' ORDER BY r.id")
             rows = c.fetchall()
         except Exception as e:
             log.warning(f"query_engines({scope}) failed: {e}")

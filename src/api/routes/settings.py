@@ -37,17 +37,36 @@ class UpdateCredentials(BaseModel):
     codearts_sk: str = ""
 
 
+# 占位符凭据（2026-08-17 修复，issue #72）：前端曾把 demo 占位符回显进输入框，
+# 用户直接保存会把占位符当真实值写库，覆盖真实 AK/SK → 部署任务注入占位符持续 401。
+# 后端兜底：任何等于占位符 / demo 前缀 / 含 xxxx 的值一律拒绝写入。
+_PLACEHOLDER_VALUES = {
+    "AK-demo-access-key-xxxx", "SK-demo-secret-key-xxxx", "ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx",
+}
+
+
+def _is_placeholder(value: str) -> bool:
+    v = (value or "").strip()
+    if not v:
+        return True  # 空 = 无值（不写）
+    if v in _PLACEHOLDER_VALUES:
+        return True
+    if v.startswith(("AK-demo-", "SK-demo-", "ghp_devopsbot_")):
+        return True
+    return "xxxx" in v.lower()
+
+
 @router.put("/credentials")
 async def update_credentials(body: UpdateCredentials, user: dict = Depends(get_current_user)):
     acc = user_db.get_user_account(user["username"]) or {}
-    if body.huawei_cloud_ak:
-        acc["huawei_cloud_ak"] = body.huawei_cloud_ak
-    if body.huawei_cloud_sk:
-        acc["huawei_cloud_sk"] = body.huawei_cloud_sk
-    if body.codearts_ak:
-        acc["CODEARTS_CLI_AK"] = body.codearts_ak
-    if body.codearts_sk:
-        acc["CODEARTS_CLI_SK"] = body.codearts_sk
+    if body.huawei_cloud_ak and not _is_placeholder(body.huawei_cloud_ak):
+        acc["huawei_cloud_ak"] = body.huawei_cloud_ak.strip()
+    if body.huawei_cloud_sk and not _is_placeholder(body.huawei_cloud_sk):
+        acc["huawei_cloud_sk"] = body.huawei_cloud_sk.strip()
+    if body.codearts_ak and not _is_placeholder(body.codearts_ak):
+        acc["CODEARTS_CLI_AK"] = body.codearts_ak.strip()
+    if body.codearts_sk and not _is_placeholder(body.codearts_sk):
+        acc["CODEARTS_CLI_SK"] = body.codearts_sk.strip()
     user_db.save_user_account(user["username"], acc)
     return {"message": "凭据已更新"}
 
@@ -131,8 +150,8 @@ async def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoCon
     from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
-    if body.bot_token:
-        update_managed_repo_bot_token(repo_key, body.bot_token)
+    if body.bot_token and not _is_placeholder(body.bot_token):
+        update_managed_repo_bot_token(repo_key, body.bot_token.strip())
     if body.bot_username:
         update_managed_repo_bot_username(repo_key, body.bot_username)
     return {"message": "GitCode Repo 配置已更新"}

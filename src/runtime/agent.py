@@ -167,6 +167,43 @@ def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
     return None
 
 
+def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
+    """v3.0 技能 zip 获取降级链：① URL 直连 OBS（重试）→ ② 服务端代拉（复用 zip_cache）。
+
+    返回 zip 字节；两条路都失败返回 None（调用方降级 skill_files 或回池）。
+    """
+    timeout = float(os.environ.get("RUNTIME_OBS_FETCH_TIMEOUT", "10"))
+    retries = int(os.environ.get("RUNTIME_OBS_FETCH_RETRIES", "3"))
+    # ① URL 直连 OBS（预签名 URL，重试）
+    for i in range(retries):
+        try:
+            with _urllib.urlopen(skill_obs_url, timeout=timeout) as resp:
+                data = resp.read()
+            if data:
+                return data
+            log.warning(f"[skill] OBS URL 直连返回空({i + 1}/{retries})")
+        except Exception as e:
+            log.warning(f"[skill] OBS URL 直连失败({i + 1}/{retries}): {type(e).__name__}")
+    # ② 服务端代拉（服务端现查 file_path → zip_cache → base64）
+    server = os.environ.get("RUNTIME_SERVER_URL", "http://localhost:3000")
+    token = os.environ.get("RUNTIME_TOKEN", "")
+    if task_id and token:
+        try:
+            req = _urllib.Request(
+                f"{server}/api/runtime/tasks/{task_id}/skill-zip",
+                headers={"Authorization": f"Bearer {token}"})
+            with _urllib.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read())
+            b64 = (payload or {}).get("zip_base64") or ""
+            if b64:
+                log.info(f"[skill] 服务端代拉成功 task={task_id}")
+                return _b64.b64decode(b64)
+            log.warning(f"[skill] 代拉返回空 task={task_id}")
+        except Exception as e:
+            log.warning(f"[skill] 服务端代拉失败: {type(e).__name__}")
+    return None
+
+
 async def _stream_runtime_async(*args, **kwargs):
     """把同步生成器 stream_runtime 放到后台线程迭代，事件循环不被 readline() 阻塞。
 
@@ -408,7 +445,7 @@ async def _reregister(client, installed, device_name) -> list[int] | None:
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
-        ids, _ = await client.register(installed, device_name=device_name)
+        ids, _probe = await client.register(installed, device_name=device_name)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
