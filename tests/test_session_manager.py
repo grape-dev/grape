@@ -10,6 +10,19 @@ import sys
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
 
 
+@pytest.fixture(autouse=True)
+def _restore_shared_session_manager():
+    """隔离：_import_session_manager 通过 importlib 重载 src.session_manager 并把它指向临时库。
+
+    若不在每个用例后恢复，后续测试文件 from src.session_manager import db 会拿到指向
+    临时旧 schema 库的连接（缺 runtime_id / chat_conversations / agent_runtimes 等表），
+    造成顺序依赖的连锁失败（如 test_tasks / test_web_chat_tooluse / test_worker_package）。
+    """
+    yield
+    for name in ("src.session_manager", "session_manager"):
+        sys.modules.pop(name, None)
+
+
 def _import_session_manager(tmp_path):
     """Import session_manager with a temporary DB path."""
     db_path = os.path.join(tmp_path, "test_sessions.db")

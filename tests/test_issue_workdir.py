@@ -10,11 +10,11 @@ from src.api import event_pipeline as ep
 class TestWorkdir:
     def test_issue_level_workdir(self):
         ws = ep.get_agent_workdir("gitcode:org/test", "issue", "#5")
-        assert ws.endswith(os.path.join("org", "test", "issue", "issues", "5")), ws
+        assert ws.endswith(os.path.join("org", "test", "issues", "5", "issue")), ws
 
     def test_workdir_normalized_issue_num(self):
         ws = ep.get_agent_workdir("gitcode:org/test", "coding", "5")
-        assert ws.endswith(os.path.join("coding", "issues", "5")), ws
+        assert ws.endswith(os.path.join("org", "test", "issues", "5", "coding")), ws
 
     def test_workdir_repo_fallback_for_0(self):
         ws = ep.get_agent_workdir("gitcode:org/test", "issue", "#0")

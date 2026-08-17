@@ -3,6 +3,10 @@ import sys, os, time, subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest, requests
 
+# 端到端 UI 测试：需 Playwright 浏览器 + 拉起本地 uvicorn 服务。
+# 默认套件排除（pytest.ini addopts = -m "not e2e_ui"），用 `pytest -m e2e_ui` 显式运行。
+pytestmark = pytest.mark.e2e_ui
+
 _SERVER = None
 BASE = "http://127.0.0.1:3099"
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))

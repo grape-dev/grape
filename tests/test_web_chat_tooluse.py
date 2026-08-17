@@ -27,10 +27,17 @@ def _seed_local_engine():
     """本机直连引擎（credential_id=0，已知类型 opencode），供 direct 用例按 engine-selection-design.md v2 解析。"""
     with db_lock:
         c = db.cursor()
-        # 清掉历史残留的 opencode-cred0 行（可能由 ensure_default_runtime 等创建），再插健康本机行
-        c.execute("DELETE FROM agent_runtimes WHERE name='opencode' AND credential_id=0 AND scope='global' AND owner_id=''")
-        c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope, owner_id) "
-                  "VALUES ('opencode','test-local',0,1,1,'online','global','')")
+        # 隔离：清掉其他测试遗留的非 opencode 本机直连候选（如幽灵 'default'），保证 resolve_local_engine
+        # 命中本测试引擎；同时清掉用户 99901 的 chat 配置残留，避免 get_chat_config 命中幽灵 runtime_id。
+        c.execute("DELETE FROM agent_runtimes WHERE credential_id=0 AND lower(name) != 'opencode'")
+        c.execute("DELETE FROM chat_agent_session WHERE user_id=99901")
+        # 复用/恢复健康的 opencode 本机行（其他用例也依赖其做兜底），缺失则插入
+        row = c.execute("SELECT id FROM agent_runtimes WHERE credential_id=0 AND lower(name)='opencode'").fetchone()
+        if row:
+            c.execute("UPDATE agent_runtimes SET installed=1, healthy=1, status='online' WHERE id=?", (row[0],))
+        else:
+            c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope, owner_id) "
+                      "VALUES ('opencode','test-local',0,1,1,'online','global','')")
         db.commit()
 
 
@@ -45,6 +52,7 @@ def client():
     with db_lock:
         c2 = db.cursor()
         c2.execute("DELETE FROM agent_runtimes WHERE display_name='test-local'")
+        c2.execute("DELETE FROM chat_agent_session WHERE user_id=99901")
         convs = c2.execute("SELECT id FROM chat_conversations WHERE user_id=99901").fetchall()
         for (cid,) in convs:
             c2.execute("DELETE FROM chat_messages WHERE conversation_id=?", (cid,))

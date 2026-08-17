@@ -252,16 +252,18 @@ class TestRepoManager:
             assert ok is True
             cmds = [c[0][0] if c and c[0] else [] for c in mock_git.call_args_list]
             assert ["init"] in cmds
-            assert ["push", "-u", "origin", "HEAD:main"] in cmds
+            assert ["push", "--force", "-u", "origin", "HEAD:main"] in cmds
 
-    def test_push_git_template_needs_bot_token(self):
-        """git 模板无 bot token → 抛错"""
+    def test_push_git_template_falls_back_to_user_token(self):
+        """git 模板：无 bot token 时回退用户 token 克隆（git 分支需 token 拉取），不应抛错。"""
         from src.user.repo_manager import push_template_to_repo
         tpl = {"id": "micro-svc", "source": "git", "source_repo": "devops-bot/cloud-native-microsvc"}
-        with patch("src.user.repo_manager._run_git") as mock_git:
-            try:
-                push_template_to_repo(tpl, "me", "repo", "user_tok", bot_token="")
-                assert False, "应抛错"
-            except RuntimeError as e:
-                assert "Bot" in str(e)
-            mock_git.assert_not_called()
+        with patch("src.user.repo_manager._run_git") as mock_git, \
+             patch("src.user.repo_manager._run_git_has_origin", return_value=False), \
+             patch("src.user.repo_manager._git_has_changes", return_value=True):
+            mock_git.side_effect = [""] * 20
+            ok = push_template_to_repo(tpl, "me", "repo", "user_tok", bot_token="")
+            assert ok is True
+            clone_call = mock_git.call_args_list[0]
+            assert clone_call[0][0][0] == "clone"
+            assert "oauth2:user_tok@" in clone_call[0][0][2]

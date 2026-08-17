@@ -4,10 +4,12 @@
 
 覆盖：
   B 组：FeishuAsync.sync_repo_feishu_mapping（异步群成员 ↔ 协作者映射）
-  C 组：handler_async.process_command_async（异步命令处理 + 阻塞回归）
 
 A 组（get_chat_members 分页/token）见 tests/test_feishu_handler.py；
-D 组（纯逻辑）见 tests/test_feishu_pure_logic.py。
+D 组（纯逻辑）见 tests/test_feishu_pure_logic.py；
+命令处理（/repo /chat /task 等导航命令卡片化）见 tests/test_feishu_navigation_commands.py。
+（旧 /bind /unbind /status /autodev /notify 命令已于 feishu-repo-navigation-commands-design.md 删除，
+  其验收用例同步移除。）
 """
 import asyncio
 import json
@@ -128,124 +130,3 @@ class TestSyncRepoFeishuMapping:
         with db_lock:
             db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user='lisi'")
             db.commit()
-
-
-# ===== C. handler_async.process_command_async =====
-
-
-class TestProcessCommandAsync:
-    async def _run_cmd(self, text, chat_id="oc_c", sender="u1", account="cli_c", bound_repo=None):
-        from src.session_manager import db, db_lock
-        with db_lock:
-            db.cursor().execute("DELETE FROM repo_im_group_binding WHERE im_chat_id=?", (chat_id,))
-            db.commit()
-        if bound_repo:
-            from src.repo_key import to_repo_key
-            with db_lock:
-                db.cursor().execute(
-                    "INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, im_app_id) VALUES (?,?,?)",
-                    (chat_id, to_repo_key(bound_repo), account))
-                db.commit()
-        ctx = _make_ctx(account)
-        api = AsyncMock()
-        api.sync_repo_feishu_mapping = AsyncMock(return_value=0)
-        from src.im.handler_async import process_command_async
-        result = await process_command_async(ctx, api, text, chat_id, sender, db, account)
-        return result, api
-
-    def test_c1_bind_writes_binding_and_calls_sync(self):
-        """C1: /bind 写 binding + 调用 async sync。"""
-        from src.session_manager import db, db_lock
-        result, api = asyncio.run(self._run_cmd("/bind owner/repo"))
-        assert "已绑定" in result
-        api.sync_repo_feishu_mapping.assert_called_once()
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id='oc_c'").fetchone()
-        assert row and row[0] == "gitcode:owner/repo"
-
-    def test_c2_bind_with_matches_shows_count(self):
-        """C2: sync 返回匹配数时展示。"""
-        from src.session_manager import db
-        ctx = _make_ctx("cli_c2")
-        api = AsyncMock()
-        api.sync_repo_feishu_mapping = AsyncMock(return_value=3)
-        from src.im.handler_async import process_command_async
-        result = asyncio.run(process_command_async(ctx, api, "/bind owner/repo", "oc_c2", "u1", db, "cli_c2"))
-        assert "已绑定" in result and "3" in result
-
-    def test_c3_unbind_deletes_binding(self):
-        """C3: /unbind 删除 binding。"""
-        from src.session_manager import db, db_lock
-        result, _ = asyncio.run(self._run_cmd("/unbind", bound_repo="owner/repo"))
-        assert "已解绑" in result
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT COUNT(*) FROM repo_im_group_binding WHERE im_chat_id='oc_c'").fetchone()
-        assert row[0] == 0
-
-    def test_c4_status_bound(self):
-        """C4: /status 已绑定展示 repo。"""
-        result, _ = asyncio.run(self._run_cmd("/status", bound_repo="owner/repo"))
-        assert "gitcode:owner/repo" in result
-
-    def test_c5_status_unbound(self):
-        """C5: /status 未绑定提示。"""
-        result, _ = asyncio.run(self._run_cmd("/status"))
-        assert "未绑定" in result
-
-    def test_c6_autodev_on(self):
-        """C6: /autodev on 开启自动实现。"""
-        from src.session_manager import db, db_lock
-        result, _ = asyncio.run(self._run_cmd("/autodev on", bound_repo="owner/repo"))
-        assert "已开启" in result
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT auto_impl_enabled FROM repo_im_group_binding WHERE im_chat_id='oc_c'").fetchone()
-        assert row[0] == 1
-
-    def test_c7_notify_off(self):
-        """C7: /notify off 关闭通知。"""
-        from src.session_manager import db, db_lock
-        result, _ = asyncio.run(self._run_cmd("/notify off", bound_repo="owner/repo"))
-        assert "已关闭" in result
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT notify_enabled FROM repo_im_group_binding WHERE im_chat_id='oc_c'").fetchone()
-        assert row[0] == 0
-
-    def test_c8_clean_clears_session(self):
-        """C8: /clean 清空 agent session。"""
-        from src.session_manager import db, db_lock
-        with db_lock:
-            db.cursor().execute(
-                "INSERT OR REPLACE INTO chat_agent_session (id, repo_key, runtime_session_id) VALUES ('sess-c8','gitcode:owner/repo','old_oc')")
-            db.commit()
-        result, _ = asyncio.run(self._run_cmd("/clean", bound_repo="owner/repo"))
-        assert "已清除" in result
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT runtime_session_id FROM chat_agent_session WHERE id='sess-c8'").fetchone()
-        assert row[0] == ""
-
-    def test_c9_help(self):
-        """C9: /help 返回命令列表。"""
-        result, _ = asyncio.run(self._run_cmd("/help"))
-        assert "/bind" in result and "/clean" in result
-
-    def test_c10_unknown_command_returns_empty(self):
-        """C10: 未知命令返回空串。"""
-        result, _ = asyncio.run(self._run_cmd("/unknownxyz"))
-        assert result == ""
-
-    def test_c11_no_sync_http_in_command_path(self):
-        """C11（阻塞回归）：命令路径不调用同步 urlopen / 全局 token。
-
-        旧实现 process_command → sync_repo_feishu_mapping 会触发同步 HTTP；
-        目标实现 /status 为纯 DB，不应触发任何同步网络调用。
-        """
-        result, _ = asyncio.run(self._run_cmd("/status", bound_repo="owner/repo"))
-        # 若代码回退到旧同步路径，patch 这些符号将失败（已删除）→ 测试报错即回归
-        from src.im import handler_async
-        assert not hasattr(handler_async, "sync_repo_feishu_mapping")  # 旧同步函数已移除
-        assert "gitcode:owner/repo" in result
