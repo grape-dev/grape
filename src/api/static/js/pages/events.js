@@ -265,6 +265,7 @@ function openTaskLog(taskId, title) {
       <span id="tlStatus" style="font-size:11px;margin-left:auto"></span>
       <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>
     </div>
+    <div id="tlInfo" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0;font-size:11px;color:var(--t2,#8a94a6)"></div>
     <div id="tlBody" style="flex:1;min-height:0;overflow-y:auto;background:#0b0e14;color:#c2cad6;padding:12px 14px;font-size:12px;font-family:monospace;line-height:1.6"></div>
   </div>`;
   document.body.appendChild(ov);
@@ -279,7 +280,27 @@ function openTaskLog(taskId, title) {
     else if (away < 30) _taskLog.following = true;
   });
   ov.addEventListener('click', e => { if (e.target === ov) closeTaskLog(); });
+  // 加载执行引擎/机器信息（智能体名+版本、设备名、IP、用户名）
+  _tlLoadInfo(taskId);
   _taskLogStream();
+}
+
+function _tlLoadInfo(taskId) {
+  const token = localStorage.getItem('token') || '';
+  fetch('/api/task-logs/' + encodeURIComponent(taskId) + '/info', {headers: {'Authorization': 'Bearer ' + token}})
+    .then(r => r.ok ? r.json() : null)
+    .then(info => {
+      if (!info) return;
+      const el = document.getElementById('tlInfo');
+      if (!el) return;
+      const bits = [];
+      if (info.agent_name) bits.push('🤖 ' + _tlEsc(info.agent_name) + (info.agent_version ? ' <span style="color:var(--t3)">v' + _tlEsc(info.agent_version) + '</span>' : ''));
+      if (info.device_name) bits.push('🖥 ' + _tlEsc(info.device_name));
+      if (info.last_ip) bits.push('🌐 ' + _tlEsc(info.last_ip));
+      if (info.owner_name) bits.push('👤 ' + _tlEsc(info.owner_name));
+      el.innerHTML = bits.map(b => '<span>' + b + '</span>').join('');
+    })
+    .catch(() => {});
 }
 
 function _tlArmWaitHint() {

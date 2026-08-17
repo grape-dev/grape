@@ -26,6 +26,41 @@ def _require_task_exists(task_id: str):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
 
 
+@router.get("/{task_id}/info")
+async def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_user)):
+    """任务关联的执行引擎/机器信息（日志面板标题栏展示）。
+
+    返回：{agent_name, agent_version, device_name, last_ip, owner_name}
+    agent_runtimes.name/version（引擎名+版本号）、runtime_credentials.device_name/last_ip/owner_name。
+    """
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            """SELECT ar.name, ar.version, rc.device_name, rc.last_ip, rc.owner_name
+               FROM agent_tasks t
+               LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id
+               LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
+               WHERE t.id = ?""",
+            (task_id,),
+        )
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    agent_name, agent_version, device_name, last_ip, owner_name = row
+    # 版本取纯数字版本号（opencode 1.18.18 / hermes "Hermes Agent v0.11.0 (2026.4.23) · upstream" → 0.11.0）
+    import re as _re
+    _m = _re.search(r"(\d+\.\d+\.\d+)", str(agent_version or ""))
+    ver = _m.group(1) if _m else str(agent_version or "")
+    return {
+        "agent_name": agent_name or "",
+        "agent_version": ver,
+        "device_name": device_name or "",
+        "last_ip": last_ip or "",
+        "owner_name": owner_name or "",
+    }
+
+
 @router.get("/{task_id}/messages")
 async def get_task_messages(task_id: str, user: dict = Depends(get_current_user),
                             since: int = Query(0, ge=0)):
