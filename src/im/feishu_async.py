@@ -443,7 +443,7 @@ class FeishuAsync:
             log.warning(f"[{ctx.name}] sync mapping: failed to fetch collaborators for {repo_key}: {e}")
             return 0
 
-        from src.session_manager import set_feishu_open_id
+        from src.session_manager import update_unified_user_info
         matched = 0
         for collab in collabs:
             nick = collab.get("nick_name", "")
@@ -452,13 +452,13 @@ class FeishuAsync:
                 continue
             for m in members:
                 if m.get("name") == nick:
-                    set_feishu_open_id(repo_key, login, m["open_id"], nick, gitcode_nickname=nick)
+                    update_unified_user_info(login, m["open_id"], nick, gitcode_nickname=nick, app_id=ctx.app_id)
                     matched += 1
                     break
         log.info(f"[{ctx.name}] sync mapping: {repo_key} -> {matched} users matched from {len(members)} group members")
         return matched
 
-    async def get_user_name(self, ctx: BotContext, user_id: str) -> str:
+    async def get_user_name(self, ctx: BotContext, user_id: str, user_id_type: str = "user_id") -> str:
         token = await self._ensure_token(ctx)
         if not token or not user_id:
             return ""
@@ -466,7 +466,7 @@ class FeishuAsync:
         url = f"{FEISHU_BASE}/contact/v3/users/{user_id}"
         headers = {"Authorization": f"Bearer {token}"}
         try:
-            async with session.get(url, params={"user_id_type": "user_id"}, headers=headers) as resp:
+            async with session.get(url, params={"user_id_type": user_id_type}, headers=headers) as resp:
                 data = await resp.json()
                 return data.get("data", {}).get("user", {}).get("name", "")
         except Exception as e:

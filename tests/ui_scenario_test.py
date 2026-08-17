@@ -1,6 +1,5 @@
 """Grape 场景测试 — 远端 http://203.0.113.2"""
 import sys, os, time
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest, requests
 
 # 端到端 UI 场景测试：需真实浏览器 + 远端服务 + 破坏性生产库操作（受 DEVOPS_UI_TEST 安全闸保护）。

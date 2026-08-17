@@ -37,6 +37,8 @@ _ADDONS = {
         "tenant": [
             "im:message:send_as_bot",  # 发送消息（reply_text / reply_card / send_card_to_user）
             "im:chat:readonly",        # 读取群成员（get_chat_members 需要）
+            "contact:user.base:readonly",  # 获取用户基本信息（get_user_name 取 feishu_name 需要，
+                                           # feishu-app-scoped-openid-fix.md §2.4）
         ],
     },
     "events": {
@@ -213,10 +215,12 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
     """后台运行 aregister_app 全流程。"""
     try:
         import lark_oapi as lark
+        # 按 bot_type 区分飞书 App 使用名：chat_bot=个人助手；vod_bot=VOD 助手
+        app_name = "Grape VOD助手" if bot_type == "vod_bot" else "Grape个人助手"
         result = await lark.aregister_app(
             on_qr_code=lambda info: _on_qr(task_id, info),
             addons=_ADDONS,
-            app_preset={"name": "Grape DevOps Bot", "desc": "由 Grape DevOps 平台自动创建并绑定"},
+            app_preset={"name": app_name, "desc": "由 Grape DevOps 平台自动创建并绑定"},
         )
         app_id = result.get("client_id", "")
         app_secret = result.get("client_secret", "")
@@ -238,10 +242,23 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
 
         # 扫码即绑定个人飞书身份（chat_bot / vod_bot 统一用扫码者 username 关联）
         if open_id and username:
+            feishu_name = ""
             try:
-                from src.session_manager import set_feishu_open_id
-                set_feishu_open_id(repo_key or "", username, open_id,
-                                   gitcode_nickname=username)
+                # 用新 bot 的通讯录读权限取扫码者飞书名（contact:user.base:readonly 已在 _ADDONS 申请；
+                # 存量 bot 无权限则留空，由 p2p 确认/sync 兜底，见 feishu-app-scoped-openid-fix.md §2.4）
+                from src.im.feishu_async import FeishuAsync, BotContext
+                _api = FeishuAsync()
+                _n = await _api.get_user_name(
+                    BotContext(app_id=app_id, app_secret=app_secret, bot_type="chat_bot"),
+                    open_id, user_id_type="open_id")
+                if _n and isinstance(_n, str):
+                    feishu_name = _n
+            except Exception as e:
+                log.warning(f"Feishu onboard: get feishu_name failed: {e}")
+            try:
+                from src.session_manager import update_unified_user_info
+                update_unified_user_info(username, open_id, feishu_name=feishu_name,
+                                         gitcode_nickname=username, app_id=app_id)
                 log.info(f"Feishu onboard: bound open_id for {username} (task={task_id[:8]})")
             except Exception as e:
                 log.warning(f"Feishu onboard: bind open_id failed: {e}")

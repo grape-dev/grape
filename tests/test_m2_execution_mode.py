@@ -29,8 +29,11 @@ class TestExecutionModeSwitch:
             # 清掉可能由其他 pipeline 测试残留的会话/阶段行，保证本测试不依赖共享库顺序
             db.cursor().execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%' OR id LIKE 'sess-m2-%'")
             db.cursor().execute("DELETE FROM issue_state WHERE repo_key LIKE 'gitcode:owner/repo%'")
-            db.cursor().execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'm2-%')")
-            db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'm2-%'")
+            # 引擎隔离：清掉全部远端/全局引擎（保留本机 credential_id=0 兜底），
+            # 避免其他测试残留的全局引擎被 pick_engine 选中导致执行模式不确定（随机顺序 flaky）
+            db.cursor().execute("DELETE FROM agent_runtimes WHERE credential_id>0")
+            db.cursor().execute("DELETE FROM runtime_credentials")
+            db.cursor().execute("DELETE FROM devops_agent_runtime_binding")
             db.commit()
 
     def test_mode_getter_meta(self, monkeypatch):

@@ -439,10 +439,12 @@ gitcode_user TEXT DEFAULT '',
 gitcode_nickname TEXT DEFAULT '',
 feishu_open_id TEXT DEFAULT '',
 feishu_name TEXT DEFAULT '',
+app_id TEXT DEFAULT '',               -- ★ 产生 feishu_open_id 的飞书 App（open_id 为 app 级，见 feishu-app-scoped-openid-fix.md）
 github_login TEXT DEFAULT '',
 dingtalk_user_id TEXT DEFAULT '',
 updated_at TEXT DEFAULT (datetime('now'))
 ```
+> ⚠️ **`feishu_open_id` 是飞书 app 级（app-scoped）**：同一人在不同飞书 App（app_id）下的 open_id 不同。`app_id` 记录该 open_id 所属的 App；**新绑定 app_id 与存储不一致 → 刷新 app_id 并清空 open_id/feishu_name，要求用户重新 p2p 确认**（feishu-app-scoped-openid-fix.md）。`_get_feishu_open_id` / `send_card_to_user` 应确保 open_id 与当前 bot app 匹配，否则通知会静默失败。
 
 #### `vod_conversations` — VOD 群会话
 ```sql
@@ -451,7 +453,7 @@ agent_session_id TEXT NOT NULL,        -- → devops_agent_session.id
 im_provider TEXT DEFAULT 'feishu',
 im_chat_id TEXT NOT NULL,
 im_channel_name TEXT DEFAULT '',
-runtime_session_id TEXT DEFAULT '',    -- ★ 通用 runtime 会话（原 backend_session_id）
+runtime_session_id TEXT DEFAULT '',    -- ★ 通用 runtime 会话（原 backend_session_id）；⚠️ 换绑（/repo 换仓库）时必须一并清空，否则新仓库 resume 旧仓库 opencode 会话 → 上下文污染（vod-navigation-commands-design.md §3.4）
 status TEXT DEFAULT 'active',
 created_at TEXT DEFAULT (datetime('now')),
 last_active_at TEXT DEFAULT (datetime('now')),

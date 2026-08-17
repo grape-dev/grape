@@ -5,7 +5,6 @@ import asyncio
 from unittest.mock import patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
-sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from fastapi.testclient import TestClient
@@ -30,6 +29,13 @@ def setup_module():
     global _uid, _token, _headers
     from src.api.db_setup import init_database
     init_database()
+    # 用户卫生：先清掉历史残留（user_accounts + 映射），保证本模块用到的测试用户 id 确定、不被跨运行回收复用
+    # （unified_user_mapping.user_id 为主键，id 被回收重用会导致 INSERT OR REPLACE 互相覆盖 → 顺序依赖失败）
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM user_accounts WHERE username IN ('test_tasks_user','bob_task_user')")
+        c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('younger_eric','bob')")
+        db.commit()
     _uid = user_db.create_user("test_tasks_user", "test123")
     if not _uid:
         _uid = user_db.get_user_by_username("test_tasks_user")
@@ -38,7 +44,6 @@ def setup_module():
     # 清理旧映射并重建 gitcode_user -> user_id 映射
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('younger_eric','bob')")
         c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,datetime('now'))",
                   (_uid["id"], "younger_eric", "ou_test_123", "吴扬"))
         db.commit()
@@ -53,6 +58,11 @@ def setup_module():
 def teardown_module():
     if _uid:
         user_db.delete_user(_uid["id"])
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM user_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user')")
+        c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('younger_eric','bob')")
+        db.commit()
 
 
 def _clean_tasks():
@@ -510,35 +520,46 @@ class TestTaskLifecycle:
     def test_reassign_closes_processing_old_assignee(self):
         """换人时原 assignee 的 processing 任务置 completed（reassigned）"""
         self._clean()
-        # 建 bob 映射（换人目标 assignee）
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,datetime('now'))",
-                      (_uid["id"], "bob", "ou_bob", "鲍勃"))
-            db.commit()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
-                      (_uid["id"], "younger_eric", "gitcode:org/test", 56))
-            db.commit()
-            old_tid = c.lastrowid
+        # bob 用独立 user_id（unified_user_mapping.user_id 为主键，直接复用 _uid["id"] 会覆盖 younger_eric 映射）
+        bob = user_db.create_user("bob_processing_user", "test123")
+        if not bob:
+            bob = user_db.get_user_by_username("bob_processing_user")
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='bob'")
+                c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,datetime('now'))",
+                          (bob["id"], "bob", "ou_bob", "鲍勃"))
+                db.commit()
+                c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+                          (_uid["id"], "younger_eric", "gitcode:org/test", 56))
+                db.commit()
+                old_tid = c.lastrowid
 
-        def _swallow(coro, *a, **k):
-            try:
-                coro.close()
-            except Exception:
-                pass
-            return None
+            def _swallow(coro, *a, **k):
+                try:
+                    coro.close()
+                except Exception:
+                    pass
+                return None
 
-        with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
-            r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
-                "assignee": "bob", "repo_key": "org/test", "issue_number": 56,
-                "task_description": "换人处理"})
-        assert r.status_code == 200
-        with db_lock:
-            c = db.cursor()
-            row = c.execute("SELECT status, completed_reason FROM tasks WHERE id=?", (old_tid,)).fetchone()
-        # 原 assignee（younger_eric）的 processing 任务应被换人关闭
-        assert row and row[0] == "completed", f"原 assignee processing 任务应 completed，实际 {row}"
-        assert row and row[1] == "reassigned"
+            with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
+                r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
+                    "assignee": "bob", "repo_key": "org/test", "issue_number": 56,
+                    "task_description": "换人处理"})
+            assert r.status_code == 200
+            with db_lock:
+                c = db.cursor()
+                row = c.execute("SELECT status, completed_reason FROM tasks WHERE id=?", (old_tid,)).fetchone()
+            # 原 assignee（younger_eric）的 processing 任务应被换人关闭
+            assert row and row[0] == "completed", f"原 assignee processing 任务应 completed，实际 {row}"
+            assert row and row[1] == "reassigned"
+        finally:
+            if bob:
+                user_db.delete_user(bob["id"])
+            with db_lock:
+                db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user='bob'")
+                db.commit()
 
     def test_mine_returns_processing(self):
         """/tasks/mine 返回 processing 状态任务"""

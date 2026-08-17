@@ -5,7 +5,6 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
-sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.im.feishu_async import BotContext
@@ -22,7 +21,7 @@ def _ctx(app_id="cli_nav"):
 def _clean():
     with db_lock:
         c = db.cursor()
-        for t in ("repo_im_group_binding", "chat_conversations", "chat_messages", "tasks", "user_repos"):
+        for t in ("repo_im_group_binding", "chat_conversations", "chat_messages", "tasks", "user_repos", "managed_repos"):
             try:
                 c.execute(f"DELETE FROM {t}")
             except Exception:
@@ -30,6 +29,8 @@ def _clean():
         c.execute("DELETE FROM chat_agent_session WHERE id LIKE 'nav-%'")
         c.execute("DELETE FROM meta WHERE key='ws_feishu_app_id'")
         db.commit()
+    from src.im.handler_async import _clear_pending_selection
+    _clear_pending_selection("nav_chat")
 
 
 def _seed():
@@ -43,6 +44,8 @@ def _seed():
         ]):
             c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (1, ?, 'navuser', ?, ?, ?)",
                       (rk, f"repo-{'a' if 'repo-a' in rk else 'b'}", admin, join))
+            c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) VALUES (?, 'navuser', ?, ?)",
+                      (rk, f"repo-{'a' if 'repo-a' in rk else 'b'}", f"navuser/repo-{'a' if 'repo-a' in rk else 'b'}"))
         db.commit()
     # 绑定 repo-a 到 chat
     with db_lock:
@@ -101,6 +104,21 @@ def test_repo_number_selects_and_binds():
     assert row and "repo-b" in row[0]
     assert _pending() is None
     assert _card_text(api).startswith("**✅ 已绑定")
+    _clean()
+
+
+def test_repo_only_shows_managed():
+    """C19：/repo 只显示已托管仓库；未托管仓库不进入候选"""
+    _seed()
+    with db_lock:
+        c = db.cursor()
+        # 加一个未托管的用户仓库（只写 user_repos，不写 managed_repos）
+        c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (1, 'gitcode:navuser/repo-unmanaged', 'navuser', 'repo-unmanaged', 1, 1)")
+        db.commit()
+    api = _run_cmd("/repo")
+    text = _card_text(api)
+    assert "repo-a" in text and "repo-b" in text
+    assert "repo-unmanaged" not in text
     _clean()
 
 
@@ -170,14 +188,16 @@ def test_repo_pagination_page2():
     _seed()
     with db_lock:
         c = db.cursor()
-        for i in range(2, 14):   # +12 仓库 → 共 14 个，2 页
+        for i in range(2, 24):   # +22 仓库 → 共 24 个，2 页（每页 20）
             c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (1, ?, 'navuser', ?, 0, 1)",
                       (f"gitcode:navuser/repo-{i}", f"repo-{i}"))
+            c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) VALUES (?, 'navuser', ?, ?)",
+                      (f"gitcode:navuser/repo-{i}", f"repo-{i}", f"navuser/repo-{i}"))
         db.commit()
     api = _run_cmd("/repo 2")
     text = _card_text(api)
     assert "第 2/2 页" in text
-    assert "repo-10" not in text      # 第 1 页首个不在第 2 页
+    assert "repo-2" not in text      # 第 1 页首个不在第 2 页
     _clean()
 
 
@@ -311,10 +331,11 @@ def _reply_text(api):
 
 
 def test_unbound_fallback_uses_current_bot_owner():
-    """W01：未绑定兜底列出当前 bot 属主（user1）的仓库，不再出现 Jason7602 仓库"""
+    """W01：未绑定兜底列出当前 bot 属主（user1）的仓库，不再出现 Jason7602 仓库（自动 /repo 卡片）"""
     _seed_unbound()
     api = _run_msg("查询下情况")
-    text = _reply_text(api)
+    api.reply_card.assert_called()
+    text = _card_text(api)
     assert "repo-a" in text or "repo-b" in text
     assert "secret-repo" not in text
     assert "Jason7602" not in text
@@ -322,19 +343,20 @@ def test_unbound_fallback_uses_current_bot_owner():
 
 
 def test_unbound_fallback_works_without_meta_key():
-    """W02：meta 无 ws_feishu_app_id 时兜底仍按当前 bot 属主正常"""
+    """W02：meta 无 ws_feishu_app_id 时兜底仍按当前 bot 属主正常（自动 /repo 卡片）"""
     _seed_unbound()
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM meta WHERE key='ws_feishu_app_id'")
         db.commit()
     api = _run_msg("查询下情况")
-    assert "repo-a" in _reply_text(api)
+    api.reply_card.assert_called()
+    assert "repo-a" in _card_text(api)
     _clean()
 
 
 def test_unbound_no_repos_guides_repo():
-    """W03：当前 bot 属主无仓库 → /repo 引导，不列仓库"""
+    """W03：当前 bot 属主无托管仓库 → /repo 引导，不列仓库"""
     _seed()
     with db_lock:
         c = db.cursor()
@@ -344,7 +366,22 @@ def test_unbound_no_repos_guides_repo():
     api = _run_msg("查询下情况")
     text = _reply_text(api)
     assert "/repo" in text
-    assert "没有加入任何仓库" in text
+    assert "还没有已托管" in text
+    _clean()
+
+
+def test_unbound_with_managed_repos_auto_repo_card():
+    """未绑定但名下有已托管仓库 → 自动触发 /repo 卡片（而非纯文本列表），pending=repo"""
+    _seed()
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='nav_chat'")
+        db.commit()
+    api = _run_msg("查询下情况")
+    api.reply_card.assert_called()
+    text = _card_text(api)
+    assert "repo-a" in text and "repo-b" in text
+    assert _pending() is not None and _pending()["action"] == "repo"
     _clean()
 
 

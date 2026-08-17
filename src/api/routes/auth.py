@@ -135,10 +135,10 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
 
     # 登录成功即建立 GitCode↔平台 user 映射（unified_user_mapping），
     # 使 /api/tasks/notify 能解析 assignee→user_id（tasks.py:52）；幂等，每次登录刷新。
-    # 传空 open_id：set_feishu_open_id 会保留已有 feishu_open_id（防覆盖飞书确认的绑定）。
+    # 传空 open_id：update_unified_user_info 会保留已有 feishu_open_id（防覆盖飞书确认的绑定）。
     try:
-        from src.session_manager import set_feishu_open_id
-        set_feishu_open_id("", gitcode_login, "", "", gitcode_nickname)
+        from src.session_manager import update_unified_user_info
+        update_unified_user_info(gitcode_login, open_id="", gitcode_nickname=gitcode_nickname)
     except Exception as e:
         log.warning(f"OAuth login: write user mapping failed: {e}")
 

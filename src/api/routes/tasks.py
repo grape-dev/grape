@@ -301,13 +301,38 @@ async def notify_task(body: TaskNotifyBody, request: Request):
     cfg = get_chat_config(user_id) if user_id else {"backend": "opencode"}
     from src.api import main as api_main
     bm = api_main.bot_manager
-    ctx = next((b for b in bm.get_all_bots().values() if getattr(b, "bot_type", "") == "chat_bot"), None) if bm else None
+    # open_id 为 app 级（feishu-app-scoped-openid-fix.md）：必须用**用户本人 chat bot** 发送，
+    # 否则命名空间不匹配 → send_card_to_user 静默失败。用户未配置本人 bot → 不通知（不回落其它 bot）。
+    ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
+    if not ctx:
+        log.warning(f"Task notify: assignee={body.assignee} 未配置本人 chat bot，跳过飞书通知 task_id={task_id} issue=#{body.issue_number}")
     api = bm.api if bm else None
     asyncio.create_task(_run_notify(ctx, api, user_id, conv_id, open_id,
                                     body.task_description, body.repo_key, body.issue_number, cfg))
 
     return {"ok": True, "task_id": task_id, "conversation_id": conv_id,
             "message": "任务已创建并通知责任人"}
+
+
+def _resolve_user_chat_bot(bm, user_id: int):
+    """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
+
+    用户未配置本人 chat bot → 返回 None（**不通知**，不回落其它 bot，避免用他人 app 发送静默失败）。
+    """
+    if not bm:
+        return None
+    try:
+        bots = bm.get_all_bots()
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND im_app_id!='' LIMIT 1",
+                (user_id,)).fetchone()
+        if row and row[0] in bots:
+            return bots[row[0]]
+    except Exception:
+        pass
+    return None
 
 
 @router.post("/{task_id}/start")

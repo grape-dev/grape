@@ -25,7 +25,7 @@
 ### 1.3 数据源
 | 数据 | 来源 |
 |---|---|
-| 用户仓库列表 | `get_user_repos(user_id)`（`user_repos` 缓存表，含 owner/role/is_admin） |
+| 用户仓库列表（**已托管**） | `get_managed_repos(user_id)`（`managed_repos` JOIN `user_repos`，即该用户名下**已托管**仓库；未托管不显示，避免绑定后事件/聊天全错） |
 | 用户会话列表 | `get_user_conversations(user_id, repo_key)`（chat_conversations，含 conv_type/issue_number/im_channel_id） |
 | 用户任务列表 | `tasks` 表（`user_id` + `repo_key`，含 issue_number/title/status/conversation_id） |
 
@@ -39,7 +39,7 @@
 
 | 命令 | 行为 | 候选 → 编号动作 |
 |---|---|---|
-| `/repo` | 卡片列出**该用户全部仓库**（编号 + full_name + 角色[owner/member]）；**当前已绑定仓库标注「绑定中」** | 回复编号 → 绑定该仓库（写 repo_im_group_binding，卡片确认） |
+| `/repo` | 卡片列出**该用户名下已托管仓库**（编号 + full_name + 角色[owner/member]）；**未托管不显示**；**当前已绑定仓库标注「绑定中」** | 回复编号 → 绑定该仓库（写 repo_im_group_binding，卡片确认） |
 | `/chat` | 卡片列出**当前绑定仓库下**的会话（编号 + 类型[一般/任务] + 标题 + 时间） | 回复编号 → `join_feishu_chat` 加入该会话（卡片确认） |
 | `/task` | 卡片列出**当前绑定仓库下**的任务（编号 + Issue# + 标题 + 状态） | 回复编号 → 定位/加入该任务的会话（卡片确认） |
 | `/new` | **当前绑定仓库下新建会话并立即加入** | —（卡片确认：会话标题 + 已加入） |
@@ -57,8 +57,8 @@
 > **关于 `/leave`（不采用）**：`/new` 的 `join_feishu_chat` "清旧设新"会原子清空旧会话的 im_channel_id，等于"离开旧会话 + 进入新会话"一步完成；若只要"离开不加入"，下一次消息也会自动新建 general 会话。故 `/leave` 与 `/new` 功能几乎等同、价值极低，不单设。
 
 ### 3.1 翻页
-- 候选超 10 条时卡片分页：命令可带页码，如 `/repo 2`；或在卡片末尾提示 `回复 <数字> 选择；输入 /repo N 翻页`。
-- 每页 ≤10 条，编号在该页内 `1..10`（跨页不续号，避免歧义）。
+- 候选超 **20 条**时卡片分页：命令可带页码，如 `/repo 2`；或在卡片末尾提示 `回复 <数字> 选择；输入 /repo N 翻页`。
+- 每页 **≤20 条**，编号在该页内 `1..20`（跨页不续号，避免歧义）。
 
 ### 3.2 数字选择状态机
 - 新增内存态 `_pending_selections: dict[chat_id → {action, repo_key, items, expires}]`（TTL 120s）。
@@ -71,7 +71,7 @@
 
 ### 3.3 卡片结构（lark_md 子集）
 ```
-📁 仓库列表（共 N 个，第 1 页）
+📁 已托管仓库列表（共 N 个，第 1 页）
 1. Jason7602/hello-calculator2（owner）
 2. Jason7602/gitcode-pr-assistant（member）【绑定中】
 3. ...
@@ -79,6 +79,7 @@
 ```
 - 表头加粗（`**`），候选用有序编号行（纯文本 `1. ...` 或 lark_md 有序列表）。
 - **当前已绑定仓库追加「绑定中」标记**（等价现有 `/对话` 的 `👈当前` pending 语义，表示该仓库当前指向本飞书聊天）。
+- **只列已托管仓库**（`get_managed_repos`），未托管仓库不进入候选，避免绑定后无 webhook/agent 而全错。
 - 内容 ≤2000 字符（复用 `to_lark_elements` 的卡片能力）。
 
 ## 4. 关键变更点
@@ -99,7 +100,7 @@
 1. **数字吞消息**：仅"纯数字 + pending 未过期"才拦截；TTL 120s 内用户若想发普通数字消息，可先发任意非数字或等待过期。可接受。
 2. **pending 内存态**：重启丢失（用户重发命令即可）；单进程内存，无需持久化。
 3. **多 bot/多 chat 隔离**：pending 以 `chat_id`（P2P 即 open_id；群即 oc_id）为键，天然按聊天隔离。
-4. **仓库缓存过期**：`user_repos` 为缓存表，可能滞后；`/repo` 可提示"如仓库列表不新请刷新"或复用现有同步逻辑。
+4. **仓库列表=已托管**：`/repo` 用 `get_managed_repos(uid)`（managed_repos ∩ 用户可见），未托管不显示；`user_repos` 为缓存表可能滞后，`/repo` 可提示"如列表不新请刷新"。
 5. **任务无会话**：任务未建 conversation 时，`/task` 选择后按 `issue_number` 查找/创建 `Issue #N` 会话再 join（复用 tasks.py 的会话创建逻辑）。
 6. **命令收敛**：`/repo` 取代 `/bind`、`/chat` 取代 `/对话 /convs /list`、`/where` 承担 `/status` 定位职能；旧 `/bind /unbind /status /refresh /autodev /notify /加入 /leave` **全部删除**（设计只保留 `/repo /chat /task /new /where /cancel /clean /help`）。`/repo` 的「绑定中」标记沿用 `repo_im_group_binding`/`im_channel_id` 判定，无新状态。
 7. **`/new` 会话标题**：新建会话默认无标题（与 Web 一致），卡片确认时提示"已加入新对话"；首次消息触发 `_auto_title`。
@@ -127,11 +128,12 @@
 | C16 | 自然语言绑定清旧指针 | 已 join 旧会话 | "绑定到 X" → 旧会话指针清空 |
 | C17 | `/where` 仓库不一致提示 | 群绑 repo-a + 会话属 repo-b | 卡片含 ⚠️ 不一致提示 |
 | C18 | `/where` 一致不提示 | 群绑与会话同仓库 | 无 ⚠️ 提示 |
+| C19 | `/repo` 只显示已托管仓库 | 用户有托管+未托管各若干 | 候选仅含托管仓库，未托管不出现；未托管无法绑定 |
 
 ## 7. 实施步骤（每步独立可测）
 
 1. **pending 状态机 + 数字分发**：`_pending_selections`、TTL、纯数字拦截/放行（含 `0` 取消）。
-2. **`/repo` 卡片 + 编号绑定**：候选生成（含「绑定中」）、绑定、卡片确认。
+2. **`/repo` 卡片 + 编号绑定**：候选来自 `get_managed_repos(uid)`（仅已托管，含「绑定中」）、绑定、卡片确认。
 3. **`/chat` 卡片 + 编号加入**：复用 `join_feishu_chat`。
 4. **`/task` 卡片 + 编号进入任务会话**：任务列表 + 会话定位/创建。
 5. **`/new` `/where` `/cancel` + `/help` 卡片化**。

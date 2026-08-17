@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS unified_user_mapping (
     gitcode_nickname TEXT DEFAULT '',
     feishu_open_id TEXT DEFAULT '',
     feishu_name TEXT DEFAULT '',
+    app_id TEXT DEFAULT '',               -- ★ 产生 feishu_open_id 的飞书 App（open_id 为 app 级，见 feishu-app-scoped-openid-fix.md）
     github_login TEXT DEFAULT '',
     dingtalk_user_id TEXT DEFAULT '',
     updated_at TEXT DEFAULT (datetime('now'))
@@ -175,6 +176,15 @@ try:
     db.commit()
 except Exception as e:
     log.warning(f"Backfill unified_user_mapping failed: {e}")
+# 兼容列迁移：unified_user_mapping 增加 app_id（feishu-app-scoped-openid-fix.md，open_id 为 app 级）
+try:
+    _um_cols2 = [r[1] for r in db.execute("PRAGMA table_info(unified_user_mapping)").fetchall()]
+    if "app_id" not in _um_cols2:
+        db.execute("ALTER TABLE unified_user_mapping ADD COLUMN app_id TEXT DEFAULT ''")
+        db.commit()
+        log.info("Added unified_user_mapping.app_id column")
+except Exception as e:
+    log.warning(f"Add unified_user_mapping.app_id failed: {e}")
 # 兼容旧列迁移（幂等）
 try:
     db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")
@@ -337,17 +347,18 @@ def get_feishu_open_id(gitcode_user):
         return row[0] if row else None
 
 
-def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_nickname=""):
-    """写入 GitCode → Feishu 用户映射（user_id = user_accounts.id，按 gitcode_user 关联）。
+def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_nickname="", app_id=""):
+    """更新 GitCode → Feishu 用户映射（user_id = user_accounts.id，按 gitcode_user 关联）。
 
-    同步刷新 gitcode_nickname / feishu_open_id / feishu_name。
+    管理 unified_user_mapping 整行：gitcode_user/gitcode_nickname/feishu_open_id/feishu_name/app_id/updated_at。
     gitcode_nickname 优先取传入值，否则从 user_accounts.nickname 获取。
     user_id 始终为真实 user_accounts.id：若该 gitcode_user 未在 user_accounts 中，
     则尝试按已有记录更新；两者都不可得时跳过（不写入负数占位）。
 
-    ★ 防覆盖：open_id 传空（如 gitcode OAuth 登录只带昵称，auth.py）时，**保留已有
-    feishu_open_id/feishu_name**——避免用空值覆盖飞书确认过的绑定（曾导致 confirmed
-    绑定被后续登录清空，系统反复要求重新确认）。见 2026-08-16 修复。
+    判定逻辑（feishu-app-scoped-openid-fix.md §2.2，"清空"由 app_id 变化触发，而非 open_id 为空）：
+      - app_id 非空 且 != 存储 app_id → 刷新 app_id，清空 open_id/feishu_name（换 app 需重确认）；
+      - open_id 非空 → 写 open_id + feishu_name(有则写) + app_id(有则写)；
+      - 否则（open_id 空且 app 未变，如 OAuth 登录）→ 仅刷 gitcode_nickname/updated_at，保留 open_id/app_id。
     """
     from src.user import db as user_db
     user_id = 0
@@ -362,34 +373,52 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_
 
     with db_lock:
         c = db.cursor()
-        # 空 open_id 时读取已有绑定，避免覆盖
-        if not open_id:
-            _existing = c.execute(
-                "SELECT feishu_open_id, feishu_name FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,)).fetchone()
-            if _existing and _existing[0]:
-                open_id = _existing[0]
-                if not feishu_name:
-                    feishu_name = _existing[1] or ""
+        stored = c.execute(
+            "SELECT user_id, feishu_open_id, feishu_name, app_id FROM unified_user_mapping WHERE gitcode_user=?",
+            (gitcode_user,)).fetchone()
+        stored_open = stored[1] or "" if stored else ""
+        stored_name = stored[2] or "" if stored else ""
+        stored_app = stored[3] or "" if stored else ""
+        app_changed = bool(app_id) and app_id != stored_app
+        if open_id:
+            # 有 open_id（扫码/sync/p2p 确认）：以传入为准，直接写 open_id + feishu_name + app_id
+            final_app = app_id or stored_app
+        elif app_changed:
+            # 换 app 且无新 open_id（手动配置）：刷新 app_id，清空 open_id/feishu_name（需重确认）
+            open_id = ""
+            feishu_name = ""
+            final_app = app_id
+        else:
+            # open_id 空且 app 未变（如 OAuth 登录）：保留已有 open_id/feishu_name/app_id
+            open_id = stored_open
+            if not feishu_name:
+                feishu_name = stored_name
+            final_app = stored_app
         if user_id:
-            # 有真实 user_id：直接以 user_id 为主键写入/覆盖（open_id 已保留非空值）
+            # 有真实 user_id：直接以 user_id 为主键写入/覆盖
             c.execute(
-                "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?,?)",
-                (user_id, gitcode_user, gitcode_nickname, open_id, feishu_name, datetime.now().isoformat())
+                "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname, feishu_open_id, feishu_name, app_id, updated_at) VALUES (?,?,?,?,?,?,?)",
+                (user_id, gitcode_user, gitcode_nickname, open_id, feishu_name, final_app, datetime.now().isoformat())
             )
         else:
-            # 无 user_id：尝试按 gitcode_user 更新已有记录（保留其 user_id）
-            row = c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,)).fetchone()
+            row = stored
             if row:
                 c.execute(
-                    "UPDATE unified_user_mapping SET gitcode_nickname=?, feishu_open_id=?, feishu_name=?, updated_at=? WHERE user_id=?",
-                    (gitcode_nickname, open_id, feishu_name, datetime.now().isoformat(), row[0])
+                    "UPDATE unified_user_mapping SET gitcode_nickname=?, feishu_open_id=?, feishu_name=?, app_id=?, updated_at=? WHERE user_id=?",
+                    (gitcode_nickname, open_id, feishu_name, final_app, datetime.now().isoformat(), row[0])
                 )
             else:
                 # 无 user_id 也无已有记录：跳过（user_id 必须为真实 user_accounts.id）
-                log.info(f"set_feishu_open_id: skip mapping for {gitcode_user} (no user_accounts record)")
+                log.info(f"update_unified_user_info: skip mapping for {gitcode_user} (no user_accounts record)")
                 return False
         db.commit()
         return True
+
+
+def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_nickname=""):
+    """[deprecated 兼容别名] 旧名，语义见 update_unified_user_info；repo_key 参数已废弃忽略。"""
+    return update_unified_user_info(gitcode_user, open_id=open_id, feishu_name=feishu_name,
+                                    gitcode_nickname=gitcode_nickname)
 
 
 def get_feishu_mapping(repo_key):

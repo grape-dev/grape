@@ -21,8 +21,11 @@ def _clean():
         c.execute("DELETE FROM events")
         c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
         c.execute("DELETE FROM issue_state WHERE repo_key LIKE 'gitcode:owner/repo%'")
-        c.execute("DELETE FROM agent_runtimes WHERE name LIKE '__auto_%'")
-        c.execute("DELETE FROM runtime_credentials WHERE name LIKE '__auto_%'")
+        # 引擎隔离：清掉全部远端/全局引擎（保留本机 credential_id=0 兜底），
+        # 避免其他测试残留的全局引擎被 pick_engine 选中导致执行模式不确定（随机顺序 flaky）
+        c.execute("DELETE FROM agent_runtimes WHERE credential_id>0")
+        c.execute("DELETE FROM runtime_credentials")
+        c.execute("DELETE FROM devops_agent_runtime_binding")
         db.commit()
 
 

@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','runtimes','event','repos','skill','tasks'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks'];
 
   function currentRepo() {
     try {
@@ -242,6 +242,9 @@ function loadAgentTypes() {
     } else if (view === 'skills') {
       title.textContent = 'DevOps Skills';
       renderSkills();
+    } else if (view === 'knowledge') {
+      title.textContent = 'Project Knowledge';
+      renderKnowledge();
     } else if (view === 'runtimes') {
       title.textContent = 'Agent Runtimes';
       API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');

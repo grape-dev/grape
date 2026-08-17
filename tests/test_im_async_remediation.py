@@ -18,8 +18,6 @@ import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..")
-if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)
 os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 

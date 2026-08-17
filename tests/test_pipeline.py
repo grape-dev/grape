@@ -1,6 +1,5 @@
 """Pipeline 单元测试：_get_issue_pipeline 的 latest_event + current_owner 逻辑"""
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # 强制使用独立测试库
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(

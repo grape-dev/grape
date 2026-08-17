@@ -1,0 +1,12 @@
+# Grape 开发/测试依赖 —— 与 requirements.txt（服务端）分开，避免污染运行依赖
+#
+# 安装：python -m pip install -r requirements-dev.txt
+# CI 未接入前本地生效（见 docs/new-version2/test-case-optimization-plan.md 附录 F）
+pytest>=7.4
+pytest-mock>=3.12
+pytest-asyncio>=0.23
+pytest-cov>=4.1
+pytest-randomly>=3.15
+pytest-timeout>=2.2
+pytest-xdist>=3.5
+pytest-rerunfailures>=13.0

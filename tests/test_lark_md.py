@@ -6,7 +6,6 @@ import os
 import sys
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
-sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.im.lark_md import to_lark_md, to_lark_elements
