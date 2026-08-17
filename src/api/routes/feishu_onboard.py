@@ -242,9 +242,23 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
 
         # 扫码即绑定个人飞书身份（chat_bot / vod_bot 统一用扫码者 username 关联）
         if open_id and username:
+            feishu_name = ""
+            try:
+                # 用新 bot 的通讯录读权限取扫码者飞书名（contact:user.base:readonly 已在 _ADDONS 申请；
+                # 存量 bot 无权限则留空，由 p2p 确认/sync 兜底，见 feishu-app-scoped-openid-fix.md §2.4）
+                from src.im.feishu_async import FeishuAsync, BotContext
+                _api = FeishuAsync()
+                _n = await _api.get_user_name(
+                    BotContext(app_id=app_id, app_secret=app_secret, bot_type="chat_bot"),
+                    open_id, user_id_type="open_id")
+                if _n and isinstance(_n, str):
+                    feishu_name = _n
+            except Exception as e:
+                log.warning(f"Feishu onboard: get feishu_name failed: {e}")
             try:
                 from src.session_manager import update_unified_user_info
-                update_unified_user_info(username, open_id, gitcode_nickname=username, app_id=app_id)
+                update_unified_user_info(username, open_id, feishu_name=feishu_name,
+                                         gitcode_nickname=username, app_id=app_id)
                 log.info(f"Feishu onboard: bound open_id for {username} (task={task_id[:8]})")
             except Exception as e:
                 log.warning(f"Feishu onboard: bind open_id failed: {e}")
