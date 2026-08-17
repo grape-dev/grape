@@ -716,6 +716,8 @@ def _resolve_chat_runtime_id(backend: str) -> int:
 
     实例名（含 `-` 后缀）→ scope=user 个人引擎；裸引擎名 → 优先本机直连（credential_id=0）；
     兜底按名/默认。修复：裸名 'opencode' 被解析成同名的共享全局 worker。
+    queue_remote 强制模式下本机直连行（credential_id=0）无 claim 方=黑洞
+    （chat-task-blackhole-local-direct-2026-08.md），跳过本机解析直接按名找远端 worker。
     """
     if not backend:
         return 0
@@ -725,9 +727,11 @@ def _resolve_chat_runtime_id(backend: str) -> int:
     if _rid is not None and scope_of_runtime(_rid) == "user":
         return _rid
     if "-" not in backend:
-        _local = get_local_direct_runtime_id(backend)
-        if _local:
-            return _local
+        from src.runtime.service import get_execution_mode, EXEC_MODE_REMOTE
+        if get_execution_mode() != EXEC_MODE_REMOTE:
+            _local = get_local_direct_runtime_id(backend)
+            if _local:
+                return _local
     return get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
 
 

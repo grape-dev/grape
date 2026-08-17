@@ -133,6 +133,43 @@ class TestWebChatToolUseRegression:
             c2.execute("DELETE FROM runtime_credentials WHERE name LIKE 'wt-%'")
             db.commit()
 
+    def test_send_stream_queue_remote_local_direct_rejected(self, client, monkeypatch):
+        """send/stream 黑洞回归：queue_remote 下 runtime_id 指向本机直连行(credential_id=0)
+        必须明确提示且不入队（chat-task-blackhole-local-direct-2026-08.md）——
+        此前缺保护 → 任务入队到无人 claim 的队列 → 前端永久「正在连接后端」。
+        """
+        from unittest.mock import patch
+        monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
+        _seed_local_engine()
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT id FROM agent_runtimes WHERE credential_id=0 AND lower(name)='opencode'").fetchone()
+            local_rid = row[0]
+            # 模拟存量故障态：配置行已被解析到本机直连行（修复前的 `_resolve_chat_runtime_id` 行为）
+            c.execute("DELETE FROM chat_agent_session WHERE user_id=99901")
+            c.execute("INSERT INTO chat_agent_session (id, user_id, runtime_id, runtime, created_at, last_active_at) "
+                      "VALUES ('sess-cfg-99901', 99901, ?, 'opencode', datetime('now'), datetime('now'))", (local_rid,))
+            db.commit()
+        with patch("src.runtime.service.enqueue_task") as m_enq, \
+             patch("src.runtime.service.wait_task_terminal") as m_wait:
+            r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
+        assert r.status_code == 200
+        # SSE 文本经 json.dumps(ensure_ascii) 转义，须解析 done 事件取 text 判断
+        import json as _json
+        texts = []
+        for line in r.text.splitlines():
+            if line.startswith("data: "):
+                evt = _json.loads(line[len("data: "):])
+                texts.append(evt.get("text", ""))
+        assert any("未配置远端引擎" in t for t in texts), f"应返回明确提示而非静默入队: {r.text[:500]}"
+        assert '"type": "done"' in r.text
+        m_enq.assert_not_called(), "本机直连行不得入队（无 claim 方）"
+        m_wait.assert_not_called()
+        with db_lock:
+            c2 = db.cursor()
+            c2.execute("DELETE FROM chat_agent_session WHERE user_id=99901")
+            db.commit()
+
     def test_send_stream_direct_still_streams(self, client, monkeypatch):
         """send/stream direct 模式：仍走本地 stream_agent（回归保护）。"""
         from unittest.mock import patch

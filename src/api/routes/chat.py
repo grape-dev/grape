@@ -334,6 +334,19 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             rid = 0
     kind = runtime_execution_kind(rid)
     if kind != EXEC_MODE_DIRECT:
+        # 本机直连行（credential_id=0）在 queue_remote 下无 claim 方：
+        # 入队 = 永久 queued 黑洞（chat-task-blackhole-local-direct-2026-08.md）
+        # rid=0 同样拦截（runtime_credential_id(0)=None → (None or 0)==0）
+        from src.runtime.service import runtime_credential_id
+        if (runtime_credential_id(rid) or 0) == 0:
+            _reply = "⚠️ 未配置远端引擎，任务会话需先在 Agent 配置中绑定远端引擎"
+            add_message(conv_id, "agent", _reply)
+            await _push_reply_to_feishu(conv, user, _reply)
+            return StreamingResponse(
+                iter([f"data: {json.dumps({'type': 'done', 'text': _reply, 'conversation_id': conv_id})}\n\n"]),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache"},
+            )
         # M2 D5 入队 + 轮询：任务由远端 RuntimeAgent claim 执行，SSE 以终态结果返回
         import json as _json
         from src.runtime.service import enqueue_task, wait_task_terminal
