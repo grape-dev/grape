@@ -53,11 +53,18 @@
 - **1** → 自动绑定（沿用）；
 - **≥2** → **自动弹 `/repo` 卡片**（编号选择，替代纯文本列表）。
 
+### 3.4 绑定关系与换绑语义（重要）
+- **`im_chat_id` 不变**：= 发消息的飞书群 id，是"这个群"的身份，`/repo` 选仓库**不改变它**。
+- **`agent_session_id` 随选择变化**：`vod_conversations` 行的 `agent_session_id` = 所选仓库的 VOD Agent 会话 id（绑定关系 = `im_chat_id → agent_session_id → devops_agent_session.repo_key`）。
+- **换绑 bug（2026-08-17 发现）**：原 `_get_or_create_conversation` 对已存在 `im_chat_id` 的行**直接返回、不更新 `agent_session_id`** → 已绑定的群再 `/repo` 选别的仓库**不生效**（只能首次绑定）。
+- **修复**：`_handle_vod_selection` 在已存在会话时显式 `UPDATE vod_conversations SET agent_session_id=? WHERE im_chat_id=?`（真正换绑），不存在才 INSERT。
+- **⚠️ 换绑须同时清空 `runtime_session_id`**：否则新仓库 resume 旧仓库的 opencode 会话 → **上下文污染**。UPDATE 一并 `SET runtime_session_id=''`（首次绑定 INSERT 天然为空，无需处理）。
+
 ## 4. 关键变更点
 
 | 模块 | 变更 |
 |---|---|
-| `src/im/vod_handler_async.py` | ① 命令改 `reply_card`（/repo /status /clean /help）；② `/repo` 候选 = `_list_vod_repos(ctx.app_id)` + pending；③ 数字选择分发 `_handle_vod_selection`（绑定 vod_conversations）；④ 自动弹卡片逻辑 |
+| `src/im/vod_handler_async.py` | ① 命令改 `reply_card`（/repo /where /help）；② `/repo` 候选 = `_list_vod_repos(ctx.app_id)` + pending；③ 数字选择分发 `_handle_vod_selection`（**绑定/换绑 vod_conversations：已存在 UPDATE agent_session_id + runtime_session_id=''，不存在 INSERT**）；④ 自动弹卡片逻辑 |
 | `src/im/handler_async.py` | `_pending_selections`/`_candidate_card` 等**导出复用**（或提取共享模块）；无逻辑改动 |
 | 无 DB 变更 | vod_conversations / devops_agent_session 已存在 |
 
@@ -67,6 +74,7 @@
 2. **`/bind` 兼容**：保留手打路径，不影响旧群。
 3. **卡片≤2000 字符**：仓库多时分页（复用 `_PENDING_SELECT_PAGE_SIZE`=20）。
 4. **与 Chat 共用 pending 状态机**：VOD 与 Chat 是不同 bot，chat_id 不同，不会互相覆盖；但同 chat 若同时被 chat_bot 与 vod_bot 接入（罕见），pending 键冲突——可接受（新命令覆盖旧）。
+5. **换绑更新 agent_session_id**（§3.4）：已绑定群 `/repo` 重选仓库须 UPDATE `vod_conversations.agent_session_id`，否则换绑失效（2026-08-17 bug 修复）。
 
 ## 6. 测试用例设计
 
@@ -82,14 +90,16 @@
 | V08 | `/help` 卡片列命令 | — | 卡片含 `/repo /where /help` |
 | V09 | `/clean`/`/reset`/`/unbind` 不再响应 | — | 按普通消息处理（不触发清会话/解绑） |
 | V10 | 与 Chat pending 互不干扰 | chat 有 pending + vod 群选择 | 各自独立生效 |
+| V11 | 已绑定群 `/repo` 重选换绑 | 已绑 repo-a，再选 repo-b | `vod_conversations.agent_session_id` 更新为 repo-b 的 VOD 会话（im_chat_id 不变）**且 `runtime_session_id` 被清空** |
 
 ## 7. 实施步骤（每步独立可测）
 
 1. **复用 pending 状态机**：`vod_handler_async` 导入 handler_async 的 `_pending_selections/_set/_get/_clear/_candidate_card/_PENDING_SELECT_PAGE_SIZE`（或提取共享模块）。
 2. **`/repo` 卡片 + 编号绑定**：候选=`_list_vod_repos(ctx.app_id)`、pending、`_handle_vod_selection` 写 vod_conversations。
 3. **数字分发 + 自动弹卡片**：`process_vod_async` 纯数字先查 pending；无绑定多仓库自动弹 `/repo` 卡片。
-4. **`/where` `/help` 卡片化；移除 `/clean`/`/reset`/`/unbind`；`/bind` 标记弃用**。
-5. 测试 V01-V10 + 回归（vod_handler / feishu_handler / nav）→ 部署。
+4. **换绑修复**：`_handle_vod_selection` 已存在会话时 UPDATE `agent_session_id` **并清空 `runtime_session_id`**（§3.4）。
+5. **`/where` `/help` 卡片化；移除 `/clean`/`/reset`/`/unbind`；`/bind` 标记弃用**。
+6. 测试 V01-V11 + 回归（vod_handler / feishu_handler / nav）→ 部署。
 
 ## 8. 结论
 

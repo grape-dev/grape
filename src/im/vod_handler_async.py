@@ -152,7 +152,21 @@ async def _handle_vod_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: 
         if not agent_session or agent_session["im_app_id"] != ctx.app_id:
             await api.reply_card(ctx, msg_id, "**❌ 该仓库未配置当前 bot 的 VOD Agent**")
             return
-        _get_or_create_conversation(chat_id, agent_session["id"])
+        # 绑定/换绑 vod_conversations（vod-navigation-commands-design.md §3.4）：
+        # 已存在 → UPDATE agent_session_id + 清空 runtime_session_id（防旧仓库 opencode 上下文污染）；不存在 → INSERT
+        from src.repo_key import from_repo_key
+        with db_lock:
+            c = db.cursor()
+            existing = c.execute("SELECT id FROM vod_conversations WHERE im_chat_id=?", (chat_id,)).fetchone()
+            if existing:
+                c.execute(
+                    "UPDATE vod_conversations SET agent_session_id=?, runtime_session_id='' WHERE im_chat_id=?",
+                    (agent_session["id"], chat_id))
+            else:
+                c.execute(
+                    "INSERT INTO vod_conversations (agent_session_id, im_chat_id, im_channel_name) VALUES (?,?,?)",
+                    (agent_session["id"], chat_id, ""))
+            db.commit()
         _clear_pending_selection(chat_id)
         await api.reply_card(ctx, msg_id, f"**✅ 已绑定 `{from_repo_key(repo['repo_key'])}`**\n后续消息将进入该仓库的 VOD 会话。")
     except Exception as e:

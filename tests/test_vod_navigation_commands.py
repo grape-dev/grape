@@ -151,3 +151,24 @@ def test_v10_chat_vod_pending_independent():
     from src.im.handler_async import _get_pending_selection as _g
     assert _g("other_chat")["action"] == "chat"
     _clean()
+
+
+def test_v11_rebind_updates_session_and_clears_runtime():
+    """V11：已绑定群 /repo 重选仓库 → agent_session_id 更新 + runtime_session_id 清空（防上下文污染）"""
+    _seed(["gitcode:owner/vod-repo-a", "gitcode:owner/vod-repo-b"])
+    _run("/repo")
+    _run("1")   # 绑 repo-a
+    with db_lock:
+        c = db.cursor()
+        row = c.execute("SELECT agent_session_id FROM vod_conversations WHERE im_chat_id=?", (CHAT,)).fetchone()
+        assert row and "vod-repo-a" in row[0]
+        c.execute("UPDATE vod_conversations SET runtime_session_id='ses_old_repo_a' WHERE im_chat_id=?", (CHAT,))
+        db.commit()
+    _run("/repo")
+    api = _run("2")   # 换绑 repo-b
+    with db_lock:
+        row = c.execute("SELECT agent_session_id, runtime_session_id FROM vod_conversations WHERE im_chat_id=?", (CHAT,)).fetchone()
+    assert row and "vod-repo-b" in row[0]
+    assert row[1] == ""          # runtime_session_id 被清空
+    assert "已绑定" in _card(api)
+    _clean()

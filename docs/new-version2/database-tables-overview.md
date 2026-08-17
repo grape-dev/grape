@@ -453,7 +453,7 @@ agent_session_id TEXT NOT NULL,        -- → devops_agent_session.id
 im_provider TEXT DEFAULT 'feishu',
 im_chat_id TEXT NOT NULL,
 im_channel_name TEXT DEFAULT '',
-runtime_session_id TEXT DEFAULT '',    -- ★ 通用 runtime 会话（原 backend_session_id）
+runtime_session_id TEXT DEFAULT '',    -- ★ 通用 runtime 会话（原 backend_session_id）；⚠️ 换绑（/repo 换仓库）时必须一并清空，否则新仓库 resume 旧仓库 opencode 会话 → 上下文污染（vod-navigation-commands-design.md §3.4）
 status TEXT DEFAULT 'active',
 created_at TEXT DEFAULT (datetime('now')),
 last_active_at TEXT DEFAULT (datetime('now')),
