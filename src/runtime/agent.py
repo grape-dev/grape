@@ -470,6 +470,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     """
     active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
     active_tasks = set()      # task_id 去重（防止同 task 被重复 claim 并发执行）
+    hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
     last_heartbeat = 0.0
     heartbeat_fail_streak = 0
     HEARTBEAT_FAIL_THRESHOLD = 3
@@ -498,6 +499,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             if not task:
                 continue
             tid = task.get("id", "")
+            e = engine_by_rid.get(rid, "")  # 本任务引擎实例名（hermes 限并发判断用）
             # 并发槽 key 与服务端 claim 串行粒度一致（multi-issue-isolation-design.md §3.3）：
             # 有关联 Issue → 按 issue_session_id（跨 Issue 并行）；无（#0/旧任务）→ 回退 agent_session_id。
             # 修复：此前一律用 agent_session_id，导致不同 Issue 的任务在客户端被误判冲突拒收
@@ -517,10 +519,16 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             if len(active_sessions) >= max_concurrent:
                 continue
+            if e == "hermes" and hermes_active >= 1:
+                # hermes 引擎限并发 1（模型 API 分钟限流，双开实测 429 → 假完成，见 #53）
+                continue
             active_sessions.add(sid)
             active_tasks.add(tid)
+            if e == "hermes":
+                hermes_active += 1
 
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
+                nonlocal hermes_active
                 task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 600)
                 # 立即标记 running（不等引擎首个事件）：hermes -z 冷启动+模型响应
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
@@ -546,6 +554,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 finally:
                     active_sessions.discard(s)
                     active_tasks.discard(_tid)
+                    if e == "hermes":
+                        hermes_active -= 1
 
             asyncio.create_task(_wrap())
 
