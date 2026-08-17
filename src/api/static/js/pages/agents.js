@@ -313,3 +313,17 @@ function startVodOnboard() {
   if (!repo) { app.showToast('请先选择仓库'); return; }
   startFeishuOnboard('vod_bot', repo.fullName);
 }
+
+function refreshVodOnboard() {
+  // VOD 扫码 onboard 完成后刷新 VOD Agent 页的 App ID/Secret 字段（对齐 chat 页 loadSideConfig，
+  // 见 feishu-onboard 差异分析 2026-08-17）。agents.js 全局函数，由 chat.js closeOnboardModal 分发调用。
+  const repo = app.currentRepo();
+  if (!repo) return;
+  API.get('/agents/vod/' + repo.owner + '/' + repo.name).then(d => {
+    const im = d.im || {};
+    const appIdEl = document.getElementById('vodImAppId');
+    if (appIdEl) appIdEl.value = im.im_app_id || '';
+    const secretEl = document.getElementById('vodImSecret');
+    if (secretEl) secretEl.value = im.connected ? '********' : '';
+  }).catch(() => {});
+}

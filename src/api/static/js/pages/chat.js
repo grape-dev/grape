@@ -487,5 +487,12 @@ function closeOnboardModal(refresh) {
   if (_onboardTimer) { clearInterval(_onboardTimer); _onboardTimer = null; }
   const m = document.getElementById('onboardModal');
   if (m) m.remove();
-  if (refresh) loadSideConfig();
+  if (refresh) {
+    // VOD onboard → 刷新 VOD Agent 页的 App ID/Secret（agents.js）；chat_bot → 刷新 Chat 页配置
+    if (_onboardBotType === 'vod_bot' && typeof window.refreshVodOnboard === 'function') {
+      window.refreshVodOnboard();
+    } else {
+      loadSideConfig();
+    }
+  }
 }
