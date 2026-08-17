@@ -294,7 +294,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     engine_id = pick_engine(repo_key, "vod", fallback_runtime_id=agent_session.get("runtime_id") or 0) or 0
     if not engine_id:
         log.warning(f"[VOD agent|repo:{repo_key}] no available engine, skip")
-        return ""
+        return "⚠️ 无可用引擎（该仓库 VOD Agent 未配置本机直连或远端引擎），请先在 Agent 配置中设置引擎。"
     _be = engine_name(engine_id) or backend
     kind = runtime_execution_kind(engine_id)
     if kind != EXEC_MODE_DIRECT:
@@ -404,6 +404,12 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
 
         text = text.strip()
         log.info(f"[VOD:{ctx.name}] msg from {sender_open_id[:20]}: {text[:100]}")
+
+        # 即时反馈：进处理前先加 OK 反应（对齐 chat bot，避免 agent 执行期间无任何回应）
+        try:
+            await api.add_reaction(ctx, msg_id, "OK")
+        except Exception:
+            pass
 
         cmd_parts = text.split()
         cmd = cmd_parts[0].lower() if cmd_parts else ""
@@ -545,8 +551,14 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
 
         reply = await _execute_vod_agent(repo_key, agent_session, {"id": 0, "runtime_session_id": runtime_session_id}, evt)
 
-        if reply and reply != "SKIP":
+        if reply == "SKIP":
+            # agent 主动跳过（对齐 chat），不回
+            pass
+        elif reply:
             await api.reply_card(ctx, msg_id, reply[:2000], title="VOD Agent", template="green")
+        else:
+            # 空回复（无引擎/出错/未生成）→ 明确提示，避免静默无回应（对齐 chat）
+            await api.reply_card(ctx, msg_id, "⚠️ 处理完成但未生成回复，请稍后重试或换个说法。", title="VOD Agent", template="green")
 
     except Exception as e:
         log.error(f"[VOD:{ctx.name}] process error: {e}")

@@ -85,7 +85,8 @@ def test_v02_number_select_binds():
 def test_v03_single_repo_auto_bind():
     _seed(["gitcode:owner/vod-repo-a"])
     api = _run("你好")
-    assert "自动绑定" in _card(api)
+    texts = "".join(a[0][2] for a in api.reply_card.call_args_list)
+    assert "自动绑定" in texts
     with db_lock:
         row = db.cursor().execute("SELECT agent_session_id FROM vod_conversations WHERE im_chat_id=?", (CHAT,)).fetchone()
     assert row
@@ -171,4 +172,22 @@ def test_v11_rebind_updates_session_and_clears_runtime():
     assert row and "vod-repo-b" in row[0]
     assert row[1] == ""          # runtime_session_id 被清空
     assert "已绑定" in _card(api)
+    _clean()
+
+
+def test_v12_immediate_ok_reaction():
+    """V12：进处理前加 add_reaction('OK') 即时反馈"""
+    _seed(["gitcode:owner/vod-repo-a"])
+    api = _run("你好")
+    api.add_reaction.assert_called()
+    assert api.add_reaction.call_args[0][2] == "OK"
+    _clean()
+
+
+def test_v13_no_engine_explicit_message():
+    """V13：无引擎时给明确提示（非静默无回应）"""
+    _seed(["gitcode:owner/vod-repo-a"])
+    api = _run("你好")
+    texts = "".join(a[0][2] for a in api.reply_card.call_args_list)
+    assert "无可用引擎" in texts
     _clean()
