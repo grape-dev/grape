@@ -429,7 +429,11 @@ def claim(runtime_id) -> dict | None:
             # 导致 dispatched 任务永久卡死、busy_slots 泄漏。这里在每次 claim 前
             # 将超时(120s)未 start 的任务回池重排；attempts>=3 直接置 failed。
             try:
-                _stale = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+                # 回收窗口 300s：hermes -z 冷启动+模型响应常 >120s 才产出首事件，
+                # 120s 会误杀执行中长任务（回收→重跑→attempts 累加 3 次 failed）。
+                # worker 端 claim 后 task_start 置 running 可彻底规避；本窗口作为
+                # 不依赖 worker 端的兜底（真死任务 5 分钟内恢复重排）。
+                _stale = (datetime.now(timezone.utc) - timedelta(seconds=300)).isoformat()
                 c.execute(
                     "SELECT id, runtime_id, event_seq FROM agent_tasks "
                     "WHERE status='dispatched' AND started_at < ? AND started_at IS NOT NULL",
@@ -477,7 +481,9 @@ def claim(runtime_id) -> dict | None:
             except Exception as _e:
                 log.warning(f"recover stale dispatched failed: {_e}")
 
-            # 确定路由：仅按 runtime_id 拉本引擎队列（claim-based 引擎池已弃用，见 engine-selection-design.md v2）
+            # 确定路由：① 定向任务（runtime_id=?）② 池任务（runtime_id=0 + pool_agent_type，
+            # 该 agent_type 的引擎集合（devops_agent_runtime_binding）含本引擎即可领；
+            # 回收逻辑会把 dispatched 超时任务归零转池任务，claim 必须兼容，否则永久死任务）
             c.execute("""
                 SELECT id FROM agent_tasks
                 WHERE runtime_id=? AND status='queued'
@@ -493,6 +499,26 @@ def claim(runtime_id) -> dict | None:
                 ORDER BY created_at ASC LIMIT 1
             """, (runtime_id,))
             row = c.fetchone()
+            if not row:
+                c.execute("""
+                    SELECT id FROM agent_tasks
+                    WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued'
+                      AND pool_agent_type IN (
+                        SELECT b.agent_type FROM devops_agent_runtime_binding b
+                        WHERE b.runtime_id=? AND b.enabled=1
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM agent_tasks a2
+                        WHERE a2.status IN ('dispatched','running')
+                          AND (
+                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                            OR
+                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                          )
+                      )
+                    ORDER BY created_at ASC LIMIT 1
+                """, (runtime_id,))
+                row = c.fetchone()
             if not row:
                 db.commit()
                 return None
