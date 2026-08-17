@@ -188,7 +188,7 @@ def test_repo_pagination_page2():
     _seed()
     with db_lock:
         c = db.cursor()
-        for i in range(2, 14):   # +12 仓库 → 共 14 个，2 页
+        for i in range(2, 24):   # +22 仓库 → 共 24 个，2 页（每页 20）
             c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (1, ?, 'navuser', ?, 0, 1)",
                       (f"gitcode:navuser/repo-{i}", f"repo-{i}"))
             c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) VALUES (?, 'navuser', ?, ?)",
@@ -197,7 +197,7 @@ def test_repo_pagination_page2():
     api = _run_cmd("/repo 2")
     text = _card_text(api)
     assert "第 2/2 页" in text
-    assert "repo-10" not in text      # 第 1 页首个不在第 2 页
+    assert "repo-2" not in text      # 第 1 页首个不在第 2 页
     _clean()
 
 

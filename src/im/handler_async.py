@@ -27,7 +27,7 @@ _pending_binds: dict[str, dict] = {}
 # 卡片命令编号选择 pending 态（feishu-repo-navigation-commands-design.md §3.2）：
 #   chat_id -> {action: repo|chat|task, repo_key, page, page_size, items, expires}
 _PENDING_SELECT_TTL = 120.0
-_PENDING_SELECT_PAGE_SIZE = 10
+_PENDING_SELECT_PAGE_SIZE = 20
 _pending_selections: dict[str, dict] = {}
 
 
