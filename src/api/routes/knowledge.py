@@ -11,6 +11,7 @@ import os, re
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Query
 from src.api.deps import get_current_user
 from src.config import log
+from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
@@ -139,7 +140,7 @@ def _project_knowledge_entries(repo_key: str) -> list[dict]:
         out.append({
             "scope": r[0], "agent_type": r[1] or "", "issue_num": r[2] or 0,
             "file_path": r[3] or "", "status": r[4] or "", "source_seq": r[5] or 0,
-            "created_by": r[6] or "", "created_at": r[7] or "", "content": content,
+            "created_by": r[6] or "", "created_at": normalize_event_time(r[7] or ""), "content": content,
         })
     return out
 
@@ -171,7 +172,7 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
         groups.setdefault(at, []).append({
             "scope": r[0], "agent_type": at, "issue_num": r[2] or 0,
             "file_path": r[3] or "", "status": r[4] or "", "source_seq": r[5] or 0,
-            "created_by": r[6] or "", "created_at": r[7] or "", "content": content,
+            "created_by": r[6] or "", "created_at": normalize_event_time(r[7] or ""), "content": content,
         })
     return groups
 

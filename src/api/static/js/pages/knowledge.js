@@ -99,7 +99,7 @@ function _renderProjectTab(d) {
           <span class="tg tg-d" style="margin-left:auto;font-size:9px">project</span>
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:6px">${preview ? escapeHtml(preview).substring(0,120) : '(空)'}</div>
-        <div style="font-size:10px;color:var(--t3)">${k.created_by || ''} · ${(k.created_at || '').replace('T',' ').substring(0,16)} · seq ${k.source_seq || 0}</div>
+        <div style="font-size:10px;color:var(--t3)">${k.created_by || ''} · ${fmtLocalTime(k.created_at).substring(0,16)} · seq ${k.source_seq || 0}</div>
         <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.file_path}')">View</button>
       </div>`;
     });
@@ -165,7 +165,7 @@ function _renderAgentTab(d) {
           <span class="tg tg-d" style="margin-left:auto;font-size:9px">${k.scope}</span>
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4">${preview ? escapeHtml(preview).substring(0,140) : '(空)'}</div>
-        <div style="font-size:10px;color:var(--t3);margin-top:4px">seq ${k.source_seq || 0} · ${(k.created_at || '').replace('T',' ').substring(0,16)}</div>
+        <div style="font-size:10px;color:var(--t3);margin-top:4px">seq ${k.source_seq || 0} · ${fmtLocalTime(k.created_at).substring(0,16)}</div>
         <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.file_path}')">View</button>
       </div>`;
     });

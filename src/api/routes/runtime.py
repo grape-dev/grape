@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user
 from src.config import log
+from src.api.time_utils import normalize_event_time
 from src.session_manager import db, db_lock
 from src.runtime import service
 
@@ -391,7 +392,7 @@ async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_u
         return {"tasks": [
             {"id": r[0], "repo_key": r[1], "agent_type": r[2], "skill": r[3],
              "status": r[4], "exit_code": r[5], "result_text": (r[6] or "")[:200],
-             "created_at": r[7], "started_at": r[8], "completed_at": r[9]}
+             "created_at": normalize_event_time(r[7]), "started_at": normalize_event_time(r[8]), "completed_at": normalize_event_time(r[9])}
             for r in c.fetchall()
         ]}
 
@@ -422,7 +423,7 @@ async def list_credential_tasks(cid: int, user: dict = Depends(get_current_user)
         return {"tasks": [
             {"id": r[0], "repo_key": r[1], "agent_type": r[2], "skill": r[3],
              "status": r[4], "exit_code": r[5], "result_text": (r[6] or "")[:200],
-             "created_at": r[7], "started_at": r[8], "completed_at": r[9]}
+             "created_at": normalize_event_time(r[7]), "started_at": normalize_event_time(r[8]), "completed_at": normalize_event_time(r[9])}
             for r in c.fetchall()
         ]}
 

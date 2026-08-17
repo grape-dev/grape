@@ -3,6 +3,7 @@ import uuid, json
 from datetime import datetime
 from src.session_manager import db, db_lock
 from src.config import log
+from src.api.time_utils import normalize_event_time
 
 
 def get_agent_type_enable(agent_type: str) -> int:
@@ -246,7 +247,7 @@ def list_agent_sessions(repo_key: str) -> list[dict]:
                         backend_name = brow[0]
                 result.append({"id": r[0], "agent_type": r[1], "backend": backend_name,
                                "runtime_session_id": r[3] or "", "status": r[4],
-                               "last_active_at": r[5] or "",
+                               "last_active_at": normalize_event_time(r[5] or ""),
                                "enable": bool(r[6]) if r[6] is not None else True})
             return result
         except Exception:
@@ -429,8 +430,8 @@ def list_issue_sessions(repo_key: str, agent_type: str = "") -> list[dict]:
         except Exception:
             return []
         return [{"id": r[0], "repo_key": r[1], "agent_type": r[2], "issue_id": r[3],
-                 "runtime_session_id": r[4] or "", "status": r[5], "last_active_at": r[6],
-                 "created_at": r[7]} for r in rows]
+                 "runtime_session_id": r[4] or "", "status": r[5], "last_active_at": normalize_event_time(r[6]),
+                 "created_at": normalize_event_time(r[7])} for r in rows]
 
 
 def remove_issue_sessions(repo_key: str):

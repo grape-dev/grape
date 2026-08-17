@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import get_current_user, get_bot_token
 from src.config import log
+from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -122,7 +123,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
                 )
                 vod_conversations = [
                     {"chat_id": r[0], "chat_name": r[1] or "", "runtime_session_id": r[2] or "",
-                     "status": r[3], "last_active_at": r[4] or ""}
+                     "status": r[3], "last_active_at": normalize_event_time(r[4] or "")}
                     for r in c.fetchall()
                 ]
             except Exception:
@@ -152,10 +153,10 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "title": r[2] or r[1], "actor": r[3] or "",
                  "summary": r[4] or r[2] or r[1],
-                 "status": r[5], "created_at": r[6],
+                 "status": r[5], "created_at": normalize_event_time(r[6]),
                  "backend": r[7] or "", "skill": r[8] or "",
                  "exit_code": r[9], "duration": r[10],
-                 "started_at": r[11] or "", "completed_at": r[12] or "",
+                 "started_at": normalize_event_time(r[11] or ""), "completed_at": normalize_event_time(r[12] or ""),
                  "issue_id": r[13] or ""}
                 for r in c.fetchall()
             ]

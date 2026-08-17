@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import get_current_user, get_user_token
 from src.config import log
+from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -486,7 +487,7 @@ async def list_runtime_credentials(user: dict = Depends(get_current_user)):
         c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at FROM runtime_credentials ORDER BY id DESC")
         return {"credentials": [
             {"id": r[0], "name": r[1], "device_name": r[2] or "", "scope": r[3],
-             "owner_id": r[4], "owner": r[5] or "", "status": r[6], "last_seen_at": r[7], "created_at": r[8]}
+             "owner_id": r[4], "owner": r[5] or "", "status": r[6], "last_seen_at": normalize_event_time(r[7]), "created_at": normalize_event_time(r[8])}
             for r in c.fetchall()
         ]}
 

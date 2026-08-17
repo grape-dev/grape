@@ -1,12 +1,21 @@
 var _AGENT_TYPES = {};  // 全局 Agent 类型缓存（由 app.js 填充）
 
-// 全局工具：UTC 时间字符串（SQLite "YYYY-MM-DD HH:MM:SS" 或 ISO）转本地（+8）展示
+// 全局工具：UTC ISO 时间字符串（后端 normalize_event_time 归一化，带 +00:00 偏移）转本地展示。
+// 支持 'YYYY-MM-DD HH:MM:SS'（视为 UTC，SQLite 语义兜底）、ISO 毫秒 + 时区偏移（±HH:MM / Z）。
 function fmtLocalTime(utcStr) {
   if (!utcStr) return '';
   let s = String(utcStr).replace('T', ' ').replace('Z', '');
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ ](\d{2}):(\d{2}):(\d{2})/);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?([+-]\d{2}:\d{2})?/);
   if (!m) return utcStr;
-  const d = new Date(Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]));
+  let ms = Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]);
+  if (m[7]) {
+    // 带偏移：把「本地假想时刻」还原成绝对 UTC 时间点（+08:00 减 8h，-05:00 加 5h）
+    const sign = m[7][0] === '-' ? 1 : -1;
+    const oh = parseInt(m[7].slice(1, 3), 10);
+    const om = parseInt(m[7].slice(4, 6), 10);
+    ms += sign * (oh * 3600 + om * 60) * 1000;
+  }
+  const d = new Date(ms);
   const pad = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }

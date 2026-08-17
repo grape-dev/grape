@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends
 from src.user import db as user_db
 from src.api.deps import get_current_user
+from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -23,7 +24,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
             )
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
-                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": r[6]}
+                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
                 for r in c.fetchall()
             ]
         except Exception:
@@ -46,7 +47,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
                 if _backend and r[5] not in ("", "active"):
                     _backend = ""
                 agent_sessions.append({
-                    "agent_type": r[0], "backend": _backend, "status": r[2], "last_active_at": r[3],
+                    "agent_type": r[0], "backend": _backend, "status": r[2], "last_active_at": normalize_event_time(r[3]),
                     "enable": bool(r[4]) if r[4] is not None else True})
         except Exception:
             pass
@@ -61,7 +62,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
                 )
                 agent_recent_events[atype] = [
                     {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
-                     "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": r[6]}
+                     "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
                     for r in c.fetchall()
                 ]
         except Exception:

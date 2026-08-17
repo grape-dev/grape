@@ -1,6 +1,7 @@
 """Pipeline 路由：Issue 工作流聚合展示"""
 from fastapi import APIRouter, Depends
 from src.api.deps import get_current_user
+from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -177,7 +178,7 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
 
     events = [
         {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
-         "status": r[6], "created_at": r[7], "actor": r[8] or "", "payload": r[9] or ""}
+         "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": r[9] or ""}
         for r in rows
     ]
 

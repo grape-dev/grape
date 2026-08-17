@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user
 from src.config import log
+from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
@@ -52,14 +53,14 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         "summary": row[8] or row[6] or row[3],
         "payload": payload,
         "status": row[10],
-        "created_at": row[11],
+        "created_at": normalize_event_time(row[11]),
         "runtime": row[12] or "",
         "skill": row[13] or "",
         "exit_code": row[14],
         "duration": row[15],
         "agent_logs": agent_logs,
-        "started_at": row[17] or "",
-        "completed_at": row[18] or "",
+        "started_at": normalize_event_time(row[17] or ""),
+        "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
     # M4：附 event.json archive 对应 pipeline 段（结构化产出展示，见 §11.4）
@@ -342,7 +343,7 @@ def _list_thread(anchor_seq: int, limit: int = 50) -> list:
             rows = c.fetchall()
         except Exception:
             rows = []
-    return [{"id": r[0], "role": r[1], "content": r[2], "created_by": r[3] or "", "created_at": r[4]} for r in rows]
+    return [{"id": r[0], "role": r[1], "content": r[2], "created_by": r[3] or "", "created_at": normalize_event_time(r[4])} for r in rows]
 
 
 def _require_event_bot_token(request: Request, repo_key: str):
@@ -709,7 +710,7 @@ async def list_events(owner: str, repo: str,
             )
             events = [
                 {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
-                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": r[6]}
+                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
                 for r in c.fetchall()
             ]
         except Exception:

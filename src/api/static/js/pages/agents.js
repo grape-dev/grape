@@ -157,7 +157,7 @@ function renderAgent(name, data) {
   const events = data.recent_events || [];
   const evtHtml = events.length > 0 ? events.map(ev =>
     `<div class="ai" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
-      <div class="t">${fmtLocalTime(ev.created_at).substring(11,16) || '--:--'}</div>
+      <div class="t">${fmtLocalTime(ev.created_at).substring(5,16) || '--:--'}</div>
       <div class="ac">${ev.summary || ev.title || ev.event_type}
         ${ev.actor ? ` <span class="ts t2">@${ev.actor}</span>` : ''}
         <span class="ts t3">Seq #${ev.seq || '?'}</span>

@@ -233,7 +233,7 @@ function _tlIcon(type) {
 
 function _tlLine(payload) {
   const type = payload.type || 'log';
-  const time = payload.created_at ? `<span style="color:var(--t3);margin-right:6px">${_tlEsc(payload.created_at.slice(11, 19))}</span>` : '';
+  const time = payload.created_at ? `<span style="color:var(--t3);margin-right:6px">${fmtLocalTime(payload.created_at).substring(11, 19)}</span>` : '';
   if (type === 'tool_use') {
     let inputHtml = '';
     try {
