@@ -125,7 +125,14 @@ def _run(cmd: list, cwd: str = None, timeout: int = 300) -> tuple[int, str, str]
 def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
     """确保分析副本为非 bare 工作目录（从 bare mirror checkout 最新 main/master）。"""
     base = _repo_base_dir(repo_key)
+    # bare mirror 不存在 → 主动建立（修复仅 VOD/Issue 仓库永不建 codebase 导致 project-info 永远 degraded 的缺陷）
     if not os.path.isdir(base):
+        try:
+            from src.runtime.repogit import ensure_repo_base
+            base = ensure_repo_base(repo_key, token or "")
+        except Exception as e:
+            log.warning(f"project-info ensure_repo_base failed {repo_key}: {e}")
+    if not base or not os.path.isdir(base):
         return None
     work = _analysis_dir(repo_key)
     try:

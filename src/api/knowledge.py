@@ -118,4 +118,29 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0) -> 
                 files[os.path.relpath(p, WORKSPACE_DIR)] = f.read()
         except Exception:
             continue
+    # 成员上传文档（project-info/member/**）一并交付远端 worker（见 knowledge-board-design.md §2.5）
+    for rel, content in member_files(repo_key).items():
+        files.setdefault(rel, content)
+    return files
+
+
+def member_files(repo_key: str) -> dict:
+    """成员上传文档快照：{rel_path: content}（project-info/member/ 下 md/txt/json）。"""
+    owner, rname = _owner_repo(repo_key)
+    base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "member")
+    files = {}
+    if not os.path.isdir(base):
+        return files
+    for root, _dirs, names in os.walk(base):
+        for n in sorted(names):
+            ext = os.path.splitext(n)[1].lower()
+            if ext not in (".md", ".txt", ".json"):
+                continue
+            p = os.path.join(root, n)
+            try:
+                rel = os.path.relpath(p, WORKSPACE_DIR).replace("\\", "/")
+                with open(p, encoding="utf-8") as f:
+                    files[rel] = f.read()
+            except Exception:
+                continue
     return files

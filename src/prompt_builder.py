@@ -552,19 +552,33 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
 # ====== Event 对话（event-conversation-design.md）======
 
 def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int = 0) -> str:
-    """共享知识段落：project + issue + issue_agent 三级 accepted 知识合并注入。"""
+    """共享知识段落：project + issue + issue_agent 三级 accepted 知识 + 成员上传文档合并注入。"""
+    lines = ["### 用户反馈沉淀的共享知识（仅 accepted）"]
+    found = False
     try:
         from src.api.knowledge import read_knowledge
         k = read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num)
     except Exception:
         k = {}
-    if not k:
-        return ""
-    lines = ["### 用户反馈沉淀的共享知识（仅 accepted）"]
     for scope in ("project", "issue", "issue_agent"):
         content = k.get(scope)
         if content:
+            found = True
             lines.append(f"[{scope} 级] {content}")
+    # 成员上传文档摘要（knowledge-board-design.md §2.5：并入对话类 Agent 上下文）
+    try:
+        from src.api.knowledge import member_files
+        mf = member_files(repo_key)
+        if mf:
+            found = True
+            lines.append("[member 级] 项目成员上传文档：")
+            for rel in sorted(mf):
+                body = mf[rel].strip()
+                lines.append(f"- {rel.split('/')[-1]}: {body[:200]}{'…' if len(body) > 200 else ''}")
+    except Exception:
+        pass
+    if not found:
+        return ""
     lines.append("后续任务应遵循以上知识，除非用户当前明确推翻。")
     return "\n".join(lines)
 

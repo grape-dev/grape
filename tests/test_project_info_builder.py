@@ -53,6 +53,48 @@ class TestBuildProjectInfo:
         assert r["degraded"] is True
         assert r["ok"] is False
 
+    def test_analysis_worktree_auto_ensure_repo_base(self, _tmp_workspace, monkeypatch):
+        """bare mirror 不存在时自动调用 ensure_repo_base 建立镜像（knowledge-board-design.md §5.2 修复）。
+
+        仅 VOD/Issue 的仓库无 codebase 时，builder 应主动建镜像而非直接 degraded。
+        走真实 _ensure_analysis_worktree（不 mock），验证 ensure_repo_base 被调用。
+        """
+        calls = {"n": 0}
+        monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
+
+        def _fake_ensure_repo_base(repo_key, token=""):
+            calls["n"] += 1
+            base = os.path.join(str(_tmp_workspace), "org", "test", "codebase")
+            os.makedirs(base, exist_ok=True)
+            return base
+
+        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        # worktree add 必然失败（临时目录不是真实 git 仓库）→ 返回 None → degraded，但 ensure_repo_base 已被调用
+        from src.project_info.builder import build_project_info
+        r = build_project_info("gitcode:org/test")
+        assert calls["n"] == 1
+        assert r["degraded"] is True
+
+    def test_ensure_repo_base_when_missing_then_generates(self, _tmp_workspace, monkeypatch):
+        """无 codebase → ensure_repo_base 建立后 → 正常生成（degraded=false）。"""
+        monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
+
+        def _fake_ensure_repo_base(repo_key, token=""):
+            base = os.path.join(str(_tmp_workspace), "org", "test", "codebase")
+            os.makedirs(base, exist_ok=True)
+            return base
+
+        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree",
+                            lambda repo_key, token="": os.path.join(str(_tmp_workspace), "org", "test", "codebase"))
+        monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: f"explore:{q}")
+        monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "file-tree")
+        from src.project_info.builder import build_project_info
+        r = build_project_info("gitcode:org/test")
+        assert r["degraded"] is False
+        pi = os.path.join(str(_tmp_workspace), "org", "test", "project-info")
+        assert os.path.isfile(os.path.join(pi, "project-graph.md"))
+
 
 class TestShouldRefresh:
     def test_missing_files_refresh(self, _tmp_workspace):
