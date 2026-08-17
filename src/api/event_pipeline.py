@@ -612,13 +612,9 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
         return
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名。
-    # pool 模式（runtime_id=0，任务由池内在线引擎领取）不兜底 "opencode"——
-    # 否则事件列表/Event Detail 误导显示 opencode（实际可能 hermes，见 #44）。
-    # 显示为 pool:<agent_type>，任务被 claim 后由 claim 侧回填真实引擎实例名。
-    if pool_mode:
-        inst_name = f"pool:{agent_type}"
-    else:
-        inst_name = runtime_instance_name(runtime_id) or backend or ""
+    # 注意：engine_select v2 派发已选定具体引擎（runtime_id>0），无 pool_mode 路径；
+    # 历史 pool 模式（runtime_id=0 + pool_agent_type）由 service.claim 兼容处理。
+    inst_name = runtime_instance_name(runtime_id) or backend or ""
     # 2) event.json 骨架（#0 跳过，见 event_archive._extract_num）
     _evt_copy = dict(evt)
     _evt_copy["issue_id"] = issue_id
