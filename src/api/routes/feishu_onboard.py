@@ -215,10 +215,12 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
     """后台运行 aregister_app 全流程。"""
     try:
         import lark_oapi as lark
+        # 按 bot_type 区分飞书 App 使用名：chat_bot=个人助手；vod_bot=VOD 助手
+        app_name = "Grape VOD助手" if bot_type == "vod_bot" else "Grape个人助手"
         result = await lark.aregister_app(
             on_qr_code=lambda info: _on_qr(task_id, info),
             addons=_ADDONS,
-            app_preset={"name": "Grape DevOps Bot", "desc": "由 Grape DevOps 平台自动创建并绑定"},
+            app_preset={"name": app_name, "desc": "由 Grape DevOps 平台自动创建并绑定"},
         )
         app_id = result.get("client_id", "")
         app_secret = result.get("client_secret", "")
