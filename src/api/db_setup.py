@@ -662,6 +662,7 @@ def init_database():
     _seed_from_json()
     _align_agent_enable()
     _cleanup_stale_meta()
+    _cleanup_chat_shared_worker_runtime()
     # engine-selection-design.md §4.4/§12：存量会话 runtime_id>0 → 回填绑定集合（单成员，幂等）
     try:
         from src.runtime.engine_select import backfill_existing_bindings
@@ -683,6 +684,33 @@ def _cleanup_stale_meta():
         log.info("Cleaned stale meta key: ws_feishu_app_id")
     except Exception as e:
         log.warning(f"Cleanup stale meta ws_feishu_app_id failed: {e}")
+
+
+def _cleanup_chat_shared_worker_runtime():
+    """把 chat 配置中指向共享全局 worker（scope='global' 且 credential_id>0）的 runtime_id
+    回落为本机直连（同名 credential_id=0），修复 backend 名解析被共享 worker 劫持
+    （chat-agent-backend-resolution-fix.md 方案 C）。幂等，启动时执行。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute("""
+                SELECT c.id, c.runtime_id, ar.name
+                FROM chat_agent_session c JOIN agent_runtimes ar ON ar.id = c.runtime_id
+                WHERE c.repo_key='' AND c.runtime_id>0 AND ar.scope='global' AND ar.credential_id>0
+            """).fetchall()
+            changed = 0
+            for cid, _rid, name in rows:
+                local = c.execute(
+                    "SELECT id FROM agent_runtimes WHERE lower(name)=? AND credential_id=0 AND installed=1 ORDER BY id LIMIT 1",
+                    ((name or "").lower(),)).fetchone()
+                new_rid = local[0] if local else 0
+                c.execute("UPDATE chat_agent_session SET runtime_id=? WHERE id=?", (new_rid, cid))
+                changed += 1
+            if changed:
+                db.commit()
+                log.info(f"chat config worker->local direct: {changed} rows")
+    except Exception as e:
+        log.warning(f"cleanup chat shared-worker runtime failed: {e}")
 
 
 def _align_agent_enable():

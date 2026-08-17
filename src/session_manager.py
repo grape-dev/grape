@@ -612,8 +612,14 @@ def get_chat_config(user_id: int) -> dict:
         c.execute("SELECT runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (user_id,))
         row = c.fetchone()
         if not row:
-            # 无配置：本机直连兜底，无则空（不回落 opencode 字符串）
-            return _chat_config_with_local_backend("", 0, "", 0, "", "", "", "")
+            # 无配置：本机直连兜底 + 幂等物化默认 runtime_id（chat-agent-backend-resolution-fix.md §3.1）
+            cfg = _chat_config_with_local_backend("", 0, "", 0, "", "", "", "")
+            if cfg.get("runtime_id"):
+                try:
+                    _write_chat_config_row(user_id, runtime_id=cfg["runtime_id"])
+                except Exception as e:
+                    log.warning(f"get_chat_config materialize default failed: {e}")
+            return cfg
         backend_name = ""
         if row[0]:
             c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
@@ -650,32 +656,60 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
             "im_app_id": im_app_id, "im_app_secret": im_app_secret, "im_provider": im_provider, "updated_at": updated_at}
 
 
-def set_chat_config(user_id: int, **kwargs):
-    """写入用户全局 Chat 配置（合并进 chat_agent_session，repo_key=''）"""
-    allowed = {"backend", "skill", "skill_id", "im_app_id", "im_app_secret", "im_provider"}
-    data = get_chat_config(user_id)
-    for k, v in kwargs.items():
-        if k in allowed and v is not None:
-            data[k] = v
-    # backend → runtime_id：优先按唯一引擎名（engine name）解析；Chat 仅个人引擎（见 runtime-admin-two-view-design §5.1）
-    runtime_id = 0
-    if data.get("backend"):
-        from src.user.db import ensure_default_backend, get_runtime_id_by_name
-        from src.runtime.instances import resolve_instance_id, scope_of_runtime
-        _rid = resolve_instance_id(data["backend"], scope="user")
-        if _rid is not None and scope_of_runtime(_rid) == "user":
-            runtime_id = _rid
-        else:
-            runtime_id = get_runtime_id_by_name(data["backend"]) or ensure_default_backend(data["backend"]) or 0
-    # skill name → skill_id（若未显式传 skill_id）
-    if data.get("skill") and not data.get("skill_id"):
-        from src.user.db import resolve_skill_id
-        data["skill_id"] = resolve_skill_id(data["skill"])
+def _resolve_chat_runtime_id(backend: str) -> int:
+    """Chat backend → runtime_id（chat-agent-backend-resolution-fix.md §方案A）。
+
+    实例名（含 `-` 后缀）→ scope=user 个人引擎；裸引擎名 → 优先本机直连（credential_id=0）；
+    兜底按名/默认。修复：裸名 'opencode' 被解析成同名的共享全局 worker。
+    """
+    if not backend:
+        return 0
+    from src.user.db import ensure_default_backend, get_runtime_id_by_name, get_local_direct_runtime_id
+    from src.runtime.instances import resolve_instance_id, scope_of_runtime
+    _rid = resolve_instance_id(backend, scope="user")
+    if _rid is not None and scope_of_runtime(_rid) == "user":
+        return _rid
+    if "-" not in backend:
+        _local = get_local_direct_runtime_id(backend)
+        if _local:
+            return _local
+    return get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
+
+
+def _write_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "", skill_id: int = 0,
+                           im_app_id: str = "", im_app_secret: str = "", im_provider: str = ""):
     sid = f"sess-cfg-{user_id}"
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
-            (sid, user_id, "", runtime_id, data["skill"], data.get("skill_id", 0), data["im_app_id"], data["im_app_secret"], data["im_provider"])
+            (sid, user_id, "", runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider)
         )
         db.commit()
+
+
+def set_chat_config(user_id: int, **kwargs):
+    """写入用户全局 Chat 配置（合并进 chat_agent_session，repo_key=''）。
+
+    runtime_id 优先级：显式传入（前端带 id，方案 B）> 由 backend 名解析（方案 A）。
+    """
+    allowed = {"backend", "runtime_id", "skill", "skill_id", "im_app_id", "im_app_secret", "im_provider"}
+    data = get_chat_config(user_id)
+    for k, v in kwargs.items():
+        if k in allowed and v is not None:
+            data[k] = v
+    explicit_rid = kwargs.get("runtime_id")
+    if explicit_rid:
+        try:
+            runtime_id = int(explicit_rid)
+        except (TypeError, ValueError):
+            runtime_id = 0
+    else:
+        runtime_id = _resolve_chat_runtime_id(data.get("backend") or "")
+    # skill name → skill_id（若未显式传 skill_id）
+    if data.get("skill") and not data.get("skill_id"):
+        from src.user.db import resolve_skill_id
+        data["skill_id"] = resolve_skill_id(data["skill"])
+    _write_chat_config_row(user_id, runtime_id=runtime_id, skill=data["skill"],
+                           skill_id=data.get("skill_id", 0), im_app_id=data["im_app_id"],
+                           im_app_secret=data["im_app_secret"], im_provider=data["im_provider"])
