@@ -167,11 +167,13 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
     if cmd == "/repo":
         if not uid:
             return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
-        from src.user.db import get_user_repos
+        from src.user.db import get_managed_repos
         from src.repo_key import from_repo_key
-        repos = get_user_repos(uid)
+        # 仅列该用户名下已托管仓库（未托管不显示，避免绑定后无 webhook/agent 而全错，
+        # feishu-repo-navigation-commands-design.md §1.3）
+        repos = get_managed_repos(uid)
         if not repos:
-            return "📋 你没有已同步的仓库。"
+            return "📋 你名下还没有已托管的仓库。"
         bound = _current_bound_repo(chat_id, account, db)
         page = max(1, int(parts[1])) if len(parts) >= 2 and parts[1].isdigit() else 1
         total_pages = max(1, -(-len(repos) // _PENDING_SELECT_PAGE_SIZE))
@@ -530,17 +532,17 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
             uid = get_user_id_by_app_id(account) or 0
             try:
                 if uid:
-                    from src.user.db import get_user_repos
-                    repos = get_user_repos(uid)
+                    from src.user.db import get_managed_repos
+                    repos = get_managed_repos(uid)
                     if repos:
-                        reply_parts.append("你已加入以下仓库，请选择绑定的仓库：")
+                        reply_parts.append("你已加入以下已托管仓库，请选择绑定的仓库：")
                         for i, r in enumerate(repos, 1):
                             reply_parts.append(f"  {i}. {r['full_name']}")
                         reply_parts.append("")
                         reply_parts.append("发送 `/repo` 以卡片形式选择并绑定仓库")
                     else:
-                        reply_parts.append("你可能还没有加入任何仓库。")
-                        reply_parts.append("请先在网页端加入仓库，然后发送 `/repo` 选择绑定。")
+                        reply_parts.append("你名下还没有已托管的仓库。")
+                        reply_parts.append("请先在网页端托管仓库，然后发送 `/repo` 选择绑定。")
                 else:
                     c = db.cursor()
                     c.execute("SELECT DISTINCT repo_key, repository, source FROM chat_agent_session ORDER BY last_active_at DESC LIMIT 10")
