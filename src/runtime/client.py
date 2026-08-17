@@ -135,6 +135,14 @@ class RuntimeClient:
         await self._request("POST", f"/api/runtime/tasks/{task_id}/fail",
                             {"error": error}, retries=4)
 
+    async def requeue(self, task_id: str):
+        """回滚 dispatched/running 任务为 queued（客户端 claim 冲突跳过时调用）。
+
+        见 seq#622/#667 教训：worker 端因并发槽冲突 skip 任务后，若服务端任务仍停留
+        dispatched 将永久悬空（不执行也不重新排队）；须调本接口回滚。
+        """
+        await self._request("POST", f"/api/runtime/tasks/{task_id}/requeue", {}, retries=4)
+
     async def recover_orphans(self, runtime_id: int):
         await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/recover-orphans", {}, retries=2)
 
