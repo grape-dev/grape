@@ -195,7 +195,7 @@ class TestMultiInstanceRegister:
         assert {r[2] for r in rows} == {"/a/opencode", "/b/opencode"}, "互不覆盖 cli_path"
 
     def test_revoked_old_credential_new_row(self, client):
-        """凭据 A revoke 后新凭据 C 注册同名 → 新行出现，旧行置 offline"""
+        """凭据 A revoke（删除）后新凭据 C 注册同名 → 只有新行（旧行已随凭据删除）"""
         from src.api.deps import get_current_user
         app = __import__("src.api.main", fromlist=["app"]).app
         app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "admin"}
@@ -206,7 +206,7 @@ class TestMultiInstanceRegister:
         old_rid = r.json()["runtimes"][0]["id"]
         with db_lock:
             old_cid = db.cursor().execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (old_rid,)).fetchone()[0]
-        # API revoke → 级联旧行 offline
+        # API revoke → 删除凭据行 + 级联删旧 runtime 行
         assert c.post(f"/api/settings/runtime-credentials/{old_cid}/revoke").status_code == 200
         tB = _make_token("new")
         r2 = client.post("/api/runtime/register", json={"runtimes": [{"name": "opencode", "version": "v-new"}]},
@@ -217,10 +217,8 @@ class TestMultiInstanceRegister:
         with db_lock:
             rows = db.cursor().execute(
                 "SELECT id, credential_id, version, status FROM agent_runtimes WHERE name='opencode' AND credential_id>0 ORDER BY id").fetchall()
-        assert len(rows) == 2, f"旧行保留 + 新行共存: {rows}"
-        status_by_ver = {v: st for _id, _cid, v, st in rows}
-        assert status_by_ver.get("v-old") == "offline", f"旧行应 offline: {rows}"
-        assert status_by_ver.get("v-new") == "online", f"新行应 online: {rows}"
+        assert len(rows) == 1, f"旧行已随凭据删除，应只剩新行: {rows}"
+        assert rows[0][2] == "v-new", rows
 
 
 class TestMultiInstanceCleanup:
@@ -246,7 +244,12 @@ class TestMultiInstanceCleanup:
         assert worker_rows and worker_rows[0][2] == "w-v", "凭据绑定行应保留且不被刷新覆盖"
         assert not any(r[0] == "codearts" for r in rows), "本机不在发现列表的行应被清理"
 
-    def test_revoke_marks_runtime_offline(self, client):
+    def test_revoke_deletes_credential_and_runtimes(self, client):
+        """revoke = 删除：凭据行 + 其 agent_runtimes 行一并删除（2026-08-17 用户指示）。
+
+        删除后：token 查不到（401）、凭据名释放可复用、Engines/Workers 视图不再出现。
+        旧语义「置 revoked + 行置 offline」已废弃。
+        """
         from src.api.deps import get_current_user
         app = __import__("src.api.main", fromlist=["app"]).app
         app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "admin"}
@@ -260,8 +263,13 @@ class TestMultiInstanceCleanup:
         r = c.post(f"/api/settings/runtime-credentials/{cid}/revoke")
         assert r.status_code == 200
         with db_lock:
-            st = db.cursor().execute("SELECT status FROM agent_runtimes WHERE id=?", (rid,)).fetchone()[0]
-        assert st == "offline", "revoke 应级联其 agent_runtimes 行置 offline"
+            cred_gone = db.cursor().execute("SELECT COUNT(*) FROM runtime_credentials WHERE id=?", (cid,)).fetchone()[0] == 0
+            rt_gone = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE id=?", (rid,)).fetchone()[0] == 0
+        assert cred_gone, "revoke 应删除凭据行"
+        assert rt_gone, "revoke 应级联删除其 agent_runtimes 行"
+        # 已删除凭据的 token 不能再注册
+        r2 = client.post("/api/runtime/register", json={"runtimes": []}, headers={"Authorization": f"Bearer {tA}"})
+        assert r2.status_code == 401
         app.dependency_overrides.clear()
 
 
@@ -289,6 +297,42 @@ class TestMultiInstanceDeviceView:
         #（回归：设备健康态曾误用 credential.status='active' → derive 恒返回 recently_lost）
         for d in devices:
             assert d["health"] == "online", f"健康设备应 online, got {d['health']}: {d}"
+
+    def test_revoke_all_credentials_no_fake_local_devices(self, client):
+        """R6 回归：吊销全部凭据后 devices 不得把 revoked 远端行伪装成本机 Runtime。
+
+        2026-08-17：旧 orphan 兜底分支遍历 cached 全量，全部凭据 revoked 时
+        devices 为空 → 大量 revoked/远端行全部以"本机 Runtime"设备展示
+        （页面出现几十个离线本机 runtime + 在线·未上线）。
+        """
+        tA = _make_token("wa")
+        tB = _make_token("wb")
+        client.post("/api/runtime/register", json={"runtimes": [{"name": "opencode", "version": "1"}]},
+                    headers={"Authorization": f"Bearer {tA}"})
+        client.post("/api/runtime/register", json={"runtimes": [{"name": "codearts", "version": "2"}]},
+                    headers={"Authorization": f"Bearer {tB}"})
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO agent_runtimes (credential_id, name, display_name, installed, healthy, scope, owner_id) VALUES (0,'hermes','Hermes',1,1,'global','')")
+            db.commit()
+            cids = [r[0] for r in c.execute("SELECT id FROM runtime_credentials").fetchall()]
+        from src.api.deps import get_current_user
+        app = __import__("src.api.main", fromlist=["app"]).app
+        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "admin"}
+        c2 = TestClient(app)
+        # 吊销全部凭据
+        for cid in cids:
+            r = c2.post(f"/api/settings/runtime-credentials/{cid}/revoke")
+            assert r.status_code == 200, r.text
+        data = c2.get("/api/settings/agent-runtimes").json()
+        app.dependency_overrides.clear()
+        devices = data["devices"]
+        assert len(devices) == 1, f"吊销全部后 devices 应只剩本机行, got {len(devices)}: {devices}"
+        assert devices[0]["credential_id"] == 0, devices
+        assert [r["name"] for r in devices[0]["runtimes"]] == ["hermes"], devices
+        # Engines 视图同样不出现 revoked 凭据的引擎
+        names = [rt["name"] for rt in data["runtimes"]]
+        assert "opencode" not in names and "codearts" not in names, names
 
 
 class TestMultiInstanceUniqueKey:
@@ -324,6 +368,22 @@ class TestRuntimeAdminViews:
         app = __import__("src.api.main", fromlist=["app"]).app
         app.dependency_overrides[get_current_user] = lambda: {"id": uid, "username": username}
         return app
+
+    def test_dup_credential_name_returns_400(self):
+        """重名凭据返回 400 友好提示而非 500。
+
+        2026-08-17 修复：原判断只认 "UNIQUE" 字样（sqlite 格式），MySQL 下重名
+        报 (1062, "Duplicate entry ... for key 'runtime_credentials.name'") 不含
+        "UNIQUE" → 误落 500「生成失败」。修复后 1062/Duplicate 亦匹配。
+        """
+        app = self._admin_user("alice")
+        c = TestClient(app)
+        r1 = c.post("/api/settings/runtime-credentials", json={"name": "w-dup", "scope": "user"})
+        assert r1.status_code == 200, r1.text
+        r2 = c.post("/api/settings/runtime-credentials", json={"name": "w-dup", "scope": "user"})
+        assert r2.status_code == 400, r2.text
+        assert "凭据名称已存在" in r2.json()["detail"]["message"], r2.text
+        app.dependency_overrides.clear()
 
     def test_instance_name_scope_owner_derived(self):
         """S1：注册凭据 → agent-runtimes 派生 instance_name/worker_name/scope/owner"""
