@@ -16,7 +16,9 @@ class TestA2AQueue:
             c.execute("DELETE FROM agent_tasks")
             c.execute("DELETE FROM events")
             c.execute("DELETE FROM issue_state WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
-            c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%' OR id LIKE 'sess-a2a-%'")
+            c.execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'a2a-cred-%')")
+            c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'a2a-cred-%'")
             db.commit()
 
     def _a2a_body(self, agent="coding", issue_number="5"):
@@ -30,6 +32,26 @@ class TestA2AQueue:
                 "context": "测试 A2A 交办",
             },
         }
+
+    def _seed_engine_and_session(self, agent="coding"):
+        """新模型（engine-selection-design.md v2）：远端引擎 + 会话 runtime_id，供派发选引擎。"""
+        import uuid
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) "
+                "VALUES (?,?,?, 'global', 'tester', 'active')",
+                ("h" + uuid.uuid4().hex, "a2a-cred-" + agent, "a2a-dev-" + agent))
+            _cid = c.lastrowid
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
+                "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'global', '', 1, 1)", (_cid,))
+            _rid = c.lastrowid
+            c.execute(
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status, enable) "
+                "VALUES (?, 'gitcode:owner/repo', ?, ?, 'idle', 1)",
+                ("sess-a2a-" + agent, agent, _rid))
+            db.commit()
 
     def teardown_method(self):
         os.environ.pop("DEVOPS_EXECUTION_MODE", None)
@@ -62,7 +84,8 @@ class TestA2AQueue:
         from fastapi.testclient import TestClient
         from src.api.main import app
         self._clean()
-        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_local"
+        self._seed_engine_and_session()
+        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         client = TestClient(app)
         r = self._post_a2a(client, self._a2a_body())
         assert r.status_code == 200, r.text
@@ -94,7 +117,8 @@ class TestA2AQueue:
         from fastapi.testclient import TestClient
         from src.api.main import app
         self._clean()
-        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_local"
+        self._seed_engine_and_session()
+        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         client = TestClient(app)
         self._post_a2a(client, self._a2a_body())
         t = self._latest_task()
@@ -113,7 +137,8 @@ class TestA2AQueue:
         from src.api.main import app
         from src.runtime import service as svc
         self._clean()
-        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_local"
+        self._seed_engine_and_session()
+        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         client = TestClient(app)
         self._post_a2a(client, self._a2a_body())
         t = self._latest_task()
@@ -132,6 +157,7 @@ class TestA2AQueue:
         from fastapi.testclient import TestClient
         from src.api.main import app
         self._clean()
+        self._seed_engine_and_session()
         os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         client = TestClient(app)
         self._post_a2a(client, self._a2a_body())
@@ -144,6 +170,7 @@ class TestA2AQueue:
         from src.api.main import app
         from src.api.routes.pipeline import _running_issue_ids
         self._clean()
+        self._seed_engine_and_session()
         os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         client = TestClient(app)
         self._post_a2a(client, self._a2a_body())
@@ -156,7 +183,8 @@ class TestA2AQueue:
         from src.api.main import app
         import src.api.event_pipeline as ep
         self._clean()
-        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_local"
+        self._seed_engine_and_session(agent="issue")
+        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         raw = json.dumps({
             "event_type": "issue_comment",
             "payload": {"issue": {"number": 5, "title": "t", "body": "x"}, "action": "comment"},

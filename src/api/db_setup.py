@@ -307,6 +307,19 @@ CREATE TABLE IF NOT EXISTS agent_type_runtime_pool (
 )
 """
 
+# ===== engine-selection-design.md §4.4：每 (仓库, agent) 引擎集合绑定 =====
+_DEVOPS_AGENT_RUNTIME_BINDING_DDL = """
+CREATE TABLE IF NOT EXISTS devops_agent_runtime_binding (
+    repo_key    TEXT NOT NULL,              -- 仓库全名（owner/repo，归一化）
+    agent_type  TEXT NOT NULL,              -- vod / issue / coding / qa / sre / chat
+    runtime_id  INTEGER NOT NULL,           -- agent_runtimes.id（本机直连或远端引擎）
+    priority    INTEGER NOT NULL DEFAULT 50, -- 小=高优先；默认按 scope：repo=10 / global=50 / local=90
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (repo_key, agent_type, runtime_id)
+)
+"""
+
 # ===== new-version2 M3：runtime_credentials 独立凭据（rta_ token，见 agent-runtime-event-full-design.md §4.1）=====
 _RUNTIME_CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS runtime_credentials (
@@ -394,6 +407,7 @@ _NEW_TABLES = [
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
     ("agent_type_runtime_pool", _AGENT_TYPE_RUNTIME_POOL_DDL),
+    ("devops_agent_runtime_binding", _DEVOPS_AGENT_RUNTIME_BINDING_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
     ("issue_state", _ISSUE_STATE_DDL),
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
@@ -610,20 +624,18 @@ def _insert_seed_data(table: str, data: dict):
 
         elif table == "agent_type":
             # agent-description.json: {"agent_type": {"name": "...", ...}}
+            # default_runtime_id 不再写死 opencode（engine-selection-design.md v2 §8.2）：
+            # 绑定一律由 pick_engine 按 (仓库, agent) 引擎集合运行时解析，种子只留 0（未绑定）。
             for agent_type, info in data.items():
                 display_name = info.get("name", agent_type)
                 description = info.get("description", "")
-                default_runtime_name = info.get("backend", "opencode")
-                # 预置 runtime（幂等），拿 id
-                from src.user.db import ensure_default_runtime
-                default_runtime_id = ensure_default_runtime(default_runtime_name) or 0
                 icon = info.get("icon", "")
                 order_num = info.get("order_num", 0)
                 subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
                 enable = 1 if info.get("enable", True) else 0
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events, enable) VALUES (?,?,?,?,?,?,?,?)",
-                    (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events, enable)
+                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events, enable) VALUES (?,?,?,0,?,?,?,?)",
+                    (agent_type, display_name, description, icon, order_num, subscribe_events, enable)
                 )
 
         elif table == "skill_official":
@@ -652,6 +664,12 @@ def init_database():
     _create_indexes()
     _seed_from_json()
     _align_agent_enable()
+    # engine-selection-design.md §4.4/§12：存量会话 runtime_id>0 → 回填绑定集合（单成员，幂等）
+    try:
+        from src.runtime.engine_select import backfill_existing_bindings
+        backfill_existing_bindings()
+    except Exception as e:
+        log.warning(f"Backfill existing runtime bindings failed: {e}")
 
 
 def _align_agent_enable():
@@ -1351,6 +1369,15 @@ def _migrate_tables():
             log.info("Added cluster columns: agent_runtimes.busy_slots/max_concurrent, agent_tasks.attempts/pool_agent_type/affinity_runtime_id")
     except Exception as e:
         log.warning(f"Add cluster columns failed: {e}")
+    # ===== engine-selection-design.md §4.4：绑定表索引（repo, agent 前缀查询加速）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("CREATE INDEX IF NOT EXISTS idx_binding_repo_agent ON devops_agent_runtime_binding(repo_key, agent_type)")
+            db.commit()
+            log.info("Binding index idx_binding_repo_agent ready")
+    except Exception as e:
+        log.warning(f"Create binding index failed: {e}")
     # ===== 修复 chat_agent_session 陈旧 UNIQUE(repo_key) 约束（多用户 chat 配置互斥顶掉，见 session_manager 注释）=====
     try:
         with db_lock:

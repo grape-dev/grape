@@ -176,6 +176,84 @@ class TestNotify:
             ).fetchall()
         assert len(rows) == 1, rows
 
+    def test_notify_prewrite_role_is_agent(self):
+        """任务分配预写入消息应为 agent（bot 下发），而非 user；任务描述只出现一次。
+
+        回归看护：task-conversation-role-fix.md §7.1
+        """
+        _clean_tasks()
+
+        def _swallow(coro, *a, **k):
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
+
+        with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
+                "assignee": "younger_eric", "repo_key": "org/test",
+                "issue_number": 12, "task_description": "处理登录超时"})
+        assert r.status_code == 200
+        conv_id = r.json()["conversation_id"]
+        assert conv_id
+
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT role, content FROM chat_messages WHERE conversation_id=? ORDER BY id",
+                (conv_id,)).fetchall()
+        assert rows, "会话应有消息"
+        first_role, first_content = rows[0]
+        assert first_role == "agent", f"预写入消息 role 应为 agent，实际 {first_role}"
+        assert "任务分配" in first_content
+        # 任务描述在整个会话中只出现一次（无 _run_notify 重复写入）
+        desc_count = sum(1 for _, content in rows if "处理登录超时" in content)
+        assert desc_count == 1, f"任务描述应只出现一次，实际 {desc_count}"
+
+    def test_notify_message_roles_order(self):
+        """会话消息顺序：agent(任务分配) 开头，后续出现用户答复。"""
+        _clean_tasks()
+
+        def _swallow(coro, *a, **k):
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
+
+        with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
+                "assignee": "younger_eric", "repo_key": "org/test",
+                "issue_number": 13, "task_description": "描述B"})
+        assert r.status_code == 200
+        conv_id = r.json()["conversation_id"]
+        assert conv_id
+
+        from src.session_manager import add_message
+        add_message(conv_id, "user", "好的，我开始处理")
+
+        with db_lock:
+            c = db.cursor()
+            roles = [row[0] for row in c.execute(
+                "SELECT role FROM chat_messages WHERE conversation_id=? ORDER BY id",
+                (conv_id,)).fetchall()]
+        assert roles and roles[0] == "agent", f"首条必须是 agent，实际 {roles}"
+        assert "user" in roles, "后续应有用户答复"
+
+    def test_build_task_context_message_content(self):
+        """任务上下文消息内容：含 Issue 号/仓库/标题/任务描述，结尾为下发询问语气。"""
+        msg = tasks_mod._build_task_context_message(
+            title="登录超时", task_description="处理登录超时",
+            repo_key="org/test", issue_number=5)
+        assert "任务分配" in msg
+        assert "#5" in msg
+        assert "org/test" in msg
+        assert "登录超时" in msg
+        assert "处理登录超时" in msg
+        # 结尾为 bot 下发询问（等待用户确认），而非用户自述
+        assert "沟通" in msg or "确认" in msg or "疑问" in msg
+
 
 class TestClose:
     def test_close_marks_completed(self):
@@ -324,3 +402,153 @@ class TestUserMappingBackfill:
         finally:
             user_db.delete_user(created["id"])
             self._clean()
+
+
+class TestTaskLifecycle:
+    """任务生命周期：processing 状态 + bot 接管（task-lifecycle-design.md）"""
+
+    def _clean(self):
+        _clean_tasks()
+
+    def test_notify_bot_takeover_closes_tasks(self):
+        """assignee=grape_bot 时，同 issue 的 active/processing 任务置 completed（bot_takeover）"""
+        self._clean()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 50))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 50))
+            db.commit()
+        r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
+            "assignee": "grape_bot", "repo_key": "org/test", "issue_number": 50,
+            "task_description": "接管"})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT status, completed_reason FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number=50").fetchall()
+        assert rows, "应有任务"
+        for status, reason in rows:
+            assert status == "completed", f"bot 接管后应为 completed，实际 {status}"
+            assert reason == "bot_takeover", f"completed_reason 应为 bot_takeover，实际 {reason}"
+
+    def test_notify_bot_takeover_no_tasks(self):
+        """同 issue 无 active/processing 任务时 bot 接管返回 ok 且不抛错"""
+        self._clean()
+        r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
+            "assignee": "grape_bot", "repo_key": "org/test", "issue_number": 51,
+            "task_description": "接管"})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_start_task_active_to_processing(self):
+        """用户点「去对话」：active → processing"""
+        self._clean()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 52))
+            db.commit()
+            tid = c.lastrowid
+        r = client.post(f"/api/tasks/{tid}/start", headers=_headers)
+        assert r.status_code == 200
+        assert r.json()["status"] == "processing"
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+        assert row and row[0] == "processing"
+
+    def test_start_task_not_owner_rejected(self):
+        """非本人任务调 start 返回 403"""
+        self._clean()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (9999, "other", "gitcode:org/test", 53))
+            db.commit()
+            tid = c.lastrowid
+        r = client.post(f"/api/tasks/{tid}/start", headers=_headers)
+        assert r.status_code == 403
+
+    def test_start_task_idempotent(self):
+        """processing 任务重复 start 返回当前状态，不改回 active"""
+        self._clean()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 54))
+            db.commit()
+            tid = c.lastrowid
+        r = client.post(f"/api/tasks/{tid}/start", headers=_headers)
+        assert r.status_code == 200
+        assert r.json()["status"] == "processing"
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+        assert row and row[0] == "processing"
+
+    def test_close_marks_processing_completed(self):
+        """Issue 关闭应关闭 processing 任务（不只 active）"""
+        self._clean()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 55))
+            db.commit()
+        r = client.post("/api/tasks/close", headers=_bot_headers(), json={"repo_key": "org/test", "issue_number": 55})
+        assert r.status_code == 200
+        assert r.json()["closed"] >= 1
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT status, completed_reason FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number=55").fetchone()
+        assert row and row[0] == "completed"
+        assert row and row[1] == "issue_closed"
+
+    def test_reassign_closes_processing_old_assignee(self):
+        """换人时原 assignee 的 processing 任务置 completed（reassigned）"""
+        self._clean()
+        # 建 bob 映射（换人目标 assignee）
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,datetime('now'))",
+                      (_uid["id"], "bob", "ou_bob", "鲍勃"))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 56))
+            db.commit()
+            old_tid = c.lastrowid
+
+        def _swallow(coro, *a, **k):
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
+
+        with patch.object(tasks_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
+                "assignee": "bob", "repo_key": "org/test", "issue_number": 56,
+                "task_description": "换人处理"})
+        assert r.status_code == 200
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT status, completed_reason FROM tasks WHERE id=?", (old_tid,)).fetchone()
+        # 原 assignee（younger_eric）的 processing 任务应被换人关闭
+        assert row and row[0] == "completed", f"原 assignee processing 任务应 completed，实际 {row}"
+        assert row and row[1] == "reassigned"
+
+    def test_mine_returns_processing(self):
+        """/tasks/mine 返回 processing 状态任务"""
+        self._clean()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 57))
+            db.commit()
+        r = client.get("/api/tasks/mine", headers=_headers)
+        assert r.status_code == 200
+        statuses = [t["status"] for t in r.json()["tasks"]]
+        assert "processing" in statuses

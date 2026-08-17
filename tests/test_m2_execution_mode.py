@@ -27,30 +27,46 @@ class TestExecutionModeSwitch:
             db.cursor().execute("DELETE FROM agent_tasks")
             db.cursor().execute("DELETE FROM events")
             # 清掉可能由其他 pipeline 测试残留的会话/阶段行，保证本测试不依赖共享库顺序
-            db.cursor().execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
+            db.cursor().execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%' OR id LIKE 'sess-m2-%'")
             db.cursor().execute("DELETE FROM issue_state WHERE repo_key LIKE 'gitcode:owner/repo%'")
+            db.cursor().execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'm2-%')")
+            db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'm2-%'")
             db.commit()
 
     def test_mode_getter_meta(self):
         self._clean()
-        service.set_execution_mode("queue_local")
-        assert service.get_execution_mode() == "queue_local"
+        service.set_execution_mode("queue_remote")
+        assert service.get_execution_mode() == "queue_remote"
         service.set_execution_mode("direct")
         assert service.get_execution_mode() == "direct"
 
     def test_queue_mode_enqueues_not_executes(self):
-        """queue_local：run_pipeline 应入队 agent_tasks，不 spawn 线程就地执行。"""
+        """queue_remote：run_pipeline 应入队 agent_tasks，不 spawn 线程就地执行（queue_local 已废除）。"""
         self._clean()
-        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_local"
+        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         import src.api.event_pipeline as ep
         # 构造最小可路由事件（issue_opened → issue agent）
         raw = json.dumps(_evt_body()).encode()
         headers = {"X-GitCode-Event": "Issue Hook"}
         # 确保路由命中
         with db_lock:
-            db.cursor().execute(
+            c = db.cursor()
+            c.execute(
                 "INSERT OR REPLACE INTO event_route_config (repo_key, event_type, skill) VALUES (?,?,?)",
                 ("", "issue_opened", "issue"))
+            # 远端引擎 + 会话 runtime_id（新模型：派发按引擎集合/会话主引擎选引擎）
+            # 注意：Issue Hook 事件归一化后路由到 issue agent，故会话 agent_type=issue
+            c.execute(
+                "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) "
+                "VALUES ('hm2q','m2-cred','m2-dev','global','tester','active')")
+            _cid = c.lastrowid
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
+                "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'global', '', 1, 1)", (_cid,))
+            _rid = c.lastrowid
+            c.execute(
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status, enable) "
+                "VALUES ('sess-m2-q', 'gitcode:owner/repo', 'issue', ?, 'idle', 1)", (_rid,))
             db.commit()
         result = ep.run_pipeline(raw, headers, account="owner/repo")
         with db_lock:

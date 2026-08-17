@@ -156,8 +156,50 @@ def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
     return None
 
 
+async def _stream_runtime_async(*args, **kwargs):
+    """把同步生成器 stream_runtime 放到后台线程迭代，事件循环不被 readline() 阻塞。
+
+    见 worker-event-loop-block-rootcause.md §8：方案 1（await sleep(0)）只在生成器每次 yield 时
+    让出；当 opencode 执行长命令静默无输出（readline 阻塞）时事件循环仍被占住。本函数把
+    同步迭代移入线程，通过线程安全 queue.Queue 桥接事件，彻底消除阻塞。
+    """
+    import queue as _queue
+    from src.runtime.executor import stream_runtime
+    q: _queue.Queue = _queue.Queue(maxsize=256)
+    sentinel = object()
+
+    def _produce():
+        try:
+            for evt in stream_runtime(*args, **kwargs):
+                while True:
+                    try:
+                        q.put_nowait(evt)
+                        break
+                    except _queue.Full:
+                        # 队列满：短暂让出，等消费者消费；sleep 在子线程安全
+                        import time as _t
+                        _t.sleep(0.001)
+        except Exception as e:
+            log.warning(f"stream_runtime producer error: {e}")
+        finally:
+            q.put(sentinel)
+
+    import threading
+    _t = threading.Thread(target=_produce, daemon=True)
+    _t.start()
+    while True:
+        try:
+            evt = q.get_nowait()
+        except _queue.Empty:
+            await asyncio.sleep(0.001)  # 轮询间隔，同时让出事件循环
+            continue
+        if evt is sentinel:
+            break
+        yield evt
+
+
 async def _execute_task(client, task, engine_name: str = ""):
-    """执行单个任务：落地技能包 → 占位符替换 → stream_runtime → 回报。
+    """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
     engine_name 为该任务所属引擎实例名（如 opencode-worker-123249），用于日志区分。
     """
@@ -174,6 +216,20 @@ async def _execute_task(client, task, engine_name: str = ""):
         env = json.loads(task.get("env_extra") or "{}")
     except Exception:
         pass
+    # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
+    # 否则 cwd 被 .skills 物化占住（目录存在但无 .git）会导致 `git worktree add` 报
+    # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
+    # 见 coding-worktree-skill-collision.md §4.1（方案 A）。
+    try:
+        from src.runtime import repogit
+        _num = repogit.issue_num_from(task.get("issue_id") or "")
+        if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
+            _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
+                                                _num, token=task.get("repo_gitcode_token") or "")
+            if _wt:
+                env["GIT_ASKPASS"] = _os.path.join(_wt, ".git-askpass.sh")
+    except Exception as e:
+        log.warning(f"git worktree ensure failed: {e}")
     skill_dir = _os.path.join(cwd, ".skills")
     prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
                                        .replace("{{SERVER_URL}}", task.get("server_url") or "")
@@ -240,7 +296,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                 env["DEVOPS_SKILLS_DIR"] = skill_dir
     except Exception as e:
         log.warning(f"skill materialize failed: {e}")
-    # project-info 落地 + git worktree（coding/qa/sre，X 工作模型，见 multi-issue-isolation-design.md §3.4.1）
+    # project-info 落地（repo 全局共享，见 multi-issue-isolation-design.md §2.4）
     proj_dir = _os.path.join(cwd, ".project-info")
     try:
         proj_files = json.loads(task.get("project_info_files") or "{}")
@@ -266,20 +322,10 @@ async def _execute_task(client, task, engine_name: str = ""):
         prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
     except Exception as e:
         log.warning(f"knowledge materialize failed: {e}")
-    try:
-        from src.runtime import repogit
-        _num = repogit.issue_num_from(task.get("issue_id") or "")
-        if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
-            _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                                _num, token=task.get("repo_gitcode_token") or "")
-            if _wt:
-                env["GIT_ASKPASS"] = _os.path.join(_wt, ".git-askpass.sh")
-    except Exception as e:
-        log.warning(f"git worktree ensure failed: {e}")
 
-    await client.task_start(tid)
     done = None
     batch = []
+    started = False
     try:
         from src.runtime.executor import stream_runtime
         _agent_label = f"[Agent:{task.get('agent_type') or ''}|repo:{task.get('repo_key') or ''}{_engine_tag}]"
@@ -297,7 +343,10 @@ async def _execute_task(client, task, engine_name: str = ""):
         if engine_name:
             _esq_parts.append(f"engine:{engine_name}")
         _esq = "|".join(_esq_parts)
-        for evt_type, data in stream_runtime(
+        # 方案 2：线程化迭代 stream_runtime（worker-event-loop-block-rootcause.md §8.5）——
+        # 同步生成器的 readline() 阻塞移到后台线程，事件循环持续调度 claim/heartbeat，
+        # 根治「长命令静默无输出」期间的事件循环停摆（替代方案 1 的 await sleep(0)）。
+        async for evt_type, data in _stream_runtime_async(
             prompt, cwd, session_id=task.get("runtime_session_id") or "",
             event_type=task.get("event_type") or "",
             backend_name="opencode",
@@ -308,6 +357,11 @@ async def _execute_task(client, task, engine_name: str = ""):
             if evt_type == "done":
                 done = data
                 continue
+            # 引擎确已开始执行（opencode 已 Popen 并产出首个执行事件）→ 才置 running。
+            # 此前任务保持 dispatched（引擎启动失败/未执行不误标 running，见 event-redispatch-design.md §2.2）
+            if not started and evt_type in ("step_start", "text", "tool_use"):
+                await client.task_start(tid)
+                started = True
             # 逐步日志（本地模式同款，供 worker 侧 journalctl 观察执行过程）；前缀含 seq 便于定位
             if evt_type == "step_start":
                 log.info(f"  [{_esq}] ▶ {data}")
@@ -323,12 +377,12 @@ async def _execute_task(client, task, engine_name: str = ""):
             if len(batch) >= 50:
                 await client.report_messages(tid, batch)
                 batch = []
-            # 每次迭代让出事件循环，避免同步生成器迭代阻塞 claim/heartbeat
-            # （见 worker-event-loop-block-rootcause.md 方案 1）
-            await asyncio.sleep(0)
         if batch:
             await client.report_messages(tid, batch)
-        if done:
+        # 引擎从未产出执行事件即结束 → 直接 fail（任务保持 dispatched→failed，跳过 running）
+        if not started and not done:
+            await client.fail(tid, "engine did not start / no output")
+        elif done:
             await client.complete(tid, done.get("text", ""), done.get("exit_code", 0),
                                   session_id=done.get("oc_session_id", ""), work_dir=cwd)
         else:

@@ -799,8 +799,8 @@ function rSettings(pc){
   <div class="stabs"><a class="ac" onclick="switchSTab(this)">执行模式</a><a onclick="switchSTab(this)">Webhook</a><a onclick="switchSTab(this)">OAuth</a><a onclick="switchSTab(this)">白名单</a></div>
   <div class="cd">
     <div class="cd-h"><h2>执行模式 <span class="c">仅 super_admin</span></h2></div>
-    <div class="radio-row"><input type="radio" name="em" checked><div><b>direct</b> <span class="ts t3">· 事件/chat 直接就地执行（现状）</span></div></div>
-    <div class="radio-row"><input type="radio" name="em"><div><b>queue_local</b> <span class="ts t3">· 入队 → bot 进程内本地 worker 执行</span></div></div>
+    <div class="radio-row"><input type="radio" name="em" checked><div><b>auto</b> <span class="ts t3">· 自动推导（本机引擎→direct，远端→入队）</span></div></div>
+    <div class="radio-row"><input type="radio" name="em"><div><b>direct</b> <span class="ts t3">· 强制就地执行（本机）</span></div></div>
     <div class="radio-row"><input type="radio" name="em"><div><b>queue_remote</b> <span class="ts t3">· 入队 → 远端 RuntimeAgent 边端执行</span></div></div>
   </div>
   <div class="cd">

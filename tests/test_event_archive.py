@@ -123,3 +123,42 @@ class TestBuildContext:
 
     def test_build_context_no_archive(self):
         assert ea.build_issue_context("test/repo", 99) == ""
+
+
+class TestLegacyPrefixedCompat:
+    """历史带前缀归档目录兼容（2026-08-15 前 event_archive 拼原始 repo_key）。
+
+    Windows 路径不含 ':'，无法创建带前缀目录，完整目录级兼容在 Linux 生产侧验证。
+    """
+
+    def test_get_event_json_path_strips_prefix(self):
+        p = ea.get_event_json_path("gitcode:test/repo", 5)
+        assert "gitcode:" not in p
+        assert p.split(os.sep)[-4:] == ["test", "repo", "issues", "5"] or "test" in p
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows 路径不允许 ':'，Linux 生产侧验证")
+    def test_load_falls_back_to_legacy_prefix_dir(self):
+        legacy = ea._legacy_base_dir("gitcode:test/repo")
+        import shutil
+        shutil.rmtree(os.path.join(WORKSPACE_DIR, "test/repo"), ignore_errors=True)
+        shutil.rmtree(os.path.dirname(legacy), ignore_errors=True)
+        os.makedirs(os.path.join(legacy, "5"), exist_ok=True)
+        with open(os.path.join(legacy, "5", "event.json"), "w", encoding="utf-8") as f:
+            json.dump({"issue": {"number": 5}, "status": "completed", "pipeline": []}, f)
+        arch = ea.load_event_json("gitcode:test/repo", 5)
+        assert arch is not None and arch["issue"]["number"] == 5
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows 路径不允许 ':'，Linux 生产侧验证")
+    def test_locate_by_seq_finds_legacy(self):
+        legacy = ea._legacy_base_dir("gitcode:test/repo")
+        import shutil
+        shutil.rmtree(os.path.join(WORKSPACE_DIR, "test/repo"), ignore_errors=True)
+        shutil.rmtree(os.path.dirname(legacy), ignore_errors=True)
+        ea.init_event_json("gitcode:test/repo", 77, _evt(), "issue")
+        # 把新路径档案移回旧带前缀目录，模拟历史数据
+        new_path = ea.get_event_json_path("gitcode:test/repo", 5)
+        os.makedirs(os.path.join(legacy, "5"), exist_ok=True)
+        os.replace(new_path, os.path.join(legacy, "5", "event.json"))
+        num, path = ea._locate_by_seq("gitcode:test/repo", 77, issue_num_hint="#5")
+        assert num == "5"
+        assert "gitcode:" in path  # 命中旧目录

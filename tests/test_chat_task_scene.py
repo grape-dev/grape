@@ -59,7 +59,91 @@ def test_build_task_chat_prompt_contains_scene_and_context():
     assert "Skills: chat" in prompt
 
 
+def test_build_task_chat_prompt_injects_task_boundary():
+    """任务会话 prompt 必须含「任务边界」：仅澄清+回帖，禁止部署/写代码（chat 越权部署修复）。"""
+    conv = {"conv_type": "task", "issue_number": 7, "title": "Issue #7", "repo_key": "owner/repo"}
+    history = [{"role": "user", "content": "📋 任务分配 · Issue #7"}]
+    prompt = build_task_chat_prompt("方式2", "owner/repo", history, conv)
+    assert "任务边界" in prompt
+    assert "澄清" in prompt and "回帖" in prompt
+    assert "不是实施/部署/写代码" in prompt or "不是实施/部署" in prompt
+    assert "pipeline" in prompt and "coding" in prompt
+    assert "严禁" in prompt and "clone" in prompt
+    # 边界提示应在场景声明之后（强位置）
+    assert prompt.index("任务边界") > prompt.index("## 场景: task")
+
+
 def test_build_task_chat_prompt_no_conv_defaults():
     prompt = build_task_chat_prompt("hi", "owner/repo", [], None)
     assert "## 场景: task" in prompt
     assert "Issue: #0" in prompt
+
+
+def _clean_tasks():
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM tasks")
+        db.commit()
+
+
+def _insert_task(repo_key, issue_number, description, conv_id="", user_id=1):
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, conversation_id, status) VALUES (?,?,?,?,?,?,?, 'active')",
+            (user_id, "alice", repo_key, issue_number, f"Issue #{issue_number}", description, conv_id))
+        db.commit()
+
+
+def test_build_task_chat_prompt_injects_task_description():
+    """任务会话 prompt 显式含 ## 任务描述（来自 tasks 表）"""
+    _clean()
+    _clean_tasks()
+    _insert_task("gitcode:owner/repo", 7, "处理登录超时")
+    conv = {"conv_type": "task", "issue_number": 7, "title": "Issue #7",
+            "repo_key": "gitcode:owner/repo", "id": ""}
+    prompt = build_task_chat_prompt("确认一下", "gitcode:owner/repo", [], conv)
+    assert "## 任务描述" in prompt
+    assert "处理登录超时" in prompt
+    _clean_tasks()
+    _clean()
+
+
+def test_build_task_chat_prompt_no_description_ok():
+    """tasks 表无对应记录时 prompt 正常（跳过 ## 任务描述）"""
+    _clean()
+    _clean_tasks()
+    conv = {"conv_type": "task", "issue_number": 99, "title": "Issue #99",
+            "repo_key": "gitcode:owner/repo", "id": ""}
+    prompt = build_task_chat_prompt("hi", "gitcode:owner/repo", [], conv)
+    assert "## 任务描述" not in prompt
+    assert "## 场景: task" in prompt
+    assert "Issue: #99" in prompt
+    _clean()
+
+
+def test_build_task_chat_prompt_by_conversation_id():
+    """conv.id 非空时按 conversation_id 反查（优先于 repo+issue）"""
+    _clean()
+    _clean_tasks()
+    cid = create_conversation(1, "owner/repo", title="Issue #8", conv_type="task", issue_number=8)
+    _insert_task("gitcode:owner/repo", 8, "通过 conversation_id 找到我", conv_id=cid)
+    conv = get_conversation(cid)
+    prompt = build_task_chat_prompt("继续", "owner/repo", [], conv)
+    assert "通过 conversation_id 找到我" in prompt
+    _clean_tasks()
+    _clean()
+
+
+def test_build_task_chat_prompt_description_survives_long_history():
+    """任务描述结构化注入，不依赖 history；>10 条历史后仍在"""
+    _clean()
+    _clean_tasks()
+    _insert_task("gitcode:owner/repo", 10, "长对话后的任务描述")
+    long_history = [{"role": "user" if i % 2 == 0 else "agent", "content": f"msg{i}"} for i in range(15)]
+    conv = {"conv_type": "task", "issue_number": 10, "title": "Issue #10",
+            "repo_key": "gitcode:owner/repo", "id": ""}
+    prompt = build_task_chat_prompt("hi", "gitcode:owner/repo", long_history, conv)
+    assert "长对话后的任务描述" in prompt
+    _clean_tasks()
+    _clean()

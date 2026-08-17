@@ -82,7 +82,7 @@ function loadCfgOptions() {
   const backendBox = document.querySelector('.cfg-backends');
   const skillSelect = document.querySelector('.cfg-skill');
 
-  // Runtime 下拉多选（引擎池）：仅未加载时加载；DevOps Agent 仅可选 仓库/全局 引擎（个人引擎不出现，见 runtime-admin-two-view-design §5.1）
+  // Runtime 下拉多选（引擎集合）：仅未加载时加载；DevOps Agent 可选 仓库级/全局/本机直连（个人引擎不出现）
   if (backendBox && !backendBox.dataset.loaded) {
     backendBox.dataset.loaded = '1';
     const panel = backendBox.querySelector('.cfg-backends-panel');
@@ -90,6 +90,7 @@ function loadCfgOptions() {
     API.get('/settings/agent-runtimes').then(d => {
       const runtimes = d.runtimes || [];
       const scopeLabel = sc => sc === 'global' ? '全局' : sc === 'repo' ? '仓库' : '个人';
+      const localLabel = r => r.is_local ? '本机直连' : scopeLabel(r.scope);
       const ok = runtimes.filter(r => r.scope === 'repo' || r.scope === 'global');
       const val = r => r.instance_name || r.name;
       const cb = (r, i) => {
@@ -102,10 +103,10 @@ function loadCfgOptions() {
           <input type="checkbox" class="cfg-backend-cb" value="${v}" data-color="${color}" ${checked} style="accent-color:${color};flex:0 0 auto;width:14px;height:14px;margin:0">
           <span style="width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0"></span>
           <span style="font-weight:600;color:${checked ? color : 'var(--t2)'};min-width:110px">${v}</span>
-          <span class="ts t3" style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${scopeLabel(r.scope)}${online ? ' ✓' : ' ✗'}</span>
+          <span class="ts t3" style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${localLabel(r)}${online ? ' ✓' : ' ✗'}</span>
         </label>`;
       };
-      panel.innerHTML = ok.map(cb).join('') || '<span class="ts t2">无可选引擎（仓库/全局范围）</span>';
+      panel.innerHTML = ok.map(cb).join('') || '<span class="ts t2">无可选引擎（仓库级/全局/本机直连）</span>';
       // 面板内点击不冒泡到 document（避免勾选时触发外部关闭）
       panel.addEventListener('click', e => e.stopPropagation());
       // 初始回显 + 勾选/取消 → 同步触发区彩色标签 + 面板行高亮
@@ -172,11 +173,16 @@ function renderAgent(name, data) {
   const er = es.running || 0;
   const et = m.total_events || 0;
 
+  const engineText = data.backend || (data.backends && data.backends.length ? data.backends.join(', ') : '');
+  const engineBadge = engineText
+    ? `<span class="ts t3" style="font-weight:600">引擎: ${engineText}</span>`
+    : `<span class="ts t3" style="color:var(--r);font-weight:700">无 engine，不可用</span>`;
+
   let html = `
 <div class="cd" style="background:${meta.bg || 'var(--bg)'};border-color:${meta.color || 'var(--b)'}33">
   <div class="flex fc gap12">
     <div style="width:44px;height:44px;border-radius:10px;background:${meta.color || 'var(--b)'}22;display:flex;align-items:center;justify-content:center;font-size:20px">${meta.icon || '?'}</div>
-    <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${meta.display_name || name}</h2><div class="ts t2">${meta.description || ''}</div></div>
+    <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${meta.display_name || name}</h2><div class="ts t2">${meta.description || ''}</div>${engineBadge}</div>
     <div class="flex gap6"><button class="bt bt-o bt-s" onclick="toggleAgentCfg()">Configure</button><button class="bt bt-p bt-s">Events</button></div>
   </div>
 </div>

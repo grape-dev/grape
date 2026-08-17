@@ -128,7 +128,7 @@
 | ID | 层级 | 场景 | 步骤 | 预期 |
 |---|---|---|---|---|
 | A3-C1 | IT | 读设置 | GET `/api/admin/settings` | 返回 webhook_url/execution_mode/whitelist_enabled/OAuth 存在性（脱敏） |
-| A3-C2 | IT | 改执行模式 | PUT `execution_mode=queue_local` | meta 表更新；写审计 |
+| A3-C2 | IT | 改执行模式 | PUT `execution_mode=queue_remote` | meta 表更新；写审计；`queue_local` 拒绝（白名单 auto/direct/queue_remote） |
 | A3-C3 | SEC | 权限点 | ops_admin 改 OAuth | 403（`settings.manage` 仅 super_admin） |
 | A3-C4 | SEC | 敏感脱敏 | 读设置 | 不返回 client_secret 明文 |
 

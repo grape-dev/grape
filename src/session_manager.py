@@ -235,7 +235,7 @@ db.commit()
 MAX_HISTORY = 100
 
 
-def get_or_create_session(repo_key, source, repository, backend="opencode"):
+def get_or_create_session(repo_key, source, repository, backend=""):
     """获取或创建 repo 级 Chat 会话（chat_agent_session，飞书 Chat 用）"""
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
@@ -260,7 +260,7 @@ def get_or_create_session(repo_key, source, repository, backend="opencode"):
         return sid, [], "", "", True
 
 
-def update_session(sid, history, status, oc_session_id=None, backend="opencode"):
+def update_session(sid, history, status, oc_session_id=None, backend=""):
     """更新 Chat 会话（runtime_session_id 存当前 backend 会话）"""
     with db_lock:
         c = db.cursor()
@@ -344,6 +344,10 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_
     gitcode_nickname 优先取传入值，否则从 user_accounts.nickname 获取。
     user_id 始终为真实 user_accounts.id：若该 gitcode_user 未在 user_accounts 中，
     则尝试按已有记录更新；两者都不可得时跳过（不写入负数占位）。
+
+    ★ 防覆盖：open_id 传空（如 gitcode OAuth 登录只带昵称，auth.py）时，**保留已有
+    feishu_open_id/feishu_name**——避免用空值覆盖飞书确认过的绑定（曾导致 confirmed
+    绑定被后续登录清空，系统反复要求重新确认）。见 2026-08-16 修复。
     """
     from src.user import db as user_db
     user_id = 0
@@ -358,8 +362,16 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_
 
     with db_lock:
         c = db.cursor()
+        # 空 open_id 时读取已有绑定，避免覆盖
+        if not open_id:
+            _existing = c.execute(
+                "SELECT feishu_open_id, feishu_name FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,)).fetchone()
+            if _existing and _existing[0]:
+                open_id = _existing[0]
+                if not feishu_name:
+                    feishu_name = _existing[1] or ""
         if user_id:
-            # 有真实 user_id：直接以 user_id 为主键写入/覆盖
+            # 有真实 user_id：直接以 user_id 为主键写入/覆盖（open_id 已保留非空值）
             c.execute(
                 "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,?,?)",
                 (user_id, gitcode_user, gitcode_nickname, open_id, feishu_name, datetime.now().isoformat())
@@ -502,7 +514,7 @@ def get_conversation_by_im(im_channel_id: str, user_id: int = 0) -> dict | None:
 
 def update_conversation(conv_id: str, **kwargs):
     allowed = {"title", "status", "runtime_session_id", "agent_session_id", "user_gitcode_token",
-               "conv_type", "issue_number"}
+               "conv_type", "issue_number", "im_channel_id"}
     sets = []
     vals = []
     for k, v in kwargs.items():
@@ -523,6 +535,28 @@ def touch_conversation(conv_id: str):
         c = db.cursor()
         c.execute("UPDATE chat_conversations SET updated_at=datetime('now') WHERE id=?", (conv_id,))
         db.commit()
+
+
+def join_feishu_chat(chat_id: str, conv_id: str, user_id: int) -> bool:
+    """原子切换飞书接入指针（feishu-web-chat-unified-design.md §3.1）。
+
+    im_channel_id 从"永久绑定"降级为"当前飞书接入指针"：任一时刻一个飞书接入点
+    （chat_id）只能指向一条 conversation。把 chat_id 从旧 conversation 移到 conv_id，
+    清旧设新在 db_lock 内同事务执行，防竞态。
+    """
+    with db_lock:
+        c = db.cursor()
+        # 新目标必须存在且属于该用户
+        c.execute("SELECT user_id FROM chat_conversations WHERE id=?", (conv_id,))
+        row = c.fetchone()
+        if not row or row[0] != user_id:
+            return False
+        # 清旧：清空当前持有该 chat_id 的其它 conversation
+        c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=? AND id!=?", (chat_id, conv_id))
+        # 设新
+        c.execute("UPDATE chat_conversations SET im_channel_id=? WHERE id=?", (chat_id, conv_id))
+        db.commit()
+        return True
 
 
 # ====== chat_messages CRUD ======
@@ -567,15 +601,20 @@ def delete_conversation(conv_id: str):
 # ====== chat_config CRUD（合并进 chat_agent_session）======
 
 def get_chat_config(user_id: int) -> dict:
-    """获取用户全局 Chat 配置（repo_key='' 表示全局配置行）"""
+    """获取用户全局 Chat 配置（repo_key='' 表示全局配置行）。
+
+    engine-selection-design.md v2：不再写死 backend='opencode' 默认。
+    无配置/未知引擎时，backend 从已注册引擎派生——优先本机直连（resolve_local_engine），
+    无任何引擎则 backend=''（前端/执行侧显示"无 engine，不可用"，绝不隐式跑 opencode）。
+    """
     with db_lock:
         c = db.cursor()
         c.execute("SELECT runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (user_id,))
         row = c.fetchone()
         if not row:
-            return {"backend": "opencode", "runtime_id": 0, "skill": "", "skill_id": 0,
-                    "im_app_id": "", "im_app_secret": "", "im_provider": "", "updated_at": ""}
-        backend_name = "opencode"
+            # 无配置：本机直连兜底，无则空（不回落 opencode 字符串）
+            return _chat_config_with_local_backend("", 0, "", 0, "", "", "", "")
+        backend_name = ""
         if row[0]:
             c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
             brow = c.fetchone()
@@ -585,10 +624,30 @@ def get_chat_config(user_id: int) -> dict:
                 if is_known_engine_name(_n):
                     backend_name = brow[0]
                 else:
-                    # 幽灵/未知引擎（如历史遗留 'default'）：回退 opencode，避免 chat 路由到不存在的引擎
-                    log.warning(f"get_chat_config: runtime_id={row[0]} 指向未知引擎 '{brow[0]}'，回退 opencode")
-        return {"backend": backend_name, "runtime_id": row[0] or 0, "skill": row[1] or "", "skill_id": row[2] or 0,
-                "im_app_id": row[3] or "", "im_app_secret": row[4] or "", "im_provider": row[5] or "", "updated_at": ""}
+                    # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
+                    log.warning(f"get_chat_config: runtime_id={row[0]} 指向未知引擎 '{brow[0]}'，按未配置处理")
+        return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
+                                               row[3] or "", row[4] or "", row[5] or "", "")
+
+
+def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
+                                    im_app_id, im_app_secret, im_provider, updated_at) -> dict:
+    """backend 为空的配置行：尝试本机直连引擎兜底（engine-selection-design.md §8.2）。
+
+    有本机直连引擎 → backend=其类型名、runtime_id=其 id（恒 direct）；
+    无 → backend=''、runtime_id=0（前端"无 engine，不可用"）。
+    """
+    if not backend:
+        try:
+            from src.runtime.engine_select import resolve_local_engine, engine_name
+            _rid = resolve_local_engine() or 0
+            if _rid:
+                backend = engine_name(_rid) or ""
+                runtime_id = _rid
+        except Exception:
+            pass
+    return {"backend": backend, "runtime_id": runtime_id, "skill": skill, "skill_id": skill_id,
+            "im_app_id": im_app_id, "im_app_secret": im_app_secret, "im_provider": im_provider, "updated_at": updated_at}
 
 
 def set_chat_config(user_id: int, **kwargs):

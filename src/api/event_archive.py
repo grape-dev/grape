@@ -45,8 +45,30 @@ def _redact(text, tokens):
     return text
 
 
+def _legacy_base_dir(repo_key: str) -> str:
+    """历史带前缀归档基目录（2026-08-15 前 event_archive 直接拼原始 repo_key，如 gitcode:Jason7602）。
+    仅供兼容读取；新写入一律走去前缀目录（与 agent 工作区统一）。
+    """
+    return os.path.join(WORKSPACE_DIR, repo_key, "issues")
+
+
 def get_event_json_path(repo_key: str, issue_num) -> str:
-    return os.path.join(WORKSPACE_DIR, repo_key, "issues", str(issue_num), "event.json")
+    """事件归档路径（去前缀，与 agent 工作区/event_pipeline 统一，见 repo_key.py 约定）。"""
+    from src.repo_key import from_repo_key
+    return os.path.join(WORKSPACE_DIR, from_repo_key(repo_key), "issues", str(issue_num), "event.json")
+
+
+def _resolve_event_json_path(repo_key: str, issue_num) -> str:
+    """读优先新路径，缺失时兼容历史带前缀目录。"""
+    new = get_event_json_path(repo_key, issue_num)
+    if os.path.exists(new):
+        return new
+    legacy = _legacy_base_dir(repo_key)
+    if ":" in (repo_key or "") and os.path.isdir(legacy):
+        old = os.path.join(legacy, str(issue_num), "event.json")
+        if os.path.exists(old):
+            return old
+    return new
 
 
 def _atomic_write(path: str, data: dict):
@@ -87,10 +109,11 @@ def _locate_by_seq(repo_key: str, seq: int, issue_num_hint: str = "") -> tuple[s
     """按 event_seq 反查 issue_num 与 event.json 路径。
     优先显式 hint（任务自带 issue_id），其次 events 表，最后扫描 issues 目录。
     """
+    from src.repo_key import from_repo_key
     if issue_num_hint:
         num = _extract_num(issue_num_hint)
         if num:
-            return num, get_event_json_path(repo_key, num)
+            return num, _resolve_event_json_path(repo_key, num)
         return "", ""
     from src.api.event_store import get_events
     events = get_events(repo_key, limit=200)
@@ -98,10 +121,12 @@ def _locate_by_seq(repo_key: str, seq: int, issue_num_hint: str = "") -> tuple[s
         if ev.get("seq") == seq and ev.get("issue_id"):
             num = _extract_num(ev["issue_id"])
             if num:
-                return num, get_event_json_path(repo_key, num)
-    # 兜底：扫描 issues 目录
-    base = os.path.join(WORKSPACE_DIR, repo_key, "issues")
-    if os.path.isdir(base):
+                return num, _resolve_event_json_path(repo_key, num)
+    # 兜底：扫描 issues 目录（新去前缀 + 历史带前缀）
+    for base in (os.path.join(WORKSPACE_DIR, from_repo_key(repo_key), "issues"),
+                 _legacy_base_dir(repo_key)):
+        if not os.path.isdir(base):
+            continue
         for d in sorted(os.listdir(base)):
             p = os.path.join(base, d, "event.json")
             arch = _load(p)
@@ -171,7 +196,7 @@ def record_a2a_to(repo_key, issue_num, target_agent):
 
     见 vod-skill-upgrade-plan.md §3.0.2（event.json 仅背景档案，非状态权威）。
     """
-    path = get_event_json_path(repo_key, issue_num)
+    path = _resolve_event_json_path(repo_key, issue_num)
     with _lock_for(repo_key):
         arch = _load(path)
         if not arch:
@@ -222,7 +247,7 @@ def finalize_event_archive(repo_key, seq, status, exit_code=None, duration=None,
 
 
 def load_event_json(repo_key, issue_num) -> dict | None:
-    return _load(get_event_json_path(repo_key, issue_num))
+    return _load(_resolve_event_json_path(repo_key, issue_num))
 
 
 def build_issue_context(repo_key, issue_num, max_chars=4000) -> str:

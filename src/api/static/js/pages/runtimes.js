@@ -31,8 +31,10 @@ function _healthBadge(h, suffix) {
   return `<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:${st.color};background:${st.bg};padding:3px 10px;border-radius:999px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:${st.color}"></span>${_healthLabel(h)}${suffix ? ' · ' + suffix : ''}</span>`;
 }
 
-function _scopeBar(sc, n) {
-  return `<div style="display:inline-flex;align-items:center;gap:8px;background:#e3edfd;color:#235ec7;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;margin:16px 0 10px">${_scopeLabel(sc)} <span style="background:rgba(35,94,199,.12);border-radius:10px;padding:0 8px;font-size:11px">${n}</span></div>`;
+function _scopeBar(sc, n, localN) {
+  // global 分组额外标注本机直连/远端数量（engine-selection-design.md §4.3）
+  const sub = (sc === 'global' && localN) ? ` <span style="color:#0e7490;font-weight:600">· 本机直连 ${localN} / 远端 ${(n || 0) - localN}</span>` : '';
+  return `<div style="display:inline-flex;align-items:center;gap:8px;background:#e3edfd;color:#235ec7;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;margin:16px 0 10px">${_scopeLabel(sc)} <span style="background:rgba(35,94,199,.12);border-radius:10px;padding:0 8px;font-size:11px">${n}</span>${sub}</div>`;
 }
 
 function _legendHtml() {
@@ -75,16 +77,23 @@ function renderEngines(data, devices) {
   SCOPE_ORDER.forEach(sc => {
     const list = groups[sc];
     if (!list.length) return;
-    html += _scopeBar(sc, list.length);
+    // 本机直连引擎（credential_id=0）恒排分组最前，与远端 worker 引擎区分（engine-selection-design.md §4.3）
+    list.sort((a, b) => (b.is_local ? 1 : 0) - (a.is_local ? 1 : 0));
+    const localN = list.filter(r => r.is_local).length;
+    html += _scopeBar(sc, list.length, localN);
     html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">`;
     list.forEach(rt => {
+      const localBadge = rt.is_local
+        ? `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 8px;white-space:nowrap;vertical-align:middle">本机直连</span>`
+        : '';
       html += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
           ${_healthBadge(rt.health)}
-          <span style="font-weight:600;font-size:14px">${rt.instance_name || rt.name} <span style="font-weight:400;color:var(--t3);font-size:12px">${rt.name} v${rt.version || ''}</span></span>
+          <span style="font-weight:600;font-size:14px">${rt.instance_name || rt.name} ${localBadge}</span>
+          <span style="font-weight:400;color:var(--t3);font-size:12px;margin-left:auto">${rt.name} v${rt.version || ''}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">worker</span> ${rt.worker_name || '—'}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">worker</span> ${rt.worker_name || (rt.is_local ? '本机' : '—')}</div>
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${rt.owner || '—'}</div>
         </div>
       </div>`;

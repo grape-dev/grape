@@ -97,6 +97,64 @@ def _auto_title(conv: dict, message: str):
         update_conversation(conv["id"], title=title)
 
 
+async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
+    """web 答复推送到飞书（feishu-web-chat-unified-design.md §3.2）。
+
+    conversation 已被飞书接入（im_channel_id 非空）时，用该用户配置的 chat_bot
+    主动推送答复给其飞书 open_id。P2P 场景 im_channel_id 即用户 open_id。
+    """
+    try:
+        im_channel_id = (conv or {}).get("im_channel_id", "")
+        if not im_channel_id:
+            return
+        from src.session_manager import db, db_lock
+        from src.api.routes.tasks import _get_feishu_open_id
+        open_id = _get_feishu_open_id(user.get("username", ""))
+        if not open_id and im_channel_id.startswith("ou_"):
+            open_id = im_channel_id
+        if not open_id:
+            return
+        from src.api import main as api_main
+        bm = api_main.bot_manager
+        if not bm or not bm.api:
+            return
+        app_id = ""
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND im_app_id!='' LIMIT 1", (user.get("id") or 0,)).fetchone()
+            if row:
+                app_id = row[0]
+        if not app_id:
+            return
+        ctx = bm.get_bot(app_id)
+        if not ctx:
+            return
+        await bm.api.send_card_to_user(ctx, open_id, f"[来自Web] {text[:1800]}", title="Chat Agent")
+        from src.config import log
+        log.info(f"Chat web->feishu push: conv={(conv or {}).get('id')} open_id={open_id[:20]} text_len={len(text)}")
+    except Exception as e:
+        from src.config import log
+        log.warning(f"Chat web->feishu push failed: {e}")
+
+
+def _resolve_gitcode_token(conv: dict | None, conv_id: str, user_token: str) -> str:
+    """解析注入 agent 的 GitCode token：优先用户当前 token（user_accounts），
+    并在会话缓存过期/为空时刷新 conversation.user_gitcode_token。
+
+    修复：会话创建时缓存旧 token（曾 401 Bad credentials），非空缓存永不被回填刷新
+    （chat.py 原逻辑仅空值才覆盖）。见 2026-08-16 修复。
+    """
+    if user_token:
+        cached = (conv or {}).get("user_gitcode_token", "") if conv else ""
+        if conv_id and cached != user_token:
+            try:
+                update_conversation(conv_id, user_gitcode_token=user_token)
+            except Exception as e:
+                log.warning(f"Chat resolve token refresh failed: {e}")
+        return user_token
+    return (conv or {}).get("user_gitcode_token", "") if conv else ""
+
+
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
@@ -117,12 +175,12 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     add_message(conv_id, "user", body.message)
 
     cfg = _get_chat_config(user["id"])
-    backend_name = cfg.get("backend", "opencode")
+    backend_name = cfg.get("backend", "")
     skill_name = cfg.get("skill", "") or "chat"
     skill_id = cfg.get("skill_id", 0) or 0
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
+    gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token)
     # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
     if conv and conv.get("conv_type") == "task":
         from src.prompt_builder import build_task_chat_prompt
@@ -134,7 +192,14 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         runtime_session_id = ""
 
     from src.config import log
-    log.info(f"Chat send: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
+    log.info(f"Chat send: backend={backend_name or '(none)'}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
+
+    # 无任何引擎（未配置本机直连/远端）→ 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
+    if not backend_name:
+        _warn = "⚠️ 无可用引擎（未配置本机直连或远端引擎）"
+        add_message(conv_id, "agent", _warn)
+        await _push_reply_to_feishu(conv, user, _warn)
+        return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
 
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
     kind = runtime_execution_kind(cfg.get("runtime_id") or 0)
@@ -193,6 +258,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 
     add_message(conv_id, "agent", reply)
     touch_conversation(conv_id)
+    # web→飞书推送：该对话已被飞书接入时推送给用户（feishu-web-chat-unified-design.md §3.2）
+    await _push_reply_to_feishu(conv, user, reply)
     # Save opencode session ID for continuity
     if new_runtime_session_id and not runtime_session_id:
         update_conversation(conv_id, runtime_session_id=new_runtime_session_id)
@@ -220,36 +287,55 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     add_message(conv_id, "user", body.message)
 
     cfg = _get_chat_config(user["id"])
-    backend_name = cfg.get("backend", "opencode")
+    backend_name = cfg.get("backend", "")
     skill_name = cfg.get("skill", "") or "chat"
     skill_id = cfg.get("skill_id", 0) or 0
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    gitcode_token = conv.get("user_gitcode_token", "") if conv else ""
-    prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id)
+    gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token)
+    # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
+    if conv and conv.get("conv_type") == "task":
+        from src.prompt_builder import build_task_chat_prompt
+        prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"])
+    else:
+        prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
 
     from src.config import log
-    log.info(f"Chat send/stream: backend={backend_name}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
+    log.info(f"Chat send/stream: backend={backend_name or '(none)'}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
+
+    # 无引擎 → 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
+    if not backend_name:
+        _reply = "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎"
+        add_message(conv_id, "agent", _reply)
+        await _push_reply_to_feishu(conv, user, _reply)
+        return StreamingResponse(
+            iter([f"data: {json.dumps({'type': 'done', 'text': _reply, 'conversation_id': conv_id})}\n\n"]),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
-    kind = runtime_execution_kind(cfg.get("runtime_id") or 0)
+    # chat 默认兜底本机直连（engine-selection-design.md §8.2）：未显式配置引擎时
+    # 选健康本机引擎（credential_id=0），恒走 direct；不再按名现挑/建 opencode 默认。
+    rid = cfg.get("runtime_id") or 0
+    if not rid:
+        try:
+            from src.runtime.engine_select import resolve_local_engine
+            rid = resolve_local_engine() or 0
+        except Exception:
+            rid = 0
+    kind = runtime_execution_kind(rid)
     if kind != EXEC_MODE_DIRECT:
-        # M2 D5 入队 + 轮询：任务由 RuntimeAgent（本地/远端边端）claim 执行，SSE 以终态结果返回
+        # M2 D5 入队 + 轮询：任务由远端 RuntimeAgent claim 执行，SSE 以终态结果返回
         import json as _json
         from src.runtime.service import enqueue_task, wait_task_terminal
         from src.api.session_store import get_or_create_agent_session
 
         session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
-        runtime_id = cfg.get("runtime_id") or 0
-        if not runtime_id:
-            try:
-                from src.user.db import ensure_default_runtime, get_runtime_id_by_name
-                runtime_id = get_runtime_id_by_name(backend_name) or ensure_default_runtime(backend_name) or 0
-            except Exception:
-                pass
+        runtime_id = rid  # 已由本机直连兜底解析（§8.2）；远端引擎才走队列
 
         async def event_stream():
             yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...', 'conversation_id': conv_id})}\n\n"
@@ -286,6 +372,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 final_text = f"收到您的消息：「{body.message}」\n\n当前使用 {backend_name} 后端处理。"
             add_message(conv_id, "agent", final_text)
             touch_conversation(conv_id)
+            # web→飞书推送（feishu-web-chat-unified-design.md §3.2）
+            await _push_reply_to_feishu(conv, user, final_text)
             if new_sid and not runtime_session_id:
                 update_conversation(conv_id, runtime_session_id=new_sid)
             yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
@@ -382,6 +470,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
         add_message(conv_id, "agent", final_text)
         touch_conversation(conv_id)
+        # web→飞书推送（feishu-web-chat-unified-design.md §3.2）
+        await _push_reply_to_feishu(conv, user, final_text)
         # Save opencode session ID for continuity
         if captured_session and not runtime_session_id:
             update_conversation(conv_id, runtime_session_id=captured_session)
@@ -405,23 +495,39 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     import os as _os
 
     cfg = _get_chat_config(user["id"])
-    backend_name = cfg.get("backend", "opencode")
+    backend_name = cfg.get("backend", "")
     # chat 会话：user_id + repo_key 绑定（chat_agent_session 是 chat 专用；此处用 devops_agent_session 保证 D9 串行）
     session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
-    # 优先用用户配置的 runtime_id（chat_agent_session），未配置再按名兜底
+    # 无引擎 → 明确不可用（engine-selection-design.md v2），不隐式跑 opencode
+    if not backend_name:
+        return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
+    # 优先用用户配置的 runtime_id（chat_agent_session），未配置按本机直连兜底（engine-selection-design.md §8.2）
     runtime_id = cfg.get("runtime_id") or 0
     if not runtime_id:
         try:
-            from src.user.db import ensure_default_runtime, get_runtime_id_by_name
-            runtime_id = get_runtime_id_by_name(backend_name) or ensure_default_runtime(backend_name) or 0
+            from src.runtime.engine_select import resolve_local_engine
+            runtime_id = resolve_local_engine() or 0
         except Exception:
-            pass
+            runtime_id = 0
     if not runtime_id:
         return {"reply": "⚠️ 无可用 runtime，请先在 Agent Runtimes 页刷新", "conversation_id": conv_id}
+    # 本机直连（credential_id=0）无 claim 方：队列任务端点不能投递到本机，需走 direct 会话
+    from src.runtime.service import runtime_credential_id
+    if (runtime_credential_id(runtime_id) or 0) == 0:
+        return {"reply": "⚠️ 未配置远端引擎，任务会话需先在 Agent 配置中绑定远端引擎", "conversation_id": conv_id}
 
     cwd = _get_chat_cwd(user["id"], conv_id)
     _os.makedirs(cwd, exist_ok=True)
-    prompt = _build_chat_prompt(message, repo_key, [], skill_name, skill_id)
+    # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task + 任务描述 + 历史）；
+    # 一般会话走通用 prompt（queue 模式也带最近历史，与 direct 一致）
+    #（见 task-conversation-prompt-align-design.md §3.2）
+    conv = get_conversation(conv_id) if conv_id else None
+    history = get_messages(conv_id, limit=10) if conv_id else []
+    if conv and conv.get("conv_type") == "task":
+        from src.prompt_builder import build_task_chat_prompt
+        prompt = build_task_chat_prompt(message, repo_key, history, conv, account=user.get("username") or "")
+    else:
+        prompt = _build_chat_prompt(message, repo_key, history, skill_name, skill_id)
     tid = enqueue_task(
         agent_session_id=session.get("id") or "",
         runtime_id=runtime_id,
@@ -549,12 +655,24 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
 @router.get("/config")
 async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
     cfg = _get_chat_config(user["id"])
-    # Chat Agent 仅可选个人引擎（scope=user，见 runtime-admin-two-view-design §5.1）
+    # Chat 后端可选面：本机直连（默认兜底，engine-selection-design.md §8.2）+ 个人引擎（scope=user，显式选择）
     from src.runtime.instances import instance_name
+    from src.user.db import is_known_engine_name
     from src.session_manager import db, db_lock
     backends = []
     with db_lock:
         c = db.cursor()
+        # 本机直连引擎（credential_id=0，已知类型且已装）
+        try:
+            c.execute("SELECT id, name, version FROM agent_runtimes WHERE credential_id=0 AND installed=1 ORDER BY id")
+            for r in c.fetchall():
+                _rid, ename, ver = r
+                if not is_known_engine_name(ename or ""):
+                    continue
+                backends.append({"name": ename, "display_name": f"{ename} v{ver or ''}（本机直连）", "scope": "local", "owner": ""})
+        except Exception:
+            pass
+        # 个人引擎（scope=user）
         try:
             c.execute("""
                 SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id
@@ -604,7 +722,7 @@ async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""
 
     return {
         "backend": {
-            "type": cfg.get("backend", "opencode"),
+            "type": cfg.get("backend", ""),
         },
         "skill": cfg.get("skill", ""),
         "skill_id": cfg.get("skill_id", 0) or 0,

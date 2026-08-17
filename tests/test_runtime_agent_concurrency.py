@@ -66,7 +66,7 @@ class FakeClient:
         self.queue = list(task_dicts)
         self.requeued = []
 
-    async def claim(self, rid):
+    async def claim(self, rid, **kwargs):
         if self.queue:
             return self.queue.pop(0)
         return None

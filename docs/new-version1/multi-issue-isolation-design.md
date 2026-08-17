@@ -21,7 +21,7 @@
 | R2 | Issue 级 session + workdir 隔离 | session 按 `(repo_key, agent_type)` 共享（`devops_agent_session` + `runtime_session_id`）；cwd = `WORKSPACE_DIR/{owner}/{repo}/{agent_type}-agent` 全 Issue 共享；D9 串行粒度 = repo+agent → 同 repo 多 Issue 无法并行 | **配置层/执行层拆分**：配置仍 repo 级，新增 Issue 级执行会话 `issue_agent_session`；workdir 改为 `{owner}/{repo}/{agent_type}/issues/{n}/`；D9 串行粒度降到 Issue 级，同 Issue 串行、跨 Issue 并行 |
 | R3 | 上下文分层：repo 全局信息只剩 project-info | 本地模式下历史文件（`WORKSPACE_DIR/history/`）与 project-info 均以**本地绝对路径**注入，远端 worker 不可读 | **三级上下文**：repo 全局（仅 project-info）+ Issue 级（event.json / issue_state / 评论）+ 事件瞬态（payload）；一切本地路径注入改为「随任务打包」或「文本内联」 |
 
-**核心矛盾点**：本地模式（`direct`/`queue_local`）下 Agent 与 Bot 同机，可以直读服务端 `data/workspaces/`；远端模式（`queue_remote`）下 worker 与 Bot 异机，`cwd` 只是字符串，worker 上并不存在服务端的数据文件。因此**一切 repo/Issue 级知识（project-info、event.json、历史）都必须走"服务端构造 → 随任务交付 / 文本内联"，而不是依赖 worker 本地文件系统**。
+**核心矛盾点**：本地模式（`direct`，`queue_local` 已废除）下 Agent 与 Bot 同机，可以直读服务端 `data/workspaces/`；远端模式（`queue_remote`）下 worker 与 Bot 异机，`cwd` 只是字符串，worker 上并不存在服务端的数据文件。因此**一切 repo/Issue 级知识（project-info、event.json、历史）都必须走"服务端构造 → 随任务交付 / 文本内联"，而不是依赖 worker 本地文件系统**。
 
 ---
 

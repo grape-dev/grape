@@ -10,8 +10,13 @@ from .registry import _RUNTIMES, register_runtime, get_runtime, discover_runtime
 from .executor import stream_runtime, stream_agent, stream_opencode, consume_stream_async
 from .service import (
     enqueue_task, claim, get_task, update_task_status, cancel_task,
-    report_messages, report_progress, complete_task, fail_task, submit_local,
+    report_messages, report_progress, complete_task, fail_task,
     get_execution_mode, set_execution_mode,
     runtime_credential_id, runtime_execution_kind,
     enqueue_async_report, start_report_ingestion_loop, wait_task_terminal,
+)
+from .engine_select import (
+    load_engine_selection, get_binding, set_binding, clear_binding,
+    pick_engine, resolve_default_engine, query_engines,
+    resolve_local_engine, engine_name, backfill_existing_bindings,
 )

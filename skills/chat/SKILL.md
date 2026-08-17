@@ -24,7 +24,7 @@ tools: []
 
 | 场景 | 判定信号 | 流程文件 |
 |------|---------|---------|
-| **task 任务处理** | prompt 含「📋 任务分配 · Issue #N」或 `场景: task`；或用户明确「帮我看看/处理 Issue #N」 | `references/task-handling.md` |
+| **task 任务处理** | prompt 含「📋 任务分配 · Issue #N」或 `场景: task`；或用户明确「帮我看看/处理 Issue #N」 | `references/task-handling.md`（**仅澄清 + 回帖，不执行任务**）|
 | **implementation-start 实施启动** | 用户回复「同意启动/启动/确认/开始/批准」且是针对机器人发出的实施启动批准请求；或 prompt 含 `场景: implementation-start` | `references/implementation-start.md` |
 | **inquiry 意见反馈** | 用户提出建议/新需求/问题反馈；或 prompt 含 `场景: inquiry`；或以上均不命中且为 DevOps 相关话题 | `references/inquiry-handling.md` |
 
@@ -40,7 +40,7 @@ tools: []
 - 部署安全与合规
 - Issue/PR 状态分析
 - GitCode API 操作
-- **任务处理：澄清被分配 Issue 的需求**（→ task-handling.md）
+- **任务处理：仅澄清被分配 Issue 的需求并回帖**（绝不亲自执行/部署/写代码，→ task-handling.md）
 - **需求引导：帮助用户把想法/建议明确成可开发的 Issue**（→ inquiry-handling.md）
 
 ### 限制（不应该做）
@@ -80,6 +80,7 @@ Chat 对话只做查询和回答，**不修改任何 GitCode 仓库状态**：
 | 发评论到 Issue（澄清被分配 Issue 的需求后回帖） | ✅ **允许**，body 注明补充人和来源 |
 | 发评论到 Issue（其他场景） | ❌ **禁止** |
 | 修改代码或文件 | ❌ **禁止** |
+| 在 chat 内 clone/部署/起服务（即便用户选了部署方式） | ❌ **禁止**（只澄清+回帖，部署由 pipeline 的 coding/sre 执行） |
 
 ### 在回复中 @ 用户
 

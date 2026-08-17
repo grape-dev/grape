@@ -140,3 +140,37 @@ def test_already_bound_no_requery():
     assert not any("GitCode" in t or "确认" in t for t in calls)
     from src.session_manager import get_feishu_open_id
     assert get_feishu_open_id("p2puser5") == "ou_existing"
+
+
+def test_oauth_login_empty_open_id_preserves_binding():
+    """OAuth 登录传空 open_id 不得覆盖已有飞书绑定（2026-08-16 修复）。
+
+    回归：此前 auth.py OAuth 登录调 set_feishu_open_id(open_id='') 用 INSERT OR REPLACE
+    把 confirmed 的 feishu_open_id 清空，导致系统反复要求重新确认绑定。修复后空 open_id
+    应保留已有 open_id，仅刷新昵称。
+    """
+    import asyncio
+    from src.session_manager import set_feishu_open_id, get_feishu_open_id, db, db_lock
+    _seed_user_and_bot("p2puser6", "cli_p2p6", 70006)
+    # 1) 飞书确认绑定 open_id
+    set_feishu_open_id("", "p2puser6", "ou_p2p6_bind", feishu_name="飞书昵称", gitcode_nickname="旧昵称")
+    assert get_feishu_open_id("p2puser6") == "ou_p2p6_bind"
+    # 2) 模拟 OAuth 登录：只带昵称，open_id 为空
+    set_feishu_open_id("", "p2puser6", "", "", gitcode_nickname="新昵称")
+    # 3) open_id 必须保留，昵称刷新
+    assert get_feishu_open_id("p2puser6") == "ou_p2p6_bind", "空 open_id 不应覆盖已有绑定"
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT feishu_open_id, gitcode_nickname, feishu_name FROM unified_user_mapping WHERE gitcode_user='p2puser6'").fetchone()
+    assert row and row[0] == "ou_p2p6_bind"
+    assert row[1] == "新昵称", "昵称应刷新"
+    assert row[2] == "飞书昵称", "空 feishu_name 不应覆盖已有 feishu_name"
+
+
+def test_set_feishu_open_id_empty_no_existing_creates_without_open_id():
+    """无已有绑定时，空 open_id 写入映射（不报错，open_id 留空）——OAuth 首次登录建行"""
+    import asyncio
+    from src.session_manager import set_feishu_open_id, get_feishu_open_id
+    _seed_user_and_bot("p2puser7", "cli_p2p7", 70007)
+    set_feishu_open_id("", "p2puser7", "", "", gitcode_nickname="昵称7")
+    assert get_feishu_open_id("p2puser7") in (None, ""), "无绑定时空 open_id 不产生 open_id"

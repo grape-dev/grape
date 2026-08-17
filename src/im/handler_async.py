@@ -6,7 +6,7 @@
   - 纯逻辑（bind/clean 意图、repo 解析、用户归属）内联本模块，无同步 HTTP；
     IO 型命令（/bind、/refresh 的群成员↔协作者映射同步）走 await api 异步方法。
 """
-import re, os, asyncio
+import re, os, asyncio, time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -23,6 +23,55 @@ if TYPE_CHECKING:
 # p2p 首次消息待确认绑定：{app_id: {username: {"open_id", "gitcode_nickname", "expires"}}}
 # 用户确认后才写入 unified_user_mapping，防止错误绑定。
 _pending_binds: dict[str, dict] = {}
+
+# 卡片命令编号选择 pending 态（feishu-repo-navigation-commands-design.md §3.2）：
+#   chat_id -> {action: repo|chat|task, repo_key, page, page_size, items, expires}
+_PENDING_SELECT_TTL = 120.0
+_PENDING_SELECT_PAGE_SIZE = 10
+_pending_selections: dict[str, dict] = {}
+
+
+def _set_pending_selection(chat_id: str, payload: dict):
+    payload["expires"] = time.time() + _PENDING_SELECT_TTL
+    payload["page_size"] = _PENDING_SELECT_PAGE_SIZE
+    _pending_selections[chat_id] = payload
+
+
+def _get_pending_selection(chat_id: str) -> dict | None:
+    p = _pending_selections.get(chat_id)
+    if not p:
+        return None
+    if p.get("expires", 0) < time.time():
+        _pending_selections.pop(chat_id, None)
+        return None
+    return p
+
+
+def _clear_pending_selection(chat_id: str):
+    _pending_selections.pop(chat_id, None)
+
+
+def _current_bound_repo(chat_id: str, account: str, db) -> str:
+    """当前飞书聊天绑定的仓库 repo_key（repo_im_group_binding）"""
+    try:
+        c = db.cursor()
+        c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
+        row = c.fetchone()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+
+def _candidate_card(emoji: str, title: str, items: list[str], page: int, total_pages: int, nav_cmd: str) -> str:
+    """卡片命令候选列表（lark_md 子集）：标题 + 编号行 + 翻页/取消提示"""
+    lines = [f"**{emoji} {title}**"]
+    for i, label in enumerate(items, 1):
+        lines.append(f"{i}. {label}")
+    if total_pages > 1:
+        lines.append(f"\n第 {page}/{total_pages} 页 · `{nav_cmd} N` 翻页")
+    lines.append("回复数字选择 · `0` 取消")
+    return "\n".join(lines)
+
 
 # 确认/否认意图
 _CONFIRM_RE = re.compile(r'^(?:是|对|确认|确定|是的|对的|没错|对的是|对，是|嗯|可以|yes|y)\s*$', re.IGNORECASE)
@@ -101,120 +150,239 @@ def get_user_id_by_app_id(app_id: str) -> int | None:
 
 async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
                                 text: str, chat_id: str, sender_id: str, db,
-                                account: str = "") -> str:
-    """异步命令处理。纯 DB 命令保持同步（SQLite 毫秒级）；含网络 IO 的
-    /bind、/refresh 走 await api.sync_repo_feishu_mapping，不阻塞事件循环。
+                                account: str = "", msg_id: str = "") -> str:
+    """异步命令处理（卡片化导航 feishu-repo-navigation-commands-design.md）。
+
+    新命令 /repo /chat /task /new /where /cancel /help 用 reply_card 回复并返回空串（调用方跳过文本回复）；
+    /clean 沿用同步逻辑后以卡片确认。旧 /bind /unbind /status /refresh /autodev /notify 及
+    /对话 /加入 已按设计删除（/repo 取代 /bind、/chat 取代 /对话、/where 承担 /status 定位）。
     """
     text = text.strip()
     parts = text.split()
     if not parts:
         return ""
     cmd = parts[0].lower()
-    if cmd == "/bind" and len(parts) >= 2:
-        from src.repo_key import to_repo_key
-        repo_key = to_repo_key(parts[1])
-        try:
-            c = db.cursor()
-            c.execute(
-                "INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
-                (chat_id, repo_key, "gitcode", sender_id, account)
-            )
-            db.commit()
-            matched = await api.sync_repo_feishu_mapping(ctx, repo_key, chat_id)
-            if matched > 0:
-                return f"✅ 已绑定 `{repo_key}`，同步了 {matched} 个用户映射"
-            return f"✅ 已绑定当前群到 `{repo_key}`"
-        except Exception as e:
-            return f"❌ 绑定失败: {e}"
-    if cmd == "/unbind":
-        try:
-            c = db.cursor()
-            c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
-            db.commit()
-            return "✅ 已解绑当前群"
-        except Exception as e:
-            return f"❌ 解绑失败: {e}"
-    if cmd == "/status":
-        try:
-            c = db.cursor()
-            c.execute("SELECT repo_key, created_at FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
-            row = c.fetchone()
-            if row:
-                return f"📋 当前绑定: `{row[0]}` (since {row[1]})"
-            return "📋 未绑定任何仓库。使用 `/bind owner/repo` 绑定"
-        except Exception as e:
-            return f"❌ 查询失败: {e}"
-    if cmd == "/refresh":
-        try:
-            c = db.cursor()
-            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
-            row = c.fetchone()
-            if not row:
-                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后刷新。"
-            matched = await api.sync_repo_feishu_mapping(ctx, row[0], chat_id)
-            return f"✅ 已刷新，同步了 {matched} 个用户映射"
-        except Exception as e:
-            return f"❌ 刷新失败: {e}"
-    if cmd == "/autodev":
-        try:
-            c = db.cursor()
-            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
-            row = c.fetchone()
-            if not row:
-                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后设置。"
-            repo_key = row[0]
-            from src.session_manager import set_auto_impl_enabled, get_auto_impl_enabled
-            if len(parts) >= 2 and parts[1].lower() in ("on", "off"):
-                enabled = parts[1].lower() == "on"
-                set_auto_impl_enabled(repo_key, enabled)
-                return f"✅ 仓库 `{repo_key}` 自动实现已{'开启' if enabled else '关闭'}"
-            current = get_auto_impl_enabled(repo_key)
-            return f"📋 仓库 `{repo_key}` 自动实现：{'✅ 开启' if current else '❌ 关闭'}"
-        except Exception as e:
-            return f"❌ 设置失败: {e}"
-    if cmd == "/notify":
-        try:
-            c = db.cursor()
-            c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
-            row = c.fetchone()
-            if not row:
-                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后设置。"
-            repo_key = row[0]
-            from src.session_manager import set_notify_enabled, get_notify_enabled
-            if len(parts) >= 2 and parts[1].lower() in ("on", "off"):
-                enabled = parts[1].lower() == "on"
-                set_notify_enabled(repo_key, enabled)
-                return f"✅ 仓库 `{repo_key}` 飞书通知已{'开启' if enabled else '关闭'}"
-            current = get_notify_enabled(repo_key)
-            return f"📋 仓库 `{repo_key}` 飞书通知：{'✅ 开启' if current else '❌ 关闭'}"
-        except Exception as e:
-            return f"❌ 设置失败: {e}"
+    uid = get_user_id_by_app_id(account) or 0
+
+    if cmd == "/repo":
+        if not uid:
+            return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
+        from src.user.db import get_user_repos
+        from src.repo_key import from_repo_key
+        repos = get_user_repos(uid)
+        if not repos:
+            return "📋 你没有已同步的仓库。"
+        bound = _current_bound_repo(chat_id, account, db)
+        page = max(1, int(parts[1])) if len(parts) >= 2 and parts[1].isdigit() else 1
+        total_pages = max(1, -(-len(repos) // _PENDING_SELECT_PAGE_SIZE))
+        page = min(page, total_pages)
+        items = []
+        for r in repos[(page - 1) * _PENDING_SELECT_PAGE_SIZE: page * _PENDING_SELECT_PAGE_SIZE]:
+            full = from_repo_key(r["repo_key"])
+            role = "owner" if r.get("is_admin") else ("member" if r.get("is_join") else "")
+            marker = "【绑定中】" if (r["repo_key"] == bound or full == bound) else ""
+            items.append(f"{full}（{role}）{marker}")
+        _set_pending_selection(chat_id, {"action": "repo", "repo_key": bound, "items": repos, "page": page})
+        await api.reply_card(ctx, msg_id, _candidate_card("📁", f"仓库列表（共 {len(repos)} 个）", items, page, total_pages, "/repo"))
+        return ""
+
+    if cmd == "/chat":
+        if not uid:
+            return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
+        bound = _current_bound_repo(chat_id, account, db)
+        if not bound:
+            await api.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n先使用 `/repo` 选择并绑定仓库。")
+            return ""
+        from src.session_manager import get_user_conversations
+        convs = get_user_conversations(uid, repo_key=bound, limit=20)
+        if not convs:
+            await api.reply_card(ctx, msg_id, f"**📄 {bound} 下暂无会话**\n使用 `/new` 新建并加入。")
+            return ""
+        page = max(1, int(parts[1])) if len(parts) >= 2 and parts[1].isdigit() else 1
+        total_pages = max(1, -(-len(convs) // _PENDING_SELECT_PAGE_SIZE))
+        page = min(page, total_pages)
+        items = []
+        for cv in convs[(page - 1) * _PENDING_SELECT_PAGE_SIZE: page * _PENDING_SELECT_PAGE_SIZE]:
+            tag = "任务" if cv.get("conv_type") == "task" else "一般"
+            cur = " 👈当前" if cv.get("im_channel_id") == chat_id else ""
+            items.append(f"[{tag}] {cv.get('title') or '新对话'}{cur}")
+        _set_pending_selection(chat_id, {"action": "chat", "repo_key": bound, "items": convs, "page": page})
+        await api.reply_card(ctx, msg_id, _candidate_card("📄", f"{bound} 会话列表", items, page, total_pages, "/chat"))
+        return ""
+
+    if cmd == "/task":
+        if not uid:
+            return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
+        bound = _current_bound_repo(chat_id, account, db)
+        if not bound:
+            await api.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n先使用 `/repo` 选择并绑定仓库。")
+            return ""
+        c = db.cursor()
+        c.execute("SELECT id, issue_number, title, status FROM tasks WHERE user_id=? AND repo_key=? ORDER BY id DESC LIMIT 20",
+                  (uid, bound))
+        tasks = c.fetchall()
+        if not tasks:
+            await api.reply_card(ctx, msg_id, f"**📋 {bound} 下暂无任务**")
+            return ""
+        page = max(1, int(parts[1])) if len(parts) >= 2 and parts[1].isdigit() else 1
+        total_pages = max(1, -(-len(tasks) // _PENDING_SELECT_PAGE_SIZE))
+        page = min(page, total_pages)
+        items = [f"Issue #{t[1]} · {t[3]} · {t[2] or ''}" for t in tasks[(page - 1) * _PENDING_SELECT_PAGE_SIZE: page * _PENDING_SELECT_PAGE_SIZE]]
+        _set_pending_selection(chat_id, {"action": "task", "repo_key": bound, "items": tasks, "page": page})
+        await api.reply_card(ctx, msg_id, _candidate_card("📋", f"{bound} 任务列表", items, page, total_pages, "/task"))
+        return ""
+
+    if cmd == "/new":
+        if not uid:
+            return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
+        bound = _current_bound_repo(chat_id, account, db)
+        if not bound:
+            await api.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n先使用 `/repo` 选择并绑定仓库。")
+            return ""
+        from src.session_manager import create_conversation, join_feishu_chat
+        cid = create_conversation(uid, bound)
+        if cid and join_feishu_chat(chat_id, cid, uid):
+            await api.reply_card(ctx, msg_id, f"**✅ 已新建并加入对话**\n`{bound}` · 新对话\n后续飞书消息将进入该对话。")
+        else:
+            await api.reply_card(ctx, msg_id, "**❌ 新建对话失败**")
+        return ""
+
+    if cmd == "/where":
+        from src.session_manager import get_conversation_by_im
+        bound = _current_bound_repo(chat_id, account, db)
+        conv = get_conversation_by_im(chat_id, uid) if uid else None
+        lines = ["**📍 当前位置**", f"仓库：{bound or '未绑定'}"]
+        if conv:
+            tag = "任务" if conv.get("conv_type") == "task" else "一般"
+            title = conv.get("title") or "新对话"
+            if conv.get("issue_number"):
+                title += f"（Issue #{conv['issue_number']}）"
+            lines.append(f"会话：[{tag}] {title}")
+            # 对账：群绑定仓库 ≠ 当前会话所属仓库 → 提示不一致（2026-08-16 发散 bug 兜底提示）
+            try:
+                from src.repo_key import from_repo_key
+                if bound and conv.get("repo_key") and from_repo_key(bound) != conv["repo_key"]:
+                    lines.append(f"⚠️ 群绑定 `{from_repo_key(bound)}` 与当前会话仓库 `{conv['repo_key']}` 不一致，建议 `/repo` 重绑或 `/new` 新建。")
+            except Exception:
+                pass
+        else:
+            lines.append("会话：未加入（新消息将新建会话）")
+        await api.reply_card(ctx, msg_id, "\n".join(lines))
+        return ""
+
+    if cmd == "/cancel":
+        _clear_pending_selection(chat_id)
+        await api.reply_card(ctx, msg_id, "**✅ 已取消当前选择**")
+        return ""
+
     if cmd in ("/clean", "/cleansession", "/reset", "/cleancache"):
         try:
             c = db.cursor()
             c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
             row = c.fetchone()
             if not row:
-                return "📋 当前群未绑定任何仓库。使用 `/bind owner/repo` 绑定后再清理。"
+                return "📋 当前群未绑定任何仓库。先使用 `/repo` 绑定后再清理。"
             repo_key = row[0]
             from src.repo_key import to_repo_key, from_repo_key
             full_key = to_repo_key(repo_key)
             legacy_key = from_repo_key(repo_key)
             c.execute("UPDATE chat_agent_session SET runtime_session_id='', runtime='' WHERE repo_key=? OR repo_key=?", (full_key, legacy_key))
             db.commit()
-            return f"✅ 已清除仓库 `{full_key}` 的 Agent 会话缓存。下次事件将使用全新的 Agent 上下文。"
+            await api.reply_card(ctx, msg_id, f"**✅ 已清除会话缓存**\n`{full_key}` 下次事件将使用全新 Agent 上下文。")
         except Exception as e:
-            return f"❌ 清理失败: {e}"
+            await api.reply_card(ctx, msg_id, f"**❌ 清理失败**\n{e}")
+        return ""
+
     if cmd in ("/help", "/start"):
-        return (
-            f"🤖 DevOps Bot\n\n"
-            f"**命令**:\n  `/bind owner/repo`  — 绑定当前群到仓库\n"
-            f"  `/unbind`           — 解绑并清除用户映射\n  `/status`           — 查看绑定\n  `/refresh`          — 刷新用户映射\n"
-            f"  `/autodev on/off`   — 自动实现开关\n  `/notify on/off`    — 飞书通知开关\n  `/clean`            — 清除 Agent 会话缓存\n"
-            f"  `/help`             — 帮助\n\n"
-            f"**直接提问**:\n  输入问题即可查询仓库状态"
-        )
+        await api.reply_card(ctx, msg_id, _HELP_CARD)
+        return ""
+
     return ""
+
+
+async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str,
+                            num: str, pending: dict):
+    """卡片命令编号选择执行（feishu-repo-navigation-commands-design.md §3.2）。"""
+    try:
+        if num == "0":
+            _clear_pending_selection(chat_id)
+            await api.reply_card(ctx, msg_id, "**✅ 已取消选择**")
+            return
+        action = pending.get("action")
+        uid = get_user_id_by_app_id(ctx.app_id) or 0
+        items = pending.get("items") or []
+        page = int(pending.get("page") or 1)
+        page_size = int(pending.get("page_size") or _PENDING_SELECT_PAGE_SIZE)
+        idx = (page - 1) * page_size + (int(num) - 1)
+        if idx < 0 or idx >= len(items):
+            await api.reply_card(ctx, msg_id, f"**⚠️ 无效编号 {num}**\n回复 `0` 取消。")
+            return
+        if action == "repo":
+            repo = items[idx]
+            repo_key = repo["repo_key"] if isinstance(repo, dict) else repo
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
+                      (chat_id, repo_key, "gitcode", str(uid), ctx.app_id))
+            # 绑定即重置会话位置：清掉旧会话指针，下次消息在新仓库下新建会话
+            #（修复 2026-08-16 "群绑定仓库 ≠ 会话所属仓库" 发散 bug）
+            c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
+            db.commit()
+            _clear_pending_selection(chat_id)
+            await api.reply_card(ctx, msg_id, f"**✅ 已绑定 `{repo_key}`**\n使用 `/chat` 选择会话，或直接开始提问。")
+        elif action == "chat":
+            cv = items[idx]
+            from src.session_manager import join_feishu_chat
+            if join_feishu_chat(chat_id, cv["id"], uid):
+                tag = "任务" if cv.get("conv_type") == "task" else "一般"
+                _clear_pending_selection(chat_id)
+                await api.reply_card(ctx, msg_id, f"**✅ 已加入对话**\n[{tag}] {cv.get('title') or '新对话'}（{cv.get('repo_key') or ''}）")
+            else:
+                await api.reply_card(ctx, msg_id, "**❌ 加入失败**")
+        elif action == "task":
+            tid, issue_number, title, status = items[idx]
+            cid = ""
+            c = db.cursor()
+            row = c.execute("SELECT conversation_id FROM tasks WHERE id=?", (tid,)).fetchone()
+            if row and row[0]:
+                cid = row[0]
+            if not cid:
+                from src.session_manager import db_lock
+                with db_lock:
+                    cc = db.cursor()
+                    r2 = cc.execute("SELECT id FROM chat_conversations WHERE user_id=? AND repo_key=? AND conv_type='task' AND issue_number=? LIMIT 1",
+                                    (uid, pending.get("repo_key", ""), issue_number)).fetchone()
+                    if r2:
+                        cid = r2[0]
+            if not cid:
+                from src.session_manager import create_conversation
+                cid = create_conversation(uid, pending.get("repo_key", ""), title=f"Issue #{issue_number}",
+                                          conv_type="task", issue_number=issue_number)
+            from src.session_manager import join_feishu_chat
+            if cid and join_feishu_chat(chat_id, cid, uid):
+                _clear_pending_selection(chat_id)
+                await api.reply_card(ctx, msg_id, f"**✅ 已进入任务会话**\nIssue #{issue_number} · {title or ''}")
+            else:
+                await api.reply_card(ctx, msg_id, "**❌ 进入任务会话失败**")
+    except Exception as e:
+        log.warning(f"[Chat:{ctx.name}] selection error: {e}")
+        try:
+            await api.reply_text(ctx, msg_id, f"❌ 选择处理失败: {e}")
+        except Exception:
+            pass
+
+
+_HELP_CARD = (
+    "**🤖 DevOps Bot 命令**\n"
+    "/repo — 列出并绑定仓库（回复编号）\n"
+    "/chat — 列出当前仓库会话并加入（回复编号）\n"
+    "/task — 列出当前仓库任务并进入（回复编号）\n"
+    "/new — 新建会话并加入\n"
+    "/where — 当前位置\n"
+    "/cancel — 取消选择\n"
+    "/clean — 清除会话缓存\n"
+    "/help — 本帮助\n\n"
+    "回复数字选择 · `0` 取消"
+)
 
 
 async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict):
@@ -297,16 +465,23 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
             return
 
         if detect_clean_intent(text):
-            result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account)
+            result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id)
             if result:
                 await api.reply_text(ctx, msg_id, result)
             return
 
         if text.startswith("/"):
-            result = await process_command_async(ctx, api, text, chat_id, parsed.get("sender_id", ""), db, account)
+            result = await process_command_async(ctx, api, text, chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id)
             if result:
                 await api.reply_text(ctx, msg_id, result)
             return
+
+        # 卡片命令编号选择：纯数字 + 有未过期 pending → 执行选择（feishu-repo-navigation-commands-design.md §3.2）
+        if text.strip().isdigit():
+            pending = _get_pending_selection(chat_id)
+            if pending:
+                await _handle_selection(ctx, api, chat_id, msg_id, text.strip(), pending)
+                return
 
         repo_key = resolve_repo(text, chat_id, parsed.get("sender_id", ""), db, account)
         if not repo_key:
@@ -328,10 +503,10 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                         for i, r in enumerate(repos, 1):
                             reply_parts.append(f"  {i}. {r['full_name']}")
                         reply_parts.append("")
-                        reply_parts.append("发送 /bind 序号 或 /bind owner/repo 完成绑定")
+                        reply_parts.append("发送 `/repo` 以卡片形式选择并绑定仓库")
                     else:
                         reply_parts.append("你可能还没有加入任何仓库。")
-                        reply_parts.append("请先在网页端加入仓库，或发送 /bind owner/repo 直接绑定。")
+                        reply_parts.append("请先在网页端加入仓库，然后发送 `/repo` 选择绑定。")
                 else:
                     c.execute("SELECT DISTINCT repo_key, repository, source FROM chat_agent_session ORDER BY last_active_at DESC LIMIT 10")
                     rows = c.fetchall()
@@ -343,19 +518,29 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                         reply_parts.append("绑定方式（任选一种）：")
                         reply_parts.append(f'  "绑定到 {rows[0][1]}"')
                         reply_parts.append(f'  "使用 {rows[0][1]}"')
-                        reply_parts.append(f"  /bind {rows[0][1]}")
+                        reply_parts.append(f"  /repo")
                     else:
-                        reply_parts.append("尚无任何仓库记录。请发送 /bind owner/repo 绑定仓库。")
+                        reply_parts.append("尚无任何仓库记录。请发送 /repo 绑定仓库。")
             except Exception as e:
                 log.warning(f"Feishu: resolve user repos error: {e}")
-                reply_parts.append("请发送：绑定到 owner/repo_name")
+                reply_parts.append("请发送 `/repo` 选择并绑定仓库。")
             await api.reply_text(ctx, msg_id, "\n".join(reply_parts))
             return
 
         bind_repo = detect_bind_intent(text)
         if bind_repo:
-            result = await process_command_async(ctx, api, f"/bind {bind_repo}", chat_id, parsed.get("sender_id", ""), db, account)
-            await api.reply_text(ctx, msg_id, result)
+            from src.repo_key import to_repo_key
+            repo_key = to_repo_key(bind_repo)
+            try:
+                c = db.cursor()
+                c.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
+                          (chat_id, repo_key, "gitcode", parsed.get("sender_id", ""), account))
+                # 绑定即重置会话位置（修复 2026-08-16 绑定/会话发散 bug）
+                c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
+                db.commit()
+            except Exception as e:
+                log.warning(f"Feishu: auto-bind failed: {e}")
+            await api.reply_card(ctx, msg_id, f"**✅ 已绑定 `{repo_key}`**\n使用 `/chat` 选择会话，或直接开始提问。")
             return
 
         from src.repo_key import to_repo_key, from_repo_key, parse_repo_key
@@ -366,14 +551,14 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         sess, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
+        # 同仓库串行（asyncio.Lock，async with 不阻塞事件循环）。
+        # 旧实现同步 threading.Lock.acquire() 在事件循环里阻塞，同仓库并发消息会死锁整机
+        #（2026-08-16 事故，见 docs/new-version2/feishu-chat-event-loop-deadlock-fix.md）。
         lock = _acquire_repo_lock(repo_key)
-        lock.acquire()
-        try:
+        async with lock:
             await _process_chat_inner_async(ctx, api, parsed, text, repo_key, repository,
                                             msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
                                             bind_account=account, exec_account=repo_key)
-        finally:
-            lock.release()
 
     except Exception as e:
         import traceback
@@ -430,19 +615,28 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         skills = ["chat"]
 
         # 获取 IM 用户 token（chat_conversations 持久化，幂等创建）
+        # im_channel_id 为"当前飞书接入指针"：get_conversation_by_im 返回当前绑定的对话
+        #（可被 `/加入` 切换），飞书用户消息写入该对话的 chat_messages，Web 侧可见
+        #（feishu-web-chat-unified-design.md §3.2）。
         user_token = ""
+        conv_id = ""
         try:
             from src.user.db import get_user_gitcode_token
-            from src.session_manager import create_conversation, get_conversation_by_im, update_conversation
+            from src.session_manager import create_conversation, get_conversation_by_im, update_conversation, add_message
             user_id = get_user_id_by_app_id(ctx.app_id) or 0
             if user_id > 0:
                 user_token = get_user_gitcode_token(user_id) or ""
                 conv = get_conversation_by_im(chat_id, user_id)
                 if not conv:
                     cid = create_conversation(user_id, repo_key, im_channel_id=chat_id, user_gitcode_token=user_token)
+                    conv_id = cid
                     log.info(f"[Chat:{ctx.name}] created chat_conversation {cid} for user={user_id} chat={chat_id[:20]}")
-                elif user_token and not conv.get("user_gitcode_token"):
-                    update_conversation(conv["id"], user_gitcode_token=user_token)
+                else:
+                    conv_id = conv["id"]
+                    if user_token and not conv.get("user_gitcode_token"):
+                        update_conversation(conv["id"], user_gitcode_token=user_token)
+                if conv_id:
+                    add_message(conv_id, "user", text)
         except Exception as e:
             log.warning(f"[Chat:{ctx.name}] resolve user gitcode token failed: {e}")
 
@@ -467,61 +661,68 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
 
         final_text = ""
         exit_code = 0
-        backend = "opencode"
-        oc_sid = {"opencode": oc_sid, "cc_sid": cc_sid}.get(backend, "")
-        new_oc_session_id = oc_sid
-
-        kind = runtime_execution_kind(chat_runtime_id)
-        if kind != EXEC_MODE_DIRECT:
-            # 入队 + 轮询：任务由 RuntimeAgent（本地/远端边端）claim 执行（见 multi-runtime-instance-design）
-            import json as _json
-            from src.runtime.service import enqueue_task, wait_task_terminal
-            from src.user.db import get_runtime_id_by_name, ensure_default_runtime
-            runtime_id = chat_runtime_id or (get_runtime_id_by_name(backend) or ensure_default_runtime(backend) or 0)
-            if runtime_id:
-                uid = 0
-                try:
-                    uid = get_user_id_by_app_id(ctx.app_id) or 0
-                except Exception:
-                    pass
-                tid = enqueue_task(
-                    agent_session_id=sess,
-                    runtime_id=runtime_id,
-                    event_seq=None, issue_id="",
-                    repo_key=repo_key, agent_type="chat", skill="chat",
-                    prompt=prompt, cwd=wsd,
-                    runtime_session_id=oc_sid,
-                    event_type="chat",
-                    account=exec_account, user_id=uid,
-                    repo_gitcode_token=user_token or "",
-                    env_extra={"IM_CHAT_ID": chat_id},
-                )
-                log.info(f"[Chat:{ctx.name}] enqueued task={tid} mode={kind}")
-                task = await wait_task_terminal(tid)
-                final_text = task.get("result_text") or ""
-                exit_code = int(task.get("exit_code") or 0)
-                try:
-                    usage = _json.loads(task.get("usage_json") or "{}") or {}
-                    new_oc_session_id = usage.get("session_id") or oc_sid
-                except Exception:
-                    new_oc_session_id = oc_sid
-                log.info(f"[Chat:{ctx.name}] task done: exit={exit_code}, text_len={len(final_text)}")
-            else:
-                log.warning(f"[Chat:{ctx.name}] no runtime for backend={backend}, task skipped")
-                final_text = ""
-                exit_code = -1
+        backend = ""
+        # engine-selection-design.md v2：无引擎（本机直连/远端均未配置）→ 明确不可用，不隐式 opencode
+        from src.runtime.engine_select import resolve_local_engine, engine_name
+        _rid = chat_runtime_id or (resolve_local_engine() or 0)
+        if not _rid:
+            log.warning(f"[Chat:{ctx.name}] no available engine for user, task skipped")
+            final_text = "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎"
+            exit_code = -1
         else:
-            async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
-                                                               backend_name=backend, account=exec_account,
-                                                               user_token=user_token, agent_name="Chat Agent",
-                                                               agent_label=f"[Agent:chat|repo:{repository}]"):
-                if event_type == "done":
-                    d = data
-                    final_text = d["text"]
-                    exit_code = d.get("exit_code", 0)
-                    if exit_code == 0 and d.get("oc_session_id"):
-                        new_oc_session_id = d["oc_session_id"]
-                    log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
+            backend = engine_name(_rid) or ""
+            oc_sid = {"opencode": oc_sid, "cc_sid": cc_sid}.get(backend, "")
+            new_oc_session_id = oc_sid
+            kind = runtime_execution_kind(_rid)
+            if kind != EXEC_MODE_DIRECT:
+                # 入队 + 轮询：任务由远端 RuntimeAgent claim 执行（见 multi-runtime-instance-design）
+                import json as _json
+                from src.runtime.service import enqueue_task, wait_task_terminal
+                runtime_id = _rid
+                if runtime_id:
+                    uid = 0
+                    try:
+                        uid = get_user_id_by_app_id(ctx.app_id) or 0
+                    except Exception:
+                        pass
+                    tid = enqueue_task(
+                        agent_session_id=sess,
+                        runtime_id=runtime_id,
+                        event_seq=None, issue_id="",
+                        repo_key=repo_key, agent_type="chat", skill="chat",
+                        prompt=prompt, cwd=wsd,
+                        runtime_session_id=oc_sid,
+                        event_type="chat",
+                        account=exec_account, user_id=uid,
+                        repo_gitcode_token=user_token or "",
+                        env_extra={"IM_CHAT_ID": chat_id},
+                    )
+                    log.info(f"[Chat:{ctx.name}] enqueued task={tid} mode={kind}")
+                    task = await wait_task_terminal(tid)
+                    final_text = task.get("result_text") or ""
+                    exit_code = int(task.get("exit_code") or 0)
+                    try:
+                        usage = _json.loads(task.get("usage_json") or "{}") or {}
+                        new_oc_session_id = usage.get("session_id") or oc_sid
+                    except Exception:
+                        new_oc_session_id = oc_sid
+                    log.info(f"[Chat:{ctx.name}] task done: exit={exit_code}, text_len={len(final_text)}")
+                else:
+                    log.warning(f"[Chat:{ctx.name}] no runtime for backend={backend}, task skipped")
+                    final_text = ""
+                    exit_code = -1
+            else:
+                async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
+                                                                   backend_name=backend, account=exec_account,
+                                                                   user_token=user_token, agent_name="Chat Agent",
+                                                                   agent_label=f"[Agent:chat|repo:{repository}]"):
+                    if event_type == "done":
+                        d = data
+                        final_text = d["text"]
+                        exit_code = d.get("exit_code", 0)
+                        if exit_code == 0 and d.get("oc_session_id"):
+                            new_oc_session_id = d["oc_session_id"]
+                        log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
 
         record = {
             "type": "chat", "time": datetime.utcnow().isoformat(),
@@ -543,6 +744,14 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             log.info("Agent decided to SKIP (no reply needed)")
         elif output:
             await api.reply_card(ctx, msg_id, output[:2000])
+            # 共享消息存储：agent 答复回写当前 conversation，Web Chat Agent 页可见
+            #（feishu-web-chat-unified-design.md §3.2）
+            if conv_id:
+                try:
+                    from src.session_manager import add_message
+                    add_message(conv_id, "agent", output)
+                except Exception as _we:
+                    log.warning(f"[Chat:{ctx.name}] write agent message failed: {_we}")
 
     except Exception as e:
         import traceback

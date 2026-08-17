@@ -317,7 +317,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
             parts.append(f"  查询仓库 {repo} 最近的 Issue 评论（GET /repos/{repo.split('/')[0]}/{repo.split('/')[-1]}/issues/{{n}}/comments），")
             parts.append("  用评论内容匹配确认 Issue 编号，然后对用户评论进行回复。")
             parts.append("  注意：即使缺少编号，也必须对用户评论作出回复，不得静默跳过。")
-        parts.append("\n必须回复该评论：使用 POST /repos/{owner}/{repo}/issues/{n}/comments，body 以 [$AGENT_NAME] 开头并引用用户评论原文。")
+        parts.append("\n必须回复该评论：使用 POST /repos/{owner}/{repo}/issues/{n}/comments，body 按你的技能规定的评论前缀开头，并引用用户评论原文。")
     elif evt_type == "vod_signal":
         user_msg = payload.get("user_message", "")
         user_name = evt.get("actor", "未知用户")
@@ -472,18 +472,61 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
     return "\n".join(parts)
 
 
+def _get_task_description(conv: dict | None) -> str:
+    """按 conversation_id 或 (repo_key, issue_number) 反查 tasks 表任务描述。
+
+    见 task-conversation-prompt-align-design.md §3.1。conv.id 非空优先按 conversation_id 精确反查；
+    否则回退 (repo_key, issue_number)。查不到返回空串（调用方跳过任务描述段）。
+    """
+    conv = conv or {}
+    issue_number = conv.get("issue_number") or 0
+    repo_key = conv.get("repo_key") or ""
+    conv_id = conv.get("id") or ""
+    if not issue_number:
+        return ""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            if conv_id:
+                c.execute(
+                    "SELECT task_description FROM tasks WHERE conversation_id=? AND task_description!='' ORDER BY id DESC LIMIT 1",
+                    (conv_id,))
+            else:
+                c.execute(
+                    "SELECT task_description FROM tasks WHERE repo_key=? AND issue_number=? AND task_description!='' ORDER BY id DESC LIMIT 1",
+                    (repo_key, issue_number))
+            row = c.fetchone()
+            return row[0] if row else ""
+    except Exception:
+        return ""
+
+
 def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: dict = None,
                            account: str = "", runtime_id: int = 0) -> str:
     """任务对话独立 prompt：注入 Issue 上下文 + `场景: task`，Agent 直接走任务处理流程。
 
     见 template-onboarding-task-full-chain-design.md §5.7.1。用于任务中心「去对话」会话
     （chat_conversations.conv_type='task'），替代通用 build_chat_prompt。
+    显式注入 `## 任务描述`（tasks 表反查），不依赖历史消息兜底（task-conversation-prompt-align-design.md §3.1）。
     """
     conv = conv or {}
     issue_number = conv.get("issue_number") or 0
     parts = [f"## 场景: task", f"## 任务 Issue", f"仓库: {repo_key}", f"Issue: #{issue_number}"]
+    # 任务边界（最高优先级，随每轮 prompt 强注入）：澄清+回帖，绝不亲自执行任务。
+    # 见 skills/chat/references/task-handling.md §0 与 coding-worktree-skill-collision.md §4.5。
+    parts.append(
+        "## 任务边界（最高优先级）\n"
+        "本对话的职责是【澄清被分配 Issue 的需求并回帖】，不是实施/部署/写代码。\n"
+        "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\n"
+        "严禁 clone/部署/起服务/修改文件/执行 git 命令。"
+    )
     if conv.get("title"):
         parts.append(f"标题: {conv['title']}")
+    # 显式注入任务描述（结构化，随每轮 prompt 携带，不随历史裁剪）
+    task_desc = _get_task_description(conv)
+    if task_desc:
+        parts.append(f"\n## 任务描述\n{task_desc}")
     try:
         from src.api.event_store import get_issue_summary
         issue_summary = get_issue_summary(repo_key)

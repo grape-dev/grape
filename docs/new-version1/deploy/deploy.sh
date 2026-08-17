@@ -3,7 +3,7 @@
 # new-version2 一键部署脚本（服务端执行：备份 → 拉代码 → 重启 → 状态检查）
 #
 # 用法：
-#   bash deploy.sh [--mode direct|queue_local|queue_remote] [--no-restart]
+#   bash deploy.sh [--mode auto|direct|queue_remote] [--no-restart]
 #
 # 注意：
 #   - 在 /opt/grape 目录下执行
@@ -13,7 +13,7 @@
 set -euo pipefail
 
 APP_DIR="/opt/grape"
-MODE="direct"          # 默认直连（行为与旧版一致），发布后手动灰度切换
+MODE="auto"          # 默认 auto（按绑定宿主推导 direct/queue_remote）；发布后可按需强制 direct/queue_remote
 RESTART="yes"
 
 for arg in "$@"; do
@@ -84,4 +84,4 @@ sqlite3 "$APP_DIR/data/sessions.db" \
 
 echo ""
 echo "=== 部署完成（execution_mode=$MODE） ==="
-echo "确认无回归后，按 runbook §五 灰度切换 queue_local / queue_remote。"
+echo "确认无回归后，按 runbook §五 灰度切换 queue_remote。"

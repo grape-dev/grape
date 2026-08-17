@@ -1,18 +1,20 @@
 """Event Store — 事件记录与查询（shared events table）"""
-import json, threading
+import json, threading, asyncio
 from datetime import datetime
 from src.session_manager import db, db_lock
 from src.config import log
 
 # ====== Per-repo 锁（从旧 event_processor 迁移）======
+# 2026-08-16 事故修复：由 threading.Lock 改为 asyncio.Lock。
+# 旧实现在异步事件循环里同步 acquire，同仓库并发消息会死锁整机（feishu-chat-event-loop-deadlock-fix.md）。
 _repo_locks = {}
 _repo_locks_lock = threading.Lock()
 
 
-def acquire_repo_lock(repo_key: str) -> threading.Lock:
+def acquire_repo_lock(repo_key: str) -> asyncio.Lock:
     with _repo_locks_lock:
         if repo_key not in _repo_locks:
-            _repo_locks[repo_key] = threading.Lock()
+            _repo_locks[repo_key] = asyncio.Lock()
         return _repo_locks[repo_key]
 
 

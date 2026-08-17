@@ -1,11 +1,23 @@
 """事件处理管道：归一化 → 路由 → 存储 → Agent 执行"""
 import json, os, time, uuid, threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from src.config import log, WORKSPACE_DIR
 from src.vcs.adapter import normalize_event, get_event_header
 from src.api.routing import NON_ISSUE_EVENT_ROUTE, PR_DEFAULT_AGENT, ISSUE_EVENT_TYPES, PR_EVENT_TYPES
 from src.api.event_store import get_issue_summary
 from src.session_manager import db, db_lock
+
+# 本机 direct 执行的有界并发池（替代无界 threading.Thread，见 engine-selection-design.md §9.3）
+_DIRECT_POOL = ThreadPoolExecutor(
+    max_workers=int(os.environ.get("RUNTIME_MAX_CONCURRENT_TASKS", "20")),
+    thread_name_prefix="ag-direct",
+)
+
+
+def start_direct_agent(fn, args, name=""):
+    """提交一个本机 direct 执行任务到有界池（webhook / run_pipeline 共用）。"""
+    _DIRECT_POOL.submit(fn, *args)
 
 
 def get_agent_display_name(agent_type: str) -> str:
@@ -360,7 +372,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             row = c.fetchone()
             if row:
                 runtime_id = row[0] or 0
-                backend = "opencode"
+                backend = ""
                 if row[0]:
                     c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
                     brow = c.fetchone()
@@ -390,7 +402,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
                 _default_skill = _mapping.get(agent_type, "")
                 if _default_skill:
-                    backend = "opencode"
+                    backend = ""
                     skill_name = _default_skill
                     log.info(f"Pipeline: using default skill for {agent_type}={_default_skill}")
                 else:
@@ -490,18 +502,26 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                    "repo_key": from_repo_key(repo_key), "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
 
-    # 执行分派：auto（按绑定引擎宿主自动推导，见 execution-mode-auto-routing-design.md）
-    # / direct（就地）/ queue_local·remote（入队 + RuntimeAgent，M2 见 implementation-plan §三）
+    # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
+    # 选中 remote → 入队该引擎（queue_remote）；选中本机 → direct 就地执行。
+    from src.runtime.engine_select import pick_engine, engine_name
     from src.runtime.service import runtime_execution_kind, enqueue_task, EXEC_MODE_DIRECT
-    kind = runtime_execution_kind(runtime_id or 0)
-    if kind != EXEC_MODE_DIRECT and backend and skill_name and seq > 0:
-        _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
-                               skill_id, skill_path, runtime_id or 0, issue_id)
-    elif backend and skill_name and seq > 0:
+    engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0)
+    if not engine_id:
+        log.info(f"Pipeline: no available engine for repo={repo_key} agent={agent_type}, seq={seq}, skip")
+        _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
+        return result
+    # backend 必须取已注册引擎的类型名（不沿用会话/字面默认），确保执行 CLI 与选中引擎一致
+    _be = engine_name(engine_id) or backend
+    kind = runtime_execution_kind(engine_id)
+    if kind != EXEC_MODE_DIRECT and _be and skill_name and seq > 0:
+        _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
+                               skill_id, skill_path, engine_id, issue_id)
+    elif _be and skill_name and seq > 0:
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
-        threading.Thread(target=_execute_agent, args=(
-            repo_key, seq, agent_type, backend, skill_name, evt, runtime_id or 0,
-        ), daemon=True, name=f"ag-{agent_type}-{seq}").start()
+        start_direct_agent(_execute_agent, (
+            repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
+        ), name=f"ag-{agent_type}-{seq}")
         log.info(f"Pipeline: started agent execution, seq={seq}, repo={repo_key}, agent={agent_type}")
 
     return result
@@ -542,16 +562,16 @@ def _issue_num_from(issue_id: str) -> str:
 
 
 def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str:
-    """Agent 工作目录（多 Issue 并行，见 multi-issue-isolation-design.md §3.4）。
+    """Agent 工作目录（按 Issue 统一隔离，见 workdir-issue-centric-design.md §二）。
 
-    - 有关联 Issue：#5 → {owner}/{repo}/{agent_type}/issues/5/
+    - 有关联 Issue：#5 → {owner}/{repo}/issues/5/{agent_type}/
     - 无关联 Issue（push/#0）→ {owner}/{repo}/{agent_type}-agent（兼容现状）
     """
     from src.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
     num = _issue_num_from(issue_id)
     if num:
-        return os.path.join(WORKSPACE_DIR, owner, rname, agent_type, "issues", num)
+        return os.path.join(WORKSPACE_DIR, owner, rname, "issues", num, agent_type)
     return os.path.join(WORKSPACE_DIR, owner, rname, f"{agent_type}-agent")
 
 
@@ -586,25 +606,13 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     import os as _os
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
-    # 1) 确定路由：绑定 runtime_id；引擎池模式（agent-cluster-design.md §4.1）→ runtime_id=0 + pool_agent_type
-    #    该 Agent 配置了引擎池时，任务由池内任意空闲引擎领取（claim 池调度）；否则按默认 runtime 兜底
-    pool_mode = False
+    # 1) 确定路由：派发已选定具体引擎（runtime_id>0）；为 0 说明派发失败，直接 fail
+    #    （不再走 agent_type 级引擎池 / opencode 兜底，见 engine-selection-design.md v2）
     if not runtime_id:
-        try:
-            from src.runtime.service import pool_runtime_ids
-            if pool_runtime_ids(agent_type):
-                pool_mode = True
-            else:
-                from src.user.db import ensure_default_runtime
-                runtime_id = ensure_default_runtime("opencode") or 0
-        except Exception:
-            runtime_id = 0
-    if not runtime_id and not pool_mode:
-        log.warning(f"Pipeline enqueue: no runtime_id for repo={repo_key} agent={agent_type}, task skipped")
-        _fail_event(seq, "入队失败：无可用 runtime（未配置引擎且不在引擎池）")
+        _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
         return
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名
-    inst_name = runtime_instance_name(runtime_id) or backend or "opencode"
+    inst_name = runtime_instance_name(runtime_id) or backend or ""
     # 2) event.json 骨架（#0 跳过，见 event_archive._extract_num）
     _evt_copy = dict(evt)
     _evt_copy["issue_id"] = issue_id
@@ -620,7 +628,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     from src.api.session_store import get_or_create_agent_session, get_or_create_issue_session
     from src.api.event_store import update_event_config
     update_event_config(seq, inst_name, skill_name, datetime.now(timezone.utc).isoformat())
-    session = get_or_create_agent_session(repo_key, agent_type, backend or "opencode")
+    session = get_or_create_agent_session(repo_key, agent_type, backend or "")
     oc_session_id = session.get("runtime_session_id") or ""
     issue_session_id = ""
     if _issue_num_from(issue_id):
@@ -661,7 +669,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         if _num and oc_session_id:
             from src.repo_key import split_owner_repo
             _o, _r = split_owner_repo(repo_key)
-            _expected_ws = os.path.join(WORKSPACE_DIR, _o, _r, agent_type, "issues", _num)
+            _expected_ws = os.path.join(WORKSPACE_DIR, _o, _r, "issues", _num, agent_type)
             if ws != _expected_ws:
                 log.warning(f"Pipeline enqueue: cwd/session mismatch, issue={issue_id} ws={ws} expected={_expected_ws}")
     except Exception:
@@ -671,7 +679,6 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         tid = enqueue_task(
             agent_session_id=session.get("id") or "",
             runtime_id=runtime_id,
-            pool_agent_type=(agent_type if pool_mode else ""),
             event_seq=seq, issue_id=issue_id,
             repo_key=repo_key, agent_type=agent_type, skill=skill_name,
             prompt=prompt, cwd=ws,
@@ -687,7 +694,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
         _fail_event(seq, f"入队失败：enqueue_task 异常 {str(e)[:150]}")
         return
-    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} pool={agent_type if pool_mode else '-'} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
+    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
 
 
 def _inject_cloud_credentials(env_extra: dict, repo_key: str) -> dict:
@@ -740,7 +747,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     from src.runtime.instances import runtime_instance_name
 
     # 引擎实例名（`{type}-{device}`，与 UI 同源）；查不到回退类型名
-    inst_name = runtime_instance_name(runtime_id) or backend or "opencode"
+    inst_name = runtime_instance_name(runtime_id) or backend or ""
 
     from src.repo_key import from_repo_key
     repository = evt.get("repository", from_repo_key(repo_key))

@@ -94,14 +94,30 @@ def _create_task(user_id: int, assignee: str, repo_key: str, issue_number: int,
 
 
 def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee: str) -> int:
-    """换人：将同 issue 其他 assignee 的 active 任务置为 completed（reassigned）"""
+    """换人：将同 issue 其他 assignee 的 active/processing 任务置为 completed（reassigned）"""
     with db_lock:
         c = db.cursor()
         c.execute(
             "UPDATE tasks SET status='completed', completed_reason='reassigned', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status='active' AND assignee<>?",
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing') AND assignee<>?",
             (repo_key, issue_number, keep_assignee)
         )
+        db.commit()
+        return c.rowcount
+
+
+def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
+    """bot 接管：将同 issue 所有 active/processing 任务置 completed（bot_takeover）。
+
+    见 task-lifecycle-design.md §2.3：issue agent 将 assignee 刷为 grape_bot 表示自己接管，
+    用户任务无需再处理，全部关闭。不建 bot 任务。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE tasks SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+            (repo_key, issue_number))
         db.commit()
         return c.rowcount
 
@@ -174,7 +190,8 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
             if evt_type == "done":
                 final_text = data.get("text", "") if isinstance(data, dict) else ""
 
-        add_message(conv_id, "user", task_description)
+        # 预写入已含完整任务上下文（含 task_description），此处仅追加 agent 回复，
+        # 不再重复写 user 任务描述（见 task-conversation-role-fix.md §3.2）
         if final_text:
             add_message(conv_id, "agent", final_text)
 
@@ -223,10 +240,14 @@ async def notify_task(body: TaskNotifyBody, request: Request):
     if body.repo_key not in managed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未托管"})
 
-    # 责任人必须是"人"而非 bot 账号（避免给 gitcode_bot 建任务）
+    # 责任人若是 bot（grape_bot）→ 视为"接管"：关闭该 issue 用户 active/processing 任务（bot_takeover），
+    # 不建 bot 任务。见 task-lifecycle-design.md §2.3/§3.1。
     from src.user.db import get_all_bot_usernames
     if body.assignee in get_all_bot_usernames():
-        return {"ok": False, "code": 400, "message": f"责任人 {body.assignee} 是 bot 账号，不创建任务"}
+        closed = _close_issue_tasks_bot_takeover(body.repo_key, body.issue_number)
+        log.info(f"Task notify: bot_takeover assignee={body.assignee} repo={body.repo_key} issue=#{body.issue_number} closed={closed} (task_id=0)")
+        return {"ok": True, "task_id": 0, "conversation_id": "",
+                "message": f"任务已由 {body.assignee} 接管" + (f"（关闭 {closed} 条待处理任务）" if closed else "（无待处理任务）")}
 
     # 解析 user_id
     user_id = _get_user_id_by_gitcode(body.assignee)
@@ -240,6 +261,7 @@ async def notify_task(body: TaskNotifyBody, request: Request):
                            title, body.task_description)
     if not task_id:
         return {"ok": False, "code": 500, "message": "任务创建失败"}
+    log.info(f"Task notify: assignee={body.assignee} repo={body.repo_key} issue=#{body.issue_number} task_id={task_id}")
 
     # 创建/复用 Web conversation（不带 im_channel_id，Chat Agent 页可见）
     from src.session_manager import get_user_conversations
@@ -262,9 +284,11 @@ async def notify_task(body: TaskNotifyBody, request: Request):
             c.execute("UPDATE tasks SET conversation_id=? WHERE id=?", (conv_id, task_id))
             db.commit()
         # 立即写入任务上下文消息（不等后台 agent，保证会话非空、去对话可见上下文）
+        # role=agent：任务由 grape_bot 下发，UI 显示在 agent 侧，等待用户答复确认
+        #（见 task-conversation-role-fix.md §3.1）
         try:
             ctx_msg = _build_task_context_message(title, body.task_description, body.repo_key, body.issue_number)
-            add_message(conv_id, "user", ctx_msg)
+            add_message(conv_id, "agent", ctx_msg)
         except Exception as e:
             log.warning(f"Task notify write context message failed: {e}")
     except Exception as e:
@@ -272,6 +296,8 @@ async def notify_task(body: TaskNotifyBody, request: Request):
 
     # 后台执行 chat-agent（立即返回）
     open_id = _get_feishu_open_id(body.assignee)
+    if not open_id:
+        log.warning(f"Task notify: assignee={body.assignee} 无飞书 open_id（unified_user_mapping.feishu_open_id 为空），跳过飞书通知 task_id={task_id} issue=#{body.issue_number}")
     cfg = get_chat_config(user_id) if user_id else {"backend": "opencode"}
     from src.api import main as api_main
     bm = api_main.bot_manager
@@ -282,6 +308,27 @@ async def notify_task(body: TaskNotifyBody, request: Request):
 
     return {"ok": True, "task_id": task_id, "conversation_id": conv_id,
             "message": "任务已创建并通知责任人"}
+
+
+@router.post("/{task_id}/start")
+async def start_task(task_id: int, user: dict = Depends(get_current_user)):
+    """用户点「去对话」开始处理：任务 active → processing（幂等，仅本人可调）。
+
+    见 task-lifecycle-design.md §3.2。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT user_id, status FROM tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        if row[0] != user["id"]:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该任务"})
+        if row[1] == "active":
+            c.execute("UPDATE tasks SET status='processing' WHERE id=?", (task_id,))
+            db.commit()
+            return {"status": "processing"}
+        return {"status": row[1]}
 
 
 @router.post("/close")
@@ -296,7 +343,7 @@ async def close_tasks(body: TaskCloseBody, request: Request):
         c = db.cursor()
         c.execute(
             "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status='active'",
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
             (body.repo_key, body.issue_number)
         )
         db.commit()
