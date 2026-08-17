@@ -206,16 +206,6 @@ class TestStreamAgentBackwardCompat:
         assert "errors" in done or "stderr" in done
 
 
-class TestConfigIntegration:
-    """Test that config.py's get_agent_backend works with the routing file."""
-    def test_config_routing(self):
-        from src.config import get_agent_backend
-        assert get_agent_backend("issue") == "opencode"
-        assert get_agent_backend("implementation") == "opencode"
-        assert get_agent_backend("build-debug") == "opencode"
-        assert get_agent_backend("unknown_skill") == "opencode"
-
-
 class _SleepBackend(AgentRuntime):
     """无输出的假 backend：spawn `python -c time.sleep(60)`，用于测超时终止。"""
     name = "sleepbackend"

@@ -61,3 +61,13 @@ class TestIssueAdvanceUnifiedFlow:
     def test_triggers_removed(self):
         # 路由由 Grape 阶段矩阵/静态映射决定（§3.0.4）；issue-advance SKILL.md 不再声明 triggers
         assert "triggers:" not in _skill()
+
+    def test_experience_verification_routes_to_sre(self):
+        """体验验证/运行时验证类任务应路由 sre（coding-worktree-skill-collision.md §4.5.4/4.5.5③）。
+        防止体验类需求默认交 coding 导致前台起服务超时（#711）。"""
+        s = _skill()
+        support_section = s.split("### 超出能力范围时主动请求支援")[1].split("### 验证外部 claim")[0]
+        assert "体验验证" in support_section or "运行时验证" in support_section, \
+            "A2A 映射表应含「体验验证/运行时验证」行"
+        assert "sre" in support_section.split("体验验证")[1] if "体验验证" in support_section else "sre" in support_section, \
+            "体验验证应指向 sre"

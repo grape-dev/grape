@@ -23,9 +23,9 @@
 
 | 阶段 | 主题 | 形态 | 结束门禁（DoD） |
 |---|---|---|---|
-| **M0** | 术语重构 backend→runtime | 纯更名，行为不变 | 全量 pytest 绿；`execution_mode=direct` 回归一致 || **M1** | 控制平面 + 事件档案模块 | 新增能力，不切换 | 单测绿；queue_local 本地链路手工跑通 |
-| **M2** | 回报协议驱动 event.json + 执行切换 | 事件/chat 切「入队 + 本地 worker」 | queue_local 全链路 E2E；`direct` 可一键回退 |
-| **M3** | 远端 RuntimeAgent + 凭据 | `/api/runtime/*` HTTP + 边端进程 | 本地/远端 RuntimeAgent 端到端；`queue_remote` 验证 |
+| **M0** | 术语重构 backend→runtime | 纯更名，行为不变 | 全量 pytest 绿；`execution_mode=direct` 回归一致 || **M1** | 控制平面 + 事件档案模块 | 新增能力，不切换 | 单测绿；direct 本地链路手工跑通 |
+| **M2** | 回报协议驱动 event.json + 执行通道收敛 | 事件/chat 切「本机 direct / 远端入队」 | queue_remote 全链路 E2E；`direct` 可一键回退 |
+| **M3** | 远端 RuntimeAgent + 凭据 | `/api/runtime/*` HTTP + 边端进程 | 远端 RuntimeAgent 端到端；`queue_remote` 验证 |
 | **M4** | 前端 | 管理页 + 绑定 + chat 轮询 + Event Detail | Playwright UI + 手工验收 |
 | **M5** | 后续演进（WS 唤醒 / 任务级 token / mTLS / GC） | **本期不做** | — |
 
@@ -35,13 +35,15 @@
 
 ## 三、功能开关与切换策略（有序升级核心）
 
-**开关**：环境变量 `DEVOPS_EXECUTION_MODE` + `meta` 表键 `execution_mode`（env 优先），三态：
+**开关**：环境变量 `DEVOPS_EXECUTION_MODE` + `meta` 表键 `execution_mode`（env 优先），取值：
 
 | 值 | 含义 | 启用时机 |
 |---|---|---|
-| `direct`（默认） | 事件/chat 直接 `stream_agent` 就地执行（现状） | 升级初始，M0/M1 期间保持 |
-| `queue_local` | 事件/chat **入队** `agent_tasks` → bot 进程内本地 worker 消费执行 | M2 灰度 |
+| `auto`（默认） | 按绑定引擎宿主自动推导：本机引擎（`credential_id=0`）→ `direct`；远端 worker（`credential_id>0`）→ `queue_remote` | 升级初始即默认 |
+| `direct` | 事件/chat 直接 `stream_agent` 就地执行 | 兼容/强制 |
 | `queue_remote` | 入队 → 远端（或本机独立进程）`RuntimeAgent` 边端经 `/api/runtime/*` claim 执行 | M3 灰度 |
+
+> `queue_local` 已废除（本机引擎一律 direct，见 `engine-default-selection-design.md` §9）；白名单仅为 auto/direct/queue_remote。
 
 **切换策略**：
 - 灰度为**按仓库/Agent** 或**全局**二选一（实现期定：建议全局 + 手工切换，先试点仓库）。
@@ -146,7 +148,7 @@
 **取消/中断**
 - [ ] `cancel_task(task_id)`：置 `cancelled`；执行侧 kill 子进程（复用 `_terminate_proc`，`executor.py:57`）。
 
-> 门禁：`queue_local` 下事件/chat/IM 三入口全链路 E2E 通过；`direct` 一键回退验证。
+> 门禁：`queue_remote` 下事件/chat/IM 三入口全链路 E2E 通过；`direct` 一键回退验证。
 
 ---
 
@@ -191,8 +193,8 @@
 | 0 | 备份 `data/sessions.db` + 记录 `main` 当前 commit | — | 恢复备份 / `git checkout` |
 | 1 | 发布 **M0**（纯更名，`execution_mode=direct`） | 全量测试绿 + 线上 smoke | 恢复上一版本（更名无行为差异） |
 | 2 | 发布 **M1**（新增能力，仍 `direct`） | 单测绿 + 冒烟 | 不切换即无影响 |
-| 3 | 发布 **M2**，灰度 `queue_local`（先试点仓库） | 事件/chat/IM 端到端 + 档案正确 | 切回 `direct`；滞留任务重入队 |
-| 4 | 发布 **M3**，灰度 `queue_remote`（先本机边端，再远端机） | 远端 E2E + 离线滞留可见 | 切回 `queue_local` / `direct` |
+| 3 | 发布 **M2**，灰度 `queue_remote`（先本机边端，再远端机；本机引擎保持 `direct`） | 事件/chat/IM 端到端 + 档案正确 | 切回 `direct`；滞留任务重入队 |
+| 4 | 发布 **M3**，扩远端 worker 规模 | 远端 E2E + 离线滞留可见 | 切回 `direct` |
 | 5 | 发布 **M4**（前端） | Playwright + 手工 | 前端独立回滚（`?v=` 恢复） |
 
 > 每步灰度为**可逆操作**，开关存 `meta` 表 `execution_mode`，运维只需改一行键值 + 重启，无需代码变更。
@@ -217,7 +219,7 @@
 
 1. `M0`：`refactor(runtime): backend→runtime 术语重构（模块/DB/API/前端/测试）` —— 独立可回滚。
 2. `M1`：`feat(runtime): agent_tasks 队列 + event_archive 档案 + stream_runtime 结构化` 。
-3. `M2`：`feat(runtime): 回报协议驱动 event.json + event_pipeline/chat 切 enqueue（execution_mode=queue_local）`。
+3. `M2`：`feat(runtime): 回报协议驱动 event.json + event_pipeline/chat 切 enqueue（execution_mode=queue_remote / 本机 direct）`。
 4. `M3`：`feat(runtime): /api/runtime/* + rta_ 凭据 + RuntimeAgent 边端（queue_remote）`。
 5. `M4`：`feat(ui): Runtime 管理页 + Agent 绑定 + chat 轮询 + Event Detail`。
 

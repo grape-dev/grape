@@ -11,6 +11,21 @@ function renderEventDetail(data) {
   _convSeq = data.seq;
   _convAgent = agent;
 
+  // Issue 编号 → GitCode 超链接（repo_key 已去前缀为 owner/repo，issue_id 为 #N）
+  const _issNum = String(data.issue_id || '').replace(/^#/, '');
+  const _repoParts = (data.repo_key || '').split('/');
+  const _issueLink = (_issNum && _repoParts.length === 2)
+    ? `<a href="https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issNum}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${data.issue_id}</a>`
+    : `Issue ${data.issue_id || '—'}`;
+
+  // 重新派发按钮显示条件（event-redispatch-design.md §3.1）：
+  // failed / running>10min / 关联 task 卡在 dispatched
+  const _ts = data.started_at ? new Date(data.started_at).getTime() : 0;
+  const _redispatchVisible =
+    data.status === 'failed' ||
+    (data.status === 'running' && _ts && (Date.now() - _ts) > 10 * 60 * 1000) ||
+    (data.task && data.task.task_status === 'dispatched');
+
   // M4：结构化产出（event.json archive 对应段，见 §11.4）
   let structuredHtml = '';
   const arch = data.archive || null;
@@ -35,7 +50,7 @@ function renderEventDetail(data) {
       <div class="tx t2" style="margin-bottom:12px;line-height:1.6;flex-shrink:0">
         <div>Trigger: ${data.event_type || '—'}</div>
         <div>Repository: ${data.repo_key || ''}</div>
-        <div>Issue: ${data.issue_id || '—'}</div>
+        <div>Issue: ${_issueLink}</div>
         <div>Actor: ${data.actor || '—'}</div>
         <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
       </div>
@@ -46,26 +61,26 @@ function renderEventDetail(data) {
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
-    <div style="display:flex;flex-direction:column;gap:12px;overflow-y:auto">
-      <div class="cd" style="padding:16px">
+    <div style="display:flex;flex-direction:column;gap:12px;height:100%;overflow:hidden">
+      <div class="cd" style="padding:16px;flex-shrink:0">
         <h3 style="font-size:12px;font-weight:600;margin-bottom:10px">Event Info</h3>
         <div style="font-size:11px;color:var(--t2);line-height:1.8">
           <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
           <div><span style="color:var(--t3)">Runtime:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b></div>
           ${data.engine_instance ? `<div><span style="color:var(--t3)">Engine:</span> <b>${data.engine_instance}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>` : ''}
           <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
-          <div><span style="color:var(--t3)">Issue:</span> ${data.issue_id || '—'}</div>
+          <div><span style="color:var(--t3)">Issue:</span> ${_issueLink}</div>
           <div><span style="color:var(--t3)">Actor:</span> @${data.actor || '—'}</div>
           <div><span style="color:var(--t3)">Agent:</span> ${agent}</div>
           <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
-          <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span></div>
+          <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}</div>
           <div id="convGate" style="margin-top:6px"><span style="color:var(--t3)">门禁:</span> <span class="tgx">…</span></div>
         </div>
       </div>
-      <div class="cd" style="padding:16px;display:flex;flex-direction:column;gap:8px">
-        <h3 style="font-size:12px;font-weight:600">💬 与 ${agentName} 对话</h3>
-        <div id="convMessages" style="flex:1;min-height:180px;max-height:46vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
-        <div id="convInputRow" style="display:none;gap:6px">
+      <div class="cd" style="padding:16px;display:flex;flex-direction:column;gap:8px;flex:1;min-height:0">
+        <h3 style="font-size:12px;font-weight:600;flex-shrink:0">💬 与 ${agentName} 对话</h3>
+        <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
+        <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
           <input id="convInput" placeholder="问一问 agent 为什么这样处理…（Enter 发送）" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
           <button class="bt bt-p bt-s" onclick="sendConversation()">发送</button>
         </div>
@@ -82,11 +97,13 @@ function _convBubble(role, content, time, by) {
     return `<div style="display:flex;justify-content:center"><div style="max-width:92%;padding:5px 10px;border-radius:8px;font-size:11px;color:var(--t2);background:#f1f5f9;text-align:center;line-height:1.4">${content || ''}</div></div>`;
   }
   const mine = role === 'user';
+  // markdown 渲染（含 HTML 转义防 XSS，见 api.js renderMarkdown），与 chat 对话框对齐
+  const rendered = renderMarkdown(content || '');
   return `<div style="display:flex;${mine ? 'justify-content:flex-end' : 'justify-content:flex-start'}">
-    <div style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;${mine
+    <div style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;${mine
       ? 'background:var(--a);color:#fff'
       : 'background:var(--bg);color:var(--t);border:1px solid var(--b)'}">
-      ${content || ''}
+      ${rendered}
       <div style="font-size:10px;opacity:.7;margin-top:3px">${mine ? (by || '我') : (by || 'agent')}${time ? ' · ' + fmtLocalTime(time).substring(11,16) : ''}</div>
     </div>
   </div>`;
@@ -173,8 +190,8 @@ function sendConversation() {
           if (!part.startsWith('data: ')) continue;
           let evt;
           try { evt = JSON.parse(part.slice(6)); } catch (e) { continue; }
-          if (evt.type === 'text') { acc += evt.text; if (replyEl) replyEl.textContent = acc; }
-          else if (evt.type === 'done') { if (replyEl) replyEl.textContent = evt.reply || acc; loadConversation(); return; }
+          if (evt.type === 'text') { acc += evt.text; if (replyEl) replyEl.innerHTML = renderMarkdown(acc); }
+          else if (evt.type === 'done') { if (replyEl) replyEl.innerHTML = renderMarkdown(evt.reply || acc); loadConversation(); return; }
         }
         if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
         return read();
@@ -182,4 +199,15 @@ function sendConversation() {
     }
     return read().catch(() => loadConversation());
   }).catch(() => loadConversation());
+}
+
+function redispatchEvent(seq) {
+  if (!confirm('确认重新派发该事件任务？\n将把卡住的任务重新入队执行，可能产生重复执行。')) return;
+  API.post('/events/' + seq + '/redispatch').then(d => {
+    app.showToast('已重新派发，等待 worker 重新执行');
+    app.nav('event', seq);  // 刷新详情
+  }).catch(e => {
+    const msg = (e.detail && e.detail.message) || e.message || e;
+    app.showToast('重派失败: ' + msg);
+  });
 }

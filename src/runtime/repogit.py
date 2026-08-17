@@ -4,7 +4,7 @@
 跨平台复用（GitHub 只需在 _HOSTS 加映射）。
 
 - 基线：{WORKSPACE_DIR}/{owner}/{repo}/codebase/ 的 bare mirror（每机懒建立，fetch --prune 刷新）
-- worktree：{WORKSPACE_DIR}/{owner}/{repo}/{agent_type}/issues/{issue_num}/（任务 cwd）
+- worktree：{WORKSPACE_DIR}/{owner}/{repo}/issues/{issue_num}/{agent_type}/（任务 cwd，按 Issue 统一隔离）
 - 鉴权安全：clone 用 `-c http.extraheader` 内联注入（不写 config、不入日志）；push 用 GIT_ASKPASS
   辅助脚本读已注入的 `$BOT_GITCODE_TOKEN`（不落盘、随目录清理）。
 """
@@ -47,7 +47,7 @@ def repo_base_dir(repo_key: str) -> str:
 def issue_dir_for(repo_key: str, agent_type: str, issue_num) -> str:
     from src.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
-    return os.path.join(config.WORKSPACE_DIR, owner, rname, agent_type, "issues", str(issue_num))
+    return os.path.join(config.WORKSPACE_DIR, owner, rname, "issues", str(issue_num), agent_type)
 
 
 def clone_url_for(repo_key: str) -> str:

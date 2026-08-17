@@ -23,9 +23,11 @@ tools:
 
 ## 执行步骤（必须按序）
 
-1. **建立项目知识基线**（参考 issue-advance）
-   - 用 codegraph 分析项目结构，生成 `project-graph.md` + `project-capabilities.md`
+1. **建立项目知识基线**（⚠️ 必须先执行，3A/3B 都依赖它）
+   - 读取 `references/codegraph-project-analysis.md`，按其流程用 codegraph 分析项目结构
+   - 产出写到共享位置 `data/workspaces/{owner}/{repo}/project-info/`：`project-graph.md` + `project-capabilities.md`（供 VOD / issue-advance 复用）
    - 提炼：技术栈、核心模块、功能特性、启动/部署方式
+   - codegraph 不可用时按该参考的降级方案（README + GitCode API），产物标注 `[degraded]`，不阻塞引导
 
 2. **判定目标类型**（读 `$ONBOARDING_TARGET`，见上）
 
@@ -69,5 +71,6 @@ tools:
 
 ## 硬约束（必须遵守）
 - 只用 `$BOT_GITCODE_TOKEN`；不读 Grape 内部数据（`data/workspaces` 项目知识文档除外）
+- 允许使用 codegraph 工具分析项目结构，允许在 `data/workspaces/{owner}/{repo}/project-info/` 下创建/更新知识基线文档
 - 不修改代码、不建 PR；仅建 1 个 Issue + 分配 + 通知
 - assignee 必须是"人"（owner），不是 bot 账号

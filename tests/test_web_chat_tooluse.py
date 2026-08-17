@@ -23,6 +23,17 @@ def _fake_stream_agent(prompt, cwd, session_id="", **kw):
     yield ("done", {"exit_code": 0, "text": "联通成功", "oc_session_id": "ses_x"})
 
 
+def _seed_local_engine():
+    """本机直连引擎（credential_id=0，已知类型 opencode），供 direct 用例按 engine-selection-design.md v2 解析。"""
+    with db_lock:
+        c = db.cursor()
+        # 清掉历史残留的 opencode-cred0 行（可能由 ensure_default_runtime 等创建），再插健康本机行
+        c.execute("DELETE FROM agent_runtimes WHERE name='opencode' AND credential_id=0 AND scope='global' AND owner_id=''")
+        c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope, owner_id) "
+                  "VALUES ('opencode','test-local',0,1,1,'online','global','')")
+        db.commit()
+
+
 @pytest.fixture
 def client():
     def _fake_user():
@@ -33,6 +44,7 @@ def client():
     app.dependency_overrides.clear()
     with db_lock:
         c2 = db.cursor()
+        c2.execute("DELETE FROM agent_runtimes WHERE display_name='test-local'")
         convs = c2.execute("SELECT id FROM chat_conversations WHERE user_id=99901").fetchall()
         for (cid,) in convs:
             c2.execute("DELETE FROM chat_messages WHERE conversation_id=?", (cid,))
@@ -43,6 +55,7 @@ def client():
 class TestWebChatToolUseRegression:
     def test_send_stream_handles_dict_tool_use(self, client):
         """send/stream：agent 产出 dict tool_use 时不应崩溃，回复应送达。"""
+        _seed_local_engine()
         with patch("src.runtime.executor.stream_agent", side_effect=_fake_stream_agent):
             r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
         assert r.status_code == 200
@@ -52,6 +65,7 @@ class TestWebChatToolUseRegression:
 
     def test_send_handles_dict_tool_use(self, client):
         """send（非流式）：同样不应因 dict tool_use 崩溃，reply 应返回。"""
+        _seed_local_engine()
         with patch("src.runtime.executor.stream_agent", side_effect=_fake_stream_agent):
             r = client.post("/api/chat/send", json={"message": "测试", "repo_key": ""})
         assert r.status_code == 200
@@ -67,15 +81,32 @@ class TestWebChatToolUseRegression:
         assert "data[:150]" not in src, "tool_use 日志不得对 data 直接切片（dict）"
 
     def test_send_stream_queue_mode_returns_result(self, client, monkeypatch):
-        """send/stream 非 direct 模式：应入队 + 轮询，由 RuntimeAgent 执行后以 SSE done 返回结果。"""
+        """send/stream 非 direct 模式：应入队 + 轮询，由远端 RuntimeAgent 执行后以 SSE done 返回结果。
+
+        新模型（engine-selection-design.md §8.2）：chat 未配置引擎 → 本机直连(direct)；
+        本用例显式配置远端引擎（chat_agent_session.runtime_id），走 queue_remote 入队。
+        """
         from unittest.mock import AsyncMock, patch
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
+        # seed 远端引擎 + chat 配置指向它
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM chat_agent_session WHERE user_id=99901")
+            c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'wt_%'")
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) "
+                      "VALUES ('hwt','wt-cred','wt-dev','global','tester','active')")
+            _cid = c.lastrowid
+            c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
+                      "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'global', '', 1, 1)", (_cid,))
+            _rid = c.lastrowid
+            db.commit()
+        from src.session_manager import set_chat_config
+        set_chat_config(99901, backend="opencode")
         with patch("src.runtime.service.enqueue_task", return_value="t_q") as m_enq, \
              patch("src.runtime.service.wait_task_terminal",
                    new=AsyncMock(return_value={"status": "completed", "exit_code": 0,
                                                "result_text": "QUEUE_OK",
                                                "usage_json": '{"session_id": "ses_q"}'})), \
-             patch("src.user.db.get_runtime_id_by_name", return_value=1), \
              patch("src.runtime.executor.stream_agent") as m_sa:
             r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
 
@@ -83,12 +114,15 @@ class TestWebChatToolUseRegression:
         assert "QUEUE_OK" in r.text, f"SSE 应包含任务结果: {r.text[:500]}"
         assert '"type": "done"' in r.text
         m_enq.assert_called_once()
-        assert m_enq.call_args.kwargs["runtime_id"] == 1
+        assert m_enq.call_args.kwargs["runtime_id"] == _rid
         m_sa.assert_not_called(), "queue 模式不应本地 stream_agent"
         # 清理 get_or_create_agent_session 产生的会话行，避免污染其他测试
         with db_lock:
             c2 = db.cursor()
             c2.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'chat:99901%' OR id LIKE 'chat:99901%'")
+            c2.execute("DELETE FROM chat_agent_session WHERE user_id=99901")
+            c2.execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'wt-%')")
+            c2.execute("DELETE FROM runtime_credentials WHERE name LIKE 'wt-%'")
             db.commit()
 
     def test_send_stream_direct_still_streams(self, client, monkeypatch):
@@ -105,6 +139,7 @@ class TestWebChatToolUseRegression:
             return ""
 
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
+        _seed_local_engine()
         with patch("src.runtime.executor.stream_agent", side_effect=_fake_stream_agent):
             r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
         assert r.status_code == 200

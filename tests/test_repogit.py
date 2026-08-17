@@ -81,6 +81,34 @@ class TestIssueWorktree:
     def test_non_git_agent_skipped(self):
         assert repogit.ensure_issue_worktree("gitcode:owner/repo", "issue", "5") is None
 
+    def test_git_agent_guard_only_coding_qa_sre(self):
+        """触发范围守卫：ensure_issue_worktree 仅对 git agent 建 worktree，vod/issue 返回 None。"""
+        for agent in ("coding", "qa", "sre"):
+            assert repogit.is_git_agent(agent), f"{agent} 应视为 git agent"
+            wt = repogit.ensure_issue_worktree("gitcode:owner/repo", agent, "5")
+            assert wt and os.path.isdir(wt), f"{agent} 应成功创建 worktree"
+        for agent in ("vod", "issue"):
+            assert not repogit.is_git_agent(agent), f"{agent} 不应视为 git agent"
+            assert repogit.ensure_issue_worktree("gitcode:owner/repo", agent, "5") is None, \
+                f"{agent} 不应创建 worktree"
+
+    def test_worktree_created_before_skill_occupies_cwd(self):
+        """方案 A 顺序看护：先建 worktree（cwd 空），再物化技能到 cwd/.skills——不复现 #711 的
+        "already exists"。若时序回归为"先技能后 worktree"，此处 worktree add 会因目录非空失败。"""
+        import shutil
+        wt = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "9")
+        assert wt and os.path.exists(os.path.join(wt, ".git")), "worktree 应含 .git（目录或 gitdir 文件）"
+        # worktree 建好后落地技能（模拟 _execute_task 物化 .skills）
+        skill_dir = os.path.join(wt, ".skills")
+        os.makedirs(os.path.join(skill_dir, "implementation"), exist_ok=True)
+        with open(os.path.join(skill_dir, "implementation", "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("# skill\n")
+        # 二次调用复用（.skills 已存在但 .git 也在）→ 直接复用不重建
+        wt2 = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "9")
+        assert wt2 == wt
+        assert os.path.isfile(os.path.join(wt, ".skills", "implementation", "SKILL.md")), "技能不应被覆盖"
+        shutil.rmtree(wt, ignore_errors=True)
+
     def test_cleanup_removes_worktree(self):
         wt = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5")
         assert os.path.isdir(wt)

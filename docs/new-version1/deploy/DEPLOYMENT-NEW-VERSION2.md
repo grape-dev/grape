@@ -11,7 +11,7 @@
 ## 〇、升级总原则（数据安全优先）
 
 1. **先备份、再迁移**：任何结构变更前 `data/sessions.db` 必须留档；部署工具已内置「迁移前自动备份」（`data/backups/*.bak`），仍建议手动再留一份。
-2. **开关灰度、可逆回滚**：`execution_mode` 默认 `direct`（行为与旧版一致），M0–M4 全部代码可在 `direct` 下发布；确认无回归后再逐仓库切 `queue_local`，最后切 `queue_remote`。
+2. **开关灰度、可逆回滚**：`execution_mode` 默认 `auto`（本机引擎→direct、远端→入队），M0–M4 全部代码可在 `auto` 下发布；确认无回归后再切 `queue_remote`（远端 worker）。`queue_local` 已废除。
 3. **绝不跨分支丢提交**：部署分支必须是已合入的 `main` 或明确的发布分支，`git pull` 前确认无冲突。
 4. **禁用 PowerShell 改含中文文件**（见 `DEPLOYMENT-REMOTE.md` §6.1 教训）——本清单所有命令均为 Bash/Python。
 
@@ -113,23 +113,10 @@ curl -s -H "Authorization: Bearer <user_token>" \
 
 ## 五、灰度切换执行模式（核心，可回退）
 
-> 默认 `direct`（就地执行，与旧版一致）。**确认线上稳定后再切换。**
+> 默认 `auto`（本机引擎→direct，远端 worker→queue_remote）。`queue_local` 已废除（见 `engine-default-selection-design.md` §9）。**确认线上稳定后再切换。**
 
-### 5.1 切 `queue_local`（入队 + 本地 worker）
-```bash
-# 方式 A：环境变量（重启生效）
-systemctl edit grape    # 追加 Environment=DEVOPS_EXECUTION_MODE=queue_local
-systemctl restart grape
+### 5.1 切 `queue_remote`（远端 RuntimeAgent）
 
-# 方式 B：API（写 meta 表，仅生效于下次 get_execution_mode 调用）
-curl -s -X PUT -H "Authorization: Bearer <admin_token>" \
-  -H "Content-Type: application/json" \
-  -d '{"mode":"queue_local"}' http://127.0.0.1:3000/api/settings/execution-mode
-```
-
-**验证**：注入一条真实 webhook → `events` 有记录 + `agent_tasks` 出现 `queued` → worker claim 执行 → `completed` → `data/workspaces/<repo>/issues/<n>/event.json` 生成。
-
-### 5.2 切 `queue_remote`（远端 RuntimeAgent）
 1. 生成凭据：Admin UI（Settings → Agent Runtimes → ＋ 生成凭据）→ 得到 `rta_...`
 2. worker 机（或本机）装同仓库 + `pip install -r requirements.txt`
 3. 启动边端：
@@ -140,12 +127,23 @@ curl -s -X PUT -H "Authorization: Bearer <admin_token>" \
    RUNTIME_HEARTBEAT_INTERVAL=15 \
    python3 -m runtime.agent   # 注意：模块在 src/runtime，需在项目根目录执行
    ```
-4. 切模式：同 5.1（`queue_remote`）
-5. 验证：Runtime 管理页设备在线（绿点）；任务被确定路由到该 worker 执行
+4. 切模式（本机引擎保持 `auto`/`direct`，无需为远端任务改动全局开关）：
+   ```bash
+   # 方式 A：环境变量（重启生效）
+   systemctl edit grape    # 追加 Environment=DEVOPS_EXECUTION_MODE=queue_remote
+   systemctl restart grape
 
-### 5.3 回退
+   # 方式 B：API（写 meta 表，仅生效于下次 get_execution_mode 调用）
+   curl -s -X PUT -H "Authorization: Bearer <admin_token>" \
+     -H "Content-Type: application/json" \
+     -d '{"mode":"queue_remote"}' http://127.0.0.1:3000/api/settings/execution-mode
+   ```
+5. 验证：注入一条真实 webhook → `events` 有记录 + `agent_tasks` 出现 `queued` → 远端 worker claim 执行 → `completed` → `data/workspaces/<repo>/issues/<n>/event.json` 生成；Runtime 管理页设备在线（绿点）。
+
+### 5.2 回退
+
 ```bash
-# 切回 direct（或 queue_local）
+# 切回 direct（或 auto）
 systemctl edit grape    # Environment=DEVOPS_EXECUTION_MODE=direct
 systemctl restart grape
 # 滞留 queued 任务：可取消（API）或重入队
@@ -219,7 +217,7 @@ systemctl start grape
 | 6 | 数据保全 | `SELECT COUNT(*) FROM agent_runtimes` | ≥1 且含 opencode |
 | 7 | 自动备份 | `ls data/backups/` | 有迁移前 `.bak` |
 | 8 | direct 回归 | webhook 触发事件 | 行为与旧版一致 |
-| 9 | queue_local | 注入事件 | 入队→claim→completed→event.json |
+| 9 | queue_remote | 注入事件 | 入队→claim→completed→event.json |
 | 10 | 前端 | 侧栏 Agent Runtimes | 显示正确、无乱码 |
 
 ---

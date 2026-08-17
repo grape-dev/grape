@@ -4,6 +4,7 @@ import os
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user
+from src.config import log
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
@@ -136,7 +137,142 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
     result["engine_device"] = engine_device
     result["engine_ip"] = engine_ip
 
+    # 关联任务（重派按钮展示/判定用，见 event-redispatch-design.md §4.1.1）
+    task_info = {"task_id": "", "task_status": "", "runtime_id": 0,
+                 "runtime_session_id": "", "task_created_at": "", "task_started_at": ""}
+    try:
+        with db_lock:
+            c4 = db.cursor()
+            c4.execute(
+                "SELECT id, status, runtime_id, runtime_session_id, created_at, started_at "
+                "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                (seq,))
+            tr3 = c4.fetchone()
+            if tr3:
+                task_info = {
+                    "task_id": tr3[0], "task_status": tr3[1], "runtime_id": tr3[2] or 0,
+                    "runtime_session_id": tr3[3] or "", "task_created_at": tr3[4] or "",
+                    "task_started_at": tr3[5] or "",
+                }
+    except Exception:
+        pass
+    result["task"] = task_info
+
     return result
+
+
+@router.post("/{seq}/redispatch")
+async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
+    """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
+
+    见 event-redispatch-design.md §4.1.2：
+    - 关联任务非终态（dispatched/running）→ requeue 置回 queued；
+    - 关联任务终态/缺失（含事件 failed）→ 复用原 task 快照参数重新 enqueue_task；
+    - 事件状态回写 running。30s 内重复调用幂等拒绝。
+    """
+    import json as _json
+    from src.session_manager import db, db_lock
+    from src.runtime.service import requeue_task, get_task, enqueue_task
+    from src.api.event_store import update_event_status
+
+    # 1) 幂等：30s 内已重派过则拒绝
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        _last = get_meta_value(f"redispatch:{seq}") or ""
+        if _last:
+            import time as _time
+            try:
+                if _time.time() - float(_last) < 30:
+                    raise HTTPException(status_code=409, detail={"code": 409, "message": "已重新派发过，请 30s 后再试"})
+            except ValueError:
+                pass
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    evt = _load_event(seq)
+
+    # 2) 查关联任务
+    task_id = ""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, status FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (seq,))
+        tr = c.fetchone()
+        if tr:
+            task_id, task_status = tr[0], tr[1] or ""
+
+    # 3) 分支处理
+    if task_id and task_status in ("dispatched", "running"):
+        # 非终态 → requeue 置回 queued，worker 重新 claim
+        requeue_task(task_id)
+    else:
+        # 终态/缺失 → 复用原 task 快照参数新建任务（新 task_id，清空 runtime_session_id）
+        if task_id:
+            old = get_task(task_id)
+            if old:
+                _sid = old.get("issue_session_id") or ""
+                _env = {}
+                try:
+                    _env = _json.loads(old.get("env_extra") or "{}")
+                except Exception:
+                    _env = {}
+                # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物，
+                # 触发 enqueue_task D3 校验失败）。复用 pipeline 同款路由逻辑（pick_engine：
+                # 引擎集合 → 专属/全局/本机；无则回退旧快照 runtime_id，仍无则拒派）。
+                _rid = old.get("runtime_id") or 0
+                try:
+                    from src.runtime.engine_select import pick_engine
+                    _rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "", fallback_runtime_id=_rid) or 0
+                except Exception:
+                    _rid = 0
+                if not _rid:
+                    raise HTTPException(status_code=409, detail={"code": 409, "message": "无可用引擎，无法重派"})
+                # cwd 按 Issue 统一隔离重算（workdir-issue-centric-design.md §二），走新结构路径
+                try:
+                    from src.api.event_pipeline import get_agent_workdir
+                    _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
+                                            old.get("issue_id") or "")
+                except Exception:
+                    _cwd = old.get("cwd") or ""
+                enqueue_task(
+                    agent_session_id=old.get("agent_session_id") or "",
+                    runtime_id=_rid,
+                    event_seq=old.get("event_seq"),
+                    issue_id=old.get("issue_id") or "#0",
+                    repo_key=old.get("repo_key") or "",
+                    agent_type=old.get("agent_type") or "",
+                    skill=old.get("skill") or "",
+                    prompt=old.get("prompt") or "",
+                    cwd=_cwd,
+                    runtime_session_id="",  # 全新上下文，避免复用坏会话
+                    event_type=old.get("event_type") or "",
+                    account=old.get("account") or "",
+                    user_id=old.get("user_id") or 0,
+                    repo_gitcode_token=old.get("repo_gitcode_token") or "",
+                    env_extra=_env,
+                    # skill_files / project_info / knowledge 不传 → enqueue 内部重新打包
+                    server_url=old.get("server_url") or "",
+                    issue_session_id=_sid,
+                )
+            else:
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
+        else:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "该事件无关联任务，无法重派"})
+
+    # 4) 事件状态回写 running
+    update_event_status(seq, "running")
+
+    # 5) 记录幂等时间戳
+    try:
+        from src.user.db import set_meta_value
+        import time as _time
+        set_meta_value(f"redispatch:{seq}", str(_time.time()))
+    except Exception:
+        pass
+
+    log.info(f"[redispatch] seq={seq} repo={evt['repo_key']} agent={evt['agent_type']} task={task_id or '(new)'} by={user.get('username','')}")
+    return {"status": "redispatched", "task_id": task_id or "(new)", "event_seq": seq}
 
 
 # ====== Event 对话（event-conversation-design.md）======
@@ -328,7 +464,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
     bot_token = get_gitcode_token(repo_key=repo_key) or ""
     repository = from_repo_key(repo_key)
 
-    from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal
+    from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task
     final_text = ""
     new_oc = oc_session_id
 
@@ -349,30 +485,24 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
             runtime_id = row[1] or 0
         if agent_sid:
             from src.config import SKILLS_DIR
-            from src.runtime.service import cancel_task, pool_runtime_ids
             from src.api.event_pipeline import get_agent_workdir
             # Fix 1：cwd 用该 issue 的 agent 目录（与 issue 会话项目一致）
             ws = get_agent_workdir(repo_key, agent_type, issue_id)
             os.makedirs(ws, exist_ok=True)
-            # 路由对齐 _enqueue_pipeline_task：会话未绑固定引擎(runtime_id=0)时，
-            # 引擎池模式优先（pool_agent_type 入队，池内引擎 claim），其次默认 runtime 兜底
-            pool_mode = False
+            # 路由对齐 _enqueue_pipeline_task：pick_engine 按引擎集合/会话主引擎选引擎
+            # （专属→全局→本机；无则跳过，不再回落硬编码默认）
             try:
-                if pool_runtime_ids(agent_type):
-                    pool_mode = True
-                else:
-                    from src.user.db import ensure_default_runtime
-                    runtime_id = ensure_default_runtime("opencode") or 0
+                from src.runtime.engine_select import pick_engine
+                runtime_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0) or 0
             except Exception:
                 runtime_id = 0
-            if not runtime_id and not pool_mode:
-                final_text = "（对话执行失败：无可用 runtime/会话）"
+            if not runtime_id:
+                final_text = "（对话执行失败：无可用引擎/会话）"
             else:
                 tid = enqueue_task(
                     agent_session_id=agent_sid, runtime_id=runtime_id, prompt=prompt, cwd=ws,
                     runtime_session_id=oc_session_id,
                     issue_session_id=issue_sess_id,        # Fix E：串行槽绑定本 issue 会话
-                    pool_agent_type=(agent_type if pool_mode else ""),
                     event_type="event_conversation",
                     repo_key=repo_key, agent_type=agent_type,
                     skill="event-dialogue",                 # Fix A：打包下发对话技能

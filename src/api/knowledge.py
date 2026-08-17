@@ -38,7 +38,7 @@ def knowledge_path(repo_key: str, scope: str, agent_type: str = "", issue_num: i
     if scope == "issue":
         return os.path.join(base, "issues", str(issue_num), "knowledge.md")
     if scope == "issue_agent":
-        return os.path.join(base, agent_type or "agent", "issues", str(issue_num), "knowledge.md")
+        return os.path.join(base, "issues", str(issue_num), agent_type or "agent", "knowledge.md")
     raise ValueError(f"unknown knowledge scope: {scope}")
 
 

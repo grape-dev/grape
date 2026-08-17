@@ -1,21 +1,19 @@
-"""服务端 RuntimeService：任务队列（确定路由 + 串行槽）与本地 worker 执行。
+"""服务端 RuntimeService：任务队列（确定路由 + 串行槽）与远端 worker 执行。
 
-见 agent-runtime-event-tech-impl.md §1.3 / concurrency-design.md §2.2-2.4。
-执行路径：业务层 enqueue_task → agent_tasks(status=queued) → claim（原子抢单+D9）
-→ 本地线程池 stream_runtime → report/complete/fail。
+见 agent-runtime-event-tech-impl.md §1.3 / concurrency-design.md §2.2-2.4 / engine-selection-design.md v2。
+执行路径：业务层 enqueue_task → agent_tasks(status=queued) → 远端 RuntimeAgent claim（原子抢单+D9）
+→ stream_runtime → report/complete/fail。本机引擎走 direct（`_execute_agent`），不走队列。
 """
 import os, json, re, threading, time, uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from src.session_manager import db, db_lock
 from src.config import log
 
-# ===== 执行模式开关（M2，见 implementation-plan §三 / concurrency-design.md）=====
+# ===== 执行模式开关（engine-selection-design.md v2）=====
 # auto（按绑定引擎宿主自动推导，见 execution-mode-auto-routing-design.md §3）
-# / direct（就地 stream_agent）/ queue_local（入队 + 本地 worker）/ queue_remote（远端 RuntimeAgent）
+# / direct（本机就地 stream_agent）/ queue_remote（远端 RuntimeAgent）。queue_local 已废除。
 EXEC_MODE_AUTO = "auto"
 EXEC_MODE_DIRECT = "direct"
-EXEC_MODE_LOCAL = "queue_local"
 EXEC_MODE_REMOTE = "queue_remote"
 
 _DEFAULT_MODE = EXEC_MODE_AUTO
@@ -102,7 +100,8 @@ def _remote_runtime_ready(runtime_id: int) -> bool:
 def runtime_execution_kind(runtime_id: int) -> str:
     """返回该任务的有效执行通道（auto 语义下的推导 / 强制模式直接生效）：
 
-    - 全局显式 direct/queue_local/queue_remote → 直接返回该强制值（向后兼容）
+    - 全局显式 direct/queue_remote → 直接返回该强制值（向后兼容；历史遗留
+      queue_local 已废除，归为 direct 本机执行）
     - auto 下按绑定引擎宿主推导：
       - credential_id == 0  → 本机引擎（服务器装着的 CLI）        → EXEC_MODE_DIRECT
       - credential_id >  0  → 远端 worker 承载的引擎             → EXEC_MODE_REMOTE
@@ -111,6 +110,8 @@ def runtime_execution_kind(runtime_id: int) -> str:
     """
     mode = get_execution_mode()
     if mode != EXEC_MODE_AUTO:
+        if mode == "queue_local":      # queue_local 已废除（无本地 worker），按本机 direct 处理
+            return EXEC_MODE_DIRECT
         return mode
     cid = runtime_credential_id(runtime_id)
     if cid is None:
@@ -121,10 +122,6 @@ def runtime_execution_kind(runtime_id: int) -> str:
         log.warning(f"runtime_execution_kind: runtime_id={runtime_id} 远端引擎不可用，降级本机 direct")
         return EXEC_MODE_DIRECT
     return EXEC_MODE_DIRECT
-
-# ===== 本地 worker 执行池（有界，替代无界 threading.Thread，见 concurrency-design.md §2.2）=====
-_DEFAULT_MAX_CONCURRENT = int(os.environ.get("RUNTIME_MAX_CONCURRENT_TASKS", "20"))
-_worker_pool = ThreadPoolExecutor(max_workers=_DEFAULT_MAX_CONCURRENT, thread_name_prefix="rt-worker")
 
 _TASK_COLUMNS = (
     "id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, "
@@ -340,6 +337,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
 
 
 # ===== 引擎池绑定（agent-cluster-design.md §4.1）=====
+# 注：origin/main 曾声明弃用（engine-selection-design.md v2），但 dev 线
+# 仍以引擎池为任务调度主路径（claim 池匹配 / pool_runtime_ids 在线过滤 /
+# 事件 runtime 回填），保留本实现，engine_select 新模型可并行引入。
 
 def set_agent_pool(agent_type: str, runtime_ids: list[int], weight: int = 1, priority: int = 5):
     """替换某 Agent 类型的引擎池绑定（先删后插，单事务）。runtime_ids 为空列表 → 清空池（回到兜底链）。"""
@@ -477,48 +477,21 @@ def claim(runtime_id) -> dict | None:
             except Exception as _e:
                 log.warning(f"recover stale dispatched failed: {_e}")
 
-            # 该 runtime 所属引擎池（enabled 才参与）
-            pools = []
-            try:
-                c.execute(
-                    "SELECT agent_type FROM agent_type_runtime_pool WHERE runtime_id=? AND enabled=1",
-                    (runtime_id,))
-                pools = [r[0] for r in c.fetchall()]
-            except Exception:
-                pass
-            if pools:
-                # MySQL 兼容抢单：拆两步——先 SELECT 候选（含串行槽 NOT EXISTS），再 UPDATE 该 id
-                ph = ",".join(["?"] * len(pools))
-                c.execute(f"""
-                    SELECT id FROM agent_tasks
-                    WHERE status='queued'
-                      AND (runtime_id=? OR (runtime_id=0 AND pool_agent_type IN ({ph})))
-                      AND NOT EXISTS (
-                        SELECT 1 FROM agent_tasks a2
-                        WHERE a2.status IN ('dispatched','running')
-                          AND (
-                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
-                            OR
-                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
-                          )
+            # 确定路由：仅按 runtime_id 拉本引擎队列（claim-based 引擎池已弃用，见 engine-selection-design.md v2）
+            c.execute("""
+                SELECT id FROM agent_tasks
+                WHERE runtime_id=? AND status='queued'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM agent_tasks a2
+                    WHERE a2.status IN ('dispatched','running')
+                      AND (
+                        (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                        OR
+                        (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
                       )
-                    ORDER BY CASE WHEN affinity_runtime_id = ? THEN 0 ELSE 1 END, created_at ASC LIMIT 1
-                """, (runtime_id, *pools, runtime_id))
-            else:
-                c.execute("""
-                    SELECT id FROM agent_tasks
-                    WHERE runtime_id=? AND status='queued'
-                      AND NOT EXISTS (
-                        SELECT 1 FROM agent_tasks a2
-                        WHERE a2.status IN ('dispatched','running')
-                          AND (
-                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
-                            OR
-                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
-                          )
-                      )
-                    ORDER BY created_at ASC LIMIT 1
-                """, (runtime_id,))
+                  )
+                ORDER BY created_at ASC LIMIT 1
+            """, (runtime_id,))
             row = c.fetchone()
             if not row:
                 db.commit()
@@ -728,109 +701,6 @@ def fail_task(task_id, error, exit_code=-1):
     update_task_status(task_id, "failed", exit_code=exit_code,
                        errors=json.dumps([str(error)] if error else []))
     log.warning(f"Task failed: {task_id} exit={exit_code} err={str(error)[:120]}")
-
-
-def _run_task(task: dict):
-    """worker 线程：stream_runtime → 回报。技能 + project-info 落地 + 占位符替换（skill-delivery-remote.md §3.5 / multi-issue-isolation-design.md §2.4）。"""
-    import os as _os
-    cwd = task.get("cwd") or _os.getcwd()
-    env = {}
-    try:
-        env = json.loads(task.get("env_extra") or "{}")
-    except Exception:
-        pass
-    prompt = task.get("prompt") or ""
-    skill_dir = _os.path.join(cwd, ".skills")
-    prompt = prompt.replace("{{SKILL_DIR}}", skill_dir).replace("{{SERVER_URL}}", task.get("server_url") or "")
-    # 技能落地
-    try:
-        skill_files = json.loads(task.get("skill_files") or "{}")
-        for _sn, files in skill_files.items():
-            for rel, content in (files or {}).items():
-                dest = _os.path.join(skill_dir, _sn, rel)
-                _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-                with open(dest, "w", encoding="utf-8") as f:
-                    f.write(content)
-        if skill_files:
-            env["DEVOPS_SKILLS_DIR"] = skill_dir
-    except Exception as e:
-        log.warning(f"skill materialize failed: {e}")
-    # project-info 落地（repo 全局共享，多 VM 一致；见 multi-issue-isolation-design.md §2.4）
-    proj_dir = _os.path.join(cwd, ".project-info")
-    try:
-        proj_files = json.loads(task.get("project_info_files") or "{}")
-        for rel, content in (proj_files or {}).items():
-            if rel == ".metadata.json":
-                continue
-            dest = _os.path.join(proj_dir, rel)
-            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-            with open(dest, "w", encoding="utf-8") as f:
-                f.write(content)
-        prompt = prompt.replace("{{PROJECT_INFO_DIR}}", proj_dir)
-    except Exception as e:
-        log.warning(f"project-info materialize failed: {e}")
-    # 共享知识落地（event-conversation-design.md §3.1.1；随任务交付远端 worker）
-    know_dir = _os.path.join(cwd, ".knowledge")
-    try:
-        know_files = json.loads(task.get("knowledge_files") or "{}")
-        for rel, content in (know_files or {}).items():
-            dest = _os.path.join(know_dir, rel)
-            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-            with open(dest, "w", encoding="utf-8") as f:
-                f.write(content)
-        prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
-    except Exception as e:
-        log.warning(f"knowledge materialize failed: {e}")
-    # git worktree（coding/qa/sre，X 工作模型，见 multi-issue-isolation-design.md §3.4.1）
-    try:
-        from src.runtime import repogit
-        _num = repogit.issue_num_from(task.get("issue_id") or "")
-        if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
-            _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                                _num, token=task.get("repo_gitcode_token") or "")
-            if _wt:
-                env["GIT_ASKPASS"] = _os.path.join(_wt, ".git-askpass.sh")
-    except Exception as e:
-        log.warning(f"git worktree ensure failed: {e}")
-    try:
-        from src.runtime.executor import stream_runtime
-        from src.agent.executor import stream_agent
-        done = None
-        messages_batch = []
-        for evt_type, data in stream_runtime(
-            prompt, cwd, session_id=task.get("runtime_session_id") or "",
-            event_type=task.get("event_type") or "",
-            backend_name="opencode",
-            account=task.get("account") or "", user_id=task.get("user_id") or 0,
-            env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
-        ):
-            if evt_type == "done":
-                done = data
-                continue
-            messages_batch.append({"type": evt_type, "data": data})
-            if len(messages_batch) >= 50:
-                report_messages(task["id"], messages_batch)
-                messages_batch = []
-        if messages_batch:
-            report_messages(task["id"], messages_batch)
-        if done:
-            complete_task(task["id"], done.get("text", ""), done.get("exit_code", 0),
-                          usage={"errors": done.get("errors", []), "stderr": done.get("stderr", ""),
-                                 "session_id": done.get("oc_session_id", "")})
-        else:
-            fail_task(task["id"], "no done event")
-    except Exception as e:
-        log.warning(f"worker _run_task failed: {e}")
-        fail_task(task["id"], str(e))
-
-
-def start_local_worker_loop():
-    """（T2 进程内 worker）从队列消费。供 queue_local 模式调用；M1 阶段由测试/调用方按需驱动。"""
-    pass
-
-
-def submit_local(task: dict):
-    _worker_pool.submit(_run_task, task)
 
 
 # ===== 回报异步化（M2，见 concurrency-design.md §2.4）=====

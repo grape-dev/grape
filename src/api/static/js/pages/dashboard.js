@@ -48,7 +48,10 @@ function renderDashboard(data) {
     const hasSession = !!ag.status;
     const statusDot = st === 'failed' ? 'var(--r)' : st === 'running' ? 'var(--y)' : hasSession ? 'var(--g)' : '#ddd';
     const statusLabel = st === 'completed' ? 'Done' : st === 'running' ? 'Active' : st === 'failed' ? 'Failed' : hasSession ? 'Active' : '—';
-    const backend = ag.backend || meta.default_backend || 'opencode';
+    const backend = ag.backend || '';   // 无硬编码默认（engine-selection-design.md v2）；空 = 无 engine
+    const backendHtml = backend
+      ? `<span class="mv">${backend}</span>`
+      : `<span class="mv" style="color:var(--r);font-weight:700">无 engine，不可用</span>`;
     const count = agentCounts[at] || 0;
     const nsText = count > 0 ? count + ' events today' : hasSession ? (st === 'running' ? 'Processing...' : 'Idle') : '—';
     const ntCls = at === 'vod' ? 'tg-v' : at === 'issue' ? 'tg-i' : at === 'coding' ? 'tg-c' : at === 'qa' ? 'tg-q' : 'tg-s';
@@ -84,7 +87,7 @@ function renderDashboard(data) {
     html += `<div class="nd" style="border-top:3px solid ${borderColor};${enabled ? '' : 'opacity:0.55'}" onclick="app.nav('${at}')">
       <div class="nh"><span class="n" style="background:${dotColor}"></span><h4>${meta.display_name || agentLabels[i]}</h4>${toggleBtn}</div>
       ${enabled ? `<div class="nds">${desc}</div>` : '<div class="t2" style="font-size:10px;margin:4px 0">已停用</div>'}
-      <div class="nm"><span class="ml">Backend</span><span class="mv">${backend}</span></div>
+      <div class="nm"><span class="ml">Backend</span>${backendHtml}</div>
       <div class="ns"><span class="d" style="background:${statusDot}"></span>${nsText}</div>
       <div class="nt ${ntCls}">${evHtml}</div>
     </div>`;

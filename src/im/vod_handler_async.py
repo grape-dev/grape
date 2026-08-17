@@ -45,7 +45,7 @@ def _get_vod_session(repo_key: str) -> dict | None:
                       "FROM devops_agent_session WHERE agent_type='vod' AND repo_key=?", (repo_key,))
             row = c.fetchone()
         if row:
-            backend = "opencode"
+            backend = ""
             if row[2]:
                 c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[2],))
                 brow = c.fetchone()
@@ -180,7 +180,7 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
 
 async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt: dict) -> str:
     runtime_session_id = conv.get("runtime_session_id", "")
-    backend = agent_session.get("backend", "opencode")
+    backend = agent_session.get("backend", "")
     skill = agent_session.get("skill", "vod")
     skill_path = ""
     if agent_session.get("skill_id"):
@@ -206,14 +206,18 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     new_oc_sid = runtime_session_id
     exit_code = -1
     start_time = time.time()
-    kind = runtime_execution_kind(agent_session.get("runtime_id") or 0)
+    # engine-selection-design.md v2：按引擎集合/会话主引擎选引擎；无引擎 → 明确不可用，不隐式 opencode
+    from src.runtime.engine_select import pick_engine, engine_name
+    engine_id = pick_engine(repo_key, "vod", fallback_runtime_id=agent_session.get("runtime_id") or 0) or 0
+    if not engine_id:
+        log.warning(f"[VOD agent|repo:{repo_key}] no available engine, skip")
+        return ""
+    _be = engine_name(engine_id) or backend
+    kind = runtime_execution_kind(engine_id)
     if kind != EXEC_MODE_DIRECT:
-        # 入队 + 轮询：任务由 RuntimeAgent（本地/远端边端）claim 执行（见 multi-runtime-instance-design）
+        # 入队 + 轮询：任务由远端 RuntimeAgent claim 执行（见 multi-runtime-instance-design）
         from src.runtime.service import enqueue_task, wait_task_terminal
-        from src.user.db import get_runtime_id_by_name, ensure_default_runtime
-        runtime_id = agent_session.get("runtime_id") or 0
-        if not runtime_id:
-            runtime_id = get_runtime_id_by_name(backend) or ensure_default_runtime(backend) or 0
+        runtime_id = engine_id
         if runtime_id:
             tid = enqueue_task(
                 agent_session_id=f"vod:{repo_key}",
@@ -243,7 +247,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             exit_code = -1
     else:
         async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
-                                                           backend_name=backend, account=repo_key,
+                                                            backend_name=_be, account=repo_key,
                                                            bot_token=repo_token, agent_name="VOD Agent",
                                                            agent_label=f"[Agent:vod|repo:{repo_key}]"):
             if event_type == "done":
@@ -444,13 +448,13 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             agent_session_id = agent_session["id"]
             runtime_session_id = ""
             repo_key = repos[0]["repo_key"]
-            agent_session = {"backend": agent_session.get("backend", "opencode"),
+            agent_session = {"backend": agent_session.get("backend", ""),
                              "skill": agent_session.get("skill", "vod"),
                              "skill_id": agent_session.get("skill_id", 0) or 0,
                              "repo_gitcode_token": agent_session.get("repo_gitcode_token", "")}
         else:
             repo_key = session_row[0]
-            backend = "opencode"
+            backend = ""
             if session_row[1]:
                 with db_lock:
                     c = db.cursor()
