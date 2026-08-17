@@ -189,6 +189,13 @@ RUNTIME_MAX_CONCURRENT_TASKS=20
 RUNTIME_POLL_INTERVAL=3
 RUNTIME_HEARTBEAT_INTERVAL=15
 EOF
+# opencode 模型 provider 引用 {env:HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY}（worker 侧 opencode.json）。
+# worker 以 systemd/nohup 运行时无交互 shell 环境变量，安装时若环境存在该变量则一并写入，
+# 避免重装后 opencode 模型调用 401（2026-08-17 事故链之二）。key 值不硬编码进脚本，
+# 安装时通过环境变量传入：export HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY=xxx && curl ... | bash
+if [ -n "${HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY:-}" ]; then
+  printf 'HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY=%s\n' "$HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY" >> "$ENV_FILE"
+fi
 chmod 600 "$ENV_FILE" 2>/dev/null || true
 log "接入配置已写入 $ENV_FILE（token + 主控地址）"
 

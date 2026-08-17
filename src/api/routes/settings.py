@@ -271,13 +271,18 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
                             "owner": cred.get("owner_name", ""),
                             "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
                             "runtimes": runtimes})
-    # 未绑定凭据的本地 runtime（历史 backend_agents 迁移而来）
-    orphan_ids = {rt["id"] for rt in cached if rt.get("id")}
-    if orphan_ids and not devices:
-        for rt in cached:
+    # 未绑定凭据的本地 runtime（历史 backend_agents 迁移而来）：
+    # 仅列可见的本机直连行（credential_id=0）。旧实现遍历 cached 全量——
+    # 吊销全部 worker 后 devices 为空必触发此分支，40 行 revoked/远端行
+    # 全部以"本机 Runtime"设备伪装展示，页面出现大量离线本机 runtime
+    #（2026-08-17 修复，见 engine-binding-revoke-collision-2026-08.md）。
+    if not devices:
+        for rt in visible_runtimes:
+            if (rt.get("credential_id") or 0) != 0:
+                continue
             devices.append({"credential_id": 0, "name": "本机 Runtime", "device_name": "本机",
                             "credential_status": "active", "last_seen_at": None,
-                            "worker_ip": "", "scope": "global", "owner": "",
+                            "worker_ip": "", "scope": rt.get("scope") or "global", "owner": "",
                             "health": rt.get("health", "offline"),
                             "runtimes": [{"id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
                                           "healthy": rt.get("healthy", False),
@@ -425,7 +430,9 @@ async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(
             db.commit()
         except Exception as e:
             msg = str(e)
-            if "UNIQUE" in msg and "runtime_credentials.name" in msg:
+            if ("UNIQUE" in msg or "1062" in msg or "Duplicate" in msg) and "runtime_credentials.name" in msg:
+                # sqlite: "UNIQUE constraint failed: ..."; MySQL: (1062, "Duplicate entry ... for key 'runtime_credentials.name'")
+                # 只认 "UNIQUE" 字样在 MySQL 下匹配不到 → 误报 500（2026-08-17 实测）
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
     # 预构建 worker 安装包（异步）：凭据生成后即可一键安装，避免首次下载才打包
@@ -459,7 +466,9 @@ async def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict 
             raise
         except Exception as e:
             msg = str(e)
-            if "UNIQUE" in msg and "runtime_credentials.name" in msg:
+            if ("UNIQUE" in msg or "1062" in msg or "Duplicate" in msg) and "runtime_credentials.name" in msg:
+                # sqlite: "UNIQUE constraint failed: ..."; MySQL: (1062, "Duplicate entry ... for key 'runtime_credentials.name'")
+                # 只认 "UNIQUE" 字样在 MySQL 下匹配不到 → 误报 500（2026-08-17 实测）
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"改名失败: {e}"})
     return {"message": f"凭据已改名为 {name}"}
@@ -481,16 +490,39 @@ async def list_runtime_credentials(user: dict = Depends(get_current_user)):
 
 @router.post("/runtime-credentials/{cid}/revoke")
 async def revoke_runtime_credential(cid: int, user: dict = Depends(get_current_user)):
-    """吊销凭据：status='revoked'，立即失效；级联其 agent_runtimes 行置 offline（见 multi-runtime-instance-design §5.2）。"""
+    """吊销并删除 worker 记录：删 runtime_credentials 行 + 级联删其 agent_runtimes 行。
+
+    2026-08-17 用户指示「吊销=删除」：删除后 token 即刻失效（_auth_credential
+    查不到 → 401）、凭据名释放可复用（全局唯一键不再被 revoked 行占用）。
+    级联清理：
+    - agent_runtimes：该凭据注册的引擎行一并删除
+    - devops_agent_runtime_binding：指向被删行的绑定删除（配置页不出现悬空 id）
+    - devops_agent_session.runtime_id：置 0（dashboard 红字「无 engine」，如实反映）
+    历史 agent_tasks 绑定旧 runtime_id 的任务恢复走 /api/events/{seq}/redispatch
+    （pick_engine 重新绑定后 requeue，见 engine-selection-claim-pool-2026-08.md）。
+    """
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE runtime_credentials SET status='revoked' WHERE id=?", (cid,))
-        if c.rowcount == 0:
+        c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,))
+        if not c.fetchone():
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
-        c.execute("UPDATE agent_runtimes SET status='offline', last_seen_at=NULL WHERE credential_id=?", (cid,))
+        c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
+        rid_list = [r[0] for r in c.fetchall()]
+        if rid_list:
+            ph = ",".join("?" for _ in rid_list)
+            try:
+                c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", rid_list)
+            except Exception as _e:
+                log.warning(f"revoke {cid}: 清理 binding 失败: {_e}")
+            try:
+                c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
+            except Exception as _e:
+                log.warning(f"revoke {cid}: 清理 session 失败: {_e}")
+        c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
+        c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
         db.commit()
-    return {"message": f"凭据 {cid} 已吊销"}
+    return {"message": f"凭据 {cid} 已吊销并删除"}
 
 
 class ExecModeBody(BaseModel):

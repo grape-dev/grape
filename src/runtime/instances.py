@@ -66,6 +66,8 @@ def resolve_instance_id(engine_name: str, scope: str | None = None) -> int | Non
             """)
         for rid, et, cid, dev, cst in c.fetchall():
             if instance_name(et, dev or "", cid) == target:
+                # 可用：本机直连（cred 0）、凭据行不存在（LEFT JOIN 无行，测试/新环境）、凭据 active；
+                # 仅凭据存在且 revoked 的旧行排除（2026-08-17 修复）
                 if (cid or 0) == 0 or cst is None or cst == "active":
                     return rid
     return None
