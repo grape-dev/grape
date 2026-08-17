@@ -13,6 +13,8 @@
 对话前端主要消费 text，逐步过程事件不产出，属预期取舍）。
 """
 import os
+import subprocess
+import threading
 from .base import AgentRuntime
 
 
@@ -20,8 +22,36 @@ class HermesRuntime(AgentRuntime):
     name = "hermes"
     binary = "hermes"
 
+    def __init__(self):
+        super().__init__()
+        self._cli_ok: bool | None = None
+        self._cli_probe_lock = threading.Lock()
+
+    def _probe_cli_flag(self) -> bool:
+        """探测当前 hermes 是否支持 --cli（一次性，带锁缓存）。
+
+        老版本（如 lvjuntao 机器 v0.11.0，2026.4）无 --cli 参数，硬带会
+        'unrecognized arguments: --cli' 直接 exit=2（远程 hermes 跑失败根因）。
+        以 `hermes --help` 输出是否含 --cli 判断，比版本号阈值更直接。
+        """
+        with self._cli_probe_lock:
+            if self._cli_ok is not None:
+                return self._cli_ok
+            ok = False
+            try:
+                res = subprocess.run([self.binary, "--help"],
+                                     capture_output=True, text=True, timeout=10)
+                ok = "--cli" in (res.stdout or "")
+            except Exception:
+                ok = False
+            self._cli_ok = ok
+            return ok
+
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
-        args = ["-z", prompt, "--yolo", "--cli"]
+        args = ["-z", prompt, "--yolo"]
+        if self._probe_cli_flag():
+            args.append("--cli")  # 新版本：非交互纯文本输出
+        # 老版本（无 --cli）：-z 单次执行同样输出纯文本（实测 v0.11 OK）
         if session_id:
             args.append("--continue")  # 继续最近会话（hermes 无指定 id 恢复）
         return args
