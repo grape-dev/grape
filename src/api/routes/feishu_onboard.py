@@ -37,6 +37,8 @@ _ADDONS = {
         "tenant": [
             "im:message:send_as_bot",  # 发送消息（reply_text / reply_card / send_card_to_user）
             "im:chat:readonly",        # 读取群成员（get_chat_members 需要）
+            "contact:user.base:readonly",  # 获取用户基本信息（get_user_name 取 feishu_name 需要，
+                                           # feishu-app-scoped-openid-fix.md §2.4）
         ],
     },
     "events": {

@@ -55,7 +55,7 @@ open_id 被清空后，用户在**新 bot** 上 p2p 首条消息 → `get_feishu
 > ⚠️ 现状 `handler_async.py:460` 传 `feishu_name=""` + **非空 open_id** → `set_feishu_open_id` 的"保留已有"仅在 open_id 为空时生效 → 会把 feishu_name **写空**。换 app 重确认时若不同步刷新，下游（`pipeline.py:52` 读 feishu_name、prompt 注入名字）拿不到名字。
 > 修复：确认调用传 `feishu_name=sender_name`，与 open_id、app_id 一并更新为新 app 下的值。
 >
-> **feishu_name 来源（无需手动输入）**：p2p 消息自带 `sender_id`/`sender_open_id` → `api.get_user_name(ctx, user_id)`（`feishu_async.py:460`，`GET /contact/v3/users/{user_id}`）直接返回发送者昵称，**用户不需要手动输入**。**优先用 `sender_open_id` 并以 `user_id_type=open_id` 调用**，使 open_id 与 feishu_name 天然来自同一次查询、保证匹配（`get_user_name` 需支持按 `user_id_type` 传参）。前提：bot 有通讯录只读权限（onboard addons 已含 `contact:user.base:readonly`）。若权限缺失/接口异常返回空 → 降级：`feishu_name` 留空，后续由群成员 sync（昵称匹配）补齐，或确认时提示用户回复昵称（备选）。
+> **feishu_name 来源（无需手动输入）**：p2p 消息自带 `sender_id`/`sender_open_id` → `api.get_user_name(ctx, user_id)`（`feishu_async.py:460`，`GET /contact/v3/users/{user_id}`）直接返回发送者昵称，**用户不需要手动输入**。**优先用 `sender_open_id` 并以 `user_id_type=open_id` 调用**，使 open_id 与 feishu_name 天然来自同一次查询、保证匹配（`get_user_name` 需支持按 `user_id_type` 传参）。前提：bot 有通讯录只读权限 **`contact:user.base:readonly`**——**onboard `_ADDONS.scopes.tenant` 已申请**（2026-08-17 补），但**已存在的 bot 需在飞书开放平台控制台手动开通该权限或重新扫码**，否则 contact API 返回的 user 无 `name` 字段、feishu_name 留空。失败降级：`feishu_name` 留空，后续由群成员 sync（昵称匹配）补齐，或确认时提示用户回复昵称（备选）。
 
 ### 2.5 发送侧校验（可选加强）
 `_get_feishu_open_id` 不变；`send_card_to_user` 前（如 `tasks._run_notify`、`chat._push_reply_to_feishu`）可校验 `mapping.app_id == 当前 bot app_id`，不匹配则打 WARNING 提示"需重新绑定"，避免静默失败。
