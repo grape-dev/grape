@@ -300,6 +300,34 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
     return ""
 
 
+def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_account: str,
+                              chat_runtime_id: int, conv_id: str, user_info: str = "") -> str:
+    """按当前加入会话的 conv_type 分支构建 Feishu chat prompt（feishu-web-chat-unified-design.md §11）。
+
+    task 会话 → build_task_chat_prompt（会话消息 get_messages 作历史，与 web chat 一致）；
+    否则 general → build_chat_prompt（事件 history）。
+    """
+    conv_obj = None
+    if conv_id:
+        try:
+            from src.session_manager import get_conversation
+            conv_obj = get_conversation(conv_id)
+        except Exception as e:
+            log.warning(f"Feishu: get conversation failed: {e}")
+    if conv_obj and conv_obj.get("conv_type") == "task":
+        from src.prompt_builder import build_task_chat_prompt
+        from src.repo_key import from_repo_key
+        try:
+            from src.session_manager import get_messages
+            conv_history = get_messages(conv_id, limit=20)
+        except Exception:
+            conv_history = []
+        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account)
+    else:
+        body = build_chat_prompt(text, repo_key, history, skills, exec_account, runtime_id=chat_runtime_id)
+    return (user_info + "\n\n" + body) if user_info else body
+
+
 async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str,
                             num: str, pending: dict):
     """卡片命令编号选择执行（feishu-repo-navigation-commands-design.md §3.2）。"""
@@ -646,8 +674,8 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         except Exception:
             chat_runtime_id = 0
 
-        prompt = user_info + "\n\n" + build_chat_prompt(text, repo_key, history, skills, exec_account,
-                                                        runtime_id=chat_runtime_id)
+        prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
+                                           chat_runtime_id, conv_id, user_info=user_info)
         log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:2000]}")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])

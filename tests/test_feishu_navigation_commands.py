@@ -346,3 +346,58 @@ def test_unbound_no_repos_guides_repo():
     assert "/repo" in text
     assert "没有加入任何仓库" in text
     _clean()
+
+
+# ---- 飞书侧 prompt 按会话类型分流（2026-08-17，feishu-web-chat-unified-design.md §11）----
+
+def _build_prompt(conv_id, text="hi", repo="gitcode:navuser/repo-a", skills=None, account="navuser"):
+    from src.im.handler_async import _build_feishu_chat_prompt
+    return _build_feishu_chat_prompt(text, repo, [], skills or ["chat"], account, 0, conv_id)
+
+
+def test_feishu_task_conversation_uses_task_prompt():
+    """P01：飞书任务会话 → build_task_chat_prompt（场景:task + 任务边界 + Issue#）"""
+    _seed()
+    cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #5", conv_type="task", issue_number=5)
+    prompt = _build_prompt(cid)
+    assert "## 场景: task" in prompt
+    assert "## 任务边界" in prompt
+    assert "Issue: #5" in prompt
+    _clean()
+
+
+def test_feishu_general_conversation_uses_chat_prompt():
+    """P02：飞书 general 会话 → build_chat_prompt，无 task 特征"""
+    _seed()
+    cid = create_conversation(1, "gitcode:navuser/repo-a", title="普通")
+    prompt = _build_prompt(cid)
+    assert "## 场景: task" not in prompt
+    assert "User asks about" in prompt
+    _clean()
+
+
+def test_feishu_task_prompt_history_from_conversation_messages():
+    """P03：任务 prompt 历史用会话消息（chat_messages）"""
+    _seed()
+    from src.session_manager import add_message
+    cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #6", conv_type="task", issue_number=6)
+    add_message(cid, "user", "任务分配")
+    add_message(cid, "agent", "收到")
+    prompt = _build_prompt(cid)
+    assert "## 对话历史" in prompt
+    assert "任务分配" in prompt
+    _clean()
+
+
+def test_feishu_task_prompt_injects_task_description():
+    """P04：任务 prompt 显式含 ## 任务描述（经 conversation_id 反查 tasks）"""
+    _seed()
+    cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #7", conv_type="task", issue_number=7)
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, conversation_id, status) VALUES (1,'navuser','gitcode:navuser/repo-a',7,'刷新readme','处理登录超时',?,'active')", (cid,))
+        db.commit()
+    prompt = _build_prompt(cid)
+    assert "## 任务描述" in prompt
+    assert "处理登录超时" in prompt
+    _clean()
