@@ -8,6 +8,7 @@ import os, json, re, threading, time, uuid
 from datetime import datetime, timezone, timedelta
 from src.session_manager import db, db_lock
 from src.config import log
+from src.api.time_utils import normalize_event_time
 
 # ===== 执行模式开关（engine-selection-design.md v2）=====
 # auto（按绑定引擎宿主自动推导，见 execution-mode-auto-routing-design.md §3）
@@ -664,9 +665,12 @@ def report_messages(task_id, messages):
                 _t = m.get("type", "log")
                 _d = m.get("data")
                 tool, content, input_json, output = _normalize_message(_t, _d)
+                # created_at 显式写 UTC ISO（时间本地化：MySQL 表默认 now() 为 CST 无时区，
+                # 双后端存储语义统一，读时 normalize_event_time 幂等）
                 c.execute(
-                    "INSERT OR IGNORE INTO task_messages (task_id, seq, type, tool, content, input_json, output) VALUES (?,?,?,?,?,?,?)",
-                    (task_id, seq, _t, tool, content, input_json, output))
+                    "INSERT OR IGNORE INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (task_id, seq, _t, tool, content, input_json, output,
+                     datetime.now(timezone.utc).isoformat()))
                 seq += 1
             db.commit()
     except Exception as e:
