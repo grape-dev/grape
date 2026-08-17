@@ -163,10 +163,12 @@ class TestResolveLocalEngine:
         loc_eng = _mk_engine("opencode", credential_id=0)
         assert es.resolve_local_engine() == loc_eng
 
-    def test_resolve_local_engine_ignores_remote_and_unhealthy(self):
-        _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))          # 远端全局不参与
+    def test_resolve_local_engine_ignores_unhealthy_and_falls_back_global(self):
+        _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))          # 远端全局：本机无健康时回退候选
         _mk_engine("opencode", credential_id=0, healthy=0)          # 本机不健康
-        assert es.resolve_local_engine() is None
+        # 本机无健康候选 → 回退全局健康引擎（#60：无 cred0 引擎时 chat 不硬失败）
+        assert es.resolve_local_engine() is not None
+        assert es.resolve_local_engine() != 0
 
 
 class TestBackfillExistingBindings:
