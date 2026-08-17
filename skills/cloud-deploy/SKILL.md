@@ -147,7 +147,11 @@ for i in 1 2 3; do
   sleep 5
 done
 # 启动（gunicorn 持久化，nohup + 端口 5000）
-pkill -f gunicorn 2>/dev/null || true
+# ⚠️ 严禁 `pkill -f gunicorn` / `pkill -f app.py` 这类按命令行模糊匹配的清理方式：
+# worker 上 opencode 进程的命令行包含完整 prompt（含 "gunicorn"/"app.py" 字样），
+# pkill -f 会 SIGTERM 掉 agent 自身进程导致任务自杀（exit=-15），
+# 见 seq#667 hello-flask2 Issue #3 实测。清理旧进程必须按端口精确操作：
+ss -tlnp 2>/dev/null | grep ':5000' | grep -oP 'pid=\K[0-9]+' | sort -u | xargs -r kill 2>/dev/null || true
 sleep 1
 nohup venv/bin/gunicorn -w 2 -b 0.0.0.0:5000 app:app > /tmp/flask.log 2>&1 &
 sleep 4
