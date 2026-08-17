@@ -331,10 +331,11 @@ def _reply_text(api):
 
 
 def test_unbound_fallback_uses_current_bot_owner():
-    """W01：未绑定兜底列出当前 bot 属主（user1）的仓库，不再出现 Jason7602 仓库"""
+    """W01：未绑定兜底列出当前 bot 属主（user1）的仓库，不再出现 Jason7602 仓库（自动 /repo 卡片）"""
     _seed_unbound()
     api = _run_msg("查询下情况")
-    text = _reply_text(api)
+    api.reply_card.assert_called()
+    text = _card_text(api)
     assert "repo-a" in text or "repo-b" in text
     assert "secret-repo" not in text
     assert "Jason7602" not in text
@@ -342,19 +343,20 @@ def test_unbound_fallback_uses_current_bot_owner():
 
 
 def test_unbound_fallback_works_without_meta_key():
-    """W02：meta 无 ws_feishu_app_id 时兜底仍按当前 bot 属主正常"""
+    """W02：meta 无 ws_feishu_app_id 时兜底仍按当前 bot 属主正常（自动 /repo 卡片）"""
     _seed_unbound()
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM meta WHERE key='ws_feishu_app_id'")
         db.commit()
     api = _run_msg("查询下情况")
-    assert "repo-a" in _reply_text(api)
+    api.reply_card.assert_called()
+    assert "repo-a" in _card_text(api)
     _clean()
 
 
 def test_unbound_no_repos_guides_repo():
-    """W03：当前 bot 属主无仓库 → /repo 引导，不列仓库"""
+    """W03：当前 bot 属主无托管仓库 → /repo 引导，不列仓库"""
     _seed()
     with db_lock:
         c = db.cursor()
@@ -365,6 +367,21 @@ def test_unbound_no_repos_guides_repo():
     text = _reply_text(api)
     assert "/repo" in text
     assert "还没有已托管" in text
+    _clean()
+
+
+def test_unbound_with_managed_repos_auto_repo_card():
+    """未绑定但名下有已托管仓库 → 自动触发 /repo 卡片（而非纯文本列表），pending=repo"""
+    _seed()
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='nav_chat'")
+        db.commit()
+    api = _run_msg("查询下情况")
+    api.reply_card.assert_called()
+    text = _card_text(api)
+    assert "repo-a" in text and "repo-b" in text
+    assert _pending() is not None and _pending()["action"] == "repo"
     _clean()
 
 

@@ -73,6 +73,32 @@ def _candidate_card(emoji: str, title: str, items: list[str], page: int, total_p
     return "\n".join(lines)
 
 
+async def _send_repo_card(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str,
+                          uid: int, account: str, page: int = 1) -> bool:
+    """生成并发送 `/repo` 卡片（候选=该用户名下**已托管**仓库，未托管不显示），设置 pending。
+
+    供 `/repo` 命令与"未绑定仓库"兜底共用（自动触发卡片，feishu-repo-navigation-commands-design.md）。
+    无候选返回 False（调用方给引导文案）。
+    """
+    from src.user.db import get_managed_repos
+    from src.repo_key import from_repo_key
+    repos = get_managed_repos(uid)
+    if not repos:
+        return False
+    bound = _current_bound_repo(chat_id, account, db)
+    total_pages = max(1, -(-len(repos) // _PENDING_SELECT_PAGE_SIZE))
+    page = min(max(1, page), total_pages)
+    items = []
+    for r in repos[(page - 1) * _PENDING_SELECT_PAGE_SIZE: page * _PENDING_SELECT_PAGE_SIZE]:
+        full = from_repo_key(r["repo_key"])
+        role = "owner" if r.get("is_admin") else ("member" if r.get("is_join") else "")
+        marker = "【绑定中】" if (r["repo_key"] == bound or full == bound) else ""
+        items.append(f"{full}（{role}）{marker}")
+    _set_pending_selection(chat_id, {"action": "repo", "repo_key": bound, "items": repos, "page": page})
+    await api.reply_card(ctx, msg_id, _candidate_card("📁", f"已托管仓库列表（共 {len(repos)} 个）", items, page, total_pages, "/repo"))
+    return True
+
+
 # 确认/否认意图
 _CONFIRM_RE = re.compile(r'^(?:是|对|确认|确定|是的|对的|没错|对的是|对，是|嗯|可以|yes|y)\s*$', re.IGNORECASE)
 _DENY_RE = re.compile(r'^(?:不是|不对|否|错|不要|取消|no|n)\s*$', re.IGNORECASE)
@@ -167,26 +193,10 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
     if cmd == "/repo":
         if not uid:
             return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
-        from src.user.db import get_managed_repos
-        from src.repo_key import from_repo_key
-        # 仅列该用户名下已托管仓库（未托管不显示，避免绑定后无 webhook/agent 而全错，
-        # feishu-repo-navigation-commands-design.md §1.3）
-        repos = get_managed_repos(uid)
-        if not repos:
-            return "📋 你名下还没有已托管的仓库。"
-        bound = _current_bound_repo(chat_id, account, db)
         page = max(1, int(parts[1])) if len(parts) >= 2 and parts[1].isdigit() else 1
-        total_pages = max(1, -(-len(repos) // _PENDING_SELECT_PAGE_SIZE))
-        page = min(page, total_pages)
-        items = []
-        for r in repos[(page - 1) * _PENDING_SELECT_PAGE_SIZE: page * _PENDING_SELECT_PAGE_SIZE]:
-            full = from_repo_key(r["repo_key"])
-            role = "owner" if r.get("is_admin") else ("member" if r.get("is_join") else "")
-            marker = "【绑定中】" if (r["repo_key"] == bound or full == bound) else ""
-            items.append(f"{full}（{role}）{marker}")
-        _set_pending_selection(chat_id, {"action": "repo", "repo_key": bound, "items": repos, "page": page})
-        await api.reply_card(ctx, msg_id, _candidate_card("📁", f"仓库列表（共 {len(repos)} 个）", items, page, total_pages, "/repo"))
-        return ""
+        if await _send_repo_card(ctx, api, chat_id, msg_id, uid, account, page):
+            return ""
+        return "📋 你名下还没有已托管的仓库。"
 
     if cmd == "/chat":
         if not uid:
@@ -526,42 +536,39 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         repo_key = resolve_repo(text, chat_id, parsed.get("sender_id", ""), db, account)
         if not repo_key:
-            # 未绑定仓库：用当前聊天 bot 的属主列仓库（修复 2026-08-17 误用全局
-            # meta.ws_feishu_app_id 把 Jason7602 的仓库发给其它用户，见 feishu-web-chat-unified-design.md §10）
-            reply_parts = ["当前未绑定任何仓库至本聊天。"]
+            # 未绑定仓库：自动触发 /repo 卡片（候选=该用户名下已托管仓库，当前 bot 属主）。
+            # 修复 2026-08-17 误用全局 meta.ws_feishu_app_id 把 Jason7602 的仓库发给其它用户
+            #（feishu-web-chat-unified-design.md §10）。
             uid = get_user_id_by_app_id(account) or 0
             try:
                 if uid:
-                    from src.user.db import get_managed_repos
-                    repos = get_managed_repos(uid)
-                    if repos:
-                        reply_parts.append("你已加入以下已托管仓库，请选择绑定的仓库：")
-                        for i, r in enumerate(repos, 1):
-                            reply_parts.append(f"  {i}. {r['full_name']}")
-                        reply_parts.append("")
-                        reply_parts.append("发送 `/repo` 以卡片形式选择并绑定仓库")
-                    else:
-                        reply_parts.append("你名下还没有已托管的仓库。")
-                        reply_parts.append("请先在网页端托管仓库，然后发送 `/repo` 选择绑定。")
+                    if await _send_repo_card(ctx, api, chat_id, msg_id, uid, account, 1):
+                        return
+                    reply_parts = [
+                        "当前未绑定任何仓库至本聊天。",
+                        "你名下还没有已托管的仓库。",
+                        "请先在网页端托管仓库，然后发送 `/repo` 选择绑定。",
+                    ]
+                    await api.reply_text(ctx, msg_id, "\n".join(reply_parts))
+                    return
+                c = db.cursor()
+                c.execute("SELECT DISTINCT repo_key, repository, source FROM chat_agent_session ORDER BY last_active_at DESC LIMIT 10")
+                rows = c.fetchall()
+                if rows:
+                    reply_parts = ["当前未绑定任何仓库至本聊天。", "已有处理的仓库："]
+                    for r in rows:
+                        reply_parts.append(f"  📦 {r[1]}")
+                    reply_parts.append("")
+                    reply_parts.append("绑定方式（任选一种）：")
+                    reply_parts.append(f'  "绑定到 {rows[0][1]}"')
+                    reply_parts.append(f'  "使用 {rows[0][1]}"')
+                    reply_parts.append("  /repo")
                 else:
-                    c = db.cursor()
-                    c.execute("SELECT DISTINCT repo_key, repository, source FROM chat_agent_session ORDER BY last_active_at DESC LIMIT 10")
-                    rows = c.fetchall()
-                    if rows:
-                        reply_parts.append("已有处理的仓库：")
-                        for r in rows:
-                            reply_parts.append(f"  📦 {r[1]}")
-                        reply_parts.append("")
-                        reply_parts.append("绑定方式（任选一种）：")
-                        reply_parts.append(f'  "绑定到 {rows[0][1]}"')
-                        reply_parts.append(f'  "使用 {rows[0][1]}"')
-                        reply_parts.append(f"  /repo")
-                    else:
-                        reply_parts.append("尚无任何仓库记录。请发送 /repo 绑定仓库。")
+                    reply_parts = ["当前未绑定任何仓库至本聊天。", "尚无任何仓库记录。请发送 /repo 绑定仓库。"]
+                await api.reply_text(ctx, msg_id, "\n".join(reply_parts))
             except Exception as e:
                 log.warning(f"Feishu: resolve user repos error: {e}")
-                reply_parts.append("请发送 `/repo` 选择并绑定仓库。")
-            await api.reply_text(ctx, msg_id, "\n".join(reply_parts))
+                await api.reply_text(ctx, msg_id, "请发送 `/repo` 选择并绑定仓库。")
             return
 
         bind_repo = detect_bind_intent(text)
