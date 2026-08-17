@@ -838,6 +838,17 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user),
         kwargs["skill_scope"] = skill_scope
     _set_chat_config(user["id"], **kwargs)
 
+    # 手动配置换 app：对账 unified_user_mapping（feishu-app-scoped-openid-fix.md §2.3）
+    # 新旧 im_app_id 不同 → 刷新 app_id 并清空 open_id/feishu_name，要求用户重新 p2p 确认
+    _new_app = kwargs.get("im_app_id") or ""
+    if _new_app and old_app_id and old_app_id != _new_app:
+        try:
+            from src.session_manager import update_unified_user_info
+            update_unified_user_info(user.get("username", ""), open_id="", app_id=_new_app)
+            log.info(f"Chat IM: app changed {old_app_id[:30]} -> {_new_app[:30]}, reconciled unified_user_mapping (open_id cleared)")
+        except Exception as e:
+            log.warning(f"Chat IM: reconcile unified_user_mapping failed: {e}")
+
     # Chat IM：通过 BotManager 动态增删 Bot
     try:
         from src.api.main import bot_manager

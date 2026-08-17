@@ -433,7 +433,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         if sender_open_id and chat_type == "p2p":
             try:
                 from src.user import db as user_db
-                from src.session_manager import set_feishu_open_id, get_feishu_open_id
+                from src.session_manager import update_unified_user_info, get_feishu_open_id
                 uid = get_user_id_by_app_id(ctx.app_id)
                 if uid:
                     user_row = user_db.get_user(uid)
@@ -457,7 +457,18 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                                 # 有待确认项：判断用户回复是确认还是否认
                                 if _CONFIRM_RE.match(text.strip()):
                                     bind_open_id = pending.get("open_id") or sender_open_id
-                                    set_feishu_open_id("", username, bind_open_id, gitcode_nickname=nickname)
+                                    # 优先以 open_id 取发送者飞书昵称（open_id 与 feishu_name 天然匹配，
+                                    # feishu-app-scoped-openid-fix.md §2.4）；拿不到则留空由 sync 兜底
+                                    feishu_name = ""
+                                    try:
+                                        _n = await api.get_user_name(
+                                            ctx, bind_open_id, user_id_type="open_id")
+                                        if _n and isinstance(_n, str):
+                                            feishu_name = _n
+                                    except Exception:
+                                        pass
+                                    update_unified_user_info(username, bind_open_id, feishu_name=feishu_name,
+                                                             gitcode_nickname=nickname, app_id=ctx.app_id)
                                     _pending_binds.pop(key, None)
                                     await api.reply_text(ctx, msg_id, f"✅ 已确认，你的 GitCode 账号「{username}」已绑定当前飞书账号。")
                                     log.info(f"Chat: confirmed feishu mapping for {username} (app={ctx.app_id[:20]})")

@@ -239,9 +239,8 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
         # 扫码即绑定个人飞书身份（chat_bot / vod_bot 统一用扫码者 username 关联）
         if open_id and username:
             try:
-                from src.session_manager import set_feishu_open_id
-                set_feishu_open_id(repo_key or "", username, open_id,
-                                   gitcode_nickname=username)
+                from src.session_manager import update_unified_user_info
+                update_unified_user_info(username, open_id, gitcode_nickname=username, app_id=app_id)
                 log.info(f"Feishu onboard: bound open_id for {username} (task={task_id[:8]})")
             except Exception as e:
                 log.warning(f"Feishu onboard: bind open_id failed: {e}")
