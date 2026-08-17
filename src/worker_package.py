@@ -21,6 +21,9 @@ UV_PYTHON_DIR = os.path.expanduser(os.environ.get("UV_PYTHON_DIR", "~/.local/sha
 
 # worker 运行闭包清单（整目录粒度，含运行时懒加载模块）。
 # 依据：src.runtime.agent 的 import 闭包（含 repogit/cleanup 等运行时 import）。
+# src/api/ 整目录：time_utils/event_store/event_archive/session_store/knowledge 等
+# 被 session_manager/service 顶层或懒加载引用；曾因只列 __init__+routing 漏掉
+# time_utils 导致 worker 包缺文件启动即崩（ModuleNotFoundError，2026-08-17）。
 MANIFEST = [
     "src/__init__.py",
     "src/config.py",
@@ -29,8 +32,7 @@ MANIFEST = [
     "src/mysql_compat.py",
     "src/user/__init__.py",
     "src/user/db.py",
-    "src/api/__init__.py",
-    "src/api/routing.py",
+    "src/api/",
     "src/agent/",
     "src/runtime/",
     "requirements-worker.txt",
