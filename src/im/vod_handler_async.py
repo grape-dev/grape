@@ -94,6 +94,75 @@ def _list_vod_repos(bot_app_id: str) -> list:
     return results
 
 
+def _current_vod_repo(chat_id: str) -> str:
+    """当前群绑定的 VOD 仓库（vod_conversations → devops_agent_session）"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT agent_session_id FROM vod_conversations WHERE im_chat_id=?", (chat_id,))
+            row = c.fetchone()
+            if row:
+                r2 = c.execute("SELECT repo_key FROM devops_agent_session WHERE id=?", (row[0],)).fetchone()
+                if r2:
+                    return r2[0]
+    except Exception:
+        pass
+    return ""
+
+
+async def _send_vod_repo_card(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str, page: int = 1) -> bool:
+    """生成并发送 `/repo` 卡片（候选=当前 bot 名下已配置 VOD 的仓库），设置 pending。无候选返回 False。"""
+    from src.im.handler_async import _set_pending_selection, _candidate_card, _PENDING_SELECT_PAGE_SIZE
+    from src.repo_key import from_repo_key
+    repos = _list_vod_repos(ctx.app_id)
+    if not repos:
+        return False
+    bound = _current_vod_repo(chat_id)
+    total_pages = max(1, -(-len(repos) // _PENDING_SELECT_PAGE_SIZE))
+    page = min(max(1, page), total_pages)
+    items = []
+    for r in repos[(page - 1) * _PENDING_SELECT_PAGE_SIZE: page * _PENDING_SELECT_PAGE_SIZE]:
+        full = from_repo_key(r["repo_key"])
+        marker = "【绑定中】" if r["repo_key"] == bound else ""
+        items.append(f"{full}{marker}")
+    _set_pending_selection(chat_id, {"action": "vod_repo", "items": repos, "page": page})
+    await api.reply_card(ctx, msg_id, _candidate_card("📁", f"VOD 仓库列表（共 {len(repos)} 个）", items, page, total_pages, "/repo"))
+    return True
+
+
+async def _handle_vod_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str,
+                                num: str, pending: dict):
+    """卡片命令编号选择执行（vod-navigation-commands-design.md §3.2，action=vod_repo）。"""
+    try:
+        from src.im.handler_async import _clear_pending_selection, _PENDING_SELECT_PAGE_SIZE
+        from src.repo_key import from_repo_key
+        if num == "0":
+            _clear_pending_selection(chat_id)
+            await api.reply_card(ctx, msg_id, "**✅ 已取消选择**")
+            return
+        items = pending.get("items") or []
+        page = int(pending.get("page") or 1)
+        page_size = int(pending.get("page_size") or _PENDING_SELECT_PAGE_SIZE)
+        idx = (page - 1) * page_size + (int(num) - 1)
+        if idx < 0 or idx >= len(items):
+            await api.reply_card(ctx, msg_id, f"**⚠️ 无效编号 {num}**\n回复 `0` 取消。")
+            return
+        repo = items[idx]
+        agent_session = _get_vod_session(repo["repo_key"])
+        if not agent_session or agent_session["im_app_id"] != ctx.app_id:
+            await api.reply_card(ctx, msg_id, "**❌ 该仓库未配置当前 bot 的 VOD Agent**")
+            return
+        _get_or_create_conversation(chat_id, agent_session["id"])
+        _clear_pending_selection(chat_id)
+        await api.reply_card(ctx, msg_id, f"**✅ 已绑定 `{from_repo_key(repo['repo_key'])}`**\n后续消息将进入该仓库的 VOD 会话。")
+    except Exception as e:
+        log.warning(f"[VOD:{ctx.name}] selection error: {e}")
+        try:
+            await api.reply_text(ctx, msg_id, f"❌ 选择处理失败: {e}")
+        except Exception:
+            pass
+
+
 def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     from src.api.event_store import get_issue_summary
     user_msg = evt.get("payload", {}).get("user_message", "")
@@ -325,31 +394,40 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
         cmd_parts = text.split()
         cmd = cmd_parts[0].lower() if cmd_parts else ""
 
+        # 卡片命令编号选择（vod-navigation-commands-design.md §3.2）：纯数字 + 有 vod_repo pending → 执行选择
+        if text.isdigit():
+            from src.im.handler_async import _get_pending_selection
+            pending = _get_pending_selection(chat_id)
+            if pending and pending.get("action") == "vod_repo":
+                await _handle_vod_selection(ctx, api, chat_id, msg_id, text, pending)
+                return
+
         if cmd == "/help":
-            await api.reply_text(ctx, msg_id,
-                "可用命令：\n/bind owner/repo - 绑定仓库\n/unbind - 解绑\n/status - 查看绑定\n/clean - 清除会话\n/help - 帮助")
+            await api.reply_card(ctx, msg_id,
+                "**🤖 VOD Bot 命令**\n"
+                "/repo — 列出并绑定仓库（回复编号）\n"
+                "/where — 当前位置\n"
+                "/help — 本帮助\n\n"
+                "回复数字选择 · `0` 取消")
             return
 
-        if cmd == "/status":
-            try:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("SELECT agent_session_id FROM vod_conversations WHERE im_chat_id=?", (chat_id,))
-                    row = c.fetchone()
-                if row:
-                    with db_lock:
-                        c = db.cursor()
-                        c.execute("SELECT repo_key FROM devops_agent_session WHERE id=?", (row[0],))
-                        repo_row = c.fetchone()
-                    repo = repo_row[0] if repo_row else "?"
-                    await api.reply_text(ctx, msg_id, f"📋 当前绑定: `{repo}`")
-                else:
-                    await api.reply_text(ctx, msg_id, "📋 未绑定。使用 `/bind owner/repo` 绑定")
-            except Exception as e:
-                await api.reply_text(ctx, msg_id, f"❌ 查询失败: {e}")
+        if cmd in ("/where", "/status"):
+            # 与 chat 一致用 /where（/status 兼容别名，vod-navigation-commands-design.md）
+            repo = _current_vod_repo(chat_id)
+            if repo:
+                await api.reply_card(ctx, msg_id, f"**📍 当前位置**\n仓库：`{repo}`")
+            else:
+                await api.reply_card(ctx, msg_id, "**📍 当前位置**\n仓库：未绑定（回复 `/repo` 选择绑定）")
+            return
+
+        if cmd == "/repo":
+            if await _send_vod_repo_card(ctx, api, chat_id, msg_id, 1):
+                return
+            await api.reply_card(ctx, msg_id, "**📁 当前 bot 名下暂无已配置 VOD 的仓库**\n请联系管理员配置。")
             return
 
         if cmd == "/bind" and len(cmd_parts) >= 2:
+            # 弃用兼容（vod-navigation-commands-design.md）：建议用 /repo 编号选择
             repo_key = cmd_parts[1]
             agent_session = _get_vod_session(repo_key)
             if not agent_session:
@@ -360,28 +438,6 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
                 return
             _get_or_create_conversation(chat_id, agent_session["id"])
             await api.reply_text(ctx, msg_id, f"✅ 已绑定 `{repo_key}`")
-            return
-
-        if cmd == "/unbind":
-            try:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("DELETE FROM vod_conversations WHERE im_chat_id=?", (chat_id,))
-                    db.commit()
-                await api.reply_text(ctx, msg_id, "✅ 已解绑")
-            except Exception as e:
-                await api.reply_text(ctx, msg_id, f"❌ 解绑失败: {e}")
-            return
-
-        if cmd in ("/clean", "/reset"):
-            try:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("UPDATE vod_conversations SET runtime_session_id='' WHERE im_chat_id=?", (chat_id,))
-                    db.commit()
-                await api.reply_text(ctx, msg_id, "✅ 已清除会话")
-            except Exception as e:
-                await api.reply_text(ctx, msg_id, f"❌ 清除失败: {e}")
             return
 
         try:
@@ -400,22 +456,22 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             repos = _list_vod_repos(ctx.app_id)
             log.info(f"[VOD:{ctx.name}] no conv, vod_repos={[r['repo_key'] for r in repos]}")
             if len(repos) == 0:
-                await api.reply_text(ctx, msg_id, "❌ 未绑定仓库，请联系管理员配置")
+                await api.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n当前 bot 名下暂无已配置 VOD 的仓库，请联系管理员配置。")
                 return
             elif len(repos) == 1:
                 agent_session = _get_vod_session(repos[0]["repo_key"])
                 if agent_session:
                     conv = _get_or_create_conversation(chat_id, agent_session["id"])
-                    if conv.get("is_new"):
-                        await api.reply_text(ctx, msg_id, f"✅ 已自动绑定 `{repos[0]['repo_key']}`")
+                    await api.reply_card(ctx, msg_id, f"**✅ 已自动绑定**\n`{repos[0]['repo_key']}`")
                     row = (agent_session["id"], conv["runtime_session_id"])
                 else:
-                    await api.reply_text(ctx, msg_id, "❌ 自动绑定失败")
+                    await api.reply_card(ctx, msg_id, "**❌ 自动绑定失败**")
                     return
             else:
-                repo_list = "\n".join([f"  - `{r['repo_key']}`" for r in repos])
-                await api.reply_text(ctx, msg_id,
-                    f"已绑定以下仓库：\n{repo_list}\n请发送 `/bind owner/repo` 选择")
+                # ≥2 仓库：自动弹 /repo 卡片（编号选择，替代纯文本列表，vod-navigation-commands-design.md §3.3）
+                if await _send_vod_repo_card(ctx, api, chat_id, msg_id, 1):
+                    return
+                await api.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n请联系管理员配置。")
                 return
 
         agent_session_id = row[0]
