@@ -123,11 +123,14 @@ async def update_notifications(body: NotificationPrefs, user: dict = Depends(get
 @router.get("/gitcode-repo/{owner}/{repo}")
 async def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.user.db import get_bot_token_by_repo
+    from src.repo_key import to_repo_key
     bot_token = get_bot_token_by_repo(owner, repo)
     bot_username = "devops-bot"
+    # GitCode name 可能是显示名（≠URL path），按 repo_key 匹配更稳（见 repo_manager.fetch_repos_with_role）
+    target_key = to_repo_key(f"{owner}/{repo}")
     repos = user_db.get_managed_repos(user["id"])
     for r in repos:
-        if r["repo_owner"] == owner and r["repo_name"] == repo:
+        if to_repo_key(f'{r.get("repo_owner", "")}/{r.get("repo_name", "")}') == target_key:
             bot_username = r.get("bot_username", "") or "devops-bot"
             break
 

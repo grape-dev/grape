@@ -609,7 +609,7 @@ def requeue_task(task_id):
 
 
 def report_messages(task_id, messages):
-    """批量执行消息 → append_event_archive_log（M1 落档，脱敏）"""
+    """批量执行消息 → append_event_archive_log（M1 落档，脱敏）+ task_messages 结构化落库 + 实时 fanout"""
     task = get_task(task_id)
     if not task:
         return
@@ -645,6 +645,86 @@ def report_messages(task_id, messages):
                                              issue_num_hint=hint)
         except Exception as e:
             log.warning(f"report_messages archive failed: {e}")
+    # 结构化落库（task_messages，双后端一致；seq 服务端生成 MAX+1，UNIQUE 防重放）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+            seq = (c.fetchone()[0] or 0) + 1
+            for m in (messages or []):
+                if not isinstance(m, dict):
+                    continue
+                _t = m.get("type", "log")
+                _d = m.get("data")
+                tool, content, input_json, output = _normalize_message(_t, _d)
+                c.execute(
+                    "INSERT OR IGNORE INTO task_messages (task_id, seq, type, tool, content, input_json, output) VALUES (?,?,?,?,?,?,?)",
+                    (task_id, seq, _t, tool, content, input_json, output))
+                seq += 1
+            db.commit()
+    except Exception as e:
+        log.warning(f"report_messages task_messages insert failed: {e}")
+    # 实时 fanout（订阅表推送，队列满丢弃保活；SSE 重连靠 since 回源）
+    try:
+        from src.runtime.task_log_stream import fanout
+        fanout(task_id, messages or [])
+    except Exception as e:
+        log.warning(f"report_messages fanout failed: {e}")
+
+
+def _normalize_message(_t: str, _d) -> tuple[str, str, str, str]:
+    """worker 消息 → (tool, content, input_json, output) 规范化。
+
+    - tool_use: data 为 dict {tool, input}（input 可能已是 JSON 字符串或 dict）
+    - text/reasoning/step_*: data 为 str 或 {text/content}
+    - output 列保留给未来 tool_result（worker 端暂未上报 tool_result 结构化输出）
+    """
+    if isinstance(_d, dict):
+        tool = str(_d.get("tool") or "")
+        if _t == "tool_use":
+            inp = _d.get("input") or {}
+            if isinstance(inp, str):
+                try:
+                    json.loads(inp)
+                    input_json = inp
+                except Exception:
+                    input_json = json.dumps({"raw": inp}, ensure_ascii=False)
+            else:
+                input_json = json.dumps(inp, ensure_ascii=False)
+            return tool, "", input_json, ""
+        content = str(_d.get("text") or _d.get("content") or "")
+        return tool, content, "", ""
+    return "", str(_d or ""), "", ""
+
+
+def list_task_messages(task_id, since: int = 0, limit: int = 5000) -> list[dict]:
+    """按 seq 增量拉取 task_messages（SSE 断线/新开页补数据用）。
+
+    返回 [{seq, type, tool, content, input, output, created_at}]，input 为解析后的 dict。
+    """
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, type, tool, content, input_json, output, created_at FROM task_messages "
+                "WHERE task_id=? AND seq>? ORDER BY seq LIMIT ?",
+                (task_id, since, limit))
+            rows = c.fetchall()
+    except Exception as e:
+        log.warning(f"list_task_messages failed: {e}")
+        return []
+    out = []
+    for r in rows:
+        inp = {}
+        try:
+            inp = _json.loads(r[4] or "{}")
+        except Exception:
+            pass
+        out.append({"seq": r[0], "type": r[1], "tool": r[2] or "",
+                    "content": r[3] or "", "input": inp, "output": r[5] or "",
+                    "created_at": r[6] or ""})
+    return out
 
 
 def report_progress(task_id, progress):

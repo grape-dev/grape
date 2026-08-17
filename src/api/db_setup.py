@@ -292,6 +292,22 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
 )
 """
 
+# ===== 运行日志：task_messages 结构化消息表（实时日志功能，对齐 multica TaskMessage 模型）=====
+_TASK_MESSAGES_DDL = """
+CREATE TABLE IF NOT EXISTS task_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    TEXT NOT NULL,           -- agent_tasks.id
+    seq        INTEGER NOT NULL,        -- worker 侧单调序号（顺序/去重/增量拉取三合一）
+    type       TEXT NOT NULL,           -- step_start|text|reasoning|tool_use|step_finish|error|done
+    tool       TEXT DEFAULT '',         -- tool_use 工具名
+    content    TEXT DEFAULT '',         -- text/reasoning/error 内容
+    input_json TEXT DEFAULT '',         -- tool_use 入参 JSON（服务端已脱敏）
+    output     TEXT DEFAULT '',         -- tool_result 输出（worker 截断 8192）
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(task_id, seq)
+)
+"""
+
 # ===== agent-cluster-design.md §4.1：Agent 类型 → 引擎池绑定（1..N）=====
 _AGENT_TYPE_RUNTIME_POOL_DDL = """
 CREATE TABLE IF NOT EXISTS agent_type_runtime_pool (
@@ -406,6 +422,7 @@ _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
+    ("task_messages", _TASK_MESSAGES_DDL),
     ("agent_type_runtime_pool", _AGENT_TYPE_RUNTIME_POOL_DDL),
     ("devops_agent_runtime_binding", _DEVOPS_AGENT_RUNTIME_BINDING_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
@@ -532,6 +549,7 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_event ON agent_tasks(event_seq)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_issue_session ON agent_tasks(issue_session_id)",
         "CREATE INDEX IF NOT EXISTS idx_issue_agent_session_repo ON issue_agent_session(repo_key, agent_type, issue_id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id)",
     ]
     for idx in indexes:
         try:

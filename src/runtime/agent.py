@@ -13,7 +13,7 @@ if sys.version_info < (3, 10):
           file=sys.stderr)
     sys.exit(1)
 
-import asyncio, json, os, random
+import asyncio, json, os, random, time
 import base64 as _b64
 import zipfile as _zf
 import urllib.request as _urllib
@@ -374,6 +374,7 @@ async def _execute_task(client, task, engine_name: str = ""):
     done = None
     batch = []
     started = False
+    _last_flush = time.monotonic()  # 实时日志双触发（50条/500ms）时间基
     try:
         from src.runtime.executor import stream_runtime
         _agent_label = f"[Agent:{task.get('agent_type') or ''}|repo:{task.get('repo_key') or ''}{_engine_tag}]"
@@ -422,9 +423,12 @@ async def _execute_task(client, task, engine_name: str = ""):
             elif evt_type == "step_finish":
                 log.info(f"  [{_esq}] ✅ {data}")
             batch.append({"type": evt_type, "data": data if not isinstance(data, str) else data})
-            if len(batch) >= 50:
+            # 双触发批量上报（实时日志实时性关键）：50 条或 500ms 时间窗任一满足即 flush
+            _now = time.monotonic()
+            if len(batch) >= 50 or (_last_flush and _now - _last_flush >= 0.5):
                 await client.report_messages(tid, batch)
                 batch = []
+                _last_flush = _now
         if batch:
             await client.report_messages(tid, batch)
         # 引擎从未产出执行事件即结束 → 直接 fail（任务保持 dispatched→failed，跳过 running）

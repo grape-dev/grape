@@ -74,6 +74,7 @@ function renderEventDetail(data) {
           <div><span style="color:var(--t3)">Agent:</span> ${agent}</div>
           <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
           <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}</div>
+          ${data.task && data.task.task_id ? `<div style="margin-top:6px"><span style="color:var(--t3)">运行日志:</span> <a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>` : ''}
           <div id="convGate" style="margin-top:6px"><span style="color:var(--t3)">门禁:</span> <span class="tgx">…</span></div>
         </div>
       </div>
@@ -210,4 +211,148 @@ function redispatchEvent(seq) {
     const msg = (e.detail && e.detail.message) || e.message || e;
     app.showToast('重派失败: ' + msg);
   });
+}
+
+// ===== 实时运行日志（task_logs SSE，grape-task-logs-analysis.md）=====
+// 模态面板：fetch + ReadableStream 消费 SSE，自动跟随（滚离底部停止，回到底部恢复）
+let _taskLog = {taskId: '', title: '', seq: 0, aborter: null, following: true, statusEl: null, bodyEl: null, waitTimer: null, hasMsg: false};
+
+function _tlEsc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function _tlIcon(type) {
+  if (type === 'tool_use') return '🔧';
+  if (type === 'step_start') return '▶';
+  if (type === 'step_finish') return '✅';
+  if (type === 'reasoning') return '🤔';
+  if (type === 'error') return '❌';
+  if (type === 'text') return '💬';
+  return '·';
+}
+
+function _tlLine(payload) {
+  const type = payload.type || 'log';
+  const time = payload.created_at ? `<span style="color:var(--t3);margin-right:6px">${_tlEsc(payload.created_at.slice(11, 19))}</span>` : '';
+  if (type === 'tool_use') {
+    let inputHtml = '';
+    try {
+      inputHtml = `<div style="margin:4px 0 4px 24px;white-space:pre-wrap;word-break:break-all;color:var(--t2);font-size:11px">${_tlEsc(JSON.stringify(payload.input || {}, null, 2))}</div>`;
+    } catch (e) {}
+    return `<div style="margin-bottom:6px">${time}🔧 <span style="color:var(--a);font-weight:600">${_tlEsc(payload.tool || 'tool')}</span>${inputHtml}</div>`;
+  }
+  const color = type === 'error' ? 'var(--tr)' : type === 'reasoning' ? 'var(--t3)' : 'var(--t2)';
+  return `<div style="margin-bottom:6px">${time}${_tlIcon(type)} <span style="color:${color};white-space:pre-wrap;word-break:break-all">${_tlEsc(payload.content || '')}</span></div>`;
+}
+
+function _tlStatus(text, color) {
+  if (_taskLog.statusEl) _taskLog.statusEl.innerHTML = `<span style="color:${color || 'var(--t3)'}">${_tlEsc(text)}</span>`;
+}
+
+function openTaskLog(taskId, title) {
+  closeTaskLog();
+  _taskLog.taskId = taskId;
+  _taskLog.title = title || taskId;
+  _taskLog.seq = 0;
+  _taskLog.following = true;
+
+  const ov = document.createElement('div');
+  ov.id = 'taskLogOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = `<div style="width:min(960px,94vw);height:min(720px,90vh);background:var(--bg,#11151c);border:1px solid var(--b,#2a3140);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.5)">
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">
+      <span style="font-size:13px;font-weight:600">📜 运行日志 <span style="color:var(--t3);font-weight:400">· ${_tlEsc(title)}</span></span>
+      <span id="tlStatus" style="font-size:11px;margin-left:auto"></span>
+      <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>
+    </div>
+    <div id="tlBody" style="flex:1;min-height:0;overflow-y:auto;background:#0b0e14;color:#c2cad6;padding:12px 14px;font-size:12px;font-family:monospace;line-height:1.6"></div>
+  </div>`;
+  document.body.appendChild(ov);
+  _taskLog.statusEl = document.getElementById('tlStatus');
+  _taskLog.bodyEl = document.getElementById('tlBody');
+  _tlStatus('⏳ 连接中…');
+  // 自动跟随：用户向上滚 >120px 停止跟随，回到底部边缘恢复
+  _taskLog.bodyEl.addEventListener('scroll', () => {
+    const el = _taskLog.bodyEl;
+    const away = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (away > 120) _taskLog.following = false;
+    else if (away < 30) _taskLog.following = true;
+  });
+  ov.addEventListener('click', e => { if (e.target === ov) closeTaskLog(); });
+  _taskLogStream();
+}
+
+function _tlArmWaitHint() {
+  // hermes 类引擎 CLI 一次性输出（推理期间无 stdout），执行中长时间无消息属正常——
+  // 8s 无消息给等待提示，避免误以为面板未生效
+  _taskLog.waitTimer = setTimeout(() => {
+    if (!_taskLog.taskId) return;
+    if (_taskLog.bodyEl && !_taskLog.hasMsg && _taskLog.bodyEl.childElementCount === 0) {
+      _taskLog.bodyEl.insertAdjacentHTML('beforeend',
+        '<div class="tl-waiting" style="color:var(--t3);padding:10px 0;font-size:12px">⏳ 引擎执行中，等待输出…（hermes 类引擎输出在任务完成时一次性返回；opencode 引擎逐步实时输出）</div>');
+      _tlStatus('⏳ 引擎执行中，等待输出…', 'var(--ty, #f1c40f)');
+    }
+  }, 8000);
+}
+
+function _taskLogStream() {
+  const token = localStorage.getItem('token') || '';
+  const ac = new AbortController();
+  _taskLog.aborter = ac;
+  fetch('/api/task-logs/' + encodeURIComponent(_taskLog.taskId) + '/stream?since=' + _taskLog.seq, {
+    headers: {'Authorization': 'Bearer ' + token},
+    signal: ac.signal,
+  }).then(resp => {
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    _tlStatus('🟢 已连接（实时）', 'var(--tgx, #2ecc71)');
+    _taskLog.hasMsg = false;
+    _tlArmWaitHint();
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    function read() {
+      return reader.read().then(({done, value}) => {
+        if (done) {
+          _tlStatus('🔚 日志流结束', 'var(--t3)');
+          if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
+          return;
+        }
+        buf += dec.decode(value, {stream: true});
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const part of parts) {
+          if (!part.startsWith('data: ')) continue;
+          let evt;
+          try { evt = JSON.parse(part.slice(6)); } catch (e) { continue; }
+          if (typeof evt.seq === 'number' && evt.seq <= _taskLog.seq) continue; // 断线重连去重
+          _taskLog.seq = (typeof evt.seq === 'number' && evt.seq > _taskLog.seq) ? evt.seq : _taskLog.seq;
+          if (!_taskLog.hasMsg) {
+            _taskLog.hasMsg = true;
+            if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
+            const ph = _taskLog.bodyEl && _taskLog.bodyEl.querySelector('.tl-waiting');
+            if (ph) ph.remove();
+            _tlStatus('🟢 已连接（实时）', 'var(--tgx, #2ecc71)');
+          }
+          _taskLog.bodyEl.insertAdjacentHTML('beforeend', _tlLine(evt));
+          if (_taskLog.following) _taskLog.bodyEl.scrollTop = _taskLog.bodyEl.scrollHeight;
+        }
+        return read();
+      });
+    }
+    return read();
+  }).catch(err => {
+    if (err.name === 'AbortError') return;
+    if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
+    _tlStatus('⚠️ 连接断开，2s 后重连…', 'var(--tr, #e74c3c)');
+    setTimeout(() => { if (_taskLog.taskId) _taskLogStream(); }, 2000);
+  });
+}
+
+function closeTaskLog() {
+  if (_taskLog.aborter) _taskLog.aborter.abort();
+  if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
+  _taskLog.aborter = null;
+  _taskLog.taskId = '';
+  const ov = document.getElementById('taskLogOverlay');
+  if (ov) ov.remove();
 }

@@ -3,7 +3,20 @@ const app = (() => {
   const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','runtimes','event','repos','skill','tasks'];
 
   function currentRepo() {
-    try { return JSON.parse(localStorage.getItem('currentRepo')); } catch { return null; }
+    try {
+      const r = JSON.parse(localStorage.getItem('currentRepo'));
+      if (r && r.fullName) {
+        // GitCode 仓库 name 是显示名（可≠URL path，如 shelltest 显示 skillstest）——
+        // 所有 API 路径/链接都用 owner/name 拼接，必须强制 URL 语义（fullName 拆分），
+        // 否则旧脏 name 导致 /api/pipeline/{owner}/{name} 查空（见 repo_manager.fetch_repos_with_role）
+        const parts = String(r.fullName).split('/');
+        if (parts.length === 2 && r.name !== parts[1]) {
+          r.name = parts[1];
+          localStorage.setItem('currentRepo', JSON.stringify(r));
+        }
+      }
+      return r;
+    } catch { return null; }
   }
 
   function showLogin() {
@@ -190,7 +203,7 @@ function loadAgentTypes() {
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
 
     if (repo) {
-      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.owner}/${repo.name}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
+      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.fullName || (repo.owner + '/' + repo.name)}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
     } else {
       repoTitle.textContent = '';
     }
