@@ -9,6 +9,8 @@ from src.agent.executor import (
     _redact, _terminate_proc, _BACKENDS,
     stream_agent, stream_opencode, consume_stream_async,
     register_backend, get_backend, discover_backends,
+    _track_proc, _untrack_proc, _active_procs, _active_procs_lock,
+    terminate_active_agents,
 )
 from .registry import register_runtime, get_runtime, discover_runtimes
 from .base import AgentRuntime
