@@ -15,6 +15,7 @@ node_modules/
 configs/global-bot-token.json
 configs/login-whitelist.json
 configs/db-backend.json
+configs/db-backend.json.bak-*
 configs/server-config.json
 skills/custom/
 skills/repo/
