@@ -78,8 +78,8 @@ function renderEventDetail(data) {
           <div id="convGate" style="margin-top:6px"><span style="color:var(--t3)">门禁:</span> <span class="tgx">…</span></div>
         </div>
       </div>
-      <div class="cd" style="padding:16px;display:flex;flex-direction:column;gap:8px;flex:1;min-height:0">
-        <h3 style="font-size:12px;font-weight:600;flex-shrink:0">💬 与 ${agentName} 对话</h3>
+      <div id="convPanel" class="cd" style="padding:16px;display:flex;flex-direction:column;gap:8px;flex:1;min-height:0">
+        <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">💬 与 ${agentName} 对话 <button class="bt bt-o bt-s" onclick="toggleConvFullscreen()" title="全屏/还原" style="padding:2px 10px">⛶ 全屏</button></h3>
         <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
         <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
           <input id="convInput" placeholder="问一问 agent 为什么这样处理…（Enter 发送）" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
@@ -201,6 +201,57 @@ function sendConversation() {
     return read().catch(() => loadConversation());
   }).catch(() => loadConversation());
 }
+
+// ===== 对话窗口全屏/还原（按钮在 convPanel 标题栏）=====
+let _convFs = false;
+function toggleConvFullscreen() {
+  const panel = document.getElementById('convPanel');
+  if (!panel) return;
+  if (!_convFs) {
+    // 进入全屏：消息区 + 输入行整体移入 fixed 全屏容器（DOM 移动保留 id/内联事件）
+    const messages = document.getElementById('convMessages');
+    const inputRow = document.getElementById('convInputRow');
+    if (!messages) return;
+    const fs = document.createElement('div');
+    fs.id = 'convFullscreen';
+    fs.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);display:flex;flex-direction:column;gap:10px;padding:18px;box-sizing:border-box';
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;justify-content:space-between;align-items:center;flex-shrink:0';
+    const title = document.createElement('h3');
+    title.style.cssText = 'font-size:13px;font-weight:600';
+    const agentName = (_AGENT_TYPES[_convAgent] && _AGENT_TYPES[_convAgent].display_name) || _convAgent || '';
+    title.textContent = '💬 与 ' + agentName + ' 对话';
+    const btn = document.createElement('button');
+    btn.className = 'bt bt-o bt-s';
+    btn.textContent = '⛶ 还原';
+    btn.title = '退出全屏';
+    btn.onclick = toggleConvFullscreen;
+    bar.appendChild(title);
+    bar.appendChild(btn);
+    fs.appendChild(bar);
+    fs.appendChild(messages);
+    fs.appendChild(inputRow);
+    document.body.appendChild(fs);
+    panel.style.display = 'none';
+    _convFs = true;
+    messages.scrollTop = messages.scrollHeight;
+  } else {
+    const fs = document.getElementById('convFullscreen');
+    if (!fs) return;
+    const messages = document.getElementById('convMessages');
+    const inputRow = document.getElementById('convInputRow');
+    panel.appendChild(messages);
+    panel.appendChild(inputRow);
+    fs.remove();
+    panel.style.display = 'flex';
+    _convFs = false;
+    messages.scrollTop = messages.scrollHeight;
+  }
+}
+// ESC 键退出全屏
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape' && _convFs) toggleConvFullscreen();
+});
 
 function redispatchEvent(seq) {
   if (!confirm('确认重新派发该事件任务？\n将把卡住的任务重新入队执行，可能产生重复执行。')) return;
