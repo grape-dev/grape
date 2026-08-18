@@ -694,9 +694,10 @@ async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""
     backends = []
     with db_lock:
         c = db.cursor()
-        # 本机直连引擎（credential_id=0，已知类型且已装）
+        # 本机直连引擎（credential_id=0，已知类型且已装且健康——与执行 resolve_local_engine 口径一致，
+        # local-direct-health-probe-design.md 方案 C，避免"页面有、执行无"）
         try:
-            c.execute("SELECT id, name, version FROM agent_runtimes WHERE credential_id=0 AND installed=1 ORDER BY id")
+            c.execute("SELECT id, name, version FROM agent_runtimes WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id")
             for r in c.fetchall():
                 _rid, ename, ver = r
                 if not is_known_engine_name(ename or ""):

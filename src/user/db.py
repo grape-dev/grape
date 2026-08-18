@@ -1782,8 +1782,18 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
             log.warning(f"ensure_default_runtime: 拒绝为未知引擎 '{name}' 创建占位行")
             return None
         installed, cli_path = _local_engine_info(name)
+        healthy, version = 0, ""
+        if installed and cli_path:
+            try:
+                from src.runtime.local_probe import probe_local_engines
+                probed = probe_local_engines([{"name": name, "cli_path": cli_path, "installed": True}])
+                if probed:
+                    healthy = 1 if probed[0].get("healthy") else 0
+                    version = probed[0].get("version", "") or ""
+            except Exception:
+                pass
         c.execute("INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
-                  (name, name.capitalize(), 1 if installed else 0, cli_path, "", 0, name, scope))
+                  (name, name.capitalize(), 1 if installed else 0, cli_path, version, healthy, name, scope))
         db.commit()
         return c.lastrowid
 
