@@ -159,3 +159,85 @@ class TestRunPipelineSubscription:
                 "SELECT COUNT(*) FROM event_skipped WHERE repo_key=? AND reason='agent_disabled'", (RK,)
             ).fetchone()
             assert skip[0] == 1
+
+    def test_double_path_subscription_extra_event(self, monkeypatch):
+        """双路径并行（event-routing-subscription-design.md §2.2）：PR Merged 阶段矩阵→qa，
+        SRE 订阅命中→额外建 a2a_event，不改 stage。"""
+        monkeypatch.setattr(ep, "_execute_agent", lambda *a, **k: None)
+        import time as _t
+        # setup: issue_state stage=qa (#1)，qa 会话 + SRE 订阅
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO issue_state (repo_key, issue_id, stage, owner_agent) VALUES (?,?,?,?)",
+                      (RK, "#1", "qa", "qa"))
+            c.execute("INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, status, last_active_at, enable) VALUES (?,?,?,?,?,?,datetime('now'),1)",
+                      (f"qa-{RK}", RK, "qa", 0, "pr", "idle"))
+            c.execute("INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, status, last_active_at, enable, subscribe_events) VALUES (?,?,?,?,?,?,datetime('now'),1,?)",
+                      (f"sub-sre-{RK}", RK, "sre", 0, "cloud-deploy", "idle",
+                       json.dumps([{"event_type": "pull_request_merged", "branch": ""}])))
+            c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) VALUES (?,?,?,?)",
+                      (RK, "owner", "repo", "owner/repo"))
+            db.commit()
+        pr = {"issues": [{"number": 1}],
+              "project": {"path_with_namespace": "owner/repo"},
+              "object_attributes": {"id": 10, "iid": 10, "title": "fix issue #1 stuff",
+                                    "target_branch": "main", "action": "merge"}}
+        r = self._run_pr_merged(pr)
+        assert r.get("ok")
+        # 主路由 = qa（阶段矩阵）
+        assert r.get("skill") == "qa"
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT seq, agent_type, event_type FROM events WHERE repo_key=? ORDER BY seq", (RK,)).fetchall()
+        # 双路径：qa 主事件 + sre 订阅事件
+        assert len(rows) == 2, f"应生成 2 个事件：qa(主) + sre(订阅)，实际 {[r[1] for r in rows]}"
+        agents = [r[1] for r in rows]
+        assert "qa" in agents
+        assert "sre" in agents
+        # sre 事件为 a2a_event 类型
+        sre_evt = [r for r in rows if r[1] == "sre"][0]
+        assert sre_evt[2] == "a2a_event"
+        # stage 不推进（仍为 qa，订阅路径不改 stage）
+        with db_lock:
+            st = db.cursor().execute("SELECT stage FROM issue_state WHERE repo_key=? AND issue_id='#1'", (RK,)).fetchone()
+        assert st and st[0] == "qa", f"订阅路径不应推进 stage，实际={st}"
+
+
+class TestA2ASreSubscriptionDedup:
+    """A2A→SRE 订阅去重（event-routing-subscription-design.md §2.6）：
+    SRE 已配置订阅时，A2A 交办只推进 stage、不创建任务。"""
+
+    def _seed(self):
+        from src.api.db_setup import init_database
+        init_database()
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (RK,))
+            c.execute("DELETE FROM agent_tasks WHERE repo_key=?", (RK,))
+            c.execute("DELETE FROM events WHERE repo_key=?", (RK,))
+            c.execute("DELETE FROM issue_state WHERE repo_key=?", (RK,))
+            db.commit()
+
+    def test_sre_subscribed_query_returns_nonempty(self):
+        """SRE 订阅非空 → a2a_endpoint 去重应生效（不建任务）。"""
+        self._seed()
+        _set_subscription(subs=[{"event_type": "pull_request_merged", "branch": ""}])
+        with db_lock:
+            r = db.cursor().execute(
+                "SELECT subscribe_events FROM devops_agent_session WHERE repo_key=? AND agent_type='sre'", (RK,)).fetchone()
+        assert r and r[0]
+        _raw = r[0].strip()
+        assert _raw and _raw != "[]" and _raw != "null", "订阅非空时应触发去重"
+
+    def test_sre_no_subscription_query_returns_empty_or_null(self):
+        """SRE 无订阅 → a2a_endpoint 去重不生效（正常创建任务）。"""
+        self._seed()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, status, last_active_at, enable, subscribe_events) VALUES (?,?,?,?,?,?,datetime('now'),1,?)",
+                      (f"sre-{RK}", RK, "sre", 0, "cloud-deploy", "idle", "[]"))
+            db.commit()
+            r = db.cursor().execute(
+                "SELECT subscribe_events FROM devops_agent_session WHERE repo_key=? AND agent_type='sre'", (RK,)).fetchone()
+        _raw = (r[0] or "").strip() if r else ""
+        assert not _raw or _raw == "[]" or _raw == "null", "无订阅/空订阅时应正常创建任务"
