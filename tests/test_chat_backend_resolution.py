@@ -31,8 +31,11 @@ def _seed_runtimes():
         ]:
             c.execute("DELETE FROM agent_runtimes WHERE id=?", (rid,))
             c.execute(
-                "INSERT OR REPLACE INTO agent_runtimes (id, credential_id, name, installed, healthy, status, scope, owner_id) VALUES (?,?,?,1,1,?,?,?)",
+                "INSERT OR REPLACE INTO agent_runtimes (id, credential_id, name, installed, healthy, status, scope, owner_id, last_seen_at) VALUES (?,?,?,1,1,?,?,?,datetime('now'))",
                 (rid, cid, "opencode", status, scope, "44" if scope == "user" else ""))
+        # 隔离：清理其他测试残留的 opencode 全局行（非种子 id），避免 get_runtime_id_by_name 选错
+        c.execute("DELETE FROM agent_runtimes WHERE lower(name)='opencode' AND scope='global' AND id NOT IN (?,?)",
+                  (R_WORKER_GLOBAL, R_LOCAL_DIRECT))
         db.commit()
 
 
