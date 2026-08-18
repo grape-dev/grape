@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends
 from src.user import db as user_db
 from src.api.deps import get_current_user
+from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -23,7 +24,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
             )
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
-                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": r[6]}
+                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
                 for r in c.fetchall()
             ]
         except Exception:
@@ -32,16 +33,22 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         agent_sessions = []
         try:
             c.execute(
-                "SELECT s.agent_type, r.name, s.status, s.last_active_at, s.enable "
+                "SELECT s.agent_type, r.name, s.status, s.last_active_at, s.enable, COALESCE(rc.status,'') "
                 "FROM devops_agent_session s LEFT JOIN agent_runtimes r ON s.runtime_id=r.id "
+                "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                 "WHERE s.repo_key=? ORDER BY s.agent_type",
                 (repo_key,)
             )
-            agent_sessions = [
-                {"agent_type": r[0], "backend": r[1] or "", "status": r[2], "last_active_at": r[3],
-                 "enable": bool(r[4]) if r[4] is not None else True}
-                for r in c.fetchall()
-            ]
+            agent_sessions = []
+            for r in c.fetchall():
+                _backend = r[1] or ""
+                # 凭据已吊销的引擎视为不可用（revoke 后旧行保留但实际无法执行）：
+                # 本机直连（rc.status=''，无凭据行）与 active 正常显示，revoked 置空走前端红字
+                if _backend and r[5] not in ("", "active"):
+                    _backend = ""
+                agent_sessions.append({
+                    "agent_type": r[0], "backend": _backend, "status": r[2], "last_active_at": normalize_event_time(r[3]),
+                    "enable": bool(r[4]) if r[4] is not None else True})
         except Exception:
             pass
 
@@ -55,7 +62,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
                 )
                 agent_recent_events[atype] = [
                     {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
-                     "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": r[6]}
+                     "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
                     for r in c.fetchall()
                 ]
         except Exception:

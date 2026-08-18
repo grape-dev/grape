@@ -84,12 +84,14 @@ class RuntimeClient:
                 delay = min(delay * 2, 64)
                 attempt += 1
 
-    async def register(self, runtimes: list[dict], device_name: str = "", cli_version: str = "") -> list[int]:
+    async def register(self, runtimes: list[dict], device_name: str = "", cli_version: str = "") -> tuple[list[int], str]:
+        """注册引擎，返回 (runtime_ids, probe_url)。probe_url：v3.0 启动可达性探测地址。"""
         data = await self._request("POST", "/api/runtime/register",
                                    {"device_name": device_name, "cli_version": cli_version, "runtimes": runtimes})
         if not data:
-            return []
-        return [r["id"] for r in (data.get("runtimes") or [])]
+            return [], ""
+        ids = [r["id"] for r in (data.get("runtimes") or [])]
+        return ids, (data.get("probe_url") or "")
 
     async def latest_version(self) -> str:
         """查询服务端当前 Worker 安装包版本（worker-server-delivery-design.md §2.4）。"""
@@ -101,8 +103,12 @@ class RuntimeClient:
         result = await self._request("POST", "/api/runtime/heartbeat", {"runtime_ids": runtime_ids}, retries=2)
         return result is not None
 
-    async def claim(self, runtime_id: int) -> dict | None:
-        data = await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/tasks/claim", retries=1)
+    async def claim(self, runtime_id: int, supports_obs_url: bool = False,
+                    prefer_fallback: bool = False) -> dict | None:
+        """claim（v3.0：携带能力声明——supports_obs_url/prefer_fallback 动态声明零落库）。"""
+        data = await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/tasks/claim",
+                                   {"supports_obs_url": supports_obs_url, "prefer_fallback": prefer_fallback},
+                                   retries=1)
         if not data:
             return None
         return data.get("task")
@@ -130,8 +136,12 @@ class RuntimeClient:
                             {"error": error}, retries=4)
 
     async def requeue(self, task_id: str):
-        """并发冲突跳过时回滚任务为 queued（避免 dispatched 悬空，见 seq#622 教训）。"""
-        await self._request("POST", f"/api/runtime/tasks/{task_id}/requeue", {}, retries=2)
+        """回滚 dispatched/running 任务为 queued（客户端 claim 冲突跳过时调用）。
+
+        见 seq#622/#667 教训：worker 端因并发槽冲突 skip 任务后，若服务端任务仍停留
+        dispatched 将永久悬空（不执行也不重新排队）；须调本接口回滚。
+        """
+        await self._request("POST", f"/api/runtime/tasks/{task_id}/requeue", {}, retries=4)
 
     async def recover_orphans(self, runtime_id: int):
         await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/recover-orphans", {}, retries=2)

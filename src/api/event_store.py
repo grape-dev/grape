@@ -3,6 +3,7 @@ import json, threading, asyncio
 from datetime import datetime
 from src.session_manager import db, db_lock
 from src.config import log
+from src.api.time_utils import normalize_event_time
 
 # ====== Per-repo 锁（从旧 event_processor 迁移）======
 # 2026-08-16 事故修复：由 threading.Lock 改为 asyncio.Lock。
@@ -287,10 +288,10 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
             return [
                 {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "",
                  "title": r[4] or r[2], "actor": r[5] or "", "summary": r[6] or r[4] or r[2],
-                 "status": r[7], "created_at": r[8],
+                 "status": r[7], "created_at": normalize_event_time(r[8]),
                  "runtime": r[9] or "", "skill": r[10] or "",
                  "exit_code": r[11], "duration": r[12],
-                 "started_at": r[13] or "", "completed_at": r[14] or ""}
+                 "started_at": normalize_event_time(r[13] or ""), "completed_at": normalize_event_time(r[14] or "")}
                 for r in c.fetchall()
             ]
         except Exception:
@@ -334,7 +335,7 @@ def get_events_grouped_by_issue(repo_key: str) -> dict[str, list[dict]]:
         grouped[iid].append({
             "seq": r[0], "event_type": r[2], "agent_type": r[3] or "",
             "title": r[4] or r[2], "actor": r[5] or "", "summary": r[6] or r[4] or r[2],
-            "status": r[7], "created_at": r[8],
+            "status": r[7], "created_at": normalize_event_time(r[8]),
         })
     return grouped
 

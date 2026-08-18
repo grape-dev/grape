@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -57,7 +58,12 @@ public class AiTaskManager {
         public volatile Process process;
 
         AiTask(String query, String sessionId) {
-            this.taskId = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+            this(query, sessionId, null);
+        }
+
+        AiTask(String query, String sessionId, String taskId) {
+            this.taskId = (taskId != null && !taskId.isBlank()) ? taskId
+                    : UUID.randomUUID().toString().replace("-", "").substring(0, 16);
             this.query = query;
             this.sessionId = sessionId;
         }
@@ -66,6 +72,7 @@ public class AiTaskManager {
     private final ConcurrentHashMap<String, AiTask> tasks = new ConcurrentHashMap<>();
     private final Semaphore slots = new Semaphore(3);
     private final AdminAiHistoryRepository historyRepository;
+    private final AiChatService chatService;
     private ThreadPoolTaskScheduler scheduler;
 
     @Value("${app.hermes-bin:}")
@@ -83,8 +90,9 @@ public class AiTaskManager {
     @Value("${GRAPE_DB_PASSWORD:}")
     private String dbPassword;
 
-    public AiTaskManager(AdminAiHistoryRepository historyRepository) {
+    public AiTaskManager(AdminAiHistoryRepository historyRepository, AiChatService chatService) {
         this.historyRepository = historyRepository;
+        this.chatService = chatService;
     }
 
     @PostConstruct
@@ -93,14 +101,38 @@ public class AiTaskManager {
         scheduler.setPoolSize(1);
         scheduler.setThreadNamePrefix("ai-timeout-");
         scheduler.initialize();
+        // N6：定时清理完成任务（30 分钟一轮）——tasks Map 不无限增长
+        scheduler.scheduleAtFixedRate(this::cleanupStaleTasks,
+                Instant.now().plusSeconds(30 * 60), Duration.ofMinutes(30));
+    }
+
+    /** N6：清理 30 分钟前已结束的任务（运行中任务保留；历史在 DB——不受影响） */
+    void cleanupStaleTasks() {
+        long cutoff = System.currentTimeMillis() - 30 * 60 * 1000L;
+        tasks.entrySet().removeIf(e -> {
+            AiTask t = e.getValue();
+            return !"running".equals(t.status) && t.finishedAt > 0 && t.finishedAt < cutoff;
+        });
     }
 
     /** 提交任务，立即返回 taskId；并发超限抛 400 */
     public String submit(String query, String sessionId) {
+        return submit(query, sessionId, null);
+    }
+
+    /** 提交任务（重试可复用 taskId——UPDATE 覆盖失败消息——一轮一条 assistant） */
+    public String submit(String query, String sessionId, String taskId) {
+        // 同会话运行中校验（权威禁发——防同会话并发提交——hermes --continue 同名并发）
+        boolean sessionBusy = tasks.values().stream()
+                .anyMatch(t -> sessionId != null && sessionId.equals(t.sessionId)
+                        && "running".equals(t.status));
+        if (sessionBusy) {
+            throw new BizException("该会话正在处理中，请等待完成后再提问");
+        }
         if (!slots.tryAcquire()) {
             throw new BizException("AI 助手并发超限（最多 3 个同时执行），请稍后重试");
         }
-        AiTask task = new AiTask(query, sessionId);
+        AiTask task = new AiTask(query, sessionId, taskId);
         tasks.put(task.taskId, task);
         Thread t = new Thread(() -> run(task), "ai-task-" + task.taskId);
         t.setDaemon(true);
@@ -119,6 +151,11 @@ public class AiTaskManager {
         AiTask task = tasks.get(taskId);
         if (task == null) throw new NotFoundException("AI 任务不存在或已过期");
         return task;
+    }
+
+    /** 查询任务（不存在返回 null——不抛 404——status 接口查库兜底用） */
+    public AiTask getOrNull(String taskId) {
+        return tasks.get(taskId);
     }
 
     /** 任务累积输出文本（token 事件拼接），供轮询模式实时显示部分结果 */
@@ -189,8 +226,7 @@ public class AiTaskManager {
         } finally {
             task.finishedAt = System.currentTimeMillis();
             synchronized (task) {
-                extractSessionId(task);
-                if ("done".equals(task.status)) saveHistory(task);
+                saveHistory(task);   // 终态统一写消息（成功写答案——失败写失败提示——task_id 幂等）
                 flush(task);
                 for (SseEmitter e : task.subscribers) completeTaskEmitter(e, task);
                 task.subscribers.clear();
@@ -207,18 +243,7 @@ public class AiTaskManager {
         }
     }
 
-    /** 从事件流中提取 hermes 会话 id（session 事件） */
-    private void extractSessionId(AiTask task) {
-        for (String line : task.events) {
-            JsonNode node = parseJson(line);
-            if (node != null && "session".equals(node.path("type").asText())) {
-                task.hermesSessionId = node.path("data").asText(null);
-                break;
-            }
-        }
-    }
-
-    /** 任务完成自动写历史（taskId 唯一幂等） */
+    /** 任务完成写消息（新表 admin_ai_chat_message——task_id 幂等——成功写答案/失败写失败提示） */
     private void saveHistory(AiTask task) {
         try {
             StringBuilder answer = new StringBuilder();
@@ -228,16 +253,28 @@ public class AiTaskManager {
                     answer.append(node.path("data").asText(""));
                 }
             }
-            if (task.hermesSessionId == null || answer.length() == 0) return;
-            AdminAiHistory h = new AdminAiHistory();
-            h.setSessionId(task.hermesSessionId);
-            h.setTaskId(task.taskId);
-            h.setQuery(task.query);
-            h.setName(task.query.length() > 50 ? task.query.substring(0, 50) : task.query);
-            h.setAnswer(answer.toString());
-            historyRepository.save(h);
+            if (task.sessionId == null) return;
+            String content = answer.toString();
+            boolean failed = !"done".equals(task.status);
+            String errorCode = null, errorMsg = null;
+            if (failed) {
+                content = "（查询失败，可重试）";
+                // 提取错误信息（error 事件——后台排查）
+                for (String line : task.events) {
+                    JsonNode node = parseJson(line);
+                    if (node != null && "error".equals(node.path("type").asText())) {
+                        String data = node.path("data").asText("");
+                        if (!data.isEmpty()) { errorMsg = data.length() > 500 ? data.substring(0, 500) : data; break; }
+                    }
+                }
+                if (errorMsg == null) errorMsg = "任务执行失败（超时或异常）";
+                errorCode = "AI_GENERATE_FAILED";
+            } else if (content.isEmpty()) {
+                content = "（无返回内容）";
+            }
+            chatService.saveAssistantAnswer(task.sessionId, task.taskId, content, failed, errorCode, errorMsg);
         } catch (Exception e) {
-            log.warn("AI 历史保存失败 task={}", task.taskId, e);
+            log.warn("AI 消息保存失败 task={}", task.taskId, e);
         }
     }
 

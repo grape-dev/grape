@@ -13,9 +13,20 @@ if sys.version_info < (3, 10):
           file=sys.stderr)
     sys.exit(1)
 
-import asyncio, json, os, random
+import asyncio, json, os, random, time
+import base64 as _b64
+import zipfile as _zf
+import urllib.request as _urllib
 
 from src.config import log
+
+# v3.0：OBS 直连能力 + 自适应降级状态（运行时能力反馈 C）
+_OBS_SUPPORT = False      # 启动探测结果（supports_obs_url）
+_OBS_FALLBACK = False     # 直连不稳 → claim 声明 prefer_fallback
+_OBS_FAIL_STREAK = 0      # 连续 URL/代拉失败计数（≥阈值降级）
+_OBS_OK_STREAK = 0        # 连续成功计数（≥阈值恢复）
+# 降级/恢复阈值（可配 env RUNTIME_OBS_FALLBACK_THRESHOLD，默认 3）
+_OBS_FALLBACK_THRESHOLD = int(os.environ.get("RUNTIME_OBS_FALLBACK_THRESHOLD", "3"))
 
 
 def _env_float(name, default):
@@ -85,13 +96,24 @@ def _remap_cwd(path: str) -> str:
     return path
 
 
-def _kill_stale_opencode(task: dict):
-    """超时后杀掉对应 opencode 子进程。按 cwd 匹配，避免误杀其他任务。"""
+def _backend_for_engine(engine_name: str | None = "") -> str:
+    """由引擎实例名推导执行后端（hermes-xxx → hermes；codearts-xxx → codearts；其余默认 opencode）。"""
+    name = (engine_name or "").lower()
+    if name.startswith("hermes"):
+        return "hermes"
+    if name.startswith("codearts"):
+        return "codearts"
+    return "opencode"
+
+
+def _kill_stale_engine(task: dict, backend: str = "opencode"):
+    """超时后杀掉对应引擎子进程（opencode run / hermes -z / codearts run）。按 cwd 匹配，避免误杀其他任务。"""
     import subprocess, signal
     cwd = _remap_cwd(task.get("cwd") or os.getcwd())
+    pattern = {"hermes": "hermes -z", "codearts": "codearts run"}.get(backend, "opencode run")
     try:
         out = subprocess.run(
-            ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", "opencode run"],
+            ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", pattern],
             capture_output=True, text=True, timeout=5
         )
         for pid_str in out.stdout.strip().split():
@@ -101,11 +123,85 @@ def _kill_stale_opencode(task: dict):
                 if proc_cwd.startswith(cwd):
                     pgid = os.getpgid(pid)
                     os.killpg(pgid, signal.SIGTERM)
-                    log.info(f"killed opencode pid={pid} pgid={pgid} cwd={proc_cwd}")
+                    log.info(f"killed {backend} pid={pid} pgid={pgid} cwd={proc_cwd}")
             except Exception as e:
                 log.debug(f"skip pid={pid}: {e}")
     except Exception as e:
-        log.warning(f"_kill_stale_opencode failed: {e}")
+        log.warning(f"_kill_stale_engine({backend}) failed: {e}")
+
+
+def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
+    """v3.0 技能 zip 获取降级链：① URL 直连 OBS（重试）→ ② 服务端代拉（复用 zip_cache）。
+
+    返回 zip 字节；两条路都失败返回 None（调用方降级 skill_files 或回池）。
+    """
+    timeout = float(os.environ.get("RUNTIME_OBS_FETCH_TIMEOUT", "10"))
+    retries = int(os.environ.get("RUNTIME_OBS_FETCH_RETRIES", "3"))
+    # ① URL 直连 OBS（预签名 URL，重试）
+    for i in range(retries):
+        try:
+            with _urllib.urlopen(skill_obs_url, timeout=timeout) as resp:
+                data = resp.read()
+            if data:
+                return data
+            log.warning(f"[skill] OBS URL 直连返回空({i + 1}/{retries})")
+        except Exception as e:
+            log.warning(f"[skill] OBS URL 直连失败({i + 1}/{retries}): {type(e).__name__}")
+    # ② 服务端代拉（服务端现查 file_path → zip_cache → base64）
+    server = os.environ.get("RUNTIME_SERVER_URL", "http://localhost:3000")
+    token = os.environ.get("RUNTIME_TOKEN", "")
+    if task_id and token:
+        try:
+            req = _urllib.Request(
+                f"{server}/api/runtime/tasks/{task_id}/skill-zip",
+                headers={"Authorization": f"Bearer {token}"})
+            with _urllib.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read())
+            b64 = (payload or {}).get("zip_base64") or ""
+            if b64:
+                log.info(f"[skill] 服务端代拉成功 task={task_id}")
+                return _b64.b64decode(b64)
+            log.warning(f"[skill] 代拉返回空 task={task_id}")
+        except Exception as e:
+            log.warning(f"[skill] 服务端代拉失败: {type(e).__name__}")
+    return None
+
+
+def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
+    """v3.0 技能 zip 获取降级链：① URL 直连 OBS（重试）→ ② 服务端代拉（复用 zip_cache）。
+
+    返回 zip 字节；两条路都失败返回 None（调用方降级 skill_files 或回池）。
+    """
+    timeout = float(os.environ.get("RUNTIME_OBS_FETCH_TIMEOUT", "10"))
+    retries = int(os.environ.get("RUNTIME_OBS_FETCH_RETRIES", "3"))
+    # ① URL 直连 OBS（预签名 URL，重试）
+    for i in range(retries):
+        try:
+            with _urllib.urlopen(skill_obs_url, timeout=timeout) as resp:
+                data = resp.read()
+            if data:
+                return data
+            log.warning(f"[skill] OBS URL 直连返回空({i + 1}/{retries})")
+        except Exception as e:
+            log.warning(f"[skill] OBS URL 直连失败({i + 1}/{retries}): {type(e).__name__}")
+    # ② 服务端代拉（服务端现查 file_path → zip_cache → base64）
+    server = os.environ.get("RUNTIME_SERVER_URL", "http://localhost:3000")
+    token = os.environ.get("RUNTIME_TOKEN", "")
+    if task_id and token:
+        try:
+            req = _urllib.Request(
+                f"{server}/api/runtime/tasks/{task_id}/skill-zip",
+                headers={"Authorization": f"Bearer {token}"})
+            with _urllib.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read())
+            b64 = (payload or {}).get("zip_base64") or ""
+            if b64:
+                log.info(f"[skill] 服务端代拉成功 task={task_id}")
+                return _b64.b64decode(b64)
+            log.warning(f"[skill] 代拉返回空 task={task_id}")
+        except Exception as e:
+            log.warning(f"[skill] 服务端代拉失败: {type(e).__name__}")
+    return None
 
 
 async def _stream_runtime_async(*args, **kwargs):
@@ -186,15 +282,66 @@ async def _execute_task(client, task, engine_name: str = ""):
     prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
                                        .replace("{{SERVER_URL}}", task.get("server_url") or "")
     try:
-        skill_files = json.loads(task.get("skill_files") or "{}")
-        for _sn, files in skill_files.items():
-            for rel, content in (files or {}).items():
-                dest = _os.path.join(skill_dir, _sn, rel)
-                _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-                with open(dest, "w", encoding="utf-8") as f:
-                    f.write(content)
-        if skill_files:
+        # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
+        # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
+        # ② 失败 → 服务端代拉（POST /tasks/{id}/skill-zip，复用 zip_cache）
+        # ③ 无 URL（老任务/无 OBS 技能）→ skill_files 文本物化（既有）
+        skill_obs_url = task.get("skill_obs_url") or ""
+        skill_zip_b64 = None
+        if skill_obs_url:
+            raw = _fetch_skill_zip(skill_obs_url, task_id=task.get("id", ""))
+            if raw:
+                skill_zip_b64 = _b64.b64encode(raw).decode()
+                # v3.0 能力反馈：直连/代拉成功 → 计数恢复
+                global _OBS_FAIL_STREAK, _OBS_OK_STREAK, _OBS_FALLBACK
+                _OBS_FAIL_STREAK = 0
+                _OBS_OK_STREAK += 1
+                if _OBS_OK_STREAK >= _OBS_FALLBACK_THRESHOLD and _OBS_FALLBACK:
+                    _OBS_FALLBACK = False
+                    _OBS_OK_STREAK = 0
+                    log.info("[skill] OBS 直连恢复（连续 3 次成功）")
+            else:
+                log.warning(f"[skill] OBS 直连+代拉均失败, task={task.get('id')} url={skill_obs_url[:60]}...")
+                # v3.0 能力反馈：连续失败 → 声明 prefer_fallback（服务端直接代拉模式）
+                _OBS_FAIL_STREAK += 1
+                _OBS_OK_STREAK = 0
+                if _OBS_FAIL_STREAK >= _OBS_FALLBACK_THRESHOLD and not _OBS_FALLBACK:
+                    _OBS_FALLBACK = True
+                    _OBS_FAIL_STREAK = 0
+                    log.warning("[skill] OBS 直连不稳定，降级为服务端代拉（prefer_fallback）")
+        if skill_zip_b64:
+            # ===== zip 物化（直连/代拉获取的 zip → 解压 → 恢复权限）=====
+            # 见 obs-skill-storage-design.md §5.7（Python 3.12+ zipfile 不再自动恢复
+            # Unix 权限位，手动按 external_attr 恢复；剥离 setuid/setgid/sticky 防提权）
+            raw = _b64.b64decode(skill_zip_b64)
+            tmp_zip = _os.path.join(skill_dir, "_skill_delivery.zip")
+            _os.makedirs(skill_dir, exist_ok=True)
+            with open(tmp_zip, "wb") as f:
+                f.write(raw)
+            with _zf.ZipFile(tmp_zip, "r") as zf:
+                zf.extractall(skill_dir)  # zip 根 = {skill_name}/，落地 .skills/{skill_name}/
+                for info in zf.infolist():
+                    mode = info.external_attr >> 16
+                    if mode and not info.is_dir():
+                        p = _os.path.join(skill_dir, info.filename)
+                        if _os.path.isfile(p):
+                            _os.chmod(p, mode & 0o777)
+            try:
+                _os.remove(tmp_zip)
+            except Exception:
+                pass
             env["DEVOPS_SKILLS_DIR"] = skill_dir
+        else:
+            # ===== 旧格式：skill_files 文本物化（老任务/老 worker 兼容）=====
+            skill_files = json.loads(task.get("skill_files") or "{}")
+            for _sn, files in skill_files.items():
+                for rel, content in (files or {}).items():
+                    dest = _os.path.join(skill_dir, _sn, rel)
+                    _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+                    with open(dest, "w", encoding="utf-8") as f:
+                        f.write(content)
+            if skill_files:
+                env["DEVOPS_SKILLS_DIR"] = skill_dir
     except Exception as e:
         log.warning(f"skill materialize failed: {e}")
     # project-info 落地（repo 全局共享，见 multi-issue-isolation-design.md §2.4）
@@ -227,6 +374,7 @@ async def _execute_task(client, task, engine_name: str = ""):
     done = None
     batch = []
     started = False
+    _last_flush = time.monotonic()  # 实时日志双触发（50条/500ms）时间基
     try:
         from src.runtime.executor import stream_runtime
         _agent_label = f"[Agent:{task.get('agent_type') or ''}|repo:{task.get('repo_key') or ''}{_engine_tag}]"
@@ -250,7 +398,7 @@ async def _execute_task(client, task, engine_name: str = ""):
         async for evt_type, data in _stream_runtime_async(
             prompt, cwd, session_id=task.get("runtime_session_id") or "",
             event_type=task.get("event_type") or "",
-            backend_name="opencode",
+            backend_name=_backend_for_engine(engine_name),
             account=task.get("account") or "", user_id=task.get("user_id") or 0,
             env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
             agent_label=_agent_label,
@@ -275,9 +423,12 @@ async def _execute_task(client, task, engine_name: str = ""):
             elif evt_type == "step_finish":
                 log.info(f"  [{_esq}] ✅ {data}")
             batch.append({"type": evt_type, "data": data if not isinstance(data, str) else data})
-            if len(batch) >= 50:
+            # 双触发批量上报（实时日志实时性关键）：50 条或 500ms 时间窗任一满足即 flush
+            _now = time.monotonic()
+            if len(batch) >= 50 or (_last_flush and _now - _last_flush >= 0.5):
                 await client.report_messages(tid, batch)
                 batch = []
+                _last_flush = _now
         if batch:
             await client.report_messages(tid, batch)
         # 引擎从未产出执行事件即结束 → 直接 fail（任务保持 dispatched→failed，跳过 running）
@@ -298,7 +449,7 @@ async def _reregister(client, installed, device_name) -> list[int] | None:
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
-        ids = await client.register(installed, device_name=device_name)
+        ids, _probe = await client.register(installed, device_name=device_name)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
@@ -323,6 +474,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     """
     active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
     active_tasks = set()      # task_id 去重（防止同 task 被重复 claim 并发执行）
+    hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
     last_heartbeat = 0.0
     heartbeat_fail_streak = 0
     HEARTBEAT_FAIL_THRESHOLD = 3
@@ -342,7 +494,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
         for rid in runtime_ids:
             try:
-                task = await client.claim(rid)
+                task = await client.claim(rid, supports_obs_url=_OBS_SUPPORT,
+                                          prefer_fallback=_OBS_FALLBACK)
             except Exception as e:
                 log.warning(f"claim rid={rid} failed: {e}")
                 heartbeat_fail_streak += 1
@@ -350,6 +503,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             if not task:
                 continue
             tid = task.get("id", "")
+            e = engine_by_rid.get(rid, "")  # 本任务引擎实例名（hermes 限并发判断用）
             # 并发槽 key 与服务端 claim 串行粒度一致（multi-issue-isolation-design.md §3.3）：
             # 有关联 Issue → 按 issue_session_id（跨 Issue 并行）；无（#0/旧任务）→ 回退 agent_session_id。
             # 修复：此前一律用 agent_session_id，导致不同 Issue 的任务在客户端被误判冲突拒收
@@ -369,11 +523,25 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             if len(active_sessions) >= max_concurrent:
                 continue
+            if e == "hermes" and hermes_active >= 1:
+                # hermes 引擎限并发 1（模型 API 分钟限流，双开实测 429 → 假完成，见 #53）
+                continue
             active_sessions.add(sid)
             active_tasks.add(tid)
+            if e == "hermes":
+                hermes_active += 1
 
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
+                nonlocal hermes_active
                 task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 600)
+                # 立即标记 running（不等引擎首个事件）：hermes -z 冷启动+模型响应
+                # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
+                # 误判未执行 → 回收重跑循环（attempts 累加 3 次直接 failed，实测 #49 100042）。
+                # 引擎启动失败由 fail_task 收尾（running → failed），无悬空风险。
+                try:
+                    await client.task_start(_tid)
+                except Exception:
+                    pass
                 try:
                     if _test_execute is not None:
                         await _test_execute(client, t, e)
@@ -381,8 +549,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         await asyncio.wait_for(_execute_task(client, t, e), timeout=task_timeout)
                 except asyncio.TimeoutError:
                     log.warning(f"task {_tid} timed out after {task_timeout}s, killing child processes and failing")
-                    # 杀掉超时任务的 opencode 子进程（按 cwd 匹配，避免误杀其他任务）
-                    _kill_stale_opencode(t)
+                    # 杀掉超时任务的引擎子进程（按 cwd 匹配，避免误杀其他任务；backend 按引擎名推导）
+                    _kill_stale_engine(t, _backend_for_engine(e))
                     try:
                         await client.fail(_tid, f"task timed out after {task_timeout}s")
                     except Exception:
@@ -390,6 +558,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 finally:
                     active_sessions.discard(s)
                     active_tasks.discard(_tid)
+                    if e == "hermes":
+                        hermes_active -= 1
 
             asyncio.create_task(_wrap())
 
@@ -461,10 +631,19 @@ def main():
         if not installed:
             log.warning("No runtimes installed locally, registering empty")
         device = os.environ.get("RUNTIME_DEVICE_NAME", os.uname().nodename if hasattr(os, "uname") else "host")
-        ids = await client.register(installed, device_name=device)
+        ids, probe_url = await client.register(installed, device_name=device)
         if not ids:
             log.error("Register failed (check RUNTIME_TOKEN / server URL)")
             return
+        # v3.0 启动探测（B）：GET probe_url 验证完整链路（网络+签名+读取）
+        global _OBS_SUPPORT
+        if probe_url:
+            try:
+                with _urllib.urlopen(probe_url, timeout=5) as _r:
+                    _OBS_SUPPORT = bool(_r.read())
+            except Exception as e:
+                log.warning(f"[skill] 启动探测失败（走 skill_files 兜底）: {type(e).__name__}")
+        log.info(f"OBS 直连能力探测: supports_obs_url={_OBS_SUPPORT}")
         # rid → 引擎实例名（`{type}-{device}`，register 返回顺序与 installed 一致）
         from src.runtime.instances import instance_name
         engine_by_rid = {rid: instance_name(r.get("name", ""), device, 0)

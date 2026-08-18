@@ -2,6 +2,7 @@
 import sqlite3, json, threading, os, time, shutil
 from datetime import datetime
 from src.config import log
+from src.api.time_utils import normalize_event_time
 
 REPO_IM_GROUP_BINDING_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS repo_im_group_binding (
@@ -508,7 +509,7 @@ def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) ->
             c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE user_id=? AND repo_key=? ORDER BY updated_at DESC LIMIT ?", (user_id, repo_key, limit))
         else:
             c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
-        return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "runtime_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": from_repo_key(r[5]), "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": r[9], "updated_at": r[10], "conv_type": r[11] or "general", "issue_number": r[12] or 0} for r in c.fetchall()]
+        return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "runtime_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": from_repo_key(r[5]), "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": normalize_event_time(r[9]), "updated_at": normalize_event_time(r[10]), "conv_type": r[11] or "general", "issue_number": r[12] or 0} for r in c.fetchall()]
 
 
 def get_conversation(conv_id: str) -> dict | None:
@@ -520,7 +521,7 @@ def get_conversation(conv_id: str) -> dict | None:
         if not row:
             return None
         return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": from_repo_key(row[5]), "im_channel_id": row[6],
-                "title": row[7], "status": row[8], "created_at": row[9], "updated_at": row[10],
+                "title": row[7], "status": row[8], "created_at": normalize_event_time(row[9]), "updated_at": normalize_event_time(row[10]),
                 "conv_type": row[11] or "general", "issue_number": row[12] or 0}
 
 
@@ -537,7 +538,7 @@ def get_conversation_by_im(im_channel_id: str, user_id: int = 0) -> dict | None:
         if not row:
             return None
         return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": from_repo_key(row[5]), "im_channel_id": row[6],
-                "title": row[7], "status": row[8], "created_at": row[9], "updated_at": row[10],
+                "title": row[7], "status": row[8], "created_at": normalize_event_time(row[9]), "updated_at": normalize_event_time(row[10]),
                 "conv_type": row[11] or "general", "issue_number": row[12] or 0}
 
 
@@ -636,7 +637,7 @@ def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> l
                       (conversation_id, limit))
         rows = c.fetchall()
         rows.reverse()
-        return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": r[4]} for r in rows]
+        return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": normalize_event_time(r[4])} for r in rows]
 
 
 def delete_messages_by_conv(conversation_id: str):
@@ -716,6 +717,8 @@ def _resolve_chat_runtime_id(backend: str) -> int:
 
     实例名（含 `-` 后缀）→ scope=user 个人引擎；裸引擎名 → 优先本机直连（credential_id=0）；
     兜底按名/默认。修复：裸名 'opencode' 被解析成同名的共享全局 worker。
+    queue_remote 强制模式下本机直连行（credential_id=0）无 claim 方=黑洞
+    （chat-task-blackhole-local-direct-2026-08.md），跳过本机解析直接按名找远端 worker。
     """
     if not backend:
         return 0
@@ -725,9 +728,11 @@ def _resolve_chat_runtime_id(backend: str) -> int:
     if _rid is not None and scope_of_runtime(_rid) == "user":
         return _rid
     if "-" not in backend:
-        _local = get_local_direct_runtime_id(backend)
-        if _local:
-            return _local
+        from src.runtime.service import get_execution_mode, EXEC_MODE_REMOTE
+        if get_execution_mode() != EXEC_MODE_REMOTE:
+            _local = get_local_direct_runtime_id(backend)
+            if _local:
+                return _local
     return get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
 
 

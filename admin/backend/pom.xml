@@ -86,6 +86,18 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- 对象存储 OBS（obs-skill-storage-design.md §3 N15）：技能库文件直连 OBS -->
+        <dependency>
+            <groupId>com.huaweicloud</groupId>
+            <artifactId>esdk-obs-java</artifactId>
+            <version>3.24.9</version>
+        </dependency>
+        <!-- zip 打包保 Unix 权限位（标准库 ZipEntry 不支持 external attrs） -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-compress</artifactId>
+            <version>1.26.2</version>
+        </dependency>
     </dependencies>
 
     <build>

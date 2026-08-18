@@ -21,6 +21,10 @@ UV_PYTHON_DIR = os.path.expanduser(os.environ.get("UV_PYTHON_DIR", "~/.local/sha
 
 # worker 运行闭包清单（整目录粒度，含运行时懒加载模块）。
 # 依据：src.runtime.agent 的 import 闭包（含 repogit/cleanup 等运行时 import）。
+# src/api/ 只列 worker 实际引用的模块：time_utils/event_store/event_archive/
+# session_store/knowledge/routing（顶层或懒加载）。曾因漏列 time_utils 导致
+# worker 包缺文件启动即崩（ModuleNotFoundError，2026-08-17）；勿整目录引入
+# main.py/run.py 等服务端专用文件（test_build_package_contents 守卫）。
 MANIFEST = [
     "src/__init__.py",
     "src/config.py",
@@ -31,6 +35,11 @@ MANIFEST = [
     "src/user/db.py",
     "src/api/__init__.py",
     "src/api/routing.py",
+    "src/api/time_utils.py",
+    "src/api/event_store.py",
+    "src/api/event_archive.py",
+    "src/api/session_store.py",
+    "src/api/knowledge.py",
     "src/agent/",
     "src/runtime/",
     "requirements-worker.txt",

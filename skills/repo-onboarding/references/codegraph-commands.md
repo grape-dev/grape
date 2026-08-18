@@ -7,12 +7,18 @@ Codegraph 是代码图谱分析工具，通过静态分析构建项目的符号�
 ## 安装
 
 ```bash
-# 全局安装
-npm install -g codegraph
+# ⚠️ 勿用 `npm install -g codegraph`：npm 上该名称是空壳占位包(无 bin/无 dist, 2026-08-18 实测)。
+# 真包名带 scope：
+npm install -g @colbymchenry/codegraph
 
 # 验证
 codegraph --version
 ```
+
+> 离线安装（无外网环境）：grape 发布包 tools/ 子包 codegraph/ 目录自带离线包
+> （codegraph-linux-arm64/x64 tgz + install-codegraph.sh，零依赖自带 node 运行时）：
+> `bash <解包目录>/codegraph/install-codegraph.sh --src <codegraph 目录>`。
+> 在线安装需 Node.js >= 18；离线包自带运行时无需 node。
 
 安装部署指南：https://github.com/colbymchenry/codegraph
 

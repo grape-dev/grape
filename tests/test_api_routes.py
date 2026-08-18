@@ -952,13 +952,16 @@ class TestSkills:
         assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT agent_type, scope, owner_id, description FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
+            row = c.execute("SELECT agent_type, scope, owner_id, description, id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
                             ("skill-repoupload", "owner/repo-x")).fetchone()
         assert row, "repo skill should be created"
-        assert row[0] == "sre" and row[1] == "repo" and row[2] == "owner/repo-x", f"got {row}"
+        # owner_id 存归一化 repo_key（OBS 化后带平台前缀，见 repo_key.to_repo_key）
+        assert row[0] == "sre" and row[1] == "repo", f"got {row}"
+        assert row[2].endswith("owner/repo-x"), f"owner_id 应为 owner/repo-x（可带平台前缀），got {row}"
         assert row[3] == "repo skill", f"description should be parsed from front matter, got {row}"
-        # 无 repo 参数也应能查看仓库技能详情（此前只查 official+user，导致 404 加载失败）
-        detail = client.get("/api/skills/skill-repoupload", headers=_headers)
+        # 无 repo 参数也应能查看仓库技能详情（此前只查 official+user，导致 404 加载失败；按 id 精确查询）
+        sid = row[4]
+        detail = client.get(f"/api/skills/by-id/{sid}", headers=_headers)
         assert detail.status_code == 200, f"Got {detail.status_code}: {detail.text[:200]}"
         assert detail.json().get("scope") == "repo"
         assert "skill-repoupload" in detail.json().get("content", "")

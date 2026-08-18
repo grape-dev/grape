@@ -71,7 +71,7 @@ function _renderProjectTab(d) {
   } else {
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     files.forEach(f => {
-      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${f.label}" onclick="app.nav('knowledge');loadKnowledgeContent('${f.name}')">
+      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${f.label}" onclick="loadKnowledgeContent('${f.name}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:var(--a)">${f.label === 'metadata' ? '🗂' : '📄'}</span>
           <span style="font-size:12px;font-weight:600">${f.label}</span>
@@ -99,7 +99,7 @@ function _renderProjectTab(d) {
           <span class="tg tg-d" style="margin-left:auto;font-size:9px">project</span>
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:6px">${preview ? escapeHtml(preview).substring(0,120) : '(空)'}</div>
-        <div style="font-size:10px;color:var(--t3)">${k.created_by || ''} · ${(k.created_at || '').replace('T',' ').substring(0,16)} · seq ${k.source_seq || 0}</div>
+        <div style="font-size:10px;color:var(--t3)">${k.created_by || ''} · ${fmtLocalTime(k.created_at).substring(0,16)} · seq ${k.source_seq || 0}</div>
         <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.path || k.file_path}')">View</button>
       </div>`;
     });
@@ -165,7 +165,7 @@ function _renderAgentTab(d) {
           <span class="tg tg-d" style="margin-left:auto;font-size:9px">${k.scope}</span>
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4">${preview ? escapeHtml(preview).substring(0,140) : '(空)'}</div>
-        <div style="font-size:10px;color:var(--t3);margin-top:4px">seq ${k.source_seq || 0} · ${(k.created_at || '').replace('T',' ').substring(0,16)}</div>
+        <div style="font-size:10px;color:var(--t3);margin-top:4px">seq ${k.source_seq || 0} · ${fmtLocalTime(k.created_at).substring(0,16)}</div>
         <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.path || k.file_path}')">View</button>
       </div>`;
     });

@@ -83,7 +83,7 @@ function _loadSkills() {
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">`;
       groupSkills.forEach(s => {
         const tagClass = s.scope === 'official' ? 'tg-c' : s.scope === 'repo' ? 'tg-i' : 'tg-d';
-        html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${s.name}" data-agent="${at}" onclick="app.nav('skill','${s.name}')">
+        html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${s.name}" data-agent="${at}" onclick="app.nav('skill','${s.id}')">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
             <span style="color:${color}">${ico}</span>
             <span style="font-size:12px;font-weight:600">${s.display_name || s.name}</span>
@@ -91,7 +91,7 @@ function _loadSkills() {
           </div>
           <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:8px">${s.description}</div>
           <div style="display:flex;gap:6px">
-            <button class="bt bt-o bt-s" onclick="event.stopPropagation();app.nav('skill','${s.name}')">View</button>
+            <button class="bt bt-o bt-s" onclick="event.stopPropagation();app.nav('skill','${s.id}')">View</button>
             ${s.scope !== 'official' ? `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteSkill('${s.name}','${s.scope}')">Delete</button>` : ''}
             ${s.scope === 'user' && _currentRepo() ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}')">转为仓库技能</button>` : ''}
           </div>
@@ -156,7 +156,17 @@ function showSkillUpload() {
 }
 
 function downloadSkillTemplate() {
-  window.open('/api/skills/template?token=' + encodeURIComponent(localStorage.getItem('token') || ''), '_blank');
+  // OBS 模式：接口返回 {url, expires_in} 临时签名 URL（点击时动态签发），直连 OBS 下载；
+  // local 模式：接口返回文件流，API.get 解析失败时回退原 window.open 逻辑
+  API.get('/skills/template?token=' + encodeURIComponent(localStorage.getItem('token') || '')).then(r => {
+    if (r && r.url) {
+      window.open(r.url, '_blank');
+      return;
+    }
+    window.open('/api/skills/template?token=' + encodeURIComponent(localStorage.getItem('token') || ''), '_blank');
+  }).catch(() => {
+    window.open('/api/skills/template?token=' + encodeURIComponent(localStorage.getItem('token') || ''), '_blank');
+  });
 }
 
 function _setSkillUploadProgress(pct, done) {
@@ -247,12 +257,15 @@ function renderSkillDetail(data) {
     <button class="bt bt-o bt-s" onclick="app.nav('skills')" style="margin-bottom:12px">← 返回 Skills Library</button>
     <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
       <div class="cd" style="padding:16px 20px;overflow-y:auto">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-          <span style="color:${color};font-size:22px">${ico}</span>
-          <div>
-            <h3 style="font-size:15px;font-weight:600">${data.display_name || data.name}</h3>
-            <span class="tg ${tagClass}" style="font-size:9px">${SCOPE_NAMES[data.scope] || data.scope}</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0">
+            <span style="color:${color};font-size:22px">${ico}</span>
+            <div>
+              <h3 style="font-size:15px;font-weight:600">${data.display_name || data.name}</h3>
+              <span class="tg ${tagClass}" style="font-size:9px">${SCOPE_NAMES[data.scope] || data.scope}</span>
+            </div>
           </div>
+          ${data.is_obs ? `<button class="bt bt-o bt-s" onclick="downloadSkillZip('${data.id}')" title="下载技能包 zip">⬇ 下载技能</button>` : ''}
         </div>
         <div style="font-size:12px;color:var(--t2);margin-bottom:14px;line-height:1.5">${data.description}</div>
         <h3 style="font-size:13px;font-weight:600;margin-bottom:6px">SKILL.md</h3>
@@ -266,6 +279,30 @@ function renderSkillDetail(data) {
         <div class="srow"><label>Description</label><span class="t2">${data.description || '—'}</span></div>
       </div>
     </div>`;
+}
+
+function downloadSkillZip(id) {
+  // 下载技能包 zip（按技能 id 精确查询）：OBS 模式 → {url, expires_in} 临时签名 URL
+  // （点击动态签发）→ 直连 OBS 下载；local 模式 → zip 文件流 → blob 触发下载
+  const token = localStorage.getItem('token') || '';
+  fetch('/api/skills/by-id/' + encodeURIComponent(id) + '/download', {
+    headers: {'Authorization': 'Bearer ' + token}
+  }).then(r => {
+    const ct = r.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      return r.json().then(d => {
+        if (d && d.url) { window.open(d.url, '_blank'); return; }
+        throw new Error('no url');
+      });
+    }
+    return r.blob().then(b => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = 'skill-' + id + '.zip';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    });
+  }).catch(() => showToast('下载技能失败，请稍后重试'));
 }
 
 function filterSkills(input) {

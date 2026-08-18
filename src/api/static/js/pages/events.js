@@ -74,11 +74,12 @@ function renderEventDetail(data) {
           <div><span style="color:var(--t3)">Agent:</span> ${agent}</div>
           <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
           <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}</div>
+          ${data.task && data.task.task_id ? `<div style="margin-top:6px"><span style="color:var(--t3)">运行日志:</span> <a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>` : ''}
           <div id="convGate" style="margin-top:6px"><span style="color:var(--t3)">门禁:</span> <span class="tgx">…</span></div>
         </div>
       </div>
-      <div class="cd" style="padding:16px;display:flex;flex-direction:column;gap:8px;flex:1;min-height:0">
-        <h3 style="font-size:12px;font-weight:600;flex-shrink:0">💬 与 ${agentName} 对话</h3>
+      <div id="convPanel" class="cd" style="padding:16px;display:flex;flex-direction:column;gap:8px;flex:1;min-height:0">
+        <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">💬 与 ${agentName} 对话 <button class="bt bt-o bt-s" onclick="toggleConvFullscreen()" title="全屏/还原" style="padding:2px 10px">⛶ 全屏</button></h3>
         <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
         <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
           <input id="convInput" placeholder="问一问 agent 为什么这样处理…（Enter 发送）" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
@@ -201,6 +202,57 @@ function sendConversation() {
   }).catch(() => loadConversation());
 }
 
+// ===== 对话窗口全屏/还原（按钮在 convPanel 标题栏）=====
+let _convFs = false;
+function toggleConvFullscreen() {
+  const panel = document.getElementById('convPanel');
+  if (!panel) return;
+  if (!_convFs) {
+    // 进入全屏：消息区 + 输入行整体移入 fixed 全屏容器（DOM 移动保留 id/内联事件）
+    const messages = document.getElementById('convMessages');
+    const inputRow = document.getElementById('convInputRow');
+    if (!messages) return;
+    const fs = document.createElement('div');
+    fs.id = 'convFullscreen';
+    fs.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);display:flex;flex-direction:column;gap:10px;padding:18px;box-sizing:border-box';
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;justify-content:space-between;align-items:center;flex-shrink:0';
+    const title = document.createElement('h3');
+    title.style.cssText = 'font-size:13px;font-weight:600';
+    const agentName = (_AGENT_TYPES[_convAgent] && _AGENT_TYPES[_convAgent].display_name) || _convAgent || '';
+    title.textContent = '💬 与 ' + agentName + ' 对话';
+    const btn = document.createElement('button');
+    btn.className = 'bt bt-o bt-s';
+    btn.textContent = '⛶ 还原';
+    btn.title = '退出全屏';
+    btn.onclick = toggleConvFullscreen;
+    bar.appendChild(title);
+    bar.appendChild(btn);
+    fs.appendChild(bar);
+    fs.appendChild(messages);
+    fs.appendChild(inputRow);
+    document.body.appendChild(fs);
+    panel.style.display = 'none';
+    _convFs = true;
+    messages.scrollTop = messages.scrollHeight;
+  } else {
+    const fs = document.getElementById('convFullscreen');
+    if (!fs) return;
+    const messages = document.getElementById('convMessages');
+    const inputRow = document.getElementById('convInputRow');
+    panel.appendChild(messages);
+    panel.appendChild(inputRow);
+    fs.remove();
+    panel.style.display = 'flex';
+    _convFs = false;
+    messages.scrollTop = messages.scrollHeight;
+  }
+}
+// ESC 键退出全屏
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape' && _convFs) toggleConvFullscreen();
+});
+
 function redispatchEvent(seq) {
   if (!confirm('确认重新派发该事件任务？\n将把卡住的任务重新入队执行，可能产生重复执行。')) return;
   API.post('/events/' + seq + '/redispatch').then(d => {
@@ -210,4 +262,169 @@ function redispatchEvent(seq) {
     const msg = (e.detail && e.detail.message) || e.message || e;
     app.showToast('重派失败: ' + msg);
   });
+}
+
+// ===== 实时运行日志（task_logs SSE，grape-task-logs-analysis.md）=====
+// 模态面板：fetch + ReadableStream 消费 SSE，自动跟随（滚离底部停止，回到底部恢复）
+let _taskLog = {taskId: '', title: '', seq: 0, aborter: null, following: true, statusEl: null, bodyEl: null, waitTimer: null, hasMsg: false};
+
+function _tlEsc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function _tlIcon(type) {
+  if (type === 'tool_use') return '🔧';
+  if (type === 'step_start') return '▶';
+  if (type === 'step_finish') return '✅';
+  if (type === 'reasoning') return '🤔';
+  if (type === 'error') return '❌';
+  if (type === 'text') return '💬';
+  return '·';
+}
+
+function _tlLine(payload) {
+  const type = payload.type || 'log';
+  const time = payload.created_at ? `<span style="color:var(--t3);margin-right:6px">${fmtLocalTime(payload.created_at).substring(11, 19)}</span>` : '';
+  if (type === 'tool_use') {
+    let inputHtml = '';
+    try {
+      inputHtml = `<div style="margin:4px 0 4px 24px;white-space:pre-wrap;word-break:break-all;color:var(--t2);font-size:11px">${_tlEsc(JSON.stringify(payload.input || {}, null, 2))}</div>`;
+    } catch (e) {}
+    return `<div style="margin-bottom:6px">${time}🔧 <span style="color:var(--a);font-weight:600">${_tlEsc(payload.tool || 'tool')}</span>${inputHtml}</div>`;
+  }
+  const color = type === 'error' ? 'var(--tr)' : type === 'reasoning' ? 'var(--t3)' : 'var(--t2)';
+  return `<div style="margin-bottom:6px">${time}${_tlIcon(type)} <span style="color:${color};white-space:pre-wrap;word-break:break-all">${_tlEsc(payload.content || '')}</span></div>`;
+}
+
+function _tlStatus(text, color) {
+  if (_taskLog.statusEl) _taskLog.statusEl.innerHTML = `<span style="color:${color || 'var(--t3)'}">${_tlEsc(text)}</span>`;
+}
+
+function openTaskLog(taskId, title) {
+  closeTaskLog();
+  _taskLog.taskId = taskId;
+  _taskLog.title = title || taskId;
+  _taskLog.seq = 0;
+  _taskLog.following = true;
+
+  const ov = document.createElement('div');
+  ov.id = 'taskLogOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = `<div style="width:min(960px,94vw);height:min(720px,90vh);background:var(--bg,#11151c);border:1px solid var(--b,#2a3140);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.5)">
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">
+      <span style="font-size:13px;font-weight:600">📜 运行日志 <span style="color:var(--t3);font-weight:400">· ${_tlEsc(title)}</span></span>
+      <span id="tlStatus" style="font-size:11px;margin-left:auto"></span>
+      <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>
+    </div>
+    <div id="tlInfo" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0;font-size:11px;color:var(--t2,#8a94a6)"></div>
+    <div id="tlBody" style="flex:1;min-height:0;overflow-y:auto;background:#0b0e14;color:#c2cad6;padding:12px 14px;font-size:12px;font-family:monospace;line-height:1.6"></div>
+  </div>`;
+  document.body.appendChild(ov);
+  _taskLog.statusEl = document.getElementById('tlStatus');
+  _taskLog.bodyEl = document.getElementById('tlBody');
+  _tlStatus('⏳ 连接中…');
+  // 自动跟随：用户向上滚 >120px 停止跟随，回到底部边缘恢复
+  _taskLog.bodyEl.addEventListener('scroll', () => {
+    const el = _taskLog.bodyEl;
+    const away = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (away > 120) _taskLog.following = false;
+    else if (away < 30) _taskLog.following = true;
+  });
+  ov.addEventListener('click', e => { if (e.target === ov) closeTaskLog(); });
+  // 加载执行引擎/机器信息（智能体名+版本、设备名、IP、用户名）
+  _tlLoadInfo(taskId);
+  _taskLogStream();
+}
+
+function _tlLoadInfo(taskId) {
+  const token = localStorage.getItem('token') || '';
+  fetch('/api/task-logs/' + encodeURIComponent(taskId) + '/info', {headers: {'Authorization': 'Bearer ' + token}})
+    .then(r => r.ok ? r.json() : null)
+    .then(info => {
+      if (!info) return;
+      const el = document.getElementById('tlInfo');
+      if (!el) return;
+      const bits = [];
+      if (info.agent_name) bits.push('🤖 ' + _tlEsc(info.agent_name) + (info.agent_version ? ' <span style="color:var(--t3)">v' + _tlEsc(info.agent_version) + '</span>' : ''));
+      if (info.device_name) bits.push('🖥 ' + _tlEsc(info.device_name));
+      if (info.last_ip) bits.push('🌐 ' + _tlEsc(info.last_ip));
+      if (info.owner_name) bits.push('👤 ' + _tlEsc(info.owner_name));
+      el.innerHTML = bits.map(b => '<span>' + b + '</span>').join('');
+    })
+    .catch(() => {});
+}
+
+function _tlArmWaitHint() {
+  // hermes 类引擎 CLI 一次性输出（推理期间无 stdout），执行中长时间无消息属正常——
+  // 8s 无消息给等待提示，避免误以为面板未生效
+  _taskLog.waitTimer = setTimeout(() => {
+    if (!_taskLog.taskId) return;
+    if (_taskLog.bodyEl && !_taskLog.hasMsg && _taskLog.bodyEl.childElementCount === 0) {
+      _taskLog.bodyEl.insertAdjacentHTML('beforeend',
+        '<div class="tl-waiting" style="color:var(--t3);padding:10px 0;font-size:12px">⏳ 引擎执行中，等待输出…（hermes 类引擎输出在任务完成时一次性返回；opencode 引擎逐步实时输出）</div>');
+      _tlStatus('⏳ 引擎执行中，等待输出…', 'var(--ty, #f1c40f)');
+    }
+  }, 8000);
+}
+
+function _taskLogStream() {
+  const token = localStorage.getItem('token') || '';
+  const ac = new AbortController();
+  _taskLog.aborter = ac;
+  fetch('/api/task-logs/' + encodeURIComponent(_taskLog.taskId) + '/stream?since=' + _taskLog.seq, {
+    headers: {'Authorization': 'Bearer ' + token},
+    signal: ac.signal,
+  }).then(resp => {
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    _tlStatus('🟢 已连接（实时）', 'var(--tgx, #2ecc71)');
+    _taskLog.hasMsg = false;
+    _tlArmWaitHint();
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    function read() {
+      return reader.read().then(({done, value}) => {
+        if (done) {
+          _tlStatus('🔚 日志流结束', 'var(--t3)');
+          if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
+          return;
+        }
+        buf += dec.decode(value, {stream: true});
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const part of parts) {
+          if (!part.startsWith('data: ')) continue;
+          let evt;
+          try { evt = JSON.parse(part.slice(6)); } catch (e) { continue; }
+          if (typeof evt.seq === 'number' && evt.seq <= _taskLog.seq) continue; // 断线重连去重
+          _taskLog.seq = (typeof evt.seq === 'number' && evt.seq > _taskLog.seq) ? evt.seq : _taskLog.seq;
+          if (!_taskLog.hasMsg) {
+            _taskLog.hasMsg = true;
+            if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
+            const ph = _taskLog.bodyEl && _taskLog.bodyEl.querySelector('.tl-waiting');
+            if (ph) ph.remove();
+            _tlStatus('🟢 已连接（实时）', 'var(--tgx, #2ecc71)');
+          }
+          _taskLog.bodyEl.insertAdjacentHTML('beforeend', _tlLine(evt));
+          if (_taskLog.following) _taskLog.bodyEl.scrollTop = _taskLog.bodyEl.scrollHeight;
+        }
+        return read();
+      });
+    }
+    return read();
+  }).catch(err => {
+    if (err.name === 'AbortError') return;
+    if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
+    _tlStatus('⚠️ 连接断开，2s 后重连…', 'var(--tr, #e74c3c)');
+    setTimeout(() => { if (_taskLog.taskId) _taskLogStream(); }, 2000);
+  });
+}
+
+function closeTaskLog() {
+  if (_taskLog.aborter) _taskLog.aborter.abort();
+  if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
+  _taskLog.aborter = null;
+  _taskLog.taskId = '';
+  const ov = document.getElementById('taskLogOverlay');
+  if (ov) ov.remove();
 }

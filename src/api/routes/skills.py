@@ -1,5 +1,6 @@
 """Skills 路由：列表、上传、删除、个人技能转仓库技能"""
-import os, tempfile, zipfile, json, shutil
+import io as _io
+import os, tempfile, zipfile, json, shutil, stat as _stat
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from pydantic import BaseModel
 from src.user import db as user_db
@@ -7,6 +8,28 @@ from src.user.validator import validate_skill as validate_custom_skill, parse_sk
 from src.api.deps import get_current_user
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
+
+# 解压后总大小上限（zip 炸弹防护，见 obs-skill-storage-design.md §7）
+MAX_EXTRACT_BYTES = int(os.environ.get("SKILL_MAX_EXTRACT_BYTES", str(100 * 1024 * 1024)))
+
+
+def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
+    """规范化重打包技能 zip：根 = {skill_name}/，逐文件保留权限位（external_attr），
+    丢弃系统目录。返回 zip 字节（OBS 存储正体，见 obs-skill-storage-design.md §2.2）。"""
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(skill_dir):
+            dirs[:] = [d for d in dirs if d not in ("__MACOSX", ".git", "__pycache__")]
+            for name in files:
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, skill_dir).replace(os.sep, "/")
+                arc = f"{skill_name}/{rel}"
+                st = os.stat(full)
+                info = zipfile.ZipInfo(arc)
+                info.external_attr = (_stat.S_IMODE(st.st_mode)) << 16  # 保留权限位
+                with open(full, "rb") as fh:
+                    zf.writestr(info, fh.read())
+    return buf.getvalue()
 
 
 @router.get("/")
@@ -21,23 +44,24 @@ async def list_skills(user: dict = Depends(get_current_user), repo: str = ""):
             if repo:
                 # 官方 + 个人 + 指定仓库技能
                 c.execute(
-                    "SELECT skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) ORDER BY agent_type, skill_name",
+                    "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) ORDER BY agent_type, skill_name",
                     (str(user["id"]), repo)
                 )
             else:
                 # 官方 + 个人
                 c.execute(
-                    "SELECT skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?)) ORDER BY agent_type, skill_name",
+                    "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?)) ORDER BY agent_type, skill_name",
                     (str(user["id"]),)
                 )
             for r in c.fetchall():
                 skills.append({
-                    "name": r[0],
-                    "display_name": r[1] or r[0],
-                    "description": r[2] or "",
-                    "agent_type": r[3] or "",
-                    "type": "official" if r[4] == "official" else "repo" if r[4] == "repo" else "user-uploaded",
-                    "scope": r[4] or "",
+                    "id": r[0],
+                    "name": r[1],
+                    "display_name": r[2] or r[1],
+                    "description": r[3] or "",
+                    "agent_type": r[4] or "",
+                    "type": "official" if r[5] == "official" else "repo" if r[5] == "repo" else "user-uploaded",
+                    "scope": r[5] or "",
                 })
         except Exception:
             pass
@@ -70,10 +94,18 @@ async def sync_official_skills(user: dict = Depends(get_current_user)):
             skill_path = info.get("path", skill_name)
             # 检查是否已存在
             existed = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'", (skill_name,)).fetchone()[0]
-            c.execute(
-                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
-                (skill_name, display_name, description, agent_type, skill_path)
-            )
+            if existed:
+                # 已存在：仅更新元信息，【保留 skill_path】（转集群模式的对象键不能被重置，
+                # 否则转集群标记丢失 → 前端按钮反复回到「转集群模式」）
+                c.execute(
+                    "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
+                    (display_name, description, agent_type, skill_name)
+                )
+            else:
+                c.execute(
+                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
+                    (skill_name, display_name, description, agent_type, skill_path)
+                )
             if existed == 0:
                 added += 1
         db.commit()
@@ -100,6 +132,15 @@ async def download_skill_template():
                 rel = os.path.relpath(full, template_dir)
                 zf.write(full, rel)
     buf.seek(0)
+    # ===== OBS 分支（N8）：打包 → 传 OBS → 返回临时签名 URL（前端点击下载时动态获取）=====
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage is not None:
+        key = "skills/template/skill-template.zip"
+        storage.save_bytes(key, buf.getvalue())
+        url = storage.temporary_url(key)
+        return {"url": url, "expires_in": storage.default_expires}
+    # ===== local 分支（原逻辑不变）=====
     from fastapi.responses import Response
     return Response(
         content=buf.getvalue(),
@@ -108,32 +149,123 @@ async def download_skill_template():
     )
 
 
-@router.get("/{name}")
-async def get_skill_detail(name: str, user: dict = Depends(get_current_user),
-                           repo: str = ""):
-    """返回技能详情（含 SKILL.md 内容）"""
-    from src.session_manager import db, db_lock
-    from src.config import SKILLS_DIR
+@router.get("/by-id/{skill_id}/download")
+async def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_current_user),
+                                   repo: str = ""):
+    """下载技能包 zip（点击时动态签发，见 obs-skill-storage-design.md N8 下载模式）。
 
-    # 查官方技能 + 个人技能 + 仓库技能（指定 repo 或用户可访问的全部）
+    按技能 id 精确查询（同名多 scope 记录无歧义）；OBS 模式返回 {url, expires_in}
+    临时签名 URL（300s，不落库），浏览器直连 OBS 下载；local 模式返回 zip 文件流。
+    官方技能（scope=official）为部署内置物，未转集群不提供下载。
+    """
+    from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         if repo:
             c.execute(
-                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id FROM skill WHERE skill_name=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))",
-                (name, str(user["id"]), repo)
+                "SELECT id, skill_path, scope, owner_id, skill_name FROM skill WHERE id=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))",
+                (skill_id, str(user["id"]), repo)
             )
         else:
             c.execute(
-                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id FROM skill WHERE skill_name=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo')",
-                (name, str(user["id"]))
+                "SELECT id, skill_path, scope, owner_id, skill_name FROM skill WHERE id=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo')",
+                (skill_id, str(user["id"]))
+            )
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能不存在"})
+    skill_id, skill_path, scope, owner_id, name = row
+
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage is not None:
+        from src.user.db import get_skill_object_key
+        object_key = get_skill_object_key(skill_id)
+        if object_key:
+            url = storage.temporary_url(object_key)
+            return {"url": url, "expires_in": getattr(storage, "default_expires", 300)}
+    # 官方技能未转集群模式：无 OBS 对象，不提供下载
+    if scope == "official":
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "官方技能为部署内置，未转集群模式不提供下载"})
+
+    # local 分支：本地技能目录打包 zip 流式返回
+    from src.config import SKILLS_DIR
+    if scope == "user":
+        skill_dir = os.path.join(SKILLS_DIR, "custom", owner_id or str(user["id"]), skill_path or name)
+    else:
+        skill_dir = os.path.join(SKILLS_DIR, "repo", owner_id, skill_path or name)
+    if not os.path.isdir(skill_dir):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能目录不存在"})
+    import io as _io
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(skill_dir):
+            dirs[:] = [d for d in dirs if d not in ("__MACOSX", ".git", "__pycache__")]
+            for f in files:
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, os.path.dirname(skill_dir)).replace(os.sep, "/")
+                zf.write(full, rel)
+    buf.seek(0)
+    from fastapi.responses import Response
+    return Response(content=buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
+
+
+@router.get("/by-id/{skill_id}")
+async def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user),
+                                 repo: str = ""):
+    """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询（同名多 scope 记录无歧义）。
+
+    权限与现状一致：official 可见；user 需本人；repo 需指定仓库（无 repo 参数时放行）。
+    """
+    from src.session_manager import db, db_lock
+    from src.config import SKILLS_DIR
+
+    with db_lock:
+        c = db.cursor()
+        if repo:
+            c.execute(
+                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id FROM skill WHERE id=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))",
+                (skill_id, str(user["id"]), repo)
+            )
+        else:
+            c.execute(
+                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id FROM skill WHERE id=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo')",
+                (skill_id, str(user["id"]))
             )
         row = c.fetchone()
 
     if row:
-        skill_dir = row[4] or name
+        skill_dir = row[4] or row[0]
         scope = row[5]
         owner_id = row[6] or ""
+        current_id = row[7]
+        # ===== OBS 分支（N5）：两级缓存 + 内存解压提取 + zip_url 临时地址 =====
+        from src.storage import get_storage
+        storage = get_storage()
+        object_key = ""
+        if storage is not None:
+            from src.user.db import get_skill_object_key
+            object_key = get_skill_object_key(current_id)  # 官方技能转集群后 skill_path 也是对象键
+        if object_key:
+            from src.storage import skill_md_content
+            content = skill_md_content(object_key, row[0]) or ""
+            zip_url = ""
+            try:
+                zip_url = storage.temporary_url(object_key)  # 用户点击下载时动态签发
+            except Exception:
+                zip_url = ""
+            return {
+                "id": current_id,
+                "name": row[0], "display_name": row[1] or row[0], "description": row[2] or "",
+                "agent_type": row[3] or "",
+                "type": "official" if scope == "official" else "repo" if scope == "repo" else "user-uploaded",
+                "scope": scope or "",
+                "content": content,
+                "zip_url": zip_url,
+                "is_obs": True,  # OBS/集群模式（skill_path 为对象键）
+            }
+        # ===== local 分支（原逻辑不变）=====
         if scope == "user":
             skill_path = os.path.join(SKILLS_DIR, "custom", owner_id or str(user["id"]), skill_dir, "SKILL.md")
         elif scope == "repo":
@@ -145,11 +277,13 @@ async def get_skill_detail(name: str, user: dict = Depends(get_current_user),
             with open(skill_path, encoding="utf-8") as f:
                 content = f.read()
         return {
+            "id": current_id,
             "name": row[0], "display_name": row[1] or row[0], "description": row[2] or "",
             "agent_type": row[3] or "",
             "type": "official" if scope == "official" else "repo" if scope == "repo" else "user-uploaded",
             "scope": scope or "",
             "content": content,
+            "is_obs": False,
         }
 
     raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
@@ -182,7 +316,21 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         extract_dir = os.path.join(tmp_dir, "extracted")
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
+                # zip 炸弹防护：解压后总大小上限（见设计文档 §7）
+                total = sum((i.file_size or 0) for i in zf.infolist())
+                if total > MAX_EXTRACT_BYTES:
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"ZIP 解压后总大小超过 {MAX_EXTRACT_BYTES // (1024 * 1024)}MB 上限"})
                 zf.extractall(extract_dir)
+                # Python 3.12+ extractall 不再恢复 Unix 权限位 → 手动恢复
+                # （否则后续规范化重打包读 st_mode 拿不到上传时的权限，见 obs-skill-storage-design.md §7）
+                for info in zf.infolist():
+                    mode = info.external_attr >> 16
+                    if mode and not info.is_dir():
+                        p = os.path.join(extract_dir, info.filename)
+                        if os.path.isfile(p):
+                            os.chmod(p, mode & 0o777)
+        except HTTPException:
+            raise
         except zipfile.BadZipFile:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "不是有效的 ZIP 文件，请上传 .zip 格式"})
 
@@ -210,6 +358,35 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
 
         import shutil
         from src.session_manager import db, db_lock
+        # ===== OBS 分支（N4）：规范化重打包 → 传 OBS 固定 key（原子覆盖）→ DB upsert → 缓存 =====
+        from src.config import log
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage is not None:
+            from src.storage import skill_key, zip_cache_put, mem_cache_invalidate
+            from src.user.db import upsert_skill_obs
+            owner = repo if scope == "repo" else str(user["id"])
+            db_scope = "repo" if scope == "repo" else "user"
+            try:
+                # 固定 key（v2.4 去版本化）：putObject 同 key 原子覆盖（最后写者胜）；
+                # user 不同 owner 段天然隔离，repo 同仓库同名覆盖不限角色
+                object_key = skill_key("custom" if db_scope == "user" else db_scope,
+                                       owner, skill_name)
+                zip_bytes = _normalize_skill_zip(skill_dir, skill_name)
+                storage.save_bytes(object_key, zip_bytes)
+                ok = upsert_skill_obs(db_scope, owner, skill_name, agent_type,
+                                      description, object_key, str(user["id"]))
+                if not ok:
+                    raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录写入失败（同名冲突或并发上传）"})
+                zip_cache_put(object_key, zip_bytes)  # put 覆盖同名 key 即天然失效旧缓存
+                mem_cache_invalidate(skill_name)      # 覆盖后显式失效内存提取缓存
+                log.info(f"skill uploaded to OBS (fixed key): {object_key}")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=502, detail={"code": 502, "message": f"技能上传 OBS 失败: {e}"})
+            return {"message": f"技能 {skill_name} 上传成功"}
+        # ===== local 分支（原逻辑不变）=====
         if scope == "repo":
             repo_key = repo
             target_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", repo_key, skill_name)
@@ -245,10 +422,37 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
 @router.delete("/{skill_name}")
 async def delete_skill(skill_name: str, user: dict = Depends(get_current_user),
                        scope: str = "user", repo: str = ""):
+    # ===== OBS 分支（N7）：先定位对象键 → DB 删除后删对象 + 清缓存 =====
+    from src.storage import get_storage
+    storage = get_storage()
+    object_key = ""
+    if storage is not None:
+        from src.user.db import get_skill_object_key
+        from src.session_manager import db, db_lock as _dl
+        owner = repo if scope == "repo" else str(user["id"])
+        db_scope = "repo" if scope == "repo" else "user"
+        try:
+            with _dl:
+                c = db.cursor()
+                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? AND is_active=1",
+                          (skill_name, db_scope, owner))
+                r = c.fetchone()
+                if r:
+                    object_key = get_skill_object_key(r[0])
+        except Exception:
+            pass
     if scope == "repo":
         exists = user_db.delete_skill(user["id"], skill_name, scope="repo", owner_id=repo)
     else:
         exists = user_db.delete_skill(user["id"], skill_name)
+    if object_key:
+        from src.storage import invalidate_skill_caches
+        try:
+            # 固定 key 模型（v2.4）：单对象删除（每技能仅 1 个固定 key 对象）
+            storage.delete_object(object_key)
+        except Exception:
+            pass
+        invalidate_skill_caches(object_key)
     if not exists:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
     return {"message": f"技能 {skill_name} 已删除"}
@@ -284,6 +488,30 @@ async def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_curr
         exists = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1", (skill_name, repo)).fetchone()[0]
     if exists:
         raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
+
+    # ===== OBS 分支（N6）：copyObject（个人→仓库固定 key）→ DB 回写 =====
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage is not None:
+        from src.storage import skill_key, zip_cache_get, zip_cache_put, mem_cache_invalidate
+        from src.user.db import get_skill_object_key, upsert_skill_obs
+        src_key = get_skill_object_key(skill_rec["id"])
+        if not src_key:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "源个人技能未在 OBS（历史数据请先执行迁移），无法转换"})
+        dst_key = skill_key("repo", repo, skill_name)
+        if not storage.copy_object(src_key, dst_key):
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"OBS 复制技能失败: {src_key} -> {dst_key}"})
+        ok = upsert_skill_obs("repo", repo, skill_name, skill_rec.get("agent_type", ""),
+                              skill_rec.get("description", ""), dst_key, str(user["id"]))
+        if not ok:
+            storage.delete_object(dst_key)
+            raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
+        # 源 zip 若在磁盘缓存，复制到目标 key（懒加载兜底亦可）
+        src_zip = zip_cache_get(src_key)
+        if src_zip:
+            zip_cache_put(dst_key, src_zip)
+        mem_cache_invalidate(skill_name)
+        return {"message": f"技能 {skill_name} 已复制到仓库 {repo}", "skill_name": skill_name, "scope": "repo", "repo": repo}
 
     # 3. 复制目录 skills/custom/{user_id}/{skill}/ → skills/repo/{repo}/{skill}/
     src_dir = os.path.join(user_db.SKILL_DIR, str(user["id"]), skill_name)

@@ -287,9 +287,15 @@ def resolve_local_engine() -> int | None:
     """返回一个健康的本机直连引擎（credential_id=0 且 installed+healthy）；无则 None。
 
     用于 chat 等未显式绑定时的本机兜底（engine-selection-design.md §8.2）。
+    无本机直连时回退全局健康引擎（credential_id>0 的远端 worker，chat 走队列执行），
+    避免"无可用引擎"硬失败（#60：清理设备后无 cred0 引擎，chat 全挂）。
     """
     cand = query_engines("", "local")
     cand = _apply_filters([dict(m, scope="local") for m in cand], load_engine_selection())
+    if not cand:
+        # 回退：任意健康全局引擎（chat 未配置时可用远端 worker 引擎入队执行）
+        cand = query_engines("", "global")
+        cand = _apply_filters([dict(m, scope="global") for m in cand], load_engine_selection())
     if not cand:
         return None
     return min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
@@ -329,7 +335,7 @@ def query_engines(repo_key: str, scope: str) -> list[dict]:
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                     " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,'') "
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.credential_id>0 AND rc.scope='repo' ORDER BY r.id")
+                    "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
                 c.execute(
                     "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '' "
@@ -339,7 +345,7 @@ def query_engines(repo_key: str, scope: str) -> list[dict]:
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                     " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,'') "
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.credential_id>0 AND rc.scope='global' ORDER BY r.id")
+                    "WHERE r.credential_id>0 AND rc.scope='global' AND rc.status='active' ORDER BY r.id")
             rows = c.fetchall()
         except Exception as e:
             log.warning(f"query_engines({scope}) failed: {e}")

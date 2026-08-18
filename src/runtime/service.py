@@ -8,6 +8,7 @@ import os, json, re, threading, time, uuid
 from datetime import datetime, timezone, timedelta
 from src.session_manager import db, db_lock
 from src.config import log
+from src.api.time_utils import normalize_event_time
 
 # ===== 执行模式开关（engine-selection-design.md v2）=====
 # auto（按绑定引擎宿主自动推导，见 execution-mode-auto-routing-design.md §3）
@@ -158,6 +159,35 @@ def _pack_skill_dir(skill_name, skill_path):
     return {skill_name: files}
 
 
+def _skill_files_from_zip(zip_bytes: bytes, skill_name: str) -> dict:
+    """OBS 模式双写（老 worker 过渡期兼容）：从技能 zip 提取可文本化文件，
+    生成与 _pack_skill_dir 相同结构的 skill_files。二进制文件跳过（老 worker 能力边界）。
+
+    （merge 修复：feat/obs-storage 合并 dev 时此函数丢失，补回——老 worker
+    兼容通道；OBS 技能本地无目录，skill_files 须从 zip 提取）
+    """
+    import io as _io
+    import zipfile as _zf
+    files = {}
+    try:
+        with _zf.ZipFile(_io.BytesIO(zip_bytes)) as zf:
+            sub = {}
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                parts = info.filename.split("/", 1)
+                inner = parts[1] if len(parts) == 2 and parts[0] == skill_name else info.filename
+                try:
+                    sub[inner] = zf.read(info.filename).decode("utf-8")
+                except Exception:
+                    continue  # 二进制/非 UTF-8：老 worker 不支持，跳过
+            if sub:
+                files[skill_name] = sub
+    except Exception as e:
+        log.warning(f"_skill_files_from_zip failed: {e}")
+    return files
+
+
 def _collect_server_env(user_id, account):
     """服务端 DB 系凭据注入（user credentials / 账户 AK-SK），远端 worker 无本地 DB 也生效。"""
     env = {}
@@ -250,10 +280,17 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     skill_files = {}
     if skill:
         try:
-            from src.user.db import resolve_skill_id, get_skill_path
+            from src.user.db import resolve_skill_id, get_skill_path, get_skill_object_key
             _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
             _path = get_skill_path(_sid) if _sid else (skill_path or "")
             skill_files = _pack_skill_dir(skill, _path or (skill_path or ""))
+            # v3.0：OBS 技能（本地无目录）→ 从 OBS zip 提取文本（老 worker 兼容通道）
+            _okey = get_skill_object_key(_sid) if _sid else ""
+            if _okey:
+                from src.storage import get_skill_zip_bytes
+                _zip = get_skill_zip_bytes(_okey)
+                if _zip:
+                    skill_files = _skill_files_from_zip(_zip, skill)
         except Exception as e:
             log.warning(f"enqueue: skill pack failed for {skill}: {e}")
     # project-info 随任务（服务端权威，多 VM 共享，见 multi-issue-isolation-design.md §2.4）
@@ -307,9 +344,72 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     return task_id
 
 
-# ===== 引擎池绑定已弃用（engine-selection-design.md v2）=====
-# 原 claim-based 引擎池（agent_type_runtime_pool / pool_agent_type）随"每 (仓库, agent)
-# 引擎集合 + 派发选择"模型弃用；绑定/展示走 src.runtime.engine_select（binding 表）。
+# ===== 引擎池绑定（agent-cluster-design.md §4.1）=====
+# 注：origin/main 曾声明弃用（engine-selection-design.md v2），但 dev 线
+# 仍以引擎池为任务调度主路径（claim 池匹配 / pool_runtime_ids 在线过滤 /
+# 事件 runtime 回填），保留本实现，engine_select 新模型可并行引入。
+
+def set_agent_pool(agent_type: str, runtime_ids: list[int], weight: int = 1, priority: int = 5):
+    """替换某 Agent 类型的引擎池绑定（先删后插，单事务）。runtime_ids 为空列表 → 清空池（回到兜底链）。"""
+    if not agent_type:
+        raise ValueError("agent_type is required")
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM agent_type_runtime_pool WHERE agent_type=?", (agent_type,))
+        for rid in (runtime_ids or []):
+            c.execute(
+                "INSERT OR IGNORE INTO agent_type_runtime_pool (agent_type, runtime_id, weight, priority) VALUES (?,?,?,?)",
+                (agent_type, int(rid), int(weight), int(priority)))
+        db.commit()
+    log.info(f"Agent pool set: {agent_type} -> {runtime_ids or []} (weight={weight}, priority={priority})")
+
+
+def get_agent_pool(agent_type: str) -> list[dict]:
+    """返回某 Agent 类型的引擎池绑定（含引擎实时状态，供管理端/调度展示）。"""
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT p.runtime_id, p.weight, p.priority, p.enabled, p.remark, "
+                "       r.name, r.status, r.healthy, r.busy_slots, r.max_concurrent, r.version, "
+                "       r.credential_id, COALESCE(rc.device_name, ''), COALESCE(rc.last_ip, '') "
+                "FROM agent_type_runtime_pool p "
+                "LEFT JOIN agent_runtimes r ON r.id = p.runtime_id "
+                "LEFT JOIN runtime_credentials rc ON rc.id = r.credential_id "
+                "WHERE p.agent_type=? ORDER BY p.priority ASC, p.id ASC",
+                (agent_type,))
+            rows = c.fetchall()
+        except Exception as e:
+            log.warning(f"get_agent_pool failed: {e}")
+            return []
+    return [{
+        "runtime_id": r[0], "weight": r[1], "priority": r[2], "enabled": bool(r[3]),
+        "remark": r[4] or "", "name": r[5] or "", "status": r[6] or "offline",
+        "healthy": bool(r[7]), "busy_slots": r[8] or 0, "max_concurrent": r[9] or 0,
+        "version": r[10] or "", "credential_id": r[11] or 0,
+        "device_name": r[12] or "", "last_ip": r[13] or "",
+    } for r in rows]
+
+
+def pool_runtime_ids(agent_type: str) -> list[int]:
+    """池内 enabled 且在线（心跳在线）的引擎 id 列表（claim 池调度用）。
+
+    只返回在线引擎：池内引擎全离线/不存在时返回空 → 调用方（入队/对话）回退
+    默认 runtime，避免任务下发到 offline worker 后无人领取而永久 queued
+    （issue #41 卡住根因：池绑定 runtime 9/12/18 全部 offline，任务挂起）。
+    """
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT p.runtime_id FROM agent_type_runtime_pool p "
+                "JOIN agent_runtimes r ON r.id = p.runtime_id "
+                "WHERE p.agent_type=? AND p.enabled=1 AND r.status='online'",
+                (agent_type,))
+            return [r[0] for r in c.fetchall()]
+        except Exception:
+            return []
+
 
 def _issue_num(issue_id) -> int:
     """'#5' / '5' / 5 → 5；无法解析返回 0。"""
@@ -337,21 +437,39 @@ def claim(runtime_id) -> dict | None:
             # 导致 dispatched 任务永久卡死、busy_slots 泄漏。这里在每次 claim 前
             # 将超时(120s)未 start 的任务回池重排；attempts>=3 直接置 failed。
             try:
-                _stale = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+                # 回收窗口 300s：hermes -z 冷启动+模型响应常 >120s 才产出首事件，
+                # 120s 会误杀执行中长任务（回收→重跑→attempts 累加 3 次 failed）。
+                # worker 端 claim 后 task_start 置 running 可彻底规避；本窗口作为
+                # 不依赖 worker 端的兜底（真死任务 5 分钟内恢复重排）。
+                _stale = (datetime.now(timezone.utc) - timedelta(seconds=300)).isoformat()
                 c.execute(
                     "SELECT id, runtime_id, event_seq FROM agent_tasks "
                     "WHERE status='dispatched' AND started_at < ? AND started_at IS NOT NULL",
                     (_stale,))
                 _stale_rows = c.fetchall()
                 for _tid, _rid, _seq in _stale_rows:
+                    # 定向任务（pool_agent_type=''）回收归零 runtime_id 后变无主：
+                    # claim 池匹配不命中、定向(runtime_id)也失配 → 永久死任务
+                    # （实测 seq#264 issue#4 卡死 71 分钟）。归零时回填 agent_type
+                    # 转为池任务，池内任意引擎可再领。
+                    _pool_fill = ""
+                    try:
+                        c.execute("SELECT agent_type FROM agent_tasks WHERE id=?", (_tid,))
+                        _row = c.fetchone()
+                        if _row and _row[0]:
+                            _pool_fill = _row[0]
+                    except Exception:
+                        pass
                     c.execute(
                         "UPDATE agent_tasks SET attempts=attempts+1, "
                         "status=CASE WHEN attempts+1 >= 3 THEN 'failed' ELSE 'queued' END, "
                         "runtime_id=CASE WHEN attempts+1 >= 3 THEN runtime_id ELSE 0 END, "
+                        "pool_agent_type=CASE WHEN attempts+1 < 3 AND pool_agent_type='' "
+                        "THEN ? ELSE pool_agent_type END, "
                         "started_at=NULL, "
                         "result_text=CASE WHEN attempts+1 >= 3 THEN '回收超限(dispatched 超时 3 次)' ELSE result_text END "
                         "WHERE id=? AND status='dispatched'",
-                        (_tid,))
+                        (_pool_fill, _tid))
                     if c.rowcount and _rid:
                         c.execute(
                             "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
@@ -371,7 +489,9 @@ def claim(runtime_id) -> dict | None:
             except Exception as _e:
                 log.warning(f"recover stale dispatched failed: {_e}")
 
-            # 确定路由：仅按 runtime_id 拉本引擎队列（claim-based 引擎池已弃用，见 engine-selection-design.md v2）
+            # 确定路由：① 定向任务（runtime_id=?）② 池任务（runtime_id=0 + pool_agent_type，
+            # 该 agent_type 的引擎集合（devops_agent_runtime_binding）含本引擎即可领；
+            # 回收逻辑会把 dispatched 超时任务归零转池任务，claim 必须兼容，否则永久死任务）
             c.execute("""
                 SELECT id FROM agent_tasks
                 WHERE runtime_id=? AND status='queued'
@@ -387,6 +507,26 @@ def claim(runtime_id) -> dict | None:
                 ORDER BY created_at ASC LIMIT 1
             """, (runtime_id,))
             row = c.fetchone()
+            if not row:
+                c.execute("""
+                    SELECT id FROM agent_tasks
+                    WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued'
+                      AND pool_agent_type IN (
+                        SELECT b.agent_type FROM devops_agent_runtime_binding b
+                        WHERE b.runtime_id=? AND b.enabled=1
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM agent_tasks a2
+                        WHERE a2.status IN ('dispatched','running')
+                          AND (
+                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                            OR
+                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                          )
+                      )
+                    ORDER BY created_at ASC LIMIT 1
+                """, (runtime_id,))
+                row = c.fetchone()
             if not row:
                 db.commit()
                 return None
@@ -408,6 +548,18 @@ def claim(runtime_id) -> dict | None:
         task = get_task(task_id)
         if task:
             task["status"] = "dispatched"
+            # 回填事件 runtime 为真实引擎实例名（pool 模式入队显示 pool:<type>，
+            # claim 后展示实际执行引擎，见 #44：vod 池 hermes 执行但事件显示 opencode）
+            if task.get("event_seq"):
+                try:
+                    from src.runtime.instances import runtime_instance_name as _rin
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("UPDATE events SET runtime=? WHERE seq=?",
+                                  (_rin(runtime_id), task["event_seq"]))
+                        db.commit()
+                except Exception as e:
+                    log.warning(f"claim backfill event runtime failed: {e}")
         from src.runtime.instances import runtime_instance_name
         log.info(f"claim: runtime_id={runtime_id}({runtime_instance_name(runtime_id)}) task={task_id}")
         return task
@@ -465,7 +617,7 @@ def requeue_task(task_id):
 
 
 def report_messages(task_id, messages):
-    """批量执行消息 → append_event_archive_log（M1 落档，脱敏）"""
+    """批量执行消息 → append_event_archive_log（M1 落档，脱敏）+ task_messages 结构化落库 + 实时 fanout"""
     task = get_task(task_id)
     if not task:
         return
@@ -501,6 +653,89 @@ def report_messages(task_id, messages):
                                              issue_num_hint=hint)
         except Exception as e:
             log.warning(f"report_messages archive failed: {e}")
+    # 结构化落库（task_messages，双后端一致；seq 服务端生成 MAX+1，UNIQUE 防重放）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+            seq = (c.fetchone()[0] or 0) + 1
+            for m in (messages or []):
+                if not isinstance(m, dict):
+                    continue
+                _t = m.get("type", "log")
+                _d = m.get("data")
+                tool, content, input_json, output = _normalize_message(_t, _d)
+                # created_at 显式写 UTC ISO（时间本地化：MySQL 表默认 now() 为 CST 无时区，
+                # 双后端存储语义统一，读时 normalize_event_time 幂等）
+                c.execute(
+                    "INSERT OR IGNORE INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (task_id, seq, _t, tool, content, input_json, output,
+                     datetime.now(timezone.utc).isoformat()))
+                seq += 1
+            db.commit()
+    except Exception as e:
+        log.warning(f"report_messages task_messages insert failed: {e}")
+    # 实时 fanout（订阅表推送，队列满丢弃保活；SSE 重连靠 since 回源）
+    try:
+        from src.runtime.task_log_stream import fanout
+        fanout(task_id, messages or [])
+    except Exception as e:
+        log.warning(f"report_messages fanout failed: {e}")
+
+
+def _normalize_message(_t: str, _d) -> tuple[str, str, str, str]:
+    """worker 消息 → (tool, content, input_json, output) 规范化。
+
+    - tool_use: data 为 dict {tool, input}（input 可能已是 JSON 字符串或 dict）
+    - text/reasoning/step_*: data 为 str 或 {text/content}
+    - output 列保留给未来 tool_result（worker 端暂未上报 tool_result 结构化输出）
+    """
+    if isinstance(_d, dict):
+        tool = str(_d.get("tool") or "")
+        if _t == "tool_use":
+            inp = _d.get("input") or {}
+            if isinstance(inp, str):
+                try:
+                    json.loads(inp)
+                    input_json = inp
+                except Exception:
+                    input_json = json.dumps({"raw": inp}, ensure_ascii=False)
+            else:
+                input_json = json.dumps(inp, ensure_ascii=False)
+            return tool, "", input_json, ""
+        content = str(_d.get("text") or _d.get("content") or "")
+        return tool, content, "", ""
+    return "", str(_d or ""), "", ""
+
+
+def list_task_messages(task_id, since: int = 0, limit: int = 5000) -> list[dict]:
+    """按 seq 增量拉取 task_messages（SSE 断线/新开页补数据用）。
+
+    返回 [{seq, type, tool, content, input, output, created_at}]，input 为解析后的 dict。
+    """
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, type, tool, content, input_json, output, created_at FROM task_messages "
+                "WHERE task_id=? AND seq>? ORDER BY seq LIMIT ?",
+                (task_id, since, limit))
+            rows = c.fetchall()
+    except Exception as e:
+        log.warning(f"list_task_messages failed: {e}")
+        return []
+    out = []
+    for r in rows:
+        inp = {}
+        try:
+            inp = _json.loads(r[4] or "{}")
+        except Exception:
+            pass
+        out.append({"seq": r[0], "type": r[1], "tool": r[2] or "",
+                    "content": r[3] or "", "input": inp, "output": r[5] or "",
+                    "created_at": normalize_event_time(r[6] or "")})
+    return out
 
 
 def report_progress(task_id, progress):

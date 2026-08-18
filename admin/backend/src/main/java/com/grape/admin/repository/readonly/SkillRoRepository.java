@@ -17,16 +17,19 @@ public interface SkillRoRepository extends JpaRepository<SkillRo, Integer> {
                                              @Param("scope") String scope,
                                              @Param("owner") String owner);
 
-    /** 上传入库（字段语义与主项目 grape create_skill 一致） */
+    /** 上传入库（v2.5：file_path 真实存储路径 + created_by/updated_by 审计） */
     @Modifying
     @Transactional
-    @Query(value = "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) "
-            + "VALUES (:name, :displayName, :description, :agentType, :skillPath, :scope, :owner)", nativeQuery = true)
+    @Query(value = "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id, created_by, updated_by) "
+            + "VALUES (:name, :displayName, :description, :agentType, :skillPath, :filePath, :scope, :owner, :createdBy, :updatedBy)", nativeQuery = true)
     void insertSkill(@Param("name") String name,
                      @Param("displayName") String displayName,
                      @Param("description") String description,
                      @Param("agentType") String agentType,
                      @Param("skillPath") String skillPath,
+                     @Param("filePath") String filePath,
                      @Param("scope") String scope,
-                     @Param("owner") String owner);
+                     @Param("owner") String owner,
+                     @Param("createdBy") String createdBy,
+                     @Param("updatedBy") String updatedBy);
 }

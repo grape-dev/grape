@@ -277,6 +277,12 @@ def translate_sql(sql: str) -> str:
         sql = re.sub(
             r"(\bADD\s+COLUMN\s+[`\"\w]+\s+TEXT(?:\s+NOT\s+NULL)?\s+DEFAULT\s+)'((?:[^'\\]|\\.)*)'",
             lambda mm: f"{mm.group(1)}('{mm.group(2)}')", sql, flags=re.I)
+        # MODIFY [COLUMN] <col> TEXT|MEDIUMTEXT|LONGTEXT ... DEFAULT '<lit>' → DEFAULT ('<lit>')
+        # （obs-skill-storage-design.md §4：skill_files 升 MEDIUMTEXT 走 MODIFY，同样受
+        #   MySQL 8.0.13 前 TEXT 系列列不允许 DEFAULT 字面量限制）
+        sql = re.sub(
+            r"(\bMODIFY\s+(?:COLUMN\s+)?[`\w]+\s+(?:TEXT|MEDIUMTEXT|LONGTEXT)(?:\s+NOT\s+NULL)?\s+DEFAULT\s+)'((?:[^'\\]|\\.)*)'",
+            lambda mm: f"{mm.group(1)}('{mm.group(2)}')", sql, flags=re.I)
     # MySQL 1093：DELETE/UPDATE 目标表不能出现在子查询的 FROM 中 → 用派生表包装
     # 模式：DELETE FROM <tbl> WHERE ... NOT IN (SELECT ... FROM <tbl> ...)
     m = re.match(r"^\s*DELETE\s+FROM\s+([`\"\w]+)\b([\s\S]*)$", sql, re.I)

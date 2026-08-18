@@ -62,6 +62,20 @@ def test_bare_engine_name_resolves_to_local_direct():
     _clean()
 
 
+def test_bare_engine_name_queue_remote_resolves_to_worker(monkeypatch):
+    """E07：queue_remote 强制模式下裸名 'opencode' → 远端 worker(901)，不得落到本机直连(902)
+
+    黑洞回归（chat-task-blackhole-local-direct-2026-08.md）：本机直连行 credential_id=0
+    无 claim 方，queue_remote 下解析到它 = 任务永久 queued。
+    """
+    monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
+    _seed_runtimes()
+    set_chat_config(44, backend="opencode")
+    rid = _cfg_runtime_id(44)
+    assert rid == R_WORKER_GLOBAL, f"queue_remote 下裸名应解析到远端 worker，实际 {rid}"
+    _clean()
+
+
 def test_instance_name_resolves_to_personal_worker():
     """E02：实例名 'opencode-worker-44'（scope=user）→ 保存到个人 worker(903)"""
     _seed_runtimes()

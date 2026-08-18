@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user
 from src.config import WORKSPACE_DIR, log
+from src.api.time_utils import normalize_event_time
 from src.session_manager import (
     db, db_lock, get_chat_config, create_conversation, add_message,
 )
@@ -406,5 +407,5 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
         "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
         "title": r[4] or "", "task_description": r[5] or "",
         "conversation_id": r[6] or "", "status": r[7],
-        "completed_reason": r[8] or "", "created_at": r[9], "completed_at": r[10],
+        "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
     } for r in rows]}

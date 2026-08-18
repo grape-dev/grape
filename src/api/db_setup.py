@@ -92,8 +92,11 @@ CREATE TABLE IF NOT EXISTS skill (
     description TEXT DEFAULT '',
     agent_type TEXT DEFAULT '',
     skill_path TEXT DEFAULT '',
+    file_path VARCHAR(512) DEFAULT '',
     scope TEXT DEFAULT 'official',
     owner_id TEXT DEFAULT '',
+    created_by VARCHAR(64) DEFAULT '',
+    updated_by VARCHAR(64) DEFAULT '',
     is_active INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
@@ -271,7 +274,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     user_id           INTEGER DEFAULT 0,
     repo_gitcode_token TEXT DEFAULT '',
     env_extra         TEXT DEFAULT '{}',    -- JSON（含服务端已注入的账号/用户凭据，见 skill-delivery-remote.md）
-    skill_files       TEXT DEFAULT '{}',    -- JSON: {skill_name: {rel_path: content}}，远端交付技能包
+    skill_files       MEDIUMTEXT DEFAULT '{}',    -- JSON: {skill_name: {rel_path: content}}，远端交付技能包（旧格式，过渡期双写）
     server_url        TEXT DEFAULT '',      -- A2A 外呼地址，worker 替换 {{SERVER_URL}}
     issue_session_id  TEXT DEFAULT '',      -- 外键 → issue_agent_session.id（Issue 级执行会话，串行粒度，见 multi-issue-isolation-design.md §3.3）
     project_info_files TEXT DEFAULT '{}',   -- JSON: {rel_path: content}，repo 全局 project-info 随任务交付（§2.4）
@@ -286,6 +289,22 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     started_at        TEXT DEFAULT NULL,
     completed_at      TEXT DEFAULT NULL,
     created_at        TEXT DEFAULT (datetime('now'))
+)
+"""
+
+# ===== 运行日志：task_messages 结构化消息表（实时日志功能，对齐 multica TaskMessage 模型）=====
+_TASK_MESSAGES_DDL = """
+CREATE TABLE IF NOT EXISTS task_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    TEXT NOT NULL,           -- agent_tasks.id
+    seq        INTEGER NOT NULL,        -- worker 侧单调序号（顺序/去重/增量拉取三合一）
+    type       TEXT NOT NULL,           -- step_start|text|reasoning|tool_use|step_finish|error|done
+    tool       TEXT DEFAULT '',         -- tool_use 工具名
+    content    TEXT DEFAULT '',         -- text/reasoning/error 内容
+    input_json TEXT DEFAULT '',         -- tool_use 入参 JSON（服务端已脱敏）
+    output     TEXT DEFAULT '',         -- tool_result 输出（worker 截断 8192）
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(task_id, seq)
 )
 """
 
@@ -403,6 +422,7 @@ _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
+    ("task_messages", _TASK_MESSAGES_DDL),
     ("agent_type_runtime_pool", _AGENT_TYPE_RUNTIME_POOL_DDL),
     ("devops_agent_runtime_binding", _DEVOPS_AGENT_RUNTIME_BINDING_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
@@ -529,6 +549,7 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_event ON agent_tasks(event_seq)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_issue_session ON agent_tasks(issue_session_id)",
         "CREATE INDEX IF NOT EXISTS idx_issue_agent_session_repo ON issue_agent_session(repo_key, agent_type, issue_id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id)",
     ]
     for idx in indexes:
         try:
@@ -690,6 +711,16 @@ def _cleanup_chat_shared_worker_runtime():
     """把 chat 配置中指向共享全局 worker（scope='global' 且 credential_id>0）的 runtime_id
     回落为本机直连（同名 credential_id=0），修复 backend 名解析被共享 worker 劫持
     （chat-agent-backend-resolution-fix.md 方案 C）。幂等，启动时执行。"""
+    # queue_remote 下本机直连行（credential_id=0）无 claim 方 = 黑洞
+    #（chat-task-blackhole-local-direct-2026-08.md）：回落会把用户配置重置为死引擎，
+    # 每次重启覆盖管理员/用户改绑（2026-08-18 实测 sess-cfg-* 全被重置为 1），跳过；
+    # direct 模式保留原防劫持语义。
+    try:
+        from src.runtime.service import get_execution_mode, EXEC_MODE_REMOTE
+        if get_execution_mode() == EXEC_MODE_REMOTE:
+            return
+    except Exception:
+        pass
     try:
         with db_lock:
             c = db.cursor()
@@ -860,6 +891,16 @@ def _migrate_tables():
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
         "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
+        # ===== OBS 技能库（obs-skill-storage-design.md §4）=====
+        # v2.4 去版本化：DROP current_version（本期新增列，无历史依赖；列不存在时 SQLite 忽略报错）
+        "ALTER TABLE skill DROP COLUMN current_version",
+        # v2.5：file_path（真实存储路径 OBS 对象键，VARCHAR(512)）+ created_by/updated_by（审计/删除权限，VARCHAR(64)）
+        "ALTER TABLE skill ADD COLUMN file_path VARCHAR(512) DEFAULT ''",
+        "ALTER TABLE skill ADD COLUMN created_by VARCHAR(64) DEFAULT ''",
+        "ALTER TABLE skill ADD COLUMN updated_by VARCHAR(64) DEFAULT ''",
+        # skill_zip 已移除（本次需求新增、未上线，无包袱直砍——见 obs-skill-storage-design.md §5.7 v3 决策）
+        # MySQL 下 skill_files 升级（SQLite 无长度限制，MODIFY 语句报错被忽略无害）
+        "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT DEFAULT '{}'",
     ]
     for sql in migrations:
         try:

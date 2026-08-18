@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user
+from src.config import log
+from src.api.time_utils import normalize_event_time
 from src.session_manager import db, db_lock
 from src.runtime import service
 
@@ -148,7 +150,22 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
                 rid = c.lastrowid
             registered.append({"id": rid, "name": name})
         db.commit()
-    return {"runtimes": registered, "server_url": _server_url()}
+    # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，
+    # 验证完整链路：网络+签名+读取；空库返回空，worker 声明能力 false）
+    probe_url = ""
+    try:
+        from src.storage import get_storage
+        _storage = get_storage()
+        if _storage is not None:
+            with db_lock:
+                _c = db.cursor()
+                _row = _c.execute(
+                    "SELECT file_path FROM skill WHERE file_path != '' AND is_active=1 LIMIT 1").fetchone()
+            if (_row and _row[0]):
+                probe_url = _storage.temporary_url(_row[0], expires=int(os.environ.get("RUNTIME_PROBE_URL_TTL", "300")))
+    except Exception:
+        pass
+    return {"runtimes": registered, "server_url": _server_url(), "probe_url": probe_url}
 
 
 @router.post("/heartbeat")
@@ -172,11 +189,88 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
     return {"status": "ok"}
 
 
+class RuntimeClaimBody(BaseModel):
+    """v3.0：worker 能力动态声明（零落库）——claim 每次携带"""
+    supports_obs_url: bool = False   # 本 worker 支持 OBS 直连（启动探测结果）
+    prefer_fallback: bool = False    # 直连不稳，服务端直接给代拉模式
+
+
+def _attach_skill_obs(task: dict) -> None:
+    """v3.0：任务附 OBS 直连信息（claim 现签 URL——file_path 权威、永远最新）。
+
+    skill_obs_url：预签名 URL（TTL env RUNTIME_SKILL_URL_TTL，默认 1800s）
+    skill_key：对象键（worker 侧可记录/排查用）
+    mode：obs（直连）/ ""（无 OBS——worker 走 skill_files）
+    """
+    try:
+        from src.storage import get_storage
+        _storage = get_storage()
+        if _storage is None:
+            return
+        skill = (task.get("skill") or "").strip()
+        if not skill:
+            return
+        from src.user.db import resolve_skill_id, get_skill_object_key
+        _sid = resolve_skill_id(skill)
+        _okey = get_skill_object_key(_sid) if _sid else ""
+        if not _okey:
+            return
+        ttl = int(os.environ.get("RUNTIME_SKILL_URL_TTL", "1800"))
+        task["skill_key"] = _okey
+        task["skill_obs_url"] = _storage.temporary_url(_okey, expires=ttl)
+        task["mode"] = "obs"
+    except Exception as e:
+        log.warning(f"attach skill_obs failed: {e}")
+
+
 @router.post("/runtimes/{runtime_id}/tasks/claim")
-async def runtime_claim(runtime_id: int, credential_id: int = Depends(_require_credential)):
-    """按 runtime_id 拉取队首任务或 null（确定路由 D3 + 串行槽 D9）。"""
+async def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
+                        credential_id: int = Depends(_require_credential)):
+    """按 runtime_id 拉取队首任务或 null（确定路由 D3 + 串行槽 D9）。
+
+    v3.0：能力声明（supports_obs_url/prefer_fallback）动态携带；
+    任务附 skill_obs_url（claim 现签预签名 URL）——prefer_fallback
+    worker 直接给 mode=server-fetch（跳过 URL 直连尝试）。
+    """
     task = service.claim(runtime_id)
+    if task:
+        if body and body.prefer_fallback:
+            task["mode"] = "server-fetch"   # 直连不稳 → worker 直接代拉
+        else:
+            _attach_skill_obs(task)
     return {"task": task}
+
+
+@router.post("/tasks/{task_id}/skill-zip")
+async def runtime_task_skill_zip(task_id: str, credential_id: int = Depends(_require_credential)):
+    """v3.0 服务端代拉（降级链 ②）：worker URL 直连失败的兜底。
+
+    服务端现查 file_path → get_skill_zip_bytes（自动走 zip_cache：
+    命中零 OBS / miss 拉 OBS 更新缓存）→ base64 返回。
+    """
+    task = service.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
+    skill = (task.get("skill") or "").strip()
+    if not skill:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "task has no skill"})
+    try:
+        from src.user.db import resolve_skill_id, get_skill_object_key
+        from src.storage import get_skill_zip_bytes
+        _sid = resolve_skill_id(skill)
+        _okey = get_skill_object_key(_sid) if _sid else ""
+        if not _okey:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "skill not on OBS"})
+        _zip = get_skill_zip_bytes(_okey)
+        if not _zip:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": "OBS fetch failed"})
+        import base64 as _b64
+        return {"zip_base64": _b64.b64encode(_zip).decode()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"skill-zip fetch failed: {e}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"fetch failed: {e}"})
 
 
 @router.post("/tasks/{task_id}/start")
@@ -298,7 +392,7 @@ async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_u
         return {"tasks": [
             {"id": r[0], "repo_key": r[1], "agent_type": r[2], "skill": r[3],
              "status": r[4], "exit_code": r[5], "result_text": (r[6] or "")[:200],
-             "created_at": r[7], "started_at": r[8], "completed_at": r[9]}
+             "created_at": normalize_event_time(r[7]), "started_at": normalize_event_time(r[8]), "completed_at": normalize_event_time(r[9])}
             for r in c.fetchall()
         ]}
 
@@ -329,7 +423,7 @@ async def list_credential_tasks(cid: int, user: dict = Depends(get_current_user)
         return {"tasks": [
             {"id": r[0], "repo_key": r[1], "agent_type": r[2], "skill": r[3],
              "status": r[4], "exit_code": r[5], "result_text": (r[6] or "")[:200],
-             "created_at": r[7], "started_at": r[8], "completed_at": r[9]}
+             "created_at": normalize_event_time(r[7]), "started_at": normalize_event_time(r[8]), "completed_at": normalize_event_time(r[9])}
             for r in c.fetchall()
         ]}
 

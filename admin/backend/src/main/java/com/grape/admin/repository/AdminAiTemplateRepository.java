@@ -8,5 +8,7 @@ import java.util.List;
 public interface AdminAiTemplateRepository extends JpaRepository<AdminAiTemplate, Long> {
     List<AdminAiTemplate> findByCreatedByAndDeletedOrderByIdDesc(String createdBy, Integer deleted);
     long countByCreatedByAndDeleted(String createdBy, Integer deleted);
-    boolean existsByCreatedByAndTemplateNameAndDeleted(String createdBy, String templateName, Integer deleted);
+    boolean existsByCreatedByAndTemplateNameAndDeleted(String createdBy, String templateName, int deleted);
+
+    boolean existsByCreatedByAndTemplateContentAndDeleted(String createdBy, String templateContent, int deleted);
 }

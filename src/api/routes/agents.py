@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import get_current_user, get_bot_token
 from src.config import log
+from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -122,7 +123,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
                 )
                 vod_conversations = [
                     {"chat_id": r[0], "chat_name": r[1] or "", "runtime_session_id": r[2] or "",
-                     "status": r[3], "last_active_at": r[4] or ""}
+                     "status": r[3], "last_active_at": normalize_event_time(r[4] or "")}
                     for r in c.fetchall()
                 ]
             except Exception:
@@ -152,10 +153,10 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "title": r[2] or r[1], "actor": r[3] or "",
                  "summary": r[4] or r[2] or r[1],
-                 "status": r[5], "created_at": r[6],
+                 "status": r[5], "created_at": normalize_event_time(r[6]),
                  "backend": r[7] or "", "skill": r[8] or "",
                  "exit_code": r[9], "duration": r[10],
-                 "started_at": r[11] or "", "completed_at": r[12] or "",
+                 "started_at": normalize_event_time(r[11] or ""), "completed_at": normalize_event_time(r[12] or ""),
                  "issue_id": r[13] or ""}
                 for r in c.fetchall()
             ]
@@ -365,8 +366,17 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     with _db_lock:
                         _c = _db.cursor()
                         if owner_id:
-                            row = _c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? AND is_active=1 LIMIT 1",
-                                             (body.skill, scope, owner_id)).fetchone()
+                            # 归一化 owner 命中：skill 表 repo/user 级 owner_id 历史上有带/不带
+                            # `gitcode:` 前缀两种写法（现存的既有老数据混存），保存时 repo_key 恒带
+                            # 前缀。归一化 after from_repo_key 后再 IN 匹配，兼容两种，确保仓库级
+                            # skill 的 skill_id 能精确落库（否则 skill_id=0 → 前端回显丢失 scope）。
+                            from src.repo_key import from_repo_key
+                            _owners = list(dict.fromkeys([owner_id, from_repo_key(owner_id)]))
+                            _q = ",".join("?" * len(_owners))
+                            row = _c.execute(
+                                f"SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id IN ({_q}) AND is_active=1 LIMIT 1",
+                                (body.skill, scope, *_owners),
+                            ).fetchone()
                         else:
                             row = _c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
                                              (body.skill, scope)).fetchone()

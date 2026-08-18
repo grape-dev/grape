@@ -5,11 +5,13 @@ from src.config import log
 from .base import AgentBackend
 from .opencode import OpencodeBackend
 from .codearts import CodeArtsBackend
+from .hermes import HermesBackend
 
 
 _BACKENDS = {
     "opencode": OpencodeBackend(),
     "codearts": CodeArtsBackend(),
+    "hermes": HermesBackend(),
 }
 
 
