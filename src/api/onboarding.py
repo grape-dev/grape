@@ -189,7 +189,7 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
            "payload": {"repository": repository, "owner": owner, "onboarding_target": target}}
     try:
         prompt = build_prompt(evt, [], "", [skill], skill_path=os.path.join(SKILLS_DIR, skill, "SKILL.md"),
-                              runtime_id=runtime_id)
+                              runtime_id=runtime_id, agent_type="vod")
     except Exception as e:
         log.warning(f"[Onboarding|repo:{repo_key}] prompt build failed: {e}")
         return

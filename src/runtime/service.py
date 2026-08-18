@@ -296,10 +296,11 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     # project-info 随任务（服务端权威，多 VM 共享，见 multi-issue-isolation-design.md §2.4）
     if project_info_files is None:
         _pif, _pim = load_project_info(repo_key)
-        # 成员上传文档并入 project-info 打包（见 knowledge-board-design.md §2.5）
+        # Agent 专属成员上传文档定向并入（仅当前任务 agent_type，key 相对 project-info 目录，
+        # 物化到 .project-info/agent/{agent_type}/，见 knowledge-board-design.md §六）
         try:
-            from src.api.knowledge import member_files
-            for rel, content in member_files(repo_key).items():
+            from src.api.knowledge import agent_files
+            for rel, content in agent_files(repo_key, agent_type).items():
                 _pif.setdefault(rel, content)
         except Exception:
             pass

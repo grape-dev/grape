@@ -158,14 +158,16 @@ function _renderAgentTab(d) {
       <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${color}">${ico} ${label} · ${entries.length} 条知识</h3>`;
     entries.forEach(k => {
       const preview = (k.content || '').split('\n').filter(l => l.trim()).slice(-2).map(l => l.replace(/^- \[[^\]]*\]\s*/, '')).join(' · ');
+      const scopeLabel = k.scope === 'member_agent' ? '成员上传' : (k.scope === 'issue_agent' ? 'Agent 级' : 'Issue 级');
+      const issueTag = (k.scope !== 'member_agent' && k.issue_num) ? ' · Issue #' + k.issue_num : '';
       html += `<div class="cd skill-card" style="padding:14px;cursor:pointer;margin-bottom:8px" data-name="${label}" onclick="loadKnowledgeContent('${k.path || k.file_path}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:${color}">${ico}</span>
-          <span style="font-size:12px;font-weight:600">${k.scope === 'issue_agent' ? 'Agent 级' : 'Issue 级'}${k.issue_num ? ' · Issue #' + k.issue_num : ''}</span>
-          <span class="tg tg-d" style="margin-left:auto;font-size:9px">${k.scope}</span>
+          <span style="font-size:12px;font-weight:600">${scopeLabel}${issueTag}</span>
+          <span class="tg ${k.scope === 'member_agent' ? 'tg-i' : 'tg-d'}" style="margin-left:auto;font-size:9px">${k.scope === 'member_agent' ? 'member' : k.scope}</span>
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4">${preview ? escapeHtml(preview).substring(0,140) : '(空)'}</div>
-        <div style="font-size:10px;color:var(--t3);margin-top:4px">seq ${k.source_seq || 0} · ${fmtLocalTime(k.created_at).substring(0,16)}</div>
+<div style="font-size:10px;color:var(--t3);margin-top:4px">${k.scope === 'member_agent' ? '成员上传 · 定向该 Agent' : 'seq ' + (k.source_seq || 0) + ' · ' + fmtLocalTime(k.created_at).substring(0,16)}</div>
         <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.path || k.file_path}')">View</button>
       </div>`;
     });

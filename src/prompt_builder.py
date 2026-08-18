@@ -76,10 +76,11 @@ def _build_history_file_guide(repo_key: str, account: str = "", runtime_id: int 
 _PROJECT_INFO_MAX_CHARS = 2500
 
 
-def _build_project_info_section(repo_key: str) -> str:
+def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
     """注入 repo 全局项目知识基线（服务端权威、多 VM 共享，见 multi-issue-isolation-design.md §2.4/§4.2）。
 
     - 内联摘要（截断）+ {{PROJECT_INFO_DIR}} 占位符（worker/本地落地后可用 read tool 读全文）
+    - agent_type 非空 → 追加「本 Agent 专属知识」路径指引（knowledge-board-design.md §六）
     - 无基线 → 明确允许降级分析
     """
     try:
@@ -90,6 +91,8 @@ def _build_project_info_section(repo_key: str) -> str:
     lines = ["\n## 项目知识基线（repo 全局）"]
     if not files:
         lines.append("[无项目知识基线] 允许降级分析：可基于 README 与 GitCode API 获取基础信息，相关结论标注 [degraded]。")
+        if agent_type:
+            lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
         return "\n".join(lines)
     _meta = meta or {}
     if _meta.get("degraded"):
@@ -106,6 +109,8 @@ def _build_project_info_section(repo_key: str) -> str:
         body = content[:_PROJECT_INFO_MAX_CHARS] + ("\n...(已截断)" if truncated else "")
         lines.append(f"### {label}\n{body}")
     lines.append("> 全文副本已落地：{{PROJECT_INFO_DIR}}/project-graph.md 与 {{PROJECT_INFO_DIR}}/project-capabilities.md，可用 read tool 读取全文。")
+    if agent_type:
+        lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
     return "\n".join(lines)
 
 
@@ -273,7 +278,8 @@ def extract_event_number(payload):
     return None
 
 
-def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0):
+def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
+                 agent_type=""):
     number = extract_event_number(evt['payload'])
     repo = evt['repository']
     payload = evt['payload']
@@ -348,7 +354,7 @@ def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_pat
     repo_key = f"{evt['source']}:{evt['repository']}"
     account = evt.get("account") or evt.get("repository", "")
     parts.append(_build_history_file_guide(repo_key, account, runtime_id))
-    parts.append(_build_project_info_section(repo_key))
+    parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else "")))
 
     if skills:
         # 技能路径占位符：worker 替换为随任务下发的物化目录；direct 由 executor 替换为服务端 SKILLS_DIR

@@ -650,7 +650,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         from src.prompt_builder import build_prompt
         evt["_skill_path"] = skill_path
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
-                              skill_path=skill_path, runtime_id=runtime_id)
+                              skill_path=skill_path, runtime_id=runtime_id, agent_type=agent_type)
     except Exception as e:
         log.warning(f"Pipeline enqueue: prompt build failed: {e}")
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
@@ -796,7 +796,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     try:
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
-                              skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id)
+                              skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id, agent_type=agent_type)
         # 直接模式（direct）：project-info 服务端本地可达，替换占位符为权威路径
         try:
             from src.repo_key import split_owner_repo
