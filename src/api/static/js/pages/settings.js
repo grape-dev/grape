@@ -24,8 +24,8 @@ function renderSettings(tab) {
           <div class="srow"><label>Account</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account + ' · 登录时自动填充' : '—'}" disabled style="background:#f1f5f9;font-size:10px"></div>
         </div>
         <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Huawei Cloud</h3>
-          <div class="srow"><label>Access Key</label><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="Access Key">${d.huawei_cloud && d.huawei_cloud.ak_exists ? '<span class="ts" style="color:var(--g);font-size:10px">✓ 已配置</span>' : ''}<button class="bt bt-o bt-s" id="huaweiToggleAk" onclick="toggleHuaweiSecret()" title="显示/隐藏明文" style="padding:2px 8px">👁</button></div>
-          <div class="srow"><label>Secret Key</label><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="Secret Key">${d.huawei_cloud && d.huawei_cloud.sk_exists ? '<span class="ts" style="color:var(--g);font-size:10px">✓ 已配置</span>' : ''}<button class="bt bt-o bt-s" id="huaweiToggleSk" onclick="toggleHuaweiSecret()" title="显示/隐藏明文" style="padding:2px 8px">👁</button></div>
+          <div class="srow"><label>Access Key</label><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="Access Key"><button class="bt bt-o bt-s" id="huaweiToggleAk" onclick="toggleHuaweiSecret()" title="显示/隐藏明文" style="padding:2px 8px">👁</button></div>
+          <div class="srow"><label>Secret Key</label><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="Secret Key"><button class="bt bt-o bt-s" id="huaweiToggleSk" onclick="toggleHuaweiSecret()" title="显示/隐藏明文" style="padding:2px 8px">👁</button></div>
           <p class="tx t2 mt8">Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.</p>
           <button class="bt bt-p mt8" onclick="saveCredentials()">Save</button>
         </div>`;
