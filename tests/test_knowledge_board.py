@@ -289,9 +289,9 @@ class TestInjection:
                            repo_key=_REPO_KEY, agent_type="vod", issue_id="#5")
         from src.runtime import service
         task = service.get_task(tid)
-        # §六：项目级 member 文档不再进 project_info_files（仅 Agent 专属进），仍进 knowledge_files
+        # §6.7：项目级 member 文档全 Agent 共享 → 进 project_info_files（key 相对 project-info 目录），也进 knowledge_files
         pif = json.loads(task["project_info_files"] or "{}")
-        assert not any("环境说明.json" in rel for rel in pif)
+        assert any("环境说明.json" in rel for rel in pif)
         kf = json.loads(task["knowledge_files"] or "{}")
         assert any("环境说明.json" in rel for rel in kf)
 
@@ -361,3 +361,50 @@ class TestAgentScopedUpload:
                "payload": {"issue": {"title": "t", "body": "b"}}, "issue_id": "#5", "_skill_path": ""}
         prompt = build_prompt(evt, [], "", ["qa"], runtime_id=1, agent_type="qa")
         assert "{{PROJECT_INFO_DIR}}/agent/qa/" in prompt
+
+
+class TestProjectScopedShared:
+    """§6.7 方案 A：项目级成员文档全 Agent 共享 + prompt 路径指引。"""
+
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def _seed_member_doc(self, name="规范.md", owner="alice"):
+        from src.config import WORKSPACE_DIR
+        d = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "member", owner)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+            f.write(f"{owner} 上传项目规范")
+
+    def test_enqueue_packs_member_docs_all_agents(self):
+        self._seed_member_doc()
+        from src.runtime.service import enqueue_task
+        from src.runtime import service
+        for at in ("coding", "vod"):
+            tid = enqueue_task(agent_session_id=f"sess-{at}", runtime_id=1, prompt="p",
+                               repo_key=_REPO_KEY, agent_type=at, issue_id="#5")
+            task = service.get_task(tid)
+            pif = json.loads(task["project_info_files"] or "{}")
+            assert any(rel == "member/alice/规范.md" for rel in pif), f"{at} 应含项目级 member 文档: {list(pif)}"
+
+    def test_member_key_is_pi_relative(self):
+        self._seed_member_doc()
+        from src.runtime.service import enqueue_task
+        from src.runtime import service
+        tid = enqueue_task(agent_session_id="sess-m", runtime_id=1, prompt="p",
+                           repo_key=_REPO_KEY, agent_type="coding", issue_id="#5")
+        task = service.get_task(tid)
+        pif = json.loads(task["project_info_files"] or "{}")
+        # key 相对 project-info 目录（member/alice/规范.md），无 WORKSPACE 前缀嵌套
+        assert all(not rel.startswith("org/test/") for rel in pif)
+        assert any(rel.startswith("member/") for rel in pif)
+
+    def test_prompt_tells_member_dir(self):
+        self._seed_member_doc()
+        from src.prompt_builder import _build_project_info_section
+        sec = _build_project_info_section(_REPO_KEY, agent_type="coding")
+        assert "{{PROJECT_INFO_DIR}}/member/" in sec
+        assert "{{PROJECT_INFO_DIR}}/agent/coding/" in sec

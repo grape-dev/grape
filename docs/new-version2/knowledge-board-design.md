@@ -1,8 +1,8 @@
 # Knowledge 看板与维护设计：Sidebar「DevOps Skills」→「Knowledge」+ 新增「Project Knowledge」
 
-> 版本：v2.2（已实施 · 已部署 + Agent 级定向注入方案 + 现状诊断）
+> 版本：v2.3（已实施 · 已部署 + Agent 级定向注入已实施 + 项目级共享方案）
 > 日期：2026-08-17
-> 说明：本方案基于现有代码实现梳理（主看板 `src/api/static/`、后端 `src/api/routes/`、`knowledge.py`、`event_archive.py`、`project_info/builder.py`、`prompt_builder.py`、`runtime/service.py` 等）。目标是：将主看板 Sidebar 的「DevOps Skills」分组更名为「Knowledge」，下挂「DevOps Skills（原 Skills Library，保留不动）」与「Project Knowledge（新增）」两个入口，提供按「项目级维度 / DevOps Agent 维度」组织、展示与维护项目级知识的统一看板。**v2.0 起标注为已实施状态**：P0~P3 已落地并部署生产（`new-version2`，commit `a0e0d4f7` / `f7ea2636`）。**v2.1** 新增「§六 Agent 级成员上传文档定向注入」方案。**v2.2** 补充 §6.6 现状诊断：`project-info/member` 知识当前几乎无效（流水线 Agent 拿不到，`{{KNOWLEDGE_DIR}}` 为死占位符）。
+> 说明：本方案基于现有代码实现梳理（主看板 `src/api/static/`、后端 `src/api/routes/`、`knowledge.py`、`event_archive.py`、`project_info/builder.py`、`prompt_builder.py`、`runtime/service.py` 等）。目标是：将主看板 Sidebar 的「DevOps Skills」分组更名为「Knowledge」，下挂「DevOps Skills（原 Skills Library，保留不动）」与「Project Knowledge（新增）」两个入口，提供按「项目级维度 / DevOps Agent 维度」组织、展示与维护项目级知识的统一看板。**v2.0 起标注为已实施状态**：P0~P3 已落地并部署生产（`new-version2`，commit `a0e0d4f7` / `f7ea2636`）。**v2.1** 新增「§六 Agent 级成员上传文档定向注入」方案。**v2.2** 补充 §6.6 现状诊断。**v2.3** 新增 §6.7 项目级成员文档方案 A（全 Agent 共享 + `{{PROJECT_INFO_DIR}}/member/` 路径指引）；§六 Agent 级定向注入已实施（commit `34d92bd7`）。
 
 ---
 
@@ -551,6 +551,51 @@ coding 任务 enqueue_task(agent_type=coding, issue_id=#5)
 
 **与 §六 方案的关系**：本方案正好一并修复以上缺陷——① 上传按 agent 分目录实现定向注入；② prompt 追加「本 Agent 专属知识：`{{PROJECT_INFO_DIR}}/agent/{agent_type}/`，用 read tool 读取」让 Agent **知道并读取**；③ 打包 key 改相对 project-info 目录修正物化；④ 复用**活**占位符 `{{PROJECT_INFO_DIR}}`（`build_prompt` 已替换）而非死的 `{{KNOWLEDGE_DIR}}`。
 
+### 6.7 项目级成员文档的 Agent 使用（方案 A：全 Agent 共享 + 路径指引，v2.3）
+
+> 背景：§六 已让 **Agent 级**成员文档定向生效；但**项目级**成员文档仍残缺——不进 `project_info_files`、流水线 prompt 无指引，流水线 Agent 完全用不上（见 §6.6）。
+
+**目标**：项目级成员文档 = 仓库通用，**所有 Agent** 都能拿到并知道去哪读，与 §六 的定向 Agent 级形成「全 Agent 共享 + 定向 Agent」两级体系。
+
+**设计：复用 `{{PROJECT_INFO_DIR}}` 活占位符（与 §六 对称）**
+
+```
+成员上传（项目级） → project-info/member/{username}/{name}
+        ↓
+enqueue_task(任意 agent_type)
+  → project_info_files 打包：
+       project-graph.md / project-capabilities.md / .metadata.json   （公共基线）
+     + member/{username}/**  项目级成员文档（所有 Agent 都拿）        ← 新增
+     + agent/{agent_type}/**  该 Agent 专属                           （§六 已有）
+        ↓ worker 物化
+  → cwd/.project-info/member/**  +  .project-info/agent/{agent_type}/**
+        ↓ prompt 注入
+  → _build_project_info_section 追加：
+     "> 项目级成员知识：{{PROJECT_INFO_DIR}}/member/，存在则用 read tool 读取并遵循。"
+     "> 本 Agent 专属知识：{{PROJECT_INFO_DIR}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。"
+```
+
+**改动点（与 §六 对称，集中在 enqueue_task + prompt_builder 两处）：**
+
+| # | 位置 | 改动 |
+|---|---|---|
+| 1 | `runtime/service.py` `enqueue_task` | `project_info_files` 打包时**同时并入 `member_files`**（项目级全 Agent）+ `agent_files`（定向当前 agent）；两者 key 均改**相对 project-info 目录**（`member/{username}/{name}` / `agent/{agent_type}/{name}`），修复物化嵌套 |
+| 2 | `prompt_builder.py` `_build_project_info_section` | 追加项目级成员目录指引 `{{PROJECT_INFO_DIR}}/member/`（与 agent 指引并列） |
+
+**方案对比（为何选 A）：**
+
+| 方案 | 机制 | 全 Agent 可用 | prompt 有指引 | 成本 | 缺点 |
+|---|---|---|---|---|---|
+| **A** | 并入 `project_info_files` 公共目录 + 指引 | ✅ | ✅ 复用活占位符 | 小 | 打包体积略增 |
+| B | 修复 `{{KNOWLEDGE_DIR}}` 死占位符 | ✅ | ✅ | 中 | 两套知识目录并存 |
+| C | 全量内联 prompt | ✅ | ✅ 直接看到 | 小 | token 成本高 |
+| D | 并入共享知识 `read_knowledge` | ✅ | 部分 | 中 | 与 `project-info/knowledge.md` 语义混叠 |
+
+**配套点：**
+- 对话类已走 `_build_knowledge_section` 内联摘要，保持不变；
+- 看板/删除沿用现有 `_member_docs` / `delete_knowledge`（member 前缀）；
+- 注入优先级保持 project 级知识 < Agent 专属（越具体越优先）。
+
 ---
 
 ## 七、实施步骤（建议顺序）
@@ -566,7 +611,8 @@ coding 任务 enqueue_task(agent_type=coding, issue_id=#5)
 | 修复 | `builder.py` `_ensure_analysis_worktree` 主动 `ensure_repo_base`（§5.2） | ✅ 已实施 |
 | 修复 | §5.5 View 加载失败路径语义统一 | ✅ 已实施（commit `386cc906`，已合入 main） |
 | 待办 | §5.4 首跑时序竞态（prompt 构建等待刷新） | ⏳ 待评估 |
-| 待办 | §六 Agent 级成员上传文档定向注入（落盘 `project-info/agent/{agent_type}/` + prompt 告知路径） | ⏳ 待实施 |
+| 实施 | §六 Agent 级成员上传文档定向注入（落盘 `project-info/agent/{agent_type}/` + prompt 告知路径） | ✅ 已实施（commit `34d92bd7`，全量 1116 passed） |
+| 待办 | §6.7 项目级成员文档方案 A（并入 `project_info_files` `member/` + prompt 告知 `{{PROJECT_INFO_DIR}}/member/`） | ⏳ 待实施 |
 | 可选 | Admin 后台延伸：admin 菜单加「项目知识」入口 + Java `KnowledgeController`（复用 `SkillController` 模式） | 不阻塞主看板 |
 
 ---
@@ -605,6 +651,9 @@ API 级测试，复用 `tests/test_event_conversation.py` 的 TestClient 模式�
 | | `test_enqueue_only_packs_own_agent_dir` | 种 `project-info/agent/vod/x.md` + `agent/coding/y.md`，`enqueue_task(agent_type=coding)` → `project_info_files` 只含 `agent/coding/`，不含 `agent/vod/` |
 | | `test_prompt_tells_agent_dir` | `_build_project_info_section(repo_key, agent_type='coding')` 输出含 `{{PROJECT_INFO_DIR}}/agent/coding/` 指引 |
 | | `test_project_info_key_is_pi_relative` | 打包 key 为相对 project-info 目录（`agent/coding/y.md`），无 WORKSPACE 前缀嵌套 |
+| **TestProjectScopedShared**（§6.7 方案 A） | `test_enqueue_packs_member_docs_all_agents` | 种 `project-info/member/alice/规范.md`，`enqueue_task(agent_type=coding/vod)` → `project_info_files` 均含 `member/alice/规范.md` |
+| | `test_member_key_is_pi_relative` | 项目级打包 key 为相对 project-info 目录（`member/alice/规范.md`），无 WORKSPACE 前缀嵌套 |
+| | `test_prompt_tells_member_dir` | `_build_project_info_section(repo_key, agent_type='coding')` 输出含 `{{PROJECT_INFO_DIR}}/member/` 指引 |
 
 ### 8.2 回归保护（不改现有测试，仅全量跑）
 

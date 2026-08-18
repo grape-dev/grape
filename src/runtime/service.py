@@ -296,6 +296,14 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     # project-info 随任务（服务端权威，多 VM 共享，见 multi-issue-isolation-design.md §2.4）
     if project_info_files is None:
         _pif, _pim = load_project_info(repo_key)
+        # 项目级成员上传文档（全 Agent 共享，key 相对 project-info 目录，物化到 .project-info/member/，
+        # 见 knowledge-board-design.md §6.7 方案 A）
+        try:
+            from src.api.knowledge import member_files_pi
+            for rel, content in member_files_pi(repo_key).items():
+                _pif.setdefault(rel, content)
+        except Exception:
+            pass
         # Agent 专属成员上传文档定向并入（仅当前任务 agent_type，key 相对 project-info 目录，
         # 物化到 .project-info/agent/{agent_type}/，见 knowledge-board-design.md §六）
         try:

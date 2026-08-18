@@ -92,6 +92,7 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
     if not files:
         lines.append("[无项目知识基线] 允许降级分析：可基于 README 与 GitCode API 获取基础信息，相关结论标注 [degraded]。")
         if agent_type:
+            lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
             lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
         return "\n".join(lines)
     _meta = meta or {}
@@ -110,6 +111,7 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
         lines.append(f"### {label}\n{body}")
     lines.append("> 全文副本已落地：{{PROJECT_INFO_DIR}}/project-graph.md 与 {{PROJECT_INFO_DIR}}/project-capabilities.md，可用 read tool 读取全文。")
     if agent_type:
+        lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
         lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
     return "\n".join(lines)
 
