@@ -2,10 +2,12 @@ package com.grape.admin.service;
 
 import com.grape.admin.entity.readonly.ManagedRepoRo;
 import com.grape.admin.repository.readonly.ManagedRepoRoRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -22,6 +24,7 @@ public class RepoService {
 
     private final ManagedRepoRoRepository repoRepository;
     private final JdbcTemplate jdbcTemplate;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public RepoService(ManagedRepoRoRepository repoRepository, @Qualifier("grapeJdbcTemplate") JdbcTemplate jdbcTemplate) {
         this.repoRepository = repoRepository;
@@ -64,6 +67,77 @@ public class RepoService {
         result.put("totalPages", totalPages);
         result.put("sceneStats", sceneStats);
         return result;
+    }
+
+    /**
+     * 仓库事件时序：按 issue 分组（组内按时间排序），用于 A2A 流程时序图。
+     */
+    public Map<String, Object> timeline(String repoKey) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("repoKey", repoKey);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload "
+                        + "FROM events WHERE repo_key = ? AND issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at", repoKey);
+        Map<String, List<Map<String, Object>>> group = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String issueId = (String) row.get("issue_id");
+            group.computeIfAbsent(issueId, k -> new ArrayList<>()).add(row);
+        }
+        List<Map<String, Object>> issues = new ArrayList<>();
+        for (Map.Entry<String, List<Map<String, Object>>> e : group.entrySet()) {
+            Map<String, Object> g = new LinkedHashMap<>();
+            g.put("issueId", e.getKey());
+            List<Map<String, Object>> evs = e.getValue();
+            // 取第一个非空标题（从 payload 解析）
+            String title = null;
+            for (Map<String, Object> ev : evs) {
+                title = issueTitleFromPayload(ev);
+                if (title != null && !title.isBlank()) break;
+            }
+            g.put("title", title);
+            g.put("eventCount", evs.size());
+            g.put("firstAt", evs.get(0).get("created_at"));
+            g.put("lastAt", evs.get(evs.size() - 1).get("created_at"));
+            // 精简事件字段
+            List<Map<String, Object>> slim = new ArrayList<>();
+            for (Map<String, Object> ev : evs) {
+                Map<String, Object> s = new LinkedHashMap<>();
+                s.put("seq", ev.get("seq"));
+                s.put("eventType", ev.get("event_type"));
+                s.put("agentType", ev.get("agent_type"));
+                s.put("skill", ev.get("skill"));
+                s.put("status", ev.get("status"));
+                s.put("duration", ev.get("duration"));
+                s.put("createdAt", ev.get("created_at"));
+                s.put("actor", ev.get("actor"));
+                slim.add(s);
+            }
+            g.put("events", slim);
+            issues.add(g);
+        }
+        result.put("issues", issues);
+        return result;
+    }
+
+    /** 从 payload JSON 提取 issue 标题（GitCode webhook 格式：object_attributes.title）。 */
+    private String issueTitleFromPayload(Map<String, Object> row) {
+        try {
+            Object payload = row.get("payload");
+            if (payload == null || !(payload instanceof String) || ((String) payload).isBlank()) return null;
+            Map<String, Object> attrs = objectMapper.readValue((String) payload, Map.class);
+            // 尝试多种字段源
+            if (attrs.containsKey("object_attributes")) {
+                Map<String, Object> oa = (Map<String, Object>) attrs.get("object_attributes");
+                if (oa.containsKey("title")) return (String) oa.get("title");
+            }
+            if (attrs.containsKey("issue")) {
+                Map<String, Object> iss = (Map<String, Object>) attrs.get("issue");
+                if (iss.containsKey("title")) return (String) iss.get("title");
+            }
+            return null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private Map<String, Map<String, Object>> loadEventStats() {

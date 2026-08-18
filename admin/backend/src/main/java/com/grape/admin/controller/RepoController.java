@@ -21,6 +21,11 @@ public class RepoController {
         this.repoService = repoService;
     }
 
+    @GetMapping("/timeline")
+    public Map<String, Object> timeline(@RequestParam String repoKey) {
+        return repoService.timeline(repoKey);
+    }
+
     @GetMapping
     public Map<String, Object> list(@RequestParam(required = false) String keyword,
                                     @RequestParam(required = false) String scene,

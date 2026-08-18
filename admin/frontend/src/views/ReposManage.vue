@@ -41,7 +41,7 @@
               <td>{{ r.botUsername || '—' }}</td>
               <td class="t3">{{ r.createdAt || '—' }}</td>
               <td>
-                <span :class="['status-tag', activityClass(r)]" :title="activityTitle(r)">
+                <span :class="['status-tag', activityClass(r), 'act-tag']" :title="activityTitle(r)" @click="openTimeline(r)">
                   {{ r.eventCount || 0 }} 个事件<template v-if="r.eventCount"> · 失败率 {{ failRate(r) }}%</template>
                 </span>
               </td>
@@ -71,7 +71,7 @@
             <div><span class="t3" style="display:inline-block;min-width:60px">注册时间</span> {{ r.createdAt || '—' }}</div>
             <div>
               <span class="t3" style="display:inline-block;min-width:60px">活跃度</span>
-              <span :class="['status-tag', activityClass(r)]" :title="activityTitle(r)">
+              <span :class="['status-tag', activityClass(r), 'act-tag']" :title="activityTitle(r)" @click="openTimeline(r)">
                 {{ r.eventCount || 0 }} 个事件<template v-if="r.eventCount"> · 失败率 {{ failRate(r) }}%</template>
               </span>
             </div>
@@ -94,11 +94,40 @@
       </div>
     </div>
   </div>
+
+  <!-- 时序弹窗（对齐全局 modal 样式：不透明白卡片） -->
+  <div v-if="timelineRepo" class="modal-overlay" @click.self="closeTimeline">
+    <div class="modal-dialog" style="width:960px;max-width:94vw;max-height:86vh;display:flex;flex-direction:column">
+      <div class="modal-header">
+        <span class="modal-icon">📈</span>
+        <span class="modal-title">仓库「{{ timelineRepo.repoName || timelineRepo.repoKey }}」A2A 时序</span>
+        <button class="btn" style="margin-left:auto;padding:2px 10px" @click="closeTimeline">✕</button>
+      </div>
+      <div class="modal-body" style="overflow-y:auto;flex:1;margin-bottom:16px">
+        <div v-if="timelineLoading" class="t2" style="padding:30px;text-align:center">加载中...</div>
+        <div v-else-if="!timelineIssues.length" class="t2" style="padding:30px;text-align:center">该仓库暂无 issue 事件记录</div>
+        <div v-for="iss in timelineIssues" :key="iss.issueId" class="tl-row">
+          <div class="tl-head" style="cursor:pointer" @click="toggleIssue(iss)">
+            <span class="tl-toggle">{{ expandedIssues.has(iss.issueId) ? '▾' : '▸' }}</span>
+            <code class="tl-issue">{{ iss.issueId }}</code>
+            <span class="t3 tl-title">{{ iss.title || '（无标题）' }}</span>
+            <span class="t3" style="margin-left:auto">{{ iss.events.length }} 个事件</span>
+          </div>
+          <div v-if="expandedIssues.has(iss.issueId)" class="tl-mmd" :data-iid="iss.issueId"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" @click="closeTimeline">关闭</button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, nextTick } from 'vue'
 import http from '../api'
+
+// mermaid 动态懒加载：仅打开时序弹窗渲染时才 import，页面冷启动不加载，避免影响整页
 
 const repos = ref([])
 const sceneStats = ref({})
@@ -112,6 +141,110 @@ const scene = ref('')
 const view = ref('card')
 const activeTab = { background: 'var(--primary)', color: '#fff', borderColor: 'var(--primary)' }
 
+// ===== 时序弹窗 =====
+const timelineRepo = ref(null)
+const timelineIssues = ref([])
+const timelineLoading = ref(false)
+const expandedIssues = ref(new Set())
+
+function toggleIssue(iss) {
+  const s = new Set(expandedIssues.value)
+  if (s.has(iss.issueId)) s.delete(iss.issueId); else s.add(iss.issueId)
+  expandedIssues.value = s
+  if (s.has(iss.issueId)) renderAllMermaid()
+}
+
+async function openTimeline(r) {
+  if (!r.eventCount) { alert('该仓库暂无事件记录'); return }
+  timelineRepo.value = r
+  timelineIssues.value = []
+  expandedIssues.value = new Set()
+  timelineLoading.value = true
+  try {
+    const { data } = await http.get('/repos/timeline', { params: { repoKey: r.repoKey } })
+    timelineIssues.value = data.issues || []
+    renderAllMermaid()
+  } catch (err) {
+    alert(err.response?.data?.message || '时序加载失败')
+  } finally {
+    timelineLoading.value = false
+  }
+}
+function closeTimeline() { timelineRepo.value = null; timelineIssues.value = []; expandedIssues.value = new Set() }
+
+// ===== mermaid 时序图（懒加载引擎） =====
+let mermaidEngine = null
+async function getMermaid() {
+  if (!mermaidEngine) {
+    const mod = await import('mermaid')
+    mermaidEngine = mod.default
+    mermaidEngine.initialize({
+      startOnLoad: false, securityLevel: 'loose', theme: 'base',
+      fontFamily: 'inherit',
+      sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 40, noteMargin: 10, boxMargin: 8 }
+    })
+  }
+  return mermaidEngine
+}
+
+function mermaidId(a) { return (a || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_') }
+
+function agentsOf(iss) {
+  const seen = []
+  for (const ev of iss.events) { const a = ev.agentType || '—'; if (!seen.includes(a)) seen.push(a) }
+  return seen
+}
+
+function actionText(t) {
+  if (t === 'a2a_event') return 'A2A 交办'
+  return {
+    issue_opened: 'issue 打开', issue_comment: '评论', issue_updated: 'issue 更新',
+    pull_request_opened: 'PR 打开', note_hook_pr: 'PR 评论', issue_closed: 'issue 关闭', push: '推送'
+  }[t] || t
+}
+
+function toMermaid(iss) {
+  const agents = agentsOf(iss)
+  const lines = ['sequenceDiagram', 'autonumber']
+  for (const a of agents) lines.push(`    participant ${mermaidId(a)} as ${a}`)
+  let prev = null
+  for (const ev of iss.events) {
+    const a = mermaidId(ev.agentType || '—')
+    const t = ev.createdAt ? ev.createdAt.slice(11) : ''
+    const label = t ? `${t} ${actionText(ev.eventType)}` : actionText(ev.eventType)
+    if (prev && a !== prev) lines.push(`    ${prev}->>${a}: ${label}`)
+    lines.push(`    ${a}->>${a}: ${label}`)
+    prev = a
+  }
+  return lines.join('\n')
+}
+
+async function renderAllMermaid() {
+  await nextTick()
+  const boxes = document.querySelectorAll('.tl-mmd')
+  if (!boxes.length) return
+  let mmd
+  try {
+    mmd = await getMermaid()
+  } catch (err) {
+    for (const box of boxes) box.innerHTML = '<span class="t3">时序引擎加载失败：' + (err.message || err) + '</span>'
+    return
+  }
+  for (const box of boxes) {
+    const iss = timelineIssues.value.find(i => i.issueId === box.getAttribute('data-iid'))
+    if (!iss || box.dataset.rendered) continue
+    box.dataset.rendered = '1'
+    box.innerHTML = '<span class="t3">渲染中…</span>'
+    const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
+    try {
+      const { svg } = await mmd.render(uid, toMermaid(iss))
+      box.innerHTML = svg
+    } catch (err) {
+      box.innerHTML = '<span class="t3">时序渲染失败：' + (err.message || err) + '</span>'
+    }
+  }
+}
+
 async function load() {
   const { data } = await http.get('/repos', { params: { keyword: keyword.value, scene: scene.value, page: page.value, size: size.value } })
   repos.value = data.content
@@ -120,20 +253,12 @@ async function load() {
   totalPages.value = data.totalPages
 }
 function reset() { keyword.value = ''; scene.value = ''; page.value = 0; load() }
-function setScene(s) {
-  scene.value = s
-  page.value = 0
-  load()
-}
+function setScene(s) { scene.value = s; page.value = 0; load() }
 
 const SCENE_HINTS = {
-  default: '默认开发场景',
-  main: '主场景',
-  quick: '快速迭代场景',
-  stable: '稳定发布场景'
+  default: '默认开发场景', main: '主场景', quick: '快速迭代场景', stable: '稳定发布场景'
 }
-
-function sceneHint(scene) { return SCENE_HINTS[scene] || '开发场景（agent-skill-mapping 配置）' }
+function sceneHint(s) { return SCENE_HINTS[s] || '开发场景（agent-skill-mapping 配置）' }
 function repoUrl(r) {
   const full = r.fullName || (r.repoKey || '').replace(/^gitcode:/, '')
   return 'https://gitcode.com/' + full
@@ -199,6 +324,17 @@ onMounted(load)
   text-decoration: none;
 }
 .repo-link:hover { text-decoration: underline; }
+/* 时序弹窗 */
+.act-tag { cursor: pointer; }
+.act-tag:hover { opacity: 0.85; }
+.tl-row { border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.tl-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.tl-toggle { color: #94a3b8; font-size: 12px; flex-shrink: 0; }
+.tl-issue { font-weight: 600; color: var(--primary); }
+.tl-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+/* mermaid 时序图容器 */
+.tl-mmd { overflow-x: auto; padding: 4px 0; }
+.tl-mmd svg { max-width: 100%; height: auto; }
 /* 场景分类徽章行（对齐设备页 dm-stats 风格） */
 .dm-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
 .dm-stat {
