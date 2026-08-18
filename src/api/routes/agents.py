@@ -366,8 +366,17 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     with _db_lock:
                         _c = _db.cursor()
                         if owner_id:
-                            row = _c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? AND is_active=1 LIMIT 1",
-                                             (body.skill, scope, owner_id)).fetchone()
+                            # 归一化 owner 命中：skill 表 repo/user 级 owner_id 历史上有带/不带
+                            # `gitcode:` 前缀两种写法（现存的既有老数据混存），保存时 repo_key 恒带
+                            # 前缀。归一化 after from_repo_key 后再 IN 匹配，兼容两种，确保仓库级
+                            # skill 的 skill_id 能精确落库（否则 skill_id=0 → 前端回显丢失 scope）。
+                            from src.repo_key import from_repo_key
+                            _owners = list(dict.fromkeys([owner_id, from_repo_key(owner_id)]))
+                            _q = ",".join("?" * len(_owners))
+                            row = _c.execute(
+                                f"SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id IN ({_q}) AND is_active=1 LIMIT 1",
+                                (body.skill, scope, *_owners),
+                            ).fetchone()
                         else:
                             row = _c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
                                              (body.skill, scope)).fetchone()
