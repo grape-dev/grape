@@ -23,6 +23,9 @@ async def get_credentials(user: dict = Depends(get_current_user)):
         "huawei_cloud": {
             "ak_exists": bool(acc.get("huawei_cloud_ak")),
             "sk_exists": bool(acc.get("huawei_cloud_sk")),
+            # 真实值回显给本人（管理台鉴权后），前端默认掩码 + 可切换明文
+            "ak": acc.get("huawei_cloud_ak", ""),
+            "sk": acc.get("huawei_cloud_sk", ""),
         },
         "codearts": {
             "ak_exists": bool(acc.get("CODEARTS_CLI_AK")),
