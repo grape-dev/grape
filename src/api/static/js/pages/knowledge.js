@@ -71,7 +71,7 @@ function _renderProjectTab(d) {
   } else {
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     files.forEach(f => {
-      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${f.label}" onclick="app.nav('knowledge');loadKnowledgeContent('${f.name}')">
+      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${f.label}" onclick="loadKnowledgeContent('${f.name}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:var(--a)">${f.label === 'metadata' ? '🗂' : '📄'}</span>
           <span style="font-size:12px;font-weight:600">${f.label}</span>
