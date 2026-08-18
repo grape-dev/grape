@@ -203,20 +203,57 @@ function actionText(t) {
   }[t] || t
 }
 
-function toMermaid(iss) {
+// 按事件生成 mermaid 文本 + 每条消息对应的状态数组（与渲染行的顺序一致）
+function buildSequence(iss) {
   const agents = agentsOf(iss)
   const lines = ['sequenceDiagram', 'autonumber']
   for (const a of agents) lines.push(`    participant ${mermaidId(a)} as ${a}`)
+  const statuses = []
   let prev = null
   for (const ev of iss.events) {
     const a = mermaidId(ev.agentType || '—')
     const t = ev.createdAt ? ev.createdAt.slice(11) : ''
     const label = t ? `${t} ${actionText(ev.eventType)}` : actionText(ev.eventType)
-    if (prev && a !== prev) lines.push(`    ${prev}->>${a}: ${label}`)
+    if (prev && a !== prev) {
+      lines.push(`    ${prev}->>${a}: ${label}`)
+      statuses.push(ev.status)
+    }
     lines.push(`    ${a}->>${a}: ${label}`)
+    statuses.push(ev.status)
     prev = a
   }
-  return lines.join('\n')
+  return { text: lines.join('\n'), statuses }
+}
+
+// 渲染后按状态给序号圆点着色：mermaid 的序号点是共用 marker（黑色），这里为每条消息
+// 克隆独立的彩色 marker 并改写引用，实现成功绿 / 失败红 / 进行中灰
+function applySequenceColors(svg, statuses) {
+  try {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+    const root = doc.documentElement
+    const defs = root.querySelector('defs')
+    if (!defs) return svg
+    const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'pending' ? '#94a3b8' : '#2e9e5b')
+    const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
+    lines.forEach((line, i) => {
+      const color = colorOf(statuses[i])
+      const markerId = `${root.id}-seqnum-${i}`
+      const marker = doc.createElementNS('http://www.w3.org/2000/svg', 'marker')
+      marker.setAttribute('id', markerId)
+      marker.setAttribute('refX', '15'); marker.setAttribute('refY', '15')
+      marker.setAttribute('markerWidth', '60'); marker.setAttribute('markerHeight', '40')
+      marker.setAttribute('orient', 'auto')
+      const circle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle')
+      circle.setAttribute('cx', '15'); circle.setAttribute('cy', '15'); circle.setAttribute('r', '6')
+      circle.setAttribute('fill', colorOf(statuses[i]))
+      marker.appendChild(circle)
+      defs.appendChild(marker)
+      line.setAttribute('marker-start', `url(#${markerId})`)
+    })
+    return new XMLSerializer().serializeToString(doc)
+  } catch (e) {
+    return svg
+  }
 }
 
 async function renderAllMermaid() {
@@ -237,8 +274,9 @@ async function renderAllMermaid() {
     box.innerHTML = '<span class="t3">渲染中…</span>'
     const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
     try {
-      const { svg } = await mmd.render(uid, toMermaid(iss))
-      box.innerHTML = svg
+      const { text, statuses } = buildSequence(iss)
+      const { svg } = await mmd.render(uid, text)
+      box.innerHTML = applySequenceColors(svg, statuses)
     } catch (err) {
       box.innerHTML = '<span class="t3">时序渲染失败：' + (err.message || err) + '</span>'
     }
