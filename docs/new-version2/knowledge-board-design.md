@@ -1,8 +1,8 @@
 # Knowledge 看板与维护设计：Sidebar「DevOps Skills」→「Knowledge」+ 新增「Project Knowledge」
 
-> 版本：v1.4（方案稿）
+> 版本：v2.0（已实施 · 已部署）
 > 日期：2026-08-17
-> 说明：本方案基于现有代码实现梳理（主看板 `src/api/static/`、后端 `src/api/routes/`、`knowledge.py`、`event_archive.py`、`project_info/builder.py`、`prompt_builder.py`、`runtime/service.py` 等）。目标是：将主看板 Sidebar 的「DevOps Skills」分组更名为「Knowledge」，下挂「DevOps Skills（原 Skills Library，保留不动）」与「Project Knowledge（新增）」两个入口，提供按「项目级维度 / DevOps Agent 维度」组织、展示与维护项目级知识的统一看板。本文为方案，不含代码改动。
+> 说明：本方案基于现有代码实现梳理（主看板 `src/api/static/`、后端 `src/api/routes/`、`knowledge.py`、`event_archive.py`、`project_info/builder.py`、`prompt_builder.py`、`runtime/service.py` 等）。目标是：将主看板 Sidebar 的「DevOps Skills」分组更名为「Knowledge」，下挂「DevOps Skills（原 Skills Library，保留不动）」与「Project Knowledge（新增）」两个入口，提供按「项目级维度 / DevOps Agent 维度」组织、展示与维护项目级知识的统一看板。**v2.0 起标注为已实施状态**：P0~P3 已落地并部署生产（`new-version2`，commit `a0e0d4f7` / `f7ea2636`），下文含实施记录与实测发现的问题。
 
 ---
 
@@ -399,10 +399,10 @@
 
 | 工作区 | 含 project-info 的仓库 | 状态 |
 |---|---|---|
-| `/opt/grape-workspaces`（主工作区） | `gcw_7pdiBkYp/hello-calculator`、`Wing-Jason/test_script`（共 2） | 均仅 `.metadata.json`，`degraded:true` |
+| `/opt/grape-workspaces`（主工作区） | 逐步累积（含 `Jason7602/get-together`、`gcw_7pdiBkYp/hello-calculator`、`Wing-Jason/test_script` 等） | `get-together` **degraded=false 完整生成**（19:06:58 触发，19:07:02 regenerated） |
 | `/opt/grape/data/workspaces`（历史遗留） | 19 个仓库 | **9 个完整**（graph + capabilities + metadata），其余仅 metadata |
 
-- 主工作区**新数据确实写这里**（近 3 天仅 2 仓库刷新，且都 degraded）；旧目录近 3 天零写入，是 2026-08-12 工作区改家目录前的历史数据，**从未迁移**。
+- 主工作区**新数据确实写这里**；旧目录是 2026-08-12 工作区改家目录前的历史数据，**从未迁移**。
 - ⚠️ 旧目录里的 9 个完整 project-info 基线（`gitcode-pr-assistant` 等，08-06~08-11 生成）当前**不会**出现在只读 `WORKSPACE_DIR` 的看板/`load_project_info` 里。
 
 ### 5.2 degraded 根因（存在 bug）
@@ -433,18 +433,48 @@ if not os.path.isdir(base):
    - **聚合层兼容旧目录**：`load_project_info` 主工作区无文件时回退旧目录（涉及改动 `runtime/service.py`，需评估）。
 3. 修复 5.2 的 bug，让新仓库能正常生成基线。
 
+### 5.4 首跑时序竞态（已定位，暂未修复）
+
+实测 `Jason7602/get-together`：issue_opened 触发刷新（19:06:58）→ 4 秒后 regenerated（19:07:02，degraded=false，文件齐全），但**同一事件构建的 VOD prompt 仍显示「无项目知识基线」**。
+
+根因：`event_pipeline.py:309` 的 `maybe_refresh_project_info` 是**异步后台线程**（`threading.Thread(...daemon=True)`），与 `run_pipeline` 同步构建 prompt 并发执行；仓库**首次**有 issue 时刷新从零开始（甚至要先 `ensure_repo_base` clone + `codegraph init`），prompt 必然抢在刷新完成前 → 第一次任务的 prompt 无基线，第二次起才有。
+
+> 注意：这是**设计如此**——`skills/vod/SKILL.md` A1/B1 明示「⚠️ 不再自行生成：知识基线由服务端统一维护」，VOD 只消费 prompt 注入的基线，服务端负责生成。问题仅在**首跑时序**，非 VOD 不主动建知识。
+
+### 5.5 已知问题：看板 View 加载失败「文件不存在」（待修复）
+
+现象：`Jason7602/get-together` 基线已生成，点击项目级页签 View 报 `文件不存在: project-graph.md`。
+
+根因：**路径语义在前后端不一致，三类路径三种基准**：
+
+| 来源 | path 语义 | 示例 | content 接口解析结果 |
+|---|---|---|---|
+| project-info `files[].name` | 相对 `project-info/` | `project-graph.md` | `{ws}/owner/repo/project-graph.md` ❌ |
+| 知识沉淀 `file_path` | 相对 `WORKSPACE_DIR`（DB 原文） | `owner/repo/project-info/knowledge.md` | 双重嵌套 ❌ |
+| 成员文档 `path` | 相对仓库根 | `project-info/member/alice/x.md` | ✅ |
+
+而后端 `GET /api/knowledge/content` 的 `_read_file` 只认「相对仓库根」。前两类与之错位 → 404。
+
+修复方向（约 15 行内，不影响注入管线）：
+1. 聚合接口 `project_files[].name` 改为完整相对路径 `project-info/project-graph.md`（与 member_docs 一致）；
+2. 知识沉淀/Agent 条目返回前，把 DB 的 WORKSPACE 相对路径剥掉 `{owner}/{repo}/` 前缀 → 「相对仓库根」；
+3. 前端 `knowledge.js` 统一用修正后的路径调用 `loadKnowledgeContent`。
+
 ---
 
 ## 六、实施步骤（建议顺序）
 
-| 阶段 | 内容 | 说明 |
+| 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | Sidebar 改名 + 新增导航入口（index.html + app.js） | 约 10 分钟，独立可验证 |
-| P1 | 后端聚合路由 `src/api/routes/knowledge.py`（项目级 + Agent 维度查询、知识读取、路径防护、context 接口），`main.py` 挂载 | |
-| P1 | 前端页面 `knowledge.js`（双维度页签、详情查看、加载失败兜底） | |
-| P2 | 成员上传：`POST /api/knowledge` + 前端上传模态框 | 仿 skills 上传 |
-| P2 | 注入补强：`prompt_builder.py` + `runtime/service.py` 并入成员文档 | |
-| P3 | 测试：新增 `tests/test_knowledge_board.py`（聚合/详情/上传/上下文/注入，见七）+ 现有知识回归（`test_event_conversation.py`）+ UI 冒烟（`tests/ui_test_playwright.py`） | |
+| P0 | Sidebar 改名 + 新增导航入口（index.html + app.js） | ✅ 已实施（`a0e0d4f7`，`app.js?v=23`） |
+| P1 | 后端聚合路由 `src/api/routes/knowledge.py`（项目级 + Agent 维度查询、知识读取、路径防护、context 接口），`main.py` 挂载 | ✅ 已实施 |
+| P1 | 前端页面 `knowledge.js`（双维度页签、详情查看、加载失败兜底） | ✅ 已实施 |
+| P2 | 成员上传：`POST /api/knowledge` + 前端上传模态框 | ✅ 已实施 |
+| P2 | 注入补强：`prompt_builder.py` + `runtime/service.py` 并入成员文档 | ✅ 已实施（`member_files` 并入 `knowledge_files` / `project_info_files`） |
+| P3 | 测试：新增 `tests/test_knowledge_board.py`（22 用例）+ builder 修复回归（3 新增） | ✅ 已实施，全量 **1071 passed** |
+| 修复 | `builder.py` `_ensure_analysis_worktree` 主动 `ensure_repo_base`（§5.2） | ✅ 已实施 |
+| 待办 | §5.5 View 加载失败路径语义统一 | ⏳ 待修复 |
+| 待办 | §5.4 首跑时序竞态（prompt 构建等待刷新） | ⏳ 待评估 |
 | 可选 | Admin 后台延伸：admin 菜单加「项目知识」入口 + Java `KnowledgeController`（复用 `SkillController` 模式） | 不阻塞主看板 |
 
 ---
