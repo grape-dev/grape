@@ -173,7 +173,7 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
     """
     import json as _json
     from src.session_manager import db, db_lock
-    from src.runtime.service import requeue_task, get_task, enqueue_task
+    from src.runtime.service import requeue_task, get_task, enqueue_task, update_task_status
     from src.api.event_store import update_event_status
 
     # 1) 幂等：30s 内已重派过则拒绝
@@ -256,6 +256,12 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                     server_url=old.get("server_url") or "",
                     issue_session_id=_sid,
                 )
+                # 取消旧任务（重派创建新任务后，旧任务不应保留 queued/running/dispatched——
+                # 否则 _running_issue_ids 仍会将其计入执行态，或以旧 runtime_id 被重复 claim）
+                try:
+                    update_task_status(task_id, "cancelled")
+                except Exception:
+                    pass
             else:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
         else:

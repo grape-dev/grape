@@ -489,3 +489,54 @@ class TestRedispatchRuntimeZero:
             db.cursor().execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'redis-cred%')")
             db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'redis-cred%'")
             db.commit()
+
+    def test_redispatch_cancels_old_queued_task(self):
+        """重派取消旧 queued 任务：重派创建新任务后，旧任务应置 cancelled——
+        防止 _running_issue_ids 仍将旧任务计为执行态，或以旧 runtime_id 被重复 claim。
+        """
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_tasks WHERE event_seq=? OR repo_key=?", (999902, _REPO_KEY))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, status, result) VALUES (?,?,?,?,?,?,?,?)",
+                      (_REPO_KEY, "issue_comment", "vod", "re2", "#5", "{}", "failed", "x"))
+            seq = c.lastrowid
+            c.execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, knowledge_files, affinity_runtime_id, pool_agent_type) "
+                "VALUES ('t_redispatch_cancel0', 'vod:'||?, 1, ?, '#5', ?, 'vod', 'repo-onboarding', 'p', '/old/vod/issues/5', 'ses_old', 'issue_comment', 'acct', 0, '', '{}', '{}', '', 'iss-redis', '{}', '{}', '{}', 0, '')",
+                (_REPO_KEY, seq, _REPO_KEY))
+            c.execute("INSERT OR IGNORE INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, status) VALUES ('iss-redis',?, 'vod', '#5', '', 'idle')", (_REPO_KEY,))
+            c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'redis-cred%'")
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) VALUES ('hredis','redis-cred','redis-dev','global','tester','active')")
+            _cid = c.lastrowid
+            c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
+                      "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'global', '', 1, 1)", (_cid,))
+            _rid = c.lastrowid
+            from src.repo_key import from_repo_key
+            _repo_norm = from_repo_key(_REPO_KEY)
+            c.execute("DELETE FROM devops_agent_runtime_binding WHERE repo_key=? AND agent_type='vod'", (_repo_norm,))
+            c.execute("INSERT INTO devops_agent_runtime_binding (repo_key, agent_type, runtime_id, priority, enabled, created_at) VALUES (?, 'vod', ?, 50, 1, datetime('now'))", (_repo_norm, _rid))
+            db.commit()
+
+        from src.user.db import set_meta_value
+        set_meta_value(f"redispatch:{seq}", "")
+
+        r = client.post(f"/api/events/{seq}/redispatch", headers=_headers)
+        assert r.status_code == 200, r.text
+        with db_lock:
+            # 旧任务应已取消
+            old = db.cursor().execute("SELECT status FROM agent_tasks WHERE id='t_redispatch_cancel0'").fetchone()
+            assert old and old[0] == "cancelled", f"旧任务应置 cancelled，实际={old}"
+            # 新任务应存在（queued 或 dispatched）
+            tasks = db.cursor().execute(
+                "SELECT id, status FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC", (seq,)).fetchall()
+            assert len(tasks) >= 2, f"应有新旧两个任务，实际={len(tasks)}"
+            new = [t for t in tasks if t[0] != 't_redispatch_cancel0'][0]
+            assert new[1] in ("queued", "dispatched"), f"新任务状态应为 queued/dispatched，实际={new[1]}"
+        # 清理
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE seq=?", (seq,))
+            db.cursor().execute("DELETE FROM agent_tasks WHERE event_seq=?", (seq,))
+            db.cursor().execute("DELETE FROM devops_agent_runtime_binding WHERE repo_key='org/test' AND agent_type='vod'")
+            db.cursor().execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'redis-cred%')")
+            db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'redis-cred%'")
+            db.commit()
