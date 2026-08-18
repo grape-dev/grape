@@ -233,6 +233,12 @@ function applySequenceColors(svg, statuses) {
     const root = doc.documentElement
     const defs = root.querySelector('defs')
     if (!defs) return svg
+    // mermaid 的 actor 生命线固定 y2=2000，图超长时纵线消失——扩展到实际高度
+    const vb = (root.getAttribute('viewBox') || '').trim().split(/\s+/)
+    const svgH = parseFloat(vb[3]) || parseFloat(root.getAttribute('height')) || 0
+    if (svgH > 0) {
+      Array.from(root.querySelectorAll('line.actor-line')).forEach(l => l.setAttribute('y2', String(svgH)))
+    }
     const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'pending' ? '#94a3b8' : '#2e9e5b')
     const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
     lines.forEach((line, i) => {
