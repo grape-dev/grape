@@ -125,7 +125,10 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0) -> 
 
 
 def member_files(repo_key: str) -> dict:
-    """成员上传文档快照：{rel_path: content}（project-info/member/ 下 md/txt/json）。"""
+    """成员上传文档快照：{rel_path: content}（project-info/member/ 下 md/txt/json）。
+
+    rel 相对 WORKSPACE_DIR（与 knowledge_files 交付语义一致，供 worker materialize 到 .knowledge/）。
+    """
     owner, rname = _owner_repo(repo_key)
     base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "member")
     files = {}
@@ -139,6 +142,60 @@ def member_files(repo_key: str) -> dict:
             p = os.path.join(root, n)
             try:
                 rel = os.path.relpath(p, WORKSPACE_DIR).replace("\\", "/")
+                with open(p, encoding="utf-8") as f:
+                    files[rel] = f.read()
+            except Exception:
+                continue
+    return files
+
+
+def member_files_pi(repo_key: str) -> dict:
+    """项目级成员上传文档快照（key 相对 project-info 目录）。
+
+    `member/{username}/{name}`，与 load_project_info / agent_files 的 key 语义一致，
+    供 enqueue_task 并入 project_info_files → worker 物化到 `.project-info/member/`。
+    见 knowledge-board-design.md §6.7（方案 A：项目级全 Agent 共享）。
+    """
+    owner, rname = _owner_repo(repo_key)
+    base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "member")
+    files = {}
+    if not os.path.isdir(base):
+        return files
+    for root, _dirs, names in os.walk(base):
+        for n in sorted(names):
+            ext = os.path.splitext(n)[1].lower()
+            if ext not in (".md", ".txt", ".json"):
+                continue
+            p = os.path.join(root, n)
+            try:
+                rel = os.path.relpath(p, os.path.join(WORKSPACE_DIR, owner, rname, "project-info")).replace("\\", "/")
+                with open(p, encoding="utf-8") as f:
+                    files[rel] = f.read()
+            except Exception:
+                continue
+    return files
+
+
+def agent_files(repo_key: str, agent_type: str = "") -> dict:
+    """Agent 专属成员上传文档快照：{rel_path: content}（project-info/agent/{agent_type}/ 下 md/txt/json）。
+
+    key 相对 project-info 目录（`agent/{agent_type}/{name}`，与 load_project_info 的 files key 语义一致），
+    供 enqueue_task 定向打包到 project_info_files → worker 物化到 `.project-info/agent/{agent_type}/`。
+    见 knowledge-board-design.md §六。
+    """
+    owner, rname = _owner_repo(repo_key)
+    base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "agent", agent_type or "")
+    files = {}
+    if not os.path.isdir(base):
+        return files
+    for root, _dirs, names in os.walk(base):
+        for n in sorted(names):
+            ext = os.path.splitext(n)[1].lower()
+            if ext not in (".md", ".txt", ".json"):
+                continue
+            p = os.path.join(root, n)
+            try:
+                rel = os.path.relpath(p, os.path.join(WORKSPACE_DIR, owner, rname, "project-info")).replace("\\", "/")
                 with open(p, encoding="utf-8") as f:
                     files[rel] = f.read()
             except Exception:

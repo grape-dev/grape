@@ -248,6 +248,90 @@ def _match_repo_subscription(repo_key: str, event_type: str, branch: str) -> str
     return ""
 
 
+def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
+                                 agent_type: str, main_agent: str):
+    """订阅并行分发（event-routing-subscription-design.md §2.2）。
+    为订阅命中的 Agent 创建独立事件并分派任务，不改 issue_state.stage。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        backend = "opencode"
+        runtime_id = 0
+        skill_name = ""
+        skill_id = 0
+        skill_path = ""
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT runtime_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                      (repo_key, agent_type))
+            row = c.fetchone()
+            if row:
+                runtime_id = row[0] or 0
+                if row[2]:
+                    skill_id = row[2]
+                    from src.user.db import get_skill_by_id
+                    _sk = get_skill_by_id(row[2])
+                    if _sk:
+                        skill_name = _sk.get("skill_name") or skill_name
+                        skill_path = _sk.get("skill_path") or skill_name
+                skill_name = skill_name or row[1] or ""
+                if row[0]:
+                    c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
+                    _br = c.fetchone()
+                    if _br and _br[0]:
+                        backend = _br[0]
+        if not skill_name:
+            # 回退默认映射
+            import json as _json
+            _mapping_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
+            if os.path.exists(_mapping_path):
+                with open(_mapping_path, "r", encoding="utf-8") as _f:
+                    _defaults = _json.load(_f)
+                _scene = _defaults.get("scenes", {}).get("default", {})
+                _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
+                skill_name = _mapping.get(agent_type, "")
+            if not skill_name:
+                log.warning(f"Pipeline subscription: no skill for agent={agent_type}, skip extra dispatch")
+                return
+        # Agent 启用检查
+        from src.api.session_store import is_agent_enabled
+        if not is_agent_enabled(repo_key, agent_type):
+            log.info(f"Pipeline subscription: agent={agent_type} disabled, skip extra dispatch")
+            return
+        # 创建事件
+        from src.api.event_store import append_event
+        issue_id = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "") or "#0"
+        seq = append_event(
+            repo_key=repo_key, event_type="a2a_event",
+            title=f"A2A (订阅): {agent_type}", issue_id=issue_id, source="a2a",
+            agent_type=agent_type, actor=evt.get("actor", ""),
+            summary=f"订阅触发: {event_type} → {agent_type}（主路由: {main_agent}）",
+            payload=evt.get("payload", {}), status="running",
+        )
+        log.info(f"Pipeline subscription: event created seq={seq} agent={agent_type}")
+        # 执行分派
+        from src.runtime.engine_select import pick_engine, engine_name
+        from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
+        engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0)
+        if not engine_id:
+            log.info(f"Pipeline subscription: no engine for agent={agent_type}, skip")
+            from src.api.event_store import update_event_status
+            update_event_status(seq, "failed")
+            return
+        _be = engine_name(engine_id) or backend
+        kind = runtime_execution_kind(engine_id)
+        if kind == EXEC_MODE_DIRECT:
+            start_direct_agent(_execute_agent, (
+                repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
+            ), name=f"sub-{agent_type}-{seq}")
+        else:
+            _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
+                                   skill_id, skill_path, engine_id, issue_id)
+        log.info(f"Pipeline subscription: dispatched seq={seq} agent={agent_type} mode={kind}")
+    except Exception as e:
+        log.warning(f"Pipeline subscription dispatch failed: {e}")
+
+
 def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                  repo_key_override: str = "") -> dict:
     """事件处理管道入口：归一化 → 路由 → 存储 → 返回结果"""
@@ -318,16 +402,22 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _default = NON_ISSUE_EVENT_ROUTE.get(event_type, "")
         agent_type = _resolve_issue_stage_agent(repo_key, event_type, evt.get("payload", {}) or {}, _default)
         log.info(f"Pipeline: routing result -> agent_type='{agent_type}'")
+    # 仓库级事件订阅匹配（提前，供 fallback 与双路径共用）：
+    # - 主路由为空 → 订阅兜底（现状）
+    # - 主路由非空且订阅命中不同 Agent → 双路径并行（event-routing-subscription-design.md §2.2）
+    _pr_branch = resolve_pr_target_branch(evt)
+    if _pr_branch and not evt.get("branch"):
+        evt["branch"] = _pr_branch
+    _sub_agent = _match_repo_subscription(repo_key, event_type, _pr_branch)
     if not agent_type:
-        # 仓库级事件订阅兜底（agent-event-subscription-design.md §六）：主路由为空时，
-        # 命中 devops_agent_session.subscribe_events（如 SRE 订阅 PR 合入 + 分支）才触发。
-        _pr_branch = resolve_pr_target_branch(evt)
-        if _pr_branch and not evt.get("branch"):
-            evt["branch"] = _pr_branch  # 回填，供摘要/event 展示（PR 合入目标分支）
-        _sub_agent = _match_repo_subscription(repo_key, event_type, _pr_branch)
+        # 主路由为空 → 订阅兜底
         if _sub_agent:
             agent_type = _sub_agent
-            log.info(f"Pipeline: repo subscription matched -> agent_type='{_sub_agent}'")
+            log.info(f"Pipeline: repo subscription matched (fallback) -> agent_type='{_sub_agent}'")
+    elif _sub_agent and _sub_agent != agent_type:
+        # 双路径并行：主路由 agent 正常处理 + 订阅 Agent 独立分派
+        _dispatch_subscription_agent(repo_key, evt, event_type, _sub_agent, agent_type)
+        log.info(f"Pipeline: subscription double-path -> extra event for '{_sub_agent}' (main='{agent_type}')")
     if not agent_type:
         _reason = "issue_done" if (event_type in ISSUE_EVENT_TYPES or event_type in PR_EVENT_TYPES) else "no_route"
         log.info(f"Pipeline: no route for type={event_type} ({_reason}), skip")
@@ -650,7 +740,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         from src.prompt_builder import build_prompt
         evt["_skill_path"] = skill_path
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
-                              skill_path=skill_path, runtime_id=runtime_id)
+                              skill_path=skill_path, runtime_id=runtime_id, agent_type=agent_type)
     except Exception as e:
         log.warning(f"Pipeline enqueue: prompt build failed: {e}")
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
@@ -796,7 +886,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     try:
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
-                              skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id)
+                              skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id, agent_type=agent_type)
         # 直接模式（direct）：project-info 服务端本地可达，替换占位符为权威路径
         try:
             from src.repo_key import split_owner_repo

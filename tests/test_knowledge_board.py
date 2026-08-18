@@ -79,7 +79,8 @@ class TestKnowledgeList:
         assert d["project"]["files"] == []
         assert d["project"]["knowledge"] == []
         assert d["project"]["member_docs"] == []
-        assert d["agents"] == {}
+        # 无 vod/coding/qa 等 Agent 分组（空仓库：仅可能含空 agent_type 的残留，不做精确 =={} 断言）
+        assert not any(k in ("vod", "coding", "qa", "sre", "issue", "chat") for k in d["agents"])
 
     def test_list_project_dimension(self):
         _write_pi("project-graph.md", "# Project Graph")
@@ -288,7 +289,122 @@ class TestInjection:
                            repo_key=_REPO_KEY, agent_type="vod", issue_id="#5")
         from src.runtime import service
         task = service.get_task(tid)
+        # §6.7：项目级 member 文档全 Agent 共享 → 进 project_info_files（key 相对 project-info 目录），也进 knowledge_files
         pif = json.loads(task["project_info_files"] or "{}")
         assert any("环境说明.json" in rel for rel in pif)
         kf = json.loads(task["knowledge_files"] or "{}")
         assert any("环境说明.json" in rel for rel in kf)
+
+
+class TestAgentScopedUpload:
+    """§六 Agent 级成员上传文档定向注入。"""
+
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def test_upload_agent_looks_agent_dir(self):
+        from src.config import WORKSPACE_DIR
+        files = {"file": ("vod部署规范.md", "VOD 专属知识".encode("utf-8"), "text/markdown")}
+        r = client.post("/api/knowledge", files=files,
+                        data={"repo": _REPO, "scope": "agent", "agent_type": "vod"}, headers=_headers)
+        assert r.status_code == 200, r.text
+        fp = r.json()["file_path"]
+        assert fp == "project-info/agent/vod/vod部署规范.md", fp
+        assert os.path.isfile(os.path.join(WORKSPACE_DIR, "org", "test", fp.replace("/", os.sep)))
+
+    def test_enqueue_only_packs_own_agent_dir(self):
+        from src.config import WORKSPACE_DIR
+        for at, name in (("vod", "v.md"), ("coding", "c.md")):
+            d = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "agent", at)
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                f.write(f"{at} 专属")
+        from src.runtime.service import enqueue_task
+        tid = enqueue_task(agent_session_id="sess-a1", runtime_id=1, prompt="p",
+                           repo_key=_REPO_KEY, agent_type="coding", issue_id="#5")
+        from src.runtime import service
+        task = service.get_task(tid)
+        pif = json.loads(task["project_info_files"] or "{}")
+        # 只含 coding 专属，不含 vod
+        assert any(rel == "agent/coding/c.md" for rel in pif)
+        assert not any(rel.startswith("agent/vod") for rel in pif)
+        # key 相对 project-info 目录（无 owner/repo 前缀，防物化嵌套）
+        assert all(not rel.startswith("org/test/") for rel in pif)
+
+    def test_prompt_tells_agent_dir(self):
+        from src.config import WORKSPACE_DIR
+        d = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "agent", "coding")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "c.md"), "w", encoding="utf-8") as f:
+            f.write("coding 规范")
+        from src.prompt_builder import _build_project_info_section
+        # 有基线：项目级文档存在时也追加 agent 指引
+        _write_pi("project-graph.md", "# Graph")
+        sec = _build_project_info_section(_REPO_KEY, agent_type="coding")
+        assert "{{PROJECT_INFO_DIR}}/agent/coding/" in sec
+        # 无基线时也追加
+        _clean()
+        sec2 = _build_project_info_section(_REPO_KEY, agent_type="coding")
+        assert "{{PROJECT_INFO_DIR}}/agent/coding/" in sec2
+
+    def test_build_prompt_includes_agent_dir_guide(self):
+        from src.config import WORKSPACE_DIR
+        d = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "agent", "qa")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "qa规范.md"), "w", encoding="utf-8") as f:
+            f.write("QA 验收规则")
+        from src.prompt_builder import build_prompt
+        evt = {"type": "issue_opened", "repository": "org/test", "source": "gitcode",
+               "payload": {"issue": {"title": "t", "body": "b"}}, "issue_id": "#5", "_skill_path": ""}
+        prompt = build_prompt(evt, [], "", ["qa"], runtime_id=1, agent_type="qa")
+        assert "{{PROJECT_INFO_DIR}}/agent/qa/" in prompt
+
+
+class TestProjectScopedShared:
+    """§6.7 方案 A：项目级成员文档全 Agent 共享 + prompt 路径指引。"""
+
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def _seed_member_doc(self, name="规范.md", owner="alice"):
+        from src.config import WORKSPACE_DIR
+        d = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "member", owner)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+            f.write(f"{owner} 上传项目规范")
+
+    def test_enqueue_packs_member_docs_all_agents(self):
+        self._seed_member_doc()
+        from src.runtime.service import enqueue_task
+        from src.runtime import service
+        for at in ("coding", "vod"):
+            tid = enqueue_task(agent_session_id=f"sess-{at}", runtime_id=1, prompt="p",
+                               repo_key=_REPO_KEY, agent_type=at, issue_id="#5")
+            task = service.get_task(tid)
+            pif = json.loads(task["project_info_files"] or "{}")
+            assert any(rel == "member/alice/规范.md" for rel in pif), f"{at} 应含项目级 member 文档: {list(pif)}"
+
+    def test_member_key_is_pi_relative(self):
+        self._seed_member_doc()
+        from src.runtime.service import enqueue_task
+        from src.runtime import service
+        tid = enqueue_task(agent_session_id="sess-m", runtime_id=1, prompt="p",
+                           repo_key=_REPO_KEY, agent_type="coding", issue_id="#5")
+        task = service.get_task(tid)
+        pif = json.loads(task["project_info_files"] or "{}")
+        # key 相对 project-info 目录（member/alice/规范.md），无 WORKSPACE 前缀嵌套
+        assert all(not rel.startswith("org/test/") for rel in pif)
+        assert any(rel.startswith("member/") for rel in pif)
+
+    def test_prompt_tells_member_dir(self):
+        self._seed_member_doc()
+        from src.prompt_builder import _build_project_info_section
+        sec = _build_project_info_section(_REPO_KEY, agent_type="coding")
+        assert "{{PROJECT_INFO_DIR}}/member/" in sec
+        assert "{{PROJECT_INFO_DIR}}/agent/coding/" in sec

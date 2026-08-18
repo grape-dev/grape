@@ -14,6 +14,41 @@ _BACKENDS = {
     "hermes": HermesBackend(),
 }
 
+# 运行中的 agent 子进程注册表：供服务停机时统一终止，避免 uvicorn 优雅停机
+# 等待 executor（opencode 子进程）超时被 systemd SIGKILL（grape-main timeout 重启根因，2026-08-18）。
+import threading as _threading
+_active_procs: set[subprocess.Popen] = set()
+_active_procs_lock = _threading.Lock()
+
+
+def _track_proc(proc: subprocess.Popen):
+    with _active_procs_lock:
+        _active_procs.add(proc)
+
+
+def _untrack_proc(proc: subprocess.Popen):
+    with _active_procs_lock:
+        _active_procs.discard(proc)
+
+
+def terminate_active_agents(grace_seconds: int = 5):
+    """服务停机时终止所有运行中的 agent 子进程（opencode 等）。
+
+    子进程被杀 → stdout 管道 EOF → executor 线程的 reader/主循环 break → 线程结束，
+    uvicorn `shutdown_default_executor()` 不再等待 → 服务快速退出，避免 stop-sigterm 超时。
+    """
+    with _active_procs_lock:
+        procs = list(_active_procs)
+        _active_procs.clear()
+    for proc in procs:
+        try:
+            _terminate_proc(proc, "shutdown")
+        except Exception:
+            pass
+    if procs:
+        log.info(f"terminate_active_agents: terminated {len(procs)} running agent subprocess(es)")
+
+
 
 def register_backend(name: str, backend: AgentBackend):
     """注册第三方 Agent 后端（插件接口，~20 行代码即可接入新引擎）"""
@@ -182,6 +217,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=cwd, env=env, bufsize=0, **_popen_kwargs
         )
+        _track_proc(proc)
         if backend.prompt_via_stdin:
             proc.stdin.write(prompt.encode("utf-8"))
             proc.stdin.close()
@@ -326,6 +362,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         "errors": error_events + ([f"no output for {max_exec_seconds}s, killed"] if _grace_tail.strip() == "" else []),
                         "stderr": "",
                     })
+                    _untrack_proc(proc)
                     return
                 time.sleep(0.1)
 
@@ -335,6 +372,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             log.warning(f"{label}{backend.name} did not exit after stdout EOF, terminating")
             _terminate_proc(proc, f"{label}{backend.name}")
             _reader_thread.join(timeout=5)
+            _untrack_proc(proc)
             yield ("done", {
                 "exit_code": -1, "text": "", "oc_session_id": new_session_id,
                 "errors": [f"{backend.name} timed out"], "stderr": ""
@@ -366,6 +404,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             log.warning(f"{label}{backend.name} stderr read err: {e}")
 
         log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={stderr_output[:120]!r}")
+        _untrack_proc(proc)
 
         yield ("done", {
             "exit_code": proc.returncode, "text": _redact(full_text, _tokens),
