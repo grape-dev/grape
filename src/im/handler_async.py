@@ -453,7 +453,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                     if username and user_row:
                         acc = user_db.get_user_account(username) or {}
                         nickname = acc.get("nickname", "") or ""
-                        existing = get_feishu_open_id(username)
+                        existing = get_feishu_open_id(username, app_id=ctx.app_id)
                         if existing:
                             # 已绑定，无需处理
                             pass
@@ -628,6 +628,12 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         sender_id = parsed.get('sender_id', '')
         sender_name = await api.get_user_name(ctx, sender_id) if sender_id else ""
         open_id = parsed.get('sender_open_id', '')
+        # 群聊 sender_id 为空 → 用 open_id 直接查飞书昵称兜底（feishu-app-scoped-openid-fix.md）
+        if not sender_name and open_id:
+            try:
+                sender_name = await api.get_user_name(ctx, open_id, user_id_type="open_id") or ""
+            except Exception:
+                pass
         user_info = f"User: {sender_name or sender_id} (ID: {sender_id})"
         if open_id:
             user_info += f"\nFeishu open_id: {open_id}\nTo @mention user, use: <at id={open_id}></at>"

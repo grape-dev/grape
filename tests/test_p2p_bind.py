@@ -131,6 +131,11 @@ def test_already_bound_no_requery():
     from src.session_manager import set_feishu_open_id
     _seed_user_and_bot("p2puser5", "cli_p2p5", 70005)
     set_feishu_open_id("", "p2puser5", "ou_existing")
+    # 补写 app_id（feishu-app-scoped-openid-fix：get_feishu_open_id 按 app_id 过滤）
+    from src.session_manager import db, db_lock
+    with db_lock:
+        db.cursor().execute("UPDATE unified_user_mapping SET app_id='cli_p2p5' WHERE gitcode_user='p2puser5'")
+        db.commit()
     api = asyncio.run(_send({
         "type": "message", "text": "你好", "chat_id": "oc_x",
         "chat_type": "p2p", "sender_open_id": "ou_existing", "message_id": "m1",

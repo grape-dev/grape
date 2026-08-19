@@ -339,11 +339,17 @@ def get_history_file_list(repo_key: str, account: str = "") -> list[str]:
     return files or []
 
 
-def get_feishu_open_id(gitcode_user):
-    """获取 GitCode 用户名对应的飞书 open_id（按 gitcode_user 全局关联）"""
+def get_feishu_open_id(gitcode_user, app_id=""):
+    """获取 GitCode 用户名对应的飞书 open_id（按 gitcode_user + app_id 过滤，见 feishu-app-scoped-openid-fix.md）。
+
+    app_id 非空 → 仅返回该 App 的 open_id；为空 → 向后兼容（不按 app 过滤）。
+    """
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
+        if app_id:
+            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=? AND app_id=?", (gitcode_user, app_id))
+        else:
+            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
         row = c.fetchone()
         return row[0] if row else None
 
