@@ -626,17 +626,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
     """
     try:
         sender_id = parsed.get('sender_id', '')
-        sender_name = await api.get_user_name(ctx, sender_id) if sender_id else ""
         open_id = parsed.get('sender_open_id', '')
-        # 群聊 sender_id 为空 → 用 open_id 直接查飞书昵称兜底（feishu-app-scoped-openid-fix.md）
-        if not sender_name and open_id:
-            try:
-                sender_name = await api.get_user_name(ctx, open_id, user_id_type="open_id") or ""
-            except Exception:
-                pass
-        user_info = f"User: {sender_name or sender_id} (ID: {sender_id})"
+        user_info = "## 用户基本信息\n"
         if open_id:
-            user_info += f"\nFeishu open_id: {open_id}\nTo @mention user, use: <at id={open_id}></at>"
             try:
                 gitcode_login = None
                 nick_name = ""
@@ -650,17 +642,13 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     nick_name = row[1] or ""
                     gitcode_nickname = row[2] or ""
                 if gitcode_login:
-                    user_info += f"\nGitCode login: {gitcode_login}"
+                    user_info += f"  GitCode login: {gitcode_login}\n"
                     if gitcode_nickname and gitcode_nickname != gitcode_login:
-                        user_info += f"\nGitCode 昵称: {gitcode_nickname}"
+                        user_info += f"  GitCode 昵称: {gitcode_nickname}\n"
                     if nick_name and nick_name != gitcode_login:
-                        user_info += f"\nGitCode nick (use this in cards): {nick_name}"
-                    from src.repo_key import from_repo_key
-                    repository_part = from_repo_key(repo_key).split("/", 1)
-                    if len(repository_part) == 2:
-                        user_info += f"\nTo check pending features: GET /api/v5/repos/{repository_part[0]}/{repository_part[1]}/issues?state=open&assignee={gitcode_login}&labels=feature"
+                        user_info += f"  飞书 昵称：{nick_name}\n"
             except Exception as e:
-                log.warning(f"Failed to resolve GitCode login for {sender_name}: {e}")
+                log.warning(f"Failed to resolve GitCode login: {e}")
 
         skills = ["chat"]
 

@@ -455,7 +455,13 @@ context 是传给下一个 Agent 的接力说明，应包含：
 
 def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "",
                       runtime_id: int = 0) -> str:
-    parts = [f"User asks about {repo_key}: {user_text}"]
+    parts = []
+
+    # Role Definition 放在最前面（见 docs/new-version2/chat-prompt-overview.md §2.1）
+    parts.append(build_chat_role_definition())
+
+    # 项目知识基线
+    parts.append(_build_project_info_section(repo_key, agent_type=skills[0] if skills else "chat"))
     # Chat messages don't have `evt`, so A2A context is not injected here
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
@@ -469,14 +475,19 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
         pass
 
     parts.append(_build_history_file_guide(repo_key, account, runtime_id))
+
+    # 本次用户消息
+    parts.append(f"## 本次用户消息\nUser asks about {repo_key}: {user_text}")
+
+    # 使用技能
     if skills:
-        parts.append(f"Skills: {', '.join(skills)}")
         _sp = f"{{{{SKILL_DIR}}}}/{skills[0]}/SKILL.md"
         parts.append(
+            f"## 使用技能\n"
+            f"Skills: {', '.join(skills)}\n"
             f"Skill 文件：{_sp}\n"
-            f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令（不得跳过读取或凭名称猜测）。"
+            f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令去完成任务（不得跳过读取或凭空猜测）。"
         )
-    parts.append(build_chat_role_definition())
     return "\n".join(parts)
 
 
@@ -516,25 +527,29 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
 
     见 template-onboarding-task-full-chain-design.md §5.7.1。用于任务中心「去对话」会话
     （chat_conversations.conv_type='task'），替代通用 build_chat_prompt。
-    显式注入 `## 任务描述`（tasks 表反查），不依赖历史消息兜底（task-conversation-prompt-align-design.md §3.1）。
     """
     conv = conv or {}
     issue_number = conv.get("issue_number") or 0
-    parts = [f"## 场景: task", f"## 任务 Issue", f"仓库: {repo_key}", f"Issue: #{issue_number}"]
-    # 任务边界（最高优先级，随每轮 prompt 强注入）：澄清+回帖，绝不亲自执行任务。
-    # 见 skills/chat/references/task-handling.md §0 与 coding-worktree-skill-collision.md §4.5。
+    parts = []
+
+    # Role Definition（docs/new-version2/chat-prompt-overview.md §2.2）
+    parts.append(build_chat_role_definition())
+
+    parts.extend([f"## 场景: task", f"## 任务背景", f"仓库: {repo_key}", f"Issue: #{issue_number}"])
+    # 任务边界
     parts.append(
-        "## 任务边界（最高优先级）\n"
+        "### 任务边界\n"
         "本对话的职责是【澄清被分配 Issue 的需求并回帖】，不是实施/部署/写代码。\n"
         "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\n"
         "严禁 clone/部署/起服务/修改文件/执行 git 命令。"
     )
     if conv.get("title"):
         parts.append(f"标题: {conv['title']}")
-    # 显式注入任务描述（结构化，随每轮 prompt 携带，不随历史裁剪）
+    # 任务描述
     task_desc = _get_task_description(conv)
     if task_desc:
-        parts.append(f"\n## 任务描述\n{task_desc}")
+        parts.append(f"\n### 任务描述\n{task_desc}")
+
     try:
         from src.api.event_store import get_issue_summary
         issue_summary = get_issue_summary(repo_key)
@@ -542,18 +557,24 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
             parts.append(f"\n{issue_summary}")
     except Exception:
         pass
+
+    # 项目知识基线
+    parts.append(_build_project_info_section(repo_key, agent_type="chat"))
+
     if history:
         parts.append("\n## 对话历史")
         for m in history[-10:]:
             parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
-    parts.append(f"\n## 用户消息\n{user_text}")
-    parts.append("Skills: chat")
+
+    parts.append(f"\n## 本次用户消息\n{user_text}")
+
     _sp = f"{{{{SKILL_DIR}}}}/chat/SKILL.md"
     parts.append(
+        f"## 使用技能\n"
+        f"Skills: chat\n"
         f"Skill 文件：{_sp}\n"
-        f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令（不得跳过读取或凭名称猜测）。"
+        f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令去完成任务（不得跳过读取或凭空猜测）。"
     )
-    parts.append(build_chat_role_definition())
     return "\n".join(parts)
 
 
@@ -623,7 +644,7 @@ def build_conversation_prompt(evt: dict, user_message: str, thread: list,
 
     knowledge = _build_knowledge_section(evt.get("repo_key", ""), agent_type=agent_type, issue_num=issue_num)
     if knowledge:
-        parts.append(knowledge)
+        parts.append(f"## 共享知识\n{knowledge}")
 
     parts.append(f"## 用户消息\n{user_message}")
     parts.append("请用中文简洁回复；如需沉淀共享知识或流程干预，调用对应端点（POST /api/events/{seq}/knowledge、/flow/reset，带 BOT_GITCODE_TOKEN）。")
