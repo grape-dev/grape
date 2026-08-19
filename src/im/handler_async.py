@@ -859,14 +859,25 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     add_message(conv_id, "agent", output)
                 except Exception as _we:
                     log.warning(f"[Chat:{ctx.name}] write agent message failed: {_we}")
-        elif exit_code != 0 and output:
-            _err = f"❌ 任务执行失败 (exit={exit_code})\n{output[:200]}"
+        elif exit_code != 0:
+            _err = f"❌ 任务执行失败 (exit={exit_code})"
+            if output:
+                _err += f"\n{output[:200]}"
             if reply_id:
                 try:
                     await api.update_message(ctx, reply_id, _err[:2000])
+                    _placeholder_replaced = True
                 except Exception:
                     pass
-        # 无引擎 / 静默失败：占位消息已发，保留占位或由外层 except 兜底
+            if not _placeholder_replaced:
+                await api.reply_card(ctx, msg_id, _err[:2000])
+        elif not output:
+            # 静默完成无输出（非错误也非 SKIP）：删除占位消息
+            if reply_id:
+                try:
+                    await api.update_message(ctx, reply_id, "✅ 处理完成")
+                except Exception:
+                    pass
 
     except Exception as e:
         import traceback
