@@ -94,6 +94,114 @@ def _create_task(user_id: int, assignee: str, repo_key: str, issue_number: int,
         return c.lastrowid
 
 
+def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
+                              title: str = "", description: str = "",
+                              write_context_on_reuse: bool = False) -> str:
+    """为任务查找/复用「Issue #N」对话（任务中心「去对话」入口）。
+
+    - 复用：同用户已有该 Issue 对话 → 补 conv_type/issue_number 标记；
+      write_context_on_reuse=True 时再次写入上下文消息（notify 语义：每次分配都刷上下文）
+    - 新建：create_conversation(conv_type="task") 并写入任务上下文消息。
+    - 失败返回空串（不抛异常，旁路不影响任务建档）。
+    """
+    from src.session_manager import get_user_conversations, create_conversation, update_conversation, add_message
+    conv_id = ""
+    try:
+        convs = get_user_conversations(user_id, repo_key=repo_key, limit=50)
+        for conv in convs:
+            if conv.get("title") == f"Issue #{issue_number}":
+                conv_id = conv["id"]
+                break
+        if conv_id:
+            update_conversation(conv_id, conv_type="task", issue_number=issue_number)
+            if write_context_on_reuse:
+                ctx_msg = _build_task_context_message(title, description, repo_key, issue_number)
+                add_message(conv_id, "agent", ctx_msg)
+        else:
+            conv_id = create_conversation(user_id, repo_key, title=f"Issue #{issue_number}",
+                                          conv_type="task", issue_number=issue_number)
+            try:
+                ctx_msg = _build_task_context_message(title, description, repo_key, issue_number)
+                add_message(conv_id, "agent", ctx_msg)
+            except Exception as e:
+                log.warning(f"Task conversation write context message failed: {e}")
+    except Exception as e:
+        log.warning(f"Task conversation ensure failed: {e}")
+        return ""
+    return conv_id
+
+
+def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
+                      description: str = "", assignee: str = "",
+                      event_type: str = "") -> int | None:
+    """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
+
+    - assignee 优先 → 对应平台 user_id；assignee 为空 → 仓库 owner
+    - assignee/owner 未注册平台（无 unified_user_mapping）→ user_id=0 落库；
+      任务中心 mine 查询 `user_id=? OR user_id=0` 展示（P2 拍板修订：展示，不隐藏）
+    - 幂等：同 repo+issue+assignee 的 active/processing 行复用
+    """
+    from src.repo_key import to_repo_key, split_owner_repo
+    repo_key = to_repo_key(repo_key)
+    try:
+        owner = split_owner_repo(repo_key)[0] or ""
+    except Exception:
+        owner = ""
+    target = assignee or owner or ""
+    user_id = _get_user_id_by_gitcode(target) if target else 0
+    if user_id is None:
+        user_id = 0
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND assignee=? AND status IN ('active','processing') LIMIT 1",
+            (repo_key, issue_number, target)
+        )
+        row = c.fetchone()
+        if row:
+            task_id = row[0]
+            linked = row[1]
+        else:
+            if not title:
+                title = _get_issue_title(repo_key, issue_number)
+            if not description:
+                description = f"{event_type or 'Issue'}：请在任务中心查看并处理。"
+            c.execute(
+                "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status) VALUES (?,?,?,?,?,?,'active')",
+                (user_id, target, repo_key, issue_number, title, description)
+            )
+            db.commit()
+            task_id = c.lastrowid
+            linked = None
+    # 「去对话」配套：user_id>0 且未关联对话时创建/复用 Issue 会话
+    if user_id > 0 and not linked:
+        try:
+            conv_id = _ensure_task_conversation(user_id, repo_key, issue_number, title, description)
+            if conv_id:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("UPDATE tasks SET conversation_id=? WHERE id=?", (conv_id, task_id))
+                    db.commit()
+        except Exception as e:
+            log.warning(f"ensure_issue_task conversation link failed: {e}")
+    return task_id
+
+
+def close_issue_tasks(repo_key: str, issue_number: int) -> int:
+    """webhook 兜底（P5）：Issue closed → 该 issue 所有 active/processing 任务完成。"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+            (repo_key, issue_number)
+        )
+        db.commit()
+        return c.rowcount
+
+
 def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee: str) -> int:
     """换人：将同 issue 其他 assignee 的 active/processing 任务置为 completed（reassigned）"""
     with db_lock:
@@ -268,36 +376,15 @@ async def notify_task(body: TaskNotifyBody, request: Request):
         return {"ok": False, "code": 500, "message": "任务创建失败"}
     log.info(f"Task notify: assignee={body.assignee} repo={body.repo_key} issue=#{body.issue_number} task_id={task_id}")
 
-    # 创建/复用 Web conversation（不带 im_channel_id，Chat Agent 页可见）
-    from src.session_manager import get_user_conversations
-    conv_id = ""
-    try:
-        convs = get_user_conversations(user_id, repo_key=body.repo_key, limit=50)
-        for c in convs:
-            if c.get("title") == f"Issue #{body.issue_number}":
-                conv_id = c["id"]
-                break
-        if not conv_id:
-            conv_id = create_conversation(user_id, body.repo_key, title=f"Issue #{body.issue_number}",
-                                          conv_type="task", issue_number=body.issue_number)
-        else:
-            # 复用存量「Issue #N」会话时补任务标记（conv_type/issue_number）
-            from src.session_manager import update_conversation
-            update_conversation(conv_id, conv_type="task", issue_number=body.issue_number)
+    # 创建/复用 Web conversation（不带 im_channel_id，Chat Agent 页可见）——
+    # 复用 _ensure_task_conversation（与 ensure_issue_task 同源，notify 语义：每次分配重刷上下文）
+    conv_id = _ensure_task_conversation(user_id, body.repo_key, body.issue_number,
+                                        title, body.task_description, write_context_on_reuse=True)
+    if conv_id:
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE tasks SET conversation_id=? WHERE id=?", (conv_id, task_id))
             db.commit()
-        # 立即写入任务上下文消息（不等后台 agent，保证会话非空、去对话可见上下文）
-        # role=agent：任务由 grape_bot 下发，UI 显示在 agent 侧，等待用户答复确认
-        #（见 task-conversation-role-fix.md §3.1）
-        try:
-            ctx_msg = _build_task_context_message(title, body.task_description, body.repo_key, body.issue_number)
-            add_message(conv_id, "agent", ctx_msg)
-        except Exception as e:
-            log.warning(f"Task notify write context message failed: {e}")
-    except Exception as e:
-        log.warning(f"Task notify conversation create failed: {e}")
 
     # 后台执行 chat-agent（立即返回）
     open_id = _get_feishu_open_id(body.assignee)
@@ -386,7 +473,7 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
     from src.repo_key import to_repo_key, from_repo_key
     if repo_key:
         repo_key = to_repo_key(repo_key)
-    clauses = ["user_id=?"]
+    clauses = ["(user_id=? OR user_id=0)"]
     params = [user["id"]]
     if status:
         clauses.append("status=?")

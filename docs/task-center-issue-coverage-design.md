@@ -62,7 +62,7 @@ webhook → issue 事件 → ensure_issue_task(repo_key, issue_number, payload)
 | # | 问题 | 方案 A 默认 | 备选 |
 |---|------|------------|------|
 | P1 | 触发范围 | 所有被托管的仓库的 Issue 事件都建任务 | 仅指定仓库 |
-| P2 | assignee 未注册平台(无 unified_user_mapping) | user_id=0 落库（assignee 保留 login），任务中心 `user_id=? OR (user_id=0 AND repo_key=? 且登录用户为该仓库 owner)`？ | 跳过建行（该 Issue 不进任务中心） |
+| P2 | assignee 未注册平台(无 unified_user_mapping) | user_id=0 落库，`/api/tasks/mine` 查询 `user_id=? OR user_id=0` **展示**（用户拍板：展示不隐藏） | 不建行 |
 | P3 | Issue 无 assignee（opened 未指派） | 建给仓库 owner 的 user_id | 不建，等 agent 分配后再 notify 建 |
 | P4 | 已有「引导/notify」任务并发 | `_create_task` active 去重已防重复 | — |
 | P5 | 关闭 | 沿用 /api/tasks/close（issue agent 当前已调用）；若部分链路没调，可补 webhook issue_closed 兜底自动 close | — |

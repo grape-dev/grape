@@ -1091,13 +1091,17 @@ def get_managed_repos(user_id: int) -> list[dict]:
                 "SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, "
                 "bot_gitcode_token, gitcode_webhook_token, bot_username, created_at, 0, 0 "
                 "FROM managed_repos ORDER BY full_name")
+        rows = c.fetchall()
+        # autocommit=False 下 SELECT 会打开事务，同线程连接后续 SELECT 看到旧快照。
+        # commit 释放事务，确保下次查询看到最新数据（修复 /repo 返回老列表）。
+        db.commit()
         return [{
             "repo_key": r[0], "repo_owner": r[1], "repo_name": r[2],
             "full_name": from_repo_key(r[0]), "webhook_id": r[4],
             "bot_gitcode_token": r[5] or "", "gitcode_webhook_token": r[6] or "",
             "bot_username": r[7] or "", "created_at": r[8],
             "is_join": bool(r[9]), "is_admin": bool(r[10]),
-        } for r in c.fetchall()]
+        } for r in rows]
 
 
 def update_managed_repo_admin(user_id: int, repo_key: str, is_admin: bool) -> bool:

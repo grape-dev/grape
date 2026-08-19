@@ -440,6 +440,41 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             set_issue_stage(repo_key, _rid2, "vod", "vod")
             log.info(f"Pipeline: issue_state init vod for {_rid2}")
 
+    # 3.2 任务中心全覆盖（task-center-issue-coverage-design.md §3-A）：
+    # Issue 事件幂等建档；closed 动作自动完成对应任务（P5 webhook 兜底）。
+    # 旁路：失败仅告警，不阻塞事件处理。
+    try:
+        from src.api.routes.tasks import ensure_issue_task, close_issue_tasks
+        _iid3 = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "") or ""
+        if _iid3:
+            _num3 = str(_iid3).lstrip("#")
+            if _num3.isdigit() and int(_num3) > 0:
+                _p3 = evt.get("payload", {}) or {}
+                _o3 = _p3.get("object_attributes", {}) or {}
+                _act3 = str(_o3.get("action", "") or "").lower()
+                _closed = _act3 in ("close", "closed") or str(_o3.get("state", "") or "").lower() == "closed"
+                if _closed:
+                    _n3 = close_issue_tasks(repo_key, int(_num3))
+                    log.info(f"Pipeline: issue closed -> complete tasks #{_num3} ({_n3} rows)")
+                elif event_type in ISSUE_EVENT_TYPES:
+                    _asg3 = ""
+                    try:
+                        _al3 = _p3.get("assignees") or []
+                        if isinstance(_al3, list) and _al3 and isinstance(_al3[0], dict):
+                            _asg3 = _al3[0].get("username") or _al3[0].get("login") or ""
+                    except Exception:
+                        pass
+                    if not _asg3:
+                        try:
+                            _asg3 = _fetch_issue_assignee(repo_key, _iid3) or ""
+                        except Exception:
+                            pass
+                    _t3 = str(_o3.get("title", "") or "") if isinstance(_o3, dict) else ""
+                    ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3, event_type=event_type)
+                    log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or '(owner)'}")
+    except Exception as _e:
+        log.warning(f"Pipeline: task-center sync failed: {_e}")
+
     # 3.3 Agent 启用检查（阶段路由后的最终 agent）
     from src.api.session_store import is_agent_enabled
     if not is_agent_enabled(repo_key, agent_type):

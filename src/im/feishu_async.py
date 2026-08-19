@@ -699,7 +699,17 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                         hs = frame.headers
                         type_ = _get_header(hs, "type")
                         if type_ == MessageType.PING.value:
-                            pass
+                            # 回 PONG 保活：飞书发应用层 PING，不回 PONG 会被判定死连接，
+                            # 停止推送消息（WS 假死根因 — TCP 未断但消息不再到达）
+                            try:
+                                # 复用原 PING 帧（含 SeqID/LogID/service 等必填字段），
+                                # 将 type header 改为 PONG
+                                for h in frame.headers:
+                                    if h.key == "type":
+                                        h.value = MessageType.PONG.value
+                                await ws.send(frame.SerializeToString())
+                            except Exception as _pe:
+                                log.warning(f"[{ctx.name}] send pong failed: {_pe}")
                         continue
 
                     if ft != FrameType.DATA:

@@ -362,6 +362,15 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             if _rid2:
                 rid = _rid2
                 kind = runtime_execution_kind(rid)
+        # 远端引擎离线/心跳超时 → 同样解析在线远端引擎兜底（与 handler_async 同源修复）
+        if kind != EXEC_MODE_DIRECT:
+            from src.runtime.service import _remote_runtime_ready
+            if not _remote_runtime_ready(rid) and backend_name:
+                from src.session_manager import _resolve_chat_runtime_id
+                _rid3 = _resolve_chat_runtime_id(backend_name) or 0
+                if _rid3 and _remote_runtime_ready(_rid3):
+                    rid = _rid3
+                    kind = runtime_execution_kind(rid)
         if (runtime_credential_id(rid) or 0) == 0:
             _reply = "⚠️ 未配置远端引擎，任务会话需先在 Agent 配置中绑定远端引擎"
             add_message(conv_id, "agent", _reply)

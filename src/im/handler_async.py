@@ -360,13 +360,15 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
         if action == "repo":
             repo = items[idx]
             repo_key = repo["repo_key"] if isinstance(repo, dict) else repo
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
-                      (chat_id, repo_key, "gitcode", str(uid), ctx.app_id))
-            # 绑定即重置会话位置：清掉旧会话指针，下次消息在新仓库下新建会话
-            #（修复 2026-08-16 "群绑定仓库 ≠ 会话所属仓库" 发散 bug）
-            c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
-            db.commit()
+            from src.session_manager import db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
+                          (chat_id, repo_key, "gitcode", str(uid), ctx.app_id))
+                # 绑定即重置会话位置：清掉旧会话指针，下次消息在新仓库下新建会话
+                #（修复 2026-08-16 "群绑定仓库 ≠ 会话所属仓库" 发散 bug）
+                c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
+                db.commit()
             _clear_pending_selection(chat_id)
             await api.reply_card(ctx, msg_id, f"**✅ 已绑定 `{repo_key}`**\n使用 `/chat` 选择会话，或直接开始提问。")
         elif action == "chat":
@@ -726,6 +728,28 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             oc_sid = {"opencode": oc_sid, "cc_sid": cc_sid}.get(backend, "")
             new_oc_session_id = oc_sid
             kind = runtime_execution_kind(_rid)
+            # queue_remote 强制模式下兜底：配置引擎离线/本机直连无 claim 方 → 解析在线远端引擎
+            #（与 web chat.py §353-364 同源；handler_async 缺此兜底致飞书消息卡 queued 黑洞）
+            if kind != EXEC_MODE_DIRECT:
+                from src.runtime.service import runtime_credential_id, _remote_runtime_ready
+                _need_fallback = False
+                _cid = runtime_credential_id(_rid)
+                if (_cid or 0) == 0:
+                    # 本机直连行（credential_id=0）在 queue_remote 下无 claim 方 = 黑洞
+                    _need_fallback = True
+                elif not _remote_runtime_ready(_rid):
+                    # 远端引擎离线/心跳超时/凭据吊销 → 无人 claim = 黑洞
+                    _need_fallback = True
+                if _need_fallback:
+                    _orig_rid = _rid
+                    from src.session_manager import _resolve_chat_runtime_id
+                    _rid2 = _resolve_chat_runtime_id(backend) or 0
+                    if _rid2 and _remote_runtime_ready(_rid2):
+                        _rid = _rid2
+                        kind = runtime_execution_kind(_rid)
+                        log.info(f"[Chat:{ctx.name}] engine fallback: {_orig_rid}->{_rid} (original offline/local-direct)")
+                    else:
+                        log.warning(f"[Chat:{ctx.name}] engine fallback failed: no online remote engine for backend={backend}")
             if kind != EXEC_MODE_DIRECT:
                 # 入队 + 轮询：任务由远端 RuntimeAgent claim 执行（见 multi-runtime-instance-design）
                 import json as _json
