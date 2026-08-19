@@ -280,7 +280,7 @@ def extract_event_number(payload):
     return None
 
 
-def build_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
+def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
                  agent_type=""):
     number = extract_event_number(evt['payload'])
     repo = evt['repository']
@@ -453,7 +453,7 @@ context 是传给下一个 Agent 的接力说明，应包含：
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url())
 
 
-def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "",
+def build_general_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "",
                       runtime_id: int = 0, user_info: str = "") -> str:
     parts = []
 
@@ -620,8 +620,8 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
     return "\n".join(lines)
 
 
-def build_conversation_prompt(evt: dict, user_message: str, thread: list,
-                              agent_type: str = "", issue_num: int = 0) -> str:
+def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
+                               agent_type: str = "", issue_num: int = 0) -> str:
     """Event 对话专用 prompt：对话 skill 指令 + 事件上下文 + 线程历史 + 共享知识。
 
     对话 skill 为元技能（skills/event-dialogue/SKILL.md），约束解释/沉淀/流程控制行为。
@@ -657,3 +657,9 @@ def build_conversation_prompt(evt: dict, user_message: str, thread: list,
     parts.append(f"## 用户消息\n{user_message}")
     parts.append("请用中文简洁回复；如需沉淀共享知识或流程干预，调用对应端点（POST /api/events/{seq}/knowledge、/flow/reset，带 BOT_GITCODE_TOKEN）。")
     return "\n\n".join(parts)
+
+
+# Backward-compat aliases (see docs/new-version2/chat-prompt-overview.md for new names)
+build_chat_prompt = build_general_chat_prompt  # deprecated: use build_general_chat_prompt
+build_prompt = build_devops_agent_prompt        # deprecated: use build_devops_agent_prompt
+build_conversation_prompt = build_event_chat_prompt  # deprecated: use build_event_chat_prompt
