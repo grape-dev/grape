@@ -454,11 +454,15 @@ context 是传给下一个 Agent 的接力说明，应包含：
 
 
 def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "",
-                      runtime_id: int = 0) -> str:
+                      runtime_id: int = 0, user_info: str = "") -> str:
     parts = []
 
-    # Role Definition 放在最前面（见 docs/new-version2/chat-prompt-overview.md §2.1）
+    # Role Definition 放在最前面
     parts.append(build_chat_role_definition())
+
+    # 用户基本信息（飞书侧前置，见 docs/new-version2/chat-prompt-overview.md §2.1）
+    if user_info:
+        parts.append(user_info)
 
     # 项目知识基线
     parts.append(_build_project_info_section(repo_key, agent_type=skills[0] if skills else "chat"))
@@ -522,7 +526,7 @@ def _get_task_description(conv: dict | None) -> str:
 
 
 def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: dict = None,
-                           account: str = "", runtime_id: int = 0) -> str:
+                           account: str = "", runtime_id: int = 0, user_info: str = "") -> str:
     """任务对话独立 prompt：注入 Issue 上下文 + `场景: task`，Agent 直接走任务处理流程。
 
     见 template-onboarding-task-full-chain-design.md §5.7.1。用于任务中心「去对话」会话
@@ -534,6 +538,10 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
 
     # Role Definition（docs/new-version2/chat-prompt-overview.md §2.2）
     parts.append(build_chat_role_definition())
+
+    # 用户基本信息（飞书侧前置）
+    if user_info:
+        parts.append(user_info)
 
     parts.extend([f"## 场景: task", f"## 任务背景", f"仓库: {repo_key}", f"Issue: #{issue_number}"])
     # 任务边界
