@@ -706,9 +706,19 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
 
         await api.add_reaction(ctx, msg_id, "OK")
 
+        # 占位消息（飞书 Chat 进度反馈，见 docs/new-version2/feishu-chat-progress-feedback-design.md）
+        import time as _time
+        _started = _time.time()
+        reply_id = ""
+        try:
+            reply_id = await api.reply_text(ctx, msg_id, "⏳ 正在处理...")
+        except Exception:
+            pass
+
         final_text = ""
         exit_code = 0
         backend = ""
+        new_oc_session_id = ""
         # engine-selection-design.md v2：无引擎（本机直连/远端均未配置）→ 明确不可用，不隐式 opencode
         from src.runtime.engine_select import resolve_local_engine, engine_name
         _rid = chat_runtime_id or (resolve_local_engine() or 0)
@@ -722,9 +732,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             new_oc_session_id = oc_sid
             kind = runtime_execution_kind(_rid)
             if kind != EXEC_MODE_DIRECT:
-                # 入队 + 轮询：任务由远端 RuntimeAgent claim 执行（见 multi-runtime-instance-design）
+                # 入队 + 心跳轮询（统一心跳，direct/queue 同逻辑）
                 import json as _json
-                from src.runtime.service import enqueue_task, wait_task_terminal
+                from src.runtime.service import enqueue_task, get_task
                 runtime_id = _rid
                 if runtime_id:
                     uid = 0
@@ -745,31 +755,71 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         env_extra={"IM_CHAT_ID": chat_id},
                     )
                     log.info(f"[Chat:{ctx.name}] enqueued task={tid} mode={kind}")
-                    task = await wait_task_terminal(tid)
-                    final_text = task.get("result_text") or ""
-                    exit_code = int(task.get("exit_code") or 0)
-                    try:
-                        usage = _json.loads(task.get("usage_json") or "{}") or {}
-                        new_oc_session_id = usage.get("session_id") or oc_sid
-                    except Exception:
-                        new_oc_session_id = oc_sid
-                    log.info(f"[Chat:{ctx.name}] task done: exit={exit_code}, text_len={len(final_text)}")
+                    # 自定义轮询（代替 wait_task_terminal，含心跳 patch）
+                    _deadline = _time.time() + 1800.0
+                    while True:
+                        await asyncio.sleep(3)
+                        task = get_task(tid)
+                        if task and task.get("status") in ("completed", "failed", "cancelled"):
+                            final_text = task.get("result_text") or ""
+                            exit_code = int(task.get("exit_code") or 0)
+                            try:
+                                usage = _json.loads(task.get("usage_json") or "{}") or {}
+                                new_oc_session_id = usage.get("session_id") or oc_sid
+                            except Exception:
+                                new_oc_session_id = oc_sid
+                            log.info(f"[Chat:{ctx.name}] task done: exit={exit_code}, text_len={len(final_text)}")
+                            break
+                        if _time.time() > _deadline:
+                            final_text = "❌ 执行超时，请稍后重试"
+                            exit_code = -1
+                            log.warning(f"[Chat:{ctx.name}] task timeout: {tid}")
+                            break
+                        # 心跳更新占位卡片
+                        _elapsed = int(_time.time() - _started)
+                        _st = (task or {}).get("status", "")
+                        _status_text = {"queued": "任务已排队", "dispatched": "已分配"}.get(_st, "执行中")
+                        _heartbeat = f"⏳ {_status_text}... ({_elapsed}s)"
+                        if reply_id:
+                            try:
+                                await api.update_message(ctx, reply_id, _heartbeat)
+                            except Exception:
+                                pass
                 else:
                     log.warning(f"[Chat:{ctx.name}] no runtime for backend={backend}, task skipped")
                     final_text = ""
                     exit_code = -1
             else:
-                async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
-                                                                   backend_name=backend, account=exec_account,
-                                                                   user_token=user_token, agent_name="Chat Agent",
-                                                                   agent_label=f"[Agent:chat|repo:{repository}]"):
-                    if event_type == "done":
-                        d = data
-                        final_text = d["text"]
-                        exit_code = d.get("exit_code", 0)
-                        if exit_code == 0 and d.get("oc_session_id"):
-                            new_oc_session_id = d["oc_session_id"]
-                        log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
+                # direct 模式 + 并行心跳
+                _direct_done = False
+                async def _heartbeat_direct():
+                    while not _direct_done:
+                        await asyncio.sleep(3)
+                        _elapsed = int(_time.time() - _started)
+                        if reply_id:
+                            try:
+                                await api.update_message(ctx, reply_id, f"⏳ 执行中... ({_elapsed}s)")
+                            except Exception:
+                                pass
+                _hb = asyncio.create_task(_heartbeat_direct())
+                try:
+                    async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
+                                                                       backend_name=backend, account=exec_account,
+                                                                       user_token=user_token, agent_name="Chat Agent",
+                                                                       agent_label=f"[Agent:chat|repo:{repository}]"):
+                        if event_type == "done":
+                            d = data
+                            final_text = d["text"]
+                            exit_code = d.get("exit_code", 0)
+                            if exit_code == 0 and d.get("oc_session_id"):
+                                new_oc_session_id = d["oc_session_id"]
+                            log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
+                    _direct_done = True
+                    _hb.cancel()
+                except Exception:
+                    _direct_done = True
+                    _hb.cancel()
+                    raise
 
         record = {
             "type": "chat", "time": datetime.utcnow().isoformat(),
@@ -786,11 +836,21 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         dump_history_to_file(repo_key, history, exec_account)
         update_session(sess, history, "idle", new_oc_session_id, backend)
 
+        # 占位卡片替换为最终结果（或错误信息）；失败兜底 reply_card
         output = final_text.strip()
+        _elapsed = int(_time.time() - _started)
+        _placeholder_replaced = False
         if output == "SKIP":
             log.info("Agent decided to SKIP (no reply needed)")
         elif output:
-            await api.reply_card(ctx, msg_id, output[:2000])
+            if reply_id and _elapsed >= 2:
+                try:
+                    await api.update_message(ctx, reply_id, output[:2000])
+                    _placeholder_replaced = True
+                except Exception:
+                    pass
+            if not _placeholder_replaced:
+                await api.reply_card(ctx, msg_id, output[:2000])
             # 共享消息存储：agent 答复回写当前 conversation，Web Chat Agent 页可见
             #（feishu-web-chat-unified-design.md §3.2）
             if conv_id:
@@ -799,6 +859,14 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     add_message(conv_id, "agent", output)
                 except Exception as _we:
                     log.warning(f"[Chat:{ctx.name}] write agent message failed: {_we}")
+        elif exit_code != 0 and output:
+            _err = f"❌ 任务执行失败 (exit={exit_code})\n{output[:200]}"
+            if reply_id:
+                try:
+                    await api.update_message(ctx, reply_id, _err[:2000])
+                except Exception:
+                    pass
+        # 无引擎 / 静默失败：占位消息已发，保留占位或由外层 except 兜底
 
     except Exception as e:
         import traceback
