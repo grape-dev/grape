@@ -74,9 +74,7 @@ function renderEventDetail(data) {
           <div><span style="color:var(--t3)">Agent:</span> ${agent}</div>
           <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
           <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}</div>
-          ${data.task && data.task.task_id
-            ? `<div style="margin-top:6px"><span style="color:var(--t3)">运行日志:</span> <a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>`
-            : `<div style="margin-top:6px"><span style="color:var(--t3)">执行日志:</span> <a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看日志</a></div>`}
+          ${data.task && data.task.task_id ? `<div style="margin-top:6px"><span style="color:var(--t3)">运行日志:</span> <a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>` : ''}
           <div id="convGate" style="margin-top:6px"><span style="color:var(--t3)">门禁:</span> <span class="tgx">…</span></div>
         </div>
       </div>
@@ -429,75 +427,4 @@ function closeTaskLog() {
   _taskLog.taskId = '';
   const ov = document.getElementById('taskLogOverlay');
   if (ov) ov.remove();
-}
-
-// ===== 内联 agent_logs 显示（direct 模式无 task_id，从 event detail agent_logs 字段展示）=====
-function openInlineLog(seq, title) {
-  // 关掉已有面板
-  closeTaskLog();
-  if (!seq) return;
-  API.get('/events/detail/' + seq).then(data => {
-    const logs = data.agent_logs || [];
-    const titleDisplay = _tlEsc(title);
-    let logHtml;
-    if (logs.length) {
-      logHtml = logs.map(function(l) {
-        if (!l) return '';
-        var type = l.type || 'log';
-        var time = l.time ? '<span style="color:var(--t3);margin-right:6px">' + (l.time.substring(11,19) || '') + '</span>' : '';
-        var msg = l.msg || '';
-        if (type === 'tool_use') {
-          var toolName = msg;
-          var inputHtml = '';
-          try {
-            var parsed = JSON.parse(msg);
-            if (parsed.tool) toolName = _tlEsc(parsed.tool);
-            if (parsed.input) inputHtml = '<div style="margin:4px 0 4px 24px;white-space:pre-wrap;word-break:break-all;color:var(--t2);font-size:11px">' + _tlEsc(JSON.stringify(parsed.input, null, 2)) + '</div>';
-          } catch(e) {}
-          return '<div style="margin-bottom:6px">' + time + '🔧 <span style="color:var(--a);font-weight:600">' + toolName + '</span>' + inputHtml + '</div>';
-        }
-        var icon = type === 'error' ? '❌' : type === 'reasoning' ? '🤔' : type === 'step_start' ? '▶' : type === 'text' ? '💬' : '·';
-        var color = type === 'error' ? 'var(--tr)' : type === 'reasoning' ? 'var(--t3)' : 'var(--t2)';
-        return '<div style="margin-bottom:6px">' + time + icon + ' <span style="color:' + color + ';white-space:pre-wrap;word-break:break-all">' + _tlEsc(msg) + '</span></div>';
-      }).join('');
-    } else {
-      // agent_logs 为空（如 engine_unavailable），展示 result 作为日志
-      var resultText = data.result || '(无执行日志 — agent 未实际运行)';
-      logHtml = '<div style="margin-bottom:6px">❌ <span style="color:var(--tr);white-space:pre-wrap;word-break:break-all">' + _tlEsc(resultText) + '</span></div>';
-    }
-    const ov = document.createElement('div');
-    ov.id = 'taskLogOverlay';
-    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
-    const maxW = 'width:min(960px,94vw);height:min(720px,90vh);background:var(--bg,#11151c);border:1px solid var(--b,#2a3140);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.5)';
-    ov.innerHTML = `<div style="${maxW}">
-      <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">
-        <span style="font-size:13px;font-weight:600">📜 执行日志 <span style="color:var(--t3);font-weight:400">· ${_tlEsc(title)}</span></span>
-        <span style="font-size:11px;margin-left:auto;color:var(--t3)">${logs.length} 条记录</span>
-        <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>
-      </div>
-      <div style="flex:1;min-height:0;overflow-y:auto;background:#0b0e14;color:#c2cad6;padding:12px 14px;font-size:12px;font-family:monospace;line-height:1.6" id="tlBody">${logs.map(function(l) {
-        if (!l) return '';
-        var type = l.type || 'log';
-        var time = l.time ? '<span style="color:var(--t3);margin-right:6px">' + (l.time.substring(11,19) || '') + '</span>' : '';
-        var msg = l.msg || '';
-        if (type === 'tool_use') {
-          var toolName = msg;
-          var inputHtml = '';
-          try {
-            var parsed = JSON.parse(msg);
-            if (parsed.tool) toolName = _tlEsc(parsed.tool);
-            if (parsed.input) inputHtml = '<div style="margin:4px 0 4px 24px;white-space:pre-wrap;word-break:break-all;color:var(--t2);font-size:11px">' + _tlEsc(JSON.stringify(parsed.input, null, 2)) + '</div>';
-          } catch(e) {}
-          return '<div style="margin-bottom:6px">' + time + '🔧 <span style="color:var(--a);font-weight:600">' + toolName + '</span>' + inputHtml + '</div>';
-        }
-        var icon = type === 'error' ? '❌' : type === 'reasoning' ? '🤔' : type === 'step_start' ? '▶' : type === 'text' ? '💬' : '·';
-        var color = type === 'error' ? 'var(--tr)' : type === 'reasoning' ? 'var(--t3)' : 'var(--t2)';
-        return '<div style="margin-bottom:6px">' + time + icon + ' <span style="color:' + color + ';white-space:pre-wrap;word-break:break-all">' + _tlEsc(msg) + '</span></div>';
-      }).join('')}</div>
-    </div>`;
-    document.body.appendChild(ov);
-    ov.addEventListener('click', function(e) { if (e.target === ov) closeTaskLog(); });
-  }).catch(function(e) {
-    app.showToast('加载日志失败: ' + e.message);
-  });
 }

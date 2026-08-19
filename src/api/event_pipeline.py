@@ -17,36 +17,7 @@ _DIRECT_POOL = ThreadPoolExecutor(
 
 def start_direct_agent(fn, args, name=""):
     """提交一个本机 direct 执行任务到有界池（webhook / run_pipeline 共用）。"""
-    try:
-        future = _DIRECT_POOL.submit(fn, *args)
-        # 提取 seq 用于 callback 兜底更新 event
-        seq = args[1] if len(args) >= 2 else 0
-        if seq:
-            def _on_error(f):
-                ex = f.exception()
-                if ex is not None:
-                    from src.config import log as _log
-                    _log.error(f"Exec agent FUTURE ERROR: seq={seq} name={name}: {ex}")
-                    from src.api.event_store import update_event_status, update_event_complete
-                    try:
-                        update_event_status(seq, "failed")
-                        update_event_complete(seq, "failed", exit_code=-1,
-                                              result=f"线程异常（Future callback）: {str(ex)[:200]}")
-                    except Exception:
-                        pass
-            future.add_done_callback(_on_error)
-    except Exception as e:
-        from src.config import log
-        log.error(f"Exec agent SUBMIT FAILED: seq={args[1] if len(args)>=2 else '?'}: {e}")
-        if len(args) >= 2:
-            seq = args[1]
-            from src.api.event_store import update_event_status, update_event_complete
-            try:
-                update_event_status(seq, "failed")
-                update_event_complete(seq, "failed", exit_code=-1,
-                                      result=f"提交线程池失败: {str(e)[:200]}")
-            except Exception:
-                pass
+    _DIRECT_POOL.submit(fn, *args)
 
 
 def get_agent_display_name(agent_type: str) -> str:
@@ -1041,18 +1012,17 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     except Exception:
         pass
 
-    # 始终记录 engine/skill 配置（无论有无产出），避免 event 中 runtime/skill 为空
-    update_event_config(seq, inst_name, skill_name, started_at)
-
     if not has_output:
         # 无产出 → 标记 failed（保留 event，不删）
         log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no output, mark failed")
+        update_event_status(seq, "failed")
         update_event_complete(seq, "failed", exit_code=exit_code, duration=duration,
                               agent_logs=agent_logs, completed_at=completed_at, result=result_text)
         return
 
-    # 有产出 → 更新该 event（写入结果 + 结论 + 执行日志）
+    # 有产出 → 更新该 event（写入配置 + 结果 + 结论 + 执行日志）
     new_status = "completed" if exit_code == 0 else "failed"
+    update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text)
     log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")
