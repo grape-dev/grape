@@ -164,6 +164,22 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         env["BOT_GITCODE_TOKEN"] = bot_token
     if user_token:
         env["USER_GITCODE_TOKEN"] = user_token
+    else:
+        # 用户 token 为空 → 兜底链路：
+        # 1) 用户登录 grape 时绑定的 GitCode token（user_accounts.gitcode_api_token）
+        # 2) 仓库 api token（bot_token 参数：worker 侧 repo_gitcode_token / 事件流水线仓库 bot token），
+        #    保证 chat agent 创建/查询 Issue 时 USER_GITCODE_TOKEN 非空，避免 401。
+        if user_id > 0:
+            try:
+                from src.user.db import get_user_gitcode_token
+                user_token = get_user_gitcode_token(user_id) or ""
+            except Exception as e:
+                log.warning(f"Fallback resolve user gitcode token failed: {e}")
+        if user_token:
+            env["USER_GITCODE_TOKEN"] = user_token
+        elif bot_token:
+            env["USER_GITCODE_TOKEN"] = bot_token
+            log.warning(f"{label}USER_GITCODE_TOKEN empty, fallback to repo bot token (len={len(bot_token)})")
     # Agent 显示名（skill 中 [$AGENT_NAME] 使用，如 "Issue Agent" / "QA Agent"）
     if agent_name:
         env["AGENT_NAME"] = agent_name

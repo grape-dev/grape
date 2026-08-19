@@ -180,6 +180,10 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
         try:
             from src.user.db import get_user_gitcode_token
             user_token = get_user_gitcode_token(user_id) or ""
+            # 用户 token 为空 → 仓库 api token 兜底（避免 chat agent 调 GitCode API 401）
+            if not user_token:
+                from src.user.db import get_gitcode_token
+                user_token = get_gitcode_token(repo_key=repo_key) or ""
         except Exception:
             pass
         prompt = _build_task_prompt(task_description, repo_key, issue_number, user_id)

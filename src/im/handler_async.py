@@ -670,6 +670,11 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             user_id = get_user_id_by_app_id(ctx.app_id) or 0
             if user_id > 0:
                 user_token = get_user_gitcode_token(user_id) or ""
+                # 用户 token 为空 → 仓库 api token 兜底（get_gitcode_token：repo_gitcode_token
+                # → managed_repos.bot_gitcode_token → 全局 bot token），避免 chat agent 调 GitCode API 401
+                if not user_token:
+                    from src.user.db import get_gitcode_token
+                    user_token = get_gitcode_token(repo_key=repo_key) or ""
                 conv = get_conversation_by_im(chat_id, user_id)
                 if not conv:
                     cid = create_conversation(user_id, repo_key, im_channel_id=chat_id, user_gitcode_token=user_token)

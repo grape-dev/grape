@@ -138,12 +138,16 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
         log.warning(f"Chat web->feishu push failed: {e}")
 
 
-def _resolve_gitcode_token(conv: dict | None, conv_id: str, user_token: str) -> str:
+def _resolve_gitcode_token(conv: dict | None, conv_id: str, user_token: str, repo_key: str = "") -> str:
     """解析注入 agent 的 GitCode token：优先用户当前 token（user_accounts），
     并在会话缓存过期/为空时刷新 conversation.user_gitcode_token。
 
     修复：会话创建时缓存旧 token（曾 401 Bad credentials），非空缓存永不被回填刷新
     （chat.py 原逻辑仅空值才覆盖）。见 2026-08-16 修复。
+
+    兜底：用户 token 与会话缓存均为空时，取仓库 api token
+    （get_gitcode_token：devops_agent_session.repo_gitcode_token → managed_repos.bot_gitcode_token
+    → 全局 bot token），避免 chat agent 拿空 USER_GITCODE_TOKEN 调 GitCode API 报 401。
     """
     if user_token:
         cached = (conv or {}).get("user_gitcode_token", "") if conv else ""
@@ -153,7 +157,19 @@ def _resolve_gitcode_token(conv: dict | None, conv_id: str, user_token: str) -> 
             except Exception as e:
                 log.warning(f"Chat resolve token refresh failed: {e}")
         return user_token
-    return (conv or {}).get("user_gitcode_token", "") if conv else ""
+    cached = (conv or {}).get("user_gitcode_token", "") if conv else ""
+    if cached:
+        return cached
+    if repo_key:
+        try:
+            from src.user.db import get_gitcode_token
+            repo_tok = get_gitcode_token(repo_key=repo_key) or ""
+            if repo_tok:
+                log.warning(f"Chat resolve token: user token empty, fallback to repo token (repo={repo_key})")
+                return repo_tok
+        except Exception as e:
+            log.warning(f"Chat resolve token fallback failed: {e}")
+    return ""
 
 
 @router.post("/send")
@@ -183,7 +199,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     skill_id = cfg.get("skill_id", 0) or 0
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token)
+    gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
     # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
     if conv and conv.get("conv_type") == "task":
         from src.prompt_builder import build_task_chat_prompt
@@ -297,7 +313,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     skill_id = cfg.get("skill_id", 0) or 0
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token)
+    gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
     # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
     if conv and conv.get("conv_type") == "task":
         from src.prompt_builder import build_task_chat_prompt
