@@ -29,4 +29,5 @@ temp/
 .skills/
 .hermes/
 .venv/
-.project-info/
+|.project-info/
+|.codeartsdoer/

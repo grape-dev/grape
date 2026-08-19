@@ -1729,6 +1729,10 @@ def is_known_engine_name(name: str) -> bool:
     name = (name or "").strip().lower()
     if not name:
         return False
+    # 静态白名单（避免 lazy import 循环引用导致 always False）
+    _KNOWN = {"opencode", "codearts", "hermes", "cursor"}
+    if name in _KNOWN:
+        return True
     try:
         from src.agent.executor import discover_backends
         if any((b.get("name") or "").strip().lower() == name for b in discover_backends()):

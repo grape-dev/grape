@@ -334,7 +334,7 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
             conv_history = get_messages(conv_id, limit=20)
         except Exception:
             conv_history = []
-        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account)
+        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id)
     else:
         body = build_chat_prompt(text, repo_key, history, skills, exec_account, runtime_id=chat_runtime_id)
     return (user_info + "\n\n" + body) if user_info else body

@@ -278,24 +278,21 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
                             "owner": cred.get("owner_name", ""),
                             "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
                             "runtimes": runtimes})
-    # 未绑定凭据的本地 runtime（历史 backend_agents 迁移而来）：
-    # 仅列可见的本机直连行（credential_id=0）。旧实现遍历 cached 全量——
-    # 吊销全部 worker 后 devices 为空必触发此分支，40 行 revoked/远端行
-    # 全部以"本机 Runtime"设备伪装展示，页面出现大量离线本机 runtime
-    #（2026-08-17 修复，见 engine-binding-revoke-collision-2026-08.md）。
-    if not devices:
-        for rt in visible_runtimes:
-            if (rt.get("credential_id") or 0) != 0:
-                continue
-            devices.append({"credential_id": 0, "name": "本机 Runtime", "device_name": "本机",
-                            "credential_status": "active", "last_seen_at": None,
-                            "worker_ip": "", "scope": rt.get("scope") or "global", "owner": "",
-                            "health": rt.get("health", "offline"),
-                            "runtimes": [{"id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
-                                          "healthy": rt.get("healthy", False),
-                                          "installed": rt.get("installed", False),
-                                          "instance_name": rt.get("instance_name", rt.get("name", "")),
-                                          "health": rt.get("health", "offline")}]})
+    # 本机直连引擎（credential_id=0，本地 runtime）：始终追加到设备列表。
+    # 旧逻辑用 `if not devices:` 哨兵，但存在远端 worker credential 时
+    # 本机引擎会被整体隐藏（mlc 反馈 2026-08-19）。
+    for rt in visible_runtimes:
+        if (rt.get("credential_id") or 0) != 0:
+            continue
+        devices.append({"credential_id": 0, "name": "本机 Runtime", "device_name": "本机",
+                        "credential_status": "active", "last_seen_at": None,
+                        "worker_ip": "", "scope": rt.get("scope") or "global", "owner": "",
+                        "health": rt.get("health", "offline"),
+                        "runtimes": [{"id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
+                                      "healthy": rt.get("healthy", False),
+                                      "installed": rt.get("installed", False),
+                                      "instance_name": rt.get("instance_name", rt.get("name", "")),
+                                      "health": rt.get("health", "offline")}]})
     return {"runtimes": visible_runtimes, "devices": devices}
 
 

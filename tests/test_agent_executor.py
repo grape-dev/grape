@@ -51,13 +51,16 @@ class TestCodeArtsRuntime:
         assert "--format" in args
         assert "json" in args
         assert "--dangerously-skip-permissions" not in args
-        assert "hello world" not in args  # prompt piped via stdin
+        assert "hello world" in args  # prompt passed as positional arg
+        assert "--model" in args
 
     def test_build_args_with_session(self):
+        """codearts 忽略 session_id（跨引擎 session 不可见，每次从头开始）"""
         args = self.backend.build_args("test prompt", "sess_abc")
-        assert "--session" in args
-        assert "sess_abc" in args
-        assert "--sessionID" not in args
+        assert "--session" not in args
+        assert "sess_abc" not in args
+        assert "test prompt" in args
+        assert "--model" in args
 
     def test_build_args_no_dangerous_flag(self):
         """CodeArts should NOT have --dangerously-skip-permissions."""

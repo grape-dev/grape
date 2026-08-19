@@ -460,6 +460,16 @@ def build_chat_prompt(user_text: str, repo_key: str, history: list, skills: list
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
 
+    # 注入当前执行的 runtime 引擎信息（供 agent 回答"你是什么runtime"之类的问题）
+    if runtime_id:
+        try:
+            from src.runtime.engine_select import engine_name
+            _be = engine_name(runtime_id) or ""
+            if _be:
+                parts.append(f"Runtime engine: {_be} (runtime_id={runtime_id})")
+        except Exception:
+            pass
+
     try:
         from src.api.event_store import get_issue_summary
         issue_summary = get_issue_summary(repo_key)
@@ -521,6 +531,15 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     conv = conv or {}
     issue_number = conv.get("issue_number") or 0
     parts = [f"## 场景: task", f"## 任务 Issue", f"仓库: {repo_key}", f"Issue: #{issue_number}"]
+    # 注入当前执行的 runtime 引擎信息
+    if runtime_id:
+        try:
+            from src.runtime.engine_select import engine_name
+            _be = engine_name(runtime_id) or ""
+            if _be:
+                parts.append(f"Runtime engine: {_be} (runtime_id={runtime_id})")
+        except Exception:
+            pass
     # 任务边界（最高优先级，随每轮 prompt 强注入）：澄清+回帖，绝不亲自执行任务。
     # 见 skills/chat/references/task-handling.md §0 与 coding-worktree-skill-collision.md §4.5。
     parts.append(
