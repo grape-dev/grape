@@ -65,6 +65,7 @@ class FakeClient:
     def __init__(self, task_dicts):
         self.queue = list(task_dicts)
         self.requeued = []
+        self.task_states = {}  # tid → status（sid 看门狗测试用）
 
     async def claim(self, rid, **kwargs):
         if self.queue:
@@ -82,6 +83,9 @@ class FakeClient:
 
     async def requeue(self, task_id):
         self.requeued.append(task_id)
+
+    async def get_task_state(self, task_id):
+        return self.task_states.get(task_id, "")
 
 
 def _drive_loop(client, execute_fn, active_prefill=set()):
@@ -142,6 +146,55 @@ def test_same_issue_conflict_requeued():
     client = FakeClient([task])
     _drive_loop(client, _fake_execute, active_prefill={"isess-A"})
     assert client.requeued == [tid], "同 Issue 冲突应 requeue 回滚，避免 dispatched 悬空"
+
+
+# ===================== sid 看门狗（seq#1485 根因修复） =====================
+
+def test_sid_watchdog_cleans_ghost_task():
+    """幽灵 sid 清理：active_tasks 里的 task 在服务端已终态（failed/cancelled），
+    但 _wrap 的 finally 没执行（opencode 进程 hang 住）→ sid 泄漏在 active_sessions →
+    看门狗查服务端状态，主动清理，后续同 sid 任务能正常执行。
+    """
+    tid_a = _enqueue(seq=1, issue_session_id="isess-GHOST", issue_id="#1")
+    tid_b = _enqueue(seq=2, issue_session_id="isess-GHOST", issue_id="#1")
+    task_a = service.get_task(tid_a)
+    task_b = service.get_task(tid_b)
+    executed = []
+
+    async def _fake_execute(client, task, engine_name=""):
+        if task.get("id") == tid_a:
+            # 模拟 opencode 进程 hang 住：不返回，但服务端已标 cancelled
+            # 看门狗会在 60s 后查到 cancelled 并清理 sid
+            # 测试里用 monkeypatch 把 60s 间隔改成 0.01s
+            await asyncio.sleep(0.5)
+        executed.append(task.get("id"))
+
+    # task_a claim 后挂起，task_b 会在 sid 冲突分支被 requeue
+    # 看门狗查到 task_a 在服务端已 cancelled → 清理 isess-GHOST → task_b 重跑
+    client = FakeClient([task_a, task_b])
+    client.task_states[tid_a] = "cancelled"  # 模拟服务端已标 cancelled
+
+    # monkeypatch 看门狗间隔为 0.01s（原 60s，通过环境变量 RUNTIME_SID_WATCHDOG_INTERVAL）
+    import os
+    os.environ["RUNTIME_SID_WATCHDOG_INTERVAL"] = "0.01"
+
+    from src.runtime import agent as _am
+
+    async def _run():
+        await _am._run_loop(client, [4], poll_interval=0.01,
+                            heartbeat_interval=999, max_concurrent=20,
+                            _test_execute=_fake_execute)
+
+    try:
+        asyncio.run(asyncio.wait_for(_run(), timeout=3.0))
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        os.environ.pop("RUNTIME_SID_WATCHDOG_INTERVAL", None)
+
+    # task_b 应该被执行（看门狗清理了幽灵 sid 后不再冲突）
+    # 注意：task_a 在 _fake_execute 里 sleep 0.5s 后也会返回（模拟进程最终退出）
+    assert tid_b in executed, "幽灵 sid 被看门狗清理后，后续任务应能执行"
 
 
 # ===================== _reregister 解包回归看护（e5c09544 引入的 bug） =====================

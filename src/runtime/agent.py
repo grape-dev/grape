@@ -473,7 +473,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     3. 网络中断恢复：连接错误计入心跳失败，触发重注册
     """
     active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
-    active_tasks = set()      # task_id 去重（防止同 task 被重复 claim 并发执行）
+    active_tasks = {}        # tid → sid 映射（task_id 去重 + sid 看门狗反查）
+    _requeue_cooldown = {}   # sid → 上次 requeue 时间戳，60s 冷却防 claim→requeue 空转死循环
+    _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
     hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
     last_heartbeat = 0.0
     heartbeat_fail_streak = 0
@@ -504,22 +506,32 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             tid = task.get("id", "")
             e = engine_by_rid.get(rid, "")  # 本任务引擎实例名（hermes 限并发判断用）
+            # 先查 tid 再查 sid：同一任务已在跑时直接跳过（不 requeue），
+            # 否则任务被 requeue 回 queued → 下轮又 claim 到 → sid 冲突 → 再 requeue →
+            # 无限循环饿死同 runtime 后续任务（seq#1477 SRE 被 chat 任务死循环阻塞 20min）。
+            if tid in active_tasks:
+                log.debug(f"task {tid} already active, skip")
+                continue
             # 并发槽 key 与服务端 claim 串行粒度一致（multi-issue-isolation-design.md §3.3）：
             # 有关联 Issue → 按 issue_session_id（跨 Issue 并行）；无（#0/旧任务）→ 回退 agent_session_id。
             # 修复：此前一律用 agent_session_id，导致不同 Issue 的任务在客户端被误判冲突拒收
             #       （服务端已放行并标记 dispatched，客户端却 skip → 任务悬空卡死，见 seq#622）。
             sid = task.get("issue_session_id") or task.get("agent_session_id") or ""
             if sid in active_sessions:
-                # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）。
+                # D9 串行槽：同 session 已有【另一个】活跃任务，跳过（服务端 claim 已排除，防御双保险）。
                 # 回滚任务为 queued，避免 dispatched 悬空（skip 后无人执行也不重新排队）。
+                # 冷却：同 sid 60s 内只 requeue 一次，避免每轮 poll(3s) 都 claim→requeue 空转
+                # 饿死后面的任务（seq#1477 chat 任务空转 20min 阻塞 SRE）。
+                _now = asyncio.get_running_loop().time()
+                _last = _requeue_cooldown.get(sid, 0)
+                if _now - _last < 60:
+                    continue  # 冷却中：不 claim 不 requeue，留给后面的任务
+                _requeue_cooldown[sid] = _now
                 log.warning(f"claim conflict: session {sid} busy, requeue task {tid}")
                 try:
                     await client.requeue(tid)
                 except Exception as _e:
                     log.warning(f"requeue task {tid} failed: {_e}")
-                continue
-            if tid in active_tasks:
-                log.debug(f"task {tid} already active, skip")
                 continue
             if len(active_sessions) >= max_concurrent:
                 continue
@@ -527,7 +539,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 # hermes 引擎限并发 1（模型 API 分钟限流，双开实测 429 → 假完成，见 #53）
                 continue
             active_sessions.add(sid)
-            active_tasks.add(tid)
+            active_tasks[tid] = sid
             if e == "hermes":
                 hermes_active += 1
 
@@ -557,7 +569,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         pass
                 finally:
                     active_sessions.discard(s)
-                    active_tasks.discard(_tid)
+                    active_tasks.pop(_tid, None)
                     if e == "hermes":
                         hermes_active -= 1
 
@@ -587,6 +599,29 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     backoff = min(30 * (2 ** (heartbeat_fail_streak - HEARTBEAT_FAIL_THRESHOLD)), 300)
                     log.warning(f"re-register failed, backing off {backoff:.0f}s")
                     await asyncio.sleep(backoff)
+
+        # ---- sid 看门狗：清理幽灵 sid ----
+        # active_tasks 里的任务如果已在服务端终态（failed/cancelled/completed/not_found），
+        # 说明 _wrap 的 finally 没执行（opencode 进程 hang 住），sid 泄漏在 active_sessions。
+        # 定期查服务端状态，主动清理，防同 sid 后续任务被假冲突挡住（seq#1485 根因）。
+        _watchdog_interval = _env_float("RUNTIME_SID_WATCHDOG_INTERVAL", 60)
+        if active_tasks and now - _sid_watchdog_last >= _watchdog_interval:
+            _sid_watchdog_last = now
+            _ghost_tids = []
+            for _tid, _sid in list(active_tasks.items()):
+                try:
+                    _state = await client.get_task_state(_tid)
+                except Exception:
+                    _state = ""
+                if _state in ("failed", "cancelled", "completed", "not_found", "") and _state:
+                    _ghost_tids.append((_tid, _sid, _state))
+                elif not _state:
+                    # 查询失败（网络抖动/服务端 500）：跳过，下次再查
+                    pass
+            for _tid, _sid, _state in _ghost_tids:
+                active_sessions.discard(_sid)
+                active_tasks.pop(_tid, None)
+                log.warning(f"sid watchdog: cleaned ghost tid={_tid} sid={_sid} (server status={_state})")
 
         await asyncio.sleep(poll_interval + random.uniform(0, poll_interval * 0.3))
 

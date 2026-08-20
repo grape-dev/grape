@@ -365,6 +365,21 @@ async def get_task_status(task_id: str, user: dict = Depends(get_current_user)):
     }
 
 
+@router.get("/tasks/{task_id}/state")
+async def runtime_task_state(task_id: str, credential_id: int = Depends(_require_credential)):
+    """worker 端轻量状态查询：只返回 status，用于 sid 看门狗检测幽灵任务。
+
+    worker 的 active_sessions 是内存 set，_wrap 的 finally 在 opencode 进程
+    hang 住时永远不执行 → sid 永久泄漏 → 同 sid 后续任务全部被假冲突挡住。
+    worker 主循环定期调本端点查 active_tasks 里的 task 是否已在服务端终态，
+    是则主动清理 active_sessions（seq#1485 根因）。
+    """
+    task = service.get_task(task_id)
+    if not task:
+        return {"status": "not_found"}
+    return {"status": task.get("status") or ""}
+
+
 @router.post("/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str, user: dict = Depends(get_current_user)):
     """取消任务（M2-5）：置 cancelled；执行侧由 worker 感知退出。"""
