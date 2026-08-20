@@ -313,6 +313,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                 account=repo_key, user_id=0,
                 repo_gitcode_token=repo_token or "",
                 skill_path=skill_path or "",
+                skill_id=agent_session.get("skill_id", 0) or 0,
             )
             log.info(f"[VOD agent|repo:{repo_key}] enqueued task={tid} mode={kind}")
             task = await wait_task_terminal(tid)

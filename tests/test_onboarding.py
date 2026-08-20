@@ -97,7 +97,7 @@ def test_trigger_launches_two_guides_direct():
     with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding") as mock_skill, \
          patch.object(ob_mod, "_is_onboarded", return_value=False), \
          patch.object(ob_mod, "_mark_onboarding_started") as mock_mark, \
-         patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 0, "")), \
+         patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 0, "", 0)), \
          patch("src.runtime.engine_select.pick_engine", return_value=1), \
          patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
          patch("src.runtime.service.runtime_execution_kind", return_value="direct"), \
@@ -118,7 +118,7 @@ def test_trigger_launches_two_guides_queue():
     with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding"), \
          patch.object(ob_mod, "_is_onboarded", return_value=False), \
          patch.object(ob_mod, "_mark_onboarding_started"), \
-         patch.object(ob_mod, "_load_vod_session", return_value=("worker", 7, "")), \
+         patch.object(ob_mod, "_load_vod_session", return_value=("worker", 7, "", 0)), \
          patch("src.runtime.service.runtime_execution_kind", return_value="queue_local"), \
          patch.object(ob_mod, "_enqueue_onboarding_task") as mock_enq:
         ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
@@ -169,7 +169,7 @@ def test_trigger_creates_two_master_events():
     with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding"), \
          patch.object(ob_mod, "_is_onboarded", return_value=False), \
          patch.object(ob_mod, "_mark_onboarding_started"), \
-         patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 0, "")), \
+         patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 0, "", 0)), \
          patch("src.runtime.engine_select.pick_engine", return_value=1), \
          patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
          patch("src.runtime.service.runtime_execution_kind", return_value="direct"), \

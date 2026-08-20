@@ -244,6 +244,7 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                     repo_key=old.get("repo_key") or "",
                     agent_type=old.get("agent_type") or "",
                     skill=old.get("skill") or "",
+                    skill_id=old.get("skill_id") or 0,
                     prompt=old.get("prompt") or "",
                     cwd=_cwd,
                     runtime_session_id="",  # 全新上下文，避免复用坏会话

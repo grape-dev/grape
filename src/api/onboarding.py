@@ -82,9 +82,9 @@ def _onboarding_workdir(repo_key: str, target: str) -> str:
     return get_agent_workdir(repo_key, "vod", _onboarding_issue_id(target))
 
 
-def _load_vod_session(repo_key: str) -> tuple[str, int, str]:
-    """查 VOD 会话配置，返回 (backend, runtime_id, skill_path)。缺失时 backend=''（无硬编码默认，见 engine-selection-design.md v2）。"""
-    backend, runtime_id, skill_path = "", 0, ""
+def _load_vod_session(repo_key: str) -> tuple[str, int, str, int]:
+    """查 VOD 会话配置，返回 (backend, runtime_id, skill_path, skill_id)。缺失时 backend=''（无硬编码默认，见 engine-selection-design.md v2）。"""
+    backend, runtime_id, skill_path, skill_id = "", 0, "", 0
     try:
         from src.session_manager import db, db_lock
         with db_lock:
@@ -94,6 +94,7 @@ def _load_vod_session(repo_key: str) -> tuple[str, int, str]:
         if row:
             runtime_id = row[0] or 0
             if row[2]:
+                skill_id = row[2]
                 from src.user.db import get_skill_by_id
                 _sk = get_skill_by_id(row[2])
                 if _sk:
@@ -107,7 +108,7 @@ def _load_vod_session(repo_key: str) -> tuple[str, int, str]:
                 backend = _r[0]
     except Exception as e:
         log.warning(f"[Onboarding|repo:{repo_key}] vod session lookup failed: {e}")
-    return backend, runtime_id, skill_path
+    return backend, runtime_id, skill_path, skill_id
 
 
 def _finalize_onboarding(repo_key: str, seq: int, owner: str, result_path: str = ""):
@@ -164,7 +165,7 @@ def _execute_agent_wrapper(repo_key, seq, owner, skill, backend, runtime_id, evt
     _finalize_onboarding(repo_key, seq, owner, _result_path)
 
 
-def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target):
+def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target, skill_id=0):
     """queue 模式：入队由本地/远端 worker 执行（本地无 opencode 也可运行）。
 
     方案 B：按预分配 issue 号（experience→#1, explore→#2）建 Issue 级会话，传 issue_session_id，
@@ -201,6 +202,7 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
         account=repository,
         repo_gitcode_token=get_gitcode_token(repo_key=repo_key) or "",
         skill_path=os.path.join(SKILLS_DIR, skill, "SKILL.md"),
+        skill_id=skill_id,
         issue_session_id=issue_session_id,
         env_extra={"REPO_FULL_NAME": repository, "REPO_OWNER": owner,
                    "ONBOARDING_RESULT": result_path, "ONBOARDING_TARGET": target},
@@ -244,7 +246,7 @@ def trigger_onboarding(repo_key: str, owner: str):
         _mark_onboarding_started(repo_key)  # 防并发重复
 
         # 1. 查 VOD 会话配置（backend/runtime_id/skill_path，走 VOD Agent）
-        backend, runtime_id, skill_path = _load_vod_session(repo_key)
+        backend, runtime_id, skill_path, skill_id = _load_vod_session(repo_key)
         # engine-selection-design.md v2：按引擎集合/会话主引擎选引擎；无引擎 → 跳过引导（不隐式 opencode）
         from src.runtime.engine_select import pick_engine, engine_name
         engine_id = pick_engine(repo_key, "vod", fallback_runtime_id=runtime_id) or 0
@@ -275,7 +277,7 @@ def trigger_onboarding(repo_key: str, owner: str):
                    "actor": owner or "", "account": from_repo_key(repo_key), "issue_id": f"#{_expected_issue}",
                    "payload": {"repository": from_repo_key(repo_key), "owner": owner, "onboarding_target": target}}
             if kind != EXEC_MODE_DIRECT:
-                _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target)
+                _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target, skill_id=skill_id)
             else:
                 evt["_skill_path"] = skill_path
                 threading.Thread(target=_execute_agent_wrapper, args=(

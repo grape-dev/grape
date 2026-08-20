@@ -126,6 +126,7 @@ def runtime_execution_kind(runtime_id: int) -> str:
 
 _TASK_COLUMNS = (
     "id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, "
+    "skill_id, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, attempts, pool_agent_type, affinity_runtime_id, "
@@ -260,7 +261,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
                  repo_gitcode_token="", env_extra=None,
                  event_seq=None, issue_id="", repo_key="", agent_type="",
-                 skill="", skill_path="", server_url="", issue_session_id="",
+                 skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
                  pool_agent_type="", affinity_runtime_id=0):
     """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
@@ -271,6 +272,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
 
     knowledge_files：共享知识快照（event-conversation-design.md §3.1.1），None 时自动打包；
     远端 worker 侧 materialize 到 cwd/.knowledge 并替换 {{KNOWLEDGE_DIR}}。
+
+    skill_id：skill 表主键，优先于 skill_name 解析（避免 user/repo scope 的 owner_id 不匹配）。
+    skill_id=0 时回退 resolve_skill_id 按名字解析（向后兼容）。
     """
     if not agent_session_id:
         raise ValueError("agent_session_id is required")
@@ -280,13 +284,29 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     skill_files = {}
     if skill:
         try:
-            from src.user.db import resolve_skill_id, get_skill_path, get_skill_object_key
-            _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
-            _path = get_skill_path(_sid) if _sid else (skill_path or "")
-            skill_files = _pack_skill_dir(skill, _path or (skill_path or ""))
-            # v3.0：OBS 技能（本地无目录）→ 从 OBS zip 提取文本（老 worker 兼容通道）
-            _okey = get_skill_object_key(_sid) if _sid else ""
-            if _okey:
+            from src.user.db import resolve_skill_id, get_skill_path, get_skill_object_key, get_skill_by_id
+            if skill_id:
+                _sk = get_skill_by_id(skill_id)
+                if _sk:
+                    # ① skill_id 有效：直接按主键查，跳过 resolve_skill_id 的 owner_id 匹配
+                    _sid = skill_id
+                    _path = get_skill_path(skill_id)  # 绝对路径（official/user/repo 三 scope 统一）
+                    _okey = _sk.get("file_path") or ""
+                else:
+                    # ② skill_id 失效（skill 被删除/停用）→ 回退按名字解析
+                    _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
+                    _path = get_skill_path(_sid) if _sid else (skill_path or "")
+                    _okey = get_skill_object_key(_sid) if _sid else ""
+            else:
+                # ③ 无 skill_id → 走老逻辑（向后兼容）
+                _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
+                _path = get_skill_path(_sid) if _sid else (skill_path or "")
+                _okey = get_skill_object_key(_sid) if _sid else ""
+            # 本地目录存在 → 打包（official 技能 + 少数有磁盘目录的 user/repo 技能）
+            if _path and os.path.isdir(os.path.dirname(_path)):
+                skill_files = _pack_skill_dir(skill, _path)
+            # file_path 非空 → OBS zip 提取（user/repo 技能主要走此路径）
+            if _okey and not skill_files:
                 from src.storage import get_skill_zip_bytes
                 _zip = get_skill_zip_bytes(_okey)
                 if _zip:
@@ -336,9 +356,10 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         c = db.cursor()
         c.execute(
             f"INSERT INTO agent_tasks ({_TASK_COLUMNS}) VALUES "
-            f"({','.join(['?'] * 34)})",
+            f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
             (task_id, agent_session_id, runtime_id, event_seq, issue_id or "", repo_key or "",
-             agent_type or "", skill or "", prompt, cwd or "", runtime_session_id or "",
+             agent_type or "", skill or "", skill_id or 0,
+             prompt, cwd or "", runtime_session_id or "",
              event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),

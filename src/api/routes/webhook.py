@@ -234,9 +234,10 @@ async def a2a_endpoint(request: Request):
         if kind == EXEC_MODE_DIRECT:
             from src.api.event_pipeline import start_direct_agent, _create_direct_task
             _issue_id = f"#{issue_number}" if issue_number else ""
+            evt["_skill_id"] = skill_id
             _create_direct_task(repo_key, seq, agent_name, _be,
                                 skill_name or agent_name, skill_path or "",
-                                engine_id, evt, _issue_id)
+                                engine_id, evt, _issue_id, skill_id=skill_id)
             start_direct_agent(_execute_agent, (
                 repo_key, seq, agent_name, _be, skill_name or agent_name, evt, engine_id,
             ), name=f"a2a-{agent_name}-{seq}")

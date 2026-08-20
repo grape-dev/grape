@@ -30,7 +30,7 @@ def start_direct_agent(fn, args, name=""):
 
 
 def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
-                        skill_path, engine_id, evt, issue_id=""):
+                        skill_path, engine_id, evt, issue_id="", skill_id=0):
     """direct 执行前创建 agent_tasks + 设 started_at，防 sweeper 误杀。"""
     from src.runtime.service import _TASK_COLUMNS_LIST
     from src.api.session_store import get_or_create_agent_session
@@ -62,9 +62,10 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             c = db.cursor()
             c.execute(
                 f"INSERT INTO agent_tasks ({','.join(_TASK_COLUMNS_LIST)}) VALUES "
-                f"({','.join(['?'] * 34)})",
+                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
                 (task_id, agent_session_id, engine_id, seq, issue_id, repo_key or "",
-                 agent_type or "", skill_name or "", "", "", "", "", "", 0, "", "{}",
+                 agent_type or "", skill_name or "", skill_id or 0,
+                 "", "", "", "", "", 0, "", "{}",
                  "{}", "", "", "{}", "{}", "{}", 0, "", 0,
                  "queued", None, "", "", "", "{}", now, None, now)
             )
@@ -415,8 +416,9 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         kind = runtime_execution_kind(engine_id)
         if kind == EXEC_MODE_DIRECT:
             evt["_skill_path"] = skill_path
+            evt["_skill_id"] = skill_id
             _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
-                                skill_path, engine_id, evt, issue_id)
+                                skill_path, engine_id, evt, issue_id, skill_id=skill_id)
             start_direct_agent(_execute_agent, (
                 repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
             ), name=f"sub-{agent_type}-{seq}")
@@ -747,9 +749,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                                skill_id, skill_path, engine_id, issue_id)
     elif _be and skill_name and seq > 0:
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
+        evt["_skill_id"] = skill_id
         # 先创建 agent_tasks + 设 started_at，防 sweeper 在排队期间误杀
         _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
-                            skill_path, engine_id, evt, issue_id)
+                            skill_path, engine_id, evt, issue_id, skill_id=skill_id)
         start_direct_agent(_execute_agent, (
             repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
         ), name=f"ag-{agent_type}-{seq}")
@@ -944,6 +947,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             repo_gitcode_token=repo_gitcode_token,
             env_extra=env_extra,
             skill_path=skill_path,
+            skill_id=skill_id,
         )
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
@@ -1113,12 +1117,40 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             prompt = prompt.replace("{{PROJECT_INFO_DIR}}", _pi_path)
         except Exception:
             pass
-        # 直接模式（direct）：技能路径占位符按真实 skill 目录替换
-        # （官方技能在 SKILLS_DIR 下，executor 会兜底替换；repo/个人技能用真实路径）
+        # 直接模式（direct）：技能路径占位符替换
+        # skill_id 优先：按主键查 skill 表拿 file_path / get_skill_path
+        # - file_path 非空（OBS 技能）→ 从 OBS 拉 zip 解压到 .skills/ → 替换 {{SKILL_DIR}}
+        # - file_path 空（本地技能）→ get_skill_path 返回绝对路径 → 替换 {{SKILL_DIR}}
+        # - 无 skill_id / stale → 回退老逻辑（_skill_path dirname 或 executor SKILLS_DIR 兜底）
         try:
-            _real_skill_dir = os.path.dirname(evt.get("_skill_path", "")) if evt.get("_skill_path") else ""
-            if _real_skill_dir:
-                prompt = prompt.replace("{{SKILL_DIR}}", _real_skill_dir)
+            from src.user.db import get_skill_by_id, get_skill_path
+            _skill_id = evt.get("_skill_id") or 0
+            if _skill_id:
+                _sk = get_skill_by_id(_skill_id)
+                if _sk:
+                    _okey = _sk.get("file_path") or ""
+                    if _okey:
+                        # OBS 技能：解压到 cwd/.skills/（zip 根 = {skill_name}/，落地 .skills/{skill_name}/SKILL.md）
+                        from src.storage import get_skill_zip_bytes
+                        _zip = get_skill_zip_bytes(_okey)
+                        if _zip:
+                            import zipfile as _zf, io as _io
+                            _skill_base = os.path.join(ws, ".skills")
+                            os.makedirs(_skill_base, exist_ok=True)
+                            with _zf.ZipFile(_io.BytesIO(_zip)) as zf:
+                                zf.extractall(_skill_base)
+                            prompt = prompt.replace("{{SKILL_DIR}}", _skill_base)
+                    else:
+                        # 本地技能：get_skill_path 返回 SKILLS_DIR/xxx/SKILL.md
+                        # dirname(dirname(...)) = SKILLS_DIR（prompt 拼成 SKILLS_DIR/xxx/SKILL.md）
+                        _full = get_skill_path(_skill_id)
+                        if _full and os.path.exists(_full):
+                            prompt = prompt.replace("{{SKILL_DIR}}", os.path.dirname(os.path.dirname(_full)))
+            else:
+                # 向后兼容：无 skill_id 时走老逻辑
+                _real_skill_dir = os.path.dirname(evt.get("_skill_path", "")) if evt.get("_skill_path") else ""
+                if _real_skill_dir:
+                    prompt = prompt.replace("{{SKILL_DIR}}", _real_skill_dir)
         except Exception:
             pass
         log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")

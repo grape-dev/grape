@@ -1447,8 +1447,9 @@ def _migrate_tables():
             _ensure_column(c, "agent_tasks", "project_info_files", "TEXT DEFAULT '{}'")
             _ensure_column(c, "agent_tasks", "project_info_meta", "TEXT DEFAULT '{}'")
             _ensure_column(c, "agent_tasks", "knowledge_files", "TEXT DEFAULT '{}'")
+            _ensure_column(c, "agent_tasks", "skill_id", "INTEGER DEFAULT 0")
             db.commit()
-            log.info("Added issue_session_id / project_info_* / knowledge_files columns to agent_tasks")
+            log.info("Added issue_session_id / project_info_* / knowledge_files / skill_id columns to agent_tasks")
     except Exception as e:
         log.warning(f"Add agent_tasks issue isolation columns failed: {e}")
     # ===== user_accounts 发布仓库列（老库升级；CREATE TABLE 只影响新库，存量库须幂等补列）=====
