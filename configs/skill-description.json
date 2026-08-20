@@ -101,10 +101,34 @@
     "path": "repo-onboarding",
     "description": "首次托管引导（VOD Agent 执行）：建立项目知识基线，按引导目标创建「快速部署体验」或「探索方向引导」单个 Issue"
   },
-  "skill-publish": {
+"skill-publish": {
     "name": "skill 发布",
     "agent_type": "sre",
     "path": "skill-publish",
     "description": "将 grape 生成的 skill 发布/下架到外部平台（ClawHub/GitHub/GitCode）。Triggers: 同步 skill, 发布 skill, 下架 skill, ClawHub, GitHub, GitCode, 撤回发布"
+  },
+  "wan-video-generation": {
+    "name": "视频生成",
+    "agent_type": "coding",
+    "path": "media-operate/wan-video-generation",
+    "description": "视频/媒体生成：通过 ModelArts MaaS Wan2.2-T2V-A14B 文生视频 + Edge TTS + FFmpeg 合成带中文旁白的短视频"
+  },
+  "qwen-image-generation": {
+    "name": "图片生成",
+    "agent_type": "coding",
+    "path": "media-operate/qwen-image-generation",
+    "description": "图片生成：通过 ModelArts MaaS qwen-image 模型批量生成主题配图，支持城市介绍、产品展示、景点宣传等场景"
+  },
+  "ai-blog-generation": {
+    "name": "AI 博客生成",
+    "agent_type": "coding",
+    "path": "media-operate/ai-blog-generation",
+    "description": "AI 博客生成：学习参考文章样式 → 生成图文博客 → AI 配图 + AI 视频 + 部署/发布。适合技术专栏、产品介绍等场景"
+  },
+  "web-publish": {
+    "name": "博客系统发布",
+    "agent_type": "sre",
+    "path": "media-operate/web-publish",
+    "description": "博客系统 API 发布：通过 Blog System API 发布/更新/删除文章，管理标签、评论、说说、留言"
   }
 }
