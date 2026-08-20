@@ -29,10 +29,11 @@ temp/
 .skills/
 .hermes/
 .venv/
-|.project-info/
-|.codeartsdoer/
-
-# CodeArts local config (credentials, MCP settings, skills)
-.codeartsdoer/
+# CodeArts local credentials & MCP settings (keep local)
+.codeartsdoer/codearts_cli.json
+.codeartsdoer/mcp/
+.codeartsdoer/.gitignore
+.codeartsdoer/package.json
+.codeartsdoer/AGENTS.md
 # Backup files
 *.bak
