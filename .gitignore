@@ -29,9 +29,8 @@ temp/
 .skills/
 .hermes/
 .venv/
-# CodeArts local credentials & MCP settings (keep local)
+# CodeArts local credentials (keep local)
 .codeartsdoer/codearts_cli.json
-.codeartsdoer/mcp/
 .codeartsdoer/.gitignore
 .codeartsdoer/package.json
 .codeartsdoer/AGENTS.md
