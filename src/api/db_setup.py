@@ -1451,6 +1451,16 @@ def _migrate_tables():
             log.info("Added issue_session_id / project_info_* / knowledge_files columns to agent_tasks")
     except Exception as e:
         log.warning(f"Add agent_tasks issue isolation columns failed: {e}")
+    # ===== user_accounts 发布仓库列（老库升级；CREATE TABLE 只影响新库，存量库须幂等补列）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "user_accounts", "gitcode_publish_repo", "TEXT DEFAULT ''")
+            _ensure_column(c, "user_accounts", "github_publish_repo", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added gitcode_publish_repo / github_publish_repo columns to user_accounts")
+    except Exception as e:
+        log.warning(f"Add user_accounts publish repo columns failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2：引擎池数据面（池表 + 槽位列 + 任务池标记）=====
     # 老库升级：agent_runtimes 补 busy_slots/max_concurrent；agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:
