@@ -1232,6 +1232,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             if issue_session_id:
                 from src.api.session_store import update_issue_session
                 update_issue_session(issue_session_id, runtime_session_id=new_oc_session_id)
+            # 本函数内其他分支有局部 import db_lock（1157 行）→ 会遮蔽模块级名；
+            # 此处必须局部重新绑定，否则 NameError（2026-08-20 修复 e7a93a5b 副作用）
+            from src.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
