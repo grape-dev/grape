@@ -759,14 +759,60 @@ def report_progress(task_id, progress):
         db.commit()
 
 
+def _detect_business_failure(agent_type, output, result_text):
+    """检测 agent 进程正常退出(exit_code=0)但业务实际失败的情况。
+
+    解析结构化 JSON 输出的 conclusion/next_step 字段，匹配部署/操作失败关键词。
+    返回 True 表示业务失败（应覆盖 exit_code 为非 0）。
+
+    仅对 sre agent_type 生效（部署类任务），其他 agent 不受影响。
+    """
+    if agent_type != "sre":
+        return False
+    if not output:
+        return False
+    # 拼接 conclusion + next_step + issue_summary 做全文匹配
+    blob = " ".join(filter(None, [
+        output.get("conclusion", ""),
+        output.get("next_step", ""),
+        output.get("issue_summary", ""),
+    ]))
+    if not blob:
+        # 降级：从 result_text 里匹配
+        blob = result_text or ""
+    if not blob:
+        return False
+    import re
+    # 失败关键词：部署中止/失败、无法购买/创建、未认证、凭证不足、部署未成功等
+    failure_patterns = [
+        r"部署.*失败", r"部署.*中止", r"部署.*未成功", r"部署.*无法",
+        r"无法购买", r"无法创建", r"无法部署",
+        r"未完成.*认证", r"未实名", r"实名认证",
+        r"凭证.*不足|凭证.*缺失|凭证.*无效",
+        r"Ecs\.0707", r"AccessDenied", r"auth.*fail",
+        r"操作失败", r"执行失败",
+        r"无法继续", r"中止\b",
+    ]
+    for pat in failure_patterns:
+        if re.search(pat, blob, re.I):
+            return True
+    return False
+
+
 def complete_task(task_id, result_text, exit_code=0, usage=None):
-    """完成：解析结构化 output → finalize_event_archive → update_event_complete → 终态。"""
+    """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。"""
     task = get_task(task_id)
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import parse_agent_output_json, update_event_complete
             from src.api.event_archive import finalize_event_archive
             output = parse_agent_output_json(result_text or "")
+            # 业务失败检测：进程退出码=0 但业务实际失败 → 覆盖 exit_code
+            if exit_code == 0 and _detect_business_failure(
+                    task.get("agent_type") or "", output, result_text):
+                exit_code = 1
+                log.info(f"Task {task_id}: business failure detected "
+                         f"(agent={task.get('agent_type')}), overriding exit_code to 1")
             status = "completed" if exit_code == 0 else "failed"
             duration = None
             try:

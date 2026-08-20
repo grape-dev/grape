@@ -26,8 +26,12 @@ class CodeArtsRuntime(AgentRuntime):
         创建的 session 不可见；且 VOD/Issue 任务每次应从头开始，续会话无意义。
         """
         args = ["run", "--format", "json"]
-        # 从环境变量读取模型，兜底默认
-        model = os.environ.get("CODEARTS_MODEL", "modelarts/deepseek-v4-flash")
+        # 模型名以 worker 本机 codearts_cli.json 的 model 为准（与 opencode/hermes
+        # 引擎同逻辑：模型由本机配置决定）；仅当显式设置 CODEARTS_MODEL 环境变量
+        # 时才传 --model 覆盖（如服务端特指某模型）。不设默认硬编码前缀——
+        # 曾写死 modelarts/deepseek-v4-flash 导致本机 opengw/… 配置被覆盖、
+        # 模型前缀不存在报 Model not found（2026-08-20 seq#1390）。
+        model = os.environ.get("CODEARTS_MODEL")
         if model:
             args.extend(["--model", model])
         # prompt 作为 positional argument（不走 stdin，避免沙箱网络封锁）
