@@ -40,6 +40,7 @@ tags:
 - 本地参考：`references/assignee-guide.md`
 - 本地参考：`references/comment-guide.md`
 - 本地参考：`references/spec-generation.md`
+- 本地参考：`references/a2a-deploy-workflow.md`（多 Agent 部署协作链路、A2A 触发时机与示例）
 
 ## 工作流
 

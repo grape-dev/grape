@@ -39,6 +39,7 @@ tags:
 - 本地参考：`references/gitcode-api-reference.md`
 - 本地参考：`references/code-review-checklist.md`
 - 本地参考：`references/security-checklist.md`
+- 本地参考：`references/huaweicloud-security-checklist.md`（华为云 IaC 专项安全检查、部署验证清单对照）
 
 ## 工作流
 

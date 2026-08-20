@@ -37,6 +37,7 @@ tags:
 
 - 本地参考：`references/gitcode-api-reference.md`
 - 本地参考：`references/build-debug-checklist.md`
+- 本地参考：`references/huaweicloud-deploy-runbook.md`（华为云 Terraform 部署 Runbook、cn-north-4 坑点、故障排查、验证清单）
 
 ## 工作流
 

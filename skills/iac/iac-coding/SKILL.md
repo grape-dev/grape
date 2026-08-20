@@ -44,6 +44,7 @@ tags:
 
 - 本地参考：`references/gitcode-api-reference.md`
 - 本地参考：`references/code-review-checklist.md`
+- 本地参考：`references/huaweicloud-tf-conventions.md`（华为云 TF 编码规范、凭证设置约定、cn-north-4 避坑指南）
 
 ## 工作流
 
