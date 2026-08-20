@@ -24,30 +24,72 @@ function renderChat(openConvId) {
   setupChatStream();
 }
 
+let _chatSkillScope = 'official';
+
+function _switchChatSkillScope(scope) {
+  _chatSkillScope = scope;
+  _loadChatSkillOptions();
+}
+
+function _loadChatSkillOptions() {
+  const skillSelect = document.getElementById('cfgSkill');
+  if (!skillSelect) return;
+  const currentSkillId = skillSelect.dataset.skillId || '0';
+  let repo = '';
+  try {
+    const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+    repo = c ? (c.fullName || '') : '';
+  } catch {}
+  const scope = _chatSkillScope || 'official';
+  let qs = '?scope=' + scope;
+  if (repo) qs += '&repo=' + encodeURIComponent(repo);
+  API.get('/skills' + qs).then(d => {
+    const allSkills = d.skills || [];
+    const filtered = allSkills.filter(s => s.agent_type === 'chat');
+    const matchCurrent = filtered.find(s => String(s.id) === currentSkillId);
+    const defaultOpt = scope === 'official' ? '<option value="0">默认官方技能（自动）</option>' : '';
+    let html = defaultOpt +
+      filtered.map((s, i) => {
+        const selected = matchCurrent ? (String(s.id) === currentSkillId) : (i === 0);
+        return `<option value="${s.id}" ${selected ? 'selected' : ''}>${s.display_name || s.name}</option>`;
+      }).join('');
+    if (filtered.length === 0) {
+      html = `<option value="0" disabled>${scope === 'repo' ? '该仓库暂无项目技能' : '暂无个人技能'}</option>`;
+    }
+    skillSelect.innerHTML = html;
+  }).catch(() => {});
+}
+
 function loadSideConfig() {
   const _repo = app.currentRepo();
   const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
   API.get('/chat/config' + _qs).then(d => {
     const feishu = d.im?.feishu || {};
     const backend = d.backend || {};
-    const currentSkill = d.skill || '';
     const backendsOpts = (d._backends || []).map(b =>
       `<option value="${b.name}" data-rid="${b.runtime_id || ''}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${b.display_name || b.name}</option>`
     ).join('') || '<option value="">Default</option>';
-    const skillsOpts = (d._skills || []).map(s => {
-      const scopeLabel = s.scope === 'official' ? '官方' : s.scope === 'repo' ? '仓库' : '个人';
-      return `<option value="${s.scope}:${s.name}" ${(d.skill_scope + ':' + currentSkill) === (s.scope + ':' + s.name) ? 'selected' : ''}>${s.display_name || s.name} (${scopeLabel})</option>`;
-    }).join('') || '<option value="">无专用技能</option>';
     const side = document.getElementById('chatSide');
     if (!side) return;
+    // scope 初始值从已配置 skill 的 scope 推导
+    _chatSkillScope = (d.skill_scope === 'repo') ? 'repo' : (d.skill_scope === 'user') ? 'user' : 'official';
     side.innerHTML = `
       <div class="cd" style="padding:12px;font-size:11px">
         <div style="font-weight:600;margin-bottom:8px">Backend</div>
         <select id="cfgBackend" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${backendsOpts}</select>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
-        <div style="font-weight:600;margin-bottom:8px">Skill</div>
-        <select id="cfgSkill" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${skillsOpts}</select>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-weight:600;flex-shrink:0">Skill</span>
+          <select id="cfgSkillScope" onchange="_switchChatSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:5px 6px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg);outline:none">
+            <option value="official">全局</option>
+            <option value="repo">项目</option>
+            <option value="user">个人</option>
+          </select>
+        </div>
+        <select id="cfgSkill" data-skill-id="${d.skill_id || 0}" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">
+          <option value="0">默认官方技能（自动）</option>
+        </select>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
         <div style="font-weight:600;margin-bottom:8px">IM</div>
@@ -67,6 +109,11 @@ function loadSideConfig() {
         <div style="font-weight:600;margin-bottom:6px">Agents</div>
         <div class="chat-agents" id="chatAgents"></div>
       </div>`;
+    // 设置 scope 下拉框初始值
+    const scopeSel = document.getElementById('cfgSkillScope');
+    if (scopeSel) scopeSel.value = _chatSkillScope;
+    // 加载 skill 下拉
+    _loadChatSkillOptions();
     // Load agent stats
     const repo = app.currentRepo();
     if (repo) {
@@ -301,26 +348,23 @@ function saveChatConfig() {
   const _bkSel = document.getElementById('cfgBackend');
   const backend = _bkSel?.value || '';
   const rid = _bkSel?.selectedOptions?.[0]?.dataset?.rid || '';
-  const skillVal = document.getElementById('cfgSkill')?.value || '';
-  // 下拉 value 格式 "scope:name"（如 "repo:chat-advance"），拆出 scope 与 name
-  let skill = skillVal, skillScope = '';
-  if (skillVal.indexOf(':') > 0) {
-    const _sp = skillVal.indexOf(':');
-    skillScope = skillVal.slice(0, _sp);
-    skill = skillVal.slice(_sp + 1);
+  const skillVal = document.getElementById('cfgSkill')?.value || '0';
+  const skillId = parseInt(skillVal) || 0;
+  // 项目/个人 scope 下不允许保存空值（无"默认技能"选项）
+  if (_chatSkillScope !== 'official' && !skillId) {
+    if (app && app.showToast) app.showToast('请选择技能');
+    return;
   }
   const provider = document.getElementById('cfgImProvider')?.value || 'feishu';
   const appId = document.getElementById('cfgImAppId')?.value || '';
   const rawSecret = document.getElementById('cfgImSecret')?.value || '';
-  // 如果密码框内容是占位符（********），说明用户没改过，不发送 secret
   const secret = rawSecret === '********' ? '' : rawSecret;
   const im = {};
   im[provider] = {app_id: appId, app_secret: secret};
   const _repo = app.currentRepo();
   const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
-  const _body = {backend, skill, im};
+  const _body = {backend, skill_id: skillId, im};
   if (rid) _body.runtime_id = parseInt(rid, 10);
-  if (skillScope) _body.skill_scope = skillScope;
   API.put('/chat/config' + _qs, _body).then(() => {
     app.showToast('配置已保存');
   }).catch(e => app.showToast('保存失败: ' + e.message));

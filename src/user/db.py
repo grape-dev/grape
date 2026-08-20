@@ -816,8 +816,9 @@ def ensure_skill_dir(user_id: int, skill_name: str) -> str:
 
 
 def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
-    """确保仓库技能目录存在，返回路径（skills/repo/{repo_key}/{skill}）"""
-    path = os.path.join(os.path.dirname(SKILL_DIR), "repo", repo_key, skill_name)
+    """确保仓库技能目录存在，返回路径（skills/repo/{owner}/{repo}/{skill}）"""
+    from src.repo_key import from_repo_key
+    path = os.path.join(os.path.dirname(SKILL_DIR), "repo", from_repo_key(repo_key), skill_name)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -875,7 +876,8 @@ def get_skill_path(skill_id) -> str:
     if skill.get("scope") == "user":
         return os.path.join(SKILLS_DIR, "custom", skill.get("owner_id") or "", sp, "SKILL.md")
     if skill.get("scope") == "repo":
-        return os.path.join(SKILLS_DIR, "repo", skill.get("owner_id") or "", sp, "SKILL.md")
+        from src.repo_key import from_repo_key
+        return os.path.join(SKILLS_DIR, "repo", from_repo_key(skill.get("owner_id") or ""), sp, "SKILL.md")
     return os.path.join(SKILLS_DIR, sp, "SKILL.md")
 
 
@@ -980,7 +982,8 @@ def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: s
             # 删除技能目录
             import shutil
             if scope == "repo":
-                path = os.path.join(os.path.dirname(SKILL_DIR), "repo", owner_id or str(user_id), skill_name)
+                from src.repo_key import from_repo_key
+                path = os.path.join(os.path.dirname(SKILL_DIR), "repo", from_repo_key(owner_id or str(user_id)), skill_name)
             else:
                 path = os.path.join(SKILL_DIR, str(user_id), skill_name)
             if os.path.exists(path):

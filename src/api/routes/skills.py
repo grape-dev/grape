@@ -33,22 +33,44 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 @router.get("/")
-async def list_skills(user: dict = Depends(get_current_user), repo: str = ""):
-    """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见"""
+async def list_skills(user: dict = Depends(get_current_user), repo: str = "", scope: str = ""):
+    """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
+    scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
+    """
     from src.session_manager import db, db_lock
+    from src.repo_key import to_repo_key
+
+    # repo 参数可能是 fullName（xiaowu2119/hello-skill），转成 repo_key（gitcode:xiaowu2119/hello-skill）
+    repo_key = to_repo_key(repo) if repo else ""
 
     skills = []
     with db_lock:
         c = db.cursor()
         try:
-            if repo:
-                # 官方 + 个人 + 指定仓库技能
+            if scope == "official":
+                c.execute(
+                    "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND scope='official' ORDER BY agent_type, skill_name",
+                )
+            elif scope == "repo":
+                if not repo:
+                    return {"skills": []}
+                c.execute(
+                    "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND scope='repo' AND owner_id=? ORDER BY agent_type, skill_name",
+                    (repo_key,)
+                )
+            elif scope == "user":
+                c.execute(
+                    "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND scope='user' AND owner_id=? ORDER BY agent_type, skill_name",
+                    (str(user["id"]),)
+                )
+            elif repo:
+                # 官方 + 个人 + 指定仓库技能（兼容旧逻辑）
                 c.execute(
                     "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) ORDER BY agent_type, skill_name",
-                    (str(user["id"]), repo)
+                    (str(user["id"]), repo_key)
                 )
             else:
-                # 官方 + 个人
+                # 官方 + 个人（兼容旧逻辑）
                 c.execute(
                     "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?)) ORDER BY agent_type, skill_name",
                     (str(user["id"]),)
@@ -159,12 +181,14 @@ async def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_curre
     官方技能（scope=official）为部署内置物，未转集群不提供下载。
     """
     from src.session_manager import db, db_lock
+    from src.repo_key import to_repo_key, from_repo_key
+    repo_key = to_repo_key(repo) if repo else ""
     with db_lock:
         c = db.cursor()
-        if repo:
+        if repo_key:
             c.execute(
                 "SELECT id, skill_path, scope, owner_id, skill_name FROM skill WHERE id=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))",
-                (skill_id, str(user["id"]), repo)
+                (skill_id, str(user["id"]), repo_key)
             )
         else:
             c.execute(
@@ -193,7 +217,7 @@ async def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_curre
     if scope == "user":
         skill_dir = os.path.join(SKILLS_DIR, "custom", owner_id or str(user["id"]), skill_path or name)
     else:
-        skill_dir = os.path.join(SKILLS_DIR, "repo", owner_id, skill_path or name)
+        skill_dir = os.path.join(SKILLS_DIR, "repo", from_repo_key(owner_id), skill_path or name)
     if not os.path.isdir(skill_dir):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能目录不存在"})
     import io as _io
@@ -214,68 +238,54 @@ async def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_curre
 @router.get("/by-id/{skill_id}")
 async def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user),
                                  repo: str = ""):
-    """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询（同名多 scope 记录无歧义）。
+    """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询，查到后校验归属权限。
 
-    权限与现状一致：official 可见；user 需本人；repo 需指定仓库（无 repo 参数时放行）。
+    权限校验：official 可见；user 需本人；repo 需当前用户托管该仓库。
     """
     from src.session_manager import db, db_lock
     from src.config import SKILLS_DIR
 
     with db_lock:
         c = db.cursor()
-        if repo:
-            c.execute(
-                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id FROM skill WHERE id=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))",
-                (skill_id, str(user["id"]), repo)
-            )
-        else:
-            c.execute(
-                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id FROM skill WHERE id=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo')",
-                (skill_id, str(user["id"]))
-            )
+        c.execute(
+            "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id FROM skill WHERE id=? AND is_active=1",
+            (skill_id,)
+        )
         row = c.fetchone()
 
-    if row:
-        skill_dir = row[4] or row[0]
-        scope = row[5]
-        owner_id = row[6] or ""
-        current_id = row[7]
-        # ===== OBS 分支（N5）：两级缓存 + 内存解压提取 + zip_url 临时地址 =====
-        from src.storage import get_storage
-        storage = get_storage()
-        object_key = ""
-        if storage is not None:
-            from src.user.db import get_skill_object_key
-            object_key = get_skill_object_key(current_id)  # 官方技能转集群后 skill_path 也是对象键
-        if object_key:
-            from src.storage import skill_md_content
-            content = skill_md_content(object_key, row[0]) or ""
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+
+    scope = row[5]
+    owner_id = row[6] or ""
+
+    # 归属校验
+    if scope == "user" and owner_id != str(user["id"]):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该技能"})
+    if scope == "repo":
+        # 从后端查当前用户托管的仓库列表，校验 skill.owner_id 在列表里
+        from src.user.db import get_user_repos
+        user_repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) if user.get("id") else [])}
+        if owner_id not in user_repo_keys:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该技能"})
+
+    skill_dir = row[4] or row[0]
+    current_id = row[7]
+    # ===== OBS 分支（N5）：两级缓存 + 内存解压提取 + zip_url 临时地址 =====
+    from src.storage import get_storage
+    storage = get_storage()
+    object_key = ""
+    if storage is not None:
+        from src.user.db import get_skill_object_key
+        object_key = get_skill_object_key(current_id)  # 官方技能转集群后 skill_path 也是对象键
+    if object_key:
+        from src.storage import skill_md_content
+        content = skill_md_content(object_key, row[0]) or ""
+        zip_url = ""
+        try:
+            zip_url = storage.temporary_url(object_key)  # 用户点击下载时动态签发
+        except Exception:
             zip_url = ""
-            try:
-                zip_url = storage.temporary_url(object_key)  # 用户点击下载时动态签发
-            except Exception:
-                zip_url = ""
-            return {
-                "id": current_id,
-                "name": row[0], "display_name": row[1] or row[0], "description": row[2] or "",
-                "agent_type": row[3] or "",
-                "type": "official" if scope == "official" else "repo" if scope == "repo" else "user-uploaded",
-                "scope": scope or "",
-                "content": content,
-                "zip_url": zip_url,
-                "is_obs": True,  # OBS/集群模式（skill_path 为对象键）
-            }
-        # ===== local 分支（原逻辑不变）=====
-        if scope == "user":
-            skill_path = os.path.join(SKILLS_DIR, "custom", owner_id or str(user["id"]), skill_dir, "SKILL.md")
-        elif scope == "repo":
-            skill_path = os.path.join(SKILLS_DIR, "repo", owner_id, skill_dir, "SKILL.md")
-        else:
-            skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
-        content = ""
-        if os.path.exists(skill_path):
-            with open(skill_path, encoding="utf-8") as f:
-                content = f.read()
         return {
             "id": current_id,
             "name": row[0], "display_name": row[1] or row[0], "description": row[2] or "",
@@ -283,10 +293,31 @@ async def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current
             "type": "official" if scope == "official" else "repo" if scope == "repo" else "user-uploaded",
             "scope": scope or "",
             "content": content,
-            "is_obs": False,
+            "zip_url": zip_url,
+            "is_obs": True,  # OBS/集群模式（skill_path 为对象键）
         }
-
-    raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+    # ===== local 分支 =====
+    if scope == "user":
+        skill_path = os.path.join(SKILLS_DIR, "custom", owner_id or str(user["id"]), skill_dir, "SKILL.md")
+    elif scope == "repo":
+        # owner_id 可能带 gitcode: 前缀，目录路径用不带前缀的 owner/repo
+        from src.repo_key import from_repo_key
+        skill_path = os.path.join(SKILLS_DIR, "repo", from_repo_key(owner_id), skill_dir, "SKILL.md")
+    else:
+        skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
+    content = ""
+    if os.path.exists(skill_path):
+        with open(skill_path, encoding="utf-8") as f:
+            content = f.read()
+    return {
+        "id": current_id,
+        "name": row[0], "display_name": row[1] or row[0], "description": row[2] or "",
+        "agent_type": row[3] or "",
+        "type": "official" if scope == "official" else "repo" if scope == "repo" else "user-uploaded",
+        "scope": scope or "",
+        "content": content,
+        "is_obs": False,
+    }
 
 
 @router.post("/upload")
@@ -365,7 +396,8 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         if storage is not None:
             from src.storage import skill_key, zip_cache_put, mem_cache_invalidate
             from src.user.db import upsert_skill_obs
-            owner = repo if scope == "repo" else str(user["id"])
+            from src.repo_key import to_repo_key
+            owner = to_repo_key(repo) if scope == "repo" else str(user["id"])
             db_scope = "repo" if scope == "repo" else "user"
             try:
                 # 固定 key（v2.4 去版本化）：putObject 同 key 原子覆盖（最后写者胜）；
@@ -386,10 +418,11 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             except Exception as e:
                 raise HTTPException(status_code=502, detail={"code": 502, "message": f"技能上传 OBS 失败: {e}"})
             return {"message": f"技能 {skill_name} 上传成功"}
-        # ===== local 分支（原逻辑不变）=====
+        # ===== local 分支 =====
         if scope == "repo":
-            repo_key = repo
-            target_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", repo_key, skill_name)
+            from src.repo_key import to_repo_key, from_repo_key
+            repo_key = to_repo_key(repo)
+            target_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", from_repo_key(repo_key), skill_name)
             os.makedirs(os.path.dirname(target_dir), exist_ok=True)
             if os.path.exists(target_dir):
                 shutil.rmtree(target_dir)
@@ -422,39 +455,84 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
 @router.delete("/{skill_name}")
 async def delete_skill(skill_name: str, user: dict = Depends(get_current_user),
                        scope: str = "user", repo: str = ""):
-    # ===== OBS 分支（N7）：先定位对象键 → DB 删除后删对象 + 清缓存 =====
+    """删除技能——按 skill_name + scope 查到后做归属校验，再删除。
+
+    权限校验：official 不允许删除；user 需本人；repo 需当前用户托管该仓库。
+    """
+    from src.session_manager import db, db_lock
+    from src.repo_key import to_repo_key
+
+    with db_lock:
+        c = db.cursor()
+        # 按 skill_name + scope 查，owner_id 归一化匹配
+        if scope == "repo":
+            repo_key = to_repo_key(repo) if repo else ""
+            c.execute(
+                "SELECT id, owner_id, skill_path FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1",
+                (skill_name, repo_key)
+            )
+        else:
+            c.execute(
+                "SELECT id, owner_id, skill_path FROM skill WHERE skill_name=? AND scope='user' AND owner_id=? AND is_active=1",
+                (skill_name, str(user["id"]))
+            )
+        row = c.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+
+    skill_id = row[0]
+    owner_id = row[1] or ""
+
+    # 归属校验
+    if scope == "user" and owner_id != str(user["id"]):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权删除该技能"})
+    if scope == "repo":
+        from src.user.db import get_user_repos
+        user_repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) if user.get("id") else [])}
+        if owner_id not in user_repo_keys:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权删除该技能"})
+
+    # OBS 对象清理
     from src.storage import get_storage
     storage = get_storage()
     object_key = ""
     if storage is not None:
         from src.user.db import get_skill_object_key
-        from src.session_manager import db, db_lock as _dl
-        owner = repo if scope == "repo" else str(user["id"])
-        db_scope = "repo" if scope == "repo" else "user"
         try:
-            with _dl:
-                c = db.cursor()
-                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? AND is_active=1",
-                          (skill_name, db_scope, owner))
-                r = c.fetchone()
-                if r:
-                    object_key = get_skill_object_key(r[0])
+            object_key = get_skill_object_key(skill_id)
         except Exception:
             pass
-    if scope == "repo":
-        exists = user_db.delete_skill(user["id"], skill_name, scope="repo", owner_id=repo)
-    else:
-        exists = user_db.delete_skill(user["id"], skill_name)
+
+    # 物理删除
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM skill WHERE id=?", (skill_id,))
+        db.commit()
+
+    # local 目录清理（local 模式下 skill 文件在磁盘上）
+    if storage is None:
+        import shutil
+        from src.config import SKILLS_DIR
+        from src.repo_key import from_repo_key
+        if scope == "user":
+            local_dir = os.path.join(SKILLS_DIR, "custom", owner_id, skill_name)
+        elif scope == "repo":
+            # owner_id 可能带 gitcode: 前缀，目录路径用不带前缀的 owner/repo
+            local_dir = os.path.join(SKILLS_DIR, "repo", from_repo_key(owner_id), skill_name)
+        else:
+            local_dir = None
+        if local_dir and os.path.exists(local_dir):
+            shutil.rmtree(local_dir, ignore_errors=True)
+
     if object_key:
         from src.storage import invalidate_skill_caches
         try:
-            # 固定 key 模型（v2.4）：单对象删除（每技能仅 1 个固定 key 对象）
             storage.delete_object(object_key)
         except Exception:
             pass
         invalidate_skill_caches(object_key)
-    if not exists:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+
     return {"message": f"技能 {skill_name} 已删除"}
 
 
@@ -476,6 +554,9 @@ async def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_curr
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "目标仓库不能为空"})
 
+    from src.repo_key import to_repo_key, from_repo_key
+    repo_key = to_repo_key(repo)
+
     # 1. 查原个人技能（须属于当前用户）
     skill_rec = next((s for s in user_db.list_skills(user["id"]) if s["skill_name"] == skill_name), None)
     if not skill_rec:
@@ -485,7 +566,7 @@ async def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_curr
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        exists = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1", (skill_name, repo)).fetchone()[0]
+        exists = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1", (skill_name, repo_key)).fetchone()[0]
     if exists:
         raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
 
@@ -498,10 +579,10 @@ async def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_curr
         src_key = get_skill_object_key(skill_rec["id"])
         if not src_key:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "源个人技能未在 OBS（历史数据请先执行迁移），无法转换"})
-        dst_key = skill_key("repo", repo, skill_name)
+        dst_key = skill_key("repo", repo_key, skill_name)
         if not storage.copy_object(src_key, dst_key):
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"OBS 复制技能失败: {src_key} -> {dst_key}"})
-        ok = upsert_skill_obs("repo", repo, skill_name, skill_rec.get("agent_type", ""),
+        ok = upsert_skill_obs("repo", repo_key, skill_name, skill_rec.get("agent_type", ""),
                               skill_rec.get("description", ""), dst_key, str(user["id"]))
         if not ok:
             storage.delete_object(dst_key)
@@ -513,9 +594,9 @@ async def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_curr
         mem_cache_invalidate(skill_name)
         return {"message": f"技能 {skill_name} 已复制到仓库 {repo}", "skill_name": skill_name, "scope": "repo", "repo": repo}
 
-    # 3. 复制目录 skills/custom/{user_id}/{skill}/ → skills/repo/{repo}/{skill}/
+    # 3. 复制目录 skills/custom/{user_id}/{skill}/ → skills/repo/{owner}/{repo}/{skill}/
     src_dir = os.path.join(user_db.SKILL_DIR, str(user["id"]), skill_name)
-    dst_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", repo, skill_name)
+    dst_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", from_repo_key(repo_key), skill_name)
     if not os.path.isdir(src_dir):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "个人技能目录不存在"})
     if os.path.exists(dst_dir):
@@ -527,7 +608,7 @@ async def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_curr
     # 4. 创建仓库技能记录（沿用 agent_type / description）
     try:
         ok = user_db.create_skill(user["id"], skill_name, skill_rec.get("agent_type", ""),
-                                  skill_rec.get("description", ""), "", scope="repo", owner_id=repo)
+                                  skill_rec.get("description", ""), "", scope="repo", owner_id=repo_key)
         if not ok:
             # 若创建失败（如并发冲突），回滚目录
             shutil.rmtree(dst_dir, ignore_errors=True)

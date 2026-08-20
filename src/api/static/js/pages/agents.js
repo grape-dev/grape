@@ -1,4 +1,10 @@
 let _agentCfgVisible = false;
+let _skillScope = 'official';
+
+function _switchSkillScope(scope) {
+  _skillScope = scope;
+  loadCfgOptions();
+}
 
 function toggleAgentCfg() {
   _agentCfgVisible = !_agentCfgVisible;
@@ -117,33 +123,35 @@ function loadCfgOptions() {
     });
   }
 
-  // Skill 下拉：仅未加载时加载（幂等），预加载后点 Configure 不再重复请求
-  if (skillSelect && !skillSelect.dataset.loaded) {
-    skillSelect.dataset.loaded = '1';
+  // Skill 下拉：按 scope 过滤加载
+  if (skillSelect) {
     let repo = '';
     try {
       const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
       repo = c ? (c.fullName || '') : '';
     } catch {}
-    const qs = repo ? '?repo=' + encodeURIComponent(repo) : '';
+    const scope = _skillScope || 'official';
+    let qs = '?scope=' + scope;
+    if (repo) qs += '&repo=' + encodeURIComponent(repo);
     API.get('/skills' + qs).then(d => {
       const allSkills = d.skills || [];
       const agentType = skillSelect.dataset.agent || '';
-      const currentSkill = skillSelect.dataset.current || '';
-      const currentScope = skillSelect.dataset.scope || '';
+      const currentSkillId = skillSelect.dataset.skillId || '0';
       const filtered = allSkills.filter(s => s.agent_type === agentType || s.parent_agent_type === agentType);
-      // 若当前配置的 skill 不在返回列表（如自定义 skill），保留该值作为一个 option
-      const hasCurrent = filtered.some(s => s.name === currentSkill);
-      const scopeLabel = sc => sc === 'official' ? '官方' : sc === 'repo' ? '仓库' : '个人';
-      let html = '<option value="">默认官方技能（自动）</option>' +
-        filtered.map(s =>
-          `<option value="${s.scope}:${s.name}" ${(currentScope + ':' + currentSkill) === (s.scope + ':' + s.name) ? 'selected' : ''}>${s.display_name || s.name} (${scopeLabel(s.scope)})</option>`
-        ).join('');
-      if (currentSkill && !hasCurrent) {
-        html += `<option value="${currentSkill}" selected>${currentSkill}（已配置）</option>`;
+      // 当前配置的 skill 在当前 scope 里 → 选中它；否则默认选第一个
+      const matchCurrent = filtered.find(s => String(s.id) === currentSkillId);
+      // "默认官方技能（自动）"仅在全局 scope 下显示
+      const defaultOpt = scope === 'official' ? '<option value="0">默认官方技能（自动）</option>' : '';
+      let html = defaultOpt +
+        filtered.map((s, i) => {
+          const selected = matchCurrent ? (String(s.id) === currentSkillId) : (i === 0);
+          return `<option value="${s.id}" ${selected ? 'selected' : ''}>${s.display_name || s.name}</option>`;
+        }).join('');
+      // 项目/个人 scope 下无 skill → 显示空提示
+      if (filtered.length === 0) {
+        html = `<option value="0" disabled>${scope === 'repo' ? '该仓库暂无项目技能' : '暂无个人技能'}</option>`;
       }
       skillSelect.innerHTML = html;
-      skillSelect.dataset.currentScope = currentScope || '';
     }).catch(() => {});
   }
 }
@@ -198,10 +206,17 @@ function renderAgent(name, data) {
       </div>
     </div>
   </div>
-    <div class="srow"><label>Skill</label>
-    <select class="cfg-skill" data-agent="${name}" data-current="${(data.skill || '')}" data-scope="${(data.skill_scope || '')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
-      <option value="${data.skill || ''}" ${data.skill ? 'selected' : ''}>${data.skill ? '加载中...' : '默认官方技能（自动）'}</option>
+    <div class="srow" style="align-items:flex-start"><label>Skill</label>
+    <div style="flex:1;display:flex;gap:8px">
+      <select class="cfg-skill-scope" onchange="_switchSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:7px 6px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--bg);outline:none">
+        <option value="official">全局</option>
+        <option value="repo">项目</option>
+        <option value="user">个人</option>
+      </select>
+      <select class="cfg-skill" data-agent="${name}" data-skill-id="${(data.skill_id || 0)}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+      <option value="0" ${!data.skill_id ? 'selected' : ''}>${data.skill ? '加载中...' : '默认官方技能（自动）'}</option>
     </select>
+    </div>
   </div>
   ${name === 'sre' ? _agentSubsSection(name, data) : ''}
   ${name === 'vod' ? `
@@ -233,6 +248,10 @@ function renderAgent(name, data) {
 <div class="cd"><div class="cd-h"><h2>Event History</h2><span class="ts t3">最近 ${events.length} 条</span></div>${evtHtml}</div>`;
 
   el.innerHTML = html;
+  // 根据已配置 skill 的 scope 设置初始页签（避免回显时看不到已配置的 skill）
+  _skillScope = (data.skill_scope === 'repo') ? 'repo' : (data.skill_scope === 'user') ? 'user' : 'official';
+  const scopeSel = document.querySelector('.cfg-skill-scope');
+  if (scopeSel) scopeSel.value = _skillScope;
   // 预加载配置下拉（即使面板隐藏），确保首次打开 Configure 立即显示 skill/backend，不显示"加载中..."
   loadCfgOptions();
   // 点击面板外部关闭引擎下拉（只注册一次）
@@ -265,18 +284,16 @@ function _agentSubsSection(name, data) {
 
 function saveAgentConfig(name) {
   const backends = Array.from(document.querySelectorAll('.cfg-backend-cb:checked')).map(cb => cb.value);
-  const skillVal = document.querySelector('.cfg-skill')?.value || '';
-  let skill = skillVal, skillScope = '';
-  if (skillVal.indexOf(':') > 0) {
-    const _sp = skillVal.indexOf(':');
-    skillScope = skillVal.slice(0, _sp);
-    skill = skillVal.slice(_sp + 1);
+  const skillVal = document.querySelector('.cfg-skill')?.value || '0';
+  const skillId = parseInt(skillVal) || 0;
+  // 项目/个人 scope 下不允许保存空值（无"默认技能"选项）
+  if (_skillScope !== 'official' && !skillId) {
+    if (app && app.showToast) app.showToast('请选择技能');
+    return;
   }
   const repo = app.currentRepo();
   if (!repo) return;
-  // 引擎池：始终显式提交 backends（数组；全不勾选 = 清空池，走默认引擎兜底）
-  const body = {backends, skill};
-  if (skillScope) body.skill_scope = skillScope;
+  const body = {backends, skill_id: skillId};
   // 事件订阅：PR 合入（勾选）+ 合入分支（逗号分隔，留空=不限）；仅 SRE Agent 开放
   const subEvents = [];
   if (name === 'sre') {

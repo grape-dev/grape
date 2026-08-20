@@ -756,13 +756,15 @@ async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""
             pass
     # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
     chat_skills = []
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo) if repo else ""
     with db_lock:
         c = db.cursor()
         try:
-            if repo:
+            if repo_key:
                 c.execute(
                     "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) ORDER BY scope, skill_name",
-                    (str(user["id"]), repo)
+                    (str(user["id"]), repo_key)
                 )
             else:
                 c.execute(
@@ -865,9 +867,25 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user),
         kwargs["backend"] = body["backend"]
     if body.get("runtime_id") is not None:
         kwargs["runtime_id"] = body["runtime_id"]
-    if body.get("skill") is not None:
+    if body.get("skill_id") is not None:
+        # 新方式：前端直传 skill_id
+        skill_id = body["skill_id"]
+        skill_name = ""
+        skill_scope = ""
+        if skill_id:
+            from src.user.db import get_skill_by_id
+            _sk = get_skill_by_id(skill_id)
+            if _sk:
+                skill_name = _sk.get("skill_name") or ""
+                skill_scope = _sk.get("scope") or ""
+            else:
+                skill_id = 0
+        kwargs["skill"] = skill_name
+        kwargs["skill_id"] = skill_id
+        kwargs["skill_scope"] = skill_scope
+    elif body.get("skill") is not None:
+        # 旧方式兼容：按名称+scope 查 id
         kwargs["skill"] = body["skill"]
-        # 解析 skill_id：若前端带 skill_scope 则精确匹配该作用域；否则 repo → user → official
         skill_name = body["skill"]
         skill_scope = body.get("skill_scope", "")
         skill_id = 0
@@ -886,14 +904,16 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user),
                     return row[0] if row else 0
 
             if skill_scope == "repo" and repo:
-                skill_id = _find_skill("repo", repo)
+                from src.repo_key import to_repo_key
+                skill_id = _find_skill("repo", to_repo_key(repo))
             elif skill_scope == "user":
                 skill_id = _find_skill("user", str(user["id"]))
             elif skill_scope == "official":
                 skill_id = _find_skill("official")
             else:
                 if repo:
-                    skill_id = _find_skill("repo", repo)
+                    from src.repo_key import to_repo_key
+                    skill_id = _find_skill("repo", to_repo_key(repo))
                 if not skill_id:
                     skill_id = _find_skill("user", str(user["id"]))
                 if not skill_id:
