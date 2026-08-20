@@ -107,6 +107,12 @@
     "path": "skill-publish",
     "description": "将 grape 生成的 skill 发布/下架到外部平台（ClawHub/GitHub/GitCode）。Triggers: 同步 skill, 发布 skill, 下架 skill, ClawHub, GitHub, GitCode, 撤回发布"
   },
+  "huawei-cloud": {
+    "name": "华为云技能包",
+    "agent_type": "sre",
+    "path": "huawei-cloud",
+    "description": "华为云综合管理技能包（22 个子技能）：ECS 弹性云服务器、VPC 虚拟私有云、OBS 对象存储、CCE 云容器引擎、IAM 统一身份认证、RDS 关系型数据库、GaussDB、APIG、WAF、NAT 等"
+  },
   "wan-video-generation": {
     "name": "视频生成",
     "agent_type": "coding",
