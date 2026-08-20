@@ -181,6 +181,24 @@ async def a2a_endpoint(request: Request):
             except Exception as _e:
                 log.warning(f"A2A: issue_state update failed: {_e}")
 
+        # 订阅感知 A2A 去重（event-routing-subscription-design.md §2.6）：
+        # SRE 已配置订阅 → A2A 交办视为重复，只推进 stage、不创建任务。
+        if agent_name == "sre" and issue_number:
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT subscribe_events FROM devops_agent_session WHERE repo_key=? AND agent_type='sre'",
+                        (repo_key,))
+                    row = c.fetchone()
+                    if row:
+                        _raw = (row[0] or "").strip()
+                        if _raw and _raw != "[]" and _raw != "null":
+                            log.info(f"A2A: sre subscribed, skip task creation (stage=sre, issue=#{issue_number})")
+                            return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "sre_subscribed"})
+            except Exception:
+                pass
+
         # 立即创建 event（status=running），Agent 执行完再更新
         from src.api.event_store import append_event
         seq = append_event(

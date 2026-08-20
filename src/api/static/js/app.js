@@ -2,6 +2,25 @@ const app = (() => {
   const $ = id => document.getElementById(id);
   const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks'];
 
+  // ── 浏览器前进/后退支持 ──
+  // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
+  // _replaying: popstate 回放时禁止再次入栈；_histReady: 首个视图用 replaceState，
+  // 避免登录后第一次导航多出一个无意义的入口。
+  let _replaying = false;
+  let _histReady = false;
+  function _pushHistory(view, param) {
+    if (_replaying) return;
+    const hash = '#' + view + (param !== undefined && param !== null ? '/' + encodeURIComponent(param) : '');
+    if (window.location.hash === hash) return; // 同一视图不重复入栈
+    try {
+      const fn = _histReady ? 'pushState' : 'replaceState';
+      if (window.history[fn]) {
+        window.history[fn]({view: view, param: (param !== undefined && param !== null) ? param : null}, '', hash);
+        _histReady = true;
+      }
+    } catch (e) {}
+  }
+
   function currentRepo() {
     try {
       const r = JSON.parse(localStorage.getItem('currentRepo'));
@@ -98,6 +117,7 @@ function loadAgentTypes() {
     const current = currentRepo();
 
     if (managedRepos.length === 0) {
+      _pushHistory('repos', null);
       $('sidebar').style.display = 'none';
       $('tb').style.display = 'none';
       $('mainView').style.display = 'flex';
@@ -163,6 +183,7 @@ function loadAgentTypes() {
 
   // 点击 Grape Logo → 返回仓库选择页（与解除托管后跳转的页面完全一致：全屏卡片页）
   function goToRepos() {
+    _pushHistory('repos', null);
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     localStorage.setItem('sidebarTab', 'projects');
     $('sidebar').style.display = 'none';
@@ -185,6 +206,8 @@ function loadAgentTypes() {
   function nav(view, param) {
     const repo = currentRepo();
     if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks') { loadRepos(); return; }
+
+    _pushHistory(view, param);
 
     document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));
     const navEl = $('nav-' + view);
@@ -258,6 +281,20 @@ function loadAgentTypes() {
       API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     }
   }
+
+  // 浏览器回退/前进：按 history 状态回放视图（回放时不重复入栈）
+  window.addEventListener('popstate', (e) => {
+    const s = e.state;
+    _replaying = true;
+    try {
+      if (s && s.view === 'repos') goToRepos();          // 全屏仓库选择页（nav('repos') 有托管仓库时会跳 dash，不能复用）
+      else if (s && s.view) nav(s.view, s.param);
+      else if (currentRepo()) nav('dash');               // 回到入口：有仓库则默认 Dashboard
+      else goToRepos();                                  // 无仓库则回到仓库选择
+    } finally {
+      _replaying = false;
+    }
+  });
 
   function search(q) {
     if (!q.trim()) return;

@@ -42,6 +42,20 @@ def _safe_rel(rel: str) -> str:
     return rel
 
 
+def _repo_root_rel(ws_rel: str, repo_key: str) -> str:
+    """WORKSPACE_DIR 相对路径 → 仓库根相对路径（剥掉 {owner}/{repo}/ 前缀）。
+
+    agent_shared_knowledge.file_path 存 WORKSPACE 相对（如 owner/repo/project-info/knowledge.md），
+    看板统一用「相对仓库根」语义（与 content 接口 / 成员文档 path 一致）。
+    """
+    rel = (ws_rel or "").replace("\\", "/").lstrip("/")
+    owner, rname = _owner_repo(repo_key)
+    prefix = f"{owner}/{rname}/"
+    if owner and rname and rel.startswith(prefix):
+        rel = rel[len(prefix):]
+    return rel
+
+
 def _read_file(repo_key: str, rel: str) -> str:
     base = _repo_base(repo_key)
     rel = _safe_rel(rel)
@@ -80,30 +94,35 @@ def _read_ws_file(repo_key: str, ws_rel: str) -> str:
 
 
 def _member_docs(repo_key: str) -> list[dict]:
-    """扫描成员上传目录 project-info/member/，返回文档清单。"""
-    base = os.path.join(_repo_base(repo_key), "project-info", "member")
+    """扫描成员上传目录 project-info/member/ 与 project-info/agent/，返回文档清单。
+
+    agent 文档带 agent_type 标注（§六：Agent 维度上传落盘 project-info/agent/{agent_type}/）。
+    """
     docs = []
-    if not os.path.isdir(base):
-        return docs
-    try:
-        for owner_dir in sorted(os.listdir(base)):
-            d = os.path.join(base, owner_dir)
-            if not os.path.isdir(d):
-                continue
-            for f in sorted(os.listdir(d)):
-                fp = os.path.join(d, f)
-                if not os.path.isfile(fp):
+    for sub in ("member", "agent"):
+        base = os.path.join(_repo_base(repo_key), "project-info", sub)
+        if not os.path.isdir(base):
+            continue
+        try:
+            for owner_dir in sorted(os.listdir(base)):
+                d = os.path.join(base, owner_dir)
+                if not os.path.isdir(d):
                     continue
-                rel = os.path.relpath(fp, _repo_base(repo_key)).replace("\\", "/")
-                docs.append({
-                    "name": f,
-                    "owner": owner_dir,
-                    "path": rel,
-                    "size": os.path.getsize(fp),
-                    "updated_at": _fmt_time(os.path.getmtime(fp)),
-                })
-    except Exception as e:
-        log.warning(f"member docs scan failed {repo_key}: {e}")
+                for f in sorted(os.listdir(d)):
+                    fp = os.path.join(d, f)
+                    if not os.path.isfile(fp):
+                        continue
+                    rel = os.path.relpath(fp, _repo_base(repo_key)).replace("\\", "/")
+                    docs.append({
+                        "name": f,
+                        "owner": owner_dir,
+                        "path": rel,
+                        "size": os.path.getsize(fp),
+                        "updated_at": _fmt_time(os.path.getmtime(fp)),
+                        "kind": sub,
+                    })
+        except Exception as e:
+            log.warning(f"member docs scan failed {repo_key} ({sub}): {e}")
     return docs
 
 
@@ -139,14 +158,15 @@ def _project_knowledge_entries(repo_key: str) -> list[dict]:
                 content = ""
         out.append({
             "scope": r[0], "agent_type": r[1] or "", "issue_num": r[2] or 0,
-            "file_path": r[3] or "", "status": r[4] or "", "source_seq": r[5] or 0,
+            "file_path": r[3] or "", "path": _repo_root_rel(r[3], repo_key),
+            "status": r[4] or "", "source_seq": r[5] or 0,
             "created_by": r[6] or "", "created_at": normalize_event_time(r[7] or ""), "content": content,
         })
     return out
 
 
 def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
-    """agent_shared_knowledge 中 issue / issue_agent 级条目，按 agent_type 分组。"""
+    """agent_shared_knowledge 中 issue / issue_agent 级条目 + Agent 专属成员文档，按 agent_type 分组。"""
     from src.session_manager import db, db_lock
     rows = []
     with db_lock:
@@ -171,9 +191,25 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
                 content = ""
         groups.setdefault(at, []).append({
             "scope": r[0], "agent_type": at, "issue_num": r[2] or 0,
-            "file_path": r[3] or "", "status": r[4] or "", "source_seq": r[5] or 0,
+            "file_path": r[3] or "", "path": _repo_root_rel(r[3], repo_key),
+            "status": r[4] or "", "source_seq": r[5] or 0,
             "created_by": r[6] or "", "created_at": normalize_event_time(r[7] or ""), "content": content,
         })
+    # Agent 专属成员上传文档（§六：project-info/agent/{agent_type}/，定向给该 Agent）
+    from src.api.knowledge import agent_files
+    import os as _os
+    base = _os.path.join(_repo_base(repo_key), "project-info", "agent")
+    if _os.path.isdir(base):
+        for at in sorted(_os.listdir(base)):
+            if not at or not _os.path.isdir(_os.path.join(base, at)):
+                continue
+            for rel, content in agent_files(repo_key, at).items():
+                groups.setdefault(at, []).append({
+                    "scope": "member_agent", "agent_type": at, "issue_num": 0,
+                    "file_path": "", "path": "project-info/" + rel,
+                    "status": "accepted", "source_seq": 0,
+                    "created_by": "member", "created_at": "", "content": content,
+                })
     return groups
 
 
@@ -195,14 +231,14 @@ async def list_knowledge(user: dict = Depends(get_current_user),
     except Exception:
         files, meta = {}, {}
     project_files = [
-        {"name": n, "label": "Project Graph", "updated": meta.get("last_updated", "")}
+        {"name": "project-info/project-graph.md", "label": "Project Graph", "updated": meta.get("last_updated", "")}
         for n in ("project-graph.md",) if n in files
     ] + [
-        {"name": n, "label": "Project Capabilities", "updated": meta.get("last_updated", "")}
+        {"name": "project-info/project-capabilities.md", "label": "Project Capabilities", "updated": meta.get("last_updated", "")}
         for n in ("project-capabilities.md",) if n in files
     ]
     if ".metadata.json" in files:
-        project_files.append({"name": ".metadata.json", "label": "metadata",
+        project_files.append({"name": "project-info/.metadata.json", "label": "metadata",
                               "updated": meta.get("last_updated", "")})
 
     return {
@@ -290,7 +326,12 @@ async def upload_knowledge(file: UploadFile = File(...),
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo)
     base = _repo_base(repo_key)
-    member_dir = os.path.join(base, "project-info", "member", str(user.get("username") or user.get("id") or "user"))
+    # §六：Agent 维度上传落盘 project-info/agent/{agent_type}/（仅该 Agent 定向注入）；
+    # 项目级维持 project-info/member/{username}/
+    if scope == "agent":
+        member_dir = os.path.join(base, "project-info", "agent", agent_type)
+    else:
+        member_dir = os.path.join(base, "project-info", "member", str(user.get("username") or user.get("id") or "user"))
     os.makedirs(member_dir, exist_ok=True)
     # 重名则加时间戳后缀，避免覆盖
     dest = os.path.join(member_dir, name)
@@ -329,7 +370,9 @@ async def delete_knowledge(repo: str = Query(""),
     from src.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo)
     rel = _safe_rel(file)
-    if not rel.startswith("project-info/member/"):
+    is_member = rel.startswith("project-info/member/")
+    is_agent = rel.startswith("project-info/agent/")
+    if not (is_member or is_agent):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅可删除成员上传文档"})
     base = _repo_base(repo_key)
     full = os.path.normpath(os.path.join(base, rel))
@@ -337,10 +380,12 @@ async def delete_knowledge(repo: str = Query(""),
         raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
     if not os.path.isfile(full):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "文件不存在"})
-    owner_part = rel.split("/")[2] if len(rel.split("/")) > 2 else ""
-    me = str(user.get("username") or user.get("id") or "")
-    if owner_part and owner_part != me:
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅可删除本人上传的文档"})
+    # 成员目录按用户名子目录校验本人；Agent 目录为团队共享（agent_type 子目录），任一定向可见即可删
+    if is_member:
+        owner_part = rel.split("/")[2] if len(rel.split("/")) > 2 else ""
+        me = str(user.get("username") or user.get("id") or "")
+        if owner_part and owner_part != me:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅可删除本人上传的文档"})
     try:
         os.remove(full)
     except Exception as e:

@@ -14,14 +14,18 @@ function renderSettings(tab) {
     html += `<div id="sCredentials"><div class="loading">加载中...</div></div></div>`;
     el.innerHTML = html;
     API.get('/settings/credentials').then(d => {
+      // AK/SK 回显真实值需 HTML 转义（防引号破坏属性）
+      const _esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      const _akVal = d.huawei_cloud ? _esc(d.huawei_cloud.ak || '') : '';
+      const _skVal = d.huawei_cloud ? _esc(d.huawei_cloud.sk || '') : '';
       document.getElementById('sCredentials').innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">GitCode API（OAuth 登录自动填充）</h3>
           <div class="srow"><label>API Token</label><input type="password" value="${d.gitcode && d.gitcode.api_token_exists ? '********' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? '' : 'placeholder="未配置"'} style="${d.gitcode && d.gitcode.api_token_exists ? 'background:#f1f5f9' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? 'disabled' : ''}></div>
           <div class="srow"><label>Account</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account + ' · 登录时自动填充' : '—'}" disabled style="background:#f1f5f9;font-size:10px"></div>
         </div>
         <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Huawei Cloud</h3>
-          <div class="srow"><label>Access Key</label><input type="password" id="huaweiAk" value="" placeholder="${d.huawei_cloud && d.huawei_cloud.ak_exists ? '已配置，留空保持不变' : 'Access Key'}">${d.huawei_cloud && d.huawei_cloud.ak_exists ? '<span class="ts" style="color:var(--g);font-size:10px">✓ 已配置</span>' : ''}</div>
-          <div class="srow"><label>Secret Key</label><input type="password" id="huaweiSk" value="" placeholder="${d.huawei_cloud && d.huawei_cloud.sk_exists ? '已配置，留空保持不变' : 'Secret Key'}">${d.huawei_cloud && d.huawei_cloud.sk_exists ? '<span class="ts" style="color:var(--g);font-size:10px">✓ 已配置</span>' : ''}</div>
+          <div class="srow"><label>Access Key</label><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="Access Key"><button class="bt bt-o bt-s" id="huaweiToggleAk" onclick="toggleHuaweiSecret()" title="显示/隐藏明文" style="padding:2px 8px">👁</button></div>
+          <div class="srow"><label>Secret Key</label><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="Secret Key"><button class="bt bt-o bt-s" id="huaweiToggleSk" onclick="toggleHuaweiSecret()" title="显示/隐藏明文" style="padding:2px 8px">👁</button></div>
           <p class="tx t2 mt8">Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.</p>
           <button class="bt bt-p mt8" onclick="saveCredentials()">Save</button>
         </div>`;
@@ -83,6 +87,20 @@ function saveCredentials() {
   if (akVal && !_isCredPlaceholder(akVal)) body.huawei_cloud_ak = akVal;
   if (skVal && !_isCredPlaceholder(skVal)) body.huawei_cloud_sk = skVal;
   API.put('/settings/credentials', body).then(r => app.showToast('凭据已更新')).catch(e => app.showToast('更新失败'));
+}
+
+// 华为云 AK/SK 明文显示/隐藏切换（默认掩码，👁 查看明文；autocomplete=new-password 防浏览器自动填充覆盖）
+let _hwSecretVisible = false;
+function toggleHuaweiSecret() {
+  _hwSecretVisible = !_hwSecretVisible;
+  ['huaweiAk', 'huaweiSk'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.type = _hwSecretVisible ? 'text' : 'password';
+  });
+  ['huaweiToggleAk', 'huaweiToggleSk'].forEach(id => {
+    const b = document.getElementById(id);
+    if (b) b.textContent = _hwSecretVisible ? '🙈' : '👁';
+  });
 }
 
 function saveGitcodeRepoConfig() {

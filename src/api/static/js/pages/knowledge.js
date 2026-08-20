@@ -71,13 +71,13 @@ function _renderProjectTab(d) {
   } else {
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     files.forEach(f => {
-      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${f.label}" onclick="app.nav('knowledge');loadKnowledgeContent('${f.name}')">
+html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${f.label}" onclick="event.stopPropagation();loadKnowledgeContent('${f.name}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:var(--a)">${f.label === 'metadata' ? '🗂' : '📄'}</span>
           <span style="font-size:12px;font-weight:600">${f.label}</span>
           <span class="tg tg-c" style="margin-left:auto;font-size:9px">project-info</span>
         </div>
-        <div style="font-size:11px;color:var(--t2);line-height:1.4">${f.name}</div>
+        <div style="font-size:11px;color:var(--t2);line-height:1.4">${f.name.split('/').pop()}</div>
         <div style="font-size:10px;color:var(--t3);margin-top:6px">${(f.updated || '—').replace('T',' ').substring(0,16)}</div>
         <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${f.name}')">View</button>
       </div>`;
@@ -92,7 +92,7 @@ function _renderProjectTab(d) {
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     krows.forEach(k => {
       const preview = (k.content || '').split('\n').filter(l => l.trim()).slice(-3).map(l => l.replace(/^- \[[^\]]*\]\s*/, '')).join(' · ');
-      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="知识沉淀" onclick="loadKnowledgeContent('${k.file_path}')">
+      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="知识沉淀" onclick="loadKnowledgeContent('${k.path || k.file_path}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:var(--pk)">📄</span>
           <span style="font-size:12px;font-weight:600">knowledge.md</span>
@@ -100,7 +100,7 @@ function _renderProjectTab(d) {
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:6px">${preview ? escapeHtml(preview).substring(0,120) : '(空)'}</div>
         <div style="font-size:10px;color:var(--t3)">${k.created_by || ''} · ${fmtLocalTime(k.created_at).substring(0,16)} · seq ${k.source_seq || 0}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.file_path}')">View</button>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.path || k.file_path}')">View</button>
       </div>`;
     });
     html += '</div>';
@@ -158,15 +158,17 @@ function _renderAgentTab(d) {
       <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${color}">${ico} ${label} · ${entries.length} 条知识</h3>`;
     entries.forEach(k => {
       const preview = (k.content || '').split('\n').filter(l => l.trim()).slice(-2).map(l => l.replace(/^- \[[^\]]*\]\s*/, '')).join(' · ');
-      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer;margin-bottom:8px" data-name="${label}" onclick="loadKnowledgeContent('${k.file_path}')">
+      const scopeLabel = k.scope === 'member_agent' ? '成员上传' : (k.scope === 'issue_agent' ? 'Agent 级' : 'Issue 级');
+      const issueTag = (k.scope !== 'member_agent' && k.issue_num) ? ' · Issue #' + k.issue_num : '';
+      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer;margin-bottom:8px" data-name="${label}" onclick="loadKnowledgeContent('${k.path || k.file_path}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:${color}">${ico}</span>
-          <span style="font-size:12px;font-weight:600">${k.scope === 'issue_agent' ? 'Agent 级' : 'Issue 级'}${k.issue_num ? ' · Issue #' + k.issue_num : ''}</span>
-          <span class="tg tg-d" style="margin-left:auto;font-size:9px">${k.scope}</span>
+          <span style="font-size:12px;font-weight:600">${scopeLabel}${issueTag}</span>
+          <span class="tg ${k.scope === 'member_agent' ? 'tg-i' : 'tg-d'}" style="margin-left:auto;font-size:9px">${k.scope === 'member_agent' ? 'member' : k.scope}</span>
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4">${preview ? escapeHtml(preview).substring(0,140) : '(空)'}</div>
-        <div style="font-size:10px;color:var(--t3);margin-top:4px">seq ${k.source_seq || 0} · ${fmtLocalTime(k.created_at).substring(0,16)}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.file_path}')">View</button>
+<div style="font-size:10px;color:var(--t3);margin-top:4px">${k.scope === 'member_agent' ? '成员上传 · 定向该 Agent' : 'seq ' + (k.source_seq || 0) + ' · ' + fmtLocalTime(k.created_at).substring(0,16)}</div>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.path || k.file_path}')">View</button>
       </div>`;
     });
     html += '</div>';

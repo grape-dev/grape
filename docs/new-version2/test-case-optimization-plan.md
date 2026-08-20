@@ -412,8 +412,8 @@ class TestXxxBehavior:
 
 | 指标 | 实施前 | 实施后 |
 | --- | --- | --- |
-| 默认套件结果 | 830 passed | **1025 passed / 5 skipped / 21 deselected，0 failed / 0 errors** |
-| 整体行覆盖率 | 65% | **71.08%**（门禁已上调至 70%） |
+| 默认套件结果 | 830 passed | **1139 passed / 5 skipped / 21 deselected，0 failed / 0 errors** |
+| 整体行覆盖率 | 65% | **73.94%**（门禁 70% 生效） |
 | pytest 插件 | 无 | asyncio/cov/randomly/timeout/xdist/rerunfailures 已装（`requirements-dev.txt`） |
 
 ### 模块覆盖率变化（P1-C）
@@ -423,6 +423,8 @@ class TestXxxBehavior:
 | runtime/client.py | 0% | **100%** |
 | api/routes/auth.py | 39% | **100%** |
 | mysql_compat.py | 16% | **93%** |
+| user/db.py | 60% | **75%** |
+| api/routes/chat.py | 63% | **81%** |
 | im/feishu_async.py | 45% | **71%** |
 | runtime/agent.py | 50% | **70%** |
 
@@ -442,12 +444,14 @@ class TestXxxBehavior:
 | tests/test_mysql_compat.py | SQL 方言翻译/配置读取/Cursor 与 DB 类(mock pymysql) | 66 |
 | tests/test_feishu_async.py | seen 去重/解析函数/BotManager/HTTP 层(mock aiohttp) | 55 |
 | tests/test_runtime_agent.py | 主循环/辅助函数/重注册/流桥接(POSIX 项按平台跳过) | 25 |
+| tests/test_user_db.py | 账户/凭据/云主机/托管/技能/引擎缓存 | 35 |
+| tests/test_chat_routes.py | 会话 CRUD/send 各路径/stream/反馈/config/辅助函数 | 23 |
 
 ### 遗留
 
-- **P1-B（隔离与确定性）尚未实施**：DB 逐用例隔离、env/网络封闭、`pytest-randomly` 启用。
-- `im/feishu_async.py`(71%)、`runtime/agent.py`(70%) 距核心模块 75% 目标尚有差距（剩余为 WS 长连接主循环与 `_execute_task` 执行链，复杂度高，建议 P1-B 后补）。
-- `user/db.py`(60%，1093 行) 未在本轮补覆盖（体量大，建议单独一轮）。
+- **P1-B（隔离与确定性）**：已实施会话库重建与确定性污染源修复（见附录 I）；**DB 逐用例隔离尚未做**（随机全绿依赖）。
+- `im/feishu_async.py`(71%)、`runtime/agent.py`(70%) 距核心模块 75% 目标尚有差距（剩余为 WS 长连接主循环与 `_execute_task` 执行链，复杂度高）。
+- 补覆盖清单中 `api/routes/agents.py`(43%)、`worker_package.py`(57%)、`im/vod_handler_async.py`(29%)、`config.py`(47%) 尚未补足。
 
 ---
 
@@ -477,8 +481,8 @@ class TestXxxBehavior:
 
 | 指标 | 实施前 | 实施后 |
 | --- | --- | --- |
-| 默认套件 | 1025 passed | **1036 passed / 5 skipped / 21 deselected，0 失败** |
-| 整体覆盖率 | 71.08% | 70.87%（门禁 70% 通过） |
+| 默认套件 | 1025 passed | **1139 passed / 5 skipped / 21 deselected，0 失败** |
+| 整体覆盖率 | 71.08% | 73.94%（门禁 70% 通过） |
 | 跨运行确定性 | 依赖残留库 | 会话开始重建干净库 |
 
 ### 遗留（需后续 DB 逐用例隔离解决）

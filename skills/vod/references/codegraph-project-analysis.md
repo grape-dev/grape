@@ -13,7 +13,7 @@
 
 ```bash
 # 安装 codegraph（参考：https://github.com/colbymchenry/codegraph）
-npm install -g codegraph
+npm install -g @colbymchenry/codegraph   # ⚠️ 勿用 `npm install -g codegraph`(npm 上是空壳占位包, 2026-08-18 实测)
 
 # 验证安装
 codegraph --version

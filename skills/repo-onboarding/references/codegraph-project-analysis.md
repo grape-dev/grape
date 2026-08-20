@@ -12,13 +12,18 @@
 如果本地未安装 codegraph，需先完成安装：
 
 ```bash
-npm install -g codegraph
+# ⚠️ 勿用 `npm install -g codegraph`：npm 上该名称是空壳占位包(无 bin/无 dist, 2026-08-18 实测)。
+# 真包名带 scope：
+npm install -g @colbymchenry/codegraph
 
 # 验证安装
 codegraph --version
 ```
 
-> ⚠️ codegraph 依赖 Node.js 环境。如未安装 Node.js >= 18，先安装；安装/初始化失败则降级（见降级方案）。
+> 离线安装（生产/无外网环境）：grape 发布包 tools/ 子包自带离线包（codegraph/ 目录，
+> 含 codegraph-linux-arm64/x64 tgz + install-codegraph.sh，零依赖自带 node 运行时）：
+> `bash <解包目录>/codegraph/install-codegraph.sh --src <codegraph 目录>`（自动按本机架构选包）。
+> 需 Node.js >= 18 仅在线安装时；离线包自带运行时无需 node。安装/初始化失败则降级（见降级方案）。
 
 ## 存储位置（共享，供下游复用）
 

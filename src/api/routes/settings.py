@@ -23,6 +23,9 @@ async def get_credentials(user: dict = Depends(get_current_user)):
         "huawei_cloud": {
             "ak_exists": bool(acc.get("huawei_cloud_ak")),
             "sk_exists": bool(acc.get("huawei_cloud_sk")),
+            # 真实值回显给本人（管理台鉴权后），前端默认掩码 + 可切换明文
+            "ak": acc.get("huawei_cloud_ak", ""),
+            "sk": acc.get("huawei_cloud_sk", ""),
         },
         "codearts": {
             "ak_exists": bool(acc.get("CODEARTS_CLI_AK")),
@@ -345,41 +348,13 @@ def user_db_get_backend_agents_alias():
 
 @router.post("/agent-runtimes/refresh")
 async def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
-    """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB"""
+    """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）"""
     from src.runtime.registry import discover_runtimes
+    from src.runtime.local_probe import probe_local_engines
     from src.user import db as user_db
-    import subprocess
 
     discovered = discover_runtimes()
-    results = []
-    for eng in discovered:
-        version = None
-        healthy = None
-        cli_path = eng["cli_path"]
-
-        if cli_path:
-            try:
-                r = subprocess.run([cli_path, "--version"], capture_output=True, text=True, timeout=5)
-                if r.returncode == 0:
-                    version = r.stdout.strip().split("\n")[0][:60]
-                    healthy = True
-                else:
-                    healthy = False
-            except Exception as e:
-                version = str(e)[:40]
-                healthy = False
-        else:
-            healthy = False
-
-        results.append({
-            "name": eng["name"],
-            "display_name": eng["name"].capitalize(),
-            "installed": eng["installed"],
-            "cli_path": cli_path or "",
-            "healthy": healthy,
-            "version": version or "",
-            "pip_package": eng.get("pip_package", ""),
-        })
+    results = probe_local_engines(discovered)
 
     # Only persist runtimes that are actually installed
     results = [r for r in results if r["installed"]]

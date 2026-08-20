@@ -711,6 +711,16 @@ def _cleanup_chat_shared_worker_runtime():
     """把 chat 配置中指向共享全局 worker（scope='global' 且 credential_id>0）的 runtime_id
     回落为本机直连（同名 credential_id=0），修复 backend 名解析被共享 worker 劫持
     （chat-agent-backend-resolution-fix.md 方案 C）。幂等，启动时执行。"""
+    # queue_remote 下本机直连行（credential_id=0）无 claim 方 = 黑洞
+    #（chat-task-blackhole-local-direct-2026-08.md）：回落会把用户配置重置为死引擎，
+    # 每次重启覆盖管理员/用户改绑（2026-08-18 实测 sess-cfg-* 全被重置为 1），跳过；
+    # direct 模式保留原防劫持语义。
+    try:
+        from src.runtime.service import get_execution_mode, EXEC_MODE_REMOTE
+        if get_execution_mode() == EXEC_MODE_REMOTE:
+            return
+    except Exception:
+        pass
     try:
         with db_lock:
             c = db.cursor()
