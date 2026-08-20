@@ -1,7 +1,7 @@
 # Grape Chat Agent Prompt 全景分析
 
-> 版本：v1.5
-> 日期：2026-08-19
+> 版本：v1.6
+> 日期：2026-08-21
 
 ## 一、Prompt 速查
 
@@ -174,3 +174,12 @@ Always reply in Chinese. Never include internal reasoning or process steps.
 | Task Center | `tasks.py` → `build_task_chat_prompt()` |
 | Pipeline | `event_pipeline.py` → `build_devops_agent_prompt()` |
 | Event 对话 | `events.py` → `build_event_chat_prompt()` |
+
+---
+
+## 五、变更日志
+
+| 版本 | 日期 | 变更 |
+|------|------|------|
+| v1.6 | 2026-08-21 | **移除 `session_history` 文件注入**：`_build_history_file_guide()` 改为空返回，`handler_async.py` 停止写历史文件到磁盘。Chat Agent 历史由引擎 `--continue` 会话机制承载，DevOps Agent 上下文由事件 payload + A2A context 承载，不再通过文件列表引导 Agent 读取历史。 |
+| v1.5 | 2026-08-19 | 初始版本，Prompt 全景分析 |

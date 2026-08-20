@@ -143,12 +143,15 @@ class TestRetry:
 
 class TestBusinessMethods:
     def test_register_returns_ids(self):
-        c = _client(_Ctx(_FakeResp(200, {"runtimes": [{"id": 1}, {"id": 2}]})))
-        assert _run(c.register([{"name": "opencode"}], "dev1", "1.0")) == [1, 2]
+        # v3.0 契约：register 返回 (runtime_ids, probe_url)
+        c = _client(_Ctx(_FakeResp(200, {"runtimes": [{"id": 1}, {"id": 2}], "probe_url": "https://p/probe"})))
+        ids, probe = _run(c.register([{"name": "opencode"}], "dev1", "1.0"))
+        assert ids == [1, 2]
+        assert probe == "https://p/probe"
 
     def test_register_empty_returns_empty_list(self):
         c = _client(_Ctx(_FakeResp(200, {})))
-        assert _run(c.register([])) == []
+        assert _run(c.register([])) == ([], "")
 
     def test_latest_version(self):
         c = _client(_Ctx(_FakeResp(200, {"version": "1.2.3"})))

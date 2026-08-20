@@ -782,8 +782,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             "oc_session_id": new_oc_session_id,
         }
         history.append(record)
-        from src.session_manager import dump_history_to_file
-        dump_history_to_file(repo_key, history, exec_account)
+        # 已废弃：session_history 文件不再注入 Prompt，无需写入磁盘
+        # from src.session_manager import dump_history_to_file
+        # dump_history_to_file(repo_key, history, exec_account)
         update_session(sess, history, "idle", new_oc_session_id, backend)
 
         output = final_text.strip()

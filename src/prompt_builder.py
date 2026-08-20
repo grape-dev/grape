@@ -51,26 +51,11 @@ def _resolve_server_url() -> str:
     return "http://localhost:8080"
 
 
-def _build_history_file_guide(repo_key: str, account: str = "", runtime_id: int = 0) -> str:
-    """Build prompt section listing available history files."""
-    from src.runtime.service import runtime_execution_kind, EXEC_MODE_REMOTE
-    if runtime_execution_kind(runtime_id) == EXEC_MODE_REMOTE:
-        # 远端模式：本地历史文件不可达，历史上下文改由 event.json 档案承载
-        #（见 multi-issue-isolation-design.md §4.2 / skill-delivery-remote.md §3.4）
-        return ""
-    repo_name = repo_key.replace("gitcode:", "").replace("/", "_")
-    if not account:
-        account = repo_key.replace("gitcode:", "")
-    base = f"{WORKSPACE_DIR}/history/{account}/{repo_name}/"
-    from src.session_manager import get_history_file_list
-    files = get_history_file_list(repo_key, account)
-    if files:
-        lines = ["Session history files (newest first):"]
-        for f in files:
-            lines.append(f"  {f}")
-        lines.append("Use the read tool to access any of these files when you need context about past events.")
-        return "\n".join(lines)
-    return f"Session history file: {base}session_history.json (none yet)"
+def _build_history_file_guide(repo_key: str = "", account: str = "", runtime_id: int = 0) -> str:
+    """已废弃：Chat Agent 历史上下文由引擎 --continue 会话机制承载，
+    DevOps Agent 上下文由事件 payload + A2A context 承载，不再通过文件列表引导 Agent 读取历史。
+    """
+    return ""
 
 
 _PROJECT_INFO_MAX_CHARS = 2500
