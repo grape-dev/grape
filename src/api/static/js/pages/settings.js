@@ -13,7 +13,9 @@ function renderSettings(tab) {
   if (current === 'credentials') {
     html += `<div id="sCredentials"><div class="loading">加载中...</div></div></div>`;
     el.innerHTML = html;
-    API.get('/settings/credentials').then(d => {
+    const curRepo = app.currentRepo();
+    const repoQ = curRepo && curRepo.fullName ? '?repo_key=gitcode:' + encodeURIComponent(curRepo.fullName) : '';
+    API.get('/settings/credentials' + repoQ).then(d => {
       // AK/SK 回显真实值需 HTML 转义（防引号破坏属性）
       const _esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
       const _akVal = d.huawei_cloud ? _esc(d.huawei_cloud.ak || '') : '';
@@ -28,7 +30,10 @@ function renderSettings(tab) {
           <div class="srow"><label>Secret Key</label><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="Secret Key"><button class="bt bt-o bt-s" id="huaweiToggleSk" onclick="toggleHuaweiSecret()" title="显示/隐藏明文" style="padding:2px 8px">👁</button></div>
           <p class="tx t2 mt8">Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.</p>
           <button class="bt bt-p mt8" onclick="saveCredentials()">Save</button>
-        </div>`;
+        </div>
+
+
+`;
     }).catch(e => document.getElementById('sCredentials').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
   } else if (current === 'notifications') {
     html += `<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Notification Preferences</h3>
@@ -83,10 +88,21 @@ function saveCredentials() {
   const sk = document.getElementById('huaweiSk');
   const body = {};
   const akVal = ak && ak.value ? ak.value.trim() : '';
+
   const skVal = sk && sk.value ? sk.value.trim() : '';
   if (akVal && !_isCredPlaceholder(akVal)) body.huawei_cloud_ak = akVal;
   if (skVal && !_isCredPlaceholder(skVal)) body.huawei_cloud_sk = skVal;
-  API.put('/settings/credentials', body).then(r => app.showToast('凭据已更新')).catch(e => app.showToast('更新失败'));
+
+  // v4.3：发布令牌按仓库（项目维度）——带当前仓库
+  const cur = app.currentRepo();
+  if (cur && cur.fullName) {
+    const parts = cur.fullName.split('/');
+    if (parts.length === 2) body.repo_key = 'gitcode:' + cur.fullName;
+  }
+  API.put('/settings/credentials', body).then(r => {
+    // 发布目标仓库（配置）与凭据区分提示：含配置类字段提示"配置已更新"
+    app.showToast('凭据已更新');
+  }).catch(e => app.showToast('更新失败'));
 }
 
 // 华为云 AK/SK 明文显示/隐藏切换（默认掩码，👁 查看明文；autocomplete=new-password 防浏览器自动填充覆盖）

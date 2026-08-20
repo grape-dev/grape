@@ -49,9 +49,9 @@
    "mapping": {
     "vod": "vod",
     "issue": "issue-advance",
-    "coding": "implementation",
-    "qa": "pr",
-    "sre": "cloud-deploy"
+    "coding": "skill-creator",
+    "qa": "skill-tester",
+    "sre": "skill-publish"
    },
    "onboarding": "repo-onboarding"
   }

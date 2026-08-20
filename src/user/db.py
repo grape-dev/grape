@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     huawei_cloud_sk TEXT DEFAULT '',
     CODEARTS_CLI_AK TEXT DEFAULT '',
     CODEARTS_CLI_SK TEXT DEFAULT '',
+    gitcode_publish_repo TEXT DEFAULT '',
+    github_publish_repo TEXT DEFAULT '',
     password TEXT DEFAULT '',
     created_by INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
@@ -1295,6 +1297,7 @@ USER_ACCOUNT_FIELDS = [
     "feishu_app_id", "feishu_app_secret",
     "huawei_cloud_ak", "huawei_cloud_sk",
     "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",
+    "gitcode_publish_repo", "github_publish_repo",
     "password",
     "created_by", "created_at",
 ]

@@ -274,7 +274,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     user_id           INTEGER DEFAULT 0,
     repo_gitcode_token TEXT DEFAULT '',
     env_extra         TEXT DEFAULT '{}',    -- JSON（含服务端已注入的账号/用户凭据，见 skill-delivery-remote.md）
-    skill_files       MEDIUMTEXT DEFAULT '{}',    -- JSON: {skill_name: {rel_path: content}}，远端交付技能包（旧格式，过渡期双写）
+    skill_files       MEDIUMTEXT,    -- JSON: {skill_name: {rel_path: content}}，远端交付技能包（MySQL 不允许 MEDIUMTEXT 默认值——无默认）
     server_url        TEXT DEFAULT '',      -- A2A 外呼地址，worker 替换 {{SERVER_URL}}
     issue_session_id  TEXT DEFAULT '',      -- 外键 → issue_agent_session.id（Issue 级执行会话，串行粒度，见 multi-issue-isolation-design.md §3.3）
     project_info_files TEXT DEFAULT '{}',   -- JSON: {rel_path: content}，repo 全局 project-info 随任务交付（§2.4）
@@ -834,6 +834,27 @@ def _rebuild_agent_runtimes_inst_key(c):
     return True
 
 
+def _alter_skill_files_if_needed() -> str:
+    """agent_tasks.skill_files 仅非 MEDIUMTEXT 时返回 ALTER（避免每次启动 DDL 触发元数据锁）。
+
+    MySQL 元数据锁（metadata lock）在并发/残留 Sleep 连接下会等待——
+    无条件每次 MODIFY 是启动变慢根因（2026-08-17 修复）。
+    SQLite 下无长度概念，直接返回空串（无害）。
+    """
+    try:
+        from src.session_manager import db
+        rows = db.execute(
+            "SELECT DATA_TYPE FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='agent_tasks' "
+            "AND COLUMN_NAME='skill_files'"
+        ).fetchall()
+        if rows and rows[0][0] == "mediumtext":
+            return ""
+        return "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT"
+    except Exception:
+        return "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT"
+
+
 def _migrate_tables():
     """已有数据库的 schema 迁移"""
     # ===== new-version2 数据安全：迁移前自动备份（仅在有改动性迁移时触发一次）=====
@@ -891,6 +912,7 @@ def _migrate_tables():
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
         "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
+        # ===== 发布配置（skill-publish v1.1）=====
         # ===== OBS 技能库（obs-skill-storage-design.md §4）=====
         # v2.4 去版本化：DROP current_version（本期新增列，无历史依赖；列不存在时 SQLite 忽略报错）
         "ALTER TABLE skill DROP COLUMN current_version",
@@ -900,7 +922,9 @@ def _migrate_tables():
         "ALTER TABLE skill ADD COLUMN updated_by VARCHAR(64) DEFAULT ''",
         # skill_zip 已移除（本次需求新增、未上线，无包袱直砍——见 obs-skill-storage-design.md §5.7 v3 决策）
         # MySQL 下 skill_files 升级（SQLite 无长度限制，MODIFY 语句报错被忽略无害）
-        "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT DEFAULT '{}'",
+        # 2026-08-17 修复：DEFAULT '{}' 在 MySQL 上触发 metadata lock 卡启动——改为无默认；
+        # 且 ALTER 仅在列非 MEDIUMTEXT 时执行（避免每次启动 DDL 触发元数据锁——启动变慢根因）
+        _alter_skill_files_if_needed(),
     ]
     for sql in migrations:
         try:

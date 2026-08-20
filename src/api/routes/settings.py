@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 # ====== Credentials ======
 
 @router.get("/credentials")
-async def get_credentials(user: dict = Depends(get_current_user)):
+async def get_credentials(user: dict = Depends(get_current_user), repo_key: str = ""):
     acc = user_db.get_user_account(user["username"]) or {}
     return {
         "gitcode": {
@@ -23,7 +23,6 @@ async def get_credentials(user: dict = Depends(get_current_user)):
         "huawei_cloud": {
             "ak_exists": bool(acc.get("huawei_cloud_ak")),
             "sk_exists": bool(acc.get("huawei_cloud_sk")),
-            # 真实值回显给本人（管理台鉴权后），前端默认掩码 + 可切换明文
             "ak": acc.get("huawei_cloud_ak", ""),
             "sk": acc.get("huawei_cloud_sk", ""),
         },
@@ -39,6 +38,7 @@ class UpdateCredentials(BaseModel):
     huawei_cloud_sk: str = ""
     codearts_ak: str = ""
     codearts_sk: str = ""
+    repo_key: str = ""
 
 
 # 占位符凭据（2026-08-17 修复，issue #72）：前端曾把 demo 占位符回显进输入框，
