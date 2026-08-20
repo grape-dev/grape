@@ -826,6 +826,25 @@ def fail_task(task_id, error, exit_code=-1):
             log.warning(f"fail_task finalize failed: {e}")
     update_task_status(task_id, "failed", exit_code=exit_code,
                        errors=json.dumps([str(error)] if error else []))
+    # 死 session 检测（smart-session-recovery-design.md §2.3）：
+    # 同一 issue_agent_session 下连续 ≥3 次 exit_code < 0（-15/-1/timeout）→ 清空 runtime_session_id
+    # 注意：worker 端 client.fail 不传 exit_code，服务端 fail_task 恒收到 exit_code=-1；
+    # exit=1（快速失败如 key/config 问题）不计入 session 故障，避免误清
+    _isid = (task or {}).get("issue_session_id") or ""
+    if _isid and exit_code < 0:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT exit_code FROM agent_tasks WHERE issue_session_id=? ORDER BY created_at DESC LIMIT 3",
+                    (_isid,))
+                rows = c.fetchall()
+                if len(rows) >= 3 and all((r[0] or 0) < 0 for r in rows):
+                    from src.api.session_store import update_issue_session
+                    update_issue_session(_isid, runtime_session_id="")
+                    log.info(f"fail_task: dead session detected (consecutive failures), cleared runtime_session_id for {_isid}")
+        except Exception as e:
+            log.warning(f"fail_task session check failed: {e}")
     log.warning(f"Task failed: {task_id} exit={exit_code} err={str(error)[:120]}")
 
 
