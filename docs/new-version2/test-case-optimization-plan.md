@@ -412,9 +412,11 @@ class TestXxxBehavior:
 
 | 指标 | 实施前 | 实施后 |
 | --- | --- | --- |
-| 默认套件结果 | 830 passed | **1139 passed / 5 skipped / 21 deselected，0 failed / 0 errors** |
-| 整体行覆盖率 | 65% | **73.94%**（门禁 70% 生效） |
+| 默认套件结果 | 830 passed | **1233 passed / 6 skipped / 21 deselected，0 failed / 0 errors** |
+| 整体行覆盖率 | 65% | **73.43%**（门禁 70% 生效；注：OBS 合并新增 src/storage 等语句，绝对覆盖行数仍在增长） |
 | pytest 插件 | 无 | asyncio/cov/randomly/timeout/xdist/rerunfailures 已装（`requirements-dev.txt`） |
+
+> 说明：本附录基线为 2026-08-18 覆盖 **main** 分支（已合并 OBS 技能存储、hermes 引擎等新功能）的实测值。
 
 ### 模块覆盖率变化（P1-C）
 
@@ -424,6 +426,7 @@ class TestXxxBehavior:
 | api/routes/auth.py | 39% | **100%** |
 | mysql_compat.py | 16% | **93%** |
 | user/db.py | 60% | **75%** |
+| api/routes/agents.py | 43% | **77%** |
 | api/routes/chat.py | 63% | **81%** |
 | im/feishu_async.py | 45% | **71%** |
 | runtime/agent.py | 50% | **70%** |
@@ -446,12 +449,13 @@ class TestXxxBehavior:
 | tests/test_runtime_agent.py | 主循环/辅助函数/重注册/流桥接(POSIX 项按平台跳过) | 25 |
 | tests/test_user_db.py | 账户/凭据/云主机/托管/技能/引擎缓存 | 35 |
 | tests/test_chat_routes.py | 会话 CRUD/send 各路径/stream/反馈/config/辅助函数 | 23 |
+| tests/test_agents_routes.py | 类型/Agent 详情/clean/配置(backend/pool/vod/技能) | 15 |
 
 ### 遗留
 
 - **P1-B（隔离与确定性）**：已实施会话库重建与确定性污染源修复（见附录 I）；**DB 逐用例隔离尚未做**（随机全绿依赖）。
 - `im/feishu_async.py`(71%)、`runtime/agent.py`(70%) 距核心模块 75% 目标尚有差距（剩余为 WS 长连接主循环与 `_execute_task` 执行链，复杂度高）。
-- 补覆盖清单中 `api/routes/agents.py`(43%)、`worker_package.py`(57%)、`im/vod_handler_async.py`(29%)、`config.py`(47%) 尚未补足。
+- 补覆盖清单中 `worker_package.py`(57%)、`im/vod_handler_async.py`(29%)、`config.py`(47%) 尚未补足。
 
 ---
 
@@ -493,6 +497,57 @@ class TestXxxBehavior:
   `chat_agent_session`/`meta`/`skill` 等表）。彻底解决需 **DB 逐用例隔离**（每个用例独立临时库 +
   模块重载链），属 P1-B 核心大改造，建议后续专项实施。
 - env 逐用例 `monkeypatch` 化、时钟/随机确定性注入尚未系统性推行（随隔离改造一并做）。
+
+---
+
+## 附录 J：P1-C 续 + OBS 合并契约对齐（2026-08-18）
+
+> 工作区随 OBS 功能（`e5c09544`）等合并切换到 **main** 分支。本节记录在该状态下的收尾工作、
+> 最新基线，以及对合并功能的 stale test 对齐。**全程未改 `src/` 业务源码**（附录 G 清单仍为空）。
+
+### 达到基线（main 分支实测，默认确定性顺序 + --cov）
+
+| 指标 | 值 |
+| --- | --- |
+| 默认套件 | **1233 passed / 6 skipped / 21 deselected，0 failed / 0 errors** |
+| 整体覆盖率 | **73.43%**（门禁 70% 通过） |
+| agents.py 覆盖率 | 44% → **77%** |
+
+### P1-C 收尾：api/routes/agents.py（43%→77%）
+
+新增 `tests/test_agents_routes.py`（15 例）：Agent 类型列表、详情（session/事件/VOD 群/引擎集合）、
+`clean`、配置（backend 单引擎 / backends 引擎集合 / VOD IM 冲突与 bot 增删 / 技能 repo/official scope）。
+
+### OBS 合并引起的 stale test 对齐（main 已含 e5c09544 等）
+
+产品合并改变了若干契约，旧用例未同步而红，已对齐：
+
+| 契约变化 | 对齐内容 |
+| --- | --- |
+| `RuntimeClient.register` 现返回 `(runtime_ids, probe_url)` 元组 | test_runtime_client register 断言改元组 |
+| `_reregister` 按新 register 契约解包 | test_runtime_agent 的 mock 返回元组 |
+| `HermesRuntime.build_args` 运行时探测 `--cli` | test_runtime_hermes 改为 mock `_probe_cli_flag`（不依赖真实 hermes 二进制） |
+| 多实例引擎选择按"在线+最近心跳"优先 | test_chat_backend_resolution 种子引擎补 `last_seen_at` + 清理残留 opencode 行 |
+| OBS 技能库：官方技能种子可能被清理 | test_skills_obs 增加 build-debug 自给自足补插 |
+| 权限位 0755 链路断言 | test_skills_obs 该用例按平台跳过（win32 无可执行位） |
+| 新增依赖 esdk-obs-python | requirements.txt 已含，测试环境需 `pip install -r requirements.txt` 后运行 |
+
+### 任务完成状态一览（截至 2026-08-18）
+
+**已完成 ✅**：P0 止血（§4.1）、P1-A 基础设施不含 CI（§4.2，CI 暂缓）、P1-B 会话库重建与确定性
+污染源修复（§4.3 部分，DB 逐用例隔离除外）、P1-C 补覆盖（client 100% / auth 100% / mysql_compat 93%
+/ user/db 75% / chat 81% / agents 77%）。
+
+**未完成 ⏳**：
+- **P1-B DB 逐用例隔离**（随机顺序全绿依赖，§4.3.1 大改造）
+- env 逐用例 `monkeypatch` 化、时钟/随机确定性（§4.3.2/4.3.4）
+- 响应录播（requests-mock/aioresponses，§4.3.3）
+- 补覆盖 `worker_package.py`(57%) / `im/vod_handler_async.py`(29%) / `config.py`(47%)（§4.4）
+- `im/feishu_async.py`(71%)、`runtime/agent.py`(70%) 提至 ≥75%（§4.2.3）
+- CI 接入（§4.2.1，Phase 2b 暂缓）
+- P2 提质：性能优化、mutation/契约/故障注入、用例设计规范落地（§4.5–4.7）
+- 度量闭环与准入 Checklist 强制（§4.8/4.9）
+- Token 轮换（`XmMq...`，运维）
 
 ---
 
