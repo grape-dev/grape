@@ -699,7 +699,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
 
         prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
                                            chat_runtime_id, conv_id, user_info=user_info)
-        log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:2000]}")
+        log.info(f"Chat prompt ({len(prompt)} chars, repo={repository})")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])
         os.makedirs(wsd, exist_ok=True)
