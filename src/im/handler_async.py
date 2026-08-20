@@ -653,6 +653,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         user_info += f"  GitCode 昵称: {gitcode_nickname}\n"
                     if nick_name and nick_name != gitcode_login:
                         user_info += f"  飞书 昵称：{nick_name}\n"
+                    elif gitcode_nickname and gitcode_nickname != gitcode_login:
+                        # 飞书 API 无 name 权限 → 用 GitCode 昵称兜底
+                        user_info += f"  飞书 昵称：{gitcode_nickname}\n"
             except Exception as e:
                 log.warning(f"Failed to resolve GitCode login: {e}")
 
