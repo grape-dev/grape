@@ -641,6 +641,12 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     gitcode_login = row[0]
                     nick_name = row[1] or ""
                     gitcode_nickname = row[2] or ""
+                # 飞书昵称 DB 为空 → 用 open_id 调飞书 API 兜底
+                if not nick_name and open_id:
+                    try:
+                        nick_name = await api.get_user_name(ctx, open_id, user_id_type="open_id") or ""
+                    except Exception:
+                        pass
                 if gitcode_login:
                     user_info += f"  GitCode login: {gitcode_login}\n"
                     if gitcode_nickname and gitcode_nickname != gitcode_login:
