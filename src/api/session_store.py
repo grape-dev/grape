@@ -278,6 +278,15 @@ def ensure_default_agent_sessions(repo_key: str):
     with open(_path, "r", encoding="utf-8") as _f:
         _cfg = json.load(_f)
     _mapping = _cfg.get("scenes", {}).get("default", {}).get("mapping", {})
+    # 读仓库开发场景（managed_repos.dev_scene），按场景读映射——skill-dev 仓库自动创建 skill-creator/skill-tester/skill-publish
+    try:
+        from src.user.db import get_repo_scene
+        _scene_id = get_repo_scene(repo_key) or "default"
+        _scene_mapping = _cfg.get("scenes", {}).get(_scene_id, {}).get("mapping", {})
+        if _scene_mapping:
+            _mapping = _scene_mapping
+    except Exception:
+        pass
     if not _mapping:
         return
 

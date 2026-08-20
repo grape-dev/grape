@@ -1,4 +1,16 @@
 {
+  "skill-creator": {
+    "name": "Skill 创建生成器",
+    "agent_type": "coding",
+    "path": "skill-creator",
+    "description": "按需求自动创建华为云 skill（借鉴 skillsopr 六阶段）：查重 → 需求澄清（确认门控）→ CLI/SDK/OpenAPI 三级调研 → 骨架生成 → 提交用户代码仓 → A2A 交 skill-tester 测试"
+  },
+  "skill-tester": {
+    "name": "Skill 测试验证",
+    "agent_type": "qa",
+    "path": "skill-tester",
+    "description": "skill 功能验证（创建后 QA 门控）：跑 skill 验证功能 + 规范脚本化检查（frontmatter/结构）+ gitleaks 密钥扫描——报告通过/失败（qa 技能本身不动）"
+  },
   "vod": {
     "name": "开发者声音分析",
     "agent_type": "vod",
@@ -88,5 +100,11 @@
     "agent_type": "vod",
     "path": "repo-onboarding",
     "description": "首次托管引导（VOD Agent 执行）：建立项目知识基线，按引导目标创建「快速部署体验」或「探索方向引导」单个 Issue"
+  },
+  "skill-publish": {
+    "name": "skill 发布",
+    "agent_type": "sre",
+    "path": "skill-publish",
+    "description": "将 grape 生成的 skill 发布/下架到外部平台（ClawHub/GitHub/GitCode）。Triggers: 同步 skill, 发布 skill, 下架 skill, ClawHub, GitHub, GitCode, 撤回发布"
   }
 }

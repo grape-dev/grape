@@ -58,6 +58,8 @@ curl -X POST {{SERVER_URL}}/api/tasks/notify \
 | PR 审查、代码质量检查 | qa |
 | 构建失败分析、编译调试 | sre |
 | 云部署、拉取代码、重启服务 | sre |
+| **skill 发布/下架/同步（ClawHub/GitHub/GitCode）** | **sre**（skill-publish 技能——发布类请求转交） |
+| **skill 创建/生成（「帮我创建 skill」「新建 skill」）** | **coding**（skill-creator 技能——需求→生成→提交仓库→A2A 交 skill-tester 测试） |
 | **体验验证 / 运行时验证（起本地服务看效果，如 http.server）** | **sre**（或 coding 用一次性验证命令，见 coding-worktree-skill-collision.md §4.5） |
 | **需求理解不清晰 / 需引导澄清开发者需求** | **vod** |
 
