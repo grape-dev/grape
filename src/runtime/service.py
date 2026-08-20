@@ -592,8 +592,14 @@ def update_task_status(task_id, status, **kw):
             return
         if row[0] in ("completed", "failed", "cancelled"):
             return
-        sets = ["status=?", "completed_at=?"]
-        params = [status, kw.get("completed_at") or datetime.now(timezone.utc).isoformat()]
+        sets = ["status=?"]
+        params = [status]
+        if status in ("completed", "failed", "cancelled"):
+            # 终态才写 completed_at；非终态（running 等）不动它，
+            # 否则运行中任务带 completed_at 脏值（2026-08-19 修复：task_start 曾把
+            # running 任务写成 completed_at=启动时刻，干扰终态判断/展示）。
+            sets.append("completed_at=?")
+            params.append(kw.get("completed_at") or datetime.now(timezone.utc).isoformat())
         for col in ("exit_code", "result_text", "errors", "stderr", "usage_json"):
             if col in kw:
                 sets.append(f"{col}=?")

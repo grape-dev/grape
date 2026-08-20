@@ -292,7 +292,10 @@ class TestTerminateProc:
                 return 0
 
         fp = FakeProc()
-        with patch("src.agent.executor.os.killpg") as mock_killpg:
+        # 生产路径：agent 经 start_new_session=True 启动，getpgid 必然成功；
+        # 此处补 getpgid mock，避免 FakeProc.pid 不存在导致走 terminate/kill 兜底分支。
+        with patch("src.agent.executor.os.killpg") as mock_killpg, \
+             patch("src.agent.executor.os.getpgid", return_value=fp.pid):
             _terminate_proc(fp, "test")
         # 第一次 SIGTERM 进程组，第二次 SIGKILL 进程组
         sigs = [c.args[1] for c in mock_killpg.call_args_list]

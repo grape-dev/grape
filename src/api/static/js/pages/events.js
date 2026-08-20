@@ -314,10 +314,12 @@ function openTaskLog(taskId, title) {
     <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">
       <span style="font-size:13px;font-weight:600">📜 运行日志 <span style="color:var(--t3);font-weight:400">· ${_tlEsc(title)}</span></span>
       <span id="tlStatus" style="font-size:11px;margin-left:auto"></span>
+      <button onclick="_copyTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" title="复制日志内容">📋 复制</button>
+      <button id="taskLogFullscreenBtn" onclick="_toggleTaskLogFullscreen()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" title="全屏/还原">⛶ 全屏</button>
       <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>
     </div>
     <div id="tlInfo" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0;font-size:11px;color:var(--t2,#8a94a6)"></div>
-    <div id="tlBody" style="flex:1;min-height:0;overflow-y:auto;background:#0b0e14;color:#c2cad6;padding:12px 14px;font-size:12px;font-family:monospace;line-height:1.6"></div>
+    <div id="tlBody" style="flex:1;min-height:0;overflow-y:auto;background:#0d1220;color:#d3dcee;padding:12px 14px;font-size:12px;font-family:monospace;line-height:1.6"></div>
   </div>`;
   document.body.appendChild(ov);
   _taskLog.statusEl = document.getElementById('tlStatus');
@@ -418,6 +420,39 @@ function _taskLogStream() {
     _tlStatus('⚠️ 连接断开，2s 后重连…', 'var(--tr, #e74c3c)');
     setTimeout(() => { if (_taskLog.taskId) _taskLogStream(); }, 2000);
   });
+}
+
+function _copyTaskLog() {
+  if (!_taskLog.bodyEl) return;
+  const txt = _taskLog.bodyEl.innerText;
+  navigator.clipboard.writeText(txt).then(
+    () => { const b = _taskLog.copyBtn; if (b) { const o = b.textContent; b.textContent = '✅ 已复制'; b.style.background = 'var(--ok,#1e7f3f)'; b.style.color = '#fff'; setTimeout(() => { b.textContent = o; b.style.background = ''; b.style.color = ''; }, 1200); } },
+    () => {}
+  );
+}
+
+function _toggleTaskLogFullscreen() {
+  const ov = document.getElementById('taskLogOverlay');
+  if (!ov) return;
+  const box = ov.firstElementChild;
+  if (!box) return;
+  const isFs = box.dataset.fs === '1';
+  if (!isFs) {
+    box.dataset.fs = '1';
+    box.style.width = '100vw';
+    box.style.height = '100vh';
+    box.style.borderRadius = '0';
+    ov.style.padding = '0';
+    const b = document.getElementById('taskLogFullscreenBtn');
+    if (b) { b.textContent = '⛶ 还原'; b.title = '退出全屏'; }
+  } else {
+    box.dataset.fs = '';
+    box.style.width = 'min(960px,94vw)';
+    box.style.height = 'min(720px,90vh)';
+    box.style.borderRadius = '10px';
+    const b = document.getElementById('taskLogFullscreenBtn');
+    if (b) { b.textContent = '⛶ 全屏'; b.title = '全屏/还原'; }
+  }
 }
 
 function closeTaskLog() {

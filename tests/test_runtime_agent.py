@@ -91,7 +91,7 @@ class TestDiscoverLocalRuntimes:
 
 
 @pytest.mark.skipif(_is_win, reason="POSIX-only: pgrep/readlink/killpg")
-class TestKillStaleOpencode:
+class TestKillStaleEngine:
     def test_kills_matching_pid(self):
         task = {"cwd": "/home/grape/org/repo"}
         with patch("os.path.expanduser", return_value="/home/zhangsan"), \
@@ -99,14 +99,14 @@ class TestKillStaleOpencode:
              patch("os.readlink", return_value="/home/zhangsan/org/repo/x"), \
              patch("os.getpgid", return_value=99), \
              patch("os.killpg") as m_kill:
-            ra._kill_stale_opencode(task)
+            ra._kill_stale_engine(task)
         m_kill.assert_called_once_with(99, __import__("signal").SIGTERM)
 
     def test_no_processes(self):
         with patch("subprocess.run", return_value=MagicMock(stdout="")), \
              patch("os.readlink", side_effect=FileNotFoundError), \
              patch("os.getpgid"), patch("os.killpg") as m_kill:
-            ra._kill_stale_opencode({})
+            ra._kill_stale_engine({})
         m_kill.assert_not_called()
 
 
@@ -118,7 +118,7 @@ class TestReregister:
 
     def test_success_recovers_orphans(self):
         c = MagicMock()
-        c.register = AsyncMock(return_value=[1, 2])
+        c.register = AsyncMock(return_value=([1, 2], "probe"))
         c.recover_orphans = AsyncMock()
         c.reset_session = AsyncMock()
         ids = asyncio.run(ra._reregister(c, [], "dev"))
@@ -155,6 +155,57 @@ class TestStreamRuntimeAsync:
         with patch("src.runtime.executor.stream_runtime", side_effect=_boom):
             events = asyncio.run(self._collect(ra._stream_runtime_async("prompt", "/w")))
         assert events == []
+
+
+class TestExecuteTaskTokenInjection:
+    """chat 任务执行必须注入用户级 token（USER_GITCODE_TOKEN 来源）。
+
+    回归：2026-08-19 修复前，队列执行的 chat 任务只传 bot_token（repo_gitcode_token），
+    user_token 缺失 → executor 不设 USER_GITCODE_TOKEN → agent 调 GitCode API 401。
+    """
+
+    def _chat_task(self, **kw):
+        t = {
+            "id": "task-chat-1", "agent_type": "chat", "event_type": "chat",
+            "user_id": 7, "repo_key": "songspace/shelltest", "issue_id": "58",
+            "prompt": "hello", "cwd": "/tmp/cg-token-test",
+            "runtime_session_id": "", "env_extra": "{}",
+            "skill_files": "{}", "project_info_files": "{}", "knowledge_files": "{}",
+            "repo_gitcode_token": "BOT_REPO_TOKEN",
+        }
+        t.update(kw)
+        return t
+
+    def _fake_stream(self):
+        """async 生成器：产出 text + done，供 _execute_task 消费。"""
+        holder = {"last_kwargs": None}
+
+        async def gen(*args, **kwargs):
+            holder["last_kwargs"] = kwargs
+            yield "text", {"text": "hi", "type": "text"}
+            yield "done", {"text": "ok", "exit_code": 0, "oc_session_id": "ses_x"}
+        return gen, holder
+
+    async def _run(self, task):
+        client = AsyncMock()
+        fake, holder = self._fake_stream()
+        with patch("src.runtime.agent._stream_runtime_async", new=fake), \
+             patch("src.user.db.get_user_gitcode_token", return_value="USER_TOKEN_ABC") as m_ut:
+            await ra._execute_task(client, task, "hermes-worker-1")
+        return holder["last_kwargs"], m_ut
+
+    def test_chat_task_injects_user_token(self):
+        kwargs, m_ut = asyncio.run(self._run(self._chat_task()))
+        assert kwargs["user_token"] == "USER_TOKEN_ABC"
+        # bot token 语义保留（repo 级）
+        assert kwargs["bot_token"] == "BOT_REPO_TOKEN"
+        m_ut.assert_called_once_with(7)
+
+    def test_non_chat_task_no_user_token(self):
+        t = self._chat_task(agent_type="coding", event_type="issue")
+        kwargs, m_ut = asyncio.run(self._run(t))
+        assert kwargs["user_token"] == ""
+        assert kwargs["bot_token"] == "BOT_REPO_TOKEN"
 
 
 class TestRunLoop:
