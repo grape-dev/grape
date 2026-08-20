@@ -36,3 +36,6 @@ temp/
 .codeartsdoer/AGENTS.md
 # Backup files
 *.bak
+
+# Duplicate skills (moved to skills/)
+.codeartsdoer/skills/
