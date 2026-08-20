@@ -334,10 +334,10 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
             conv_history = get_messages(conv_id, limit=20)
         except Exception:
             conv_history = []
-        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account)
+        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account, user_info=user_info)
     else:
-        body = build_chat_prompt(text, repo_key, history, skills, exec_account, runtime_id=chat_runtime_id)
-    return (user_info + "\n\n" + body) if user_info else body
+        body = build_chat_prompt(text, repo_key, history, skills, exec_account, runtime_id=chat_runtime_id, user_info=user_info)
+    return body
 
 
 async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str,
@@ -453,7 +453,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                     if username and user_row:
                         acc = user_db.get_user_account(username) or {}
                         nickname = acc.get("nickname", "") or ""
-                        existing = get_feishu_open_id(username)
+                        existing = get_feishu_open_id(username, app_id=ctx.app_id)
                         if existing:
                             # 已绑定，无需处理
                             pass
@@ -626,11 +626,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
     """
     try:
         sender_id = parsed.get('sender_id', '')
-        sender_name = await api.get_user_name(ctx, sender_id) if sender_id else ""
         open_id = parsed.get('sender_open_id', '')
-        user_info = f"User: {sender_name or sender_id} (ID: {sender_id})"
+        user_info = "## 用户基本信息\n"
         if open_id:
-            user_info += f"\nFeishu open_id: {open_id}\nTo @mention user, use: <at id={open_id}></at>"
             try:
                 gitcode_login = None
                 nick_name = ""
@@ -643,18 +641,20 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     gitcode_login = row[0]
                     nick_name = row[1] or ""
                     gitcode_nickname = row[2] or ""
+                # 飞书昵称 DB 为空 → 用 open_id 调飞书 API 兜底
+                if not nick_name and open_id:
+                    try:
+                        nick_name = await api.get_user_name(ctx, open_id, user_id_type="open_id") or ""
+                    except Exception:
+                        pass
                 if gitcode_login:
-                    user_info += f"\nGitCode login: {gitcode_login}"
+                    user_info += f"  GitCode login: {gitcode_login}\n"
                     if gitcode_nickname and gitcode_nickname != gitcode_login:
-                        user_info += f"\nGitCode 昵称: {gitcode_nickname}"
+                        user_info += f"  GitCode 昵称: {gitcode_nickname}\n"
                     if nick_name and nick_name != gitcode_login:
-                        user_info += f"\nGitCode nick (use this in cards): {nick_name}"
-                    from src.repo_key import from_repo_key
-                    repository_part = from_repo_key(repo_key).split("/", 1)
-                    if len(repository_part) == 2:
-                        user_info += f"\nTo check pending features: GET /api/v5/repos/{repository_part[0]}/{repository_part[1]}/issues?state=open&assignee={gitcode_login}&labels=feature"
+                        user_info += f"  飞书 昵称：{nick_name}\n"
             except Exception as e:
-                log.warning(f"Failed to resolve GitCode login for {sender_name}: {e}")
+                log.warning(f"Failed to resolve GitCode login: {e}")
 
         skills = ["chat"]
 
@@ -699,7 +699,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
 
         prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
                                            chat_runtime_id, conv_id, user_info=user_info)
-        log.info(f"Chat prompt ({len(prompt)} chars): {prompt[:2000]}")
+        log.info(f"Chat prompt ({len(prompt)} chars, repo={repository})")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])
         os.makedirs(wsd, exist_ok=True)
@@ -782,8 +782,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             "oc_session_id": new_oc_session_id,
         }
         history.append(record)
-        from src.session_manager import dump_history_to_file
-        dump_history_to_file(repo_key, history, exec_account)
+        # 已废弃：session_history 文件不再注入 Prompt，无需写入磁盘
+        # from src.session_manager import dump_history_to_file
+        # dump_history_to_file(repo_key, history, exec_account)
         update_session(sess, history, "idle", new_oc_session_id, backend)
 
         output = final_text.strip()

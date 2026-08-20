@@ -475,7 +475,7 @@ class TestRedispatchRuntimeZero:
         assert row, "应创建新任务"
         assert row[0] and row[0] != 0, f"runtime_id 应重新解析非 0，实际 {row[0]}"
         assert row[1] == expected_cwd, f"cwd 应走新结构，实际 {row[1]} 期望 {expected_cwd}"
-        assert row[2] == "", "runtime_session_id 应清空（不复用坏会话）"
+        assert row[2] == "ses_old", "runtime_session_id 应保留原值（续接会话），实际={row[2]}"
         assert row[3] == "iss-redis", "issue_session_id 应复用"
         # 事件状态回写 running
         with db_lock:
@@ -539,4 +539,34 @@ class TestRedispatchRuntimeZero:
             db.cursor().execute("DELETE FROM devops_agent_runtime_binding WHERE repo_key='org/test' AND agent_type='vod'")
             db.cursor().execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'redis-cred%')")
             db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'redis-cred%'")
+            db.commit()
+
+    def test_fail_task_clears_dead_session(self):
+        """连续 3 次 fail（exit_code < 0）→ 清空 runtime_session_id（smart-session-recovery-design.md §2.3）。"""
+        from src.runtime.service import fail_task, get_task
+        from src.api.session_store import update_issue_session, get_issue_session as _get_iss
+        # 1) seed issue_agent_session + 3 个 failed task
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM issue_agent_session WHERE id='iss-dead'")
+            c.execute("INSERT OR REPLACE INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, status) VALUES ('iss-dead',?, 'vod', '#9', 'ses_dead', 'idle')", (_REPO_KEY,))
+            for i in range(3):
+                c.execute(
+                    "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, prompt, cwd, issue_session_id, status, exit_code, created_at) "
+                    "VALUES ('t_dead%d', 'vod:'||?, 1, %d, '#9', ?, 'vod', 's', 'p', '/tmp', 'iss-dead', 'failed', -15, datetime('now', '-%d minutes'))" % (i, i, 10-2*i),
+                    (_REPO_KEY, _REPO_KEY))
+            db.commit()
+        # 2) 验证 session 有值
+        iss = _get_iss(_REPO_KEY, "vod", "#9")
+        assert iss and iss.get("runtime_session_id") == "ses_dead"
+        # 3) 再 fail 一次（连续第 3+1）
+        fail_task("t_dead2", "test", exit_code=-1)
+        # 4) session 应被清空
+        iss2 = _get_iss(_REPO_KEY, "vod", "#9")
+        assert iss2.get("runtime_session_id") == "", f"连续失败后 session 应被清空，实际={iss2.get('runtime_session_id')}"
+        # 清理
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM issue_agent_session WHERE id='iss-dead'")
+            c.execute("DELETE FROM agent_tasks WHERE issue_session_id='iss-dead'")
             db.commit()
