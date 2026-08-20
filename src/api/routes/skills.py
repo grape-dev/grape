@@ -620,3 +620,145 @@ async def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_curr
         raise HTTPException(status_code=500, detail={"code": 500, "message": f"复制技能失败: {e}"})
 
     return {"message": f"技能 {skill_name} 已复制到仓库 {repo}", "skill_name": skill_name, "scope": "repo", "repo": repo}
+
+
+@router.get("/{skill_id}/sub")
+async def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user)):
+    """返回技能包的子技能列表（从 skill_path 的 references/ 目录读取）"""
+    from src.session_manager import db, db_lock
+    import re as _re
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT skill_name, skill_path FROM skill WHERE id=? AND is_active=1", (skill_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+
+    skill_name, skill_path = row[0], row[1] or ""
+    base_dir = os.path.dirname(skill_path) if skill_path else ""
+    ref_dir = os.path.join(base_dir, "references")
+
+    if not os.path.isdir(ref_dir):
+        return {"skill_name": skill_name, "sub_skills": []}
+
+    subs = []
+    for entry in sorted(os.listdir(ref_dir)):
+        sub_dir = os.path.join(ref_dir, entry)
+        if not os.path.isdir(sub_dir):
+            continue
+        sub_md = os.path.join(sub_dir, "SKILL.md")
+        display_name = entry
+        description = ""
+        file_count = 0
+        if os.path.isfile(sub_md):
+            try:
+                with open(sub_md, encoding="utf-8") as f:
+                    front = f.read(500)
+                m = _re.search(r'description:\s*["\']?(.*?)["\']?$', front, _re.MULTILINE)
+                if m:
+                    description = m.group(1)[:200]
+                dm = _re.search(r'name:\s*["\']?(.*?)["\']?$', front, _re.MULTILINE)
+                if dm:
+                    display_name = dm.group(1)
+            except Exception:
+                pass
+        for _, _, files in os.walk(sub_dir):
+            file_count += len(files)
+        subs.append({
+            "name": entry,
+            "display_name": display_name,
+            "description": description,
+            "file_count": file_count,
+        })
+
+    return {"skill_name": skill_name, "sub_skills": subs}
+
+
+@router.get("/{skill_id}/sub/{sub_name}")
+async def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_current_user)):
+    """读取技能包子技能的 SKILL.md 内容"""
+    from src.session_manager import db, db_lock
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT skill_name, skill_path FROM skill WHERE id=? AND is_active=1", (skill_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+
+    base_dir = os.path.dirname(row[1] or "") if row[1] else ""
+    sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
+
+    if not os.path.isfile(sub_md):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})
+
+    try:
+        with open(sub_md, encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
+
+    # 也读取 references/ 下的文件列表
+    ref_dir = os.path.join(base_dir, "references", sub_name, "references")
+    refs = []
+    if os.path.isdir(ref_dir):
+        for r in sorted(os.listdir(ref_dir)):
+            rp = os.path.join(ref_dir, r)
+            if os.path.isfile(rp):
+                try:
+                    with open(rp, encoding="utf-8") as f:
+                        refs.append({"name": r, "content": f.read()[:2000]})
+                except Exception:
+                    refs.append({"name": r, "content": ""})
+
+    return {"name": sub_name, "content": content, "references": refs}
+
+
+@router.get("/package-sub/{pkg_id}/{sub_name}")
+async def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_current_user)):
+    """返回技能包子技能详情（格式与 skill detail 一致，支持导航到独立详情页）"""
+    from src.session_manager import db, db_lock
+    import re as _re
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT skill_name, skill_path, scope FROM skill WHERE id=? AND is_active=1", (pkg_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "父技能未找到"})
+
+    base_dir = os.path.dirname(row[1] or "") if row[1] else ""
+    sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
+    if not os.path.isfile(sub_md):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})
+
+    try:
+        with open(sub_md, encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
+
+    # 从 frontmatter 解析 name 和 description
+    display_name = sub_name
+    description = ""
+    m = _re.search(r'^---\s*\n(.*?)\n---', content, _re.DOTALL)
+    if m:
+        front = m.group(1)
+        dm = _re.search(r'name:\s*["\']?(.*?)["\']?\s*$', front, _re.MULTILINE)
+        if dm:
+            display_name = dm.group(1)
+        desc_m = _re.search(r'description:\s*["\']?(.*?)["\']?\s*$', front, _re.MULTILINE)
+        if desc_m:
+            description = desc_m.group(1)[:200]
+
+    return {
+        "id": f"{pkg_id}/{sub_name}",
+        "name": sub_name,
+        "display_name": display_name,
+        "description": description,
+        "agent_type": "sre",
+        "scope": row[2] or "official",
+        "content": content,
+        "type": "package-sub",
+    }

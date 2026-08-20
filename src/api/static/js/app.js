@@ -279,6 +279,10 @@ function loadAgentTypes() {
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
       API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+    } else if (view === 'skill-sub') {
+      // 技能包子技能详情（如 "38/huawei-ecs"）
+      title.textContent = 'Sub Skill Detail';
+      API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     }
   }
 

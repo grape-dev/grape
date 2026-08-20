@@ -1,6 +1,6 @@
 """事件处理管道：归一化 → 路由 → 存储 → Agent 执行"""
 import json, os, time, uuid, threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
 from src.config import log, WORKSPACE_DIR
 from src.vcs.adapter import normalize_event, get_event_header
@@ -13,11 +13,98 @@ _DIRECT_POOL = ThreadPoolExecutor(
     max_workers=int(os.environ.get("RUNTIME_MAX_CONCURRENT_TASKS", "20")),
     thread_name_prefix="ag-direct",
 )
+# {event_seq: Future} — 供 sweeper 取消排队中的 direct 任务
+_DIRECT_FUTURES: dict[int, Future] = {}
+_DIRECT_FUTURES_LOCK = threading.Lock()
 
 
 def start_direct_agent(fn, args, name=""):
     """提交一个本机 direct 执行任务到有界池（webhook / run_pipeline 共用）。"""
-    _DIRECT_POOL.submit(fn, *args)
+    future = _DIRECT_POOL.submit(fn, *args)
+    # 从 args 中提取 seq（约定第一个参数是 repo_key，第二个是 seq）
+    seq = args[1] if len(args) > 1 else 0
+    if seq:
+        with _DIRECT_FUTURES_LOCK:
+            _DIRECT_FUTURES[seq] = future
+    return future
+
+
+def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
+                        skill_path, engine_id, evt, issue_id=""):
+    """direct 执行前创建 agent_tasks + 设 started_at，防 sweeper 误杀。"""
+    from src.runtime.service import _TASK_COLUMNS_LIST
+    from src.api.session_store import get_or_create_agent_session
+    from src.api.event_store import update_event_config
+    from src.runtime.instances import runtime_instance_name
+    from datetime import datetime, timezone
+
+    inst_name = runtime_instance_name(engine_id) or backend or ""
+    now = datetime.now(timezone.utc).isoformat()
+
+    # 先设 started_at/runtime/skill，让 sweeper 的 no_start 检查跳过
+    update_event_config(seq, inst_name, skill_name, now)
+
+    # 查 agent_session_id
+    session = get_or_create_agent_session(repo_key, agent_type, backend or "")
+    agent_session_id = session.get("id", "")
+    if not agent_session_id:
+        log.warning(f"create_direct_task: no agent_session_id for {repo_key}/{agent_type}")
+        return ""
+
+    task_id = "t_" + uuid.uuid4().hex[:12]
+    # issue_id 优先用传参，兜底从 evt 解析
+    if not issue_id:
+        issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
+    from src.repo_key import from_repo_key
+
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"INSERT INTO agent_tasks ({','.join(_TASK_COLUMNS_LIST)}) VALUES "
+                f"({','.join(['?'] * 34)})",
+                (task_id, agent_session_id, engine_id, seq, issue_id, repo_key or "",
+                 agent_type or "", skill_name or "", "", "", "", "", "", 0, "", "{}",
+                 "{}", "", "", "{}", "{}", "{}", 0, "", 0,
+                 "queued", None, "", "", "", "{}", now, None, now)
+            )
+            db.commit()
+        log.info(f"Direct task created: {task_id} seq={seq} engine={engine_id}({inst_name}) skill={skill_name}")
+    except Exception as e:
+        log.warning(f"create_direct_task failed for seq={seq}: {e}")
+        return ""
+    return task_id
+
+
+def _update_direct_task(seq, status, exit_code=0, result_text=""):
+    """direct 执行完成后更新 agent_tasks 状态（通过 event_seq 反查）。"""
+    try:
+        from datetime import datetime, timezone
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE agent_tasks SET status=?, exit_code=?, result_text=?, completed_at=? "
+                "WHERE event_seq=? AND status='queued'",
+                (status, exit_code, result_text or "", datetime.now(timezone.utc).isoformat(), seq)
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"update_direct_task failed for seq={seq}: {e}")
+
+
+def cancel_direct_task(seq: int) -> bool:
+    """取消排队/运行中的 direct 任务（sweeper 用）。"""
+    cancelled = False
+    with _DIRECT_FUTURES_LOCK:
+        future = _DIRECT_FUTURES.pop(seq, None)
+    if future is not None and not future.done():
+        cancelled = future.cancel()
+        if cancelled:
+            log.info(f"cancel_direct_task: seq={seq} removed from thread pool queue")
+        else:
+            # Future 已在运行中，尝试 kill 对应子进程
+            log.info(f"cancel_direct_task: seq={seq} already running, skip")
+    return cancelled
 
 
 def get_agent_display_name(agent_type: str) -> str:
@@ -327,6 +414,9 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         _be = engine_name(engine_id) or backend
         kind = runtime_execution_kind(engine_id)
         if kind == EXEC_MODE_DIRECT:
+            evt["_skill_path"] = skill_path
+            _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
+                                skill_path, engine_id, evt, issue_id)
             start_direct_agent(_execute_agent, (
                 repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
             ), name=f"sub-{agent_type}-{seq}")
@@ -657,6 +747,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                                skill_id, skill_path, engine_id, issue_id)
     elif _be and skill_name and seq > 0:
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
+        # 先创建 agent_tasks + 设 started_at，防 sweeper 在排队期间误杀
+        _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
+                            skill_path, engine_id, evt, issue_id)
         start_direct_agent(_execute_agent, (
             repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
         ), name=f"ag-{agent_type}-{seq}")
@@ -926,7 +1019,35 @@ def get_prompt_context(repo_key: str) -> str:
 
 def _execute_agent(repo_key: str, seq: int, agent_type: str,
                    backend: str, skill_name: str, evt: dict, runtime_id: int = 0):
-    """后台执行 Agent：构建 prompt → stream_agent → 更新 event（result/status/agent_log）"""
+    """后台执行 Agent：构建 prompt → stream_agent → 更新 event（result/status/agent_log）
+    
+    顶层 try/except 兜底：防止线程内未捕获异常导致事件永久卡在 running
+    （如 runtime_instance_name / skill 加载 / stream_agent 启动前崩溃）。
+    """
+    try:
+        _execute_agent_inner(repo_key, seq, agent_type, backend, skill_name, evt, runtime_id)
+    except Exception as e:
+        import traceback
+        _tb = traceback.format_exc()
+        log.error(f"Exec agent: [Agent:{agent_type}|repo:{repo_key}] UNHANDLED CRASH: {e}\n{_tb}")
+        from datetime import datetime, timezone
+        try:
+            from src.api.event_store import update_event_complete
+            update_event_complete(seq, "failed", exit_code=1,
+                                  completed_at=datetime.now(timezone.utc).isoformat(),
+                                  result=f"执行崩溃：{e}")
+            _update_direct_task(seq, "failed", exit_code=1, result_text=f"执行崩溃：{e}")
+        except Exception:
+            pass
+    finally:
+        # 清理 Future 记录
+        with _DIRECT_FUTURES_LOCK:
+            _DIRECT_FUTURES.pop(seq, None)
+
+
+def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
+                         backend: str, skill_name: str, evt: dict, runtime_id: int = 0):
+    """_execute_agent 的实际逻辑（被顶层 try/except 包裹）。"""
     from src.runtime.executor import stream_agent
     from src.prompt_builder import build_prompt
     from src.api.event_store import (
@@ -1135,6 +1256,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     if not has_output:
         # 无产出 → 标记 failed（保留 event，不删）
         log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no output, mark failed")
+        _update_direct_task(seq, "failed", exit_code=exit_code, result_text=result_text)
         update_event_status(seq, "failed")
         update_event_complete(seq, "failed", exit_code=exit_code, duration=duration,
                               agent_logs=agent_logs, completed_at=completed_at, result=result_text)
@@ -1142,7 +1264,37 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     # 有产出 → 更新该 event（写入配置 + 结果 + 结论 + 执行日志）
     new_status = "completed" if exit_code == 0 else "failed"
+    _update_direct_task(seq, new_status, exit_code=exit_code, result_text=result_text)
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text)
     log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")
+
+    # 执行完成 → 自动回帖到 Issue（仅 sre 等有实质产出的 Agent，且有关联 Issue）
+    if new_status == "completed" and result_text and issue_id:
+        _issue_num = _issue_num_from(issue_id)
+        if _issue_num and repo_gitcode_token:
+            _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type)
+
+
+def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_token: str, agent_type: str):
+    """Agent 执行完成后，将结果作为评论发回 GitCode Issue。"""
+    if not repository or not issue_number or not bot_token:
+        return
+    try:
+        import urllib.request, json as _json
+        _comment = f"**{agent_type.upper()} Agent 执行报告**\n\n{result_text[:3000]}"
+        _data = _json.dumps({"body": _comment}).encode("utf-8")
+        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
+        _req = urllib.request.Request(
+            _url, data=_data,
+            headers={
+                "Authorization": f"Bearer {bot_token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(_req, timeout=15)
+        log.info(f"Exec agent: posted result comment to {repository}/issues/{issue_number}")
+    except Exception as e:
+        log.warning(f"Exec agent: failed to post result comment: {e}")

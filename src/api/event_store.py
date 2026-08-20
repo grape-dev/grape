@@ -207,6 +207,13 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
             m = re.search(r'/issues/(\d+)', text)
             result = f"创建了 Issue #{m.group(1) if m else '?'}"
             has_output = True
+        if not has_output:
+            for t in tool_uses:
+                cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+                if "POST" in cmd.upper() and ("/comments" in cmd or "labels" in cmd):
+                    result = "对 Issue 执行了写操作（评论/标签）"
+                    has_output = True
+                    break
 
     return has_output, result
 

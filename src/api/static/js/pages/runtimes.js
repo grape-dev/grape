@@ -94,7 +94,7 @@ function renderEngines(data, devices) {
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">worker</span> ${rt.worker_name || (rt.is_local ? '本机' : '—')}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${rt.owner || '—'}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${rt.owner || '—'} ${rt.is_local ? `<span style="color:var(--t3);font-size:10px">(${rt.owner_id || 'global'})</span>` : ''}</div>
         </div>
       </div>`;
     });
@@ -121,7 +121,7 @@ function renderWorkers(data, devices) {
           <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'} <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span></span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${d.owner || '—'}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${d.owner || '—'} ${d.credential_id === 0 ? `<span style="color:var(--t3);font-size:10px">(${d.owner_id || 'global'})</span>` : ''}</div>
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">凭据</span> <b style="color:${credColor}">${d.credential_status || ''}</b>${d.credential_id ? ` <button class="bt bt-o bt-s" onclick="renameCredential(${d.credential_id})">改名</button> <button class="bt bt-r bt-s" onclick="revokeCredential(${d.credential_id})">吊销</button>` : ''}</div>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;font-size:12px;color:var(--t2)">

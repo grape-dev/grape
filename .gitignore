@@ -31,3 +31,8 @@ temp/
 .venv/
 |.project-info/
 |.codeartsdoer/
+
+# CodeArts local config (credentials, MCP settings, skills)
+.codeartsdoer/
+# Backup files
+*.bak

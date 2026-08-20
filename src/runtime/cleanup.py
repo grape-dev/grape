@@ -145,6 +145,13 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
                 db.commit()
             if fixed:
                 log.info(f"sweeper: recovered {fixed} stuck running event(s): {dead}")
+            # 取消对应的线程池排队任务（防止 event 已 failed 但子进程还在跑）
+            try:
+                from src.api.event_pipeline import cancel_direct_task
+                for _seq in dead:
+                    cancel_direct_task(_seq)
+            except Exception as e:
+                log.warning(f"sweeper: cancel_direct_task failed: {e}")
     except Exception as e:
         log.warning(f"sweeper event recovery failed: {e}")
     return fixed
