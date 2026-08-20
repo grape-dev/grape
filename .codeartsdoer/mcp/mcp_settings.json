@@ -3,7 +3,7 @@
     "huaweicloud-devkit": {
       "command": "node",
       "args": [
-        "/root/.codeartsdoer/huaweicloud-plugins/src/mcp-server.mjs"
+        "/opt/grape/.codeartsdoer/huaweicloud-plugins/src/mcp-server.mjs"
       ],
       "env": {
         "HUAWEICLOUD_AGENT_TOOLKIT_MODE": "local"

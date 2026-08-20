@@ -39,3 +39,5 @@ temp/
 
 # Duplicate skills (moved to skills/)
 .codeartsdoer/skills/
+# MCP installed marker (regenerated on use)
+.codeartsdoer/.installed
