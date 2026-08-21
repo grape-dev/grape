@@ -15,6 +15,59 @@
 - 华为云 AK/SK 已获取（或通过 Grape 控制台注入）
 - OBS bucket 已创建（或通过 scripts/bootstrap.sh 创建）
 
+## Terraform Provider 预装（防下载超时）
+
+worker 机器网络到 registry.terraform.io / releases.hashicorp.com 可能慢或偶发超时。
+**部署前必须确认所有 provider 二进制已预装到 plugin cache 目录**，不要依赖 terraform init 现下载。
+
+### 检查已装 provider
+
+```bash
+# 1. 确认机器架构（arm64 vs amd64）
+uname -m   # aarch64 = arm64, x86_64 = amd64
+
+# 2. 检查 plugin cache 里的 provider 二进制
+find ~/.terraform.d/plugin-cache -name 'terraform-provider-*' -type f
+
+# 3. 确认架构匹配——arm64 机器上不能放 _linux_amd64 的二进制
+#    amd64 文件名: terraform-provider-xxx_X.Y.Z_linux_amd64.zip
+#    arm64 文件名: terraform-provider-xxx_X.Y.Z_linux_arm64.zip
+```
+
+### 手动预装 provider（当 terraform init 下载超时时）
+
+```bash
+# huaweicloud provider（从 registry 下载对应架构的 zip）
+ARCH=linux_arm64   # arm64 机器用 linux_arm64，amd64 机器用 linux_amd64
+VERSION=1.97.0     # 用最新版
+
+curl -L -o /tmp/huaweicloud_provider.zip \
+  "https://releases.hashicorp.com/terraform-provider-huaweicloud/${VERSION}/terraform-provider-huaweicloud_${VERSION}_${ARCH}.zip"
+unzip -o /tmp/huaweicloud_provider.zip -d ~/.terraform.d/plugin-cache/registry.terraform.io/huaweicloud/huaweicloud/${VERSION}/${ARCH}/
+
+# hashicorp/random provider（同理）
+RANDOM_VERSION=3.6.3
+curl -L -o /tmp/random_provider.zip \
+  "https://releases.hashicorp.com/terraform-provider-random/${RANDOM_VERSION}/terraform-provider-random_${RANDOM_VERSION}_${ARCH}.zip"
+unzip -o /tmp/random_provider.zip -d ~/.terraform.d/plugin-cache/registry.terraform.io/hashicorp/random/${RANDOM_VERSION}/${ARCH}/
+```
+
+### terraform init 超时处理
+
+如果 `terraform init` 仍然超时（provider 下载慢）：
+
+```bash
+# 方法 1：设置更长的超时
+TF_REGISTRY_CLIENT_TIMEOUT=300 terraform init
+
+# 方法 2：用 -backend=false 先跳过 backend，只验证 provider
+terraform init -backend=false
+
+# 方法 3：手动下载 zip 后解压到 plugin cache（见上方手动预装步骤）
+```
+
+⚠️ **架构陷阱**：arm64 机器上下载了 amd64 的 provider zip 会导致 `terraform init` 报 `incompatible provider version`。务必确认 `uname -m` 与下载的 zip 文件名架构一致。
+
 ## 部署 Runbook
 
 ### 1. 凭证设置
@@ -140,6 +193,13 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 | 创建桶 | CreateBucket | mb |
 
 ## 常见问题排查
+
+### terraform init 失败：provider 下载超时
+
+- 根因：worker 网络到 releases.hashicorp.com / registry.terraform.io 偶发慢，terraform init 默认超时不够
+- 解决：见上方「Terraform Provider 预装」段落，手动下载对应架构的 provider zip 解压到 plugin cache
+- ⚠️ 务必确认架构匹配：arm64 机器（`uname -m` = `aarch64`）只能用 `linux_arm64` 的 zip，amd64 用 `linux_amd64`
+- 也可设置 `TF_REGISTRY_CLIENT_TIMEOUT=300` 加长超时
 
 ### terraform init 失败：No valid credential sources found
 

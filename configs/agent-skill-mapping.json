@@ -54,6 +54,17 @@
     "sre": "skill-publish"
    },
    "onboarding": "repo-onboarding"
+  },
+  "blog-publish": {
+   "name": "博客发布",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue-advance",
+    "coding": "ai-blog-generation",
+    "qa": "pr",
+    "sre": "blog-publish"
+   },
+   "onboarding": "repo-onboarding"
   }
  }
 }
