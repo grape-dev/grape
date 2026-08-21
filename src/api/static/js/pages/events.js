@@ -27,14 +27,15 @@ function renderEventDetail(data) {
     (data.task && data.task.task_status === 'dispatched');
 
   // M4：结构化产出（event.json archive 对应段，见 §11.4）
+  // "Agent 处理记录" 作为方框外部左上角标题，与下方"Agent 答复结论"上下对齐
   let structuredHtml = '';
   const arch = data.archive || null;
   if (arch && arch.output) {
     const o = arch.output;
     const actions = (o.actions || []).map(a => `<div>• ${a}</div>`).join('');
     const arts = (o.artifacts || []).map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('');
-    structuredHtml = `<div class="cd" style="padding:14px;margin-top:10px;background:#f8f9fb;flex-shrink:0;max-height:200px;overflow-y:auto">
-      <h3 style="font-size:12px;font-weight:600;margin-bottom:8px;position:sticky;top:0;background:#f8f9fb">Agent 处理记录（结构化）</h3>
+    structuredHtml = `<h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Agent 处理记录</h3>
+    <div class="cd" style="padding:14px;margin-bottom:10px;background:#f8f9fb;flex-shrink:0;max-height:200px;overflow-y:auto">
       ${o.conclusion ? `<div style="font-size:12px;margin-bottom:6px"><b>结论:</b> ${o.conclusion}</div>` : ''}
       ${actions ? `<div style="font-size:12px;margin-bottom:6px"><b>动作:</b> ${actions}</div>` : ''}
       ${arts ? `<div style="font-size:12px;margin-bottom:6px"><b>产出:</b> ${arts}</div>` : ''}
@@ -56,7 +57,7 @@ function renderEventDetail(data) {
       </div>
       ${structuredHtml}
       <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Agent 答复结论</h3>
-      <div style="flex:1;overflow-y:auto;background:var(--s);color:#c2cad6;border-radius:8px;padding:12px;font-size:12px;font-family:monospace;line-height:1.7;white-space:pre-wrap">
+      <div style="flex:1;overflow-y:auto;background:var(--s);color:#000;border-radius:8px;padding:12px;font-size:12px;font-family:monospace;line-height:1.7;white-space:pre-wrap">
         ${result || '<div style="color:var(--t3)">（无结论）</div>'}
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
