@@ -10,7 +10,7 @@
 ## 前置条件
 
 - Terraform >= 1.0 已安装
-- huaweicloud provider (~> 1.50，实际验证 v1.94.0 可用)
+- huaweicloud provider（最新版即可，实际验证 v1.94.0 可用；不要写 `~> 1.50` 或 `~> 1.60` 等上限约束，会匹配不到高版本）
 - obsutil 已安装（用于 OBS 对象操作，替代 curl SigV4）
 - 华为云 AK/SK 已获取（或通过 Grape 控制台注入）
 - OBS bucket 已创建（或通过 scripts/bootstrap.sh 创建）
