@@ -79,3 +79,33 @@ date -u +"%Y-%m-%dT%H:%M:%SZ"
 - 华为云 Terraform Provider 文档：https://registry.terraform.io/providers/huaweicloud/huaweicloud/latest/docs
 - OBS S3 兼容 API：https://support.huaweicloud.com/api-obs/obs_03_0152.html
 - RDS Flavor 查询 API：https://support.huaweicloud.com/api-rds/rds_06_0005.html
+
+## Provider 版本约束规范
+
+生成 Terraform 代码时，`required_providers` 块中 huaweicloud provider 的版本约束遵循以下规则：
+
+- ✅ 正确写法：不写版本约束（使用最新版），或写 `>= 1.50`（下限约束，允许高版本）
+- ❌ 禁止写法：`~> 1.50`、`~> 1.60` 等 `~>` 上限约束——只匹配 minor 版本段，实际安装的 v1.94.0 会被排除导致 `terraform init` 下载 provider 失败
+
+示例（正确）：
+```hcl
+terraform {
+  required_providers {
+    huaweicloud = {
+      source = "huaweicloud/huaweicloud"
+    }
+  }
+}
+```
+
+示例（错误，禁止）：
+```hcl
+terraform {
+  required_providers {
+    huaweicloud = {
+      source  = "huaweicloud/huaweicloud"
+      version = "~> 1.60"  # ❌ 匹配不到 v1.94.0
+    }
+  }
+}
+```
