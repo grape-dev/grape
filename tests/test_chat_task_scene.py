@@ -51,7 +51,7 @@ def test_build_task_chat_prompt_contains_scene_and_context():
     history = [{"role": "user", "content": "📋 任务分配 · Issue #7"}, {"role": "agent", "content": "收到"}]
     prompt = build_task_chat_prompt("我需要澄清一下", "owner/repo", history, conv)
     assert "## 场景: task" in prompt
-    assert "## 任务 Issue" in prompt
+    assert "## 任务背景" in prompt
     assert "Issue: #7" in prompt
     assert "标题: Issue #7" in prompt
     assert "对话历史" in prompt

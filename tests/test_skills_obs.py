@@ -14,6 +14,9 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db")
 
 import pytest  # noqa: E402
+import sys as _sys
+
+_is_win = _sys.platform == "win32"
 from fastapi.testclient import TestClient  # noqa: E402
 from src.api.main import app  # noqa: E402
 from src.user import db as user_db  # noqa: E402
@@ -156,6 +159,22 @@ def _skill_id(skill_name, scope="user"):
         conn.close()
 
 
+def _ensure_official_build_debug():
+    """官方 build-debug 技能缺失时补插（test_repos_remove_cleanup 等会清空 skill 表）。"""
+    if _skill_id("build-debug", "official"):
+        return
+    import sqlite3 as _sq
+    dbp = os.path.join(os.path.dirname(__file__), "..", "data", "test_sessions.db")
+    conn = _sq.connect(dbp)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, is_active) "
+            "VALUES ('build-debug','build-debug','官方调试技能','chat','build-debug','official','',1)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class TestSkillsObs:
     @pytest.fixture(autouse=True)
     def _restore_clean_session_manager(self):
@@ -220,6 +239,7 @@ class TestSkillsObs:
         errs = r.json()["detail"].get("errors") or []
         assert any("可执行文件" in e for e in errs), r.text
 
+    @pytest.mark.skipif(_is_win, reason="POSIX-only: 权限位 0755 在 Windows 解压重打包链路不保持")
     def test_upload_obs_allows_text_scripts(self, _obs_env):
         """官方规范 scripts/ 文本脚本（.py/.sh）放行 → OBS 上传成功 + zip 保留脚本。"""
         zip_bytes = _make_skill_zip("obs-script-ok", with_script=True)
@@ -246,6 +266,7 @@ class TestSkillsObs:
 
     def test_detail_is_obs_field(self, _obs_env):
         """详情返回 is_obs：官方未转 False（默认环境，按 id）。"""
+        _ensure_official_build_debug()
         sid = _skill_id("build-debug", "official")
         assert sid, "build-debug 官方技能应存在"
         r = client.get(f"/api/skills/by-id/{sid}", headers=_headers)
@@ -272,6 +293,7 @@ class TestSkillsObs:
 
     def test_download_official_rejected(self, _obs_env):
         """官方技能为部署内置物（未转集群），下载接口拒绝（400，按 id）。"""
+        _ensure_official_build_debug()
         sid = _skill_id("build-debug", "official")
         assert sid, "build-debug 官方技能应存在"
         r = client.get(f"/api/skills/by-id/{sid}/download", headers=_headers)

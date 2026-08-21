@@ -247,7 +247,9 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                     skill_id=old.get("skill_id") or 0,
                     prompt=old.get("prompt") or "",
                     cwd=_cwd,
-                    runtime_session_id="",  # 全新上下文，避免复用坏会话
+                    # 从 issue_agent_session 读取 runtime_session_id（保留会话连续性），
+                    # 空时走全新会话。执行端检测连续失败后自动清空（smart-session-recovery-design.md）
+                    runtime_session_id=old.get("runtime_session_id") or "",
                     event_type=old.get("event_type") or "",
                     account=old.get("account") or "",
                     user_id=old.get("user_id") or 0,
