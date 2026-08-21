@@ -55,7 +55,28 @@ tools:
 
 ## API 凭证
 
-**API Key 存储在项目知识（Project Knowledge）中**。执行任务时，prompt 中的「用户反馈沉淀的共享知识」段会包含 API 凭据信息，从中提取使用。
+**所有 API 信息（Key、URL、Model）均从项目知识（Project Knowledge）中读取**。执行任务时，prompt 中的「用户反馈沉淀的共享知识」段会包含 `ai-models.yaml` 中的配置信息，从中提取使用：
+
+```yaml
+# project-info/member/ai-models.yaml（示例结构）
+ai_models:
+  video:
+    key: "<你的API Key>"
+    url: "https://api.modelarts-maas.com/v1/video/generations"
+    model: "Wan2.2-T2V-A14B"
+```
+
+代码中按以下方式引用（勿硬编码值）：
+
+```python
+# 从 prompt 的「共享知识」段读取，示例：
+# video_url  = 共享知识中 ai_models.video.url 的值
+# video_key  = 共享知识中 ai_models.video.key 的值
+# video_model = 共享知识中 ai_models.video.model 的值
+API = video_url    # 从项目知识中读取，勿硬编码
+KEY = video_key    # 从项目知识中读取
+MODEL = video_model # 从项目知识中读取
+```
 
 > ⚠️ `Wan2.2-I2V-A14B`（图生视频）有后端 bug，`input.image` 不会传给底层 pipeline，不可用。
 
@@ -87,12 +108,13 @@ mkdir -p /root/output
 ```python
 import requests, time
 
-API = "https://api.modelarts-maas.com/v1/video/generations"
-KEY = # 从 prompt 的「共享知识」段读取 KEY 值，如：os.environ.get("MODELARTS_API_KEY", "从知识段读取的KEY")
+API = video_url  # 从项目知识读取（ai_models.video.url）
+KEY = video_key  # 从项目知识读取（ai_models.video.key）
+MODEL = video_model  # 从项目知识读取（ai_models.video.model）
 H = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
 
 resp = requests.post(API, headers=H, json={
-    "model": "Wan2.2-T2V-A14B",
+    "model": MODEL,
     "input": {"prompt": "英文画面描述，如：A cinematic aerial view of Shenzhen at night, skyscrapers, lights"}
 }, timeout=30)
 task_id = resp.json()["task_id"]
@@ -155,13 +177,14 @@ ffmpeg -y -i /root/output/generated.mp4 -i /root/output/audio_trim.mp3 \
 ```python
 import requests, time, subprocess, os
 
-API = "https://api.modelarts-maas.com/v1/video/generations"
-KEY = # 从 prompt 的「共享知识」段读取 KEY 值，如：os.environ.get("MODELARTS_API_KEY", "从知识段读取的KEY")
+API = video_url  # 从项目知识读取
+KEY = video_key  # 从项目知识读取
+MODEL = video_model  # 从项目知识读取
 DIR = "/root/output"
 
 def gen_video(prompt):
     H = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
-    r = requests.post(API, headers=H, json={"model": "Wan2.2-T2V-A14B", "input": {"prompt": prompt}}, timeout=30)
+    r = requests.post(API, headers=H, json={"model": MODEL, "input": {"prompt": prompt}}, timeout=30)
     tid = r.json()["task_id"]
     time.sleep(30)
     r2 = requests.get(f"{API}/{tid}", headers=H).json()

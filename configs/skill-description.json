@@ -131,10 +131,10 @@
     "path": "media-operate/ai-blog-generation",
     "description": "AI 博客生成：学习参考文章样式 → 生成图文博客 → AI 配图 + AI 视频 + 部署/发布。适合技术专栏、产品介绍等场景"
   },
-  "web-publish": {
+  "blog-publish": {
     "name": "博客系统发布",
     "agent_type": "sre",
-    "path": "media-operate/web-publish",
+    "path": "media-operate/blog-publish",
     "description": "博客系统 API 发布：通过 Blog System API 发布/更新/删除文章，管理标签、评论、说说、留言"
   }
 }
