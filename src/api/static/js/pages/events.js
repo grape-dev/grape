@@ -33,8 +33,8 @@ function renderEventDetail(data) {
     const o = arch.output;
     const actions = (o.actions || []).map(a => `<div>• ${a}</div>`).join('');
     const arts = (o.artifacts || []).map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('');
-    structuredHtml = `<div class="cd" style="padding:14px;margin-top:10px;background:#f8f9fb">
-      <h3 style="font-size:12px;font-weight:600;margin-bottom:8px">Agent 处理记录（结构化）</h3>
+    structuredHtml = `<div class="cd" style="padding:14px;margin-top:10px;background:#f8f9fb;flex-shrink:0;max-height:200px;overflow-y:auto">
+      <h3 style="font-size:12px;font-weight:600;margin-bottom:8px;position:sticky;top:0;background:#f8f9fb">Agent 处理记录（结构化）</h3>
       ${o.conclusion ? `<div style="font-size:12px;margin-bottom:6px"><b>结论:</b> ${o.conclusion}</div>` : ''}
       ${actions ? `<div style="font-size:12px;margin-bottom:6px"><b>动作:</b> ${actions}</div>` : ''}
       ${arts ? `<div style="font-size:12px;margin-bottom:6px"><b>产出:</b> ${arts}</div>` : ''}
@@ -73,7 +73,7 @@ function renderEventDetail(data) {
           <div><span style="color:var(--t3)">Actor:</span> @${data.actor || '—'}</div>
           <div><span style="color:var(--t3)">Agent:</span> ${agent}</div>
           <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
-          <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}</div>
+          <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}${data.status === 'running' && data.task && data.task.task_id ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${data.task.task_id}')" title="强行终止正在运行的 Agent">⏹ 终止</button>` : ''}</div>
           ${data.task && data.task.task_id
             ? `<div style="margin-top:6px"><span style="color:var(--t3)">运行日志:</span> <a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>`
             : `<div style="margin-top:6px"><span style="color:var(--t3)">执行日志:</span> <a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看日志</a></div>`}
@@ -317,6 +317,7 @@ function openTaskLog(taskId, title) {
       <span style="font-size:13px;font-weight:600">📜 运行日志 <span style="color:var(--t3);font-weight:400">· ${_tlEsc(title)}</span></span>
       <span id="tlStatus" style="font-size:11px;margin-left:auto"></span>
       <button onclick="_copyTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" title="复制日志内容">📋 复制</button>
+      <button id="tlKillBtn" onclick="terminateCurrentTask()" style="border:1px solid var(--tr,#e74c3c);background:transparent;color:var(--tr,#e74c3c);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;display:none" title="强行终止正在运行的任务">⏹ 终止</button>
       <button id="taskLogFullscreenBtn" onclick="_toggleTaskLogFullscreen()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" title="全屏/还原">⛶ 全屏</button>
       <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>
     </div>
@@ -382,6 +383,7 @@ function _taskLogStream() {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     _tlStatus('🟢 已连接（实时）', 'var(--tgx, #2ecc71)');
     _taskLog.hasMsg = false;
+    _tlCheckTaskStatus();
     _tlArmWaitHint();
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -390,6 +392,7 @@ function _taskLogStream() {
       return reader.read().then(({done, value}) => {
         if (done) {
           _tlStatus('🔚 日志流结束', 'var(--t3)');
+          _tlHideKillBtn();
           if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
           return;
         }
@@ -455,6 +458,65 @@ function _toggleTaskLogFullscreen() {
     const b = document.getElementById('taskLogFullscreenBtn');
     if (b) { b.textContent = '⛶ 全屏'; b.title = '全屏/还原'; }
   }
+}
+
+function _tlHideKillBtn() {
+  const btn = document.getElementById('tlKillBtn');
+  if (btn) btn.style.display = 'none';
+}
+
+function _tlCheckTaskStatus() {
+  if (!_taskLog.taskId) return;
+  const token = localStorage.getItem('token') || '';
+  fetch('/api/runtime/tasks/' + encodeURIComponent(_taskLog.taskId) + '/status', {
+    headers: {'Authorization': 'Bearer ' + token},
+  }).then(r => r.ok ? r.json() : null).then(d => {
+    if (!d || !d.status) return;
+    if (d.status === 'running' || d.status === 'dispatched') {
+      const btn = document.getElementById('tlKillBtn');
+      if (btn) btn.style.display = '';
+    } else {
+      _tlHideKillBtn();
+    }
+  }).catch(() => {});
+}
+
+function terminateEventTask(seq, taskId) {
+  _doTerminateEvent(seq, taskId);
+}
+
+function terminateCurrentTask() {
+  if (!_taskLog.taskId) return;
+  _doTerminateTask(_taskLog.taskId, function() {
+    _tlStatus('⏹ 正在终止…', 'var(--tr, #e74c3c)');
+    _tlHideKillBtn();
+  });
+}
+
+function _doTerminateTask(taskId, onSuccess) {
+  API.post('/runtime/tasks/' + encodeURIComponent(taskId) + '/cancel').then(function(d) {
+    if (onSuccess) onSuccess();
+  }).catch(function(e) {
+    app.showToast('终止失败: ' + (e.message || e));
+  });
+}
+
+function _doTerminateEvent(seq, taskId) {
+  // 优先走 event terminate（同时支持 direct 和 worker 模式）
+  API.post('/events/' + seq + '/terminate').then(function(d) {
+    app.showToast('⏹ 任务终止请求已发送');
+    API.get('/events/detail/' + seq).then(renderEventDetail);
+  }).catch(function(e) {
+    // fallback: 如果有 task_id 尝试直接 cancel
+    if (taskId) {
+      _doTerminateTask(taskId, function() {
+        app.showToast('⏹ 任务终止请求已发送');
+        API.get('/events/detail/' + seq).then(renderEventDetail);
+      });
+    } else {
+      app.showToast('终止失败: ' + (e.message || e));
+    }
+  });
 }
 
 function closeTaskLog() {
