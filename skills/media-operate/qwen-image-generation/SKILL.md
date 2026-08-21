@@ -47,9 +47,37 @@ tools:
 
 ## API 凭证
 
-**API Key 存储在项目知识（Project Knowledge）中**。执行任务时，prompt 中的「用户反馈沉淀的共享知识」段会包含 API 凭据信息，从中提取使用。
+**所有 API 信息（Key、URL、Model）均从项目知识（Project Knowledge）中读取**。执行任务时，prompt 中的「用户反馈沉淀的共享知识」段会包含 `ai-models.yaml` 中的配置信息，从中提取使用：
 
-> 图片理解模型：`qwen2.5-vl-72b`（`/v1/chat/completions`），可用于生成更精确的图片描述 prompt。同样需要在项目知识中获取该 API 的 Key。
+```yaml
+# project-info/member/ai-models.yaml（示例结构）
+ai_models:
+  image:
+    key: "<你的API Key>"
+    url: "https://api.modelarts-maas.com/v1/images/generations"
+    model: "qwen-image"
+  vision:
+    key: "<你的API Key>"
+    url: "https://api.modelarts-maas.com/v1/chat/completions"
+    model: "qwen2.5-vl-72b"
+```
+
+代码中按以下方式引用（勿硬编码值）：
+
+```python
+# 从 prompt 的「共享知识」段读取，示例：
+# image_url    = 共享知识中 ai_models.image.url 的值
+# image_key    = 共享知识中 ai_models.image.key 的值
+# image_model  = 共享知识中 ai_models.image.model 的值
+# vision_url   = 共享知识中 ai_models.vision.url 的值
+# vision_key   = 共享知识中 ai_models.vision.key 的值
+# vision_model = 共享知识中 ai_models.vision.model 的值
+API_IMAGE = image_url    # 从项目知识读取，勿硬编码
+KEY_IMAGE = image_key    # 从项目知识读取
+MODEL_IMAGE = image_model # 从项目知识读取
+```
+
+> 图片理解模型：`qwen2.5-vl-72b`（`/v1/chat/completions`），可用于生成更精确的图片描述 prompt。URL 和 Key 同样从项目知识中获取。
 
 ## 工作流
 
@@ -84,8 +112,9 @@ mkdir -p /root/output/images
 ```python
 import requests, json, base64, os, time
 
-API = "https://api.modelarts-maas.com/v1/images/generations"
-KEY = # 从 prompt 的「共享知识」段读取 KEY 值，如：os.environ.get("MODELARTS_API_KEY", "从知识段读取的KEY")
+API = API_IMAGE  # 从项目知识读取（ai_models.image.url）
+KEY = KEY_IMAGE  # 从项目知识读取（ai_models.image.key）
+model = MODEL_IMAGE  # 从项目知识读取（ai_models.image.model）
 headers = {
     "Authorization": f"Bearer {KEY}",
     "Content-Type": "application/json"
@@ -102,7 +131,7 @@ themes = [
 
 for i, theme in enumerate(themes):
     payload = {
-        "model": "qwen-image",
+        "model": model,
         "prompt": theme["prompt"],
         "n": 1,
         "size": "1024x1024"
@@ -137,11 +166,12 @@ for i, theme in enumerate(themes):
 ```python
 import requests, json
 
-API_CHAT = "https://api.modelarts-maas.com/v1/chat/completions"
-KEY = # 从 prompt 的「共享知识」段读取 KEY 值
+API_CHAT = vision_url  # 从项目知识读取（ai_models.vision.url）
+KEY = vision_key  # 从项目知识读取（ai_models.vision.key）
+vision_model = vision_model_name  # 从项目知识读取（ai_models.vision.model）
 
 payload = {
-    "model": "qwen2.5-vl-72b",
+    "model": vision_model,
     "messages": [
         {
             "role": "user",
@@ -189,6 +219,6 @@ optimized_prompt = resp.json()["choices"][0]["message"]["content"]
 
 ## 参考
 
-- ModelArts qwen-image API：`POST /v1/images/generations`
+- qwen-image API：`POST /v1/images/generations`（URL 和 Key 从项目知识获取）
 - 速率限制：2 req/s
 - 输出格式：返回 `b64_json`（base64 编码 PNG）

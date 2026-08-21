@@ -1,9 +1,9 @@
 ---
 name: ai-blog-generation
-version: 1.0.0
+version: 2.0.0
 description: |
   AI 博客生成技能。学习参考文章的排版风格 → 撰写同风格主题文章 → 
-  AI 配图 + AI 视频 + Nginx 部署。适合技术专栏、产品介绍、品牌宣传等场景。
+  AI 配图 + AI 视频 → 交办 SRE 发布。适合技术专栏、产品介绍、品牌宣传等场景。
 tools:
   - curl
   - edge-tts
@@ -12,7 +12,9 @@ tools:
 
 ## 安全硬约束（必须遵守）
 
-1. 调用前确认 API Key 已正确设置。运行时替换 `<your_api_key>` 为实际值。
+1. **所有 API 信息（Key、URL、Model）从项目知识（Project Knowledge）中获取**，来自 `project-info/member/ai-models.yaml`。包含：
+   - 图片生成：`ai_models.image`（url、key、model）
+   - 视频生成：`ai_models.video`（url、key、model）
 2. 调用 ModelArts API 只用此 Key，严禁从数据库 / 配置文件 / 日志 / 历史中寻找其他 token。
 3. token 不得写入日志或回复。
 4. API 返回 403 / 429 时：停止重试并报告用户。速率限制 2 req/s。
@@ -23,23 +25,19 @@ tools:
 ## 核心原则
 
 ### 专注博客生成
-
-负责全流程：学习参考文章 → 规划主题 → 撰写文章 → 生成配图 → 生成视频 → Nginx 部署交付。
+负责全流程：学习参考文章 → 规划主题 → 撰写文章 → 生成配图 → 生成视频 → 交办 SRE 发布。
 不负责代码实现、PR 管理、Issue 分类。
 
 ### 三步模仿法
-
 1. **学结构**：分析参考文章的标题层级、段落长度、配图密度、引用/高亮/表格等特殊元素的用法
 2. **学风格**：分析语气（技术深度/轻松活泼/营销推广）、句式特点
 3. **学排版**：分析配图位置、标签样式、元数据展示方式
 
 ### 依赖前序分析
-
 通过 A2A 被调用时，prompt 顶部包含「前序 Agent 处理摘要」。
 必须与用户确认参考文章和主题后再开始生成。
 
 ### 超出能力范围时主动请求支援
-
 如需要发布到小红书/公众号等平台，通过 A2A 交办给发布技能。
 
 ## 场景识别
@@ -59,9 +57,30 @@ apt-get install -y ffmpeg
 pip3 install --break-system-packages --index-url https://pypi.tuna.tsinghua.edu.cn/simple edge-tts Pillow requests
 ```
 
+## 产物目录约定
+
+所有博客产物统一保存在：
+
+```
+/opt/grape-workspaces/{owner}/{repo}/issues/{issue_number}/coding/blog_output/
+```
+
+目录结构：
+```
+blog_output/
+├── index.html          # 博客文章（HTML）
+├── intro.mp4           # 5秒介绍视频
+├── cover.png           # 封面图
+├── images/             # 配图
+│   ├── theme_1.png
+│   ├── theme_2.png
+│   └── ...
+└── assets/             # 其他资源（CSS/JS等，可选）
+```
+
 ## 工作流
 
-### 1. 学习参考文章
+### 1. 学习参考文章（如有）
 
 用浏览器打开目标 URL，提取以下信息：
 
@@ -120,15 +139,17 @@ td { padding: 12px 16px; border: 1px solid #e0e6ed; }
 
 ### 3. 生成配图
 
-参考上文「qwen-image-generation」skill，为文章主题生成 3-5 张配图：
+从项目知识中获取 qwen-image 的 API Key 和 URL，调用 ModelArts 图片生成 API：
 
 ```python
 import requests, json, base64, os, time
 
-API = "https://api.modelarts-maas.com/v1/images/generations"
-KEY = "<your_api_key>"
-headers = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
-DIR = "/root/output/images"
+# API 信息从项目知识读取（ai_models.image.url / .key / .model）
+API_IMAGE = image_url    # 从 prompt 的「共享知识」段读取
+KEY_IMAGE = image_key
+MODEL_IMAGE = image_model
+headers = {"Authorization": f"Bearer {KEY_IMAGE}", "Content-Type": "application/json"}
+DIR = "/opt/grape-workspaces/<owner>/<repo>/issues/<issue_number>/coding/blog_output/images"
 os.makedirs(DIR, exist_ok=True)
 
 themes = [
@@ -137,7 +158,7 @@ themes = [
 ]
 
 for i, t in enumerate(themes):
-    resp = requests.post(API, headers=headers, json={"model": "qwen-image", "prompt": t["prompt"], "n": 1, "size": "1024x1024"}, timeout=60)
+    resp = requests.post(API_IMAGE, headers=headers, json={"model": MODEL_IMAGE, "prompt": t["prompt"], "n": 1, "size": "1024x1024"}, timeout=60)
     b64 = resp.json()["data"][0]["b64_json"]
     if "," in b64: b64 = b64.split(",")[1]
     with open(f"{DIR}/{t['file']}.png", "wb") as f: f.write(base64.b64decode(b64))
@@ -146,22 +167,24 @@ for i, t in enumerate(themes):
 
 ### 4. 生成视频
 
-参考上文「wan-video-generation」skill，生成 5s 介绍视频：
+从项目知识中获取 Wan2.2 的 API Key 和 URL，调用文生视频 API：
 
 ```python
 import requests, time
 
-API = "https://api.modelarts-maas.com/v1/video/generations"
-KEY = "<your_api_key>"
-H = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
+# API 信息从项目知识读取（ai_models.video.url / .key / .model）
+API_VIDEO = video_url    # 从 prompt 的「共享知识」段读取
+KEY_VIDEO = video_key
+MODEL_VIDEO = video_model
+H = {"Authorization": f"Bearer {KEY_VIDEO}", "Content-Type": "application/json"}
 
-resp = requests.post(API, headers=H, json={
-    "model": "Wan2.2-T2V-A14B",
+resp = requests.post(API_VIDEO, headers=H, json={
+    "model": MODEL_VIDEO,
     "input": {"prompt": "英文画面描述"}
 }, timeout=30)
 task_id = resp.json()["task_id"]
 time.sleep(30)
-result = requests.get(f"{API}/{task_id}", headers=H).json()
+result = requests.get(f"{API_VIDEO}/{task_id}", headers=H).json()
 if result['status'] == 'succeeded':
     video_url = result['content']['result_url']
 ```
@@ -169,68 +192,44 @@ if result['status'] == 'succeeded':
 下载并合成音视频：
 
 ```bash
-curl -sLo /root/output/generated.mp4 "<video_url>"
-edge-tts --voice zh-CN-XiaoxiaoNeural --text "旁白文案，18-22字" --write-media /root/output/narration.mp3
-ffmpeg -y -i /root/output/narration.mp3 -t 5 -af "afade=t=out:st=4.5:d=0.5" /root/output/audio_trim.mp3
-ffmpeg -y -i /root/output/generated.mp4 -i /root/output/audio_trim.mp3 \
+OUTPUT_DIR="/opt/grape-workspaces/<owner>/<repo>/issues/<issue_number>/coding/blog_output"
+curl -sLo "$OUTPUT_DIR/generated.mp4" "<video_url>"
+edge-tts --voice zh-CN-XiaoxiaoNeural --text "旁白文案，18-22字" --write-media "$OUTPUT_DIR/narration.mp3"
+ffmpeg -y -i "$OUTPUT_DIR/narration.mp3" -t 5 -af "afade=t=out:st=4.5:d=0.5" "$OUTPUT_DIR/audio_trim.mp3"
+ffmpeg -y -i "$OUTPUT_DIR/generated.mp4" -i "$OUTPUT_DIR/audio_trim.mp3" \
   -c:v libx264 -crf 23 -preset fast -c:a aac -b:a 128k \
-  -map 0:v:0 -map 1:a:0 -shortest /root/output/intro.mp4
+  -map 0:v:0 -map 1:a:0 -shortest "$OUTPUT_DIR/intro.mp4"
 ```
 
-### 5. 组织文件并部署
+### 5. 组织产物
 
 ```bash
-# 创建输出目录
-mkdir -p /root/blog_output/images
-cp /root/output/index.html /root/blog_output/
-cp /root/output/intro.mp4 /root/blog_output/
-cp /root/output/images/*.png /root/blog_output/images/
-
-# 部署到 nginx
-cp -r /root/blog_output /var/www/blog
-chown -R www-data:www-data /var/www/blog
-
-# 在 nginx 配置中增加 location
-# location /blog/ { root /var/www; autoindex on; index index.html; }
+OUTPUT_DIR="/opt/grape-workspaces/<owner>/<repo>/issues/<issue_number>/coding/blog_output"
+mkdir -p "$OUTPUT_DIR/images"
+# 确保 index.html, intro.mp4, cover.png 等都在正确位置
+ls -la "$OUTPUT_DIR/"
 ```
 
-## 完整自动化脚本
+### 6. ✅ 交办 SRE 发布（必须执行）
 
-```python
-import requests, time, subprocess, os, base64, json
+博客内容生成完毕后，**必须**通过 A2A 通知 SRE Agent 进行发布上传：
 
-API_IMG = "https://api.modelarts-maas.com/v1/images/generations"
-API_VID = "https://api.modelarts-maas.com/v1/video/generations"
-KEY = "<your_api_key>"
-DIR = "/root/blog_output"
+```bash
+# 构造 A2A 上下文，包含产物路径和博客主题
+A2A_CONTEXT='{
+  "repository": "'"$REPO_FULL_NAME"'",
+  "account": "'"$REPO_OWNER"'",
+  "issue_number": "'"$ISSUE_NUMBER"'",
+  "context": "博客内容已生成完毕。产物路径：/opt/grape-workspaces/'"$REPO_FULL_NAME"'/issues/'"$ISSUE_NUMBER"'/coding/blog_output/。包含 index.html（文章HTML）、intro.mp4（5秒介绍视频）、images/（配图）。主题：'"$BLOG_TOPIC"'。请将此博客发布到博客平台。"
+}'
 
-def gen_images(themes):
-    os.makedirs(f"{DIR}/images", exist_ok=True)
-    H = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
-    for i, t in enumerate(themes):
-        r = requests.post(API_IMG, headers=H, json={"model":"qwen-image","prompt":t["prompt"],"n":1,"size":"1024x1024"}, timeout=60)
-        b64 = r.json()["data"][0]["b64_json"].split(",")[-1]
-        with open(f"{DIR}/images/{t['file']}.png","wb") as f: f.write(base64.b64decode(b64))
-        print(f"  img [{i+1}/{len(themes)}] {t['file']}.png")
-        if i < len(themes)-1: time.sleep(1)
-
-def gen_video(prompt, narration):
-    H = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
-    r = requests.post(API_VID, headers=H, json={"model":"Wan2.2-T2V-A14B","input":{"prompt":prompt}}, timeout=30)
-    tid = r.json()["task_id"]
-    time.sleep(30)
-    r2 = requests.get(f"{API_VID}/{tid}", headers=H).json()
-    if r2['status'] != 'succeeded': raise Exception(str(r2))
-    subprocess.run(["curl","-sLo",f"{DIR}/generated.mp4",r2['content']['result_url']], check=True)
-    subprocess.run(["edge-tts","--voice","zh-CN-XiaoxiaoNeural","--text",narration,"--write-media",f"{DIR}/narration.mp3"], check=True)
-    subprocess.run(["ffmpeg","-y","-i",f"{DIR}/narration.mp3","-t","5","-af","afade=t=out:st=4.5:d=0.5",f"{DIR}/audio_trim.mp3"], check=True, capture_output=True)
-    subprocess.run(["ffmpeg","-y","-i",f"{DIR}/generated.mp4","-i",f"{DIR}/audio_trim.mp3","-c:v","libx264","-crf","23","-preset","fast","-c:a","aac","-b:a","128k","-map","0:v:0","-map","1:a:0","-shortest",f"{DIR}/intro.mp4"], check=True)
-
-def deploy_nginx(blog_dir):
-    dest = "/var/www/blog"
-    subprocess.run(["cp","-r",blog_dir,dest], check=True)
-    subprocess.run(["chown","-R","www-data:www-data",dest], check=True)
+curl -X POST {{SERVER_URL}}/api/a2a \
+  -H "Authorization: Bearer {{A2A_TOKEN}}" \
+  -H "Content-Type: application/json" \
+  -d "$A2A_CONTEXT"
 ```
+
+> ⚠️ `{{SERVER_URL}}` 和 `{{A2A_TOKEN}}` 从项目知识中获取（项目级配置），勿硬编码。
 
 ## 硬规则
 
@@ -242,6 +241,7 @@ def deploy_nginx(blog_dir):
 | 文章顶部嵌入视频 | ✅ **必须做（如有）** |
 | 至少包含一个特殊元素 | ✅ **表格/引用/高亮块至少选一个** |
 | 每次 API 调用间隔 ≥ 1 秒 | ✅ **必须做（防限流）** |
+| ✔️ **生成后 A2A 通知 SRE 发布** | ✅ **必须做，不可跳过** |
 | ✔️ **任务结束输出 JSON 块** | ✅ **必须做，不可跳过** |
 
 ## 输出格式
@@ -250,16 +250,16 @@ def deploy_nginx(blog_dir):
 
 ```json
 {
-  "actions": ["blog_generation"],
+  "actions": ["blog_generation", "a2a_to_sre"],
   "conclusion": "completed",
   "artifacts": {
-    "article": "/var/www/blog/index.html",
-    "video": "/var/www/blog/intro.mp4",
+    "article": "/opt/grape-workspaces/<owner>/<repo>/issues/<issue_number>/coding/blog_output/index.html",
+    "video": "/opt/grape-workspaces/<owner>/<repo>/issues/<issue_number>/coding/blog_output/intro.mp4",
     "images": 5,
-    "url": "http://<host>/blog/"
+    "output_dir": "/opt/grape-workspaces/<owner>/<repo>/issues/<issue_number>/coding/blog_output/"
   },
-  "next_step": "用户查看并确认",
-  "summary": "已生成图文并茂的博客文章并部署到 nginx"
+  "next_step": "已 A2A 通知 SRE Agent 进行发布上传",
+  "summary": "已生成图文并茂的博客文章并交办 SRE 发布"
 }
 ```
 
@@ -267,7 +267,7 @@ def deploy_nginx(blog_dir):
 
 ## 参考
 
-- qwen-image 图片生成：`POST /v1/images/generations`
-- Wan2.2 T2V 视频生成：`POST /v1/video/generations`
+- qwen-image 图片生成：`POST /v1/images/generations`（URL/Key/Model 从项目知识获取）
+- Wan2.2 T2V 视频生成：`POST /v1/video/generations`（URL/Key/Model 从项目知识获取）
 - Edge TTS：`edge-tts --voice zh-CN-XiaoxiaoNeural --text "文案" --write-media output.mp3`
-- 部署路径：`/var/www/` + nginx location 配置
+- A2A 端点：`POST {{SERVER_URL}}/api/a2a`（URL 和 Token 从项目知识获取）

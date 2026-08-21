@@ -62,7 +62,7 @@ class TestBuildChatRoleDefinition:
     def test_contains_capabilities(self, pb):
         role = pb.build_chat_role_definition()
         assert "DevOps" in role
-        assert "代码审查" in role or "chat" in role
+        assert "Code review" in role  # domain list, not capabilities list
 
 
 class TestGetSkillCapabilities:

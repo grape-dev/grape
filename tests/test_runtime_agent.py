@@ -118,7 +118,7 @@ class TestReregister:
 
     def test_success_recovers_orphans(self):
         c = MagicMock()
-        c.register = AsyncMock(return_value=([1, 2], "probe"))
+        c.register = AsyncMock(return_value=([1, 2], "https://p/probe"))
         c.recover_orphans = AsyncMock()
         c.reset_session = AsyncMock()
         ids = asyncio.run(ra._reregister(c, [], "dev"))
@@ -127,7 +127,7 @@ class TestReregister:
 
     def test_empty_ids_returns_none(self):
         c = MagicMock()
-        c.register = AsyncMock(return_value=[])
+        c.register = AsyncMock(return_value=([], ""))
         c.reset_session = AsyncMock()
         assert asyncio.run(ra._reregister(c, [], "dev")) is None
 

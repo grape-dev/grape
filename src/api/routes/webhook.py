@@ -1,5 +1,5 @@
 """Webhook & A2A 端点 — 集成事件管道"""
-import json, time
+import json, os, time
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from src.config import log
@@ -151,6 +151,28 @@ async def a2a_endpoint(request: Request):
                             skill_path = _sk.get("skill_path") or skill_name
         except Exception:
             pass
+
+        # 回退：DB 未配置 skill 时从 agent-skill-mapping.json 获取默认 skill
+        if not skill_name:
+            try:
+                _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "agent-skill-mapping.json")
+                if os.path.exists(_defaults_path):
+                    with open(_defaults_path, "r", encoding="utf-8") as _f:
+                        _defaults = json.load(_f)
+                    _scene = _defaults.get("scenes", {}).get("default", {})
+                    try:
+                        from src.user.db import get_repo_scene
+                        _scene_id = get_repo_scene(repo_key) or "default"
+                        _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
+                    except Exception:
+                        pass
+                    _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
+                    _default_skill = _mapping.get(agent_name, "")
+                    if _default_skill:
+                        skill_name = _default_skill
+                        log.info(f"A2A: fallback skill for {agent_name}={_default_skill}")
+            except Exception as e:
+                log.warning(f"A2A: fallback skill lookup failed: {e}")
 
         evt = {
             "type": "a2a_event",

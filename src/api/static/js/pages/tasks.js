@@ -157,11 +157,13 @@ function _detailHtml(t) {
 }
 
 function openTaskConversation(t) {
-  // 跳转 chat agent；传 issue_number + repo_key 以便会话不存在时重建
-  const convId = t && t.conversation_id ? t.conversation_id : undefined;
+  // 跳转 chat agent：始终用 issue:N:repoKey 格式，由 chat.js 调 ensure-issue
+  // 查找或新建会话（会话被删除后旧 conversation_id 仍在 task 表里，直接传 conv_id
+  // 会在会话列表找不到而回退到第一个会话，不会触发重建）
   const issueNum = t && t.issue_number ? String(t.issue_number) : '';
   const repoKey = t && t.repo_key ? t.repo_key : '';
-  const go = () => app.nav('chat', convId || (issueNum && repoKey ? 'issue:' + issueNum + ':' + repoKey : undefined));
+  const param = issueNum && repoKey ? 'issue:' + issueNum + ':' + repoKey : (t && t.conversation_id || undefined);
+  const go = () => app.nav('chat', param);
   if (t && t.id && t.status === 'active') {
     API.post('/tasks/' + t.id + '/start').then(d => {
       if (window._tasksById[t.id] && d && d.status) { window._tasksById[t.id].status = d.status; }
