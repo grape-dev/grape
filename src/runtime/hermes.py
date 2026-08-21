@@ -84,6 +84,8 @@ class HermesRuntime(AgentRuntime):
         verbose = self._probe_verbose_mode()
         if verbose:
             # v2: chat -q -v 模式，实时输出思考/工具/API 过程
+            # verbose 级别由 HERMES_TOOL_PROGRESS_MODE env 控制（off→new→all→verbose）
+            # 默认 new：只展示新消息和工具结果，不展示内部思考/API 细节，减少日志量
             args = ["chat", "-q", prompt, "--yolo", "-v"]
         else:
             # 旧版回退：-z oneshot 模式（只在完成时输出最终文本）
@@ -271,4 +273,8 @@ class HermesRuntime(AgentRuntime):
         # verbose 模式下禁用 Rich 彩色输出（ANSI 转义序列干扰 parse_output）
         env["NO_COLOR"] = "1"
         env["TERM"] = "dumb"
+        # 工具进度级别：new = 只展示新消息/工具结果，不展示内部思考/API 细节
+        # 减少子进程输出量 → 减少 state.db 写入 → 降低并发争锁概率
+        # 级别：off(无) → new(新消息) → all(含思考) → verbose(全部含API)
+        env["HERMES_TOOL_PROGRESS_MODE"] = os.environ.get("HERMES_TOOL_PROGRESS_MODE", "new")
         return env

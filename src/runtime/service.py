@@ -477,7 +477,21 @@ def claim(runtime_id) -> dict | None:
                     "WHERE status='dispatched' AND started_at < ? AND started_at IS NOT NULL",
                     (_stale,))
                 _stale_rows = c.fetchall()
+                _actually_recovered = []
                 for _tid, _rid, _seq in _stale_rows:
+                    # 活跃度检查（2026-08-21 修复）：task_start 失败时 status 留在 dispatched
+                    # 但 agent 实际在跑（有 task_messages 产出）。查最近 60s 是否有消息，
+                    # 有则跳过回收——agent 活跃说明只是 task_start 回调丢了，不该重跑。
+                    try:
+                        _active_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+                        c.execute(
+                            "SELECT 1 FROM task_messages WHERE task_id=? AND created_at > ? LIMIT 1",
+                            (_tid, _active_cutoff))
+                        if c.fetchone():
+                            continue  # 最近 60s 有消息，agent 在跑，跳过回收
+                    except Exception:
+                        pass  # 查询失败不阻塞回收（保守：宁可误回收也不留死任务）
+                    _actually_recovered.append((_tid, _rid, _seq))
                     # 定向任务（pool_agent_type=''）回收归零 runtime_id 后变无主：
                     # claim 池匹配不命中、定向(runtime_id)也失配 → 永久死任务
                     # （实测 seq#264 issue#4 卡死 71 分钟）。归零时回填 agent_type
@@ -514,8 +528,9 @@ def claim(runtime_id) -> dict | None:
                                 update_event_status(_seq, "failed")
                             except Exception:
                                 pass
-                if _stale_rows:
-                    log.info(f"recover stale dispatched: {len(_stale_rows)} tasks")
+                if _actually_recovered:
+                    log.info(f"recover stale dispatched: {len(_actually_recovered)}/{len(_stale_rows)} tasks "
+                             f"({len(_stale_rows) - len(_actually_recovered)} skipped: active messages)")
             except Exception as _e:
                 log.warning(f"recover stale dispatched failed: {_e}")
 
@@ -566,6 +581,24 @@ def claim(runtime_id) -> dict | None:
                 (runtime_id, datetime.now(timezone.utc).isoformat(), task_id))
             claimed = c.rowcount > 0
             if claimed:
+                # busy_slots 对账（2026-08-21 修复）：手动终止/kill -9/超时等场景
+                # busy_slots 不递减 → 只增不减 → 溢出 max_concurrent。claim 时如果
+                # busy_slots 远超实际活跃任务数（差值>2），重置为实际值。
+                # 安全：有心跳的 worker 会在心跳中重新上报；正在执行的任务不受影响。
+                try:
+                    c.execute(
+                        "SELECT COUNT(*) FROM agent_tasks "
+                        "WHERE runtime_id=? AND status IN ('dispatched','running')", (runtime_id,))
+                    _actual_active = c.fetchone()[0] or 0
+                    c.execute("SELECT busy_slots FROM agent_runtimes WHERE id=?", (runtime_id,))
+                    _current_busy = c.fetchone()[0] or 0
+                    if _current_busy > _actual_active + 2:
+                        log.info(f"busy_slots reconcile: runtime={runtime_id} "
+                                 f"busy={_current_busy} actual_active={_actual_active} -> reset to {_actual_active}")
+                        c.execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?",
+                                  (_actual_active, runtime_id))
+                except Exception as _re:
+                    log.warning(f"busy_slots reconcile failed: {_re}")
                 # 槽位 +1（观测/池调度排序用；不硬限流，边端 RUNTIME_MAX_CONCURRENT_TASKS 仍控制执行并发）
                 c.execute("UPDATE agent_runtimes SET busy_slots=busy_slots+1 WHERE id=?", (runtime_id,))
             db.commit()

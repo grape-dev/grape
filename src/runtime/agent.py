@@ -562,10 +562,26 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
                 # 误判未执行 → 回收重跑循环（attempts 累加 3 次直接 failed，实测 #49 100042）。
                 # 引擎启动失败由 fail_task 收尾（running → failed），无悬空风险。
-                try:
-                    await client.task_start(_tid)
-                except Exception:
-                    pass
+                # task_start 重试（3次/1s间隔）：网络抖动时静默失败会导致任务留在 dispatched
+                # 被服务端 300s 回收 → 重跑循环 → 最终"回收超限"failed（实测今天 11/29 失败因此）。
+                _start_ok = False
+                for _start_attempt in range(3):
+                    try:
+                        _start_result = await client.task_start(_tid)
+                        if _start_result is not None:
+                            _start_ok = True
+                            break
+                    except Exception as _se:
+                        log.warning(f"task_start attempt {_start_attempt+1}/3 for {_tid} failed: {_se}")
+                    if _start_attempt < 2:
+                        await asyncio.sleep(1)
+                if not _start_ok:
+                    log.warning(f"task_start 3 attempts all failed for {_tid}, failing task to avoid dispatched stall")
+                    try:
+                        await client.fail(_tid, "task_start failed after 3 retries (network error)")
+                    except Exception:
+                        pass
+                    return
                 try:
                     if _test_execute is not None:
                         await _test_execute(client, t, e)
