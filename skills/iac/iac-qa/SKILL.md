@@ -26,6 +26,7 @@ tags:
 - 已安装 git 和 curl
 - 已配置 `$BOT_GITCODE_TOKEN` 环境变量
 - 目标 PR 已创建且有可获取的 diff
+- Grape 平台 A2A 服务可用（https://example.com/api/a2a）
 
 ## 安全硬约束（必须遵守）
 
@@ -40,6 +41,7 @@ tags:
 - 本地参考：`references/code-review-checklist.md`
 - 本地参考：`references/security-checklist.md`
 - 本地参考：`references/huaweicloud-security-checklist.md`（华为云 IaC 专项安全检查、部署验证清单对照）
+- 本地参考：`references/a2a-handoff.md`（PR 合并后 A2A 交办 SRE Agent 的触发时机与示例）
 
 ## 工作流
 
@@ -76,6 +78,21 @@ tags:
 - 审查时检索历史 Issue/PR 中同类变更的常见问题清单，核对当前变更是否已采取规避措施
 - 凭据落盘检查：plan/state 中无明文密码
 
+### A2A 交办 SRE Agent
+QA 审查通过（✅ LGTM）且 PR 已合并后，**必须通过 A2A 将 Issue 交给 SRE Agent** 执行部署。
+
+⚠️ **QA 不得只在报告中「建议」维护者交办 SRE**——必须自己发起 A2A 调用，将部署任务交给 SRE Agent。
+
+触发条件（同时满足）：
+1. QA 审查结论为 ✅ LGTM（无 P0/P1 阻塞项）
+2. PR 已合并（pull_request_merged 事件到达，或 PR 状态确认为 merged）
+
+不触发的情况：
+- 审查结论为 Request Changes（有 P0/P1 未修复）→ A2A 回 Coding Agent 修复
+- PR 尚未合并 → 等合并事件到达后再触发
+
+详见 `references/a2a-handoff.md`。
+
 ## 硬规则
 
 | 行为 | 态度 |
@@ -85,4 +102,7 @@ tags:
 | 发现问题必须在 PR 评论中详细描述 | ✅ **必须做** |
 | 问题按严重程度分级（P0/P1/P2/P3） | ✅ **必须做** |
 | 审查通过后必须在 PR 评论标记 ✅ LGTM | ✅ **必须做** |
+| 审查通过且 PR 合并后通过 A2A 交办 SRE Agent | ✅ **必须做，不可跳过** |
+| 审查不通过时通过 A2A 回 Coding Agent 修复 | ✅ **必须做** |
 | 回复 Token/密码等敏感信息 | ❌ **禁止** |
+| 只在报告中建议交办 SRE 而不实际调用 A2A | ❌ **禁止** |
