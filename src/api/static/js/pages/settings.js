@@ -5,6 +5,7 @@ function renderSettings(tab) {
   const tabs = [
     {id:'credentials', label:'Credentials'},
     {id:'notifications', label:'Notifications'},
+    {id:'appearance', label:'Appearance'},
   ];
 
   let html = `<div class="cd"><div class="cd-h"><h2>Settings</h2></div>
@@ -43,6 +44,77 @@ function renderSettings(tab) {
       <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> Release events</label>
       <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox"> VOD signals</label>
     </div></div>`;
+    el.innerHTML = html;
+  } else if (current === 'appearance') {
+    // Appearance / Theme selection
+    const curTheme = app.getTheme ? app.getTheme() : (localStorage.getItem('grapeTheme') || 'default');
+    const curMode = app.getThemeMode ? app.getThemeMode() : (localStorage.getItem('grapeThemeMode') || 'light');
+    html += `
+    <div class="cd">
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:16px">界面风格 / Interface Theme</h3>
+      <p class="tx t2" style="margin-bottom:20px;font-size:12px;line-height:1.6">
+        选择 Grape 控台的视觉风格。Liquid Glass 风格采用毛玻璃侧栏、系统字体栈、精致圆角和 pill 按钮，整体简洁通透。
+      </p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
+        <div id="themeCardDefault" onclick="selectTheme('default')"
+          style="cursor:pointer;border:2px solid ${curTheme==='default'?'var(--a)':'var(--b)'};border-radius:14px;padding:20px;transition:all .25s;background:var(--c)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <span style="font-size:14px;font-weight:600;color:var(--t)">Grape Default</span>
+            ${curTheme==='default'?'<span style="color:var(--a);font-size:12px;font-weight:600">✓ 当前</span>':''}
+          </div>
+          <div style="height:80px;border-radius:10px;overflow:hidden;border:1px solid var(--b);display:flex">
+            <div style="width:60px;background:#0c1222;display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px">
+              <div style="width:24px;height:3px;background:#1e2940;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#1e2940;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#3168e0;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#1e2940;border-radius:2px"></div>
+            </div>
+            <div style="flex:1;background:#f5f6f8;padding:10px">
+              <div style="height:4px;width:60%;background:#101724;border-radius:2px;margin-bottom:6px"></div>
+              <div style="height:3px;width:40%;background:#5b667b;border-radius:2px;margin-bottom:8px"></div>
+              <div style="height:30px;background:#fff;border-radius:6px;border:1px solid #e3e6ee"></div>
+            </div>
+          </div>
+          <p style="font-size:11px;color:var(--t3);margin-top:10px">深色侧栏 + 浅色内容区</p>
+        </div>
+        <div id="themeCardApple" onclick="selectTheme('apple')"
+          style="cursor:pointer;border:2px solid ${curTheme==='apple'?'var(--a)':'var(--b)'};border-radius:14px;padding:20px;transition:all .25s;background:var(--c)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <span style="font-size:14px;font-weight:600;color:var(--t)">Liquid Glass</span>
+            ${curTheme==='apple'?'<span style="color:var(--a);font-size:12px;font-weight:600">✓ 当前</span>':''}
+          </div>
+          <div style="height:80px;border-radius:10px;overflow:hidden;border:1px solid #d2d2d7;display:flex">
+            <div style="width:60px;background:rgba(245,245,247,0.8);backdrop-filter:blur(10px);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px">
+              <div style="width:24px;height:3px;background:#d2d2d7;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#d2d2d7;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#0071e3;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#d2d2d7;border-radius:2px"></div>
+            </div>
+            <div style="flex:1;background:#f5f5f7;padding:10px">
+              <div style="height:4px;width:60%;background:#1d1d1f;border-radius:2px;margin-bottom:6px"></div>
+              <div style="height:3px;width:40%;background:#6e6e73;border-radius:2px;margin-bottom:8px"></div>
+              <div style="height:30px;background:#fff;border-radius:12px;border:1px solid #d2d2d7;box-shadow:0 2px 8px rgba(0,0,0,0.04)"></div>
+            </div>
+          </div>
+          <p style="font-size:11px;color:var(--t3);margin-top:10px">毛玻璃侧栏 + 系统字体栈</p>
+        </div>
+      </div>
+    </div>
+    <div class="cd mt16" id="themeModeSection" style="${curTheme==='apple'?'':'opacity:0.4;pointer-events:none'}">
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">外观模式 / Appearance Mode</h3>
+      <p class="tx t2" style="margin-bottom:14px;font-size:12px">Liquid Glass 风格专属 — 跟随系统自动切换深浅色。</p>
+      <div style="display:flex;gap:10px">
+        <button onclick="selectThemeMode('light')"
+          style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curMode==='light'?'var(--a)':'var(--c)'};color:${curMode==='light'?'#fff':'var(--t2)'};transition:all .2s">
+          ☀️ 浅色
+        </button>
+        <button onclick="selectThemeMode('auto')"
+          style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curMode==='auto'?'var(--a)':'var(--c)'};color:${curMode==='auto'?'#fff':'var(--t2)'};transition:all .2s">
+          🌓 跟随系统
+        </button>
+      </div>
+    </div>
+    </div>`;
     el.innerHTML = html;
   } else if (current === 'gitcode') {
     // GitCode Repo 页面 — 需要已有仓库
@@ -167,4 +239,19 @@ function applyScene(owner, repo) {
   API.post('/scenes/apply/' + owner + '/' + repo, {scene_id: sceneId})
     .then(r => app.showToast(r.message || '场景已应用'))
     .catch(e => app.showToast('应用场景失败: ' + (e.message || e)));
+}
+
+// ── Theme switching ──
+function selectTheme(theme) {
+  if (!app.setTheme) { app.showToast('主题切换不可用'); return; }
+  app.setTheme(theme);
+  // re-render to update selection visual + toggle mode section
+  renderSettings('appearance');
+  app.showToast(theme === 'apple' ? '已切换到 Liquid Glass 风格' : '已切换到默认风格');
+}
+
+function selectThemeMode(mode) {
+  if (!app.setThemeMode) return;
+  app.setThemeMode(mode);
+  renderSettings('appearance');
 }

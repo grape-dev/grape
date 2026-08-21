@@ -417,10 +417,10 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         if kind == EXEC_MODE_DIRECT:
             evt["_skill_path"] = skill_path
             evt["_skill_id"] = skill_id
-            _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
+            _direct_tid = _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
                                 skill_path, engine_id, evt, issue_id, skill_id=skill_id)
             start_direct_agent(_execute_agent, (
-                repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
+                repo_key, seq, agent_type, _be, skill_name, evt, engine_id, _direct_tid,
             ), name=f"sub-{agent_type}-{seq}")
         else:
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
@@ -751,10 +751,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
         evt["_skill_id"] = skill_id
         # 先创建 agent_tasks + 设 started_at，防 sweeper 在排队期间误杀
-        _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
+        _direct_tid = _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
                             skill_path, engine_id, evt, issue_id, skill_id=skill_id)
         start_direct_agent(_execute_agent, (
-            repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
+            repo_key, seq, agent_type, _be, skill_name, evt, engine_id, _direct_tid,
         ), name=f"ag-{agent_type}-{seq}")
         log.info(f"Pipeline: started agent execution, seq={seq}, repo={repo_key}, agent={agent_type}")
 
@@ -1022,14 +1022,15 @@ def get_prompt_context(repo_key: str) -> str:
 
 
 def _execute_agent(repo_key: str, seq: int, agent_type: str,
-                   backend: str, skill_name: str, evt: dict, runtime_id: int = 0):
+                   backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
+                   task_id: str = ""):
     """后台执行 Agent：构建 prompt → stream_agent → 更新 event（result/status/agent_log）
     
     顶层 try/except 兜底：防止线程内未捕获异常导致事件永久卡在 running
     （如 runtime_instance_name / skill 加载 / stream_agent 启动前崩溃）。
     """
     try:
-        _execute_agent_inner(repo_key, seq, agent_type, backend, skill_name, evt, runtime_id)
+        _execute_agent_inner(repo_key, seq, agent_type, backend, skill_name, evt, runtime_id, task_id)
     except Exception as e:
         import traceback
         _tb = traceback.format_exc()
@@ -1050,7 +1051,8 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
 
 def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
-                         backend: str, skill_name: str, evt: dict, runtime_id: int = 0):
+                         backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
+                         task_id: str = ""):
     """_execute_agent 的实际逻辑（被顶层 try/except 包裹）。"""
     from src.runtime.executor import stream_agent
     from src.prompt_builder import build_prompt
@@ -1236,6 +1238,14 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             if repo_gitcode_token:
                 _msg = _msg.replace(repo_gitcode_token, "[REDACTED]")
             agent_logs.append({"time": datetime.utcnow().isoformat(), "type": evt_type, "msg": _msg})
+            # 实时推送：direct 模式复用 worker 的 report_messages（落库 task_messages + fanout SSE）
+            # 让前端「实时日志」面板在 hermes 执行期间就能看到逐步输出，不用等执行完成
+            if task_id and evt_type != "done":
+                try:
+                    from src.runtime.service import report_messages
+                    report_messages(task_id, [{"type": evt_type, "data": data}])
+                except Exception as _re:
+                    log.warning(f"direct report_messages failed (task={task_id}): {_re}")
             if evt_type == "done":
                 d = data
                 exit_code = d.get("exit_code", -1)

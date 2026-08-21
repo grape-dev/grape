@@ -56,7 +56,7 @@ function renderRuntimes(data) {
 
   const tabBtn = t => {
     const active = _runtimeTab === t;
-    return `<button onclick="_runtimeTab='${t}';renderRuntimes(__runtimeData)" style="padding:7px 16px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;cursor:pointer;${active ? 'background:var(--a);color:#fff' : 'background:var(--c)'}">${t === 'engines' ? 'Engines 引擎' : 'Workers 设备'}</button>`;
+    return `<button class="bt ${active ? 'bt-p' : 'bt-o'}" onclick="_runtimeTab='${t}';renderRuntimes(__runtimeData)">${t === 'engines' ? 'Engines 引擎' : 'Workers 设备'}</button>`;
   };
   let html = `<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
       ${tabBtn('engines')}${tabBtn('workers')}
@@ -122,11 +122,11 @@ function renderWorkers(data, devices) {
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${d.owner || '—'} ${d.credential_id === 0 ? `<span style="color:var(--t3);font-size:10px">(${d.owner_id || 'global'})</span>` : ''}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">凭据</span> <b style="color:${credColor}">${d.credential_status || ''}</b>${d.credential_id ? ` <button class="bt bt-o bt-s" onclick="renameCredential(${d.credential_id})">改名</button> <button class="bt bt-r bt-s" onclick="revokeCredential(${d.credential_id})">吊销</button>` : ''}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">凭据</span> <b style="color:${credColor}">${d.credential_status || ''}</b>${d.credential_id ? ` <button class="bt bt-o" onclick="renameCredential(${d.credential_id})">改名</button> <button class="bt bt-r" onclick="revokeCredential(${d.credential_id})">吊销</button>` : ''}</div>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;font-size:12px;color:var(--t2)">
           <div><span style="color:var(--t3);min-width:46px;display:inline-block">承载引擎</span> ${clis || '—'}</div>
-          ${d.credential_id ? `<button class="bt bt-o bt-s" onclick="openDeviceTasks(${d.credential_id})">任务</button>` : ''}
+          ${d.credential_id ? `<button class="bt bt-o" onclick="openDeviceTasks(${d.credential_id})">任务</button>` : ''}
         </div>
       </div>`;
     });
@@ -155,7 +155,7 @@ function openGenCredential() {
     <div class="srow"><label>归属用户</label><input value="${cur}" disabled style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:#f1f5f9"></div>
     <div class="srow"><label>范围</label><select id="credScope" onchange="toggleRepoKey()" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"><option value="user">个人</option><option value="repo">仓库</option><option value="global">全局</option></select></div>
     <div class="srow" id="repoKeyRow" style="display:none"><label>仓库 (owner/repo)</label><input id="credRepoKey" placeholder="owner/repo" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
-    <div class="flex gap6" style="margin-top:12px"><button class="bt bt-p bt-s" onclick="doCreateCredential()">生成</button><button class="bt bt-o bt-s" onclick="closeGenCredential()">取消</button></div>
+    <div class="flex gap6" style="margin-top:12px"><button class="bt bt-p" onclick="doCreateCredential()">生成</button><button class="bt bt-o" onclick="closeGenCredential()">取消</button></div>
   </div>`;
   el.insertAdjacentHTML('afterbegin', html);
 }
@@ -186,11 +186,11 @@ function doCreateCredential() {
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px">${token}</code>
       <div style="margin-top:10px;font-size:12px">📦 在 Worker 机器（普通用户）一键安装接入：</div>
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-top:4px">${oneCmd}</code>
-      <button class="bt bt-p bt-s" style="margin-top:8px" onclick="copyText('${oneCmd.replace(/'/g, "\\'")}')">📋 复制一键命令</button>
+      <button class="bt bt-p" style="margin-top:8px" onclick="copyText('${oneCmd.replace(/'/g, "\\'")}')">📋 复制一键命令</button>
       <div style="margin-top:8px;font-size:11px;color:var(--t2)">该命令从主控下载运行包（grape-worker.tar.gz）解压到用户家目录，自动写入凭据与主控地址并后台启动注册；免 root。重复执行可升级。</div>
       <div style="margin-top:10px;font-size:12px">或手动启动 RuntimeAgent：</div>
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-top:4px">${runCmd}</code>
-      <button class="bt bt-o bt-s" style="margin-top:8px" onclick="copyText('${token}')">📋 复制 token</button>
+      <button class="bt bt-o" style="margin-top:8px" onclick="copyText('${token}')">📋 复制 token</button>
     </div>`;
     const el = document.getElementById('pageContent');
     el.insertAdjacentHTML('afterbegin', box);

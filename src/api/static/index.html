@@ -6,6 +6,12 @@
 <title>Grape — Multi-Agent DevOps</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
 <link rel="stylesheet" href="/static/css/app.css?v=32">
+<link rel="stylesheet" href="/static/css/apple-theme.css?v=4">
+<script>
+// Early theme application — prevents flash of unstyled content (FOUC).
+// Reads localStorage 'grapeTheme' before DOM renders.
+(function(){var t=localStorage.getItem('grapeTheme');if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
+</script>
 </head>
 <body>
 
@@ -86,15 +92,15 @@
 <script src="/static/js/pages/dashboard.js?v=11"></script>
 <script src="/static/js/pages/pipeline.js?v=10"></script>
 <script src="/static/js/pages/agents.js?v=19"></script>
-<script src="/static/js/pages/events.js?v=21"></script>
+<script src="/static/js/pages/events.js?v=27"></script>
 <script src="/static/js/pages/chat.js?v=19"></script>
 <script src="/static/js/pages/repos.js?v=28"></script>
 <script src="/static/js/pages/templates.js?v=8"></script>
 <script src="/static/js/pages/tasks.js?v=19"></script>
-<script src="/static/js/pages/settings.js?v=9"></script>
+<script src="/static/js/pages/settings.js?v=11"></script>
 <script src="/static/js/pages/skills.js?v=15"></script>
 <script src="/static/js/pages/knowledge.js?v=4"></script>
-<script src="/static/js/pages/runtimes.js?v=9"></script>
-<script src="/static/js/app.js?v=26"></script>
+<script src="/static/js/pages/runtimes.js?v=10"></script>
+<script src="/static/js/app.js?v=27"></script>
 </body>
 </html>
