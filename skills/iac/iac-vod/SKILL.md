@@ -23,6 +23,7 @@ tags:
 - 已安装 curl 和 git
 - 已配置 `$BOT_GITCODE_TOKEN` 环境变量
 - 仓库已存在 Gitee/GitCode Issue 模块
+- Grape 平台 A2A 服务可用（https://example.com/api/a2a）
 
 ## 安全硬约束（必须遵守）
 
@@ -36,6 +37,7 @@ tags:
 - 本地参考：`references/gitcode-api-reference.md`
 - 本地参考：`references/labeling-guide.md`
 - 本地参考：`references/comment-guide.md`
+- 本地参考：`references/a2a-handoff.md`（A2A 交办 Issue Agent 的触发时机与示例）
 
 ## 工作流
 
@@ -61,6 +63,13 @@ tags:
 - 按回报价值判定标准区分"需回复"与"可静默"：根据反馈的完整性、可复现性和影响面积决定是否回应
 - 创建 Issue 前对比已有 Issue 列表，按关键词搜索去重，避免重复报告
 
+### A2A 交办 Issue Agent
+VOD 完成分析、标签和评论后，**必须通过 A2A 将 Issue 交给 Issue Agent**，由 Issue Agent 接力进行分类确认、指派、Spec 生成，再由 Issue Agent 触发 Coding Agent。
+
+⚠️ **VOD 不得直接 A2A 交办 Coding/QA/SRE Agent**——VOD 的职责边界到分析评论为止，后续流转由 Issue Agent 主导。
+
+详见 `references/a2a-handoff.md`。
+
 ## 硬规则
 
 | 行为 | 态度 |
@@ -69,7 +78,9 @@ tags:
 | 分析结果必须包含频率统计 | ✅ **必须做** |
 | 创建 Issue 前须确认无重复 | ✅ **必须做** |
 | Issue 标签须包含 `vod` | ✅ **必须做** |
+| 分析完成后通过 A2A 交办 Issue Agent | ✅ **必须做，不可跳过** |
 | 单条反馈价值不足时标记存档不创建 Issue | ✅ **根据判断** |
 | 修改非 VOD 相关 Issue | ❌ **禁止** |
 | 回复 Token/密码等敏感信息 | ❌ **禁止** |
 | 直接关闭/合并 Issue | ❌ **禁止** |
+| 直接 A2A 交办 Coding/QA/SRE Agent | ❌ **禁止（必须先经 Issue Agent）** |
