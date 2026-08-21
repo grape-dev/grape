@@ -107,10 +107,11 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
 
 
 def _kill_stale_engine(task: dict, backend: str = "opencode"):
-    """超时后杀掉对应引擎子进程（opencode run / hermes -z / codearts run）。按 cwd 匹配，避免误杀其他任务。"""
+    """超时后杀掉对应引擎子进程（opencode run / hermes chat / codearts run）。按 cwd 匹配，避免误杀其他任务。"""
     import subprocess, signal
     cwd = _remap_cwd(task.get("cwd") or os.getcwd())
-    pattern = {"hermes": "hermes -z", "codearts": "codearts run"}.get(backend, "opencode run")
+    # hermes verbose 模式用 `chat -q`，旧版用 `hermes -z`；两个模式都匹配以防漏杀
+    pattern = {"hermes": "hermes chat", "codearts": "codearts run"}.get(backend, "opencode run")
     try:
         out = subprocess.run(
             ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", pattern],
@@ -557,7 +558,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 nonlocal hermes_active
                 task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 1200)
-                # 立即标记 running（不等引擎首个事件）：hermes -z 冷启动+模型响应
+                # 立即标记 running（不等引擎首个事件）：hermes chat -q 冷启动+模型响应
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
                 # 误判未执行 → 回收重跑循环（attempts 累加 3 次直接 failed，实测 #49 100042）。
                 # 引擎启动失败由 fail_task 收尾（running → failed），无悬空风险。

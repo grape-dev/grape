@@ -306,11 +306,8 @@ function openTaskLog(taskId, title) {
   closeTaskLog();
   _taskLog.taskId = taskId;
   _taskLog.title = title || taskId;
-  _taskLog.seq = 0;
+  _taskLog.seq = 0;  // task_messages seq 从 1 递增，不等于 event seq
   _taskLog.following = true;
-  // 从 title（如 seq#100140）解析 seq
-  const m = String(title || '').match(/seq#(\d+)/);
-  if (m) _taskLog.seq = parseInt(m[1]);
 
   const ov = document.createElement('div');
   ov.id = 'taskLogOverlay';
@@ -369,7 +366,7 @@ function _tlArmWaitHint() {
     if (!_taskLog.taskId) return;
     if (_taskLog.bodyEl && !_taskLog.hasMsg && _taskLog.bodyEl.childElementCount === 0) {
       _taskLog.bodyEl.insertAdjacentHTML('beforeend',
-        '<div class="tl-waiting" style="color:var(--t3);padding:10px 0;font-size:12px">⏳ 引擎执行中，等待输出…（hermes 类引擎输出在任务完成时一次性返回；opencode 引擎逐步实时输出）</div>');
+        '<div class="tl-waiting" style="color:var(--t3);padding:10px 0;font-size:12px">⏳ 引擎执行中，等待输出…</div>');
       _tlStatus('⏳ 引擎执行中，等待输出…', 'var(--ty, #f1c40f)');
     }
   }, 8000);

@@ -315,10 +315,19 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                             "input": _redact(json.dumps(parsed.get("input", {}), ensure_ascii=False, default=str), _tokens),
                         })
                     elif et == "step_finish":
-                        yield ("step_finish", f"Step {step_count} done, tokens={parsed['tokens']}")
+                        _tok = parsed.get("tokens", "")
+                        yield ("step_finish", f"Step {step_count} done" + (f", tokens={_tok}" if _tok else ""))
                     elif et == "error":
                         error_events.append(_redact(parsed["message"], _tokens))
                         yield ("error", _redact(parsed["message"], _tokens))
+                    elif et in ("tool_finish", "tool_result", "api_call", "api_response", "session"):
+                        # Hermes verbose 模式新事件类型：直接转发 text 字段
+                        _txt = parsed.get("text", "")
+                        if _txt:
+                            yield (et, _redact(_txt, _tokens))
+                        # session 事件提取 sessionID
+                        if et == "session" and parsed.get("sessionID"):
+                            new_session_id = parsed["sessionID"]
                     else:
                         yield ("other", et)
             elif _reader_done:
