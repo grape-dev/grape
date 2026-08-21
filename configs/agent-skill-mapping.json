@@ -25,11 +25,11 @@
   "iac": {
    "name": "IaC开发",
    "mapping": {
-    "vod": "vod",
-    "issue": "issue-advance",
-    "coding": "implementation",
-    "qa": "pr",
-    "sre": "cloud-deploy"
+    "vod": "iac-vod",
+    "issue": "iac-issue",
+    "coding": "iac-coding",
+    "qa": "iac-qa",
+    "sre": "iac-sre"
    },
    "onboarding": "repo-onboarding"
   },

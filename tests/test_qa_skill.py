@@ -73,10 +73,13 @@ class TestQaSkillConfig:
         assert cfg["qa"]["path"] == "qa"
 
     def test_agent_skill_mapping_qa_defaults_to_pr(self):
-        # pr 保持默认：qa agent 默认技能为 pr（qa skill 为按仓库启用的增强备选）
+        # 默认场景 qa 映射为 pr；使用专属 skill 的场景（iac→iac-qa, skill-dev→skill-tester）例外
+        EXPECTED_QA = {"iac": "iac-qa", "skill-dev": "skill-tester"}
         cfg = _load_json("agent-skill-mapping.json")
         for scene, info in cfg["scenes"].items():
-            assert info["mapping"]["qa"] == "pr", f"scene '{scene}' qa mapping mismatch"
+            qa_skill = info["mapping"]["qa"]
+            expected = EXPECTED_QA.get(scene, "pr")
+            assert qa_skill == expected, f"scene '{scene}' qa should be '{expected}', got '{qa_skill}'"
 
     def test_agent_description_qa_subscribes_pr_with_stage_gate(self):
         # 生命周期矩阵（vod-skill-upgrade-plan.md §3.0.3）：PR 事件默认归属 qa（阶段矩阵兜底），
