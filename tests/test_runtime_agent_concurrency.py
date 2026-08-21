@@ -81,6 +81,9 @@ class FakeClient:
     async def fail(self, task_id, reason):
         pass
 
+    async def task_start(self, task_id):
+        return {"status": "running"}  # mock success
+
     async def requeue(self, task_id):
         self.requeued.append(task_id)
 

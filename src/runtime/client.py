@@ -114,7 +114,8 @@ class RuntimeClient:
         return data.get("task")
 
     async def task_start(self, task_id: str):
-        await self._request("POST", f"/api/runtime/tasks/{task_id}/start", {})
+        """标记任务 running。返回 _request 结果（None=失败），调用方据此判断是否成功。"""
+        return await self._request("POST", f"/api/runtime/tasks/{task_id}/start", {})
 
     async def report_progress(self, task_id: str, summary: str = "", step: int = 0, total: int = 0):
         await self._request("POST", f"/api/runtime/tasks/{task_id}/progress",

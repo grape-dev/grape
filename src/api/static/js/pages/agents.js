@@ -163,19 +163,38 @@ function renderAgent(name, data) {
   const m = data.metrics || {};
   const es = m.event_stats || {};
   const events = data.recent_events || [];
-  const evtHtml = events.length > 0 ? events.map(ev =>
-    `<div class="ai" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
-      <div class="t">${fmtLocalTime(ev.created_at).substring(5,16) || '--:--'}</div>
-      <div class="ac">${ev.summary || ev.title || ev.event_type}
-        ${ev.actor ? ` <span class="ts t2">@${ev.actor}</span>` : ''}
-        <span class="ts t3">Seq #${ev.seq || '?'}</span>
-        ${ev.issue_id ? ` <span class="tg tg-d">${ev.issue_id}</span>` : ''}
-        ${ev.duration ? ` <span class="ts t3">${ev.duration}s</span>` : ''}
-        ${ev.backend ? ` <span class="tg tg-d">${ev.backend}</span>` : ''}
-        <span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}">${ev.status}</span>
-      </div>
-    </div>`
-  ).join('') : '<div class="tx t2">暂无事件</div>';
+  const evtHtml = events.length > 0 ? `
+    <table style="width:100%;font-size:12px;table-layout:fixed">
+      <thead><tr>
+        <th style="width:60px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Seq</th>
+        <th style="width:130px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">时间</th>
+        <th style="width:auto;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">内容</th>
+        <th style="width:75px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Issue</th>
+        <th style="width:85px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Actor</th>
+        <th style="width:60px;text-align:center;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">耗时</th>
+        <th style="width:160px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">引擎</th>
+        <th style="width:70px;text-align:right;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">状态</th>
+      </tr></thead>
+      <tbody>
+        ${events.map(ev => {
+          const _issNum = String(ev.issue_id || '').replace(/^#/, '');
+          const _repoParts = (ev.repo_key || '').split('/');
+          const _issLink = (_issNum && _repoParts.length === 2)
+            ? `<a href="https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issNum}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">${ev.issue_id}</a>`
+            : ev.issue_id || '—';
+          return `<tr class="pipe-row" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
+          <td style="padding:8px 10px;font-size:11px;font-weight:600;color:var(--t2)">#${ev.seq || '?'}</td>
+          <td style="padding:8px 10px;white-space:nowrap;font-size:10px;color:var(--t3)">${fmtLocalTime(ev.created_at).substring(5,16) || '--:--'}</td>
+          <td style="padding:8px 10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${ev.summary || ev.title || ev.event_type}</td>
+          <td style="padding:8px 10px;font-size:11px">${_issLink}</td>
+          <td style="padding:8px 10px;font-size:10px;color:var(--t2)">${ev.actor ? '@'+ev.actor : '—'}</td>
+          <td style="padding:8px 10px;text-align:center;font-size:10px;color:var(--t3)">${ev.duration ? ev.duration + 's' : '—'}</td>
+          <td style="padding:8px 10px;font-size:10px;color:var(--t3);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-clamp:2;word-break:break-all">${ev.backend || '—'}</td>
+          <td style="padding:8px 10px;text-align:right"><span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}" style="font-size:10px;font-weight:600">${ev.status}</span></td>
+        </tr>`;
+        }).join('')}
+      </tbody>
+    </table>` : '<div class="tx t2" style="padding:12px 0">暂无事件</div>';
 
   const ef = es.completed || 0;
   const er = es.running || 0;

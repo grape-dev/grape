@@ -140,6 +140,84 @@ def _terminate_proc(proc, label: str = "", grace_seconds: float = 10.0):
     log.warning(f"{label} force killed (SIGKILL) after grace {grace_seconds}s")
 
 
+def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
+                       account, user_id, env_extra, bot_token, user_token,
+                       agent_name, agent_label, max_exec_seconds) -> Generator:
+    """hermes ACP 模式入口：构建 env → 调 hermes_acp.HermesACPBackend.stream_execute。
+
+    与 stream_agent 的 opencode/codearts 路径并行，不走 build_args/parse_output。
+    """
+    from src.agent.hermes_acp import HermesACPBackend
+
+    acp = HermesACPBackend()
+    env = acp.get_env(account=account, user_id=user_id)
+    env["DEVOPS_EVENT_TYPE"] = event_type
+
+    # GitCode token 注入（与 stream_agent 一致）
+    if bot_token:
+        env["BOT_GITCODE_TOKEN"] = bot_token
+    if user_token:
+        env["USER_GITCODE_TOKEN"] = user_token
+    elif bot_token:
+        env["USER_GITCODE_TOKEN"] = bot_token
+    if agent_name:
+        env["AGENT_NAME"] = agent_name
+    if env_extra:
+        env.update(env_extra)
+
+    # 技能路径占位符替换
+    try:
+        from src.config import SKILLS_DIR
+        prompt = prompt.replace("{{SKILL_DIR}}", SKILLS_DIR)
+    except Exception:
+        pass
+
+    # 注入用户凭据
+    if user_id > 0:
+        try:
+            from src.user.db import get_credentials
+            for c in get_credentials(user_id):
+                for k, v in c.get("config", {}).items():
+                    env[k.upper()] = str(v)
+        except Exception as e:
+            log.warning(f"Failed to inject user credentials: {e}")
+
+    # 脱敏 token 列表
+    _tokens = [t for t in (bot_token, user_token) if t]
+
+    def _redact_text(text):
+        if not text or not _tokens:
+            return text
+        s = str(text)
+        for t in _tokens:
+            if t:
+                s = s.replace(t, "[REDACTED]")
+        return s
+
+    label = f"{agent_label} " if agent_label else ""
+
+    # 会话失效重试（与 stream_agent 一致）
+    for evt_type, data in acp.stream_execute(
+        prompt, cwd, session_id=session_id, env=env,
+        max_exec_seconds=max_exec_seconds, agent_label=label,
+    ):
+        if evt_type == "text":
+            yield ("text", _redact_text(data))
+        elif evt_type == "tool_use":
+            if isinstance(data, dict):
+                data["input"] = _redact_text(json.dumps(data.get("input", {}), ensure_ascii=False, default=str))
+            yield ("tool_use", data)
+        elif evt_type == "tool_result":
+            yield ("tool_result", _redact_text(data))
+        elif evt_type == "done":
+            if isinstance(data, dict):
+                data["text"] = _redact_text(data.get("text", ""))
+                data["stderr"] = _redact_text(data.get("stderr", ""))
+            yield ("done", data)
+        else:
+            yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
+
+
 def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  event_type: str = "", backend_name: str = "opencode",
                  account: str = "", user_id: int = 0,
@@ -154,9 +232,23 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     opencode 会以 exit=1 + stderr "Session not found" 快速失败。
     本函数检测到该情况自动降级为「不带 session」重跑一次，用新会话继续，
     避免 agent 因旧 session 失效而整体失败（无回复）。
+
+    **hermes ACP 模式**：hermes 后端走 ACP JSON-RPC 协议（hermes_acp.py），
+    不走旧的 build_args/parse_output CLI 文本解析。ACP 模式下 hermes 内部
+    线程模型更简单，不触发 CLI 模式的 futex 死锁。
     """
     label = f"{agent_label} " if agent_label else ""
     backend = get_backend(backend_name)
+
+    # ── hermes ACP 专用路径 ──
+    if backend_name == "hermes":
+        yield from _stream_hermes_acp(
+            prompt, cwd, session_id, event_type, backend,
+            account, user_id, env_extra, bot_token, user_token,
+            agent_name, agent_label, max_exec_seconds,
+        )
+        return
+
     env = backend.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
     # GitCode token 通过子进程环境变量注入（不写入 prompt，避免 token 进会话历史/日志）
@@ -227,11 +319,58 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         if hasattr(os, "getpgid"):  # POSIX：独立进程组，便于整组优雅终止
             _popen_kwargs["start_new_session"] = True
 
+        # hermes 引擎：每个子进程隔离 HERMES_HOME → 独立 state.db，避免并发争锁
+        # （多 hermes chat -q 子进程共享 ~/.hermes/state.db 时 SQLite 写锁互斥阻塞）
+        # 必须把 config.yaml / .env 复制过去，否则 hermes 在空目录里找不到 provider/key
+        _proc_env = env
+        _iso_home = ""
+        if backend.name == "hermes":
+            import tempfile, shutil as _sh
+            _iso_home = tempfile.mkdtemp(prefix="hermes-iso-")
+            # 从默认 HERMES_HOME（~/.hermes 或 env HERMES_HOME）复制配置文件
+            _src_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
+            for _cfg in ("config.yaml", ".env", "SOUL.md"):
+                _src = os.path.join(_src_home, _cfg)
+                if os.path.isfile(_src):
+                    try:
+                        _sh.copy2(_src, os.path.join(_iso_home, _cfg))
+                    except Exception:
+                        pass
+            # 覆写 config.yaml 中的 tool_progress 为 new（减少 state.db 写入量，
+            # 避免 hermes 内部多线程争锁）。env HERMES_TOOL_PROGRESS_MODE 已 deprecated，
+            # config.yaml 优先级更高，必须改文件才生效。
+            _cfg_path = os.path.join(_iso_home, "config.yaml")
+            if os.path.isfile(_cfg_path):
+                try:
+                    with open(_cfg_path, "r") as _f:
+                        _cfg_text = _f.read()
+                    import re as _re
+                    _cfg_text = _re.sub(
+                        r'(tool_progress:\s*)\w+',
+                        r'\g<1>new',
+                        _cfg_text)
+                    with open(_cfg_path, "w") as _f:
+                        _f.write(_cfg_text)
+                except Exception:
+                    pass
+            # 注入 _grape_memory_db.pth：让 hermes state.db 使用 :memory:（纯内存）。
+            # sitecustomize.py 方式不稳定（import hermes_state 在 Python 启动初期可能失败）。
+            # .pth 文件由 site 模块在 sys.path 初始化后处理，hermes_state 此时已可 import。
+            _inject_dir = os.path.join(_iso_home, "py_inject")
+            os.makedirs(_inject_dir, exist_ok=True)
+            with open(os.path.join(_inject_dir, "_grape_memory_db.pth"), "w") as _f:
+                _f.write("import hermes_state, pathlib; hermes_state.DEFAULT_DB_PATH = pathlib.Path(':memory:')\n")
+            _proc_env = dict(env)
+            _proc_env["HERMES_HOME"] = _iso_home
+            _old_pp = _proc_env.get("PYTHONPATH", "")
+            _proc_env["PYTHONPATH"] = _inject_dir + (":" + _old_pp if _old_pp else "")
+            log.info(f"{label}hermes HERMES_HOME isolated: {_iso_home} (state.db=:memory: via .pth)")
+
         # 纯管道启动（与 main 一致；script 包装为临时对照，已按分析移除）
         proc = subprocess.Popen(
             [agent_cmd] + args,
             stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=cwd, env=env, bufsize=0, **_popen_kwargs
+            cwd=cwd, env=_proc_env, bufsize=0, **_popen_kwargs
         )
         _track_proc(proc)
         if backend.prompt_via_stdin:
@@ -315,10 +454,19 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                             "input": _redact(json.dumps(parsed.get("input", {}), ensure_ascii=False, default=str), _tokens),
                         })
                     elif et == "step_finish":
-                        yield ("step_finish", f"Step {step_count} done, tokens={parsed['tokens']}")
+                        _tok = parsed.get("tokens", "")
+                        yield ("step_finish", f"Step {step_count} done" + (f", tokens={_tok}" if _tok else ""))
                     elif et == "error":
                         error_events.append(_redact(parsed["message"], _tokens))
                         yield ("error", _redact(parsed["message"], _tokens))
+                    elif et in ("tool_finish", "tool_result", "api_call", "api_response", "session"):
+                        # Hermes verbose 模式新事件类型：直接转发 text 字段
+                        _txt = parsed.get("text", "")
+                        if _txt:
+                            yield (et, _redact(_txt, _tokens))
+                        # session 事件提取 sessionID
+                        if et == "session" and parsed.get("sessionID"):
+                            new_session_id = parsed["sessionID"]
                     else:
                         yield ("other", et)
             elif _reader_done:
@@ -421,6 +569,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
         log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={stderr_output[:120]!r}")
         _untrack_proc(proc)
+
+        # 清理 hermes 隔离的 HERMES_HOME 临时目录（state.db 等不再需要）
+        if backend.name == "hermes" and _iso_home:
+            try:
+                import shutil as _shutil
+                _shutil.rmtree(_iso_home, ignore_errors=True)
+            except Exception:
+                pass
 
         yield ("done", {
             "exit_code": proc.returncode, "text": _redact(full_text, _tokens),

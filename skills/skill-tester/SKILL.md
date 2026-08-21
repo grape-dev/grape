@@ -79,7 +79,7 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
 ### 1. 功能验证（Real-Environment First——不用 mock）
 - 定位 skill：从当前 worktree 的 skills/{name}/ 读
 - 读取测试用例：从 `templates/test-vars.json` 读取 creator 生成的测试用例（JSON 格式，含 id/name/command/expected）
-- AK/SK 检测：动态扫描 HUAWEI/HW/HWC 开头 + 含 ACCESS_KEY/_AK/SECRET_KEY/_SK 的环境变量（不依赖固定变量名，与 skill 脚本扫描逻辑一致）；环境变量缺失时，递归扫描 .project-info/ 目录找 repo-credentials.json，从 secrets.HUAWEI_AK / secrets.HUAWEI_SK 读取，读到后 export 到环境变量（用 HUAWEI 开头的变量名，如 HUAWEI_AK / HUAWEI_SK，确保 skill 脚本扫描能匹配到）
+- AK/SK 检测：优先从项目知识（.project-info/ 目录递归扫描找 repo-credentials.json）读取 secrets.HUAWEI_AK / secrets.HUAWEI_SK，读到后 export 到环境变量（用 HUAWEI 开头的变量名，如 HUAWEI_AK / HUAWEI_SK，确保 skill 脚本扫描能匹配到）；项目知识缺失时，扫描 HUAWEI/HW/HWC 开头 + 含 ACCESS_KEY/_AK/SECRET_KEY/_SK 的环境变量动态匹配（不依赖固定变量名，与 skill 脚本扫描逻辑一致）
   - ⚠️ 变量/JSON 值存在但值为空也算缺失——必须检查值非空
   - AK/SK 均缺失或为空 → ⛔ 终止测试，输出"AK/SK missing or empty, cannot execute tests"
   - AK/SK 可用（值非空）→ 继续真实 API 验证
