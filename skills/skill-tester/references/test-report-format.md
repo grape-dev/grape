@@ -4,15 +4,15 @@
 
 评论 body 开头独立行，后跟空行再写详细报告：
 
-- 通过：`[$AGENT_NAME] ✅ 测试通过`
-- 失败：`[$AGENT_NAME] 🔴 测试失败`
+- 通过：`[QA Agent] ✅ 测试通过`
+- 失败：`[QA Agent] 🔴 测试失败`
 
 标记放在开头保证 merge 事件前置判断时 grep 稳定匹配。
 
 ## 通过报告模板
 
 ```
-[$AGENT_NAME] ✅ 测试通过
+[QA Agent] ✅ 测试通过
 
 ## Skill 测试报告：{name} v{version}
 
@@ -42,7 +42,7 @@
 ## 失败报告模板
 
 ```
-[$AGENT_NAME] 🔴 测试失败
+[QA Agent] 🔴 测试失败
 
 ## Skill 测试报告：{name} v{version}
 

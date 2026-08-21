@@ -64,9 +64,9 @@ def check_frontmatter(skill_dir: str) -> list:
         dir_name = os.path.basename(skill_dir.rstrip("/"))
         if name != dir_name:
             problems.append(f"frontmatter name '{name}' 不匹配目录名 '{dir_name}'")
-        # 命名规范建议
-        if not dir_name.startswith("huawei-cloud-"):
-            problems.append(f"命名规范：skill 目录名 '{dir_name}' 建议以 huawei-cloud- 开头")
+        # 命名规范强制检查
+        if not re.match(r"^huawei-cloud-[a-z0-9]+(-[a-z0-9]+)*$", dir_name):
+            problems.append(f"命名规范：目录名 '{dir_name}' 不符合 huawei-cloud-{{product}}-{{function}} 格式")
 
     # version 格式
     m = re.search(r"^version:\s*([^\n]+)", fm, re.M)
@@ -94,7 +94,7 @@ def check_structure(skill_dir: str) -> list:
     """文件结构检查——合并目录/文件存在性检查。
 
     覆盖：
-    - scripts/ 目录存在且有可执行 .py 脚本
+    - scripts/ 目录存在且有可执行 .py 或 .sh 脚本
     - SKILL.md 存在（frontmatter 检查也查，但这里作为结构检查的一部分）
     - references/ 目录存在
     - references/iam-policies.md 存在
@@ -109,10 +109,10 @@ def check_structure(skill_dir: str) -> list:
     if not os.path.isdir(scripts_dir):
         problems.append("scripts/ 目录缺失")
     else:
-        py_files = [f for f in os.listdir(scripts_dir) if f.endswith(".py")]
-        if not py_files:
-            problems.append("scripts/ 无 .py 脚本")
-        for f in py_files:
+        entry_files = [f for f in os.listdir(scripts_dir) if f.endswith(".py") or f.endswith(".sh")]
+        if not entry_files:
+            problems.append("scripts/ 无 .py 或 .sh 脚本")
+        for f in entry_files:
             p = os.path.join(scripts_dir, f)
             if not os.access(p, os.X_OK):
                 problems.append(f"scripts/{f} 不可执行（缺 +x）")
@@ -209,18 +209,36 @@ def check_content(skill_dir: str) -> list:
     if re.search(r'\.agents/skills/[^\s`]+', content):
         problems.append("SKILL.md 包含 .agents/skills/ 路径引用——skill 应自包含")
 
-    # CLI 命令格式
+    # CLI 命令格式（排除 configure/list/help 等 CLI 管理命令，只检查 API 命令）
+    cli_mgmt_commands = {"configure", "list", "help", "version", "version", "completion", "debug"}
     commands = re.findall(r'hcloud\s+([A-Za-z]+)\s+([A-Za-z]+)', content)
     for service, operation in commands:
         if service.startswith("<") or service.startswith("{"):
+            continue
+        if service.lower() in cli_mgmt_commands:
             continue
         if not service[0].isupper():
             problems.append(f"CLI 命令 Service '{service}' 应首字母大写")
         if not operation[0].isupper():
             problems.append(f"CLI 命令 Operation '{operation}' 应 PascalCase")
     lines = content.split("\n")
+    in_code_block = False
     for i, line in enumerate(lines, 1):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        # 只检查代码块内和表格内的 hcloud 命令（跳过正文文字描述）
+        if not in_code_block and not line.strip().startswith("|"):
+            continue
         if re.search(r'hcloud\s+[A-Za-z]+\s+[A-Za-z]+', line):
+            # 排除 CLI 管理命令（configure/list/help 等）
+            cmd_match = re.search(r'hcloud\s+([A-Za-z]+)', line)
+            if cmd_match and cmd_match.group(1).lower() in cli_mgmt_commands:
+                continue
+            # 排除表格描述列里的 hcloud 命令（反引号包裹的描述不是实际命令）
+            # 只检查实际可执行的命令行（代码块内或反引号包裹的命令）
+            if line.strip().startswith("|") and not line.strip().startswith("| `"):
+                continue
             if "--help" not in line and "<" not in line and "{" not in line:
                 if "--cli-region" not in line:
                     problems.append(f"CLI 命令（行 {i}）缺 --cli-region 参数")
@@ -235,19 +253,24 @@ def check_content(skill_dir: str) -> list:
                     problems.append(f"references 文件 '{f}' 不符合 kebab-case 命名")
 
     # Markdown 风格
+    in_code_block = False
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
-        in_code_block = stripped.startswith("```") or stripped.startswith("|")
         if not in_code_block and len(line.rstrip("\n")) > 200 and not stripped.startswith("http"):
             problems.append(f"MD013 行 {i}: 行长度 {len(line.rstrip())} 超限（≤200 字符）")
-        if re.match(r"^\*\*[^*]+\*\*$", stripped) and not stripped.startswith("|"):
+        if not in_code_block and re.match(r"^\*\*[^*]+\*\*$", stripped) and not stripped.startswith("|"):
             problems.append(f"MD036 行 {i}: 加粗文本当标题，改用 ### 标题")
     prev_blank = True
+    in_code_block = False
     for i, line in enumerate(lines, 1):
-        if line.strip().startswith("```"):
-            if not prev_blank and i > 1:
-                problems.append(f"MD031 行 {i}: 代码块前缺空行")
-        prev_blank = line.strip() == ""
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if not in_code_block:
+                # 代码块开始标记——前面需要空行
+                if not prev_blank and i > 1:
+                    problems.append(f"MD031 行 {i}: 代码块前缺空行")
+            in_code_block = not in_code_block
+        prev_blank = stripped == ""
 
     # 包大小限制
     md_path = os.path.join(skill_dir, "SKILL.md")
@@ -274,7 +297,7 @@ def check_content(skill_dir: str) -> list:
 def check_no_mock(skill_dir: str) -> list:
     """Mock 模式检查——skill 脚本严禁包含 mock 模式/假数据。
 
-    检查 scripts/*.py 中是否存在 --mock 参数、MOCK_DATA、mock 相关代码。
+    检查 scripts/*.py 和 scripts/*.sh 中是否存在 --mock 参数、MOCK_DATA、mock 相关代码。
     SKILL.md 中的检查排除否定语境（"不使用 mock"/"严禁 mock"/"no mock" 等）。
     """
     problems = []
@@ -298,10 +321,10 @@ def check_no_mock(skill_dir: str) -> list:
         r'no\s+mock', r'without\s+mock', r'不包含\s*mock',
         r'should\s+not.*mock', r'must\s+not.*mock',
     ]
-    # 检查 Python 脚本（严格检查，不排除否定语境）
+    # 检查脚本文件（.py 和 .sh，严格检查，不排除否定语境）
     if os.path.isdir(scripts_dir):
         for f in os.listdir(scripts_dir):
-            if not f.endswith(".py"):
+            if not (f.endswith(".py") or f.endswith(".sh")):
                 continue
             p = os.path.join(scripts_dir, f)
             content = open(p, encoding="utf-8", errors="ignore").read()
@@ -325,6 +348,78 @@ def check_no_mock(skill_dir: str) -> list:
     return problems
 
 
+def check_huawei_cloud_dependency(skill_dir: str) -> list:
+    """华为云依赖检测——生成的 skill 必须依赖华为云。
+
+    检查 scripts/*.sh 和 *.py 中是否有 hcloud/huaweicloudsdk/AK/SK。
+    也检查 SKILL.md 中是否有 hcloud 命令。
+    """
+    problems = []
+    found = False
+
+    # 检查脚本文件
+    scripts_dir = os.path.join(skill_dir, "scripts")
+    if os.path.isdir(scripts_dir):
+        for f in os.listdir(scripts_dir):
+            if not (f.endswith(".py") or f.endswith(".sh")):
+                continue
+            p = os.path.join(scripts_dir, f)
+            content = open(p, encoding="utf-8", errors="ignore").read()
+            if re.search(r"hcloud|huaweicloudsdk|HUAWEI_AK|HUAWEI_SK|HW_ACCESS_KEY|HW_SECRET_KEY", content, re.I):
+                found = True
+                break
+
+    # 检查 SKILL.md
+    if not found:
+        content, fm, body, exists = _read_skill_md(skill_dir)
+        if exists and re.search(r"hcloud\s", content, re.I):
+            found = True
+
+    if not found:
+        problems.append("华为云依赖缺失：scripts/ 和 SKILL.md 中未找到 hcloud/huaweicloudsdk/AK/SK")
+
+    return problems
+
+
+def check_write_operation_confirmation(skill_dir: str) -> list:
+    """变更操作确认检查——涉及 Create/Delete/Update 时 SKILL.md 必须有确认提示。"""
+    problems = []
+    content, fm, body, exists = _read_skill_md(skill_dir)
+    if not exists:
+        return problems
+
+    has_write_op = re.search(r"Create|Delete|Update|创建|删除|更新", content, re.I)
+    has_confirmation = re.search(r"确认|confirm|用户确认", content, re.I)
+
+    if has_write_op and not has_confirmation:
+        problems.append("变更操作确认缺失：SKILL.md 涉及 Create/Delete/Update 但无确认提示")
+
+    return problems
+
+
+def check_no_hardcoded_address(skill_dir: str) -> list:
+    """硬编码地址检测——SKILL.md 正文代码块外不应出现 http://IP:port 形式地址。"""
+    problems = []
+    content, fm, body, exists = _read_skill_md(skill_dir)
+    if not exists:
+        return problems
+
+    lines = content.split("\n")
+    in_code_block = False
+    for i, line in enumerate(lines, 1):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        # 检查 http://IP:port 或 https://IP:port（排除 example.com / localhost）
+        if re.search(r"https?://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+", line):
+            if "example.com" not in line and "localhost" not in line:
+                problems.append(f"硬编码地址（行 {i}）：{line.strip()[:80]}")
+
+    return problems
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("用法: python3 spec_check.py <skill_dir>")
@@ -339,6 +434,9 @@ def main() -> int:
         + check_one_pr_one_skill(skill_dir)
         + check_content(skill_dir)
         + check_no_mock(skill_dir)
+        + check_huawei_cloud_dependency(skill_dir)
+        + check_write_operation_confirmation(skill_dir)
+        + check_no_hardcoded_address(skill_dir)
     )
     if all_problems:
         print("🔴 规范检查失败:")

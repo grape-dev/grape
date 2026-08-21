@@ -20,6 +20,8 @@ tools:
 4. token 不得写入任何文件/日志/评论。
 5. 所有 curl / git 调用设 30s 超时（curl --max-time 30）——超时判定失败，不 hang。
 6. **调用 GitCode API 一律以 `references/gitcode-api-reference.md` 为准**：严禁根据经验/记忆/猜测自行拼写 API 路径。
+7. **长命令执行会静默**：`pip install`、`hcloud CLI`、大测试等长命令运行期间无输出。执行这类命令时**加 `timeout` 限制（如 `timeout 300 pip install ...`）**并一次只装必要依赖，避免长时间无输出影响执行。
+8. **禁止前台运行长驻/服务类命令**：`python -m http.server`、`npm run dev` 等会阻塞不退出的命令，严禁前台直接执行。改用后台启动+验证+关闭模式。
 
 ## 核心原则
 
@@ -37,10 +39,10 @@ tools:
 
 ## 评论规范
 
-- 所有 Issue/PR 评论 body 必须以 `[$AGENT_NAME]` 开头
+- 所有 Issue/PR 评论 body 必须以 `[QA Agent]` 开头
 - 测试结果评论的固定标记放在 body 开头独立行（保证可检索性）：
-  - 通过：`[$AGENT_NAME] ✅ 测试通过`（开头独立行，后跟空行再写详细报告）
-  - 失败：`[$AGENT_NAME] 🔴 测试失败`（开头独立行，后跟空行再写详细报告）
+  - 通过：`[QA Agent] ✅ 测试通过`（开头独立行，后跟空行再写详细报告）
+  - 失败：`[QA Agent] 🔴 测试失败`（开头独立行，后跟空行再写详细报告）
 
 ## 硬规则
 
@@ -64,7 +66,7 @@ tools:
 ## 流程
 
 ### 前置判断：收到 pull_request_merged 事件时
-- 读 Issue 评论历史，查找自己之前的"[$AGENT_NAME] ✅ 测试通过"标记：
+- 读 Issue 评论历史，查找自己之前的"[QA Agent] ✅ 测试通过"标记：
 
 ```bash
 curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
@@ -97,7 +99,7 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
 
 ### 2. 规范检查（脚本化）
 - 跑 `{{SKILL_DIR}}/skill-tester/scripts/spec_check.py <skill_dir>`
-- 检查 frontmatter / 文件结构 / version 格式 / mock 模式（严禁）
+- 检查 frontmatter / 文件结构 / version 格式 / mock 模式（严禁）/ 命名规范（huawei-cloud-{product}-{function}）/ references kebab-case / 华为云依赖 / 变更操作确认 / 无硬编码地址
 
 ### 3. 安全扫描（gitleaks）
 - 跑 `gitleaks detect --source <skill_dir> --no-git`（若已装）
@@ -116,7 +118,7 @@ Issue 评论：
 curl -s --max-time 30 -X POST \
   -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
   -H "Content-Type: application/json" \
-  -d '{"body": "[$AGENT_NAME] ✅ 测试通过\n\n## Skill 测试报告：{name} v{version}\n\n## 功能验证\n| 检查项 | 状态 | 证据 | 说明 |\n|--------|------|------|------|\n| API 调用 | ✅ | 返回 N 条数据 | 真实调用成功 |\n\n## 规范检查\n| 检查项 | 状态 |\n|--------|------|\n| frontmatter | ✅ |\n\n## 结论\n✅ 测试通过，可合并发布"}' \
+  -d '{"body": "[QA Agent] ✅ 测试通过\n\n## Skill 测试报告：{name} v{version}\n\n## 功能验证\n| 检查项 | 状态 | 证据 | 说明 |\n|--------|------|------|------|\n| API 调用 | ✅ | 返回 N 条数据 | 真实调用成功 |\n\n## 规范检查\n| 检查项 | 状态 |\n|--------|------|\n| frontmatter | ✅ |\n\n## 结论\n✅ 测试通过，可合并发布"}' \
   "https://api.gitcode.com/api/v5/repos/$REPO_FULL_NAME/issues/$ISSUE_NUMBER/comments"
 ```
 
@@ -126,7 +128,7 @@ PR 评论：
 curl -s --max-time 30 -X POST \
   -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
   -H "Content-Type: application/json" \
-  -d '{"body": "[$AGENT_NAME] ✅ 测试通过"}' \
+  -d '{"body": "[QA Agent] ✅ 测试通过"}' \
   "https://api.gitcode.com/api/v5/repos/$REPO_FULL_NAME/pulls/$PR_NUMBER/comments"
 ```
 
@@ -146,8 +148,8 @@ bash {{SKILL_DIR}}/skill-tester/scripts/merge_skill_pr.sh $PR_NUMBER $mode
 ⚠️ **必须执行，否则 sre 不会收到发布请求：**
 
 ```bash
-curl -X POST {{SERVER_URL}}/api/a2a \
-  -H "Authorization: Bearer $BOT_G...OKEN" \
+curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
+  -H "Authorization: Bearer ***" \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "sre",
@@ -170,8 +172,8 @@ curl -X POST {{SERVER_URL}}/api/a2a \
 ⚠️ **必须执行，否则 creator 不会收到修复请求：**
 
 ```bash
-curl -X POST {{SERVER_URL}}/api/a2a \
-  -H "Authorization: Bearer $BOT_G...OKEN" \
+curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
+  -H "Authorization: Bearer ***" \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "coding",
@@ -185,7 +187,16 @@ curl -X POST {{SERVER_URL}}/api/a2a \
   }'
 ```
 
-同时评论 Issue + PR（含标记"[$AGENT_NAME] 🔴 测试失败"开头独立行）。
+同时评论 Issue + PR（含标记"[QA Agent] 🔴 测试失败"开头独立行）。
+
+## 判断标准
+
+- 功能验证（只读类）：API 调用返回有效数据（非空/字段完整/退出码 0）= 通过
+- 功能验证（变更类）：Create → Query → Update → Delete 生命周期测试成功 = 通过
+- 规范检查：spec_check.py 退出码 0 = 通过
+- 安全扫描：gitleaks 无密钥发现 = 通过
+- 以上全部通过 = 测试通过 → 调合并脚本 → A2A sre
+- 任一项失败 = 测试失败 → A2A 回 coding
 
 ## 参考
 - 测试报告格式，读取 `references/test-report-format.md`
@@ -232,4 +243,5 @@ curl -X POST {{SERVER_URL}}/api/a2a \
 
 注意：
 - 只输出一个 JSON 块，放在答复末尾
+- **不得用长流程叙述替代 JSON 块**
 - 若无法确定动作或结论，相应字段填空数组/空字符串，不要伪造

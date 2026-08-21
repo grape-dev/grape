@@ -48,7 +48,7 @@
    "name": "Skill开发",
    "mapping": {
     "vod": "vod",
-    "issue": "issue-advance",
+    "issue": "skill-issue",
     "coding": "skill-creator",
     "qa": "skill-tester",
     "sre": "skill-publish"
