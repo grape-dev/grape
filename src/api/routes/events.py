@@ -166,7 +166,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
 async def terminate_event(seq: int, user: dict = Depends(get_current_user)):
     """强行终止正在运行的事件任务。
 
-    - 有关联 task_id（worker 模式）→ 调 cancel_task
+    - 有关联 task_id（worker 模式）→ 调 fail_task（更新 task+event 状态为 failed）
     - 无 task_id（direct 模式）→ 调 cancel_direct_task
     - 事件状态回写 failed
     """
@@ -198,15 +198,15 @@ async def terminate_event(seq: int, user: dict = Depends(get_current_user)):
         pass
 
     cancelled = False
-    # 1) 有关联 task_id → 走 worker cancel
+    # 1) 有关联 task_id → 走 fail_task（同时更新 task 和 event 状态为 failed）
     if task_id:
         try:
-            from src.runtime.service import cancel_task
-            cancel_task(task_id)
+            from src.runtime.service import fail_task
+            fail_task(task_id, "用户手动终止")
             cancelled = True
-            log.info(f"Event terminate: seq={seq} task={task_id} cancelled via service")
+            log.info(f"Event terminate: seq={seq} task={task_id} failed via fail_task")
         except Exception as e:
-            log.warning(f"Event terminate: cancel_task failed: {e}")
+            log.warning(f"Event terminate: fail_task failed: {e}")
 
     # 2) direct 模式 → cancel_direct_task（无论有无 task_id 都尝试，兜底）
     if not cancelled:
@@ -217,7 +217,7 @@ async def terminate_event(seq: int, user: dict = Depends(get_current_user)):
         except Exception as e:
             log.warning(f"Event terminate: cancel_direct_task failed: {e}")
 
-    # 3) 事件状态回写 failed
+    # 3) 事件状态回写 failed（兜底，fail_task 已处理但再确认一次）
     try:
         update_event_status(seq, "failed")
     except Exception as e:

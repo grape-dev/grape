@@ -308,6 +308,9 @@ function openTaskLog(taskId, title) {
   _taskLog.title = title || taskId;
   _taskLog.seq = 0;
   _taskLog.following = true;
+  // 从 title（如 seq#100140）解析 seq
+  const m = String(title || '').match(/seq#(\d+)/);
+  if (m) _taskLog.seq = parseInt(m[1]);
 
   const ov = document.createElement('div');
   ov.id = 'taskLogOverlay';
@@ -486,11 +489,19 @@ function terminateEventTask(seq, taskId) {
 }
 
 function terminateCurrentTask() {
-  if (!_taskLog.taskId) return;
-  _doTerminateTask(_taskLog.taskId, function() {
-    _tlStatus('⏹ 正在终止…', 'var(--tr, #e74c3c)');
-    _tlHideKillBtn();
-  });
+  if (!_taskLog.taskId && !_taskLog.seq) return;
+  // 优先走 event terminate（同时更新 task + event 状态）
+  if (_taskLog.seq) {
+    _doTerminateEvent(_taskLog.seq, _taskLog.taskId, function() {
+      _tlStatus('⏹ 正在终止…', 'var(--tr, #e74c3c)');
+      _tlHideKillBtn();
+    });
+  } else {
+    _doTerminateTask(_taskLog.taskId, function() {
+      _tlStatus('⏹ 正在终止…', 'var(--tr, #e74c3c)');
+      _tlHideKillBtn();
+    });
+  }
 }
 
 function _doTerminateTask(taskId, onSuccess) {
@@ -501,17 +512,23 @@ function _doTerminateTask(taskId, onSuccess) {
   });
 }
 
-function _doTerminateEvent(seq, taskId) {
+function _doTerminateEvent(seq, taskId, onSuccess) {
   // 优先走 event terminate（同时支持 direct 和 worker 模式）
   API.post('/events/' + seq + '/terminate').then(function(d) {
-    app.showToast('⏹ 任务终止请求已发送');
-    API.get('/events/detail/' + seq).then(renderEventDetail);
+    if (onSuccess) onSuccess();
+    else {
+      app.showToast('⏹ 任务终止请求已发送');
+      API.get('/events/detail/' + seq).then(renderEventDetail);
+    }
   }).catch(function(e) {
     // fallback: 如果有 task_id 尝试直接 cancel
     if (taskId) {
       _doTerminateTask(taskId, function() {
-        app.showToast('⏹ 任务终止请求已发送');
-        API.get('/events/detail/' + seq).then(renderEventDetail);
+        if (onSuccess) onSuccess();
+        else {
+          app.showToast('⏹ 任务终止请求已发送');
+          API.get('/events/detail/' + seq).then(renderEventDetail);
+        }
       });
     } else {
       app.showToast('终止失败: ' + (e.message || e));
