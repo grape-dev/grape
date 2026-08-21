@@ -162,6 +162,70 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
     return result
 
 
+@router.post("/{seq}/terminate")
+async def terminate_event(seq: int, user: dict = Depends(get_current_user)):
+    """强行终止正在运行的事件任务。
+
+    - 有关联 task_id（worker 模式）→ 调 cancel_task
+    - 无 task_id（direct 模式）→ 调 cancel_direct_task
+    - 事件状态回写 failed
+    """
+    from src.session_manager import db, db_lock
+    from src.api.event_store import update_event_status
+
+    # 查事件状态
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "事件不存在"})
+    evt_status = row[0]
+
+    if evt_status not in ('running', 'dispatched'):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"事件状态为 {evt_status}，无法终止"})
+
+    # 查关联 task_id（agent_tasks 表按 event_seq 关联）
+    task_id = ""
+    try:
+        with db_lock:
+            c2 = db.cursor()
+            c2.execute("SELECT id FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (seq,))
+            tr = c2.fetchone()
+            if tr:
+                task_id = tr[0]
+    except Exception:
+        pass
+
+    cancelled = False
+    # 1) 有关联 task_id → 走 worker cancel
+    if task_id:
+        try:
+            from src.runtime.service import cancel_task
+            cancel_task(task_id)
+            cancelled = True
+            log.info(f"Event terminate: seq={seq} task={task_id} cancelled via service")
+        except Exception as e:
+            log.warning(f"Event terminate: cancel_task failed: {e}")
+
+    # 2) direct 模式 → cancel_direct_task（无论有无 task_id 都尝试，兜底）
+    if not cancelled:
+        try:
+            from src.api.event_pipeline import cancel_direct_task
+            cancelled = cancel_direct_task(seq)
+            log.info(f"Event terminate: seq={seq} direct cancel={cancelled}")
+        except Exception as e:
+            log.warning(f"Event terminate: cancel_direct_task failed: {e}")
+
+    # 3) 事件状态回写 failed
+    try:
+        update_event_status(seq, "failed")
+    except Exception as e:
+        log.warning(f"Event terminate: update_event_status failed: {e}")
+
+    return {"message": f"事件 {seq} 终止请求已发送", "cancelled": cancelled}
+
+
 @router.post("/{seq}/redispatch")
 async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
     """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
