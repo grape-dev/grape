@@ -157,9 +157,11 @@ function _detailHtml(t) {
 }
 
 function openTaskConversation(t) {
-  // 点「去对话」仅跳转 chat；任务状态以"真实对话消息"为准（task-status-processing-trigger-fix.md §3.3，
-  // /tasks/{id}/start 已不再翻转状态，仅返回当前状态）。跳转放 API 回调内，避免覆盖导航结果。
-  const go = () => app.nav('chat', t && t.conversation_id ? t.conversation_id : undefined);
+  // 跳转 chat agent；传 issue_number + repo_key 以便会话不存在时重建
+  const convId = t && t.conversation_id ? t.conversation_id : undefined;
+  const issueNum = t && t.issue_number ? String(t.issue_number) : '';
+  const repoKey = t && t.repo_key ? t.repo_key : '';
+  const go = () => app.nav('chat', convId || (issueNum && repoKey ? 'issue:' + issueNum + ':' + repoKey : undefined));
   if (t && t.id && t.status === 'active') {
     API.post('/tasks/' + t.id + '/start').then(d => {
       if (window._tasksById[t.id] && d && d.status) { window._tasksById[t.id].status = d.status; }

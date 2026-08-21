@@ -162,7 +162,14 @@ function loadSideConfig() {
 function loadConversations(autoSelect) {
   // 去对话指定会话时，不过滤 repo，确保任务会话可被定位
   const repo = app.currentRepo();
-  const repoKey = (_openConvId ? '' : (repo ? repo.fullName : ''));
+  // 解析 issue:N:repoKey 格式的 _openConvId（Task Center 跳转，会话可能已删除需重建）
+  let _issueParam = null;
+  if (_openConvId && _openConvId.startsWith('issue:')) {
+    const parts = _openConvId.split(':');
+    if (parts.length >= 3) _issueParam = {num: parts[1], repo: parts.slice(2).join(':')};
+    _openConvId = null;
+  }
+  const repoKey = (_openConvId || _issueParam ? '' : (repo ? repo.fullName : ''));
   API.get('/chat/conversations' + (repoKey ? '?repo_key=' + encodeURIComponent(repoKey) : '')).then(d => {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
@@ -185,11 +192,21 @@ function loadConversations(autoSelect) {
     list.querySelectorAll('.conv-item').forEach(item => {
       item.addEventListener('click', () => switchConversation(item.dataset.id));
     });
-    // Auto-select: 优先打开任务指定的 conversation，否则第一个
-    if (autoSelect && convs.length > 0 && !_currentConvId) {
-      const target = _openConvId && convs.some(c => c.id === _openConvId) ? _openConvId : convs[0].id;
-      _openConvId = null;
-      switchConversation(target);
+    // Auto-select: 优先 issue 重建 > 任务指定的 conversation > 第一个
+    if (autoSelect && !_currentConvId) {
+      if (_issueParam) {
+        // Task Center 跳转：会话可能已删除，调 ensure-issue 重建
+        API.post('/chat/conversations/ensure-issue', {repo_key: _issueParam.repo, issue_number: parseInt(_issueParam.num)}).then(r => {
+          loadConversations(false);
+          if (r.conversation_id) switchConversation(r.conversation_id);
+        }).catch(() => {
+          if (convs.length > 0) switchConversation(convs[0].id);
+        });
+      } else if (convs.length > 0) {
+        const target = _openConvId && convs.some(c => c.id === _openConvId) ? _openConvId : convs[0].id;
+        _openConvId = null;
+        switchConversation(target);
+      }
     }
   }).catch(() => {});
 }
