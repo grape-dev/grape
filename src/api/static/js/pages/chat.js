@@ -3,6 +3,33 @@ let _chatAbort = null;
 let _openConvId = null;
 const _NO_REPLY = '⚠️ 未收到回复，连接可能中断，请重试。';
 
+/**
+ * 将 "Issue #N" 文本渲染为 GitCode Issue 超链接。
+ * @param {string} text - 原始文本
+ * @param {string} repoKey - 仓库 key（如 "songspace/hello-blog"），用于构建 URL
+ * @returns {string} HTML 字符串，Issue #N 变为 <a> 标签
+ */
+function linkifyIssueNumbers(text, repoKey) {
+  if (!text) return '';
+  // repoKey 可能为空（普通对话无仓库）→ 仅当能解析出 owner/repo 时才链接化
+  let ownerRepo = '';
+  if (repoKey) {
+    // 去掉可能的 gitcode: 前缀
+    const parts = repoKey.replace(/^gitcode:/, '').split('/');
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      ownerRepo = parts[0] + '/' + parts[1];
+    }
+  }
+  // 匹配 "Issue #N" 或 "issue #N"（N 为数字）
+  return text.replace(/(Issue\s*#(\d+))/gi, (match, full, num) => {
+    if (ownerRepo) {
+      const url = `https://gitcode.com/${ownerRepo}/issues/${num}`;
+      return `<a href="${url}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${full}</a>`;
+    }
+    return match; // 无仓库信息时保持原文
+  });
+}
+
 function renderChat(openConvId) {
   _currentConvId = null;
   _openConvId = openConvId || null;
@@ -143,8 +170,9 @@ function loadConversations(autoSelect) {
     let html = '<div style="padding:10px 12px;border-bottom:1px solid var(--b)"><button class="bt bt-p bt-s" onclick="newConversation()" style="width:100%">＋ 新对话</button></div>';
     convs.forEach(c => {
       const active = c.id === _currentConvId ? ' style="background:var(--b)"' : '';
+      const titleHtml = c.title ? linkifyIssueNumbers(c.title, c.repo_key) : '新对话';
       html += `<div class="conv-item" data-id="${c.id}"${active}>
-        <div class="conv-title">${c.title || '新对话'}</div>
+        <div class="conv-title">${titleHtml}</div>
         <div class="conv-meta">${fmtLocalTime(c.created_at).substring(0,16)}</div>
         <span class="conv-del" onclick="event.stopPropagation();deleteConversation('${c.id}')">✕</span>
       </div>`;
@@ -199,13 +227,23 @@ function switchConversation(convId) {
   body.innerHTML = '<div class="loading">加载中...</div>';
   API.get('/chat/messages/' + convId).then(d => {
     const msgs = d.messages || [];
-    // 更新会话标题（如 Issue #4）到页头
+    // 更新会话标题（如 Issue #4）到页头，Issue #N 渲染为 GitCode 超链接
     const conv = d.conversation || {};
     const hdr = document.querySelector('.chat-hdr h2');
-    if (hdr) hdr.textContent = 'Chat Agent · ' + (conv.title || 'Personal Assistant');
-    body.innerHTML = msgs.map(m =>
-      `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${renderMarkdown(m.content)}</div>`
-    ).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">开始新对话</div>';
+    if (hdr) {
+      const titleBase = conv.title || 'Personal Assistant';
+      const repoKey = conv.repo_key || '';
+      // 先转义 HTML，再链接化 Issue #N（renderMarkdown 已转义，这里需手动处理）
+      const safeTitle = String(titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const linkedTitle = linkifyIssueNumbers(safeTitle, repoKey);
+      hdr.innerHTML = 'Chat Agent · ' + linkedTitle;
+    }
+    body.innerHTML = msgs.map(m => {
+      const rendered = renderMarkdown(m.content);
+      // 消息内容中的 "Issue #N" 渲染为 GitCode 超链接
+      const repoKey = conv.repo_key || '';
+      return `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${linkifyIssueNumbers(rendered, repoKey)}</div>`;
+    }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">开始新对话</div>';
     body.scrollTop = body.scrollHeight;
     if (input) input.disabled = false;
     const sendBtn = document.querySelector('.chat-in button');

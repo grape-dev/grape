@@ -83,6 +83,20 @@ async def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict =
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
+    # 任务会话：打开时自动从 GitCode Issue 补拉 agent 评论到会话
+    # （agent 通过技能 curl 在 Issue 上发的澄清追问等评论，可能未同步到会话）
+    if not before and conv.get("conv_type") == "task" and conv.get("issue_number"):
+        try:
+            from src.api.event_pipeline import _sync_issue_comments_to_conversation
+            from src.user.db import get_gitcode_token
+            from src.repo_key import from_repo_key
+            _rk = conv.get("repo_key", "")
+            _repo = from_repo_key(_rk) if _rk else ""
+            _token = get_gitcode_token(repo_key=_rk) or ""
+            if _repo and _token:
+                _sync_issue_comments_to_conversation(_rk, conv["issue_number"], _token, repository=_repo)
+        except Exception:
+            pass  # 旁路同步，不影响消息加载
     msgs = get_messages(conv_id, before_id=before)
     return {"messages": msgs, "conversation": conv}
 

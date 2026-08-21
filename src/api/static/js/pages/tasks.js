@@ -79,7 +79,7 @@ function _render() {
     const icon = isDone ? '✓' : isProc ? '⏳' : '#';
     const tagCls = isDone ? 'tsk-tag-d' : isProc ? 'tsk-tag-pr' : 'tsk-tag-p';
     const tagText = isDone ? '<b></b>已完成' : isProc ? '<b></b>处理中' : '<b></b>待处理';
-    return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()">
+    return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
       <div class="tsk-r-ic ${rIc}">${icon}</div>
       <div class="tsk-r-main">
         <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
@@ -114,6 +114,7 @@ function _render() {
     <div class="tsk-top">
       <h1>Task Center</h1>
       <div class="tsk-controls">
+        <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:10px">+ 新建任务</button>
         ${tab('all', '全部', cntAll)}${tab('active', '待处理', cntActive)}${tab('completed', '已完成', cntDone)}
         <div class="tsk-search"><span>🔍</span><input placeholder="搜索任务..." value="${_taskQuery}" oninput="_taskQuery=this.value;if(_taskQuery.length>1||!_taskQuery){_render()}" onkeyup="if(event.key==='Enter')_render()"></div>
       </div>
@@ -151,7 +152,6 @@ function _detailHtml(t) {
     </div>
     <div class="tsk-det-desc">${t.task_description || '暂无任务描述。'}</div>
     <div class="tsk-det-actions">
-      <button class="tsk-btn tsk-btn-primary" onclick="openTaskConversation(window._tasksById[${t.id}])">去对话</button>
       <button class="tsk-btn tsk-btn-ghost" onclick="window.open('https://gitcode.com/${t.repo_key}/issues/${t.issue_number}','_blank')">查看 Issue ↗</button>
     </div>`;
 }
@@ -168,4 +168,76 @@ function openTaskConversation(t) {
   } else {
     go();
   }
+}
+
+// ===== 新建任务（同步建 GitCode Issue + 既有流程建档；责任人 = General Settings Account）=====
+let _taskCreateModal = null;
+
+function openTaskCreateModal() {
+  const repo = app.currentRepo();
+  const defaultRepo = repo ? repo.fullName : '';
+  if (_taskCreateModal) _taskCreateModal.remove();
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+    <h3 style="margin:0 0 14px;font-size:15px;color:#111">+ 新建任务</h3>
+    <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+      <div style="font-size:11px;color:#555">仓库：<b>${esc(defaultRepo) || '—（请先进入仓库页再创建）'}</b></div>
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">标题 <span style="font-size:11px;color:#888">将作为 GitCode Issue 标题（同仓库同名 open Issue 自动复用，不重复创建）</span>
+        <input id="tcCreateTitle" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" placeholder="任务标题（必填）">
+      </label>
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">描述
+        <textarea id="tcCreateDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical" placeholder="任务描述"></textarea>
+      </label>
+      <div style="font-size:11px;color:#888">Issue 责任人 = 系统 General Settings 的 Account（当前登录账号）</div>
+      <div id="tcError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="tsk-btn tsk-btn-ghost" onclick="document.getElementById('taskCreateOverlay').remove()">取消</button>
+      <button class="tsk-btn tsk-btn-primary" id="tcSubmitBtn" onclick="createTaskSubmit()">创建任务</button>
+    </div>
+  </div>`;
+  ov.id = 'taskCreateOverlay';
+  document.body.appendChild(ov);
+  _taskCreateModal = ov;
+  // 点击遮罩空白处关闭：需 mousedown 和 click 都落在 ov 上才关闭，
+  // 防止在输入框拖选文字（mousedown 在 input、mouseup 落到 ov）时误关。
+  let _modalDownOnOverlay = false;
+  ov.addEventListener('mousedown', e => { _modalDownOnOverlay = (e.target === ov); });
+  ov.addEventListener('click', e => { if (e.target === ov && _modalDownOnOverlay) ov.remove(); });
+}
+
+function createTaskSubmit() {
+  const repo = app.currentRepo();
+  const repoKey = repo ? repo.fullName : '';
+  const title = (document.getElementById('tcCreateTitle') || {}).value || '';
+  const desc = (document.getElementById('tcCreateDesc') || {}).value || '';
+  const errEl = document.getElementById('tcError');
+  const showErr = (msg) => { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
+  if (!repoKey.trim()) { showErr('请先在仓库页选择仓库，再创建任务'); return; }
+  if (!title.trim()) { showErr('请填写任务标题'); return; }
+  const btn = document.getElementById('tcSubmitBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
+  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim()})
+    .then(d => {
+      const ov = document.getElementById('taskCreateOverlay');
+      if (ov) ov.remove();
+      if (errEl && d && d.message) { errEl.style.display = 'block'; errEl.textContent = '✅ ' + d.message; }
+      loadTasks();
+    })
+    .catch(e => {
+      if (btn) { btn.disabled = false; btn.textContent = '创建任务'; }
+      const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
+      showErr('创建失败: ' + msg);
+    });
+}
+
+function changeTaskStatus(taskId, status) {
+  API.put('/tasks/' + taskId + '/status', {status: status})
+    .then(() => loadTasks())
+    .catch(e => {
+      const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
+      alert('状态更新失败: ' + msg);
+    });
 }

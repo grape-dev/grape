@@ -227,6 +227,8 @@
 .tsk-btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:11px 16px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;border:none}
 .tsk-btn-primary{background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;box-shadow:0 6px 16px rgba(49,104,224,.3)}
 .tsk-btn-primary:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(49,104,224,.4)}
+.tsk-btn-ok{background:var(--ok,#1e7f3f);color:#fff;box-shadow:0 6px 16px rgba(30,127,63,.3)}
+.tsk-btn-ok:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(30,127,63,.4)}
 .tsk-btn-ghost{background:var(--c);border:1px solid var(--b);color:var(--t2)}
 .tsk-btn-ghost:hover{border-color:var(--a);color:var(--a);background:#f4f7ff}
 @media(max-width:860px){.tsk-layout{grid-template-columns:1fr}.tsk-detail{position:static}.tsk-controls{margin-left:0;width:100%}.tsk-search{flex:1}.tsk-search input{flex:1}}

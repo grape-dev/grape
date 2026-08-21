@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_user_token
 from src.config import WORKSPACE_DIR, log
 from src.api.time_utils import normalize_event_time
 from src.session_manager import (
@@ -443,6 +443,277 @@ async def start_task(task_id: int, user: dict = Depends(get_current_user)):
         if row[0] != user["id"]:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该任务"})
         return {"status": row[1]}
+
+
+class TaskCreateBody(BaseModel):
+    repo_key: str = ""
+    title: str = ""
+    description: str = ""
+    assignee: str = ""
+
+
+class TaskStatusBody(BaseModel):
+    status: str = ""
+
+
+# 任务状态迁移规则（任务中心新建任务支持的状态流）
+_TASK_STATUS_FLOWS = {
+    "active": ("processing", "cancelled"),
+    "processing": ("completed", "cancelled", "active"),
+    "completed": (),
+    "cancelled": ("active",),
+}
+
+
+def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str) -> int | None:
+    """幂等查找：同仓库已存在同名 open Issue → 返回其 number（避免重复建 issue）。"""
+    from src.user.repo_manager import _req
+    try:
+        data = _req("GET",
+                    f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=all&per_page=50&page=1",
+                    api_token)
+    except Exception:
+        return None
+    if isinstance(data, dict):
+        _cand = data.get("data") if isinstance(data.get("data"), list) else (data.get("items") or data.get("records") or [])
+        items = _cand or []
+    else:
+        items = data if isinstance(data, list) else []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if str(it.get("title") or "").strip() == title.strip():
+            st = str(it.get("state") or "").lower()
+            if st in ("open", "opened", "active", "1", "todo"):
+                n = it.get("number") or it.get("iid") or it.get("id")
+                if n:
+                    return int(n)
+    return None
+
+
+def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
+                        body_text: str = "", assignee: str = "") -> dict:
+    """创建 GitCode Issue（v5 实测：必须 access_token query + form-encoded，勿用 Bearer+JSON body）。
+
+    Gitee 系 API 特点：POST /repos/{owner}/{repo}/issues?access_token=xxx
+    body 为 application/x-www-form-urlencoded 的 title/body/assignee；
+    JSON body 会返回 400 "body不能为空"（2026-08-21 实测）。
+    """
+    import json as _json
+    import urllib.parse as _up
+    import urllib.request as _ur
+    import urllib.error as _uerr
+    params = {"title": title}
+    if body_text:
+        params["body"] = body_text
+    if assignee:
+        params["assignee"] = assignee
+    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?access_token={api_token}"
+    req = _ur.Request(url, data=_up.urlencode(params).encode(),
+                      headers={"Content-Type": "application/x-www-form-urlencoded",
+                               "Accept": "application/json"}, method="POST")
+    try:
+        with _ur.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+            return _json.loads(raw) if raw.strip() else {}
+    except _uerr.HTTPError as e:
+        raise RuntimeError(f"GitCode API POST issues failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
+    except _uerr.URLError as e:
+        raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
+
+
+@router.post("/create")
+async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user)):
+    """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
+
+    - issue 责任人 = 系统 General Settings 的 Account（settings.credentials.gitcode.account，
+      即当前登录用户 gitcode 账号；也可显式传 assignee 覆盖）
+    - 幂等：同仓库同标题的 open issue 存在 → 复用（不重复创建）；
+      同一 issue 的任务 id 不重复（ensure_issue_task 幂等）
+    - 状态迁移：task 支持 active/processing/completed/cancelled（PUT /api/tasks/{id}/status）
+    """
+    from src.repo_key import to_repo_key, split_owner_repo
+    if not body.repo_key or not body.title.strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key / title 必填"})
+    repo_key = to_repo_key(body.repo_key)
+    owner, rname = split_owner_repo(repo_key)
+    api_token = get_user_token(user["username"])
+    if not api_token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+    assignee = (body.assignee or "").strip() or user["username"]  # General Settings Account：登录用户 gitcode 账号
+    # 1) 幂等：同 title open issue 复用
+    issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip())
+    created = False
+    if issue_num is None:
+        resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
+                                   (body.description or "").strip(), assignee=assignee)
+        n = None
+        if isinstance(resp, dict):
+            n = resp.get("number") or resp.get("iid") or resp.get("id")
+        if not n:
+            raise HTTPException(status_code=502, detail={"code": 502,
+                                                         "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
+        issue_num = int(n)
+        created = True
+    # 2) 按既有流程幂等建档（同 issue 任务 id 复用）
+    task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee)
+    if not task_id:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
+    return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
+            "assignee": assignee, "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
+
+
+@router.put("/{task_id}/status")
+async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = Depends(get_current_user)):
+    """任务状态迁移（active → processing → completed / cancelled；cancelled → active 可恢复）。
+
+    终端状态 completed 不可改；同一任务只能单向流转（按 _TASK_STATUS_FLOWS 校验）。
+    """
+    ns = (body.status or "").strip()
+    if ns not in _TASK_STATUS_FLOWS:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"非法状态: {ns}"})
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT user_id, status FROM tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        if row[0] not in (user["id"], 0):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该任务"})
+        cur = row[1]
+        if cur != ns and ns not in _TASK_STATUS_FLOWS.get(cur, ()):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"不允许从 {cur} 迁移到 {ns}"})
+        c.execute(
+            "UPDATE tasks SET status=?, "
+            "completed_at=CASE WHEN ? IN ('completed','cancelled') THEN datetime('now') ELSE completed_at END, "
+            "completed_reason=CASE WHEN ?='completed' THEN 'manual' WHEN ?='cancelled' THEN 'cancelled' ELSE completed_reason END "
+            "WHERE id=?",
+            (ns, ns, ns, ns, task_id)
+        )
+        db.commit()
+    return {"ok": True, "task_id": task_id, "status": ns}
+
+
+class TaskClarifyBody(BaseModel):
+    message: str = ""
+
+
+def _get_task_issue_info(task_id: int) -> tuple[str, int, str] | None:
+    """从 tasks 表取 repo_key + issue_number + conversation_id（关联 agent_tasks 的键）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number, conversation_id FROM tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+    if not row:
+        return None
+    return row[0], row[1], row[2] or ""
+
+
+def _find_agent_task_ids(repo_key: str, issue_number: int) -> list[str]:
+    """按 repo_key + issue_id 关联 agent_tasks（agent 执行产生的 task_messages 以此为外键）。"""
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(repo_key)
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id FROM agent_tasks WHERE repo_key=? AND issue_id=? ORDER BY created_at DESC",
+            (rk, issue_number))
+        return [r[0] for r in c.fetchall()]
+
+
+@router.get("/{task_id}/clarifications")
+async def get_task_clarifications(task_id: int, user: dict = Depends(get_current_user)):
+    """拉取 agent 在该 Issue 上的澄清消息（task_messages 中 text/tool_use 类型）。
+
+    关联链：tasks.issue_number + repo_key → agent_tasks.id → task_messages.task_id。
+    只返回 text / reasoning / error 类型（agent 向用户发出的消息），不含 step_start/finish 噪音。
+    """
+    info = _get_task_issue_info(task_id)
+    if not info:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    repo_key, issue_number, conv_id = info
+    agent_task_ids = _find_agent_task_ids(repo_key, issue_number)
+    messages = []
+    if agent_task_ids:
+        with db_lock:
+            c = db.cursor()
+            # 取最近 50 条 agent 澄清消息（text/reasoning/error/tool_use）
+            placeholders = ",".join("?" * len(agent_task_ids))
+            c.execute(
+                f"SELECT task_id, seq, type, tool, content, input_json, created_at "
+                f"FROM task_messages WHERE task_id IN ({placeholders}) "
+                f"AND type IN ('text','reasoning','error','tool_use') "
+                f"ORDER BY created_at DESC LIMIT 50",
+                agent_task_ids)
+            rows = c.fetchall()
+        import json as _json
+        for r in reversed(rows):
+            msg = {"task_id": r[0], "seq": r[1], "type": r[2], "tool": r[3] or "",
+                   "content": r[4] or "", "created_at": normalize_event_time(r[6])}
+            if r[5]:
+                try:
+                    msg["input"] = _json.loads(r[5])
+                except Exception:
+                    msg["input"] = r[5]
+            messages.append(msg)
+    # 也拉 task conversation 里的历史消息（用户与 agent 的对话）
+    conv_messages = []
+    if conv_id:
+        from src.session_manager import get_messages
+        conv_messages = get_messages(conv_id, limit=30)
+    return {"messages": messages, "conversation_id": conv_id,
+            "issue_url": f"https://gitcode.com/{repo_key}/issues/{issue_number}"}
+
+
+@router.post("/{task_id}/clarify")
+async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
+                                 user: dict = Depends(get_current_user)):
+    """开发者在 Task Center 回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话。
+
+    - Issue 评论：以「💬 开发者澄清」前缀发到 GitCode（agent 通过 webhook issue_comment 事件继续处理）
+    - 任务会话：写入 chat_messages（user 角色），后续「去对话」可看到完整上下文
+    """
+    msg = (body.message or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "消息不能为空"})
+    info = _get_task_issue_info(task_id)
+    if not info:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    repo_key, issue_number, conv_id = info
+    api_token = get_user_token(user["username"])
+    if not api_token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+
+    # 1) 发 GitCode Issue 评论（form + access_token，同 _post_gitcode_issue 的实测结论）
+    from src.repo_key import split_owner_repo
+    import urllib.parse as _up
+    import urllib.request as _ur
+    import urllib.error as _uerr
+    owner, rname = split_owner_repo(repo_key)
+    comment_body = f"💬 **开发者澄清**\n\n{msg}"
+    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/issues/{issue_number}/comments?access_token={api_token}"
+    req = _ur.Request(url, data=_up.urlencode({"body": comment_body}).encode(),
+                      headers={"Content-Type": "application/x-www-form-urlencoded",
+                               "Accept": "application/json"}, method="POST")
+    try:
+        with _ur.urlopen(req, timeout=30) as resp:
+            resp.read()
+        log.info(f"Task clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
+    except _uerr.HTTPError as e:
+        raise HTTPException(status_code=502, detail={"code": 502,
+                                                     "message": f"GitCode 评论失败({e.code}): {e.read().decode(errors='replace')[:200]}"})
+    except _uerr.URLError as e:
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"无法连接 GitCode: {e.reason}"})
+
+    # 2) 写入任务会话（如有 conv_id）
+    if conv_id:
+        try:
+            from src.session_manager import add_message
+            add_message(conv_id, "user", msg)
+        except Exception as e:
+            log.warning(f"Task clarify: write conversation message failed: {e}")
+
+    return {"ok": True, "message": "澄清已发送到 Issue 并同步到任务会话"}
 
 
 @router.post("/close")

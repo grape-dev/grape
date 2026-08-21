@@ -1311,14 +1311,43 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         if _issue_num and repo_gitcode_token:
             _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type)
 
+    # 执行完成 → 同步 agent 结果到任务会话（用户「去对话」可见 agent 澄清/报告）
+    # 独立于 _post_result_to_issue：agent 可能自己用 curl 发了 Issue 评论，
+    # 但 task conversation 仍需写入才能在 Chat 页展示。
+    if new_status == "completed" and result_text and issue_id:
+        _issue_num = _issue_num_from(issue_id)
+        if _issue_num:
+            try:
+                from src.repo_key import to_repo_key
+                from src.session_manager import db as _db, db_lock as _dl, add_message as _am
+                _rk = to_repo_key(repo_key)
+                with _dl:
+                    _c = _db.cursor()
+                    _c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+                               (_rk, _issue_num))
+                    _row = _c.fetchone()
+                if _row and _row[0]:
+                    _am(_row[0], "agent", f"[{agent_type.upper()} Agent] {result_text[:3000]}")
+                    log.info(f"Exec agent: synced result to task conversation {_row[0]} (issue #{_issue_num})")
+            except Exception as _e:
+                log.warning(f"Exec agent: sync to task conversation failed: {_e}")
+
+    # 执行完成 → 从 GitCode Issue 拉取 agent 发的评论，同步到任务会话
+    # （agent 通过技能 curl 直接在 Issue 上发的澄清追问等评论，上面 result_text 同步的是
+    #   结构化输出摘要，不含 Issue 上的实际评论内容；此处补拉 Issue 评论去重写入会话）
+    if new_status == "completed" and issue_id:
+        _issue_num = _issue_num_from(issue_id)
+        if _issue_num and repo_gitcode_token:
+            _sync_issue_comments_to_conversation(repo_key, _issue_num, repo_gitcode_token, agent_type, repository)
+
 
 def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_token: str, agent_type: str):
-    """Agent 执行完成后，将结果作为评论发回 GitCode Issue。"""
+    """Agent 执行完成后，将结果作为评论发回 GitCode Issue，并同步写入任务会话（去对话可见）。"""
     if not repository or not issue_number or not bot_token:
         return
     try:
         import urllib.request, json as _json
-        _comment = f"**{agent_type.upper()} Agent 执行报告**\n\n{result_text[:3000]}"
+        _comment = f"[{agent_type.upper()} Agent] {result_text[:3000]}"
         _data = _json.dumps({"body": _comment}).encode("utf-8")
         _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
         _req = urllib.request.Request(
@@ -1333,3 +1362,112 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
         log.info(f"Exec agent: posted result comment to {repository}/issues/{issue_number}")
     except Exception as e:
         log.warning(f"Exec agent: failed to post result comment: {e}")
+    # 同步写入任务会话：用户「去对话」时可见 agent 澄清/报告
+    try:
+        from src.repo_key import to_repo_key
+        from src.session_manager import db, db_lock, add_message
+        rk = to_repo_key(repository)
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+                      (rk, issue_number))
+            row = c.fetchone()
+        if row and row[0]:
+            add_message(row[0], "agent", f"[{agent_type.upper()} Agent] {result_text[:3000]}")
+            log.info(f"Exec agent: synced result to task conversation {row[0]}")
+    except Exception as e:
+        log.warning(f"Exec agent: sync to task conversation failed: {e}")
+
+
+def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token: str,
+                                         agent_type: str = "", repository: str = ""):
+    """从 GitCode Issue 拉取 agent 发的评论，去重后同步到任务会话。
+
+    VOD 等 agent 通过技能 curl 直接在 Issue 上发澄清追问评论，这些评论内容
+    不会出现在 result_text（结构化输出摘要）中。此函数补拉 Issue 上的实际评论，
+    与会话已有消息去重后写入，确保 Chat Agent「去对话」可见完整内容。
+
+    agent_type 为空时同步所有 agent 前缀评论（用于打开会话时全量补拉）。
+    """
+    import urllib.request
+    import re
+    import json as _json
+    try:
+        from src.repo_key import to_repo_key
+        from src.session_manager import db as _db, db_lock as _dl, add_message as _am, get_messages as _get_msgs
+    except Exception:
+        return
+
+    rk = to_repo_key(repo_key)
+
+    # 1) 查关联的 task conversation
+    try:
+        with _dl:
+            c = _db.cursor()
+            c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+                      (rk, issue_number))
+            row = c.fetchone()
+        if not row or not row[0]:
+            return
+        conv_id = row[0]
+    except Exception as e:
+        log.warning(f"Sync issue comments: find conversation failed: {e}")
+        return
+
+    # 2) 从 GitCode API 拉取 Issue 评论
+    try:
+        if not repository:
+            from src.repo_key import from_repo_key
+            repository = from_repo_key(rk)
+        api_url = f"https://api.gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
+        req = urllib.request.Request(api_url)
+        req.add_header("Authorization", f"Bearer {bot_token}")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            comments = _json.loads(resp.read())
+    except Exception as e:
+        log.warning(f"Sync issue comments: fetch from GitCode failed: {e}")
+        return
+
+    if not comments:
+        return
+
+    # 3) 获取会话已有消息，提取内容指纹用于去重
+    try:
+        existing_msgs = _get_msgs(conv_id, limit=100)
+    except Exception:
+        existing_msgs = []
+    existing_sigs = set()
+    # 匹配 [XXX Agent] 标记（可能在引用块 > 之后出现，不要求在 body 开头）
+    _agent_tag_re = re.compile(r'\[([A-Za-z_]+)\s+Agent\]', re.IGNORECASE)
+    for m in existing_msgs:
+        content = m.get("content", "")
+        # 去掉引用块和 [XXX Agent] 标记后取前 80 字符做指纹
+        sig = _agent_tag_re.sub("", content).strip()[:80].lower()
+        existing_sigs.add(sig)
+
+    # 4) 筛选含 [XXX Agent] 标记的评论，去重后写入会话
+    synced = 0
+    for cm in comments:
+        body = cm.get("body", "")
+        if not body:
+            continue
+        # 评论中必须包含 [XXX Agent] 标记（可能在引用块之后）
+        tag_match = _agent_tag_re.search(body)
+        if not tag_match:
+            continue
+        # 如果指定了 agent_type，只同步该 agent 的评论
+        if agent_type:
+            if tag_match.group(1).upper() != agent_type.upper():
+                continue
+        # 去重：去掉 [XXX Agent] 标记后取前 80 字符做指纹（大小写不敏感）
+        sig = _agent_tag_re.sub("", body).strip()[:80].lower()
+        if sig in existing_sigs:
+            continue
+        try:
+            _am(conv_id, "agent", body[:4000])
+            synced += 1
+        except Exception:
+            pass
+
+    if synced > 0:
+        log.info(f"Sync issue comments: synced {synced} comments to conversation {conv_id} (issue #{issue_number})")
