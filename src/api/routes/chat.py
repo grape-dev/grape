@@ -76,6 +76,53 @@ async def remove_conversation(conv_id: str, user: dict = Depends(get_current_use
     return {"message": "对话已删除"}
 
 
+class EnsureIssueConvBody(BaseModel):
+    repo_key: str
+    issue_number: int
+
+
+@router.post("/conversations/ensure-issue")
+async def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(get_current_user)):
+    """基于 repo_key + issue_number 查找或新建任务会话（Task Center 跳转用）。
+
+    会话被删除后，Task Center 双击跳转时调用此接口重建「Issue #N」会话，
+    并写入任务上下文消息 + 从 GitCode Issue 补拉 agent 评论。
+    """
+    from src.api.routes.tasks import _ensure_task_conversation, _get_issue_title
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(body.repo_key)
+    title = ""
+    try:
+        title = _get_issue_title(rk, body.issue_number)
+    except Exception:
+        pass
+    conv_id = _ensure_task_conversation(user["id"], rk, body.issue_number, title=title)
+    if not conv_id:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "创建会话失败"})
+    # 更新 task 表中的 conversation_id 关联
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        with _dl:
+            c = _db.cursor()
+            c.execute("UPDATE tasks SET conversation_id=? WHERE repo_key=? AND issue_number=?",
+                      (conv_id, rk, body.issue_number))
+            _db.commit()
+    except Exception:
+        pass
+    # 从 GitCode Issue 补拉 agent 评论到新会话
+    try:
+        from src.api.event_pipeline import _sync_issue_comments_to_conversation
+        from src.user.db import get_gitcode_token
+        from src.repo_key import from_repo_key
+        _repo = from_repo_key(rk)
+        _token = get_gitcode_token(repo_key=rk) or ""
+        if _repo and _token:
+            _sync_issue_comments_to_conversation(rk, body.issue_number, _token, repository=_repo)
+    except Exception:
+        pass
+    return {"conversation_id": conv_id}
+
+
 # ====== Messages ======
 
 @router.get("/messages/{conv_id}")
@@ -83,6 +130,20 @@ async def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict =
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
+    # 任务会话：打开时自动从 GitCode Issue 补拉 agent 评论到会话
+    # （agent 通过技能 curl 在 Issue 上发的澄清追问等评论，可能未同步到会话）
+    if not before and conv.get("conv_type") == "task" and conv.get("issue_number"):
+        try:
+            from src.api.event_pipeline import _sync_issue_comments_to_conversation
+            from src.user.db import get_gitcode_token
+            from src.repo_key import from_repo_key
+            _rk = conv.get("repo_key", "")
+            _repo = from_repo_key(_rk) if _rk else ""
+            _token = get_gitcode_token(repo_key=_rk) or ""
+            if _repo and _token:
+                _sync_issue_comments_to_conversation(_rk, conv["issue_number"], _token, repository=_repo)
+        except Exception:
+            pass  # 旁路同步，不影响消息加载
     msgs = get_messages(conv_id, before_id=before)
     return {"messages": msgs, "conversation": conv}
 
