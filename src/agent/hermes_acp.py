@@ -158,6 +158,14 @@ class HermesACPBackend:
                 _text_buf.append(content)
                 if "\n" in content or sum(len(s) for s in _text_buf) >= _BUF_MAX:
                     _flush_text()
+                    # 内容兜底：检测处理记录 JSON 块（grape agent 任务完成标志）
+                    # hermes ACP 有时不发 turn_end/response，但输出里含 JSON 记录
+                    if not prompt_done.is_set():
+                        _full = "".join(_text_buf) if _text_buf else "".join(collected_text[-3:])
+                        if '"actions"' in _full and '"conclusion"' in _full and '"issue_summary"' in _full:
+                            log.info(f"{label}hermes ACP detected JSON record in text output, assuming prompt done")
+                            prompt_result["stopReason"] = "end_turn"
+                            prompt_done.set()
             elif msg_type == "thinking":
                 _think_buf.append(content)
                 if "\n" in content or sum(len(s) for s in _think_buf) >= _BUF_MAX:
