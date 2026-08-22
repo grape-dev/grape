@@ -42,8 +42,8 @@ tools:
 
 ## 评论规范
 
-- 所有 Issue/PR 评论 body 必须以 `[$AGENT_NAME]` 开头
-- 引用用户原文：`> {用户评论}\n\n[$AGENT_NAME] {回复}`
+- 所有 Issue/PR 评论 body 必须以 `[Coding Agent]` 开头
+- 引用用户原文：`> {用户评论}\n\n[Coding Agent] {回复}`
 
 ## Configuration
 
@@ -109,12 +109,16 @@ rest-api-skill-creator 通过 grape A2A 链路触发，生成的 skill 参与 A2
 | 段落 | 说明 |
 |------|------|
 | 安全硬约束 | token 不写文件/不读内部数据/curl --max-time 30/调用 API 以 references 为准 |
-| 评论规范 | [$AGENT_NAME] 开头 + 引用原文 |
+| 评论规范 | [$AGENT_NAME] 开头 + 引用原文（未注入时用 skill name） |
+| Configuration | base_url 解析 4 级优先级 + 配置指导（环境变量方式 + 项目知识 JSON 方式 + 示例） |
 | YAML Frontmatter | name + description + version（x.y.z 格式，如 0.1.0）+ triggers + tags（≤5） |
 | 场景 / When to Use | 适用场景 + Don't use for 反例。从需求提取 |
 | 知识 / Knowledge | API 技术栈 + 认证方式 + base_url 优先级 + 端点表 + Common Pitfalls + 字段说明 |
 | 步骤 / Steps | 主流程按序号（Step 1/2/3），每个操作是子步骤，含 curl 示例 + Expected 返回值 |
+| 判断标准 / Verification | Verification Checklist（checkbox 格式） |
+| 输出规范 / Output Format | JSON / Markdown 表格 / curl 示例格式 |
 | 参考文档 / References | references/ 下文档链接 |
+| 分析结论示例 | 成功/失败两种场景的分析结论输出参考 |
 | 任务结束 | JSON 块（actions/conclusion/artifacts/next_step/issue_summary） |
 
 可选段落（按需添加）：
@@ -303,15 +307,15 @@ test-vars.json 只含测试用例和元数据，**不含真实地址/凭据值**
 - **拼写修正**：如果 API 路径有拼写错误（如 lables 应为 labels），子命令用正确拼写，但在脚本内部请求时用 API 实际路径（lables）。在 SKILL.md 的 Core Commands 表格里注明端点实际路径
 - **特殊路径处理**：路径含 restore/reply/heat/top 等语义段时，子命令名取语义段 + resource 名（restore-article / reply-message / top-articles）
 - **Web 页面端点排除**：GET / 和 GET /article/{id} 等返回 HTML 页面的端点不生成子命令（非 API 端点）
-- **文件上传特殊处理**：requestBody 为 multipart/form-data 时，子命令的 _api_request 调用用 `files=` 参数（不是 `json=`）。如 upload-file 用 `with open(path, 'rb') as f: _api_request('POST', '/api/upload', files={'file': f})`
+- **文件上传特殊处理**：requestBody 为 multipart/form-data 时，子命令的 _api_request 调用用 `files=` 参数（不是 `json=`）。单文件用 `files={'字段名': f}`（dict value 是单个 file object，字段名由 API 文档定义），批量上传用 `files=[('字段名', f) for f in files]`（元组列表，不能用 dict value 为列表——requests 会报 unpack 错误）
 - 子命令参数由 API 文档的 parameters / requestBody 定义决定
 
 **生成的脚本凭据读取规范**（前缀由 skill name 推导，认证方式由需求澄清决定）：
 
 凭据和 base_url 统一按 4 级优先级读取（与 Configuration 段落一致）：
-1. **环境变量** — 扫描 `{PREFIX}_*` 开头变量
-2. **项目知识** — 环境变量缺失时递归扫描 `.project-info/` 下所有 JSON 文件（secrets.{PREFIX}_USERNAME / secrets.{PREFIX}_TOKEN 等）
-3. **当前上下文** — A2A context 已注入的环境变量（已包含在步骤 1）
+1. **项目知识** — 递归扫描 `.project-info/` 下所有 JSON 文件（secrets.{PREFIX}_USERNAME / secrets.{PREFIX}_TOKEN 等）
+2. **环境变量** — 项目知识缺失时扫描 `{PREFIX}_*` 开头变量
+3. **当前上下文** — A2A context 已注入的环境变量（已包含在步骤 2）
 4. **交互输入** — 以上都无时提示用户输入
 
 详细代码模板见 `references/rest-api-skill-template.md` 的 `_load_credentials` + `_load_from_project_knowledge` 函数。
@@ -390,7 +394,7 @@ resp = requests.get(f"{base_url}/{path}", timeout=30)
 curl -s --max-time 30 -X POST \
   -H "PRIVATE-TOKEN: $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"body": "[$AGENT_NAME] ✅ Skill 已创建并提交 PR\n\n**Skill 名称**：{name}\n**功能摘要**：{一句话描述}\n**API 端点数**：{N} 个\n**认证方式**：{AUTH_TYPE}\n**PR 链接**：{PR_URL}\n**测试状态**：已 A2A 交棒 QA Agent，测试中\n\n**下一步**：\n- 测试通过后自动合并 → 发布"}' \
+  -d '{"body": "[Coding Agent] ✅ Skill 已创建并提交 PR\n\n**Skill 名称**：{name}\n**功能摘要**：{一句话描述}\n**API 端点数**：{N} 个\n**认证方式**：{AUTH_TYPE}\n**PR 链接**：{PR_URL}\n**测试状态**：已 A2A 交棒 QA Agent，测试中\n\n**下一步**：\n- 测试通过后自动合并 → 发布"}' \
   "https://api.gitcode.com/api/v5/repos/$REPO_FULL_NAME/issues/$ISSUE_NUMBER/comments"
 ```
 

@@ -226,6 +226,30 @@ def cmd_{subcommand_2}(args):
     return result
 
 
+# --- 以下场景生成时参考对应代码片段（不替换上方占位符示例）---
+
+# GET/DELETE 路径参数：路径中的变量用 f-string 拼接（路径和变量名由 API 文档决定）
+result = _api_request('GET', f'{base_path}/{args.{id_param}}')
+result = _api_request('DELETE', f'{base_path}/{args.{id_param}}', params=params)
+
+# 可选参数：用 is not None 判断，不传 None 到 API
+payload = {'{required}': args.{required}}
+if args.{optional} is not None:
+    payload['{optional}'] = args.{optional}
+
+# 文件上传单文件：files=dict（value 是单个 file object）
+with open(args.filepath, 'rb') as f:
+    result = _api_request('POST', '{path}', files={'{field}': f})
+
+# 文件上传批量：files=元组列表（不能用 dict value 为列表——requests 会报 unpack 错误）
+files = [open(fp, 'rb') for fp in args.filepaths]
+try:
+    result = _api_request('POST', '{path}', files=[('{field}', f) for f in files])
+finally:
+    for f in files:
+        f.close()
+
+
 # ---------------------------------------------------------------------------
 # Capability list
 # ---------------------------------------------------------------------------
@@ -397,7 +421,7 @@ tools:
 
 ## 评论规范
 
-- 所有 Issue/PR 评论 body 必须以 `[$AGENT_NAME]` 开头
+- 所有 Issue/PR 评论 body 必须以 `[$AGENT_NAME]` 开头（如果环境变量未注入，使用 skill name 作为前缀，如 `[blog-use]`）
 - 引用用户原文：`> {用户评论}\n\n[$AGENT_NAME] {回复}`
 
 ## Configuration
@@ -407,8 +431,8 @@ tools:
 `{base_url}` 解析优先级：
 
 1. **项目知识** — 检查 `.project-info/` 目录下 JSON 配置文件（config.{CRED_PREFIX}_BASE_URL）
-2. **当前上下文** — 用户直接提供或 A2A context 中已包含
-3. **环境变量** — `{CRED_PREFIX}_BASE_URL`
+2. **环境变量** — `{CRED_PREFIX}_BASE_URL`
+3. **当前上下文** — 用户直接提供或 A2A context 中已包含
 4. **交互输入** — 以上都无时提示用户输入
 
 ### 配置指导
@@ -491,9 +515,9 @@ All endpoints below are relative to this base. {AUTH_TYPE} 认证{需要/不需�
 
 **凭据读取优先级（4 级，与 base_url 一致）**：
 
-1. **环境变量** — 扫描 `{CRED_PREFIX}_*` 开头变量（如 `{CRED_PREFIX}_TOKEN`）
-2. **项目知识** — 环境变量缺失时递归扫描 `.project-info/` 下所有 JSON 文件，读取 `secrets.{CRED_PREFIX}_*` 字段（key 必须按前缀命名，避免与其他系统凭据冲突）
-3. **当前上下文** — A2A context 已注入的环境变量（已包含在步骤 1）
+1. **项目知识** — 递归扫描 `.project-info/` 下所有 JSON 文件，读取 `secrets.{CRED_PREFIX}_*` 字段（key 必须按前缀命名，避免与其他系统凭据冲突）
+2. **环境变量** — 项目知识缺失时扫描 `{CRED_PREFIX}_*` 开头变量（如 `{CRED_PREFIX}_TOKEN`）
+3. **当前上下文** — A2A context 已注入的环境变量（已包含在步骤 2）
 4. **交互输入** — 以上都无时提示用户输入
 
 **项目知识 JSON 配置示例**（有认证时）：
@@ -540,9 +564,9 @@ python3 scripts/{skill_name}.py {list-subcommand}
 ```
 Expected: `{"code":200,"data":[...]}`
 
-### 3. 执行操作（按用户需求选择）
+### 3. 执行操作
 
-{对每个解析到的端点生成子步骤}
+⚠️ 每个子命令必须生成一个子步骤（含命令 + Expected + 参数说明），不得省略。
 
 #### {subcommand_1}
 ```bash
@@ -619,18 +643,18 @@ Expected: `{"capability":"capability-list","subcommand_count":N,...}`
 
 ```
 分析结论：
-- 场景：{API 操作}（{触发方式}）
+- 场景：{API 操作}
 - Skill：{skill_name} v{version}
 - 操作：{subcommand} {params}
 - 结果：✅ 成功（{API 返回的关键数据摘要}）
-- 必须执行：Issue 评论汇总 → 任务结束
+- 必须执行：Issue 评论汇总结果 → 任务结束
 ```
 
 失败时：
 
 ```
 分析结论：
-- 场景：{API 操作}（{触发方式}）
+- 场景：{API 操作}
 - Skill：{skill_name} v{version}
 - 操作：{subcommand} {params}
 - 结果：🔴 失败（{错误原因}）
@@ -643,11 +667,11 @@ Expected: `{"capability":"capability-list","subcommand_count":N,...}`
 
 ```json
 {
-  "actions": ["做了什么"],
-  "conclusion": "处理结论",
-  "artifacts": ["产生的产物"],
-  "next_step": "下一步建议",
-  "issue_summary": "Issue 最新聚合结论（紧凑文本，用 | 分隔）"
+  "actions": ["{具体执行的操作，如 list-articles: 返回 5 篇文章}"],
+  "conclusion": "{处理结论，如 查询成功，返回 5 篇文章}",
+  "artifacts": ["{产生的产物：写操作返回资源 ID 或操作结果 / 文件操作返回 URL / 只读查询无产物填空数组}"],
+  "next_step": "{下一步建议，如 无 / 等待用户下一步指令}",
+  "issue_summary": "{Issue 最新聚合结论，紧凑文本，用 | 分隔}"
 }
 ```
 

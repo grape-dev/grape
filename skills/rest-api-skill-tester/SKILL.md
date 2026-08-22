@@ -42,10 +42,10 @@ tools:
 
 ## 评论规范
 
-- 所有 Issue/PR 评论 body 必须以 `[$AGENT_NAME]` 开头
+- 所有 Issue/PR 评论 body 必须以 `[QA Agent]` 开头
 - 测试结果评论的固定标记放在 body 开头独立行：
-  - 通过：`[$AGENT_NAME] ✅ 测试通过`
-  - 失败：`[$AGENT_NAME] 🔴 测试失败`
+  - 通过：`[QA Agent] ✅ 测试通过`
+  - 失败：`[QA Agent] 🔴 测试失败`
 
 ## Configuration
 
@@ -83,7 +83,7 @@ Don't use for: 创建 skill（creator 职责）/ 修改 skill 内容（只读验
 
 ### 前置判断：收到 pull_request_merged 事件时
 
-读 Issue 评论历史，查找自己之前的"[$AGENT_NAME] ✅ 测试通过"标记：
+读 Issue 评论历史，查找自己之前的"[QA Agent] ✅ 测试通过"标记：
 - 找到 → PR 之前已测试通过，直接 A2A SRE Agent
 - 找不到 → 正常测试流程
 
@@ -151,7 +151,7 @@ Issue 评论：
 curl -s --max-time 30 -X POST \
   -H "PRIVATE-TOKEN: $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"body": "[$AGENT_NAME] ✅ 测试通过\n\n## Skill 测试报告：{name} v{version}\n\n## 功能验证\n| 检查项 | 状态 | 证据 | 说明 |\n|--------|------|------|------|\n| API 调用 | ✅ | 返回 N 条数据 | 真实调用成功 |\n\n## 结论\n✅ 测试通过，可合并发布"}' \
+  -d '{"body": "[QA Agent] ✅ 测试通过\n\n## Skill 测试报告：{name} v{version}\n\n## 功能验证\n| 检查项 | 状态 | 证据 | 说明 |\n|--------|------|------|------|\n| API 调用 | ✅ | 返回 N 条数据 | 真实调用成功 |\n\n## 结论\n✅ 测试通过，可合并发布"}' \
   "https://api.gitcode.com/api/v5/repos/$REPO_FULL_NAME/issues/$ISSUE_NUMBER/comments"
 ```
 
@@ -161,7 +161,7 @@ PR 评论：
 curl -s --max-time 30 -X POST \
   -H "PRIVATE-TOKEN: $BOT_GITCODE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"body": "[$AGENT_NAME] ✅ 测试通过"}' \
+  -d '{"body": "[QA Agent] ✅ 测试通过"}' \
   "https://api.gitcode.com/api/v5/repos/$REPO_FULL_NAME/pulls/$PR_NUMBER/comments"
 ```
 
