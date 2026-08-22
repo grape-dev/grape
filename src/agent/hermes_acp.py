@@ -356,9 +356,10 @@ class HermesACPBackend:
                     log.warning(f"{label}hermes ACP no activity for {max_exec_seconds}s, terminating")
                     break
 
-                # 兜底：30s 无新消息 + 已有文本输出 → prompt 已完成但 response 丢失
-                if elapsed_silent > 30 and collected_text:
-                    log.info(f"{label}hermes ACP idle 30s with {len(collected_text)} text chunks, assuming prompt done (response may be lost)")
+                # 兜底：600s 无新消息 + 已有文本输出 → prompt 已完成但 response 丢失
+                # （原 30s 太激进，terraform init/apply 等长命令执行期间无 stdout，30s idle 会误杀）
+                if elapsed_silent > 600 and collected_text:
+                    log.info(f"{label}hermes ACP idle 600s with {len(collected_text)} text chunks, assuming prompt done (response may be lost)")
                     prompt_result["stopReason"] = "end_turn"
                     break
 
