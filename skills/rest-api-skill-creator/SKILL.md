@@ -104,7 +104,7 @@ Don't use for: 测试 skill（tester 职责）/ 发布 skill（publish 职责）
 
 rest-api-skill-creator 通过 grape A2A 链路触发，生成的 skill 参与 A2A 链路（creator → tester → SRE Agent 发布），默认生成**系统级 skill**——除标准段落外额外生成系统级段落。
 
-必填段落（缺失 = spec_check 失败）：
+必填段落（缺失 = validate-skill.sh 失败）：
 
 | 段落 | 说明 |
 |------|------|
@@ -419,7 +419,7 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 ## 判断标准 / Verification
 
 - 脚本自测：--help 无语法错误 + 真实 API 调用返回有效数据 = 通过
-- spec_check：frontmatter / 文件结构 / version 格式 / mock 检查 / 段落规范（场景/知识/步骤）全过 = 通过
+- validate-skill.sh：frontmatter / 文件结构 / 无 mock / 无硬编码地址 / 段落规范（场景/知识/步骤）全过 = 通过
 - PR 创建：GitCode API 返回 PR URL = 成功
 - Issue 评论：评论发送成功（API 返回 200）= 成功
 - A2A 交棒：api/a2a 返回 status=ok = 成功
@@ -449,7 +449,7 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 - 场景：skill 创建（A2A 触发，Issue Agent 交棒 Coding Agent）
 - Skill：{skill_name} v{version}
 - 产物：SKILL.md + scripts/{skill_name}.py + references/ + templates/test-vars.json
-- 验证：spec_check ✅ / test-skill-commands ✅
+- 验证：validate-skill.sh ✅ / API 调用 ✅
 - 必须执行：创建 PR → A2A 交棒 QA
 ```
 
@@ -459,7 +459,7 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 分析结论：
 - 场景：skill 创建
 - Skill：{skill_name}
-- 结果：🔴 失败（spec_check 失败 / API 调研失败）
+- 结果：🔴 失败（validate-skill.sh 失败 / API 调研失败）
 - 必须执行：Issue 评论报告错误 → A2A 回 Issue Agent
 ```
 
