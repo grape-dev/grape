@@ -143,7 +143,8 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
 - **命名规范**：遵循官方规范 `huawei-cloud-{product}-{function}`（如 huawei-cloud-obs-buckets / huawei-cloud-vpc-query），正则 `^huawei-cloud-[a-z0-9]+(-[a-z0-9]+)*$`
 - 文件结构：
   - `SKILL.md`（≤500 行）
-  - `scripts/test-cli-commands.sh`（bash 脚本——可执行——含参数校验/错误处理/输出内容检查：exit code=0 但输出含 `[USE_ERROR]`/`error`/`failed` 也判定失败）
+  - `scripts/{name}.py`（用户入口脚本——Python——可执行——含参数校验/错误处理/AK-SK 获取/退出码/输出格式化——用户或被绑定的 agent 用此脚本执行操作）
+  - `scripts/test-cli-commands.sh`（自测脚本——bash——可执行——含参数校验/错误处理/输出内容检查：exit code=0 但输出含 `[USE_ERROR]`/`error`/`failed` 也判定失败）
     - **根据 Execution Mode 生成不同脚本内容**：
       - CLI 模式：脚本内跑 `hcloud <Service> <Operation> --cli-region={region} [--params]`
       - SDK 模式：脚本内跑 `python3 -c "from huaweicloudsdk{service} import ..."` 调 SDK（CLI 不可用时降级）

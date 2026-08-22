@@ -80,14 +80,24 @@ echo "--- File Structure ---"
 
 # Find entry file (.sh or .py)
 ENTRY_FILE=""
-for f in "$SKILL_DIR"/scripts/*.sh "$SKILL_DIR"/scripts/*.py; do
+TEST_FILE=""
+for f in "$SKILL_DIR"/scripts/*.py; do
     [ -f "$f" ] && ENTRY_FILE="$f" && break
 done
+for f in "$SKILL_DIR"/scripts/test-cli-commands.sh; do
+    [ -f "$f" ] && TEST_FILE="$f" && break
+done
 if [ -n "$ENTRY_FILE" ]; then
-    pass "Entry file exists: scripts/$(basename "$ENTRY_FILE")"
-    [ -x "$ENTRY_FILE" ] && pass "Entry file is executable" || warn "Entry file not executable (chmod +x recommended)"
+    pass "User entry file exists: scripts/$(basename "$ENTRY_FILE")"
+    [ -x "$ENTRY_FILE" ] && pass "User entry file is executable" || fail "User entry file not executable (chmod +x required)"
 else
-    fail "No entry file (.sh or .py) in scripts/"
+    fail "No user entry file (.py) in scripts/ (user or bound agent needs this to execute operations)"
+fi
+if [ -n "$TEST_FILE" ]; then
+    pass "Self-test script exists: scripts/$(basename "$TEST_FILE")"
+    [ -x "$TEST_FILE" ] && pass "Self-test script is executable" || fail "Self-test script not executable (chmod +x required)"
+else
+    fail "No self-test script (test-cli-commands.sh) in scripts/"
 fi
 
 # references/iam-policies.md
