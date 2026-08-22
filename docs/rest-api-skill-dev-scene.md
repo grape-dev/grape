@@ -1,10 +1,12 @@
-# rest-api-skill-creator/tester 纳入 grape 技能池方案
+# api-skill-dev 场景——通用 API skill 创建/测试纳入 grape 技能池
 
 ## 背景
 
-grape 系统在发展，skill 创建场景需要扩展。当前 skill-dev 场景只有华为云专用 creator（CLI/SDK/OpenAPI 三级调研），需要新增通用 REST API 场景（OpenAPI/文档/基础信息三级调研）。
+grape 系统在发展，skill 创建场景需要扩展。当前 skill-dev 场景只有华为云专用 creator（CLI/SDK/OpenAPI 三级调研），需要新增通用 API 场景（OpenAPI/文档/基础信息三级调研）。
 
 hello-skill 仓库的 rest-api-skill-creator/tester 已完善（项目知识优先、扫描所有 JSON 文件、test-vars.json 无敏感字段、Agent 角色称呼统一），可以纳入 grape 技能池。
+
+场景命名：`api-skill-dev`（API Skill 开发）——不限定 REST，将来 GraphQL/数据库 API 也能用，和 `skill-dev`（华为云）形成清晰区分。
 
 ## 改动范围
 
@@ -21,11 +23,11 @@ hello-skill 仓库的 rest-api-skill-creator/tester 已完善（项目知识优�
 - rest-api-skill-creator/: SKILL.md + references/(4 个) + scripts/(1 个) + templates/(1 个)
 - rest-api-skill-tester/: SKILL.md + references/(2 个) + scripts/(2 个)
 
-### 2. 新增 rest-api-skill-dev 场景（configs/agent-skill-mapping.json）
+### 2. 新增 api-skill-dev 场景（configs/agent-skill-mapping.json）
 
 ```json
-"rest-api-skill-dev": {
-    "name": "REST API Skill 开发",
+"api-skill-dev": {
+    "name": "API Skill 开发",
     "mapping": {
         "vod": "vod",
         "issue": "skill-issue",
@@ -74,11 +76,11 @@ hello-skill 仓库的 rest-api-skill-creator/tester 已完善（项目知识优�
 | 场景 | coding | qa | 适用场景 |
 |------|--------|-----|----------|
 | skill-dev | skill-creator | skill-tester | 华为云 skill（CLI/SDK/OpenAPI 三级调研） |
-| rest-api-skill-dev | rest-api-skill-creator | rest-api-skill-tester | 通用 REST API skill（OpenAPI/文档/基础信息三级调研） |
+| api-skill-dev | rest-api-skill-creator | rest-api-skill-tester | 通用 API skill（OpenAPI/文档/基础信息三级调研） |
 
 ## 验证
 
 1. skills/rest-api-skill-creator/ 和 skills/rest-api-skill-tester/ 文件完整（12 个文件）
-2. configs/agent-skill-mapping.json 含 rest-api-skill-dev 场景
+2. configs/agent-skill-mapping.json 含 api-skill-dev 场景
 3. configs/skill-description.json 含 2 个新 skill 描述
 4. grape 服务能加载新 skill（健康检查通过）
