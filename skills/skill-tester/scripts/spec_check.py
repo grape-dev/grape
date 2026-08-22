@@ -94,7 +94,7 @@ def check_structure(skill_dir: str) -> list:
     """文件结构检查——合并目录/文件存在性检查。
 
     覆盖：
-    - scripts/ 目录存在且有可执行 .py 或 .sh 脚本
+    - scripts/ 目录存在且有用户入口脚本（.py）和自测脚本（test-cli-commands.sh）
     - SKILL.md 存在（frontmatter 检查也查，但这里作为结构检查的一部分）
     - references/ 目录存在
     - references/iam-policies.md 存在
@@ -104,18 +104,25 @@ def check_structure(skill_dir: str) -> list:
     """
     problems = []
 
-    # scripts/ 目录 + 可执行性
+    # scripts/ 目录 + 用户入口脚本 + 自测脚本
     scripts_dir = os.path.join(skill_dir, "scripts")
     if not os.path.isdir(scripts_dir):
         problems.append("scripts/ 目录缺失")
     else:
-        entry_files = [f for f in os.listdir(scripts_dir) if f.endswith(".py") or f.endswith(".sh")]
+        # 用户入口脚本（.py）
+        entry_files = [f for f in os.listdir(scripts_dir) if f.endswith(".py")]
         if not entry_files:
-            problems.append("scripts/ 无 .py 或 .sh 脚本")
+            problems.append("scripts/ 无用户入口脚本（.py）——用户或被绑定的 agent 需要此脚本执行操作")
         for f in entry_files:
             p = os.path.join(scripts_dir, f)
             if not os.access(p, os.X_OK):
                 problems.append(f"scripts/{f} 不可执行（缺 +x）")
+        # 自测脚本（test-cli-commands.sh）
+        test_script = os.path.join(scripts_dir, "test-cli-commands.sh")
+        if not os.path.exists(test_script):
+            problems.append("scripts/test-cli-commands.sh 缺失（creator 自测脚本）")
+        elif not os.access(test_script, os.X_OK):
+            problems.append("scripts/test-cli-commands.sh 不可执行（缺 +x）")
 
     # references/ 目录
     refs_dir = os.path.join(skill_dir, "references")
