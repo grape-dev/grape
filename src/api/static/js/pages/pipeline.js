@@ -9,7 +9,51 @@ const stageLabels = {vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE',d
 
 function selPipe(idx) {
   _pipeActiveIdx = idx;
-  renderPipeline(_pipeData);
+  // 只更新流程图区域 + 高亮选中行，不重建表格（保持滚动位置）
+  const data = _pipeData;
+  if (!data) return;
+  const active = data.active;
+  const history = data.history || [];
+  const allPipes = active ? [active, ...history] : history;
+  const displayPipe = allPipes[idx] || active;
+  if (!displayPipe) return;
+
+  // 重建流程图 HTML
+  const iss = displayPipe.issue_id || '#?';
+  const num = String(iss).replace(/^#/, '');
+  const repoParts = (data.repo || '').replace(/^gitcode:/, '').split('/');
+  const issueUrl = repoParts.length === 2 ? `https://gitcode.com/${repoParts[0]}/${repoParts[1]}/issues/${num}` : '';
+  const issHtml = issueUrl ? `<a href="${issueUrl}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${iss}</a>` : `Issue ${iss}`;
+  const stages = displayPipe.stages || [];
+  const statuses = displayPipe.statuses || [];
+  const owner = displayPipe.current_owner || '';
+  const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>' : ' &nbsp;<span class="ts t2">空闲</span>';
+
+  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
+    <div class="af" style="min-height:auto;padding:6px 0">`;
+  stages.forEach((stage, i) => {
+    const sc = statuses[i];
+    const ev = stage.latest_event || {};
+    const evTitle = ev.title || '';
+    const dotc = sc === 2 ? 'var(--g)' : sc === 1 ? 'var(--y)' : sc === 3 ? 'var(--r)' : sc === 0 ? 'var(--t3)' : '#ddd';
+    const dimStyle = sc === 0 ? 'background:#eef0f4;border-top-color:#d5d9e0;filter:grayscale(0.6)' : `background:${sc === 1 ? '#fff8e8' : '#fff'};border-top-color:${agentColors[i]}`;
+    flowHtml += `<div class="nd" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${agentIds[i]}')">
+      <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : agentColors[i]}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${agentLabels[i]}</h4></div>
+      <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? evTitle || ev.event_type || '—' : '—'}</div>
+      <div class="nds" style="margin-bottom:1px;font-size:9px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev && ev.actor ? '@' + ev.actor : ' '}</div>
+      <div class="ns"><span class="d" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : sc === 0 ? 'Pending' : '—'}</div>
+    </div>`;
+  });
+  flowHtml += `</div>`;
+
+  // 替换流程图区域（表格不动，保持滚动位置）
+  const flowEl = document.getElementById('pipeFlow');
+  if (flowEl) flowEl.innerHTML = flowHtml;
+
+  // 更新选中行高亮（不重建表格）
+  document.querySelectorAll('.pipe-row').forEach(tr => tr.classList.remove('sel'));
+  const selRow = document.querySelector(`.pipe-row[data-idx="${idx}"]`);
+  if (selRow) selRow.classList.add('sel');
 }
 
 function renderPipeline(data) {
@@ -32,7 +76,7 @@ function renderPipeline(data) {
   if (displayPipe) {
     const iss = displayPipe.issue_id || '#?';
     const num = String(iss).replace(/^#/, '');
-    const repoParts = (data.repo || '').split('/');
+    const repoParts = (data.repo || '').replace(/^gitcode:/, '').split('/');
     const issueUrl = repoParts.length === 2
       ? `https://gitcode.com/${repoParts[0]}/${repoParts[1]}/issues/${num}`
       : '';
@@ -45,7 +89,7 @@ function renderPipeline(data) {
     const execBadge = displayPipe.executing
       ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>'
       : ' &nbsp;<span class="ts t2">空闲</span>';
-    flowHtml = `<div style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
+    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
     stages.forEach((stage, i) => {
       const sc = statuses[i];
@@ -107,12 +151,13 @@ function renderPipeline(data) {
     }).join('');
     const stageName = p.stage ? (stageLabels[p.stage] || p.stage) : '—';
     const stageClass = p.stage === 'done' ? 'tgx' : ['vod','issue','coding','qa','sre'].includes(p.stage) ? 'ty' : 't3';
-    const dur = p.duration ? p.duration + 's' : '—';
+    const _dur = p.duration;
+    const dur = _dur ? (_dur >= 60 ? Math.floor(_dur/60) + 'm ' + Math.round(_dur%60) + 's' : _dur + 's') : '—';
     const owner = p.current_owner || '—';
     const execBadge = p.executing
       ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ 执行中</span>'
       : '<span class="ts t2">空闲</span>';
-    html += `<tr class="pipe-row${s}" onclick="selPipe(${realIdx})">
+    html += `<tr class="pipe-row${s}" data-idx="${realIdx}" onclick="selPipe(${realIdx})">
       <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
       <td>${dur}</td>
       <td>${agentTags}</td>

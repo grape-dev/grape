@@ -94,17 +94,48 @@ def _update_direct_task(seq, status, exit_code=0, result_text=""):
 
 
 def cancel_direct_task(seq: int) -> bool:
-    """取消排队/运行中的 direct 任务（sweeper 用）。"""
+    """取消排队/运行中的 direct 任务。Future 在队列中 → cancel；
+    已在运行 → 杀掉对应的 opencode/hermes/codearts 子进程。"""
     cancelled = False
     with _DIRECT_FUTURES_LOCK:
         future = _DIRECT_FUTURES.pop(seq, None)
-    if future is not None and not future.done():
-        cancelled = future.cancel()
-        if cancelled:
-            log.info(f"cancel_direct_task: seq={seq} removed from thread pool queue")
+    if future is not None:
+        if not future.done():
+            cancelled = future.cancel()
+            if cancelled:
+                log.info(f"cancel_direct_task: seq={seq} removed from thread pool queue")
+            else:
+                # Future 已在运行中 → 杀掉对应子进程（按 seq 查 task 的 cwd + engine）
+                log.info(f"cancel_direct_task: seq={seq} running, killing engine subprocess")
+                try:
+                    from src.session_manager import db, db_lock
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("SELECT id, runtime_id, cwd, agent_type FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (seq,))
+                        tr = c.fetchone()
+                    if tr:
+                        _task = {"id": tr[0], "runtime_id": tr[1], "cwd": tr[2], "agent_type": tr[3]}
+                        # 推断 backend
+                        _backend = "opencode"
+                        try:
+                            with db_lock:
+                                c2 = db.cursor()
+                                c2.execute("SELECT name FROM agent_runtimes WHERE id=?", (tr[1],))
+                                rn = c2.fetchone()
+                            if rn and "hermes" in (rn[0] or "").lower():
+                                _backend = "hermes"
+                            elif rn and "codearts" in (rn[0] or "").lower():
+                                _backend = "codearts"
+                        except Exception:
+                            pass
+                        from src.runtime.agent import _kill_stale_engine
+                        _kill_stale_engine(_task, _backend)
+                        cancelled = True
+                except Exception as e:
+                    log.warning(f"cancel_direct_task: kill process failed for seq={seq}: {e}")
         else:
-            # Future 已在运行中，尝试 kill 对应子进程
-            log.info(f"cancel_direct_task: seq={seq} already running, skip")
+            # Future 已完成，清理
+            cancelled = True
     return cancelled
 
 
