@@ -54,19 +54,36 @@ grape 仓库的 skill-creator/tester/publish 需要对齐。
 | skill-creator/SKILL.md | — | 无小写 agent 称呼（已改过） | — |
 | configs/skill-description.json | — | skill-tester description 里 qa agent/sre | QA Agent/SRE Agent |
 
-### 4. 不改动
+### 4. skill-issue 角色称呼统一（24 处，第二批改动）
+
+skill-issue 里的 coding agent / issue agent / sre 称呼也需要统一。
+
+| 文件 | 处数 | 改动类型 |
+|------|------|----------|
+| skill-issue/SKILL.md | 1 | coding → Coding Agent |
+| skill-issue/references/comment-guide.md | 8 | coding agent→Coding Agent(2) + issue agent→Issue Agent(5,含评论前缀) + coding Agent→Coding Agent(1) |
+| skill-issue/references/issue-developability-analysis.md | 5 | coding agent→Coding Agent(2) + issue agent→Issue Agent(3) |
+| skill-issue/references/spec-generation.md | 6 | coding agent→Coding Agent(5) + sre Agent→SRE Agent(1) |
+| skill-issue/references/codeowners-guide.md | 1 | coding Agent→Coding Agent |
+
+**影响分析**（已确认无影响）：
+- grape 系统用正则 `\[([A-Za-z_]+)\s+Agent\]` + `re.IGNORECASE` 匹配评论标记——`[issue agent]` 和 `[Issue Agent]` 都能匹配
+- AGENT_NAME 环境变量从 agent-description.json 注入（已是正确格式：Issue Agent / Coding Agent / QA Agent / SRE Agent）
+- A2A API 参数值和 agent_type 保持不变
+
+### 5. 不改动
 
 | 项目 | 原因 |
 |------|------|
 | A2A API 参数值 `"agent": "sre"` | grape 系统注册名 |
 | a2a:sre / a2a:coding | API 参数值 |
-| skill-issue/SKILL.md 里的 sre | 转交表里的角色名（非 A2A 交棒描述） |
+| configs 里的 `"agent_type": "sre"` | 系统注册名 |
 | chat/SKILL.md 里的 sre | 非 skill-dev 链路的描述 |
 | iac/iac-qa 里的 sre | IaC 链路，不在本次范围 |
 
 ## 验证
 
-1. skill-creator/tester/publish 无 repo-credentials.json 残留
+1. skill-creator/tester/publish/issue 无 repo-credentials.json 残留
 2. skill-publish 令牌获取为项目知识优先
-3. skill-creator/tester/publish 无小写 agent 称呼（A2A API 参数除外）
+3. skill-creator/tester/publish/issue 无小写 agent 称呼（A2A API 参数和 agent_type 除外）
 4. configs/skill-description.json description 无小写 agent 称呼

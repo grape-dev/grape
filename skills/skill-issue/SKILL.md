@@ -70,7 +70,7 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/tasks/notify \
 
 判断标准：
 1. **用户明确要求做某事，而本技能的「硬约束」表中该行为被标记为 ❌ 禁止** → 说明此任务超出你的范围，查 Agent 列表交办。
-2. **可开发性评级为 ready** → 生成 Spec 文档 → 识别危险场景 → 无危险直接 A2A / 有危险等用户确认后 A2A 交办 coding agent。
+2. **可开发性评级为 ready** → 生成 Spec 文档 → 识别危险场景 → 无危险直接 A2A / 有危险等用户确认后 A2A 交办 Coding Agent。
 3. **需求不清晰 / 无法确定需求边界时** → 通过 A2A 交办 **vod**（开发者声音引导与需求澄清），由 vod 与开发者沟通收敛需求后再回到 issue 流程。
 
 ### 验证外部 claim
@@ -131,7 +131,7 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
 | 讨论方案设计 | 基于知识基线参与讨论 |
 | 质疑分配结果 | 重新核对 CODEOWNERS |
 | 对已发布 Spec 提出修改意见 | 更新 Spec（版本号+1），重新发布，重新识别危险场景 |
-| 确认 Spec 可执行 | A2A 通知 coding agent |
+| 确认 Spec 可执行 | A2A 通知 Coding Agent |
 | 其他 DevOps 相关 | 基于知识基线分析并回复 |
 
 ### 5. 按评级执行动作 + 标签 + 分配 + 危险场景识别

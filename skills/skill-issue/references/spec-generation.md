@@ -131,7 +131,7 @@
 - **若需求含"运行验证"（起本地服务看效果，如 `python -m http.server 8080`）**：
   - 在 Spec 中**改写为一次性验证模式**，严禁把裸前台命令写入 Spec：
     `python3 -m http.server 8080 >/tmp/httpd.log 2>&1 & sleep 1; curl -s http://localhost:8080/ | head -20; kill %1`
-  - 或将"运行验证"标注为**由 sre Agent 执行**（构建部署/运行验证），编码阶段不做运行时验证；
+  - 或将"运行验证"标注为**由 SRE Agent 执行**（构建部署/运行验证），编码阶段不做运行时验证；
   - 原因：coding 前台执行长驻命令会导致 opencode 等待命令退出而超时失败（见 coding-worktree-skill-collision.md §4.5）。
 
 ### Step 7: 填写 Risks & Mitigations
@@ -237,10 +237,10 @@ curl -X POST {{SERVER_URL}}/api/a2a \
 ### context 构造规则
 
 1. **可开发性评级**：`ready`
-2. **负责人已分配给机器人**：coding agent 确认这是机器人接管的任务
+2. **负责人已分配给机器人**：Coding Agent 确认这是机器人接管的任务
 3. **Spec 核心摘要**：Objective + Scope + Technical Approach + Affected Modules + Acceptance Criteria
 4. **Spec 位置**：告知完整 Spec 在 Issue 评论中
-5. **原始 Issue 编号**：coding agent 据此获取完整 Issue 信息
+5. **原始 Issue 编号**：Coding Agent 据此获取完整 Issue 信息
 
 ## Spec 版本管理
 
@@ -259,15 +259,15 @@ curl -X POST {{SERVER_URL}}/api/a2a \
 *Updated: {datetime} | Changes: {修改摘要}*
 ```
 
-4. 通过 A2A 重新通知 coding agent（context 中标注 `Spec v2`）
+4. 通过 A2A 重新通知 Coding Agent（context 中标注 `Spec v2`）
 
 ## Spec 与 implementation skill 的衔接
 
-coding agent 收到 A2A 调用后：
+Coding Agent 收到 A2A 调用后：
 
 1. 从 A2A context 获取 Spec 摘要
 2. 通过 GitCode API 获取 Issue 完整内容（含 Spec 评论）
-3. 基于 Spec，由 coding agent 按 implementation skill 的开发流程执行（spec 落在 Issue 评论作为上下文）
+3. 基于 Spec，由 Coding Agent 按 implementation skill 的开发流程执行（spec 落在 Issue 评论作为上下文）
 4. Spec 中的 Technical Approach 对应方案设计
 5. Spec 中的 Acceptance Criteria 对应测试用例设计
 6. Spec 中的 Affected Modules 对应代码改动范围
