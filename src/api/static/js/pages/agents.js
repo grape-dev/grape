@@ -6,11 +6,22 @@ function _switchSkillScope(scope) {
   loadCfgOptions();
 }
 
-function toggleAgentCfg() {
-  _agentCfgVisible = !_agentCfgVisible;
+function toggleAgentCfg(showCfg) {
+  // showCfg=true → Configure 视图（蓝），false → Events 视图（蓝）
+  if (showCfg === undefined) showCfg = !_agentCfgVisible;
+  _agentCfgVisible = showCfg;
   const p = document.getElementById('agentCfgPanel');
-  if (p) p.classList.toggle('hidden');
-  if (_agentCfgVisible) loadCfgOptions();
+  if (p) p.classList.toggle('hidden', !showCfg);
+  const btnCfg = document.getElementById('btnConfigure');
+  const btnEvt = document.getElementById('btnEvents');
+  if (showCfg) {
+    loadCfgOptions();
+    if (btnCfg) btnCfg.className = 'bt bt-p bt-s';
+    if (btnEvt) btnEvt.className = 'bt bt-o bt-s';
+  } else {
+    if (btnCfg) btnCfg.className = 'bt bt-o bt-s';
+    if (btnEvt) btnEvt.className = 'bt bt-p bt-s';
+  }
 }
 
 // ===== Backend Engines 下拉多选（引擎池，agent-cluster-design.md §4.1）=====
@@ -210,7 +221,7 @@ function renderAgent(name, data) {
   <div class="flex fc gap12">
     <div style="width:44px;height:44px;border-radius:10px;background:${meta.color || 'var(--b)'}22;display:flex;align-items:center;justify-content:center;font-size:20px">${meta.icon || '?'}</div>
     <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${meta.display_name || name}</h2><div class="ts t2">${meta.description || ''}</div>${engineBadge}</div>
-    <div class="flex gap6"><button class="bt bt-o bt-s" onclick="toggleAgentCfg()">Configure</button><button class="bt bt-p bt-s">Events</button></div>
+    <div class="flex gap6"><button id="btnConfigure" class="bt bt-o bt-s" onclick="toggleAgentCfg(true)">Configure</button><button id="btnEvents" class="bt bt-p bt-s" onclick="toggleAgentCfg(false)">Events</button></div>
   </div>
 </div>
 <div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">
@@ -253,7 +264,7 @@ function renderAgent(name, data) {
       ${data.im.conversations.map(c => `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--b)">${c.chat_name || c.chat_id} <span class="ts t3">${c.status}</span></div>`).join('')}
     </div>` : ''}
   </div>` : ''}
-  <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg()">Cancel</button></div>
+  <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg(false)">Cancel</button></div>
   <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
     <div class="ts t3" style="margin-bottom:6px">清空会话后，下一次事件将创建全新的 Agent 上下文（不延续历史对话）。</div>
     <button class="bt bt-r bt-s" onclick="cleanAgentSession('${name}')">🧹 Clean Session</button>
@@ -331,7 +342,7 @@ function saveAgentConfig(name) {
   }
   API.put('/agents/' + name + '/' + repo.owner + '/' + repo.name, body).then(r => {
     app.showToast('配置已保存');
-    toggleAgentCfg();
+    toggleAgentCfg(false);
   }).catch(e => app.showToast('保存失败: ' + e.message));
 }
 

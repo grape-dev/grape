@@ -2,6 +2,24 @@
 let _convSeq = null;
 let _convAgent = '';
 
+function navEvent(seq) {
+  if (!seq || seq < 1) return;
+  // 局部刷新：直接拿数据调 renderEventDetail，不走路由避免整体闪抖
+  API.get('/events/detail/' + seq).then(function(data) {
+    // 仅更新标题栏 seq，不重置 pageContent
+    var titleEl = document.getElementById('pageTitle');
+    if (titleEl) titleEl.textContent = 'Event Detail #' + seq;
+    renderEventDetail(data);
+  }).catch(function(e) {
+    // 事件不存在 → 后端返回 max_seq，跳转到最后一个事件
+    var detail = (e && e.detail) || {};
+    var maxSeq = detail.max_seq;
+    if (maxSeq && maxSeq > 0 && maxSeq !== seq) {
+      navEvent(maxSeq);
+    }
+  });
+}
+
 function renderEventDetail(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -34,60 +52,67 @@ function renderEventDetail(data) {
     const o = arch.output;
     const actions = (o.actions || []).map(a => `<div>• ${a}</div>`).join('');
     const arts = (o.artifacts || []).map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('');
-    structuredHtml = `<h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Agent 处理记录</h3>
-    <div class="cd" style="padding:14px;margin-bottom:10px;background:#f8f9fb;flex-shrink:0;max-height:200px;overflow-y:auto">
-      ${o.conclusion ? `<div style="font-size:12px;margin-bottom:6px"><b>结论:</b> ${o.conclusion}</div>` : ''}
-      ${actions ? `<div style="font-size:12px;margin-bottom:6px"><b>动作:</b> ${actions}</div>` : ''}
-      ${arts ? `<div style="font-size:12px;margin-bottom:6px"><b>产出:</b> ${arts}</div>` : ''}
-      ${o.next_step ? `<div style="font-size:12px;margin-bottom:6px"><b>下一步:</b> ${o.next_step}</div>` : ''}
+    structuredHtml = `<div style="margin-bottom:8px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">
+      ${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>结论:</b> ${o.conclusion}</div>` : ''}
+      ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>动作:</b> ${actions}</div>` : ''}
+      ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>产出:</b> ${arts}</div>` : ''}
+      ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>下一步:</b> ${o.next_step}</div>` : ''}
       ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>Issue 摘要:</b> ${o.issue_summary}</div>` : ''}
     </div>`;
   }
 
-  const html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← 返回 ${agentName}</button>
-  <div style="display:grid;grid-template-columns:1fr 320px;gap:14px;height:calc(100vh - 160px);overflow:hidden">
+  const html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← ${agentName}</button>
+  <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;height:calc(100vh - 160px);overflow:hidden">
+    <!-- 左栏大框：导航 + Event Context + Event Info + 处理记录+答复结论 -->
     <div class="cd" style="padding:16px 20px;display:flex;flex-direction:column;overflow:hidden">
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Event Context</h3>
-      <div class="tx t2" style="margin-bottom:12px;line-height:1.6;flex-shrink:0">
-        <div>Trigger: ${data.event_type || '—'}</div>
-        <div>Repository: ${data.repo_key || ''}</div>
-        <div>Issue: ${_issueLink}</div>
-        <div>Actor: ${data.actor || '—'}</div>
-        <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
+      <!-- 顶部导航栏 -->
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--b)">
+        <button class="bt bt-o bt-s" onclick="navEvent(${data.prev_seq || 0})" title="上一个 ${agentName} 事件" ${!data.prev_seq ? 'disabled style="opacity:.4;cursor:not-allowed"' : ''}>‹</button>
+        <span class="ts t3" style="font-size:12px;font-weight:600">Event #${data.seq || '—'}</span>
+        <button class="bt bt-o bt-s" onclick="navEvent(${data.next_seq || 0})" title="下一个 ${agentName} 事件" ${!data.next_seq ? 'disabled style="opacity:.4;cursor:not-allowed"' : ''}>›</button>
       </div>
-      ${structuredHtml}
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:8px;flex-shrink:0">Agent 答复结论</h3>
-      <div style="flex:1;overflow-y:auto;background:var(--s);color:#000;border-radius:8px;padding:12px;font-size:12px;font-family:monospace;line-height:1.7;white-space:pre-wrap">
-        ${result || '<div style="color:var(--t3)">（无结论）</div>'}
+      <!-- 上半：Event Context + Event Info 左右并列 -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;flex-shrink:0;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--b)">
+        <div>
+          <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Context</h3>
+          <div class="tx t2" style="line-height:1.6">
+            <div>Trigger: ${data.event_type || '—'}</div>
+            <div>Repository: ${data.repo_key || ''}</div>
+            <div>Issue: ${_issueLink}</div>
+            <div>Actor: ${data.actor || '—'}</div>
+            <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
+          </div>
+        </div>
+        <div>
+          <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Info</h3>
+          <div style="font-size:11px;color:var(--t2);line-height:1.8">
+            <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
+            <div><span style="color:var(--t3)">Engine:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>
+            <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
+            <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
+            <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="强行终止正在运行的 Agent">⏹ 终止</button>` : ''}</div>
+            ${data.task && data.task.task_id
+              ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>`
+              : `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看日志</a></div>`}
+            <div id="convGate" style="display:none"></div>
+          </div>
+        </div>
+      </div>
+      <!-- 下：Agent 处理记录 + 答复结论 合并 -->
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">Agent 处理记录与答复结论</h3>
+      <div style="flex:1;overflow-y:auto;background:var(--s);color:#000;border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
+        ${structuredHtml}
+        ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">（无结论）</div>'}
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
-    <div style="display:flex;flex-direction:column;gap:12px;height:100%;overflow:hidden">
-      <div class="cd" style="padding:16px;flex-shrink:0">
-        <h3 style="font-size:12px;font-weight:600;margin-bottom:10px">Event Info</h3>
-        <div style="font-size:11px;color:var(--t2);line-height:1.8">
-          <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
-          <div><span style="color:var(--t3)">Runtime:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b></div>
-          ${data.engine_instance ? `<div><span style="color:var(--t3)">Engine:</span> <b>${data.engine_instance}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>` : ''}
-          <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
-          <div><span style="color:var(--t3)">Issue:</span> ${_issueLink}</div>
-          <div><span style="color:var(--t3)">Actor:</span> @${data.actor || '—'}</div>
-          <div><span style="color:var(--t3)">Agent:</span> ${agent}</div>
-          <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
-          <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="强行终止正在运行的 Agent">⏹ 终止</button>` : ''}</div>
-          ${data.task && data.task.task_id
-            ? `<div style="margin-top:6px"><span style="color:var(--t3)">运行日志:</span> <a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>`
-            : `<div style="margin-top:6px"><span style="color:var(--t3)">执行日志:</span> <a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看日志</a></div>`}
-          <div id="convGate" style="margin-top:6px"><span style="color:var(--t3)">门禁:</span> <span class="tgx">…</span></div>
-        </div>
-      </div>
-      <div id="convPanel" class="cd" style="padding:16px;display:flex;flex-direction:column;gap:8px;flex:1;min-height:0">
-        <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">💬 与 ${agentName} 对话 <button class="bt bt-o bt-s" onclick="toggleConvFullscreen()" title="全屏/还原" style="padding:2px 10px">⛶ 全屏</button></h3>
-        <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
-        <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
-          <input id="convInput" placeholder="问一问 agent 为什么这样处理…（Enter 发送）" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
-          <button class="bt bt-p bt-s" onclick="sendConversation()">发送</button>
-        </div>
+    <!-- 右栏：对话面板 -->
+    <div id="convPanel" class="cd" style="padding:14px;display:flex;flex-direction:column;gap:8px;height:100%;overflow:hidden">
+      <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">💬 与 ${agentName} 对话 <button class="bt bt-o bt-s" onclick="toggleConvFullscreen()" title="全屏/还原" style="padding:2px 10px">⛶ 全屏</button></h3>
+      <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
+      <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
+        <input id="convInput" placeholder="问一问 agent…（Enter 发送）" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
+        <button class="bt bt-p bt-s" onclick="sendConversation()">发送</button>
       </div>
     </div>
   </div>`;

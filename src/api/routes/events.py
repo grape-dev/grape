@@ -63,6 +63,20 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
+    # 前后同 agent_type 事件 seq（供前端箭头导航）
+    try:
+        agent_type = row[5] or ""
+        with db_lock:
+            c2 = db.cursor()
+            c2.execute("SELECT MAX(seq) FROM events WHERE seq < ? AND agent_type=?", (seq, agent_type))
+            prev_seq = c2.fetchone()[0]
+            c2.execute("SELECT MIN(seq) FROM events WHERE seq > ? AND agent_type=?", (seq, agent_type))
+            next_seq = c2.fetchone()[0]
+        result["prev_seq"] = prev_seq if prev_seq else 0
+        result["next_seq"] = next_seq if next_seq else 0
+    except Exception:
+        result["prev_seq"] = 0
+        result["next_seq"] = 0
     # M4：附 event.json archive 对应 pipeline 段（结构化产出展示，见 §11.4）
     try:
         import re as _re
@@ -377,7 +391,13 @@ def _load_event(seq: int) -> dict:
         except Exception:
             row = None
     if not row:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
+        # 返回当前最大 seq 供前端回退
+        try:
+            c.execute("SELECT MAX(seq) FROM events")
+            max_seq = c.fetchone()[0] or 0
+        except Exception:
+            max_seq = 0
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到", "max_seq": max_seq})
     return {"seq": row[0], "repo_key": row[1], "issue_id": row[2] or "", "agent_type": row[3] or "",
             "event_type": row[4] or "", "title": row[5] or "", "result": row[6] or "", "status": row[7] or ""}
 
