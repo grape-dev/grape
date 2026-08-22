@@ -243,8 +243,7 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
      → 从 test-vars.json 提取测试用例，只读类跑真实调用，变更类只做 --help——**不过不创建 PR**
      → 生成 references/test-report.md 测试报告
   3. CLI 模式：检查 `hcloud configure list` 是否已配置——已配置 → 跑一次 CLI 命令验证；未配置 → 标记 CLI 模式待 tester 验证，不阻塞
-  4. 跑 `python3 {{SKILL_DIR}}/skill-tester/scripts/spec_check.py skills/{name}/` → 确认 frontmatter / 文件结构 / version 格式 / mock 模式（严禁）全过——**不过不创建 PR**
-  5. **代码自审查 checklist**（创建 PR 前必须逐项确认）：
+  4. **代码自审查 checklist**（创建 PR 前必须逐项确认）：
      - [ ] 无硬编码 AK/SK/Token（凭据从环境变量/项目知识读取）
      - [ ] 无 mock 模式/假数据/MOCK_DATA
      - [ ] 错误处理完整（API 错误有提示，不静默崩溃）
@@ -261,10 +260,10 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
   - API 调用失败 → 分析原因（权限/参数/端点），修复后重试
   - validate-skill.sh 失败 → 按报告修复（缺文件/缺段落/硬编码地址），重试
   - test-skill-commands.sh 失败 → 按测试报告修复（语法错误/API 不可达），重试
-  - spec_check 失败 → 按报告修复（缺文件/缺段落/有 mock），重试
+  - validate-skill.sh 失败 → 按报告修复（缺文件/缺段落/硬编码地址），重试
   - 无法修复 → 在 Issue 评论说明失败原因，不创建 PR，不交棒 tester
 - **自测通过** → 继续 Step 4 创建 PR
-- ⚠️ 自测结果记录在 PR 评论中告知 tester（"creator 已自测通过：validate-skill ✅ / test-skill-commands ✅ / spec_check ✅ / API 返回 N 条数据"），避免 tester 重复排查
+- ⚠️ 自测结果记录在 PR 评论中告知 tester（"creator 已自测通过：validate-skill ✅ / test-skill-commands ✅ / API 返回 N 条数据"），避免 tester 重复排查
 
 ### Step 4: 创建 PR
 - 在当前 worktree（feat/issue-{N} 分支）提交 skill 产物到 skills/{name}/
@@ -336,7 +335,7 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 ## 判断标准
 
 - 脚本自测：--help 无语法错误 + 真实 API 调用返回有效数据 = 通过
-- spec_check：frontmatter / 文件结构 / version 格式 / mock 检查全过 = 通过
+- validate-skill.sh：frontmatter / 文件结构 / 无 mock / 无硬编码地址检查全过 = 通过
 - PR 创建：GitCode API 返回 PR URL = 成功
 - Issue 评论：评论发送成功（API 返回 200）= 成功
 - A2A 交棒：api/a2a 返回 status=ok = 成功
