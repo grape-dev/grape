@@ -55,6 +55,17 @@
    },
    "onboarding": "repo-onboarding"
   },
+  "rest-api-skill-dev": {
+   "name": "REST API Skill 开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "skill-issue",
+    "coding": "rest-api-skill-creator",
+    "qa": "rest-api-skill-tester",
+    "sre": "skill-publish"
+   },
+   "onboarding": "repo-onboarding"
+  },
   "blog-publish": {
    "name": "博客发布",
    "mapping": {

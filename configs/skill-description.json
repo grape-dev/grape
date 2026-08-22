@@ -142,5 +142,17 @@
     "agent_type": "issue",
     "path": "skill-issue",
     "description": "Issue 运营（skill-dev 专用）：项目知识基线 → 深度可开发性分析 → Spec 生成 → 危险场景识别 → 用户确认 → A2A 触发开发"
+  },
+  "rest-api-skill-creator": {
+    "name": "REST API Skill 创建生成器",
+    "agent_type": "coding",
+    "path": "rest-api-skill-creator",
+    "description": "按需求自动创建 REST API 管理 skill：查重 → 读取 Spec → OpenAPI/文档/基础信息三级调研 → 骨架生成 → 自测 → 创建 PR → A2A 交棒 QA Agent 测试。通用不限目标系统"
+  },
+  "rest-api-skill-tester": {
+    "name": "REST API Skill 测试验证",
+    "agent_type": "qa",
+    "path": "rest-api-skill-tester",
+    "description": "REST API skill 功能验证（QA 门控）：凭据/地址检测（项目知识优先）→ 跑 skill 验证 + 规范检查（生成质量6项）→ Issue 报告 + PR 评论 → A2A 交棒 SRE Agent 发布"
   }
 }
