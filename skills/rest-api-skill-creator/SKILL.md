@@ -355,21 +355,29 @@ resp = requests.get(f"{base_url}/{path}", timeout=30)
 ### Step 3.5: 自测
 
 - 跑 `python3 skills/{name}/scripts/{name}.py --help` → 确认无语法错误
-- 跑 spec_check.py 做文件完整性校验：
+- 跑 validate-skill.sh 做结构校验：
 
+  ```bash
+  bash {{SKILL_DIR}}/rest-api-skill-creator/scripts/validate-skill.sh skills/{name}/
   ```
-  python3 {{SKILL_DIR}}/rest-api-skill-tester/scripts/spec_check.py skills/{name}/
-  ```
-  校验项：
+  校验项（16 项）：
   - SKILL.md frontmatter（name/version/description/triggers/tags/tools）
-  - SKILL.md 必填段落（场景/知识/步骤）——对齐 references/skill-spec.md 规范
-  - Python 入口文件存在（scripts/*.py 或根目录 *.py）
+  - name 与目录名一致（kebab-case）
+  - 必填段落（安全硬约束/评论规范/Configuration/场景/知识/步骤/判断标准/输出规范/参考文档/分析结论示例/任务结束）
+  - Python 入口文件存在 + 可执行
   - references/api-reference.md 存在
-  - templates/test-vars.json 存在（含 skill_name/auth_type/cred_prefix/base_url/test_cases）
+  - templates/test-vars.json 存在
+  - requirements.txt 存在
   - 无 mock 代码
-  - 无密钥泄露
+  - 无硬编码 IP 地址（SKILL.md + api-reference.md）
+  - 安全硬约束不含 GitCode
+  - 脚本用 requests 不用 urllib
+  - test-vars.json 无敏感字段（base_url/cred_prefix/auth_type）
+  - test-vars.json 字段完整（id/name/command/method/category/description）
+  - SKILL.md ≤500 行
+  - 文件数 ≤50
 - 跑真实 API 调用一次（只读端点，如 `python3 skills/{name}/scripts/{name}.py list-{resource}`）→ 确认 API 可达
-- spec_check 或 API 调用失败 → 修复后重试；无法修复 → Issue 评论说明，不创建 PR
+- validate-skill.sh 或 API 调用失败 → 修复后重试；无法修复 → Issue 评论说明，不创建 PR
 - 全部通过 → 继续 Step 4
 
 ### Step 4: 创建 PR
