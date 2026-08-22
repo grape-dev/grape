@@ -517,6 +517,7 @@ class _ACPSimpleClient:
             evt = self._pending.get(req_id)
 
         if evt is None:
+            # 未匹配的 response，记录但不处理
             return
 
         if "error" in raw:
@@ -526,6 +527,8 @@ class _ACPSimpleClient:
                 err_msg += f" (data={err['data']})"
             with self._lock:
                 self._pending_errors[req_id] = err_msg
+            # error response 也意味着 prompt 结束
+            self._on_prompt_done({"stopReason": "error", "result": raw})
         else:
             result = raw.get("result")
             # 如果是 session/prompt 响应，提取 stopReason 并触发回调
@@ -534,6 +537,14 @@ class _ACPSimpleClient:
                 if stop_reason:
                     # prompt 完成，触发回调
                     self._on_prompt_done({"stopReason": stop_reason, "result": result})
+                else:
+                    # response 没有 stopReason 字段——可能是 hermes ACP 实现差异
+                    # 仍然视为 prompt 完成（response 到了说明 hermes 已处理完）
+                    log.info(f"{self.label}hermes ACP response without stopReason, treating as done (id={req_id})")
+                    self._on_prompt_done({"stopReason": "end_turn", "result": result})
+            else:
+                # result 不是 dict（可能是 None 或其他类型），也视为完成
+                self._on_prompt_done({"stopReason": "end_turn", "result": result or {}})
             with self._lock:
                 self._pending_results[req_id] = result
 
