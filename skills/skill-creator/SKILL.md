@@ -2,7 +2,7 @@
 name: skill-creator
 version: 1.3.0
 description: |
-  按需求自动创建华为云 skill：查重 → 需求澄清（确认门控）→
+  按需求自动创建华为云 skill：查重 → 读取 Spec（从 issue 产出的 Spec 获取确定的方案）→
   三级技术调研（CLI→SDK→OpenAPI）→ 骨架生成 → 自测 → 创建 PR → 清理 → A2A 交棒 QA Agent 测试。
   生成物进用户代码仓（用户资产——版本管理）——不进系统技能池。
 tools:
@@ -132,7 +132,7 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
   - Skill Name → Target Service + Feature Scope 拼装（huawei-cloud-{product}-{function}）
   - ⚠️ 以技术调研真实结果为准，不盲信 Spec 填写值
 - 【真实 API 验证】：AK/SK 可用时，用 hcloud CLI 或 SDK 真实调用一次确认 API 可用 + 返回数据结构
-  - AK/SK 获取方式：优先扫描 HUAWEI/HW/HWC 开头 + 含 ACCESS_KEY/_AK/SECRET_KEY/_SK 的环境变量，动态匹配（不依赖固定变量名）；环境变量缺失时，递归扫描 .project-info/ 目录找 repo-credentials.json，从 secrets.HUAWEI_AK / secrets.HUAWEI_SK 读取，读到后 export 到环境变量（用 HUAWEI 开头的变量名，如 HUAWEI_AK / HUAWEI_SK）
+  - AK/SK 获取方式：优先从项目知识（.project-info/ 目录递归扫描找 JSON 配置文件）读取 secrets.HUAWEI_AK / secrets.HUAWEI_SK，读到后 export 到环境变量（用 HUAWEI 开头的变量名，如 HUAWEI_AK / HUAWEI_SK）；项目知识缺失时，扫描 HUAWEI/HW/HWC 开头 + 含 ACCESS_KEY/_AK/SECRET_KEY/_SK 的环境变量动态匹配（不依赖固定变量名）
   - ⚠️ 变量/JSON 值存在但值为空也算缺失——必须检查值非空
   - AK/SK 均缺失或为空 → 提示用户提供；不提供 → 终止流程（严禁跳过——不生成文件，保证"生成物必须可执行"）
   - 真实调用成功 → 记录返回数据结构用于 Step 3 骨架生成
@@ -143,7 +143,7 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
 - **命名规范**：遵循官方规范 `huawei-cloud-{product}-{function}`（如 huawei-cloud-obs-buckets / huawei-cloud-vpc-query），正则 `^huawei-cloud-[a-z0-9]+(-[a-z0-9]+)*$`
 - 文件结构：
   - `SKILL.md`（≤500 行）
-  - `scripts/test-cli-commands.sh`（bash 脚本——可执行——含参数校验/错误处理/输出内容检查：exit code=0 但输出含 `[USE_ERROR]`/`error`/`failed` 也判定失败）
+  - `scripts/{name}.py`（用户入口脚本——Python——可执行——含参数校验/错误处理/AK-SK 获取/退出码/输出格式化——用户或被绑定的 agent 用此脚本执行操作）
     - **根据 Execution Mode 生成不同脚本内容**：
       - CLI 模式：脚本内跑 `hcloud <Service> <Operation> --cli-region={region} [--params]`
       - SDK 模式：脚本内跑 `python3 -c "from huaweicloudsdk{service} import ..."` 调 SDK（CLI 不可用时降级）
@@ -243,8 +243,7 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
      → 从 test-vars.json 提取测试用例，只读类跑真实调用，变更类只做 --help——**不过不创建 PR**
      → 生成 references/test-report.md 测试报告
   3. CLI 模式：检查 `hcloud configure list` 是否已配置——已配置 → 跑一次 CLI 命令验证；未配置 → 标记 CLI 模式待 tester 验证，不阻塞
-  4. 跑 `python3 {{SKILL_DIR}}/skill-tester/scripts/spec_check.py skills/{name}/` → 确认 frontmatter / 文件结构 / version 格式 / mock 模式（严禁）全过——**不过不创建 PR**
-  5. **代码自审查 checklist**（创建 PR 前必须逐项确认）：
+  4. **代码自审查 checklist**（创建 PR 前必须逐项确认）：
      - [ ] 无硬编码 AK/SK/Token（凭据从环境变量/项目知识读取）
      - [ ] 无 mock 模式/假数据/MOCK_DATA
      - [ ] 错误处理完整（API 错误有提示，不静默崩溃）
@@ -261,10 +260,10 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
   - API 调用失败 → 分析原因（权限/参数/端点），修复后重试
   - validate-skill.sh 失败 → 按报告修复（缺文件/缺段落/硬编码地址），重试
   - test-skill-commands.sh 失败 → 按测试报告修复（语法错误/API 不可达），重试
-  - spec_check 失败 → 按报告修复（缺文件/缺段落/有 mock），重试
+  - validate-skill.sh 失败 → 按报告修复（缺文件/缺段落/硬编码地址），重试
   - 无法修复 → 在 Issue 评论说明失败原因，不创建 PR，不交棒 tester
 - **自测通过** → 继续 Step 4 创建 PR
-- ⚠️ 自测结果记录在 PR 评论中告知 tester（"creator 已自测通过：validate-skill ✅ / test-skill-commands ✅ / spec_check ✅ / API 返回 N 条数据"），避免 tester 重复排查
+- ⚠️ 自测结果记录在 PR 评论中告知 tester（"creator 已自测通过：validate-skill ✅ / test-skill-commands ✅ / API 返回 N 条数据"），避免 tester 重复排查
 
 ### Step 4: 创建 PR
 - 在当前 worktree（feat/issue-{N} 分支）提交 skill 产物到 skills/{name}/
@@ -317,8 +316,8 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 ```
 
 ## 边界情况（Edge Cases）
-- 用户跳过提问直接说「开始」→ 提醒：需求澄清必须先完成
-- AK/SK 环境变量缺失或为空（HUAWEI/HW/HWC 开头 + AK/SK 键），且 .project-info/ 下 repo-credentials.json 中也无 secrets.HUAWEI_AK / secrets.HUAWEI_SK → 提示用户提供；用户不提供 → 终止流程（严禁跳过——不生成文件，保证"生成物必须可执行"不被绕过）
+- 用户跳过提问直接说「开始」→ 提醒：Spec 读取必须先完成
+- AK/SK 环境变量缺失或为空，且 .project-info/ 下递归扫描 JSON 配置文件 中也无 secrets.HUAWEI_AK / secrets.HUAWEI_SK → 提示用户提供；用户不提供 → 终止流程（严禁跳过——不生成文件，保证"生成物必须可执行"不被绕过）
 - API 调研超 5 分钟未确认端点 → 标记 ⛔（API 不存在）→ 走失败门控
 - SDK 有方法但 _http_info 无 resource_path → 标记 ⛔，不推断
 - BSS 全局服务 → SDK 初始化须 GlobalCredentials + with_endpoints
@@ -336,7 +335,7 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 ## 判断标准
 
 - 脚本自测：--help 无语法错误 + 真实 API 调用返回有效数据 = 通过
-- spec_check：frontmatter / 文件结构 / version 格式 / mock 检查全过 = 通过
+- validate-skill.sh：frontmatter / 文件结构 / 无 mock / 无硬编码地址检查全过 = 通过
 - PR 创建：GitCode API 返回 PR URL = 成功
 - Issue 评论：评论发送成功（API 返回 200）= 成功
 - A2A 交棒：api/a2a 返回 status=ok = 成功

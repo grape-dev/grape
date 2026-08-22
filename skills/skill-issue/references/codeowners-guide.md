@@ -65,7 +65,7 @@ curl -s -X POST -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 
 ## 用户回复后的处理
 
-当用户在引导 Issue 中回复了模块责任人信息后，将用户填写的内容提取出来，作为 A2A context 发送给 coding Agent。
+当用户在引导 Issue 中回复了模块责任人信息后，将用户填写的内容提取出来，作为 A2A context 发送给 Coding Agent。
 
 ### context 构造示例
 

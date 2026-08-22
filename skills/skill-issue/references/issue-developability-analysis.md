@@ -171,7 +171,7 @@ ELSE (不通过维度数 <= 2 且均为 minor 缺失)
 
 | 评级 | 负责人分配 | 动作 | 后续 |
 |------|-----------|------|------|
-| `ready` | **分配给机器人** | 生成 Spec → 贴到 Issue → A2A 通知 coding agent | 等待 coding agent 开始开发 |
+| `ready` | **分配给机器人** | 生成 Spec → 贴到 Issue → A2A 通知 Coding Agent | 等待 Coding Agent 开始开发 |
 | `almost-ready` | **分配给项目责任人**（CODEOWNERS） | 针对不明确维度精确追问 1-2 个问题 | 等待责任人补充信息后重新分析 |
 | `needs-discussion` | **分配给项目责任人**（CODEOWNERS） | 逐维度列出缺失项 → 逐一追问 → 标记 `need-info` | 等待责任人补充信息后重新分析 |
 | `not-feasible` | 不分配 | 评论说明不可行原因 → 标记 `invalid` | 结束处理 |
@@ -196,7 +196,7 @@ ELSE (不通过维度数 <= 2 且均为 minor 缺失)
 针对不明确的维度，生成 1-2 个精确问题：
 
 ```
-[issue agent] 分析了该 Issue，需求基本清晰，但有以下问题需要确认：
+[Issue Agent] 分析了该 Issue，需求基本清晰，但有以下问题需要确认：
 
 1. **验收标准**：Issue 中提到"优化响应速度"，请明确具体的性能指标（如：P99 延迟 < 200ms？）
 2. **边界条件**：是否需要考虑并发场景？如果需要，预期的并发量级是多少？
@@ -209,7 +209,7 @@ ELSE (不通过维度数 <= 2 且均为 minor 缺失)
 逐维度列出缺失项，每个维度 1-3 个问题：
 
 ```
-[issue agent] 对该 Issue 进行了深度可开发性分析，当前评级：needs-discussion
+[Issue Agent] 对该 Issue 进行了深度可开发性分析，当前评级：needs-discussion
 
 ### 需求完整性: partial
 - 功能点基本明确，但缺少验收标准
@@ -229,7 +229,7 @@ ELSE (不通过维度数 <= 2 且均为 minor 缺失)
 ### not-feasible 说明
 
 ```
-[issue agent] 该 Issue 经分析判定为不可行，原因：
+[Issue Agent] 该 Issue 经分析判定为不可行，原因：
 
 **技术阻碍**：该需求要求实现 X 功能，但当前项目使用的 Y 框架不支持此特性。
 

@@ -26,8 +26,8 @@
 | Spec 文档发布 | 以 `[Issue Agent] 📋 Spec Document` 开头发布格式化 Spec |
 | Spec 文档更新 | 以 `[Issue Agent] 📋 Spec Document v{N}` 开头，末尾标注变更摘要 |
 | 用户补充信息后重新分析 | 重新执行深度可开发性分析，根据新评级执行对应动作 |
-| 用户对 Spec 提出修改意见 | 更新 Spec 版本，重新发布，A2A 通知 coding agent |
-| 用户确认 Spec 可执行 | A2A 通知 coding agent 开始开发 |
+| 用户对 Spec 提出修改意见 | 更新 Spec 版本，重新发布，A2A 通知 Coding Agent |
+| 用户确认 Spec 可执行 | A2A 通知 Coding Agent 开始开发 |
 | issue_opened 新 Issue | 告知对 Issue 的理解总结用于对齐双方认知，同时说明处理结果（评级、标签、分配情况）；如有疑问或信息缺失，继续追问 |
 | 用户 @提及机器人 | 分析评论并回复 |
 | 评论补充了信息（原为 need-info） | 重新分类，PATCH 更新 labels，再回复 |
@@ -35,7 +35,7 @@
 | 评论讨论方案设计 | 参与讨论给出建议 |
 | 用户质疑分配结果 | 重新核对 CODEOWNERS，基于分析维持或调整，不盲从 |
 | 用户要求启动开发等超出范围的任务 | 查 Agent 列表，通过 A2A API 交办 |
-    | 用户回复了 CODEOWNERS 引导 Issue | 提取内容，构造 context，A2A 调用 coding Agent |
+    | 用户回复了 CODEOWNERS 引导 Issue | 提取内容，构造 context，A2A 调用 Coding Agent |
 | 其他 DevOps 相关评论 | 分析并回复 |
 
 ## 评论格式要求
@@ -44,11 +44,11 @@
 POST /repos/{owner}/{repo}/issues/{number}/comments
 Authorization: Bearer $BOT_GITCODE_TOKEN
 Content-Type: application/json
-{"body": "> 用户的问题原文\n\n[issue agent] 这是机器人的回复内容。"}
+{"body": "> 用户的问题原文\n\n[Issue Agent] 这是机器人的回复内容。"}
 ```
 
-- body 必须以 `[issue agent]` 开头
-- issue_comment 事件需引用原文：`> {用户评论}\n\n[issue agent] {机器人回复}`
+- body 必须以 `[Issue Agent]` 开头
+- issue_comment 事件需引用原文：`> {用户评论}\n\n[Issue Agent] {机器人回复}`
 - 引用 commit：` [`sha`](https://gitcode.com/{owner}/{repo}/commit/sha) `
 - 引用 Issue/PR：`[#N](https://gitcode.com/{owner}/{repo}/issues/N)`
 
@@ -57,7 +57,7 @@ Content-Type: application/json
 ### ready 评级评论
 
 ```
-[issue agent] ✅ 该 Issue 已通过深度可开发性分析，评级：**ready**
+[Issue Agent] ✅ 该 Issue 已通过深度可开发性分析，评级：**ready**
 
 **分析结论**：
 - 需求完整性：complete — 功能点明确，验收标准清晰
@@ -71,7 +71,7 @@ Content-Type: application/json
 ### almost-ready 评级评论
 
 ```
-[issue agent] 🔍 该 Issue 可开发性分析评级：**almost-ready**
+[Issue Agent] 🔍 该 Issue 可开发性分析评级：**almost-ready**
 
 需求基本清晰，但有以下问题需要确认：
 
@@ -84,11 +84,11 @@ Content-Type: application/json
 ### needs-discussion 评级评论
 
 ```
-[issue agent] 🔍 该 Issue 可开发性分析评级：**needs-discussion**
+[Issue Agent] 🔍 该 Issue 可开发性分析评级：**needs-discussion**
 
 {逐维度列出缺失项和追问}
 
 请逐一回复以上问题，确认后将重新评估可开发性。
 ```
 
-> 注：评论 body 前缀固定为 `[issue agent]`，不再使用 `$AGENT_NAME` 环境变量。
+> 注：评论 body 前缀固定为 `[Issue Agent]`，不再使用 `$AGENT_NAME` 环境变量。
