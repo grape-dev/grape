@@ -2,9 +2,9 @@
 name: skill-tester
 version: 1.3.0
 description: |
-  skill 功能验证（创建后 QA 门控——qa agent 执行）：跑 skill 验证功能正确性 +
+  skill 功能验证（创建后 QA 门控——QA Agent 执行）：跑 skill 验证功能正确性 +
   规范脚本化检查（frontmatter/文件结构）+ gitleaks 密钥扫描
-  （安全）——输出 Issue 报告 + PR 评论（✅ 通过 / 🔴 失败+原因）。测试通过后调合并脚本 + A2A 交棒 sre。
+  （安全）——输出 Issue 报告 + PR 评论（✅ 通过 / 🔴 失败+原因）。测试通过后调合并脚本 + A2A 交棒 SRE Agent。
 tools:
   - curl
   - git
@@ -50,7 +50,7 @@ tools:
 |------|------|
 | 测试通过后必须在 Issue + PR 发评论告知 | ✅ **必须做，不可跳过** |
 | 测试失败后必须 A2A 回 coding | ✅ **必须做，不可跳过** |
-| 测试通过后必须调合并脚本 + A2A sre | ✅ **必须做，不可跳过** |
+| 测试通过后必须调合并脚本 + A2A SRE Agent | ✅ **必须做，不可跳过** |
 | A2A 必须携带 issue_number 和 pr_number | ✅ **必须做** |
 | 修改 skill 内容 | ❌ **禁止**（只读验证） |
 | 直接合并 PR（不经合并脚本） | ❌ **禁止** |
@@ -73,13 +73,13 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
   "https://api.gitcode.com/api/v5/repos/$REPO_FULL_NAME/issues/$ISSUE_NUMBER/comments?per_page=100" 2>/dev/null
 ```
 
-- 找到 → PR 之前已测试通过，直接 A2A sre（不重新测试）
+- 找到 → PR 之前已测试通过，直接 A2A SRE Agent（不重新测试）
 - 找不到 → 正常测试流程
 
 ### 1. 功能验证（Real-Environment First——不用 mock）
 - 定位 skill：从当前 worktree 的 skills/{name}/ 读
 - 读取测试用例：从 `templates/test-vars.json` 读取 creator 生成的测试用例（JSON 格式，含 id/name/command/expected）
-- AK/SK 检测：优先从项目知识（.project-info/ 目录递归扫描找 repo-credentials.json）读取 secrets.HUAWEI_AK / secrets.HUAWEI_SK，读到后 export 到环境变量（用 HUAWEI 开头的变量名，如 HUAWEI_AK / HUAWEI_SK，确保 skill 脚本扫描能匹配到）；项目知识缺失时，扫描 HUAWEI/HW/HWC 开头 + 含 ACCESS_KEY/_AK/SECRET_KEY/_SK 的环境变量动态匹配（不依赖固定变量名，与 skill 脚本扫描逻辑一致）
+- AK/SK 检测：优先从项目知识（.project-info/ 目录递归扫描找 JSON 配置文件）读取 secrets.HUAWEI_AK / secrets.HUAWEI_SK，读到后 export 到环境变量（用 HUAWEI 开头的变量名，如 HUAWEI_AK / HUAWEI_SK，确保 skill 脚本扫描能匹配到）；项目知识缺失时，扫描 HUAWEI/HW/HWC 开头 + 含 ACCESS_KEY/_AK/SECRET_KEY/_SK 的环境变量动态匹配（不依赖固定变量名，与 skill 脚本扫描逻辑一致）
   - ⚠️ 变量/JSON 值存在但值为空也算缺失——必须检查值非空
   - AK/SK 均缺失或为空 → ⛔ 终止测试，输出"AK/SK missing or empty, cannot execute tests"
   - AK/SK 可用（值非空）→ 继续真实 API 验证
@@ -144,8 +144,8 @@ bash {{SKILL_DIR}}/skill-tester/scripts/merge_skill_pr.sh $PR_NUMBER $mode
 ```
 - 脚本输出 MERGED=1（已合并）或 MERGED=0（未合并）
 
-### MERGED=1（自动合并成功）→ A2A 交棒 sre
-⚠️ **必须执行，否则 sre 不会收到发布请求：**
+### MERGED=1（自动合并成功）→ A2A 交棒 SRE Agent
+⚠️ **必须执行，否则 SRE Agent 不会收到发布请求：**
 
 ```bash
 curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
@@ -164,9 +164,9 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 ```
 
 ### MERGED=0（等人工合并）
-- 不 A2A sre，stage 保持 qa
+- 不 A2A SRE Agent，stage 保持 qa
 - 评论 PR + Issue："✅ 测试通过，请人工评审合并"
-- 人工合并后 pull_request_merged 事件 → 前置判断找标记 → A2A sre
+- 人工合并后 pull_request_merged 事件 → 前置判断找标记 → A2A SRE Agent
 
 ### 测试失败 → A2A 回 coding
 ⚠️ **必须执行，否则 creator 不会收到修复请求：**
@@ -195,7 +195,7 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 - 功能验证（变更类）：Create → Query → Update → Delete 生命周期测试成功 = 通过
 - 规范检查：spec_check.py 退出码 0 = 通过
 - 安全扫描：gitleaks 无密钥发现 = 通过
-- 以上全部通过 = 测试通过 → 调合并脚本 → A2A sre
+- 以上全部通过 = 测试通过 → 调合并脚本 → A2A SRE Agent
 - 任一项失败 = 测试失败 → A2A 回 coding
 
 ## 参考
@@ -214,7 +214,7 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 - Skill：hcs-ecs-servers v0.1.0
 - 操作类型：只读查询类（List）→ mode=merge
 - 测试结果：✅ 通过（API 调用成功，返回 3 条数据）
-- 必须执行：报告 Issue+PR 评论 → 调合并脚本 → A2A sre
+- 必须执行：报告 Issue+PR 评论 → 调合并脚本 → A2A SRE Agent
 ```
 
 失败时：

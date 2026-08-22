@@ -132,7 +132,7 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
   - Skill Name → Target Service + Feature Scope 拼装（huawei-cloud-{product}-{function}）
   - ⚠️ 以技术调研真实结果为准，不盲信 Spec 填写值
 - 【真实 API 验证】：AK/SK 可用时，用 hcloud CLI 或 SDK 真实调用一次确认 API 可用 + 返回数据结构
-  - AK/SK 获取方式：优先从项目知识（.project-info/ 目录递归扫描找 repo-credentials.json）读取 secrets.HUAWEI_AK / secrets.HUAWEI_SK，读到后 export 到环境变量（用 HUAWEI 开头的变量名，如 HUAWEI_AK / HUAWEI_SK）；项目知识缺失时，扫描 HUAWEI/HW/HWC 开头 + 含 ACCESS_KEY/_AK/SECRET_KEY/_SK 的环境变量动态匹配（不依赖固定变量名）
+  - AK/SK 获取方式：优先从项目知识（.project-info/ 目录递归扫描找 JSON 配置文件）读取 secrets.HUAWEI_AK / secrets.HUAWEI_SK，读到后 export 到环境变量（用 HUAWEI 开头的变量名，如 HUAWEI_AK / HUAWEI_SK）；项目知识缺失时，扫描 HUAWEI/HW/HWC 开头 + 含 ACCESS_KEY/_AK/SECRET_KEY/_SK 的环境变量动态匹配（不依赖固定变量名）
   - ⚠️ 变量/JSON 值存在但值为空也算缺失——必须检查值非空
   - AK/SK 均缺失或为空 → 提示用户提供；不提供 → 终止流程（严禁跳过——不生成文件，保证"生成物必须可执行"）
   - 真实调用成功 → 记录返回数据结构用于 Step 3 骨架生成
@@ -318,7 +318,7 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 
 ## 边界情况（Edge Cases）
 - 用户跳过提问直接说「开始」→ 提醒：Spec 读取必须先完成
-- AK/SK 环境变量缺失或为空，且 .project-info/ 下递归扫描 repo-credentials.json 中也无 secrets.HUAWEI_AK / secrets.HUAWEI_SK → 提示用户提供；用户不提供 → 终止流程（严禁跳过——不生成文件，保证"生成物必须可执行"不被绕过）
+- AK/SK 环境变量缺失或为空，且 .project-info/ 下递归扫描 JSON 配置文件 中也无 secrets.HUAWEI_AK / secrets.HUAWEI_SK → 提示用户提供；用户不提供 → 终止流程（严禁跳过——不生成文件，保证"生成物必须可执行"不被绕过）
 - API 调研超 5 分钟未确认端点 → 标记 ⛔（API 不存在）→ 走失败门控
 - SDK 有方法但 _http_info 无 resource_path → 标记 ⛔，不推断
 - BSS 全局服务 → SDK 初始化须 GlobalCredentials + with_endpoints

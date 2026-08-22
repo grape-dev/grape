@@ -13,9 +13,9 @@ tools:
 # Skill 发布管理
 
 ## 安全硬约束（违反即违规）
-1. **令牌获取方式**：优先读环境变量 `$CLAWHUB_TOKEN` / `$GITHUB_TOKEN` / `$GITCODE_TOKEN` / `$CLAWHUB_OWNER_HANDLE`；环境变量缺失时，递归扫描 .project-info/ 目录找 repo-credentials.json，从 secrets 字段读令牌（CLAWHUB_TOKEN / GITHUB_TOKEN / GITCODE_TOKEN），从 config 字段读发布配置（GITHUB_PUBLISH_REPO / GITCODE_PUBLISH_REPO / CLAWHUB_OWNER_HANDLE），读到后 export 到环境变量
-2. **禁止直连业务数据库**（repo_platform_tokens 等）、读取 Grape 运行目录（data/、configs/、sessions.db）或日志寻找 token；允许的 token 来源仅限：环境变量 + .project-info/ 下 repo-credentials.json
-3. **严禁遍历系统目录考古**（/usr/local/lib/hermes-agent、/opt/grape 等）——只读注入的环境变量或项目知识库 repo-credentials.json
+1. **令牌获取方式**：优先从项目知识（.project-info/ 目录递归扫描所有 JSON 文件）读取 secrets 字段令牌（CLAWHUB_TOKEN / GITHUB_TOKEN / GITCODE_TOKEN）+ config 字段发布配置（GITHUB_PUBLISH_REPO / GITCODE_PUBLISH_REPO / CLAWHUB_OWNER_HANDLE），读到后 export 到环境变量；项目知识缺失时，扫描环境变量 `$CLAWHUB_TOKEN` / `$GITHUB_TOKEN` / `$GITCODE_TOKEN` / `$CLAWHUB_OWNER_HANDLE`
+2. **禁止直连业务数据库**（repo_platform_tokens 等）、读取 Grape 运行目录（data/、configs/、sessions.db）或日志寻找 token；允许的 token 来源仅限：环境变量 + .project-info/ 下 JSON 配置文件
+3. **严禁遍历系统目录考古**（/usr/local/lib/hermes-agent、/opt/grape 等）——只读注入的环境变量或项目知识库 JSON 配置文件
 4. **401/403 区分处理**：
    - 401 = 令牌无效/过期 → 报告「{平台} 令牌无效或过期，请到设置页更新」→ 跳过该平台
    - 403 = 令牌无权限 → 报告「{平台} 令牌对目标无权限，请检查 token 权限或目标归属」→ 跳过该平台
@@ -33,7 +33,7 @@ tools:
 
 | 行为 | 态度 |
 |------|------|
-| 令牌优先读环境变量，缺失时回退 repo-credentials.json | ✅ **必须做** |
+| 令牌优先从项目知识读取，缺失时回退环境变量 | ✅ **必须做** |
 | 发布/下架完成后必须发 Issue 评论告知 | ✅ **必须做，不可跳过** |
 | 一个平台失败不中断其他平台 | ✅ **必须做** |
 | 查询数据库/配置文件/日志寻找 token | ❌ **禁止** |
@@ -75,7 +75,7 @@ tools:
    - ⚠️ **不是** `https://clawhub.ai/skills/{slug}`（会 307 重定向到 `/skills/skills/{slug}`，页面空 skeleton）
    - ⚠️ **不是** `https://clawhub.ai/{用户名}/{slug}`（少了 `/skills/` 段，307 重定向）
    - **ownerHandle 获取优先级**：
-     a. 发布时使用的 ownerHandle（用户指令/环境变量 $CLAWHUB_OWNER_HANDLE/repo-credentials.json config）
+     a. 发布时使用的 ownerHandle（用户指令/环境变量 $CLAWHUB_OWNER_HANDLE/JSON 配置文件 config）
      b. GET /api/v1/skills/{slug} 返回的 `owner.handle`（发布后校验时获取）
      c. GET /api/v1/whoami 返回的 `user.handle`（个人发布兜底——用 Bearer $CLAWHUB_TOKEN 调，返回当前账号 handle）
    - 拼好 URL 后必须 GET /api/v1/skills/{slug} 确认 skill 存在（200=URL 正确，404=发布失败）
@@ -83,7 +83,7 @@ tools:
 
 ## 发布流程
 1. 定位 skill + 读 frontmatter（name/version/description）
-2. 读取各平台令牌（优先环境变量，缺失时回退 .project-info/ 下 repo-credentials.json）：
+2. 读取各平台令牌（优先项目知识 .project-info/ 下 JSON 配置文件，缺失时回退环境变量）：
    - 环境变量和 JSON 均缺失 → 报告「未配置 {平台} 令牌，请到设置页配置」→ 跳过该平台
    - 401/403 → 按安全约束区分报告 → 跳过该平台（不中断其他平台）
 3. 幂等探测:
@@ -156,7 +156,7 @@ curl -s --max-time 30 -X POST \
 ```
 
 ## 下架流程
-1. 读取各平台令牌（优先环境变量，缺失时回退 .project-info/ 下 repo-credentials.json）；令牌缺失/401/403 → 跳过该平台并输出提示
+1. 读取各平台令牌（优先项目知识 .project-info/ 下 JSON 配置文件，缺失时回退环境变量）；令牌缺失/401/403 → 跳过该平台并输出提示
 2. 按平台下架:
    - ClawHub: DELETE /api/v1/skills/{slug}（组织配置时带 ?ownerHandle=）——软删除 30 天；**扫描中不可删除：遇到该状态直接失败不重试**
    - GitHub/GitCode: 调脚本封装 clone→备份→删除→1次commit→push：
@@ -191,7 +191,7 @@ curl -s --max-time 30 -X POST \
 
 ```
 分析结论：
-- 场景：skill 发布（A2A 触发，tester 测试通过后交棒 sre）
+- 场景：skill 发布（A2A 触发，tester 测试通过后交棒 SRE Agent）
 - Skill：blog-manager v0.1.0
 - 触发方式：A2A 自动 → 直接发布
 - ClawHub：v0.1.0 被占用 → bump v0.2.0 → 已提交（安全扫描中）

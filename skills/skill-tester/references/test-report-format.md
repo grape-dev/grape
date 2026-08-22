@@ -52,7 +52,7 @@
 | API 调用 | 🔴 失败 | 退出码 1，报错 timeout | skill 不可用 | 检查 API 端点/超时设置 |
 
 ## 结论
-🔴 测试失败，已 A2A 回退 coding agent 修复
+🔴 测试失败，已 A2A 回退 Coding Agent 修复
 - 失败原因：{摘要}
 - 修复后 creator 重新 push → 自动重新测试
 ```
