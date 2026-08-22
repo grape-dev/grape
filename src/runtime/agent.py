@@ -107,28 +107,55 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
 
 
 def _kill_stale_engine(task: dict, backend: str = "opencode"):
-    """超时后杀掉对应引擎子进程（opencode run / hermes chat / codearts run）。按 cwd 匹配，避免误杀其他任务。"""
-    import subprocess, signal
+    """超时/终止后杀掉对应引擎子进程（opencode run / hermes acp / hermes chat / codearts run）。
+    按 cwd 匹配，避免误杀其他任务。SIGTERM 后 3s SIGKILL 兜底。"""
+    import subprocess, signal, time as _time
     cwd = _remap_cwd(task.get("cwd") or os.getcwd())
-    # hermes verbose 模式用 `chat -q`，旧版用 `hermes -z`；两个模式都匹配以防漏杀
-    pattern = {"hermes": "hermes chat", "codearts": "codearts run"}.get(backend, "opencode run")
-    try:
-        out = subprocess.run(
-            ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", pattern],
-            capture_output=True, text=True, timeout=5
-        )
-        for pid_str in out.stdout.strip().split():
-            pid = int(pid_str)
-            try:
-                proc_cwd = os.readlink(f"/proc/{pid}/cwd")
-                if proc_cwd.startswith(cwd):
-                    pgid = os.getpgid(pid)
-                    os.killpg(pgid, signal.SIGTERM)
-                    log.info(f"killed {backend} pid={pid} pgid={pgid} cwd={proc_cwd}")
-            except Exception as e:
-                log.debug(f"skip pid={pid}: {e}")
-    except Exception as e:
-        log.warning(f"_kill_stale_engine({backend}) failed: {e}")
+    # hermes ACP 模式用 `hermes acp`，CLI 模式用 `hermes chat`；两个模式都匹配
+    patterns = {
+        "hermes": ["hermes acp", "hermes chat", "hermes -z"],
+        "codearts": ["codearts run"],
+    }.get(backend, ["opencode run"])
+    killed_any = False
+    for pattern in patterns:
+        try:
+            out = subprocess.run(
+                ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", pattern],
+                capture_output=True, text=True, timeout=5
+            )
+            for pid_str in out.stdout.strip().split():
+                if not pid_str:
+                    continue
+                try:
+                    pid = int(pid_str)
+                    proc_cwd = os.readlink(f"/proc/{pid}/cwd")
+                    if proc_cwd.startswith(cwd):
+                        pgid = os.getpgid(pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                        log.info(f"killed {backend} pid={pid} pgid={pgid} cwd={proc_cwd}")
+                        killed_any = True
+                        # 3s 后检查进程是否还在，SIGKILL 兜底
+                        _time.sleep(0.1)
+                        try:
+                            os.killpg(pgid, 0)  # check if still alive
+                            # 启动后台计时器 3s 后 SIGKILL
+                            import threading
+                            def _force_kill(pg, delay=3):
+                                _time.sleep(delay)
+                                try:
+                                    os.killpg(pg, signal.SIGKILL)
+                                    log.warning(f"force killed pgid={pg} (SIGKILL after {delay}s)")
+                                except Exception:
+                                    pass
+                            threading.Thread(target=_force_kill, args=(pgid,), daemon=True).start()
+                        except ProcessLookupError:
+                            pass  # already dead
+                except Exception as e:
+                    log.debug(f"skip pid={pid}: {e}")
+        except Exception as e:
+            log.warning(f"_kill_stale_engine({backend}, pattern={pattern}) failed: {e}")
+    if not killed_any:
+        log.info(f"_kill_stale_engine({backend}): no matching process found for cwd={cwd}")
 
 
 def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
@@ -443,17 +470,11 @@ async def _execute_task(client, task, engine_name: str = ""):
                 _last_flush = _now
         if batch:
             await client.report_messages(tid, batch)
-        # 引擎从未产出执行事件即结束 → 直接 fail（任务保持 dispatched→failed，跳过 running）
-        if not started and not done:
-            await client.fail(tid, "engine did not start / no output")
-        elif done:
-            await client.complete(tid, done.get("text", ""), done.get("exit_code", 0),
-                                  session_id=done.get("oc_session_id", ""), work_dir=cwd)
-        else:
-            await client.fail(tid, "no done event")
+        # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
+        return done
     except Exception as e:
-        log.warning(f"task {tid} failed: {e}")
-        await client.fail(tid, str(e))
+        log.warning(f"task {tid} stream failed: {e}")
+        return {"_error": str(e), "_started": started}
 
 
 async def _reregister(client, installed, device_name) -> list[int] | None:
@@ -586,20 +607,30 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     if _test_execute is not None:
                         await _test_execute(client, t, e)
                     else:
-                        await asyncio.wait_for(_execute_task(client, t, e), timeout=task_timeout)
+                        # timeout 只保护流式执行阶段，complete/fail 在 timeout 外处理
+                        _result = await asyncio.wait_for(_execute_task(client, t, e), timeout=task_timeout)
                 except asyncio.TimeoutError:
                     log.warning(f"task {_tid} timed out after {task_timeout}s, killing child processes and failing")
-                    # 杀掉超时任务的引擎子进程（按 cwd 匹配，避免误杀其他任务；backend 按引擎名推导）
                     _kill_stale_engine(t, _backend_for_engine(e))
+                    _result = None  # timeout → 走 fail 路径
+                # 在 timeout 外处理 complete/fail（网络重试不触发 timeout 覆盖完成状态）
+                if _test_execute is None:
                     try:
-                        await client.fail(_tid, f"task timed out after {task_timeout}s")
-                    except Exception:
-                        pass
-                finally:
-                    active_sessions.discard(s)
-                    active_tasks.pop(_tid, None)
-                    if e == "hermes":
-                        hermes_active -= 1
+                        if isinstance(_result, dict) and _result.get("_error"):
+                            await client.fail(_tid, _result["_error"])
+                        elif _result is None:
+                            await client.fail(_tid, f"task timed out after {task_timeout}s")
+                        elif isinstance(_result, dict) and "exit_code" in _result:
+                            await client.complete(_tid, _result.get("text", ""), _result.get("exit_code", 0),
+                                                  session_id=_result.get("oc_session_id", ""), work_dir=t.get("cwd") or ".")
+                        else:
+                            await client.fail(_tid, "no done event")
+                    except Exception as _ce:
+                        log.warning(f"task {_tid} complete/fail callback error: {_ce}")
+                active_sessions.discard(s)
+                active_tasks.pop(_tid, None)
+                if e == "hermes":
+                    hermes_active -= 1
 
             asyncio.create_task(_wrap())
 

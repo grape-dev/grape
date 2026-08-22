@@ -189,7 +189,8 @@ function renderAgent(name, data) {
       <tbody>
         ${events.map(ev => {
           const _issNum = String(ev.issue_id || '').replace(/^#/, '');
-          const _repoParts = (ev.repo_key || '').split('/');
+          const _repoKey = (ev.repo_key || '').replace(/^gitcode:/, '');
+          const _repoParts = _repoKey.split('/');
           const _issLink = (_issNum && _repoParts.length === 2)
             ? `<a href="https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issNum}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">${ev.issue_id}</a>`
             : ev.issue_id || '—';

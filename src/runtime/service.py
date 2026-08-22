@@ -492,6 +492,26 @@ def claim(runtime_id) -> dict | None:
                     except Exception:
                         pass  # 查询失败不阻塞回收（保守：宁可误回收也不留死任务）
                     _actually_recovered.append((_tid, _rid, _seq))
+                    # 杀掉旧进程：recover 重新入队后会有新 worker claim 启动新进程，
+                    # 旧进程不杀会继续执行（tf-infra7 出现过 2 个进程同时跑同一 task）
+                    try:
+                        c.execute("SELECT cwd, runtime_id FROM agent_tasks WHERE id=?", (_tid,))
+                        _old = c.fetchone()
+                        if _old:
+                            _backend = "opencode"
+                            try:
+                                c.execute("SELECT name FROM agent_runtimes WHERE id=?", (_old[1],))
+                                _rn = c.fetchone()
+                                if _rn and "hermes" in (_rn[0] or "").lower():
+                                    _backend = "hermes"
+                                elif _rn and "codearts" in (_rn[0] or "").lower():
+                                    _backend = "codearts"
+                            except Exception:
+                                pass
+                            from src.runtime.agent import _kill_stale_engine
+                            _kill_stale_engine({"cwd": _old[0], "id": _tid}, _backend)
+                    except Exception as _ke:
+                        log.warning(f"recover: kill stale engine failed for task {_tid}: {_ke}")
                     # 定向任务（pool_agent_type=''）回收归零 runtime_id 后变无主：
                     # claim 池匹配不命中、定向(runtime_id)也失配 → 永久死任务
                     # （实测 seq#264 issue#4 卡死 71 分钟）。归零时回填 agent_type
@@ -918,6 +938,10 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
 
 def fail_task(task_id, error, exit_code=-1):
     task = get_task(task_id)
+    # 幂等保护：如果 task 已经 completed，不调 fail（防止 complete→fail 竞态覆盖）
+    if task and task.get("status") == "completed":
+        log.info(f"Task {task_id} already completed, skip fail_task (error={error[:60]})")
+        return
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import update_event_complete

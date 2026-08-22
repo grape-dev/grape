@@ -32,7 +32,7 @@ function renderPipeline(data) {
   if (displayPipe) {
     const iss = displayPipe.issue_id || '#?';
     const num = String(iss).replace(/^#/, '');
-    const repoParts = (data.repo || '').split('/');
+    const repoParts = (data.repo || '').replace(/^gitcode:/, '').split('/');
     const issueUrl = repoParts.length === 2
       ? `https://gitcode.com/${repoParts[0]}/${repoParts[1]}/issues/${num}`
       : '';
@@ -107,7 +107,8 @@ function renderPipeline(data) {
     }).join('');
     const stageName = p.stage ? (stageLabels[p.stage] || p.stage) : '—';
     const stageClass = p.stage === 'done' ? 'tgx' : ['vod','issue','coding','qa','sre'].includes(p.stage) ? 'ty' : 't3';
-    const dur = p.duration ? p.duration + 's' : '—';
+    const _dur = p.duration;
+    const dur = _dur ? (_dur >= 60 ? Math.floor(_dur/60) + 'm ' + Math.round(_dur%60) + 's' : _dur + 's') : '—';
     const owner = p.current_owner || '—';
     const execBadge = p.executing
       ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ 执行中</span>'
