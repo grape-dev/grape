@@ -70,7 +70,9 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/tasks/notify \
 
 判断标准：
 1. **用户明确要求做某事，而本技能的「硬约束」表中该行为被标记为 ❌ 禁止** → 说明此任务超出你的范围，查 Agent 列表交办。
-2. **可开发性评级为 ready** → 生成 Spec 文档 → 识别危险场景 → 无危险直接 A2A / 有危险等用户确认后 A2A 交办 Coding Agent。
+2. **需求类型路由（必须先于 Spec 生成判断）**：
+   - **下架**（关键词：下架/撤回/unpublish，不含"删除"）→ 不生成 Spec，直接 A2A 转 SRE Agent，context 带需求摘要和操作类型（下架）
+   - **其他开发需求（含创建/生成/删除）** → 可开发性评级为 ready → 生成 Spec 文档 → 识别危险场景 → 无危险直接 A2A / 有危险等用户确认后 A2A 交办 Coding Agent
 3. **需求不清晰 / 无法确定需求边界时** → 通过 A2A 交办 **vod**（开发者声音引导与需求澄清），由 vod 与开发者沟通收敛需求后再回到 issue 流程。
 
 ### 验证外部 claim
@@ -125,6 +127,7 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
 | 事件/意图 | 处理 |
 |---------|------|
 | 用户提问 / @提及机器人 | 基于知识基线与分析结论答复 |
+| 用户要求下架 | **不生成 Spec**；直接 A2A 转 SRE Agent，context 带需求摘要和操作类型（下架） |
 | 用户要求启动开发/实现功能 | **先确认评级**；ready → 生成 Spec → 识别危险场景 → 无危险直接 A2A / 有危险等确认；未 ready → 按评级处理 |
 | 评论补充信息 | 重新执行深度可开发性分析，更新评级 |
 | 评论请求关闭 Issue | 验证后回复建议 |
@@ -136,7 +139,9 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
 
 ### 5. 按评级执行动作 + 标签 + 分配 + 危险场景识别
 
-- **ready** → 生成 Spec（`references/spec-generation.md`）→ 贴 Issue 评论 → 打 `spec-ready` → **识别危险场景**：
+- **ready** → 先判断需求类型：
+  - **下架**（关键词：下架/撤回/unpublish，不含"删除"）→ 不生成 Spec，直接 A2A 转 SRE Agent，context 带需求摘要和操作类型（下架）
+  - **其他** → 生成 Spec（`references/spec-generation.md`）→ 贴 Issue 评论 → 打 `spec-ready` → **识别危险场景**：
 
   **危险场景识别（新增）：**
   扫描 Spec 的 Technical Approach / Affected Modules / Acceptance Criteria，匹配以下关键词：
@@ -180,7 +185,8 @@ curl -s --max-time 30 -H "PRIVATE-TOKEN: $BOT_G...OKEN" \
 - 评论 body 前缀固定为 `[Issue Agent]`
 
 ### 7. 需要 A2A 时（⚠️ 危险场景已确认或无危险场景时）
-- 查本 prompt 底部 Agent 列表，构造 context，调用 `curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a`
+- **下架类需求** → 直接 A2A 转 SRE Agent，不走危险场景判断，context 带需求摘要和操作类型（下架）
+- **其他需求**（危险场景已确认或无危险场景时）→ 查本 prompt 底部 Agent 列表，构造 context，调用 `curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a`
 - ⚠️ **A2A 必须携带真实 `issue_number`（必填）**
 - **危险场景已确认时**，A2A context 需额外带"用户已确认危险操作"
 

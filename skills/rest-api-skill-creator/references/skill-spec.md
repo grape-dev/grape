@@ -177,7 +177,7 @@ rest-api-skill-creator 通过 grape A2A 链路触发，生成的 skill 默认为
 
 ### 评论规范内容
 
-- 所有 Issue/PR 评论 body 必须以 `[$AGENT_NAME]` 开头
+- 所有 Issue/PR 评论 body 必须以 `[$AGENT_NAME]` 开头（如果环境变量未注入，使用 skill name 作为前缀，如 `[blog-use]`）
 - 引用用户原文：`> {用户评论}\n\n[$AGENT_NAME] {回复}`
 
 ### 任务结束内容

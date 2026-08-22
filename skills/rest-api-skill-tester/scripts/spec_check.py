@@ -429,9 +429,9 @@ def check_generation_quality(skill_dir: str) -> list:
                      if f.endswith(".py") and f != "spec_check.py"]
     for p in py_files:
         script_content = open(p, encoding="utf-8", errors="ignore").read()
-        if re.search(r'^import\s+urllib', script_content, re.M):
+        if re.search(r'import\s+urllib', script_content):
             problems.append(f"scripts/{os.path.basename(p)}: 使用了 urllib（应使用 requests 库）")
-        if not re.search(r'^import\s+requests', script_content, re.M):
+        if not re.search(r'import\s+requests', script_content):
             problems.append(f"scripts/{os.path.basename(p)}: 未 import requests（脚本必须用 requests 库调 REST API）")
 
     # 5. requirements.txt 含 requests 声明
