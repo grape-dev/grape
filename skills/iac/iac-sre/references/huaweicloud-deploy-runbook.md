@@ -9,11 +9,45 @@
 
 ## 前置条件
 
-- Terraform >= 1.0 已安装
+- **Terraform >= 1.7.5 且 <= 1.10.5**（⚠️ 版本硬约束，详见下方「Terraform 版本兼容性」段）
 - huaweicloud provider（最新版即可，实际验证 v1.94.0 可用；不要写 `~> 1.50` 或 `~> 1.60` 等上限约束，会匹配不到高版本）
 - obsutil 已安装（用于 OBS 对象操作，替代 curl SigV4）
 - 华为云 AK/SK 已获取（或通过 Grape 控制台注入）
 - OBS bucket 已创建（或通过 scripts/bootstrap.sh 创建）
+
+## Terraform 版本兼容性（⚠️ 关键约束）
+
+OBS S3 backend 与 Terraform CLI 版本存在严格的兼容性窗口，**版本选错会导致 state 写入失败**。以下结论基于实测（8 个版本 × 3 种配置 = 24 组测试 + 端到端验证）：
+
+| TF 版本 | OBS S3 backend | 根因 | 结论 |
+|---------|---------------|------|------|
+| 1.5.x | ✅ 可用 | aws-sdk-go v1，签名兼容 | 可用（minimal 配置，无需 skip 参数） |
+| **1.6.x** | ❌ 不可用 | 要求获取 AWS account ID（调 STS），但不支持 `skip_requesting_account_id` 参数 | **断层版本，完全不可用** |
+| **1.7.5 ~ 1.10.5** | ✅ 可用 | aws-sdk-go v2，但 `skip_s3_checksum=true` 能绕过 SHA256 不匹配 | **推荐版本区间** |
+| **1.11.0+** | ❌ 不可用 | `skip_s3_checksum` 参数被接受但实际无效，`x-amz-content-sha256` header 仍不匹配 | **不可用** |
+
+### 推荐配置
+
+```
+Terraform 版本: 1.9.8（或 1.7.5 ~ 1.10.5 区间内任意版本）
+backend 配置: 必须包含以下 skip 参数：
+  - skip_requesting_account_id = true  （1.7+ 必需，跳过 AWS STS 调用）
+  - skip_s3_checksum            = true  （1.7~1.10 必需，绕过 SHA256 不匹配）
+  - skip_region_validation      = true
+  - skip_credentials_validation = true
+  - skip_metadata_api_check     = true
+  - endpoint 必须带 https:// 前缀
+```
+
+### 不可用版本的症状
+
+TF 1.11+ 执行 `terraform apply` 时：
+1. 资源创建成功（`Creation complete`）
+2. state 写入 OBS 失败（`XAmzContentSHA256Mismatch: HTTP 400`）
+3. state 落到本地 `errored.tfstate` 文件
+4. `terraform destroy` 失败（因 state 不在后端，Terraform 不知道要销毁什么）
+
+**遇到此症状首先检查 Terraform 版本是否在 1.7.5 ~ 1.10.5 区间内。**
 
 ## Terraform Provider 预装（防下载超时）
 
@@ -90,6 +124,11 @@ export TF_VAR_ecs_admin_pass='<ECS密码>'
 export TF_VAR_rds_password='<RDS密码>'
 ```
 
+⚠️ **凭证说明**：`HW_ACCESS_KEY`/`HW_SECRET_KEY` 和 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` 是**同一条 AK/SK**，设两套变量是因为：
+- huaweicloud provider 读 `HW_*` 变量
+- Terraform S3 backend 读 `AWS_*` 变量
+- 两条认证路径完全独立（provider 走 IAM token，backend 走 SigV4），但用同一组密钥
+
 ### 2. 预建 OBS Bucket（首次部署）
 
 ```bash
@@ -100,6 +139,9 @@ export TF_VAR_rds_password='<RDS密码>'
 
 ```bash
 cd examples/blog-infrastructure
+
+# 确认 Terraform 版本在 1.7.5 ~ 1.10.5 区间内
+terraform version
 
 # 初始化（配置 OBS 远程状态后端）
 terraform init
@@ -219,6 +261,28 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 - 解决：用 `-var="rds_volume_type=CLOUDSSD"` 覆盖
 - 永久修复：修改 variables.tf 默认值
 
+### terraform apply 失败：Failed to save state (XAmzContentSHA256Mismatch)
+
+- 根因：Terraform 版本不在兼容区间内（1.7.5 ~ 1.10.5），或 backend 配置缺少 `skip_s3_checksum`/`skip_requesting_account_id` 参数
+- 症状：资源创建成功（`Creation complete`），但 state 写入 OBS 失败（HTTP 400），state 落到本地 `errored.tfstate`
+- 恢复：`errored.tfstate` 含本次创建的资源信息，可用于人工排查，但**不应通过 obsutil 手动上传到 OBS 替代 state**（会破坏 state 一致性和锁机制）
+- 解决：
+  1. 检查 `terraform version` 是否在 1.7.5 ~ 1.10.5 区间
+  2. 检查 backend 配置是否包含 `skip_s3_checksum = true` 和 `skip_requesting_account_id = true`
+  3. 修正后重新 `terraform init && terraform apply`
+- ⚠️ 如果资源已创建但 state 未写入 OBS，需通过 API/控制台确认资源状态后再决定是否重建
+
+### terraform init 失败：Retrieving AWS account details (STS GetCallerIdentity)
+
+- 根因：Terraform 1.6+ 尝试调用 AWS STS 获取 account ID，华为云没有 STS 服务
+- 解决：backend 配置加 `skip_requesting_account_id = true`
+- ⚠️ TF 1.6.x 不支持此参数（断层版本），必须升级到 1.7.5+
+
+### terraform init 失败：VirtualHostDomainRequired
+
+- 根因：backend 配置了 `force_path_style = true`，但 cn-north-4 的 OBS 要求 virtual-host-style
+- 解决：移除 `force_path_style` 参数，让 Terraform 使用默认的 virtual-host-style
+
 ### save-inventory-to-obs.sh 失败：HTTP 400
 
 - 根因：SigV4 签名日期格式错误（含连字符）
@@ -233,11 +297,13 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 
 ## 部署验证清单
 
+- [ ] `terraform version` 在 1.7.5 ~ 1.10.5 区间内
 - [ ] `terraform fmt -check -recursive` PASS
 - [ ] `terraform validate` PASS
 - [ ] `terraform init` PASS（OBS backend 配置成功，provider 下载成功）
-- [ ] `terraform plan` PASS（资源变更预览正确）
-- [ ] `terraform apply` PASS（全部资源创建成功）
+- [ ] `terraform plan` PASS（⚠️ 必须通过——init 成功不等于 state 读写正常，plan 会实际访问 OBS backend）
+- [ ] `terraform apply` PASS（全部资源创建成功，**state 成功写入 OBS，无 errored.tfstate 文件生成**）
+- [ ] 工作目录下**不存在** `errored.tfstate` 文件（存在则说明 state 写入失败，需排查版本/配置）
 - [ ] `terraform output -json` 获取完整资源清单（含 sensitive 密码）
 - [ ] `save-inventory-to-obs.sh` 上传成功（或 obsutil cp 成功）
 - [ ] OBS GET 验证 inventory.json 可读（HTTP 200）

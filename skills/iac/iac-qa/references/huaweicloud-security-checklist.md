@@ -17,6 +17,15 @@
 - [ ] inventory.json 上传时设置 `x-amz-acl: private` header
 - [ ] OBS bucket 访问策略限制到指定 AK/SK
 
+## OBS Backend 配置审查（⚠️ 关键）
+
+- [ ] backend 配置包含 `skip_s3_checksum = true`（TF 1.7~1.10 必需，缺失会导致 state 写入 OBS 失败）
+- [ ] backend 配置包含 `skip_requesting_account_id = true`（TF 1.7+ 必需，跳过 AWS STS 调用）
+- [ ] backend 配置包含 `skip_region_validation`、`skip_credentials_validation`、`skip_metadata_api_check`
+- [ ] `endpoint` 值带 `https://` 前缀（如 `https://obs.cn-north-4.myhuaweicloud.com`）
+- [ ] backend 配置**未使用** `force_path_style = true`（cn-north-4 OBS 要求 virtual-host-style）
+- [ ] 如 .tf 文件或文档中指定了 Terraform CLI 版本约束，确认在 1.7.5 ~ 1.10.5 区间内
+
 ## 安全组规则审查
 
 - [ ] 安全组规则最小化（最小权限原则）
@@ -34,11 +43,13 @@
 
 审查 PR 时核对以下部署验证项是否齐全：
 
+- [ ] `terraform version` 在 1.7.5 ~ 1.10.5 区间内
 - [ ] `terraform fmt -check -recursive` PASS
 - [ ] `terraform validate` PASS
-- [ ] `terraform init` PASS（OBS backend 配置成功）
-- [ ] `terraform plan` PASS（资源变更预览正确）
-- [ ] `terraform apply` PASS（全部资源创建成功）
+- [ ] `terraform init` PASS（OBS backend 配置成功，provider 下载成功）
+- [ ] `terraform plan` PASS（⚠️ 必须通过——init 成功不等于 state 读写正常，plan 会实际访问 OBS backend 读写 state）
+- [ ] `terraform apply` PASS（全部资源创建成功，**无 errored.tfstate 文件生成**）
+- [ ] 工作目录下**不存在** `errored.tfstate` 文件（存在则说明 state 写入 OBS 失败，需排查 TF 版本和 backend 配置）
 - [ ] `terraform output -json` 获取完整资源清单
 - [ ] inventory.json 已上传到 OBS 并验证可读
 - [ ] ECS 公网 80 端口可访问

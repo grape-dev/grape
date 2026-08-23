@@ -10,7 +10,6 @@ Issue Agent（需求分类、标签、指派、触发 A2A）
   → QA Agent（代码审查、安全检查、自动化测试）
     → 合并 PR
   → SRE Agent（部署执行、运维处置、故障排查）
-  → Issue Agent（部署总结、经验沉淀）
 ```
 
 ### 各 Agent 职责边界
@@ -51,4 +50,3 @@ curl -X POST https://example.com/api/a2a \
 | coding | Issue 分类完成，spec 已生成 | 需求描述、方案建议、关联资源 |
 | qa | coding 创建 PR 后 | PR 编号、变更说明、资源清单 |
 | sre | PR 已合并，凭证已就绪 | 仓库、Issue 编号、部署上下文 |
-| issue（回调） | sre 部署完成 | 部署结果、资源清单、经验总结 |

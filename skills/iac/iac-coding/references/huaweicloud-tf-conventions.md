@@ -8,14 +8,16 @@
 
 | 用途 | 环境变量 | 说明 |
 |------|---------|------|
-| 华为云 AK | `HW_ACCESS_KEY` | Provider 认证 + OBS backend |
-| 华为云 SK | `HW_SECRET_KEY` | Provider 认证 + OBS backend |
+| 华为云 AK | `HW_ACCESS_KEY` | Provider 认证（走 IAM token） |
+| 华为云 SK | `HW_SECRET_KEY` | Provider 认证（走 IAM token） |
 | 区域 | `HW_REGION` | 如 cn-north-4 |
-| AWS 兼容 AK | `AWS_ACCESS_KEY_ID` | OBS S3 backend init 必需，与 HW_ACCESS_KEY 同值 |
+| AWS 兼容 AK | `AWS_ACCESS_KEY_ID` | OBS S3 backend 认证（走 SigV4），与 HW_ACCESS_KEY 同值 |
 | AWS 兼容 SK | `AWS_SECRET_ACCESS_KEY` | 同上，与 HW_SECRET_KEY 同值 |
 | AWS 兼容 Region | `AWS_DEFAULT_REGION` | 同上，与 HW_REGION 同值 |
 | ECS 密码 | `TF_VAR_ecs_admin_pass` | 8-26位，含大小写+数字+特殊字符 !@$%^-_=+ |
 | RDS 密码 | `TF_VAR_rds_password` | 8-32位，含大小写+数字+特殊字符 |
+
+⚠️ **两套凭证是同一条 AK/SK**，设两套变量是因为 huaweicloud provider 读 `HW_*`、Terraform S3 backend 读 `AWS_*`。两条认证路径完全独立（provider 走 IAM token，backend 走 SigV4）。
 
 ### TF variables.tf 规范
 
@@ -109,3 +111,54 @@ terraform {
   }
 }
 ```
+
+## OBS S3 Backend 配置规范
+
+生成 Terraform 代码时，OBS 远程状态后端（S3 兼容模式）的配置必须遵循以下规则。
+
+### Terraform CLI 版本约束（⚠️ 关键）
+
+OBS S3 backend 与 Terraform CLI 版本存在严格兼容性窗口（基于实测验证）：
+
+| TF 版本 | 兼容性 | 原因 |
+|---------|--------|------|
+| 1.5.x | ✅ 可用 | aws-sdk-go v1，签名兼容（无需 skip 参数） |
+| 1.6.x | ❌ 不可用 | 要求 STS account ID 但不支持 skip 参数（断层） |
+| **1.7.5 ~ 1.10.5** | ✅ **推荐** | `skip_s3_checksum=true` 有效 |
+| 1.11.0+ | ❌ 不可用 | `skip_s3_checksum` 被接受但无效，SHA256 仍不匹配 |
+
+### Backend 配置模板（TF 1.7.5 ~ 1.10.5）
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket                      = "<bucket-name>"
+    key                         = "<project>/terraform.tfstate"
+    region                      = "cn-north-4"
+    endpoint                    = "https://obs.cn-north-4.myhuaweicloud.com"
+    skip_region_validation      = true
+    skip_credentials_validation = true
+    skip_metadata_api_check     = true
+    skip_requesting_account_id  = true   # 1.7+ 必需，跳过 AWS STS 调用
+    skip_s3_checksum            = true   # 1.7~1.10 必需，绕过 SHA256 不匹配
+  }
+}
+```
+
+### 必须包含的 skip 参数
+
+| 参数 | 作用 | 缺失后果 |
+|------|------|---------|
+| `skip_requesting_account_id` | 跳过 AWS STS GetCallerIdentity 调用 | init 失败（华为云无 STS 服务） |
+| `skip_s3_checksum` | 不发送 CRC32/SHA256 校验头 | apply 时 PutObject 返回 400 |
+| `skip_region_validation` | 跳过 AWS region 格式校验 | init 失败（非 AWS 标准 region 名） |
+| `skip_credentials_validation` | 跳过 AWS 凭证预校验 | init 失败（非 AWS 标准 AK/SK） |
+| `skip_metadata_api_check` | 跳过 AWS metadata API 探测 | init 慢或超时 |
+
+### 禁止的配置
+
+| 配置 | 原因 |
+|------|------|
+| `force_path_style = true` | cn-north-4 OBS 要求 virtual-host-style，path-style 返回 403 VirtualHostDomainRequired |
+| `endpoint` 不带 `https://` 前缀 | TF 1.6+ 校验 endpoint 必须是完整 URL，返回 unsupported protocol scheme |
+| `~> 1.x` 版本上限约束 | 匹配不到高版本 provider，导致 init 下载失败 |
