@@ -89,7 +89,14 @@ function renderPipeline(data) {
     const execBadge = displayPipe.executing
       ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>'
       : ' &nbsp;<span class="ts t2">空闲</span>';
-    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
+    // 触发 SRE 部署按钮：stage 非 done 时显示
+    const _issueNum = String(iss).replace(/^#/, '');
+    const _repoFullName = (data.repo || '').replace(/^gitcode:/, '');
+    const _stage = displayPipe.stage || '';
+    const _sreBtn = (_stage && _stage !== 'done' && _issueNum && _repoFullName)
+      ? ` <button class="bt bt-o bt-s" style="margin-left:8px;padding:3px 10px;font-size:11px;border-color:var(--or);color:var(--or)" onclick="triggerSREDeploy('${_repoFullName}', '${_issueNum}', '${_stage}')" title="手动触发 SRE Agent 执行部署/资源释放">🚀 触发 SRE</button>`
+      : '';
+    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
     stages.forEach((stage, i) => {
       const sc = statuses[i];
@@ -168,4 +175,33 @@ function renderPipeline(data) {
   html += `</div><div class="tx t2 mt8">点击历史表中的 Issue 会切换上方工作流状态展示</div>`;
 
   el.innerHTML = html;
+}
+
+function triggerSREDeploy(repoFullName, issueNum, stage) {
+  if (!confirm(`确认触发 SRE Agent 处理 Issue #${issueNum}？\n\n仓库：${repoFullName}\n当前阶段：${stage}\n\nSRE Agent 将根据 Issue 内容自动判断部署或资源释放。`))
+    return;
+  const ctx = stage === 'sre'
+    ? `手动触发 SRE 处理 Issue #${issueNum}（当前阶段 sre，可能需要部署或资源释放）`
+    : `手动触发 SRE 部署 Issue #${issueNum}（从 ${stage} 阶段跳转）`;
+  API.post('/a2a', {
+    agent: 'sre',
+    payload: {
+      repository: repoFullName,
+      account: repoFullName,
+      issue_number: parseInt(issueNum) || issueNum,
+      context: ctx
+    }
+  }).then(d => {
+    if (d.skipped) {
+      alert(`SRE 任务被跳过：${d.skipped}\n\n可能原因：SRE 已配置订阅且本次请求被判定为重复。请检查 SRE Agent 订阅配置。`);
+    } else if (d.seq > 0) {
+      alert(`✅ SRE Agent 已触发！\n\n事件编号：seq=${d.seq}\n可在 Events 页面查看执行进度。`);
+      // 刷新 pipeline
+      if (typeof loadPipeline === 'function') loadPipeline();
+    } else {
+      alert(`SRE 触发结果：${JSON.stringify(d)}`);
+    }
+  }).catch(e => {
+    alert('触发 SRE 失败：' + (e.message || e));
+  });
 }
