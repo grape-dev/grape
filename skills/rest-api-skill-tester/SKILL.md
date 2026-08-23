@@ -173,6 +173,12 @@ curl -s --max-time 30 -X POST \
 bash {{SKILL_DIR}}/rest-api-skill-tester/scripts/merge_skill_pr.sh $PR_NUMBER
 ```
 
+脚本输出 `MERGED=1/0` + `BRANCH_DELETED=1/0` + `MESSAGE`。
+
+合并后脚本自动兜底删除源分支（prune_branch 不可靠，脚本合并后查询分支是否还在，在则调 API 主动删除）：
+- `BRANCH_DELETED=1` → 分支已删除（prune_branch 生效或兜底删除成功）
+- `BRANCH_DELETED=0` → 分支删除失败 → Issue 评论告警「分支未删除，请手动清理」
+
 ### MERGED=1 → A2A 交棒 SRE Agent
 
 ```bash
@@ -258,10 +264,10 @@ curl -s --max-time 30 -X POST {{SERVER_URL}}/api/a2a \
 
 ```json
 {
-  "actions": ["做了什么，如 tested:rest-api-skill-xxx / merged:PR#N / a2a:sre / a2a:coding"],
-  "conclusion": "处理结论（测试通过已自动合并/测试失败/自动合并失败）",
-  "artifacts": ["产生的产物：测试报告评论 / PR 评论 / 合并状态"],
-  "next_step": "下一步建议",
-  "issue_summary": "Issue 最新聚合结论（紧凑文本，用 | 分隔）"
+  "actions": ["{具体执行的操作，如 tested:rest-api-skill-xxx / merged:PR#N / a2a:sre / a2a:coding}"],
+  "conclusion": "{处理结论，如 测试通过已自动合并 / 测试失败 / 自动合并失败}",
+  "artifacts": ["{产生的产物：测试报告评论 / PR 评论 / 合并状态}"],
+  "next_step": "{下一步建议，如 无 / 等待用户下一步指令}",
+  "issue_summary": "{Issue 最新聚合结论，紧凑文本，用 | 分隔}"
 }
 ```

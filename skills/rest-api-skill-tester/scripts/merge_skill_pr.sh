@@ -13,6 +13,7 @@
 #   REPO_FULL_NAME     仓库全名 owner/repo（必填）
 #
 # 退出码：0=合并成功；1=参数/环境错误；2=merge API 调用失败
+# 输出：MERGED=1/0 + BRANCH_DELETED=1/0 + MESSAGE
 # ============================================================================
 set -uo pipefail
 
@@ -60,19 +61,68 @@ if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
   echo "$BODY_ONLY" | head -c 500
   echo ""
   echo "MERGED=0"
+  echo "BRANCH_DELETED=0"
   echo "MESSAGE=merge API 失败 HTTP ${HTTP_CODE}，请手动合并"
   exit 2
 fi
 
 # 检查 merged 字段
 MERGED=$(echo "$BODY_ONLY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('merged', ''))" 2>/dev/null || true)
-if [[ "$MERGED" == "True" || "$MERGED" == "true" || "$MERGED" == "1" ]]; then
-  log "PR #${PR_NUMBER} 合并成功"
-  echo "MERGED=1"
-  exit 0
-else
+if [[ "$MERGED" != "True" && "$MERGED" != "true" && "$MERGED" != "1" ]]; then
   # 有些 GitCode 版本不返回 merged 字段，HTTP 2xx 即视为成功
-  log "PR #${PR_NUMBER} 合并成功（HTTP ${HTTP_CODE}）"
-  echo "MERGED=1"
+  log "PR #${PR_NUMBER} 合并成功（HTTP ${HTTP_CODE}，无 merged 字段）"
+fi
+
+log "PR #${PR_NUMBER} 合并成功"
+echo "MERGED=1"
+
+# ============================================================================
+# 兜底删除源分支（prune_branch 不可靠，合并后查询+主动删除）
+# ============================================================================
+# 获取 PR 的源分支名
+PR_DETAIL=$(curl -s --max-time 10 \
+  -H "PRIVATE-TOKEN: ${TOKEN}" \
+  "${API_BASE}/repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}" 2>/dev/null)
+BRANCH_NAME=$(echo "$PR_DETAIL" | python3 -c "import json,sys; print(json.load(sys.stdin).get('head',{}).get('ref',''))" 2>/dev/null || true)
+
+if [[ -z "$BRANCH_NAME" ]]; then
+  log "WARNING: 无法获取源分支名，跳过兜底删除"
+  echo "BRANCH_DELETED=0"
+  echo "MESSAGE=合并成功，但无法获取源分支名，请手动确认分支是否删除"
   exit 0
 fi
+
+# 查询分支是否还存在
+BRANCH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+  -H "PRIVATE-TOKEN: ${TOKEN}" \
+  "${API_BASE}/repos/${OWNER}/${REPO}/branches/${BRANCH_NAME}" 2>/dev/null)
+
+if [[ "$BRANCH_CHECK" == "404" ]]; then
+  log "源分支 ${BRANCH_NAME} 已删除（prune_branch 生效）"
+  echo "BRANCH_DELETED=1"
+  echo "MESSAGE=合并成功，源分支已自动删除"
+  exit 0
+fi
+
+if [[ "$BRANCH_CHECK" == "200" ]]; then
+  log "源分支 ${BRANCH_NAME} 仍存在，执行兜底删除..."
+  DELETE_RESP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+    -X DELETE \
+    -H "PRIVATE-TOKEN: ${TOKEN}" \
+    "${API_BASE}/repos/${OWNER}/${REPO}/branches/${BRANCH_NAME}" 2>/dev/null)
+  if [[ "$DELETE_RESP" =~ ^2 ]]; then
+    log "源分支 ${BRANCH_NAME} 兜底删除成功"
+    echo "BRANCH_DELETED=1"
+    echo "MESSAGE=合并成功，源分支已兜底删除"
+  else
+    log "WARNING: 源分支 ${BRANCH_NAME} 兜底删除失败 HTTP ${DELETE_RESP}"
+    echo "BRANCH_DELETED=0"
+    echo "MESSAGE=合并成功，但源分支 ${BRANCH_NAME} 删除失败 (HTTP ${DELETE_RESP})，请手动清理"
+  fi
+  exit 0
+fi
+
+log "WARNING: 查询分支 ${BRANCH_NAME} 状态异常 HTTP ${BRANCH_CHECK}"
+echo "BRANCH_DELETED=0"
+echo "MESSAGE=合并成功，但查询分支状态异常 (HTTP ${BRANCH_CHECK})，请手动确认"
+exit 0
