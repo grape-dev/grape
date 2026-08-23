@@ -2,20 +2,27 @@
 name: cloud-deploy
 version: 1.0.0
 description: |
-  Huawei Cloud deployment skill. Listens for PR merge events on master/main,
-  automatically determines build method from project files,
+  Huawei Cloud deployment skill. Supports two entry points:
+  1. A2A direct deployment (a2a_event) — triggered by Issue/Coding Agent handing off a deploy task, no PR merge required.
+  2. PR merge on master/main — full build→deploy→verify pipeline.
+  Automatically determines build method from project files,
   deploys to Huawei Cloud using hcloud CLI, and verifies deployment.
-  NOT for: non-merge PR events, pushes to non-master branches.
+  NOT for: non-merge, non-A2A PR events; pushes to non-master branches.
 tools:
   - curl
   - git
 ---
 ## 安全硬约束（必须遵守）
 
-1. 调用 GitCode API 只用 prompt 注入的 \\，严禁从数据库/configs/日志/历史中寻找其他 token。
-2. 严禁读取 data/、configs/、sessions.db、user_accounts 等 Grape 内部数据。
-3. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
-4. token 不得写入任何文件/日志/评论。
+1. 调用 GitCode API 只用环境变量 `$BOT_GITCODE_TOKEN`，严禁从数据库/configs/日志/历史中寻找其他 token。
+2. GitCode API 调用格式（必须用 Bearer）：
+   ```bash
+   curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" "https://gitcode.com/api/v5/repos/$REPO_FULL_NAME/issues/$ISSUE_NUMBER"
+   ```
+   ⚠️ 必须用 `Authorization: Bearer ***` `Authorization: token ***` 会被 GitCode API 返回 401。
+3. 严禁读取 data/、configs/、sessions.db、user_accounts 等 Grape 内部数据。
+4. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
+5. token 不得写入任何文件/日志/评论。
 
 
 
@@ -23,8 +30,13 @@ tools:
 
 ## 入口判定
 
-- 仅当 `pull_request_merged` 事件且分支为 `master` 或 `main` 时继续
-- 其他事件类型直接输出 `SKIP` 并返回
+支持以下入口，按优先级判定：
+
+1. **A2A 直接触发**（`a2a_event` 类型，不依赖 PR merge）：当 Issue Agent 或 Coding Agent 通过 A2A 交办部署任务时直接执行部署，不要求 PR 已合并。
+   - 从 A2A context 中获取部署需求摘要；从 payload 中获取 `issue_number`、`pr_number`（可选）。
+   - 代码来源：有 `pr_number` 时拉取对应 PR 分支代码；无 `pr_number` 时拉取仓库默认分支最新代码。
+2. **PR 合并触发**（`pull_request_merged` 事件）：分支为 `master` 或 `main` 时继续，走完整构建→部署流程。
+3. **其他事件类型**：直接输出 `SKIP` 并返回。
 
 ## 流程
 
@@ -44,13 +56,18 @@ tools:
 | `app.py` / `main.py` | Python Flask 项目 |
 | `static/` / `templates/` | Flask 模板项目 |
 
-### 2. 构建
+### 2. 获取代码并构建
 
-根据上一步的判断，执行对应构建命令。查看项目文档获取参数。
+根据入口判定结果获取代码，再按项目类型执行构建命令。
 
 ```bash
-# 示例（根据实际项目类型选择）
-git checkout master && git pull
+# 代码获取（根据入口类型选择）：
+# A2A 直接触发 + 有 pr_number：拉取 PR 分支代码
+#   git clone <repo_url> && git checkout <pr_branch>
+# A2A 直接触发 + 无 pr_number：拉取仓库默认分支最新代码
+#   git clone <repo_url>
+# PR 合并触发：拉取 master/main 分支
+#   git checkout master && git pull
 cd /path/to/repo
 # 按需执行：npm install && npm run build
 # 或：pip install -r requirements.txt
@@ -179,15 +196,25 @@ echo 'nameserver 8.8.8.8' > /etc/resolv.conf
 echo 'nameserver 223.5.5.5' >> /etc/resolv.conf
 
 cd /opt/__REPO_NAME__
-# 系统依赖（Ubuntu 22.04 精简镜像缺 python3-venv，不装则 venv 建不出 pip → 部署失败）
+# 镜像加速（2026-08-22 规则更新）：所有下载资源优先使用国内镜像源，
+# 减少跨境网络延迟与超时。以下按优先级排列：
+#   apt: 华为云镜像
+#   pip: 华为云镜像
+#   npm: 华为云镜像（若为 Node.js 项目）
+#   docker: 华为云 SWR 镜像（若为容器化项目）
+
+# 系统依赖 + apt 镜像源（华为云 ecs region cn-north-4 内网加速）
+sed -i 's|http://archive.ubuntu.com|http://mirrors.huaweicloud.com|g' /etc/apt/sources.list 2>/dev/null || true
+sed -i 's|http://security.ubuntu.com|http://mirrors.huaweicloud.com|g' /etc/apt/sources.list 2>/dev/null || true
 apt-get update -qq
 apt-get install -y -qq python3 python3-pip python3-venv python3.10-venv 2>/dev/null || apt-get install -y -qq python3 python3-pip python3-venv
-# venv + 依赖（pip 网络超时是常态，重试 3 次）
+# venv + 依赖（pip 网络超时是常态，华为云镜像优先，回退到官方源重试 3 次）
 rm -rf venv
 python3 -m venv venv
-venv/bin/pip install -q --upgrade pip || true
+venv/bin/pip install -q --upgrade pip -i https://mirrors.huaweicloud.com/repository/pypi/simple --trusted-host mirrors.huaweicloud.com || true
 for i in 1 2 3; do
-  venv/bin/pip install -q -r requirements.txt gunicorn && break
+  venv/bin/pip install -q -r requirements.txt gunicorn \
+    -i https://mirrors.huaweicloud.com/repository/pypi/simple --trusted-host mirrors.huaweicloud.com && break
   echo "pip retry $i/3"
   sleep 5
 done
@@ -221,13 +248,14 @@ curl -s -o /dev/null -w '%{http_code}' "http://$ECS_IP:5000/post/1"  # Flask 示
 
 > ⚠️ 部署阶段实测坑（持续积累）：
 > 1. **Ubuntu 22.04 精简镜像缺 python3-venv** → venv 建不出 pip，必须 `apt-get install python3-venv python3.10-venv`
-> 2. **pip 连 files.pythonhosted.org 经常 ReadTimeout** → 必须重试（实测第 1 次超时、第 2 次成功）
+> 2. **pip 连 files.pythonhosted.org 经常 ReadTimeout** → 优先使用华为云 PyPI 镜像（`mirrors.huaweicloud.com/repository/pypi/simple`），仅镜像不可用时回退官方源重试
 > 3. **SSH 部署务必用单条 ssh 会话跑完所有命令**（或先 ssh-copy-id 免密）——expect 密码交互多命令叠加会超 600s 任务上限
 > 4. **创建 ECS 必须带 keypair + 创建前先查已有实例**——否则建完 SSH 连不上，Agent 会反复试错重建（每跑一次多一台机器、多一份费用）
 > 5. **可用区 cn-north-4g 不可用**（2026-08-20 实测）：该 AZ 使用 DPDK/vhostuser 高性能网卡，不走标准内核网络栈，SSH 永远连不上。必须指定 `--server.availability_zone=cn-north-4a` 或 `cn-north-4b`。
 > 6. **Ecs.0707 规格找不到**（2026-08-20 实测）：`s6.small.1` 等硬编码 flavor 在 postPaid 模式下可能不售卖。用 `hcloud ECS ListFlavors` + `ListFlavorSellPolicies` 动态查询最小可用规格，确认 sell_status=available 再使用。
 > 7. **DNS 解析失败**（2026-08-20 实测）：Ubuntu 22.04 的 systemd-resolved（127.0.0.53）可能无法解析 GitCode 等外部域名（SERVFAIL）。部署 SSH 脚本内先设 `echo 'nameserver 8.8.8.8' > /etc/resolv.conf`。
 > 8. **EIP 必须自动创建**（2026-08-20 实测）：创建 ECS 时必须用 `--server.publicip.eip.*` 参数让 API 自动创建并关联 EIP，不要先建 ECS 再手动关联，否则可能因 VPC 缺少 Internet Gateway 而无法通信。
+> 9. **国内镜像优先**（2026-08-22 规则）：所有下载资源（apt/pip/npm/docker）必须优先使用华为云镜像源加速：apt 换 `mirrors.huaweicloud.com`，pip 加 `-i https://mirrors.huaweicloud.com/repository/pypi/simple`，npm 设 `registry=https://mirrors.huaweicloud.com/repository/npm/`，docker pull 用 `swr.cn-north-4.myhuaweicloud.com`。镜像不可用时才回退官方源。
 
 ## 环境变量
 
@@ -244,3 +272,4 @@ curl -s -o /dev/null -w '%{http_code}' "http://$ECS_IP:5000/post/1"  # Flask 示
 - ✅ 仅执行当前 PR 合并后的部署流程
 - ✅ 部署前先理解项目结构
 - ✅ 部署失败时输出错误信息，不自动回滚
+- ✅ **下载资源优先使用国内镜像加速**：apt/pip/npm/docker 等包管理器及运行时下载均优先使用华为云国内镜像源，仅在镜像不可用时回退官方源，减少跨境网络延迟与超时

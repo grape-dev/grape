@@ -204,8 +204,9 @@ async def a2a_endpoint(request: Request):
                 log.warning(f"A2A: issue_state update failed: {_e}")
 
         # 订阅感知 A2A 去重（event-routing-subscription-design.md §2.6）：
-        # SRE 已配置订阅 → A2A 交办视为重复，只推进 stage、不创建任务。
-        if agent_name == "sre" and issue_number:
+        # SRE 已配置订阅 → PR 合并事件触发的 A2A 交办视为重复，只推进 stage、不创建任务。
+        # 但无 pr_number 的直接部署请求（Issue A2A 交办、非 PR 场景）不跳过，需正常创建任务。
+        if agent_name == "sre" and issue_number and pr_number:
             try:
                 with db_lock:
                     c = db.cursor()
@@ -216,7 +217,7 @@ async def a2a_endpoint(request: Request):
                     if row:
                         _raw = (row[0] or "").strip()
                         if _raw and _raw != "[]" and _raw != "null":
-                            log.info(f"A2A: sre subscribed, skip task creation (stage=sre, issue=#{issue_number})")
+                            log.info(f"A2A: sre subscribed + pr_number={pr_number}, skip task creation (stage=sre, issue=#{issue_number})")
                             return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "sre_subscribed"})
             except Exception:
                 pass
