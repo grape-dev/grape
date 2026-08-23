@@ -30,13 +30,35 @@ tools:
 
 ## 入口判定
 
-支持以下入口，按优先级判定：
+支持以下入口，按优先级判定。**首先根据 A2A context / Issue 内容判断操作类型（部署 vs 释放），再走对应流程。**
 
-1. **A2A 直接触发**（`a2a_event` 类型，不依赖 PR merge）：当 Issue Agent 或 Coding Agent 通过 A2A 交办部署任务时直接执行部署，不要求 PR 已合并。
-   - 从 A2A context 中获取部署需求摘要；从 payload 中获取 `issue_number`、`pr_number`（可选）。
-   - 代码来源：有 `pr_number` 时拉取对应 PR 分支代码；无 `pr_number` 时拉取仓库默认分支最新代码。
-2. **PR 合并触发**（`pull_request_merged` 事件）：分支为 `master` 或 `main` 时继续，走完整构建→部署流程。
-3. **其他事件类型**：直接输出 `SKIP` 并返回。
+### 操作类型识别
+
+读取 A2A context 或 Issue 正文，按关键词判定：
+- **资源释放**：包含「释放/销毁/删除/回收/destroy/release/teardown/cleanup/清退」等关键词
+- **部署**：其他情况（创建/部署/上线/更新/deploy 等）
+
+### 入口 1：A2A 直接触发（`a2a_event` 类型，不依赖 PR merge）
+
+当 Issue Agent 或 Coding Agent 通过 A2A 交办任务时直接执行，不要求 PR 已合并。
+从 A2A context 中获取需求摘要；从 payload 中获取 `issue_number`、`pr_number`（可选）。
+
+**部署场景**：
+- 代码来源：有 `pr_number` 时拉取对应 PR 分支代码；无 `pr_number` 时拉取仓库默认分支最新代码。
+- 走下方「流程 §1~§4」完整构建→部署→验证流程。
+
+**资源释放场景**：
+- 跳过构建/部署，直接走「资源释放流程」（见下方专节）。
+- 从 Issue 正文/评论中提取要释放的资源信息（ECS 名称/IP、RDS 实例名、OBS 桶名等）。
+- 如果 Issue 中没有明确的资源信息，先用 GitCode API 查 Issue 评论补充；仍无法确定时回帖追问用户。
+
+### 入口 2：PR 合并触发（`pull_request_merged` 事件）
+
+分支为 `master` 或 `main` 时继续，走完整构建→部署流程。
+
+### 入口 3：其他事件类型
+
+直接输出 `SKIP` 并返回。
 
 ## 流程
 
@@ -273,3 +295,84 @@ curl -s -o /dev/null -w '%{http_code}' "http://$ECS_IP:5000/post/1"  # Flask 示
 - ✅ 部署前先理解项目结构
 - ✅ 部署失败时输出错误信息，不自动回滚
 - ✅ **下载资源优先使用国内镜像加速**：apt/pip/npm/docker 等包管理器及运行时下载均优先使用华为云国内镜像源，仅在镜像不可用时回退官方源，减少跨境网络延迟与超时
+
+## 资源释放流程
+
+当操作类型识别为「资源释放」时，跳过构建/部署，按以下步骤释放华为云资源。
+
+### 1. 收集资源信息
+
+从 Issue 正文和评论中提取要释放的资源：
+
+- **ECS 实例**：名称（如 `deploy-songspace-forum-java-084723`）或 IP
+- **RDS 实例**：实例名或 ID
+- **OBS 桶**：桶名
+- **安全组/密钥对/EIP**：如有关联资源也一并释放
+
+如果 Issue 中资源信息不完整，用 GitCode API 查 Issue 评论补充：
+```bash
+curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
+  "https://gitcode.com/api/v5/repos/$REPO_FULL_NAME/issues/$ISSUE_NUMBER/comments"
+```
+
+仍无法确定时，在 Issue 回帖追问用户，列出已知资源请用户确认。
+
+### 2. 查询并释放资源
+
+**先查询再释放，确认每个资源存在后再操作。释放后验证已删除。**
+
+```bash
+# 确认 hcloud 可用（与部署流程相同的前置检查）
+hcloud configure set --cli-access-key="$HUAWEICLOUD_SDK_AK" --cli-secret-key="$HUAWEICLOUD_SDK_SK" --cli-region=cn-north-4
+
+# 2.1 释放 ECS 实例
+#   查询：按名称前缀过滤（deploy-<repo> 或 <repo>-deploy）
+hcloud ECS ListServersDetails --cli-region=cn-north-4 | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for s in data.get('servers',[]):
+    print(s.get('id',''), s.get('name',''), s.get('status',''))
+"
+#   确认目标实例后删除：
+hcloud ECS DeleteServer --cli-region=cn-north-4 --server_id="<INSTANCE_ID>"
+#   验证：再次 ListServersDetails 确认该实例已不存在
+
+# 2.2 释放 RDS 实例
+hcloud RDS ListInstances --cli-region=cn-north-4 | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for i in data.get('instances',[]):
+    print(i.get('id',''), i.get('name',''), i.get('status',''))
+"
+#   确认目标实例后删除：
+hcloud RDS DeleteInstance --cli-region=cn-north-4 --instance_id="<RDS_ID>"
+
+# 2.3 释放 OBS 桶
+#   先清空桶内对象（非空桶无法删除）：
+obsutil rm <BUCKET_NAME> -r -f 2>/dev/null || true
+#   再删桶：
+obsutil rm <BUCKET_NAME> -b 2>/dev/null || hcloud OBS DeleteBucket --bucket="<BUCKET_NAME>" 2>/dev/null || true
+
+# 2.4 释放 EIP（如有独立 EIP 未随 ECS 自动释放）
+hcloud EIP ListPublicIps --cli-region=cn-north-4 2>/dev/null | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for e in data.get('publicips',[]):
+    print(e.get('id',''), e.get('public_ip_address',''), e.get('status',''))
+"
+#   确认后删除：
+hcloud EIP DeletePublicIp --cli-region=cn-north-4 --publicip_id="<EIP_ID>"
+```
+
+### 3. 验证与报告
+
+- 逐个确认资源已释放（查询返回空或 404）
+- 在 Issue 回帖汇总释放结果（资源名 → 状态：已释放/未找到/释放失败）
+- 输出最终 JSON 块（`actions` 中列出释放操作，`conclusion` 汇总结果）
+
+> ⚠️ 释放注意事项：
+> 1. **先查再删**：必须先查询确认资源存在，避免误删或操作不存在的资源。
+> 2. **ECS 先删再删 EIP**：ECS 关联的 EIP 在 ECS 删除后可能自动释放，独立 EIP 需手动删。
+> 3. **OBS 桶必须先清空**：非空桶删除会失败，先 `obsutil rm <bucket> -r -f` 清空对象。
+> 4. **RDS 删除可能异步**：RDS DeleteInstance 返回后实例可能仍在「删除中」状态，等几分钟再验证。
+> 5. **幂等**：重复释放同一资源不应报错，资源已不存在视为成功。

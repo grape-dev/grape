@@ -58,6 +58,65 @@ def _build_history_file_guide(repo_key: str = "", account: str = "", runtime_id:
     return ""
 
 
+def _build_recent_chat_history(history: list, repo_key: str = "", max_turns: int = 6) -> str:
+    """构建近期对话摘要，注入 general chat prompt。
+
+    数据来源：chat_messages 表（按 repo_key 查所有 conversation 的最近消息，含用户消息+agent回复），
+    补充 chat_agent_session.event_history（agent 回复的 stdout）。
+    使 agent 感知用户之前的对话上下文，避免重复追问已确认的信息。
+    """
+    lines = ["## 近期对话历史（请勿重复追问以下已确认的信息）"]
+    found = False
+
+    # 优先从 chat_messages 表拉用户+agent 消息（跨 general/task 对话）
+    if repo_key:
+        try:
+            from src.session_manager import db, db_lock
+            from src.repo_key import to_repo_key
+            rk = to_repo_key(repo_key)
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT cm.role, cm.content, cm.created_at, cc.conv_type, cc.issue_number "
+                    "FROM chat_messages cm JOIN chat_conversations cc ON cm.conversation_id = cc.id "
+                    "WHERE cc.repo_key=? ORDER BY cm.created_at DESC LIMIT ?",
+                    (rk, max_turns * 2)
+                )
+                rows = c.fetchall()
+            if rows:
+                found = True
+                for r in reversed(rows):  # 时间正序展示
+                    role, content, created_at, conv_type, issue_num = r
+                    tag = "用户" if role == "user" else "助手"
+                    ctx = f" [Issue #{issue_num}]" if issue_num else ""
+                    snippet = (content or "")[:300]
+                    if len(content or "") > 300:
+                        snippet += "…"
+                    t = (created_at or "")[:19]
+                    lines.append(f"[{t} {tag}{ctx}] {snippet}")
+        except Exception:
+            pass
+
+    # 补充：event_history 里的 agent 回复（当 chat_messages 无数据时兜底）
+    if not found and history:
+        recent = history[-max_turns:]
+        for h in recent:
+            stdout = (h.get("stdout") or "").strip()
+            if not stdout:
+                continue
+            snippet = stdout[:300]
+            if len(stdout) > 300:
+                snippet += "…"
+            t = (h.get("time") or "")[:19].replace("T", " ")
+            success = "✓" if h.get("success") else "✗"
+            lines.append(f"[{t} 助手 {success}] {snippet}")
+            found = True
+
+    if not found:
+        return ""
+    return "\n".join(lines)
+
+
 _PROJECT_INFO_MAX_CHARS = 2500
 
 
@@ -239,7 +298,7 @@ Your capabilities:
    - API: POST /repos/{{owner}}/{{repo}}/issues
    - 标题：简明描述需求（如"创建 2C4G Ubuntu 22.04 ECS"）
    - 正文：将用户已提供的参数整理为结构化清单（核对表格式），标注来源"飞书用户需求"
-   - 标签：按类型打标签 — sre（云资源/部署运维）、feature（新功能/开发）、bug（缺陷修复）
+   - 标签：按类型打标签 — sre-deploy（云资源创建/部署运维）、sre-release（资源释放/销毁/回收）、feature（新功能/开发）、bug（缺陷修复）
 4. 创建后告知用户 Issue 编号（附链接）和后续流程预期（VOD 审视 → 开发/部署流水线）
 5. 用户询问进度时（如"ECS 建好了吗"），用 GitCode API 查询 Issue 状态：
    - GET /repos/{{owner}}/{{repo}}/issues/{{number}} 看当前状态和标签
@@ -466,8 +525,11 @@ def build_general_chat_prompt(user_text: str, repo_key: str, history: list, skil
     # 项目知识基线
     parts.append(_build_project_info_section(repo_key, agent_type=skills[0] if skills else "chat"))
     # Chat messages don't have `evt`, so A2A context is not injected here
-    if history:
-        parts.append(f"This repository has {len(history)} past events recorded.")
+    # 注入近期 Chat 对话历史（用户消息 + agent 回复），使 agent 感知用户已说过的内容，
+    # 避免重复追问已确认的信息（如部署规格、云平台选择等）。
+    _recent_chat = _build_recent_chat_history(history, repo_key=repo_key)
+    if _recent_chat:
+        parts.append(_recent_chat)
 
     # 注入当前执行的 runtime 引擎信息（供 agent 回答"你是什么runtime"之类的问题）
     if runtime_id:
@@ -567,8 +629,14 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     parts.append(
         "### 任务边界\n"
         "本对话的职责是【澄清被分配 Issue 的需求并回帖】，不是实施/部署/写代码。\n"
-        "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\n"
-        "严禁 clone/部署/起服务/修改文件/执行 git 命令。"
+        "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\\n"
+        "严禁 clone/部署/起服务/修改文件/执行 git 命令。\\n"
+        "### A2A 交办规则\\n"
+        "需求澄清完成后，根据 Issue 标签决定 A2A 目标：\\n"
+        "- 标签含 `sre-deploy` 或需求涉及创建/部署云资源 → A2A 给 `sre`，context 写明「部署」+ 资源规格\\n"
+        "- 标签含 `sre-release` 或需求涉及释放/销毁/回收云资源 → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\\n"
+        "- 标签含 `feature`/`bug` → A2A 给 `coding`\\n"
+        "A2A 时 `pr_number` 仅在有实际 PR 时传入，资源释放类请求不需要 pr_number。"
     )
     if conv.get("title"):
         parts.append(f"标题: {conv['title']}")
