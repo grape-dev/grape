@@ -93,9 +93,7 @@ function renderPipeline(data) {
     const _issueNum = String(iss).replace(/^#/, '');
     const _repoFullName = (data.repo || '').replace(/^gitcode:/, '');
     const _stage = displayPipe.stage || '';
-    const _sreBtn = (_stage && _stage !== 'done' && _issueNum && _repoFullName)
-      ? ` <button class="bt bt-o bt-s" style="margin-left:8px;padding:3px 10px;font-size:11px;border-color:var(--or);color:var(--or)" onclick="triggerSREDeploy('${_repoFullName}', '${_issueNum}', '${_stage}')" title="手动触发 SRE Agent 执行部署/资源释放">🚀 触发 SRE</button>`
-      : '';
+    const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
     flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
     stages.forEach((stage, i) => {
