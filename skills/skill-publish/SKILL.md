@@ -13,7 +13,7 @@ tools:
 # Skill 发布管理
 
 ## 安全硬约束（违反即违规）
-1. **令牌获取方式**：优先从项目知识（.project-info/ 目录递归扫描所有 JSON 文件）读取 secrets 字段令牌（CLAWHUB_TOKEN / GITHUB_TOKEN / GITCODE_TOKEN）+ config 字段发布配置（GITHUB_PUBLISH_REPO / GITCODE_PUBLISH_REPO / CLAWHUB_OWNER_HANDLE），读到后 export 到环境变量；项目知识缺失时，扫描环境变量 `$CLAWHUB_TOKEN` / `$GITHUB_TOKEN` / `$GITCODE_TOKEN` / `$CLAWHUB_OWNER_HANDLE`
+1. **令牌获取方式**：优先从项目知识（.project-info/ 目录递归扫描所有 JSON 文件）读取 secrets 字段令牌（CLAWHUB_TOKEN / GITHUB_TOKEN / GITCODE_TOKEN）+ config 字段发布配置（GITHUB_PUBLISH_REPO / GITCODE_PUBLISH_REPO / CLAWHUB_OWNER_HANDLE），读到后直接在 curl/脚本命令中使用；项目知识缺失时，扫描环境变量 `$CLAWHUB_TOKEN` / `$GITHUB_TOKEN` / `$GITCODE_TOKEN` / `$CLAWHUB_OWNER_HANDLE`。⚠️ sync_skill_platform.sh 脚本会自动从 .project-info/ 读取令牌，agent 无需手动 export（export 不跨 shell 生效）
 2. **禁止直连业务数据库**（repo_platform_tokens 等）、读取 Grape 运行目录（data/、configs/、sessions.db）或日志寻找 token；允许的 token 来源仅限：环境变量 + .project-info/ 下 JSON 配置文件
 3. **严禁遍历系统目录考古**（/usr/local/lib/hermes-agent、/opt/grape 等）——只读注入的环境变量或项目知识库 JSON 配置文件
 4. **401/403 区分处理**：
@@ -23,6 +23,22 @@ tools:
 5. token 绝不写入任何文件、日志、评论、脚本（项目知识库 JSON 由上层业务维护，本技能只读不写）
 6. 所有 curl / git 调用设 30s 超时（curl --max-time 30；git 用 timeout 30）——超时判定该平台任务失败，不 hang
 7. **调用 GitCode API 一律以 `references/gitcode-api-reference.md` 为准**：严禁根据经验/记忆/猜测自行拼写 API 路径
+8. **重试策略**：
+   - 401/403/配置缺失 → 不重试，直接跳过该平台
+   - 5xx/连接超时/DNS 失败 → 最多 3 次指数退避重试（1s、2s、4s）
+   - 版本冲突 bump → 最多 3 次（已有规则）
+   
+   重试代码示例：
+   ```bash
+   for i in 1 2 3; do
+     resp=$(curl -s -w "\n%{http_code}" --max-time 30 -X POST ... )
+     http_code=$(echo "$resp" | tail -1)
+     if [[ "$http_code" =~ ^2 ]]; then break; fi
+     if [[ "$http_code" =~ ^[45][0-9][0-9]$ ]] && [[ "$http_code" != "5"* ]]; then break; fi
+     echo "retry $i/3 (HTTP $http_code)"
+     sleep "$i"
+   done
+   ```
 
 ## 评论规范
 
@@ -56,6 +72,19 @@ tools:
 - 同步/发布/下架/撤回 skill 请求 → 本技能
 - 非 skill 发布类请求 → 不处理，回复说明范围
 
+## 入参契约
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| action | 是 | publish / unpublish |
+| skill_name | 是 | skill 名称 |
+| issue_number | 是 | Issue 编号，用于评论和 commit message |
+| pr_number | 是（publish） | PR 编号，用于追溯 |
+| skill_dir | 是（publish） | skill 源目录路径 |
+| version | 否（publish） | 版本号，默认从 frontmatter 读取 |
+
+缺失必填参数 → 终止任务，Issue 评论返回参数缺失。
+
 ## 定位 skill
 - 仓库内 skills/{name}/ 或根目录 {name}/（含 SKILL.md）
 - version 取 SKILL.md frontmatter（默认 0.1.0）；slug = name 转小写连字符
@@ -82,6 +111,13 @@ tools:
    - 不得自己拼 URL——必须用上述优先级获取 ownerHandle
 
 ## 发布流程
+### 0. 敏感文件扫描（发布前必执行）
+
+扫描 skill 目录，发现以下文件直接终止该平台发布并 Issue 评论告警：
+- .env / .env.*
+- id_rsa / id_ed25519 / *.pem / *.p12 / *.keystore
+- 文件名含 key/secret 但实际非密钥（如 keyboard-config.json）→ grep 文件内容检测 AK/SK/token 模式，命中才拦截
+
 1. 定位 skill + 读 frontmatter（name/version/description）
 2. 读取各平台令牌（优先项目知识 .project-info/ 下 JSON 配置文件，缺失时回退环境变量）：
    - 环境变量和 JSON 均缺失 → 报告「未配置 {平台} 令牌，请到设置页配置」→ 跳过该平台
@@ -106,7 +142,7 @@ tools:
        --action publish --platform gitcode \
        --skill-name {name} --skill-dir {skill_dir} --version {version}
      ```
-     脚本输出 PUSHED=1/0 + BACKUP_BRANCH + TARGET_URL；一个平台失败不中断其他平台
+     脚本输出 JSON：{"PUSHED":1/0, "BACKUP_BRANCH":"", "TARGET_URL":"", "MESSAGE":""}；一个平台失败不中断其他平台
 6. 脚本内置安全备份：目录已存在时自动建 backup/pre-sync-{timestamp} 分支并推远端（无需手动执行）。备份分支推送失败不阻断主流程——发布结果不受影响
 7. 校验: SHA256 逐字节比对 + 平台 API 确认状态；ClawHub 校验时从 GET /api/v1/skills/{slug} 返回的 `owner.handle` 拼接页面 URL（`https://clawhub.ai/{owner.handle}/skills/{slug}`）
 8. 目标仓库解析（GitHub/GitCode）:
@@ -156,6 +192,14 @@ curl -s --max-time 30 -X POST \
 ```
 
 ## 下架流程
+### 前置校验（下架前必执行）
+
+1. 从目标仓库拉取远端 skill 目录
+2. 计算远端 skill SHA-256 指纹
+3. 与本地预期指纹比对
+4. 不匹配 → Issue 评论告警「远端版本与预期不一致，请人工确认」→ 终止下架
+5. 匹配 → 继续执行下架
+
 1. 读取各平台令牌（优先项目知识 .project-info/ 下 JSON 配置文件，缺失时回退环境变量）；令牌缺失/401/403 → 跳过该平台并输出提示
 2. 按平台下架:
    - ClawHub: DELETE /api/v1/skills/{slug}（组织配置时带 ?ownerHandle=）——软删除 30 天；**扫描中不可删除：遇到该状态直接失败不重试**
@@ -168,7 +212,7 @@ curl -s --max-time 30 -X POST \
        --action unpublish --platform gitcode \
        --skill-name {name} --issue-num {issue_number}
      ```
-     目录不存在时脚本输出 PUSHED=0 + MESSAGE=无需下架（非失败）；脚本内置 backup/pre-delist-{timestamp} 备份分支
+     目录不存在时脚本输出 JSON {"PUSHED":0, "MESSAGE":"无需下架"}（非失败）；脚本内置 backup/pre-delist-{timestamp} 备份分支
 3. 执行后校验平台状态，汇总回复（同发布结果表格格式）
 
 ## ClawHub payload 契约（已验证，协议存档）
@@ -183,9 +227,20 @@ curl -s --max-time 30 -X POST \
 ## 判断标准
 
 - ClawHub：POST 返回 200 = 已提交（安全扫描中，通过后公开）；GET 确认 status=published = 发布成功
-- GitHub/GitCode：脚本输出 PUSHED=1 = push 成功；SHA-256 校验一致 = 内容正确
+- GitHub/GitCode：脚本输出 JSON PUSHED=1 = push 成功；SHA-256 校验一致 = 内容正确
 - 跳过的平台：版本填「—」，状态填「⚠️ 跳过」+ 真实原因
 - 失败的平台：版本填「—」，状态填「🔴 失败」+ 原因
+
+## 实测教训（持续积累）
+
+> 以下为实际执行中遇到的问题，后续执行时注意规避。
+
+1. **sync 脚本环境变量不跨 shell**（2026-08-23 实测）：agent 用 read tool 读到 token 后 export，但执行 sync 脚本时是独立 shell，export 不生效。脚本已改为环境变量缺失时自己从 `.project-info/` 读取。
+2. **GitCode 私有仓库 clone URL 必须 `oauth2:` 前缀**（2026-08-23 实测）：`https://{token}@gitcode.com` 格式对私有仓库报 `could not read Password`，必须用 `https://oauth2:{token}@gitcode.com`。
+3. **GitHub PAT 用 `x-access-token:` 前缀**（2026-08-23 实测）：`https://{token}@github.com` 能工作但不够标准，GitHub 官方推荐 `https://x-access-token:{token}@github.com`。
+4. **ClawHub 安全扫描中不可删除**（实测）：DELETE 遇到 scanning 状态直接失败不重试，等扫描完成才能删。
+5. **ClawHub 页面 URL 不能漏 `/skills/` 段**（实测）：`https://clawhub.ai/{user}/{slug}` 会 307 重定向到空页面，必须用 `https://clawhub.ai/{ownerHandle}/skills/{slug}`。
+6. **ClawHub slug 软删除占用 30 天**（实测）：DELETE 后 30 天内同名 slug 不能重新发布，POST 返回 "slug already exists"。
 
 ## 分析结论示例
 
@@ -202,6 +257,21 @@ curl -s --max-time 30 -X POST \
 
 ## 参考
 - 调用 GitCode API 时，**必须以 `references/gitcode-api-reference.md` 为准**——严禁自行拼写 API 路径
+
+## 环境变量
+
+| 变量 | 来源 | 说明 |
+|------|------|------|
+| `CLAWHUB_TOKEN` | 项目知识 secrets / 环境变量 | ClawHub API Bearer token |
+| `GITHUB_TOKEN` | 项目知识 secrets / 环境变量 | GitHub PAT（x-access-token 格式） |
+| `GITCODE_TOKEN` | 项目知识 secrets / 环境变量 | GitCode API token（oauth2 格式） |
+| `CLAWHUB_OWNER_HANDLE` | 项目知识 config / 环境变量 | ClawHub 组织 handle（可选，空=个人发布） |
+| `GITHUB_PUBLISH_REPO` | 项目知识 config / 环境变量 | GitHub 目标仓库 namespace/repo |
+| `GITCODE_PUBLISH_REPO` | 项目知识 config / 环境变量 | GitCode 目标仓库 namespace/repo |
+| `BOT_GITCODE_TOKEN` | 系统 prompt 注入 | GitCode Issue 评论发帖 token |
+| `REPO_FULL_NAME` | 系统 prompt 注入 | 当前仓库全名 |
+| `ISSUE_NUMBER` | 系统 prompt 注入 | Issue 编号 |
+| `PR_NUMBER` | 系统 prompt 注入 | PR 编号 |
 
 ## 任务结束
 

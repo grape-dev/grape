@@ -28,7 +28,7 @@
 #   GITCODE_PUBLISH_REPO / GITHUB_PUBLISH_REPO  目标仓库 namespace/repo
 #
 # 退出码：0=成功；1=参数/环境错误；2=git 操作失败
-# 输出：PUSHED=1 / PUSHED=0 + BACKUP_BRANCH=xxx + TARGET_URL=xxx
+# 输出：stdout 一行 JSON：{"PUSHED":0|1,"BACKUP_BRANCH":"","TARGET_URL":"","MESSAGE":""}
 # ============================================================================
 set -uo pipefail
 
@@ -84,6 +84,28 @@ if [[ "$ACTION" == "publish" ]]; then
     VERSION="0.1.0"
     echo "[sync] WARNING: --version 未指定，默认 $VERSION" >&2
   fi
+fi
+
+# ---- 环境变量缺失时从项目知识加载（.project-info/ 下递归扫描 JSON）-----------
+# 按当前平台检查所需 token 和 PUBLISH_REPO，任一缺失则从项目知识加载
+_need_load=0
+if [[ "$PLATFORM" == "gitcode" ]]; then
+  [[ -z "${GITCODE_TOKEN:-}" || -z "${GITCODE_PUBLISH_REPO:-}" ]] && _need_load=1
+else
+  [[ -z "${GITHUB_TOKEN:-}" || -z "${GITHUB_PUBLISH_REPO:-}" ]] && _need_load=1
+fi
+if [[ "$_need_load" == "1" ]]; then
+  while IFS='=' read -r key val; do
+    [[ -n "$key" && -n "$val" ]] && export "$key=$val"
+  done < <(python3 -c "
+import json, glob
+for f in glob.glob('.project-info/**/*.json', recursive=True):
+    try:
+        d = json.load(open(f))
+        for k, v in {**d.get('secrets',{}), **d.get('config',{})}.items():
+            if v: print(f'{k}={v}')
+    except: pass
+" 2>/dev/null)
 fi
 
 # ---- 解析环境变量 -----------------------------------------------------------
@@ -145,8 +167,7 @@ fi
 # ---- 4. 处理目录不存在的情况 ------------------------------------------------
 if [[ "$ACTION" == "unpublish" && "$SKILL_EXISTS" == "no" ]]; then
   log "${SKILL_TARGET_DIR}/ 不存在，无需下架"
-  echo "PUSHED=0"
-  echo "MESSAGE=${SKILL_NAME} 在 ${PUBLISH_REPO} 中不存在，无需下架"
+  echo "{\"PUSHED\":0,\"BACKUP_BRANCH\":\"\",\"TARGET_URL\":\"\",\"MESSAGE\":\"${SKILL_NAME} 在 ${PUBLISH_REPO} 中不存在，无需下架\"}"
   rm -rf "$TMP_DIR"
   exit 0
 fi
@@ -206,8 +227,7 @@ git add -A
 # 检查是否有变更
 if git diff --cached --quiet 2>/dev/null; then
   log "无变更（内容与目标仓库一致），跳过 commit"
-  echo "PUSHED=0"
-  echo "MESSAGE=${SKILL_NAME} 内容与目标仓库一致，无需推送"
+  echo "{\"PUSHED\":0,\"BACKUP_BRANCH\":\"\",\"TARGET_URL\":\"\",\"MESSAGE\":\"${SKILL_NAME} 内容与目标仓库一致，无需推送\"}"
   rm -rf "$TMP_DIR"
   exit 0
 fi
@@ -235,9 +255,7 @@ else
   TARGET_URL="https://github.com/${OWNER}/${REPO}/tree/${DEFAULT_BRANCH}/${SKILL_TARGET_DIR}"
 fi
 
-echo "PUSHED=1"
-echo "BACKUP_BRANCH=${BACKUP_BRANCH}"
-echo "TARGET_URL=${TARGET_URL}"
+echo "{\"PUSHED\":1,\"BACKUP_BRANCH\":\"${BACKUP_BRANCH}\",\"TARGET_URL\":\"${TARGET_URL}\",\"MESSAGE\":\"\"}"
 log "完成: ${TARGET_URL}"
 
 # ---- 10. 清理临时目录 -------------------------------------------------------
