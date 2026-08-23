@@ -128,10 +128,11 @@ OWNER="${PUBLISH_REPO%%/*}"
 REPO="${PUBLISH_REPO#*/}"
 
 # 构建 clone URL（HTTPS + token 鉴权，不依赖 SSH key）
+# GitCode 私有仓库必须用 oauth2:{token} 格式；GitHub 用 x-access-token:{token}
 if [[ "$PLATFORM" == "gitcode" ]]; then
-  CLONE_URL="https://${TOKEN}@gitcode.com/${OWNER}/${REPO}.git"
+  CLONE_URL="https://oauth2:${TOKEN}@gitcode.com/${OWNER}/${REPO}.git"
 else
-  CLONE_URL="https://${TOKEN}@github.com/${OWNER}/${REPO}.git"
+  CLONE_URL="https://x-access-token:${TOKEN}@github.com/${OWNER}/${REPO}.git"
 fi
 
 log() { echo "[sync:${PLATFORM}] $*"; }
@@ -176,19 +177,41 @@ if [[ "$ACTION" == "publish" && "$SKILL_EXISTS" == "no" ]]; then
   log "${SKILL_TARGET_DIR}/ 不存在，首次发布（无需备份）"
 fi
 
-# ---- 5. 建备份分支（目录已存在时）-------------------------------------------
+# ---- 5. 建备份分支（目录已存在且内容不同时）---------------------------------
 BACKUP_BRANCH=""
 if [[ "$SKILL_EXISTS" == "yes" ]]; then
-  TIMESTAMP=$(date +%Y%m%d%H%M%S)
+  # publish 时先比较内容——内容一致则跳过，不建备份
   if [[ "$ACTION" == "publish" ]]; then
-    BACKUP_BRANCH="backup/pre-sync-${TIMESTAMP}"
-  else
-    BACKUP_BRANCH="backup/pre-delist-${TIMESTAMP}"
+    _tmp_compare=$(mktemp -d /tmp/skill-cmp-XXXXXX)
+    cp -r "$SKILL_TARGET_DIR" "$_tmp_compare/old" 2>/dev/null
+    find "$_tmp_compare/old" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+    find "$_tmp_compare/old" -name "*.pyc" -delete 2>/dev/null || true
+    cp -r "$SKILL_DIR" "$_tmp_compare/new" 2>/dev/null
+    find "$_tmp_compare/new" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+    find "$_tmp_compare/new" -name "*.pyc" -delete 2>/dev/null || true
+    find "$_tmp_compare/new" -name ".DS_Store" -delete 2>/dev/null || true
+    if diff -rq "$_tmp_compare/old" "$_tmp_compare/new" >/dev/null 2>&1; then
+      log "内容一致，跳过备份和发布"
+      echo "{\"PUSHED\":0,\"BACKUP_BRANCH\":\"\",\"TARGET_URL\":\"\",\"MESSAGE\":\"${SKILL_NAME} 内容与目标仓库一致，无需推送\"}"
+      rm -rf "$_tmp_compare" "$TMP_DIR"
+      exit 0
+    fi
+    rm -rf "$_tmp_compare"
   fi
-  log "建备份分支: ${BACKUP_BRANCH}"
+  # 内容不同（或 unpublish）——用 skill name 命名备份分支，覆盖旧的（只保留 1 个）
+  if [[ "$ACTION" == "publish" ]]; then
+    BACKUP_BRANCH="backup/pre-sync-${SKILL_NAME}"
+  else
+    BACKUP_BRANCH="backup/pre-delist-${SKILL_NAME}"
+  fi
+  log "建备份分支: ${BACKUP_BRANCH}（覆盖旧备份）"
+  # 删除旧备份分支（本地 + 远端），best-effort
+  git branch -D "$BACKUP_BRANCH" 2>/dev/null || true
+  timeout 30 git push --quiet origin --delete "$BACKUP_BRANCH" 2>/dev/null || true
+  # 建新备份分支
   git branch "$BACKUP_BRANCH" 2>/dev/null || true
-  # 推备份分支到远端（best-effort，超时 30s，失败不阻塞）
-  timeout 30 git push --quiet origin "$BACKUP_BRANCH" 2>/dev/null || \
+  # 推备份分支到远端（force 覆盖，best-effort，超时 30s，失败不阻塞）
+  timeout 30 git push --quiet --force origin "$BACKUP_BRANCH" 2>/dev/null || \
     log "WARNING: 备份分支推远端失败或超时（非阻断，不影响发布）"
 fi
 

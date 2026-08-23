@@ -143,7 +143,7 @@ tools:
        --skill-name {name} --skill-dir {skill_dir} --version {version}
      ```
      脚本输出 JSON：{"PUSHED":1/0, "BACKUP_BRANCH":"", "TARGET_URL":"", "MESSAGE":""}；一个平台失败不中断其他平台
-6. 脚本内置安全备份：目录已存在时自动建 backup/pre-sync-{timestamp} 分支并推远端（无需手动执行）。备份分支推送失败不阻断主流程——发布结果不受影响
+6. 脚本内置安全备份：目录已存在且内容不同时自动建 `backup/pre-sync-{skill_name}` 分支并推远端（用 skill name 命名，覆盖旧备份，每个 skill 只保留 1 个备份分支）。内容一致时跳过，不建备份。备份分支推送失败不阻断主流程——发布结果不受影响
 7. 校验: SHA256 逐字节比对 + 平台 API 确认状态；ClawHub 校验时从 GET /api/v1/skills/{slug} 返回的 `owner.handle` 拼接页面 URL（`https://clawhub.ai/{owner.handle}/skills/{slug}`）
 8. 目标仓库解析（GitHub/GitCode）:
    - 默认读 $GITCODE_PUBLISH_REPO / $GITHUB_PUBLISH_REPO（格式 namespace/repo）
@@ -212,7 +212,7 @@ curl -s --max-time 30 -X POST \
        --action unpublish --platform gitcode \
        --skill-name {name} --issue-num {issue_number}
      ```
-     目录不存在时脚本输出 JSON {"PUSHED":0, "MESSAGE":"无需下架"}（非失败）；脚本内置 backup/pre-delist-{timestamp} 备份分支
+     目录不存在时脚本输出 JSON {"PUSHED":0, "MESSAGE":"无需下架"}（非失败）；脚本内置 `backup/pre-delist-{skill_name}` 备份分支（覆盖旧备份，只保留 1 个）
 3. 执行后校验平台状态，汇总回复（同发布结果表格格式）
 
 ## ClawHub payload 契约（已验证，协议存档）
