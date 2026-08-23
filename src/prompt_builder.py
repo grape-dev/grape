@@ -483,6 +483,30 @@ context 是传给下一个 Agent 的接力说明，应包含：
 ⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
 """)
 
+    # 角色特定的 A2A 交办规则（按 agent_type 注入，指引何时 A2A 给哪个 Agent）
+    _a2a_role_rules = {
+        "qa": (
+            "\n### QA Agent A2A 交办规则\n"
+            "PR 审查完成后，根据审查结果决定 A2A 目标：\n"
+            "- 审查通过（无 Critical/Required 问题）且 PR 已合并 → A2A 给 `sre`，context 写明「部署」+ PR 编号 + 合并摘要\n"
+            "- 审查通过但 PR 未合并 → 不 A2A，在评论中建议维护者合并\n"
+            "- 审查不通过（有 Critical/Required 问题）→ A2A 给 `coding`，context 写明问题清单和修复建议\n"
+            "⚠️ 审查通过+PR合并后必须 A2A 给 `sre` 触发部署，不要输出「无需 A2A 交办」。\n"
+            "⚠️ A2A 给 `sre` 时**不传 `pr_number`**（避免触发订阅去重导致 SRE 任务被跳过），在 context 中写明 PR 编号和合并摘要即可。\n"
+        ),
+        "issue": (
+            "\n### Issue Agent A2A 交办规则\n"
+            "需求澄清完成后，根据 Issue 标签决定 A2A 目标：\n"
+            "- 标签含 `sre-deploy` 或需求涉及创建/部署云资源 → A2A 给 `sre`，context 写明「部署」+ 资源规格\n"
+            "- 标签含 `sre-release` 或需求涉及释放/销毁/回收云资源 → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\n"
+            "- 标签含 `feature`/`bug` → A2A 给 `coding`\n"
+            "A2A 时 `pr_number` 仅在当前任务有直接关联的 PR（如 PR 审查后交办）时传入。纯部署/资源释放类请求不传 `pr_number`，否则会触发订阅去重导致 SRE 任务被跳过。\n"
+        ),
+    }
+    _role_rule = _a2a_role_rules.get(agent_type, "")
+    if _role_rule:
+        parts.append(_role_rule)
+
     # M1 结构化产出契约（所有 skill 生效，一处维护，见 agent-runtime-event-full-design.md §8）
     parts.append("""
 ## 处理记录输出要求
