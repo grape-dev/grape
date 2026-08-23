@@ -189,6 +189,7 @@ function _detailHtml(t) {
     <div class="tsk-det-desc">${t.task_description || '暂无任务描述。'}</div>
     <div class="tsk-det-actions">
       <button class="tsk-btn tsk-btn-ghost" onclick="window.open('https://gitcode.com/${t.repo_key}/issues/${t.issue_number}','_blank')">查看 Issue ↗</button>
+      <button class="tsk-btn tsk-btn-ghost" onclick="openTaskConversation(window._tasksById[${t.id}])">去对话 ↗</button>
     </div>`;
 }
 
