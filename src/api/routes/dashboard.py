@@ -109,9 +109,30 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         if s in event_counts:
             event_counts[s] += 1
 
+    # 获取当前场景和场景列表
+    dev_scene = "default"
+    try:
+        with db_lock:
+            c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            if row and row[0]:
+                dev_scene = row[0]
+    except Exception:
+        pass
+
+    scenes = []
+    try:
+        from src.api.routes.scenes import _load_scenes
+        for sid, s in _load_scenes().items():
+            scenes.append({"id": sid, "name": s.get("name", sid)})
+    except Exception:
+        pass
+
     return {
         "repo": repo_key,
         "role": role,
+        "dev_scene": dev_scene,
+        "_scenes": scenes,
         "metrics": {
             "total_events": len(recent_events),
             "active_agents": sum(1 for a in agent_sessions if a["status"] == "running"),
