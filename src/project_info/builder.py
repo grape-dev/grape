@@ -270,13 +270,31 @@ def build_project_info(repo_key: str, token: str = "") -> dict:
 
 
 def should_refresh(repo_key: str) -> bool:
-    """更新条件：文件缺失 / 超 7 天 / degraded 标记（且 codegraph 现在可用）。"""
+    """更新条件：文件缺失 / commit 变化 / 超 7 天 / degraded 标记（且 codegraph 现在可用）。"""
     meta = _read_meta(repo_key)
     pi = _pi_dir(repo_key)
     if not os.path.isfile(os.path.join(pi, _GRAPH_FILE)) or not os.path.isfile(os.path.join(pi, _CAP_FILE)):
         return True
     if meta.get("degraded") and _codegraph_available():
         return True
+    # 检查远程 commit 是否变化（比 7 天过期更及时）
+    last_sha = meta.get("last_commit_sha", "")
+    if last_sha:
+        try:
+            import urllib.request, json as _json
+            from src.user.db import get_gitcode_token
+            from src.repo_key import split_owner_repo
+            tok = get_gitcode_token(repo_key=repo_key) or ""
+            if tok:
+                owner, rname = split_owner_repo(repo_key)
+                req = urllib.request.Request(
+                    f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                    headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
+                commits = _json.load(urllib.request.urlopen(req, timeout=20))
+                if commits and commits[0].get("sha", "") != last_sha:
+                    return True
+        except Exception:
+            pass
     last = meta.get("last_updated", "")
     if last:
         try:
