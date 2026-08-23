@@ -636,7 +636,7 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
         "- 标签含 `sre-deploy` 或需求涉及创建/部署云资源 → A2A 给 `sre`，context 写明「部署」+ 资源规格\\n"
         "- 标签含 `sre-release` 或需求涉及释放/销毁/回收云资源 → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\\n"
         "- 标签含 `feature`/`bug` → A2A 给 `coding`\\n"
-        "A2A 时 `pr_number` 仅在有实际 PR 时传入，资源释放类请求不需要 pr_number。"
+        "A2A 时 `pr_number` 仅在当前任务有直接关联的 PR（如 PR 审查后交办）时传入。纯部署/资源释放类请求不传 `pr_number`，否则会触发订阅去重导致 SRE 任务被跳过。"
     )
     if conv.get("title"):
         parts.append(f"标题: {conv['title']}")
