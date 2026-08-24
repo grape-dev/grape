@@ -131,6 +131,13 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
     # 生命周期阶段（issue_state.stage）：vod/issue/coding/qa/sre/done；无记录默认 vod
     stage = (_st.get("stage") if _st else "") or "vod"
 
+    # 总执行时长：所有已完成事件的 duration 之和
+    total_duration = 0.0
+    for e in issue_events:
+        d = e.get("duration")
+        if d and isinstance(d, (int, float)):
+            total_duration += d
+
     return {
         "issue_id": issue_id,
         "title": title,
@@ -141,6 +148,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         "agents": involved_agents,
         "current_owner": current_owner,
         "event_count": len(issue_events),
+        "duration": round(total_duration, 1) if total_duration > 0 else None,
     }
 
 
@@ -169,7 +177,7 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, created_at, actor, payload FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
+                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, created_at, actor, payload, duration FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
                 (repo_key,)
             )
             rows = c.fetchall()
@@ -178,7 +186,8 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
 
     events = [
         {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
-         "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": r[9] or ""}
+         "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": r[9] or "",
+         "duration": r[10]}
         for r in rows
     ]
 

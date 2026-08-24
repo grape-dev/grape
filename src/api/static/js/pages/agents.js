@@ -1,10 +1,27 @@
 let _agentCfgVisible = false;
+let _skillScope = 'official';
 
-function toggleAgentCfg() {
-  _agentCfgVisible = !_agentCfgVisible;
+function _switchSkillScope(scope) {
+  _skillScope = scope;
+  loadCfgOptions();
+}
+
+function toggleAgentCfg(showCfg) {
+  // showCfg=true → Configure 视图（蓝），false → Events 视图（蓝）
+  if (showCfg === undefined) showCfg = !_agentCfgVisible;
+  _agentCfgVisible = showCfg;
   const p = document.getElementById('agentCfgPanel');
-  if (p) p.classList.toggle('hidden');
-  if (_agentCfgVisible) loadCfgOptions();
+  if (p) p.classList.toggle('hidden', !showCfg);
+  const btnCfg = document.getElementById('btnConfigure');
+  const btnEvt = document.getElementById('btnEvents');
+  if (showCfg) {
+    loadCfgOptions();
+    if (btnCfg) btnCfg.className = 'bt bt-p bt-s';
+    if (btnEvt) btnEvt.className = 'bt bt-o bt-s';
+  } else {
+    if (btnCfg) btnCfg.className = 'bt bt-o bt-s';
+    if (btnEvt) btnEvt.className = 'bt bt-p bt-s';
+  }
 }
 
 // ===== Backend Engines 下拉多选（引擎池，agent-cluster-design.md §4.1）=====
@@ -117,33 +134,35 @@ function loadCfgOptions() {
     });
   }
 
-  // Skill 下拉：仅未加载时加载（幂等），预加载后点 Configure 不再重复请求
-  if (skillSelect && !skillSelect.dataset.loaded) {
-    skillSelect.dataset.loaded = '1';
+  // Skill 下拉：按 scope 过滤加载
+  if (skillSelect) {
     let repo = '';
     try {
       const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
       repo = c ? (c.fullName || '') : '';
     } catch {}
-    const qs = repo ? '?repo=' + encodeURIComponent(repo) : '';
+    const scope = _skillScope || 'official';
+    let qs = '?scope=' + scope;
+    if (repo) qs += '&repo=' + encodeURIComponent(repo);
     API.get('/skills' + qs).then(d => {
       const allSkills = d.skills || [];
       const agentType = skillSelect.dataset.agent || '';
-      const currentSkill = skillSelect.dataset.current || '';
-      const currentScope = skillSelect.dataset.scope || '';
+      const currentSkillId = skillSelect.dataset.skillId || '0';
       const filtered = allSkills.filter(s => s.agent_type === agentType || s.parent_agent_type === agentType);
-      // 若当前配置的 skill 不在返回列表（如自定义 skill），保留该值作为一个 option
-      const hasCurrent = filtered.some(s => s.name === currentSkill);
-      const scopeLabel = sc => sc === 'official' ? '官方' : sc === 'repo' ? '仓库' : '个人';
-      let html = '<option value="">默认官方技能（自动）</option>' +
-        filtered.map(s =>
-          `<option value="${s.scope}:${s.name}" ${(currentScope + ':' + currentSkill) === (s.scope + ':' + s.name) ? 'selected' : ''}>${s.display_name || s.name} (${scopeLabel(s.scope)})</option>`
-        ).join('');
-      if (currentSkill && !hasCurrent) {
-        html += `<option value="${currentSkill}" selected>${currentSkill}（已配置）</option>`;
+      // 当前配置的 skill 在当前 scope 里 → 选中它；否则默认选第一个
+      const matchCurrent = filtered.find(s => String(s.id) === currentSkillId);
+      // "默认官方技能（自动）"仅在全局 scope 下显示
+      const defaultOpt = scope === 'official' ? '<option value="0">默认官方技能（自动）</option>' : '';
+      let html = defaultOpt +
+        filtered.map((s, i) => {
+          const selected = matchCurrent ? (String(s.id) === currentSkillId) : (i === 0);
+          return `<option value="${s.id}" ${selected ? 'selected' : ''}>${s.display_name || s.name}</option>`;
+        }).join('');
+      // 项目/个人 scope 下无 skill → 显示空提示
+      if (filtered.length === 0) {
+        html = `<option value="0" disabled>${scope === 'repo' ? '该仓库暂无项目技能' : '暂无个人技能'}</option>`;
       }
       skillSelect.innerHTML = html;
-      skillSelect.dataset.currentScope = currentScope || '';
     }).catch(() => {});
   }
 }
@@ -155,19 +174,39 @@ function renderAgent(name, data) {
   const m = data.metrics || {};
   const es = m.event_stats || {};
   const events = data.recent_events || [];
-  const evtHtml = events.length > 0 ? events.map(ev =>
-    `<div class="ai" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
-      <div class="t">${fmtLocalTime(ev.created_at).substring(5,16) || '--:--'}</div>
-      <div class="ac">${ev.summary || ev.title || ev.event_type}
-        ${ev.actor ? ` <span class="ts t2">@${ev.actor}</span>` : ''}
-        <span class="ts t3">Seq #${ev.seq || '?'}</span>
-        ${ev.issue_id ? ` <span class="tg tg-d">${ev.issue_id}</span>` : ''}
-        ${ev.duration ? ` <span class="ts t3">${ev.duration}s</span>` : ''}
-        ${ev.backend ? ` <span class="tg tg-d">${ev.backend}</span>` : ''}
-        <span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}">${ev.status}</span>
-      </div>
-    </div>`
-  ).join('') : '<div class="tx t2">暂无事件</div>';
+  const evtHtml = events.length > 0 ? `
+    <table style="width:100%;font-size:12px;table-layout:fixed">
+      <thead><tr>
+        <th style="width:60px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Seq</th>
+        <th style="width:130px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">时间</th>
+        <th style="width:auto;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">内容</th>
+        <th style="width:75px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Issue</th>
+        <th style="width:85px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Actor</th>
+        <th style="width:60px;text-align:center;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">耗时</th>
+        <th style="width:160px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">引擎</th>
+        <th style="width:70px;text-align:right;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">状态</th>
+      </tr></thead>
+      <tbody>
+        ${events.map(ev => {
+          const _issNum = String(ev.issue_id || '').replace(/^#/, '');
+          const _repoKey = (ev.repo_key || '').replace(/^gitcode:/, '');
+          const _repoParts = _repoKey.split('/');
+          const _issLink = (_issNum && _repoParts.length === 2)
+            ? `<a href="https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issNum}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">${ev.issue_id}</a>`
+            : ev.issue_id || '—';
+          return `<tr class="pipe-row" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
+          <td style="padding:8px 10px;font-size:11px;font-weight:600;color:var(--t2)">#${ev.seq || '?'}</td>
+          <td style="padding:8px 10px;white-space:nowrap;font-size:10px;color:var(--t3)">${fmtLocalTime(ev.created_at).substring(5,16) || '--:--'}</td>
+          <td style="padding:8px 10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${ev.summary || ev.title || ev.event_type}</td>
+          <td style="padding:8px 10px;font-size:11px">${_issLink}</td>
+          <td style="padding:8px 10px;font-size:10px;color:var(--t2)">${ev.actor ? '@'+ev.actor : '—'}</td>
+          <td style="padding:8px 10px;text-align:center;font-size:10px;color:var(--t3)">${ev.duration ? ev.duration + 's' : '—'}</td>
+          <td style="padding:8px 10px;font-size:10px;color:var(--t3);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-clamp:2;word-break:break-all">${ev.backend || '—'}</td>
+          <td style="padding:8px 10px;text-align:right"><span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}" style="font-size:10px;font-weight:600">${ev.status}</span></td>
+        </tr>`;
+        }).join('')}
+      </tbody>
+    </table>` : '<div class="tx t2" style="padding:12px 0">暂无事件</div>';
 
   const ef = es.completed || 0;
   const er = es.running || 0;
@@ -183,7 +222,7 @@ function renderAgent(name, data) {
   <div class="flex fc gap12">
     <div style="width:44px;height:44px;border-radius:10px;background:${meta.color || 'var(--b)'}22;display:flex;align-items:center;justify-content:center;font-size:20px">${meta.icon || '?'}</div>
     <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${meta.display_name || name}</h2><div class="ts t2">${meta.description || ''}</div>${engineBadge}</div>
-    <div class="flex gap6"><button class="bt bt-o bt-s" onclick="toggleAgentCfg()">Configure</button><button class="bt bt-p bt-s">Events</button></div>
+    <div class="flex gap6"><button id="btnConfigure" class="bt bt-o bt-s" onclick="toggleAgentCfg(true)">Configure</button><button id="btnEvents" class="bt bt-p bt-s" onclick="toggleAgentCfg(false)">Events</button></div>
   </div>
 </div>
 <div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">
@@ -198,10 +237,17 @@ function renderAgent(name, data) {
       </div>
     </div>
   </div>
-    <div class="srow"><label>Skill</label>
-    <select class="cfg-skill" data-agent="${name}" data-current="${(data.skill || '')}" data-scope="${(data.skill_scope || '')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
-      <option value="${data.skill || ''}" ${data.skill ? 'selected' : ''}>${data.skill ? '加载中...' : '默认官方技能（自动）'}</option>
+    <div class="srow" style="align-items:flex-start"><label>Skill</label>
+    <div style="flex:1;display:flex;gap:8px">
+      <select class="cfg-skill-scope" onchange="_switchSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:7px 6px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--bg);outline:none">
+        <option value="official">全局</option>
+        <option value="repo">项目</option>
+        <option value="user">个人</option>
+      </select>
+      <select class="cfg-skill" data-agent="${name}" data-skill-id="${(data.skill_id || 0)}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
+      <option value="0" ${!data.skill_id ? 'selected' : ''}>${data.skill ? '加载中...' : '默认官方技能（自动）'}</option>
     </select>
+    </div>
   </div>
   ${name === 'sre' ? _agentSubsSection(name, data) : ''}
   ${name === 'vod' ? `
@@ -219,7 +265,7 @@ function renderAgent(name, data) {
       ${data.im.conversations.map(c => `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--b)">${c.chat_name || c.chat_id} <span class="ts t3">${c.status}</span></div>`).join('')}
     </div>` : ''}
   </div>` : ''}
-  <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg()">Cancel</button></div>
+  <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg(false)">Cancel</button></div>
   <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
     <div class="ts t3" style="margin-bottom:6px">清空会话后，下一次事件将创建全新的 Agent 上下文（不延续历史对话）。</div>
     <button class="bt bt-r bt-s" onclick="cleanAgentSession('${name}')">🧹 Clean Session</button>
@@ -233,6 +279,10 @@ function renderAgent(name, data) {
 <div class="cd"><div class="cd-h"><h2>Event History</h2><span class="ts t3">最近 ${events.length} 条</span></div>${evtHtml}</div>`;
 
   el.innerHTML = html;
+  // 根据已配置 skill 的 scope 设置初始页签（避免回显时看不到已配置的 skill）
+  _skillScope = (data.skill_scope === 'repo') ? 'repo' : (data.skill_scope === 'user') ? 'user' : 'official';
+  const scopeSel = document.querySelector('.cfg-skill-scope');
+  if (scopeSel) scopeSel.value = _skillScope;
   // 预加载配置下拉（即使面板隐藏），确保首次打开 Configure 立即显示 skill/backend，不显示"加载中..."
   loadCfgOptions();
   // 点击面板外部关闭引擎下拉（只注册一次）
@@ -265,18 +315,16 @@ function _agentSubsSection(name, data) {
 
 function saveAgentConfig(name) {
   const backends = Array.from(document.querySelectorAll('.cfg-backend-cb:checked')).map(cb => cb.value);
-  const skillVal = document.querySelector('.cfg-skill')?.value || '';
-  let skill = skillVal, skillScope = '';
-  if (skillVal.indexOf(':') > 0) {
-    const _sp = skillVal.indexOf(':');
-    skillScope = skillVal.slice(0, _sp);
-    skill = skillVal.slice(_sp + 1);
+  const skillVal = document.querySelector('.cfg-skill')?.value || '0';
+  const skillId = parseInt(skillVal) || 0;
+  // 项目/个人 scope 下不允许保存空值（无"默认技能"选项）
+  if (_skillScope !== 'official' && !skillId) {
+    if (app && app.showToast) app.showToast('请选择技能');
+    return;
   }
   const repo = app.currentRepo();
   if (!repo) return;
-  // 引擎池：始终显式提交 backends（数组；全不勾选 = 清空池，走默认引擎兜底）
-  const body = {backends, skill};
-  if (skillScope) body.skill_scope = skillScope;
+  const body = {backends, skill_id: skillId};
   // 事件订阅：PR 合入（勾选）+ 合入分支（逗号分隔，留空=不限）；仅 SRE Agent 开放
   const subEvents = [];
   if (name === 'sre') {
@@ -295,7 +343,7 @@ function saveAgentConfig(name) {
   }
   API.put('/agents/' + name + '/' + repo.owner + '/' + repo.name, body).then(r => {
     app.showToast('配置已保存');
-    toggleAgentCfg();
+    toggleAgentCfg(false);
   }).catch(e => app.showToast('保存失败: ' + e.message));
 }
 

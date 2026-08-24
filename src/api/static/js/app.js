@@ -279,6 +279,10 @@ function loadAgentTypes() {
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
       API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+    } else if (view === 'skill-sub') {
+      // 技能包子技能详情（如 "38/huawei-ecs"）
+      title.textContent = 'Sub Skill Detail';
+      API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     }
   }
 
@@ -397,6 +401,34 @@ function loadAgentTypes() {
     else { showLogin(); }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile};
+  // ── Theme Management (Apple Developer Theme) ──
+  // Theme: 'default' | 'apple'  Mode: 'light' | 'auto' (dark adapt)
+  function getTheme() { return localStorage.getItem('grapeTheme') || 'default'; }
+  function getThemeMode() { return localStorage.getItem('grapeThemeMode') || 'light'; }
+
+  function setTheme(theme) {
+    localStorage.setItem('grapeTheme', theme);
+    const html = document.documentElement;
+    if (theme === 'apple') {
+      html.setAttribute('data-theme', 'apple');
+      // re-apply mode so dark-auto picks up
+      setThemeMode(getThemeMode());
+    } else {
+      html.removeAttribute('data-theme');
+      html.removeAttribute('data-theme-mode');
+    }
+    // dispatch event so pages can react if needed
+    window.dispatchEvent(new CustomEvent('themechange', {detail: {theme}}));
+  }
+
+  function setThemeMode(mode) {
+    localStorage.setItem('grapeThemeMode', mode);
+    const html = document.documentElement;
+    if (getTheme() === 'apple') {
+      html.setAttribute('data-theme-mode', mode);
+    }
+  }
+
+  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());

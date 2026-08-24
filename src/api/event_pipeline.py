@@ -1,6 +1,6 @@
 """事件处理管道：归一化 → 路由 → 存储 → Agent 执行"""
 import json, os, time, uuid, threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
 from src.config import log, WORKSPACE_DIR
 from src.vcs.adapter import normalize_event, get_event_header
@@ -13,11 +13,130 @@ _DIRECT_POOL = ThreadPoolExecutor(
     max_workers=int(os.environ.get("RUNTIME_MAX_CONCURRENT_TASKS", "20")),
     thread_name_prefix="ag-direct",
 )
+# {event_seq: Future} — 供 sweeper 取消排队中的 direct 任务
+_DIRECT_FUTURES: dict[int, Future] = {}
+_DIRECT_FUTURES_LOCK = threading.Lock()
 
 
 def start_direct_agent(fn, args, name=""):
     """提交一个本机 direct 执行任务到有界池（webhook / run_pipeline 共用）。"""
-    _DIRECT_POOL.submit(fn, *args)
+    future = _DIRECT_POOL.submit(fn, *args)
+    # 从 args 中提取 seq（约定第一个参数是 repo_key，第二个是 seq）
+    seq = args[1] if len(args) > 1 else 0
+    if seq:
+        with _DIRECT_FUTURES_LOCK:
+            _DIRECT_FUTURES[seq] = future
+    return future
+
+
+def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
+                        skill_path, engine_id, evt, issue_id="", skill_id=0):
+    """direct 执行前创建 agent_tasks + 设 started_at，防 sweeper 误杀。"""
+    from src.runtime.service import _TASK_COLUMNS_LIST
+    from src.api.session_store import get_or_create_agent_session
+    from src.api.event_store import update_event_config
+    from src.runtime.instances import runtime_instance_name
+    from datetime import datetime, timezone
+
+    inst_name = runtime_instance_name(engine_id) or backend or ""
+    now = datetime.now(timezone.utc).isoformat()
+
+    # 先设 started_at/runtime/skill，让 sweeper 的 no_start 检查跳过
+    update_event_config(seq, inst_name, skill_name, now)
+
+    # 查 agent_session_id
+    session = get_or_create_agent_session(repo_key, agent_type, backend or "")
+    agent_session_id = session.get("id", "")
+    if not agent_session_id:
+        log.warning(f"create_direct_task: no agent_session_id for {repo_key}/{agent_type}")
+        return ""
+
+    task_id = "t_" + uuid.uuid4().hex[:12]
+    # issue_id 优先用传参，兜底从 evt 解析
+    if not issue_id:
+        issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
+    from src.repo_key import from_repo_key
+
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"INSERT INTO agent_tasks ({','.join(_TASK_COLUMNS_LIST)}) VALUES "
+                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
+                (task_id, agent_session_id, engine_id, seq, issue_id, repo_key or "",
+                 agent_type or "", skill_name or "", skill_id or 0,
+                 "", "", "", "", "", 0, "", "{}",
+                 "{}", "", "", "{}", "{}", "{}", 0, "", 0,
+                 "queued", None, "", "", "", "{}", now, None, now)
+            )
+            db.commit()
+        log.info(f"Direct task created: {task_id} seq={seq} engine={engine_id}({inst_name}) skill={skill_name}")
+    except Exception as e:
+        log.warning(f"create_direct_task failed for seq={seq}: {e}")
+        return ""
+    return task_id
+
+
+def _update_direct_task(seq, status, exit_code=0, result_text=""):
+    """direct 执行完成后更新 agent_tasks 状态（通过 event_seq 反查）。"""
+    try:
+        from datetime import datetime, timezone
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE agent_tasks SET status=?, exit_code=?, result_text=?, completed_at=? "
+                "WHERE event_seq=? AND status='queued'",
+                (status, exit_code, result_text or "", datetime.now(timezone.utc).isoformat(), seq)
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"update_direct_task failed for seq={seq}: {e}")
+
+
+def cancel_direct_task(seq: int) -> bool:
+    """取消排队/运行中的 direct 任务。Future 在队列中 → cancel；
+    已在运行 → 杀掉对应的 opencode/hermes/codearts 子进程。"""
+    cancelled = False
+    with _DIRECT_FUTURES_LOCK:
+        future = _DIRECT_FUTURES.pop(seq, None)
+    if future is not None:
+        if not future.done():
+            cancelled = future.cancel()
+            if cancelled:
+                log.info(f"cancel_direct_task: seq={seq} removed from thread pool queue")
+            else:
+                # Future 已在运行中 → 杀掉对应子进程（按 seq 查 task 的 cwd + engine）
+                log.info(f"cancel_direct_task: seq={seq} running, killing engine subprocess")
+                try:
+                    from src.session_manager import db, db_lock
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("SELECT id, runtime_id, cwd, agent_type FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (seq,))
+                        tr = c.fetchone()
+                    if tr:
+                        _task = {"id": tr[0], "runtime_id": tr[1], "cwd": tr[2], "agent_type": tr[3]}
+                        # 推断 backend
+                        _backend = "opencode"
+                        try:
+                            with db_lock:
+                                c2 = db.cursor()
+                                c2.execute("SELECT name FROM agent_runtimes WHERE id=?", (tr[1],))
+                                rn = c2.fetchone()
+                            if rn and "hermes" in (rn[0] or "").lower():
+                                _backend = "hermes"
+                            elif rn and "codearts" in (rn[0] or "").lower():
+                                _backend = "codearts"
+                        except Exception:
+                            pass
+                        from src.runtime.agent import _kill_stale_engine
+                        _kill_stale_engine(_task, _backend)
+                        cancelled = True
+                except Exception as e:
+                    log.warning(f"cancel_direct_task: kill process failed for seq={seq}: {e}")
+        else:
+            # Future 已完成，清理
+            cancelled = True
+    return cancelled
 
 
 def get_agent_display_name(agent_type: str) -> str:
@@ -180,7 +299,6 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
         return stage  # coding/qa/sre → 对应执行 Agent
 
 
-
 def resolve_actor(payload: dict, evt: dict) -> str:
     """从 payload 提取执行者"""
     actor = evt.get("actor", "")
@@ -288,6 +406,13 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                 with open(_mapping_path, "r", encoding="utf-8") as _f:
                     _defaults = _json.load(_f)
                 _scene = _defaults.get("scenes", {}).get("default", {})
+                # 读仓库开发场景（managed_repos.dev_scene），按场景读映射
+                try:
+                    from src.user.db import get_repo_scene
+                    _scene_id = get_repo_scene(repo_key) or "default"
+                    _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
+                except Exception:
+                    pass
                 _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
                 skill_name = _mapping.get(agent_type, "")
             if not skill_name:
@@ -321,8 +446,12 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         _be = engine_name(engine_id) or backend
         kind = runtime_execution_kind(engine_id)
         if kind == EXEC_MODE_DIRECT:
+            evt["_skill_path"] = skill_path
+            evt["_skill_id"] = skill_id
+            _direct_tid = _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
+                                skill_path, engine_id, evt, issue_id, skill_id=skill_id)
             start_direct_agent(_execute_agent, (
-                repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
+                repo_key, seq, agent_type, _be, skill_name, evt, engine_id, _direct_tid,
             ), name=f"sub-{agent_type}-{seq}")
         else:
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
@@ -440,6 +569,41 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             set_issue_stage(repo_key, _rid2, "vod", "vod")
             log.info(f"Pipeline: issue_state init vod for {_rid2}")
 
+    # 3.2 任务中心全覆盖（task-center-issue-coverage-design.md §3-A）：
+    # Issue 事件幂等建档；closed 动作自动完成对应任务（P5 webhook 兜底）。
+    # 旁路：失败仅告警，不阻塞事件处理。
+    try:
+        from src.api.routes.tasks import ensure_issue_task, close_issue_tasks
+        _iid3 = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "") or ""
+        if _iid3:
+            _num3 = str(_iid3).lstrip("#")
+            if _num3.isdigit() and int(_num3) > 0:
+                _p3 = evt.get("payload", {}) or {}
+                _o3 = _p3.get("object_attributes", {}) or {}
+                _act3 = str(_o3.get("action", "") or "").lower()
+                _closed = _act3 in ("close", "closed") or str(_o3.get("state", "") or "").lower() == "closed"
+                if _closed:
+                    _n3 = close_issue_tasks(repo_key, int(_num3))
+                    log.info(f"Pipeline: issue closed -> complete tasks #{_num3} ({_n3} rows)")
+                elif event_type in ISSUE_EVENT_TYPES:
+                    _asg3 = ""
+                    try:
+                        _al3 = _p3.get("assignees") or []
+                        if isinstance(_al3, list) and _al3 and isinstance(_al3[0], dict):
+                            _asg3 = _al3[0].get("username") or _al3[0].get("login") or ""
+                    except Exception:
+                        pass
+                    if not _asg3:
+                        try:
+                            _asg3 = _fetch_issue_assignee(repo_key, _iid3) or ""
+                        except Exception:
+                            pass
+                    _t3 = str(_o3.get("title", "") or "") if isinstance(_o3, dict) else ""
+                    ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3, event_type=event_type)
+                    log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or '(owner)'}")
+    except Exception as _e:
+        log.warning(f"Pipeline: task-center sync failed: {_e}")
+
     # 3.3 Agent 启用检查（阶段路由后的最终 agent）
     from src.api.session_store import is_agent_enabled
     if not is_agent_enabled(repo_key, agent_type):
@@ -489,6 +653,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 with open(_defaults_path, "r", encoding="utf-8") as _f:
                     _defaults = json.load(_f)
                 _scene = _defaults.get("scenes", {}).get("default", {})
+                # 读仓库开发场景（managed_repos.dev_scene），按场景读映射——skill-dev 仓库回退到 skill-creator 而非 implementation
+                try:
+                    from src.user.db import get_repo_scene
+                    _scene_id = get_repo_scene(repo_key) or "default"
+                    _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
+                except Exception:
+                    pass
                 _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
                 _default_skill = _mapping.get(agent_type, "")
                 if _default_skill:
@@ -609,8 +780,12 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                                skill_id, skill_path, engine_id, issue_id)
     elif _be and skill_name and seq > 0:
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
+        evt["_skill_id"] = skill_id
+        # 先创建 agent_tasks + 设 started_at，防 sweeper 在排队期间误杀
+        _direct_tid = _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
+                            skill_path, engine_id, evt, issue_id, skill_id=skill_id)
         start_direct_agent(_execute_agent, (
-            repo_key, seq, agent_type, _be, skill_name, evt, engine_id,
+            repo_key, seq, agent_type, _be, skill_name, evt, engine_id, _direct_tid,
         ), name=f"ag-{agent_type}-{seq}")
         log.info(f"Pipeline: started agent execution, seq={seq}, repo={repo_key}, agent={agent_type}")
 
@@ -748,6 +923,28 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
 
     env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
     _inject_cloud_credentials(env_extra, repo_key)
+    # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
+    if agent_type == "sre":
+        # v4.5：评论指定仓库（「到 owner/repo」/「to owner/repo」）覆盖默认目标
+        _apply_comment_repo_override(env_extra, evt)
+    # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
+    if agent_type == "coding":
+        try:
+            from src.session_manager import db, db_lock
+            from src.repo_key import to_repo_key
+            _rk = to_repo_key(repo_key)
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
+                row = c.fetchone()
+                _bot_name = row[0] if row else ""
+            if not _bot_name:
+                from src.repo_key import split_owner_repo
+                _o, _r = split_owner_repo(repo_key)
+                _bot_name = _o
+            env_extra["BOT_USERNAME"] = _bot_name
+        except Exception:
+            pass
     _issue_num = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
     if _issue_num:
         env_extra["ISSUE_NUMBER"] = str(_issue_num).lstrip("#")
@@ -781,6 +978,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             repo_gitcode_token=repo_gitcode_token,
             env_extra=env_extra,
             skill_path=skill_path,
+            skill_id=skill_id,
         )
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
@@ -819,6 +1017,33 @@ def _inject_cloud_credentials(env_extra: dict, repo_key: str) -> dict:
     return env_extra
 
 
+def _apply_comment_repo_override(env_extra: dict, evt: dict) -> None:
+    """v4.5：评论里指定发布目标仓库（「同步到 signway/xxx」/「to owner/repo」）→ 覆盖默认。"""
+    import re
+    note = ""
+    payload = evt.get("payload") or {}
+    if isinstance(payload, dict):
+        note = str(payload.get("object_attributes", {}).get("note") or "")
+    if not note:
+        return
+    m = re.search(r"(?:到|同步到|push\s*到|to)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", note)
+    if m:
+        repo = m.group(1)
+        # 按平台覆盖（评论提到 github/gitcode 时精确覆盖；否则同时覆盖）
+        low = note.lower()
+        if "github" in low:
+            env_extra["GITHUB_PUBLISH_REPO"] = repo
+        if "gitcode" in low:
+            env_extra["GITCODE_PUBLISH_REPO"] = repo
+        if "github" not in low and "gitcode" not in low:
+            env_extra["GITCODE_PUBLISH_REPO"] = repo
+            env_extra["GITHUB_PUBLISH_REPO"] = repo
+    # v4.6：评论指定 ClawHub 组织发布者（「发布到组织 @my-org」/「owner: my-org」/「ownerHandle: xxx」）
+    mo = re.search(r"(?:组织\s*@|owner(?:handle)?\s*[:：]\s*@?)([A-Za-z0-9_.-]+)", note, re.IGNORECASE)
+    if mo:
+        env_extra["CLAWHUB_OWNER_HANDLE"] = mo.group(1)
+
+
 def get_prompt_context(repo_key: str) -> str:
     """构建 Prompt 用的 Issue 聚类上下文"""
     summary = get_issue_summary(repo_key)
@@ -828,8 +1053,38 @@ def get_prompt_context(repo_key: str) -> str:
 
 
 def _execute_agent(repo_key: str, seq: int, agent_type: str,
-                   backend: str, skill_name: str, evt: dict, runtime_id: int = 0):
-    """后台执行 Agent：构建 prompt → stream_agent → 更新 event（result/status/agent_log）"""
+                   backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
+                   task_id: str = ""):
+    """后台执行 Agent：构建 prompt → stream_agent → 更新 event（result/status/agent_log）
+    
+    顶层 try/except 兜底：防止线程内未捕获异常导致事件永久卡在 running
+    （如 runtime_instance_name / skill 加载 / stream_agent 启动前崩溃）。
+    """
+    try:
+        _execute_agent_inner(repo_key, seq, agent_type, backend, skill_name, evt, runtime_id, task_id)
+    except Exception as e:
+        import traceback
+        _tb = traceback.format_exc()
+        log.error(f"Exec agent: [Agent:{agent_type}|repo:{repo_key}] UNHANDLED CRASH: {e}\n{_tb}")
+        from datetime import datetime, timezone
+        try:
+            from src.api.event_store import update_event_complete
+            update_event_complete(seq, "failed", exit_code=1,
+                                  completed_at=datetime.now(timezone.utc).isoformat(),
+                                  result=f"执行崩溃：{e}")
+            _update_direct_task(seq, "failed", exit_code=1, result_text=f"执行崩溃：{e}")
+        except Exception:
+            pass
+    finally:
+        # 清理 Future 记录
+        with _DIRECT_FUTURES_LOCK:
+            _DIRECT_FUTURES.pop(seq, None)
+
+
+def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
+                         backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
+                         task_id: str = ""):
+    """_execute_agent 的实际逻辑（被顶层 try/except 包裹）。"""
     from src.runtime.executor import stream_agent
     from src.prompt_builder import build_prompt
     from src.api.event_store import (
@@ -895,12 +1150,40 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             prompt = prompt.replace("{{PROJECT_INFO_DIR}}", _pi_path)
         except Exception:
             pass
-        # 直接模式（direct）：技能路径占位符按真实 skill 目录替换
-        # （官方技能在 SKILLS_DIR 下，executor 会兜底替换；repo/个人技能用真实路径）
+        # 直接模式（direct）：技能路径占位符替换
+        # skill_id 优先：按主键查 skill 表拿 file_path / get_skill_path
+        # - file_path 非空（OBS 技能）→ 从 OBS 拉 zip 解压到 .skills/ → 替换 {{SKILL_DIR}}
+        # - file_path 空（本地技能）→ get_skill_path 返回绝对路径 → 替换 {{SKILL_DIR}}
+        # - 无 skill_id / stale → 回退老逻辑（_skill_path dirname 或 executor SKILLS_DIR 兜底）
         try:
-            _real_skill_dir = os.path.dirname(evt.get("_skill_path", "")) if evt.get("_skill_path") else ""
-            if _real_skill_dir:
-                prompt = prompt.replace("{{SKILL_DIR}}", _real_skill_dir)
+            from src.user.db import get_skill_by_id, get_skill_path
+            _skill_id = evt.get("_skill_id") or 0
+            if _skill_id:
+                _sk = get_skill_by_id(_skill_id)
+                if _sk:
+                    _okey = _sk.get("file_path") or ""
+                    if _okey:
+                        # OBS 技能：解压到 cwd/.skills/（zip 根 = {skill_name}/，落地 .skills/{skill_name}/SKILL.md）
+                        from src.storage import get_skill_zip_bytes
+                        _zip = get_skill_zip_bytes(_okey)
+                        if _zip:
+                            import zipfile as _zf, io as _io
+                            _skill_base = os.path.join(ws, ".skills")
+                            os.makedirs(_skill_base, exist_ok=True)
+                            with _zf.ZipFile(_io.BytesIO(_zip)) as zf:
+                                zf.extractall(_skill_base)
+                            prompt = prompt.replace("{{SKILL_DIR}}", _skill_base)
+                    else:
+                        # 本地技能：get_skill_path 返回 SKILLS_DIR/xxx/SKILL.md
+                        # dirname(dirname(...)) = SKILLS_DIR（prompt 拼成 SKILLS_DIR/xxx/SKILL.md）
+                        _full = get_skill_path(_skill_id)
+                        if _full and os.path.exists(_full):
+                            prompt = prompt.replace("{{SKILL_DIR}}", os.path.dirname(os.path.dirname(_full)))
+            else:
+                # 向后兼容：无 skill_id 时走老逻辑
+                _real_skill_dir = os.path.dirname(evt.get("_skill_path", "")) if evt.get("_skill_path") else ""
+                if _real_skill_dir:
+                    prompt = prompt.replace("{{SKILL_DIR}}", _real_skill_dir)
         except Exception:
             pass
         log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
@@ -928,6 +1211,29 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         "ACCOUNT": exec_account,
     }
     _inject_cloud_credentials(env_extra, repo_key)
+    # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
+    # （direct 模式同样需要——A2A 交办 sre 走本路径，见 _enqueue_pipeline_task 同款逻辑）
+    if agent_type == "sre":
+        # v4.5：评论指定仓库（「到 owner/repo」/「to owner/repo」）覆盖默认目标
+        _apply_comment_repo_override(env_extra, evt)
+    # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
+    if agent_type == "coding":
+        try:
+            from src.session_manager import db, db_lock
+            from src.repo_key import to_repo_key
+            _rk = to_repo_key(repo_key)
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
+                row = c.fetchone()
+                _bot_name = row[0] if row else ""
+            if not _bot_name:
+                from src.repo_key import split_owner_repo
+                _o, _r = split_owner_repo(repo_key)
+                _bot_name = _o
+            env_extra["BOT_USERNAME"] = _bot_name
+        except Exception:
+            pass
     # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT / ONBOARDING_TARGET）
     _ext = evt.get("_env_extra") or {}
     if isinstance(_ext, dict):
@@ -963,6 +1269,14 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             if repo_gitcode_token:
                 _msg = _msg.replace(repo_gitcode_token, "[REDACTED]")
             agent_logs.append({"time": datetime.utcnow().isoformat(), "type": evt_type, "msg": _msg})
+            # 实时推送：direct 模式复用 worker 的 report_messages（落库 task_messages + fanout SSE）
+            # 让前端「实时日志」面板在 hermes 执行期间就能看到逐步输出，不用等执行完成
+            if task_id and evt_type != "done":
+                try:
+                    from src.runtime.service import report_messages
+                    report_messages(task_id, [{"type": evt_type, "data": data}])
+                except Exception as _re:
+                    log.warning(f"direct report_messages failed (task={task_id}): {_re}")
             if evt_type == "done":
                 d = data
                 exit_code = d.get("exit_code", -1)
@@ -991,6 +1305,9 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             if issue_session_id:
                 from src.api.session_store import update_issue_session
                 update_issue_session(issue_session_id, runtime_session_id=new_oc_session_id)
+            # 本函数内其他分支有局部 import db_lock（1157 行）→ 会遮蔽模块级名；
+            # 此处必须局部重新绑定，否则 NameError（2026-08-20 修复 e7a93a5b 副作用）
+            from src.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
@@ -1015,6 +1332,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     if not has_output:
         # 无产出 → 标记 failed（保留 event，不删）
         log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no output, mark failed")
+        _update_direct_task(seq, "failed", exit_code=exit_code, result_text=result_text)
         update_event_status(seq, "failed")
         update_event_complete(seq, "failed", exit_code=exit_code, duration=duration,
                               agent_logs=agent_logs, completed_at=completed_at, result=result_text)
@@ -1022,7 +1340,175 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
 
     # 有产出 → 更新该 event（写入配置 + 结果 + 结论 + 执行日志）
     new_status = "completed" if exit_code == 0 else "failed"
+    _update_direct_task(seq, new_status, exit_code=exit_code, result_text=result_text)
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text)
     log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")
+
+    # 执行完成 → 自动回帖到 Issue（仅 sre 等有实质产出的 Agent，且有关联 Issue）
+    if new_status == "completed" and result_text and issue_id:
+        _issue_num = _issue_num_from(issue_id)
+        if _issue_num and repo_gitcode_token:
+            _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type)
+
+    # 执行完成 → 同步 agent 结果到任务会话（用户「去对话」可见 agent 澄清/报告）
+    # 独立于 _post_result_to_issue：agent 可能自己用 curl 发了 Issue 评论，
+    # 但 task conversation 仍需写入才能在 Chat 页展示。
+    if new_status == "completed" and result_text and issue_id:
+        _issue_num = _issue_num_from(issue_id)
+        if _issue_num:
+            try:
+                from src.repo_key import to_repo_key
+                from src.session_manager import db as _db, db_lock as _dl, add_message as _am
+                _rk = to_repo_key(repo_key)
+                with _dl:
+                    _c = _db.cursor()
+                    _c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+                               (_rk, _issue_num))
+                    _row = _c.fetchone()
+                if _row and _row[0]:
+                    _am(_row[0], "agent", f"[{agent_type.upper()} Agent] {result_text[:3000]}")
+                    log.info(f"Exec agent: synced result to task conversation {_row[0]} (issue #{_issue_num})")
+            except Exception as _e:
+                log.warning(f"Exec agent: sync to task conversation failed: {_e}")
+
+    # 执行完成 → 从 GitCode Issue 拉取 agent 发的评论，同步到任务会话
+    # （agent 通过技能 curl 直接在 Issue 上发的澄清追问等评论，上面 result_text 同步的是
+    #   结构化输出摘要，不含 Issue 上的实际评论内容；此处补拉 Issue 评论去重写入会话）
+    if new_status == "completed" and issue_id:
+        _issue_num = _issue_num_from(issue_id)
+        if _issue_num and repo_gitcode_token:
+            _sync_issue_comments_to_conversation(repo_key, _issue_num, repo_gitcode_token, agent_type, repository)
+
+
+def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_token: str, agent_type: str):
+    """Agent 执行完成后，将结果作为评论发回 GitCode Issue，并同步写入任务会话（去对话可见）。"""
+    if not repository or not issue_number or not bot_token:
+        return
+    try:
+        import urllib.request, json as _json
+        _comment = f"[{agent_type.upper()} Agent] {result_text[:3000]}"
+        _data = _json.dumps({"body": _comment}).encode("utf-8")
+        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
+        _req = urllib.request.Request(
+            _url, data=_data,
+            headers={
+                "Authorization": f"Bearer {bot_token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(_req, timeout=15)
+        log.info(f"Exec agent: posted result comment to {repository}/issues/{issue_number}")
+    except Exception as e:
+        log.warning(f"Exec agent: failed to post result comment: {e}")
+    # 同步写入任务会话：用户「去对话」时可见 agent 澄清/报告
+    try:
+        from src.repo_key import to_repo_key
+        from src.session_manager import db, db_lock, add_message
+        rk = to_repo_key(repository)
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+                      (rk, issue_number))
+            row = c.fetchone()
+        if row and row[0]:
+            add_message(row[0], "agent", f"[{agent_type.upper()} Agent] {result_text[:3000]}")
+            log.info(f"Exec agent: synced result to task conversation {row[0]}")
+    except Exception as e:
+        log.warning(f"Exec agent: sync to task conversation failed: {e}")
+
+
+def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token: str,
+                                         agent_type: str = "", repository: str = ""):
+    """从 GitCode Issue 拉取 agent 发的评论，去重后同步到任务会话。
+
+    VOD 等 agent 通过技能 curl 直接在 Issue 上发澄清追问评论，这些评论内容
+    不会出现在 result_text（结构化输出摘要）中。此函数补拉 Issue 上的实际评论，
+    与会话已有消息去重后写入，确保 Chat Agent「去对话」可见完整内容。
+
+    agent_type 为空时同步所有 agent 前缀评论（用于打开会话时全量补拉）。
+    """
+    import urllib.request
+    import re
+    import json as _json
+    try:
+        from src.repo_key import to_repo_key
+        from src.session_manager import db as _db, db_lock as _dl, add_message as _am, get_messages as _get_msgs
+    except Exception:
+        return
+
+    rk = to_repo_key(repo_key)
+
+    # 1) 查关联的 task conversation
+    try:
+        with _dl:
+            c = _db.cursor()
+            c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+                      (rk, issue_number))
+            row = c.fetchone()
+        if not row or not row[0]:
+            return
+        conv_id = row[0]
+    except Exception as e:
+        log.warning(f"Sync issue comments: find conversation failed: {e}")
+        return
+
+    # 2) 从 GitCode API 拉取 Issue 评论
+    try:
+        if not repository:
+            from src.repo_key import from_repo_key
+            repository = from_repo_key(rk)
+        api_url = f"https://api.gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
+        req = urllib.request.Request(api_url)
+        req.add_header("Authorization", f"Bearer {bot_token}")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            comments = _json.loads(resp.read())
+    except Exception as e:
+        log.warning(f"Sync issue comments: fetch from GitCode failed: {e}")
+        return
+
+    if not comments:
+        return
+
+    # 3) 获取会话已有消息，提取内容指纹用于去重
+    try:
+        existing_msgs = _get_msgs(conv_id, limit=100)
+    except Exception:
+        existing_msgs = []
+    existing_sigs = set()
+    # 匹配 [XXX Agent] 标记（可能在引用块 > 之后出现，不要求在 body 开头）
+    _agent_tag_re = re.compile(r'\[([A-Za-z_]+)\s+Agent\]', re.IGNORECASE)
+    for m in existing_msgs:
+        content = m.get("content", "")
+        # 去掉引用块和 [XXX Agent] 标记后取前 80 字符做指纹
+        sig = _agent_tag_re.sub("", content).strip()[:80].lower()
+        existing_sigs.add(sig)
+
+    # 4) 筛选含 [XXX Agent] 标记的评论，去重后写入会话
+    synced = 0
+    for cm in comments:
+        body = cm.get("body", "")
+        if not body:
+            continue
+        # 评论中必须包含 [XXX Agent] 标记（可能在引用块之后）
+        tag_match = _agent_tag_re.search(body)
+        if not tag_match:
+            continue
+        # 如果指定了 agent_type，只同步该 agent 的评论
+        if agent_type:
+            if tag_match.group(1).upper() != agent_type.upper():
+                continue
+        # 去重：去掉 [XXX Agent] 标记后取前 80 字符做指纹（大小写不敏感）
+        sig = _agent_tag_re.sub("", body).strip()[:80].lower()
+        if sig in existing_sigs:
+            continue
+        try:
+            _am(conv_id, "agent", body[:4000])
+            synced += 1
+        except Exception:
+            pass
+
+    if synced > 0:
+        log.info(f"Sync issue comments: synced {synced} comments to conversation {conv_id} (issue #{issue_number})")

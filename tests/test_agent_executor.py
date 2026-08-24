@@ -51,13 +51,16 @@ class TestCodeArtsRuntime:
         assert "--format" in args
         assert "json" in args
         assert "--dangerously-skip-permissions" not in args
-        assert "hello world" not in args  # prompt piped via stdin
+        assert "hello world" in args  # prompt passed as positional arg
+        assert "--model" in args
 
     def test_build_args_with_session(self):
+        """codearts 忽略 session_id（跨引擎 session 不可见，每次从头开始）"""
         args = self.backend.build_args("test prompt", "sess_abc")
-        assert "--session" in args
-        assert "sess_abc" in args
-        assert "--sessionID" not in args
+        assert "--session" not in args
+        assert "sess_abc" not in args
+        assert "test prompt" in args
+        assert "--model" in args
 
     def test_build_args_no_dangerous_flag(self):
         """CodeArts should NOT have --dangerously-skip-permissions."""
@@ -289,7 +292,10 @@ class TestTerminateProc:
                 return 0
 
         fp = FakeProc()
-        with patch("src.agent.executor.os.killpg") as mock_killpg:
+        # 生产路径：agent 经 start_new_session=True 启动，getpgid 必然成功；
+        # 此处补 getpgid mock，避免 FakeProc.pid 不存在导致走 terminate/kill 兜底分支。
+        with patch("src.agent.executor.os.killpg") as mock_killpg, \
+             patch("src.agent.executor.os.getpgid", return_value=fp.pid):
             _terminate_proc(fp, "test")
         # 第一次 SIGTERM 进程组，第二次 SIGKILL 进程组
         sigs = [c.args[1] for c in mock_killpg.call_args_list]

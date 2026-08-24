@@ -171,6 +171,63 @@ class TestTerminal:
         service.fail_task("t_nonexistent", "x")
 
 
+class TestBusinessFailureDetection:
+    """业务失败检测：进程 exit_code=0 但业务实际失败 → 覆盖为 failed"""
+
+    def test_sre_deploy_failure_detected(self):
+        """SRE 结论含'部署中止/失败'→ exit_code 覆盖为 1, status=failed"""
+        from src.api.event_store import parse_agent_output_json
+        text = ('由于华为云账号未完成实名认证，无法购买ECS实例（Ecs.0707）。部署无法继续。\n'
+                '```json\n{"conclusion":"部署中止，账号未实名认证","next_step":"请完成实名认证后重新部署"}\n```')
+        output = parse_agent_output_json(text)
+        assert service._detect_business_failure("sre", output, text) is True
+
+    def test_sre_deploy_success_not_flagged(self):
+        """SRE 结论含'部署成功'→ 不触发失败检测"""
+        from src.api.event_store import parse_agent_output_json
+        text = '```json\n{"conclusion":"ECS创建成功，应用已部署","next_step":"访问 http://1.2.3.4 验证"}\n```'
+        output = parse_agent_output_json(text)
+        assert service._detect_business_failure("sre", output, text) is False
+
+    def test_non_sre_not_checked(self):
+        """非 SRE agent（issue/coding/qa）→ 不检测，返回 False"""
+        from src.api.event_store import parse_agent_output_json
+        text = '```json\n{"conclusion":"部署失败，无法继续"}\n```'
+        output = parse_agent_output_json(text)
+        assert service._detect_business_failure("issue", output, text) is False
+        assert service._detect_business_failure("coding", output, text) is False
+
+    def test_complete_task_overrides_exit_code_on_business_failure(self):
+        """complete_task 收到 exit_code=0 但业务失败 → task status=failed"""
+        # enqueue SRE 任务
+        tid = service.enqueue_task(
+            agent_session_id="s1", runtime_id=1, prompt="p",
+            event_seq=99, issue_id="#1", repo_key="gitcode:test/repo",
+            agent_type="sre", skill="cloud-deploy",
+        )
+        service.claim(1)
+        result_text = ('部署无法继续\n```json\n{"conclusion":"ECS创建失败(Ecs.0707)，部署中止",'
+                        '"next_step":"完成实名认证后重新触发部署"}\n```')
+        service.complete_task(tid, result_text, 0)
+        t = service.get_task(tid)
+        assert t["status"] == "failed", f"业务失败应标 failed, got {t['status']}"
+        assert t["exit_code"] != 0, f"exit_code 应被覆盖为非0, got {t['exit_code']}"
+
+    def test_complete_task_keeps_success_on_real_success(self):
+        """complete_task 收到 exit_code=0 且业务成功 → task status=completed"""
+        tid = service.enqueue_task(
+            agent_session_id="s1", runtime_id=1, prompt="p",
+            event_seq=98, issue_id="#1", repo_key="gitcode:test/repo",
+            agent_type="sre", skill="cloud-deploy",
+        )
+        service.claim(1)
+        result_text = '```json\n{"conclusion":"ECS部署成功，服务已上线","next_step":"验证访问"}\n```'
+        service.complete_task(tid, result_text, 0)
+        t = service.get_task(tid)
+        assert t["status"] == "completed", f"业务成功应保持 completed, got {t['status']}"
+        assert t["exit_code"] == 0
+
+
 class TestWaitTaskTerminal:
     """wait_task_terminal：入队 + 轮询终态（IM/web 队列路径的回报助手，见 multi-runtime-instance-design 配套）"""
 

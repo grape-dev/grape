@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     huawei_cloud_sk TEXT DEFAULT '',
     CODEARTS_CLI_AK TEXT DEFAULT '',
     CODEARTS_CLI_SK TEXT DEFAULT '',
+    gitcode_publish_repo TEXT DEFAULT '',
+    github_publish_repo TEXT DEFAULT '',
     password TEXT DEFAULT '',
     created_by INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
@@ -814,8 +816,9 @@ def ensure_skill_dir(user_id: int, skill_name: str) -> str:
 
 
 def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
-    """确保仓库技能目录存在，返回路径（skills/repo/{repo_key}/{skill}）"""
-    path = os.path.join(os.path.dirname(SKILL_DIR), "repo", repo_key, skill_name)
+    """确保仓库技能目录存在，返回路径（skills/repo/{owner}/{repo}/{skill}）"""
+    from src.repo_key import from_repo_key
+    path = os.path.join(os.path.dirname(SKILL_DIR), "repo", from_repo_key(repo_key), skill_name)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -873,7 +876,8 @@ def get_skill_path(skill_id) -> str:
     if skill.get("scope") == "user":
         return os.path.join(SKILLS_DIR, "custom", skill.get("owner_id") or "", sp, "SKILL.md")
     if skill.get("scope") == "repo":
-        return os.path.join(SKILLS_DIR, "repo", skill.get("owner_id") or "", sp, "SKILL.md")
+        from src.repo_key import from_repo_key
+        return os.path.join(SKILLS_DIR, "repo", from_repo_key(skill.get("owner_id") or ""), sp, "SKILL.md")
     return os.path.join(SKILLS_DIR, sp, "SKILL.md")
 
 
@@ -978,7 +982,8 @@ def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: s
             # 删除技能目录
             import shutil
             if scope == "repo":
-                path = os.path.join(os.path.dirname(SKILL_DIR), "repo", owner_id or str(user_id), skill_name)
+                from src.repo_key import from_repo_key
+                path = os.path.join(os.path.dirname(SKILL_DIR), "repo", from_repo_key(owner_id or str(user_id)), skill_name)
             else:
                 path = os.path.join(SKILL_DIR, str(user_id), skill_name)
             if os.path.exists(path):
@@ -1091,13 +1096,17 @@ def get_managed_repos(user_id: int) -> list[dict]:
                 "SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, "
                 "bot_gitcode_token, gitcode_webhook_token, bot_username, created_at, 0, 0 "
                 "FROM managed_repos ORDER BY full_name")
+        rows = c.fetchall()
+        # autocommit=False 下 SELECT 会打开事务，同线程连接后续 SELECT 看到旧快照。
+        # commit 释放事务，确保下次查询看到最新数据（修复 /repo 返回老列表）。
+        db.commit()
         return [{
             "repo_key": r[0], "repo_owner": r[1], "repo_name": r[2],
             "full_name": from_repo_key(r[0]), "webhook_id": r[4],
             "bot_gitcode_token": r[5] or "", "gitcode_webhook_token": r[6] or "",
             "bot_username": r[7] or "", "created_at": r[8],
             "is_join": bool(r[9]), "is_admin": bool(r[10]),
-        } for r in c.fetchall()]
+        } for r in rows]
 
 
 def update_managed_repo_admin(user_id: int, repo_key: str, is_admin: bool) -> bool:
@@ -1291,6 +1300,7 @@ USER_ACCOUNT_FIELDS = [
     "feishu_app_id", "feishu_app_secret",
     "huawei_cloud_ak", "huawei_cloud_sk",
     "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",
+    "gitcode_publish_repo", "github_publish_repo",
     "password",
     "created_by", "created_at",
 ]
@@ -1729,6 +1739,10 @@ def is_known_engine_name(name: str) -> bool:
     name = (name or "").strip().lower()
     if not name:
         return False
+    # 静态白名单（避免 lazy import 循环引用导致 always False）
+    _KNOWN = {"opencode", "codearts", "hermes", "cursor"}
+    if name in _KNOWN:
+        return True
     try:
         from src.agent.executor import discover_backends
         if any((b.get("name") or "").strip().lower() == name for b in discover_backends()):

@@ -5,6 +5,7 @@ function renderSettings(tab) {
   const tabs = [
     {id:'credentials', label:'Credentials'},
     {id:'notifications', label:'Notifications'},
+    {id:'appearance', label:'Appearance'},
   ];
 
   let html = `<div class="cd"><div class="cd-h"><h2>Settings</h2></div>
@@ -13,7 +14,9 @@ function renderSettings(tab) {
   if (current === 'credentials') {
     html += `<div id="sCredentials"><div class="loading">加载中...</div></div></div>`;
     el.innerHTML = html;
-    API.get('/settings/credentials').then(d => {
+    const curRepo = app.currentRepo();
+    const repoQ = curRepo && curRepo.fullName ? '?repo_key=gitcode:' + encodeURIComponent(curRepo.fullName) : '';
+    API.get('/settings/credentials' + repoQ).then(d => {
       // AK/SK 回显真实值需 HTML 转义（防引号破坏属性）
       const _esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
       const _akVal = d.huawei_cloud ? _esc(d.huawei_cloud.ak || '') : '';
@@ -28,7 +31,10 @@ function renderSettings(tab) {
           <div class="srow"><label>Secret Key</label><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="Secret Key"><button class="bt bt-o bt-s" id="huaweiToggleSk" onclick="toggleHuaweiSecret()" title="显示/隐藏明文" style="padding:2px 8px">👁</button></div>
           <p class="tx t2 mt8">Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.</p>
           <button class="bt bt-p mt8" onclick="saveCredentials()">Save</button>
-        </div>`;
+        </div>
+
+
+`;
     }).catch(e => document.getElementById('sCredentials').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
   } else if (current === 'notifications') {
     html += `<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Notification Preferences</h3>
@@ -38,6 +44,77 @@ function renderSettings(tab) {
       <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> Release events</label>
       <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox"> VOD signals</label>
     </div></div>`;
+    el.innerHTML = html;
+  } else if (current === 'appearance') {
+    // Appearance / Theme selection
+    const curTheme = app.getTheme ? app.getTheme() : (localStorage.getItem('grapeTheme') || 'default');
+    const curMode = app.getThemeMode ? app.getThemeMode() : (localStorage.getItem('grapeThemeMode') || 'light');
+    html += `
+    <div class="cd">
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:16px">界面风格 / Interface Theme</h3>
+      <p class="tx t2" style="margin-bottom:20px;font-size:12px;line-height:1.6">
+        选择 Grape 控台的视觉风格。Liquid Glass 风格采用毛玻璃侧栏、系统字体栈、精致圆角和 pill 按钮，整体简洁通透。
+      </p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
+        <div id="themeCardDefault" onclick="selectTheme('default')"
+          style="cursor:pointer;border:2px solid ${curTheme==='default'?'var(--a)':'var(--b)'};border-radius:14px;padding:20px;transition:all .25s;background:var(--c)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <span style="font-size:14px;font-weight:600;color:var(--t)">Grape Default</span>
+            ${curTheme==='default'?'<span style="color:var(--a);font-size:12px;font-weight:600">✓ 当前</span>':''}
+          </div>
+          <div style="height:80px;border-radius:10px;overflow:hidden;border:1px solid var(--b);display:flex">
+            <div style="width:60px;background:#0c1222;display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px">
+              <div style="width:24px;height:3px;background:#1e2940;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#1e2940;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#3168e0;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#1e2940;border-radius:2px"></div>
+            </div>
+            <div style="flex:1;background:#f5f6f8;padding:10px">
+              <div style="height:4px;width:60%;background:#101724;border-radius:2px;margin-bottom:6px"></div>
+              <div style="height:3px;width:40%;background:#5b667b;border-radius:2px;margin-bottom:8px"></div>
+              <div style="height:30px;background:#fff;border-radius:6px;border:1px solid #e3e6ee"></div>
+            </div>
+          </div>
+          <p style="font-size:11px;color:var(--t3);margin-top:10px">深色侧栏 + 浅色内容区</p>
+        </div>
+        <div id="themeCardApple" onclick="selectTheme('apple')"
+          style="cursor:pointer;border:2px solid ${curTheme==='apple'?'var(--a)':'var(--b)'};border-radius:14px;padding:20px;transition:all .25s;background:var(--c)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <span style="font-size:14px;font-weight:600;color:var(--t)">Liquid Glass</span>
+            ${curTheme==='apple'?'<span style="color:var(--a);font-size:12px;font-weight:600">✓ 当前</span>':''}
+          </div>
+          <div style="height:80px;border-radius:10px;overflow:hidden;border:1px solid #d2d2d7;display:flex">
+            <div style="width:60px;background:rgba(245,245,247,0.8);backdrop-filter:blur(10px);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px">
+              <div style="width:24px;height:3px;background:#d2d2d7;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#d2d2d7;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#0071e3;border-radius:2px"></div>
+              <div style="width:20px;height:3px;background:#d2d2d7;border-radius:2px"></div>
+            </div>
+            <div style="flex:1;background:#f5f5f7;padding:10px">
+              <div style="height:4px;width:60%;background:#1d1d1f;border-radius:2px;margin-bottom:6px"></div>
+              <div style="height:3px;width:40%;background:#6e6e73;border-radius:2px;margin-bottom:8px"></div>
+              <div style="height:30px;background:#fff;border-radius:12px;border:1px solid #d2d2d7;box-shadow:0 2px 8px rgba(0,0,0,0.04)"></div>
+            </div>
+          </div>
+          <p style="font-size:11px;color:var(--t3);margin-top:10px">毛玻璃侧栏 + 系统字体栈</p>
+        </div>
+      </div>
+    </div>
+    <div class="cd mt16" id="themeModeSection" style="${curTheme==='apple'?'':'opacity:0.4;pointer-events:none'}">
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">外观模式 / Appearance Mode</h3>
+      <p class="tx t2" style="margin-bottom:14px;font-size:12px">Liquid Glass 风格专属 — 跟随系统自动切换深浅色。</p>
+      <div style="display:flex;gap:10px">
+        <button onclick="selectThemeMode('light')"
+          style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curMode==='light'?'var(--a)':'var(--c)'};color:${curMode==='light'?'#fff':'var(--t2)'};transition:all .2s">
+          ☀️ 浅色
+        </button>
+        <button onclick="selectThemeMode('auto')"
+          style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curMode==='auto'?'var(--a)':'var(--c)'};color:${curMode==='auto'?'#fff':'var(--t2)'};transition:all .2s">
+          🌓 跟随系统
+        </button>
+      </div>
+    </div>
+    </div>`;
     el.innerHTML = html;
   } else if (current === 'gitcode') {
     // GitCode Repo 页面 — 需要已有仓库
@@ -83,10 +160,21 @@ function saveCredentials() {
   const sk = document.getElementById('huaweiSk');
   const body = {};
   const akVal = ak && ak.value ? ak.value.trim() : '';
+
   const skVal = sk && sk.value ? sk.value.trim() : '';
   if (akVal && !_isCredPlaceholder(akVal)) body.huawei_cloud_ak = akVal;
   if (skVal && !_isCredPlaceholder(skVal)) body.huawei_cloud_sk = skVal;
-  API.put('/settings/credentials', body).then(r => app.showToast('凭据已更新')).catch(e => app.showToast('更新失败'));
+
+  // v4.3：发布令牌按仓库（项目维度）——带当前仓库
+  const cur = app.currentRepo();
+  if (cur && cur.fullName) {
+    const parts = cur.fullName.split('/');
+    if (parts.length === 2) body.repo_key = 'gitcode:' + cur.fullName;
+  }
+  API.put('/settings/credentials', body).then(r => {
+    // 发布目标仓库（配置）与凭据区分提示：含配置类字段提示"配置已更新"
+    app.showToast('凭据已更新');
+  }).catch(e => app.showToast('更新失败'));
 }
 
 // 华为云 AK/SK 明文显示/隐藏切换（默认掩码，👁 查看明文；autocomplete=new-password 防浏览器自动填充覆盖）
@@ -151,4 +239,19 @@ function applyScene(owner, repo) {
   API.post('/scenes/apply/' + owner + '/' + repo, {scene_id: sceneId})
     .then(r => app.showToast(r.message || '场景已应用'))
     .catch(e => app.showToast('应用场景失败: ' + (e.message || e)));
+}
+
+// ── Theme switching ──
+function selectTheme(theme) {
+  if (!app.setTheme) { app.showToast('主题切换不可用'); return; }
+  app.setTheme(theme);
+  // re-render to update selection visual + toggle mode section
+  renderSettings('appearance');
+  app.showToast(theme === 'apple' ? '已切换到 Liquid Glass 风格' : '已切换到默认风格');
+}
+
+function selectThemeMode(mode) {
+  if (!app.setThemeMode) return;
+  app.setThemeMode(mode);
+  renderSettings('appearance');
 }

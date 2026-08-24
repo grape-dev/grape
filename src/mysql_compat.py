@@ -504,6 +504,12 @@ class MySQLCompatCursor:
         t = translate_sql(sql)
         cur = self._conn._raw_cursor()
         cur.execute(t, params)
+        # autocommit=False：SELECT 也会隐式开启事务，同线程连接复用时
+        # 后续 SELECT 看到旧 MVCC 快照（/repo 返回老列表根因）。
+        # 只读语句执行后自动 commit 释放事务，保持读一致性。
+        _is_read_only = t.lstrip().upper().startswith(("SELECT", "SHOW", "PRAGMA"))
+        if _is_read_only:
+            self._conn.commit()
         self._pycur = cur
         self.rowcount = cur.rowcount
         self.lastrowid = cur.lastrowid

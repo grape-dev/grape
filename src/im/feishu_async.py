@@ -116,7 +116,9 @@ class BotContext:
 
     reconnect_delay: float = 5.0
     max_reconnect_delay: float = 300.0
-    ws_ping_interval: float = 20.0
+    # websockets 协议级 ping 禁用（None）：飞书 WS 不回协议级 pong，会导致 ping_timeout 断连。
+    # 保活依赖飞书应用层 PING/PONG（run_bot 里收到 PING 帧回 PONG）。
+    ws_ping_interval: float = 0.0  # 0 → websockets.connect(ping_interval=None) 禁用协议级 ping
 
     _task: Optional[asyncio.Task] = None
     _ws: Optional[Any] = None
@@ -672,10 +674,13 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                 continue
 
             log.info(f"[{ctx.name}] connecting to WS...")
+            # ping_interval=None 禁用 websockets 协议级 ping（飞书不回协议级 pong 会触发超时断连）；
+            # 保活由飞书应用层 PING/PONG 机制负责（上方收到 PING 帧回 PONG）
+            _ws_ping = ctx.ws_ping_interval if ctx.ws_ping_interval > 0 else None
             async with websockets.connect(
                 ws_url,
-                ping_interval=ctx.ws_ping_interval,
-                ping_timeout=ctx.ws_ping_interval + 10,
+                ping_interval=_ws_ping,
+                ping_timeout=(_ws_ping + 10) if _ws_ping else None,
                 close_timeout=5,
             ) as ws:
                 ctx._ws = ws
@@ -684,75 +689,122 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                 delay = ctx.reconnect_delay
                 log.info(f"[{ctx.name}] connected")
 
-                async for raw in ws:
-                    if not isinstance(raw, bytes):
-                        continue
+                # 主动 PING 保活（lark-oapi SDK 同款机制）：每 120 秒发应用层 PING 帧，
+                # 飞书收到后回 PONG 保持连接活跃。不发 PING → 飞书判定死连接 → 停止推消息。
+                _ws_service_id = 0
+                try:
+                    _ws_service_id = int(ws_url.split("fpid=")[1].split("&")[0]) if "fpid=" in ws_url else 0
+                except Exception:
+                    pass
 
-                    try:
-                        frame = Frame()
-                        frame.ParseFromString(raw)
-                        ft = FrameType(frame.method)
-                    except Exception:
-                        continue
+                async def _ping_keepalive():
+                    while ctx._running and ws is ctx._ws:
+                        try:
+                            await asyncio.sleep(120)
+                            if ws is not ctx._ws:
+                                break
+                            ping = Frame()
+                            ping.method = FrameType.CONTROL.value
+                            ping.service = _ws_service_id
+                            ping.SeqID = 0
+                            ping.LogID = 0
+                            ping.headers.add(key="type", value=MessageType.PING.value)
+                            await ws.send(ping.SerializeToString())
+                            log.debug(f"[{ctx.name}] keepalive ping sent")
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as _pe:
+                            log.warning(f"[{ctx.name}] keepalive ping failed: {_pe}")
+                            break
 
-                    if ft == FrameType.CONTROL:
+                _ping_task = asyncio.create_task(_ping_keepalive(), name=f"ping-{ctx.name}")
+
+                try:
+                    async for raw in ws:
+                        if not isinstance(raw, bytes):
+                            continue
+
+                        try:
+                            frame = Frame()
+                            frame.ParseFromString(raw)
+                            ft = FrameType(frame.method)
+                        except Exception:
+                            continue
+
+                        if ft == FrameType.CONTROL:
+                            hs = frame.headers
+                            type_ = _get_header(hs, "type")
+                            if type_ == MessageType.PING.value:
+                                # 回 PONG 保活：飞书发应用层 PING，不回 PONG 会被判定死连接，
+                                # 停止推送消息（WS 假死根因 — TCP 未断但消息不再到达）
+                                try:
+                                    # 复用原 PING 帧（含 SeqID/LogID/service 等必填字段），
+                                    # 将 type header 改为 PONG
+                                    for h in frame.headers:
+                                        if h.key == "type":
+                                            h.value = MessageType.PONG.value
+                                    await ws.send(frame.SerializeToString())
+                                except Exception as _pe:
+                                    log.warning(f"[{ctx.name}] send pong failed: {_pe}")
+                            continue
+
+                        if ft != FrameType.DATA:
+                            continue
+
                         hs = frame.headers
                         type_ = _get_header(hs, "type")
-                        if type_ == MessageType.PING.value:
-                            pass
-                        continue
+                        if type_ != MessageType.EVENT.value:
+                            continue
 
-                    if ft != FrameType.DATA:
-                        continue
+                        try:
+                            payload_str = frame.payload.decode("utf-8") if frame.payload else ""
+                            event_data = json.loads(payload_str)
+                        except Exception:
+                            # 解析失败也需 ack，否则飞书重推导致死循环
+                            try:
+                                await ws.send(_build_ack_frame(frame))
+                            except Exception:
+                                pass
+                            continue
 
-                    hs = frame.headers
-                    type_ = _get_header(hs, "type")
-                    if type_ != MessageType.EVENT.value:
-                        continue
-
-                    try:
-                        payload_str = frame.payload.decode("utf-8") if frame.payload else ""
-                        event_data = json.loads(payload_str)
-                    except Exception:
-                        # 解析失败也需 ack，否则飞书重推导致死循环
+                        # 统一 ack：无论消息是否被处理（seen 命中 / 无文本 / 处理中），
+                        # 都必须回传 ack 帧，否则飞书会用新的 message_id 反复投递该消息。
                         try:
                             await ws.send(_build_ack_frame(frame))
-                        except Exception:
-                            pass
-                        continue
+                        except Exception as e:
+                            log.warning(f"[{ctx.name}] send ack failed: {e}")
 
-                    # 统一 ack：无论消息是否被处理（seen 命中 / 无文本 / 处理中），
-                    # 都必须回传 ack 帧，否则飞书会用新的 message_id 反复投递该消息。
-                    try:
-                        await ws.send(_build_ack_frame(frame))
-                    except Exception as e:
-                        log.warning(f"[{ctx.name}] send ack failed: {e}")
-
-                    parsed = _parse_event(event_data)
-                    if not parsed or not parsed.get("text"):
-                        continue
-
-                    msg_id = parsed.get("message_id", "")
-                    if msg_id:
-                        if msg_id in ctx._seen_msg_ids:
+                        parsed = _parse_event(event_data)
+                        if not parsed or not parsed.get("text"):
                             continue
-                        ctx._seen_msg_ids.add(msg_id)
-                        _persist_seen_msg_id(ctx.app_id, msg_id)
-                        if len(ctx._seen_msg_ids) > 2000:
-                            ctx._seen_msg_ids = set(list(ctx._seen_msg_ids)[-1000:])
 
-                    log.info(f"[{ctx.name}] received message: chat={parsed.get('chat_id','')[:20]} text={parsed.get('text','')[:50]}")
-                    ctx.metrics.messages_received += 1
-                    ctx.metrics.last_message_at = time.time()
-                    if not ctx.semaphore.locked() or ctx.semaphore._value > 0:
-                        t = asyncio.create_task(
-                            _safe_handle(ctx, api, on_message, parsed),
-                            name=f"msg-{ctx.name}-{ctx.metrics.messages_received}",
-                        )
-                        ctx._handle_tasks.add(t)
-                        t.add_done_callback(ctx._handle_tasks.discard)
-                    else:
-                        log.warning(f"[{ctx.name}] concurrency limit reached, dropping message")
+                        msg_id = parsed.get("message_id", "")
+                        if msg_id:
+                            if msg_id in ctx._seen_msg_ids:
+                                continue
+                            ctx._seen_msg_ids.add(msg_id)
+                            _persist_seen_msg_id(ctx.app_id, msg_id)
+                            if len(ctx._seen_msg_ids) > 2000:
+                                ctx._seen_msg_ids = set(list(ctx._seen_msg_ids)[-1000:])
+
+                        log.info(f"[{ctx.name}] received message: chat={parsed.get('chat_id','')[:20]} text={parsed.get('text','')[:50]}")
+                        ctx.metrics.messages_received += 1
+                        ctx.metrics.last_message_at = time.time()
+                        if not ctx.semaphore.locked() or ctx.semaphore._value > 0:
+                            t = asyncio.create_task(
+                                _safe_handle(ctx, api, on_message, parsed),
+                                name=f"msg-{ctx.name}-{ctx.metrics.messages_received}",
+                            )
+                            ctx._handle_tasks.add(t)
+                            t.add_done_callback(ctx._handle_tasks.discard)
+                        else:
+                            log.warning(f"[{ctx.name}] concurrency limit reached, dropping message")
+                finally:
+                    _ping_task.cancel()
+                    try:
+                        await _ping_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
         except asyncio.CancelledError:
             ctx._running = False

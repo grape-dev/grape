@@ -93,4 +93,14 @@ async def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
         db.commit()
 
     log.info(f"Scene applied: scene={body.scene_id}, repo={repo_key}, updated={updated} agents")
+
+    # 更新 managed_repos.dev_scene（前端 Dashboard 读取此字段显示当前场景）
+    try:
+        with db_lock:
+            c2 = db.cursor()
+            c2.execute("UPDATE managed_repos SET dev_scene=? WHERE repo_key=?", (body.scene_id, repo_key))
+            db.commit()
+    except Exception as e:
+        log.warning(f"Scene apply: failed to update dev_scene: {e}")
+
     return {"message": f"场景 '{scene.get('name', body.scene_id)}' 已应用", "updated": updated}

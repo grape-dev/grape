@@ -1,5 +1,5 @@
 """Webhook & A2A 端点 — 集成事件管道"""
-import json, time
+import json, os, time
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from src.config import log
@@ -152,6 +152,28 @@ async def a2a_endpoint(request: Request):
         except Exception:
             pass
 
+        # 回退：DB 未配置 skill 时从 agent-skill-mapping.json 获取默认 skill
+        if not skill_name:
+            try:
+                _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "agent-skill-mapping.json")
+                if os.path.exists(_defaults_path):
+                    with open(_defaults_path, "r", encoding="utf-8") as _f:
+                        _defaults = json.load(_f)
+                    _scene = _defaults.get("scenes", {}).get("default", {})
+                    try:
+                        from src.user.db import get_repo_scene
+                        _scene_id = get_repo_scene(repo_key) or "default"
+                        _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
+                    except Exception:
+                        pass
+                    _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
+                    _default_skill = _mapping.get(agent_name, "")
+                    if _default_skill:
+                        skill_name = _default_skill
+                        log.info(f"A2A: fallback skill for {agent_name}={_default_skill}")
+            except Exception as e:
+                log.warning(f"A2A: fallback skill lookup failed: {e}")
+
         evt = {
             "type": "a2a_event",
             "repository": repository,
@@ -182,8 +204,9 @@ async def a2a_endpoint(request: Request):
                 log.warning(f"A2A: issue_state update failed: {_e}")
 
         # 订阅感知 A2A 去重（event-routing-subscription-design.md §2.6）：
-        # SRE 已配置订阅 → A2A 交办视为重复，只推进 stage、不创建任务。
-        if agent_name == "sre" and issue_number:
+        # SRE 已配置订阅 → PR 合并事件触发的 A2A 交办视为重复，只推进 stage、不创建任务。
+        # 但无 pr_number 的直接部署请求（Issue A2A 交办、非 PR 场景）不跳过，需正常创建任务。
+        if agent_name == "sre" and issue_number and pr_number:
             try:
                 with db_lock:
                     c = db.cursor()
@@ -194,7 +217,7 @@ async def a2a_endpoint(request: Request):
                     if row:
                         _raw = (row[0] or "").strip()
                         if _raw and _raw != "[]" and _raw != "null":
-                            log.info(f"A2A: sre subscribed, skip task creation (stage=sre, issue=#{issue_number})")
+                            log.info(f"A2A: sre subscribed + pr_number={pr_number}, skip task creation (stage=sre, issue=#{issue_number})")
                             return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "sre_subscribed"})
             except Exception:
                 pass
@@ -232,7 +255,12 @@ async def a2a_endpoint(request: Request):
         _be = engine_name(engine_id) or backend
         kind = runtime_execution_kind(engine_id)
         if kind == EXEC_MODE_DIRECT:
-            from src.api.event_pipeline import start_direct_agent
+            from src.api.event_pipeline import start_direct_agent, _create_direct_task
+            _issue_id = f"#{issue_number}" if issue_number else ""
+            evt["_skill_id"] = skill_id
+            _create_direct_task(repo_key, seq, agent_name, _be,
+                                skill_name or agent_name, skill_path or "",
+                                engine_id, evt, _issue_id, skill_id=skill_id)
             start_direct_agent(_execute_agent, (
                 repo_key, seq, agent_name, _be, skill_name or agent_name, evt, engine_id,
             ), name=f"a2a-{agent_name}-{seq}")

@@ -3,6 +3,33 @@ let _chatAbort = null;
 let _openConvId = null;
 const _NO_REPLY = '⚠️ 未收到回复，连接可能中断，请重试。';
 
+/**
+ * 将 "Issue #N" 文本渲染为 GitCode Issue 超链接。
+ * @param {string} text - 原始文本
+ * @param {string} repoKey - 仓库 key（如 "songspace/hello-blog"），用于构建 URL
+ * @returns {string} HTML 字符串，Issue #N 变为 <a> 标签
+ */
+function linkifyIssueNumbers(text, repoKey) {
+  if (!text) return '';
+  // repoKey 可能为空（普通对话无仓库）→ 仅当能解析出 owner/repo 时才链接化
+  let ownerRepo = '';
+  if (repoKey) {
+    // 去掉可能的 gitcode: 前缀
+    const parts = repoKey.replace(/^gitcode:/, '').split('/');
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      ownerRepo = parts[0] + '/' + parts[1];
+    }
+  }
+  // 匹配 "Issue #N" 或 "issue #N"（N 为数字）
+  return text.replace(/(Issue\s*#(\d+))/gi, (match, full, num) => {
+    if (ownerRepo) {
+      const url = `https://gitcode.com/${ownerRepo}/issues/${num}`;
+      return `<a href="${url}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${full}</a>`;
+    }
+    return match; // 无仓库信息时保持原文
+  });
+}
+
 function renderChat(openConvId) {
   _currentConvId = null;
   _openConvId = openConvId || null;
@@ -24,30 +51,72 @@ function renderChat(openConvId) {
   setupChatStream();
 }
 
+let _chatSkillScope = 'official';
+
+function _switchChatSkillScope(scope) {
+  _chatSkillScope = scope;
+  _loadChatSkillOptions();
+}
+
+function _loadChatSkillOptions() {
+  const skillSelect = document.getElementById('cfgSkill');
+  if (!skillSelect) return;
+  const currentSkillId = skillSelect.dataset.skillId || '0';
+  let repo = '';
+  try {
+    const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+    repo = c ? (c.fullName || '') : '';
+  } catch {}
+  const scope = _chatSkillScope || 'official';
+  let qs = '?scope=' + scope;
+  if (repo) qs += '&repo=' + encodeURIComponent(repo);
+  API.get('/skills' + qs).then(d => {
+    const allSkills = d.skills || [];
+    const filtered = allSkills.filter(s => s.agent_type === 'chat');
+    const matchCurrent = filtered.find(s => String(s.id) === currentSkillId);
+    const defaultOpt = scope === 'official' ? '<option value="0">默认官方技能（自动）</option>' : '';
+    let html = defaultOpt +
+      filtered.map((s, i) => {
+        const selected = matchCurrent ? (String(s.id) === currentSkillId) : (i === 0);
+        return `<option value="${s.id}" ${selected ? 'selected' : ''}>${s.display_name || s.name}</option>`;
+      }).join('');
+    if (filtered.length === 0) {
+      html = `<option value="0" disabled>${scope === 'repo' ? '该仓库暂无项目技能' : '暂无个人技能'}</option>`;
+    }
+    skillSelect.innerHTML = html;
+  }).catch(() => {});
+}
+
 function loadSideConfig() {
   const _repo = app.currentRepo();
   const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
   API.get('/chat/config' + _qs).then(d => {
     const feishu = d.im?.feishu || {};
     const backend = d.backend || {};
-    const currentSkill = d.skill || '';
     const backendsOpts = (d._backends || []).map(b =>
       `<option value="${b.name}" data-rid="${b.runtime_id || ''}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${b.display_name || b.name}</option>`
     ).join('') || '<option value="">Default</option>';
-    const skillsOpts = (d._skills || []).map(s => {
-      const scopeLabel = s.scope === 'official' ? '官方' : s.scope === 'repo' ? '仓库' : '个人';
-      return `<option value="${s.scope}:${s.name}" ${(d.skill_scope + ':' + currentSkill) === (s.scope + ':' + s.name) ? 'selected' : ''}>${s.display_name || s.name} (${scopeLabel})</option>`;
-    }).join('') || '<option value="">无专用技能</option>';
     const side = document.getElementById('chatSide');
     if (!side) return;
+    // scope 初始值从已配置 skill 的 scope 推导
+    _chatSkillScope = (d.skill_scope === 'repo') ? 'repo' : (d.skill_scope === 'user') ? 'user' : 'official';
     side.innerHTML = `
       <div class="cd" style="padding:12px;font-size:11px">
         <div style="font-weight:600;margin-bottom:8px">Backend</div>
         <select id="cfgBackend" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${backendsOpts}</select>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
-        <div style="font-weight:600;margin-bottom:8px">Skill</div>
-        <select id="cfgSkill" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${skillsOpts}</select>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-weight:600;flex-shrink:0">Skill</span>
+          <select id="cfgSkillScope" onchange="_switchChatSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:5px 6px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg);outline:none">
+            <option value="official">全局</option>
+            <option value="repo">项目</option>
+            <option value="user">个人</option>
+          </select>
+        </div>
+        <select id="cfgSkill" data-skill-id="${d.skill_id || 0}" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">
+          <option value="0">默认官方技能（自动）</option>
+        </select>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
         <div style="font-weight:600;margin-bottom:8px">IM</div>
@@ -67,6 +136,11 @@ function loadSideConfig() {
         <div style="font-weight:600;margin-bottom:6px">Agents</div>
         <div class="chat-agents" id="chatAgents"></div>
       </div>`;
+    // 设置 scope 下拉框初始值
+    const scopeSel = document.getElementById('cfgSkillScope');
+    if (scopeSel) scopeSel.value = _chatSkillScope;
+    // 加载 skill 下拉
+    _loadChatSkillOptions();
     // Load agent stats
     const repo = app.currentRepo();
     if (repo) {
@@ -88,7 +162,14 @@ function loadSideConfig() {
 function loadConversations(autoSelect) {
   // 去对话指定会话时，不过滤 repo，确保任务会话可被定位
   const repo = app.currentRepo();
-  const repoKey = (_openConvId ? '' : (repo ? repo.fullName : ''));
+  // 解析 issue:N:repoKey 格式的 _openConvId（Task Center 跳转，会话可能已删除需重建）
+  let _issueParam = null;
+  if (_openConvId && _openConvId.startsWith('issue:')) {
+    const parts = _openConvId.split(':');
+    if (parts.length >= 3) _issueParam = {num: parts[1], repo: parts.slice(2).join(':')};
+    _openConvId = null;
+  }
+  const repoKey = (_openConvId || _issueParam ? '' : (repo ? repo.fullName : ''));
   API.get('/chat/conversations' + (repoKey ? '?repo_key=' + encodeURIComponent(repoKey) : '')).then(d => {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
@@ -96,8 +177,9 @@ function loadConversations(autoSelect) {
     let html = '<div style="padding:10px 12px;border-bottom:1px solid var(--b)"><button class="bt bt-p bt-s" onclick="newConversation()" style="width:100%">＋ 新对话</button></div>';
     convs.forEach(c => {
       const active = c.id === _currentConvId ? ' style="background:var(--b)"' : '';
+      const titleHtml = c.title ? linkifyIssueNumbers(c.title, c.repo_key) : '新对话';
       html += `<div class="conv-item" data-id="${c.id}"${active}>
-        <div class="conv-title">${c.title || '新对话'}</div>
+        <div class="conv-title">${titleHtml}</div>
         <div class="conv-meta">${fmtLocalTime(c.created_at).substring(0,16)}</div>
         <span class="conv-del" onclick="event.stopPropagation();deleteConversation('${c.id}')">✕</span>
       </div>`;
@@ -110,11 +192,21 @@ function loadConversations(autoSelect) {
     list.querySelectorAll('.conv-item').forEach(item => {
       item.addEventListener('click', () => switchConversation(item.dataset.id));
     });
-    // Auto-select: 优先打开任务指定的 conversation，否则第一个
-    if (autoSelect && convs.length > 0 && !_currentConvId) {
-      const target = _openConvId && convs.some(c => c.id === _openConvId) ? _openConvId : convs[0].id;
-      _openConvId = null;
-      switchConversation(target);
+    // Auto-select: 优先 issue 重建 > 任务指定的 conversation > 第一个
+    if (autoSelect && !_currentConvId) {
+      if (_issueParam) {
+        // Task Center 跳转：会话可能已删除，调 ensure-issue 重建
+        API.post('/chat/conversations/ensure-issue', {repo_key: _issueParam.repo, issue_number: parseInt(_issueParam.num)}).then(r => {
+          loadConversations(false);
+          if (r.conversation_id) switchConversation(r.conversation_id);
+        }).catch(() => {
+          if (convs.length > 0) switchConversation(convs[0].id);
+        });
+      } else if (convs.length > 0) {
+        const target = _openConvId && convs.some(c => c.id === _openConvId) ? _openConvId : convs[0].id;
+        _openConvId = null;
+        switchConversation(target);
+      }
     }
   }).catch(() => {});
 }
@@ -152,13 +244,23 @@ function switchConversation(convId) {
   body.innerHTML = '<div class="loading">加载中...</div>';
   API.get('/chat/messages/' + convId).then(d => {
     const msgs = d.messages || [];
-    // 更新会话标题（如 Issue #4）到页头
+    // 更新会话标题（如 Issue #4）到页头，Issue #N 渲染为 GitCode 超链接
     const conv = d.conversation || {};
     const hdr = document.querySelector('.chat-hdr h2');
-    if (hdr) hdr.textContent = 'Chat Agent · ' + (conv.title || 'Personal Assistant');
-    body.innerHTML = msgs.map(m =>
-      `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${renderMarkdown(m.content)}</div>`
-    ).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">开始新对话</div>';
+    if (hdr) {
+      const titleBase = conv.title || 'Personal Assistant';
+      const repoKey = conv.repo_key || '';
+      // 先转义 HTML，再链接化 Issue #N（renderMarkdown 已转义，这里需手动处理）
+      const safeTitle = String(titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const linkedTitle = linkifyIssueNumbers(safeTitle, repoKey);
+      hdr.innerHTML = 'Chat Agent · ' + linkedTitle;
+    }
+    body.innerHTML = msgs.map(m => {
+      const rendered = renderMarkdown(m.content);
+      // 消息内容中的 "Issue #N" 渲染为 GitCode 超链接
+      const repoKey = conv.repo_key || '';
+      return `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${linkifyIssueNumbers(rendered, repoKey)}</div>`;
+    }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">开始新对话</div>';
     body.scrollTop = body.scrollHeight;
     if (input) input.disabled = false;
     const sendBtn = document.querySelector('.chat-in button');
@@ -301,26 +403,23 @@ function saveChatConfig() {
   const _bkSel = document.getElementById('cfgBackend');
   const backend = _bkSel?.value || '';
   const rid = _bkSel?.selectedOptions?.[0]?.dataset?.rid || '';
-  const skillVal = document.getElementById('cfgSkill')?.value || '';
-  // 下拉 value 格式 "scope:name"（如 "repo:chat-advance"），拆出 scope 与 name
-  let skill = skillVal, skillScope = '';
-  if (skillVal.indexOf(':') > 0) {
-    const _sp = skillVal.indexOf(':');
-    skillScope = skillVal.slice(0, _sp);
-    skill = skillVal.slice(_sp + 1);
+  const skillVal = document.getElementById('cfgSkill')?.value || '0';
+  const skillId = parseInt(skillVal) || 0;
+  // 项目/个人 scope 下不允许保存空值（无"默认技能"选项）
+  if (_chatSkillScope !== 'official' && !skillId) {
+    if (app && app.showToast) app.showToast('请选择技能');
+    return;
   }
   const provider = document.getElementById('cfgImProvider')?.value || 'feishu';
   const appId = document.getElementById('cfgImAppId')?.value || '';
   const rawSecret = document.getElementById('cfgImSecret')?.value || '';
-  // 如果密码框内容是占位符（********），说明用户没改过，不发送 secret
   const secret = rawSecret === '********' ? '' : rawSecret;
   const im = {};
   im[provider] = {app_id: appId, app_secret: secret};
   const _repo = app.currentRepo();
   const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
-  const _body = {backend, skill, im};
+  const _body = {backend, skill_id: skillId, im};
   if (rid) _body.runtime_id = parseInt(rid, 10);
-  if (skillScope) _body.skill_scope = skillScope;
   API.put('/chat/config' + _qs, _body).then(() => {
     app.showToast('配置已保存');
   }).catch(e => app.showToast('保存失败: ' + e.message));

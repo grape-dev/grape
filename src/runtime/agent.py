@@ -107,27 +107,55 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
 
 
 def _kill_stale_engine(task: dict, backend: str = "opencode"):
-    """超时后杀掉对应引擎子进程（opencode run / hermes -z / codearts run）。按 cwd 匹配，避免误杀其他任务。"""
-    import subprocess, signal
+    """超时/终止后杀掉对应引擎子进程（opencode run / hermes acp / hermes chat / codearts run）。
+    按 cwd 匹配，避免误杀其他任务。SIGTERM 后 3s SIGKILL 兜底。"""
+    import subprocess, signal, time as _time
     cwd = _remap_cwd(task.get("cwd") or os.getcwd())
-    pattern = {"hermes": "hermes -z", "codearts": "codearts run"}.get(backend, "opencode run")
-    try:
-        out = subprocess.run(
-            ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", pattern],
-            capture_output=True, text=True, timeout=5
-        )
-        for pid_str in out.stdout.strip().split():
-            pid = int(pid_str)
-            try:
-                proc_cwd = os.readlink(f"/proc/{pid}/cwd")
-                if proc_cwd.startswith(cwd):
-                    pgid = os.getpgid(pid)
-                    os.killpg(pgid, signal.SIGTERM)
-                    log.info(f"killed {backend} pid={pid} pgid={pgid} cwd={proc_cwd}")
-            except Exception as e:
-                log.debug(f"skip pid={pid}: {e}")
-    except Exception as e:
-        log.warning(f"_kill_stale_engine({backend}) failed: {e}")
+    # hermes ACP 模式用 `hermes acp`，CLI 模式用 `hermes chat`；两个模式都匹配
+    patterns = {
+        "hermes": ["hermes acp", "hermes chat", "hermes -z"],
+        "codearts": ["codearts run"],
+    }.get(backend, ["opencode run"])
+    killed_any = False
+    for pattern in patterns:
+        try:
+            out = subprocess.run(
+                ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", pattern],
+                capture_output=True, text=True, timeout=5
+            )
+            for pid_str in out.stdout.strip().split():
+                if not pid_str:
+                    continue
+                try:
+                    pid = int(pid_str)
+                    proc_cwd = os.readlink(f"/proc/{pid}/cwd")
+                    if proc_cwd.startswith(cwd):
+                        pgid = os.getpgid(pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                        log.info(f"killed {backend} pid={pid} pgid={pgid} cwd={proc_cwd}")
+                        killed_any = True
+                        # 3s 后检查进程是否还在，SIGKILL 兜底
+                        _time.sleep(0.1)
+                        try:
+                            os.killpg(pgid, 0)  # check if still alive
+                            # 启动后台计时器 3s 后 SIGKILL
+                            import threading
+                            def _force_kill(pg, delay=3):
+                                _time.sleep(delay)
+                                try:
+                                    os.killpg(pg, signal.SIGKILL)
+                                    log.warning(f"force killed pgid={pg} (SIGKILL after {delay}s)")
+                                except Exception:
+                                    pass
+                            threading.Thread(target=_force_kill, args=(pgid,), daemon=True).start()
+                        except ProcessLookupError:
+                            pass  # already dead
+                except Exception as e:
+                    log.debug(f"skip pid={pid}: {e}")
+        except Exception as e:
+            log.warning(f"_kill_stale_engine({backend}, pattern={pattern}) failed: {e}")
+    if not killed_any:
+        log.info(f"_kill_stale_engine({backend}): no matching process found for cwd={cwd}")
 
 
 def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
@@ -392,6 +420,16 @@ async def _execute_task(client, task, engine_name: str = ""):
         if engine_name:
             _esq_parts.append(f"engine:{engine_name}")
         _esq = "|".join(_esq_parts)
+        # chat 任务以用户身份执行（回帖/建 issue 等 GitCode API 操作）——注入用户级 token。
+        # 直接执行路径（send/IM）均传 user_token；唯队列路径曾漏传，导致
+        # USER_GITCODE_TOKEN 为空、agent 回帖 401（2026-08-19 修复）。
+        user_token = ""
+        if (task.get("agent_type") or "") == "chat" or (task.get("event_type") or "") == "chat":
+            try:
+                from src.user.db import get_user_gitcode_token
+                user_token = get_user_gitcode_token(task.get("user_id") or 0) or ""
+            except Exception as e:
+                log.warning(f"chat user token resolve failed: {e}")
         # 方案 2：线程化迭代 stream_runtime（worker-event-loop-block-rootcause.md §8.5）——
         # 同步生成器的 readline() 阻塞移到后台线程，事件循环持续调度 claim/heartbeat，
         # 根治「长命令静默无输出」期间的事件循环停摆（替代方案 1 的 await sleep(0)）。
@@ -401,6 +439,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             backend_name=_backend_for_engine(engine_name),
             account=task.get("account") or "", user_id=task.get("user_id") or 0,
             env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
+            user_token=user_token,
             agent_label=_agent_label,
         ):
             if evt_type == "done":
@@ -431,17 +470,11 @@ async def _execute_task(client, task, engine_name: str = ""):
                 _last_flush = _now
         if batch:
             await client.report_messages(tid, batch)
-        # 引擎从未产出执行事件即结束 → 直接 fail（任务保持 dispatched→failed，跳过 running）
-        if not started and not done:
-            await client.fail(tid, "engine did not start / no output")
-        elif done:
-            await client.complete(tid, done.get("text", ""), done.get("exit_code", 0),
-                                  session_id=done.get("oc_session_id", ""), work_dir=cwd)
-        else:
-            await client.fail(tid, "no done event")
+        # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
+        return done
     except Exception as e:
-        log.warning(f"task {tid} failed: {e}")
-        await client.fail(tid, str(e))
+        log.warning(f"task {tid} stream failed: {e}")
+        return {"_error": str(e), "_started": started}
 
 
 async def _reregister(client, installed, device_name) -> list[int] | None:
@@ -473,7 +506,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     3. 网络中断恢复：连接错误计入心跳失败，触发重注册
     """
     active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
-    active_tasks = set()      # task_id 去重（防止同 task 被重复 claim 并发执行）
+    active_tasks = {}        # tid → sid 映射（task_id 去重 + sid 看门狗反查）
+    _requeue_cooldown = {}   # sid → 上次 requeue 时间戳，60s 冷却防 claim→requeue 空转死循环
+    _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
     hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
     last_heartbeat = 0.0
     heartbeat_fail_streak = 0
@@ -504,22 +539,32 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             tid = task.get("id", "")
             e = engine_by_rid.get(rid, "")  # 本任务引擎实例名（hermes 限并发判断用）
+            # 先查 tid 再查 sid：同一任务已在跑时直接跳过（不 requeue），
+            # 否则任务被 requeue 回 queued → 下轮又 claim 到 → sid 冲突 → 再 requeue →
+            # 无限循环饿死同 runtime 后续任务（seq#1477 SRE 被 chat 任务死循环阻塞 20min）。
+            if tid in active_tasks:
+                log.debug(f"task {tid} already active, skip")
+                continue
             # 并发槽 key 与服务端 claim 串行粒度一致（multi-issue-isolation-design.md §3.3）：
             # 有关联 Issue → 按 issue_session_id（跨 Issue 并行）；无（#0/旧任务）→ 回退 agent_session_id。
             # 修复：此前一律用 agent_session_id，导致不同 Issue 的任务在客户端被误判冲突拒收
             #       （服务端已放行并标记 dispatched，客户端却 skip → 任务悬空卡死，见 seq#622）。
             sid = task.get("issue_session_id") or task.get("agent_session_id") or ""
             if sid in active_sessions:
-                # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）。
+                # D9 串行槽：同 session 已有【另一个】活跃任务，跳过（服务端 claim 已排除，防御双保险）。
                 # 回滚任务为 queued，避免 dispatched 悬空（skip 后无人执行也不重新排队）。
+                # 冷却：同 sid 60s 内只 requeue 一次，避免每轮 poll(3s) 都 claim→requeue 空转
+                # 饿死后面的任务（seq#1477 chat 任务空转 20min 阻塞 SRE）。
+                _now = asyncio.get_running_loop().time()
+                _last = _requeue_cooldown.get(sid, 0)
+                if _now - _last < 60:
+                    continue  # 冷却中：不 claim 不 requeue，留给后面的任务
+                _requeue_cooldown[sid] = _now
                 log.warning(f"claim conflict: session {sid} busy, requeue task {tid}")
                 try:
                     await client.requeue(tid)
                 except Exception as _e:
                     log.warning(f"requeue task {tid} failed: {_e}")
-                continue
-            if tid in active_tasks:
-                log.debug(f"task {tid} already active, skip")
                 continue
             if len(active_sessions) >= max_concurrent:
                 continue
@@ -527,39 +572,65 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 # hermes 引擎限并发 1（模型 API 分钟限流，双开实测 429 → 假完成，见 #53）
                 continue
             active_sessions.add(sid)
-            active_tasks.add(tid)
+            active_tasks[tid] = sid
             if e == "hermes":
                 hermes_active += 1
 
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 nonlocal hermes_active
-                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 600)
-                # 立即标记 running（不等引擎首个事件）：hermes -z 冷启动+模型响应
+                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 1200)
+                # 立即标记 running（不等引擎首个事件）：hermes chat -q 冷启动+模型响应
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
                 # 误判未执行 → 回收重跑循环（attempts 累加 3 次直接 failed，实测 #49 100042）。
                 # 引擎启动失败由 fail_task 收尾（running → failed），无悬空风险。
-                try:
-                    await client.task_start(_tid)
-                except Exception:
-                    pass
+                # task_start 重试（3次/1s间隔）：网络抖动时静默失败会导致任务留在 dispatched
+                # 被服务端 300s 回收 → 重跑循环 → 最终"回收超限"failed（实测今天 11/29 失败因此）。
+                _start_ok = False
+                for _start_attempt in range(3):
+                    try:
+                        _start_result = await client.task_start(_tid)
+                        if _start_result is not None:
+                            _start_ok = True
+                            break
+                    except Exception as _se:
+                        log.warning(f"task_start attempt {_start_attempt+1}/3 for {_tid} failed: {_se}")
+                    if _start_attempt < 2:
+                        await asyncio.sleep(1)
+                if not _start_ok:
+                    log.warning(f"task_start 3 attempts all failed for {_tid}, failing task to avoid dispatched stall")
+                    try:
+                        await client.fail(_tid, "task_start failed after 3 retries (network error)")
+                    except Exception:
+                        pass
+                    return
                 try:
                     if _test_execute is not None:
                         await _test_execute(client, t, e)
                     else:
-                        await asyncio.wait_for(_execute_task(client, t, e), timeout=task_timeout)
+                        # timeout 只保护流式执行阶段，complete/fail 在 timeout 外处理
+                        _result = await asyncio.wait_for(_execute_task(client, t, e), timeout=task_timeout)
                 except asyncio.TimeoutError:
                     log.warning(f"task {_tid} timed out after {task_timeout}s, killing child processes and failing")
-                    # 杀掉超时任务的引擎子进程（按 cwd 匹配，避免误杀其他任务；backend 按引擎名推导）
                     _kill_stale_engine(t, _backend_for_engine(e))
+                    _result = None  # timeout → 走 fail 路径
+                # 在 timeout 外处理 complete/fail（网络重试不触发 timeout 覆盖完成状态）
+                if _test_execute is None:
                     try:
-                        await client.fail(_tid, f"task timed out after {task_timeout}s")
-                    except Exception:
-                        pass
-                finally:
-                    active_sessions.discard(s)
-                    active_tasks.discard(_tid)
-                    if e == "hermes":
-                        hermes_active -= 1
+                        if isinstance(_result, dict) and _result.get("_error"):
+                            await client.fail(_tid, _result["_error"])
+                        elif _result is None:
+                            await client.fail(_tid, f"task timed out after {task_timeout}s")
+                        elif isinstance(_result, dict) and "exit_code" in _result:
+                            await client.complete(_tid, _result.get("text", ""), _result.get("exit_code", 0),
+                                                  session_id=_result.get("oc_session_id", ""), work_dir=t.get("cwd") or ".")
+                        else:
+                            await client.fail(_tid, "no done event")
+                    except Exception as _ce:
+                        log.warning(f"task {_tid} complete/fail callback error: {_ce}")
+                active_sessions.discard(s)
+                active_tasks.pop(_tid, None)
+                if e == "hermes":
+                    hermes_active -= 1
 
             asyncio.create_task(_wrap())
 
@@ -587,6 +658,29 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     backoff = min(30 * (2 ** (heartbeat_fail_streak - HEARTBEAT_FAIL_THRESHOLD)), 300)
                     log.warning(f"re-register failed, backing off {backoff:.0f}s")
                     await asyncio.sleep(backoff)
+
+        # ---- sid 看门狗：清理幽灵 sid ----
+        # active_tasks 里的任务如果已在服务端终态（failed/cancelled/completed/not_found），
+        # 说明 _wrap 的 finally 没执行（opencode 进程 hang 住），sid 泄漏在 active_sessions。
+        # 定期查服务端状态，主动清理，防同 sid 后续任务被假冲突挡住（seq#1485 根因）。
+        _watchdog_interval = _env_float("RUNTIME_SID_WATCHDOG_INTERVAL", 60)
+        if active_tasks and now - _sid_watchdog_last >= _watchdog_interval:
+            _sid_watchdog_last = now
+            _ghost_tids = []
+            for _tid, _sid in list(active_tasks.items()):
+                try:
+                    _state = await client.get_task_state(_tid)
+                except Exception:
+                    _state = ""
+                if _state in ("failed", "cancelled", "completed", "not_found", "") and _state:
+                    _ghost_tids.append((_tid, _sid, _state))
+                elif not _state:
+                    # 查询失败（网络抖动/服务端 500）：跳过，下次再查
+                    pass
+            for _tid, _sid, _state in _ghost_tids:
+                active_sessions.discard(_sid)
+                active_tasks.pop(_tid, None)
+                log.warning(f"sid watchdog: cleaned ghost tid={_tid} sid={_sid} (server status={_state})")
 
         await asyncio.sleep(poll_interval + random.uniform(0, poll_interval * 0.3))
 

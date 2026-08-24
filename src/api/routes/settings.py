@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 # ====== Credentials ======
 
 @router.get("/credentials")
-async def get_credentials(user: dict = Depends(get_current_user)):
+async def get_credentials(user: dict = Depends(get_current_user), repo_key: str = ""):
     acc = user_db.get_user_account(user["username"]) or {}
     return {
         "gitcode": {
@@ -23,7 +23,6 @@ async def get_credentials(user: dict = Depends(get_current_user)):
         "huawei_cloud": {
             "ak_exists": bool(acc.get("huawei_cloud_ak")),
             "sk_exists": bool(acc.get("huawei_cloud_sk")),
-            # 真实值回显给本人（管理台鉴权后），前端默认掩码 + 可切换明文
             "ak": acc.get("huawei_cloud_ak", ""),
             "sk": acc.get("huawei_cloud_sk", ""),
         },
@@ -39,6 +38,7 @@ class UpdateCredentials(BaseModel):
     huawei_cloud_sk: str = ""
     codearts_ak: str = ""
     codearts_sk: str = ""
+    repo_key: str = ""
 
 
 # 占位符凭据（2026-08-17 修复，issue #72）：前端曾把 demo 占位符回显进输入框，
@@ -211,6 +211,16 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
     uname = user.get("username") or ""
     user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}
 
+    # 获取全部有效用户名，用于判断已删除用户的本地引擎
+    valid_users = set()
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT username FROM user_accounts")
+            valid_users = {r[0] for r in c.fetchall()}
+        except Exception:
+            pass
+
     # 凭据映射：id -> 派生所需字段
     cred_map = {}
     with db_lock:
@@ -224,6 +234,8 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
 
     def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
         if not cid:                      # credential_id=0（历史本机引擎）
+            # 本机引擎行若有 owner_id，需确认对应用户仍存在
+            # 已删除用户的本地引擎不展示（用户删除后系统不会自动清理行）
             return True
         if cscope == "global":
             return True
@@ -243,6 +255,13 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
                                      "owner_name": "", "owner_id": "", "last_ip": ""}
         if not _visible_credential(cid, cred["scope"], cred["owner_name"], cred["owner_id"]):
             continue
+        if cid == 0:
+            # 本机引擎行可能绑定了已删除用户的 owner_id，需校验用户是否仍存在
+            rt_owner = (rt.get("owner_id") or "").strip()
+            if rt_owner and rt_owner not in valid_users:
+                # 对应用户已删除 → 引擎不展示，标记 health=user_deleted 供排查
+                log.info(f"agent-runtimes: skipping local engine '{rt['name']}' owned by deleted user '{rt_owner}'")
+                continue
         if cred.get("status") == "revoked":
             # 设备已吊销 → 引擎不再展示（与 Workers 视图只列 active 一致）；
             # DB 行保留 offline，避免历史会话/任务绑定的 runtime_id 悬空
@@ -250,8 +269,13 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
         rt["instance_name"] = instance_name(rt["name"], cred["device_name"], cid)
         rt["worker_name"] = cred["name"]
         rt["worker_ip"] = cred["last_ip"]
-        rt["owner"] = cred["owner_name"]
-        rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
+        # 本机直连（cid=0）：owner/scope 取引擎自身 DB 值，不继承空凭据默认值
+        if cid == 0:
+            rt["owner"] = cred["owner_name"]
+            rt["scope"] = rt.get("scope", cred["scope"]) or "global"
+        else:
+            rt["owner"] = cred["owner_name"]
+            rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
         visible_runtimes.append(rt)
 
@@ -278,24 +302,22 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
                             "owner": cred.get("owner_name", ""),
                             "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
                             "runtimes": runtimes})
-    # 未绑定凭据的本地 runtime（历史 backend_agents 迁移而来）：
-    # 仅列可见的本机直连行（credential_id=0）。旧实现遍历 cached 全量——
-    # 吊销全部 worker 后 devices 为空必触发此分支，40 行 revoked/远端行
-    # 全部以"本机 Runtime"设备伪装展示，页面出现大量离线本机 runtime
-    #（2026-08-17 修复，见 engine-binding-revoke-collision-2026-08.md）。
-    if not devices:
-        for rt in visible_runtimes:
-            if (rt.get("credential_id") or 0) != 0:
-                continue
-            devices.append({"credential_id": 0, "name": "本机 Runtime", "device_name": "本机",
-                            "credential_status": "active", "last_seen_at": None,
-                            "worker_ip": "", "scope": rt.get("scope") or "global", "owner": "",
-                            "health": rt.get("health", "offline"),
-                            "runtimes": [{"id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
-                                          "healthy": rt.get("healthy", False),
-                                          "installed": rt.get("installed", False),
-                                          "instance_name": rt.get("instance_name", rt.get("name", "")),
-                                          "health": rt.get("health", "offline")}]})
+    # 本机直连引擎（credential_id=0，本地 runtime）：始终追加到设备列表。
+    # 旧逻辑用 `if not devices:` 哨兵，但存在远端 worker credential 时
+    # 本机引擎会被整体隐藏（mlc 反馈 2026-08-19）。
+    for rt in visible_runtimes:
+        if (rt.get("credential_id") or 0) != 0:
+            continue
+        devices.append({"credential_id": 0, "name": "本机 Runtime", "device_name": "本机",
+                        "credential_status": "active", "last_seen_at": None,
+                        "worker_ip": "", "scope": rt.get("scope") or "global", "owner": "",
+                        "owner_id": rt.get("owner_id", ""),  # 引擎所属用户 id，区分全局/个人
+                        "health": rt.get("health", "offline"),
+                        "runtimes": [{"id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
+                                      "healthy": rt.get("healthy", False),
+                                      "installed": rt.get("installed", False),
+                                      "instance_name": rt.get("instance_name", rt.get("name", "")),
+                                      "health": rt.get("health", "offline")}]})
     return {"runtimes": visible_runtimes, "devices": devices}
 
 

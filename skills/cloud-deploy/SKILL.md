@@ -2,20 +2,27 @@
 name: cloud-deploy
 version: 1.0.0
 description: |
-  Huawei Cloud deployment skill. Listens for PR merge events on master/main,
-  automatically determines build method from project files,
+  Huawei Cloud deployment skill. Supports two entry points:
+  1. A2A direct deployment (a2a_event) — triggered by Issue/Coding Agent handing off a deploy task, no PR merge required.
+  2. PR merge on master/main — full build→deploy→verify pipeline.
+  Automatically determines build method from project files,
   deploys to Huawei Cloud using hcloud CLI, and verifies deployment.
-  NOT for: non-merge PR events, pushes to non-master branches.
+  NOT for: non-merge, non-A2A PR events; pushes to non-master branches.
 tools:
   - curl
   - git
 ---
 ## 安全硬约束（必须遵守）
 
-1. 调用 GitCode API 只用 prompt 注入的 \\，严禁从数据库/configs/日志/历史中寻找其他 token。
-2. 严禁读取 data/、configs/、sessions.db、user_accounts 等 Grape 内部数据。
-3. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
-4. token 不得写入任何文件/日志/评论。
+1. 调用 GitCode API 只用环境变量 `$BOT_GITCODE_TOKEN`，严禁从数据库/configs/日志/历史中寻找其他 token。
+2. GitCode API 调用格式（必须用 Bearer）：
+   ```bash
+   curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" "https://gitcode.com/api/v5/repos/$REPO_FULL_NAME/issues/$ISSUE_NUMBER"
+   ```
+   ⚠️ 必须用 `Authorization: Bearer ***` `Authorization: token ***` 会被 GitCode API 返回 401。
+3. 严禁读取 data/、configs/、sessions.db、user_accounts 等 Grape 内部数据。
+4. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
+5. token 不得写入任何文件/日志/评论。
 
 
 
@@ -23,8 +30,35 @@ tools:
 
 ## 入口判定
 
-- 仅当 `pull_request_merged` 事件且分支为 `master` 或 `main` 时继续
-- 其他事件类型直接输出 `SKIP` 并返回
+支持以下入口，按优先级判定。**首先根据 A2A context / Issue 内容判断操作类型（部署 vs 释放），再走对应流程。**
+
+### 操作类型识别
+
+读取 A2A context 或 Issue 正文，按关键词判定：
+- **资源释放**：包含「释放/销毁/删除/回收/destroy/release/teardown/cleanup/清退」等关键词
+- **部署**：其他情况（创建/部署/上线/更新/deploy 等）
+
+### 入口 1：A2A 直接触发（`a2a_event` 类型，不依赖 PR merge）
+
+当 Issue Agent 或 Coding Agent 通过 A2A 交办任务时直接执行，不要求 PR 已合并。
+从 A2A context 中获取需求摘要；从 payload 中获取 `issue_number`、`pr_number`（可选）。
+
+**部署场景**：
+- 代码来源：有 `pr_number` 时拉取对应 PR 分支代码；无 `pr_number` 时拉取仓库默认分支最新代码。
+- 走下方「流程 §1~§4」完整构建→部署→验证流程。
+
+**资源释放场景**：
+- 跳过构建/部署，直接走「资源释放流程」（见下方专节）。
+- 从 Issue 正文/评论中提取要释放的资源信息（ECS 名称/IP、RDS 实例名、OBS 桶名等）。
+- 如果 Issue 中没有明确的资源信息，先用 GitCode API 查 Issue 评论补充；仍无法确定时回帖追问用户。
+
+### 入口 2：PR 合并触发（`pull_request_merged` 事件）
+
+分支为 `master` 或 `main` 时继续，走完整构建→部署流程。
+
+### 入口 3：其他事件类型
+
+直接输出 `SKIP` 并返回。
 
 ## 流程
 
@@ -44,13 +78,18 @@ tools:
 | `app.py` / `main.py` | Python Flask 项目 |
 | `static/` / `templates/` | Flask 模板项目 |
 
-### 2. 构建
+### 2. 获取代码并构建
 
-根据上一步的判断，执行对应构建命令。查看项目文档获取参数。
+根据入口判定结果获取代码，再按项目类型执行构建命令。
 
 ```bash
-# 示例（根据实际项目类型选择）
-git checkout master && git pull
+# 代码获取（根据入口类型选择）：
+# A2A 直接触发 + 有 pr_number：拉取 PR 分支代码
+#   git clone <repo_url> && git checkout <pr_branch>
+# A2A 直接触发 + 无 pr_number：拉取仓库默认分支最新代码
+#   git clone <repo_url>
+# PR 合并触发：拉取 master/main 分支
+#   git checkout master && git pull
 cd /path/to/repo
 # 按需执行：npm install && npm run build
 # 或：pip install -r requirements.txt
@@ -116,28 +155,45 @@ if [ -n "$EXISTING_ECS" ]; then
   echo "复用已有 ECS: $EXISTING_ECS"
   ECS_IP="$EXISTING_ECS"
 else
-  # 新建：**必须带 keypair**（否则建完 SSH 连不上，Agent 会反复试错重建——15:38 事故）
+  # 新建：动态选取当前区域最小可用按量规格
+  #
+  # 实测 cn-north-4 的 s6.small.1 已废弃，硬编码会导致
+  # Ecs.0019（flavor abandoned）/ Ecs.0707（product not found）。
+  # 必须动态查询：
+  #   1) ListFlavors → 获取规格列表（含 vCPU/内存/架构）
+  #   2) ListFlavorSellPolicies → 确认 postPaid 可售
+  #   3) 按 vCPU↑、RAM↑ 取第一个符合架构的
+  # **必须带 keypair**（否则建完 SSH 连不上，Agent 会反复试错重建——15:38 事故）
   #   keypair 不存在则先创建并保存私钥；公钥来自 worker ~/.ssh/id_ed25519.pub
   if ! hcloud ECS NovaListKeypairs --cli-region=cn-north-4 2>/dev/null | grep -q "grape-deploy-kp"; then
     hcloud ECS NovaCreateKeypair --cli-region=cn-north-4 --name=grape-deploy-kp \
       --public_key="$(cat ~/.ssh/id_ed25519.pub)" 2>/dev/null || true
   fi
-  INSTANCE_NAME="deploy-${REPO_FULL_NAME//\\//-}-$(date +%H%M%S)"
-    hcloud ECS CreatePostPaidServers --cli-region=cn-north-4 \
-      --server.flavorRef="at7.large.1" --server.imageRef="4b038034-9845-4eeb-b2b1-f847c411086b" \
-      --server.name="$INSTANCE_NAME" \
-      --server.root_volume.volumetype="SSD" \
-      --server.vpcid="$VPC_ID" \
-      --server.nics.1.subnet_id="$SUBNET_ID" \
-      --server.security_groups.1.id="$SG_ID" \
-      --server.key_name="grape-deploy-kp" \
-      --server.availability_zone="cn-north-4b" \
-      --server.publicip.eip.iptype="5_bgp" \
-      --server.publicip.eip.bandwidth.sharetype="PER" \
-      --server.publicip.eip.bandwidth.size=1 \
-      --server.publicip.delete_on_termination=true \
-      --server.count=1 2>&1
-    # 等待 ECS running，拿公网浮动 IP（hcloud ECS ListServersDetails 按名称查）
+  # 动态选最小可用规格（2026-08-20 修复：不再硬编码 s6.small.1）
+  # 流程：ListFlavors → 取规格列表 → 按架构/按需/最小排序
+  ARCH=$(uname -m)
+  MIN_FLAVOR=$(hcloud ECS ListFlavors --cli-region=cn-north-4 2>/dev/null | python3 -c "
+  import json,sys
+  arch='$ARCH'  # bash 展开
+  arch_map={'x86_64':'x86','amd64':'x86','aarch64':'ARM','arm64':'ARM'}
+  want=arch_map.get(arch.strip(),'x86')
+  data=json.load(sys.stdin)
+  flavors=data.get('flavors',[]) if isinstance(data,dict) else data
+  candidates=[f for f in flavors
+    if f.get('os_extra_specs',{}).get('ecs:architecture','')==want
+    and f.get('is_public',True)]
+  candidates.sort(key=lambda f:(f.get('vcpus',999),f.get('ram',99999)))
+  print(candidates[0]['id'] if candidates else 's6.small.1')
+  " 2>/dev/null)
+  echo "Selected flavor: $MIN_FLAVOR"
+  INSTANCE_NAME="deploy-${REPO_FULL_NAME//\/-}-$(date +%H%M%S)"
+  hcloud ECS <CreateServer> --cli-region=cn-north-4 \
+      --name "$INSTANCE_NAME" --flavor "$MIN_FLAVOR" --image "Ubuntu 22.04" \
+    --charging-mode postPaid --security-group "default" \
+    --keypair "grape-deploy-kp" \
+    --user-data "#!/bin/bash
+      mkdir -p /root/.ssh && echo '$(cat ~/.ssh/id_ed25519.pub)' >> /root/.ssh/authorized_keys" ...
+  # 等待 ECS running，拿公网浮动 IP（hcloud ECS ListServersDetails 按名称查）
   ECS_IP=$(...按 INSTANCE_NAME 过滤出浮动 IP...)
 fi
 # 复用场景也要确保免密可用：公钥没进去就补推一次
@@ -162,15 +218,25 @@ echo 'nameserver 8.8.8.8' > /etc/resolv.conf
 echo 'nameserver 223.5.5.5' >> /etc/resolv.conf
 
 cd /opt/__REPO_NAME__
-# 系统依赖（Ubuntu 22.04 精简镜像缺 python3-venv，不装则 venv 建不出 pip → 部署失败）
+# 镜像加速（2026-08-22 规则更新）：所有下载资源优先使用国内镜像源，
+# 减少跨境网络延迟与超时。以下按优先级排列：
+#   apt: 华为云镜像
+#   pip: 华为云镜像
+#   npm: 华为云镜像（若为 Node.js 项目）
+#   docker: 华为云 SWR 镜像（若为容器化项目）
+
+# 系统依赖 + apt 镜像源（华为云 ecs region cn-north-4 内网加速）
+sed -i 's|http://archive.ubuntu.com|http://mirrors.huaweicloud.com|g' /etc/apt/sources.list 2>/dev/null || true
+sed -i 's|http://security.ubuntu.com|http://mirrors.huaweicloud.com|g' /etc/apt/sources.list 2>/dev/null || true
 apt-get update -qq
 apt-get install -y -qq python3 python3-pip python3-venv python3.10-venv 2>/dev/null || apt-get install -y -qq python3 python3-pip python3-venv
-# venv + 依赖（pip 网络超时是常态，重试 3 次）
+# venv + 依赖（pip 网络超时是常态，华为云镜像优先，回退到官方源重试 3 次）
 rm -rf venv
 python3 -m venv venv
-venv/bin/pip install -q --upgrade pip || true
+venv/bin/pip install -q --upgrade pip -i https://mirrors.huaweicloud.com/repository/pypi/simple --trusted-host mirrors.huaweicloud.com || true
 for i in 1 2 3; do
-  venv/bin/pip install -q -r requirements.txt gunicorn && break
+  venv/bin/pip install -q -r requirements.txt gunicorn \
+    -i https://mirrors.huaweicloud.com/repository/pypi/simple --trusted-host mirrors.huaweicloud.com && break
   echo "pip retry $i/3"
   sleep 5
 done
@@ -204,13 +270,14 @@ curl -s -o /dev/null -w '%{http_code}' "http://$ECS_IP:5000/post/1"  # Flask 示
 
 > ⚠️ 部署阶段实测坑（持续积累）：
 > 1. **Ubuntu 22.04 精简镜像缺 python3-venv** → venv 建不出 pip，必须 `apt-get install python3-venv python3.10-venv`
-> 2. **pip 连 files.pythonhosted.org 经常 ReadTimeout** → 必须重试（实测第 1 次超时、第 2 次成功）
+> 2. **pip 连 files.pythonhosted.org 经常 ReadTimeout** → 优先使用华为云 PyPI 镜像（`mirrors.huaweicloud.com/repository/pypi/simple`），仅镜像不可用时回退官方源重试
 > 3. **SSH 部署务必用单条 ssh 会话跑完所有命令**（或先 ssh-copy-id 免密）——expect 密码交互多命令叠加会超 600s 任务上限
 > 4. **创建 ECS 必须带 keypair + 创建前先查已有实例**——否则建完 SSH 连不上，Agent 会反复试错重建（每跑一次多一台机器、多一份费用）
 > 5. **可用区 cn-north-4g 不可用**（2026-08-20 实测）：该 AZ 使用 DPDK/vhostuser 高性能网卡，不走标准内核网络栈，SSH 永远连不上。必须指定 `--server.availability_zone=cn-north-4a` 或 `cn-north-4b`。
 > 6. **Ecs.0707 规格找不到**（2026-08-20 实测）：`s6.small.1` 等硬编码 flavor 在 postPaid 模式下可能不售卖。用 `hcloud ECS ListFlavors` + `ListFlavorSellPolicies` 动态查询最小可用规格，确认 sell_status=available 再使用。
 > 7. **DNS 解析失败**（2026-08-20 实测）：Ubuntu 22.04 的 systemd-resolved（127.0.0.53）可能无法解析 GitCode 等外部域名（SERVFAIL）。部署 SSH 脚本内先设 `echo 'nameserver 8.8.8.8' > /etc/resolv.conf`。
 > 8. **EIP 必须自动创建**（2026-08-20 实测）：创建 ECS 时必须用 `--server.publicip.eip.*` 参数让 API 自动创建并关联 EIP，不要先建 ECS 再手动关联，否则可能因 VPC 缺少 Internet Gateway 而无法通信。
+> 9. **国内镜像优先**（2026-08-22 规则）：所有下载资源（apt/pip/npm/docker）必须优先使用华为云镜像源加速：apt 换 `mirrors.huaweicloud.com`，pip 加 `-i https://mirrors.huaweicloud.com/repository/pypi/simple`，npm 设 `registry=https://mirrors.huaweicloud.com/repository/npm/`，docker pull 用 `swr.cn-north-4.myhuaweicloud.com`。镜像不可用时才回退官方源。
 
 ## 环境变量
 
@@ -227,3 +294,85 @@ curl -s -o /dev/null -w '%{http_code}' "http://$ECS_IP:5000/post/1"  # Flask 示
 - ✅ 仅执行当前 PR 合并后的部署流程
 - ✅ 部署前先理解项目结构
 - ✅ 部署失败时输出错误信息，不自动回滚
+- ✅ **下载资源优先使用国内镜像加速**：apt/pip/npm/docker 等包管理器及运行时下载均优先使用华为云国内镜像源，仅在镜像不可用时回退官方源，减少跨境网络延迟与超时
+
+## 资源释放流程
+
+当操作类型识别为「资源释放」时，跳过构建/部署，按以下步骤释放华为云资源。
+
+### 1. 收集资源信息
+
+从 Issue 正文和评论中提取要释放的资源：
+
+- **ECS 实例**：名称（如 `deploy-songspace-forum-java-084723`）或 IP
+- **RDS 实例**：实例名或 ID
+- **OBS 桶**：桶名
+- **安全组/密钥对/EIP**：如有关联资源也一并释放
+
+如果 Issue 中资源信息不完整，用 GitCode API 查 Issue 评论补充：
+```bash
+curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
+  "https://gitcode.com/api/v5/repos/$REPO_FULL_NAME/issues/$ISSUE_NUMBER/comments"
+```
+
+仍无法确定时，在 Issue 回帖追问用户，列出已知资源请用户确认。
+
+### 2. 查询并释放资源
+
+**先查询再释放，确认每个资源存在后再操作。释放后验证已删除。**
+
+```bash
+# 确认 hcloud 可用（与部署流程相同的前置检查）
+hcloud configure set --cli-access-key="$HUAWEICLOUD_SDK_AK" --cli-secret-key="$HUAWEICLOUD_SDK_SK" --cli-region=cn-north-4
+
+# 2.1 释放 ECS 实例
+#   查询：按名称前缀过滤（deploy-<repo> 或 <repo>-deploy）
+hcloud ECS ListServersDetails --cli-region=cn-north-4 | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for s in data.get('servers',[]):
+    print(s.get('id',''), s.get('name',''), s.get('status',''))
+"
+#   确认目标实例后删除：
+hcloud ECS DeleteServer --cli-region=cn-north-4 --server_id="<INSTANCE_ID>"
+#   验证：再次 ListServersDetails 确认该实例已不存在
+
+# 2.2 释放 RDS 实例
+hcloud RDS ListInstances --cli-region=cn-north-4 | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for i in data.get('instances',[]):
+    print(i.get('id',''), i.get('name',''), i.get('status',''))
+"
+#   确认目标实例后删除：
+hcloud RDS DeleteInstance --cli-region=cn-north-4 --instance_id="<RDS_ID>"
+
+# 2.3 释放 OBS 桶
+#   先清空桶内对象（非空桶无法删除）：
+obsutil rm <BUCKET_NAME> -r -f 2>/dev/null || true
+#   再删桶：
+obsutil rm <BUCKET_NAME> -b 2>/dev/null || hcloud OBS DeleteBucket --bucket="<BUCKET_NAME>" 2>/dev/null || true
+
+# 2.4 释放 EIP（如有独立 EIP 未随 ECS 自动释放）
+hcloud EIP ListPublicIps --cli-region=cn-north-4 2>/dev/null | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for e in data.get('publicips',[]):
+    print(e.get('id',''), e.get('public_ip_address',''), e.get('status',''))
+"
+#   确认后删除：
+hcloud EIP DeletePublicIp --cli-region=cn-north-4 --publicip_id="<EIP_ID>"
+```
+
+### 3. 验证与报告
+
+- 逐个确认资源已释放（查询返回空或 404）
+- 在 Issue 回帖汇总释放结果（资源名 → 状态：已释放/未找到/释放失败）
+- 输出最终 JSON 块（`actions` 中列出释放操作，`conclusion` 汇总结果）
+
+> ⚠️ 释放注意事项：
+> 1. **先查再删**：必须先查询确认资源存在，避免误删或操作不存在的资源。
+> 2. **ECS 先删再删 EIP**：ECS 关联的 EIP 在 ECS 删除后可能自动释放，独立 EIP 需手动删。
+> 3. **OBS 桶必须先清空**：非空桶删除会失败，先 `obsutil rm <bucket> -r -f` 清空对象。
+> 4. **RDS 删除可能异步**：RDS DeleteInstance 返回后实例可能仍在「删除中」状态，等几分钟再验证。
+> 5. **幂等**：重复释放同一资源不应报错，资源已不存在视为成功。

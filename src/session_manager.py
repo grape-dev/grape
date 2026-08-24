@@ -704,8 +704,11 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
 
     有本机直连引擎 → backend=其类型名、runtime_id=其 id（恒 direct）；
     无 → backend=''、runtime_id=0（前端"无 engine，不可用"）。
+
+    注意：如果 runtime_id 已显式配置（>0），即使 backend 未知也不覆盖，
+    由上游 get_chat_config 自行决定是否用 runtime_id 直接执行。
     """
-    if not backend:
+    if not backend and not runtime_id:
         try:
             from src.runtime.engine_select import resolve_local_engine, engine_name
             _rid = resolve_local_engine() or 0

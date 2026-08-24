@@ -8,9 +8,10 @@ function renderDashboard(data) {
   const role = data.role || 'Member';
   const agentCounts = data.agent_event_counts || {};
   const scenes = data._scenes || [];
+  const currentScene = data.dev_scene || 'default';
   const owner = data._owner || '';
   const name = data._name || '';
-  const sceneOpts = scenes.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+  const sceneOpts = scenes.map(s => `<option value="${s.id}"${s.id === currentScene ? ' selected' : ''}>${s.name}</option>`).join('');
 
   const agentOrder = ['vod','issue','coding','qa','sre'];
   const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];

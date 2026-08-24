@@ -1,0 +1,1023 @@
+/* ═══════════════════════════════════════════════════════════
+   Apple Developer Theme for Grape
+   Inspired by developer.apple.com — clarity, deference, depth.
+   Liquid Glass sidebar, restrained palette, SF Pro typography.
+   Activate: <html data-theme="apple"> — overrides :root vars.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── 1. Variable Overrides ── */
+[data-theme="apple"] {
+  /* Backgrounds — Apple's signature light staircase */
+  --s: #f5f5f7;          /* sidebar bg → light (was dark navy) */
+  --s2: #ffffff;          /* sidebar elevated */
+  --s3: #eaeaec;          /* sidebar tertiary / hover */
+  --bg: #f5f5f7;          /* main bg — Apple's canonical light gray */
+  --c: #ffffff;           /* card bg — pure white */
+  --b: #d2d2d7;           /* borders — Apple's hairline gray */
+
+  /* Text — Apple's type staircase */
+  --t: #1d1d1f;           /* primary text — Apple near-black */
+  --t2: #6e6e73;          /* secondary text — Apple gray */
+  --t3: #86868b;          /* tertiary text — Apple light gray */
+
+  /* Accents — Apple system colors */
+  --a: #0071e3;           /* Apple Blue (developer.apple.com link blue) */
+  --ah: #0077ed;          /* Apple Blue hover */
+  --g: #34c759;           /* Apple Green */
+  --y: #ff9f0a;           /* Apple Orange (was yellow) */
+  --r: #ff3b30;           /* Apple Red */
+  --pu: #af52de;          /* Apple Purple */
+  --or: #ff9f0a;          /* Apple Orange */
+  --pk: #ff2d92;          /* Apple Pink */
+  --sk: #5ac8fa;          /* Apple Sky */
+
+  /* Radius — Apple's generous rounding */
+  --rd: 12px;             /* default radius (was 8px) */
+  --r2: 18px;             /* large radius (was 12px) */
+
+  /* Shadow — Apple's subtle multi-layer depth */
+  --sh: 0 2px 8px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.06);
+
+  /* Apple-specific tokens (non-overriding) */
+  --apple-nav-height: 44px;
+  --apple-glass-blur: 20px;
+  --apple-glass-bg: rgba(255,255,255,0.72);
+  --apple-content-width: 980px;
+  --apple-section-gap: 100px;
+  --apple-transition: 0.3s cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+/* ── 2. Body & Global Typography ── */
+[data-theme="apple"] body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Noto Sans SC", sans-serif;
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+[data-theme="apple"] ::-webkit-scrollbar { width: 6px; }
+[data-theme="apple"] ::-webkit-scrollbar-track { background: transparent; }
+[data-theme="apple"] ::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.15);
+  border-radius: 3px;
+}
+[data-theme="apple"] ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.25); }
+
+/* ── 3. Login Screen ── */
+[data-theme="apple"] .ln {
+  background: linear-gradient(180deg, #1d1d1f 0%, #000000 100%);
+}
+[data-theme="apple"] .lbox .logo {
+  border-radius: 22px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+[data-theme="apple"] .lbox h1 {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+[data-theme="apple"] .lbox .sub {
+  color: #86868b;
+  font-weight: 400;
+}
+[data-theme="apple"] .lbox .obtn {
+  border-radius: 980px;          /* Apple pill */
+  background: #0071e3;
+  font-weight: 500;
+  transition: all 0.3s cubic-bezier(0.25,0.1,0.25,1);
+}
+[data-theme="apple"] .lbox .obtn:hover {
+  background: #0077ed;
+  transform: scale(1.02);
+  box-shadow: 0 8px 24px rgba(0,113,227,0.3);
+}
+[data-theme="apple"] .lbox .inp input {
+  border-radius: 12px;
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.08);
+}
+
+/* ── 4. Sidebar — Liquid Glass (developer.apple.com style) ── */
+[data-theme="apple"] .sb {
+  background: rgba(245,245,247,0.8);
+  backdrop-filter: blur(var(--apple-glass-blur)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--apple-glass-blur)) saturate(180%);
+  border-right: 1px solid rgba(0,0,0,0.06);
+  color: var(--t);              /* override hardcoded #fff → dark text on light glass */
+}
+[data-theme="apple"] .sb-h {
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+[data-theme="apple"] .sb-h h1 {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--t);              /* near-black "Grape" title */
+}
+[data-theme="apple"] .tagline {
+  color: var(--t3);
+  font-weight: 400;
+}
+[data-theme="apple"] .sb-sel select {
+  background: var(--c);
+  border: 1px solid var(--b);
+  border-radius: 10px;
+  color: var(--t);
+  font-weight: 500;
+}
+[data-theme="apple"] .sb-sel select option {
+  background: var(--c);
+  color: var(--t);
+}
+[data-theme="apple"] .sb-sel select:focus { border-color: var(--a); }
+
+/* Sidebar nav items */
+[data-theme="apple"] .sb-nav .grp {
+  color: var(--t3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+[data-theme="apple"] .sb-nav a {
+  color: var(--t);
+  font-weight: 400;
+  border-radius: 8px;
+  transition: background 0.2s, color 0.2s;
+}
+[data-theme="apple"] .sb-nav a:hover {
+  background: rgba(0,0,0,0.04);
+}
+[data-theme="apple"] .sb-nav a.act {
+  background: rgba(0,113,227,0.1);
+  color: var(--a);
+  font-weight: 500;
+}
+[data-theme="apple"] .sb-nav a .ic {
+  opacity: 0.7;
+}
+
+/* Sidebar footer */
+[data-theme="apple"] .sb-ft {
+  border-top: 1px solid rgba(0,0,0,0.06);
+}
+[data-theme="apple"] .sb-ft .av {
+  background: linear-gradient(135deg, #0071e3, #af52de);
+  font-weight: 600;
+  border-radius: 50%;
+}
+[data-theme="apple"] .sb-ft .by {
+  color: var(--t);
+}
+[data-theme="apple"] .sb-ft .by span {
+  color: var(--t2);
+}
+[data-theme="apple"] .sb-ft .by span::before {
+  background: var(--t3);
+}
+
+/* ── 5. Top Bar ── */
+[data-theme="apple"] .tb {
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+[data-theme="apple"] .bc b {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+[data-theme="apple"] .srch {
+  background: rgba(0,0,0,0.04);
+  border-radius: 10px;
+  border: none;
+}
+[data-theme="apple"] .srch input {
+  color: var(--t);
+}
+[data-theme="apple"] .srch input::placeholder { color: var(--t3); }
+
+/* ── 6. Buttons ── */
+[data-theme="apple"] .bt {
+  border-radius: 980px;           /* Apple pill */
+  font-weight: 500;
+  transition: all var(--apple-transition);
+}
+[data-theme="apple"] .bt-p {
+  background: #0071e3;
+  color: #fff;
+  border: none;
+}
+[data-theme="apple"] .bt-p:hover {
+  background: #0077ed;
+}
+[data-theme="apple"] .bt-o {
+  background: var(--c);
+  color: var(--a);
+  border: 1px solid var(--b);
+}
+[data-theme="apple"] .bt-o:hover {
+  background: rgba(0,113,227,0.04);
+  border-color: var(--a);
+}
+[data-theme="apple"] .bt-s {
+  font-size: 12px;
+  padding: 6px 16px;
+}
+
+/* ── 7. Cards ── */
+[data-theme="apple"] .cd {
+  background: var(--c);
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: var(--r2);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+[data-theme="apple"] .cd-h h2 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* ── 8. Tables ── */
+[data-theme="apple"] .tg {
+  border-radius: var(--r2);
+  overflow: hidden;
+  border: 1px solid rgba(0,0,0,0.06);
+}
+[data-theme="apple"] .tg th {
+  background: #f5f5f7;
+  color: var(--t2);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+[data-theme="apple"] .tg td {
+  border-color: rgba(0,0,0,0.06);
+}
+[data-theme="apple"] .tg-row:hover {
+  background: rgba(0,113,227,0.03);
+}
+
+/* ── 9. Lobby / Repository Selection ── */
+[data-theme="apple"] .lobby {
+  background: linear-gradient(180deg, #ffffff 0%, #f5f5f7 30%);
+}
+[data-theme="apple"] .lobby::before {
+  background: radial-gradient(ellipse at center, rgba(0,113,227,0.06) 0%, rgba(175,82,222,0.04) 45%, transparent 70%);
+}
+[data-theme="apple"] .lobby::after {
+  background: radial-gradient(circle, rgba(0,113,227,0.04), transparent 65%);
+}
+[data-theme="apple"] .lobby-head {
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+[data-theme="apple"] .lobby-tabs {
+  background: rgba(0,0,0,0.04);
+  border: none;
+  border-radius: 10px;
+  box-shadow: none;
+}
+[data-theme="apple"] .rs-tab {
+  border-radius: 8px;
+  font-weight: 500;
+}
+[data-theme="apple"] .rs-tab-act {
+  background: #0071e3;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(0,113,227,0.2);
+}
+[data-theme="apple"] .rs-tab-act:hover { background: #0077ed; }
+
+[data-theme="apple"] .lobby-title {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+[data-theme="apple"] .lobby-title span {
+  background: linear-gradient(90deg, #0071e3, #af52de);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+[data-theme="apple"] .lobby-eyebrow {
+  color: var(--a);
+  letter-spacing: 3px;
+}
+[data-theme="apple"] .lobby-eyebrow i {
+  background: linear-gradient(90deg, transparent, var(--a));
+}
+[data-theme="apple"] .lobby-eyebrow i:last-child {
+  background: linear-gradient(90deg, var(--a), transparent);
+}
+
+[data-theme="apple"] .lobby-card {
+  border-radius: 18px;
+  border: 1px solid rgba(0,0,0,0.06);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+  transition: all 0.3s cubic-bezier(0.25,0.1,0.25,1);
+}
+[data-theme="apple"] .lobby-card::after {
+  background: linear-gradient(90deg, #0071e3, #af52de);
+  height: 2px;
+}
+[data-theme="apple"] .lobby-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 40px rgba(0,0,0,0.08);
+  border-color: rgba(0,113,227,0.15);
+}
+[data-theme="apple"] .lobby-card-ic {
+  border-radius: 14px;
+  background: linear-gradient(135deg, #e8f0fe, #f0e8fe);
+  box-shadow: inset 0 0 0 1px rgba(0,113,227,0.08), 0 4px 12px rgba(0,113,227,0.06);
+}
+[data-theme="apple"] .lobby-card h3 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+[data-theme="apple"] .lobby-btn-solid {
+  background: #0071e3;
+  border-radius: 980px;
+  box-shadow: 0 4px 12px rgba(0,113,227,0.2);
+}
+[data-theme="apple"] .lobby-btn-solid:hover {
+  background: #0077ed;
+  box-shadow: 0 8px 20px rgba(0,113,227,0.3);
+}
+[data-theme="apple"] .lobby-btn-ghost {
+  border-radius: 980px;
+  border: 1px solid var(--b);
+}
+[data-theme="apple"] .lobby-card-add {
+  border-radius: 18px;
+  background: linear-gradient(135deg, #f0f5ff, #f5f0ff);
+}
+[data-theme="apple"] .lobby-card-add .lobby-card-plus {
+  border-radius: 16px;
+  background: linear-gradient(135deg, #0071e3, #af52de);
+}
+[data-theme="apple"] .lobby-avatar {
+  border-radius: 50%;
+  background: linear-gradient(135deg, #0071e3, #af52de);
+}
+
+/* ── 10. Settings Tabs ── */
+[data-theme="apple"] .stabs a {
+  color: var(--t2);
+  font-weight: 500;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+[data-theme="apple"] .stabs a.ac {
+  color: var(--a);
+  background: rgba(0,113,227,0.08);
+}
+[data-theme="apple"] .srow input {
+  border-radius: 10px;
+  border: 1px solid var(--b);
+  background: var(--c);
+  color: var(--t);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+[data-theme="apple"] .srow input:focus {
+  border-color: var(--a);
+  box-shadow: 0 0 0 4px rgba(0,113,227,0.1);
+  outline: none;
+}
+
+/* ── 11. Chat ── */
+[data-theme="apple"] .chat-side {
+  background: rgba(245,245,247,0.6);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-right: 1px solid rgba(0,0,0,0.06);
+}
+[data-theme="apple"] .chat-hdr {
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+[data-theme="apple"] .conv-item {
+  border-radius: 10px;
+  transition: background 0.2s;
+}
+[data-theme="apple"] .conv-item:hover {
+  background: rgba(0,0,0,0.04);
+}
+[data-theme="apple"] .conv-item.sel {
+  background: rgba(0,113,227,0.08);
+}
+[data-theme="apple"] .chat-in {
+  background: var(--c);
+  border-top: 1px solid rgba(0,0,0,0.06);
+}
+[data-theme="apple"] .chat-in textarea {
+  border-radius: 18px;
+  border: 1px solid var(--b);
+  background: var(--bg);
+  color: var(--t);
+}
+
+/* ── 12. Task Center ── */
+[data-theme="apple"] .tsk-list {
+  border-radius: 18px;
+  border: 1px solid rgba(0,0,0,0.06);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+[data-theme="apple"] .tsk-row {
+  border-color: rgba(0,0,0,0.06);
+  transition: background 0.2s;
+}
+[data-theme="apple"] .tsk-row:hover {
+  background: rgba(0,113,227,0.03);
+}
+[data-theme="apple"] .tsk-row-sel {
+  background: rgba(0,113,227,0.06);
+}
+[data-theme="apple"] .tsk-row-sel::before {
+  background: var(--a);
+}
+[data-theme="apple"] .tsk-row-sel .tsk-r-title {
+  color: var(--a) !important;
+}
+[data-theme="apple"] .tsk-tab {
+  border-radius: 980px !important;
+  font-weight: 500 !important;
+  border: 1px solid rgba(0,0,0,0.08) !important;
+}
+[data-theme="apple"] .tsk-tab:hover {
+  border-color: rgba(0,113,227,0.3) !important;
+  color: var(--a) !important;
+}
+[data-theme="apple"] .tsk-tab-act {
+  background: #0071e3 !important;
+  border-color: transparent !important;
+  box-shadow: 0 2px 8px rgba(0,113,227,0.2) !important;
+}
+[data-theme="apple"] .tsk-tab-act:hover {
+  background: #0077ed !important;
+  color: #fff !important;
+}
+[data-theme="apple"] .tsk-tab-cnt {
+  border-radius: 6px !important;
+}
+[data-theme="apple"] .tsk-r-ic {
+  border-radius: 10px;
+}
+
+/* Task Center — icon colors (Apple system palette) */
+[data-theme="apple"] .tsk-ic-p,
+[data-theme="apple"] .tsk-det-ic-p {
+  background: linear-gradient(135deg, #fff4e6, #ffe4e8) !important;
+  color: #ff9f0a !important;
+  box-shadow: inset 0 0 0 1px rgba(255,159,10,0.12) !important;
+}
+[data-theme="apple"] .tsk-ic-d,
+[data-theme="apple"] .tsk-det-ic-d {
+  background: linear-gradient(135deg, #e8f9ee, #e3edfd) !important;
+  color: #34c759 !important;
+  box-shadow: inset 0 0 0 1px rgba(52,199,89,0.12) !important;
+}
+[data-theme="apple"] .tsk-ic-pr,
+[data-theme="apple"] .tsk-det-ic-pr {
+  background: linear-gradient(135deg, #e3edfd, #f3e9fe) !important;
+  color: #0071e3 !important;
+  box-shadow: inset 0 0 0 1px rgba(0,113,227,0.12) !important;
+}
+
+/* Task Center — status tags (Apple system palette) */
+[data-theme="apple"] .tsk-tag {
+  border-radius: 980px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  padding: 4px 12px !important;
+}
+[data-theme="apple"] .tsk-tag-p {
+  background: rgba(255,159,10,0.1) !important;
+  color: #c2410c !important;
+}
+[data-theme="apple"] .tsk-tag-p b {
+  background: #ff9f0a !important;
+}
+[data-theme="apple"] .tsk-tag-d {
+  background: rgba(52,199,89,0.1) !important;
+  color: #1a9c52 !important;
+}
+[data-theme="apple"] .tsk-tag-d b {
+  background: #34c759 !important;
+}
+[data-theme="apple"] .tsk-tag-pr {
+  background: rgba(0,113,227,0.08) !important;
+  color: #0071e3 !important;
+}
+[data-theme="apple"] .tsk-tag-pr b {
+  background: #0071e3 !important;
+}
+
+/* Task Center — buttons (uniform pill, Apple colors) */
+[data-theme="apple"] .tsk-btn {
+  padding: 8px 18px !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  border-radius: 980px !important;
+  min-height: 36px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  transition: all 0.25s cubic-bezier(0.25,0.1,0.25,1) !important;
+}
+[data-theme="apple"] .tsk-btn-primary {
+  background: #0071e3 !important;
+  color: #fff !important;
+  border: none !important;
+  box-shadow: 0 2px 8px rgba(0,113,227,0.2) !important;
+}
+[data-theme="apple"] .tsk-btn-primary:hover {
+  background: #0077ed !important;
+  box-shadow: 0 4px 14px rgba(0,113,227,0.3) !important;
+  transform: translateY(-1px) !important;
+}
+[data-theme="apple"] .tsk-btn-ok {
+  background: #34c759 !important;
+  color: #fff !important;
+  border: none !important;
+  box-shadow: 0 2px 8px rgba(52,199,89,0.2) !important;
+}
+[data-theme="apple"] .tsk-btn-ok:hover {
+  background: #2bb24c !important;
+  box-shadow: 0 4px 14px rgba(52,199,89,0.3) !important;
+  transform: translateY(-1px) !important;
+}
+[data-theme="apple"] .tsk-btn-ghost {
+  background: var(--c) !important;
+  border: 1px solid var(--b) !important;
+  color: var(--t2) !important;
+}
+[data-theme="apple"] .tsk-btn-ghost:hover {
+  border-color: var(--a) !important;
+  color: var(--a) !important;
+  background: rgba(0,113,227,0.04) !important;
+}
+
+/* Task Center — detail panel */
+[data-theme="apple"] .tsk-detail {
+  border-radius: 18px !important;
+  border: 1px solid rgba(0,0,0,0.06) !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.04) !important;
+  padding: 24px !important;
+}
+[data-theme="apple"] .tsk-det-ic {
+  border-radius: 14px !important;
+}
+[data-theme="apple"] .tsk-det-title {
+  font-weight: 600 !important;
+  letter-spacing: -0.01em !important;
+}
+[data-theme="apple"] .tsk-det-meta {
+  border-color: rgba(0,0,0,0.06) !important;
+}
+[data-theme="apple"] .tsk-det-actions {
+  gap: 10px !important;
+}
+
+/* Task Center — search box */
+[data-theme="apple"] .tsk-search {
+  border-radius: 10px !important;
+  border: 1px solid rgba(0,0,0,0.08) !important;
+  background: var(--c) !important;
+}
+[data-theme="apple"] .tsk-search input {
+  font-size: 13px !important;
+  color: var(--t) !important;
+}
+[data-theme="apple"] .tsk-search input::placeholder {
+  color: var(--t3) !important;
+}
+
+/* Task Center — section headers */
+[data-theme="apple"] .tsk-list-sec {
+  color: var(--t3) !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.5px !important;
+}
+[data-theme="apple"] .tsk-sec-n {
+  color: var(--a) !important;
+}
+
+/* Task Center — empty state */
+[data-theme="apple"] .tsk-empty h3 {
+  font-weight: 600 !important;
+}
+
+/* Task Center — create task modal (inline-styled, needs override) */
+[data-theme="apple"] #taskCreateOverlay > div {
+  border-radius: 18px !important;
+  border: 1px solid rgba(0,0,0,0.08) !important;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15) !important;
+  padding: 24px 28px !important;
+}
+[data-theme="apple"] #taskCreateOverlay h3 {
+  font-weight: 600 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--t) !important;
+}
+[data-theme="apple"] #taskCreateOverlay input,
+[data-theme="apple"] #taskCreateOverlay textarea {
+  border-radius: 10px !important;
+  border: 1px solid var(--b) !important;
+  background: var(--bg) !important;
+  color: var(--t) !important;
+  font-size: 13px !important;
+  transition: border-color 0.2s, box-shadow 0.2s !important;
+}
+[data-theme="apple"] #taskCreateOverlay input:focus,
+[data-theme="apple"] #taskCreateOverlay textarea:focus {
+  border-color: var(--a) !important;
+  box-shadow: 0 0 0 3px rgba(0,113,227,0.12) !important;
+  outline: none !important;
+}
+[data-theme="apple"] #taskCreateOverlay #tcError {
+  border-radius: 10px !important;
+  background: rgba(255,59,48,0.06) !important;
+  border: 1px solid rgba(255,59,48,0.12) !important;
+  color: var(--r) !important;
+}
+
+/* ── 13. Template Cards ── */
+[data-theme="apple"] .tmpl-card {
+  border-radius: 18px;
+  border: 1px solid rgba(0,0,0,0.06);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+[data-theme="apple"] .tmpl-card::after {
+  background: linear-gradient(90deg, #0071e3, #af52de);
+  height: 2px;
+}
+[data-theme="apple"] .tmpl-card:hover {
+  box-shadow: 0 12px 40px rgba(0,0,0,0.08);
+}
+[data-theme="apple"] .tmpl-tab-act {
+  background: #0071e3;
+  box-shadow: 0 4px 14px rgba(0,113,227,0.2);
+}
+[data-theme="apple"] .tmpl-btn {
+  border-radius: 980px;
+  background: #0071e3;
+  box-shadow: 0 4px 12px rgba(0,113,227,0.2);
+}
+
+/* ── 14. Badges & Tags ── */
+[data-theme="apple"] .badge {
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 11px;
+}
+[data-theme="apple"] .pg-a { background: rgba(0,113,227,0.1); color: var(--a); }
+[data-theme="apple"] .pg-d { background: rgba(0,0,0,0.06); color: var(--t2); }
+[data-theme="apple"] .pg-e { background: rgba(255,59,48,0.1); color: var(--r); }
+
+/* ── 15. Error & Loading ── */
+[data-theme="apple"] .error {
+  border-radius: var(--r2);
+  background: rgba(255,59,48,0.06);
+  color: var(--r);
+  border: 1px solid rgba(255,59,48,0.12);
+}
+[data-theme="apple"] .loading {
+  color: var(--t3);
+  font-weight: 400;
+}
+
+/* ── 16. Markdown Messages ── */
+[data-theme="apple"] .msg pre {
+  background: #1d1d1f;
+  border-radius: 12px;
+}
+[data-theme="apple"] .msg code {
+  background: rgba(0,0,0,0.05);
+  border-radius: 4px;
+  font-size: 11px;
+}
+[data-theme="apple"] .msg a {
+  color: var(--a);
+  text-decoration: none;
+}
+[data-theme="apple"] .msg a:hover { text-decoration: underline; }
+
+/* ── 17. Modal / Overlay ── */
+[data-theme="apple"] .create-repo-modal {
+  border-radius: 18px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+}
+
+/* ── 18. Inputs (generic) ── */
+[data-theme="apple"] input[type="text"],
+[data-theme="apple"] input[type="password"],
+[data-theme="apple"] input[type="email"],
+[data-theme="apple"] select,
+[data-theme="apple"] textarea {
+  font-family: inherit;
+  border-radius: 10px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+[data-theme="apple"] input:focus,
+[data-theme="apple"] select:focus,
+[data-theme="apple"] textarea:focus {
+  outline: none;
+  border-color: var(--a);
+  box-shadow: 0 0 0 4px rgba(0,113,227,0.1);
+}
+
+/* ── 19. Misc ── */
+[data-theme="apple"] .stats {
+  border-radius: var(--r2);
+}
+[data-theme="apple"] .badge { border-radius: 6px; }
+[data-theme="apple"] .tag { border-radius: 6px; font-weight: 600; }
+
+/* ── 20. Reduced Transparency Fallback ── */
+@media (prefers-reduced-transparency) {
+  [data-theme="apple"] .sb,
+  [data-theme="apple"] .tb,
+  [data-theme="apple"] .lobby-head,
+  [data-theme="apple"] .chat-hdr,
+  [data-theme="apple"] .chat-side {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: #f5f5f7;
+  }
+}
+
+/* ── 22. Design Polish — Button Consistency, Type Scale, Spacing ── */
+/* Force uniform button sizing across all inline-styled elements in Liquid Glass theme. */
+
+/* ── 22a. Uniform Button Specs ── */
+/* Standard button: 8px 18px, 13px font, pill radius */
+[data-theme="apple"] .bt,
+[data-theme="apple"] .bt-p,
+[data-theme="apple"] .bt-o,
+[data-theme="apple"] .bt-g,
+[data-theme="apple"] .bt-r {
+  padding: 8px 18px !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  border-radius: 980px !important;
+  line-height: 1.2 !important;
+  min-height: 36px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+
+/* Small button variant: tighter padding */
+[data-theme="apple"] .bt-s {
+  padding: 5px 14px !important;
+  font-size: 12px !important;
+  min-height: 30px !important;
+}
+
+/* Lobby buttons — match standard */
+[data-theme="apple"] .lobby-btn,
+[data-theme="apple"] .lobby-btn-solid,
+[data-theme="apple"] .lobby-btn-ghost {
+  padding: 8px 18px !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  border-radius: 980px !important;
+  min-height: 36px !important;
+}
+
+/* Template buttons — match standard */
+[data-theme="apple"] .tmpl-btn {
+  padding: 8px 18px !important;
+  font-size: 13px !important;
+  border-radius: 980px !important;
+  min-height: 36px !important;
+}
+
+/* Task Center buttons */
+[data-theme="apple"] .tsk-btn,
+[data-theme="apple"] .tsk-btn-primary,
+[data-theme="apple"] .tsk-btn-ghost,
+[data-theme="apple"] .tsk-btn-ok {
+  padding: 8px 18px !important;
+  font-size: 13px !important;
+  border-radius: 980px !important;
+  min-height: 36px !important;
+}
+
+/* Chat send button & input buttons */
+[data-theme="apple"] .chat-in input[type="submit"],
+[data-theme="apple"] .chat-in button,
+[data-theme="apple"] .cr-btn,
+[data-theme="apple"] .cr-btn-primary,
+[data-theme="apple"] .cr-btn-ghost {
+  padding: 8px 18px !important;
+  font-size: 13px !important;
+  border-radius: 980px !important;
+  min-height: 36px !important;
+}
+
+/* Save buttons in settings */
+[data-theme="apple"] .srow ~ .bt,
+[data-theme="apple"] .cd .bt-p {
+  padding: 8px 22px !important;
+  font-size: 13px !important;
+  border-radius: 980px !important;
+  min-height: 36px !important;
+}
+
+/* ── 22b. Unified Type Scale (4 levels) ── */
+/* Level 1: Page/Section titles → 17px, weight 600 */
+[data-theme="apple"] .cd-h h2,
+[data-theme="apple"] .tsk-top h1,
+[data-theme="apple"] .chat-hdr h2 {
+  font-size: 17px !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.01em !important;
+}
+
+/* Level 2: Subsection titles → 14px, weight 600 */
+[data-theme="apple"] .cd h3,
+[data-theme="apple"] .lobby-card h3,
+[data-theme="apple"] .tmpl-card h3,
+[data-theme="apple"] .tsk-det-title {
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.005em !important;
+}
+
+/* Level 3: Body text → 13px, weight 400 */
+[data-theme="apple"] .ai,
+[data-theme="apple"] .chat-body,
+[data-theme="apple"] .chat-body .msg,
+[data-theme="apple"] .tsk-r-title,
+[data-theme="apple"] .conv-title,
+[data-theme="apple"] .srow label,
+[data-theme="apple"] .tx {
+  font-size: 13px !important;
+}
+
+/* Level 4: Caption/meta → 11px, weight 400 */
+[data-theme="apple"] .ts,
+[data-theme="apple"] .t2,
+[data-theme="apple"] .tsk-r-meta,
+[data-theme="apple"] .conv-meta,
+[data-theme="apple"] .lobby-card-owner,
+[data-theme="apple"] .tmpl-card-stats,
+[data-theme="apple"] .badge,
+[data-theme="apple"] .tag {
+  font-size: 11px !important;
+}
+
+/* Table headers and table body */
+[data-theme="apple"] th {
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.4px !important;
+  padding: 10px 12px !important;
+}
+[data-theme="apple"] td {
+  font-size: 12px !important;
+  padding: 10px 12px !important;
+}
+
+/* ── 22c. Spacing System ── */
+/* Cards: uniform padding 20px 24px */
+[data-theme="apple"] .cd {
+  padding: 20px 24px !important;
+}
+
+/* Card header: consistent bottom margin */
+[data-theme="apple"] .cd-h {
+  margin-bottom: 16px !important;
+}
+
+/* Content area: breathing room */
+[data-theme="apple"] .ct {
+  padding: 24px 32px !important;
+}
+
+/* Top bar: consistent height and padding */
+[data-theme="apple"] .tb {
+  height: 52px !important;
+  padding: 0 32px !important;
+}
+
+/* Settings form rows: consistent gap */
+[data-theme="apple"] .srow {
+  margin-bottom: 14px !important;
+}
+[data-theme="apple"] .srow input,
+[data-theme="apple"] .srow select {
+  padding: 9px 12px !important;
+  font-size: 13px !important;
+  border-radius: 10px !important;
+}
+
+/* Stats tiles: uniform size */
+[data-theme="apple"] .st {
+  padding: 12px 18px !important;
+  border-radius: 12px !important;
+}
+[data-theme="apple"] .st .v {
+  font-size: 17px !important;
+  font-weight: 700 !important;
+}
+[data-theme="apple"] .st .l {
+  font-size: 11px !important;
+}
+
+/* Sidebar nav: consistent spacing */
+[data-theme="apple"] .sb-nav a {
+  padding: 8px 12px !important;
+  font-size: 13px !important;
+  border-radius: 10px !important;
+  margin-bottom: 2px !important;
+}
+[data-theme="apple"] .sb-nav .grp {
+  font-size: 11px !important;
+  padding: 16px 12px 6px !important;
+}
+
+/* Sidebar select: match nav padding */
+[data-theme="apple"] .sb-sel select {
+  padding: 9px 12px !important;
+  font-size: 12px !important;
+}
+
+/* Chat input: consistent height */
+[data-theme="apple"] .chat-in input,
+[data-theme="apple"] .chat-in textarea {
+  padding: 10px 16px !important;
+  font-size: 13px !important;
+  border-radius: 12px !important;
+}
+
+/* Lobby refresh button: match standard */
+[data-theme="apple"] .lobby-refresh-btn {
+  padding: 8px 18px !important;
+  font-size: 13px !important;
+  border-radius: 980px !important;
+  min-height: 36px !important;
+}
+
+/* Template tab pills: consistent */
+[data-theme="apple"] .tmpl-tab,
+[data-theme="apple"] .tsk-tab {
+  padding: 7px 16px !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  border-radius: 980px !important;
+}
+
+/* Search input in top bar */
+[data-theme="apple"] .tb .srch {
+  padding: 7px 14px !important;
+  border-radius: 10px !important;
+}
+[data-theme="apple"] .tb .srch input {
+  font-size: 13px !important;
+}
+
+/* ── 22d. Focus ring uniformity ── */
+[data-theme="apple"] .bt:focus,
+[data-theme="apple"] input:focus,
+[data-theme="apple"] select:focus,
+[data-theme="apple"] textarea:focus {
+  outline: none !important;
+  box-shadow: 0 0 0 3px rgba(0,113,227,0.12) !important;
+}
+
+/* Dark mode auto-adapt (developer.apple.com supports dark) */
+@media (prefers-color-scheme: dark) {
+  [data-theme="apple"][data-theme-mode="auto"] {
+    --s: #1c1c1e;
+    --s2: #2c2c2e;
+    --s3: #3a3a3c;
+    --bg: #000000;
+    --c: #1c1c1e;
+    --b: #38383a;
+    --t: #f5f5f7;
+    --t2: #aeaeb2;
+    --t3: #8e8e93;
+  }
+  [data-theme="apple"][data-theme-mode="auto"] .sb {
+    background: rgba(28,28,30,0.8);
+    border-right-color: rgba(255,255,255,0.08);
+  }
+  [data-theme="apple"][data-theme-mode="auto"] .tb {
+    background: rgba(28,28,30,0.72);
+    border-bottom-color: rgba(255,255,255,0.08);
+  }
+  [data-theme="apple"][data-theme-mode="auto"] .lobby-head {
+    background: rgba(28,28,30,0.72);
+    border-bottom-color: rgba(255,255,255,0.08);
+  }
+  [data-theme="apple"][data-theme-mode="auto"] .msg pre {
+    background: #000;
+  }
+}

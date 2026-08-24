@@ -83,6 +83,18 @@ function _loadSkills() {
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">`;
       groupSkills.forEach(s => {
         const tagClass = s.scope === 'official' ? 'tg-c' : s.scope === 'repo' ? 'tg-i' : 'tg-d';
+        // 华为云技能包 → 文件夹导航到独立页面
+        if (s.name === 'huawei-cloud') {
+          html += `<div class="cd" style="padding:14px;cursor:pointer" onclick="app.nav('skill','${s.id}')">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:20px">📁</span>
+              <span style="font-size:13px;font-weight:600">${s.display_name || s.name}</span>
+              <span class="tg ${tagClass}" style="margin-left:auto;font-size:9px">${SCOPE_NAMES[s.scope] || s.scope}</span>
+            </div>
+            <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-top:6px">${s.description}</div>
+          </div>`;
+          return;
+        }
         html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${s.name}" data-agent="${at}" onclick="app.nav('skill','${s.id}')">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
             <span style="color:${color}">${ico}</span>
@@ -245,6 +257,13 @@ function convertSkill(skillName) {
 function renderSkillDetail(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
+
+  // 华为云技能包 → 展示子技能卡片页面
+  if (data.name === 'huawei-cloud') {
+    renderHuaweiCloudPackage(el, data);
+    return;
+  }
+
   const META = _AGENT_TYPES || {};
   const meta = META[data.agent_type] || {};
   const color = meta.color || 'var(--t2)';
@@ -281,6 +300,102 @@ function renderSkillDetail(data) {
     </div>`;
 }
 
+// ===== 华为云技能包：独立页面展示子技能卡片 =====
+function renderHuaweiCloudPackage(el, data) {
+  const SCOPE_NAMES = {official:'官方技能', repo:'仓库技能', user:'个人技能'};
+  const tagClass = data.scope === 'official' ? 'tg-c' : data.scope === 'repo' ? 'tg-i' : 'tg-d';
+
+  el.innerHTML = `
+      <button class="bt bt-o bt-s" onclick="app.nav('skills')" style="margin-bottom:12px">← 返回 Skills Library</button>
+      <div class="cd" style="padding:16px 20px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-size:28px">📁</span>
+          <div>
+            <h3 style="font-size:16px;font-weight:600;margin:0">${data.display_name || data.name}</h3>
+            <div style="font-size:12px;color:var(--t2);margin-top:4px">${data.description}</div>
+          </div>
+          <span class="tg ${tagClass}" style="margin-left:auto;font-size:10px">${SCOPE_NAMES[data.scope] || data.scope}</span>
+          <button class="bt bt-o bt-s" onclick="togglePkgSkillMd(${data.id})" style="font-size:11px">📖 查看 SKIL.md</button>
+        </div>
+      </div>
+      <div id="subSkillsGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">
+        <div style="padding:20px;text-align:center;color:var(--t3);font-size:13px">⏳ 加载子技能...</div>
+      </div>`;
+
+  // 加载子技能列表
+  API.get('/skills/' + data.id + '/sub').then(d => {
+    var subs = d.sub_skills || [];
+    var grid = document.getElementById('subSkillsGrid');
+    if (!grid) return;
+    if (!subs.length) {
+      grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t3)">（暂无子技能）</div>';
+      return;
+    }
+    var html = '';
+    subs.forEach(function(sub) {
+      html += '<div class="cd" style="padding:14px;cursor:pointer;display:flex;flex-direction:column" onclick="loadSubSkillDetail(' + data.id + ',\'' + sub.name + '\')">'
+        + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+        + '<span style="font-size:16px">📄</span>'
+        + '<span style="font-size:13px;font-weight:600">' + (sub.display_name || sub.name) + '</span>'
+        + '</div>'
+        + '<div style="font-size:10px;color:var(--t3);margin-bottom:6px">' + sub.name + '</div>'
+        + '<div style="font-size:11px;color:var(--t2);line-height:1.5;flex:1">' + (sub.description || '').substring(0, 200) + '</div>'
+        + '<div style="font-size:10px;color:var(--t3);margin-top:6px">' + sub.file_count + ' 个文件</div>'
+        + '</div>';
+    });
+    grid.innerHTML = html;
+  }).catch(function() {
+    var grid = document.getElementById('subSkillsGrid');
+    if (grid) grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--tr)">加载失败</div>';
+  });
+}
+
+// ===== 加载并展示子技能详情（替换当前页面内容）=====
+function loadSubSkillDetail(pkgId, subName) {
+  var el = document.getElementById('pageContent');
+  if (!el) return;
+  el.innerHTML = '<div class="loading">加载中...</div>';
+
+  API.get('/skills/package-sub/' + pkgId + '/' + subName).then(function(data) {
+    var META = typeof _AGENT_TYPES !== 'undefined' ? _AGENT_TYPES : {};
+    var meta = META[data.agent_type] || {};
+    var color = meta.color || 'var(--t2)';
+    var ico = meta.icon || '◈';
+    var SCOPE_NAMES = {official:'官方技能', repo:'仓库技能', user:'个人技能'};
+    var tagClass = data.scope === 'official' ? 'tg-c' : data.scope === 'repo' ? 'tg-i' : 'tg-d';
+    // 转义模板字面量特殊字符
+    var safeContent = (data.content || '').replace(/`/g, '\\`').replace(/\${/g, '\\${');
+
+    el.innerHTML = `
+      <button class="bt bt-o bt-s" onclick="renderHuaweiCloudPackage(document.getElementById('pageContent'), {id:${pkgId},name:'huawei-cloud',display_name:'华为云技能包',description:'',agent_type:'sre',scope:'official'})" style="margin-bottom:12px">← 返回华为云技能包</button>
+      <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
+        <div class="cd" style="padding:16px 20px;overflow-y:auto">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px">
+            <div style="display:flex;align-items:center;gap:8px;min-width:0">
+              <span style="color:${color};font-size:22px">${ico}</span>
+              <div>
+                <h3 style="font-size:15px;font-weight:600">${data.display_name || data.name}</h3>
+                <span class="tg ${tagClass}" style="font-size:9px">${SCOPE_NAMES[data.scope] || data.scope}</span>
+              </div>
+            </div>
+          </div>
+          <div style="font-size:12px;color:var(--t2);margin-bottom:14px;line-height:1.5">${data.description}</div>
+          <h3 style="font-size:13px;font-weight:600;margin-bottom:6px">SKILL.md</h3>
+          <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${safeContent || '(无详细内容)'}</pre>
+        </div>
+        <div class="cd" style="padding:16px 20px;font-size:12px">
+          <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">Skill Info</h3>
+          <div class="srow"><label>Name</label><span>${data.name}</span></div>
+          <div class="srow"><label>Agent Type</label><span>${data.agent_type}</span></div>
+          <div class="srow"><label>Type</label><span>${SCOPE_NAMES[data.scope] || data.scope}</span></div>
+          <div class="srow"><label>Description</label><span class="t2">${data.description || '—'}</span></div>
+        </div>
+      </div>`;
+  }).catch(function(e) {
+    el.innerHTML = '<div class="error">加载失败: ' + (e.message || '') + '</div>';
+  });
+}
+
 function downloadSkillZip(id) {
   // 下载技能包 zip（按技能 id 精确查询）：OBS 模式 → {url, expires_in} 临时签名 URL
   // （点击动态签发）→ 直连 OBS 下载；local 模式 → zip 文件流 → blob 触发下载
@@ -312,4 +427,101 @@ function filterSkills(input) {
     const agent = (card.dataset.agent || '').toLowerCase();
     card.style.display = (name.includes(q) || agent.includes(q)) ? '' : 'none';
   });
+}
+
+// ===== 华为云技能包 文件夹展开/折叠 =====
+function toggleSkillFolder(skillId, headerEl) {
+  const container = headerEl.closest('.cd');
+  if (!container) return;
+  const subEl = container.querySelector('.sub-skills');
+  const arrow = container.querySelector('.folder-arrow');
+  if (!subEl) return;
+
+  if (subEl.style.display !== 'none') {
+    subEl.style.display = 'none';
+    if (arrow) arrow.textContent = '▶';
+    return;
+  }
+
+  subEl.style.display = 'block';
+  if (arrow) arrow.textContent = '▼';
+
+  // 已加载过的直接显示
+  if (subEl.dataset.loaded) return;
+  subEl.innerHTML = '<div style="font-size:11px;color:var(--t3);padding:8px">加载子技能...</div>';
+
+  API.get('/skills/' + skillId + '/sub').then(d => {
+    const subs = d.sub_skills || [];
+    if (!subs.length) {
+      subEl.innerHTML = '<div style="font-size:11px;color:var(--t3);padding:8px">（无子技能）</div>';
+      return;
+    }
+    var html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px">';
+    subs.forEach(function(sub) {
+      html += '<div class="cd sub-skill-card" style="padding:12px;cursor:pointer" onclick="showSubSkillContent(' + skillId + ',\'' + sub.name + '\',\'' + _escQuotes(sub.display_name) + '\')">'
+        + '<div style="font-size:12px;font-weight:600;margin-bottom:3px">📄 ' + (sub.display_name || sub.name) + '</div>'
+        + '<div style="font-size:10px;color:var(--t3);margin-bottom:4px">' + sub.name + '</div>'
+        + '<div style="font-size:11px;color:var(--t2);line-height:1.4">' + (sub.description || '').substring(0, 150) + '</div>'
+        + '<div style="font-size:10px;color:var(--t3);margin-top:4px">' + sub.file_count + ' 个文件</div>'
+        + '</div>';
+    });
+    html += '</div>';
+    subEl.innerHTML = html;
+    subEl.dataset.loaded = '1';
+  }).catch(function() {
+    subEl.innerHTML = '<div style="font-size:11px;color:var(--tr);padding:8px">加载失败</div>';
+  });
+}
+
+function _escQuotes(s) {
+  return String(s || '').replace(/'/g, '\\\'').replace(/"/g, '&quot;');
+}
+
+// ===== 子技能 SKILL.md 内容展示（模态框）=====
+function showSubSkillContent(skillId, subName, displayName) {
+  closeSubSkillModal();
+  var ov = document.createElement('div');
+  ov.id = 'subSkillModal';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = '<div style="width:min(860px,92vw);height:min(700px,88vh);background:var(--bg,#11151c);border:1px solid var(--b,#2a3140);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.5)">'
+    + '<div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">'
+    + '<span style="font-size:13px;font-weight:600">📄 ' + (displayName || subName) + '</span>'
+    + '<span style="font-size:10px;color:var(--t3)">' + subName + '</span>'
+    + '<button onclick="closeSubSkillModal()" style="margin-left:auto;border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>'
+    + '</div>'
+    + '<div id="subSkillContent" style="flex:1;min-height:0;overflow-y:auto;padding:14px;font-size:13px;line-height:1.7;white-space:pre-wrap;font-family:monospace;color:var(--t)">⏳ 加载中...</div>'
+    + '</div>';
+  document.body.appendChild(ov);
+  ov.addEventListener('click', function(e) { if (e.target === ov) closeSubSkillModal(); });
+
+  API.get('/skills/' + skillId + '/sub/' + subName).then(function(data) {
+    var contentEl = document.getElementById('subSkillContent');
+    if (contentEl) {
+      var md = data.content || '(无内容)';
+      var html = '<div style="background:#0b0e14;color:#c2cad6;padding:14px;border-radius:8px;font-size:12px;font-family:monospace;line-height:1.7;white-space:pre-wrap">' + _escHtml(md) + '</div>';
+      // 如果有 references 文件
+      if (data.references && data.references.length) {
+        html += '<h3 style="font-size:12px;font-weight:600;margin:14px 0 8px">📎 参考文档</h3>';
+        data.references.forEach(function(ref) {
+          html += '<div style="margin-bottom:8px;background:#0b0e14;border-radius:6px;padding:10px;border:1px solid var(--b,#2a3140)">'
+            + '<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--a)">' + _escHtml(ref.name) + '</div>'
+            + '<div style="font-size:11px;color:var(--t2);line-height:1.5;white-space:pre-wrap;font-family:monospace">' + _escHtml(ref.content) + '</div>'
+            + '</div>';
+        });
+      }
+      contentEl.innerHTML = html;
+    }
+  }).catch(function() {
+    var contentEl = document.getElementById('subSkillContent');
+    if (contentEl) contentEl.innerHTML = '<div style="color:var(--tr)">加载失败</div>';
+  });
+}
+
+function _escHtml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function closeSubSkillModal() {
+  var ov = document.getElementById('subSkillModal');
+  if (ov) ov.remove();
 }

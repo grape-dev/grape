@@ -63,6 +63,20 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
+    # 前后同 agent_type 事件 seq（供前端箭头导航）
+    try:
+        agent_type = row[5] or ""
+        with db_lock:
+            c2 = db.cursor()
+            c2.execute("SELECT MAX(seq) FROM events WHERE seq < ? AND agent_type=?", (seq, agent_type))
+            prev_seq = c2.fetchone()[0]
+            c2.execute("SELECT MIN(seq) FROM events WHERE seq > ? AND agent_type=?", (seq, agent_type))
+            next_seq = c2.fetchone()[0]
+        result["prev_seq"] = prev_seq if prev_seq else 0
+        result["next_seq"] = next_seq if next_seq else 0
+    except Exception:
+        result["prev_seq"] = 0
+        result["next_seq"] = 0
     # M4：附 event.json archive 对应 pipeline 段（结构化产出展示，见 §11.4）
     try:
         import re as _re
@@ -162,6 +176,72 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
     return result
 
 
+@router.post("/{seq}/terminate")
+async def terminate_event(seq: int, user: dict = Depends(get_current_user)):
+    """强行终止正在运行的事件任务。
+
+    - 有关联 task_id（worker 模式）→ 调 fail_task（更新 task+event 状态为 failed）
+    - 无 task_id（direct 模式）→ 调 cancel_direct_task
+    - 事件状态回写 failed
+    """
+    from src.session_manager import db, db_lock
+    from src.api.event_store import update_event_status
+
+    # 查事件状态
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "事件不存在"})
+    evt_status = row[0]
+
+    if evt_status not in ('running', 'dispatched'):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"事件状态为 {evt_status}，无法终止"})
+
+    # 查关联 task_id（agent_tasks 表按 event_seq 关联）
+    task_id = ""
+    try:
+        with db_lock:
+            c2 = db.cursor()
+            c2.execute("SELECT id FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (seq,))
+            tr = c2.fetchone()
+            if tr:
+                task_id = tr[0]
+    except Exception:
+        pass
+
+    cancelled = False
+    # 1) 有关联 task_id → 走 fail_task（同时更新 task 和 event 状态为 failed）+ 杀进程
+    if task_id:
+        try:
+            from src.runtime.service import fail_task
+            fail_task(task_id, "用户手动终止")
+            cancelled = True
+            log.info(f"Event terminate: seq={seq} task={task_id} failed via fail_task")
+        except Exception as e:
+            log.warning(f"Event terminate: fail_task failed: {e}")
+
+    # 2) direct 模式 → cancel_direct_task（无论有无 task_id 都尝试，兜底）
+    #    同时取消 worker 模式的 future（direct 模式杀本地子进程）
+    try:
+        from src.api.event_pipeline import cancel_direct_task
+        dc = cancel_direct_task(seq)
+        if dc:
+            cancelled = True
+            log.info(f"Event terminate: seq={seq} direct cancel={dc}")
+    except Exception as e:
+        log.warning(f"Event terminate: cancel_direct_task failed: {e}")
+
+    # 3) 事件状态回写 failed（兜底，fail_task 已处理但再确认一次）
+    try:
+        update_event_status(seq, "failed")
+    except Exception as e:
+        log.warning(f"Event terminate: update_event_status failed: {e}")
+
+    return {"message": f"事件 {seq} 终止请求已发送", "cancelled": cancelled}
+
+
 @router.post("/{seq}/redispatch")
 async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
     """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
@@ -244,6 +324,7 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                     repo_key=old.get("repo_key") or "",
                     agent_type=old.get("agent_type") or "",
                     skill=old.get("skill") or "",
+                    skill_id=old.get("skill_id") or 0,
                     prompt=old.get("prompt") or "",
                     cwd=_cwd,
                     # 从 issue_agent_session 读取 runtime_session_id（保留会话连续性），
@@ -312,7 +393,13 @@ def _load_event(seq: int) -> dict:
         except Exception:
             row = None
     if not row:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
+        # 返回当前最大 seq 供前端回退
+        try:
+            c.execute("SELECT MAX(seq) FROM events")
+            max_seq = c.fetchone()[0] or 0
+        except Exception:
+            max_seq = 0
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到", "max_seq": max_seq})
     return {"seq": row[0], "repo_key": row[1], "issue_id": row[2] or "", "agent_type": row[3] or "",
             "event_type": row[4] or "", "title": row[5] or "", "result": row[6] or "", "status": row[7] or ""}
 

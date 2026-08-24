@@ -30,4 +30,15 @@ temp/
 .skills/
 .hermes/
 .venv/
-.project-info/
+# CodeArts local credentials (keep local)
+.codeartsdoer/codearts_cli.json
+.codeartsdoer/.gitignore
+.codeartsdoer/package.json
+.codeartsdoer/AGENTS.md
+# Backup files
+*.bak
+
+# Duplicate skills (moved to skills/)
+.codeartsdoer/skills/
+# MCP installed marker (regenerated on use)
+.codeartsdoer/.installed

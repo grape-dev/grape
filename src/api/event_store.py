@@ -207,6 +207,13 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
             m = re.search(r'/issues/(\d+)', text)
             result = f"创建了 Issue #{m.group(1) if m else '?'}"
             has_output = True
+        if not has_output:
+            for t in tool_uses:
+                cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+                if "POST" in cmd.upper() and ("/comments" in cmd or "labels" in cmd):
+                    result = "对 Issue 执行了写操作（评论/标签）"
+                    has_output = True
+                    break
 
     return has_output, result
 
@@ -248,10 +255,20 @@ def update_event_config(seq: int, runtime: str, skill: str, started_at: str):
 def update_event_complete(seq: int, status: str, exit_code: int = None,
                           duration: float = None, agent_logs: list = None,
                           completed_at: str = "", result: str = ""):
-    """写入执行结果（status, exit_code, duration, agent_logs, completed_at, result）"""
+    """写入执行结果（status, exit_code, duration, agent_logs, completed_at, result）
+
+    幂等保护：如果 event 已经是 completed 状态，不允许用 failed 覆盖。
+    防止 task 完成后 client.complete() 网络失败 → client.fail() 覆盖 completed→failed。
+    """
     with db_lock:
         try:
             c = db.cursor()
+            # 检查当前状态：已 completed 的事件不允许被 failed 覆盖
+            c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+            row = c.fetchone()
+            if row and row[0] == "completed" and status == "failed":
+                log.info(f"Event {seq} already completed, skip failed overwrite (result={result[:60]})")
+                return
             c.execute(
                 "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, result=? WHERE seq=?",
                 (status, exit_code, duration, json.dumps(agent_logs or []), completed_at, result, seq)
@@ -341,7 +358,11 @@ def get_events_grouped_by_issue(repo_key: str) -> dict[str, list[dict]]:
 
 
 def get_issue_summary(repo_key: str, max_issues: int = 10) -> str:
-    """按 Issue 聚类生成事件摘要文本，用于 Prompt 注入"""
+    """按 Issue 聚类生成事件摘要文本，用于 Prompt 注入。
+
+    每条 Issue 包含：事件流（agent:type✓）+ 最新已完成事件的 result 摘要（截断 300 字符），
+    使 Chat Agent 能感知「部署已完成 / PR 已合并」等关键结论，避免重复追问用户已提供的信息。
+    """
     grouped = get_events_grouped_by_issue(repo_key)
     if not grouped:
         return ""
@@ -361,4 +382,27 @@ def get_issue_summary(repo_key: str, max_issues: int = 10) -> str:
         title = events[0]["title"] or iid
         lines.append(f"  {iid} {title} — {' → '.join(agent_flow)}")
 
+        # 注入最新已完成事件的 result 摘要（关键结论，如"部署完成 EIP=xxx"）
+        last_result = _get_latest_result(repo_key, iid)
+        if last_result:
+            snippet = last_result[:300].replace("\n", " ").strip()
+            if len(last_result) > 300:
+                snippet += "…"
+            lines.append(f"    最新结论: {snippet}")
+
     return "Issue Pipeline:\n" + "\n".join(lines)
+
+
+def _get_latest_result(repo_key: str, issue_id: str) -> str:
+    """获取某 Issue 下最新已完成事件的 result 字段（截断 500 字符）"""
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT result FROM events WHERE repo_key=? AND issue_id=? AND status='completed' AND result IS NOT NULL AND result != '' ORDER BY seq DESC LIMIT 1",
+                (repo_key, issue_id)
+            )
+            row = c.fetchone()
+            return (row[0] or "")[:500] if row else ""
+        except Exception:
+            return ""

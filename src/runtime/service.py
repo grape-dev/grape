@@ -126,6 +126,7 @@ def runtime_execution_kind(runtime_id: int) -> str:
 
 _TASK_COLUMNS = (
     "id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, "
+    "skill_id, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, attempts, pool_agent_type, affinity_runtime_id, "
@@ -260,7 +261,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
                  repo_gitcode_token="", env_extra=None,
                  event_seq=None, issue_id="", repo_key="", agent_type="",
-                 skill="", skill_path="", server_url="", issue_session_id="",
+                 skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
                  pool_agent_type="", affinity_runtime_id=0):
     """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
@@ -271,6 +272,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
 
     knowledge_files：共享知识快照（event-conversation-design.md §3.1.1），None 时自动打包；
     远端 worker 侧 materialize 到 cwd/.knowledge 并替换 {{KNOWLEDGE_DIR}}。
+
+    skill_id：skill 表主键，优先于 skill_name 解析（避免 user/repo scope 的 owner_id 不匹配）。
+    skill_id=0 时回退 resolve_skill_id 按名字解析（向后兼容）。
     """
     if not agent_session_id:
         raise ValueError("agent_session_id is required")
@@ -280,13 +284,29 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     skill_files = {}
     if skill:
         try:
-            from src.user.db import resolve_skill_id, get_skill_path, get_skill_object_key
-            _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
-            _path = get_skill_path(_sid) if _sid else (skill_path or "")
-            skill_files = _pack_skill_dir(skill, _path or (skill_path or ""))
-            # v3.0：OBS 技能（本地无目录）→ 从 OBS zip 提取文本（老 worker 兼容通道）
-            _okey = get_skill_object_key(_sid) if _sid else ""
-            if _okey:
+            from src.user.db import resolve_skill_id, get_skill_path, get_skill_object_key, get_skill_by_id
+            if skill_id:
+                _sk = get_skill_by_id(skill_id)
+                if _sk:
+                    # ① skill_id 有效：直接按主键查，跳过 resolve_skill_id 的 owner_id 匹配
+                    _sid = skill_id
+                    _path = get_skill_path(skill_id)  # 绝对路径（official/user/repo 三 scope 统一）
+                    _okey = _sk.get("file_path") or ""
+                else:
+                    # ② skill_id 失效（skill 被删除/停用）→ 回退按名字解析
+                    _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
+                    _path = get_skill_path(_sid) if _sid else (skill_path or "")
+                    _okey = get_skill_object_key(_sid) if _sid else ""
+            else:
+                # ③ 无 skill_id → 走老逻辑（向后兼容）
+                _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
+                _path = get_skill_path(_sid) if _sid else (skill_path or "")
+                _okey = get_skill_object_key(_sid) if _sid else ""
+            # 本地目录存在 → 打包（official 技能 + 少数有磁盘目录的 user/repo 技能）
+            if _path and os.path.isdir(os.path.dirname(_path)):
+                skill_files = _pack_skill_dir(skill, _path)
+            # file_path 非空 → OBS zip 提取（user/repo 技能主要走此路径）
+            if _okey and not skill_files:
                 from src.storage import get_skill_zip_bytes
                 _zip = get_skill_zip_bytes(_okey)
                 if _zip:
@@ -336,9 +356,10 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         c = db.cursor()
         c.execute(
             f"INSERT INTO agent_tasks ({_TASK_COLUMNS}) VALUES "
-            f"({','.join(['?'] * 34)})",
+            f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
             (task_id, agent_session_id, runtime_id, event_seq, issue_id or "", repo_key or "",
-             agent_type or "", skill or "", prompt, cwd or "", runtime_session_id or "",
+             agent_type or "", skill or "", skill_id or 0,
+             prompt, cwd or "", runtime_session_id or "",
              event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
@@ -456,7 +477,41 @@ def claim(runtime_id) -> dict | None:
                     "WHERE status='dispatched' AND started_at < ? AND started_at IS NOT NULL",
                     (_stale,))
                 _stale_rows = c.fetchall()
+                _actually_recovered = []
                 for _tid, _rid, _seq in _stale_rows:
+                    # 活跃度检查（2026-08-21 修复）：task_start 失败时 status 留在 dispatched
+                    # 但 agent 实际在跑（有 task_messages 产出）。查最近 60s 是否有消息，
+                    # 有则跳过回收——agent 活跃说明只是 task_start 回调丢了，不该重跑。
+                    try:
+                        _active_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+                        c.execute(
+                            "SELECT 1 FROM task_messages WHERE task_id=? AND created_at > ? LIMIT 1",
+                            (_tid, _active_cutoff))
+                        if c.fetchone():
+                            continue  # 最近 60s 有消息，agent 在跑，跳过回收
+                    except Exception:
+                        pass  # 查询失败不阻塞回收（保守：宁可误回收也不留死任务）
+                    _actually_recovered.append((_tid, _rid, _seq))
+                    # 杀掉旧进程：recover 重新入队后会有新 worker claim 启动新进程，
+                    # 旧进程不杀会继续执行（tf-infra7 出现过 2 个进程同时跑同一 task）
+                    try:
+                        c.execute("SELECT cwd, runtime_id FROM agent_tasks WHERE id=?", (_tid,))
+                        _old = c.fetchone()
+                        if _old:
+                            _backend = "opencode"
+                            try:
+                                c.execute("SELECT name FROM agent_runtimes WHERE id=?", (_old[1],))
+                                _rn = c.fetchone()
+                                if _rn and "hermes" in (_rn[0] or "").lower():
+                                    _backend = "hermes"
+                                elif _rn and "codearts" in (_rn[0] or "").lower():
+                                    _backend = "codearts"
+                            except Exception:
+                                pass
+                            from src.runtime.agent import _kill_stale_engine
+                            _kill_stale_engine({"cwd": _old[0], "id": _tid}, _backend)
+                    except Exception as _ke:
+                        log.warning(f"recover: kill stale engine failed for task {_tid}: {_ke}")
                     # 定向任务（pool_agent_type=''）回收归零 runtime_id 后变无主：
                     # claim 池匹配不命中、定向(runtime_id)也失配 → 永久死任务
                     # （实测 seq#264 issue#4 卡死 71 分钟）。归零时回填 agent_type
@@ -493,8 +548,9 @@ def claim(runtime_id) -> dict | None:
                                 update_event_status(_seq, "failed")
                             except Exception:
                                 pass
-                if _stale_rows:
-                    log.info(f"recover stale dispatched: {len(_stale_rows)} tasks")
+                if _actually_recovered:
+                    log.info(f"recover stale dispatched: {len(_actually_recovered)}/{len(_stale_rows)} tasks "
+                             f"({len(_stale_rows) - len(_actually_recovered)} skipped: active messages)")
             except Exception as _e:
                 log.warning(f"recover stale dispatched failed: {_e}")
 
@@ -545,6 +601,24 @@ def claim(runtime_id) -> dict | None:
                 (runtime_id, datetime.now(timezone.utc).isoformat(), task_id))
             claimed = c.rowcount > 0
             if claimed:
+                # busy_slots 对账（2026-08-21 修复）：手动终止/kill -9/超时等场景
+                # busy_slots 不递减 → 只增不减 → 溢出 max_concurrent。claim 时如果
+                # busy_slots 远超实际活跃任务数（差值>2），重置为实际值。
+                # 安全：有心跳的 worker 会在心跳中重新上报；正在执行的任务不受影响。
+                try:
+                    c.execute(
+                        "SELECT COUNT(*) FROM agent_tasks "
+                        "WHERE runtime_id=? AND status IN ('dispatched','running')", (runtime_id,))
+                    _actual_active = c.fetchone()[0] or 0
+                    c.execute("SELECT busy_slots FROM agent_runtimes WHERE id=?", (runtime_id,))
+                    _current_busy = c.fetchone()[0] or 0
+                    if _current_busy > _actual_active + 2:
+                        log.info(f"busy_slots reconcile: runtime={runtime_id} "
+                                 f"busy={_current_busy} actual_active={_actual_active} -> reset to {_actual_active}")
+                        c.execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?",
+                                  (_actual_active, runtime_id))
+                except Exception as _re:
+                    log.warning(f"busy_slots reconcile failed: {_re}")
                 # 槽位 +1（观测/池调度排序用；不硬限流，边端 RUNTIME_MAX_CONCURRENT_TASKS 仍控制执行并发）
                 c.execute("UPDATE agent_runtimes SET busy_slots=busy_slots+1 WHERE id=?", (runtime_id,))
             db.commit()
@@ -592,8 +666,14 @@ def update_task_status(task_id, status, **kw):
             return
         if row[0] in ("completed", "failed", "cancelled"):
             return
-        sets = ["status=?", "completed_at=?"]
-        params = [status, kw.get("completed_at") or datetime.now(timezone.utc).isoformat()]
+        sets = ["status=?"]
+        params = [status]
+        if status in ("completed", "failed", "cancelled"):
+            # 终态才写 completed_at；非终态（running 等）不动它，
+            # 否则运行中任务带 completed_at 脏值（2026-08-19 修复：task_start 曾把
+            # running 任务写成 completed_at=启动时刻，干扰终态判断/展示）。
+            sets.append("completed_at=?")
+            params.append(kw.get("completed_at") or datetime.now(timezone.utc).isoformat())
         for col in ("exit_code", "result_text", "errors", "stderr", "usage_json"):
             if col in kw:
                 sets.append(f"{col}=?")
@@ -759,14 +839,60 @@ def report_progress(task_id, progress):
         db.commit()
 
 
+def _detect_business_failure(agent_type, output, result_text):
+    """检测 agent 进程正常退出(exit_code=0)但业务实际失败的情况。
+
+    解析结构化 JSON 输出的 conclusion/next_step 字段，匹配部署/操作失败关键词。
+    返回 True 表示业务失败（应覆盖 exit_code 为非 0）。
+
+    仅对 sre agent_type 生效（部署类任务），其他 agent 不受影响。
+    """
+    if agent_type != "sre":
+        return False
+    if not output:
+        return False
+    # 拼接 conclusion + next_step + issue_summary 做全文匹配
+    blob = " ".join(filter(None, [
+        output.get("conclusion", ""),
+        output.get("next_step", ""),
+        output.get("issue_summary", ""),
+    ]))
+    if not blob:
+        # 降级：从 result_text 里匹配
+        blob = result_text or ""
+    if not blob:
+        return False
+    import re
+    # 失败关键词：部署中止/失败、无法购买/创建、未认证、凭证不足、部署未成功等
+    failure_patterns = [
+        r"部署.*失败", r"部署.*中止", r"部署.*未成功", r"部署.*无法",
+        r"无法购买", r"无法创建", r"无法部署",
+        r"未完成.*认证", r"未实名", r"实名认证",
+        r"凭证.*不足|凭证.*缺失|凭证.*无效",
+        r"Ecs\.0707", r"AccessDenied", r"auth.*fail",
+        r"操作失败", r"执行失败",
+        r"无法继续", r"中止\b",
+    ]
+    for pat in failure_patterns:
+        if re.search(pat, blob, re.I):
+            return True
+    return False
+
+
 def complete_task(task_id, result_text, exit_code=0, usage=None):
-    """完成：解析结构化 output → finalize_event_archive → update_event_complete → 终态。"""
+    """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。"""
     task = get_task(task_id)
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import parse_agent_output_json, update_event_complete
             from src.api.event_archive import finalize_event_archive
             output = parse_agent_output_json(result_text or "")
+            # 业务失败检测：进程退出码=0 但业务实际失败 → 覆盖 exit_code
+            if exit_code == 0 and _detect_business_failure(
+                    task.get("agent_type") or "", output, result_text):
+                exit_code = 1
+                log.info(f"Task {task_id}: business failure detected "
+                         f"(agent={task.get('agent_type')}), overriding exit_code to 1")
             status = "completed" if exit_code == 0 else "failed"
             duration = None
             try:
@@ -812,6 +938,10 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
 
 def fail_task(task_id, error, exit_code=-1):
     task = get_task(task_id)
+    # 幂等保护：如果 task 已经 completed，不调 fail（防止 complete→fail 竞态覆盖）
+    if task and task.get("status") == "completed":
+        log.info(f"Task {task_id} already completed, skip fail_task (error={error[:60]})")
+        return
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import update_event_complete

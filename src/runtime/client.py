@@ -114,7 +114,8 @@ class RuntimeClient:
         return data.get("task")
 
     async def task_start(self, task_id: str):
-        await self._request("POST", f"/api/runtime/tasks/{task_id}/start", {})
+        """标记任务 running。返回 _request 结果（None=失败），调用方据此判断是否成功。"""
+        return await self._request("POST", f"/api/runtime/tasks/{task_id}/start", {})
 
     async def report_progress(self, task_id: str, summary: str = "", step: int = 0, total: int = 0):
         await self._request("POST", f"/api/runtime/tasks/{task_id}/progress",
@@ -142,6 +143,19 @@ class RuntimeClient:
         dispatched 将永久悬空（不执行也不重新排队）；须调本接口回滚。
         """
         await self._request("POST", f"/api/runtime/tasks/{task_id}/requeue", {}, retries=4)
+
+    async def get_task_state(self, task_id: str) -> str:
+        """轻量查询任务状态（worker 端 sid 看门狗用，seq#1485 根因修复）。
+
+        worker 的 active_sessions 是内存 set，_wrap 的 finally 在 opencode 进程
+        hang 住时永远不执行 → sid 永久泄漏。主循环定期调本方法查 active_tasks
+        里的 task 是否已在服务端终态（failed/cancelled/completed/not_found），
+        是则主动清理 active_sessions。
+        """
+        data = await self._request("GET", f"/api/runtime/tasks/{task_id}/state", retries=1)
+        if not data:
+            return ""
+        return data.get("status") or ""
 
     async def recover_orphans(self, runtime_id: int):
         await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/recover-orphans", {}, retries=2)

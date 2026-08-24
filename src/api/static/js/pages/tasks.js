@@ -4,6 +4,8 @@ let _tasksTab = 'all';        // all / active / completed
 let _tasksAll = [];           // 全部任务缓存
 let _taskSel = null;          // 选中的任务
 let _taskQuery = '';          // 搜索关键字
+let _taskPage = 1;            // 当前页码
+const _TASKS_PER_PAGE = 15;   // 每页任务数
 
 function renderTasks() {
   const el = document.getElementById('pageContent');
@@ -63,13 +65,26 @@ function _render() {
 
   const tab = (key, label, cnt) => {
     const act = _tasksTab === key ? ' tsk-tab-act' : '';
-    return `<button class="tsk-tab${act}" onclick="_tasksTab='${key}';_render()">${label} <span class="tsk-tab-cnt">${cnt}</span></button>`;
+    return `<button class="tsk-tab${act}" onclick="_tasksTab='${key}';_taskPage=1;_render()">${label} <span class="tsk-tab-cnt">${cnt}</span></button>`;
   };
 
   // 分组列表（待处理/处理中在前，已完成在后）
   const activeRows = filtered.filter(t => t.status === 'active');
   const procRows = filtered.filter(t => t.status === 'processing');
   const doneRows = filtered.filter(t => t.status === 'completed');
+
+  // 分页：合并分组后按页切片
+  const allRows = [...activeRows, ...procRows, ...doneRows];
+  const totalPages = Math.ceil(allRows.length / _TASKS_PER_PAGE);
+  if (_taskPage > totalPages) _taskPage = 1;
+  if (_taskPage < 1) _taskPage = 1;
+  const pageStart = (_taskPage - 1) * _TASKS_PER_PAGE;
+  const pageRows = allRows.slice(pageStart, pageStart + _TASKS_PER_PAGE);
+
+  // 重新按分组拆分当前页
+  const pageActive = pageRows.filter(t => t.status === 'active');
+  const pageProc = pageRows.filter(t => t.status === 'processing');
+  const pageDone = pageRows.filter(t => t.status === 'completed');
 
   const rowHtml = (t) => {
     const isDone = t.status === 'completed';
@@ -79,7 +94,7 @@ function _render() {
     const icon = isDone ? '✓' : isProc ? '⏳' : '#';
     const tagCls = isDone ? 'tsk-tag-d' : isProc ? 'tsk-tag-pr' : 'tsk-tag-p';
     const tagText = isDone ? '<b></b>已完成' : isProc ? '<b></b>处理中' : '<b></b>待处理';
-    return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()">
+    return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
       <div class="tsk-r-ic ${rIc}">${icon}</div>
       <div class="tsk-r-main">
         <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
@@ -90,20 +105,41 @@ function _render() {
   };
 
   let listHtml = '';
-  if (activeRows.length > 0) {
+  if (pageActive.length > 0) {
     listHtml += `<div class="tsk-list-sec">待处理 <span class="tsk-sec-n">${activeRows.length}</span></div>` +
-      activeRows.map(rowHtml).join('');
+      pageActive.map(rowHtml).join('');
   }
-  if (procRows.length > 0) {
+  if (pageProc.length > 0) {
     listHtml += `<div class="tsk-list-sec">处理中 <span class="tsk-sec-n">${procRows.length}</span></div>` +
-      procRows.map(rowHtml).join('');
+      pageProc.map(rowHtml).join('');
   }
-  if (doneRows.length > 0) {
+  if (pageDone.length > 0) {
     listHtml += `<div class="tsk-list-sec">已完成 <span class="tsk-sec-n">${doneRows.length}</span></div>` +
-      doneRows.map(rowHtml).join('');
+      pageDone.map(rowHtml).join('');
   }
   if (!listHtml) {
     listHtml = `<div class="tsk-empty"><div>🗒</div><h3>暂无任务</h3><p>当前筛选下没有匹配的任务。</p></div>`;
+  }
+
+  // 分页控件
+  let pagerHtml = '';
+  if (totalPages > 1) {
+    const pBtn = (label, page, disabled, active) =>
+      `<button class="tsk-btn tsk-btn-ghost" style="padding:3px 10px;font-size:11px;${disabled ? 'opacity:.4;cursor:not-allowed' : ''}${active ? ';border-color:var(--a);color:var(--a);font-weight:600' : ''}" ${disabled ? 'disabled' : `onclick="_taskPage=${page};_render()"`}>${label}</button>`;
+    let btns = '';
+    // 最多显示 7 个页码按钮
+    let s = Math.max(1, _taskPage - 3);
+    let e = Math.min(totalPages, s + 6);
+    if (e - s < 6) s = Math.max(1, e - 6);
+    if (s > 1) btns += pBtn('1', 1, false, _taskPage === 1) + (s > 2 ? '<span style="color:var(--t3);padding:0 2px">…</span>' : '');
+    for (let i = s; i <= e; i++) btns += pBtn(String(i), i, false, _taskPage === i);
+    if (e < totalPages) btns += (e < totalPages - 1 ? '<span style="color:var(--t3);padding:0 2px">…</span>' : '') + pBtn(String(totalPages), totalPages, false, _taskPage === totalPages);
+    pagerHtml = `<div style="display:flex;align-items:center;gap:4px;padding:10px 16px;border-top:1px solid var(--b);background:var(--bg);flex-shrink:0">
+      ${pBtn('‹', _taskPage - 1, _taskPage <= 1, false)}
+      ${btns}
+      ${pBtn('›', _taskPage + 1, _taskPage >= totalPages, false)}
+      <span class="ts t3" style="margin-left:8px;font-size:10px">共 ${allRows.length} 条 · ${_taskPage}/${totalPages} 页</span>
+    </div>`;
   }
 
   // 详情面板
@@ -114,13 +150,14 @@ function _render() {
     <div class="tsk-top">
       <h1>Task Center</h1>
       <div class="tsk-controls">
+        <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:10px">+ 新建任务</button>
         ${tab('all', '全部', cntAll)}${tab('active', '待处理', cntActive)}${tab('completed', '已完成', cntDone)}
-        <div class="tsk-search"><span>🔍</span><input placeholder="搜索任务..." value="${_taskQuery}" oninput="_taskQuery=this.value;if(_taskQuery.length>1||!_taskQuery){_render()}" onkeyup="if(event.key==='Enter')_render()"></div>
+        <div class="tsk-search"><span>🔍</span><input placeholder="搜索任务..." value="${_taskQuery}" oninput="_taskQuery=this.value;_taskPage=1;if(_taskQuery.length>1||!_taskQuery){_render()}" onkeyup="if(event.key==='Enter')_render()"></div>
       </div>
     </div>
-    <div class="tsk-layout">
-      <div class="tsk-list">${listHtml}</div>
-      <div class="tsk-detail">${detailHtml}</div>
+    <div class="tsk-layout" style="height:calc(100vh - 200px)">
+      <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
+      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}</div>
     </div>
   </div>`;
 
@@ -151,15 +188,19 @@ function _detailHtml(t) {
     </div>
     <div class="tsk-det-desc">${t.task_description || '暂无任务描述。'}</div>
     <div class="tsk-det-actions">
-      <button class="tsk-btn tsk-btn-primary" onclick="openTaskConversation(window._tasksById[${t.id}])">去对话</button>
       <button class="tsk-btn tsk-btn-ghost" onclick="window.open('https://gitcode.com/${t.repo_key}/issues/${t.issue_number}','_blank')">查看 Issue ↗</button>
+      <button class="tsk-btn tsk-btn-ghost" onclick="openTaskConversation(window._tasksById[${t.id}])">去对话 ↗</button>
     </div>`;
 }
 
 function openTaskConversation(t) {
-  // 点「去对话」仅跳转 chat；任务状态以"真实对话消息"为准（task-status-processing-trigger-fix.md §3.3，
-  // /tasks/{id}/start 已不再翻转状态，仅返回当前状态）。跳转放 API 回调内，避免覆盖导航结果。
-  const go = () => app.nav('chat', t && t.conversation_id ? t.conversation_id : undefined);
+  // 跳转 chat agent：始终用 issue:N:repoKey 格式，由 chat.js 调 ensure-issue
+  // 查找或新建会话（会话被删除后旧 conversation_id 仍在 task 表里，直接传 conv_id
+  // 会在会话列表找不到而回退到第一个会话，不会触发重建）
+  const issueNum = t && t.issue_number ? String(t.issue_number) : '';
+  const repoKey = t && t.repo_key ? t.repo_key : '';
+  const param = issueNum && repoKey ? 'issue:' + issueNum + ':' + repoKey : (t && t.conversation_id || undefined);
+  const go = () => app.nav('chat', param);
   if (t && t.id && t.status === 'active') {
     API.post('/tasks/' + t.id + '/start').then(d => {
       if (window._tasksById[t.id] && d && d.status) { window._tasksById[t.id].status = d.status; }
@@ -168,4 +209,76 @@ function openTaskConversation(t) {
   } else {
     go();
   }
+}
+
+// ===== 新建任务（同步建 GitCode Issue + 既有流程建档；责任人 = General Settings Account）=====
+let _taskCreateModal = null;
+
+function openTaskCreateModal() {
+  const repo = app.currentRepo();
+  const defaultRepo = repo ? repo.fullName : '';
+  if (_taskCreateModal) _taskCreateModal.remove();
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+    <h3 style="margin:0 0 14px;font-size:15px;color:#111">+ 新建任务</h3>
+    <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+      <div style="font-size:11px;color:#555">仓库：<b>${esc(defaultRepo) || '—（请先进入仓库页再创建）'}</b></div>
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">标题 <span style="font-size:11px;color:#888">将作为 GitCode Issue 标题（同仓库同名 open Issue 自动复用，不重复创建）</span>
+        <input id="tcCreateTitle" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" placeholder="任务标题（必填）">
+      </label>
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">描述
+        <textarea id="tcCreateDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical" placeholder="任务描述"></textarea>
+      </label>
+      <div style="font-size:11px;color:#888">Issue 责任人 = 系统 General Settings 的 Account（当前登录账号）</div>
+      <div id="tcError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="tsk-btn tsk-btn-ghost" onclick="document.getElementById('taskCreateOverlay').remove()">取消</button>
+      <button class="tsk-btn tsk-btn-primary" id="tcSubmitBtn" onclick="createTaskSubmit()">创建任务</button>
+    </div>
+  </div>`;
+  ov.id = 'taskCreateOverlay';
+  document.body.appendChild(ov);
+  _taskCreateModal = ov;
+  // 点击遮罩空白处关闭：需 mousedown 和 click 都落在 ov 上才关闭，
+  // 防止在输入框拖选文字（mousedown 在 input、mouseup 落到 ov）时误关。
+  let _modalDownOnOverlay = false;
+  ov.addEventListener('mousedown', e => { _modalDownOnOverlay = (e.target === ov); });
+  ov.addEventListener('click', e => { if (e.target === ov && _modalDownOnOverlay) ov.remove(); });
+}
+
+function createTaskSubmit() {
+  const repo = app.currentRepo();
+  const repoKey = repo ? repo.fullName : '';
+  const title = (document.getElementById('tcCreateTitle') || {}).value || '';
+  const desc = (document.getElementById('tcCreateDesc') || {}).value || '';
+  const errEl = document.getElementById('tcError');
+  const showErr = (msg) => { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
+  if (!repoKey.trim()) { showErr('请先在仓库页选择仓库，再创建任务'); return; }
+  if (!title.trim()) { showErr('请填写任务标题'); return; }
+  const btn = document.getElementById('tcSubmitBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
+  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim()})
+    .then(d => {
+      const ov = document.getElementById('taskCreateOverlay');
+      if (ov) ov.remove();
+      if (errEl && d && d.message) { errEl.style.display = 'block'; errEl.textContent = '✅ ' + d.message; }
+      loadTasks();
+    })
+    .catch(e => {
+      if (btn) { btn.disabled = false; btn.textContent = '创建任务'; }
+      const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
+      showErr('创建失败: ' + msg);
+    });
+}
+
+function changeTaskStatus(taskId, status) {
+  API.put('/tasks/' + taskId + '/status', {status: status})
+    .then(() => loadTasks())
+    .catch(e => {
+      const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
+      alert('状态更新失败: ' + msg);
+    });
 }

@@ -147,7 +147,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
 
         try:
             c.execute(
-                "SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at, issue_id FROM events WHERE repo_key=? AND agent_type=? ORDER BY seq DESC LIMIT 10",
+                "SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at, issue_id, repo_key FROM events WHERE repo_key=? AND agent_type=? ORDER BY seq DESC LIMIT 10",
                 (repo_key, name)
             )
             recent_events = [
@@ -157,7 +157,7 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
                  "backend": r[7] or "", "skill": r[8] or "",
                  "exit_code": r[9], "duration": r[10],
                  "started_at": normalize_event_time(r[11] or ""), "completed_at": normalize_event_time(r[12] or ""),
-                 "issue_id": r[13] or ""}
+                 "issue_id": r[13] or "", "repo_key": r[14] or ""}
                 for r in c.fetchall()
             ]
         except Exception:
@@ -221,12 +221,11 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
 class AgentConfig(BaseModel):
     backend: str = ""  # 无字面默认（engine-selection-design.md v2）：单引擎由 backends 集合派发解析
     backends: list[str] | None = None  # 引擎集合（1..N 引擎实例名）
-    # None=未传（单 backend 兼容）；[]=显式清空集合；非空=替换集合绑定
-    skill: str = ""
-    skill_scope: str = ""  # official / repo（前端下拉回显同名技能时精确匹配）
-    enable: bool | None = None  # Agent 启用开关（Dashboard 切换；None=不修改）
-    subscribe_events: list | None = None  # 仓库级事件订阅 [{"event_type","branch"}]；None=不修改
-    # VOD IM 配置（仅在 name=="vod" 时生效）
+    skill: str = ""  # 兼容旧前端（按名称保存）；新前端传 skill_id 直传
+    skill_id: int = 0  # 新：直接传 skill 主键 id，避免同名 skill 误命中
+    skill_scope: str = ""  # 兼容旧前端（official / repo / user）
+    enable: bool | None = None
+    subscribe_events: list | None = None
     im_app_id: str = ""
     im_app_secret: str = ""
 
@@ -358,18 +357,27 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                         raise HTTPException(status_code=400, detail={"code": 400, "message": f"DevOps Agent 只能绑定仓库/全局引擎，所选为个人引擎: {body.backend}"})
                 else:
                     runtime_id = get_runtime_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
-            # 精确按 scope(+owner) 解析 skill_id，避免同名时官方优先误命中
+            # 精确解析 skill_id：
+            # 新方式：body.skill_id 有值 → 直接用，同步查出 skill_name 写入 skill 字段（兜底）
+            # 旧方式兼容：body.skill 有值且无 skill_id → 按 skill_scope 查 id
+            # skill_id=0 且 skill='' → 清空配置（用默认映射）
             skill_id = 0
-            if body.skill:
+            skill_name_for_save = ""
+            if body.skill_id:
+                from src.user.db import get_skill_by_id
+                _sk = get_skill_by_id(body.skill_id)
+                if _sk:
+                    skill_id = body.skill_id
+                    skill_name_for_save = _sk.get("skill_name") or ""
+                else:
+                    log.warning(f"Agent config: skill_id={body.skill_id} not found or inactive, ignoring")
+            elif body.skill:
+                # 旧方式兼容：按名称+scope 查 id
                 from src.session_manager import db as _db, db_lock as _db_lock
                 def _find_skill(scope, owner_id=""):
                     with _db_lock:
                         _c = _db.cursor()
                         if owner_id:
-                            # 归一化 owner 命中：skill 表 repo/user 级 owner_id 历史上有带/不带
-                            # `gitcode:` 前缀两种写法（现存的既有老数据混存），保存时 repo_key 恒带
-                            # 前缀。归一化 after from_repo_key 后再 IN 匹配，兼容两种，确保仓库级
-                            # skill 的 skill_id 能精确落库（否则 skill_id=0 → 前端回显丢失 scope）。
                             from src.repo_key import from_repo_key
                             _owners = list(dict.fromkeys([owner_id, from_repo_key(owner_id)]))
                             _q = ",".join("?" * len(_owners))
@@ -386,10 +394,13 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     skill_id = _find_skill("repo", repo_key)
                 elif getattr(body, "skill_scope", "") == "official":
                     skill_id = _find_skill("official")
+                elif getattr(body, "skill_scope", "") == "user":
+                    skill_id = _find_skill("user", str(user["id"]))
                 else:
                     skill_id = _find_skill("repo", repo_key)
                     if not skill_id:
                         skill_id = _find_skill("official")
+                skill_name_for_save = body.skill
             # enable：body 显式传则用；否则继承 agent_type 默认（sre 默认关）
             if body.enable is not None:
                 _enable = 1 if body.enable else 0
@@ -401,7 +412,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             from src.api.session_store import upsert_agent_session
             session_id = upsert_agent_session(
                 repo_key=repo_key, agent_type=name,
-                runtime_id=runtime_id, skill=body.skill, skill_id=skill_id,
+                runtime_id=runtime_id, skill=skill_name_for_save, skill_id=skill_id,
                 repo_gitcode_token=repo_token, status="idle",
                 enable=_enable,
                 subscribe_events=json.dumps(body.subscribe_events, ensure_ascii=False) if body.subscribe_events is not None else "[]",
