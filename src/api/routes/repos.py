@@ -70,14 +70,114 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
     return result
 
 
+def _probe_stale_repos(api_token: str, user_id: int):
+    """检查当前用户名下的托管仓库在 GitCode 上的状态，清理失效的托管记录。
+
+    两步检查：
+    1. 并发查仓库是否存在（404 = 已删除，立即清理）
+    2. 仓库存在的，串行查 webhook 是否还在（200 + hooks 列表不含 expected_wh = webhook 丢失，清理）
+       串行避免 GitCode API 限流返回空列表导致误判。
+
+    只检查当前用户名下的托管仓库（不查其他用户的），减少 API 调用量。
+    在 list_member_repos（前端托管页面入口）调用，确保打开页面时数据是最新的。
+    """
+    import concurrent.futures, urllib.request, urllib.error, json as _json
+    all_repos = user_db.get_managed_repos(user_id)
+    if not all_repos or not api_token:
+        return
+
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_token}"}
+
+    # 第一步：并发查仓库是否存在（404 = 已删除）
+    def _check_exists(item):
+        r = item
+        owner = r.get("repo_owner", "")
+        repo_name = r.get("repo_name", "")
+        if not owner or not repo_name:
+            return None
+        repo_key = r["repo_key"]
+        url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo_name}"
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                pass  # 200 = 仓库存在
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return ("deleted", repo_key, r.get("repo_owner", ""), r.get("repo_name", ""))
+        except Exception:
+            pass  # 超时/网络抖动，不判定
+        return None
+
+    check_items = list(all_repos)
+    stale_keys = []
+    existing_repos = []  # 仓库存在（200）的，需要进一步查 webhook
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(_check_exists, item) for item in check_items]
+        for f in concurrent.futures.as_completed(futures, timeout=15):
+            try:
+                result = f.result(timeout=5)
+                if result and result[0] == "deleted":
+                    stale_keys.append((result[1], result[2], result[3]))
+            except Exception:
+                pass
+
+    # 收集仓库存在（200）的记录，用于串行查 webhook
+    deleted_keys = {sk[0] for sk in stale_keys}
+    for r in all_repos:
+        if r["repo_key"] not in deleted_keys:
+            existing_repos.append(r)
+
+    # 第二步：串行查 webhook（只查仓库存在且有 webhook_id 的）
+    for r in existing_repos:
+        expected_wh = r.get("webhook_id", 0) or 0
+        if not expected_wh:
+            continue
+        owner = r.get("repo_owner", "")
+        repo_name = r.get("repo_name", "")
+        if not owner or not repo_name:
+            continue
+        repo_key = r["repo_key"]
+        url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo_name}/hooks"
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                hooks = _json.loads(resp.read().decode() or "[]")
+            hook_ids = {h.get("id") for h in hooks if isinstance(h, dict)} if isinstance(hooks, list) else set()
+            if expected_wh not in hook_ids:
+                stale_keys.append((repo_key, owner, repo_name))
+                log.info(f"managed repos: webhook {expected_wh} not found for {repo_key}, marking stale")
+        except urllib.error.HTTPError as e:
+            # 403 = 非 owner 无权限查 hooks，跳过（不误判）
+            # 404 = 仓库在此刻被删了（刚才 200 现在变 404），算 stale
+            if e.code == 404:
+                stale_keys.append((repo_key, owner, repo_name))
+            # 其他错误跳过
+        except Exception:
+            pass  # 超时/网络抖动，不判定
+
+    for repo_key, owner, repo_name in stale_keys:
+        log.info(f"managed repos: repo {repo_key} stale (deleted or webhook lost), auto-cleanup")
+        _cleanup_repo_data(repo_key, owner, repo_name)
+        user_db.remove_managed_repo(repo_key)
+
+
 @router.get("/member")
 async def list_member_repos(user: dict = Depends(get_current_user)):
-    """获取用户可操作仓库列表：优先从 user_repos 缓存读取；缓存为空或超过 TTL 时自动从 GitCode 拉取刷新"""
+    """获取用户可操作仓库列表：优先从 user_repos 缓存读取；缓存为空或超过 TTL 时自动从 GitCode 拉取刷新
+
+    加载前先检查托管仓库在 GitCode 上是否还存在（GitCode 删仓库不发 webhook，
+    grape 收不到通知，旧记录残留导致重建同名仓库时前端误显"已托管"）。
+    """
     from datetime import datetime, timezone
 
     api_token = get_user_token(user["username"])
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
+
+    # 主动探测：检查托管仓库在 GitCode 上是否还存在（并发，短超时）
+    # 只检查 404（仓库已删除），不查 webhook（并发场景下 GitCode 限流返回空列表会误判）
+    _probe_stale_repos(api_token, user["id"])
 
     # 优先读取 DB 缓存（未过期）
     cached = user_db.get_user_repos(user["id"])
@@ -315,6 +415,9 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         existing_id = find_existing_webhook(webhook_token, owner, repo_name, webhook_url)
         if existing_id:
             repo_key = to_repo_key(body.full_name)
+            # 清理同名旧仓库残留的 DB 数据（用户可能直接在 GitCode 删仓库后重建同名，旧数据残留导致前端混乱）
+            from src.api.onboarding import cleanup_stale_repo_data
+            cleanup_stale_repo_data(repo_key)
             user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
             user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             from src.api.session_store import ensure_default_agent_sessions
@@ -323,6 +426,9 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
 
         hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=webhook_token)
         repo_key = to_repo_key(body.full_name)
+        # 清理同名旧仓库残留的 DB 数据（同上）
+        from src.api.onboarding import cleanup_stale_repo_data
+        cleanup_stale_repo_data(repo_key)
         user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
         user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
         from src.api.session_store import ensure_default_agent_sessions

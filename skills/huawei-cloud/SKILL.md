@@ -32,6 +32,7 @@ version: 1
 - **huawei-smn-dms**: Use when creating or managing SMN topics/subscriptions/messages or DMS Kafka/RabbitMQ/RocketMQ queues on Huawei Cloud. T
 - **huawei-vpc**: Use when creating, configuring, or managing VPC networks, subnets, security groups, EIPs, NAT gateways, VPN connections,
 - **huawei-waf-aad**: Use when configuring Web Application Firewall (WAF) policies/rules, or Anti-DDoS (AAD) protection on Huawei Cloud. Trigg
+- **grape-deploy**: Grape 平台专用部署子技能。当 SRE Agent 在 Grape 平台执行华为云 ECS 部署任务时使用。核心：用 Grape 注入的 HUAWEICLOUD_SDK_AK/SK 环境变量配置 hcloud CLI 认证，确保使用仓库 owner 的凭据而非 worker 机器预配凭据。Triggers: Grape A2A 交办部署、PR 合并后触发部署、用户请求 ECS 部署
 
 ## 路由规则
 
@@ -60,6 +61,7 @@ version: 1
 | waf, aad, 防火墙, ddos, 安全防护, web安全 | huawei-waf-aad | WAF/AAD Web安全与DDoS |
 | sandbox, 沙箱, workspace, 终端, web app, 网页部署 | huawei-sandbox | Sandbox 沙箱环境 |
 | 入门, 新手, 开始, kooCLI, hcloud, 安装, 初始化, auth, 认证 | huawei-getting-started | 入门指南 |
+| grape, 部署, deploy, PR 合并, A2A, ECS 部署, 应用部署 | grape-deploy | Grape 平台部署（注入凭据 + ECS 创建 + 应用部署） |
 | 其他未匹配的华为云关键词 | huawei-cloud-find-skills | 技能搜索 |
 
 **使用步骤：**
@@ -81,5 +83,6 @@ read references/<技能名>/SKILL.md
 - 创建 ECS 实例 → 读 `references/huawei-ecs/SKILL.md`
 - 配置 VPC 网络 → 读 `references/huawei-vpc/SKILL.md`
 - 管理 OBS 存储桶 → 读 `references/huawei-obs/SKILL.md`
+- Grape 平台部署应用 → 读 `references/grape-deploy/SKILL.md`
 
 每个子技能的 references/ 目录下包含该服务的详细操作文档和参数参考。
