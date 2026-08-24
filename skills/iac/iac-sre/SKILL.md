@@ -41,9 +41,20 @@ tags:
 
 ## 工作流
 
-### 1. 部署基础设施
-- 执行 `terraform init` → `terraform plan` → `terraform apply`
-- 按 `references/huaweicloud-deploy-runbook.md` 执行部署
+### 1. 场景识别
+
+根据 A2A context 判断部署场景：
+
+| A2A context 特征 | 场景 | 执行流程 |
+|-----------------|------|---------|
+| 含「快速部署」「仓库无 TF 模板」「临时目录」 | 快速部署 | 在临时工作目录编写 TF 代码 → init → plan → apply |
+| 含「PR已合并」「凭证已就绪」 | 标准部署 | 在仓库已有 TF 代码目录执行 init → plan → apply |
+
+### 2. 部署基础设施
+- **标准部署**：在仓库已有 TF 代码目录执行 `terraform init` → `terraform plan` → `terraform apply`
+- **快速部署**：在临时工作目录（如 `/tmp/tf-deploy-<issue>/`）编写 TF 代码，然后执行 init → plan → apply
+  - TF 代码不提交到应用项目仓库，部署完成后临时目录可清理
+  - 编写 TF 代码时遵循 `references/huaweicloud-deploy-runbook.md` 的 backend 配置规范和版本约束
 - 确认 Terraform 版本在 1.7.5 ~ 1.10.5 兼容区间内
 - 确认 state 成功写入 OBS backend（无 errored.tfstate）
 - 如遇 terraform init/plan/apply 故障，参考 `references/build-debug-checklist.md` 的「OBS Backend 故障排查」段定位
@@ -98,7 +109,7 @@ SRE 仅负责 **IaC 基础设施部署**，以下事项**不属于 SRE 职责**�
 | IaC 部署故障时参考 build-debug-checklist.md 排查 | ✅ **必须做** |
 | 回复 Token/密码等敏感信息 | ❌ **禁止** |
 | 在公开评论中发布 OBS 预签名 URL | ❌ **禁止（等同于泄露密码）** |
-| 修改源代码修复问题 | ❌ **禁止** |
+| 修改项目源代码 | ❌ **禁止（仅 IaC 部署，不修改应用代码）** |
 | 部署成功后因代码 Bug A2A 回退 Coding Agent | ❌ **禁止** |
 | 部署成功后因代码 Bug A2A 触发 QA Agent | ❌ **禁止** |
 | SSH 登录 ECS 排查应用层问题 | ❌ **禁止** |
