@@ -347,13 +347,13 @@ class TestFeishuAsyncHttp:
     def test_get_ws_endpoint_success(self):
         api, sess = _api_with_session()
         sess.post.return_value = _HttpCtx(_FakeResp({"code": 0, "data": {"URL": "wss://x"}}))
-        assert asyncio.run(api.get_ws_endpoint(_ctx())) == "wss://x"
+        assert asyncio.run(api.get_ws_endpoint(_ctx())) == ("wss://x", 0)
 
     def test_get_ws_endpoint_error(self):
         api, sess = _api_with_session()
         sess.post.return_value = _HttpCtx(_FakeResp({"code": 1}))
         ctx = _ctx()
-        assert asyncio.run(api.get_ws_endpoint(ctx)) == ""
+        assert asyncio.run(api.get_ws_endpoint(ctx)) == ("", 1)
         assert "endpoint api error" in ctx.metrics.last_error
 
     def test_reply_text_success(self):
@@ -473,4 +473,48 @@ class TestFeishuAsyncHttp:
         api, sess = _api_with_session()
         with patch.object(api, "get_tenant_token", new=AsyncMock(return_value="tok")):
             assert asyncio.run(api.get_user_name(_ctx(), "")) == ""
+
+
+class TestWsPermanentFailure:
+    """永久失效 Bot 自动停用（feishu_async.py _WS_PERMANENT_ERROR_CODES）。"""
+
+    def test_permanent_codes_trigger_disable(self):
+        """10002/10014/10003 永久错误码 → _disable_bot 写入 DB is_active=0"""
+        from src.session_manager import db, db_lock
+        app_id = "cli_test_perm_" + str(int(time.time()))
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, is_active) VALUES (?,?,?)",
+                          (app_id, "chat_bot", 1))
+                db.commit()
+            # 直接测试 _disable_bot
+            asyncio.run(fa._disable_bot(app_id))
+            with db_lock:
+                c = db.cursor()
+                r = c.execute("SELECT is_active FROM global_im_bot_config WHERE bot_app_id=?", (app_id,)).fetchone()
+            assert r and r[0] == 0
+        finally:
+            with db_lock:
+                db.cursor().execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
+                db.commit()
+
+    def test_permanent_codes_in_constant(self):
+        """_WS_PERMANENT_ERROR_CODES 包含 10002/10014/10003，不包含 0/-1（正常/网络错误）"""
+        codes = fa.FeishuAsync._WS_PERMANENT_ERROR_CODES
+        assert 10002 in codes
+        assert 10014 in codes
+        assert 10003 in codes
+        assert 0 not in codes
+        assert -1 not in codes
+
+    def test_ws_endpoint_returns_error_code(self):
+        """get_ws_endpoint 失败时返回 (url, error_code)，非 0 错误码"""
+        api, sess = _api_with_session()
+        sess.post.return_value = _HttpCtx(_FakeResp({"code": 10014}))
+        ctx = _ctx()
+        url, code = asyncio.run(api.get_ws_endpoint(ctx))
+        assert url == ""
+        assert code == 10014
+        assert "endpoint api error" in ctx.metrics.last_error
         sess.get.assert_not_called()
