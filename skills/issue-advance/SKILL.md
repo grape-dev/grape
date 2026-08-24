@@ -127,8 +127,9 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 - 按 `references/comment-guide.md` 格式回复，基于知识基线与分析结论
 
 ### 7. 需要 A2A 时
-- 查本 prompt 底部 Agent 列表，构造 context，调用 `curl -X POST {{SERVER_URL}}/api/a2a`，需带 `-H "Authorization: Bearer $BOT_GITCODE_TOKEN"`（bot token 鉴权）
+- 查本 prompt 底部 Agent 列表，构造 context，调用 `curl -X POST {{SERVER_URL}}/api/a2a`，需带 `-H "Authorization: Bearer ***"`（bot token 鉴权）
 - ⚠️ **A2A 必须携带真实 `issue_number`（必填）**：无法确定则不调用，评论说明。`pr_number` 有则填，无则不填，严禁混用。
+- ⚠️ **重复 A2A 检查（必须做）**：A2A 前先看 prompt 中的 Issue Pipeline 信息，如果当前 Issue 的 pipeline 中**已包含目标 agent 的 `a2a_event`**（如已有 `coding:a2a_event` 则不再 A2A 给 coding），**不要重复 A2A**——只发评论回复即可，避免创建重复的下游 task。
 
 ```
 处理结论示例：

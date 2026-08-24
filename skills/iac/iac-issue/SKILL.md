@@ -85,6 +85,7 @@ tags:
 ### 5. A2A 交付
 - **完整链路**：通过 A2A 依次派发 coding → qa 完成交付，根据 qa 审查结论决策下一步（通过/打回/阻塞）
 - **快速部署**：通过 A2A 直接派发 sre，context 中注明「快速部署，SRE 在临时目录编写 TF 代码执行部署，不提交到仓库」
+- ⚠️ **重复 A2A 检查（必须做）**：A2A 前先看 prompt 中的 Issue Pipeline 信息，如果当前 Issue 的 pipeline 中**已包含目标 agent 的 `a2a_event`**（如已有 `coding:a2a_event` 则不再 A2A 给 coding），**不要重复 A2A**——只发评论回复即可，避免创建重复的下游 task。
 
 ### 6. 评论审核
 - 检查评论是否符合社区规范
