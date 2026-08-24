@@ -50,7 +50,25 @@ tags:
 | 含「快速部署」「仓库无 TF 模板」「临时目录」 | 快速部署 | 在临时工作目录编写 TF 代码 → init → plan → apply |
 | 含「PR已合并」「凭证已就绪」 | 标准部署 | 在仓库已有 TF 代码目录执行 init → plan → apply |
 
-### 2. 部署基础设施
+### 2. 资源查重（部署前必须执行）
+在执行 `terraform apply` 之前，**必须先检查 Issue 中要求创建的资源是否已在华为云中存在**：
+
+1. 提取 Issue 清单中的资源命名和规格（VPC 名称、ECS 名称、RDS 名称、OBS 桶名等）
+2. 通过华为云 API（使用 AK/SK 获取 IAM token）查询同名资源是否已存在：
+   - VPC：`GET /v1/{project_id}/vpcs?name={name}`
+   - ECS：`GET /v1/{project_id}/cloudservers?name={name}`
+   - RDS：`GET /v3/{project_id}/instances?name={name}`
+   - OBS：`GET /`（ListBuckets，检查桶名是否已存在）
+3. 查重结果处理：
+   - **资源已存在且属于当前 Issue 部署**：跳过该资源创建，复用已有资源
+   - **资源已存在但不属于当前 Issue**：**立即停止部署**，在 Issue 评论告知「资源 <名称> 已被占用，疑似其他项目的资源，请确认命名后重试」，**不得强制创建或抢占**
+   - **资源不存在**：正常继续 terraform apply
+4. 查重结果记录在处理记录 JSON 的 `pre_check` 字段中
+
+⚠️ **不得跳过资源查重直接 apply——可能创建重复资源或抢占他人资源。**
+⚠️ **发现资源冲突时只能停止并报告，严禁删除或接管他人资源。**
+
+### 3. 部署基础设施
 - **标准部署**：在仓库已有 TF 代码目录执行 `terraform init` → `terraform plan` → `terraform apply`
 - **快速部署**：在临时工作目录（如 `/tmp/tf-deploy-<issue>/`）编写 TF 代码，然后执行 init → plan → apply
   - TF 代码不提交到应用项目仓库，部署完成后临时目录可清理
@@ -59,14 +77,14 @@ tags:
 - 确认 state 成功写入 OBS backend（无 errored.tfstate）
 - 如遇 terraform init/plan/apply 故障，参考 `references/build-debug-checklist.md` 的「OBS Backend 故障排查」段定位
 
-### 2. 部署验证
+### 4. 部署验证
 仅验证基础设施层可达性，不涉及应用层：
 - VPC/子网/安全组创建成功
 - ECS 实例运行中、EIP 绑定成功
 - RDS 实例可用、3306 端口 VPC 内网可达
 - OBS bucket 创建成功、inventory.json 上传成功
 
-### 3. 部署成功后的资源清单输出（最高优先级）
+### 5. 部署成功后的资源清单输出（最高优先级）
 Terraform apply 成功后，**必须立即输出资源清单**，此步骤优先于一切后续动作：
 
 1. 执行 `terraform output -json` 获取完整资源清单（含 sensitive 密码）
@@ -107,6 +125,8 @@ SRE 仅负责 **IaC 基础设施部署**，以下事项**不属于 SRE 职责**�
 | 部署成功后必须立即输出资源清单（Issue 评论 + OBS 上传） | ✅ **必须做，最高优先级** |
 | 资源清单输出完成前不得执行其他动作 | ✅ **必须做** |
 | IaC 部署故障时参考 build-debug-checklist.md 排查 | ✅ **必须做** |
+| 部署前必须执行资源查重（检查同名资源是否已存在） | ✅ **必须做，不可跳过** |
+| 发现资源冲突时立即停止并报告 | ✅ **必须做** |
 | 回复 Token/密码等敏感信息 | ❌ **禁止** |
 | 在公开评论中发布 OBS 预签名 URL | ❌ **禁止（等同于泄露密码）** |
 | 修改项目源代码 | ❌ **禁止（仅 IaC 部署，不修改应用代码）** |
@@ -115,3 +135,5 @@ SRE 仅负责 **IaC 基础设施部署**，以下事项**不属于 SRE 职责**�
 | SSH 登录 ECS 排查应用层问题 | ❌ **禁止** |
 | 检查/分析/修复项目应用代码 Bug | ❌ **禁止** |
 | 部署或启动应用服务（Spring Boot/Tomcat/nginx 等） | ❌ **禁止** |
+| 跳过资源查重直接 terraform apply | ❌ **禁止** |
+| 删除或接管他人已有资源 | ❌ **禁止** |
