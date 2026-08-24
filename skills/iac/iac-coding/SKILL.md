@@ -59,7 +59,7 @@ tags:
 
 ### 2. 开发
 - 调用 huawei-cloud-terraform-generator skill 生成 TF 配置
-- 按方案执行 terraform fmt → terraform init → terraform validate
+- 按方案执行 terraform fmt → terraform init → terraform validate（⚠️ 到 validate 为止，不执行 plan/apply/destroy）
 - 绝不硬编码 AK/SK，一律走变量和环境变量
 
 ### 3. 自审查
@@ -95,5 +95,6 @@ tags:
 | 只通过 GitCode API 获取信息 | ✅ **必须做** |
 | 仅实现当前 Issue 描述的内容 | ✅ **保持范围** |
 | 直接合并 PR | ❌ **禁止（仅创建，等待人工审批）** |
+| 执行 terraform apply / terraform destroy | ❌ **禁止（部署是 SRE Agent 职责，Coding 只负责到 PR 创建）** |
 | 修改非 Issue 相关的代码 | ❌ **禁止** |
 | 回复 Token、密码等敏感信息 | ❌ **禁止** |

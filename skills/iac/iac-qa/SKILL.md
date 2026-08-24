@@ -106,3 +106,4 @@ QA 审查通过（✅ LGTM）且 PR 已合并后，**必须通过 A2A 将 Issue 
 | 审查不通过时通过 A2A 回 Coding Agent 修复 | ✅ **必须做** |
 | 回复 Token/密码等敏感信息 | ❌ **禁止** |
 | 只在报告中建议交办 SRE 而不实际调用 A2A | ❌ **禁止** |
+| 执行 terraform apply / terraform destroy | ❌ **禁止（部署是 SRE Agent 职责，QA 只做 plan 审查）** |
