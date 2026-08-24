@@ -131,6 +131,12 @@
     "path": "media-operate/ai-blog-generation",
     "description": "AI 博客生成：学习参考文章样式 → 生成图文博客 → AI 配图 + AI 视频 + 部署/发布。适合技术专栏、产品介绍等场景"
   },
+  "blog-vod": {
+    "name": "博客需求精细化引导",
+    "agent_type": "vod",
+    "path": "media-operate/blog-vod",
+    "description": "博客需求精细化引导：通过结构化问卷引导用户完整描述博客需求（主题、风格、配图、视频、结构等），输出高质量需求摘要供 Issue/Coding Agent 继承"
+  },
   "blog-publish": {
     "name": "博客系统发布",
     "agent_type": "sre",

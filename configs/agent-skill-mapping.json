@@ -1,92 +1,81 @@
 {
-  "scenes": {
-    "default": {
-      "name": "通用开发",
-      "mapping": {
-        "vod": "vod",
-        "issue": "issue-advance",
-        "coding": "implementation",
-        "qa": "pr",
-        "sre": "cloud-deploy"
-      },
-      "onboarding": "repo-onboarding"
-    },
-    "cloud-native": {
-      "name": "云原生开发",
-      "mapping": {
-        "vod": "vod",
-        "issue": "issue-advance",
-        "coding": "implementation",
-        "qa": "pr",
-        "sre": "cloud-deploy"
-      },
-      "onboarding": "repo-onboarding"
-    },
-    "iac": {
-      "name": "IaC开发",
-      "mapping": {
-        "vod": "iac-vod",
-        "issue": "iac-issue",
-        "coding": "iac-coding",
-        "qa": "iac-qa",
-        "sre": "iac-sre"
-      },
-      "onboarding": "repo-onboarding"
-    },
-    "agent-dev": {
-      "name": "Agent开发",
-      "mapping": {
-        "vod": "vod",
-        "issue": "issue-advance",
-        "coding": "implementation",
-        "qa": "pr",
-        "sre": "cloud-deploy"
-      },
-      "onboarding": "repo-onboarding"
-    },
-    "skill-dev": {
-      "name": "Skill开发",
-      "mapping": {
-        "vod": "vod",
-        "issue": "skill-issue",
-        "coding": "skill-creator",
-        "qa": "skill-tester",
-        "sre": "skill-publish"
-      },
-      "onboarding": "repo-onboarding"
-    },
-    "api-skill-dev": {
-      "name": "API Skill 开发",
-      "mapping": {
-        "vod": "vod",
-        "issue": "skill-issue",
-        "coding": "rest-api-skill-creator",
-        "qa": "rest-api-skill-tester",
-        "sre": "skill-publish"
-      },
-      "onboarding": "repo-onboarding"
-    },
-    "blog-publish": {
-      "name": "博客发布",
-      "mapping": {
-        "vod": "vod",
-        "issue": "issue-advance",
-        "coding": "ai-blog-generation",
-        "qa": "pr",
-        "sre": "blog-publish"
-      },
-      "onboarding": "repo-onboarding"
-    },
-    "blog-skill-publish": {
-      "name": "基于skill自动生成的博客发布",
-      "mapping": {
-        "vod": "vod",
-        "issue": "issue-advance",
-        "coding": "ai-blog-generation",
-        "qa": "pr",
-        "sre": "blog-manager"
-      },
-      "onboarding": "repo-onboarding"
-    }
+ "scenes": {
+  "default": {
+   "name": "通用开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue-advance",
+    "coding": "implementation",
+    "qa": "pr",
+    "sre": "cloud-deploy"
+   },
+   "onboarding": "repo-onboarding"
+  },
+  "cloud-native": {
+   "name": "云原生开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue-advance",
+    "coding": "implementation",
+    "qa": "pr",
+    "sre": "cloud-deploy"
+   },
+   "onboarding": "repo-onboarding"
+  },
+  "iac": {
+   "name": "IaC开发",
+   "mapping": {
+    "vod": "iac-vod",
+    "issue": "iac-issue",
+    "coding": "iac-coding",
+    "qa": "iac-qa",
+    "sre": "iac-sre"
+   },
+   "onboarding": "repo-onboarding"
+  },
+  "agent-dev": {
+   "name": "Agent开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue-advance",
+    "coding": "implementation",
+    "qa": "pr",
+    "sre": "cloud-deploy"
+   },
+   "onboarding": "repo-onboarding"
+  },
+  "skill-dev": {
+   "name": "Skill开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "skill-issue",
+    "coding": "skill-creator",
+    "qa": "skill-tester",
+    "sre": "skill-publish"
+   },
+   "onboarding": "repo-onboarding"
+  },
+  "api-skill-dev": {
+   "name": "API Skill 开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "skill-issue",
+    "coding": "rest-api-skill-creator",
+    "qa": "rest-api-skill-tester",
+    "sre": "skill-publish"
+   },
+   "onboarding": "repo-onboarding"
+  },
+  "blog-publish": {
+   "name": "博客发布",
+   "mapping": {
+    "vod": "blog-vod",
+    "issue": "issue-advance",
+    "coding": "ai-blog-generation",
+    "qa": "pr",
+    "sre": "blog-publish"
+   },
+   "onboarding": "repo-onboarding"
   }
+ }
 }
