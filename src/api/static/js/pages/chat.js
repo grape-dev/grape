@@ -38,7 +38,7 @@ function renderChat(openConvId) {
   el.innerHTML = `<div class="chat-wrap" style="height:calc(100vh - 96px)">
     <div class="chat-convlist" id="convList"></div>
     <div class="chat-main">
-      <div class="chat-hdr"><h2>Chat Agent · Personal Assistant</h2></div>
+      <div class="chat-hdr"><h2>Chat Agent · Personal Assistant</h2><button class="chat-cfg-btn" id="chatCfgBtn" onclick="toggleChatSide()">⚙ 配置</button></div>
       <div class="chat-body" id="chatBody">
         <div style="text-align:center;color:var(--t3);padding:60px 20px">加载中...</div>
       </div>
@@ -52,6 +52,14 @@ function renderChat(openConvId) {
 }
 
 let _chatSkillScope = 'official';
+
+function toggleChatSide() {
+  const side = document.getElementById('chatSide');
+  const btn = document.getElementById('chatCfgBtn');
+  if (!side) return;
+  side.classList.toggle('open');
+  if (btn) btn.classList.toggle('active', side.classList.contains('open'));
+}
 
 function _switchChatSkillScope(scope) {
   _chatSkillScope = scope;
