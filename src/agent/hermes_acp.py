@@ -116,6 +116,21 @@ class HermesACPBackend:
         new_session_id = session_id
         error_events = []
 
+        # chat 任务完成检测参数（根因1修复）：
+        # chat 任务不输出 JSON 记录块，用 text 输出稳定检测替代。
+        # _CHAT_STABLE_SECONDS: 首次有 text 后至少等 N 秒（给 hermes 时间输出完整回复）
+        # _CHAT_IDLE_SECONDS: 最后一条 text 后连续 N 秒无新 text → 认为输出完
+        _CHAT_STABLE_SECONDS = 15
+        _CHAT_IDLE_SECONDS = 10
+        _chat_first_text_time = 0.0
+        _chat_last_text_time = 0.0
+        # 判断是否 chat 任务：env 里有 DEVOPS_EVENT_TYPE=chat 或 AGENT_NAME 含 chat
+        _is_chat_task = False
+        if env:
+            _evt = env.get("DEVOPS_EVENT_TYPE", "") or ""
+            _ag = env.get("AGENT_NAME", "") or ""
+            _is_chat_task = (_evt == "chat") or ("chat" in _ag.lower())
+
         # ── ACP JSON-RPC 客户端 ──
         client = _ACPSimpleClient(
             stdin=proc.stdin,
@@ -174,6 +189,24 @@ class HermesACPBackend:
                                 proc.stdin.close()
                             except Exception:
                                 pass
+                        elif _is_chat_task and collected_text:
+                            # chat 任务不输出 JSON 记录块（actions/conclusion/issue_summary），
+                            # 用 text 输出稳定检测：记录首次有 text 的时间，
+                            # 连续 _CHAT_STABLE_SECONDS 无新 text 输出 → 认为已完成
+                            nonlocal _chat_first_text_time, _chat_last_text_time
+                            if _chat_first_text_time == 0:
+                                _chat_first_text_time = time.time()
+                            _chat_last_text_time = time.time()
+                            _chat_stable = (time.time() - _chat_first_text_time) >= _CHAT_STABLE_SECONDS
+                            _chat_idle = (time.time() - _chat_last_text_time) >= _CHAT_IDLE_SECONDS
+                            if _chat_stable and _chat_idle:
+                                log.info(f"{label}hermes ACP chat task text stable for {_CHAT_IDLE_SECONDS}s, assuming done")
+                                prompt_result["stopReason"] = "end_turn"
+                                prompt_done.set()
+                                try:
+                                    proc.stdin.close()
+                                except Exception:
+                                    pass
             elif msg_type == "thinking":
                 _think_buf.append(content)
                 if "\n" in content or sum(len(s) for s in _think_buf) >= _BUF_MAX:

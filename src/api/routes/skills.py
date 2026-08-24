@@ -636,7 +636,8 @@ async def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user))
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
     skill_name, skill_path = row[0], row[1] or ""
-    base_dir = os.path.dirname(skill_path) if skill_path else ""
+    from src.config import SKILLS_DIR
+    base_dir = os.path.join(SKILLS_DIR, skill_path) if skill_path else ""
     ref_dir = os.path.join(base_dir, "references")
 
     if not os.path.isdir(ref_dir):
@@ -687,7 +688,8 @@ async def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
-    base_dir = os.path.dirname(row[1] or "") if row[1] else ""
+    from src.config import SKILLS_DIR
+    base_dir = os.path.join(SKILLS_DIR, row[1] or "") if row[1] else ""
     sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
 
     if not os.path.isfile(sub_md):
@@ -728,7 +730,8 @@ async def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "父技能未找到"})
 
-    base_dir = os.path.dirname(row[1] or "") if row[1] else ""
+    from src.config import SKILLS_DIR
+    base_dir = os.path.join(SKILLS_DIR, row[1] or "") if row[1] else ""
     sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
     if not os.path.isfile(sub_md):
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})

@@ -432,6 +432,20 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
     try:
         if parsed.get("type") != "message":
             return
+
+        # 根因4修复：bot 被 removed 后不再处理新消息
+        # BotManager.remove_bot() 设 ctx._running=False + cancel WS task，
+        # 但 wait_task_terminal 阻塞的 handler 协程不受 cancel 影响。
+        # 这里在入口处检查 _running，removed 的 bot 直接跳过不占 repo lock。
+        # 注意：BotContext._running 默认 False（WS 连接前），只有 WS 连接后才设 True。
+        # 测试环境不跑 WS 循环，用 getattr 兜底 + 检查 state 字段区分"未启动"和"已停止"。
+        if not getattr(ctx, "_running", True):
+            _state = getattr(ctx, "state", None)
+            _state_val = getattr(_state, "value", str(_state)) if _state else ""
+            # state=STOPPED 表示被 remove_bot 显式停止；None/空表示测试环境未初始化，放行
+            if _state_val and "stop" in str(_state_val).lower():
+                log.info(f"[Chat:{ctx.name}] bot stopped, skip message")
+                return
         text = parsed["text"]
         chat_id = parsed["chat_id"]
         msg_id = parsed["message_id"]
@@ -772,6 +786,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         account=exec_account, user_id=uid,
                         repo_gitcode_token=user_token or "",
                         env_extra={"IM_CHAT_ID": chat_id},
+                        pool_agent_type="chat",
                     )
                     log.info(f"[Chat:{ctx.name}] enqueued task={tid} mode={kind}")
                     task = await wait_task_terminal(tid)

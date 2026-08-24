@@ -1,6 +1,6 @@
 ---
 name: ai-blog-generation
-version: 2.0.0
+version: 2.1.0
 description: |
   AI 博客生成技能。学习参考文章的排版风格 → 撰写同风格主题文章 → 
   AI 配图 + AI 视频 → 交办 SRE 发布。适合技术专栏、产品介绍、品牌宣传等场景。
@@ -12,9 +12,10 @@ tools:
 
 ## 安全硬约束（必须遵守）
 
-1. **所有 API 信息（Key、URL、Model）从项目知识（Project Knowledge）中获取**，来自 `project-info/member/ai-models.yaml`。包含：
+1. **所有 API 信息（Key、URL、Model）从项目知识（Project Knowledge）中获取**，读取 `.project-info/member/` 目录下所有文件（`glob .project-info/member/**`），逐个 `read` 后从内容中提取 `ai_models` 配置（可能以 YAML/JSON 格式或嵌入在 Markdown 代码块中）。包含：
    - 图片生成：`ai_models.image`（url、key、model）
    - 视频生成：`ai_models.video`（url、key、model）
+   > ⚠️ 如知识文件中 `video.model` 为 `Wan2.2-I2V-A14B`，**必须替换为 `Wan2.2-T2V-A14B`**（I2V 不可用，见避坑指引 §1）。
 2. 调用 ModelArts API 只用此 Key，严禁从数据库 / 配置文件 / 日志 / 历史中寻找其他 token。
 3. token 不得写入日志或回复。
 4. API 返回 403 / 429 时：停止重试并报告用户。速率限制 2 req/s。
@@ -50,12 +51,37 @@ tools:
 | 含「学习这个」「仿照这个」「参考这个」等 + URL | **参考文章学习** | 先抓取分析，再按博客生成流程 |
 | 其他 | 不做处理，结束 | — |
 
-## 前置依赖
+## 前置检查（在内容生成之前执行，单步完成）
 
 ```bash
-apt-get install -y ffmpeg
-pip3 install --break-system-packages --index-url https://pypi.tuna.tsinghua.edu.cn/simple edge-tts Pillow requests
+echo "=== TOOLS ==="
+which ffmpeg 2>/dev/null && echo "ffmpeg: OK" || echo "ffmpeg: MISSING → 跳过TTS字幕"
+python3 -c "import edge_tts; print('edge_tts: OK')" 2>/dev/null || echo "edge_tts: MISSING → 跳过TTS"
+python3 -c "import requests; print('requests: OK')" 2>/dev/null || echo "requests: MISSING"
+
+echo "=== BLOG API ==="
+curl -s -o /dev/null -w 'blog_api: %{http_code}' http://120.46.93.118/api/articles
 ```
+
+根据结果设置降级标志，不在流程中间尝试安装缺失工具。
+
+**读取项目知识中的 API 配置（必须在生成配图/视频之前完成）：**
+
+```bash
+# 列出 .project-info/member/ 下所有文件并读取内容
+find .project-info/member/ -type f \( -name '*.md' -o -name '*.txt' -o -name '*.json' \) -exec echo "--- {} ---" \; -exec cat {} \;
+
+# 从输出中提取 ai_models 配置：
+# - ai_models.image: key, url, model（图片生成）
+# - ai_models.video: key, url, model（视频生成）
+# 配置可能以 YAML 格式或嵌入在 Markdown 代码块中，需解析提取
+```
+
+> ⚠️ **必须实际 read 这些文件**，不要只 glob 不 read。API Key/URL/Model 只存在于项目知识文件中，不在环境变量里。找不到文件时报告用户，不要用环境变量中的其他 token 替代。
+
+> ⚠️ **EulerOS 仓库不含 ffmpeg**，`dnf install -y ffmpeg` / `yum` / `conda` / `pip` / 源码编译全部会失败。**不要尝试安装**，缺失时直接降级：跳过 TTS 旁白和字幕合成，使用 T2V 生成的原始 MP4。
+>
+> ⚠️ **edge-tts** 在 CI 环境不安装，测试用 mock。缺失时同样跳过 TTS。
 
 ## 产物目录约定
 
@@ -77,6 +103,40 @@ blog_output/
 │   └── ...
 └── assets/             # 其他资源（CSS/JS等，可选）
 ```
+
+## 运行时避坑指引（必读，节省 50% 执行时间）
+
+> 以下问题已在实际运行中确认（Issue #8, wdmike/blog-auto-publish），按此指引执行可避免重复踩坑。
+
+### 1. 视频生成：只用 T2V，禁止 I2V
+- **Wan2.2-I2V-A14B（图生视频）在 ModelArts MaaS 上不可用**：API 接受请求但图片不会传递到生成管线，所有格式（base64/URL/PNG/JPEG）均失败
+- **必须使用 Wan2.2-T2V-A14B（文生视频）**：已验证可用，用文字 prompt 生成 5 秒视频
+- 不要尝试 I2V，不要花步数调试 I2V 的图片格式
+
+### 2. 工具缺失：降级而非安装
+- **ffmpeg**：EulerOS 仓库不含此包，`dnf install -y ffmpeg` 会失败。不要尝试 yum/conda/pip/源码编译。缺失时跳过 TTS 旁白和字幕合成，直接使用 T2V 生成的原始 MP4
+- **edge-tts**：CI 环境不安装。测试用 mock，不需要真实 edge_tts。缺失时同样跳过 TTS
+- 在流程开始时一次性检查（`which ffmpeg` + `python3 -c "import edge_tts"`），根据结果设降级标志，不在中间尝试安装
+
+### 3. 测试：只修自己的
+- 改代码前先跑 `pytest tests/ -v`，记录基线失败
+- 改完后只修复本次引入的新失败
+- 已有失败（如 blog_server.py Markup 导入、server.py 类型注解）在 PR body 注明，不修
+
+### 4. 时间预算
+- 目标 < 600 秒（grape runtime 1200 秒超时）
+- 接近 1200 秒时：跳过 TTS、字幕、额外测试修复
+- 视频轮询：让 pipeline 脚本内部处理（sleep + poll），不要 Agent 手动逐步轮询
+
+### 5. 降级优先原则
+工具缺失或 API 不可用时，**降级并继续**，不要花步数安装或修复。
+博客流水线在以下降级条件下仍能产出有效内容：
+- 无 ffmpeg → 跳过 TTS/字幕，用原始 T2V 视频
+- 无 edge-tts → 同上
+- 无 I2V → 用 T2V
+- 已有测试失败 → PR body 注明，不修
+
+目标是在 1200 秒预算内发布一篇含正文+配图+视频的博客，不是打造完美流水线。
 
 ## 工作流
 
@@ -144,10 +204,10 @@ td { padding: 12px 16px; border: 1px solid #e0e6ed; }
 ```python
 import requests, json, base64, os, time
 
-# API 信息从项目知识读取（ai_models.image.url / .key / .model）
-API_IMAGE = image_url    # 从 prompt 的「共享知识」段读取
-KEY_IMAGE = image_key
-MODEL_IMAGE = image_model
+# API 信息从 .project-info/member/ 读取的 ai_models 配置中提取
+API_IMAGE = image_url    # ai_models.image.url
+KEY_IMAGE = image_key    # ai_models.image.key
+MODEL_IMAGE = image_model  # ai_models.image.model
 headers = {"Authorization": f"Bearer {KEY_IMAGE}", "Content-Type": "application/json"}
 DIR = "/opt/grape-workspaces/<owner>/<repo>/issues/<issue_number>/coding/blog_output/images"
 os.makedirs(DIR, exist_ok=True)
@@ -167,38 +227,64 @@ for i, t in enumerate(themes):
 
 ### 4. 生成视频
 
+> ⚠️ **禁止使用 Wan2.2-I2V-A14B（图生视频）** — ModelArts MaaS 平台 I2V 接口存在限制，图片不会传递到生成管线，所有格式（base64/URL/PNG/JPEG）均失败。不要花步数调试 I2V 的图片格式。
+>
+> **必须使用 Wan2.2-T2V-A14B（文生视频）** — 已验证可用，用文字 prompt 生成 5 秒视频。调用方式与 I2V 相同（POST /v1/video/generations），只是 input 参数用 prompt 而非 image。
+
 从项目知识中获取 Wan2.2 的 API Key 和 URL，调用文生视频 API：
 
 ```python
 import requests, time
 
-# API 信息从项目知识读取（ai_models.video.url / .key / .model）
-API_VIDEO = video_url    # 从 prompt 的「共享知识」段读取
-KEY_VIDEO = video_key
-MODEL_VIDEO = video_model
+# API 信息从 .project-info/member/ 读取的 ai_models 配置中提取
+API_VIDEO = video_url    # ai_models.video.url
+KEY_VIDEO = video_key    # ai_models.video.key
+MODEL_VIDEO = video_model  # ai_models.video.model
 H = {"Authorization": f"Bearer {KEY_VIDEO}", "Content-Type": "application/json"}
 
+# T2V prompt 示例：写实风格，{topic}，5秒，专业镜头语言，高画质
 resp = requests.post(API_VIDEO, headers=H, json={
     "model": MODEL_VIDEO,
-    "input": {"prompt": "英文画面描述"}
+    "input": {"prompt": "写实风格，英文画面描述，5秒，专业镜头语言，高画质"}
 }, timeout=30)
 task_id = resp.json()["task_id"]
-time.sleep(30)
-result = requests.get(f"{API_VIDEO}/{task_id}", headers=H).json()
-if result['status'] == 'succeeded':
-    video_url = result['content']['result_url']
+
+# 轮询等待结果，最多 120s（让脚本内部处理轮询，不要 Agent 手动逐步 sleep）
+video_url = None
+for attempt in range(12):
+    time.sleep(10)
+    result = requests.get(f"{API_VIDEO}/{task_id}", headers=H, timeout=15).json()
+    status = result.get('status', '')
+    if status == 'succeeded':
+        video_url = result['content']['result_url']
+        break
+    elif status == 'failed':
+        print(f"视频生成失败: {result}")
+        break
+    print(f"轮询第 {attempt+1} 次, status={status}")
+
+if not video_url:
+    print("视频未生成，降级为纯图文博客")
 ```
 
-下载并合成音视频：
+下载并合成音视频（**如 ffmpeg 缺失则跳过 TTS 旁白和字幕合成，直接使用 T2V 生成的原始 MP4**）：
 
 ```bash
 OUTPUT_DIR="/opt/grape-workspaces/<owner>/<repo>/issues/<issue_number>/coding/blog_output"
 curl -sLo "$OUTPUT_DIR/generated.mp4" "<video_url>"
-edge-tts --voice zh-CN-XiaoxiaoNeural --text "旁白文案，18-22字" --write-media "$OUTPUT_DIR/narration.mp3"
-ffmpeg -y -i "$OUTPUT_DIR/narration.mp3" -t 5 -af "afade=t=out:st=4.5:d=0.5" "$OUTPUT_DIR/audio_trim.mp3"
-ffmpeg -y -i "$OUTPUT_DIR/generated.mp4" -i "$OUTPUT_DIR/audio_trim.mp3" \
-  -c:v libx264 -crf 23 -preset fast -c:a aac -b:a 128k \
-  -map 0:v:0 -map 1:a:0 -shortest "$OUTPUT_DIR/intro.mp4"
+
+# 检查 ffmpeg 是否可用，缺失则跳过 TTS 合成，直接用原始视频
+if which ffmpeg 2>/dev/null; then
+    edge-tts --voice zh-CN-XiaoxiaoNeural --text "旁白文案，18-22字" --write-media "$OUTPUT_DIR/narration.mp3"
+    ffmpeg -y -i "$OUTPUT_DIR/narration.mp3" -t 5 -af "afade=t=out:st=4.5:d=0.5" "$OUTPUT_DIR/audio_trim.mp3"
+    ffmpeg -y -i "$OUTPUT_DIR/generated.mp4" -i "$OUTPUT_DIR/audio_trim.mp3" \
+      -c:v libx264 -crf 23 -preset fast -c:a aac -b:a 128k \
+      -map 0:v:0 -map 1:a:0 -shortest "$OUTPUT_DIR/intro.mp4"
+else
+    # ffmpeg 缺失：EulerOS 仓库不含此包，不要尝试安装，直接用原始视频
+    cp "$OUTPUT_DIR/generated.mp4" "$OUTPUT_DIR/intro.mp4"
+    echo "ffmpeg 缺失，跳过 TTS 旁白和字幕合成，使用原始 T2V 视频"
+fi
 ```
 
 ### 5. 组织产物
@@ -267,7 +353,7 @@ curl -X POST {{SERVER_URL}}/api/a2a \
 
 ## 参考
 
-- qwen-image 图片生成：`POST /v1/images/generations`（URL/Key/Model 从项目知识获取）
-- Wan2.2 T2V 视频生成：`POST /v1/video/generations`（URL/Key/Model 从项目知识获取）
+- qwen-image 图片生成：`POST /v1/images/generations`（URL/Key/Model 从 `.project-info/member/` 项目知识文件中提取 `ai_models.image`）
+- Wan2.2 T2V 视频生成：`POST /v1/video/generations`（URL/Key/Model 从 `.project-info/member/` 项目知识文件中提取 `ai_models.video`，model 必须用 `Wan2.2-T2V-A14B`）
 - Edge TTS：`edge-tts --voice zh-CN-XiaoxiaoNeural --text "文案" --write-media output.mp3`
 - A2A 端点：`POST {{SERVER_URL}}/api/a2a`（URL 和 Token 从项目知识获取）

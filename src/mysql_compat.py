@@ -103,11 +103,12 @@ _CONCAT_RE = re.compile(r"'gitcode:'\s*\|\|\s*([A-Za-z_][A-Za-z0-9_.]*)")
 
 # CREATE TABLE 语句中的列行级翻译
 _COL_TEXT_PK_RE = re.compile(r"^(\s*)([`\"\w]+)\s+TEXT\s+PRIMARY\s+KEY\b", re.I)
+# TEXT 系列列（TEXT/MEDIUMTEXT/LONGTEXT）DEFAULT 字面量 → 表达式（MySQL 8.0.13 前不允许 DEFAULT 字面量）
 _COL_TEXT_DEFAULT_RE = re.compile(
-    r"^(\s*)([`\"\w]+)\s+TEXT\s+NOT\s+NULL\s+DEFAULT\s+'((?:[^'\\]|\\.)*)'(?=[,\s)]|$)", re.I
+    r"^(\s*)([`\"\w]+)\s+(?:MEDIUMTEXT|LONGTEXT|TEXT)\s+NOT\s+NULL\s+DEFAULT\s+'((?:[^'\\]|\\.)*)'(?=[,\s)]|$)", re.I
 )
 _COL_TEXT_DEFAULT2_RE = re.compile(
-    r"^(\s*)([`\"\w]+)\s+TEXT\s+DEFAULT\s+'((?:[^'\\]|\\.)*)'(?=[,\s)]|$)", re.I
+    r"^(\s*)([`\"\w]+)\s+(?:MEDIUMTEXT|LONGTEXT|TEXT)\s+DEFAULT\s+'((?:[^'\\]|\\.)*)'(?=[,\s)]|$)", re.I
 )
 _COL_INT_PK_AUTOINC_RE = re.compile(
     r"^(\s*)([`\"\w]+)\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", re.I
@@ -213,11 +214,14 @@ def _translate_create_table(sql: str) -> str:
         )
         # TEXT NOT NULL DEFAULT 'x' / TEXT DEFAULT 'x' → 表达式默认值（8.0.13+）
         if _COL_TEXT_DEFAULT_RE.search(c) or _COL_TEXT_DEFAULT2_RE.search(c):
-            if re.match(r"^[`\"\w]+\s+TEXT\b", c, re.I) and "PRIMARY KEY" not in c.upper():
+            if re.match(r"^[`\"\w]+\s+(?:MEDIUMTEXT|LONGTEXT|TEXT)\b", c, re.I) and "PRIMARY KEY" not in c.upper():
                 def _expr_default(mm):
                     prefix, name, val = mm.group(1), mm.group(2), mm.group(3)
+                    # 保留原始 TEXT 变体类型（MEDIUMTEXT/LONGTEXT/TEXT）
+                    type_m = re.match(r"^[`\"\w]+\s+(MEDIUMTEXT|LONGTEXT|TEXT)\b", c, re.I)
+                    col_type = type_m.group(1).upper() if type_m else "TEXT"
                     not_null = " NOT NULL" if "NOT NULL" in mm.string[:mm.start()].upper() or "NOT NULL" in c.upper() else ""
-                    return f"{prefix}{name} TEXT{not_null} DEFAULT ('{val}')"
+                    return f"{prefix}{name} {col_type}{not_null} DEFAULT ('{val}')"
                 c = _COL_TEXT_DEFAULT_RE.sub(_expr_default, c)
                 c = _COL_TEXT_DEFAULT2_RE.sub(_expr_default, c)
         # datetime('now') → CAST(NOW() AS CHAR)（字符串语义与 SQLite 一致，且避免 % 占位冲突）

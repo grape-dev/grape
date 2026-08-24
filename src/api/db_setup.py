@@ -22,8 +22,8 @@ CREATE TABLE IF NOT EXISTS events (
     status TEXT DEFAULT 'pending',
     exit_code INTEGER DEFAULT NULL,
     duration REAL DEFAULT NULL,
-    agent_logs TEXT DEFAULT '[]',
-    result TEXT DEFAULT '',
+    agent_logs MEDIUMTEXT DEFAULT '[]',
+    result MEDIUMTEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
     completed_at TEXT DEFAULT ''
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS agent_type (
     default_backend_id INTEGER DEFAULT 0,
     icon TEXT DEFAULT '',
     order_num INTEGER DEFAULT 0,
-    subscribe_events TEXT DEFAULT '[]',
+    subscribe_events MEDIUMTEXT DEFAULT '[]',
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS agent_type_config (
     order_num INTEGER DEFAULT 0,
     parent_agent_type TEXT DEFAULT '',
     skill_path TEXT DEFAULT '',
-    subscribe_events TEXT DEFAULT '[]',
+    subscribe_events MEDIUMTEXT DEFAULT '[]',
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id TEXT NOT NULL,
     role TEXT NOT NULL,
-    content TEXT NOT NULL,
+    content MEDIUMTEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -266,26 +266,26 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     repo_key          TEXT DEFAULT '',
     agent_type        TEXT DEFAULT '',
     skill             TEXT DEFAULT '',
-    prompt            TEXT NOT NULL,
+    prompt            MEDIUMTEXT NOT NULL,
     cwd               TEXT DEFAULT '',
     runtime_session_id TEXT DEFAULT '',
     event_type        TEXT DEFAULT '',
     account           TEXT DEFAULT '',
     user_id           INTEGER DEFAULT 0,
     repo_gitcode_token TEXT DEFAULT '',
-    env_extra         TEXT DEFAULT '{}',    -- JSON（含服务端已注入的账号/用户凭据，见 skill-delivery-remote.md）
+    env_extra         MEDIUMTEXT DEFAULT '{}',    -- JSON（含服务端已注入的账号/用户凭据，见 skill-delivery-remote.md）
     skill_files       MEDIUMTEXT,    -- JSON: {skill_name: {rel_path: content}}，远端交付技能包（MySQL 不允许 MEDIUMTEXT 默认值——无默认）
     server_url        TEXT DEFAULT '',      -- A2A 外呼地址，worker 替换 {{SERVER_URL}}
     issue_session_id  TEXT DEFAULT '',      -- 外键 → issue_agent_session.id（Issue 级执行会话，串行粒度，见 multi-issue-isolation-design.md §3.3）
-    project_info_files TEXT DEFAULT '{}',   -- JSON: {rel_path: content}，repo 全局 project-info 随任务交付（§2.4）
-    project_info_meta  TEXT DEFAULT '{}',   -- JSON: {last_commit_sha, branches, last_updated, degraded}
-    knowledge_files    TEXT DEFAULT '{}',   -- JSON: {rel_path: content}，共享知识快照交付（event-conversation-design.md §3.1.1）
+    project_info_files MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content}，repo 全局 project-info 随任务交付（§2.4）
+    project_info_meta  MEDIUMTEXT DEFAULT '{}',   -- JSON: {last_commit_sha, branches, last_updated, degraded}
+    knowledge_files    MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content}，共享知识快照交付（event-conversation-design.md §3.1.1）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/completed/failed/cancelled
     exit_code         INTEGER DEFAULT NULL,
-    result_text       TEXT DEFAULT '',
-    errors            TEXT DEFAULT '',
-    stderr            TEXT DEFAULT '',
-    usage_json        TEXT DEFAULT '{}',
+    result_text       MEDIUMTEXT DEFAULT '',
+    errors            MEDIUMTEXT DEFAULT '',
+    stderr            MEDIUMTEXT DEFAULT '',
+    usage_json        MEDIUMTEXT DEFAULT '{}',
     started_at        TEXT DEFAULT NULL,
     completed_at      TEXT DEFAULT NULL,
     created_at        TEXT DEFAULT (datetime('now'))
@@ -300,8 +300,8 @@ CREATE TABLE IF NOT EXISTS task_messages (
     seq        INTEGER NOT NULL,        -- worker 侧单调序号（顺序/去重/增量拉取三合一）
     type       TEXT NOT NULL,           -- step_start|text|reasoning|tool_use|step_finish|error|done
     tool       TEXT DEFAULT '',         -- tool_use 工具名
-    content    TEXT DEFAULT '',         -- text/reasoning/error 内容
-    input_json TEXT DEFAULT '',         -- tool_use 入参 JSON（服务端已脱敏）
+    content    MEDIUMTEXT DEFAULT '',         -- text/reasoning/error 内容
+    input_json MEDIUMTEXT DEFAULT '',         -- tool_use 入参 JSON（服务端已脱敏）
     output     TEXT DEFAULT '',         -- tool_result 输出（worker 截断 8192）
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(task_id, seq)
@@ -395,7 +395,7 @@ CREATE TABLE IF NOT EXISTS event_thread (
     issue_id    TEXT DEFAULT '',            -- 关联 Issue（如 '#5'；无关联事件为 ''）
     agent_type  TEXT NOT NULL,              -- vod/issue/coding/qa/sre
     role        TEXT NOT NULL,              -- user / agent
-    content     TEXT NOT NULL,
+    content     MEDIUMTEXT NOT NULL,
     created_by  TEXT DEFAULT '',
     created_at  TEXT DEFAULT (datetime('now'))
 )

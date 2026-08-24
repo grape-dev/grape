@@ -23,6 +23,8 @@ tools:
 3. 严禁读取 data/、configs/、sessions.db、user_accounts 等 Grape 内部数据。
 4. API 返回 403/无权限时：立即停止该操作并回复用户「该操作需要管理员/维护者权限，请在 GitCode 仓库设置中手动配置后重试」，严禁尝试其他 token 或绕行手段。
 5. token 不得写入任何文件/日志/评论。
+6. AK/SK 必须从 Grape 控制台配置获取，严禁从数据库/configs/日志/历史/其他文件中寻找或硬编码凭证。
+7. 如 Grape 控制台未配置 AK/SK，立即停止操作并回复用户「请在 Grape 控制台中配置华为云 AK/SK 后重试」，严禁尝试其他来源或绕行手段。
 
 
 
@@ -283,8 +285,8 @@ curl -s -o /dev/null -w '%{http_code}' "http://$ECS_IP:5000/post/1"  # Flask 示
 
 | 变量 | 来源 | 说明 |
 |------|------|------|
-| `HUAWEICLOUD_SDK_AK` | account 配置 | 华为云 Access Key |
-| `HUAWEICLOUD_SDK_SK` | account 配置 | 华为云 Secret Key |
+| `HUAWEICLOUD_SDK_AK` | Grape 控制台 | 华为云 Access Key |
+| `HUAWEICLOUD_SDK_SK` | Grape 控制台 | 华为云 Secret Key |
 | `BOT_GITCODE_TOKEN` | account 配置 | GitCode API Token |
 
 ## 硬约束
