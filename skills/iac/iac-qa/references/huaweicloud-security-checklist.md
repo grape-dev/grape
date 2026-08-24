@@ -16,6 +16,8 @@
 - [ ] Terraform 远程状态存储于 OBS 私有 bucket（非公开）
 - [ ] inventory.json 上传时设置 `x-amz-acl: private` header
 - [ ] OBS bucket 访问策略限制到指定 AK/SK
+- [ ] **Issue/PR 评论中不包含 OBS 预签名 URL**（预签名 URL 任何人持有即可访问，等同于泄露密码）
+- [ ] 敏感凭证只通过 OBS 桶名 + 对象路径告知，由维护者用 AK/SK 自行获取
 
 ## OBS Backend 配置审查（⚠️ 关键）
 
