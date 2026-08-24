@@ -314,7 +314,10 @@ SECURITY (MUST FOLLOW):
 1. Use ONLY the GitCode token provided in this prompt (USER_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.
 2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.
 3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in GitCode). NEVER try other tokens or workarounds.
-4. NEVER write any token into files, logs, or comments."""
+4. NEVER write any token into files, logs, or comments.
+
+ISSUE COMMENT FORMAT (MUST FOLLOW):
+When posting comments to GitCode Issues, the comment body MUST start with `[RoleName Agent]` prefix (e.g. `[Coding Agent]`, `[QA Agent]`, `[SRE Agent]`, `[Issue Agent]`, `[VOD Agent]`). Role name capitalized. NEVER use skill name, repo name, or other custom prefixes."""
 
 
 def extract_event_number(payload):
@@ -384,6 +387,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             parts.append("  用评论内容匹配确认 Issue 编号，然后对用户评论进行回复。")
             parts.append("  注意：即使缺少编号，也必须对用户评论作出回复，不得静默跳过。")
         parts.append("\n必须回复该评论：使用 POST /repos/{owner}/{repo}/issues/{n}/comments，body 按你的技能规定的评论前缀开头，并引用用户评论原文。")
+        parts.append("\n⚠️ **Issue 评论格式规范（必须遵守）**：评论 body 开头必须用 `[角色名 Agent]` 做前缀（如 `[Coding Agent]`、`[QA Agent]`、`[SRE Agent]`、`[Issue Agent]`、`[VOD Agent]`），角色名首字母大写。**禁止**使用 skill 名、仓库名或其他自定义前缀。")
     elif evt_type == "vod_signal":
         user_msg = payload.get("user_message", "")
         user_name = evt.get("actor", "未知用户")
@@ -493,6 +497,14 @@ context 是传给下一个 Agent 的接力说明，应包含：
             "- 审查不通过（有 Critical/Required 问题）→ A2A 给 `coding`，context 写明问题清单和修复建议\n"
             "⚠️ 审查通过+PR合并后必须 A2A 给 `sre` 触发部署，不要输出「无需 A2A 交办」。\n"
             "⚠️ A2A 给 `sre` 时**不传 `pr_number`**（避免触发订阅去重导致 SRE 任务被跳过），在 context 中写明 PR 编号和合并摘要即可。\n"
+        ),
+        "coding": (
+            "\n### Coding Agent A2A 交办规则\n"
+            "任务完成后，根据是否创建了 PR 决定 A2A 目标：\n"
+            "- 创建了 PR（代码改动类任务）→ A2A 给 `qa`，context 写明 PR 编号、改动摘要和验收标准，触发代码审查\n"
+            "- 未创建 PR（直接执行类任务，如博客生成/发布、脚本执行、配置变更等）→ A2A 给 `sre`，context 写明「发布验证」+ 执行摘要 + 产物链接（如文章 URL），触发发布后验证\n"
+            "⚠️ 任务完成后必须 A2A 交办下一个 Agent，不要输出「任务已完成，如需 XX 可调用 A2A」这类建议性语句。直接调用。\n"
+            "⚠️ 创建了 PR 时 A2A 给 `qa` 传 `pr_number`；未创建 PR 时 A2A 给 `sre` 不传 `pr_number`（避免触发订阅去重导致 SRE 任务被跳过），在 context 中写明执行摘要和产物链接即可。\n"
         ),
         "issue": (
             "\n### Issue Agent A2A 交办规则\n"

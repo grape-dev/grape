@@ -699,10 +699,18 @@ def requeue_task(task_id):
     """
     with db_lock:
         c = db.cursor()
+        # 释放槽位（根因2修复）：requeue 前先查 runtime_id，requeue 后 busy_slots-1
+        c.execute("SELECT runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
         c.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE id=? AND status IN ('dispatched','running')",
                   (task_id,))
+        ret = c.rowcount > 0
+        if ret and row and row[0]:
+            c.execute(
+                "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
+                (row[0],))
         db.commit()
-        return c.rowcount > 0
+        return ret
 
 
 def report_messages(task_id, messages):

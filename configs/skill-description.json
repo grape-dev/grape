@@ -154,5 +154,11 @@
     "agent_type": "qa",
     "path": "rest-api-skill-tester",
     "description": "REST API skill 功能验证（QA 门控）：凭据/地址检测（项目知识优先）→ 跑 skill 验证 + 规范检查（生成质量6项）→ Issue 报告 + PR 评论 → A2A 交棒 SRE Agent 发布"
+  },
+  "blog-manager": {
+    "name": "博客系统管理",
+    "agent_type": "sre",
+    "path": "media-operate/blog-manager",
+    "description": "封装 Blog System REST API 的管理 skill，提供文章/标签/用户/评论/留言/说说/上传/健康检查共 8 模块 28 个子命令的命令行能力"
   }
 }

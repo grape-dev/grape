@@ -137,14 +137,14 @@ async def create_from_template(body: CreateTemplateRequest,
     try:
         from src.repo_key import to_repo_key
         from src.user.db import set_repo_scene
-        from src.api.onboarding import trigger_onboarding, clear_onboarding_mark
+        from src.api.onboarding import trigger_onboarding, cleanup_stale_repo_data
         repo_key = to_repo_key(full_name)
         owner = user.get("username", "") or gitcode_login
-        # 仓库是全新创建时，作废旧仓库可能残留的 onboarding 幂等标记
-        # （旧仓库若被用户在 GitCode 网页直接删除、未走解除托管，标记会残留，
-        #   导致同名新仓库重建后引导被跳过——见 clear_onboarding_mark 注释）
+        # 仓库是全新创建时，清理同名旧仓库可能残留的 DB 数据
+        # （旧仓库若被用户在 GitCode 网页直接删除、未走解除托管，
+        #   events/issue_state/agent_tasks/sessions 等残留，导致新仓库前端界面混乱）
         if repo_created:
-            clear_onboarding_mark(repo_key)
+            cleanup_stale_repo_data(repo_key)
         set_repo_scene(repo_key, scene_id)
         trigger_onboarding(repo_key, owner)
     except Exception as e:
