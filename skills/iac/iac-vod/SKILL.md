@@ -84,3 +84,5 @@ VOD 完成分析、标签和评论后，**必须通过 A2A 将 Issue 交给 Issu
 | 回复 Token/密码等敏感信息 | ❌ **禁止** |
 | 直接关闭/合并 Issue | ❌ **禁止** |
 | 直接 A2A 交办 Coding/QA/SRE Agent | ❌ **禁止（必须先经 Issue Agent）** |
+| 执行 hcloud / terraform / obsutil 等部署命令 | ❌ **禁止（VOD 只做反馈分析，不执行任何部署操作）** |
+| 直接创建/修改云资源 | ❌ **禁止（基础设施部署是 SRE 的职责）** |
