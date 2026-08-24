@@ -187,10 +187,10 @@ class TestBusinessMethods:
     ])
     def test_simple_post_methods(self, method, args, kwargs, path):
         c = _client(_Ctx(_FakeResp(200, {})))
-        # task_start returns _request result ({} on success) for retry logic;
+        # task_start and report_messages return _request result ({} on success);
         # other methods are fire-and-forget (return None).
         result = _run(getattr(c, method)(*args, **kwargs))
-        if method == "task_start":
+        if method in ("task_start", "report_messages"):
             assert result is not None  # {} on success
         else:
             assert result is None

@@ -56,7 +56,10 @@ class RuntimeClient:
                         raise RuntimeGoneError(path)
                     if resp.status >= 400:
                         txt = (await resp.text())[:200]
-                        log.warning(f"RuntimeClient {method} {path} -> {resp.status}: {txt}")
+                        if resp.status == 410:
+                            log.info(f"RuntimeClient {method} {path} -> 410 (task terminated): {txt}")
+                        else:
+                            log.warning(f"RuntimeClient {method} {path} -> {resp.status}: {txt}")
                         return None
                     if resp.status == 204:
                         return {}
@@ -122,7 +125,13 @@ class RuntimeClient:
                             {"summary": summary, "step": step, "total": total}, retries=1)
 
     async def report_messages(self, task_id: str, messages: list):
-        await self._request("POST", f"/api/runtime/tasks/{task_id}/messages", {"messages": messages}, retries=1)
+        """返回 dict（正常响应）或 None（网络错误/410 task 已终态）。
+
+        410 Gone 表示 task 已被服务端标终态（用户终止/超时），worker 应中断执行。
+        """
+        data = await self._request("POST", f"/api/runtime/tasks/{task_id}/messages",
+                                   {"messages": messages}, retries=1)
+        return data
 
     async def report_usage(self, task_id: str, usage: dict):
         await self._request("POST", f"/api/runtime/tasks/{task_id}/usage", usage, retries=1)

@@ -890,6 +890,11 @@ def _detect_business_failure(agent_type, output, result_text):
 def complete_task(task_id, result_text, exit_code=0, usage=None):
     """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。"""
     task = get_task(task_id)
+    # 幂等保护：如果 task 已经是终态（failed/cancelled），不覆盖（防止 worker 终止后残留进程
+    # 跑完调 complete 把 failed 状态覆盖成 completed，2026-08-24 seq#2488 实例）。
+    if task and task.get("status") in ("failed", "cancelled"):
+        log.info(f"Task {task_id} already {task.get('status')}, skip complete_task (result={result_text[:60]})")
+        return
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import parse_agent_output_json, update_event_complete
