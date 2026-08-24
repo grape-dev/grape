@@ -72,35 +72,36 @@ def _load_from_project_knowledge():
     """从 .project-info/ 目录递归查找 JSON 配置文件，读取 secrets.{PREFIX}_* 字段。
 
     不固定文件名——扫描所有 .json 文件，检查是否含 secrets/config 字段。
+    .project-info/ 由 grape worker 物化到 agent 工作目录（cwd）下，直接在当前目录查找。
+    base_url 和 secrets 都严格按 {PREFIX}_ 前缀精确匹配，不做 fallback。
     """
     import glob
     creds = {}
-    # 搜索当前目录及上级目录的 .project-info/ 下所有 JSON 文件
-    for pattern in ['.project-info/**/*.json',
-                    '../.project-info/**/*.json',
-                    '../../.project-info/**/*.json']:
-        for filepath in glob.glob(pattern, recursive=True):
-            try:
-                with open(filepath) as f:
-                    data = __import__('json').load(f)
-                secrets = data.get('secrets', {})
-                config = data.get('config', {})
-                prefix = _CRED_PREFIX + '_'
-                for key, val in secrets.items():
-                    if key.upper().startswith(prefix):
-                        if 'USERNAME' in key.upper():
-                            creds.setdefault('username', val)
-                        if 'PASSWORD' in key.upper():
-                            creds.setdefault('password', val)
-                        if 'TOKEN' in key.upper():
-                            creds.setdefault('token', val)
-                        if 'API_KEY' in key.upper():
-                            creds.setdefault('api_key', val)
+    for filepath in glob.glob('.project-info/**/*.json', recursive=True):
+        try:
+            with open(filepath) as f:
+                data = __import__('json').load(f)
+            secrets = data.get('secrets', {})
+            config = data.get('config', {})
+            prefix = _CRED_PREFIX + '_'
+            for key, val in secrets.items():
+                if key.upper().startswith(prefix):
+                    if 'USERNAME' in key.upper():
+                        creds.setdefault('username', val)
+                    if 'PASSWORD' in key.upper():
+                        creds.setdefault('password', val)
+                    if 'TOKEN' in key.upper():
+                        creds.setdefault('token', val)
+                    if 'API_KEY' in key.upper():
+                        creds.setdefault('api_key', val)
+            # base_url：严格按前缀精确匹配
+            if 'base_url' not in creds:
                 for key, val in config.items():
-                    if key.upper().startswith(prefix) and 'BASE_URL' in key.upper():
+                    if key.upper() == (prefix + 'BASE_URL'):
                         creds.setdefault('base_url', val)
-            except Exception:
-                continue
+                        break
+        except Exception:
+            continue
     return creds
 
 
