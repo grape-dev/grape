@@ -419,7 +419,7 @@ function openTaskLog(taskId, title) {
     <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">
       <span style="font-size:13px;font-weight:600">📜 运行日志 <span style="color:var(--t3);font-weight:400">· ${_tlEsc(title)}</span></span>
       <span id="tlStatus" style="font-size:11px;margin-left:auto"></span>
-      <button onclick="_copyTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" title="复制日志内容">📋 复制</button>
+      <button id="tlCopyBtn" onclick="_copyTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;transition:all .2s" title="复制日志内容">📋 复制</button>
       <button id="tlKillBtn" onclick="terminateCurrentTask()" style="border:1px solid var(--tr,#e74c3c);background:transparent;color:var(--tr,#e74c3c);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;display:none" title="强行终止正在运行的任务">⏹ 终止</button>
       <button id="taskLogFullscreenBtn" onclick="_toggleTaskLogFullscreen()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" title="全屏/还原">⛶ 全屏</button>
       <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>
@@ -532,11 +532,60 @@ function _taskLogStream() {
 
 function _copyTaskLog() {
   if (!_taskLog.bodyEl) return;
-  const txt = _taskLog.bodyEl.innerText;
-  navigator.clipboard.writeText(txt).then(
-    () => { const b = _taskLog.copyBtn; if (b) { const o = b.textContent; b.textContent = '✅ 已复制'; b.style.background = 'var(--ok,#1e7f3f)'; b.style.color = '#fff'; setTimeout(() => { b.textContent = o; b.style.background = ''; b.style.color = ''; }, 1200); } },
-    () => {}
-  );
+  var txt = _taskLog.bodyEl.innerText;
+  var btn = document.getElementById('tlCopyBtn');
+  if (!btn) return;
+  var orig = btn.textContent;
+  var origBg = btn.style.background;
+  var origColor = btn.style.color;
+  function _flashOk() {
+    btn.textContent = '✅ 已复制';
+    btn.style.background = 'var(--g,#1ca44c)';
+    btn.style.color = '#fff';
+    btn.style.borderColor = 'var(--g,#1ca44c)';
+    setTimeout(function() {
+      btn.textContent = orig;
+      btn.style.background = origBg;
+      btn.style.color = origColor;
+      btn.style.borderColor = '';
+    }, 1500);
+  }
+  function _flashFail() {
+    btn.textContent = '❌ 复制失败';
+    btn.style.background = 'var(--r,#dc2828)';
+    btn.style.color = '#fff';
+    btn.style.borderColor = 'var(--r,#dc2828)';
+    setTimeout(function() {
+      btn.textContent = orig;
+      btn.style.background = origBg;
+      btn.style.color = origColor;
+      btn.style.borderColor = '';
+    }, 1500);
+  }
+  // navigator.clipboard API（HTTPS / localhost）
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(_flashOk, function() {
+      _fallbackCopy(txt, _flashOk, _flashFail);
+    });
+  } else {
+    _fallbackCopy(txt, _flashOk, _flashFail);
+  }
+}
+
+function _fallbackCopy(text, onOk, onFail) {
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    var ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) { onOk(); } else { onFail(); }
+  } catch (e) {
+    onFail();
+  }
 }
 
 function _toggleTaskLogFullscreen() {
