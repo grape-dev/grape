@@ -262,6 +262,25 @@
             "show": true,
             "stars": 1
           }
+        },
+        {
+          "id": "hello-blog-sys",
+          "name": "HELLO-BLOG-SYS",
+          "description": "基于 Flask 的博客系统：完整的博客网站骨架，适合学习 Web 开发与数据库操作",
+          "icon": "📰",
+          "source": "git",
+          "source_repo": "XOcto/BLOG-SYS",
+          "default_repo_name": "HELLO-BLOG-SYS",
+          "tags": [
+            "python",
+            "flask",
+            "blog",
+            "web"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": false
+          }
         }
       ],
       "page_size": 9
