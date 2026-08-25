@@ -66,6 +66,7 @@ Content-Type: application/json
 #### A5 A2A 交办 Issue Agent
 - 需求收敛为清晰后，`POST /api/a2a {"agent":"issue", ...}`（见 guide §五）
 - 交办后 Issue 进入 `issue` 阶段（issue_state 归属更新）
+- ⚠️ **重复 A2A 检查（必须做）**：A2A 前先看 prompt 中的 Issue Pipeline 信息，如果当前 Issue 的 pipeline 中**已包含 `issue:a2a_event`**（即前一个 VOD 或其他 agent 已经 A2A 给了 Issue Agent），**不要重复 A2A**——只发评论回复即可，避免创建重复的 Issue Agent / Coding task。
 
 ### 场景 B：Issue 审视（接管 issue_opened）
 
@@ -89,6 +90,7 @@ Content-Type: application/json
 #### B6 A2A 交办 Issue Agent
 - 审视清晰后 `POST /api/a2a {"agent":"issue", ...}`
 - 交办后 Issue 进入 `issue` 阶段
+- ⚠️ **重复 A2A 检查（必须做）**：A2A 前先看 prompt 中的 Issue Pipeline 信息，如果当前 Issue 的 pipeline 中**已包含 `issue:a2a_event`**（即前一个 VOD 或其他 agent 已经 A2A 给了 Issue Agent），**不要重复 A2A**——只发评论回复即可，避免创建重复的 Issue Agent / Coding task。
 
 ## 需求引导漏斗规则（A3/B4 通用）
 
@@ -107,6 +109,7 @@ Content-Type: application/json
 | 审视已有 Issue、沟通澄清 | ✅ **可以做** |
 | 创建/总结 Issue（模板结构） | ✅ **可以做** |
 | A2A 交办 Issue Agent（清晰需求后） | ✅ **必须做** |
+| A2A 前检查 pipeline 是否已有 issue:a2a_event | ✅ **必须做（防重复交办）** |
 | 修改 Issue 标签/里程碑/分配 | ❌ **不做**（Issue Agent 职责） |
 | 修改代码 / 建 PR | ❌ **禁止** |
 | 回复 Token/密码 | ❌ **禁止** |

@@ -45,7 +45,7 @@
    "onboarding": "repo-onboarding"
   },
   "skill-dev": {
-   "name": "Skill开发",
+   "name": "华为云Skill开发",
    "mapping": {
     "vod": "vod",
     "issue": "skill-issue",
@@ -56,7 +56,7 @@
    "onboarding": "repo-onboarding"
   },
   "api-skill-dev": {
-   "name": "API Skill 开发",
+   "name": "通用Skill开发",
    "mapping": {
     "vod": "vod",
     "issue": "skill-issue",
@@ -69,7 +69,7 @@
   "blog-publish": {
    "name": "博客发布",
    "mapping": {
-    "vod": "vod",
+    "vod": "blog-vod",
     "issue": "issue-advance",
     "coding": "ai-blog-generation",
     "qa": "pr",

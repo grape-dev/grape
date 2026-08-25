@@ -66,6 +66,8 @@ tags:
 ### A2A 交办 Issue Agent
 VOD 完成分析、标签和评论后，**必须通过 A2A 将 Issue 交给 Issue Agent**，由 Issue Agent 接力进行分类确认、指派、Spec 生成，再由 Issue Agent 触发 Coding Agent。
 
+⚠️ **重复 A2A 检查（必须做）**：A2A 前先看 prompt 中的 Issue Pipeline 信息，如果当前 Issue 的 pipeline 中**已包含 `issue:a2a_event`**（即前一个 VOD 或其他 agent 已经 A2A 给了 Issue Agent），**不要重复 A2A**——只发评论回复即可，避免创建重复的 Issue Agent / Coding task。典型场景：issue_opened 和 issue_comment 两个事件先后到达，issue_opened 的 VOD 已经 A2A 过了，issue_comment 的 VOD 不应再 A2A。
+
 ⚠️ **VOD 不得直接 A2A 交办 Coding/QA/SRE Agent**——VOD 的职责边界到分析评论为止，后续流转由 Issue Agent 主导。
 
 详见 `references/a2a-handoff.md`。
@@ -79,8 +81,11 @@ VOD 完成分析、标签和评论后，**必须通过 A2A 将 Issue 交给 Issu
 | 创建 Issue 前须确认无重复 | ✅ **必须做** |
 | Issue 标签须包含 `vod` | ✅ **必须做** |
 | 分析完成后通过 A2A 交办 Issue Agent | ✅ **必须做，不可跳过** |
+| A2A 前检查 pipeline 是否已有 issue:a2a_event | ✅ **必须做（防重复交办）** |
 | 单条反馈价值不足时标记存档不创建 Issue | ✅ **根据判断** |
 | 修改非 VOD 相关 Issue | ❌ **禁止** |
 | 回复 Token/密码等敏感信息 | ❌ **禁止** |
 | 直接关闭/合并 Issue | ❌ **禁止** |
 | 直接 A2A 交办 Coding/QA/SRE Agent | ❌ **禁止（必须先经 Issue Agent）** |
+| 执行 hcloud / terraform / obsutil 等部署命令 | ❌ **禁止（VOD 只做反馈分析，不执行任何部署操作）** |
+| 直接创建/修改云资源 | ❌ **禁止（基础设施部署是 SRE 的职责）** |

@@ -309,6 +309,11 @@ async def runtime_task_progress(task_id: str, body: ProgressBody, credential_id:
 
 @router.post("/tasks/{task_id}/messages")
 async def runtime_task_messages(task_id: str, body: MessagesBody, credential_id: int = Depends(_require_credential)):
+    # task 已终态（failed/cancelled/completed）时拒绝消息，返回 410 Gone。
+    # worker 端 _execute_task 检测到 410 后中断执行（用户终止后残留进程不再继续产出）。
+    task = service.get_task(task_id)
+    if task and task.get("status") in ("failed", "cancelled", "completed"):
+        raise HTTPException(status_code=410, detail={"code": 410, "message": f"task already {task.get('status')}"})
     service.enqueue_async_report("messages", task_id, body.messages)
     return {"status": "ok"}
 

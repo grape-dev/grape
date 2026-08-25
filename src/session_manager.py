@@ -134,7 +134,7 @@ db.execute("""
         im_provider TEXT DEFAULT '',
         im_app_id TEXT DEFAULT '',
         im_app_secret TEXT DEFAULT '',
-        event_history TEXT DEFAULT '[]',
+        event_history MEDIUMTEXT DEFAULT '[]',
         created_at TEXT, last_active_at TEXT
     )
 """)
@@ -256,7 +256,14 @@ def get_or_create_session(repo_key, source, repository, backend=""):
         row = c.fetchone()
         if row:
             sid, hist_json, bsid, status = row
-            history = json.loads(hist_json) if hist_json else []
+            history = []
+            if hist_json:
+                try:
+                    history = json.loads(hist_json)
+                except json.JSONDecodeError:
+                    log.warning(f"session {sid} event_history corrupted (len={len(hist_json)}), resetting to []")
+                    c.execute("UPDATE chat_agent_session SET event_history=? WHERE id=?", ("[]", sid))
+                    db.commit()
             if status == "failed":
                 c.execute("UPDATE chat_agent_session SET status=? WHERE id=?", ("idle", sid))
                 db.commit()

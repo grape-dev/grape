@@ -312,16 +312,16 @@ function _tlIcon(type) {
 
 function _tlLine(payload) {
   const type = payload.type || 'log';
-  const time = payload.created_at ? `<span style="color:var(--t3);margin-right:6px">${fmtLocalTime(payload.created_at).substring(11, 19)}</span>` : '';
+  const time = payload.created_at ? `<span style="color:#7a85a0;margin-right:6px;font-size:13px">${fmtLocalTime(payload.created_at).substring(11, 19)}</span>` : '';
   if (type === 'tool_use') {
     let inputHtml = '';
     try {
-      inputHtml = `<div style="margin:4px 0 4px 24px;white-space:pre-wrap;word-break:break-all;color:var(--t2);font-size:11px">${_tlEsc(JSON.stringify(payload.input || {}, null, 2))}</div>`;
+      inputHtml = `<div style="margin:4px 0 4px 24px;white-space:pre-wrap;word-break:break-all;color:#b8c2d6;font-size:13px">${_tlEsc(JSON.stringify(payload.input || {}, null, 2))}</div>`;
     } catch (e) {}
-    return `<div style="margin-bottom:6px">${time}🔧 <span style="color:var(--a);font-weight:600">${_tlEsc(payload.tool || 'tool')}</span>${inputHtml}</div>`;
+    return `<div style="margin-bottom:8px">${time}🔧 <span style="color:#5b9eff;font-weight:600">${_tlEsc(payload.tool || 'tool')}</span>${inputHtml}</div>`;
   }
-  const color = type === 'error' ? 'var(--tr)' : type === 'reasoning' ? 'var(--t3)' : 'var(--t2)';
-  return `<div style="margin-bottom:6px">${time}${_tlIcon(type)} <span style="color:${color};white-space:pre-wrap;word-break:break-all">${_tlEsc(payload.content || '')}</span></div>`;
+  const color = type === 'error' ? '#ff5b5b' : type === 'reasoning' ? '#a0aac0' : '#e0e6f0';
+  return `<div style="margin-bottom:8px">${time}${_tlIcon(type)} <span style="color:${color};white-space:pre-wrap;word-break:break-all">${_tlEsc(payload.content || '')}</span></div>`;
 }
 
 function _tlStatus(text, color) {
@@ -348,7 +348,7 @@ function openTaskLog(taskId, title) {
       <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>
     </div>
     <div id="tlInfo" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0;font-size:11px;color:var(--t2,#8a94a6)"></div>
-    <div id="tlBody" style="flex:1;min-height:0;overflow-y:auto;background:#0d1220;color:#d3dcee;padding:12px 14px;font-size:12px;font-family:monospace;line-height:1.6"></div>
+    <div id="tlBody" style="flex:1;min-height:0;overflow-y:auto;background:#000;color:#fff;padding:14px 18px;font-size:15px;font-family:'JetBrains Mono','Fira Code','Cascadia Code','Source Code Pro','SF Mono',Consolas,'Liberation Mono',Menlo,monospace;line-height:1.75;letter-spacing:0.2px"></div>
   </div>`;
   document.body.appendChild(ov);
   _taskLog.statusEl = document.getElementById('tlStatus');
@@ -392,7 +392,7 @@ function _tlArmWaitHint() {
     if (!_taskLog.taskId) return;
     if (_taskLog.bodyEl && !_taskLog.hasMsg && _taskLog.bodyEl.childElementCount === 0) {
       _taskLog.bodyEl.insertAdjacentHTML('beforeend',
-        '<div class="tl-waiting" style="color:var(--t3);padding:10px 0;font-size:12px">⏳ 引擎执行中，等待输出…</div>');
+        '<div class="tl-waiting" style="color:#a0aac0;padding:10px 0;font-size:15px">⏳ 引擎执行中，等待输出…</div>');
       _tlStatus('⏳ 引擎执行中，等待输出…', 'var(--ty, #f1c40f)');
     }
   }, 8000);
@@ -579,7 +579,7 @@ function openInlineLog(seq, title) {
       bodyHtml = logs.map(function(l) {
         if (!l) return '';
         var type = l.type || 'log';
-        var time = l.time ? '<span style="color:var(--t3);margin-right:6px">' + (l.time.substring(11,19) || '') + '</span>' : '';
+        var time = l.time ? '<span style="color:#7a85a0;margin-right:6px">' + (l.time.substring(11,19) || '') + '</span>' : '';
         var msg = l.msg || '';
         if (type === 'tool_use') {
           var toolName = msg;
@@ -587,17 +587,17 @@ function openInlineLog(seq, title) {
           try {
             var parsed = JSON.parse(msg);
             if (parsed.tool) toolName = _tlEsc(parsed.tool);
-            if (parsed.input) inputHtml = '<div style="margin:4px 0 4px 24px;white-space:pre-wrap;word-break:break-all;color:var(--t2);font-size:11px">' + _tlEsc(JSON.stringify(parsed.input, null, 2)) + '</div>';
+            if (parsed.input) inputHtml = '<div style="margin:4px 0 4px 24px;white-space:pre-wrap;word-break:break-all;color:#b8c2d6;font-size:13px">' + _tlEsc(JSON.stringify(parsed.input, null, 2)) + '</div>';
           } catch(e) {}
-          return '<div style="margin-bottom:6px">' + time + '🔧 <span style="color:var(--a);font-weight:600">' + toolName + '</span>' + inputHtml + '</div>';
+          return '<div style="margin-bottom:8px">' + time + '🔧 <span style="color:#5b9eff;font-weight:600">' + toolName + '</span>' + inputHtml + '</div>';
         }
         var icon = type === 'error' ? '❌' : type === 'reasoning' ? '🤔' : type === 'step_start' ? '▶' : type === 'text' ? '💬' : '·';
-        var color = type === 'error' ? 'var(--tr)' : type === 'reasoning' ? 'var(--t3)' : 'var(--t2)';
-        return '<div style="margin-bottom:6px">' + time + icon + ' <span style="color:' + color + ';white-space:pre-wrap;word-break:break-all">' + _tlEsc(msg) + '</span></div>';
+        var color = type === 'error' ? '#ff5b5b' : type === 'reasoning' ? '#a0aac0' : '#e0e6f0';
+        return '<div style="margin-bottom:8px">' + time + icon + ' <span style="color:' + color + ';white-space:pre-wrap;word-break:break-all">' + _tlEsc(msg) + '</span></div>';
       }).join('');
     } else {
       var resultText = data.result || '(无执行日志 — agent 未实际运行)';
-      bodyHtml = '<div style="margin-bottom:6px">❌ <span style="color:var(--tr);white-space:pre-wrap;word-break:break-all">' + _tlEsc(resultText) + '</span></div>';
+      bodyHtml = '<div style="margin-bottom:8px">❌ <span style="color:#ff5b5b;white-space:pre-wrap;word-break:break-all">' + _tlEsc(resultText) + '</span></div>';
     }
     var ov = document.createElement('div');
     ov.id = 'taskLogOverlay';
@@ -608,7 +608,7 @@ function openInlineLog(seq, title) {
       + '<span style="font-size:11px;margin-left:auto;color:var(--t3)">' + logs.length + ' 条记录</span>'
       + '<button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>'
       + '</div>'
-      + '<div style="flex:1;min-height:0;overflow-y:auto;background:#0b0e14;color:#c2cad6;padding:12px 14px;font-size:12px;font-family:monospace;line-height:1.6">' + bodyHtml + '</div>'
+      + '<div style="flex:1;min-height:0;overflow-y:auto;background:#000;color:#fff;padding:14px 18px;font-size:15px;font-family:JetBrains Mono,Fira Code,Cascadia Code,Source Code Pro,SF Mono,Consolas,Liberation Mono,Menlo,monospace;line-height:1.75;letter-spacing:0.2px">' + bodyHtml + '</div>'
       + '</div>';
     document.body.appendChild(ov);
     ov.addEventListener('click', function(e) { if (e.target === ov) closeTaskLog(); });

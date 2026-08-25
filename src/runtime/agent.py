@@ -465,11 +465,20 @@ async def _execute_task(client, task, engine_name: str = ""):
             # 双触发批量上报（实时日志实时性关键）：50 条或 500ms 时间窗任一满足即 flush
             _now = time.monotonic()
             if len(batch) >= 50 or (_last_flush and _now - _last_flush >= 0.5):
-                await client.report_messages(tid, batch)
+                _resp = await client.report_messages(tid, batch)
+                if _resp is None:
+                    # task 已被服务端标终态（410 Gone / 网络错误）→ 中断执行，杀引擎进程
+                    log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
+                    _kill_stale_engine(task, _backend_for_engine(engine_name))
+                    return {"_error": "task terminated by server (aborted during execution)", "_started": started}
                 batch = []
                 _last_flush = _now
         if batch:
-            await client.report_messages(tid, batch)
+            _resp = await client.report_messages(tid, batch)
+            if _resp is None:
+                log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
+                _kill_stale_engine(task, _backend_for_engine(engine_name))
+                return {"_error": "task terminated by server (aborted at final flush)", "_started": started}
         # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
         return done
     except Exception as e:
@@ -507,6 +516,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     """
     active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
     active_tasks = {}        # tid → sid 映射（task_id 去重 + sid 看门狗反查）
+    active_task_objs = {}    # tid → task dict（sid 看门狗杀进程需要 task 的 cwd/backend 信息）
     _requeue_cooldown = {}   # sid → 上次 requeue 时间戳，60s 冷却防 claim→requeue 空转死循环
     _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
     hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
@@ -573,6 +583,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             active_sessions.add(sid)
             active_tasks[tid] = sid
+            task["_engine_name"] = e  # 供 sid 看门狗杀进程用
+            active_task_objs[tid] = task
             if e == "hermes":
                 hermes_active += 1
 
@@ -629,6 +641,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         log.warning(f"task {_tid} complete/fail callback error: {_ce}")
                 active_sessions.discard(s)
                 active_tasks.pop(_tid, None)
+                active_task_objs.pop(_tid, None)
                 if e == "hermes":
                     hermes_active -= 1
 
@@ -680,7 +693,19 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             for _tid, _sid, _state in _ghost_tids:
                 active_sessions.discard(_sid)
                 active_tasks.pop(_tid, None)
-                log.warning(f"sid watchdog: cleaned ghost tid={_tid} sid={_sid} (server status={_state})")
+                _task = active_task_objs.pop(_tid, None)
+                # 杀掉残留引擎进程：用户终止/超时后服务端已标终态，但 worker 上的
+                # 引擎进程可能仍在跑（没有服务端→worker 的推送通道通知停进程）。
+                # 看门狗发现 task 已终态时主动杀进程，防残留进程继续产出消息/调 complete。
+                if _task:
+                    _backend = _backend_for_engine(_task.get("_engine_name") or "")
+                    try:
+                        _kill_stale_engine(_task, _backend)
+                        log.warning(f"sid watchdog: killed engine for ghost tid={_tid} sid={_sid} (server status={_state}, backend={_backend})")
+                    except Exception as _ke:
+                        log.warning(f"sid watchdog: kill engine failed for tid={_tid}: {_ke}")
+                else:
+                    log.warning(f"sid watchdog: cleaned ghost tid={_tid} sid={_sid} (server status={_state}, no task obj for kill)")
 
         await asyncio.sleep(poll_interval + random.uniform(0, poll_interval * 0.3))
 

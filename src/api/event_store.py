@@ -257,17 +257,19 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                           completed_at: str = "", result: str = ""):
     """写入执行结果（status, exit_code, duration, agent_logs, completed_at, result）
 
-    幂等保护：如果 event 已经是 completed 状态，不允许用 failed 覆盖。
-    防止 task 完成后 client.complete() 网络失败 → client.fail() 覆盖 completed→failed。
+    幂等保护：终态事件不允许被其他终态覆盖。
+    - 已 completed 的事件不允许被 failed 覆盖（防止 complete→fail 竞态）。
+    - 已 failed 的事件不允许被 completed 覆盖（防止用户终止后残留进程跑完
+      调 complete 把 failed 覆盖成 completed，2026-08-24 seq#2488 实例）。
     """
     with db_lock:
         try:
             c = db.cursor()
-            # 检查当前状态：已 completed 的事件不允许被 failed 覆盖
+            # 检查当前状态：已终态的事件不允许被其他终态覆盖
             c.execute("SELECT status FROM events WHERE seq=?", (seq,))
             row = c.fetchone()
-            if row and row[0] == "completed" and status == "failed":
-                log.info(f"Event {seq} already completed, skip failed overwrite (result={result[:60]})")
+            if row and row[0] in ("completed", "failed", "cancelled") and status in ("completed", "failed", "cancelled"):
+                log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (result={result[:60]})")
                 return
             c.execute(
                 "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, result=? WHERE seq=?",

@@ -217,7 +217,7 @@ _CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS user_credentials (
     user_id INTEGER NOT NULL,
     provider TEXT NOT NULL,       -- 'gitcode','feishu','huawei','codearts'
-    config_json TEXT NOT NULL,
+    config_json MEDIUMTEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, provider)
 )
@@ -451,7 +451,7 @@ _OAUTH_STATES_DDL = """
 CREATE TABLE IF NOT EXISTS oauth_states (
     state TEXT PRIMARY KEY,
     provider TEXT NOT NULL,
-    data_json TEXT DEFAULT '{}',
+    data_json MEDIUMTEXT DEFAULT '{}',
     expires REAL NOT NULL
 )
 """

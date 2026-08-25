@@ -1,0 +1,108 @@
+{
+  "skill_name": "blog-manager-kit",
+  "entry_file": "scripts/blog-manager-kit.py",
+  "test_cases": [
+    {
+      "id": "TC-01",
+      "name": "health-check",
+      "command": "python3 scripts/blog-manager-kit.py health-check",
+      "expected": "{\"status\":\"ok\"}",
+      "method": "GET",
+      "category": "readonly",
+      "description": "检查 API 可达性"
+    },
+    {
+      "id": "TC-02",
+      "name": "capability-list",
+      "command": "python3 scripts/blog-manager-kit.py capability-list",
+      "expected": "{\"capability\":\"capability-list\",\"skill\":\"blog-manager-kit\",\"subcommand_count\":28}",
+      "method": "GET",
+      "category": "readonly",
+      "description": "列出本 skill 所有能力项（28 个子命令）"
+    },
+    {
+      "id": "TC-03",
+      "name": "list-articles",
+      "command": "python3 scripts/blog-manager-kit.py list-articles --page 1 --size 5",
+      "expected": "{\"code\":200,\"data\":[...]}",
+      "method": "GET",
+      "category": "readonly",
+      "description": "分页查询文章列表"
+    },
+    {
+      "id": "TC-04",
+      "name": "top-articles",
+      "command": "python3 scripts/blog-manager-kit.py top-articles --limit 3",
+      "expected": "{\"code\":200,\"data\":[...]}",
+      "method": "GET",
+      "category": "readonly",
+      "description": "获取热门文章 Top N"
+    },
+    {
+      "id": "TC-05",
+      "name": "list-labels",
+      "command": "python3 scripts/blog-manager-kit.py list-labels",
+      "expected": "{\"code\":200,\"data\":[{\"id\":1,\"lname\":\"...\"}]}",
+      "method": "GET",
+      "category": "readonly",
+      "description": "获取所有标签（API 路径 /api/lables）"
+    },
+    {
+      "id": "TC-06",
+      "name": "list-users",
+      "command": "python3 scripts/blog-manager-kit.py list-users",
+      "expected": "{\"code\":200,\"data\":[...]}",
+      "method": "GET",
+      "category": "readonly",
+      "description": "获取用户列表"
+    },
+    {
+      "id": "TC-07",
+      "name": "list-comments",
+      "command": "python3 scripts/blog-manager-kit.py list-comments --aid 1",
+      "expected": "{\"code\":200,\"data\":[...]}",
+      "method": "GET",
+      "category": "readonly",
+      "description": "获取文章 1 的评论列表"
+    },
+    {
+      "id": "TC-08",
+      "name": "list-messages",
+      "command": "python3 scripts/blog-manager-kit.py list-messages",
+      "expected": "{\"code\":200,\"data\":[...]}",
+      "method": "GET",
+      "category": "readonly",
+      "description": "获取留言列表（含回复）"
+    },
+    {
+      "id": "TC-09",
+      "name": "list-moods",
+      "command": "python3 scripts/blog-manager-kit.py list-moods",
+      "expected": "{\"code\":200,\"data\":[...]}",
+      "method": "GET",
+      "category": "readonly",
+      "description": "获取说说列表"
+    },
+    {
+      "id": "TC-10",
+      "name": "list-uploads",
+      "command": "python3 scripts/blog-manager-kit.py list-uploads",
+      "expected": "{\"code\":200,\"data\":[{\"filename\":\"...\",\"url\":\"...\",\"type\":\"image\"}]}",
+      "method": "GET",
+      "category": "readonly",
+      "description": "列出所有已上传文件"
+    },
+    {
+      "id": "TC-11",
+      "name": "create-article",
+      "command": "python3 scripts/blog-manager-kit.py create-article --title bmk-test-article --content auto-cleanup --uid 1",
+      "expected": "{\"code\":200,\"data\":{\"id\":...}}",
+      "method": "POST",
+      "category": "mutable",
+      "description": "创建测试文章（用于验证写操作）",
+      "cleanup": "从返回 JSON 的 data 中提取文章 id，执行 python3 scripts/blog-manager-kit.py delete-article --article-id <id> 软删除该测试文章"
+    }
+  ],
+  "env_vars_required": ["BLOG_MANAGER_KIT_BASE_URL（API 地址，可选；未设置时使用内置默认地址）"],
+  "notes": "本 API 无需认证。base_url 从环境变量 BLOG_MANAGER_KIT_BASE_URL 或 .project-info/ 下 JSON 配置文件获取，未配置时使用 skill 内置默认地址。不写入此文件。"
+}

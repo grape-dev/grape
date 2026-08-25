@@ -64,6 +64,85 @@ def clear_onboarding_mark(repo_key: str):
         log.warning(f"onboarding: clear mark failed for {repo_key}: {e}")
 
 
+def cleanup_stale_repo_data(repo_key: str):
+    """清理同名旧仓库残留的 DB 数据（不删 managed_repos / workspace / skill 目录）。
+
+    当用户在 GitCode 网页直接删除仓库后重建同名仓库时，grape 不知道旧仓库被删，
+    events / issue_state / agent_tasks / devops_agent_session 等表残留旧数据。
+    新仓库的 repo_key 与旧仓库完全相同，前端查到旧数据导致界面混乱。
+
+    在 trigger_onboarding 之前调用（repo_created=True 时），确保新仓库干净启动。
+    与 _cleanup_repo_data 的区别：不删 managed_repos / workspace / skill 目录
+    （新仓库刚托管，managed_repos 是刚写入的；workspace 可能含新模板代码）。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        keys = [repo_key]
+        if repo_key.startswith("gitcode:"):
+            keys.append(repo_key[8:])
+        else:
+            keys.append(f"gitcode:{repo_key}")
+        keys = list(dict.fromkeys(k for k in keys if k))
+
+        with db_lock:
+            c = db.cursor()
+            ph = ",".join("?" for _ in keys)
+            total = 0
+            # 1. vod_conversations（依赖 devops_agent_session.id，需先删）
+            try:
+                c.execute(
+                    f"DELETE FROM vod_conversations WHERE agent_session_id IN "
+                    f"(SELECT id FROM devops_agent_session WHERE repo_key IN ({ph}))",
+                    keys,
+                )
+                total += c.rowcount
+            except Exception:
+                pass
+            # 2. chat_messages（依赖 chat_conversations.id，需先删）
+            try:
+                c.execute(f"SELECT id FROM chat_conversations WHERE repo_key IN ({ph})", keys)
+                conv_ids = [r[0] for r in c.fetchall()]
+                if conv_ids:
+                    cid_ph = ",".join("?" for _ in conv_ids)
+                    c.execute(f"DELETE FROM chat_messages WHERE conversation_id IN ({cid_ph})", conv_ids)
+                    total += c.rowcount
+            except Exception:
+                pass
+            # 3. 直接按 repo_key 匹配的表
+            for tbl in (
+                "events", "event_skipped", "chat_conversations", "chat_agent_session",
+                "repo_im_group_binding", "pipeline_instances", "devops_agent_session",
+                "issue_agent_session", "issue_state", "agent_tasks",
+            ):
+                try:
+                    c.execute(f"DELETE FROM {tbl} WHERE repo_key IN ({ph})", keys)
+                    total += c.rowcount
+                except Exception as e:
+                    log.warning(f"cleanup_stale_repo_data: {tbl} failed: {e}")
+            # 4. 仓库 skill 记录（scope='repo'）
+            try:
+                c.execute(
+                    f"DELETE FROM skill WHERE scope='repo' AND owner_id IN ({ph})",
+                    keys,
+                )
+                total += c.rowcount
+            except Exception:
+                pass
+            # 5. onboarding 幂等标记
+            try:
+                _ob_keys = [f"onboarded:{k}" for k in keys]
+                _ob_ph = ",".join("?" for _ in _ob_keys)
+                c.execute(f"DELETE FROM meta WHERE `key` IN ({_ob_ph})", _ob_keys)
+                total += c.rowcount
+            except Exception:
+                pass
+            db.commit()
+            if total:
+                log.info(f"cleanup_stale_repo_data: cleaned {total} rows for {repo_key}")
+    except Exception as e:
+        log.warning(f"cleanup_stale_repo_data: failed for {repo_key}: {e}")
+
+
 def _onboarding_issue_id(target: str) -> str:
     """引导预分配 Issue 号（与主事件 issue_id 预分配一致）：experience→#1, explore→#2。"""
     try:

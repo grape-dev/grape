@@ -338,7 +338,12 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 4. Terraform 远程状态存储于 OBS 私有 bucket
 5. 安全组规则最小化：80/tcp 公网开放 + 3306/tcp 仅限 VPC 内网（10.0.0.0/16）
 6. inventory.json 上传时设置 `x-amz-acl: private` header 双重保障
-7. 密码获取途径：`terraform output -json`（sensitive 字段）或从 OBS bucket 读取
+7. **敏感凭证获取方式**：
+   - inventory.json 存储在 OBS 私有桶中，包含 ECS 密码、RDS 密码等敏感信息
+   - Issue 评论中**只发布 OBS 桶名和对象路径**（如 `obs://bucket/inventory/inventory.json`），**不发布预签名 URL**
+   - 维护者使用自己的 AK/SK 通过 obsutil 获取：`obsutil cp obs://bucket/inventory/inventory.json ./inventory.json`
+   - 也可通过 `terraform output -json` 获取（需有 AK/SK 执行 terraform 命令）
+8. ⚠️ **禁止在 Issue 评论、PR 评论或任何公开渠道发布 OBS 预签名 URL**——预签名 URL 任何人持有即可访问，等同于泄露密码
 
 ## 参考资源
 
