@@ -41,16 +41,7 @@ tags:
 
 ## 工作流
 
-### 1. 场景识别
-
-根据 A2A context 判断部署场景：
-
-| A2A context 特征 | 场景 | 执行流程 |
-|-----------------|------|---------|
-| 含「快速部署」「仓库无 TF 模板」「临时目录」 | 快速部署 | 在临时工作目录编写 TF 代码 → init → plan → apply |
-| 含「PR已合并」「凭证已就绪」 | 标准部署 | 在仓库已有 TF 代码目录执行 init → plan → apply |
-
-### 2. 资源查重（部署前必须执行）
+### 1. 资源查重（部署前必须执行）
 在执行 `terraform apply` 之前，**必须先检查 Issue 中要求创建的资源是否已在华为云中存在**：
 
 1. 提取 Issue 清单中的资源命名和规格（VPC 名称、ECS 名称、RDS 名称、OBS 桶名等）
@@ -68,23 +59,21 @@ tags:
 ⚠️ **不得跳过资源查重直接 apply——可能创建重复资源或抢占他人资源。**
 ⚠️ **发现资源冲突时只能停止并报告，严禁删除或接管他人资源。**
 
-### 3. 部署基础设施
-- **标准部署**：在仓库已有 TF 代码目录执行 `terraform init` → `terraform plan` → `terraform apply`
-- **快速部署**：在临时工作目录（如 `/tmp/tf-deploy-<issue>/`）编写 TF 代码，然后执行 init → plan → apply
-  - TF 代码不提交到应用项目仓库，部署完成后临时目录可清理
-  - 编写 TF 代码时遵循 `references/huaweicloud-deploy-runbook.md` 的 backend 配置规范和版本约束
+### 2. 部署基础设施
+- 执行 `terraform init` → `terraform plan` → `terraform apply`
+- 按 `references/huaweicloud-deploy-runbook.md` 执行部署
 - 确认 Terraform 版本在 1.7.5 ~ 1.10.5 兼容区间内
 - 确认 state 成功写入 OBS backend（无 errored.tfstate）
 - 如遇 terraform init/plan/apply 故障，参考 `references/build-debug-checklist.md` 的「OBS Backend 故障排查」段定位
 
-### 4. 部署验证
+### 3. 部署验证
 仅验证基础设施层可达性，不涉及应用层：
 - VPC/子网/安全组创建成功
 - ECS 实例运行中、EIP 绑定成功
 - RDS 实例可用、3306 端口 VPC 内网可达
 - OBS bucket 创建成功、inventory.json 上传成功
 
-### 5. 部署成功后的资源清单输出（最高优先级）
+### 4. 部署成功后的资源清单输出（最高优先级）
 Terraform apply 成功后，**必须立即输出资源清单**，此步骤优先于一切后续动作：
 
 1. 执行 `terraform output -json` 获取完整资源清单（含 sensitive 密码）
@@ -129,7 +118,7 @@ SRE 仅负责 **IaC 基础设施部署**，以下事项**不属于 SRE 职责**�
 | 发现资源冲突时立即停止并报告 | ✅ **必须做** |
 | 回复 Token/密码等敏感信息 | ❌ **禁止** |
 | 在公开评论中发布 OBS 预签名 URL | ❌ **禁止（等同于泄露密码）** |
-| 修改项目源代码 | ❌ **禁止（仅 IaC 部署，不修改应用代码）** |
+| 修改源代码修复问题 | ❌ **禁止** |
 | 部署成功后因代码 Bug A2A 回退 Coding Agent | ❌ **禁止** |
 | 部署成功后因代码 Bug A2A 触发 QA Agent | ❌ **禁止** |
 | SSH 登录 ECS 排查应用层问题 | ❌ **禁止** |
