@@ -118,14 +118,11 @@ function renderEventDetail(data) {
           <span style="color:#a0aac0">点击展开加载…</span>
         </div>
       </div>
-      <!-- 区块3：Agent 处理记录 + 答复结论（flex:1 撑满剩余空间） -->
-      <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-        ${structuredHtml ? `<h3 style="font-size:12px;font-weight:600;margin:0 0 4px;flex-shrink:0">Agent 处理记录</h3>` : ''}
-        ${structuredHtml ? `<div class="ev-result-panel" style="flex-shrink:0;max-height:200px;overflow-y:auto;background:var(--s);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:12px;line-height:1.6;border-left:3px solid var(--a)">${structuredHtml}</div>` : ''}
-        <h3 style="font-size:12px;font-weight:600;margin:0 0 4px;flex-shrink:0">Agent 答复结论</h3>
-        <div class="ev-result-panel" style="flex:1;overflow-y:auto;background:var(--s);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
-          ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">（无结论）</div>'}
-        </div>
+      <!-- 区块3：Agent 处理记录与答复结论（统一标题，内置框+结论，整体滑动） -->
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">Agent 处理记录与答复结论</h3>
+      <div class="ev-result-panel" style="flex:1;overflow-y:auto;background:var(--s);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
+        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:rgba(128,128,128,0.08);border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>` : ''}
+        ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">（无结论）</div>'}
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
