@@ -681,6 +681,7 @@ def init_database():
     _migrate_tables()
     _create_indexes()
     _seed_from_json()
+    _sync_official_skills()
     _align_agent_enable()
     _cleanup_stale_meta()
     _cleanup_chat_shared_worker_runtime()
@@ -690,6 +691,53 @@ def init_database():
         backfill_existing_bindings()
     except Exception as e:
         log.warning(f"Backfill existing runtime bindings failed: {e}")
+
+
+def _sync_official_skills():
+    """启动时从 configs/skill-description.json 同步官方技能到 skill 表（幂等）。
+
+    与 /api/skills/sync-official 逻辑一致：新增 INSERT + 已有 UPDATE 元信息
+   （display_name/description/agent_type）。_seed_from_json 只补种缺失技能，
+    不更新已有技能的元信息——配置文件中改名/改描述后需要此步骤同步。
+    """
+    try:
+        import json as _json
+        config_dir = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
+        json_path = os.path.join(config_dir, "skill-description.json")
+        if not os.path.exists(json_path):
+            return
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        added = 0
+        updated = 0
+        with db_lock:
+            c = db.cursor()
+            for skill_name, info in data.items():
+                display_name = info.get("name", skill_name)
+                description = info.get("description", "")
+                agent_type = info.get("agent_type", "")
+                skill_path = info.get("path", skill_name)
+                existed = c.execute(
+                    "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'",
+                    (skill_name,)
+                ).fetchone()[0]
+                if existed:
+                    c.execute(
+                        "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, skill_name)
+                    )
+                    updated += 1
+                else:
+                    c.execute(
+                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
+                        (skill_name, display_name, description, agent_type, skill_path)
+                    )
+                    added += 1
+            db.commit()
+        if added or updated:
+            log.info(f"Official skills synced: +{added} added, {updated} updated")
+    except Exception as e:
+        log.warning(f"Sync official skills failed: {e}")
 
 
 def _cleanup_stale_meta():
