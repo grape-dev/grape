@@ -182,3 +182,33 @@ terraform {
 | `force_path_style = true` | cn-north-4 OBS 要求 virtual-host-style，path-style 返回 403 VirtualHostDomainRequired |
 | `endpoint` 不带 `https://` 前缀 | TF 1.6+ 校验 endpoint 必须是完整 URL，返回 unsupported protocol scheme |
 | `~> 1.x` 版本上限约束 | 匹配不到高版本 provider，导致 init 下载失败 |
+
+## 国内镜像源配置
+
+worker 机器在国内网络环境下，默认从 `registry.terraform.io` / `releases.hashicorp.com` 下载 Terraform CLI 和 provider 经常超时。编码时生成的 Makefile 或部署脚本中应包含华为云镜像源配置：
+
+### Provider 镜像源（~/.terraformrc）
+
+```bash
+cat > ~/.terraformrc << 'EOF'
+provider_installation {
+  network_mirror {
+    url = "https://mirrors.huaweicloud.com/terraform/providers/"
+  }
+}
+EOF
+export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+```
+
+### Terraform CLI 镜像源
+
+安装/升级 Terraform 二进制时从华为云镜像下载：
+- `https://mirrors.huaweicloud.com/terraform/`
+
+### Plugin Cache
+
+配合镜像源使用，避免重复下载：
+```bash
+export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
+mkdir -p "$TF_PLUGIN_CACHE_DIR"
+```

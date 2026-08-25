@@ -54,6 +54,30 @@ TF 1.11+ 执行 `terraform apply` 时：
 worker 机器网络到 registry.terraform.io / releases.hashicorp.com 可能慢或偶发超时。
 **部署前必须确认所有 provider 二进制已预装到 plugin cache 目录**，不要依赖 terraform init 现下载。
 
+### 使用国内镜像源（必须）
+
+Terraform CLI 和 provider 默认从 `registry.terraform.io` / `releases.hashicorp.com` 下载，国内访问慢且经常超时。**必须配置华为云镜像源**：
+
+```bash
+# Terraform CLI 下载镜像（安装/升级 terraform 二进制时使用）
+# https://mirrors.huaweicloud.com/terraform/
+
+# Provider registry 镜像（terraform init 下载 provider 时使用）
+# 通过 ~/.terraformrc 或 TF_CLI_CONFIG_FILE 指定
+cat > ~/.terraformrc << 'EOF'
+provider_installation {
+  network_mirror {
+    url = "https://mirrors.huaweicloud.com/terraform/providers/"
+  }
+}
+EOF
+
+# 或通过环境变量临时指定
+export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+```
+
+⚠️ **不配置镜像源时，terraform init 下载 provider 可能超时 5 分钟以上甚至失败。**
+
 ### 启用 plugin cache（必须）
 
 Terraform 默认不启用 plugin cache，必须设置环境变量 `TF_PLUGIN_CACHE_DIR`，否则 `terraform init` 不会从 cache 目录读取，每次都重新下载。
@@ -83,18 +107,18 @@ find ~/.terraform.d/plugin-cache -name 'terraform-provider-*' -type f
 ### 手动预装 provider（当 terraform init 下载超时时）
 
 ```bash
-# huaweicloud provider（从 registry 下载对应架构的 zip）
+# huaweicloud provider（从华为云镜像下载对应架构的 zip）
 ARCH=linux_arm64   # arm64 机器用 linux_arm64，amd64 机器用 linux_amd64
 VERSION=1.97.0     # 用最新版
 
 curl -L -o /tmp/huaweicloud_provider.zip \
-  "https://releases.hashicorp.com/terraform-provider-huaweicloud/${VERSION}/terraform-provider-huaweicloud_${VERSION}_${ARCH}.zip"
+  "https://mirrors.huaweicloud.com/terraform/providers/terraform-provider-huaweicloud/${VERSION}/terraform-provider-huaweicloud_${VERSION}_${ARCH}.zip"
 unzip -o /tmp/huaweicloud_provider.zip -d ~/.terraform.d/plugin-cache/registry.terraform.io/huaweicloud/huaweicloud/${VERSION}/${ARCH}/
 
 # hashicorp/random provider（同理）
 RANDOM_VERSION=3.6.3
 curl -L -o /tmp/random_provider.zip \
-  "https://releases.hashicorp.com/terraform-provider-random/${RANDOM_VERSION}/terraform-provider-random_${RANDOM_VERSION}_${ARCH}.zip"
+  "https://mirrors.huaweicloud.com/terraform/providers/terraform-provider-random/${RANDOM_VERSION}/terraform-provider-random_${RANDOM_VERSION}_${ARCH}.zip"
 unzip -o /tmp/random_provider.zip -d ~/.terraform.d/plugin-cache/registry.terraform.io/hashicorp/random/${RANDOM_VERSION}/${ARCH}/
 ```
 
@@ -103,13 +127,14 @@ unzip -o /tmp/random_provider.zip -d ~/.terraform.d/plugin-cache/registry.terraf
 如果 `terraform init` 仍然超时（provider 下载慢）：
 
 ```bash
-# 方法 1：设置更长的超时
+# 方法 1：确认已配置华为云镜像源（见上方「使用国内镜像源」段）
+# 方法 2：设置更长的超时
 TF_REGISTRY_CLIENT_TIMEOUT=300 terraform init
 
-# 方法 2：用 -backend=false 先跳过 backend，只验证 provider
+# 方法 3：用 -backend=false 先跳过 backend，只验证 provider
 terraform init -backend=false
 
-# 方法 3：手动下载 zip 后解压到 plugin cache（见上方手动预装步骤）
+# 方法 4：手动下载 zip 后解压到 plugin cache（见上方手动预装步骤，使用华为云镜像 URL）
 ```
 
 ⚠️ **架构陷阱**：arm64 机器上下载了 amd64 的 provider zip 会导致 `terraform init` 报 `incompatible provider version`。务必确认 `uname -m` 与下载的 zip 文件名架构一致。
@@ -132,6 +157,18 @@ export AWS_DEFAULT_REGION="cn-north-4"
 # 启用 Terraform plugin cache（复用已预装的 provider，避免每次重新下载）
 export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
 mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+# 配置华为云镜像源（provider 下载走国内镜像，避免超时）
+export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+if [ ! -f "$TF_CLI_CONFIG_FILE" ]; then
+  cat > "$TF_CLI_CONFIG_FILE" << 'EOF'
+provider_installation {
+  network_mirror {
+    url = "https://mirrors.huaweicloud.com/terraform/providers/"
+  }
+}
+EOF
+fi
 
 # 敏感密码（通过环境变量传入，绝不硬编码到 .tf 文件）
 # ECS root 密码：8-26位，含大小写+数字+特殊字符 !@$%^-_=+
@@ -255,9 +292,12 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 ### terraform init 失败：provider 下载超时
 
 - 根因：worker 网络到 releases.hashicorp.com / registry.terraform.io 偶发慢，terraform init 默认超时不够
-- 解决：见上方「Terraform Provider 预装」段落，手动下载对应架构的 provider zip 解压到 plugin cache
+- 解决（按优先级）：
+  1. 确认已配置华为云镜像源（`~/.terraformrc` 中 `network_mirror` 指向 `https://mirrors.huaweicloud.com/terraform/providers/`）
+  2. 确认已设置 `TF_PLUGIN_CACHE_DIR` 且 cache 中有 provider 二进制
+  3. 手动从华为云镜像下载 provider zip 解压到 plugin cache（见上方手动预装步骤）
+  4. 设置 `TF_REGISTRY_CLIENT_TIMEOUT=300` 加长超时
 - ⚠️ 务必确认架构匹配：arm64 机器（`uname -m` = `aarch64`）只能用 `linux_arm64` 的 zip，amd64 用 `linux_amd64`
-- 也可设置 `TF_REGISTRY_CLIENT_TIMEOUT=300` 加长超时
 
 ### terraform init 失败：No valid credential sources found
 
