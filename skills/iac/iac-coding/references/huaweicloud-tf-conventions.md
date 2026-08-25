@@ -26,12 +26,12 @@ repo/
 
 ### AK/SK 来源
 
-华为云 AK/SK 从 Grape 控制台获取（与 SRE Agent 使用同一组凭证）。Coding 执行 `terraform plan` 时需要 AK/SK 调用 provider API 验证资源规格，但**仅用于 plan（只读），不执行 apply/destroy**。
+华为云 AK/SK 从 Grape 控制台获取（与 SRE Agent 使用同一组凭证）。Grape 控制台注入的变量名是 `HUAWEICLOUD_SDK_AK`/`HUAWEICLOUD_SDK_SK`，必须映射为 Terraform 期望的 `HW_ACCESS_KEY`/`HW_SECRET_KEY`。Coding 执行 `terraform plan` 时需要 AK/SK 调用 provider API 验证资源规格，但**仅用于 plan（只读），不执行 apply/destroy**。
 
 ```bash
-# 从 Grape 控制台获取 AK/SK 后设置环境变量
-export HW_ACCESS_KEY="<AK>"
-export HW_SECRET_KEY="<SK>"
+# Grape 控制台注入的变量名 → Terraform 期望的变量名映射
+export HW_ACCESS_KEY="${HUAWEICLOUD_SDK_AK}"
+export HW_SECRET_KEY="${HUAWEICLOUD_SDK_SK}"
 export HW_REGION="cn-north-4"
 export AWS_ACCESS_KEY_ID="$HW_ACCESS_KEY"
 export AWS_SECRET_ACCESS_KEY="$HW_SECRET_KEY"
@@ -39,6 +39,7 @@ export AWS_DEFAULT_REGION="cn-north-4"
 ```
 
 ⚠️ AK/SK 不得写入任何 .tf 文件、日志、评论或 PR body。仅在环境变量中使用。
+⚠️ 不要使用 obsutil 的 `~/.obsutilconfig` 凭证——那是另一套，不能用于 Terraform。
 
 ### 环境变量名
 
@@ -50,8 +51,8 @@ export AWS_DEFAULT_REGION="cn-north-4"
 | AWS 兼容 AK | `AWS_ACCESS_KEY_ID` | OBS S3 backend 认证（走 SigV4），与 HW_ACCESS_KEY 同值 |
 | AWS 兼容 SK | `AWS_SECRET_ACCESS_KEY` | 同上，与 HW_SECRET_KEY 同值 |
 | AWS 兼容 Region | `AWS_DEFAULT_REGION` | 同上，与 HW_REGION 同值 |
-| ECS 密码 | `TF_VAR_ecs_admin_pass` | 8-26位，含大小写+数字+特殊字符 !@$%^-_=+ |
-| RDS 密码 | `TF_VAR_rds_password` | 8-32位，含大小写+数字+特殊字符 |
+| ECS 密码 | `TF_VAR_ecs_admin_pass` | 8-26位，含大小写+数字（不强制特殊字符，避免 shell 转义和平台兼容问题） |
+| RDS 密码 | `TF_VAR_rds_password` | 8-32位，含大小写+数字（不强制特殊字符） |
 
 ⚠️ **两套凭证是同一条 AK/SK**，设两套变量是因为 huaweicloud provider 读 `HW_*`、Terraform S3 backend 读 `AWS_*`。两条认证路径完全独立（provider 走 IAM token，backend 走 SigV4）。
 
@@ -111,6 +112,67 @@ date -u +"%Y-%m-%dT%H:%M:%SZ"
 - 3306/tcp 仅限 VPC 内网（10.0.0.0/16）
 - 遵循最小权限原则，不开放非必要端口
 - inventory.json 上传时设置 `x-amz-acl: private` header
+
+### ECS 镜像查询编码规范
+
+使用 `data "huaweicloud_images_image"` 查询镜像时，必须遵循以下规则：
+
+- `name_regex` 尾部加 `$` 锚定，避免模糊匹配到 GPU 镜像等不兼容版本
+- `most_recent = true`，避免匹配多个镜像导致 plan 报错
+- `visibility = "public"`，使用公共镜像
+
+```hcl
+# ✅ 正确：尾部 $ 锚定 + most_recent
+data "huaweicloud_images_image" "ubuntu" {
+  name_regex     = "^Ubuntu 22.04 server 64bit$"
+  visibility     = "public"
+  most_recent    = true
+  sort_key       = "created_at"
+  sort_direction = "desc"
+}
+
+# ❌ 错误：无 $ 锚定，会匹配到 "Ubuntu 22.04 server 64bit GPU" 等
+# name_regex = "Ubuntu 22.04 server 64bit"
+
+# ❌ 错误：无 most_recent，多个匹配结果时 plan 报错
+# most_recent = false
+```
+
+### random_password 编码规范
+
+使用 `random_password` 自动生成密码时，**不强制特殊字符**（`special = false`），避免 shell 转义、URL 编码、平台兼容等问题：
+
+```hcl
+# ✅ 正确：仅大小写+数字，不含特殊字符
+resource "random_password" "ecs_password" {
+  length  = 18
+  special = false
+  upper   = true
+  lower   = true
+  numeric = true
+}
+
+# ❌ 避免：含特殊字符，$ ! @ 等在 shell/URL/JSON 中可能被转义导致错误
+# resource "random_password" "ecs_password" {
+#   special = true
+#   override_special = "!@$%^-_=+"
+# }
+```
+
+### OBS 凭证隔离说明
+
+obsutil 使用 `~/.obsutilconfig` 中的凭证，与环境变量 `HW_ACCESS_KEY`/`HW_SECRET_KEY` **不是同一套**。`~/.obsutilconfig` 中的 SK 可能是 base64 编码的，不要尝试解码或混用。obsutil 仅用于 OBS 对象上传/下载，**不用于 Terraform 部署**。
+
+### Grape 控制台凭证变量名映射
+
+Grape 控制台注入的是 `HUAWEICLOUD_SDK_AK`/`HUAWEICLOUD_SDK_SK`，Terraform 期望的是 `HW_ACCESS_KEY`/`HW_SECRET_KEY`。编码时生成的部署脚本/Makefile 中应包含变量映射：
+
+```bash
+export HW_ACCESS_KEY="${HUAWEICLOUD_SDK_AK}"
+export HW_SECRET_KEY="${HUAWEICLOUD_SDK_SK}"
+export AWS_ACCESS_KEY_ID="$HW_ACCESS_KEY"
+export AWS_SECRET_ACCESS_KEY="$HW_SECRET_KEY"
+```
 
 ## 参考资源
 

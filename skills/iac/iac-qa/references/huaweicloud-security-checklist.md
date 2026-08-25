@@ -4,16 +4,19 @@
 
 ## 凭证获取（QA 执行 terraform plan 时需要）
 
-QA 执行 `terraform plan` 审查时需要 AK/SK 连接 OBS backend 和调用 provider API。AK/SK 从 Grape 控制台获取（与 SRE Agent 使用同一组凭证），仅用于 plan（只读），不执行 apply/destroy。
+QA 执行 `terraform plan` 审查时需要 AK/SK 连接 OBS backend 和调用 provider API。AK/SK 从 Grape 控制台获取（与 SRE Agent 使用同一组凭证）。Grape 控制台注入的变量名是 `HUAWEICLOUD_SDK_AK`/`HUAWEICLOUD_SDK_SK`，必须映射为 `HW_ACCESS_KEY`/`HW_SECRET_KEY`。仅用于 plan（只读），不执行 apply/destroy。
 
 ```bash
-export HW_ACCESS_KEY="<AK>"
-export HW_SECRET_KEY="<SK>"
+# Grape 控制台变量名 → Terraform 期望的变量名映射
+export HW_ACCESS_KEY="${HUAWEICLOUD_SDK_AK}"
+export HW_SECRET_KEY="${HUAWEICLOUD_SDK_SK}"
 export HW_REGION="cn-north-4"
 export AWS_ACCESS_KEY_ID="$HW_ACCESS_KEY"
 export AWS_SECRET_ACCESS_KEY="$HW_SECRET_KEY"
 export AWS_DEFAULT_REGION="cn-north-4"
 ```
+
+⚠️ 不要使用 obsutil 的 `~/.obsutilconfig` 凭证——那是另一套，不能用于 Terraform。
 
 ## 敏感信息检查
 

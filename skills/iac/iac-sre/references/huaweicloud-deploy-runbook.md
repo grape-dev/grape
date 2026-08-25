@@ -153,10 +153,12 @@ terraform init -backend=false
 
 ### 1. 凭证设置
 
+Grape 控制台注入的凭证环境变量名为 `HUAWEICLOUD_SDK_AK`/`HUAWEICLOUD_SDK_SK`，但 Terraform provider 和 OBS S3 backend 期望的是 `HW_ACCESS_KEY`/`HW_SECRET_KEY` 和 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`。**必须先做变量映射**：
+
 ```bash
-# 华为云凭证（Provider 认证 + OBS backend 认证共用）
-export HW_ACCESS_KEY="<AK>"
-export HW_SECRET_KEY="<SK>"
+# ⚠️ Grape 控制台注入的变量名 → Terraform 期望的变量名映射
+export HW_ACCESS_KEY="${HUAWEICLOUD_SDK_AK}"
+export HW_SECRET_KEY="${HUAWEICLOUD_SDK_SK}"
 export HW_REGION="cn-north-4"
 
 # AWS 兼容凭证（OBS S3 backend init 必需，与 HW 同值）
@@ -184,17 +186,20 @@ provider_installation {
 EOF
 fi
 
-# 敏感密码（通过环境变量传入，绝不硬编码到 .tf 文件）
-# ECS root 密码：8-26位，含大小写+数字+特殊字符 !@$%^-_=+
-export TF_VAR_ecs_admin_pass='<ECS密码>'
-# RDS root 密码：8-32位，含大小写+数字+特殊字符
-export TF_VAR_rds_password='<RDS密码>'
+# 敏感密码（如果 Grape 控制台未注入，通过 random_password 自动生成，可不设置）
+# 如需手动指定（仅大小写+数字，不含特殊字符，避免 shell 转义问题）：
+# export TF_VAR_ecs_admin_pass='<ECS密码>'
+# export TF_VAR_rds_password='<RDS密码>'
 ```
 
 ⚠️ **凭证说明**：`HW_ACCESS_KEY`/`HW_SECRET_KEY` 和 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` 是**同一条 AK/SK**，设两套变量是因为：
 - huaweicloud provider 读 `HW_*` 变量
 - Terraform S3 backend 读 `AWS_*` 变量
 - 两条认证路径完全独立（provider 走 IAM token，backend 走 SigV4），但用同一组密钥
+
+⚠️ **obsutil 凭证隔离**：`obsutil` 使用 `~/.obsutilconfig` 中的凭证，与环境变量 `HW_ACCESS_KEY`/`HW_SECRET_KEY` **不是同一套**。`~/.obsutilconfig` 中的 SK 可能是 base64 编码的，不要尝试解码或混用。obsutil 仅用于 OBS 对象上传/下载（如 inventory.json），**不用于 Terraform 部署**。
+
+⚠️ **Grape 控制台凭证变量名**：控制台注入的是 `HUAWEICLOUD_SDK_AK`/`HUAWEICLOUD_SDK_SK`，不是 `HW_ACCESS_KEY`/`HW_SECRET_KEY`。必须先做变量映射（见上方），否则 `terraform init` 会报 `No valid credential sources found`。
 
 ### 2. 预建 OBS Bucket（首次部署）
 
@@ -318,9 +323,10 @@ hcloud CLI 与 Terraform/provider 使用的凭证可能不同。**资源验证�
 
 ### terraform init 失败：No valid credential sources found
 
-- 根因：环境变量 HW_ACCESS_KEY / HW_SECRET_KEY 未设置
-- 解决：在 Grape 控制台注入 AK/SK，或手动 `export HW_ACCESS_KEY=... HW_SECRET_KEY=...`
+- 根因：环境变量 HW_ACCESS_KEY / HW_SECRET_KEY 未设置，或 Grape 控制台注入的是 `HUAWEICLOUD_SDK_AK`/`HUAWEICLOUD_SDK_SK` 但未做变量映射
+- 解决：先执行 `export HW_ACCESS_KEY="${HUAWEICLOUD_SDK_AK}"` / `export HW_SECRET_KEY="${HUAWEICLOUD_SDK_SK}"`，再设置 AWS 兼容变量
 - 注意：同时需要设置 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY（S3 backend 兼容）
+- ⚠️ 不要使用 obsutil 的 `~/.obsutilconfig` 中的凭证——那是另一套，可能 base64 编码，不能直接用于 Terraform
 
 ### terraform apply 失败：DBS.280434 Invalid specification code
 
