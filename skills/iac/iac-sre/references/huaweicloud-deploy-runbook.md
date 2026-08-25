@@ -63,11 +63,15 @@ Terraform CLI 和 provider 默认从 `registry.terraform.io` / `releases.hashico
 # https://mirrors.huaweicloud.com/terraform/
 
 # Provider registry 镜像（terraform init 下载 provider 时使用）
-# 通过 ~/.terraformrc 或 TF_CLI_CONFIG_FILE 指定
+# ⚠️ 华为云镜像不包含所有 provider（如 hashicorp/local、hashicorp/null 等），
+# 必须使用 network_mirror + direct 混合配置：优先华为云镜像，找不到的 fallback 到官方 registry
 cat > ~/.terraformrc << 'EOF'
 provider_installation {
   network_mirror {
     url = "https://mirrors.huaweicloud.com/terraform/providers/"
+  }
+  direct {
+    exclude = ["registry.terraform.io/huaweicloud/*"]
   }
 }
 EOF
@@ -76,7 +80,13 @@ EOF
 export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
 ```
 
+混合配置说明：
+- `network_mirror`：优先从华为云镜像下载所有 provider（huaweicloud、hashicorp/random 等）
+- `direct`：华为云镜像没有的 provider（如 hashicorp/local、hashicorp/null）从官方 registry 下载
+- `exclude`：避免 huaweicloud provider 回退到官方 registry（官方源国内访问慢）
+
 ⚠️ **不配置镜像源时，terraform init 下载 provider 可能超时 5 分钟以上甚至失败。**
+⚠️ **只用 `network_mirror` 不加 `direct` 时，hashicorp/local 等 provider 会下载失败。**
 
 ### 启用 plugin cache（必须）
 
@@ -159,12 +169,16 @@ export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
 mkdir -p "$TF_PLUGIN_CACHE_DIR"
 
 # 配置华为云镜像源（provider 下载走国内镜像，避免超时）
+# ⚠️ 混合配置：华为云镜像优先，找不到的 provider fallback 到官方 registry
 export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
 if [ ! -f "$TF_CLI_CONFIG_FILE" ]; then
   cat > "$TF_CLI_CONFIG_FILE" << 'EOF'
 provider_installation {
   network_mirror {
     url = "https://mirrors.huaweicloud.com/terraform/providers/"
+  }
+  direct {
+    exclude = ["registry.terraform.io/huaweicloud/*"]
   }
 }
 EOF

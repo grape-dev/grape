@@ -24,6 +24,22 @@ repo/
 
 编码时必须遵循以下凭证约定，绝不硬编码到 .tf 文件：
 
+### AK/SK 来源
+
+华为云 AK/SK 从 Grape 控制台获取（与 SRE Agent 使用同一组凭证）。Coding 执行 `terraform plan` 时需要 AK/SK 调用 provider API 验证资源规格，但**仅用于 plan（只读），不执行 apply/destroy**。
+
+```bash
+# 从 Grape 控制台获取 AK/SK 后设置环境变量
+export HW_ACCESS_KEY="<AK>"
+export HW_SECRET_KEY="<SK>"
+export HW_REGION="cn-north-4"
+export AWS_ACCESS_KEY_ID="$HW_ACCESS_KEY"
+export AWS_SECRET_ACCESS_KEY="$HW_SECRET_KEY"
+export AWS_DEFAULT_REGION="cn-north-4"
+```
+
+⚠️ AK/SK 不得写入任何 .tf 文件、日志、评论或 PR body。仅在环境变量中使用。
+
 ### 环境变量名
 
 | 用途 | 环境变量 | 说明 |
@@ -189,16 +205,26 @@ worker 机器在国内网络环境下，默认从 `registry.terraform.io` / `rel
 
 ### Provider 镜像源（~/.terraformrc）
 
+⚠️ 华为云镜像不包含所有 provider（如 `hashicorp/local`、`hashicorp/null`），必须使用 `network_mirror` + `direct` 混合配置：
+
 ```bash
 cat > ~/.terraformrc << 'EOF'
 provider_installation {
   network_mirror {
     url = "https://mirrors.huaweicloud.com/terraform/providers/"
   }
+  direct {
+    exclude = ["registry.terraform.io/huaweicloud/*"]
+  }
 }
 EOF
 export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
 ```
+
+混合配置说明：
+- `network_mirror`：优先从华为云镜像下载所有 provider
+- `direct`：华为云镜像没有的 provider（如 hashicorp/local、hashicorp/null）从官方 registry 下载
+- `exclude`：避免 huaweicloud provider 回退到官方 registry（官方源国内访问慢）
 
 ### Terraform CLI 镜像源
 

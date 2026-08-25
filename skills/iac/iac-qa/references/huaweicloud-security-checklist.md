@@ -2,6 +2,19 @@
 
 在通用安全检查（references/security-checklist.md）基础上，审查华为云 Terraform IaC PR 时增加以下专项检查。
 
+## 凭证获取（QA 执行 terraform plan 时需要）
+
+QA 执行 `terraform plan` 审查时需要 AK/SK 连接 OBS backend 和调用 provider API。AK/SK 从 Grape 控制台获取（与 SRE Agent 使用同一组凭证），仅用于 plan（只读），不执行 apply/destroy。
+
+```bash
+export HW_ACCESS_KEY="<AK>"
+export HW_SECRET_KEY="<SK>"
+export HW_REGION="cn-north-4"
+export AWS_ACCESS_KEY_ID="$HW_ACCESS_KEY"
+export AWS_SECRET_ACCESS_KEY="$HW_SECRET_KEY"
+export AWS_DEFAULT_REGION="cn-north-4"
+```
+
 ## 敏感信息检查
 
 - [ ] AK/SK 未硬编码到任何 .tf 文件，仅通过环境变量（HW_ACCESS_KEY / HW_SECRET_KEY）传入
