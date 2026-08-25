@@ -2,17 +2,18 @@
 
 ## 触发时机
 
-QA 审查通过且 PR 已合并后，**必须** A2A 交办 SRE Agent 执行部署。
+QA 审查通过后，**自动合并 PR**，合并成功后 **必须** A2A 交办 SRE Agent 执行部署。
 
-### 触发条件（同时满足）
+### 触发步骤（按顺序执行）
 
 1. QA 审查结论为 ✅ LGTM（无 P0/P1 阻塞项）
-2. PR 已合并（收到 `pull_request_merged` 事件，或通过 GitCode API 确认 PR 状态为 `merged`）
+2. QA 通过 GitCode API 自动合并 PR：`PUT /repos/:owner/:repo/pulls/:number/merge`
+3. PR 合并确认后，通过 A2A 交办 SRE Agent
 
 ### 不触发的情况
 
 - 审查结论为 Request Changes（有 P0/P1 未修复）→ A2A 回 Coding Agent 修复
-- PR 尚未合并 → 等合并事件到达后再触发，不提前交办
+- PR 合并失败（如冲突、权限不足）→ 在 PR 评论告知「PR 合并失败：<原因>，请人工处理」，不提前交办 SRE
 
 ⚠️ **不可只在报告中「建议」维护者交办 SRE**——必须自己发起 A2A 调用。
 

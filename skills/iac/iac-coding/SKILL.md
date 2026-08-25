@@ -58,6 +58,8 @@ tags:
 | 其他 | 不做处理，结束 | - |
 
 ### 2. 开发
+- 所有 TF 代码和脚本文件统一放在仓库的 `iac/` 子目录下，不得放在仓库根目录或其他目录
+- 如仓库中不存在 `iac/` 目录，新建该目录
 - 调用 huawei-cloud-terraform-generator skill 生成 TF 配置
 - 按方案执行 terraform fmt → terraform init → terraform validate（⚠️ 到 validate 为止，不执行 plan/apply/destroy）
 - 绝不硬编码 AK/SK，一律走变量和环境变量
@@ -92,6 +94,7 @@ tags:
 | 创建 PR 后必须通过 A2A 通知 QA Agent 进行代码审查 | ✅ **必须做，不可跳过** |
 | 代码优化场景修改完成后必须在 PR 评论告知 | ✅ **必须做** |
 | 每个提交一个原子变更 | ✅ **必须做** |
+| 所有 TF 代码和脚本放在仓库 `iac/` 子目录下 | ✅ **必须做** |
 | 只通过 GitCode API 获取信息 | ✅ **必须做** |
 | 仅实现当前 Issue 描述的内容 | ✅ **保持范围** |
 | 直接合并 PR | ❌ **禁止（仅创建，等待人工审批）** |

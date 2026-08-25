@@ -1,5 +1,25 @@
 # 华为云 Terraform 编码规范与避坑指南（Coding Agent 用）
 
+## 目录结构规范
+
+所有 TF 代码和脚本文件统一放在仓库的 `iac/` 子目录下，不得放在仓库根目录或其他目录。如仓库中不存在 `iac/` 目录，新建该目录。
+
+```
+repo/
+├── iac/                    # IaC 代码根目录
+│   ├── versions.tf         # Provider 版本约束 + backend 配置
+│   ├── providers.tf        # Provider 配置
+│   ├── variables.tf        # 变量定义
+│   ├── main.tf             # 资源定义（VPC/ECS/RDS/安全组等）
+│   ├── outputs.tf          # 输出
+│   ├── inventory.tf        # 资源清单生成
+│   ├── Makefile            # 命令封装
+│   ├── scripts/            # 脚本
+│   └── tests/              # 验证测试
+├── src/                    # 项目源代码（不混入 TF 文件）
+└── ...
+```
+
 ## 凭证设置规范
 
 编码时必须遵循以下凭证约定，绝不硬编码到 .tf 文件：

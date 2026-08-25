@@ -79,17 +79,18 @@ tags:
 - 凭据落盘检查：plan/state 中无明文密码
 
 ### A2A 交办 SRE Agent
-QA 审查通过（✅ LGTM）且 PR 已合并后，**必须通过 A2A 将 Issue 交给 SRE Agent** 执行部署。
+QA 审查通过（✅ LGTM）后，**自动合并 PR**，然后**通过 A2A 将 Issue 交给 SRE Agent** 执行部署。
 
 ⚠️ **QA 不得只在报告中「建议」维护者交办 SRE**——必须自己发起 A2A 调用，将部署任务交给 SRE Agent。
 
-触发条件（同时满足）：
+触发条件（按顺序执行）：
 1. QA 审查结论为 ✅ LGTM（无 P0/P1 阻塞项）
-2. PR 已合并（pull_request_merged 事件到达，或 PR 状态确认为 merged）
+2. **QA 自动合并 PR**（通过 GitCode API `PUT /repos/:owner/:repo/pulls/:number/merge`）
+3. PR 合并确认后，通过 A2A 交办 SRE Agent
 
 不触发的情况：
 - 审查结论为 Request Changes（有 P0/P1 未修复）→ A2A 回 Coding Agent 修复
-- PR 尚未合并 → 等合并事件到达后再触发
+- PR 合并失败（如冲突、权限不足）→ 在 PR 评论告知，等待人工处理
 
 详见 `references/a2a-handoff.md`。
 
@@ -102,7 +103,8 @@ QA 审查通过（✅ LGTM）且 PR 已合并后，**必须通过 A2A 将 Issue 
 | 发现问题必须在 PR 评论中详细描述 | ✅ **必须做** |
 | 问题按严重程度分级（P0/P1/P2/P3） | ✅ **必须做** |
 | 审查通过后必须在 PR 评论标记 ✅ LGTM | ✅ **必须做** |
-| 审查通过且 PR 合并后通过 A2A 交办 SRE Agent | ✅ **必须做，不可跳过** |
+| 审查通过（✅ LGTM）后自动合并 PR | ✅ **必须做，不等维护者手动合并** |
+| PR 合并成功后通过 A2A 交办 SRE Agent | ✅ **必须做，不可跳过** |
 | 审查不通过时通过 A2A 回 Coding Agent 修复 | ✅ **必须做** |
 | 回复 Token/密码等敏感信息 | ❌ **禁止** |
 | 只在报告中建议交办 SRE 而不实际调用 A2A | ❌ **禁止** |
