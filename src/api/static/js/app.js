@@ -194,6 +194,7 @@ function loadAgentTypes() {
     mv.style.inset = '0';
     mv.style.zIndex = '100';
     $('pageTitle').textContent = '选择仓库';
+    $('pageContent').innerHTML = '<div class="loading">加载中...</div>';
     API.get('/repos/member').then(d => {
       renderRepoSelection(d.repos || []);
     }).catch(e => {

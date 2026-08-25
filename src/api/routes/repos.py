@@ -177,7 +177,8 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
 
     # 主动探测：检查托管仓库在 GitCode 上是否还存在（并发，短超时）
     # 只检查 404（仓库已删除），不查 webhook（并发场景下 GitCode 限流返回空列表会误判）
-    _probe_stale_repos(api_token, user["id"])
+    import threading
+    threading.Thread(target=_probe_stale_repos, args=(api_token, user["id"]), daemon=True).start()
 
     # 优先读取 DB 缓存（未过期）
     cached = user_db.get_user_repos(user["id"])
