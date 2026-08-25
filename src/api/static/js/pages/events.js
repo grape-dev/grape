@@ -52,13 +52,11 @@ function renderEventDetail(data) {
     const o = arch.output;
     const actions = (o.actions || []).map(a => `<div>• ${a}</div>`).join('');
     const arts = (o.artifacts || []).map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('');
-    structuredHtml = `<div style="margin-bottom:8px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">
-      ${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>结论:</b> ${o.conclusion}</div>` : ''}
+    structuredHtml = `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>结论:</b> ${o.conclusion}</div>` : ''}
       ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>动作:</b> ${actions}</div>` : ''}
       ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>产出:</b> ${arts}</div>` : ''}
       ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>下一步:</b> ${o.next_step}</div>` : ''}
-      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>Issue 摘要:</b> ${o.issue_summary}</div>` : ''}
-    </div>`;
+      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>Issue 摘要:</b> ${o.issue_summary}</div>` : ''}`;
   }
 
   // 上下文折叠区块摘要（折叠时显示）
@@ -121,10 +119,13 @@ function renderEventDetail(data) {
         </div>
       </div>
       <!-- 区块3：Agent 处理记录 + 答复结论（flex:1 撑满剩余空间） -->
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">Agent 处理记录与答复结论</h3>
-      <div class="ev-result-panel" style="flex:1;overflow-y:auto;background:var(--s);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
-        ${structuredHtml}
-        ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">（无结论）</div>'}
+      <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+        ${structuredHtml ? `<h3 style="font-size:12px;font-weight:600;margin:0 0 4px;flex-shrink:0">Agent 处理记录</h3>` : ''}
+        ${structuredHtml ? `<div class="ev-result-panel" style="flex-shrink:0;max-height:200px;overflow-y:auto;background:var(--s);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:12px;line-height:1.6;border-left:3px solid var(--a)">${structuredHtml}</div>` : ''}
+        <h3 style="font-size:12px;font-weight:600;margin:0 0 4px;flex-shrink:0">Agent 答复结论</h3>
+        <div class="ev-result-panel" style="flex:1;overflow-y:auto;background:var(--s);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
+          ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">（无结论）</div>'}
+        </div>
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
