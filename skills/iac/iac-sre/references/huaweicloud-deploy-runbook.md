@@ -54,6 +54,18 @@ TF 1.11+ 执行 `terraform apply` 时：
 worker 机器网络到 registry.terraform.io / releases.hashicorp.com 可能慢或偶发超时。
 **部署前必须确认所有 provider 二进制已预装到 plugin cache 目录**，不要依赖 terraform init 现下载。
 
+### 启用 plugin cache（必须）
+
+Terraform 默认不启用 plugin cache，必须设置环境变量 `TF_PLUGIN_CACHE_DIR`，否则 `terraform init` 不会从 cache 目录读取，每次都重新下载。
+
+```bash
+# 在部署前设置（写入 ~/.bashrc 或部署脚本开头）
+export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
+mkdir -p "$TF_PLUGIN_CACHE_DIR"
+```
+
+⚠️ **未设置 `TF_PLUGIN_CACHE_DIR` 时，即使 provider 已预装到 `~/.terraform.d/plugin-cache` 目录，`terraform init` 仍会重新下载。**
+
 ### 检查已装 provider
 
 ```bash
@@ -116,6 +128,10 @@ export HW_REGION="cn-north-4"
 export AWS_ACCESS_KEY_ID="$HW_ACCESS_KEY"
 export AWS_SECRET_ACCESS_KEY="$HW_SECRET_KEY"
 export AWS_DEFAULT_REGION="cn-north-4"
+
+# 启用 Terraform plugin cache（复用已预装的 provider，避免每次重新下载）
+export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
+mkdir -p "$TF_PLUGIN_CACHE_DIR"
 
 # 敏感密码（通过环境变量传入，绝不硬编码到 .tf 文件）
 # ECS root 密码：8-26位，含大小写+数字+特殊字符 !@$%^-_=+
