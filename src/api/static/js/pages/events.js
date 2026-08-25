@@ -151,9 +151,14 @@ function _toggleEvSection(bodyId, headerEl) {
   const arrow = headerEl.querySelector('.ev-arrow');
   const isHidden = body.style.display === 'none';
   if (isHidden) {
-    body.style.display = '';
+    // 恢复缓存的原始 display 值（grid/block 等），无缓存则清空回退到默认
+    body.style.display = body.dataset.origDisplay || '';
     if (arrow) { arrow.textContent = '▼'; arrow.style.transform = 'rotate(0deg)'; }
   } else {
+    // 折叠前缓存当前 display 值（如 grid），防止展开时丢失
+    if (body.style.display && body.style.display !== 'none') {
+      body.dataset.origDisplay = body.style.display;
+    }
     body.style.display = 'none';
     if (arrow) { arrow.textContent = '▶'; arrow.style.transform = 'rotate(0deg)'; }
   }
