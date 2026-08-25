@@ -509,8 +509,8 @@ context 是传给下一个 Agent 的接力说明，应包含：
         "issue": (
             "\n### Issue Agent A2A 交办规则\n"
             "需求澄清完成后，根据 Issue 标签决定 A2A 目标：\n"
-            "- 标签含 `sre-deploy` 或需求涉及创建/部署云资源 → A2A 给 `sre`，context 写明「部署」+ 资源规格\n"
-            "- 标签含 `sre-release` 或需求涉及释放/销毁/回收云资源 → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\n"
+            "- 标签含 `sre-deploy` → A2A 给 `sre`，context 写明「部署」+ 资源规格\n"
+            "- 标签含 `sre-release` → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\n"
             "- 标签含 `feature`/`bug` → A2A 给 `coding`\n"
             "A2A 时 `pr_number` 仅在当前任务有直接关联的 PR（如 PR 审查后交办）时传入。纯部署/资源释放类请求不传 `pr_number`，否则会触发订阅去重导致 SRE 任务被跳过。\n"
         ),
@@ -669,8 +669,8 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
         "严禁 clone/部署/起服务/修改文件/执行 git 命令。\\n"
         "### A2A 交办规则\\n"
         "需求澄清完成后，根据 Issue 标签决定 A2A 目标：\\n"
-        "- 标签含 `sre-deploy` 或需求涉及创建/部署云资源 → A2A 给 `sre`，context 写明「部署」+ 资源规格\\n"
-        "- 标签含 `sre-release` 或需求涉及释放/销毁/回收云资源 → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\\n"
+        "- 标签含 `sre-deploy` → A2A 给 `sre`，context 写明「部署」+ 资源规格\\n"
+        "- 标签含 `sre-release` → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\\n"
         "- 标签含 `feature`/`bug` → A2A 给 `coding`\\n"
         "A2A 时 `pr_number` 仅在当前任务有直接关联的 PR（如 PR 审查后交办）时传入。纯部署/资源释放类请求不传 `pr_number`，否则会触发订阅去重导致 SRE 任务被跳过。"
     )
