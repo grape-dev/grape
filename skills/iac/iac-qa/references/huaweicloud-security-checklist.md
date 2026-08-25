@@ -55,5 +55,10 @@
 - [ ] 工作目录下**不存在** `errored.tfstate` 文件（存在则说明 state 写入 OBS 失败，需排查 TF 版本和 backend 配置）
 - [ ] `terraform output -json` 获取完整资源清单
 - [ ] inventory.json 已上传到 OBS 并验证可读
-- [ ] ECS 公网 80 端口可访问
-- [ ] RDS 3306 端口 VPC 内网可达
+- [ ] ECS 实例状态为 ACTIVE（运行中），EIP 已绑定
+- [ ] RDS 实例状态为可用
+- [ ] OBS bucket 创建成功
+
+**不在验证范围内（应用层，SRE/QA 不检查）：**
+- ~~ECS 公网 80 端口可访问~~（应用是否启动是应用层问题）
+- ~~RDS 3306 端口实际连接测试~~（应用层连接逻辑）

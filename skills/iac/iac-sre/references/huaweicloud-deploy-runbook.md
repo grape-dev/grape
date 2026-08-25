@@ -241,11 +241,13 @@ cn-north-4 仅支持 `n1` / `x1` / `arm` 类型 RDS flavor，不支持 `c2` 类�
 | rds.mysql.c2.large.2 | 不存在 | rds.mysql.n1.large.2 (2c4g) |
 | rds.mysql.c2.large.4 | 不存在 | rds.mysql.n1.large.4 (2c8g) |
 
-部署前通过 ListFlavors API 确认可用规格：
+部署前通过 `terraform plan` 验证 RDS flavor 可用性（plan 会调用 provider API 检查，使用环境变量中的 `HW_ACCESS_KEY`/`HW_SECRET_KEY`）：
 ```bash
-# 查询可用 RDS flavor
-curl -s -H "X-Auth-Token: ***" \
-  "https://rds.cn-north-4.myhuaweicloud.com/v3/flavors?db_name=mysql&region=cn-north-4"
+# terraform plan 会自动验证 flavor 是否存在
+terraform plan -out=tfplan
+
+# 如需手动查询可用规格，使用环境变量中的 AK/SK 获取 IAM token（不要用 hcloud CLI 的凭证）
+# IAM token 获取方式见部署 Runbook 第 1 步
 ```
 
 ### RDS 存储类型
@@ -257,10 +259,10 @@ curl -s -H "X-Auth-Token: ***" \
 | LOCALSSD | 可用 | 本地 SSD |
 | ESSD | 可用 | 增强型 SSD |
 
-部署前通过 ListStorageTypes API 确认：
+部署前通过 `terraform plan` 验证存储类型可用性：
 ```bash
-curl -s -H "X-Auth-Token: ***" \
-  "https://rds.cn-north-4.myhuaweicloud.com/v3/storage-type?region=cn-north-4&engine=mysql"
+# terraform plan 会自动验证存储类型是否存在
+terraform plan -out=tfplan
 ```
 
 ### OBS SigV4 签名日期格式
@@ -277,15 +279,16 @@ date -u +"%Y%m%dT%H%M%SZ"        # 20260820T154154Z
 
 建议：优先使用 obsutil 替代手动 SigV4 curl 签名，避免格式坑点。
 
-### hcloud CLI OBS 命令差异
+### hcloud CLI 与凭证隔离
 
-hcloud CLI 与 obsutil 的 OBS 命令语法不同：
+hcloud CLI 与 Terraform/provider 使用的凭证可能不同。**资源验证和查重必须使用环境变量中的 `HW_ACCESS_KEY`/`HW_SECRET_KEY`（与 Terraform provider 同源），禁止使用 hcloud CLI 中配置的凭证**，否则可能因权限不一致导致误操作或查重结果不准确。
 
-| 操作 | hcloud（不存在） | obsutil（正确） |
-|------|-----------------|----------------|
-| 上传对象 | PutObject | cp |
-| 列举对象 | ListBuckets | ls |
-| 创建桶 | CreateBucket | mb |
+| 操作 | 推荐方式 | 不推荐 |
+|------|---------|--------|
+| 资源规格验证 | `terraform plan`（自动调 provider API） | hcloud CLI |
+| 资源查重 | 华为云 API + 环境变量 AK/SK 获取 IAM token | hcloud CLI |
+| OBS 对象操作 | obsutil | hcloud CLI（OBS 命令不存在） |
+| 部署执行 | `terraform apply` | hcloud CLI |
 
 ## 常见问题排查
 
@@ -343,7 +346,7 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 
 - 根因：SigV4 签名日期格式错误（含连字符）
 - 解决：使用 obsutil 替代 curl，或修复 date 格式为 `date -u +"%Y%m%dT%H%M%SZ"`
-- 注意：hcloud CLI 不存在 PutObject 命令，必须使用 obsutil
+- 注意：OBS 对象操作必须使用 obsutil（hcloud CLI 不存在 PutObject 命令）
 
 ### RDS 创建耗时较长
 
@@ -353,6 +356,7 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 
 ## 部署验证清单
 
+**Terraform 层验证：**
 - [ ] `terraform version` 在 1.7.5 ~ 1.10.5 区间内
 - [ ] `terraform fmt -check -recursive` PASS
 - [ ] `terraform validate` PASS
@@ -363,8 +367,18 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 - [ ] `terraform output -json` 获取完整资源清单（含 sensitive 密码）
 - [ ] `save-inventory-to-obs.sh` 上传成功（或 obsutil cp 成功）
 - [ ] OBS GET 验证 inventory.json 可读（HTTP 200）
-- [ ] ECS 公网 80 端口可访问
-- [ ] RDS 3306 端口 VPC 内网可达
+
+**基础设施层验证（通过 terraform state / output 确认资源状态，不涉及应用层）：**
+- [ ] VPC/子网/安全组状态为可用
+- [ ] ECS 实例状态为 ACTIVE（运行中），EIP 已绑定
+- [ ] RDS 实例状态为可用
+- [ ] OBS bucket 创建成功
+
+**不在验证范围内（⚠️ 应用层，SRE 不检查）：**
+- ~~ECS 公网 80 端口可访问~~（应用是否启动是应用层问题）
+- ~~RDS 3306 端口实际连接测试~~（应用层连接逻辑）
+- ~~HTTP 状态码 200/500~~（应用页面是否正常）
+- ~~SSH 登录 ECS 检查进程~~（应用运维问题）
 
 ## 资源清单 inventory.json 结构
 

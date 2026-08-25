@@ -45,19 +45,21 @@ tags:
 在执行 `terraform apply` 之前，**必须先检查 Issue 中要求创建的资源是否已在华为云中存在**：
 
 1. 提取 Issue 清单中的资源命名和规格（VPC 名称、ECS 名称、RDS 名称、OBS 桶名等）
-2. 通过华为云 API（使用 AK/SK 获取 IAM token）查询同名资源是否已存在：
+2. 优先通过 `terraform plan` 验证资源规格可用性（plan 会调用 provider API 检查镜像/flavor/规格是否存在）
+3. 如需查询已有资源，通过华为云 API（使用环境变量中的 `HW_ACCESS_KEY`/`HW_SECRET_KEY` 获取 IAM token）查询：
    - VPC：`GET /v1/{project_id}/vpcs?name={name}`
    - ECS：`GET /v1/{project_id}/cloudservers?name={name}`
    - RDS：`GET /v3/{project_id}/instances?name={name}`
    - OBS：`GET /`（ListBuckets，检查桶名是否已存在）
-3. 查重结果处理：
+4. 查重结果处理：
    - **资源已存在且属于当前 Issue 部署**：跳过该资源创建，复用已有资源
    - **资源已存在但不属于当前 Issue**：**立即停止部署**，在 Issue 评论告知「资源 <名称> 已被占用，疑似其他项目的资源，请确认命名后重试」，**不得强制创建或抢占**
    - **资源不存在**：正常继续 terraform apply
-4. 查重结果记录在处理记录 JSON 的 `pre_check` 字段中
+5. 查重结果记录在处理记录 JSON 的 `pre_check` 字段中
 
 ⚠️ **不得跳过资源查重直接 apply——可能创建重复资源或抢占他人资源。**
 ⚠️ **发现资源冲突时只能停止并报告，严禁删除或接管他人资源。**
+⚠️ **资源验证和查重必须使用环境变量中的 `HW_ACCESS_KEY`/`HW_SECRET_KEY`，禁止使用 hcloud CLI 中配置的凭证——两者可能不同，混用会导致权限不一致或误操作他人资源。**
 
 ### 2. 部署基础设施
 - 执行 `terraform init` → `terraform plan` → `terraform apply`
@@ -67,11 +69,19 @@ tags:
 - 如遇 terraform init/plan/apply 故障，参考 `references/build-debug-checklist.md` 的「OBS Backend 故障排查」段定位
 
 ### 3. 部署验证
-仅验证基础设施层可达性，不涉及应用层：
-- VPC/子网/安全组创建成功
-- ECS 实例运行中、EIP 绑定成功
-- RDS 实例可用、3306 端口 VPC 内网可达
-- OBS bucket 创建成功、inventory.json 上传成功
+仅验证基础设施层资源状态，不涉及应用层：
+
+**验证项（terraform state / terraform output 确认资源创建成功）：**
+- VPC/子网/安全组：状态为可用
+- ECS 实例：状态为运行中（ACTIVE），EIP 已绑定
+- RDS 实例：状态为可用，3306 端口在安全组规则中已放通（仅限 VPC 内网）
+- OBS bucket：创建成功，inventory.json 上传成功
+
+**不在验证范围内：**
+- HTTP 80 端口是否可访问（应用是否启动、nginx 是否运行是应用层问题）
+- SSH 登录 ECS 检查应用进程
+- 应用页面返回 200/500 等 HTTP 状态码
+- 数据库连接是否成功（应用层连接逻辑）
 
 ### 4. 部署成功后的资源清单输出（最高优先级）
 Terraform apply 成功后，**必须立即输出资源清单**，此步骤优先于一切后续动作：
@@ -82,7 +92,7 @@ Terraform apply 成功后，**必须立即输出资源清单**，此步骤优先
    - 资源列表（ECS 公网 IP、RDS 私网 IP、VPC/子网/安全组/EIP 等）
    - 敏感凭证存储位置：OBS 桶名 + 对象路径（如 `obs://bucket/inventory/inventory.json`），**不发布预签名 URL**
    - 凭证获取方式提示：「使用 AK/SK 通过 obsutil 或 OBS API 访问上述路径获取」
-   - 基础设施验证结果（ECS 运行中、RDS 可用、OBS 上传成功）
+   - 基础设施验证结果（ECS ACTIVE、RDS 可用、OBS 上传成功）
 4. 输出处理记录 JSON 块，`artifacts` 包含资源清单和 OBS 路径（非 URL）
 
 ⚠️ **资源清单输出完成前，不得执行任何 A2A 调用或其他动作。**
@@ -116,6 +126,7 @@ SRE 仅负责 **IaC 基础设施部署**，以下事项**不属于 SRE 职责**�
 | IaC 部署故障时参考 build-debug-checklist.md 排查 | ✅ **必须做** |
 | 部署前必须执行资源查重（检查同名资源是否已存在） | ✅ **必须做，不可跳过** |
 | 发现资源冲突时立即停止并报告 | ✅ **必须做** |
+| 资源验证优先使用 terraform state / terraform plan | ✅ **必须做** |
 | 回复 Token/密码等敏感信息 | ❌ **禁止** |
 | 在公开评论中发布 OBS 预签名 URL | ❌ **禁止（等同于泄露密码）** |
 | 修改源代码修复问题 | ❌ **禁止** |
@@ -126,3 +137,4 @@ SRE 仅负责 **IaC 基础设施部署**，以下事项**不属于 SRE 职责**�
 | 部署或启动应用服务（Spring Boot/Tomcat/nginx 等） | ❌ **禁止** |
 | 跳过资源查重直接 terraform apply | ❌ **禁止** |
 | 删除或接管他人已有资源 | ❌ **禁止** |
+| 使用 hcloud CLI 配置的凭证进行资源验证/查重 | ❌ **禁止（必须使用环境变量 HW_ACCESS_KEY/HW_SECRET_KEY，两者可能不同）** |
