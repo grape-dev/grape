@@ -1,8 +1,8 @@
-# Grape — Multi-Agent DevOps 使用场景与工作流设计（new-version1）
+# Grape — Multi-Agent DevOps 使用场景与工作流设计（new-version2）
 
-> 版本：v2.1（对齐 `new-version1` 分支最新实现）
-> 日期：2026-08-16
-> 说明：本文基于 `new-version1` 分支的**实际代码实现**重新梳理（前端 `src/api/static/`、后端 `src/api/routes/`、`event_pipeline.py`、`runtime/service.py` 等）。v2.1 修正 workdir/event.json 新结构、Event 对话已上线、SRE 默认启用、Chat 本机直连引擎、engine-selection v2、onboarding 归并、执行分派等与最新代码不一致处。只描述现状，不含未落地设计。
+> 版本：v2.2（对齐 `new-version2` 分支最新实现）
+> 日期：2026-08-24
+> 说明：本文基于 `new-version2` 分支的**实际代码实现**重新梳理。v2.2 修正 Sidebar Knowledge 分组、Project Knowledge 看板、Prompt 结构优化、飞书 Bot 失效停用、sender_name 修复等与最新代码不一致处。
 
 ---
 
@@ -169,8 +169,9 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 │    ● QA Agent                                       │
 │    ● SRE Agent                                      │
 │                                                     │
-│  DevOps Skills                                      │
-│    ◈ Skills Library                                 │
+│  Knowledge                                          │
+│    ◈ DevOps Skills                                  │
+│    ❖ Project Knowledge                              │
 │                                                     │
 │  Account                                            │
 │    📋 Task Center                                   │
@@ -418,9 +419,9 @@ Agent 详情说明：
 
 ---
 
-### 2.8 Skills Library（技能库）
+### 2.8 DevOps Skills（技能库）
 
-技能库按 Agent 分区展示，顶部提供**官方技能 / 仓库技能 / 个人技能**三个页签与搜索框：
+技能库按 Agent 分区展示，顶部提供**官方技能 / 仓库技能 / 个人技能**三个页签与搜索框，入口位于 Sidebar **Knowledge → DevOps Skills**：
 
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
@@ -488,7 +489,45 @@ Agent 详情说明：
 
 ---
 
-### 2.9 Chat Agent（个人助手）
+### 2.9 Project Knowledge（项目知识看板）
+
+> new-version2 新增，入口位于 Sidebar **Knowledge → Project Knowledge**。详见 `docs/new-version2/knowledge-board-design.md`。
+
+Project Knowledge 是项目级知识的统一看板与维护页面，按**项目级 / Agent 维度**双维度组织：
+
+```
+┌─ Top Bar ─────────────────────────────────────────────────┐
+│  Project Knowledge · team/backend-service ↗                │
+│  [🔍 搜索知识...]  [项目级] [Agent 维度]        [＋ 上传知识] │
+├────────────────────────────────────────────────────────────┤
+│  📦 项目知识基线（DevOps Agent 自动生成 · project-info）      │
+│  ┌─────────────────────┐  ┌─────────────────────┐          │
+│  │ 📊 Project Graph    │  │ ⚙ Project Caps      │          │
+│  │ 代码依赖与调用链     │  │ 技术栈与能力清单     │          │
+│  │ [View]             │  │ [View]             │          │
+│  └─────────────────────┘  └─────────────────────┘          │
+│                                                            │
+│  👥 成员上传文档（项目成员手动维护）                          │
+│  ┌─────────────────────┐  ┌─────────────────────┐          │
+│  │ 📄 部署规范.md       │  │ 📄 环境说明.json     │          │
+│  │ @alice · 08-15 16:40 │  │ @bob · 08-14 09:12  │          │
+│  │ [View] [Delete]     │  │ [View] [Delete]     │          │
+│  └─────────────────────┘  └─────────────────────┘          │
+└────────────────────────────────────────────────────────────┘
+```
+
+| 区域 | 内容 |
+|------|------|
+| **项目级页签** | project-info 自动生成基线（Project Graph / Capabilities / metadata）+ 项目级知识沉淀（knowledge.md）+ 成员上传文档区（含「＋ 上传知识」） |
+| **Agent 维度页签** | VOD / Issue / Coding / QA / SRE / Chat 各 Agent 沉淀的知识（来自 Issue 对话的 accepted 共享知识），按 Issue 聚合展示 |
+
+**成员上传知识**：支持 `.md/.txt/.json`（≤10MB），项目级落盘 `project-info/member/{username}/`，Agent 级定向落盘 `project-info/agent/{agent_type}/`。Agent 在处理任务时，这些知识通过 `{{PROJECT_INFO_DIR}}` 占位符物化到工作目录，prompt 中告知读取路径。
+
+**项目基线生成**：`issue_opened` 事件触发后台 codegraph 分析 → 自动生成 `project-info/project-graph.md` + `project-capabilities.md` + `.metadata.json`。
+
+---
+
+### 2.10 Chat Agent（个人助手）
 
 Chat Agent 为**三栏布局**：左栏对话列表、中栏对话区、右栏固定配置面板。
 
@@ -670,12 +709,12 @@ Issue Agent 在分配/换人时通过 `/api/tasks/notify` 为用户创建任务�
 
 ### 2.12 Settings（通用设置）
 
-Settings 包含 **Credentials** 与 **Notifications** 两个页签：
+Settings 包含 **Credentials**、**Notifications**、**Appearance** 三个页签：
 
 ```
 ┌─ Top Bar ────────────────────────────────────────────┐
 │  Settings                                            │
-│  [Credentials] [Notifications]                        │
+│  [Credentials] [Notifications] [Appearance]           │
 ├───────────────────────────────────────────────────────┤
 │  GitCode API（OAuth 登录自动填充）                     │
 │  API Token  [********（登录时自动填充，不可编辑）]       │
@@ -692,6 +731,7 @@ Settings 包含 **Credentials** 与 **Notifications** 两个页签：
 
 - **Credentials**：GitCode API Token（OAuth 登录自动获取，只读展示）、华为云 AK/SK（为 Coding Agent 提供云端开发环境），后端还支持 CodeArts CLI AK/SK 字段。
 - **Notifications**：Issue events / PR events / Build failures / Release events / VOD signals 勾选偏好。
+- **Appearance**（v2.2 新增）：支持**默认主题**和 **Liquid Glass 毛玻璃主题**（`apple-theme.css`），一键切换、持久化到 `localStorage`。
 - 用户个人 GitCode Token 由 **Chat Agent** 代表用户在 GitCode 上操作（提交 Issue、查询状态、审批）；**DevOps Agents 使用独立的 Bot Token**，不受此页影响。
 
 ---
