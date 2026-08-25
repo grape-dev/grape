@@ -42,6 +42,8 @@ VOD Agent ──→ Issue Agent ──→ Coding Agent ──→ QA Agent ──
 
 ## 二、用户旅程（端到端）
 
+> 各页面 ASCII 线框原型已抽取至 `docs/new-version2/ui-design/index.md`，本文聚焦使用场景与功能说明。
+
 ### 2.1 登录
 
 登录页面提供 **GitCode OAuth 一键登录**和**密码登录**两种方式。OAuth 支持白名单控制（`configs/login-whitelist.json`，未在白名单的新用户无法登录）。
