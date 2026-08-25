@@ -348,12 +348,18 @@ for i, t in enumerate(themes):
 
 ### 5. 生成视频
 
-从项目知识中获取 Wan2.2 的 API Key 和 URL，调用文生视频 API。
+从项目知识中获取视频生成模型的 API Key、URL 和 Model（`ai_models.video`）。
+⚠️ **禁止使用 I2V（图生视频）模型**——只能使用 T2V（文生视频）模型。模型名中含 `I2V`（如 `Wan2.2-I2V-A14B`）的一律不得调用，需在项目知识中配置 T2V 模型（如 `Wan2.2-T2V-A14B`）。
+
 视频 prompt 必须基于步骤 3 提取的 `visual_info` 来构造准确的产品外观描述：
 
 ```python
 import requests, json, time
 import os, glob
+
+# ⚠️ 模型校验：禁止 I2V 模型
+MODEL_VIDEO = video_model
+assert "I2V" not in MODEL_VIDEO.upper(), f"禁止使用 I2V 模型({MODEL_VIDEO})，请配置 T2V 模型"
 
 # 尝试加载产品视觉特征（如存在）
 VIDEO_PROMPT = "英文画面描述"  # 默认fallback
@@ -371,11 +377,10 @@ if os.path.exists(product_info_path):
 
 API_VIDEO = video_url
 KEY_VIDEO = video_key
-MODEL_VIDEO = video_model
 H = {"Authorization": f"Bearer {KEY_VIDEO}", "Content-Type": "application/json"}
 
 resp = requests.post(API_VIDEO, headers=H, json={
-    "model": MODEL_VIDEO,
+    "model": MODEL_VIDEO,       # 必须是 T2V 模型（如 Wan2.2-T2V-A14B）
     "input": {"prompt": VIDEO_PROMPT}
 }, timeout=30)
 task_id = resp.json()["task_id"]
@@ -565,6 +570,7 @@ curl -X POST {{SERVER_URL}}/api/a2a \
 | 直接上传文件到博客服务器 | ❌ **禁止（SRE 职责）** |
 | 直接创建/更新/删除博客文章 | ❌ **禁止（SRE 职责）** |
 | 仅凭模型预训练记忆生成产品外观不核实官网 | ❌ **禁止（须先执行步骤 3 产品调研）** |
+| 使用 I2V（图生视频）模型生成视频 | ❌ **禁止（只能用 T2V 文生视频模型）** |
 
 ## 输出格式
 
@@ -593,6 +599,6 @@ curl -X POST {{SERVER_URL}}/api/a2a \
 
 - `$SKILL_DIR/references/gitcode-api-reference.md` — GitCode API 调用规范
 - qwen-image 图片生成：`POST /v1/images/generations`（URL/Key/Model 从项目知识获取）
-- Wan2.2 T2V 视频生成：`POST /v1/video/generations`（URL/Key/Model 从项目知识获取）
+- Wan2.2 T2V 视频生成：`POST /v1/video/generations`（URL/Key/Model 从项目知识获取，⚠️ 只能用 T2V 模型，禁止 I2V）
 - Edge TTS：`edge-tts --voice zh-CN-XiaoxiaoNeural --text "文案" --write-media output.mp3`
 - A2A 端点：`POST {{SERVER_URL}}/api/a2a`（URL 和 Token 从项目知识获取）

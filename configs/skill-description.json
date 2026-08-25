@@ -179,6 +179,12 @@
     "path": "iac/iac-issue",
     "description": "IaC Issue 高级运营：分类、标签管理、负责人指派、Spec 生成。通过 A2A 协议触发 Coding Agent 进行基础设施开发交付"
   },
+  "blog-issue": {
+    "name": "博客 Issue 运营",
+    "agent_type": "issue",
+    "path": "media-operate/blog-issue",
+    "description": "Issue 高级运营（博客增强版）：保留 issue-advance 全部能力，增加博客场景分流→博客 Spec→A2A coding(ai-blog-generation)→A2A sre(blog-publish)"
+  },
   "iac-coding": {
     "name": "IaC 代码实现",
     "agent_type": "coding",
