@@ -1187,6 +1187,18 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception:
             pass
         log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
+        # 回写 prompt 到 agent_tasks（direct 模式创建时 prompt 为空，此处补写）
+        log.info(f"Exec agent: prompt writeback check: task_id={task_id!r}, prompt_len={len(prompt)}")
+        if task_id and prompt:
+            try:
+                from src.session_manager import db as _wdb, db_lock as _wdl
+                with _wdl:
+                    c = _wdb.cursor()
+                    c.execute("UPDATE agent_tasks SET prompt=? WHERE id=? AND prompt=''", (prompt, task_id))
+                    _wdb.commit()
+                log.info(f"Exec agent: prompt writeback OK for task={task_id}, rows={c.rowcount}")
+            except Exception as _pe:
+                log.warning(f"Exec agent: prompt writeback failed for task={task_id}: {_pe}")
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
         append_skipped_event(repo_key, evt.get("type", ""), "prompt_build_failed", str(e))

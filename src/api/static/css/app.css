@@ -292,3 +292,11 @@
 .cr-btn-loading{font-size:12.5px}
 @keyframes crFadeIn{from{opacity:0}to{opacity:1}}
 @keyframes crPopUp{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+
+/* ===== Event Detail: 处理记录面板深色背景下的浅色文字 ===== */
+.ev-result-panel,.ev-result-panel p,.ev-result-panel h1,.ev-result-panel h2,.ev-result-panel h3,
+.ev-result-panel h4,.ev-result-panel h5,.ev-result-panel h6,.ev-result-panel li,.ev-result-panel ul,
+.ev-result-panel ol,.ev-result-panel span,.ev-result-panel td,.ev-result-panel th,.ev-result-panel div,
+.ev-result-panel strong,.ev-result-panel em,.ev-result-panel blockquote{color:#e0e6f0}
+.ev-result-panel a{color:#5b9eff}
+.ev-result-panel pre,.ev-result-panel code{color:#b8c2d6}

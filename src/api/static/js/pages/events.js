@@ -61,9 +61,13 @@ function renderEventDetail(data) {
     </div>`;
   }
 
+  // 上下文折叠区块摘要（折叠时显示）
+  const _ctxSummary = `${data.event_type || '—'} · ${data.actor || '—'}`;
+  const _infoSummary = `${data.status === 'completed' ? '✅' : data.status === 'failed' ? '❌' : '⏳'} ${data.duration ? data.duration + 's' : '—'}`;
+
   const html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← ${agentName}</button>
   <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;height:calc(100vh - 160px);overflow:hidden">
-    <!-- 左栏大框：导航 + Event Context + Event Info + 处理记录+答复结论 -->
+    <!-- 左栏大框：导航 + 可折叠区块 + 处理记录+答复结论 -->
     <div class="cd" style="padding:16px 20px;display:flex;flex-direction:column;overflow:hidden">
       <!-- 顶部导航栏 -->
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--b)">
@@ -71,36 +75,54 @@ function renderEventDetail(data) {
         <span class="ts t3" style="font-size:12px;font-weight:600">Event #${data.seq || '—'}</span>
         <button class="bt bt-o bt-s" onclick="navEvent(${data.next_seq || 0})" title="下一个 ${agentName} 事件" ${!data.next_seq ? 'disabled style="opacity:.4;cursor:not-allowed"' : ''}>›</button>
       </div>
-      <!-- 上半：Event Context + Event Info 左右并列 -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;flex-shrink:0;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--b)">
-        <div>
-          <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Context</h3>
-          <div class="tx t2" style="line-height:1.6">
-            <div>Trigger: ${data.event_type || '—'}</div>
-            <div>Repository: ${data.repo_key || ''}</div>
-            <div>Issue: ${_issueLink}</div>
-            <div>Actor: ${data.actor || '—'}</div>
-            <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
-          </div>
+      <!-- 区块1：Event Context & Info（可折叠，默认展开） -->
+      <div class="ev-section" style="flex-shrink:0;margin-bottom:8px">
+        <div class="ev-section-header" onclick="_toggleEvSection('ctxInfo', this)" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:6px 0;user-select:none">
+          <span class="ev-arrow" style="font-size:10px;transition:transform .2s;display:inline-block">▼</span>
+          <span style="font-size:12px;font-weight:600">Event Context & Info</span>
+          <span class="ts t3" style="font-size:11px;margin-left:auto">${_ctxSummary} · ${_infoSummary}</span>
         </div>
-        <div>
-          <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Info</h3>
-          <div style="font-size:11px;color:var(--t2);line-height:1.8">
-            <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
-            <div><span style="color:var(--t3)">Engine:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>
-            <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
-            <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
-            <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="强行终止正在运行的 Agent">⏹ 终止</button>` : ''}</div>
-            ${data.task && data.task.task_id
-              ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>`
-              : `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看日志</a></div>`}
-            <div id="convGate" style="display:none"></div>
+        <div id="ctxInfo" class="ev-section-body" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;padding-bottom:10px;border-bottom:1px solid var(--b)">
+          <div>
+            <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Context</h3>
+            <div class="tx t2" style="line-height:1.6">
+              <div>Trigger: ${data.event_type || '—'}</div>
+              <div>Repository: ${data.repo_key || ''}</div>
+              <div>Issue: ${_issueLink}</div>
+              <div>Actor: ${data.actor || '—'}</div>
+              <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
+            </div>
+          </div>
+          <div>
+            <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Info</h3>
+            <div style="font-size:11px;color:var(--t2);line-height:1.8">
+              <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
+              <div><span style="color:var(--t3)">Engine:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>
+              <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
+              <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
+              <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="强行终止正在运行的 Agent">⏹ 终止</button>` : ''}</div>
+              ${data.task && data.task.task_id
+                ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>`
+                : `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看日志</a></div>`}
+              <div id="convGate" style="display:none"></div>
+            </div>
           </div>
         </div>
       </div>
-      <!-- 下：Agent 处理记录 + 答复结论 合并 -->
+      <!-- 区块2：接收上下文 prompt（可折叠，默认折叠） -->
+      <div class="ev-section" style="flex-shrink:0;margin-bottom:8px">
+        <div class="ev-section-header" onclick="_toggleEvSection('promptBody', this);_loadEventPrompt(${data.task && data.task.task_id ? "'" + data.task.task_id + "'" : 'null'}, ${data.seq})" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:6px 0;user-select:none">
+          <span class="ev-arrow" style="font-size:10px;transition:transform .2s;display:inline-block">▶</span>
+          <span style="font-size:12px;font-weight:600">📋 接收上下文</span>
+          <span id="promptMeta" class="ts t3" style="font-size:11px;margin-left:auto"></span>
+        </div>
+        <div id="promptBody" class="ev-section-body" style="display:none;max-height:400px;overflow-y:auto;background:#000;color:#fff;border-radius:8px;padding:14px 18px 28px;font-size:14px;font-family:JetBrains Mono,Fira Code,Cascadia Code,Consolas,Menlo,monospace;line-height:1.75;letter-spacing:0.2px;white-space:pre-wrap;word-break:break-all">
+          <span style="color:#a0aac0">点击展开加载…</span>
+        </div>
+      </div>
+      <!-- 区块3：Agent 处理记录 + 答复结论（flex:1 撑满剩余空间） -->
       <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">Agent 处理记录与答复结论</h3>
-      <div style="flex:1;overflow-y:auto;background:var(--s);color:#000;border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
+      <div class="ev-result-panel" style="flex:1;overflow-y:auto;background:var(--s);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
         ${structuredHtml}
         ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">（无结论）</div>'}
       </div>
@@ -119,6 +141,55 @@ function renderEventDetail(data) {
 
   el.innerHTML = html;
   loadConversation();
+}
+
+// ===== 可折叠区块交互 =====
+function _toggleEvSection(bodyId, headerEl) {
+  const body = document.getElementById(bodyId);
+  if (!body) return;
+  const arrow = headerEl.querySelector('.ev-arrow');
+  const isHidden = body.style.display === 'none';
+  if (isHidden) {
+    body.style.display = '';
+    if (arrow) { arrow.textContent = '▼'; arrow.style.transform = 'rotate(0deg)'; }
+  } else {
+    body.style.display = 'none';
+    if (arrow) { arrow.textContent = '▶'; arrow.style.transform = 'rotate(0deg)'; }
+  }
+}
+
+// ===== 异步加载 event 的接收上下文（prompt） =====
+let _promptLoadedSeq = 0;
+function _loadEventPrompt(taskId, seq) {
+  if (!taskId) {
+    const body = document.getElementById('promptBody');
+    const meta = document.getElementById('promptMeta');
+    if (body) body.innerHTML = '<span style="color:#a0aac0">无关联任务（direct 模式或尚未执行）</span>';
+    if (meta) meta.textContent = '';
+    return;
+  }
+  // 同一 event 只加载一次
+  if (_promptLoadedSeq === seq) return;
+  _promptLoadedSeq = seq;
+  const body = document.getElementById('promptBody');
+  const meta = document.getElementById('promptMeta');
+  if (body) body.innerHTML = '<span style="color:#a0aac0">加载中…</span>';
+  const token = localStorage.getItem('token') || '';
+  fetch('/api/task-logs/' + encodeURIComponent(taskId) + '/info', {headers: {'Authorization': 'Bearer ' + token}})
+    .then(r => r.ok ? r.json() : null)
+    .then(info => {
+      if (!info) { if (body) body.innerHTML = '<span style="color:#ff5b5b">加载失败</span>'; return; }
+      const prompt = info.prompt || '';
+      const fullLen = info.prompt_full_length || 0;
+      if (meta) meta.textContent = fullLen > 0 ? fullLen + ' 字' : '';
+      if (!prompt) {
+        if (body) body.innerHTML = '<span style="color:#a0aac0">（prompt 为空 — 任务可能通过 queue 模式创建但尚未执行，或 direct 模式 prompt 回写前执行失败）</span>';
+      } else {
+        const truncated = fullLen > prompt.length ? '\n\n...(已截断，完整 ' + fullLen + ' 字)' : '';
+        if (body) body.textContent = prompt + truncated;
+      }
+    })
+    .catch(() => { if (body) body.innerHTML = '<span style="color:#ff5b5b">加载失败</span>'; });
 }
 
 function _convBubble(role, content, time, by) {
