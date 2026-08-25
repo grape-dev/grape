@@ -49,7 +49,8 @@
 - [ ] `terraform fmt -check -recursive` PASS
 - [ ] `terraform validate` PASS
 - [ ] `terraform init` PASS（OBS backend 配置成功，provider 下载成功）
-- [ ] `terraform plan` PASS（⚠️ 必须通过——init 成功不等于 state 读写正常，plan 会实际访问 OBS backend 读写 state）
+- [ ] `terraform plan` PASS（⚠️ 不加 -backend=false，使用真实 OBS backend 验证 state 读写；plan 还会调用 provider API 验证镜像/flavor/规格是否存在）
+- [ ] plan 输出中无报错（如镜像不存在、RDS flavor 不可用、provider 不兼容等）
 - [ ] `terraform apply` PASS（全部资源创建成功，**无 errored.tfstate 文件生成**）
 - [ ] 工作目录下**不存在** `errored.tfstate` 文件（存在则说明 state 写入 OBS 失败，需排查 TF 版本和 backend 配置）
 - [ ] `terraform output -json` 获取完整资源清单

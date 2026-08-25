@@ -61,7 +61,9 @@ tags:
 - 所有 TF 代码和脚本文件统一放在仓库的 `iac/` 子目录下，不得放在仓库根目录或其他目录
 - 如仓库中不存在 `iac/` 目录，新建该目录
 - 调用 huawei-cloud-terraform-generator skill 生成 TF 配置
-- 按方案执行 terraform fmt → terraform init → terraform validate（⚠️ 到 validate 为止，不执行 plan/apply/destroy）
+- 按方案执行 terraform fmt → terraform init → terraform validate → terraform plan -out=tfplan
+  - `terraform plan` 只预览变更不创建资源，用于提前发现镜像/flavor/provider/API 等问题
+  - ⚠️ 到 plan 为止，**不执行 terraform apply / terraform destroy**
 - 绝不硬编码 AK/SK，一律走变量和环境变量
 
 ### 3. 自审查

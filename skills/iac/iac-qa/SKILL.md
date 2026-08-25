@@ -71,8 +71,9 @@ tags:
 - 问题按严重程度分级（P0/P1/P2/P3）
 
 ### 原始职责内化
-- terraform init -backend=false → terraform plan -out=plan-review.tfplan
+- terraform init → terraform plan -out=plan-review.tfplan（⚠️ 不加 -backend=false，使用真实 OBS backend，验证 state 读写正常）
 - 逐资源分析 plan 输出，按风险规则分类（create/update/destroy/replace）
+- plan 阶段验证项：镜像存在性、RDS flavor 可用性、provider 下载成功、OBS backend 连通
 - tfsec 安全扫描 .tf 文件
 - 安全组规则变更审查
 - 审查时检索历史 Issue/PR 中同类变更的常见问题清单，核对当前变更是否已采取规避措施
