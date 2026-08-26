@@ -365,7 +365,7 @@ async def lease_sweep_loop():
 - DB 错误（连接断/查询超时）→ 保持 WebSocket 连接，等 DB 恢复后重试续约
 - CAS 失败（lease 被其他实例抢走）→ release lease + 断开
 
-### 场景验证总结（60 个场景）
+### 场景验证总结（68 个场景）
 
 | # | 场景 | 结果 | 说明 |
 |---|------|:---:|------|
@@ -429,6 +429,20 @@ async def lease_sweep_loop():
 | 58 | SIGTERM vs SIGKILL | ⚠️ | 问题 T——uvicorn grace period 冲突 |
 | 59 | 配置热更新 | ✅ | 需重启是正常行为 |
 | 60 | 日志量和轮转 | ✅ | 1.7-4.3 MB/天，日志轮转处理 |
+| 61 | instance_id 重启后变化 | ✅ | 旧 lease 60 秒过期，新实例 CAS 成功 |
+| 62 | load_eligible_bots 部分失败 | ✅ | DB 查询原子，要么全成功要么全失败 |
+| 63 | DB 连接池耗尽 | ⚠️ | 问题 U——后续优化独立连接池 |
+| 64 | onboarding 注册期间 lease | ✅ | 注册完才写 DB，sweep 不会提前发现 |
+| 65 | 注册过程用户取消 | ✅ | bot 不创建，DB 无行，lease 不管 |
+| 66 | 多租户 bot 管理 | ✅ | 按 app_id 管理，不区分 org |
+| 67 | CAS UPDATE 行锁竞争 | ✅ | 0.24ms 锁持有极短 |
+| 68 | ALTER TABLE 期间 lease 查询 | ✅ | migration 在 GET_LOCK 里，时序保证 |
+
+### 问题 U：DB 连接池耗尽时 lease 查询无优先级
+
+场景：API 高负载时 DB 连接池耗尽 → lease 查询拿不到连接 → 续约失败 → lease 过期 → 其他实例抢但也连不上 DB → 所有 bot 断开。
+
+当前可接受——db_lock 共享连接，lease 查询 0.49ms 极快，不会长时间占用连接。后续优化：lease DB 查询用独立连接或优先级连接。
 
 ### 问题 T：uvicorn graceful shutdown timeout 和 stop() timeout 冲突
 
