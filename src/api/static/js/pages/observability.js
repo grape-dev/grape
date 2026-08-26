@@ -255,15 +255,29 @@ function renderAnomalyTab(container, ops) {
 
 function loadErrorLogs(container) {
   if (!container) return;
-  container.innerHTML = '<div class="loading">加载中...</div>';
-  fetch('/api/dashboard/ops/error-logs?limit=100').then(r => r.json()).then(d => {
+  let currentLevel = _errorLogLevel || '';
+  container.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+      <div style="display:flex;gap:0">
+        <button class="bt bt-s ${currentLevel===''?'bt-p':'bt-o'}" onclick="_errorLogLevel='';loadErrorLogs(document.getElementById('obsContent'))">全部</button>
+        <button class="bt bt-s ${currentLevel==='ERROR'?'bt-p':'bt-o'}" onclick="_errorLogLevel='ERROR';loadErrorLogs(document.getElementById('obsContent'))">仅 ERROR</button>
+        <button class="bt bt-s ${currentLevel==='WARNING'?'bt-p':'bt-o'}" onclick="_errorLogLevel='WARNING';loadErrorLogs(document.getElementById('obsContent'))">仅 WARNING</button>
+      </div>
+      <span class="ts t3" id="errorLogCount"></span>
+    </div>
+    <div id="errorLogBody"><div class="loading">加载中...</div></div>
+  `;
+  const levelParam = currentLevel ? '&level=' + currentLevel : '';
+  fetch('/api/dashboard/ops/error-logs?limit=100' + levelParam).then(r => r.json()).then(d => {
     const entries = d.entries || [];
+    const countEl = document.getElementById('errorLogCount');
+    const bodyEl = document.getElementById('errorLogBody');
+    if (countEl) countEl.textContent = `${entries.length} 条（来自 ${d.files ? d.files.length : 1} 个日志文件）`;
     if (!entries.length) {
-      container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">无错误日志</div>';
+      if (bodyEl) bodyEl.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">无匹配日志</div>';
       return;
     }
-    let html = `<div style="font-size:11px;color:var(--t3);margin-bottom:8px">${entries.length} 条 ERROR / WARNING（来自 ${d.file || 'devops-bot.log'}）</div>`;
-    html += '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.5;border-radius:8px;overflow:hidden;max-height:70vh;overflow-y:auto">';
+    let html = '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.5;border-radius:8px;overflow:hidden;max-height:70vh;overflow-y:auto">';
     entries.forEach(e => {
       const level = e.level || '';
       const color = level === 'ERROR' ? '#dc2828' : '#d49c0f';
@@ -273,11 +287,13 @@ function loadErrorLogs(container) {
       html += `<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">${time}</span>${rid} <span style="color:${color}"><b>${level}</b></span> <span style="color:#e0e6f0">${(e.message||'').substring(0,300)}</span><span style="color:#8d97a8">${extra}</span></div>`;
     });
     html += '</div>';
-    container.innerHTML = html;
+    if (bodyEl) bodyEl.innerHTML = html;
   }).catch(e => {
-    container.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    const bodyEl = document.getElementById('errorLogBody');
+    if (bodyEl) bodyEl.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
   });
 }
+let _errorLogLevel = '';
 
 // ===== Tab: 任务 =====
 function renderTasksTab(ops, rt, mt) {

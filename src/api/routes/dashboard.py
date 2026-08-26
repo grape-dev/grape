@@ -173,41 +173,129 @@ async def get_ops_overview():
 
 
 @router.get("/ops/error-logs")
-async def get_error_logs(limit: int = 100):
-    """最近错误/警告日志（从 data/logs/devops-bot.log 读取 JSON 行）。
+async def get_error_logs(limit: int = 100, level: str = ""):
+    """最近错误/警告日志。
+
+    同时读取新旧两个日志文件：
+    - data/logs/devops-bot.log（新 JSON 结构化日志）
+    - data/devops-bot.log（旧纯文本日志 + 轮转文件）
+
+    参数：
+    - limit: 最多返回条数（默认 100）
+    - level: 过滤级别 — ""（ERROR+WARNING）/"ERROR"/"WARNING"
 
     无认证：运维诊断数据，与 /health/realtime 同级。
-    返回 [{ts, level, component, request_id, message, method, path, status, duration_ms}]。
     """
-    import os, json as _json
+    import os, json as _json, glob as _glob, re as _re
     from src.config import LOG_DIR
 
-    log_file = os.path.join(LOG_DIR, "devops-bot.log")
+    allowed_levels = {"ERROR", "WARNING"}
+    if level and level.upper() in allowed_levels:
+        allowed_levels = {level.upper()}
+
     entries = []
-    if not os.path.exists(log_file):
-        return {"entries": [], "file": log_file, "error": "log file not found"}
+    files_read = []
 
-    # 从文件尾部读取，倒序收集 ERROR/WARNING 行
-    try:
-        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        for line in reversed(lines):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = _json.loads(line)
-                level = entry.get("level", "")
-                if level in ("ERROR", "WARNING"):
-                    entries.append(entry)
-                    if len(entries) >= limit:
-                        break
-            except (_json.JSONDecodeError, ValueError):
-                continue
-    except Exception as e:
-        return {"entries": [], "file": log_file, "error": str(e)}
+    def _parse_json_log(filepath):
+        """解析 JSON 行格式日志"""
+        nonlocal entries
+        if not os.path.exists(filepath):
+            return
+        files_read.append(filepath)
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = _json.loads(line)
+                    if entry.get("level", "") in allowed_levels:
+                        entries.append(entry)
+                        if len(entries) >= limit:
+                            return
+                except (_json.JSONDecodeError, ValueError):
+                    continue
+        except Exception:
+            pass
 
-    return {"entries": entries, "file": log_file}
+    def _parse_text_log(filepath):
+        """解析旧纯文本格式日志（正则提取 level + message）"""
+        nonlocal entries
+        if not os.path.exists(filepath):
+            return
+        files_read.append(filepath)
+        # 旧格式: "2026-08-26T10:30:00.000Z - ERROR - devops-bot - message..."
+        # 或: "ERROR:devops-bot:message"
+        _re_json = _re.compile(r'^\s*\{.*\}\s*$')
+        _re_text = _re.compile(
+            r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[.\dZ]*)\s*[-_]\s*'
+            r'(ERROR|WARNING|WARN)\s*[-_]\s*'
+            r'(\S+)\s*[-_]\s*(.*)',
+            _re.IGNORECASE
+        )
+        _re_simple = _re.compile(r'^(ERROR|WARNING|WARN)[:\s]+(.+)', _re.IGNORECASE)
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                # 跳过 JSON 行（已由 _parse_json_log 处理）
+                if _re_json.match(line):
+                    try:
+                        entry = _json.loads(line)
+                        if entry.get("level", "") in allowed_levels:
+                            entries.append(entry)
+                            if len(entries) >= limit:
+                                return
+                    except Exception:
+                        pass
+                    continue
+                # 纯文本格式
+                m = _re_text.match(line)
+                if m:
+                    lvl = m.group(2).upper()
+                    if lvl == "WARN":
+                        lvl = "WARNING"
+                    if lvl in allowed_levels:
+                        entries.append({
+                            "ts": m.group(1), "level": lvl,
+                            "component": m.group(3), "request_id": "-",
+                            "message": m.group(4)[:500],
+                        })
+                        if len(entries) >= limit:
+                            return
+                    continue
+                m2 = _re_simple.match(line)
+                if m2:
+                    lvl = m2.group(1).upper()
+                    if lvl == "WARN":
+                        lvl = "WARNING"
+                    if lvl in allowed_levels:
+                        entries.append({
+                            "ts": "", "level": lvl, "component": "",
+                            "request_id": "-", "message": m2.group(2)[:500],
+                        })
+                        if len(entries) >= limit:
+                            return
+        except Exception:
+            pass
+
+    # 1. 新日志（JSON 格式）
+    _parse_json_log(os.path.join(LOG_DIR, "devops-bot.log"))
+
+    # 2. 旧日志（纯文本格式）+ 轮转文件
+    old_log_dir = os.path.dirname(LOG_DIR)  # data/
+    _parse_text_log(os.path.join(old_log_dir, "devops-bot.log"))
+    for rotated in sorted(_glob.glob(os.path.join(old_log_dir, "devops-bot.log.*")), reverse=True):
+        if len(entries) >= limit:
+            break
+        _parse_text_log(rotated)
+
+    return {"entries": entries, "files": files_read, "count": len(entries)}
 
 
 @router.get("/ops/a2a-health")
