@@ -659,6 +659,21 @@ def claim(runtime_id) -> dict | None:
                     log.warning(f"claim backfill event runtime failed: {e}")
         from src.runtime.instances import runtime_instance_name
         log.info(f"claim: runtime_id={runtime_id}({runtime_instance_name(runtime_id)}) task={task_id}")
+        # 可观察性埋点：任务被 claim/dispatched
+        try:
+            from src.observability import record_task_dispatched
+            if task:
+                _queue_wait = -1
+                if task.get("created_at"):
+                    try:
+                        _created = datetime.fromisoformat(task["created_at"])
+                        _queue_wait = (datetime.now(timezone.utc) - _created).total_seconds()
+                    except Exception:
+                        pass
+                record_task_dispatched(task_id, task.get("event_type") or task.get("agent_type") or "other",
+                                       runtime_id, _queue_wait)
+        except Exception:
+            pass
         return task
 
 
