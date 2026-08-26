@@ -154,11 +154,24 @@ Worker 通过 credential_id → runtime_credentials.scope + owner_id 确定归�
 - scope=global：repo_key=NULL（全局 Worker 不绑定项目）
 - scope=admin：repo_key=NULL（管理员 Worker 不绑定项目）
 - scope=repo：repo_key=项目 repo_key（已有 owner_id 存 repo_key，新字段冗余存储方便查询）
-- scope=user：repo_key=注册时指定的项目 repo_key（新注册时写入，老数据留 NULL）
+- scope=user：repo_key=创建凭据时指定的项目 repo_key（新创建时写入，老数据留 NULL）
 
-注册逻辑改动（最小化）：
-- Worker 注册时如果 scope=user，从请求中获取 repo_key 写入 runtime_credentials.repo_key 和 agent_runtimes.repo_key
-- 其他 scope 不变——global/admin 不写 repo_key，repo scope 的 owner_id 已有 repo_key
+改动点（凭据创建时写入 repo_key，Worker 注册时复制）：
+
+1. 前端 runtimes.js 创建凭据时，scope=user 也传 repo_key（从当前项目页面获取）
+   - 当前：scope=repo 才传 repo_key，scope=user 不传
+   - 改后：scope=user 也传当前项目的 repo_key
+
+2. settings.py create_runtime_credential 接口，scope=user 时也存 repo_key
+   - 当前第 421 行：`if scope == "repo": repo_key = body.repo_key`
+   - 改后：`if scope in ("repo", "user"): repo_key = body.repo_key`
+   - INSERT 语句加 repo_key 字段
+
+3. runtime.py runtime_register 接口，Worker 注册时从凭据复制 repo_key 到 agent_runtimes
+   - 当前第 130 行：注册时读凭据的 scope/owner_name/owner_id
+   - 改后：也读凭据的 repo_key，INSERT agent_runtimes 时写入
+
+4. health.py 和 dashboard.py System Health 展示时按 repo_key 过滤三级 Worker
 
 现有逻辑不感知：
 - claim/heartbeat/任务分配/cancel 等逻辑全部不改——不读 repo_key 字段
