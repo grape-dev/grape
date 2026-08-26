@@ -3,7 +3,7 @@ import uvicorn, multiprocessing, signal, sys
 
 
 def _start_main():
-    uvicorn.run("src.api.main:app", host="127.0.0.1", port=3000, log_level="info")
+    uvicorn.run("src.api.main:app", host="0.0.0.0", port=3000, log_level="info")
 
 
 def _start_webhook():
@@ -12,7 +12,7 @@ def _start_webhook():
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--dev":
-        uvicorn.run("src.api.main:app", host="127.0.0.1", port=3000, reload=True)
+        uvicorn.run("src.api.main:app", host="0.0.0.0", port=3000, reload=True)
         sys.exit(0)
 
     p1 = multiprocessing.Process(target=_start_main, name="main-api")
