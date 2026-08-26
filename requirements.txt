@@ -12,3 +12,4 @@ aiohttp>=3.9
 websockets>=12.0
 pymysql>=1.1
 esdk-obs-python>=3.26
+python-jose[cryptography]>=3.3

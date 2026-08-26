@@ -20,7 +20,9 @@ async def password_login(body: PasswordLogin):
     user = user_db.verify_user(body.username, body.password)
     if not user:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "用户名或密码错误"})
-    token = user_db.create_session_token(user["id"])
+    # JWT 无状态 token——任何实例都能验证（集群会话共享）
+    from src.api.jwt_utils import create_jwt_token
+    token = create_jwt_token(user["id"], user["username"])
     return {
         "token": token,
         "user": {"id": user["id"], "username": user["username"]}
