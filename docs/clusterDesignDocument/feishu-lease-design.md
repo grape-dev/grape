@@ -202,14 +202,68 @@ BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 | 4 | src/api/main.py | lifespan 改造：创建 lease_store + 启动 sweep_task + 关闭时 cancel + 释放 |
 | 5 | src/config.py | 新增 4 个环境变量读取 |
 
-## 九、不需要改动
+## 九、遗漏修复（实施时必须处理）
+
+### 1. sweep 抢锁后 WebSocket 连接失败要释放 lease
+
+问题：lease_sweep_loop 里 try_acquire 成功 → add_bot 连 WebSocket。但如果连接失败（飞书 API 不可达、凭证错误），lease 已经被抢了但没有实际连上。其他实例看到 lease 被持有不会抢——这个 bot 60 秒内无人处理。
+
+修复：try_acquire 成功 → add_bot → 如果连接失败 → release lease → 其他实例下次 sweep 可以抢。
+
+### 2. 续约失败后要 release lease 再断开
+
+问题：续约失败后如果直接 _running=False 断开，lease 可能还在 DB 里（续约失败不代表 lease 立即过期——还有 40 秒余量）。其他实例看到 lease 被持有不会抢。
+
+修复：续约失败 2 次（40 秒）后 release lease + _running=False 断开。让其他实例立即接管，不用等 lease 自然过期。
+
+### 3. _disable_bot 永久停用后要释放 lease
+
+问题：_disable_bot 把 is_active=0 永久停用 bot。如果这个 bot 持有 lease——lease 没被释放，其他实例看到 is_active=0 不会抢，但 lease 还在 DB 里——脏数据。
+
+修复：_disable_bot 时同时释放 lease（lease_token=NULL, lease_expires_at=NULL, lease_owner=NULL）。
+
+### 4. load_eligible_bots 时确保所有 bot 登记到 global_im_bot_config
+
+问题：load_from_db 从 3 张表查 bot 配置（chat_agent_session / global_im_bot_config / devops_agent_session）。如果某个用户在 chat_agent_session 配了新 bot 但没在 global_im_bot_config 登记——这个 bot 的 lease 字段查不到，lease 管不到。
+
+当前数据没这个问题（所有 bot 都登记了），但代码上需要防御。
+
+修复：load_eligible_bots 从 3 张表查到所有 bot 配置后，如果某个 app_id 不在 global_im_bot_config 里，INSERT 登记一条（bot_app_id + bot_type + is_active=1），确保 lease 字段一定有地方存。
+
+## 十、待优化（实施时一并处理）
+
+### 1. sweep 和续约 DB 查询合并
+
+当前 sweep 每 10 秒查一次 list_expired_or_unheld，续约每 20 秒每个 bot 一次 renew（8 bot = 8 次）。
+
+优化：sweep 时批量续约（一条 SQL 更新所有持有的 lease），减少到每 10 秒 2 次 DB 查询。
+
+### 2. health_check 加 lease 状态
+
+当前 health_check 返回 bot 的 state/metrics。集群后需要知道每个 bot 的 lease 状态（谁持有、何时过期）。
+
+优化：health_check 加 lease_owner / lease_expires_at。
+
+### 3. 热加载 lease 感知
+
+当前 add_bot / remove_bot 支持运行时热加载。lease 模式下：
+- add_bot 不应该直接连——应该先登记 IDLE，由 sweep 决定是否连
+- remove_bot 应该同时释放 lease
+
+### 4. try_acquire 竞争失败打 info 日志
+
+两个实例同时 sweep 同时 try_acquire 同一个 bot——CAS 保证只有一个成功。失败的那个打 info 日志（不是 warning，正常竞争不是错误；也不是静默，静默不合理无法排查）。
+
+日志格式：`[lease] bot {app_id} acquire failed, held by {lease_owner}`
+
+## 十一、不需要改动
 
 - bot_seen_messages 去重保留（额外保险）
 - nginx 不影响飞书 WebSocket（不经过 nginx）
 - worker 侧不受影响
 - 飞书 API 调用不受影响（任何实例都能 reply，用 tenant_token）
 
-## 十、上线顺序
+## 十二、上线顺序
 
 **重要：两台必须同时部署 lease 代码再同时启用。**
 
@@ -221,7 +275,7 @@ BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 3. 两台同时改 BOT_LEASE_DISABLED=false 重启
 4. 验证只有一个实例连每个 bot
 
-## 十一、数据库新增字段
+## 十三、数据库新增字段
 
 | # | 表.字段 | 类型 | 默认值 | 用途 |
 |---|---------|------|--------|------|
