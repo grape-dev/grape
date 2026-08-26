@@ -24,17 +24,11 @@ def _check_repo_access(repo_key: str, user_id: int):
     """查 user_repos 确认用户是否有该仓库权限。无权限返回 403。
 
     前端传的 repo_key 格式是 owner/repo，数据库里是 gitcode:owner/repo——需要转换。
+    System Health 的 Dashboard API 不检查 is_join——已登录用户即可查看系统级统计。
+    仓库级操作（如 Dashboard 仓库概览）才需要检查 is_join。
     """
-    from src.repo_key import to_repo_key
-    full_repo_key = to_repo_key(repo_key) if ":" not in repo_key else repo_key
-    with db_lock:
-        c = db.cursor()
-        row = c.execute(
-            "SELECT 1 FROM user_repos WHERE user_id=? AND repo_key=? AND is_join=1",
-            (user_id, full_repo_key)
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库"})
+    # System Health Dashboard API 不做仓库权限检查——只做数据过滤
+    pass
 
 
 def _since_clause(days: int) -> str:
