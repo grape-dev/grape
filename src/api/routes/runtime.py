@@ -337,6 +337,12 @@ async def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int =
         c.execute("UPDATE agent_tasks SET usage_json=? WHERE id=?",
                   (json.dumps(body.model_dump()), task_id))
         db.commit()
+    # 可观察性埋点：LLM token 用量
+    try:
+        from src.observability import record_llm_usage
+        record_llm_usage(body.provider, body.model, body.input, body.output, body.cache)
+    except Exception:
+        pass
     return {"status": "ok"}
 
 

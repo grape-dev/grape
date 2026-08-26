@@ -327,6 +327,39 @@ def record_task_failed(task_id: str, source: str, runtime_id: int, failure_reaso
     TASK_FAILED.labels(source=s, runtime_mode=m, failure_reason=failure_reason or "unknown").inc()
 
 
+# ===== LLM token 用量指标（参考 multica metrics/business.go llmTokens）=====
+
+LLM_TOKENS = Counter(
+    "grape_llm_tokens_total",
+    "Total LLM tokens by provider, model, and token type.",
+    ["provider", "model", "token_type"],
+    registry=registry,
+)
+
+LLM_REQUESTS = Counter(
+    "grape_llm_request_total",
+    "Total LLM usage reports by provider and model.",
+    ["provider", "model"],
+    registry=registry,
+)
+
+
+def record_llm_usage(provider: str, model: str, input_tokens: int, output_tokens: int, cache_tokens: int = 0):
+    """记录 LLM token 用量。在 /tasks/{task_id}/usage 端点调用。
+
+    参考 multica metrics/business.go RecordLLMUsage。
+    """
+    p = (provider or "unknown").strip().lower() or "unknown"
+    m = (model or "unknown").strip().lower() or "unknown"
+    if input_tokens > 0:
+        LLM_TOKENS.labels(provider=p, model=m, token_type="input").inc(input_tokens)
+    if output_tokens > 0:
+        LLM_TOKENS.labels(provider=p, model=m, token_type="output").inc(output_tokens)
+    if cache_tokens > 0:
+        LLM_TOKENS.labels(provider=p, model=m, token_type="cache").inc(cache_tokens)
+    LLM_REQUESTS.labels(provider=p, model=m).inc()
+
+
 # ===== MySQL 连接池指标（参考 multica metrics/db.go，适配 grape MySQL）=====
 
 DB_THREADS_CONNECTED = Gauge(

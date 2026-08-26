@@ -377,6 +377,14 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         record_task_enqueued(task_id, event_type or agent_type or "other", runtime_id)
     except Exception:
         pass
+    # 事件总线：任务创建
+    try:
+        from src.observability.events import bus, Event
+        bus.publish(Event(type="task:enqueued", task_id=task_id,
+                          payload={"agent_type": agent_type, "runtime_id": runtime_id,
+                                    "repo_key": repo_key, "skill": skill}))
+    except Exception:
+        pass
     return task_id
 
 
@@ -975,6 +983,13 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                                  task.get("runtime_id", 0), _terminal, _run_s, _total_s)
     except Exception:
         pass
+    # 事件总线：任务完成
+    try:
+        from src.observability.events import bus, Event
+        bus.publish(Event(type="task:completed" if exit_code == 0 else "task:failed",
+                          task_id=task_id, payload={"exit_code": exit_code}))
+    except Exception:
+        pass
 
 
 def fail_task(task_id, error, exit_code=-1):
@@ -1038,6 +1053,13 @@ def fail_task(task_id, error, exit_code=-1):
                                  task.get("runtime_id", 0), "failed", _run_s, _total_s)
             record_task_failed(task_id, task.get("event_type") or task.get("agent_type") or "other",
                                task.get("runtime_id", 0), str(error)[:200])
+    except Exception:
+        pass
+    # 事件总线：任务失败
+    try:
+        from src.observability.events import bus, Event
+        bus.publish(Event(type="task:failed", task_id=task_id,
+                          payload={"exit_code": exit_code, "error": str(error)[:200]}))
     except Exception:
         pass
 
