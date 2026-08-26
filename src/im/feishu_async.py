@@ -275,6 +275,7 @@ class FeishuAsync:
                 data = await resp.json()
                 reply_id = data.get("data", {}).get("message_id", "")
                 ctx.metrics.messages_sent += 1
+                log.debug(f"[{ctx.name}] reply_text: {text[:50]}")
                 return reply_id
         except Exception as e:
             ctx.metrics.messages_failed += 1
@@ -304,6 +305,7 @@ class FeishuAsync:
                 data = await resp.json()
                 reply_id = data.get("data", {}).get("message_id", "")
                 ctx.metrics.messages_sent += 1
+                log.debug(f"[{ctx.name}] reply_card: {text[:50]}")
                 return reply_id
         except Exception as e:
             ctx.metrics.messages_failed += 1
