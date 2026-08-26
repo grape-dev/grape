@@ -108,6 +108,10 @@ function renderOverview(ops, rt, mt) {
   const taskRunning = parseMetric(mt, 'grape_task_running');
   const taskStuck = parseMetric(mt, 'grape_task_stuck');
   const httpReq = parseMetric(mt, 'grape_http_in_flight_requests');
+  const httpTotal = parseLabeledSum(mt, 'grape_http_requests_total');
+  const httpDurSum = parseLabeledSum(mt, 'grape_http_request_duration_seconds_sum');
+  const httpDurCount = parseLabeledSum(mt, 'grape_http_request_duration_seconds_count');
+  const httpAvgMs = httpDurCount > 0 ? Math.round(httpDurSum / httpDurCount * 1000) : 0;
   const llmTokens = parseLabeledSum(mt, 'grape_llm_tokens_total');
 
   return `
@@ -125,12 +129,17 @@ function renderOverview(ops, rt, mt) {
       { label: '离线', value: r.offline || 0, color: 'var(--t3)' },
       { label: '本机/远端', value: `${(r.by_mode||{}).local||0} / ${(r.by_mode||{}).remote||0}`, color: 'var(--pu)' },
     ])}
-    ${section('数据库 & HTTP')}
+    ${section('数据库')}
     ${kpiRow([
       { label: 'DB 连接数', value: db['grape_db_threads_connected'] || 0, color: 'var(--a)', hint: `max ${db['grape_db_max_used_connections']||0}` },
       { label: 'DB 活跃线程', value: db['grape_db_threads_running'] || 0, color: (db['grape_db_threads_running']||0) > 5 ? 'var(--r)' : 'var(--g)' },
-      { label: 'HTTP 在途', value: httpReq || 0, color: 'var(--sk)' },
       { label: 'LLM Tokens', value: fmtNum(llmTokens), color: 'var(--pu)' },
+    ])}
+    ${section('HTTP 请求')}
+    ${kpiRow([
+      { label: '在途', value: httpReq || 0, color: 'var(--sk)', hint: '当前处理中' },
+      { label: '累计请求', value: fmtNum(httpTotal), color: 'var(--a)', hint: '启动至今总数' },
+      { label: '平均延迟', value: httpAvgMs + 'ms', color: httpAvgMs > 500 ? 'var(--r)' : httpAvgMs > 100 ? 'var(--y)' : 'var(--g)' },
     ])}
     ${section('实时队列')}
     ${kpiRow([
