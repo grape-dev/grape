@@ -371,6 +371,12 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     from src.runtime.instances import runtime_instance_name
     _inst = runtime_instance_name(runtime_id)
     log.info(f"Task enqueued: {task_id} session={agent_session_id} runtime={runtime_id}({_inst}) skill={skill}")
+    # 可观察性埋点：任务入队
+    try:
+        from src.observability import record_task_enqueued
+        record_task_enqueued(task_id, event_type or agent_type or "other", runtime_id)
+    except Exception:
+        pass
     return task_id
 
 
@@ -947,6 +953,28 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
         except Exception as e:
             log.warning(f"complete_task update repo session failed: {e}")
     log.info(f"Task completed: {task_id} exit={exit_code}")
+    # 可观察性埋点：任务到达终态
+    try:
+        from src.observability import record_task_terminal
+        _terminal = "completed" if exit_code == 0 else "failed"
+        _run_s = -1
+        _total_s = -1
+        if task:
+            _now = datetime.now(timezone.utc)
+            if task.get("started_at"):
+                try:
+                    _run_s = (_now - datetime.fromisoformat(task["started_at"])).total_seconds()
+                except Exception:
+                    pass
+            if task.get("created_at"):
+                try:
+                    _total_s = (_now - datetime.fromisoformat(task["created_at"])).total_seconds()
+                except Exception:
+                    pass
+            record_task_terminal(task_id, task.get("event_type") or task.get("agent_type") or "other",
+                                 task.get("runtime_id", 0), _terminal, _run_s, _total_s)
+    except Exception:
+        pass
 
 
 def fail_task(task_id, error, exit_code=-1):
@@ -989,6 +1017,29 @@ def fail_task(task_id, error, exit_code=-1):
         except Exception as e:
             log.warning(f"fail_task session check failed: {e}")
     log.warning(f"Task failed: {task_id} exit={exit_code} err={str(error)[:120]}")
+    # 可观察性埋点：任务失败
+    try:
+        from src.observability import record_task_terminal, record_task_failed
+        _run_s = -1
+        _total_s = -1
+        if task:
+            _now = datetime.now(timezone.utc)
+            if task.get("started_at"):
+                try:
+                    _run_s = (_now - datetime.fromisoformat(task["started_at"])).total_seconds()
+                except Exception:
+                    pass
+            if task.get("created_at"):
+                try:
+                    _total_s = (_now - datetime.fromisoformat(task["created_at"])).total_seconds()
+                except Exception:
+                    pass
+            record_task_terminal(task_id, task.get("event_type") or task.get("agent_type") or "other",
+                                 task.get("runtime_id", 0), "failed", _run_s, _total_s)
+            record_task_failed(task_id, task.get("event_type") or task.get("agent_type") or "other",
+                               task.get("runtime_id", 0), str(error)[:200])
+    except Exception:
+        pass
 
 
 # ===== 回报异步化（M2，见 concurrency-design.md §2.4）=====

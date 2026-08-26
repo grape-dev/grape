@@ -181,3 +181,147 @@ def start_metrics_server():
 
     from src.config import log
     log.info(f"metrics server starting on {addr}")
+
+
+# ===== 业务指标（参考 multica metrics/business.go）=====
+# 任务生命周期 Counter + Histogram + Gauge
+
+_TASK_BUCKETS = (1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1200, 3600, 7200)
+
+TASK_ENQUEUED = Counter(
+    "grape_agent_task_enqueued_total",
+    "Total agent tasks enqueued.",
+    ["source", "runtime_mode"],
+    registry=registry,
+)
+
+TASK_DISPATCHED = Counter(
+    "grape_agent_task_dispatched_total",
+    "Total agent tasks dispatched to a runtime.",
+    ["source", "runtime_mode"],
+    registry=registry,
+)
+
+TASK_TERMINAL = Counter(
+    "grape_agent_task_terminal_total",
+    "Total agent tasks that reached a terminal state.",
+    ["source", "runtime_mode", "terminal_status"],
+    registry=registry,
+)
+
+TASK_FAILED = Counter(
+    "grape_agent_task_failed_total",
+    "Total failed agent tasks by failure reason.",
+    ["source", "runtime_mode", "failure_reason"],
+    registry=registry,
+)
+
+TASK_QUEUE_WAIT = Histogram(
+    "grape_agent_task_queue_wait_seconds",
+    "Time agent tasks spent queued before dispatch.",
+    ["source", "runtime_mode"],
+    buckets=_TASK_BUCKETS,
+    registry=registry,
+)
+
+TASK_RUN_SECONDS = Histogram(
+    "grape_agent_task_run_seconds",
+    "Time agent tasks spent running before a terminal state.",
+    ["source", "runtime_mode", "terminal_status"],
+    buckets=_TASK_BUCKETS,
+    registry=registry,
+)
+
+TASK_TOTAL_SECONDS = Histogram(
+    "grape_agent_task_total_seconds",
+    "Total time from agent task creation to terminal state.",
+    ["source", "runtime_mode", "terminal_status"],
+    buckets=_TASK_BUCKETS,
+    registry=registry,
+)
+
+TASK_IN_PROGRESS = Gauge(
+    "grape_agent_task_in_progress",
+    "Current agent tasks dispatched by this process and not yet terminal.",
+    ["source", "runtime_mode"],
+    registry=registry,
+)
+
+
+# ===== 标签规范化（参考 multica metrics/labels.go）=====
+
+_VALID_SOURCES = frozenset({"chat", "issue", "webhook", "manual", "api", "vod", "autopilot", "other"})
+_VALID_MODES = frozenset({"local", "remote", "unknown"})
+_VALID_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+
+def _normalize_source(source: str) -> str:
+    s = (source or "").strip().lower()
+    return s if s in _VALID_SOURCES else "other"
+
+
+def _normalize_mode(mode: str) -> str:
+    m = (mode or "").strip().lower()
+    return m if m in _VALID_MODES else "unknown"
+
+
+def _normalize_terminal(status: str) -> str:
+    s = (status or "").strip().lower()
+    return s if s in _VALID_TERMINAL else "unknown"
+
+
+def _runtime_mode(runtime_id: int) -> str:
+    """从 runtime_id 推导 runtime_mode（local/remote）。"""
+    try:
+        from src.runtime.service import runtime_credential_id
+        cid = runtime_credential_id(runtime_id)
+        if cid is None:
+            return "unknown"
+        return "remote" if cid > 0 else "local"
+    except Exception:
+        return "unknown"
+
+
+# ===== 埋点函数（业务代码调用这些，不直接碰 Prometheus 对象）=====
+
+# 运行中任务跟踪（用于 in_progress gauge 增减）
+_in_progress_tracker: dict[str, dict] = {}
+
+
+def record_task_enqueued(task_id: str, source: str, runtime_id: int):
+    """任务入队时调用。"""
+    s = _normalize_source(source)
+    m = _normalize_mode(_runtime_mode(runtime_id))
+    TASK_ENQUEUED.labels(source=s, runtime_mode=m).inc()
+    _in_progress_tracker[task_id] = {"source": s, "runtime_mode": m}
+
+
+def record_task_dispatched(task_id: str, source: str, runtime_id: int, queue_wait_seconds: float = -1):
+    """任务被 claim/分发时调用。"""
+    s = _normalize_source(source)
+    m = _normalize_mode(_runtime_mode(runtime_id))
+    TASK_DISPATCHED.labels(source=s, runtime_mode=m).inc()
+    if queue_wait_seconds >= 0:
+        TASK_QUEUE_WAIT.labels(source=s, runtime_mode=m).observe(queue_wait_seconds)
+    _in_progress_tracker[task_id] = {"source": s, "runtime_mode": m}
+
+
+def record_task_terminal(task_id: str, source: str, runtime_id: int,
+                         terminal_status: str, run_seconds: float = -1, total_seconds: float = -1):
+    """任务到达终态时调用。"""
+    s = _normalize_source(source)
+    m = _normalize_mode(_runtime_mode(runtime_id))
+    ts = _normalize_terminal(terminal_status)
+    TASK_TERMINAL.labels(source=s, runtime_mode=m, terminal_status=ts).inc()
+    if run_seconds >= 0:
+        TASK_RUN_SECONDS.labels(source=s, runtime_mode=m, terminal_status=ts).observe(run_seconds)
+    if total_seconds >= 0:
+        TASK_TOTAL_SECONDS.labels(source=s, runtime_mode=m, terminal_status=ts).observe(total_seconds)
+    _in_progress_tracker.pop(task_id, None)
+
+
+def record_task_failed(task_id: str, source: str, runtime_id: int, failure_reason: str = ""):
+    """任务失败时调用。"""
+    s = _normalize_source(source)
+    m = _normalize_mode(_runtime_mode(runtime_id))
+    TASK_FAILED.labels(source=s, runtime_mode=m, failure_reason=failure_reason or "unknown").inc()
