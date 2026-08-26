@@ -67,9 +67,9 @@ grape 当前是单实例部署，缺少健康监控、任务取消实时性、�
 
 ## grape 分阶段方案
 
-### 阶段 1：单机增强（零新依赖）
+### 阶段 1：单机增强（零新依赖）——✅ 已完成+验证
 
-**目标：** 加健康监控 + 任务取消实时性 + 前端 Dashboard
+**目标：** 加健康监控 + 任务取消实时性 + 前端 Dashboard + Worker 三级分类
 
 #### 1.1 健康端点（分两层）
 
@@ -311,7 +311,7 @@ System（新增分组）
 
 ---
 
-### 阶段 2：容器化部署（Docker）
+### 阶段 2：容器化部署（Docker）——✅ 已完成+验证
 
 **目标：** Docker 化 backend，支持快速部署和迁移。nginx 不容器化——保留宿主机。
 
@@ -430,11 +430,11 @@ db_setup.py init_database() 加迁移锁：
 
 ---
 
-### 阶段 3：多实例集群（JWT 会话共享 + 可选 Redis）
+### 阶段 3：多实例集群（JWT 会话共享 + 可选 Redis）——✅ 已完成+验证
 
 **目标：** Backend 水平扩展，支持高可用
 
-**基于本地验证结论：** 多实例核心能力（迁移锁/claim/取消感知/负载均衡）已验证通过——不需要 Redis 也能多实例运行。所有状态在 MySQL 共享数据库，实例间不需要通信。
+**基于本地验证结论：** 多实例核心能力（迁移锁/claim/取消感知/负载均衡/JWT 跨实例/token_version 跨实例撤销）已验证通过——不需要 Redis 也能多实例运行。所有状态在 MySQL 共享数据库，实例间不需要通信。
 
 #### 3.1 会话共享（JWT 无状态——必须做）
 
@@ -457,29 +457,62 @@ db_setup.py init_database() 加迁移锁：
 | Agent 任务会话 | 数据库（agent_tasks.runtime_session_id） | 不变 | 不改 |
 
 改动：
-1. `src/api/jwt_utils.py` create_access_token（15分钟）+ create_refresh_token（7天滚动续期）
-2. `src/api/routes/auth.py` login() 返回双 token + POST /auth/refresh 换新 access_token + 滚动续期 refresh_token
-3. `src/api/deps.py` get_current_user() 改为 verify_access_token（不查 _user_tokens）
+1. `src/api/jwt_utils.py` create_access_token（15分钟）+ create_refresh_token（7天滚动 + 30天绝对上限 max_exp）
+2. `src/api/routes/auth.py` login() 返回双 token + POST /auth/refresh 换新 access_token + 滚动续期 refresh_token + OAuth 回调签发双 token + logout token_version+1
+3. `src/api/deps.py` get_current_user() 改为 verify_access_token + token_version 校验
 4. 新增 `JWT_SECRET` 环境变量（所有实例共享）
 5. 新增 `python-jose` 依赖
-6. 前端 api.js：401 时自动 refresh + 重发原请求
+6. 前端 api.js：401 时自动 refresh + Promise 队列防并发 + 多 Tab storage 同步
+7. `src/user/db.py` 新增 get_token_version / increment_token_version
+8. `src/api/db_setup.py` user_accounts DDL + migration 加 token_version 字段
 
 **双 token 机制：**
 
-| token | 有效期 | 用途 | 续期策略 |
-|-------|--------|------|---------|
-| access_token | 15 分钟 | API 请求 | 过期后用 refresh_token 换新 |
-| refresh_token | 7 天 | 换新 access_token | 每次换新时滚动续期（从当前时间重新算 7 天） |
+| token | 有效期 | 用途 | 续期策略 | 存储 |
+|-------|--------|------|---------|------|
+| access_token | 15 分钟 | API 请求 | 过期后用 refresh_token 换新 | localStorage（JS 可读） |
+| refresh_token | 7 天滚动 + 30 天绝对上限 | 换新 access_token | 每次换新时滚动续期 7 天，max_exp 30 天不更新 | HttpOnly cookie（JS 不可读） |
 
-**滚动续期逻辑：**
+**滚动续期 + 绝对上限逻辑：**
 
-用户调 POST /auth/refresh 时，服务端同时返回新的 access_token + 新的 refresh_token。新 refresh_token 过期时间从当前时刻重新算 7 天。
+refresh_token payload 含两个时间字段：
+- `exp`：滚动过期时间（每次 refresh 重新算 now + 7 天）
+- `max_exp`：绝对上限（首次签发时 = now + 30 天，refresh 时继承不更新）
+
+verify 时 4 个条件全通过才有效：签名 + exp + max_exp + token_version
 
 效果：
-- 用户一直操作 → access_token 15分钟过期 → 自动 refresh → 拿到新 access + 新 refresh（续期 7 天）→ 永不踢出
-- 用户 7 天不操作 → refresh_token 过期 → 下次操作时 refresh 失败 → 跳登录页重新登录
+- 用户一直操作 → access_token 15分钟过期 → 自动 refresh → 拿到新 access + 新 refresh（续期 7 天，max_exp 不变）→ 30 天内永不踢出
+- 用户 7 天不操作 → refresh_token exp 过期 → 下次操作时 refresh 失败 → 跳登录页
+- 用户 30 天后 → max_exp 到达 → 即使 exp 没过期也强制登录
 
-前端 api.js refresh 成功后同时更新 localStorage 里的 access_token 和 refresh_token。
+**token_version 撤销机制：**
+
+user_accounts 表有 token_version INT DEFAULT 0 字段。
+- 签发 token 时：JWT payload 写入 ver=当前 token_version
+- 验证 token 时：对比 payload.ver 和数据库 token_version——不匹配则 401
+- logout 时：token_version+1 → 所有旧 token 立即失效（access + refresh）
+- 改密码时：token_version+1 → 同上
+- 攻击者无法伪造：改 ver 需要重新签名，没有 JWT_SECRET 不能签名
+
+**refresh_token HttpOnly cookie + CSRF 保护：**
+
+- refresh_token 存 HttpOnly cookie（HttpOnly + Secure + SameSite=Lax + Path=/api/auth）
+- refresh 端点从 cookie 读 refresh_token（JS 不接触）
+- CSRF 保护：X-Requested-With: XMLHttpRequest header（跨站伪造无法加自定义 header）
+- 业务接口继续用 Bearer header——不需要 CSRF
+
+**并发 401 Promise 队列：**
+
+- 多个请求同时 401 时，第一个创建 _refreshPromise，其他请求 await 同一个 Promise
+- refresh 完成后所有请求用新 token 重发——不丢失请求
+- refresh 本身 401 时队列全部请求跳登录页
+
+**多 Tab 同步：**
+
+- 监听 storage 事件——Tab A 刷新 token 后其他 Tab 自动同步
+- 定位：体验优化不是安全屏障——兜底有 401 + Promise 队列
+- 局限：只同步 access（refresh 在 cookie JS 读不到）
 
 **待优化项（本次一并实施）：**
 
@@ -609,7 +642,9 @@ upstream grape_backend {
 
 | 操作 | 怎么保证 | 验证状态 |
 |------|---------|:---:|
-| 用户会话共享 | JWT 无状态（JWT_SECRET 共享） | 阶段 3 加 |
+| 用户会话共享 | JWT 无状态（JWT_SECRET 共享） | ✅ 已验证 |
+| token_version 跨实例撤销 | 共享数据库 token_version | ✅ 已验证 |
+| refresh 跨实例 | 同一个 JWT_SECRET + 共享 token_version | ✅ 已验证 |
 | 任务不重复 claim | MySQL 行锁 UPDATE WHERE status='queued' | ✅ 已验证 |
 | 任务不重复完成 | UPDATE WHERE status='running' 幂等 | ✅ |
 | 取消通知跨实例 | heartbeat 查 MySQL cancelled_tasks | ✅ 已验证 |
@@ -617,18 +652,30 @@ upstream grape_backend {
 | 心跳不冲突 | UPDATE last_seen_at 幂等 | ✅ |
 | 迁移不冲突 | MySQL GET_LOCK | ✅ 已验证 |
 
+**多集群验证结果（11 项全通过）：**
+- 实例 A 登录的 token 实例 B 能用 ✅
+- 实例 A refresh 的新 token 实例 B 能用 ✅
+- 实例 B logout 后实例 A 的 token 也失效 ✅（token_version 跨实例）
+- 实例 B logout 后实例 A 的 refresh 也失效 ✅
+- 迁移锁两个实例同时启动不冲突 ✅
+
 **改动文件：**
-- src/api/routes/auth.py（JWT 签发）
-- src/api/deps.py（JWT 验证）
-- 新增 JWT_SECRET 环境变量
-- 新增 python-jose 依赖
+- src/api/jwt_utils.py（JWT 签发+验证工具——access/refresh/max_exp/token_version）
+- src/api/routes/auth.py（login/refresh/logout/OAuth——双 token + HttpOnly cookie + token_version+1）
+- src/api/deps.py（get_current_user——verify_access_token + token_version 校验）
+- src/user/db.py（get_token_version / increment_token_version / verify_user 返回 token_version）
+- src/api/db_setup.py（user_accounts DDL + migration 加 token_version）
+- src/api/static/js/api.js（Promise 队列 + refresh 从 cookie + CSRF header + 多 Tab storage 同步）
+- src/api/static/js/app.js（登录/logout 不操作 refresh_token——cookie 管理）
 - .env.example 加 JWT_SECRET
+- requirements.txt 加 python-jose[cryptography]
+- 12 个测试文件适配 JWT（_jwt_access_token helper）
 
 **不需要：** Redis / WebSocket / Redis Stream / docker-compose 加 Redis / nginx 改 upstream（已有）
 
 ---
 
-### 阶段 4：K8s 集群（Helm）
+### 阶段 4：K8s 集群（Helm）——❌ 未开始
 
 **目标：** 生产级 K8s 部署
 
