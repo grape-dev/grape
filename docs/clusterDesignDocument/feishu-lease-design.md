@@ -365,7 +365,7 @@ async def lease_sweep_loop():
 - DB 错误（连接断/查询超时）→ 保持 WebSocket 连接，等 DB 恢复后重试续约
 - CAS 失败（lease 被其他实例抢走）→ release lease + 断开
 
-### 场景验证总结（41 个场景）
+### 场景验证总结（49 个场景）
 
 | # | 场景 | 结果 | 说明 |
 |---|------|:---:|------|
@@ -410,6 +410,14 @@ async def lease_sweep_loop():
 | 39 | nginx 配置变更 | ✅ | lease 自动适应 |
 | 40 | lease_token 安全性 | ✅ | 只是锁令牌不是用户凭证 |
 | 41 | SQL 注入 | ✅ | 参数化查询 |
+| 42 | DB 查询阻塞 asyncio | ✅ | 0.73ms/10s，和现有代码同模式 |
+| 43 | BotContext 内存占用 | ✅ | 700KB/7bot，lease 切换时清理 |
+| 44 | sweep_loop 异常退出 | ⚠️ | 问题 O——加 try-except 保护 |
+| 45 | _seen_msg_ids lease 切换后清理 | ✅ | 共享 DB，新实例重新加载 |
+| 46 | lease_expires_at 时区 | ✅ | UTC_TIMESTAMP() 时区无关 |
+| 47 | 续约时间精度 | ✅ | 1 秒误差 << 20 秒续约间隔 |
+| 48 | chat_bot 和 vod_bot lease 差异 | ✅ | 按 app_id 管理，不关 bot_type |
+| 49 | bot_type 为空或异常 | ✅ | 不匹配走 chat 默认逻辑 |
 
 ### 问题 L：lease 状态变更日志不完整
 
@@ -434,6 +442,24 @@ async def lease_sweep_loop():
 - lease 切换次数（lease_acquired_at 变化次数）
 - 当前每个 bot 的 lease_owner / lease_expires_at / lease_acquired_at
 - 告警后续按需加
+
+### 问题 O：lease_sweep_loop 异常退出没有保护
+
+场景：lease_sweep_loop 如果抛异常（未 catch）→ task 静默退出 → lease 不再续约 → 所有 bot 最终断开。
+
+修复：lease_sweep_loop 加 try-except 包住每轮 sweep——异常时 log error + 继续 sleep + 下一轮重试，不让一个异常杀死整个 sweep 循环。
+
+```python
+async def lease_sweep_loop():
+    while True:
+        try:
+            # 游标分页查询 + try_acquire
+            # 批量续约
+            # 检查 is_active=0 断开
+        except Exception as e:
+            log.error(f"[lease] sweep error: {e}")
+        await asyncio.sleep(sweep_interval)
+```
 
 ### 问题 H：lifespan 关闭顺序
 
