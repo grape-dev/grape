@@ -23,8 +23,6 @@ function renderObservability() {
       <div class="stabs" style="padding:0 20px;border-bottom:1px solid var(--b)">
         <a class="${_obsTab==='overview'?'ac':''}" onclick="switchObsTab('overview',event)">概览</a>
         <a class="${_obsTab==='tasks'?'ac':''}" onclick="switchObsTab('tasks',event)">任务</a>
-        <a class="${_obsTab==='runtimes'?'ac':''}" onclick="switchObsTab('runtimes',event)">Runtime</a>
-        <a class="${_obsTab==='database'?'ac':''}" onclick="switchObsTab('database',event)">数据库</a>
       </div>
       <div id="obsContent" style="padding:20px"><div class="loading">加载中...</div></div>
     </div>
@@ -77,8 +75,6 @@ function renderObsContent() {
     loadOverviewDiagnostics(realOps);
   }
   else if (_obsTab === 'tasks') c.innerHTML = renderTasksTab(realOps, rt, mt);
-  else if (_obsTab === 'runtimes') c.innerHTML = renderRuntimesTab(realOps, rt, mt);
-  else if (_obsTab === 'database') c.innerHTML = renderDatabaseTab(rt, mt);
 }
 
 // ===== KPI 卡片行（仿 multica KpiCard grid）=====
@@ -153,15 +149,13 @@ function renderOverview(ops, rt, mt) {
     ])}
     <div id="obs-anomaly-tasks"></div>
     <div id="obs-a2a-health"></div>
-    <div id="obs-error-logs"></div>
   `;
 }
 
-// 异步加载异常任务、A2A 健康、错误日志
+// 异步加载异常任务、A2A 健康
 function loadOverviewDiagnostics(ops) {
   loadAnomalyTasks(ops);
   loadA2aHealth();
-  loadErrorLogs();
 }
 
 function loadAnomalyTasks(ops) {
@@ -227,30 +221,29 @@ function loadA2aHealth() {
   });
 }
 
-function loadErrorLogs() {
-  const container = document.getElementById('obs-error-logs');
+function loadErrorLogs(container) {
   if (!container) return;
-  container.innerHTML = section('错误日志', '最近 ERROR / WARNING') + '<div class="loading">加载中...</div>';
-  fetch('/api/dashboard/ops/error-logs?limit=50').then(r => r.json()).then(d => {
+  container.innerHTML = '<div class="loading">加载中...</div>';
+  fetch('/api/dashboard/ops/error-logs?limit=100').then(r => r.json()).then(d => {
     const entries = d.entries || [];
     if (!entries.length) {
-      container.innerHTML = section('错误日志') + '<div class="ts t2" style="padding:12px">无错误日志</div>';
+      container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">无错误日志</div>';
       return;
     }
-    let html = section('错误日志', `最近 ${entries.length} 条 ERROR / WARNING`);
-    html += '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.5;border-radius:8px;overflow:hidden;max-height:400px;overflow-y:auto">';
+    let html = `<div style="font-size:11px;color:var(--t3);margin-bottom:8px">${entries.length} 条 ERROR / WARNING（来自 ${d.file || 'devops-bot.log'}）</div>`;
+    html += '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.5;border-radius:8px;overflow:hidden;max-height:70vh;overflow-y:auto">';
     entries.forEach(e => {
       const level = e.level || '';
       const color = level === 'ERROR' ? '#dc2828' : '#d49c0f';
-      const time = (e.ts || '').substring(11,19);
+      const time = (e.ts || '').substring(0,19);
       const rid = e.request_id && e.request_id !== '-' ? ` [${e.request_id}]` : '';
       const extra = e.method ? ` ${e.method} ${e.path||''} ${e.status||''} ${e.duration_ms||0}ms` : '';
-      html += `<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">${time}</span>${rid} <span style="color:${color}"><b>${level}</b></span> <span style="color:#e0e6f0">${(e.message||'').substring(0,200)}</span><span style="color:#8d97a8">${extra}</span></div>`;
+      html += `<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">${time}</span>${rid} <span style="color:${color}"><b>${level}</b></span> <span style="color:#e0e6f0">${(e.message||'').substring(0,300)}</span><span style="color:#8d97a8">${extra}</span></div>`;
     });
     html += '</div>';
     container.innerHTML = html;
   }).catch(e => {
-    container.innerHTML = section('错误日志') + '<div class="error">加载失败: ' + e.message + '</div>';
+    container.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
   });
 }
 
@@ -352,96 +345,7 @@ function renderTasksTab(ops, rt, mt) {
   return html || '<div class="loading">无数据</div>';
 }
 
-// ===== Tab: Runtime =====
-function renderRuntimesTab(ops, rt, mt) {
-  const r = ops.runtimes || {};
-  const list = r.list || [];
-  const onlineLocal = parseLabeledSumByLabel(mt, 'grape_runtime_online', 'mode', 'local');
-  const onlineRemote = parseLabeledSumByLabel(mt, 'grape_runtime_online', 'mode', 'remote');
-
-  let html = '';
-  html += section('Runtime 概览');
-  html += kpiRow([
-    { label: 'Total', value: r.total || 0, color: 'var(--a)' },
-    { label: 'Online', value: r.online || 0, color: 'var(--g)' },
-    { label: 'Offline', value: r.offline || 0, color: 'var(--t3)' },
-    { label: 'Local / Remote', value: `${onlineLocal} / ${onlineRemote}`, color: 'var(--pu)', hint: 'from /metrics' },
-  ]);
-
-  if (list.length > 0) {
-    html += section('引擎列表');
-    html += table(['ID', 'Name', 'Mode', 'Status', 'Health', 'Provider', 'Last Seen'],
-      list.map(e => {
-        const hc = e.health === 'online' ? 'var(--g)' : e.health === 'recently_lost' ? 'var(--or)' : 'var(--t3)';
-        return [
-          e.id,
-          `<b>${e.name}</b>`,
-          `<span class="tg tg-d">${e.mode}</span>`,
-          e.status,
-          `<b style="color:${hc}">${e.health}</b>`,
-          `<span class="ts">${e.provider || '-'}</span>`,
-          `<span class="ts">${e.last_seen_at || '-'}</span>`,
-        ];
-      })
-    );
-  } else {
-    html += section('引擎列表');
-    html += '<div class="loading">无 Runtime 详情（ops/overview 未认证时降级，仅显示汇总数）</div>';
-    // 从 /metrics 补充
-    if (rt.runtimes) {
-      html += table(['指标', '值'],
-        [['Total', rt.runtimes.total || 0], ['Online', rt.runtimes.online || 0]]
-      );
-    }
-  }
-
-  return html;
-}
-
-// ===== Tab: 数据库 =====
-function renderDatabaseTab(rt, mt) {
-  const db = parseMetrics(mt, [
-    'grape_db_threads_connected', 'grape_db_threads_running', 'grape_db_threads_cached',
-    'grape_db_threads_created_total', 'grape_db_max_used_connections', 'grape_db_aborted_connects_total',
-  ]);
-
-  const connected = db['grape_db_threads_connected'] || 0;
-  const maxUsed = db['grape_db_max_used_connections'] || 1;
-  const usagePct = maxUsed > 0 ? Math.round(connected / maxUsed * 100) : 0;
-  const usageColor = usagePct > 80 ? 'var(--r)' : usagePct > 60 ? 'var(--y)' : 'var(--g)';
-
-  let html = '';
-  html += section('MySQL 连接');
-  html += kpiRow([
-    { label: 'Threads Connected', value: connected, color: 'var(--a)' },
-    { label: 'Threads Running', value: db['grape_db_threads_running'] || 0, color: (db['grape_db_threads_running']||0) > 5 ? 'var(--r)' : 'var(--g)' },
-    { label: 'Threads Cached', value: db['grape_db_threads_cached'] || 0, color: 'var(--t3)' },
-    { label: 'Max Used', value: maxUsed, color: 'var(--y)' },
-  ]);
-  html += kpiRow([
-    { label: 'Threads Created', value: fmtNum(db['grape_db_threads_created_total'] || 0), color: 'var(--pu)' },
-    { label: 'Aborted Connects', value: db['grape_db_aborted_connects_total'] || 0, color: (db['grape_db_aborted_connects_total']||0) > 5 ? 'var(--r)' : 'var(--t3)' },
-  ]);
-
-  html += section('连接使用率', `${connected}/${maxUsed}`);
-  html += `<div style="background:var(--bg);border-radius:8px;padding:4px;margin-bottom:16px"><div style="height:24px;border-radius:6px;background:${usageColor};width:${Math.min(usagePct,100)}%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;transition:width .3s">${usagePct}%</div></div>`;
-
-  if (rt.tasks) {
-    html += section('任务队列快照', 'from /health/realtime');
-    html += table(['Status', 'Count'],
-      Object.entries(rt.tasks).map(([k, v]) => [`<b>${k}</b>`, v])
-    );
-  }
-  html += section('Runtime 快照');
-  html += kpiRow([
-    { label: 'Total', value: rt.runtimes ? rt.runtimes.total : 0, color: 'var(--a)' },
-    { label: 'Online', value: rt.runtimes ? rt.runtimes.online : 0, color: 'var(--g)' },
-    { label: 'In Progress', value: rt.in_progress || 0, color: 'var(--pu)' },
-    { label: 'IM Connected', value: rt.im ? `${rt.im.connected}/${rt.im.total_bots}` : '0/0', color: 'var(--sk)' },
-  ]);
-
-  return html;
-}
+// ===== 辅助函数 =====
 
 // ===== 降级 ops =====
 function fallbackOps(realtime) {
