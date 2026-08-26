@@ -498,12 +498,14 @@ upstream grape_backend {
 | 用户会话共享 | JWT 无状态（JWT_SECRET 共享） | ✅ 已验证 |
 | token_version 跨实例撤销 | 共享数据库 token_version | ✅ 已验证 |
 | refresh 跨实例 | 同一个 JWT_SECRET + 共享 token_version | ✅ 已验证 |
+| OAuth state 跨实例 | 共享 MySQL oauth_states 表（从进程内存改为 DB 存储） | ✅ 已验证 |
 | 任务不重复 claim | MySQL 行锁 UPDATE WHERE status='queued' | ✅ 已验证 |
 | 任务不重复完成 | UPDATE WHERE status='running' 幂等 | ✅ |
 | 取消通知跨实例 | heartbeat 查 MySQL cancelled_tasks | ✅ 已验证 |
 | webhook 不重复 | nginx 随机打一个实例 | ✅ |
 | 心跳不冲突 | UPDATE last_seen_at 幂等 | ✅ |
 | 迁移不冲突 | MySQL GET_LOCK | ✅ 已验证 |
+| lease 跨实例 | 共享 MySQL lease_token CAS（飞书 Bot Lease） | ✅ 已验证 |
 
 **多集群验证结果（全部通过）：**
 
