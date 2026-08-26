@@ -175,9 +175,7 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
-    # 主动探测：检查托管仓库在 GitCode 上是否还存在（并发，短超时）
-    # 只检查 404（仓库已删除），不查 webhook（并发场景下 GitCode 限流返回空列表会误判）
-    _probe_stale_repos(api_token, user["id"])
+    # 探活已迁移到 /repos/sync（手动刷新按钮），避免每次进大堂阻塞 2-3 秒
 
     # 优先读取 DB 缓存（未过期）
     cached = user_db.get_user_repos(user["id"])
@@ -211,10 +209,12 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
 
 @router.post("/sync")
 async def sync_repos(user: dict = Depends(get_current_user)):
-    """手动从 GitCode 同步仓库列表，刷新 user_repos 缓存"""
+    """手动从 GitCode 同步仓库列表，刷新 user_repos 缓存，并探活清理失效托管记录"""
     api_token = get_user_token(user["username"])
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+
+    _probe_stale_repos(api_token, user["id"])
 
     try:
         repos = _fetch_and_cache(user["id"], api_token)

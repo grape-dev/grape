@@ -220,8 +220,17 @@ class FeishuAsync:
 
     # ── WS Endpoint ────────────────────────────────────────
 
-    async def get_ws_endpoint(self, ctx: BotContext) -> str:
-        """获取飞书 WebSocket 动态端点 URL"""
+    # WS endpoint 永久失败错误码（凭证无效/App 不存在，重试无意义）
+    _WS_PERMANENT_ERROR_CODES = frozenset({10002, 10014, 10003})  # app not found / secret invalid / app disabled
+
+    async def get_ws_endpoint(self, ctx: BotContext) -> tuple[str, int]:
+        """获取飞书 WebSocket 动态端点 URL。
+
+        返回 (url, error_code)。error_code=0 表示成功，非0 表示飞书 API 错误码。
+        - 10014 = app secret invalid（永久失效）
+        - 10002 = app not found（永久失效）
+        - 其他 = 临时/未知
+        """
         session = await self._get_session()
         payload = {"AppID": ctx.app_id, "AppSecret": ctx.app_secret}
         try:
@@ -230,13 +239,15 @@ class FeishuAsync:
                 headers={"User-Agent": "devops-bot/2.0"},
             ) as resp:
                 data = await resp.json()
-                if data.get("code") == 0:
-                    return data.get("data", {}).get("URL", "")
-                ctx.metrics.last_error = f"endpoint api error: code={data.get('code')}"
+                code = data.get("code", 0)
+                if code == 0:
+                    return data.get("data", {}).get("URL", ""), 0
+                ctx.metrics.last_error = f"endpoint api error: code={code}"
+                return "", code
         except Exception as e:
             ctx.metrics.last_error = f"endpoint error: {e}"
             log.warning(f"[{ctx.name}] endpoint error: {e}")
-        return ""
+        return "", -1
 
     # ── Message Send ───────────────────────────────────────
 
@@ -639,6 +650,20 @@ def _parse_event(event_data: dict) -> dict | None:
 
 # ── 单Bot WS 协程 ─────────────────────────────────────────
 
+async def _disable_bot(app_id: str):
+    """永久停用 Bot（凭证失效/App 不存在），写入 DB is_active=0 防止重启后重载"""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE global_im_bot_config SET is_active=0 WHERE bot_app_id=?", (app_id,))
+            if c.rowcount > 0:
+                db.commit()
+                log.info(f"BotManager: disabled bot {app_id}")
+    except Exception as e:
+        log.warning(f"BotManager: disable bot {app_id} failed: {e}")
+
+
 async def run_bot(ctx: BotContext, api: FeishuAsync,
                   on_message: Callable[[BotContext, dict], Awaitable[None]]):
     """单Bot的WS连接主协程 — 完整生命周期：鉴权→获取端点→连接→接收→重连
@@ -665,8 +690,17 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
         try:
             ctx.state = BotState.CONNECTING
 
-            ws_url = await api.get_ws_endpoint(ctx)
+            ws_url, err_code = await api.get_ws_endpoint(ctx)
             if not ws_url:
+                if err_code in FeishuAsync._WS_PERMANENT_ERROR_CODES:
+                    log.warning(f"[{ctx.name}] permanent WS failure (code={err_code}), disabling bot")
+                    try:
+                        ctx.metrics.last_error = f"permanent failure: code={err_code}, bot disabled"
+                        await _disable_bot(ctx.app_id)
+                    except Exception:
+                        pass
+                    ctx._running = False
+                    break
                 log.warning(f"[{ctx.name}] no ws endpoint, retry in {delay:.0f}s")
                 ctx.state = BotState.RECONNECTING
                 await asyncio.sleep(delay)
