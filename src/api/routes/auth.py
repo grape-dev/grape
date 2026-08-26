@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import get_current_user
-from src.config import log
+from src.config import log, COOKIE_SECURE
 import hashlib, os, time
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -27,7 +27,7 @@ def _set_refresh_cookie(response: Response, refresh_token: str):
         key=_COOKIE_NAME,
         value=refresh_token,
         httponly=True,
-        secure=False,  # TODO: 生产环境改 True（需 HTTPS）
+        secure=COOKIE_SECURE,  # 环境变量控制：生产 HTTPS true / 开发 HTTP false
         samesite="strict",
         path=_COOKIE_PATH,
         max_age=_COOKIE_MAX_AGE,
