@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     gitcode_publish_repo TEXT DEFAULT '',
     github_publish_repo TEXT DEFAULT '',
     password TEXT DEFAULT '',
+    token_version INTEGER DEFAULT 0,  -- JWT 撤销版本号——改密码/logout 时 +1
     created_by INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 )
@@ -106,13 +107,33 @@ def update_password(user_id: int, new_password: str) -> bool:
 
 
 def verify_user(username: str, password: str) -> dict | None:
-    """验证用户名密码，成功返回用户信息，失败返回 None"""
+    """验证用户名密码，成功返回用户信息（含 token_version），失败返回 None"""
     user = get_user_by_username(username)
     if not user:
         return None
     if user["password_hash"] != _hash_password(password):
         return None
-    return {"id": user["id"], "username": user["username"], "created_by": user["created_by"], "created_at": user["created_at"]}
+    token_version = get_token_version(user["id"])
+    return {"id": user["id"], "username": user["username"], "created_by": user["created_by"], "created_at": user["created_at"], "token_version": token_version}
+
+
+# ====== JWT token_version 管理 ======
+
+def get_token_version(user_id: int) -> int:
+    """获取用户的 token_version——JWT verify 时对比，不匹配则 token 失效"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT token_version FROM user_accounts WHERE id=?", (user_id,))
+        row = c.fetchone()
+    return (row[0] if row and row[0] is not None else 0)
+
+
+def increment_token_version(user_id: int) -> None:
+    """token_version+1——改密码/logout 时调用，使所有旧 token 失效"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE user_accounts SET token_version=token_version+1 WHERE id=?", (user_id,))
+        db.commit()
 
 
 # ====== Token 管理 ======

@@ -10,21 +10,27 @@ TOKEN_TYPE_WEBHOOK = "webhook"
 def get_current_user(authorization: str = Header(None)) -> dict:
     """从 Authorization: Bearer *** 提取并验证 JWT access token。
 
-    JWT 无状态验证——不查 _user_tokens、不查数据库。
+    JWT 无状态验证——签名+过期在 jwt_utils 验证。
+    token_version 对比数据库——改密码/logout 后旧 token 失效。
     任何实例都能验证（集群会话共享）。
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail={"code": 401, "message": "未登录"})
     token = authorization.replace("Bearer ", "").strip()
-    # JWT access token 验证——无状态，任何实例都能验证
+    # JWT access token 验证——签名+过期
     from src.api.jwt_utils import verify_access_token
     payload = verify_access_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "会话过期"})
     uid = int(payload.get("sub", 0))
     username = payload.get("username", "")
+    token_ver = int(payload.get("ver", 0))
     if not uid:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "用户不存在"})
+    # token_version 校验——改密码/logout 后 +1，旧 token 失效
+    db_ver = user_db.get_token_version(uid)
+    if token_ver != db_ver:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "会话已失效"})
     return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_USER}
 
 

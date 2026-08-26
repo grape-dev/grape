@@ -371,7 +371,7 @@ function loadAgentTypes() {
     if (!u || !p) return showToast('请输入用户名和密码');
     API.post('/auth/login', {username: u, password: p}).then(d => {
       localStorage.setItem('token', d.token);
-      if (d.refresh_token) localStorage.setItem('refresh_token', d.refresh_token);
+      // refresh_token 在 HttpOnly cookie 里——不需要存 localStorage
       localStorage.setItem('user', JSON.stringify(d.user));
       showApp();
     }).catch(e => showToast('登录失败: ' + e.message));
@@ -381,8 +381,8 @@ function loadAgentTypes() {
     API.post('/auth/logout', {}).catch(() => {});
     // 保留 currentRepo（记录上次选择的仓库），下次登录恢复；只清登录态
     localStorage.removeItem('token');
-    localStorage.removeItem('refresh_token');
     localStorage.removeItem('user');
+    // refresh_token cookie 由服务端 logout 清除
     showLogin();
   }
 
@@ -430,11 +430,9 @@ function loadAgentTypes() {
     if (localStorage.getItem('app_cache_ver') !== '5') {
       const oldRepo = localStorage.getItem('currentRepo');
       const oldToken = localStorage.getItem('token');
-      const oldRefresh = localStorage.getItem('refresh_token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
-      if (oldRefresh) localStorage.setItem('refresh_token', oldRefresh);
       if (oldUser) localStorage.setItem('user', oldUser);
       if (oldRepo) localStorage.setItem('currentRepo', oldRepo);
       localStorage.setItem('app_cache_ver', '5');

@@ -12,7 +12,8 @@ from src.session_manager import db, db_lock
 
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    return create_access_token(user_id, username)
+    from src.user.db import get_token_version
+    return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
 
@@ -129,8 +130,14 @@ class TestAuth:
         r = client.post("/api/auth/logout", headers=_headers)
         assert r.status_code == 200
         r2 = client.get("/api/auth/profile", headers=_headers)
-        assert r2.status_code == 200  # JWT 无状态，logout 后 token 仍有效
+        assert r2.status_code == 401  # logout 后 token_version+1 → token 失效
+        # logout 后 token_version+1——需要用新版本重新生成 token
+        from src.user.db import get_token_version
+        _new_ver = get_token_version(_uid["id"])
         _token = _jwt_access_token(_uid["id"], _uid["username"])
+        # _jwt_access_token 默认 ver=0——logout 后需要 ver=新版本
+        from src.api.jwt_utils import create_access_token
+        _token = create_access_token(_uid["id"], _uid["username"], _new_ver)
         _headers = {"Authorization": f"Bearer {_token}"}
 
     def test_oauth_gitcode_url(self):

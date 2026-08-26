@@ -1009,6 +1009,8 @@ def _migrate_tables():
         # Worker 三级分类——repo_key 字段（scope=user 时关联项目）
         "ALTER TABLE runtime_credentials ADD COLUMN repo_key TEXT DEFAULT NULL",
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key TEXT DEFAULT NULL",
+        # JWT 撤销——token_version 字段（改密码/logout 时 +1）
+        "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
     ]
     for sql in migrations:
         try:

@@ -25,7 +25,8 @@ from src.session_manager import db, db_lock
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    return create_access_token(user_id, username)
+    from src.user.db import get_token_version
+    return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
 

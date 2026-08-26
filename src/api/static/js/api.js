@@ -46,7 +46,7 @@ function renderMarkdown(text) {
 
 const API = (() => {
   const BASE = '/api';
-  let _refreshing = false;  // 防止并发 refresh
+  let _refreshPromise = null;  // 并发 refresh 时所有请求等待同一个 Promise
 
   function headers() {
     const h = {'Content-Type': 'application/json'};
@@ -55,38 +55,41 @@ const API = (() => {
     return h;
   }
 
-  // 用 refresh_token 换新的 access_token
+  // 用 refresh_token 换新的 access_token（滚动续期）
+  // refresh_token 从 HttpOnly cookie 自动发送——JS 不需要读
+  // 并发 401 时所有请求等待同一个 Promise——避免重复 refresh
   function doRefresh() {
-    if (_refreshing) return Promise.reject(new Error('refresh in progress'));
-    const refreshToken = localStorage.getItem('refresh_token');
-    if (!refreshToken) return Promise.reject(new Error('no refresh token'));
-    _refreshing = true;
-    return fetch(BASE + '/auth/refresh', {
+    if (_refreshPromise) return _refreshPromise;
+    _refreshPromise = fetch(BASE + '/auth/refresh', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({refresh_token: refreshToken})
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',  // CSRF 保护——跨站伪造无法加自定义 header
+      },
+      credentials: 'same-origin',  // 自动带 HttpOnly cookie 里的 refresh_token
     }).then(r => {
-      _refreshing = false;
       if (!r.ok) throw new Error('refresh failed');
       return r.json();
     }).then(d => {
       if (d.token) {
         localStorage.setItem('token', d.token);
+        // refresh_token 在 HttpOnly cookie 里自动更新——JS 不需要接触
         return d.token;
       }
       throw new Error('no token in refresh response');
     }).catch(e => {
-      _refreshing = false;
       throw e;
+    }).finally(() => {
+      _refreshPromise = null;
     });
+    return _refreshPromise;
   }
 
   // 401 时尝试 refresh，成功后重发原请求
   function handle401(retryFn) {
     return doRefresh().then(() => retryFn()).catch(() => {
-      // refresh 也失败——清 token 跳登录
+      // refresh 也失败——清 token 跳登录（refresh_token cookie 由服务端清除）
       localStorage.removeItem('token');
-      localStorage.removeItem('refresh_token');
       localStorage.removeItem('user');
       if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
       throw new Error('会话过期，请重新登录');
@@ -95,14 +98,13 @@ const API = (() => {
 
   function handleResp(r, retryFn) {
     if (!r.ok) {
-      if (r.status === 401 && retryFn && localStorage.getItem('refresh_token')) {
-        // 有 refresh_token——尝试刷新后重发
+      if (r.status === 401 && retryFn) {
+        // 尝试 refresh（refresh_token 在 HttpOnly cookie 里自动带）
         return handle401(retryFn);
       }
       if (r.status === 401) {
-        // 没有 refresh_token——直接跳登录
+        // 没有 retryFn——直接跳登录
         localStorage.removeItem('token');
-        localStorage.removeItem('refresh_token');
         localStorage.removeItem('user');
         if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
       }
@@ -155,7 +157,6 @@ const API = (() => {
             if (xhr.status === 401) {
               // upload 401 不自动 refresh——直接跳登录
               localStorage.removeItem('token');
-              localStorage.removeItem('refresh_token');
               localStorage.removeItem('user');
               if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
             }

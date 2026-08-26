@@ -8,13 +8,15 @@ Access Token：
   - 过期后用 refresh_token 换新的
 
 Refresh Token：
-  - 长有效期（7 天）
+  - 长有效期（7 天，滚动续期）
   - 只用于 POST /auth/refresh 换新的 access_token
+  - 存 HttpOnly cookie——XSS 偷不到
   - 过期后需重新登录
 
 主动撤销：
   - refresh_token 里存 token_version
-  - 改密码时 token_version + 1 → 旧 refresh_token 版本不匹配 → 失效
+  - 改密码/logout 时 token_version + 1 → 旧 token 版本不匹配 → 失效
+  - verify 时需要对比数据库的 token_version（在 deps.py/auth.py 里做）
 """
 import os
 import time
@@ -65,7 +67,11 @@ def create_refresh_token(user_id: int, username: str, token_version: int = 0) ->
 
 
 def verify_access_token(token: str) -> dict | None:
-    """验证 access token——返回 payload 或 None。"""
+    """验证 access token——返回 payload 或 None。
+
+    只验证签名和过期——不查数据库。
+    token_version 校验在 deps.py 里做（对比数据库）。
+    """
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access":
@@ -76,7 +82,11 @@ def verify_access_token(token: str) -> dict | None:
 
 
 def verify_refresh_token(token: str) -> dict | None:
-    """验证 refresh token——返回 payload 或 None。"""
+    """验证 refresh token——返回 payload 或 None。
+
+    只验证签名和过期——不查数据库。
+    token_version 校验在 auth.py refresh 端点里做（对比数据库）。
+    """
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "refresh":
