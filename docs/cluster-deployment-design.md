@@ -505,12 +505,50 @@ upstream grape_backend {
 | 心跳不冲突 | UPDATE last_seen_at 幂等 | ✅ |
 | 迁移不冲突 | MySQL GET_LOCK | ✅ 已验证 |
 
-**多集群验证结果（11 项全通过）：**
+**多集群验证结果（全部通过）：**
+
+JWT 跨实例验证（11 项）：
 - 实例 A 登录的 token 实例 B 能用 ✅
 - 实例 A refresh 的新 token 实例 B 能用 ✅
 - 实例 B logout 后实例 A 的 token 也失效 ✅（token_version 跨实例）
 - 实例 B logout 后实例 A 的 refresh 也失效 ✅
 - 迁移锁两个实例同时启动不冲突 ✅
+
+容器化集群验证（15 项）：
+- 两个容器实例只启动 3000（不启动 8080）✅
+- JWT 跨容器验证 ✅
+- token_version 跨容器撤销 ✅
+- Worker 跨容器注册/心跳/claim ✅
+- webhook 在 main:app 里（每个容器都有）✅
+- Docker healthcheck 端点正常 ✅
+- 迁移锁防多容器同时迁移 ✅
+- nginx 负载均衡 ✅
+
+实例切换验证（A↔B 互切）：
+- A 启动→停 B→Worker 自动转 A→任务不中断 ✅
+- B 启动→停 A→Worker 自动转 B→任务不中断 ✅
+- Worker 走 nginx 80→实例停了自动转→无感知 ✅
+- Issue #24 任务在实例切换过程中继续执行 ✅
+
+**Worker 连接方式（重要）：**
+
+Worker 必须连 nginx 80（负载均衡），不能直连某个实例：
+```
+RUNTIME_SERVER_URL=http://127.0.0.1:80  （或 http://公网IP）
+```
+- 直连某个实例（如 3001）→ 该实例停了 Worker 无法重连
+- 连 nginx 80 → 实例停了 nginx 自动转 → Worker 自动重连
+
+**10 分钟宕机数据丢失分析：**
+
+| 数据 | 会丢吗 | 说明 |
+|------|:---:|------|
+| 任务状态 | ❌ 不丢 | 在共享 MySQL |
+| queued 任务 | ❌ 不丢 | 在共享 MySQL |
+| 正在执行的任务 | ❌ 不中断 | Worker 进程没停，引擎继续执行 |
+| Worker 本地日志 | ❌ 不丢 | /tmp/worker.log 继续写 |
+| heartbeat | ❌ 不丢 | 恢复后继续 |
+| step 日志 | ⚠️ 可能丢部分 | report_messages 失败的日志丢失（retries 3 次后丢弃） |
 
 **改动文件：**
 - src/api/jwt_utils.py（JWT 签发+验证工具——access/refresh/max_exp/token_version）
