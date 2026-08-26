@@ -1,6 +1,20 @@
-"""JWT 工具——签发和验证无状态会话 token。
+"""JWT 工具——双 token 机制（access + refresh）。
 
 集群多实例共享：所有实例配同一个 JWT_SECRET 环境变量。
+
+Access Token：
+  - 短有效期（15 分钟）
+  - 用于 API 请求 Authorization: Bearer header
+  - 过期后用 refresh_token 换新的
+
+Refresh Token：
+  - 长有效期（7 天）
+  - 只用于 POST /auth/refresh 换新的 access_token
+  - 过期后需重新登录
+
+主动撤销：
+  - refresh_token 里存 token_version
+  - 改密码时 token_version + 1 → 旧 refresh_token 版本不匹配 → 失效
 """
 import os
 import time
@@ -10,7 +24,10 @@ from jose import jwt, JWTError
 _DEFAULT_SECRET = "grape-dev-secret-change-in-production"
 JWT_SECRET = os.environ.get("JWT_SECRET", _DEFAULT_SECRET)
 JWT_ALGORITHM = "HS256"
-JWT_TTL = 86400  # 24 小时（秒）
+
+# 过期时间
+ACCESS_TOKEN_TTL = 15 * 60       # 15 分钟
+REFRESH_TOKEN_TTL = 7 * 24 * 3600  # 7 天
 
 # 已知不安全的默认值——生产环境拒绝启动
 _INSECURE_SECRETS = {"", _DEFAULT_SECRET, "change-me-in-production"}
@@ -21,24 +38,49 @@ def validate_jwt_secret() -> bool:
     return JWT_SECRET not in _INSECURE_SECRETS
 
 
-def create_jwt_token(user_id: int, username: str) -> str:
-    """签发 JWT token——含 user_id + username + 过期时间。"""
+def create_access_token(user_id: int, username: str, token_version: int = 0) -> str:
+    """签发 access token——短有效期（15 分钟），用于 API 请求。"""
     payload = {
         "sub": str(user_id),
         "username": username,
+        "type": "access",
+        "ver": token_version,
         "iat": int(time.time()),
-        "exp": int(time.time()) + JWT_TTL,
+        "exp": int(time.time()) + ACCESS_TOKEN_TTL,
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def verify_jwt_token(token: str) -> dict | None:
-    """验证 JWT token——返回 payload 或 None。
+def create_refresh_token(user_id: int, username: str, token_version: int = 0) -> str:
+    """签发 refresh token——长有效期（7 天），用于刷新 access token。"""
+    payload = {
+        "sub": str(user_id),
+        "username": username,
+        "type": "refresh",
+        "ver": token_version,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + REFRESH_TOKEN_TTL,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-    任何实例都能验证——不需要查数据库、不查进程内内存。
-    """
+
+def verify_access_token(token: str) -> dict | None:
+    """验证 access token——返回 payload 或 None。"""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            return None
+        return payload
+    except JWTError:
+        return None
+
+
+def verify_refresh_token(token: str) -> dict | None:
+    """验证 refresh token——返回 payload 或 None。"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "refresh":
+            return None
         return payload
     except JWTError:
         return None

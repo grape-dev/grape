@@ -46,6 +46,7 @@ function renderMarkdown(text) {
 
 const API = (() => {
   const BASE = '/api';
+  let _refreshing = false;  // 防止并发 refresh
 
   function headers() {
     const h = {'Content-Type': 'application/json'};
@@ -54,10 +55,54 @@ const API = (() => {
     return h;
   }
 
-  function handleResp(r) {
+  // 用 refresh_token 换新的 access_token
+  function doRefresh() {
+    if (_refreshing) return Promise.reject(new Error('refresh in progress'));
+    const refreshToken = localStorage.getItem('refresh_token');
+    if (!refreshToken) return Promise.reject(new Error('no refresh token'));
+    _refreshing = true;
+    return fetch(BASE + '/auth/refresh', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({refresh_token: refreshToken})
+    }).then(r => {
+      _refreshing = false;
+      if (!r.ok) throw new Error('refresh failed');
+      return r.json();
+    }).then(d => {
+      if (d.token) {
+        localStorage.setItem('token', d.token);
+        return d.token;
+      }
+      throw new Error('no token in refresh response');
+    }).catch(e => {
+      _refreshing = false;
+      throw e;
+    });
+  }
+
+  // 401 时尝试 refresh，成功后重发原请求
+  function handle401(retryFn) {
+    return doRefresh().then(() => retryFn()).catch(() => {
+      // refresh 也失败——清 token 跳登录
+      localStorage.removeItem('token');
+      localStorage.removeItem('refresh_token');
+      localStorage.removeItem('user');
+      if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+      throw new Error('会话过期，请重新登录');
+    });
+  }
+
+  function handleResp(r, retryFn) {
     if (!r.ok) {
+      if (r.status === 401 && retryFn && localStorage.getItem('refresh_token')) {
+        // 有 refresh_token——尝试刷新后重发
+        return handle401(retryFn);
+      }
       if (r.status === 401) {
+        // 没有 refresh_token——直接跳登录
         localStorage.removeItem('token');
+        localStorage.removeItem('refresh_token');
         localStorage.removeItem('user');
         if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
       }
@@ -71,11 +116,24 @@ const API = (() => {
     return r.json();
   }
 
+  function _get(path) {
+    return fetch(BASE + path, {headers: headers()}).then(r => handleResp(r, () => _get(path)));
+  }
+  function _post(path, body) {
+    return fetch(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}).then(r => handleResp(r, () => _post(path, body)));
+  }
+  function _put(path, body) {
+    return fetch(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}).then(r => handleResp(r, () => _put(path, body)));
+  }
+  function _del(path) {
+    return fetch(BASE + path, {method: 'DELETE', headers: headers()}).then(r => handleResp(r, () => _del(path)));
+  }
+
   return {
-    get: (path) => fetch(BASE + path, {headers: headers()}).then(handleResp),
-    post: (path, body) => fetch(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}).then(handleResp),
-    put: (path, body) => fetch(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}).then(handleResp),
-    del: (path) => fetch(BASE + path, {method: 'DELETE', headers: headers()}).then(handleResp),
+    get: _get,
+    post: _post,
+    put: _put,
+    del: _del,
     upload: (path, formData, onUploadProgress) => {
       const token = localStorage.getItem('token');
       return new Promise((resolve, reject) => {
@@ -83,7 +141,7 @@ const API = (() => {
         xhr.open('POST', BASE + path);
         if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
         xhr.upload.onprogress = (e) => {
-          if (onUploadProgress && e.lengthComputable) {
+          if (onUploadProgress && e.lengthcomputable) {
             onUploadProgress(Math.round((e.loaded / e.total) * 100));
           }
         };
@@ -95,7 +153,9 @@ const API = (() => {
             resolve(json || {message: resp});
           } else {
             if (xhr.status === 401) {
+              // upload 401 不自动 refresh——直接跳登录
               localStorage.removeItem('token');
+              localStorage.removeItem('refresh_token');
               localStorage.removeItem('user');
               if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
             }

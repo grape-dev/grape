@@ -20,13 +20,39 @@ async def password_login(body: PasswordLogin):
     user = user_db.verify_user(body.username, body.password)
     if not user:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "用户名或密码错误"})
-    # JWT 无状态 token——任何实例都能验证（集群会话共享）
-    from src.api.jwt_utils import create_jwt_token
-    token = create_jwt_token(user["id"], user["username"])
+    # JWT 双 token——access（15分钟）+ refresh（7天）
+    from src.api.jwt_utils import create_access_token, create_refresh_token
+    token_version = 0  # TODO: 从 user_accounts.token_version 读（主动撤销用）
+    access_token = create_access_token(user["id"], user["username"], token_version)
+    refresh_token = create_refresh_token(user["id"], user["username"], token_version)
     return {
-        "token": token,
+        "token": access_token,
+        "refresh_token": refresh_token,
         "user": {"id": user["id"], "username": user["username"]}
     }
+
+
+@router.post("/refresh")
+async def refresh_token(body: dict):
+    """用 refresh_token 换新的 access_token。
+
+    前端 access_token 过期（401）时自动调这个接口。
+    refresh_token 也过期则返回 401——前端跳登录页。
+    """
+    refresh = (body.get("refresh_token") or "").strip()
+    if not refresh:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "缺少 refresh_token"})
+    from src.api.jwt_utils import verify_refresh_token, create_access_token
+    payload = verify_refresh_token(refresh)
+    if not payload:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "refresh_token 过期或无效"})
+    uid = int(payload.get("sub", 0))
+    username = payload.get("username", "")
+    token_version = payload.get("ver", 0)
+    if not uid:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "用户不存在"})
+    new_access_token = create_access_token(uid, username, token_version)
+    return {"token": new_access_token}
 
 
 @router.get("/login/gitcode")
@@ -168,6 +194,6 @@ async def get_profile(user: dict = Depends(get_current_user)):
 
 
 @router.post("/logout")
-async def logout(user: dict = Depends(get_current_user)):
-    user_db.clear_token(user["token"])
+async def logout():
+    """登出——JWT 无状态，前端删 token 即可。"""
     return {"message": "已登出"}
