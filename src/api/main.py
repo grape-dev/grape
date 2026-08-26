@@ -134,6 +134,19 @@ metrics_middleware(app)
 if metrics_enabled():
     start_metrics_server()
 
+# 可观察性：request_id 中间件（参考 multica middleware/request_logger.go）
+# 为每个请求注入 X-Request-ID，贯穿日志 + 响应头
+import uuid as _uuid
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    rid = request.headers.get("X-Request-ID") or _uuid.uuid4().hex[:12]
+    request.scope["request_id"] = rid
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = rid
+    return response
+
 app.include_router(auth.router)
 app.include_router(repos.router)
 app.include_router(dashboard.router)
@@ -177,15 +190,108 @@ _load_accounts()
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     from src.config import log
-    log.warning(f"API error: {exc}")
-    return JSONResponse(status_code=500, content={"code": 500, "message": str(exc)})
+    rid = request.scope.get("request_id", "-")
+    log.warning(f"[{rid}] API error: {exc}")
+    return JSONResponse(status_code=500, content={"code": 500, "message": str(exc), "request_id": rid})
 
+
+# ===== 三层健康检查（参考 multica health.go）=====
 
 @app.get("/health")
 async def health():
-    result = {"status": "ok", "version": "2.0.0"}
+    """Liveness：进程存活，不检查 DB。
+
+    K8s livenessProbe 用此端点。DB 挂了不应导致 pod 重启，只标记 NotReady。
+    """
+    import os
+    return {
+        "status": "ok",
+        "version": "2.0.0",
+        "pid": os.getpid(),
+    }
+
+
+@app.get("/healthz")
+@app.get("/readyz")
+async def readiness():
+    """Readiness：检查 DB 连通 + 表结构完整性。
+
+    K8s readinessProbe / startupProbe 用此端点。
+    """
+    from src.session_manager import db, db_lock
+    checks = {"db": "ok", "tables": "ok"}
+    status = "ok"
+    http_status = 200
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT 1")
+            c.fetchone()
+    except Exception as e:
+        checks["db"] = f"error: {e}"
+        checks["tables"] = "unknown"
+        status = "not_ready"
+        http_status = 503
+    else:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT COUNT(*) FROM agent_tasks")
+                c.fetchone()
+        except Exception:
+            checks["tables"] = "error: agent_tasks missing"
+            status = "not_ready"
+            http_status = 503
+    return JSONResponse(
+        status_code=http_status,
+        content={"status": status, "checks": checks},
+    )
+
+
+@app.get("/health/realtime")
+async def health_realtime():
+    """运维诊断：暴露 IM bot 状态、任务队列深度、runtime 在线数。
+
+    参考 multica /health/realtime（health_realtime.go）。
+    生产环境建议通过反向代理限制访问（仅 loopback 或 REALTIME_METRICS_TOKEN）。
+    """
+    from src.session_manager import db, db_lock
+    from src.runtime.health import derive_runtime_health
+    import time as _time, os as _os
+
+    now_ts = _time.time()
+    result = {
+        "status": "ok",
+        "version": "2.0.0",
+        "pid": _os.getpid(),
+    }
+
+    # IM bot 状态
     if bot_manager:
         result["im"] = bot_manager.health_check()
+
+    # 任务队列实时快照
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT status, COUNT(*) FROM agent_tasks GROUP BY status")
+            result["tasks"] = {r[0]: r[1] for r in c.fetchall()}
+
+            c.execute("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('dispatched','running')")
+            result["in_progress"] = c.fetchone()[0]
+
+            c.execute("SELECT status, last_seen_at, credential_id FROM agent_runtimes")
+            online = 0
+            total = 0
+            for r in c.fetchall():
+                total += 1
+                h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
+                if h == "online":
+                    online += 1
+            result["runtimes"] = {"total": total, "online": online}
+    except Exception as e:
+        result["db_error"] = str(e)
+
     return result
 
 
