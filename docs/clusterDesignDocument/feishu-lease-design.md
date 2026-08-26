@@ -6,16 +6,24 @@
 
 ## 一、DB 变更
 
-global_im_bot_config 表新增 3 个字段：
+global_im_bot_config 表新增 5 个字段 + 修改 1 个字段类型：
 
 ```sql
+-- 新增字段
 ALTER TABLE global_im_bot_config
+  ADD COLUMN bot_name VARCHAR(128) DEFAULT '' COMMENT 'bot 名称',
   ADD COLUMN lease_token VARCHAR(128) DEFAULT NULL COMMENT 'lease 锁令牌',
   ADD COLUMN lease_expires_at DATETIME DEFAULT NULL COMMENT 'lease 过期时间（UTC）',
-  ADD COLUMN lease_owner VARCHAR(128) DEFAULT NULL COMMENT '持有 lease 的实例 ID';
+  ADD COLUMN lease_owner VARCHAR(128) DEFAULT NULL COMMENT '持有 lease 的实例 ID',
+  ADD COLUMN lease_acquired_at DATETIME DEFAULT NULL COMMENT 'lease 获取时间（UTC）',
+  ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间';
+
+-- 修改字段类型
+ALTER TABLE global_im_bot_config
+  MODIFY COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间';
 ```
 
-DDL 同步修改（新库建表时包含 3 个字段）。
+DDL 同步修改（新库建表时包含所有字段）。
 
 字段类型用 DATETIME 而非 TIMESTAMP——避免 MySQL TIMESTAMP 自动转 UTC 的时区坑。统一存 UTC 时间。
 
@@ -24,16 +32,19 @@ DDL 同步修改（新库建表时包含 3 个字段）。
 抢锁/续约（原子）：
 ```sql
 UPDATE global_im_bot_config
-SET lease_token = ?, lease_expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), lease_owner = ?
+SET lease_token = ?, lease_expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND),
+    lease_owner = ?, lease_acquired_at = UTC_TIMESTAMP()
 WHERE bot_app_id = ? AND is_active = 1
   AND (lease_token IS NULL OR lease_expires_at < UTC_TIMESTAMP() OR lease_token = ?);
 -- affected_rows=1 = 抢到/续约成功
 ```
 
+注意：续约时不更新 lease_acquired_at（保持首次抢锁时间），只更新 lease_expires_at。
+
 释放：
 ```sql
 UPDATE global_im_bot_config
-SET lease_token = NULL, lease_expires_at = NULL, lease_owner = NULL
+SET lease_token = NULL, lease_expires_at = NULL, lease_owner = NULL, lease_acquired_at = NULL
 WHERE bot_app_id = ? AND lease_token = ?;
 ```
 
@@ -349,6 +360,14 @@ BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 
 | # | 表.字段 | 类型 | 默认值 | 用途 |
 |---|---------|------|--------|------|
-| 1 | global_im_bot_config.lease_token | VARCHAR(128) | NULL | lease 锁令牌 |
-| 2 | global_im_bot_config.lease_expires_at | DATETIME | NULL | lease 过期时间（UTC） |
-| 3 | global_im_bot_config.lease_owner | VARCHAR(128) | NULL | 持有 lease 的实例 ID |
+| 1 | global_im_bot_config.bot_name | VARCHAR(128) | '' | bot 可读名称，日志/前端友好 |
+| 2 | global_im_bot_config.lease_token | VARCHAR(128) | NULL | lease 锁令牌 |
+| 3 | global_im_bot_config.lease_expires_at | DATETIME | NULL | lease 过期时间（UTC） |
+| 4 | global_im_bot_config.lease_owner | VARCHAR(128) | NULL | 持有 lease 的实例 ID |
+| 5 | global_im_bot_config.lease_acquired_at | DATETIME | NULL | lease 获取时间（UTC）——排查"lease 持有多久" |
+| 6 | global_im_bot_config.updated_at | DATETIME | CURRENT_TIMESTAMP ON UPDATE | 更新时间 |
+
+字段类型修改：
+| 字段 | 原类型 | 新类型 | 原因 |
+|------|--------|--------|------|
+| created_at | text | DATETIME DEFAULT CURRENT_TIMESTAMP | text 不能做时间范围查询 |
