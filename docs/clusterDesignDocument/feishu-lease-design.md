@@ -256,14 +256,59 @@ BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 
 日志格式：`[lease] bot {app_id} acquire failed, held by {lease_owner}`
 
-## 十一、不需要改动
+## 十一、全链路场景分析（新发现问题）
+
+### 问题 A：WebSocket 重连退避超过 TTL 导致 lease 过期
+
+场景：WebSocket 断开 → run_bot 指数退避重连（5s → 10s → 20s → 40s → 80s → ...）。重连到第 5 次 80 秒 > TTL 60 秒 → lease 过期 → 其他实例抢 → 实例 A 重连成功但 lease 被抢 → 两个实例同时连。
+
+修复：重连成功后检查 lease 是否还在自己手里——如果不在就主动断开。续约走 DB 不依赖 WebSocket，重连期间保持续约——只要 DB 没断 lease 就不会过期。
+
+### 问题 B：运行时新增 bot 不会被发现
+
+场景：用户新增 bot 配置 → chat_agent_session 插入新行 → 但 load_eligible_bots 只在启动时调一次 → 运行时新增的 bot 不会被 sweep 发现。
+
+修复：sweep_loop 里定期重新加载 bot 配置（每 5 分钟调一次 load_eligible_bots），发现新 bot 登记 IDLE 并纳入 lease 管理。
+
+### 问题 C：正在处理消息时 lease 被抢导致消息中断
+
+场景：实例 A 正在处理耗时消息（如 VOD 分析）→ 续约失败 → lease 被实例 B 抢 → 实例 A 断开 → stop() 强制 cancel timeout=10 → 正在处理的消息被中断 → 用户收不到回复。
+
+修复：续约失败后给宽限期（30 秒）等正在处理的消息完成再断开。宽限期内 lease 已释放，其他实例可以抢 WebSocket——但实例 A 的 WebSocket 还连着会重复收消息，bot_seen_messages 去重兜底。
+
+### 问题 D：DB 断连时不应立即断开 bot
+
+场景：DB 连接断 → 续约失败 2 次 → release lease + 断开 → 所有 bot 断开。但 DB 断了应该等恢复，不是断 bot。
+
+修复：区分续约失败原因：
+- DB 错误（连接断/查询超时）→ 保持 WebSocket 连接，等 DB 恢复后重试续约
+- CAS 失败（lease 被其他实例抢走）→ release lease + 断开
+
+### 场景验证总结（12 个场景）
+
+| # | 场景 | 结果 | 说明 |
+|---|------|:---:|------|
+| 1 | 正常消息处理 | ✅ | 只有持有 lease 的实例收消息，reply 走 API 不依赖 WebSocket |
+| 2 | 实例挂了实例 B 接管 | ✅ | 70 秒恢复，过渡期消息靠飞书重试 |
+| 3 | 处理消息时 lease 被抢 | ⚠️ | 问题 C——宽限期 30 秒等处理完 |
+| 4 | 两个实例同时启动 | ✅ | CAS 保证只有一个成功 |
+| 5 | 正常重启 | ✅ | stop 释放 lease，10 秒内接管 |
+| 6 | DB 连接断了 | ⚠️ | 问题 D——DB 错误保持连接等恢复 |
+| 7 | 飞书 API 不可达 | ✅ | 连接失败 release lease 已处理 |
+| 8 | WebSocket 断开重连 | ⚠️ | 问题 A——重连后检查 lease 是否还在 |
+| 9 | 运行时新增 bot | ⚠️ | 问题 B——sweep 定期重新加载配置 |
+| 10 | kill -9 | ✅ | lease 自然过期，70 秒接管 |
+| 11 | tenant_token 缓存 | ✅ | 各自获取不冲突 |
+| 12 | VOD bot lease | ✅ | 管 WebSocket 不关 repo |
+
+## 十二、不需要改动
 
 - bot_seen_messages 去重保留（额外保险）
 - nginx 不影响飞书 WebSocket（不经过 nginx）
 - worker 侧不受影响
 - 飞书 API 调用不受影响（任何实例都能 reply，用 tenant_token）
 
-## 十二、上线顺序
+## 十三、上线顺序
 
 **按正常顺序逐台部署即可，不需要强制同时重启。**
 
@@ -291,7 +336,7 @@ BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 - 两台都部署完成后 lease 自动生效
 - 无法保证集群同时重启——实际部署都是逐台滚动
 
-## 十三、数据库新增字段
+## 十四、数据库新增字段
 
 | # | 表.字段 | 类型 | 默认值 | 用途 |
 |---|---------|------|--------|------|
