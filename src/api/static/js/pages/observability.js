@@ -73,7 +73,7 @@ function renderObsContent() {
   const mt = metricsText || '';
 
   if (_obsTab === 'overview') c.innerHTML = renderOverview(realOps, rt, mt);
-  else if (_obsTab === 'tasks') c.innerHTML = renderTasksTab(realOps, rt);
+  else if (_obsTab === 'tasks') c.innerHTML = renderTasksTab(realOps, rt, mt);
   else if (_obsTab === 'runtimes') c.innerHTML = renderRuntimesTab(realOps, rt, mt);
   else if (_obsTab === 'database') c.innerHTML = renderDatabaseTab(rt, mt);
 }
@@ -152,7 +152,7 @@ function renderOverview(ops, rt, mt) {
 }
 
 // ===== Tab: 任务 =====
-function renderTasksTab(ops, rt) {
+function renderTasksTab(ops, rt, mt) {
   const t = ops.tasks || {};
   const sc = t.status_counts || {};
   const stuck = t.stuck_tasks || [];
@@ -178,6 +178,52 @@ function renderTasksTab(ops, rt) {
     { label: 'Completed', value: today.completed || 0, color: 'var(--g)' },
     { label: 'Failed', value: today.failed || 0, color: (today.failed||0) > 0 ? 'var(--r)' : 'var(--t3)' },
   ]);
+
+  // 任务生命周期累计指标（从 /metrics 解析，Counter/Histogram，服务重启后归零）
+  if (mt) {
+    const enqueued = parseLabeledSum(mt, 'grape_agent_task_enqueued_total');
+    const dispatched = parseLabeledSum(mt, 'grape_agent_task_dispatched_total');
+    const terminal = parseLabeledSum(mt, 'grape_agent_task_terminal_total');
+    const failed = parseLabeledSum(mt, 'grape_agent_task_failed_total');
+    const qWaitSum = parseLabeledSum(mt, 'grape_agent_task_queue_wait_seconds_sum');
+    const qWaitCnt = parseLabeledSum(mt, 'grape_agent_task_queue_wait_seconds_count');
+    const runSum = parseLabeledSum(mt, 'grape_agent_task_run_seconds_sum');
+    const runCnt = parseLabeledSum(mt, 'grape_agent_task_run_seconds_count');
+    const totalSum = parseLabeledSum(mt, 'grape_agent_task_total_seconds_sum');
+    const totalCnt = parseLabeledSum(mt, 'grape_agent_task_total_seconds_count');
+    const avgQueueWait = qWaitCnt > 0 ? (qWaitSum / qWaitCnt).toFixed(1) + 's' : '-';
+    const avgRun = runCnt > 0 ? (runSum / runCnt).toFixed(1) + 's' : '-';
+    const avgTotal = totalCnt > 0 ? (totalSum / totalCnt).toFixed(1) + 's' : '-';
+    const failRate = terminal > 0 ? (failed / terminal * 100).toFixed(0) + '%' : '-';
+
+    html += section('任务生命周期累计', 'from /metrics — 服务重启后归零');
+    html += kpiRow([
+      { label: 'Enqueued', value: enqueued, color: 'var(--a)' },
+      { label: 'Dispatched', value: dispatched, color: 'var(--sk)' },
+      { label: 'Terminal', value: terminal, color: 'var(--g)' },
+      { label: 'Failed', value: failed, color: failed > 0 ? 'var(--r)' : 'var(--t3)', hint: `失败率 ${failRate}` },
+    ]);
+    html += kpiRow([
+      { label: '平均排队等待', value: avgQueueWait, color: 'var(--y)' },
+      { label: '平均执行时长', value: avgRun, color: 'var(--pu)' },
+      { label: '平均总时长', value: avgTotal, color: 'var(--or)' },
+    ]);
+
+    // 按来源分组的 enqueued/failed 明细
+    const sources = parseLabeledKeys(mt, 'grape_agent_task_enqueued_total', 'source');
+    if (sources.length > 0) {
+      html += section('按来源分组（累计）');
+      html += table(['Source', 'Enqueued', 'Dispatched', 'Terminal', 'Failed'],
+        sources.map(src => [
+          `<b>${src}</b>`,
+          parseLabeledSumByLabel(mt, 'grape_agent_task_enqueued_total', 'source', src),
+          parseLabeledSumByLabel(mt, 'grape_agent_task_dispatched_total', 'source', src),
+          parseLabeledSumByLabel(mt, 'grape_agent_task_terminal_total', 'source', src),
+          parseLabeledSumByLabel(mt, 'grape_agent_task_failed_total', 'source', src),
+        ])
+      );
+    }
+  }
 
   if (Object.keys(bySource).length > 0) {
     html += section('按 Agent 类型分组', '排队 / 运行中');
@@ -338,4 +384,13 @@ function fmtNum(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
   return String(n);
+}
+function parseLabeledKeys(text, name, labelKey) {
+  const keys = [];
+  const re = new RegExp('^' + name + '\\\\{[^}]*' + labelKey + '=\"([^\"]+)\"[^}]*\\\\}', 'gm');
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (!keys.includes(m[1])) keys.push(m[1]);
+  }
+  return keys;
 }
