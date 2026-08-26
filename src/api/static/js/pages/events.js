@@ -52,18 +52,20 @@ function renderEventDetail(data) {
     const o = arch.output;
     const actions = (o.actions || []).map(a => `<div>• ${a}</div>`).join('');
     const arts = (o.artifacts || []).map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('');
-    structuredHtml = `<div style="margin-bottom:8px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">
-      ${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>结论:</b> ${o.conclusion}</div>` : ''}
+    structuredHtml = `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>结论:</b> ${o.conclusion}</div>` : ''}
       ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>动作:</b> ${actions}</div>` : ''}
       ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>产出:</b> ${arts}</div>` : ''}
       ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>下一步:</b> ${o.next_step}</div>` : ''}
-      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>Issue 摘要:</b> ${o.issue_summary}</div>` : ''}
-    </div>`;
+      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>Issue 摘要:</b> ${o.issue_summary}</div>` : ''}`;
   }
+
+  // 上下文折叠区块摘要（折叠时显示）
+  const _ctxSummary = `${data.event_type || '—'} · ${data.actor || '—'}`;
+  const _infoSummary = `${data.status === 'completed' ? '✅' : data.status === 'failed' ? '❌' : '⏳'} ${data.duration ? data.duration + 's' : '—'}`;
 
   const html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← ${agentName}</button>
   <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;height:calc(100vh - 160px);overflow:hidden">
-    <!-- 左栏大框：导航 + Event Context + Event Info + 处理记录+答复结论 -->
+    <!-- 左栏大框：导航 + 可折叠区块 + 处理记录+答复结论 -->
     <div class="cd" style="padding:16px 20px;display:flex;flex-direction:column;overflow:hidden">
       <!-- 顶部导航栏 -->
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--b)">
@@ -71,37 +73,55 @@ function renderEventDetail(data) {
         <span class="ts t3" style="font-size:12px;font-weight:600">Event #${data.seq || '—'}</span>
         <button class="bt bt-o bt-s" onclick="navEvent(${data.next_seq || 0})" title="下一个 ${agentName} 事件" ${!data.next_seq ? 'disabled style="opacity:.4;cursor:not-allowed"' : ''}>›</button>
       </div>
-      <!-- 上半：Event Context + Event Info 左右并列 -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;flex-shrink:0;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--b)">
-        <div>
-          <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Context</h3>
-          <div class="tx t2" style="line-height:1.6">
-            <div>Trigger: ${data.event_type || '—'}</div>
-            <div>Repository: ${data.repo_key || ''}</div>
-            <div>Issue: ${_issueLink}</div>
-            <div>Actor: ${data.actor || '—'}</div>
-            <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
-          </div>
+      <!-- 区块1：Event Context & Info（可折叠，默认展开） -->
+      <div class="ev-section" style="flex-shrink:0;margin-bottom:8px">
+        <div class="ev-section-header" onclick="_toggleEvSection('ctxInfo', this)" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:6px 0;user-select:none">
+          <span class="ev-arrow" style="font-size:10px;transition:transform .2s;display:inline-block">▼</span>
+          <span style="font-size:12px;font-weight:600">Event Context & Info</span>
+          <span class="ts t3" style="font-size:11px;margin-left:auto">${_ctxSummary} · ${_infoSummary}</span>
         </div>
-        <div>
-          <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Info</h3>
-          <div style="font-size:11px;color:var(--t2);line-height:1.8">
-            <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
-            <div><span style="color:var(--t3)">Engine:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>
-            <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
-            <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
-            <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="强行终止正在运行的 Agent">⏹ 终止</button>` : ''}</div>
-            ${data.task && data.task.task_id
-              ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>`
-              : `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看日志</a></div>`}
-            <div id="convGate" style="display:none"></div>
+        <div id="ctxInfo" class="ev-section-body" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;padding-bottom:10px;border-bottom:1px solid var(--b)">
+          <div>
+            <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Context</h3>
+            <div class="tx t2" style="line-height:1.6">
+              <div>Trigger: ${data.event_type || '—'}</div>
+              <div>Repository: ${data.repo_key || ''}</div>
+              <div>Issue: ${_issueLink}</div>
+              <div>Actor: ${data.actor || '—'}</div>
+              <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
+            </div>
+          </div>
+          <div>
+            <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Info</h3>
+            <div style="font-size:11px;color:var(--t2);line-height:1.8">
+              <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
+              <div><span style="color:var(--t3)">Engine:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>
+              <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
+              <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
+              <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="强行终止正在运行的 Agent">⏹ 终止</button>` : ''}</div>
+              ${data.task && data.task.task_id
+                ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>`
+                : `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看日志</a></div>`}
+              <div id="convGate" style="display:none"></div>
+            </div>
           </div>
         </div>
       </div>
-      <!-- 下：Agent 处理记录 + 答复结论 合并 -->
+      <!-- 区块2：接收上下文 prompt（可折叠，默认折叠） -->
+      <div class="ev-section" style="flex-shrink:0;margin-bottom:8px">
+        <div class="ev-section-header" onclick="_toggleEvSection('promptBody', this);_loadEventPrompt(${data.task && data.task.task_id ? "'" + data.task.task_id + "'" : 'null'}, ${data.seq})" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:6px 0;user-select:none">
+          <span class="ev-arrow" style="font-size:10px;transition:transform .2s;display:inline-block">▶</span>
+          <span style="font-size:12px;font-weight:600">📋 接收上下文</span>
+          <span id="promptMeta" class="ts t3" style="font-size:11px;margin-left:auto"></span>
+        </div>
+        <div id="promptBody" class="ev-section-body" style="display:none;max-height:400px;overflow-y:auto;background:#000;color:#fff;border-radius:8px;padding:14px 18px 28px;font-size:14px;font-family:JetBrains Mono,Fira Code,Cascadia Code,Consolas,Menlo,monospace;line-height:1.75;letter-spacing:0.2px;white-space:pre-wrap;word-break:break-all">
+          <span style="color:#a0aac0">点击展开加载…</span>
+        </div>
+      </div>
+      <!-- 区块3：Agent 处理记录与答复结论（统一标题，内置框+结论，整体滑动） -->
       <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">Agent 处理记录与答复结论</h3>
-      <div style="flex:1;overflow-y:auto;background:var(--s);color:#000;border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
-        ${structuredHtml}
+      <div class="ev-result-panel" style="flex:1;overflow-y:auto;background:var(--s);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
+        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:rgba(128,128,128,0.08);border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>` : ''}
         ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">（无结论）</div>'}
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
@@ -119,6 +139,60 @@ function renderEventDetail(data) {
 
   el.innerHTML = html;
   loadConversation();
+}
+
+// ===== 可折叠区块交互 =====
+function _toggleEvSection(bodyId, headerEl) {
+  const body = document.getElementById(bodyId);
+  if (!body) return;
+  const arrow = headerEl.querySelector('.ev-arrow');
+  const isHidden = body.style.display === 'none';
+  if (isHidden) {
+    // 恢复缓存的原始 display 值（grid/block 等），无缓存则清空回退到默认
+    body.style.display = body.dataset.origDisplay || '';
+    if (arrow) { arrow.textContent = '▼'; arrow.style.transform = 'rotate(0deg)'; }
+  } else {
+    // 折叠前缓存当前 display 值（如 grid），防止展开时丢失
+    if (body.style.display && body.style.display !== 'none') {
+      body.dataset.origDisplay = body.style.display;
+    }
+    body.style.display = 'none';
+    if (arrow) { arrow.textContent = '▶'; arrow.style.transform = 'rotate(0deg)'; }
+  }
+}
+
+// ===== 异步加载 event 的接收上下文（prompt） =====
+let _promptLoadedSeq = 0;
+function _loadEventPrompt(taskId, seq) {
+  if (!taskId) {
+    const body = document.getElementById('promptBody');
+    const meta = document.getElementById('promptMeta');
+    if (body) body.innerHTML = '<span style="color:#a0aac0">无关联任务（direct 模式或尚未执行）</span>';
+    if (meta) meta.textContent = '';
+    return;
+  }
+  // 同一 event 只加载一次
+  if (_promptLoadedSeq === seq) return;
+  _promptLoadedSeq = seq;
+  const body = document.getElementById('promptBody');
+  const meta = document.getElementById('promptMeta');
+  if (body) body.innerHTML = '<span style="color:#a0aac0">加载中…</span>';
+  const token = localStorage.getItem('token') || '';
+  fetch('/api/task-logs/' + encodeURIComponent(taskId) + '/info', {headers: {'Authorization': 'Bearer ' + token}})
+    .then(r => r.ok ? r.json() : null)
+    .then(info => {
+      if (!info) { if (body) body.innerHTML = '<span style="color:#ff5b5b">加载失败</span>'; return; }
+      const prompt = info.prompt || '';
+      const fullLen = info.prompt_full_length || 0;
+      if (meta) meta.textContent = fullLen > 0 ? fullLen + ' 字' : '';
+      if (!prompt) {
+        if (body) body.innerHTML = '<span style="color:#a0aac0">（prompt 为空 — 任务可能通过 queue 模式创建但尚未执行，或 direct 模式 prompt 回写前执行失败）</span>';
+      } else {
+        const truncated = fullLen > prompt.length ? '\n\n...(已截断，完整 ' + fullLen + ' 字)' : '';
+        if (body) body.textContent = prompt + truncated;
+      }
+    })
+    .catch(() => { if (body) body.innerHTML = '<span style="color:#ff5b5b">加载失败</span>'; });
 }
 
 function _convBubble(role, content, time, by) {
@@ -342,7 +416,7 @@ function openTaskLog(taskId, title) {
     <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">
       <span style="font-size:13px;font-weight:600">📜 运行日志 <span style="color:var(--t3);font-weight:400">· ${_tlEsc(title)}</span></span>
       <span id="tlStatus" style="font-size:11px;margin-left:auto"></span>
-      <button onclick="_copyTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" title="复制日志内容">📋 复制</button>
+      <button id="tlCopyBtn" onclick="_copyTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;transition:all .2s" title="复制日志内容">📋 复制</button>
       <button id="tlKillBtn" onclick="terminateCurrentTask()" style="border:1px solid var(--tr,#e74c3c);background:transparent;color:var(--tr,#e74c3c);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;display:none" title="强行终止正在运行的任务">⏹ 终止</button>
       <button id="taskLogFullscreenBtn" onclick="_toggleTaskLogFullscreen()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" title="全屏/还原">⛶ 全屏</button>
       <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>
@@ -455,11 +529,60 @@ function _taskLogStream() {
 
 function _copyTaskLog() {
   if (!_taskLog.bodyEl) return;
-  const txt = _taskLog.bodyEl.innerText;
-  navigator.clipboard.writeText(txt).then(
-    () => { const b = _taskLog.copyBtn; if (b) { const o = b.textContent; b.textContent = '✅ 已复制'; b.style.background = 'var(--ok,#1e7f3f)'; b.style.color = '#fff'; setTimeout(() => { b.textContent = o; b.style.background = ''; b.style.color = ''; }, 1200); } },
-    () => {}
-  );
+  var txt = _taskLog.bodyEl.innerText;
+  var btn = document.getElementById('tlCopyBtn');
+  if (!btn) return;
+  var orig = btn.textContent;
+  var origBg = btn.style.background;
+  var origColor = btn.style.color;
+  function _flashOk() {
+    btn.textContent = '✅ 已复制';
+    btn.style.background = 'var(--g,#1ca44c)';
+    btn.style.color = '#fff';
+    btn.style.borderColor = 'var(--g,#1ca44c)';
+    setTimeout(function() {
+      btn.textContent = orig;
+      btn.style.background = origBg;
+      btn.style.color = origColor;
+      btn.style.borderColor = '';
+    }, 1500);
+  }
+  function _flashFail() {
+    btn.textContent = '❌ 复制失败';
+    btn.style.background = 'var(--r,#dc2828)';
+    btn.style.color = '#fff';
+    btn.style.borderColor = 'var(--r,#dc2828)';
+    setTimeout(function() {
+      btn.textContent = orig;
+      btn.style.background = origBg;
+      btn.style.color = origColor;
+      btn.style.borderColor = '';
+    }, 1500);
+  }
+  // navigator.clipboard API（HTTPS / localhost）
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(_flashOk, function() {
+      _fallbackCopy(txt, _flashOk, _flashFail);
+    });
+  } else {
+    _fallbackCopy(txt, _flashOk, _flashFail);
+  }
+}
+
+function _fallbackCopy(text, onOk, onFail) {
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    var ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) { onOk(); } else { onFail(); }
+  } catch (e) {
+    onFail();
+  }
 }
 
 function _toggleTaskLogFullscreen() {

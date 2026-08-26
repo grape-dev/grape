@@ -54,6 +54,52 @@ TF 1.11+ 执行 `terraform apply` 时：
 worker 机器网络到 registry.terraform.io / releases.hashicorp.com 可能慢或偶发超时。
 **部署前必须确认所有 provider 二进制已预装到 plugin cache 目录**，不要依赖 terraform init 现下载。
 
+### 使用国内镜像源（必须）
+
+Terraform CLI 和 provider 默认从 `registry.terraform.io` / `releases.hashicorp.com` 下载，国内访问慢且经常超时。**必须配置华为云镜像源**：
+
+```bash
+# Terraform CLI 下载镜像（安装/升级 terraform 二进制时使用）
+# https://mirrors.huaweicloud.com/terraform/
+
+# Provider registry 镜像（terraform init 下载 provider 时使用）
+# ⚠️ 华为云镜像不包含所有 provider（如 hashicorp/local、hashicorp/null 等），
+# 必须使用 network_mirror + direct 混合配置：优先华为云镜像，找不到的 fallback 到官方 registry
+cat > ~/.terraformrc << 'EOF'
+provider_installation {
+  network_mirror {
+    url = "https://mirrors.huaweicloud.com/terraform/providers/"
+  }
+  direct {
+    exclude = ["registry.terraform.io/huaweicloud/*"]
+  }
+}
+EOF
+
+# 或通过环境变量临时指定
+export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+```
+
+混合配置说明：
+- `network_mirror`：优先从华为云镜像下载所有 provider（huaweicloud、hashicorp/random 等）
+- `direct`：华为云镜像没有的 provider（如 hashicorp/local、hashicorp/null）从官方 registry 下载
+- `exclude`：避免 huaweicloud provider 回退到官方 registry（官方源国内访问慢）
+
+⚠️ **不配置镜像源时，terraform init 下载 provider 可能超时 5 分钟以上甚至失败。**
+⚠️ **只用 `network_mirror` 不加 `direct` 时，hashicorp/local 等 provider 会下载失败。**
+
+### 启用 plugin cache（必须）
+
+Terraform 默认不启用 plugin cache，必须设置环境变量 `TF_PLUGIN_CACHE_DIR`，否则 `terraform init` 不会从 cache 目录读取，每次都重新下载。
+
+```bash
+# 在部署前设置（写入 ~/.bashrc 或部署脚本开头）
+export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
+mkdir -p "$TF_PLUGIN_CACHE_DIR"
+```
+
+⚠️ **未设置 `TF_PLUGIN_CACHE_DIR` 时，即使 provider 已预装到 `~/.terraform.d/plugin-cache` 目录，`terraform init` 仍会重新下载。**
+
 ### 检查已装 provider
 
 ```bash
@@ -71,18 +117,18 @@ find ~/.terraform.d/plugin-cache -name 'terraform-provider-*' -type f
 ### 手动预装 provider（当 terraform init 下载超时时）
 
 ```bash
-# huaweicloud provider（从 registry 下载对应架构的 zip）
+# huaweicloud provider（从华为云镜像下载对应架构的 zip）
 ARCH=linux_arm64   # arm64 机器用 linux_arm64，amd64 机器用 linux_amd64
 VERSION=1.97.0     # 用最新版
 
 curl -L -o /tmp/huaweicloud_provider.zip \
-  "https://releases.hashicorp.com/terraform-provider-huaweicloud/${VERSION}/terraform-provider-huaweicloud_${VERSION}_${ARCH}.zip"
+  "https://mirrors.huaweicloud.com/terraform/providers/terraform-provider-huaweicloud/${VERSION}/terraform-provider-huaweicloud_${VERSION}_${ARCH}.zip"
 unzip -o /tmp/huaweicloud_provider.zip -d ~/.terraform.d/plugin-cache/registry.terraform.io/huaweicloud/huaweicloud/${VERSION}/${ARCH}/
 
 # hashicorp/random provider（同理）
 RANDOM_VERSION=3.6.3
 curl -L -o /tmp/random_provider.zip \
-  "https://releases.hashicorp.com/terraform-provider-random/${RANDOM_VERSION}/terraform-provider-random_${RANDOM_VERSION}_${ARCH}.zip"
+  "https://mirrors.huaweicloud.com/terraform/providers/terraform-provider-random/${RANDOM_VERSION}/terraform-provider-random_${RANDOM_VERSION}_${ARCH}.zip"
 unzip -o /tmp/random_provider.zip -d ~/.terraform.d/plugin-cache/registry.terraform.io/hashicorp/random/${RANDOM_VERSION}/${ARCH}/
 ```
 
@@ -91,13 +137,14 @@ unzip -o /tmp/random_provider.zip -d ~/.terraform.d/plugin-cache/registry.terraf
 如果 `terraform init` 仍然超时（provider 下载慢）：
 
 ```bash
-# 方法 1：设置更长的超时
+# 方法 1：确认已配置华为云镜像源（见上方「使用国内镜像源」段）
+# 方法 2：设置更长的超时
 TF_REGISTRY_CLIENT_TIMEOUT=300 terraform init
 
-# 方法 2：用 -backend=false 先跳过 backend，只验证 provider
+# 方法 3：用 -backend=false 先跳过 backend，只验证 provider
 terraform init -backend=false
 
-# 方法 3：手动下载 zip 后解压到 plugin cache（见上方手动预装步骤）
+# 方法 4：手动下载 zip 后解压到 plugin cache（见上方手动预装步骤，使用华为云镜像 URL）
 ```
 
 ⚠️ **架构陷阱**：arm64 机器上下载了 amd64 的 provider zip 会导致 `terraform init` 报 `incompatible provider version`。务必确认 `uname -m` 与下载的 zip 文件名架构一致。
@@ -106,10 +153,12 @@ terraform init -backend=false
 
 ### 1. 凭证设置
 
+Grape 控制台注入的凭证环境变量名为 `HUAWEICLOUD_SDK_AK`/`HUAWEICLOUD_SDK_SK`，但 Terraform provider 和 OBS S3 backend 期望的是 `HW_ACCESS_KEY`/`HW_SECRET_KEY` 和 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`。**必须先做变量映射**：
+
 ```bash
-# 华为云凭证（Provider 认证 + OBS backend 认证共用）
-export HW_ACCESS_KEY="<AK>"
-export HW_SECRET_KEY="<SK>"
+# ⚠️ Grape 控制台注入的变量名 → Terraform 期望的变量名映射
+export HW_ACCESS_KEY="${HUAWEICLOUD_SDK_AK}"
+export HW_SECRET_KEY="${HUAWEICLOUD_SDK_SK}"
 export HW_REGION="cn-north-4"
 
 # AWS 兼容凭证（OBS S3 backend init 必需，与 HW 同值）
@@ -117,17 +166,40 @@ export AWS_ACCESS_KEY_ID="$HW_ACCESS_KEY"
 export AWS_SECRET_ACCESS_KEY="$HW_SECRET_KEY"
 export AWS_DEFAULT_REGION="cn-north-4"
 
-# 敏感密码（通过环境变量传入，绝不硬编码到 .tf 文件）
-# ECS root 密码：8-26位，含大小写+数字+特殊字符 !@$%^-_=+
-export TF_VAR_ecs_admin_pass='<ECS密码>'
-# RDS root 密码：8-32位，含大小写+数字+特殊字符
-export TF_VAR_rds_password='<RDS密码>'
+# 启用 Terraform plugin cache（复用已预装的 provider，避免每次重新下载）
+export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
+mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+# 配置华为云镜像源（provider 下载走国内镜像，避免超时）
+# ⚠️ 混合配置：华为云镜像优先，找不到的 provider fallback 到官方 registry
+export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+if [ ! -f "$TF_CLI_CONFIG_FILE" ]; then
+  cat > "$TF_CLI_CONFIG_FILE" << 'EOF'
+provider_installation {
+  network_mirror {
+    url = "https://mirrors.huaweicloud.com/terraform/providers/"
+  }
+  direct {
+    exclude = ["registry.terraform.io/huaweicloud/*"]
+  }
+}
+EOF
+fi
+
+# 敏感密码（如果 Grape 控制台未注入，通过 random_password 自动生成，可不设置）
+# 如需手动指定（仅大小写+数字，不含特殊字符，避免 shell 转义问题）：
+# export TF_VAR_ecs_admin_pass='<ECS密码>'
+# export TF_VAR_rds_password='<RDS密码>'
 ```
 
 ⚠️ **凭证说明**：`HW_ACCESS_KEY`/`HW_SECRET_KEY` 和 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` 是**同一条 AK/SK**，设两套变量是因为：
 - huaweicloud provider 读 `HW_*` 变量
 - Terraform S3 backend 读 `AWS_*` 变量
 - 两条认证路径完全独立（provider 走 IAM token，backend 走 SigV4），但用同一组密钥
+
+⚠️ **obsutil 凭证隔离**：`obsutil` 使用 `~/.obsutilconfig` 中的凭证，与环境变量 `HW_ACCESS_KEY`/`HW_SECRET_KEY` **不是同一套**。`~/.obsutilconfig` 中的 SK 可能是 base64 编码的，不要尝试解码或混用。obsutil 仅用于 OBS 对象上传/下载（如 inventory.json），**不用于 Terraform 部署**。
+
+⚠️ **Grape 控制台凭证变量名**：控制台注入的是 `HUAWEICLOUD_SDK_AK`/`HUAWEICLOUD_SDK_SK`，不是 `HW_ACCESS_KEY`/`HW_SECRET_KEY`。必须先做变量映射（见上方），否则 `terraform init` 会报 `No valid credential sources found`。
 
 ### 2. 预建 OBS Bucket（首次部署）
 
@@ -188,11 +260,13 @@ cn-north-4 仅支持 `n1` / `x1` / `arm` 类型 RDS flavor，不支持 `c2` 类�
 | rds.mysql.c2.large.2 | 不存在 | rds.mysql.n1.large.2 (2c4g) |
 | rds.mysql.c2.large.4 | 不存在 | rds.mysql.n1.large.4 (2c8g) |
 
-部署前通过 ListFlavors API 确认可用规格：
+部署前通过 `terraform plan` 验证 RDS flavor 可用性（plan 会调用 provider API 检查，使用环境变量中的 `HW_ACCESS_KEY`/`HW_SECRET_KEY`）：
 ```bash
-# 查询可用 RDS flavor
-curl -s -H "X-Auth-Token: ***" \
-  "https://rds.cn-north-4.myhuaweicloud.com/v3/flavors?db_name=mysql&region=cn-north-4"
+# terraform plan 会自动验证 flavor 是否存在
+terraform plan -out=tfplan
+
+# 如需手动查询可用规格，使用环境变量中的 AK/SK 获取 IAM token（不要用 hcloud CLI 的凭证）
+# IAM token 获取方式见部署 Runbook 第 1 步
 ```
 
 ### RDS 存储类型
@@ -204,10 +278,10 @@ curl -s -H "X-Auth-Token: ***" \
 | LOCALSSD | 可用 | 本地 SSD |
 | ESSD | 可用 | 增强型 SSD |
 
-部署前通过 ListStorageTypes API 确认：
+部署前通过 `terraform plan` 验证存储类型可用性：
 ```bash
-curl -s -H "X-Auth-Token: ***" \
-  "https://rds.cn-north-4.myhuaweicloud.com/v3/storage-type?region=cn-north-4&engine=mysql"
+# terraform plan 会自动验证存储类型是否存在
+terraform plan -out=tfplan
 ```
 
 ### OBS SigV4 签名日期格式
@@ -224,30 +298,35 @@ date -u +"%Y%m%dT%H%M%SZ"        # 20260820T154154Z
 
 建议：优先使用 obsutil 替代手动 SigV4 curl 签名，避免格式坑点。
 
-### hcloud CLI OBS 命令差异
+### hcloud CLI 与凭证隔离
 
-hcloud CLI 与 obsutil 的 OBS 命令语法不同：
+hcloud CLI 与 Terraform/provider 使用的凭证可能不同。**资源验证和查重必须使用环境变量中的 `HW_ACCESS_KEY`/`HW_SECRET_KEY`（与 Terraform provider 同源），禁止使用 hcloud CLI 中配置的凭证**，否则可能因权限不一致导致误操作或查重结果不准确。
 
-| 操作 | hcloud（不存在） | obsutil（正确） |
-|------|-----------------|----------------|
-| 上传对象 | PutObject | cp |
-| 列举对象 | ListBuckets | ls |
-| 创建桶 | CreateBucket | mb |
+| 操作 | 推荐方式 | 不推荐 |
+|------|---------|--------|
+| 资源规格验证 | `terraform plan`（自动调 provider API） | hcloud CLI |
+| 资源查重 | 华为云 API + 环境变量 AK/SK 获取 IAM token | hcloud CLI |
+| OBS 对象操作 | obsutil | hcloud CLI（OBS 命令不存在） |
+| 部署执行 | `terraform apply` | hcloud CLI |
 
 ## 常见问题排查
 
 ### terraform init 失败：provider 下载超时
 
 - 根因：worker 网络到 releases.hashicorp.com / registry.terraform.io 偶发慢，terraform init 默认超时不够
-- 解决：见上方「Terraform Provider 预装」段落，手动下载对应架构的 provider zip 解压到 plugin cache
+- 解决（按优先级）：
+  1. 确认已配置华为云镜像源（`~/.terraformrc` 中 `network_mirror` 指向 `https://mirrors.huaweicloud.com/terraform/providers/`）
+  2. 确认已设置 `TF_PLUGIN_CACHE_DIR` 且 cache 中有 provider 二进制
+  3. 手动从华为云镜像下载 provider zip 解压到 plugin cache（见上方手动预装步骤）
+  4. 设置 `TF_REGISTRY_CLIENT_TIMEOUT=300` 加长超时
 - ⚠️ 务必确认架构匹配：arm64 机器（`uname -m` = `aarch64`）只能用 `linux_arm64` 的 zip，amd64 用 `linux_amd64`
-- 也可设置 `TF_REGISTRY_CLIENT_TIMEOUT=300` 加长超时
 
 ### terraform init 失败：No valid credential sources found
 
-- 根因：环境变量 HW_ACCESS_KEY / HW_SECRET_KEY 未设置
-- 解决：在 Grape 控制台注入 AK/SK，或手动 `export HW_ACCESS_KEY=... HW_SECRET_KEY=...`
+- 根因：环境变量 HW_ACCESS_KEY / HW_SECRET_KEY 未设置，或 Grape 控制台注入的是 `HUAWEICLOUD_SDK_AK`/`HUAWEICLOUD_SDK_SK` 但未做变量映射
+- 解决：先执行 `export HW_ACCESS_KEY="${HUAWEICLOUD_SDK_AK}"` / `export HW_SECRET_KEY="${HUAWEICLOUD_SDK_SK}"`，再设置 AWS 兼容变量
 - 注意：同时需要设置 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY（S3 backend 兼容）
+- ⚠️ 不要使用 obsutil 的 `~/.obsutilconfig` 中的凭证——那是另一套，可能 base64 编码，不能直接用于 Terraform
 
 ### terraform apply 失败：DBS.280434 Invalid specification code
 
@@ -287,7 +366,7 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 
 - 根因：SigV4 签名日期格式错误（含连字符）
 - 解决：使用 obsutil 替代 curl，或修复 date 格式为 `date -u +"%Y%m%dT%H%M%SZ"`
-- 注意：hcloud CLI 不存在 PutObject 命令，必须使用 obsutil
+- 注意：OBS 对象操作必须使用 obsutil（hcloud CLI 不存在 PutObject 命令）
 
 ### RDS 创建耗时较长
 
@@ -297,6 +376,7 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 
 ## 部署验证清单
 
+**Terraform 层验证：**
 - [ ] `terraform version` 在 1.7.5 ~ 1.10.5 区间内
 - [ ] `terraform fmt -check -recursive` PASS
 - [ ] `terraform validate` PASS
@@ -307,8 +387,18 @@ hcloud CLI 与 obsutil 的 OBS 命令语法不同：
 - [ ] `terraform output -json` 获取完整资源清单（含 sensitive 密码）
 - [ ] `save-inventory-to-obs.sh` 上传成功（或 obsutil cp 成功）
 - [ ] OBS GET 验证 inventory.json 可读（HTTP 200）
-- [ ] ECS 公网 80 端口可访问
-- [ ] RDS 3306 端口 VPC 内网可达
+
+**基础设施层验证（通过 terraform state / output 确认资源状态，不涉及应用层）：**
+- [ ] VPC/子网/安全组状态为可用
+- [ ] ECS 实例状态为 ACTIVE（运行中），EIP 已绑定
+- [ ] RDS 实例状态为可用
+- [ ] OBS bucket 创建成功
+
+**不在验证范围内（⚠️ 应用层，SRE 不检查）：**
+- ~~ECS 公网 80 端口可访问~~（应用是否启动是应用层问题）
+- ~~RDS 3306 端口实际连接测试~~（应用层连接逻辑）
+- ~~HTTP 状态码 200/500~~（应用页面是否正常）
+- ~~SSH 登录 ECS 检查进程~~（应用运维问题）
 
 ## 资源清单 inventory.json 结构
 

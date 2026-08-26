@@ -31,6 +31,11 @@
   --pk: #ff2d92;          /* Apple Pink */
   --sk: #5ac8fa;          /* Apple Sky */
 
+  /* Event Detail: 处理记录面板 — 浅色背景用深色文字 */
+  --result-fg: #1d1d1f;
+  --result-link: #0071e3;
+  --result-code: #6e6e73;
+
   /* Radius — Apple's generous rounding */
   --rd: 12px;             /* default radius (was 8px) */
   --r2: 18px;             /* large radius (was 12px) */
@@ -1004,6 +1009,9 @@
     --t: #f5f5f7;
     --t2: #aeaeb2;
     --t3: #8e8e93;
+    --result-fg: #e0e6f0;
+    --result-link: #5b9eff;
+    --result-code: #b8c2d6;
   }
   [data-theme="apple"][data-theme-mode="auto"] .sb {
     background: rgba(28,28,30,0.8);

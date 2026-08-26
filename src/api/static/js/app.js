@@ -182,22 +182,44 @@ function loadAgentTypes() {
   }
 
   // 点击 Grape Logo → 返回仓库选择页（与解除托管后跳转的页面完全一致：全屏卡片页）
+  // 折中方案：先叠轻量 loading 遮罩（不改变当前布局），API 返回后一次性切换 UI，避免中间态闪烁
   function goToRepos() {
     _pushHistory('repos', null);
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     localStorage.setItem('sidebarTab', 'projects');
-    $('sidebar').style.display = 'none';
-    $('tb').style.display = 'none';
-    const mv = $('mainView');
-    mv.style.display = 'flex';
-    mv.style.position = 'fixed';
-    mv.style.inset = '0';
-    mv.style.zIndex = '100';
-    $('pageTitle').textContent = '选择仓库';
-    $('pageContent').innerHTML = '<div class="loading">加载中...</div>';
+
+    // 叠加轻量 loading 遮罩，不改动当前 DOM 布局
+    let ov = document.getElementById('gotoReposOverlay');
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = 'gotoReposOverlay';
+      ov.style.cssText = 'position:fixed;inset:0;z-index:9998;background:rgba(255,255,255,.45);display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--t2)';
+      ov.textContent = '加载中...';
+      document.body.appendChild(ov);
+    }
+
     API.get('/repos/member').then(d => {
+      // 数据就绪，一次性切换 UI
+      if (ov) ov.remove();
+      $('sidebar').style.display = 'none';
+      $('tb').style.display = 'none';
+      const mv = $('mainView');
+      mv.style.display = 'flex';
+      mv.style.position = 'fixed';
+      mv.style.inset = '0';
+      mv.style.zIndex = '100';
+      $('pageTitle').textContent = '选择仓库';
       renderRepoSelection(d.repos || []);
     }).catch(e => {
+      if (ov) ov.remove();
+      $('sidebar').style.display = 'none';
+      $('tb').style.display = 'none';
+      const mv = $('mainView');
+      mv.style.display = 'flex';
+      mv.style.position = 'fixed';
+      mv.style.inset = '0';
+      mv.style.zIndex = '100';
+      $('pageTitle').textContent = '选择仓库';
       const pc = $('pageContent');
       if (pc) pc.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">加载失败: ' + e.message + '</div></div>';
     });

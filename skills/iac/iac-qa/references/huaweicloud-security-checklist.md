@@ -2,6 +2,22 @@
 
 在通用安全检查（references/security-checklist.md）基础上，审查华为云 Terraform IaC PR 时增加以下专项检查。
 
+## 凭证获取（QA 执行 terraform plan 时需要）
+
+QA 执行 `terraform plan` 审查时需要 AK/SK 连接 OBS backend 和调用 provider API。AK/SK 从 Grape 控制台获取（与 SRE Agent 使用同一组凭证）。Grape 控制台注入的变量名是 `HUAWEICLOUD_SDK_AK`/`HUAWEICLOUD_SDK_SK`，必须映射为 `HW_ACCESS_KEY`/`HW_SECRET_KEY`。仅用于 plan（只读），不执行 apply/destroy。
+
+```bash
+# Grape 控制台变量名 → Terraform 期望的变量名映射
+export HW_ACCESS_KEY="${HUAWEICLOUD_SDK_AK}"
+export HW_SECRET_KEY="${HUAWEICLOUD_SDK_SK}"
+export HW_REGION="cn-north-4"
+export AWS_ACCESS_KEY_ID="$HW_ACCESS_KEY"
+export AWS_SECRET_ACCESS_KEY="$HW_SECRET_KEY"
+export AWS_DEFAULT_REGION="cn-north-4"
+```
+
+⚠️ 不要使用 obsutil 的 `~/.obsutilconfig` 凭证——那是另一套，不能用于 Terraform。
+
 ## 敏感信息检查
 
 - [ ] AK/SK 未硬编码到任何 .tf 文件，仅通过环境变量（HW_ACCESS_KEY / HW_SECRET_KEY）传入
@@ -49,10 +65,16 @@
 - [ ] `terraform fmt -check -recursive` PASS
 - [ ] `terraform validate` PASS
 - [ ] `terraform init` PASS（OBS backend 配置成功，provider 下载成功）
-- [ ] `terraform plan` PASS（⚠️ 必须通过——init 成功不等于 state 读写正常，plan 会实际访问 OBS backend 读写 state）
+- [ ] `terraform plan` PASS（⚠️ 不加 -backend=false，使用真实 OBS backend 验证 state 读写；plan 还会调用 provider API 验证镜像/flavor/规格是否存在）
+- [ ] plan 输出中无报错（如镜像不存在、RDS flavor 不可用、provider 不兼容等）
 - [ ] `terraform apply` PASS（全部资源创建成功，**无 errored.tfstate 文件生成**）
 - [ ] 工作目录下**不存在** `errored.tfstate` 文件（存在则说明 state 写入 OBS 失败，需排查 TF 版本和 backend 配置）
 - [ ] `terraform output -json` 获取完整资源清单
 - [ ] inventory.json 已上传到 OBS 并验证可读
-- [ ] ECS 公网 80 端口可访问
-- [ ] RDS 3306 端口 VPC 内网可达
+- [ ] ECS 实例状态为 ACTIVE（运行中），EIP 已绑定
+- [ ] RDS 实例状态为可用
+- [ ] OBS bucket 创建成功
+
+**不在验证范围内（应用层，SRE/QA 不检查）：**
+- ~~ECS 公网 80 端口可访问~~（应用是否启动是应用层问题）
+- ~~RDS 3306 端口实际连接测试~~（应用层连接逻辑）

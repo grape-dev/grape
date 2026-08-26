@@ -166,5 +166,59 @@
     "agent_type": "sre",
     "path": "media-operate/blog-manager",
     "description": "封装 Blog System REST API 的管理 skill，提供文章/标签/用户/评论/留言/说说/上传/健康检查共 8 模块 28 个子命令的命令行能力"
+  },
+  "iac-vod": {
+    "name": "IaC 需求分析",
+    "agent_type": "vod",
+    "path": "iac/iac-vod",
+    "description": "IaC 场景开发者声音分析：收集基础设施需求，聚类分析共性诉求，提炼价值需求，自动创建 Issue 推进改进"
+  },
+  "iac-issue": {
+    "name": "IaC Issue 运营",
+    "agent_type": "issue",
+    "path": "iac/iac-issue",
+    "description": "IaC Issue 高级运营：分类、标签管理、负责人指派、Spec 生成。通过 A2A 协议触发 Coding Agent 进行基础设施开发交付"
+  },
+  "blog-issue": {
+    "name": "博客 Issue 运营",
+    "agent_type": "issue",
+    "path": "media-operate/blog-issue",
+    "description": "Issue 高级运营（博客增强版）：保留 issue-advance 全部能力，增加博客场景分流→博客 Spec→A2A coding(ai-blog-generation)→A2A sre(blog-publish)"
+  },
+  "iac-coding": {
+    "name": "IaC 代码实现",
+    "agent_type": "coding",
+    "path": "iac/iac-coding",
+    "description": "IaC 代码实现与 PR 创建：Terraform 配置编写、fmt/init/validate、提交 PR。禁止执行 terraform apply/destroy（SRE 职责）"
+  },
+  "iac-qa": {
+    "name": "IaC 质量审查",
+    "agent_type": "qa",
+    "path": "iac/iac-qa",
+    "description": "IaC QA 审查：代码审查、terraform plan 审查、安全检查。通过 A2A 协议被 Coding Agent 调用执行审查"
+  },
+  "iac-sre": {
+    "name": "IaC 部署运维",
+    "agent_type": "sre",
+    "path": "iac/iac-sre",
+    "description": "IaC 基础设施部署与运维：Terraform 部署执行（init/plan/apply）、资源验证、资源清单输出、OBS 状态管理、部署故障排查"
+  },
+  "os-disk-list": {
+    "name": "系统磁盘列表",
+    "agent_type": "sre",
+    "path": "os/os-disk-list",
+    "description": "枚举当前系统所有挂载硬盘列表，输出设备名/挂载点/文件系统类型/总容量/已用容量"
+  },
+  "event-dialogue": {
+    "name": "事件对话",
+    "agent_type": "vod",
+    "path": "event-dialogue",
+    "description": "以事件为锚点与用户就 DevOps Agent 处理结果进行多轮对话：解释处理逻辑、沉淀共享知识、触发流程干预（暂停/回退/重新派发）"
+  },
+  "runtime-install": {
+    "name": "引擎安装配置",
+    "agent_type": "sre",
+    "path": "runtime-install",
+    "description": "安装、配置和注册 hermes/opencode/codearts 运行时引擎到 Grape 系统，包括自定义 API 端点和模型配置"
   }
 }
