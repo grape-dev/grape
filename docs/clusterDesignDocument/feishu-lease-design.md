@@ -284,7 +284,7 @@ BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 - DB 错误（连接断/查询超时）→ 保持 WebSocket 连接，等 DB 恢复后重试续约
 - CAS 失败（lease 被其他实例抢走）→ release lease + 断开
 
-### 场景验证总结（12 个场景）
+### 场景验证总结（21 个场景）
 
 | # | 场景 | 结果 | 说明 |
 |---|------|:---:|------|
@@ -300,6 +300,15 @@ BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 | 10 | kill -9 | ✅ | lease 自然过期，70 秒接管 |
 | 11 | tenant_token 缓存 | ✅ | 各自获取不冲突 |
 | 12 | VOD bot lease | ✅ | 管 WebSocket 不关 repo |
+| 13 | enqueue_task 下发任务到 Worker | ✅ | lease 管 WebSocket 不影响任务下发 |
+| 14 | 任务回调飞书回复 | ✅ | consume_stream_async 在 bot 实例同步执行，不跨实例回复 |
+| 15 | seen_msg_ids 跨实例共享 | ✅ | 共享 MySQL，毫秒级窗口重复概率极低可接受 |
+| 16 | 飞书 ack 机制 | ✅ | WebSocket 层面，只有持有 bot 的实例 ack |
+| 17 | PING/PONG 保活 | ✅ | 续约走 DB 不依赖 WebSocket，重连后检查 lease |
+| 18 | semaphore 限流 | ✅ | lease 切换新建 BotContext，宽限期等处理完 |
+| 19 | _periodic_cleanup | ✅ | DB DELETE 共享 MySQL |
+| 20 | bot 配置删除 | ✅ | sweep 5 分钟内重新加载 |
+| 21 | 多用户同 app_id 去重 | ✅ | 按 app_id 去重 + lease 按 app_id 管理 |
 
 ## 十二、不需要改动
 
