@@ -7,6 +7,146 @@ from src.api.time_utils import normalize_event_time
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
+# ===== 运维可观察性端点（必须在 /{owner}/{repo} 之前注册，否则被通配路由拦截）=====
+
+
+@router.get("/ops/overview")
+async def get_ops_overview():
+    """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
+
+    参考 multica BusinessSampler（metrics/business_sampler.go）的实时采样设计，
+    但通过 Dashboard API 暴露给前端看板，无需 Prometheus 基础设施。
+
+    无认证：运维只读数据，不涉及敏感信息（与 /health/realtime 同级）。
+    数据全部来自 agent_tasks / agent_runtimes 表的实时 SQL 查询。
+    """
+    from src.session_manager import db, db_lock
+    from src.runtime.health import derive_runtime_health
+    from datetime import datetime, timezone, timedelta
+    import time as _time
+
+    now_ts = _time.time()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    # stuck 阈值：running 超 30 分钟（对齐 multica stuckRunningInterval）
+    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+
+    with db_lock:
+        c = db.cursor()
+
+        # --- 任务队列状态分布 ---
+        task_status_counts = {"queued": 0, "dispatched": 0, "running": 0,
+                              "completed": 0, "failed": 0, "cancelled": 0}
+        try:
+            c.execute("SELECT status, COUNT(*) FROM agent_tasks GROUP BY status")
+            for status, count in c.fetchall():
+                if status in task_status_counts:
+                    task_status_counts[status] = count
+        except Exception:
+            pass
+
+        # --- in_progress（dispatched + running）---
+        in_progress = task_status_counts["dispatched"] + task_status_counts["running"]
+
+        # --- stuck 检测：running 且 started_at < 30 分钟前 ---
+        stuck_tasks = []
+        try:
+            c.execute(
+                "SELECT id, agent_type, runtime_id, started_at, repo_key "
+                "FROM agent_tasks WHERE status='running' AND started_at IS NOT NULL AND started_at < ? "
+                "ORDER BY started_at ASC LIMIT 100",
+                (stuck_cutoff,),
+            )
+            for r in c.fetchall():
+                stuck_tasks.append({
+                    "id": r[0], "agent_type": r[1] or "", "runtime_id": r[2],
+                    "started_at": normalize_event_time(r[3]), "repo_key": r[4] or "",
+                })
+        except Exception:
+            pass
+
+        # --- 按来源（agent_type）分组排队/运行数 ---
+        task_by_source = {}
+        try:
+            c.execute(
+                "SELECT agent_type, status, COUNT(*) FROM agent_tasks "
+                "WHERE status IN ('queued','dispatched','running') GROUP BY agent_type, status"
+            )
+            for atype, status, count in c.fetchall():
+                key = atype or "unknown"
+                if key not in task_by_source:
+                    task_by_source[key] = {"queued": 0, "running": 0}
+                if status == "queued":
+                    task_by_source[key]["queued"] += count
+                elif status in ("dispatched", "running"):
+                    task_by_source[key]["running"] += count
+        except Exception:
+            pass
+
+        # --- runtime 在线状态 ---
+        runtimes_online = 0
+        runtimes_total = 0
+        runtime_by_mode = {"local": 0, "remote": 0, "unknown": 0}
+        runtime_list = []
+        try:
+            c.execute(
+                "SELECT id, name, credential_id, status, last_seen_at, provider "
+                "FROM agent_runtimes ORDER BY id"
+            )
+            for r in c.fetchall():
+                rid, rname, cid, rstatus, rlast_seen, rprovider = r
+                runtimes_total += 1
+                health = derive_runtime_health(rstatus or "offline", rlast_seen, now_ts)
+                mode = "remote" if (cid or 0) > 0 else "local"
+                is_online = health == "online"
+                if is_online:
+                    runtimes_online += 1
+                    runtime_by_mode[mode] = runtime_by_mode.get(mode, 0) + 1
+                runtime_list.append({
+                    "id": rid, "name": rname or "", "status": rstatus or "offline",
+                    "health": health, "mode": mode,
+                    "provider": rprovider or "", "last_seen_at": normalize_event_time(rlast_seen),
+                })
+        except Exception:
+            pass
+
+        # --- 今日任务统计（UTC 日期前缀匹配 created_at ISO 时间戳）---
+        today_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_stats = {"created": 0, "completed": 0, "failed": 0}
+        try:
+            c.execute(
+                "SELECT status, COUNT(*) FROM agent_tasks "
+                "WHERE created_at LIKE ? GROUP BY status",
+                (today_prefix + "%",),
+            )
+            for status, count in c.fetchall():
+                if status in today_stats:
+                    today_stats[status] = count
+        except Exception:
+            pass
+
+    return {
+        "timestamp": now_iso,
+        "tasks": {
+            "status_counts": task_status_counts,
+            "in_progress": in_progress,
+            "stuck_count": len(stuck_tasks),
+            "stuck_tasks": stuck_tasks,
+            "by_source": task_by_source,
+            "today": today_stats,
+        },
+        "runtimes": {
+            "total": runtimes_total,
+            "online": runtimes_online,
+            "offline": runtimes_total - runtimes_online,
+            "by_mode": runtime_by_mode,
+            "list": runtime_list,
+        },
+    }
+
+
+# ===== 仓库 Dashboard（需认证）=====
+
+
 @router.get("/{owner}/{repo}")
 async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
@@ -143,140 +283,4 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         "agent_event_counts": agent_event_counts,
         "agent_recent_events": agent_recent_events,
         "activity": recent_events,
-    }
-
-
-# ===== 运维可观察性：实时运维概览（参考 multica BusinessSampler）=====
-
-
-@router.get("/ops/overview")
-async def get_ops_overview(user: dict = Depends(get_current_user)):
-    """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
-
-    参考 multica BusinessSampler（metrics/business_sampler.go）的实时采样设计，
-    但通过 Dashboard API 暴露给前端看板，无需 Prometheus 基础设施。
-
-    数据全部来自 agent_tasks / agent_runtimes 表的实时 SQL 查询。
-    """
-    from src.session_manager import db, db_lock
-    from src.runtime.health import derive_runtime_health
-    from datetime import datetime, timezone, timedelta
-    import time as _time
-
-    now_ts = _time.time()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    # stuck 阈值：running 超 30 分钟（对齐 multica stuckRunningInterval）
-    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
-
-    with db_lock:
-        c = db.cursor()
-
-        # --- 任务队列状态分布 ---
-        task_status_counts = {"queued": 0, "dispatched": 0, "running": 0,
-                              "completed": 0, "failed": 0, "cancelled": 0}
-        try:
-            c.execute("SELECT status, COUNT(*) FROM agent_tasks GROUP BY status")
-            for status, count in c.fetchall():
-                if status in task_status_counts:
-                    task_status_counts[status] = count
-        except Exception:
-            pass
-
-        # --- in_progress（dispatched + running）---
-        in_progress = task_status_counts["dispatched"] + task_status_counts["running"]
-
-        # --- stuck 检测：running 且 started_at < 30 分钟前 ---
-        stuck_tasks = []
-        try:
-            c.execute(
-                "SELECT id, agent_type, runtime_id, started_at, repo_key "
-                "FROM agent_tasks WHERE status='running' AND started_at IS NOT NULL AND started_at < ? "
-                "ORDER BY started_at ASC LIMIT 100",
-                (stuck_cutoff,),
-            )
-            for r in c.fetchall():
-                stuck_tasks.append({
-                    "id": r[0], "agent_type": r[1] or "", "runtime_id": r[2],
-                    "started_at": normalize_event_time(r[3]), "repo_key": r[4] or "",
-                })
-        except Exception:
-            pass
-
-        # --- 按来源（agent_type）分组排队/运行数 ---
-        task_by_source = {}
-        try:
-            c.execute(
-                "SELECT agent_type, status, COUNT(*) FROM agent_tasks "
-                "WHERE status IN ('queued','dispatched','running') GROUP BY agent_type, status"
-            )
-            for atype, status, count in c.fetchall():
-                key = atype or "unknown"
-                if key not in task_by_source:
-                    task_by_source[key] = {"queued": 0, "running": 0}
-                if status == "queued":
-                    task_by_source[key]["queued"] += count
-                elif status in ("dispatched", "running"):
-                    task_by_source[key]["running"] += count
-        except Exception:
-            pass
-
-        # --- runtime 在线状态 ---
-        runtimes_online = 0
-        runtimes_total = 0
-        runtime_by_mode = {"local": 0, "remote": 0, "unknown": 0}
-        runtime_list = []
-        try:
-            c.execute(
-                "SELECT id, name, credential_id, status, last_seen_at, provider "
-                "FROM agent_runtimes ORDER BY id"
-            )
-            for r in c.fetchall():
-                rid, rname, cid, rstatus, rlast_seen, rprovider = r
-                runtimes_total += 1
-                health = derive_runtime_health(rstatus or "offline", rlast_seen, now_ts)
-                mode = "remote" if (cid or 0) > 0 else "local"
-                is_online = health == "online"
-                if is_online:
-                    runtimes_online += 1
-                    runtime_by_mode[mode] = runtime_by_mode.get(mode, 0) + 1
-                runtime_list.append({
-                    "id": rid, "name": rname or "", "status": rstatus or "offline",
-                    "health": health, "mode": mode,
-                    "provider": rprovider or "", "last_seen_at": normalize_event_time(rlast_seen),
-                })
-        except Exception:
-            pass
-
-        # --- 今日任务统计（UTC 日期前缀匹配 created_at ISO 时间戳）---
-        today_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        today_stats = {"created": 0, "completed": 0, "failed": 0}
-        try:
-            c.execute(
-                "SELECT status, COUNT(*) FROM agent_tasks "
-                "WHERE created_at LIKE ? GROUP BY status",
-                (today_prefix + "%",),
-            )
-            for status, count in c.fetchall():
-                if status in today_stats:
-                    today_stats[status] = count
-        except Exception:
-            pass
-
-    return {
-        "timestamp": now_iso,
-        "tasks": {
-            "status_counts": task_status_counts,
-            "in_progress": in_progress,
-            "stuck_count": len(stuck_tasks),
-            "stuck_tasks": stuck_tasks,
-            "by_source": task_by_source,
-            "today": today_stats,
-        },
-        "runtimes": {
-            "total": runtimes_total,
-            "online": runtimes_online,
-            "offline": runtimes_total - runtimes_online,
-            "by_mode": runtime_by_mode,
-            "list": runtime_list,
-        },
     }
