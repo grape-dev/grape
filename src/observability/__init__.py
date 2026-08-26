@@ -325,3 +325,239 @@ def record_task_failed(task_id: str, source: str, runtime_id: int, failure_reaso
     s = _normalize_source(source)
     m = _normalize_mode(_runtime_mode(runtime_id))
     TASK_FAILED.labels(source=s, runtime_mode=m, failure_reason=failure_reason or "unknown").inc()
+
+
+# ===== MySQL 连接池指标（参考 multica metrics/db.go，适配 grape MySQL）=====
+
+DB_THREADS_CONNECTED = Gauge(
+    "grape_db_threads_connected",
+    "MySQL Threads_connected: current connected threads.",
+    registry=registry,
+)
+
+DB_THREADS_RUNNING = Gauge(
+    "grape_db_threads_running",
+    "MySQL Threads_running: active threads executing queries.",
+    registry=registry,
+)
+
+DB_THREADS_CREATED = Counter(
+    "grape_db_threads_created_total",
+    "MySQL Threads_created: total threads created since server start.",
+    registry=registry,
+)
+
+DB_THREADS_CACHED = Gauge(
+    "grape_db_threads_cached",
+    "MySQL Threads_cached: threads in the thread cache.",
+    registry=registry,
+)
+
+DB_MAX_USED_CONNECTIONS = Gauge(
+    "grape_db_max_used_connections",
+    "MySQL Max_used_connections: max simultaneous connections since server start.",
+    registry=registry,
+)
+
+DB_ABORTED_CONNECTS = Counter(
+    "grape_db_aborted_connects_total",
+    "MySQL Aborted_connects: failed connection attempts.",
+    registry=registry,
+)
+
+
+def collect_mysql_metrics():
+    """采集 MySQL SHOW STATUS 指标。在 /metrics scrape 时调用。
+
+    仅 MySQL 后端时有效；SQLite 后端跳过。
+    """
+    try:
+        from src.session_manager import _is_mysql_backend, db, db_lock
+        if not _is_mysql_backend():
+            return
+        with db_lock:
+            c = db.cursor()
+            c.execute("SHOW STATUS WHERE Variable_name IN "
+                      "('Threads_connected','Threads_running','Threads_created',"
+                      "'Threads_cached','Max_used_connections','Aborted_connects')")
+            for row in c.fetchall():
+                name, value = row[0], int(row[1])
+                if name == "Threads_connected":
+                    DB_THREADS_CONNECTED.set(value)
+                elif name == "Threads_running":
+                    DB_THREADS_RUNNING.set(value)
+                elif name == "Threads_created":
+                    DB_THREADS_CREATED.inc(value)
+                elif name == "Threads_cached":
+                    DB_THREADS_CACHED.set(value)
+                elif name == "Max_used_connections":
+                    DB_MAX_USED_CONNECTIONS.set(value)
+                elif name == "Aborted_connects":
+                    DB_ABORTED_CONNECTS.inc(value)
+    except Exception:
+        pass  # 采集失败不影响 /metrics
+
+
+# ===== BusinessSampler 采样器（参考 multica metrics/business_sampler.go）=====
+# 在 /metrics scrape 时执行轻量 SQL，暴露 DB 级实时业务度量。
+# 安全设计：独立查询 + LIMIT 100 + 8s TTL 缓存。
+
+import threading as _threading
+
+_sampler_cache: dict = {"snapshot": None, "taken_at": 0}
+_sampler_lock = _threading.Lock()
+_SAMPLER_CACHE_TTL = 8  # 秒
+_STUCK_MINUTES = 30
+
+
+# 采样器 Gauge 描述（用 ConstMetric，避免 stale series）
+from prometheus_client import Gauge as _Gauge
+
+SAMPLER_TASK_QUEUED = _Gauge(
+    "grape_task_queued",
+    "Current agent_tasks rows in queued status. Sampled from DB.",
+    ["source"],
+    registry=registry,
+)
+
+SAMPLER_TASK_RUNNING = _Gauge(
+    "grape_task_running",
+    "Current agent_tasks rows in dispatched/running status. Sampled from DB.",
+    ["source"],
+    registry=registry,
+)
+
+SAMPLER_TASK_STUCK = _Gauge(
+    "grape_task_stuck",
+    "Current running agent_tasks with started_at older than 30 minutes. Sampled from DB.",
+    ["source"],
+    registry=registry,
+)
+
+SAMPLER_RUNTIME_ONLINE = _Gauge(
+    "grape_runtime_online",
+    "Count of agent_runtimes with last_seen_at within heartbeat window. Sampled from DB.",
+    ["mode"],
+    registry=registry,
+)
+
+SAMPLER_IN_PROGRESS = _Gauge(
+    "grape_task_in_progress",
+    "Current agent_tasks dispatched+running. Sampled from DB.",
+    registry=registry,
+)
+
+
+def collect_business_sampler():
+    """BusinessSampler：scrape 时执行 SQL 采样，带 TTL 缓存。
+
+    参考 multica BusinessSamplerCollector.Collect()。
+    """
+    import time as _time
+
+    now = _time.time()
+    with _sampler_lock:
+        snap = _sampler_cache["snapshot"]
+        if snap is not None and now - _sampler_cache["taken_at"] < _SAMPLER_CACHE_TTL:
+            return  # 缓存未过期，跳过
+
+    # 采集新快照
+    try:
+        from src.session_manager import db, db_lock
+        from src.runtime.health import derive_runtime_health
+        from datetime import datetime, timezone, timedelta
+
+        now_ts = _time.time()
+        stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=_STUCK_MINUTES)).isoformat()
+
+        with db_lock:
+            c = db.cursor()
+
+            # task_queued by source
+            queued_by_source = {}
+            try:
+                c.execute(
+                    "SELECT COALESCE(agent_type,'unknown'), COUNT(*) FROM agent_tasks "
+                    "WHERE status='queued' GROUP BY agent_type"
+                )
+                for r in c.fetchall():
+                    queued_by_source[r[0] or "unknown"] = r[1]
+            except Exception:
+                pass
+
+            # task_running by source
+            running_by_source = {}
+            try:
+                c.execute(
+                    "SELECT COALESCE(agent_type,'unknown'), COUNT(*) FROM agent_tasks "
+                    "WHERE status IN ('dispatched','running') GROUP BY agent_type"
+                )
+                for r in c.fetchall():
+                    running_by_source[r[0] or "unknown"] = r[1]
+            except Exception:
+                pass
+
+            # task_stuck by source
+            stuck_by_source = {}
+            try:
+                c.execute(
+                    "SELECT COALESCE(agent_type,'unknown'), COUNT(*) FROM agent_tasks "
+                    "WHERE status='running' AND started_at IS NOT NULL AND started_at < ? "
+                    "GROUP BY agent_type",
+                    (stuck_cutoff,),
+                )
+                for r in c.fetchall():
+                    stuck_by_source[r[0] or "unknown"] = r[1]
+            except Exception:
+                pass
+
+            # runtime online
+            online_local = 0
+            online_remote = 0
+            try:
+                c.execute("SELECT status, last_seen_at, credential_id FROM agent_runtimes")
+                for r in c.fetchall():
+                    h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
+                    if h == "online":
+                        if (r[2] or 0) > 0:
+                            online_remote += 1
+                        else:
+                            online_local += 1
+            except Exception:
+                pass
+
+        # 更新 Prometheus gauges
+        all_sources = set(queued_by_source) | set(running_by_source) | set(stuck_by_source)
+        for src in all_sources:
+            SAMPLER_TASK_QUEUED.labels(source=src).set(queued_by_source.get(src, 0))
+            SAMPLER_TASK_RUNNING.labels(source=src).set(running_by_source.get(src, 0))
+            SAMPLER_TASK_STUCK.labels(source=src).set(stuck_by_source.get(src, 0))
+
+        SAMPLER_RUNTIME_ONLINE.labels(mode="local").set(online_local)
+        SAMPLER_RUNTIME_ONLINE.labels(mode="remote").set(online_remote)
+
+        in_progress = sum(running_by_source.values())
+        SAMPLER_IN_PROGRESS.set(in_progress)
+
+        with _sampler_lock:
+            _sampler_cache["snapshot"] = {
+                "queued": queued_by_source,
+                "running": running_by_source,
+                "stuck": stuck_by_source,
+                "online_local": online_local,
+                "online_remote": online_remote,
+                "in_progress": in_progress,
+            }
+            _sampler_cache["taken_at"] = now
+    except Exception:
+        pass  # 采样失败不影响 /metrics
+
+
+def on_metrics_scrape():
+    """在 /metrics 端点被 scrape 时调用，触发 MySQL 指标采集 + BusinessSampler。
+
+    参考 multica /metrics handler — multica 用 prometheus.Collector 自动采集，
+    grape 用手动触发方式（更简单，适配 prometheus_client Python SDK）。
+    """
+    collect_mysql_metrics()
+    collect_business_sampler()

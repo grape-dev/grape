@@ -297,5 +297,10 @@ async def health_realtime():
 
 @app.get("/metrics")
 async def metrics():
-    """Prometheus 指标端点（参考 multica metrics/server.go NewHandler）。"""
+    """Prometheus 指标端点（参考 multica metrics/server.go NewHandler）。
+
+    scrape 时触发 MySQL 指标采集 + BusinessSampler 采样。
+    """
+    from src.observability import on_metrics_scrape
+    on_metrics_scrape()
     return metrics_endpoint()
