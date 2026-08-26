@@ -36,7 +36,7 @@ cookie secure=False → refresh_token 在 HTTP 和 HTTPS 都发送
 
 ## 修复方案
 
-需要修 3 个地方（代码 2 个 + 运维 1 个）：
+需要修 2 个代码文件 + 1 个运维配置：
 
 ### 1. Dockerfile CMD 加 --proxy-headers（代码）
 
@@ -75,7 +75,7 @@ COOKIE_SECURE=false    # 开发环境 HTTP
 COOKIE_SECURE=true     # 生产环境 HTTPS（默认，不配也是这个）
 ```
 
-### 3. nginx 配置加 X-Forwarded-Proto（运维，不是代码）
+### 3. nginx 配置加 X-Forwarded-Proto（运维配置，不在代码仓）
 
 ```nginx
 # nginx 配置每个 location 块加：
@@ -84,7 +84,7 @@ proxy_set_header X-Forwarded-Proto $scheme;
 
 - nginx 把协议（http/https）传给后端
 - 没有 nginx 传 header，uvicorn --proxy-headers 也读不到
-- 这是运维配置，不在代码仓里改
+- 这是运维配置，部署时由运维在服务器上改，不进代码仓
 
 ## HTTP/HTTPS 双模式兼容
 
