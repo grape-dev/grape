@@ -209,25 +209,27 @@ function renderTasksTab(ops, rt, mt) {
       { label: '平均总时长', value: avgTotal, color: 'var(--or)' },
     ]);
 
-    // 按来源分组的 enqueued/failed 明细
+    // 按来源分组的实时 + 累计合并表格
     const sources = parseLabeledKeys(mt, 'grape_agent_task_enqueued_total', 'source');
-    if (sources.length > 0) {
-      html += section('按来源分组（累计）');
-      html += table(['Source', 'Enqueued', 'Dispatched', 'Terminal', 'Failed'],
-        sources.map(src => [
+    // 合并 ops/overview 的 bySource（实时 queued/running）和 /metrics 的累计数据
+    const allSources = new Set([...sources, ...Object.keys(bySource)]);
+    if (allSources.size > 0) {
+      html += section('按来源分组', '实时排队/运行 + 累计统计');
+      html += table(['Source', 'Queued', 'Running', 'Enqueued', 'Terminal', 'Failed'],
+        Array.from(allSources).sort().map(src => [
           `<b>${src}</b>`,
+          (bySource[src] || {}).queued || 0,
+          (bySource[src] || {}).running || 0,
           parseLabeledSumByLabel(mt, 'grape_agent_task_enqueued_total', 'source', src),
-          parseLabeledSumByLabel(mt, 'grape_agent_task_dispatched_total', 'source', src),
           parseLabeledSumByLabel(mt, 'grape_agent_task_terminal_total', 'source', src),
           parseLabeledSumByLabel(mt, 'grape_agent_task_failed_total', 'source', src),
         ])
       );
     }
-  }
-
-  if (Object.keys(bySource).length > 0) {
-    html += section('按 Agent 类型分组', '排队 / 运行中');
-    html += table(['Agent Type', 'Queued', 'Running'],
+  } else if (Object.keys(bySource).length > 0) {
+    // /metrics 无数据时仅展示实时
+    html += section('按来源分组', '排队 / 运行中');
+    html += table(['Source', 'Queued', 'Running'],
       Object.entries(bySource).map(([src, c]) => [
         `<b>${src}</b>`, c.queued || 0, c.running || 0
       ])
@@ -241,14 +243,6 @@ function renderTasksTab(ops, rt, mt) {
         `<span class="ts">${s.id}</span>`, s.agent_type || '-', s.runtime_id || '-',
         `<span class="ts">${s.started_at || '-'}</span>`, `<span class="ts">${s.repo_key || '-'}</span>`
       ])
-    );
-  }
-
-  // realtime 补充
-  if (rt.tasks) {
-    html += section('实时快照', 'from /health/realtime');
-    html += table(['Status', 'Count'],
-      Object.entries(rt.tasks).map(([k, v]) => [`<b>${k}</b>`, v])
     );
   }
 
