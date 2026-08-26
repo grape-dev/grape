@@ -51,6 +51,12 @@ OBS_ACCESS_KEY = os.environ.get("OBS_ACCESS_KEY", "")
 OBS_SECRET_KEY = os.environ.get("OBS_SECRET_KEY", "")
 OBS_PREFIX = os.environ.get("OBS_PREFIX", "grape/prod")
 OBS_URL_EXPIRES = int(os.environ.get("OBS_URL_EXPIRES", "300"))
+
+# ── 飞书 Bot Lease（集群部署，保证同一 bot 同一时刻只有一个实例连 WebSocket）──
+BOT_LEASE_DISABLED = os.environ.get("BOT_LEASE_DISABLED", "false").lower() in ("1", "true", "yes")
+BOT_LEASE_TTL = int(os.environ.get("BOT_LEASE_TTL", "60"))
+BOT_LEASE_RENEW_INTERVAL = int(os.environ.get("BOT_LEASE_RENEW_INTERVAL", "20"))
+BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 # 本地缓存根（磁盘 LRU zip 缓存；默认 data/cache/storage）
 OBS_LOCAL_CACHE = os.environ.get("OBS_LOCAL_CACHE", "")
 
