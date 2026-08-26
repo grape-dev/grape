@@ -265,15 +265,31 @@ BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 
 ## 十二、上线顺序
 
-**重要：两台必须同时部署 lease 代码再同时启用。**
+**按正常顺序逐台部署即可，不需要强制同时重启。**
 
-如果只有一台部署了 lease（BOT_LEASE_DISABLED=false），另一台没有 lease 代码——没有 lease 的那台会无条件连所有 bot，导致重复。
+### 部署过渡期处理
 
-正确顺序：
-1. 两台都部署 lease 代码 + BOT_LEASE_DISABLED=true（先不启用）
-2. 验证两台都退回旧模式正常工作
-3. 两台同时改 BOT_LEASE_DISABLED=false 重启
-4. 验证只有一个实例连每个 bot
+新旧代码混用期间（一台部署了 lease 代码，另一台还是旧代码）会有短暂重复——旧代码的实例无条件连所有 bot，新代码的实例 try_acquire 后也连上。重复消息靠 bot_seen_messages 去重兜底，不影响功能。
+
+两台都部署完成后 lease 机制自动生效——只有抢到 lease 的实例连 bot。
+
+### 部署步骤
+
+1. 实例 A 部署 lease 代码 + 重启（BOT_LEASE_DISABLED=false 默认开启）
+   - 实例 A 启用 lease，try_acquire 成功的 bot 连 WebSocket
+   - 实例 B 还是旧代码，无条件连所有 bot
+   - 过渡期：两台可能同时连同一个 bot，bot_seen_messages 去重兜底
+2. 实例 B 部署 lease 代码 + 重启
+   - 实例 B 启用 lease，try_acquire 时发现 lease 被实例 A 持有 → 跳过
+   - lease 机制自动生效——只有抢到 lease 的实例连 bot
+3. 验证：只有一个实例连每个 bot
+
+### 不需要同时部署的原因
+
+- lease 代码向下兼容——旧代码的实例不影响新代码运行
+- 过渡期重复靠 bot_seen_messages 去重兜底
+- 两台都部署完成后 lease 自动生效
+- 无法保证集群同时重启——实际部署都是逐台滚动
 
 ## 十三、数据库新增字段
 
