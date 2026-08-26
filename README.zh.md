@@ -1,5 +1,7 @@
 <h1 align="center">Grape</h1>
 
+<p align="center"><a href="README.md">English</a> | 中文</p>
+
 <p align="center">
   <strong>AI Native DevOps —— 将任意 Git 项目一键变为 AI 自主驱动的开发工作流</strong>
   <br>
@@ -17,10 +19,6 @@
   <a href="#如何贡献">如何贡献</a> ·
   <a href="#反馈问题">反馈问题</a>
 </p>
-
----
-
-[English](README.md) | 中文
 
 ---
 
