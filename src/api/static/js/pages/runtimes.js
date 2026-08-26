@@ -144,7 +144,7 @@ function renderRuntimeTaskList(container, tasks, rtName) {
   html += '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent / Skill</th><th>Repo</th><th>Status</th><th>Exit</th><th>Created</th></tr></thead><tbody>';
   tasks.forEach(t => {
     const issueSeq = (t.issue_id && t.event_seq) ? `${t.issue_id} #${t.event_seq}` : (t.event_seq ? `#${t.event_seq}` : t.id.substring(0,12));
-    html += `<tr style="cursor:pointer" onclick="openTaskLogModal('${t.id}')">
+    html += `<tr style="cursor:pointer" onclick="openTaskLogModal('${t.id}', ${JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:(t.repo_key||'').replace('gitcode:',''), created:t.created_at||''})})">
       <td class="ts"><b>${issueSeq}</b></td>
       <td><b>${t.agent_type || '-'}</b><br><span class="ts t3">${t.skill || '-'}</span></td>
       <td class="ts t3">${(t.repo_key || '').replace('gitcode:','').substring(0,20)}</td>
@@ -158,9 +158,17 @@ function renderRuntimeTaskList(container, tasks, rtName) {
 }
 
 // 任务行点击 → 弹窗显示运行日志
-function openTaskLogModal(taskId) {
+function openTaskLogModal(taskId, info) {
   const old = document.getElementById('rtLogModal');
   if (old) old.remove();
+
+  info = info || {};
+  const titleParts = [];
+  if (info.repo) titleParts.push(`<span class="ts t3">${info.repo}</span>`);
+  if (info.issue) titleParts.push(`<b>${info.issue}</b>`);
+  if (info.seq) titleParts.push(`<span class="ts">#${info.seq}</span>`);
+  if (info.created) titleParts.push(`<span class="ts t3">${info.created.substring(0,19)}</span>`);
+  const titleHtml = titleParts.length ? titleParts.join(' · ') : '任务日志';
 
   const modal = document.createElement('div');
   modal.id = 'rtLogModal';
@@ -168,7 +176,7 @@ function openTaskLogModal(taskId) {
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   modal.innerHTML = `<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
-      <h3 style="font-size:14px;font-weight:600">任务日志 · <span class="ts">${taskId.substring(0,16)}</span></h3>
+      <h3 style="font-size:13px;font-weight:600">${titleHtml}</h3>
       <button class="bt bt-o bt-s" onclick="document.getElementById('rtLogModal').remove()">✕ 关闭</button>
     </div>
     <div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>
