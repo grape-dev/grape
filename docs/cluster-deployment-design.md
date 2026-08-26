@@ -481,6 +481,31 @@ db_setup.py init_database() 加迁移锁：
 
 前端 api.js refresh 成功后同时更新 localStorage 里的 access_token 和 refresh_token。
 
+**待优化项（本次一并实施）：**
+
+1. **并发 401 请求丢失**
+   - 问题：页面同时发多个请求，access_token 过期时多个请求同时 401，_refreshing 锁导致部分请求直接 reject 不重试
+   - 优化：用 Promise 队列——第一个 refresh 时其他请求等待同一个 Promise，refresh 完成后全部重发
+
+2. **OAuth 登录没有 refresh_token**
+   - 问题：OAuth 回调只返回 access_token，15 分钟后被踢
+   - 优化：OAuth 回调也签发 refresh_token，通过 URL 或 cookie 传给前端
+
+3. **旧 refresh_token 仍然有效（token_version 机制）**
+   - 问题：refresh_token 续期后旧的没失效——被盗后无法撤销
+   - 优化：user_accounts 表加 token_version INT DEFAULT 0
+     - JWT payload 里带 ver=token_version
+     - verify 时对比数据库的 token_version——不匹配则失效
+     - 改密码时 token_version+1 → 所有旧 token 失效
+     - 用户主动"踢出所有设备"时 token_version+1
+
+4. **logout 后 token 仍然有效（token_version 撤销）**
+   - 问题：JWT 无状态 → logout 后旧 token 在过期前仍然有效
+   - 优化：logout 时 token_version+1 → 当前用户所有 token 失效
+     - 比 Redis 黑名单更轻量——不需要新依赖
+     - 副作用：logout 会踢出所有设备（多设备同时被踢）
+     - 可接受——用户主动登出时踢所有设备是合理行为
+
 JWT_SECRET 安全（参照 multica）：
 - 生产环境不能用默认 secret
 - 启动时校验——空值或已知默认值拒绝启动
