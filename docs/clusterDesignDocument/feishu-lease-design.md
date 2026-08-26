@@ -365,7 +365,7 @@ async def lease_sweep_loop():
 - DB 错误（连接断/查询超时）→ 保持 WebSocket 连接，等 DB 恢复后重试续约
 - CAS 失败（lease 被其他实例抢走）→ release lease + 断开
 
-### 场景验证总结（53 个场景）
+### 场景验证总结（60 个场景）
 
 | # | 场景 | 结果 | 说明 |
 |---|------|:---:|------|
@@ -422,6 +422,19 @@ async def lease_sweep_loop():
 | 51 | lease 查询缺少索引 | ⚠️ | 问题 Q——当前 7 行不需要，后续加 idx_lease_owner + idx_is_active |
 | 52 | lease 测试缺失 | ⚠️ | 问题 R——新增 test_bot_lease.py |
 | 53 | lease 状态 API 暴露 | ⚠️ | 问题 S——加 GET /api/im/status 路由 |
+| 54 | 飞书 API 限流 | ✅ | token 缓存 2 小时，频率极低 |
+| 55 | 飞书 WebSocket 连接数限制 | ✅ | lease 保证唯一连接 |
+| 56 | 网络分区 split-brain | ✅ | 单 MySQL 实例不存在分区 |
+| 57 | 时钟漂移 | ✅ | NTP 保证，10 秒 << TTL 60 秒 |
+| 58 | SIGTERM vs SIGKILL | ⚠️ | 问题 T——uvicorn grace period 冲突 |
+| 59 | 配置热更新 | ✅ | 需重启是正常行为 |
+| 60 | 日志量和轮转 | ✅ | 1.7-4.3 MB/天，日志轮转处理 |
+
+### 问题 T：uvicorn graceful shutdown timeout 和 stop() timeout 冲突
+
+场景：uvicorn 默认 timeout_graceful_shutdown=5 秒，但 stop() 的 timeout=30 秒（问题 I 改的）→ uvicorn 5 秒后强制退出 → lease 没释放完。
+
+修复：uvicorn 启动参数加 `--timeout-graceful-shutdown 30`，或 systemd 配置 `TimeoutStopSec=35`。确保 uvicorn grace period >= stop() timeout。
 
 ### 问题 P：lease 负载不均衡
 
