@@ -365,7 +365,7 @@ async def lease_sweep_loop():
 - DB 错误（连接断/查询超时）→ 保持 WebSocket 连接，等 DB 恢复后重试续约
 - CAS 失败（lease 被其他实例抢走）→ release lease + 断开
 
-### 场景验证总结（49 个场景）
+### 场景验证总结（53 个场景）
 
 | # | 场景 | 结果 | 说明 |
 |---|------|:---:|------|
@@ -418,6 +418,45 @@ async def lease_sweep_loop():
 | 47 | 续约时间精度 | ✅ | 1 秒误差 << 20 秒续约间隔 |
 | 48 | chat_bot 和 vod_bot lease 差异 | ✅ | 按 app_id 管理，不关 bot_type |
 | 49 | bot_type 为空或异常 | ✅ | 不匹配走 chat 默认逻辑 |
+| 50 | lease 负载不均衡 | ⚠️ | 问题 P——当前不管，后续按需加 max_bots_per_instance |
+| 51 | lease 查询缺少索引 | ⚠️ | 问题 Q——当前 7 行不需要，后续加 idx_lease_owner + idx_is_active |
+| 52 | lease 测试缺失 | ⚠️ | 问题 R——新增 test_bot_lease.py |
+| 53 | lease 状态 API 暴露 | ⚠️ | 问题 S——加 GET /api/im/status 路由 |
+
+### 问题 P：lease 负载不均衡
+
+场景：sweep 抢锁，谁先 sweep 谁抢到所有 bot → 一个实例扛所有 bot，另一个闲着。lease 只保证"不重复"不保证"均衡"。
+
+当前 7 个 bot 消息量小，一个实例完全扛得住。lease 的目标是"不重复"不是"均衡"。后续如果消息量大再加 max_bots_per_instance 限制（环境变量 BOT_LEASE_MAX_BOTS 配置，7 bot / 2 实例 = 每个最多 4 个）。
+
+### 问题 Q：lease 查询缺少索引
+
+场景：lease 查询 WHERE is_active=1 AND (lease_token IS NULL OR lease_expires_at < UTC_TIMESTAMP()) 不走主键索引 → 全表扫描。当前 7 行 0.25ms 没问题，数据量增长后需要索引。
+
+后续 bot 数量增长加索引：idx_lease_owner (lease_owner) + idx_is_active (is_active)。
+
+### 问题 R：lease 测试缺失
+
+场景：当前没有 lease 机制的测试。
+
+修复：新增 test_bot_lease.py 单元测试：
+- try_acquire 成功/失败
+- renew 成功/失败
+- release
+- list_expired_or_unheld
+- 游标分页
+- 批量续约
+
+集成测试：
+- 两个实例抢同一个 bot
+- lease 过期后被其他实例抢走
+- 续约失败后断开
+
+### 问题 S：lease 状态 API 暴露
+
+场景：health_check 是 BotManager 的方法但没有 API 路由暴露 lease 状态。
+
+修复：加 GET /api/im/status 路由，返回 health_check + lease 状态（lease_owner / lease_expires_at / lease_acquired_at）。
 
 ### 问题 L：lease 状态变更日志不完整
 
