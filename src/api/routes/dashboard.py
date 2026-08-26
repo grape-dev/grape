@@ -69,15 +69,24 @@ async def get_ops_overview():
         failed_tasks = []
         try:
             c.execute(
-                "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, event_seq, result_text "
+                "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, event_seq, result_text, exit_code, errors "
                 "FROM agent_tasks WHERE status='failed' ORDER BY completed_at DESC"
             )
             for r in c.fetchall():
+                # errors 字段是 JSON 数组字符串，解析后取前 3 条
+                import json as _json
+                _errors = []
+                try:
+                    _errors = _json.loads(r[10]) if r[10] else []
+                except Exception:
+                    _errors = [r[10]] if r[10] else []
                 failed_tasks.append({
                     "id": r[0], "agent_type": r[1] or "", "runtime_id": r[2],
                     "started_at": normalize_event_time(r[3]), "completed_at": normalize_event_time(r[4]),
                     "repo_key": r[5] or "", "issue_id": r[6] or "", "event_seq": r[7] or 0,
                     "result_text": (r[8] or "")[:200],
+                    "exit_code": r[9],
+                    "errors": _errors[:3],
                 })
         except Exception:
             pass

@@ -188,7 +188,7 @@ function openTaskLogModal(taskId, infoEnc) {
 
   // 并行加载日志和时间线
   API.get('/task-logs/' + taskId + '/messages?since=0').then(msgs => {
-    renderTaskLogMessages(document.getElementById('rtLogModalBody'), msgs || []);
+    renderTaskLogMessages(document.getElementById('rtLogModalBody'), msgs || [], info);
   }).catch(e => {
     document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
   });
@@ -235,9 +235,27 @@ function renderTaskTimeline(container, info) {
   container.style.display = 'block';
 }
 
-function renderTaskLogMessages(container, msgs) {
+function renderTaskLogMessages(container, msgs, errorInfo) {
   if (!msgs.length) {
-    container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">无日志消息</div>';
+    let html = '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;border-radius:8px;overflow:hidden">';
+    html += '<div style="padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.06);color:#8d97a8">无执行日志</div>';
+    if (errorInfo) {
+      const ei = errorInfo;
+      if (ei.result_text) {
+        html += `<div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#d49c0f">结果</span> <span style="color:#e0e6f0">${ei.result_text}</span></div>`;
+      }
+      if (ei.exit_code != null) {
+        html += `<div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#d49c0f">Exit Code</span> <span style="color:${ei.exit_code !== 0 ? '#dc2828' : '#1ca44c'}">${ei.exit_code}</span></div>`;
+      }
+      if (ei.errors && ei.errors.length) {
+        html += '<div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#d49c0f">错误信息</span></div>';
+        ei.errors.forEach(e => {
+          html += `<div style="padding:4px 14px 4px 28px;color:#dc2828">${e}</div>`;
+        });
+      }
+    }
+    html += '</div>';
+    container.innerHTML = html;
     return;
   }
   const typeIcon = { step_start: '▶', step_finish: '✓', text: '💬', reasoning: '🤔', tool_use: '🔧', error: '❌', done: '✅' };
