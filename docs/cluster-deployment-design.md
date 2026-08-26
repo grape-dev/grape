@@ -568,7 +568,7 @@ JWT_SECRET 安全（参照 multica）：
 - 生产环境不能用默认 secret
 - 启动时校验——空值或已知默认值拒绝启动
 
-**不加 Redis、不加数据库表——JWT 无状态集群原生支持。**
+**multica 方案对比：** multica 单 token 存 HttpOnly cookie，TTL 30 天固定过期，无滚动续期，无 refresh 端点。30 天后不管用不用都必须重新登录。grape 更灵活——7 天滚动续期（活跃用户不踢出）+ 30 天绝对上限（防止永久存活）。
 
 #### 3.2 Redis（可选优化——规模上来再做）
 

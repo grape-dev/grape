@@ -5,13 +5,13 @@
 Access Token：
   - 短有效期（15 分钟）
   - 用于 API 请求 Authorization: Bearer header
-  - 过期后用 refresh_token 换新的
+  - 存 localStorage（JS 可读）
 
 Refresh Token：
-  - 长有效期（7 天，滚动续期）
+  - 长有效期（7 天滚动续期）+ 绝对上限（30 天）
   - 只用于 POST /auth/refresh 换新的 access_token
   - 存 HttpOnly cookie——XSS 偷不到
-  - 过期后需重新登录
+  - max_exp：首次签发时写入，refresh 时继承不更新——30 天后强制登录
 
 主动撤销：
   - refresh_token 里存 token_version
@@ -29,7 +29,8 @@ JWT_ALGORITHM = "HS256"
 
 # 过期时间
 ACCESS_TOKEN_TTL = 15 * 60       # 15 分钟
-REFRESH_TOKEN_TTL = 7 * 24 * 3600  # 7 天
+REFRESH_TOKEN_TTL = 7 * 24 * 3600  # 7 天（滚动续期）
+REFRESH_MAX_LIFETIME = 30 * 24 * 3600  # 30 天（绝对上限——防 token 永久存活）
 
 # 已知不安全的默认值——生产环境拒绝启动
 _INSECURE_SECRETS = {"", _DEFAULT_SECRET, "change-me-in-production"}
@@ -41,7 +42,10 @@ def validate_jwt_secret() -> bool:
 
 
 def create_access_token(user_id: int, username: str, token_version: int = 0) -> str:
-    """签发 access token——短有效期（15 分钟），用于 API 请求。"""
+    """签发 access token——短有效期（15 分钟），用于 API 请求。
+
+    access_token 不带 max_exp——30 天上限只管控 refresh 长令牌。
+    """
     payload = {
         "sub": str(user_id),
         "username": username,
@@ -53,15 +57,26 @@ def create_access_token(user_id: int, username: str, token_version: int = 0) -> 
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def create_refresh_token(user_id: int, username: str, token_version: int = 0) -> str:
-    """签发 refresh token——长有效期（7 天），用于刷新 access token。"""
+def create_refresh_token(user_id: int, username: str, token_version: int = 0,
+                         max_exp: int = None) -> str:
+    """签发 refresh token——长有效期（7 天滚动）+ 绝对上限（30 天）。
+
+    max_exp：绝对过期时间戳（首次签发时 = now + 30 天）。
+    refresh 换新 refresh 时继承旧 max_exp 不重新生成。
+    到达 max_exp 后强制登录——防止 token 永久存活。
+    """
+    now = int(time.time())
+    if max_exp is None:
+        # 首次签发——设置 30 天绝对上限
+        max_exp = now + REFRESH_MAX_LIFETIME
     payload = {
         "sub": str(user_id),
         "username": username,
         "type": "refresh",
         "ver": token_version,
-        "iat": int(time.time()),
-        "exp": int(time.time()) + REFRESH_TOKEN_TTL,
+        "max_exp": max_exp,  # 绝对上限——refresh 时继承不更新
+        "iat": now,
+        "exp": now + REFRESH_TOKEN_TTL,  # 滚动续期——每次 refresh 重新算 7 天
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -84,13 +99,23 @@ def verify_access_token(token: str) -> dict | None:
 def verify_refresh_token(token: str) -> dict | None:
     """验证 refresh token——返回 payload 或 None。
 
-    只验证签名和过期——不查数据库。
-    token_version 校验在 auth.py refresh 端点里做（对比数据库）。
+    验证签名 + 过期 + max_exp（绝对上限）。
+    不查数据库——token_version 校验在 auth.py refresh 端点里做。
+
+    4 个条件全通过才有效：
+    1. 签名合法（JWTError 不抛）
+    2. type=refresh
+    3. exp 未过期（滚动续期 7 天）
+    4. max_exp 未到达（绝对上限 30 天）
     """
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "refresh":
             return None
+        # 检查 max_exp 绝对上限
+        max_exp = payload.get("max_exp")
+        if max_exp and int(time.time()) > int(max_exp):
+            return None  # 到达 30 天绝对上限——强制登录
         return payload
     except JWTError:
         return None

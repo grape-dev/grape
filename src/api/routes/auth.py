@@ -92,9 +92,11 @@ async def refresh_token(request: Request, response: Response):
     db_ver = user_db.get_token_version(uid)
     if token_ver != db_ver:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "会话已失效"})
-    # 滚动续期——同时返回新 access_token + 新 refresh_token
+    # 滚动续期——新 access_token + 新 refresh_token
+    # 新 refresh_token 继承旧 max_exp（不重新生成——30 天绝对上限）
+    old_max_exp = int(payload.get("max_exp", 0))
     new_access_token = create_access_token(uid, username, db_ver)
-    new_refresh_token = create_refresh_token(uid, username, db_ver)
+    new_refresh_token = create_refresh_token(uid, username, db_ver, max_exp=old_max_exp)
     _set_refresh_cookie(response, new_refresh_token)
     return {"token": new_access_token}
 

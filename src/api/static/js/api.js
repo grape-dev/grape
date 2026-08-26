@@ -48,6 +48,21 @@ const API = (() => {
   const BASE = '/api';
   let _refreshPromise = null;  // 并发 refresh 时所有请求等待同一个 Promise
 
+  // 多 Tab 同步——监听 localStorage token 变化，其他 Tab 刷新 token 后自动同步
+  // 体验优化，不是安全屏障——同步失败有 401 + Promise 队列兜底
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', (e) => {
+      if (e.key === 'token') {
+        // token 被其他 Tab 更新了——当前 Tab 的下次请求会自动用新 token（从 localStorage 读）
+        // 如果新值为 null（其他 Tab logout 了）——跳登录页
+        if (!e.newValue) {
+          localStorage.removeItem('user');
+          if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+        }
+      }
+    });
+  }
+
   function headers() {
     const h = {'Content-Type': 'application/json'};
     const token = localStorage.getItem('token');
