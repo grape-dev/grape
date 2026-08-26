@@ -1172,15 +1172,28 @@ class BotManager:
                             self._held_leases[app_id] = token
                             eligible = self._eligible_bots[app_id]
                             try:
-                                await self.add_bot(app_id, eligible["app_secret"], eligible["bot_type"])
-                                # 问题 A：把 lease_token 设到 BotContext 供重连后检查
-                                if app_id in self._bots:
-                                    self._bots[app_id]._lease_token = token
+                                # 抢到 lease 后直接创建 BotContext + run_bot 连接
+                                # 不走 add_bot（add_bot 在 lease 模式下只登记不连接）
+                                ctx = BotContext(
+                                    app_id=app_id,
+                                    app_secret=eligible["app_secret"],
+                                    bot_type=eligible["bot_type"],
+                                    max_concurrent=self._max_concurrent,
+                                )
+                                ctx._lease_token = token  # 问题 A：供重连后检查
+                                self._bots[app_id] = ctx
+                                if self._on_message and self._api:
+                                    ctx._task = asyncio.create_task(
+                                        run_bot(ctx, self._api, self._on_message),
+                                        name=f"bot-{ctx.name}",
+                                    )
+                                    log.info(f"[lease] bot {ctx.name} connected after acquiring lease")
                             except Exception as e:
                                 # 遗漏修复 1：连接失败要释放 lease
                                 log.warning(f"[lease] bot {app_id} connect failed: {e}, releasing lease")
                                 lease_store.release(app_id, token)
                                 self._held_leases.pop(app_id, None)
+                                self._bots.pop(app_id, None)
                     cursor = candidates[-1]["bot_app_id"]
                     if len(candidates) < 500:
                         break
