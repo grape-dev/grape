@@ -26,7 +26,6 @@
 - vod - From Voice of Developer
 - good-first-issue - For newcomers
 - help-wanted - Needs community help
-- quick-deploy - 应用项目仓库无 TF 模板，跳过 Coding+QA，SRE 临时编写 TF 代码直接部署
 
 ## Rules
 1. Every issue must have at least one type label

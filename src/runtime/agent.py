@@ -106,6 +106,44 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
     return "opencode"
 
 
+def _cleanup_task_tmp(task: dict):
+    """task 完成后清理 agent 在 /tmp 下产生的工作残留。
+    agent 执行过程中会在 /tmp 创建临时目录（tf-deploy-*/blog-build-*/blog-deploy.*
+    /tmp/ptmpl_* 等），task 完成后不清理会叠加撑满 tmpfs。
+    只清理已知的 agent 工作产物前缀，不碰其他进程的文件。"""
+    import shutil as _shutil
+    import glob as _glob
+    tmp_patterns = [
+        "/tmp/tf-deploy-*",
+        "/tmp/tf-sys-xhy*",
+        "/tmp/blog-build-*",
+        "/tmp/blog-deploy*",
+        "/tmp/blog-gen*",
+        "/tmp/blog-publish-*",
+        "/tmp/blog-sys-*.tar.gz",
+        "/tmp/ptmpl_*",
+        "/tmp/tf-state-backup.json",
+        "/tmp/inventory_state.json",
+        "/tmp/inventory*.json",
+        # bun/opencode 的 libopentui JIT .so 缓存——按 cwd 生成不同 hash，
+        # JSC_diskCachePath 重定向大部分但 FFI 层仍有少量写入 /tmp，需兜底清理。
+        "/tmp/.39ee*.so",
+    ]
+    cleaned = 0
+    for pattern in tmp_patterns:
+        for path in _glob.glob(pattern):
+            try:
+                if os.path.isdir(path):
+                    _shutil.rmtree(path, ignore_errors=True)
+                elif os.path.isfile(path):
+                    os.remove(path)
+                cleaned += 1
+            except Exception:
+                pass
+    if cleaned:
+        log.info(f"cleaned {cleaned} temp files/dirs from /tmp after task")
+
+
 def _kill_stale_engine(task: dict, backend: str = "opencode"):
     """超时/终止后杀掉对应引擎子进程（opencode run / hermes acp / hermes chat / codearts run）。
     按 cwd 匹配，避免误杀其他任务。SIGTERM 后 3s SIGKILL 兜底。"""
@@ -639,6 +677,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             await client.fail(_tid, "no done event")
                     except Exception as _ce:
                         log.warning(f"task {_tid} complete/fail callback error: {_ce}")
+                    # 清理 agent 在 /tmp 下的工作残留（tf-deploy/blog-build/ptmpl 等），
+                    # 避免多 task 叠加撑满 tmpfs 导致后续 git clone/template push 失败。
+                    # 按 cwd 的 owner/repo 前缀匹配，只清当前 task 产生的，不误删其他 task 的。
+                    _cleanup_task_tmp(t)
                 active_sessions.discard(s)
                 active_tasks.pop(_tid, None)
                 active_task_objs.pop(_tid, None)
