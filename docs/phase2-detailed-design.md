@@ -5,6 +5,18 @@
 阶段 1 已完成（健康监控 + 取消实时性），代码在 `feat/health-monitoring` 分支。
 阶段 2 将 grape backend 容器化——Dockerfile + docker-compose + 迁移锁。
 
+**两种部署方式共存：** 容器化部署和老方式部署都支持，共用同一套代码。
+
+| 部署方式 | 启动命令 | 端口 | 适用场景 |
+|---------|---------|------|---------|
+| 老方式（非容器） | `python src/api/run.py` | 3000+8080 双进程 | 开发/测试/快速部署 |
+| 新方式（容器） | `docker compose up -d` | 3000 单进程 | 生产/标准化部署 |
+
+**老方式不受影响：**
+- run.py 没改——multiprocessing 启动 3000+8080 照常
+- db_setup.py 迁移锁——MySQL 走 GET_LOCK 但单实例无竞争，和没加锁一样
+- nginx 不容器化——宿主机 nginx 不变
+
 **nginx 不容器化——保留宿主机。** nginx 是基础设施不是 grape 服务，不应该耦合进服务部署。
 
 ## 当前部署方式
