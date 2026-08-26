@@ -13,6 +13,10 @@ from unittest.mock import patch
 from src.user import db as udb
 from src.session_manager import db, db_lock
 
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    return create_access_token(user_id, username)
+
 
 def _uid():
     return "udb_" + uuid.uuid4().hex[:8]
@@ -84,11 +88,14 @@ class TestAccounts:
     def test_token_flow(self):
         u, uname = _mk_user()
         try:
-            tok = udb.create_session_token(u["id"])
-            assert udb.validate_token(tok) == u["id"]
-            udb.clear_token(tok)
-            assert udb.validate_token(tok) is None
-            assert udb.validate_token("bad") is None
+            # JWT 无状态——create_access_token + verify_access_token
+            from src.api.jwt_utils import create_access_token, verify_access_token
+            tok = create_access_token(u["id"], u["username"])
+            payload = verify_access_token(tok)
+            assert payload is not None
+            assert int(payload["sub"]) == u["id"]
+            # 坏 token 验证失败
+            assert verify_access_token("bad") is None
         finally:
             _cleanup_user(uname)
 

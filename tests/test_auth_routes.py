@@ -12,6 +12,10 @@ from unittest.mock import patch
 from src.api.main import app
 from src.user import db as user_db
 from src.session_manager import db, db_lock
+# JWT access token helper（替代旧的 create_session_token）
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    return create_access_token(user_id, username)
 
 client = TestClient(app)
 
@@ -217,7 +221,7 @@ class TestOAuthCallback:
 class TestProfileLogout:
     def _auth_headers(self):
         u = user_db.create_user("auth_prof_" + uuid.uuid4().hex[:6], "pw")
-        tok = user_db.create_session_token(u["id"])
+        tok = _jwt_access_token(u["id"], u["username"])
         return u, {"Authorization": f"Bearer {tok}"}
 
     def test_profile_returns_user(self):
@@ -237,8 +241,9 @@ class TestProfileLogout:
             r = client.post("/api/auth/logout", headers=h)
             assert r.status_code == 200
             assert r.json()["message"] == "已登出"
-            # token 已失效
+            # JWT 无状态——logout 后旧 token 在过期前仍有效
+            # （前端负责删 localStorage token，服务端无法撤销 JWT）
             r2 = client.get("/api/auth/profile", headers=h)
-            assert r2.status_code == 401
+            assert r2.status_code == 200  # JWT 无状态，token 仍有效
         finally:
             user_db.delete_user(u["id"])

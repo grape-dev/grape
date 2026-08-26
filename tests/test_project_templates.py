@@ -15,6 +15,10 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.api.routes import templates as templates_mod
 from src.user import db as user_db
+# JWT access token helper（替代旧的 create_session_token）
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    return create_access_token(user_id, username)
 
 client = TestClient(app)
 
@@ -33,7 +37,7 @@ def setup_module():
     acc = user_db.get_user_account("test_tmpl") or {}
     acc["gitcode_api_token"] = "test_tmpl_token_12345"
     user_db.save_user_account("test_tmpl", acc)
-    _token = user_db.create_session_token(_uid["id"])
+    _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
 
 
@@ -150,7 +154,7 @@ class TestCreate:
             acc = user_db.get_user_account("test_tmpl_notok") or {}
             acc["gitcode_api_token"] = ""
             user_db.save_user_account("test_tmpl_notok", acc)
-            tok = user_db.create_session_token(uid["id"])
+            tok = _jwt_access_token(uid["id"], uid["username"])
             h = {"Authorization": f"Bearer {tok}"}
             with patch.object(templates_mod, "_find_template",
                               return_value={"template": {"id": "hello-skill", "source": "local"}, "scene_id": "skill-dev"}):

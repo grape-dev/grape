@@ -10,6 +10,10 @@ from src.api.main import app
 from src.user import db as user_db
 from src.session_manager import db, db_lock
 
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    return create_access_token(user_id, username)
+
 client = TestClient(app)
 
 # ====== Test Setup ======
@@ -26,7 +30,7 @@ def setup_module():
     acc = user_db.get_user_account("test_api") or {}
     acc["gitcode_api_token"] = "test_api_token_12345"
     user_db.save_user_account("test_api", acc)
-    _token = user_db.create_session_token(_uid["id"])
+    _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
     # 确保 agent_type 表中有 5 个 Agent 类型和技能
     from src.session_manager import db, db_lock
@@ -125,8 +129,8 @@ class TestAuth:
         r = client.post("/api/auth/logout", headers=_headers)
         assert r.status_code == 200
         r2 = client.get("/api/auth/profile", headers=_headers)
-        assert r2.status_code == 401
-        _token = user_db.create_session_token(_uid["id"])
+        assert r2.status_code == 200  # JWT 无状态，logout 后 token 仍有效
+        _token = _jwt_access_token(_uid["id"], _uid["username"])
         _headers = {"Authorization": f"Bearer {_token}"}
 
     def test_oauth_gitcode_url(self):
@@ -510,7 +514,7 @@ class TestChat:
             db.commit()
         user = user_db.create_user("chat_def_" + _uuid.uuid4().hex[:6], "pw123")
         assert user
-        tok = user_db.create_session_token(user["id"])
+        tok = _jwt_access_token(user["id"], user["username"])
         hd = {"Authorization": f"Bearer {tok}"}
         # 清理该用户历史 chat 配置，保证干净
         with db_lock:
@@ -552,7 +556,7 @@ class TestChat:
 
         # 用户 B（新用户，无配置）读不到 A 的 app_id
         user_b = user_db.get_user_by_username("chat_iso_b") or user_db.create_user("chat_iso_b", "pw123")
-        token_b = user_db.create_session_token(user_b["id"])
+        token_b = _jwt_access_token(user_b["id"], user_b["username"])
         headers_b = {"Authorization": f"Bearer {token_b}"}
         r = client.get("/api/chat/config", headers=headers_b)
         assert r.status_code == 200
@@ -581,7 +585,7 @@ class TestChat:
 
         # 用户 B 尝试绑定同一 app_id → 400
         user_b = user_db.get_user_by_username("chat_uniq_b") or user_db.create_user("chat_uniq_b", "pw123")
-        token_b = user_db.create_session_token(user_b["id"])
+        token_b = _jwt_access_token(user_b["id"], user_b["username"])
         headers_b = {"Authorization": f"Bearer {token_b}"}
         r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec_x"}}}, headers=headers_b)
         assert r.status_code == 400, f"Expected 400, got {r.status_code}: {r.text[:200]}"

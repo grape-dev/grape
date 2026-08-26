@@ -12,6 +12,10 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.session_manager import db, db_lock
 from src.user import db as user_db
+# JWT access token helper（替代旧的 create_session_token）
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    return create_access_token(user_id, username)
 
 client = TestClient(app)
 _uid = None
@@ -27,7 +31,7 @@ def setup_module():
     _uid = user_db.create_user("kb_user", "pwd")
     if not _uid:
         _uid = user_db.get_user_by_username("kb_user")
-    _headers = {"Authorization": "Bearer " + user_db.create_session_token(_uid["id"])}
+    _headers = {"Authorization": "Bearer " + _jwt_access_token(_uid["id"], _uid["username"])}
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token) VALUES (?,?,?,?,?,?)",

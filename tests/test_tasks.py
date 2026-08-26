@@ -13,6 +13,10 @@ from src.api.routes import tasks as tasks_mod
 from src.session_manager import db, db_lock
 from src.user import db as user_db
 
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    return create_access_token(user_id, username)
+
 client = TestClient(app)
 
 _uid = None
@@ -39,7 +43,7 @@ def setup_module():
     _uid = user_db.create_user("test_tasks_user", "test123")
     if not _uid:
         _uid = user_db.get_user_by_username("test_tasks_user")
-    _token = user_db.create_session_token(_uid["id"])
+    _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
     # 清理旧映射并重建 gitcode_user -> user_id 映射
     with db_lock:
