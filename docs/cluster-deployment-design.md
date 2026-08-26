@@ -140,9 +140,35 @@ Worker 通过 credential_id → runtime_credentials.scope + owner_id 确定归�
 - 当前项目 Worker（scope=repo, owner_id=当前项目 repo_key）
 - 当前用户的个人 Worker（scope=user, owner_name=当前用户）
 
-**遗留问题：scope=user 的 Worker 注册时不指定项目——owner_id 只存 username 不存 repo_key。** 用户关联多个项目时无法区分 Worker 属于哪个项目。
+**遗留问题（当前实施）：scope=user 的 Worker 需要加项目字段。**
 
-需要改注册逻辑：user scope 注册时也存 repo_key，Worker 只执行该项目的任务。当前暂不实现——System Health 先按 owner_name 归类展示个人 Worker。后续注册逻辑改造后精确按项目归类。
+当前 scope=user 的凭据只存 owner_name（用户名），不存 repo_key——用户关联多个项目时无法区分 Worker 属于哪个项目。
+
+**解决方案：现在就加 repo_key 字段，现有逻辑不感知。**
+
+数据库改动：
+1. runtime_credentials 表加 `repo_key VARCHAR(191) DEFAULT NULL`——记录凭据关联的项目
+2. agent_runtimes 表加 `repo_key VARCHAR(191) DEFAULT NULL`——记录 Worker 关联的项目（注册时从凭据复制）
+
+字段使用规则：
+- scope=global：repo_key=NULL（全局 Worker 不绑定项目）
+- scope=admin：repo_key=NULL（管理员 Worker 不绑定项目）
+- scope=repo：repo_key=项目 repo_key（已有 owner_id 存 repo_key，新字段冗余存储方便查询）
+- scope=user：repo_key=注册时指定的项目 repo_key（新注册时写入，老数据留 NULL）
+
+注册逻辑改动（最小化）：
+- Worker 注册时如果 scope=user，从请求中获取 repo_key 写入 runtime_credentials.repo_key 和 agent_runtimes.repo_key
+- 其他 scope 不变——global/admin 不写 repo_key，repo scope 的 owner_id 已有 repo_key
+
+现有逻辑不感知：
+- claim/heartbeat/任务分配/cancel 等逻辑全部不改——不读 repo_key 字段
+- 老数据 repo_key=NULL——不影响现有 Worker 运行
+- 后续注册逻辑完整改造后（Worker 只执行关联项目任务），再让 claim 等逻辑感知 repo_key
+
+System Health 展示按 repo_key 过滤：
+- 全局 Worker：scope=global OR scope=admin
+- 当前项目 Worker：scope=repo AND repo_key=当前项目
+- 当前用户个人 Worker：scope=user AND owner_name=当前用户 AND repo_key=当前项目
 
 **改动文件：** 新增 src/api/routes/health.py（2 个端点）
 
