@@ -55,6 +55,7 @@ function refreshObservability() {
   content.innerHTML = '<div class="loading">加载中...</div>';
 
   // 并行拉取 ops/overview 和 health/realtime
+  // ops/overview 需要认证，失败时降级用 /health/realtime + /metrics 补齐
   Promise.all([
     API.get('/dashboard/ops/overview').catch(e => ({error: e.message})),
     fetch('/health/realtime').then(r => r.json()).catch(e => ({error: e.message})),
@@ -63,6 +64,11 @@ function refreshObservability() {
     const lu = document.getElementById('obsLastUpdate');
     if (lu) lu.textContent = '更新: ' + now;
 
+    // ops 401 降级：从 realtime + metrics 补齐基础数据
+    if (ops.error) {
+      ops = fallbackOps(realtime);
+    }
+
     if (_obsTab === 'tasks') renderObsTasks(content, ops, realtime);
     else if (_obsTab === 'runtimes') renderObsRuntimes(content, ops, realtime);
     else if (_obsTab === 'database') renderObsDatabase(content, realtime);
@@ -70,6 +76,29 @@ function refreshObservability() {
   }).catch(e => {
     content.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
   });
+}
+
+// ops/overview 降级：从 /health/realtime 的 tasks + runtimes 构建最小 ops 对象
+function fallbackOps(realtime) {
+  const tasks = (realtime && realtime.tasks) || {};
+  return {
+    timestamp: new Date().toISOString(),
+    tasks: {
+      status_counts: tasks,
+      in_progress: realtime ? (realtime.in_progress || 0) : 0,
+      stuck_count: 0,
+      stuck_tasks: [],
+      by_source: {},
+      today: {},
+    },
+    runtimes: {
+      total: realtime && realtime.runtimes ? realtime.runtimes.total : 0,
+      online: realtime && realtime.runtimes ? realtime.runtimes.online : 0,
+      offline: realtime && realtime.runtimes ? (realtime.runtimes.total - realtime.runtimes.online) : 0,
+      by_mode: {},
+      list: [],
+    },
+  };
 }
 
 // ===== Tab: 任务队列 =====
