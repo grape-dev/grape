@@ -457,11 +457,29 @@ db_setup.py init_database() 加迁移锁：
 | Agent 任务会话 | 数据库（agent_tasks.runtime_session_id） | 不变 | 不改 |
 
 改动：
-1. `src/api/routes/auth.py` login()——改为签发 JWT（含 user_id + 过期时间）
-2. `src/api/deps.py` get_current_user()——改为 JWT 验证（不查 _user_tokens）
-3. 新增 `JWT_SECRET` 环境变量（所有实例共享）
-4. 新增 `python-jose` 依赖（FastAPI JWT 库）
-5. HttpOnly cookie 存 JWT + CSRF 保护
+1. `src/api/jwt_utils.py` create_access_token（15分钟）+ create_refresh_token（7天滚动续期）
+2. `src/api/routes/auth.py` login() 返回双 token + POST /auth/refresh 换新 access_token + 滚动续期 refresh_token
+3. `src/api/deps.py` get_current_user() 改为 verify_access_token（不查 _user_tokens）
+4. 新增 `JWT_SECRET` 环境变量（所有实例共享）
+5. 新增 `python-jose` 依赖
+6. 前端 api.js：401 时自动 refresh + 重发原请求
+
+**双 token 机制：**
+
+| token | 有效期 | 用途 | 续期策略 |
+|-------|--------|------|---------|
+| access_token | 15 分钟 | API 请求 | 过期后用 refresh_token 换新 |
+| refresh_token | 7 天 | 换新 access_token | 每次换新时滚动续期（从当前时间重新算 7 天） |
+
+**滚动续期逻辑：**
+
+用户调 POST /auth/refresh 时，服务端同时返回新的 access_token + 新的 refresh_token。新 refresh_token 过期时间从当前时刻重新算 7 天。
+
+效果：
+- 用户一直操作 → access_token 15分钟过期 → 自动 refresh → 拿到新 access + 新 refresh（续期 7 天）→ 永不踢出
+- 用户 7 天不操作 → refresh_token 过期 → 下次操作时 refresh 失败 → 跳登录页重新登录
+
+前端 api.js refresh 成功后同时更新 localStorage 里的 access_token 和 refresh_token。
 
 JWT_SECRET 安全（参照 multica）：
 - 生产环境不能用默认 secret
