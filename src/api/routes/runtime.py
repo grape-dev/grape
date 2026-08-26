@@ -444,12 +444,13 @@ async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_u
         params.append(status)
     with db_lock:
         c = db.cursor()
-        c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
+        c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at, issue_id, event_seq FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
                   params + [limit])
         return {"tasks": [
             {"id": r[0], "repo_key": r[1], "agent_type": r[2], "skill": r[3],
              "status": r[4], "exit_code": r[5], "result_text": (r[6] or "")[:200],
-             "created_at": normalize_event_time(r[7]), "started_at": normalize_event_time(r[8]), "completed_at": normalize_event_time(r[9])}
+             "created_at": normalize_event_time(r[7]), "started_at": normalize_event_time(r[8]), "completed_at": normalize_event_time(r[9]),
+             "issue_id": r[10] or "", "event_seq": r[11] or 0}
             for r in c.fetchall()
         ]}
 
