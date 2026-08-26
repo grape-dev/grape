@@ -548,3 +548,125 @@ readinessProbe:
 | 缓存 | 无 | Redis 缓存 | Redis 缓存 |
 | 指标 | 数据库聚合 | 数据库聚合 | Prometheus |
 | 告警 | 无 | 无 | PrometheusRule + 飞书 |
+
+---
+
+## 本地验证方案——模拟多实例集群（零新依赖）
+
+在没装 Docker 的情况下，通过启动多个 uvicorn 进程模拟集群部署，验证集群兼容性。
+
+### 验证环境
+
+```
+nginx:80（upstream 负载均衡）
+  ├── 实例 A: 127.0.0.1:3001（uvicorn main:app）
+  └── 实例 B: 127.0.0.1:3002（uvicorn main:app）
+
+共享：MySQL RDS + OBS
+```
+
+### 验证项
+
+#### 1. 迁移锁验证
+
+**目的：** 两个实例同时启动时，迁移锁是否生效——防止同时建表/改表。
+
+**步骤：**
+1. 同时启动实例 A（3001）和实例 B（3002）
+2. 观察日志——实例 A 拿到 GET_LOCK，实例 B 等待
+3. 实例 A 迁移完释放锁，实例 B 拿到锁发现表已存在（no-op）
+
+**预期：**
+- 日志出现 `GET_LOCK('grape_migrate')` 
+- 两个实例不会同时执行 `_create_tables()`
+- 不会报 "Table already exists" 错误
+
+#### 2. 任务不重复 claim 验证
+
+**目的：** 两个实例同时 claim 任务——MySQL 行锁是否防止重复。
+
+**步骤：**
+1. 创建一个测试任务（status=queued）
+2. 实例 A 和实例 B 同时调 `POST /api/runtime/runtimes/{id}/tasks/claim`
+3. 检查任务 status——只有一个实例 claim 成功
+
+**预期：**
+- 只有一个实例拿到任务（status=dispatched）
+- 另一个实例返回空（no task）
+
+#### 3. 任务取消跨实例感知验证
+
+**目的：** 实例 A 取消任务——实例 B 的 Worker 是否通过 heartbeat 感知。
+
+**步骤：**
+1. 实例 A 的 Worker 认领任务
+2. 通过实例 B 调 `POST /api/runtime/tasks/{id}/cancel`
+3. 实例 A 的 Worker 下次 heartbeat 时收到 `cancelled_tasks`
+4. Worker 杀引擎进程
+
+**预期：**
+- heartbeat 响应包含 `cancelled_tasks: [task_id]`
+- Worker 日志出现 `heartbeat: task {id} cancelled, killing engine`
+- 任务 status 变为 cancelled
+
+#### 4. nginx 负载均衡验证
+
+**目的：** 请求是否分发到两个实例。
+
+**步骤：**
+1. nginx upstream 配置 3001 + 3002
+2. 连续调 `GET /api/health` 多次
+3. 检查两个实例的日志——都有请求
+
+**预期：**
+- 两个实例都收到请求
+- 负载均衡正常分发
+
+### nginx 配置（验证用）
+
+在现有 nginx 配置里加 upstream：
+
+```nginx
+upstream grape_cluster {
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3002;
+}
+
+server {
+    listen 80;
+    server_name 1.92.115.229;
+
+    location /api/ {
+        proxy_pass http://grape_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+### 启动命令
+
+```bash
+# 实例 A
+OBS_ENABLED=true OBS_BUCKET=obs-grape-dev-file \
+  OBS_ACCESS_KEY=*** OBS_SECRET_KEY=*** \
+  OBS_ENDPOINT=https://obs.cn-north-4.myhuaweicloud.com \
+  OBS_PREFIX=grape/prod PYTHONPATH=/home/yangaiwu/grape \
+  .venv/bin/uvicorn src.api.main:app --host 127.0.0.1 --port 3001
+
+# 实例 B
+OBS_ENABLED=true OBS_BUCKET=obs-grape-dev-file \
+  OBS_ACCESS_KEY=*** OBS_SECRET_KEY=*** \
+  OBS_ENDPOINT=https://obs.cn-north-4.myhuaweicloud.com \
+  OBS_PREFIX=grape/prod PYTHONPATH=/home/yangaiwu/grape \
+  .venv/bin/uvicorn src.api.main:app --host 127.0.0.1 --port 3002
+```
+
+### 注意事项
+
+1. 两个实例共用同一个 MySQL + OBS——环境变量相同
+2. 两个实例各自有进程内 `_user_tokens`——登录 token 不互通（阶段 3 JWT 解决）
+3. Worker 只连一个实例——验证时手动指定 RUNTIME_SERVER_URL
+4. 验证完后恢复单实例部署
+5. nginx 配置验证完后恢复原配置
