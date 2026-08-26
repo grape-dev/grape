@@ -637,7 +637,69 @@ async def lease_sweep_loop():
 - 两台都部署完成后 lease 自动生效
 - 无法保证集群同时重启——实际部署都是逐台滚动
 
-## 十四、数据库新增字段
+## 十五、场景用例和测试用例
+
+### 真实部署验证用例（已验证通过）
+
+| # | 用例 | 验证步骤 | 预期结果 | 实际结果 |
+|---|------|---------|---------|:---:|
+| V1 | 实例 A 启动 + lease 抢锁 | 启动 3001，查日志 + DB | 8 bot 全部 acquired + connected | ✅ |
+| V2 | 实例 B 不抢已有 lease | 启动 3002，查日志 | 0 bot connected（A 持有） | ✅ |
+| V3 | 续约正常 | 等 30 秒查日志 | 每 10 秒 batch renewed 8 lease(s) | ✅ |
+| V4 | 故障转移（停 A → B 接管） | kill 3001，等 70 秒 | 7 bot 全部被 B 接管 + connected | ✅ |
+| V5 | A 重启不抢 B 的 bot | 重启 3001，查 DB | lease_owner 还是 B | ✅ |
+| V6 | 新建飞书 bot + 收发消息 | 飞书注册新 bot，发消息 | 注册→抢锁→连接→收消息→回复 | ✅ |
+| V7 | 切换实例后收发消息 | 停 A→B 接管→发消息 | B 收到消息 + 回复 | ✅ |
+| V8 | nginx 负载均衡 | curl 80 端口 | 正常代理到后端 | ✅ |
+
+### BotLeaseStore 单元测试用例（test_bot_lease.py）
+
+| # | 用例 | 测试步骤 | 预期结果 |
+|---|------|---------|---------|
+| TC-L01 | try_acquire 成功——无人持有 | DB lease_token=NULL，调 try_acquire | 返回 token，DB lease_token 更新 |
+| TC-L02 | try_acquire 失败——已被持有 | DB lease_token=other_token，调 try_acquire | 返回 None，DB 不变 |
+| TC-L03 | try_acquire 成功——lease 已过期 | DB lease_expires_at < NOW()，调 try_acquire | 返回 token，DB 更新 |
+| TC-L04 | renew 成功——自己的 token | DB lease_token=my_token，调 renew | 返回 True，lease_expires_at 刷新 |
+| TC-L05 | renew 失败——CAS 不匹配 | DB lease_token=other_token，调 renew | 返回 False |
+| TC-L06 | release 成功 | DB lease_token=my_token，调 release | lease 字段全 NULL |
+| TC-L07 | release 失败——token 不匹配 | DB lease_token=other_token，调 release | DB 不变 |
+| TC-L08 | list_expired_or_unheld | DB 有 3 个无人持有 + 2 个过期 | 返回 5 个 bot |
+| TC-L09 | 游标分页 | DB 有 600 个 bot，LIMIT 500 | 第 1 次返回 500，cursor 推进后第 2 次返回 100 |
+| TC-L10 | batch_renew 成功 | 3 个 bot 都是自己持有的 | 全部返回 True，lease_expires_at 刷新 |
+| TC-L11 | batch_renew 部分失败 | 3 个 bot 里 1 个被抢走 | 被抢的返回 False，其他 True |
+| TC-L12 | batch_renew DB 错误 | mock DB 异常 | 全部返回 True（保持连接） |
+| TC-L13 | check_inactive_bots | 3 个 bot 里 1 个 is_active=0 | 返回 1 个 app_id |
+| TC-L14 | get_lease_status | 3 个 bot 有 lease | 返回 {app_id: {lease_owner, expires_at, acquired_at}} |
+| TC-L15 | _disabled 标志 | mock DB 异常调 try_acquire | _disabled=True |
+
+### BotManager lease 模式测试用例
+
+| # | 用例 | 测试步骤 | 预期结果 |
+|---|------|---------|---------|
+| TC-M01 | load_from_db lease 模式 | lease_store 不为 None，调 load_from_db | 只登记 _eligible_bots，_bots 为空 |
+| TC-M02 | load_from_db 旧模式 | lease_store=None，调 load_from_db | 无条件 add_bot 连接 |
+| TC-M03 | lease_sweep_loop 抢锁连接 | try_acquire 成功 | 创建 BotContext + run_bot + _lease_token 设上 |
+| TC-M04 | 续约成功清宽限期 | batch_renew 返回 True | _grace_deadlines 清除 |
+| TC-M05 | 续约失败宽限期 30 秒 | batch_renew 返回 False | 设 _grace_deadlines[app_id]=now+30，30 秒后断开 |
+| TC-M06 | is_active=0 断开 | check_inactive_bots 返回 app_id | remove_bot + release lease |
+| TC-M07 | add_bot lease 模式 | lease_store 不为 None | 只登记 _eligible_bots，返回 None |
+| TC-M08 | remove_bot lease 模式 | lease_store 不为 None | 释放 lease + 清 _eligible_bots |
+| TC-M09 | stop 释放所有 lease | 有 3 个 held_leases | release_all + 清 _held_leases + 清 _bots |
+| TC-M10 | _disable_bot 清 lease | 调 _disable_bot | SQL SET lease 字段全 NULL |
+| TC-M11 | health_check 返回 lease | lease_store 不为 None | 返回 lease 状态字典 |
+| TC-M12 | 问题 M 退回旧模式 | lease_store._disabled=True | 清 lease_store + load_from_db 旧模式 |
+| TC-M13 | 问题 A 重连后检查 lease | run_bot 连接成功 + _lease_token 有值 | 查 DB 对比 lease_token，不匹配则断开 |
+| TC-M14 | 问题 B 定期重新加载 | sweep_count % (300//10)==0 | 调 load_from_db |
+
+### 消息丢失场景用例
+
+| # | 用例 | 场景 | 预期结果 | 说明 |
+|---|------|------|---------|------|
+| TC-V01 | 正常 stop 不丢消息 | SIGTERM → stop() 释放 lease → B 10 秒接管 | 消息基本不丢 | 生产环境正常重启 |
+| TC-V02 | kill -9 可能丢消息 | kill -9 → lease 60 秒过期 → B 70 秒接管 | 70 秒窗口内消息可能丢 | 异常崩溃 |
+| TC-V03 | 缩短 TTL 减小窗口 | TTL=30 + SWEEP=5 | 最慢 35 秒 | 可选优化 |
+
+## 十六、数据库新增字段
 
 | # | 表.字段 | 类型 | 默认值 | 用途 |
 |---|---------|------|--------|------|
