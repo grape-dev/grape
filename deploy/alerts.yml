@@ -15,8 +15,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Agent task stuck (>30min running)"
-          description: "{{ $value }} task(s) have been running for over 30 minutes."
+          summary: "Agent task stuck (>15min running)"
+          description: "{{ $value }} task(s) have been running for over 15 minutes."
 
       # 任务失败率：5 分钟内失败率 > 50%
       - alert: GrapeTaskFailureRateHigh

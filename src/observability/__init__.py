@@ -440,7 +440,7 @@ import threading as _threading
 _sampler_cache: dict = {"snapshot": None, "taken_at": 0}
 _sampler_lock = _threading.Lock()
 _SAMPLER_CACHE_TTL = 8  # 秒
-_STUCK_MINUTES = 30
+_STUCK_MINUTES = 15  # running > 15min 视为卡住（worker 默认 RUNTIME_TASK_TIMEOUT=1200s=20min，15min 能在超时前预警）
 
 
 # 采样器 Gauge 描述（用 ConstMetric，避免 stale series）

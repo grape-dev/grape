@@ -27,8 +27,8 @@ async def get_ops_overview():
 
     now_ts = _time.time()
     now_iso = datetime.now(timezone.utc).isoformat()
-    # stuck 阈值：running 超 30 分钟（对齐 multica stuckRunningInterval）
-    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    # stuck 阈值：running 超 15 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=1200s=20min，15min 能在超时前预警）
+    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
 
     with db_lock:
         c = db.cursor()

@@ -119,7 +119,7 @@ function renderOverview(ops, rt, mt) {
     ${kpiRow([
       { label: '排队中', value: sc.queued || 0, color: 'var(--y)' },
       { label: '执行中', value: (t.in_progress || 0), color: 'var(--a)' },
-      { label: '卡住 (>30min)', value: t.stuck_count || 0, color: (t.stuck_count||0) > 0 ? 'var(--r)' : 'var(--g)' },
+      { label: '卡住 (>15min)', value: t.stuck_count || 0, color: (t.stuck_count||0) > 0 ? 'var(--r)' : 'var(--g)' },
       { label: '已完成', value: sc.completed || 0, color: 'var(--g)' },
     ])}
     ${section('Runtime 概览')}
@@ -237,7 +237,7 @@ function renderTasksTab(ops, rt, mt) {
   }
 
   if (stuck.length > 0) {
-    html += section('⚠ 卡住的任务', 'running > 30min');
+    html += section('⚠ 卡住的任务', 'running > 15min（超时前 5min 预警）');
     html += table(['Task ID', 'Agent', 'Runtime', 'Started', 'Repo'],
       stuck.map(s => [
         `<span class="ts">${s.id}</span>`, s.agent_type || '-', s.runtime_id || '-',
