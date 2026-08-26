@@ -1,9 +1,8 @@
-# 系统数据表全景与关系梳理（new-version1）
+# 系统数据表全景与关系梳理（new-version2）
 
 > 数据文件：`data/sessions.db`（SQLite 单库，WAL 模式）
-> 采集时间：2026-08-16（基于 `src/api/db_setup.py` 实际 DDL，已含 M0–M4 + 引擎选择 v2 + Issue 级会话等全部变更）
-> 前置：`docs/new-version/database-tables-overview.md`（v3.1 基线）；本文在其基础上反映 new-version2/new-version1 全部变更
-> 说明：表中列名以**运行时实际结构**为准（DDL 建表后由 `db_setup._migrate_tables()` 迁移改名）
+> 采集时间：2026-08-26（基于 `src/api/db_setup.py` 实际 DDL，已含 Knowledge 看板 + Prompt 优化 + 飞书 Bot 停用等全部变更）
+> 版本：v2.0
 
 ---
 
@@ -389,21 +388,21 @@ created_by TEXT DEFAULT '',
 created_at TEXT DEFAULT (datetime('now'))
 ```
 > 以事件为锚点的 Agent 对话消息线程（Event Detail 右栏），见 `event-conversation-design.md`。
+#### `agent_shared_knowledge` — 共享知识索引（Agent 对话沉淀 + 成员上传）
 
-#### `agent_shared_knowledge` — 共享知识索引（Agent 对话沉淀）
 ```sql
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-repo_key TEXT DEFAULT '',
-scope TEXT DEFAULT '',                     -- project / issue / issue_agent
-agent_type TEXT DEFAULT '',
-issue_num INTEGER DEFAULT 0,
-content TEXT DEFAULT '',
-accepted INTEGER DEFAULT 1,
-anchor_seq INTEGER DEFAULT 0,
-created_by TEXT DEFAULT '',
-created_at TEXT DEFAULT (datetime('now'))
+id          INTEGER PRIMARY KEY AUTOINCREMENT,
+scope       TEXT NOT NULL,              -- project / issue / issue_agent / member
+repo_key    TEXT NOT NULL,
+agent_type  TEXT DEFAULT '',            -- scope=issue_agent 时必填
+issue_num   INTEGER DEFAULT 0,
+file_path   TEXT NOT NULL,              -- 知识正文文件（相对 WORKSPACE_DIR）
+status      TEXT DEFAULT 'accepted',    -- accepted / rejected
+source_seq  INTEGER DEFAULT 0,          -- 来源事件 seq
+created_by  TEXT DEFAULT '',            -- agent / 用户名
+created_at  TEXT DEFAULT (datetime('now'))
 ```
-> Event 对话中用户建议沉淀为共享知识，后续任务自动参考（`knowledge.py`）。
+> 正文以文件为唯一正体（`project-info/knowledge.md`、`issues/{n}/knowledge.md`、`issues/{n}/{agent}/knowledge.md`），DB 仅存索引/状态/审计。scope='member' 为成员上传文档。见 `knowledge-board-design.md`。
 
 ### 2.6 IM / 飞书
 
