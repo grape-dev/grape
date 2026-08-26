@@ -95,7 +95,6 @@ function renderEngines(data, devices) {
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">worker</span> ${rt.worker_name || (rt.is_local ? '本机' : '—')}</div>
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${rt.owner || '—'} ${rt.is_local ? `<span style="color:var(--t3);font-size:10px">(${rt.owner_id || 'global'})</span>` : ''}</div>
         </div>
-        <div id="rt-tasks-${rt.id}" style="display:none;margin-top:12px;border-top:1px solid var(--b);padding-top:10px"></div>
       </div>`;
     });
     html += `</div>`;
@@ -103,98 +102,111 @@ function renderEngines(data, devices) {
   return html || '<div class="ts t2" style="padding:12px">暂无引擎</div>';
 }
 
-// 引擎卡片点击展开/收起任务列表
+// 引擎卡片点击 → 弹窗显示任务列表
 let _expandedRuntime = null;
 function toggleRuntimeTasks(rtId, rtName) {
-  const div = document.getElementById('rt-tasks-' + rtId);
-  if (!div) return;
-  // 收起已展开的
-  if (_expandedRuntime && _expandedRuntime !== rtId) {
-    const old = document.getElementById('rt-tasks-' + _expandedRuntime);
-    if (old) old.style.display = 'none';
-  }
-  if (div.style.display === 'none') {
-    div.style.display = 'block';
-    _expandedRuntime = rtId;
-    div.innerHTML = '<div class="loading">加载任务...</div>';
-    API.get('/runtime/runtimes/' + rtId + '/tasks?limit=20').then(d => {
-      renderRuntimeTaskList(div, d.tasks || [], rtId, rtName);
-    }).catch(e => {
-      div.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
-    });
-  } else {
-    div.style.display = 'none';
-    _expandedRuntime = null;
-  }
+  openRuntimeTaskModal(rtId, rtName);
 }
 
-function renderRuntimeTaskList(container, tasks, rtId, rtName) {
+function openRuntimeTaskModal(rtId, rtName) {
+  // 移除已有弹窗
+  const old = document.getElementById('rtTaskModal');
+  if (old) old.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'rtTaskModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  modal.innerHTML = `<div class="cd" style="width:720px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
+      <h3 style="font-size:14px;font-weight:600">${rtName} · 任务列表</h3>
+      <button class="bt bt-o bt-s" onclick="document.getElementById('rtTaskModal').remove()">✕ 关闭</button>
+    </div>
+    <div id="rtTaskModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载任务...</div></div>
+  </div>`;
+  document.body.appendChild(modal);
+
+  API.get('/runtime/runtimes/' + rtId + '/tasks?limit=50').then(d => {
+    renderRuntimeTaskList(document.getElementById('rtTaskModalBody'), d.tasks || [], rtName);
+  }).catch(e => {
+    document.getElementById('rtTaskModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+  });
+}
+
+function renderRuntimeTaskList(container, tasks, rtName) {
   if (!tasks.length) {
-    container.innerHTML = '<div class="ts t2" style="padding:8px 0">暂无任务</div>';
+    container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">暂无任务</div>';
     return;
   }
   const statusIcon = { queued: '⏳', dispatched: '🔄', running: '🔄', completed: '✅', failed: '❌', cancelled: '⛔' };
   const statusColor = { queued: 'var(--y)', dispatched: 'var(--a)', running: 'var(--a)', completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)' };
-  let html = `<div style="font-size:11px;color:var(--t3);margin-bottom:6px">${rtName} · 最近 ${tasks.length} 个任务（点击行展开日志）</div>`;
-  html += '<div class="tw" style="font-size:11px"><table><thead><tr><th>Task ID</th><th>Agent/Skill</th><th>Status</th><th>Exit</th><th>Created</th></tr></thead><tbody>';
+  let html = `<div style="font-size:11px;color:var(--t3);margin-bottom:8px">${rtName} · ${tasks.length} 个任务（点击行查看日志）</div>`;
+  html += '<div class="tw"><table><thead><tr><th>Task ID</th><th>Agent / Skill</th><th>Repo</th><th>Status</th><th>Exit</th><th>Created</th></tr></thead><tbody>';
   tasks.forEach(t => {
-    html += `<tr id="rt-task-${t.id}" style="cursor:pointer" onclick="toggleTaskLogs('${t.id}')">
+    html += `<tr style="cursor:pointer" onclick="openTaskLogModal('${t.id}')">
       <td class="ts">${t.id.substring(0,12)}</td>
       <td><b>${t.agent_type || '-'}</b><br><span class="ts t3">${t.skill || '-'}</span></td>
+      <td class="ts t3">${(t.repo_key || '').replace('gitcode:','').substring(0,20)}</td>
       <td><span style="color:${statusColor[t.status] || 'var(--t3)'}">${statusIcon[t.status] || ''} ${t.status}</span></td>
       <td>${t.exit_code ?? '-'}</td>
       <td class="ts t3">${(t.created_at || '').substring(0,16)}</td>
     </tr>`;
-    html += `<tr id="rt-logs-${t.id}" style="display:none"><td colspan="5" style="padding:0"><div id="rt-logs-content-${t.id}" style="max-height:300px;overflow-y:auto;padding:8px 12px;background:var(--bg);font-size:11px;font-family:monospace;white-space:pre-wrap"></div></td></tr>`;
   });
   html += '</tbody></table></div>';
   container.innerHTML = html;
 }
 
-// 任务行点击展开/收起运行日志
-function toggleTaskLogs(taskId) {
-  const logRow = document.getElementById('rt-logs-' + taskId);
-  if (!logRow) return;
-  if (logRow.style.display === 'none') {
-    logRow.style.display = '';
-    const content = document.getElementById('rt-logs-content-' + taskId);
-    if (content) {
-      content.innerHTML = '<span style="color:var(--t3)">加载日志...</span>';
-      API.get('/task-logs/' + taskId + '/messages?since=0').then(msgs => {
-        renderTaskLogMessages(content, msgs || [], taskId);
-      }).catch(e => {
-        content.innerHTML = '<span style="color:var(--r)">加载失败: ' + e.message + '</span>';
-      });
-    }
-  } else {
-    logRow.style.display = 'none';
-  }
+// 任务行点击 → 弹窗显示运行日志
+function openTaskLogModal(taskId) {
+  const old = document.getElementById('rtLogModal');
+  if (old) old.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'rtLogModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000';
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  modal.innerHTML = `<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
+      <h3 style="font-size:14px;font-weight:600">任务日志 · <span class="ts">${taskId.substring(0,16)}</span></h3>
+      <button class="bt bt-o bt-s" onclick="document.getElementById('rtLogModal').remove()">✕ 关闭</button>
+    </div>
+    <div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>
+  </div>`;
+  document.body.appendChild(modal);
+
+  API.get('/task-logs/' + taskId + '/messages?since=0').then(msgs => {
+    renderTaskLogMessages(document.getElementById('rtLogModalBody'), msgs || []);
+  }).catch(e => {
+    document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+  });
 }
 
-function renderTaskLogMessages(container, msgs, taskId) {
+function renderTaskLogMessages(container, msgs) {
   if (!msgs.length) {
-    container.innerHTML = '<span style="color:var(--t3)">无日志消息</span>';
+    container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">无日志消息</div>';
     return;
   }
   const typeIcon = { step_start: '▶', step_finish: '✓', text: '💬', reasoning: '🤔', tool_use: '🔧', error: '❌', done: '✅' };
   const typeColor = { step_start: 'var(--a)', step_finish: 'var(--g)', text: 'var(--t)', reasoning: 'var(--pu)', tool_use: 'var(--or)', error: 'var(--r)', done: 'var(--g)' };
-  let html = '';
+  const typeBg = { step_start: '#eef3ff', step_finish: '#eefdf2', text: '', reasoning: '#f3e9fe', tool_use: '#fef0e4', error: '#fee2e2', done: '#eefdf2' };
+  let html = '<div style="font-family:monospace;font-size:11px;line-height:1.6">';
   msgs.forEach(m => {
     const icon = typeIcon[m.type] || '•';
     const color = typeColor[m.type] || 'var(--t2)';
+    const bg = typeBg[m.type] || '';
     const time = (m.created_at || '').substring(11,19);
-    let line = '';
+    let content = '';
     if (m.type === 'tool_use') {
-      line = `${time} ${icon} <b style="color:${color}">${m.tool || 'tool'}</b>`;
-      if (m.content) line += `\n  ${m.content.substring(0, 200)}`;
+      content = `<b style="color:${color}">${m.tool || 'tool'}</b>`;
+      if (m.content) content += `<br>&nbsp;&nbsp;<span style="color:var(--t2)">${m.content.substring(0, 300)}</span>`;
     } else if (m.type === 'text' || m.type === 'reasoning' || m.type === 'error') {
-      const text = (m.content || '').substring(0, 500);
-      line = `${time} ${icon} <span style="color:${color}">${text}</span>`;
+      content = `<span style="color:${color}">${(m.content || '').substring(0, 800)}</span>`;
     } else {
-      line = `${time} ${icon} <span style="color:${color}">${m.type}</span> ${m.content || ''}`.substring(0, 300);
+      content = `<span style="color:${color}">${m.type}</span> ${m.content || ''}`.substring(0, 300);
     }
-    html += line + '\n';
+    html += `<div style="padding:6px 10px;border-bottom:1px solid var(--b);background:${bg}"><span style="color:var(--t3)">${time}</span> ${icon} ${content}</div>`;
   });
+  html += '</div>';
   container.innerHTML = html;
 }
 
