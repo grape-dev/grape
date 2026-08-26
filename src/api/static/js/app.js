@@ -309,11 +309,11 @@ function loadAgentTypes() {
     } else if (view === 'health') {
       title.textContent = 'System Health';
       const loadHealth = () => Promise.all([
-        API.get('/api/health/detail'),
-        API.get('/api/dashboard/runtime/status'),
-        API.get('/api/dashboard/task/daily?days=7'),
-        API.get('/api/dashboard/task/by-agent?days=7'),
-        API.get('/api/dashboard/failures/by-agent?days=7'),
+        API.get('/health/detail'),
+        API.get('/dashboard/runtime/status'),
+        API.get('/dashboard/task/daily?days=7'),
+        API.get('/dashboard/task/by-agent?days=7'),
+        API.get('/dashboard/failures/by-agent?days=7'),
       ]).then(([health, runtime, taskDaily, taskByAgent, failuresByAgent]) => {
         renderHealth({health, runtime, taskDaily, taskByAgent, failuresByAgent});
       }).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
