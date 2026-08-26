@@ -1,11 +1,10 @@
 """用户系统数据库：users/credentials/vms/skills 表管理"""
-import json, hashlib, time, os, threading
+import json, hashlib, time, os
 from src.session_manager import db, db_lock
 from src.config import log
 
 # OAuth state 存储（内存，不依赖 SQLite 跨线程事务）
-_oauth_store = {}
-_oauth_lock = threading.Lock()
+# OAuth state 已改为 DB 共享存储（oauth_states 表），不再用进程内存
 
 
 # ====== 用户账户表（合并 users + bot_accounts） ======
@@ -175,27 +174,46 @@ def _cleanup_expired_oauth_states():
 
 
 def save_oauth_state(state: str, provider: str, data: dict | None = None):
-    """保存 OAuth state（防 CSRF，10 分钟过期，内存存储）"""
+    """保存 OAuth state（防 CSRF，10 分钟过期，DB 共享存储——集群多实例可用）。"""
+    import json as _json
     expires = time.time() + 600
-    with _oauth_lock:
-        _oauth_store[state] = {"provider": provider, "data": data or {}, "expires": expires}
-    log.info(f"save_oauth_state: state={state[:20]}... saved OK, total={len(_oauth_store)}")
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO oauth_states (state, provider, data_json, expires) VALUES (?,?,?,?)",
+                (state, provider, _json.dumps(data or {}), expires),
+            )
+            db.commit()
+        log.info(f"save_oauth_state: state={state[:20]}... saved OK")
+    except Exception as e:
+        log.warning(f"save_oauth_state failed: {e}")
 
 
 def validate_oauth_state(state: str, provider: str) -> dict | None:
-    """验证并消耗 OAuth state（查 + 删），返回 data 或 None"""
-    with _oauth_lock:
-        entry = _oauth_store.pop(state, None)
-    if entry is None:
-        log.warning(f"validate_oauth_state: state={state[:20]}... NOT FOUND")
+    """验证并消耗 OAuth state（查 + 删），返回 data 或 None。"""
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT provider, data_json, expires FROM oauth_states WHERE state=?", (state,))
+            row = c.fetchone()
+            if row:
+                c.execute("DELETE FROM oauth_states WHERE state=?", (state,))
+                db.commit()
+        if not row:
+            log.warning(f"validate_oauth_state: state={state[:20]}... NOT FOUND")
+            return None
+        if row[0] != provider:
+            log.warning(f"validate_oauth_state: provider mismatch")
+            return None
+        if time.time() > row[2]:
+            log.warning(f"validate_oauth_state: state expired")
+            return None
+        return _json.loads(row[1] or "{}")
+    except Exception as e:
+        log.warning(f"validate_oauth_state failed: {e}")
         return None
-    if entry["provider"] != provider:
-        log.warning(f"validate_oauth_state: provider mismatch")
-        return None
-    if time.time() > entry["expires"]:
-        log.warning(f"validate_oauth_state: state expired")
-        return None
-    return entry["data"]
 
 
 

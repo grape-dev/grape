@@ -60,6 +60,9 @@ BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 # 本地缓存根（磁盘 LRU zip 缓存；默认 data/cache/storage）
 OBS_LOCAL_CACHE = os.environ.get("OBS_LOCAL_CACHE", "")
 
+# Cookie 安全——生产 HTTPS 默认 secure=True，开发 HTTP 配 COOKIE_SECURE=false
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "true", "yes")
+
 # ====== 数据库路径（可通过环境变量指向独立测试库，防止测试污染生产库）======
 DB_PATH = os.environ.get("DEVOPS_DB_PATH", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/sessions.db")))
 

@@ -22,4 +22,4 @@ EXPOSE 3000
 
 # 只启动 3000 主服务——main:app 已包含所有路由（含 webhook + A2A + runtime API）
 # 不启动 8080——run_webhook:app 是冗余的，main:app 已注册 webhook_router（main.py 第 119 行）
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "3000"]
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "3000", "--proxy-headers", "--forwarded-allow-ips=*"]
