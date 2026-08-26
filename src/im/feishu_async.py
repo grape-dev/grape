@@ -653,7 +653,7 @@ def _parse_event(event_data: dict) -> dict | None:
 
 # ── 单Bot WS 协程 ─────────────────────────────────────────
 
-async def _disable_bot(app_id: str, lease_store=None):
+async def _disable_bot(app_id: str):
     """永久停用 Bot（凭证失效/App 不存在），写入 DB is_active=0 防止重启后重载。
     同时释放 lease（遗漏修复 3）——防止 lease 脏数据。
     """
@@ -966,6 +966,8 @@ class BotManager:
             self._lease_store.release_all(self._held_leases)
             self._held_leases.clear()
 
+        self._grace_deadlines.clear()
+        self._eligible_bots.clear()
         self._bots.clear()
         log.info("BotManager: all bots stopped")
 
@@ -1110,6 +1112,7 @@ class BotManager:
 
         # lease 模式：只登记不连接
         if self._lease_store:
+            self._eligible_bots.clear()  # 清旧配置（已删的 bot 不再保留）
             for bot_app_id, bot_type in bots.items():
                 self._eligible_bots[bot_app_id] = {
                     "bot_type": bot_type,
@@ -1200,8 +1203,8 @@ class BotManager:
                     if len(candidates) < 500:
                         break
 
-                # 2. 批量续约
-                if self._held_leases:
+                # 2. 批量续约（每 RENEW_INTERVAL 秒续约一次，不是每次 sweep 都续约）
+                if self._held_leases and sweep_count % (BOT_LEASE_RENEW_INTERVAL // BOT_LEASE_SWEEP_INTERVAL) == 0:
                     renew_results = lease_store.batch_renew(self._held_leases)
                     now = _time.time()
                     for app_id, success in renew_results.items():
@@ -1213,7 +1216,10 @@ class BotManager:
                         else:
                             # 续约成功 → 清除宽限期
                             self._grace_deadlines.pop(app_id, None)
-                    # 检查宽限期到期 → 断开
+
+                # 2b. 每次 sweep 都检查宽限期到期 → 断开（不等续约间隔）
+                if self._grace_deadlines:
+                    now = _time.time()
                     expired_grace = [aid for aid, dl in self._grace_deadlines.items() if now >= dl]
                     for app_id in expired_grace:
                         log.info(f"[lease] bot {app_id} grace period expired, disconnecting")
