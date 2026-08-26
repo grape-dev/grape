@@ -119,9 +119,11 @@ async def dashboard_task_daily(
     """每日任务统计（按 agent_type 分组）。"""
     if repo_key:
         _check_repo_access(repo_key, user["id"])
+    from src.repo_key import to_repo_key
+    full_rk = to_repo_key(repo_key) if repo_key and ":" not in repo_key else repo_key
     where = _since_clause(days)
-    if repo_key:
-        where += f" AND repo_key='{repo_key}'"
+    if full_rk:
+        where += f" AND repo_key='{full_rk}'"
     with db_lock:
         c = db.cursor()
         rows = c.execute(
@@ -157,9 +159,11 @@ async def dashboard_task_by_agent(
     """按 agent 的任务统计。"""
     if repo_key:
         _check_repo_access(repo_key, user["id"])
+    from src.repo_key import to_repo_key
+    full_rk = to_repo_key(repo_key) if repo_key and ":" not in repo_key else repo_key
     where = _since_clause(days)
-    if repo_key:
-        where += f" AND repo_key='{repo_key}'"
+    if full_rk:
+        where += f" AND repo_key='{full_rk}'"
     with db_lock:
         c = db.cursor()
         rows = c.execute(
@@ -194,9 +198,11 @@ async def dashboard_failures_daily(
     """每日失败统计（按 exit_code 分组）。"""
     if repo_key:
         _check_repo_access(repo_key, user["id"])
+    from src.repo_key import to_repo_key
+    full_rk = to_repo_key(repo_key) if repo_key and ":" not in repo_key else repo_key
     where = f"status='failed' AND {_since_clause(days)}"
-    if repo_key:
-        where += f" AND repo_key='{repo_key}'"
+    if full_rk:
+        where += f" AND repo_key='{full_rk}'"
     with db_lock:
         c = db.cursor()
         rows = c.execute(
@@ -226,9 +232,11 @@ async def dashboard_failures_by_agent(
     """按 agent 的失败统计（按 exit_code 分组）。"""
     if repo_key:
         _check_repo_access(repo_key, user["id"])
+    from src.repo_key import to_repo_key
+    full_rk = to_repo_key(repo_key) if repo_key and ":" not in repo_key else repo_key
     where = f"status='failed' AND {_since_clause(days)}"
-    if repo_key:
-        where += f" AND repo_key='{repo_key}'"
+    if full_rk:
+        where += f" AND repo_key='{full_rk}'"
     with db_lock:
         c = db.cursor()
         rows = c.execute(
