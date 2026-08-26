@@ -144,7 +144,8 @@ function renderRuntimeTaskList(container, tasks, rtName) {
   html += '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent / Skill</th><th>Repo</th><th>Status</th><th>Exit</th><th>Created</th></tr></thead><tbody>';
   tasks.forEach(t => {
     const issueSeq = (t.issue_id && t.event_seq) ? `${t.issue_id} #${t.event_seq}` : (t.event_seq ? `#${t.event_seq}` : t.id.substring(0,12));
-    html += `<tr style="cursor:pointer" onclick="openTaskLogModal('${t.id}', ${JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:(t.repo_key||'').replace('gitcode:',''), created:t.created_at||''})})">
+    const infoEnc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:(t.repo_key||'').replace('gitcode:',''), created:t.created_at||''}));
+    html += `<tr style="cursor:pointer" onclick="openTaskLogModal('${t.id}', '${infoEnc}')">
       <td class="ts"><b>${issueSeq}</b></td>
       <td><b>${t.agent_type || '-'}</b><br><span class="ts t3">${t.skill || '-'}</span></td>
       <td class="ts t3">${(t.repo_key || '').replace('gitcode:','').substring(0,20)}</td>
@@ -158,11 +159,12 @@ function renderRuntimeTaskList(container, tasks, rtName) {
 }
 
 // 任务行点击 → 弹窗显示运行日志
-function openTaskLogModal(taskId, info) {
+function openTaskLogModal(taskId, infoEnc) {
   const old = document.getElementById('rtLogModal');
   if (old) old.remove();
 
-  info = info || {};
+  let info = {};
+  try { info = JSON.parse(decodeURIComponent(infoEnc || '')); } catch(e) {}
   const titleParts = [];
   if (info.repo) titleParts.push(`<span class="ts t3">${info.repo}</span>`);
   if (info.issue) titleParts.push(`<b>${info.issue}</b>`);
