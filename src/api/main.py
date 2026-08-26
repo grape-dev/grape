@@ -128,6 +128,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 可观察性：HTTP 请求指标中间件（仅 METRICS_ADDR 启用时挂载）
+from src.observability import metrics_middleware, start_metrics_server, metrics_endpoint, metrics_enabled
+metrics_middleware(app)
+if metrics_enabled():
+    start_metrics_server()
+
 app.include_router(auth.router)
 app.include_router(repos.router)
 app.include_router(dashboard.router)
@@ -181,3 +187,9 @@ async def health():
     if bot_manager:
         result["im"] = bot_manager.health_check()
     return result
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus 指标端点（参考 multica metrics/server.go NewHandler）。"""
+    return metrics_endpoint()
