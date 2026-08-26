@@ -116,10 +116,11 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
         # 凭据作用域决定 runtime 归属：user scope 的个人 worker 注册为 user scope + owner_id；
         # repo scope 用凭据行 owner_id（仓库全名），否则 set_chat_config / Engines 视图的
         # scope 判定失效（个人/仓库级引擎永远选不中，见 engine-selection §7.1）
-        c.execute("SELECT scope, owner_name, owner_id FROM runtime_credentials WHERE id=?", (credential_id,))
+        c.execute("SELECT scope, owner_name, owner_id, repo_key FROM runtime_credentials WHERE id=?", (credential_id,))
         cred_row = c.fetchone()
         cred_scope = (cred_row[0] if cred_row and cred_row[0] else "global").strip().lower()
         owner_id = (cred_row[2] or "") if cred_row else ""
+        cred_repo_key = (cred_row[3] or "") if cred_row else ""
         if cred_scope == "user" and cred_row and cred_row[1]:
             # owner_id 与 user_accounts.id 对齐（按用户名），找不到保持空
             try:
@@ -143,10 +144,10 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
                            datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), rid))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, repo_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, cred_repo_key))
                 rid = c.lastrowid
             registered.append({"id": rid, "name": name})
         db.commit()

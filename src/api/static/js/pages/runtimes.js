@@ -174,7 +174,7 @@ function doCreateCredential() {
   const name = (document.getElementById('credName') || {}).value || '';
   if (!name) { app.showToast('请填写凭据名称'); return; }
   const scope = document.getElementById('credScope').value;
-  const repo_key = scope === 'repo' ? ((document.getElementById('credRepoKey') || {}).value || '').trim() : '';
+  const repo_key = (scope === 'repo' || scope === 'user') ? ((document.getElementById('credRepoKey') || {}).value || '').trim() : '';
   if (scope === 'repo' && !repo_key) { app.showToast('仓库范围需填写仓库 owner/repo'); return; }
   API.post('/settings/runtime-credentials', { name, scope, repo_key }).then(d => {
     const token = d.token || '';

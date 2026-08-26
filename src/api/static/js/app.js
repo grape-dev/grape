@@ -308,12 +308,16 @@ function loadAgentTypes() {
       API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (view === 'health') {
       title.textContent = 'System Health';
+      const _cr = currentRepo();
+      const _repoKey = _cr ? (_cr.fullName || '') : '';
+      const _rkQs = _repoKey ? '?repo_key=' + encodeURIComponent(_repoKey) : '';
+      const _rkParam = _repoKey ? '&repo_key=' + encodeURIComponent(_repoKey) : '';
       const loadHealth = () => Promise.all([
-        API.get('/health/detail'),
-        API.get('/dashboard/runtime/status'),
-        API.get('/dashboard/task/daily?days=7'),
-        API.get('/dashboard/task/by-agent?days=7'),
-        API.get('/dashboard/failures/by-agent?days=7'),
+        API.get('/health/detail' + _rkQs),
+        API.get('/dashboard/runtime/status' + _rkQs),
+        API.get('/dashboard/task/daily?days=7' + _rkParam),
+        API.get('/dashboard/task/by-agent?days=7' + _rkParam),
+        API.get('/dashboard/failures/by-agent?days=7' + _rkParam),
       ]).then(([health, runtime, taskDaily, taskByAgent, failuresByAgent]) => {
         renderHealth({health, runtime, taskDaily, taskByAgent, failuresByAgent});
       }).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');

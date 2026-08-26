@@ -38,24 +38,74 @@ def _since_clause(days: int) -> str:
 
 
 @router.get("/runtime/status")
-async def dashboard_runtime_status(user: dict = Depends(get_current_user)):
-    """Worker 在线/离线/槽位统计。"""
-    with db_lock:
-        c = db.cursor()
-        row = c.execute(
-            "SELECT COUNT(*), "
-            "SUM(CASE WHEN status='online' THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN status!='online' THEN 1 ELSE 0 END), "
-            "COALESCE(SUM(busy_slots), 0), "
-            "COALESCE(SUM(max_concurrent), 0) "
-            "FROM agent_runtimes"
-        ).fetchone()
+async def dashboard_runtime_status(
+    repo_key: str = Query(""),
+    user: dict = Depends(get_current_user),
+):
+    """Worker 在线/离线/槽位统计——按三级分类（全局/项目/个人）。"""
+    username = user.get("username", "")
+
+    def _stats(where_clause: str, params: list) -> dict:
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                f"SELECT COUNT(*), "
+                f"SUM(CASE WHEN status='online' THEN 1 ELSE 0 END), "
+                f"SUM(CASE WHEN status!='online' THEN 1 ELSE 0 END), "
+                f"COALESCE(SUM(busy_slots), 0), "
+                f"COALESCE(SUM(max_concurrent), 0) "
+                f"FROM agent_runtimes WHERE {where_clause}",
+                params
+            ).fetchone()
+        return {
+            "total": row[0] or 0,
+            "online": row[1] or 0,
+            "offline": row[2] or 0,
+            "busy_slots": row[3] or 0,
+            "max_concurrent": row[4] or 0,
+        }
+
+    empty = {"total": 0, "online": 0, "offline": 0, "busy_slots": 0, "max_concurrent": 0}
+
+    # 全局 Worker：scope=global OR scope=admin
+    global_stats = _stats("scope IN ('global', 'admin')", [])
+
+    # 项目 Worker：scope=repo AND repo_key=当前项目
+    project_stats = _stats("scope='repo' AND repo_key=%s", [repo_key]) if repo_key else empty
+
+    # 个人 Worker：scope=user AND 凭据 owner_name=当前用户 AND repo_key=当前项目
+    # agent_runtimes 没有 owner_name——JOIN runtime_credentials 获取
+    def _stats_join(where_clause: str, params: list) -> dict:
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                f"SELECT COUNT(*), "
+                f"SUM(CASE WHEN r.status='online' THEN 1 ELSE 0 END), "
+                f"SUM(CASE WHEN r.status!='online' THEN 1 ELSE 0 END), "
+                f"COALESCE(SUM(r.busy_slots), 0), "
+                f"COALESCE(SUM(r.max_concurrent), 0) "
+                f"FROM agent_runtimes r "
+                f"JOIN runtime_credentials rc ON r.credential_id=rc.id "
+                f"WHERE {where_clause}",
+                params
+            ).fetchone()
+        return {
+            "total": row[0] or 0,
+            "online": row[1] or 0,
+            "offline": row[2] or 0,
+            "busy_slots": row[3] or 0,
+            "max_concurrent": row[4] or 0,
+        }
+
+    if repo_key:
+        personal_stats = _stats_join("r.scope='user' AND rc.owner_name=%s AND r.repo_key=%s", [username, repo_key])
+    else:
+        personal_stats = _stats_join("r.scope='user' AND rc.owner_name=%s", [username])
+
     return {
-        "total": row[0] or 0,
-        "online": row[1] or 0,
-        "offline": row[2] or 0,
-        "busy_slots": row[3] or 0,
-        "max_concurrent": row[4] or 0,
+        "global": global_stats,
+        "project": project_stats,
+        "personal": personal_stats,
     }
 
 
