@@ -21,12 +21,17 @@ _days_dep = Query(7, ge=1, le=_MAX_DAYS)
 
 
 def _check_repo_access(repo_key: str, user_id: int):
-    """查 user_repos 确认用户是否有该仓库权限。无权限返回 403。"""
+    """查 user_repos 确认用户是否有该仓库权限。无权限返回 403。
+
+    前端传的 repo_key 格式是 owner/repo，数据库里是 gitcode:owner/repo——需要转换。
+    """
+    from src.repo_key import to_repo_key
+    full_repo_key = to_repo_key(repo_key) if ":" not in repo_key else repo_key
     with db_lock:
         c = db.cursor()
         row = c.execute(
             "SELECT 1 FROM user_repos WHERE user_id=? AND repo_key=? AND is_join=1",
-            (user_id, repo_key)
+            (user_id, full_repo_key)
         ).fetchone()
     if not row:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库"})
@@ -43,6 +48,8 @@ async def dashboard_runtime_status(
     user: dict = Depends(get_current_user),
 ):
     """Worker 在线/离线/槽位统计——按三级分类（全局/项目/个人）。"""
+    from src.repo_key import to_repo_key
+    full_repo_key = to_repo_key(repo_key) if repo_key and ":" not in repo_key else repo_key
     username = user.get("username", "")
 
     def _stats(where_clause: str, params: list) -> dict:
@@ -71,7 +78,7 @@ async def dashboard_runtime_status(
     global_stats = _stats("scope IN ('global', 'admin')", [])
 
     # 项目 Worker：scope=repo AND repo_key=当前项目
-    project_stats = _stats("scope='repo' AND repo_key=%s", [repo_key]) if repo_key else empty
+    project_stats = _stats("scope='repo' AND repo_key=%s", [full_repo_key]) if full_repo_key else empty
 
     # 个人 Worker：scope=user AND 凭据 owner_name=当前用户 AND repo_key=当前项目
     # agent_runtimes 没有 owner_name——JOIN runtime_credentials 获取
@@ -97,8 +104,8 @@ async def dashboard_runtime_status(
             "max_concurrent": row[4] or 0,
         }
 
-    if repo_key:
-        personal_stats = _stats_join("r.scope='user' AND rc.owner_name=%s AND r.repo_key=%s", [username, repo_key])
+    if full_repo_key:
+        personal_stats = _stats_join("r.scope='user' AND rc.owner_name=%s AND r.repo_key=%s", [username, full_repo_key])
     else:
         personal_stats = _stats_join("r.scope='user' AND rc.owner_name=%s", [username])
 

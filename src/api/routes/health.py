@@ -133,10 +133,12 @@ async def health_detail(repo_key: str = "", user: dict = Depends(get_current_use
     供前端系统监控页面使用。包含数据库、OBS、Worker 详情。
     Worker 按三级分类：全局/项目/个人。
     """
+    from src.repo_key import to_repo_key
+    full_repo_key = to_repo_key(repo_key) if repo_key and ":" not in repo_key else repo_key
     return {
         "server": "ok",
         "database": _check_db(),
         "obs": _check_obs(),
-        "workers": _check_workers(user, repo_key),
+        "workers": _check_workers(user, full_repo_key),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
