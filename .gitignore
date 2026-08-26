@@ -8,6 +8,7 @@ tunnel-*.log
 __pycache__/
 *.pyc
 .arts/
+.codeartsdoer/
 .pytest_cache/
 .venv/
 data/test_*
