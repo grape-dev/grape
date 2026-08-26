@@ -1,5 +1,7 @@
 <h1 align="center">Grape</h1>
 
+<p align="center">English | <a href="README.zh.md">中文</a></p>
+
 <p align="center">
   <strong>AI Native DevOps —— Turn Any Git Project into an AI-Driven Development Workflow with One Click</strong>
   <br>
@@ -15,10 +17,6 @@
   <a href="#contributing">Contributing</a> ·
   <a href="#feedback">Feedback</a>
 </p>
-
----
-
-English | [中文](README.zh.md)
 
 ---
 
