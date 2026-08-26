@@ -181,15 +181,58 @@ function openTaskLogModal(taskId, infoEnc) {
       <h3 style="font-size:13px;font-weight:600">${titleHtml}</h3>
       <button class="bt bt-o bt-s" onclick="document.getElementById('rtLogModal').remove()">✕ 关闭</button>
     </div>
+    <div id="rtLogTimeline" style="padding:10px 18px;border-bottom:1px solid var(--b);display:none"></div>
     <div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>
   </div>`;
   document.body.appendChild(modal);
 
+  // 并行加载日志和时间线
   API.get('/task-logs/' + taskId + '/messages?since=0').then(msgs => {
     renderTaskLogMessages(document.getElementById('rtLogModalBody'), msgs || []);
   }).catch(e => {
     document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
   });
+
+  // 加载时间线（/info 端点需认证，用 API.get）
+  API.get('/task-logs/' + taskId + '/info').then(info => {
+    renderTaskTimeline(document.getElementById('rtLogTimeline'), info);
+  }).catch(e => {
+    // 时间线加载失败不影响日志查看
+  });
+}
+
+function renderTaskTimeline(container, info) {
+  if (!container || !info) return;
+  const stages = [];
+  if (info.created_at) stages.push({ label: '入队', time: info.created_at, color: 'var(--y)' });
+  if (info.started_at) stages.push({ label: '开始执行', time: info.started_at, color: 'var(--a)' });
+  if (info.completed_at) stages.push({ label: '完成', time: info.completed_at, color: info.status === 'failed' ? 'var(--r)' : 'var(--g)' });
+  if (!stages.length) return;
+
+  // 计算各阶段耗时
+  const durations = [];
+  for (let i = 1; i < stages.length; i++) {
+    const prev = new Date(stages[i-1].time);
+    const curr = new Date(stages[i].time);
+    const diff = Math.round((curr - prev) / 1000);
+    durations.push(diff);
+  }
+
+  const statusColor = { queued: 'var(--y)', dispatched: 'var(--a)', running: 'var(--a)', completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)' };
+  let html = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px">';
+  stages.forEach((s, i) => {
+    html += `<div style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:50%;background:${s.color}"></span><span style="color:var(--t2)">${s.label}</span><span class="ts t3">${s.time.substring(11,19)}</span></div>`;
+    if (i < stages.length - 1) {
+      const dur = durations[i];
+      const durStr = dur > 60 ? Math.round(dur/60) + 'm' : dur + 's';
+      const durColor = dur > 300 ? 'var(--r)' : dur > 60 ? 'var(--y)' : 'var(--g)';
+      html += `<span style="color:${durColor};font-size:10px">→ ${durStr}</span>`;
+    }
+  });
+  if (info.status) html += `<span style="margin-left:auto;padding:2px 8px;border-radius:4px;background:${statusColor[info.status]||'var(--t3)'};color:#fff;font-size:10px;font-weight:600">${info.status.toUpperCase()}</span>`;
+  html += '</div>';
+  container.innerHTML = html;
+  container.style.display = 'block';
 }
 
 function renderTaskLogMessages(container, msgs) {

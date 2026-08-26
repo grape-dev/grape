@@ -72,7 +72,10 @@ function renderObsContent() {
   const rt = realtime || {};
   const mt = metricsText || '';
 
-  if (_obsTab === 'overview') c.innerHTML = renderOverview(realOps, rt, mt);
+  if (_obsTab === 'overview') {
+    c.innerHTML = renderOverview(realOps, rt, mt);
+    loadOverviewDiagnostics(realOps);
+  }
   else if (_obsTab === 'tasks') c.innerHTML = renderTasksTab(realOps, rt, mt);
   else if (_obsTab === 'runtimes') c.innerHTML = renderRuntimesTab(realOps, rt, mt);
   else if (_obsTab === 'database') c.innerHTML = renderDatabaseTab(rt, mt);
@@ -148,7 +151,107 @@ function renderOverview(ops, rt, mt) {
       { label: 'Stuck (live)', value: taskStuck, color: (taskStuck||0) > 0 ? 'var(--r)' : 'var(--g)' },
       { label: 'IM Bots', value: rt.im ? `${rt.im.connected}/${rt.im.total_bots}` : '0/0', color: 'var(--sk)' },
     ])}
+    <div id="obs-anomaly-tasks"></div>
+    <div id="obs-a2a-health"></div>
+    <div id="obs-error-logs"></div>
   `;
+}
+
+// 异步加载异常任务、A2A 健康、错误日志
+function loadOverviewDiagnostics(ops) {
+  loadAnomalyTasks(ops);
+  loadA2aHealth();
+  loadErrorLogs();
+}
+
+function loadAnomalyTasks(ops) {
+  const container = document.getElementById('obs-anomaly-tasks');
+  if (!container) return;
+  const stuck = (ops.tasks || {}).stuck_tasks || [];
+  const failed = (ops.tasks || {}).failed_tasks || [];
+  if (!stuck.length && !failed.length) {
+    container.innerHTML = '';
+    return;
+  }
+  let html = section('⚠ 异常任务', '点击查看日志');
+  if (stuck.length) {
+    html += table(['Issue/Seq', 'Agent', 'Repo', 'Started', '状态'],
+      stuck.map(s => {
+        const is = (s.issue_id && s.event_seq) ? `${s.issue_id} #${s.event_seq}` : s.id.substring(0,12);
+        return [`<a onclick="openTaskLogModal('${s.id}','${encodeURIComponent(JSON.stringify({issue:s.issue_id,seq:s.event_seq,repo:(s.repo_key||'').replace('gitcode:',''),created:s.started_at}))}')" style="cursor:pointer;color:var(--a)"><b>${is}</b></a>`,
+          s.agent_type || '-', (s.repo_key||'').replace('gitcode:','').substring(0,20),
+          `<span class="ts t3">${(s.started_at||'').substring(0,19)}</span>`,
+          `<span style="color:var(--r)">🔴 STUCK</span>`];
+      })
+    );
+  }
+  if (failed.length) {
+    html += table(['Issue/Seq', 'Agent', 'Repo', 'Failed', '结果'],
+      failed.map(f => {
+        const is = (f.issue_id && f.event_seq) ? `${f.issue_id} #${f.event_seq}` : f.id.substring(0,12);
+        return [`<a onclick="openTaskLogModal('${f.id}','${encodeURIComponent(JSON.stringify({issue:f.issue_id,seq:f.event_seq,repo:(f.repo_key||'').replace('gitcode:',''),created:f.completed_at||f.started_at}))}')" style="cursor:pointer;color:var(--a)"><b>${is}</b></a>`,
+          f.agent_type || '-', (f.repo_key||'').replace('gitcode:','').substring(0,20),
+          `<span class="ts t3">${(f.completed_at||'').substring(0,19)}</span>`,
+          `<span class="ts t3" style="color:var(--r)">${(f.result_text||'').substring(0,60)}</span>`];
+      })
+    );
+  }
+  container.innerHTML = html;
+}
+
+function loadA2aHealth() {
+  const container = document.getElementById('obs-a2a-health');
+  if (!container) return;
+  container.innerHTML = section('A2A 健康检查', 'server_base_url 可达性') + '<div class="loading">检查中...</div>';
+  fetch('/api/dashboard/ops/a2a-health').then(r => r.json()).then(d => {
+    const status = d.reachable
+      ? `<span style="color:var(--g)">✓ 可达</span> (${d.latency_ms}ms)`
+      : `<span style="color:var(--r)">✗ 不可达</span> ${d.error ? '<span class="ts t3">'+d.error.substring(0,80)+'</span>' : ''}`;
+    let html = section('A2A 健康检查', 'server_base_url 可达性');
+    html += kpiRow([
+      { label: 'Server URL', value: `<span class="ts" style="font-size:10px">${d.server_base_url}</span>`, color: 'var(--a)' },
+      { label: '状态', value: status, color: d.reachable ? 'var(--g)' : 'var(--r)' },
+      { label: '延迟', value: d.latency_ms ? d.latency_ms + 'ms' : '-', color: 'var(--sk)' },
+    ]);
+    if (d.recent_a2a && d.recent_a2a.length) {
+      html += table(['Seq', 'Type', 'Repo', 'Issue', 'Status', 'Time'],
+        d.recent_a2a.map(a => [
+          a.seq, a.event_type.substring(0,20), (a.repo_key||'').replace('gitcode:','').substring(0,15),
+          a.issue_id || '-', a.status || '-', `<span class="ts t3">${(a.created_at||'').substring(0,19)}</span>`
+        ])
+      );
+    }
+    container.innerHTML = html;
+  }).catch(e => {
+    container.innerHTML = section('A2A 健康检查') + '<div class="error">加载失败: ' + e.message + '</div>';
+  });
+}
+
+function loadErrorLogs() {
+  const container = document.getElementById('obs-error-logs');
+  if (!container) return;
+  container.innerHTML = section('错误日志', '最近 ERROR / WARNING') + '<div class="loading">加载中...</div>';
+  fetch('/api/dashboard/ops/error-logs?limit=50').then(r => r.json()).then(d => {
+    const entries = d.entries || [];
+    if (!entries.length) {
+      container.innerHTML = section('错误日志') + '<div class="ts t2" style="padding:12px">无错误日志</div>';
+      return;
+    }
+    let html = section('错误日志', `最近 ${entries.length} 条 ERROR / WARNING`);
+    html += '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.5;border-radius:8px;overflow:hidden;max-height:400px;overflow-y:auto">';
+    entries.forEach(e => {
+      const level = e.level || '';
+      const color = level === 'ERROR' ? '#dc2828' : '#d49c0f';
+      const time = (e.ts || '').substring(11,19);
+      const rid = e.request_id && e.request_id !== '-' ? ` [${e.request_id}]` : '';
+      const extra = e.method ? ` ${e.method} ${e.path||''} ${e.status||''} ${e.duration_ms||0}ms` : '';
+      html += `<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">${time}</span>${rid} <span style="color:${color}"><b>${level}</b></span> <span style="color:#e0e6f0">${(e.message||'').substring(0,200)}</span><span style="color:#8d97a8">${extra}</span></div>`;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  }).catch(e => {
+    container.innerHTML = section('错误日志') + '<div class="error">加载失败: ' + e.message + '</div>';
+  });
 }
 
 // ===== Tab: 任务 =====

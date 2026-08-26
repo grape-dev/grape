@@ -51,7 +51,7 @@ async def get_ops_overview():
         stuck_tasks = []
         try:
             c.execute(
-                "SELECT id, agent_type, runtime_id, started_at, repo_key "
+                "SELECT id, agent_type, runtime_id, started_at, repo_key, issue_id, event_seq "
                 "FROM agent_tasks WHERE status='running' AND started_at IS NOT NULL AND started_at < ? "
                 "ORDER BY started_at ASC LIMIT 100",
                 (stuck_cutoff,),
@@ -60,6 +60,24 @@ async def get_ops_overview():
                 stuck_tasks.append({
                     "id": r[0], "agent_type": r[1] or "", "runtime_id": r[2],
                     "started_at": normalize_event_time(r[3]), "repo_key": r[4] or "",
+                    "issue_id": r[5] or "", "event_seq": r[6] or 0,
+                })
+        except Exception:
+            pass
+
+        # --- 最近 failed 任务（最近 20 条）---
+        failed_tasks = []
+        try:
+            c.execute(
+                "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, event_seq, result_text "
+                "FROM agent_tasks WHERE status='failed' ORDER BY completed_at DESC LIMIT 20"
+            )
+            for r in c.fetchall():
+                failed_tasks.append({
+                    "id": r[0], "agent_type": r[1] or "", "runtime_id": r[2],
+                    "started_at": normalize_event_time(r[3]), "completed_at": normalize_event_time(r[4]),
+                    "repo_key": r[5] or "", "issue_id": r[6] or "", "event_seq": r[7] or 0,
+                    "result_text": (r[8] or "")[:200],
                 })
         except Exception:
             pass
@@ -131,6 +149,7 @@ async def get_ops_overview():
             "in_progress": in_progress,
             "stuck_count": len(stuck_tasks),
             "stuck_tasks": stuck_tasks,
+            "failed_tasks": failed_tasks,
             "by_source": task_by_source,
             "today": today_stats,
         },
@@ -144,7 +163,94 @@ async def get_ops_overview():
     }
 
 
-# ===== 仓库 Dashboard（需认证）=====
+@router.get("/ops/error-logs")
+async def get_error_logs(limit: int = 100):
+    """最近错误/警告日志（从 data/logs/devops-bot.log 读取 JSON 行）。
+
+    无认证：运维诊断数据，与 /health/realtime 同级。
+    返回 [{ts, level, component, request_id, message, method, path, status, duration_ms}]。
+    """
+    import os, json as _json
+    from src.config import LOG_DIR
+
+    log_file = os.path.join(LOG_DIR, "devops-bot.log")
+    entries = []
+    if not os.path.exists(log_file):
+        return {"entries": [], "file": log_file, "error": "log file not found"}
+
+    # 从文件尾部读取，倒序收集 ERROR/WARNING 行
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = _json.loads(line)
+                level = entry.get("level", "")
+                if level in ("ERROR", "WARNING"):
+                    entries.append(entry)
+                    if len(entries) >= limit:
+                        break
+            except (_json.JSONDecodeError, ValueError):
+                continue
+    except Exception as e:
+        return {"entries": [], "file": log_file, "error": str(e)}
+
+    return {"entries": entries, "file": log_file}
+
+
+@router.get("/ops/a2a-health")
+async def get_a2a_health():
+    """A2A 健康检查：server_base_url 可达性 + 最近 A2A 调用记录。
+
+    无认证：运维诊断数据。
+    """
+    import requests as _requests
+    from src.user.db import get_server_base_url
+    from src.session_manager import db, db_lock
+
+    base_url = get_server_base_url()
+    result = {
+        "server_base_url": base_url,
+        "reachable": False,
+        "health_status": None,
+        "latency_ms": None,
+        "error": None,
+        "recent_a2a": [],
+    }
+
+    # 检查可达性
+    try:
+        import time as _time
+        t0 = _time.time()
+        r = _requests.get(base_url.rstrip("/") + "/health", timeout=5)
+        result["latency_ms"] = round((_time.time() - t0) * 1000)
+        result["reachable"] = r.status_code == 200
+        result["health_status"] = r.status_code
+    except Exception as e:
+        result["error"] = str(e)[:200]
+
+    # 最近 A2A 调用记录（从 events 表查 agent_type=A2A 的最近记录）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, event_type, repo_key, issue_id, status, created_at, payload "
+                "FROM events WHERE event_type LIKE '%a2a%' OR event_type LIKE '%A2A%' "
+                "ORDER BY created_at DESC LIMIT 10"
+            )
+            for row in c.fetchall():
+                result["recent_a2a"].append({
+                    "seq": row[0], "event_type": row[1] or "", "repo_key": row[2] or "",
+                    "issue_id": row[3] or "", "status": row[4] or "",
+                    "created_at": normalize_event_time(row[5]),
+                })
+    except Exception:
+        pass
+
+    return result
 
 
 @router.get("/{owner}/{repo}")
