@@ -1007,8 +1007,8 @@ def _migrate_tables():
         # 且 ALTER 仅在列非 MEDIUMTEXT 时执行（避免每次启动 DDL 触发元数据锁——启动变慢根因）
         _alter_skill_files_if_needed(),
         # Worker 三级分类——repo_key 字段（scope=user 时关联项目）
-        "ALTER TABLE runtime_credentials ADD COLUMN repo_key TEXT DEFAULT NULL",
-        "ALTER TABLE agent_runtimes ADD COLUMN repo_key TEXT DEFAULT NULL",
+        "ALTER TABLE runtime_credentials ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
+        "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
     ]
