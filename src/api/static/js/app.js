@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','error-logs'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -228,7 +228,7 @@ function loadAgentTypes() {
   let _refreshTimer = null;
   function nav(view, param) {
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'observability' && view !== 'error-logs') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'observability') { loadRepos(); return; }
 
     _pushHistory(view, param);
 
@@ -297,10 +297,6 @@ function loadAgentTypes() {
     } else if (view === 'observability') {
       title.textContent = '系统监控';
       if (typeof renderObservability === 'function') renderObservability();
-    } else if (view === 'error-logs') {
-      title.textContent = '错误日志';
-      pc.innerHTML = '<div class="cd"><div class="cd-h"><h2>错误日志</h2><button class="bt bt-o bt-s" onclick="app.nav(\'error-logs\')">⟳ 刷新</button></div><div id="errorLogContainer"></div></div>';
-      loadErrorLogs(document.getElementById('errorLogContainer'));
     } else if (view === 'repos') {
       title.textContent = '选择仓库';
       loadRepos();

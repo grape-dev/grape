@@ -23,6 +23,8 @@ function renderObservability() {
       <div class="stabs" style="padding:0 20px;border-bottom:1px solid var(--b)">
         <a class="${_obsTab==='overview'?'ac':''}" onclick="switchObsTab('overview',event)">概览</a>
         <a class="${_obsTab==='tasks'?'ac':''}" onclick="switchObsTab('tasks',event)">任务</a>
+        <a class="${_obsTab==='anomaly'?'ac':''}" onclick="switchObsTab('anomaly',event)">异常任务</a>
+        <a class="${_obsTab==='errorlogs'?'ac':''}" onclick="switchObsTab('errorlogs',event)">错误日志</a>
       </div>
       <div id="obsContent" style="padding:20px"><div class="loading">加载中...</div></div>
     </div>
@@ -72,9 +74,11 @@ function renderObsContent() {
 
   if (_obsTab === 'overview') {
     c.innerHTML = renderOverview(realOps, rt, mt);
-    loadOverviewDiagnostics(realOps);
+    loadA2aHealth();
   }
   else if (_obsTab === 'tasks') c.innerHTML = renderTasksTab(realOps, rt, mt);
+  else if (_obsTab === 'anomaly') renderAnomalyTab(c, realOps);
+  else if (_obsTab === 'errorlogs') loadErrorLogs(c);
 }
 
 // ===== KPI 卡片行（仿 multica KpiCard grid）=====
@@ -147,52 +151,11 @@ function renderOverview(ops, rt, mt) {
       { label: 'Stuck (live)', value: taskStuck, color: (taskStuck||0) > 0 ? 'var(--r)' : 'var(--g)' },
       { label: 'IM Bots', value: rt.im ? `${rt.im.connected}/${rt.im.total_bots}` : '0/0', color: 'var(--sk)' },
     ])}
-    <div id="obs-anomaly-tasks"></div>
     <div id="obs-a2a-health"></div>
   `;
 }
 
-// 异步加载异常任务、A2A 健康
-function loadOverviewDiagnostics(ops) {
-  loadAnomalyTasks(ops);
-  loadA2aHealth();
-}
-
-function loadAnomalyTasks(ops) {
-  const container = document.getElementById('obs-anomaly-tasks');
-  if (!container) return;
-  const stuck = (ops.tasks || {}).stuck_tasks || [];
-  const failed = (ops.tasks || {}).failed_tasks || [];
-  if (!stuck.length && !failed.length) {
-    container.innerHTML = '';
-    return;
-  }
-  let html = section('⚠ 异常任务', '点击查看日志');
-  if (stuck.length) {
-    html += table(['Issue/Seq', 'Agent', 'Repo', 'Started', '状态'],
-      stuck.map(s => {
-        const is = (s.issue_id && s.event_seq) ? `${s.issue_id} #${s.event_seq}` : s.id.substring(0,12);
-        return [`<a onclick="openTaskLogModal('${s.id}','${encodeURIComponent(JSON.stringify({issue:s.issue_id,seq:s.event_seq,repo:(s.repo_key||'').replace('gitcode:',''),created:s.started_at}))}')" style="cursor:pointer;color:var(--a)"><b>${is}</b></a>`,
-          s.agent_type || '-', (s.repo_key||'').replace('gitcode:','').substring(0,20),
-          `<span class="ts t3">${(s.started_at||'').substring(0,19)}</span>`,
-          `<span style="color:var(--r)">🔴 STUCK</span>`];
-      })
-    );
-  }
-  if (failed.length) {
-    html += table(['Issue/Seq', 'Agent', 'Repo', 'Failed', '结果'],
-      failed.map(f => {
-        const is = (f.issue_id && f.event_seq) ? `${f.issue_id} #${f.event_seq}` : f.id.substring(0,12);
-        return [`<a onclick="openTaskLogModal('${f.id}','${encodeURIComponent(JSON.stringify({issue:f.issue_id,seq:f.event_seq,repo:(f.repo_key||'').replace('gitcode:',''),created:f.completed_at||f.started_at}))}')" style="cursor:pointer;color:var(--a)"><b>${is}</b></a>`,
-          f.agent_type || '-', (f.repo_key||'').replace('gitcode:','').substring(0,20),
-          `<span class="ts t3">${(f.completed_at||'').substring(0,19)}</span>`,
-          `<span class="ts t3" style="color:var(--r)">${(f.result_text||'').substring(0,60)}</span>`];
-      })
-    );
-  }
-  container.innerHTML = html;
-}
-
+// A2A 健康检查（概览 tab 内异步加载）
 function loadA2aHealth() {
   const container = document.getElementById('obs-a2a-health');
   if (!container) return;
@@ -219,6 +182,42 @@ function loadA2aHealth() {
   }).catch(e => {
     container.innerHTML = section('A2A 健康检查') + '<div class="error">加载失败: ' + e.message + '</div>';
   });
+}
+
+// ===== Tab: 异常任务 =====
+function renderAnomalyTab(container, ops) {
+  const stuck = (ops.tasks || {}).stuck_tasks || [];
+  const failed = (ops.tasks || {}).failed_tasks || [];
+  if (!stuck.length && !failed.length) {
+    container.innerHTML = '<div class="ts t2" style="padding:40px;text-align:center">🎉 无异常任务</div>';
+    return;
+  }
+  let html = '';
+  if (stuck.length) {
+    html += section('🔴 卡住的任务', 'running > 15min — 点击查看日志');
+    html += table(['Issue/Seq', 'Agent', 'Repo', 'Started', '状态'],
+      stuck.map(s => {
+        const is = (s.issue_id && s.event_seq) ? `${s.issue_id} #${s.event_seq}` : s.id.substring(0,12);
+        return [`<a onclick="openTaskLogModal('${s.id}','${encodeURIComponent(JSON.stringify({issue:s.issue_id,seq:s.event_seq,repo:(s.repo_key||'').replace('gitcode:',''),created:s.started_at}))}')" style="cursor:pointer;color:var(--a)"><b>${is}</b></a>`,
+          s.agent_type || '-', (s.repo_key||'').replace('gitcode:','').substring(0,20),
+          `<span class="ts t3">${(s.started_at||'').substring(0,19)}</span>`,
+          `<span style="color:var(--r)">🔴 STUCK</span>`];
+      })
+    );
+  }
+  if (failed.length) {
+    html += section('❌ 失败的任务', '最近 20 条 — 点击查看日志');
+    html += table(['Issue/Seq', 'Agent', 'Repo', 'Failed', '结果'],
+      failed.map(f => {
+        const is = (f.issue_id && f.event_seq) ? `${f.issue_id} #${f.event_seq}` : f.id.substring(0,12);
+        return [`<a onclick="openTaskLogModal('${f.id}','${encodeURIComponent(JSON.stringify({issue:f.issue_id,seq:f.event_seq,repo:(f.repo_key||'').replace('gitcode:',''),created:f.completed_at||f.started_at}))}')" style="cursor:pointer;color:var(--a)"><b>${is}</b></a>`,
+          f.agent_type || '-', (f.repo_key||'').replace('gitcode:','').substring(0,20),
+          `<span class="ts t3">${(f.completed_at||'').substring(0,19)}</span>`,
+          `<span class="ts t3" style="color:var(--r)">${(f.result_text||'').substring(0,80)}</span>`];
+      })
+    );
+  }
+  container.innerHTML = html;
 }
 
 function loadErrorLogs(container) {
