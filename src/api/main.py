@@ -186,14 +186,20 @@ async def request_id_and_log_middleware(request: Request, call_next):
         if not skip_log:
             duration = (_time.time() - start) * 1000
             redacted_path = _redact_path(path)
-            msg = (f"{request.method} {redacted_path} "
-                   f"status={status} duration={duration:.0f}ms")
+            # 结构化字段通过 extra 注入，作为独立 JSON 字段输出（非 message 文本）
+            extra = {
+                "method": request.method,
+                "path": redacted_path,
+                "status": status,
+                "duration_ms": round(duration),
+            }
+            msg = f"{request.method} {redacted_path} status={status} duration={duration:.0f}ms"
             if status >= 500:
-                _log.error(msg)
+                _log.error(msg, extra=extra)
             elif status >= 400:
-                _log.warning(msg)
+                _log.warning(msg, extra=extra)
             else:
-                _log.info(msg)
+                _log.info(msg, extra=extra)
         request_id_var.reset(token)
 
 app.include_router(auth.router)
@@ -246,27 +252,44 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # ===== 三层健康检查（参考 multica health.go）=====
 
+import os as _os_mod
+from datetime import datetime as _dt, timezone as _tz
+
+_PROCESS_STARTED_AT = _dt.now(_tz.utc).isoformat()
+
+
 @app.get("/health")
 async def health():
     """Liveness：进程存活，不检查 DB。
 
     K8s livenessProbe 用此端点。DB 挂了不应导致 pod 重启，只标记 NotReady。
     """
-    import os
     return {
         "status": "ok",
         "version": "2.0.0",
-        "pid": os.getpid(),
+        "pid": _os_mod.getpid(),
+        "started_at": _PROCESS_STARTED_AT,
     }
+
+
+# /healthz 3s TTL 缓存（参考 multica readinessCacheTTL）
+_readiness_cache = {"result": None, "expires_at": 0}
+_READINESS_CACHE_TTL = 3  # 秒
 
 
 @app.get("/healthz")
 @app.get("/readyz")
 async def readiness():
-    """Readiness：检查 DB 连通 + 表结构完整性。
+    """Readiness：检查 DB 连通 + 表结构完整性，3s 缓存。
 
     K8s readinessProbe / startupProbe 用此端点。
     """
+    import time as _t
+    now = _t.time()
+    cached = _readiness_cache["result"]
+    if cached and now < _readiness_cache["expires_at"]:
+        return cached
+
     from src.session_manager import db, db_lock
     checks = {"db": "ok", "tables": "ok"}
     status = "ok"
@@ -291,10 +314,13 @@ async def readiness():
             checks["tables"] = "error: agent_tasks missing"
             status = "not_ready"
             http_status = 503
-    return JSONResponse(
+    resp = JSONResponse(
         status_code=http_status,
         content={"status": status, "checks": checks},
     )
+    _readiness_cache["result"] = resp
+    _readiness_cache["expires_at"] = now + _READINESS_CACHE_TTL
+    return resp
 
 
 @app.get("/health/realtime")

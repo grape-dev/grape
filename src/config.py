@@ -26,7 +26,14 @@ class _JsonFormatter(logging.Formatter):
 
     兼容已有 log.info("f-string") 调用——message 字段放原始文本，
     其余字段从 LogRecord / ContextVar 提取。
+
+    HTTP 请求日志中间件通过 log.info(..., extra={...}) 注入结构化字段：
+    method, path, status, duration_ms — 这些会作为独立 JSON 字段输出，
+    而非塞在 message 文本中，便于 Loki/ELK 按字段过滤/聚合。
     """
+
+    # extra 字段白名单：只有这些 LogRecord 属性会被提升为顶层 JSON 字段
+    _EXTRA_FIELDS = ("method", "path", "status", "duration_ms", "user_id")
 
     def format(self, record):
         import time as _t
@@ -38,6 +45,11 @@ class _JsonFormatter(logging.Formatter):
             "request_id": getattr(record, "request_id", "-"),
             "message": record.getMessage(),
         }
+        # 提取 extra 字段（HTTP 请求日志中间件注入的结构化维度）
+        for field in self._EXTRA_FIELDS:
+            val = getattr(record, field, None)
+            if val is not None:
+                log_entry[field] = val
         if record.exc_info and record.exc_info[1]:
             log_entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(log_entry, ensure_ascii=False)
