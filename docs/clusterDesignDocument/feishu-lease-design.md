@@ -281,33 +281,62 @@ LIMIT 500
 - 每批 500 条 → 内存不爆
 - 性能恒定 → 不随数据量增长变慢
 
-**续约——批量 UPDATE：**
+**续约——批量 UPDATE（已实施）：**
 ```sql
 UPDATE global_im_bot_config
 SET lease_expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND)
-WHERE lease_owner = ? AND lease_token = ? AND is_active = 1
+WHERE lease_owner = ? AND is_active = 1
 ```
-一条 SQL 更新本实例持有的所有 lease。
+一条 SQL 更新本实例持有的所有 lease，然后查 DB 确认每个 bot 的 lease_token 是否还是自己的。
+
+**续约间隔——每 RENEW_INTERVAL 秒续约一次（已实施）：**
+sweep 每 SWEEP_INTERVAL（10 秒）跑一次，但续约每 RENEW_INTERVAL（20 秒）一次——通过 sweep_count % (RENEW_INTERVAL // SWEEP_INTERVAL) == 0 控制。宽限期检查每次 sweep 都做（不等续约间隔）。
 
 **实现逻辑：**
 ```python
 async def lease_sweep_loop():
     while True:
-        cursor = ''  # 每轮 sweep 从头开始
-        while True:
-            bots = list_expired_or_unheld(cursor=cursor, limit=500)
-            if not bots:
-                break
-            for bot in bots:
-                try_acquire(bot.app_id)
-            cursor = bots[-1].app_id  # 游标推进
-            if len(bots) < 500:
-                break  # 没有更多了
-        # 批量续约
-        batch_renew()
-        # 检查 is_active=0 的 bot 断开
-        check_inactive_bots()
-        await asyncio.sleep(sweep_interval)
+        try:
+            # 0. 问题 M：lease 字段不存在时退回旧模式
+            if lease_store._disabled:
+                self._lease_store = None
+                await self.load_from_db()
+                return
+
+            sweep_count += 1
+            # 1. 游标分页查询可抢的 bot → try_acquire → 创建 BotContext + run_bot
+            cursor = ""
+            while True:
+                candidates = lease_store.list_expired_or_unheld(cursor=cursor, limit=500)
+                if not candidates:
+                    break
+                for bot_info in candidates:
+                    # try_acquire → 创建 BotContext + ctx._lease_token = token + run_bot
+                cursor = candidates[-1]["bot_app_id"]
+                if len(candidates) < 500:
+                    break
+
+            # 2. 批量续约（每 RENEW_INTERVAL 秒续约一次）
+            if self._held_leases and sweep_count % (RENEW_INTERVAL // SWEEP_INTERVAL) == 0:
+                renew_results = lease_store.batch_renew(self._held_leases)
+                # CAS 失败 → 设宽限期 30 秒
+                # 续约成功 → 清宽限期
+
+            # 2b. 每次 sweep 都检查宽限期到期 → 断开
+            if self._grace_deadlines:
+                # 到期的断开 + release lease
+
+            # 3. 检查 is_active=0 的 bot → 断开 + 释放 lease（问题 K）
+            if self._held_leases:
+                inactive = lease_store.check_inactive_bots(self._held_leases)
+
+            # 4. 定期重新加载 bot 配置（问题 B：每 5 分钟重新加载）
+            if sweep_count % (300 // BOT_LEASE_SWEEP_INTERVAL) == 0:
+                await self.load_from_db()  # 清旧 _eligible_bots + 重新填充
+
+        except Exception as e:
+            log.error(f"[lease] sweep error: {e}")
+        await asyncio.sleep(BOT_LEASE_SWEEP_INTERVAL)
 ```
 
 **优化前后对比：**
@@ -318,6 +347,7 @@ async def lease_sweep_loop():
 | 耗时 | 2.57ms | 0.49ms |
 | CPU | 0.026% | 0.005% |
 | 数据量扩展 | 线性增长 | 恒定（游标分页） |
+| 续约频率 | 每次 sweep（10 秒） | 每 RENEW_INTERVAL（20 秒） |
 
 ### 2. health_check 加 lease 状态
 
