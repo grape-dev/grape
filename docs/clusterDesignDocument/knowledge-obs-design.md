@@ -268,3 +268,88 @@ OBS 网络异常时回退本地 file_path。如果本地文件也不存在（容
 | # | 表.字段 | 类型 | 默认值 | 用途 |
 |---|---------|------|--------|------|
 | 1 | agent_shared_knowledge.obs_key | VARCHAR(512) | '' | OBS 对象键——非空走 OBS，空走本地 |
+
+## 十三、项目知识基线文件 OBS 改造（补充）
+
+### 背景
+
+项目知识基线文件（project-graph.md / project-capabilities.md / .metadata.json）不在 agent_shared_knowledge 表里——它们由服务端 `src/project_info/builder.py` 的 `build_project_info()` 生成，直接写到工作区 `project-info/` 目录。
+
+涉及 3 个读写位置：
+1. **生成（写入）**：`src/project_info/builder.py` → `_write_file()` / `_write_meta()` → 本地 `open(w)`
+2. **读取（服务端）**：`src/runtime/service.py` → `load_project_info()` → 本地 `open(r)`
+3. **读取（VOD 注入）**：`src/im/vod_handler_async.py` 第 203 行 → 本地 `open(r)`
+
+集群后这 3 个位置都读不到本地文件——需要 OBS 改造。
+
+### OBS 对象键设计
+
+```
+project-info/{repo_key}/project-graph.md
+project-info/{repo_key}/project-capabilities.md
+project-info/{repo_key}/.metadata.json
+```
+
+### 改造点
+
+#### 1. src/project_info/builder.py（生成→写入 OBS）
+
+`_write_file()` 和 `_write_meta()` 改造：
+
+```
+OBS 模式（storage 不为 None）：
+  1. obs_key = f"project-info/{repo_key}/{filename}"
+  2. storage.save_bytes(obs_key, content.encode())
+  3. 同时写本地（兼容老逻辑）—— open(w) 保留
+
+本地模式（storage 为 None）：
+  1. 走现有 open(w) 写本地
+```
+
+#### 2. src/runtime/service.py（读取→走 OBS）
+
+`load_project_info()` 改造：
+
+```
+OBS 模式（storage 不为 None）：
+  1. obs_key_prefix = f"project-info/{repo_key}/"
+  2. storage.read_bytes(f"project-info/{repo_key}/project-graph.md")
+  3. storage.read_bytes(f"project-info/{repo_key}/project-capabilities.md")
+  4. storage.read_bytes(f"project-info/{repo_key}/.metadata.json")
+  5. OBS 读取失败 → try-except 回退本地 open(r)
+
+本地模式（storage 为 None）：
+  1. 走现有 open(r) 读本地
+```
+
+#### 3. src/im/vod_handler_async.py（VOD 注入→走 OBS）
+
+第 203 行读 project-graph.md / project-capabilities.md：
+
+```
+OBS 模式：
+  1. storage.read_bytes(f"project-info/{repo_key}/project-graph.md")
+  2. OBS 读取失败 → 回退本地 open(r)
+
+本地模式：
+  1. 走现有 open(r)
+```
+
+### 不需要 DB 字段
+
+project-info 基线文件不在 agent_shared_knowledge 表里——OBS 对象键按固定规则生成（`project-info/{repo_key}/{filename}`），不需要 DB 字段存储。
+
+### 兼容策略
+
+与共享知识同模式：
+- OBS 模式：先读 OBS，失败回退本地
+- 本地模式：走现有逻辑
+- 老数据：本地文件继续可用，新生成的同时写 OBS
+
+### 改动文件清单（补充）
+
+| # | 文件 | 改动内容 |
+|---|------|---------|
+| 7 | src/project_info/builder.py | _write_file / _write_meta 加 OBS 写入 |
+| 8 | src/runtime/service.py | load_project_info 加 OBS 读取 + 回退本地 |
+| 9 | src/im/vod_handler_async.py | VOD 注入读基线加 OBS 读取 + 回退本地 |
