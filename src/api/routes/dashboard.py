@@ -70,7 +70,7 @@ async def get_ops_overview():
         try:
             c.execute(
                 "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, event_seq, result_text "
-                "FROM agent_tasks WHERE status='failed' ORDER BY completed_at DESC LIMIT 20"
+                "FROM agent_tasks WHERE status='failed' ORDER BY completed_at DESC"
             )
             for r in c.fetchall():
                 failed_tasks.append({

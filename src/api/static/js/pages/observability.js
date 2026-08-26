@@ -185,6 +185,9 @@ function loadA2aHealth() {
 }
 
 // ===== Tab: 异常任务 =====
+let _anomalyPage = 0;
+const _ANOMALY_PAGE_SIZE = 10;
+
 function renderAnomalyTab(container, ops) {
   const stuck = (ops.tasks || {}).stuck_tasks || [];
   const failed = (ops.tasks || {}).failed_tasks || [];
@@ -192,31 +195,52 @@ function renderAnomalyTab(container, ops) {
     container.innerHTML = '<div class="ts t2" style="padding:40px;text-align:center">🎉 无异常任务</div>';
     return;
   }
+
+  const _enc = s => encodeURIComponent(JSON.stringify({issue:s.issue_id,seq:s.event_seq,repo:(s.repo_key||'').replace('gitcode:',''),created:s.started_at}));
+  const _row = (s, showFailed) => {
+    const is = (s.issue_id && s.event_seq) ? `${s.issue_id} #${s.event_seq}` : s.id.substring(0,12);
+    const time = showFailed ? (s.completed_at||'') : (s.started_at||'');
+    const label = showFailed ? 'Failed' : 'Started';
+    const badge = showFailed
+      ? `<span class="ts t3" style="color:var(--r)">${(s.result_text||'').substring(0,80)}</span>`
+      : `<span style="color:var(--r)">🔴 STUCK</span>`;
+    return [`<a onclick="openTaskLogModal('${s.id}','${_enc(s)}')" style="cursor:pointer;color:var(--a)"><b>${is}</b></a>`,
+      s.agent_type || '-', (s.repo_key||'').replace('gitcode:','').substring(0,20),
+      `<span class="ts t3">${time.substring(0,19)}</span>`, badge];
+  };
+
   let html = '';
+
+  // Stuck 任务（通常很少，不分页）
   if (stuck.length) {
-    html += section('🔴 卡住的任务', 'running > 15min — 点击查看日志');
+    html += section('🔴 卡住的任务', `${stuck.length} 个 — running > 15min`);
     html += table(['Issue/Seq', 'Agent', 'Repo', 'Started', '状态'],
-      stuck.map(s => {
-        const is = (s.issue_id && s.event_seq) ? `${s.issue_id} #${s.event_seq}` : s.id.substring(0,12);
-        return [`<a onclick="openTaskLogModal('${s.id}','${encodeURIComponent(JSON.stringify({issue:s.issue_id,seq:s.event_seq,repo:(s.repo_key||'').replace('gitcode:',''),created:s.started_at}))}')" style="cursor:pointer;color:var(--a)"><b>${is}</b></a>`,
-          s.agent_type || '-', (s.repo_key||'').replace('gitcode:','').substring(0,20),
-          `<span class="ts t3">${(s.started_at||'').substring(0,19)}</span>`,
-          `<span style="color:var(--r)">🔴 STUCK</span>`];
-      })
+      stuck.map(s => _row(s, false))
     );
   }
+
+  // Failed 任务（分页）
   if (failed.length) {
-    html += section('❌ 失败的任务', '最近 20 条 — 点击查看日志');
+    const totalPages = Math.ceil(failed.length / _ANOMALY_PAGE_SIZE);
+    if (_anomalyPage >= totalPages) _anomalyPage = 0;
+    const start = _anomalyPage * _ANOMALY_PAGE_SIZE;
+    const pageItems = failed.slice(start, start + _ANOMALY_PAGE_SIZE);
+
+    html += section('❌ 失败的任务', `共 ${failed.length} 条 — 第 ${_anomalyPage+1}/${totalPages} 页`);
     html += table(['Issue/Seq', 'Agent', 'Repo', 'Failed', '结果'],
-      failed.map(f => {
-        const is = (f.issue_id && f.event_seq) ? `${f.issue_id} #${f.event_seq}` : f.id.substring(0,12);
-        return [`<a onclick="openTaskLogModal('${f.id}','${encodeURIComponent(JSON.stringify({issue:f.issue_id,seq:f.event_seq,repo:(f.repo_key||'').replace('gitcode:',''),created:f.completed_at||f.started_at}))}')" style="cursor:pointer;color:var(--a)"><b>${is}</b></a>`,
-          f.agent_type || '-', (f.repo_key||'').replace('gitcode:','').substring(0,20),
-          `<span class="ts t3">${(f.completed_at||'').substring(0,19)}</span>`,
-          `<span class="ts t3" style="color:var(--r)">${(f.result_text||'').substring(0,80)}</span>`];
-      })
+      pageItems.map(s => _row(s, true))
     );
+
+    // 分页栏
+    if (totalPages > 1) {
+      html += `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0">
+        <button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;refreshObservability()">‹ 上一页</button>
+        <span class="ts t3">${_anomalyPage+1} / ${totalPages}</span>
+        <button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;refreshObservability()">下一页 ›</button>
+      </div>`;
+    }
   }
+
   container.innerHTML = html;
 }
 
