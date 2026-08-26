@@ -365,7 +365,7 @@ async def lease_sweep_loop():
 - DB 错误（连接断/查询超时）→ 保持 WebSocket 连接，等 DB 恢复后重试续约
 - CAS 失败（lease 被其他实例抢走）→ release lease + 断开
 
-### 场景验证总结（27 个场景）
+### 场景验证总结（41 个场景）
 
 | # | 场景 | 结果 | 说明 |
 |---|------|:---:|------|
@@ -396,6 +396,44 @@ async def lease_sweep_loop():
 | 25 | bot_manager 启动失败 | ✅ | lease_store 创建在 try 块里，失败整体失败 |
 | 26 | webhook 和飞书 IM 关系 | ✅ | webhook 不直接调飞书 reply，不依赖 WebSocket |
 | 27 | 跨实例配置变更热加载 | ⚠️ | 问题 K——remove_bot 跨实例无效，sweep 检查 is_active=0 立即断开 |
+| 28 | lease 状态变更日志 | ⚠️ | 问题 L——续约/release 打 info 日志 |
+| 29 | lease 异常监控 | ⚠️ | 问题 N——health_check 加 lease 切换次数 |
+| 30 | sweep 和 add_bot/remove_bot 竞态 | ✅ | CAS 原子操作 |
+| 31 | sweep 和续约竞态 | ✅ | WHERE 条件保证 |
+| 32 | 两实例同时 sweep+续约 | ✅ | CAS + WHERE lease_owner 各自隔离 |
+| 33 | bot_app_id 为空或异常 | ✅ | 当前代码 if not bot_app_id: continue |
+| 34 | lease_token 冲突 | ✅ | secrets.token_hex(16) 冲突概率 1/2^128 |
+| 35 | DB 字段缺失 | ⚠️ | 问题 M——migration 失败退回旧模式 |
+| 36 | instance_id 重复 | ✅ | lease_token 区分，不会误续约 |
+| 37 | 回滚 | ✅ | 旧代码不读 lease 字段，不影响 |
+| 38 | migration 失败 | ⚠️ | 问题 M——退回旧模式 |
+| 39 | nginx 配置变更 | ✅ | lease 自动适应 |
+| 40 | lease_token 安全性 | ✅ | 只是锁令牌不是用户凭证 |
+| 41 | SQL 注入 | ✅ | 参数化查询 |
+
+### 问题 L：lease 状态变更日志不完整
+
+场景：try_acquire 成功/失败有日志，但续约成功/失败和 release 没有明确日志。
+
+修复：每次 lease 状态变更都打 info 日志：
+- 续约成功：`[lease] bot {app_id} renewed by {instance_id}`
+- 续约失败：`[lease] bot {app_id} renew failed: {reason}`
+- release：`[lease] bot {app_id} lease released by {instance_id}`
+
+### 问题 M：migration 失败时 lease 代码防御
+
+场景：ALTER TABLE 失败（字段已存在或 DB 权限问题）→ lease 字段不存在 → lease 代码报错。
+
+修复：lease 代码加防御——查询时如果字段不存在（catch 异常），自动退回旧模式（BOT_LEASE_DISABLED=true），log warning 提示 migration 失败。
+
+### 问题 N：lease 频繁切换监控
+
+场景：lease 频繁切换（每分钟换一次）说明网络问题或实例不稳定，需要可观测。
+
+修复：health_check 加 lease 统计：
+- lease 切换次数（lease_acquired_at 变化次数）
+- 当前每个 bot 的 lease_owner / lease_expires_at / lease_acquired_at
+- 告警后续按需加
 
 ### 问题 H：lifespan 关闭顺序
 
