@@ -240,70 +240,160 @@ System（新增分组）
 
 ### 阶段 2：容器化部署（Docker）
 
-**目标：** Docker 化，支持快速部署和迁移
+**目标：** Docker 化 backend，支持快速部署和迁移。nginx 不容器化——保留宿主机。
 
-#### 2.1 Dockerfile（Backend）
+详细方案见 `docs/phase2-detailed-design.md`。
+
+#### 2.1 Dockerfile
 
 ```dockerfile
 FROM python:3.14-slim
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-EXPOSE 3000 8080
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+EXPOSE 3000
 CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "3000"]
 ```
 
-#### 2.2 docker-compose.yml
+- 只启动 3000——main:app 已注册所有路由（Web 页面 + API + runtime + webhook + A2A）
+- 不启动 8080——run_webhook:app 是冗余的，main:app 已有 webhook_router
+- hcloud CLI 不装——backend 容器不执行 hcloud，由 worker 在宿主机执行
+
+#### 2.2 .dockerignore
+
+排除 .git/.venv/data/logs/__pycache__/docs/skills/tools 等不需要的目录。
+configs/ 整个目录通过 docker-compose volume 挂载——不打进镜像（运行时从宿主机读取）。
+保留 configs/*.example.json 作模板打进镜像。
+
+#### 2.3 docker-compose.yml
+
+**只容器化 backend——nginx 保留宿主机。**
 
 ```yaml
 services:
   backend:
     build: .
+    container_name: grape-backend
     ports:
-      - "127.0.0.1:3000:3000"
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:3000:3000"   # 宿主机 nginx 反代到容器 3000
+    env_file: [.env]
     environment:
-      - OBS_ENABLED=true
-      - OBS_BUCKET=obs-grape-dev-file
-      # AK/SK 通过 .env 注入
-    depends_on:
-      - nginx
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
+      - TZ=Asia/Shanghai
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
+      - grape-data:/app/data
+      - ./configs:/app/configs
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+volumes:
+  grape-data:
 ```
 
-#### 2.3 数据库迁移锁
+**架构设计：**
 
-db_setup.py 加 MySQL GET_LOCK 防多实例同时迁移：
-
-```python
-# 获取迁移锁（多实例排队）
-cursor.execute("SELECT GET_LOCK('grape_migrate', 300)")
-lock_acquired = cursor.fetchone()[0]
-if lock_acquired:
-    try:
-        run_migrations()
-    finally:
-        cursor.execute("SELECT RELEASE_LOCK('grape_migrate')")
 ```
+当前（容器化后）：
+  用户 → nginx:80（宿主机）→ 127.0.0.1:3000（容器）→ uvicorn main:app
+
+后续去掉 nginx：
+  用户 → ELB 443 → 宿主机 3000（容器）→ uvicorn main:app
+```
+
+| 端口 | 绑定 | 服务 | 对外 | 说明 |
+|------|------|------|:---:|------|
+| 80 | 0.0.0.0 | 宿主机 nginx | ✅ | TLS 终止 + 反代到 3000 |
+| 443 | 0.0.0.0 | 宿主机 nginx | ✅ | HTTPS（证书在宿主机 nginx） |
+| 3000 | 127.0.0.1 | 容器 backend | ❌ | 宿主机 nginx 反代到容器 |
+
+**为什么 nginx 不容器化：**
+- nginx 是基础设施不是 grape 服务——不应该耦合进服务部署
+- 宿主机已有 nginx 在跑——再起 nginx 容器 80 端口冲突
+- 后续可以去掉 nginx——ELB 直接转发到 backend
+- nginx 的作用（TLS 终止/反代/静态文件）ELB 和 FastAPI 都能做
+
+**Worker 连接方式：**
+
+| Worker 位置 | RUNTIME_SERVER_URL | 路径 |
+|------------|-------------------|------|
+| 本机 | http://localhost:3000 | 宿主机 3000 → 容器 3000 |
+| 其他虚机 | http://域名或IP | ELB → nginx:80 → 容器:3000 |
+
+- env_file: .env——敏感信息注入
+- healthcheck 用阶段 1 的 /api/health
+- restart: unless-stopped
+- data/logs 持久化 volume
+
+#### 2.4 .env.example
+
+敏感信息模板（DB/OBS/Server 配置），.env 不提交 git。
+
+#### 2.5 数据库迁移锁（双后端兼容）
+
+db_setup.py init_database() 加迁移锁：
+- MySQL：GET_LOCK('grape_migrate', 300) 防多实例同时迁移，finally RELEASE_LOCK
+- SQLite：跳过锁（单实例不需要）
 
 **改动文件：**
 - 新增 Dockerfile
+- 新增 .dockerignore
 - 新增 docker-compose.yml
+- 新增 .env.example
 - src/api/db_setup.py 加迁移锁
+
+**零新依赖。** nginx 不容器化——保留宿主机。Worker 连 localhost:3000 不变。
 
 ---
 
-### 阶段 3：多实例集群（加 Redis）
+### 阶段 3：多实例集群（加 Redis + JWT 会话共享）
 
 **目标：** Backend 水平扩展，支持高可用
 
-#### 3.1 引入 Redis
+#### 3.1 会话共享（JWT 无状态——参照 multica）
+
+**问题：** 当前用户登录会话是进程内内存（`_user_tokens` dict）——多实例时用户在实例 A 登录，请求打到实例 B 会 401。
+
+**multica 的方案：** JWT 无状态会话
+- 登录时用 JWT_SECRET 签发 JWT（含 user_id + 过期时间）
+- token 存 HttpOnly cookie
+- 每次请求用 JWT_SECRET 验证签名——不查数据库、不存内存
+- 所有实例配同一个 JWT_SECRET——任何实例都能验证
+
+**grape 的方案：**
+
+| 会话类型 | 当前 | 改后 | 需要改？ |
+|---------|------|------|:---:|
+| 用户登录 | 进程内内存（_user_tokens） | JWT 无状态 | ❌ 改 |
+| Worker 认证 | 数据库（runtime_credentials） | 不变 | ✅ 不改 |
+| Agent 任务会话 | 数据库（agent_tasks.runtime_session_id） | 不变 | ✅ 不改 |
+
+改动：
+1. `src/api/routes/auth.py` login()——改为签发 JWT（含 user_id + email + 过期时间）
+2. `src/api/deps.py` get_current_user()——改为 JWT 验证（不查 _user_tokens）
+3. 新增 `JWT_SECRET` 环境变量（所有实例共享）
+4. 新增 `python-jose` 依赖（FastAPI JWT 库）
+5. HttpOnly cookie 存 JWT + CSRF 保护
+
+JWT_SECRET 安全（参照 multica）：
+- 生产环境不能用默认 secret
+- Helm Chart 里 existingSecret 包含 JWT_SECRET
+- 启动时校验——空值或已知默认值拒绝启动
+
+**不加 Redis、不加数据库表——JWT 无状态集群原生支持。**
+
+#### 3.2 引入 Redis
 
 | 用途 | 说明 |
 |------|------|
@@ -311,13 +401,13 @@ if lock_acquired:
 | 任务回收 | ZSET 精确调度（替代 60 秒看门狗轮询） |
 | 缓存 | runtime/skill/model 数据缓存 |
 
-#### 3.2 WebSocket 端点（可选）
+#### 3.3 WebSocket 端点（可选）
 
 - 服务端加 WebSocket 端点（FastAPI WebSocket）
 - worker 连 WebSocket 接收实时通知（cancel/wakeup）
 - HTTP 作为兜底（WebSocket 断了回退 HTTP）
 
-#### 3.3 Backend replicas>1
+#### 3.4 Backend replicas>1
 
 ```nginx
 upstream grape_backend {
@@ -331,10 +421,11 @@ upstream grape_backend {
 - 共享 MySQL + Redis + OBS
 - 不需要 PVC（用 OBS 替代本地存储）
 
-#### 3.4 集群兼容保证
+#### 3.5 集群兼容保证
 
 | 操作 | 怎么保证 | 已有？ |
 |------|---------|:---:|
+| 用户会话共享 | JWT 无状态（JWT_SECRET 共享） | 阶段 3 加 |
 | 任务不重复 claim | MySQL 行锁 UPDATE WHERE status='queued' | ✅ |
 | 任务不重复完成 | UPDATE WHERE status='running' 幂等 | ✅ |
 | 取消通知跨实例 | Redis Stream 转发 | 阶段 3 加 |
@@ -343,6 +434,10 @@ upstream grape_backend {
 | 迁移不冲突 | MySQL GET_LOCK | 阶段 2 加 |
 
 **改动文件：**
+- src/api/routes/auth.py（JWT 签发）
+- src/api/deps.py（JWT 验证）
+- 新增 JWT_SECRET 环境变量
+- 新增 python-jose 依赖
 - 新增 Redis 依赖
 - src/api/routes/ 加 WebSocket 端点
 - src/runtime/agent.py 加 WebSocket 客户端

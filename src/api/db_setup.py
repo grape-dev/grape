@@ -677,20 +677,51 @@ def _insert_seed_data(table: str, data: dict):
 
 def init_database():
     """初始化所有新表（幂等），启动时调用"""
-    _create_tables()
-    _migrate_tables()
-    _create_indexes()
-    _seed_from_json()
-    _sync_official_skills()
-    _align_agent_enable()
-    _cleanup_stale_meta()
-    _cleanup_chat_shared_worker_runtime()
-    # engine-selection-design.md §4.4/§12：存量会话 runtime_id>0 → 回填绑定集合（单成员，幂等）
-    try:
-        from src.runtime.engine_select import backfill_existing_bindings
-        backfill_existing_bindings()
-    except Exception as e:
-        log.warning(f"Backfill existing runtime bindings failed: {e}")
+    # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移
+    # SQLite 不支持 GET_LOCK，跳过（单实例不需要）
+    from src.mysql_compat import get_db_backend
+    if get_db_backend() == "mysql":
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT GET_LOCK('grape_migrate', 300)")
+            lock_acquired = c.fetchone()[0]
+            if not lock_acquired:
+                log.warning("Could not acquire migrate lock, waiting...")
+            try:
+                # 迁移逻辑在同一个 with db_lock 块内——同一个连接
+                # db_lock 是 RLock（可重入）——_create_tables() 等内部 with db_lock 不会死锁
+                _create_tables()
+                _migrate_tables()
+                _create_indexes()
+                _seed_from_json()
+                _sync_official_skills()
+                _align_agent_enable()
+                _cleanup_stale_meta()
+                _cleanup_chat_shared_worker_runtime()
+                # engine-selection-design.md §4.4/§12：存量会话 runtime_id>0 → 回填绑定集合（单成员，幂等）
+                try:
+                    from src.runtime.engine_select import backfill_existing_bindings
+                    backfill_existing_bindings()
+                except Exception as e:
+                    log.warning(f"Backfill existing runtime bindings failed: {e}")
+            finally:
+                c.execute("SELECT RELEASE_LOCK('grape_migrate')")
+    else:
+        # SQLite——单实例不需要锁
+        _create_tables()
+        _migrate_tables()
+        _create_indexes()
+        _seed_from_json()
+        _sync_official_skills()
+        _align_agent_enable()
+        _cleanup_stale_meta()
+        _cleanup_chat_shared_worker_runtime()
+        # engine-selection-design.md §4.4/§12：存量会话 runtime_id>0 → 回填绑定集合（单成员，幂等）
+        try:
+            from src.runtime.engine_select import backfill_existing_bindings
+            backfill_existing_bindings()
+        except Exception as e:
+            log.warning(f"Backfill existing runtime bindings failed: {e}")
 
 
 def _sync_official_skills():

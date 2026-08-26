@@ -1,13 +1,28 @@
-version: '3.8'
 services:
-  api:
+  backend:
     build: .
+    container_name: grape-backend
     ports:
-      - "80:80"
-      - "8080:8080"
-    volumes:
-      - ./data:/app/data
-      - ./configs:/app/configs
+      - "127.0.0.1:3000:3000"   # 宿主机 nginx 反代到容器 3000
+    env_file:
+      - .env
     environment:
-      - OAUTH_REDIRECT_URI=https://your-domain.com/api/auth/callback/gitcode
+      - TZ=Asia/Shanghai
+    volumes:
+      - grape-data:/app/data
+      - ./configs:/app/configs   # 挂载整个 configs 目录（运行时可改配置）
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  grape-data:
