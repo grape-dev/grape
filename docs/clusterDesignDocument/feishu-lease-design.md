@@ -365,7 +365,48 @@ async def lease_sweep_loop():
 - DB 错误（连接断/查询超时）→ 保持 WebSocket 连接，等 DB 恢复后重试续约
 - CAS 失败（lease 被其他实例抢走）→ release lease + 断开
 
-### 场景验证总结（68 个场景）
+### 场景验证总结（68 个场景 + 真实部署验证）
+
+真实部署验证（两实例 3001+3002 + nginx 负载均衡）：
+
+| # | 验证项 | 结果 | 说明 |
+|---|--------|:---:|------|
+| V1 | 实例 A 启动 + lease 抢锁 | ✅ | 8 bot 全部 acquired + connected |
+| V2 | 实例 B 启动 + 不抢已有 lease | ✅ | 0 bot connected（A 持有） |
+| V3 | 续约正常 | ✅ | 每 10 秒 batch renewed 8 lease(s) |
+| V4 | 故障转移（停 A → B 接管） | ✅ | 70 秒内全部被 B 接管 |
+| V5 | A 重启后不抢 B 的 bot | ✅ | 0 bot，DB lease_owner 还是 B |
+| V6 | 新建飞书 bot + 收发消息 | ✅ | 注册→抢锁→连接→收消息→回复 |
+| V7 | 切换实例后收发消息 | ✅ | A 停→B 抢锁→收消息→回复 |
+| V8 | nginx 负载均衡 | ✅ | 80 端口正常代理 |
+
+消息丢失场景说明：
+- kill -9 强杀实例 A → lease 60 秒过期 → B 70 秒内接管 → 期间飞书消息丢失
+- 正常 stop（SIGTERM）→ stop() 释放 lease → B 10 秒内接管 → 消息基本不丢
+- 生产环境 systemd 重启发 SIGTERM → 正常 stop → 不丢消息
+- 缩短 TTL 可减小窗口但无法完全消除
+
+### 问题 V：切换实例时消息丢失
+
+场景：kill -9 强杀实例 A → lease 60 秒过期 → B 70 秒内接管 → 期间飞书消息无人处理。
+
+原因：
+- 3001 停了 → WebSocket 断开 → 飞书推消息但无人接
+- 3002 等 lease 过期才抢锁 → 70 秒窗口
+- 飞书重试窗口可能 < 70 秒 → 消息丢
+
+解决方案（已有 + 可选）：
+1. 正常 stop 释放 lease（已实施）→ 10 秒内接管 → 消息基本不丢
+2. 生产环境 systemd SIGTERM 正常停止 → 不是 kill -9
+3. 缩短 TTL（可选）→ TTL=30 + SWEEP=5 = 最慢 35 秒
+
+### 问题 W：reply_text/reply_card 缺少 debug 日志
+
+场景：reply 成功时没有日志，排查困难。
+
+修复：成功时打 debug 日志（不是 info 避免日志量太大）：
+- `log.debug(f"[{ctx.name}] reply_text: {text[:50]}")`
+- `log.debug(f"[{ctx.name}] reply_card: {text[:50]}")`
 
 | # | 场景 | 结果 | 说明 |
 |---|------|:---:|------|
