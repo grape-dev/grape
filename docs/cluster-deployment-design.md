@@ -506,6 +506,15 @@ db_setup.py init_database() 加迁移锁：
      - 副作用：logout 会踢出所有设备（多设备同时被踢）
      - 可接受——用户主动登出时踢所有设备是合理行为
 
+5. **refresh_token 存 localStorage 有 XSS 风险**
+   - 问题：access_token 和 refresh_token 都存 localStorage → XSS 可以偷到 refresh_token → 7 天内无限刷新
+   - 优化：refresh_token 改存 HttpOnly cookie → XSS 偷不到
+     - access_token 仍存 localStorage（需要 JS 读取加到 header）
+     - refresh_token 只用于 POST /auth/refresh → 服务端从 cookie 读 → JS 不需要接触
+     - 需要加 CSRF 保护：refresh 端点校验 SameSite=Strict cookie + 自定义 header（X-Requested-With）
+     - 登录时 Set-Cookie refresh_token（HttpOnly + Secure + SameSite=Strict + Path=/api/auth）
+     - logout 时 Set-Cookie 清除 refresh_token cookie
+
 JWT_SECRET 安全（参照 multica）：
 - 生产环境不能用默认 secret
 - 启动时校验——空值或已知默认值拒绝启动
