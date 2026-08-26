@@ -521,13 +521,36 @@ db_setup.py init_database() 加迁移锁：
    - 优化：设置最大绝对生命周期 30 天
      - 相对滚动：每次刷新 exp = now + 7 天
      - 绝对上限：不能超过首次签发 + 30 天，到时间强制登录
-     - 实现：JWT payload 加 `max_exp` 字段（首次签发时写入，refresh 时不更新），verify 时检查 max_exp 过期则拒绝
+     - 实现：max_exp 写在 refresh_token payload 里（不写 access——access 只有 15 分钟，30 天上限管控对象是 refresh 长令牌）
+     - 首次登录时生成 max_exp = now + 30 天
+     - refresh 换新 refresh 时继承旧 max_exp，不重新生成
+     - verify 时 4 个条件全通过才下发新 token：签名 + exp + max_exp + token_version
+   - 边界：改密码触发 token_version+1 优先走 version 失效，不用等到 max_exp
 
 7. **多 Tab token 同步**
    - 问题：Tab A 刷新 token 成功，Tab B 还拿旧 access_token 触发 401 再次刷新——多 Tab 场景 token 不同步
    - 优化：监听 storage 事件——Tab A 刷新 token 后其他 Tab 通过 storage event 同步新 token
      - window.addEventListener('storage', ...) 监听 localStorage['token'] 变化
      - 检测到变化时更新当前 Tab 的请求 header
+   - 定位：体验优化，不是安全屏障——不能强依赖 storage 事件
+   - 局限：storage 事件只同步 access（refresh 在 HttpOnly cookie 里 JS 读不到）
+   - 兜底：即使同步失败，旧 access 401 → Promise 队列 refresh → 正常工作，只是多一次刷新流程
+
+**配套约束：**
+
+1. **Cookie 完整配置（refresh cookie）**
+   - Set-Cookie: refresh_token=xxx; HttpOnly; Secure; SameSite=Lax; Path=/api/auth
+   - Path 限制只在刷新接口发送，减少 cookie 随业务接口到处携带
+   - 生产环境必须 HTTPS（Secure=True）
+
+2. **refresh 接口 CSRF**
+   - 只有 refresh 接口需要 CSRF 校验——从 Cookie 拿 refresh_token + 请求头 X-Requested-With
+   - 业务接口继续沿用 Bearer Header，不需要 CSRF
+   - 贴合现有架构——Bearer 鉴权兼容 Web/CLI/Daemon/第三方调用
+
+3. **登出逻辑**
+   - DB 执行原子 token_version += 1，使现存 refresh/access 全部失效
+   - Set-Cookie 指令清除 refresh_token HttpOnly Cookie
 
 **性能优化（后续按需实施）：**
 
