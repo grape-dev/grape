@@ -198,24 +198,22 @@ function renderTaskLogMessages(container, msgs) {
     return;
   }
   const typeIcon = { step_start: '▶', step_finish: '✓', text: '💬', reasoning: '🤔', tool_use: '🔧', error: '❌', done: '✅' };
-  const typeColor = { step_start: 'var(--a)', step_finish: 'var(--g)', text: 'var(--t)', reasoning: 'var(--pu)', tool_use: 'var(--or)', error: 'var(--r)', done: 'var(--g)' };
-  const typeBg = { step_start: '#eef3ff', step_finish: '#eefdf2', text: '', reasoning: '#f3e9fe', tool_use: '#fef0e4', error: '#fee2e2', done: '#eefdf2' };
-  let html = '<div style="font-family:monospace;font-size:11px;line-height:1.6">';
+  const typeColor = { step_start: '#5b9eff', step_finish: '#1ca44c', text: '#e0e6f0', reasoning: '#b388ff', tool_use: '#ea5a0c', error: '#dc2828', done: '#1ca44c' };
+  let html = '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.6;border-radius:8px;overflow:hidden">';
   msgs.forEach(m => {
     const icon = typeIcon[m.type] || '•';
-    const color = typeColor[m.type] || 'var(--t2)';
-    const bg = typeBg[m.type] || '';
+    const color = typeColor[m.type] || '#c2cad6';
     const time = (m.created_at || '').substring(11,19);
     let content = '';
     if (m.type === 'tool_use') {
       content = `<b style="color:${color}">${m.tool || 'tool'}</b>`;
-      if (m.content) content += `<br>&nbsp;&nbsp;<span style="color:var(--t2)">${m.content.substring(0, 300)}</span>`;
+      if (m.content) content += `<br>&nbsp;&nbsp;<span style="color:#8d97a8">${m.content.substring(0, 300)}</span>`;
     } else if (m.type === 'text' || m.type === 'reasoning' || m.type === 'error') {
       content = `<span style="color:${color}">${(m.content || '').substring(0, 800)}</span>`;
     } else {
-      content = `<span style="color:${color}">${m.type}</span> ${m.content || ''}`.substring(0, 300);
+      content = `<span style="color:${color}">${m.type}</span> <span style="color:#c2cad6">${m.content || ''}</span>`;
     }
-    html += `<div style="padding:6px 10px;border-bottom:1px solid var(--b);background:${bg}"><span style="color:var(--t3)">${time}</span> ${icon} ${content}</div>`;
+    html += `<div style="padding:5px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">${time}</span> ${icon} ${content}</div>`;
   });
   html += '</div>';
   container.innerHTML = html;
