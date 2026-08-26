@@ -486,10 +486,11 @@ db_setup.py init_database() 加迁移锁：
 1. **并发 401 请求丢失**
    - 问题：页面同时发多个请求，access_token 过期时多个请求同时 401，_refreshing 锁导致部分请求直接 reject 不重试
    - 优化：用 Promise 队列——第一个 refresh 时其他请求等待同一个 Promise，refresh 完成后全部重发
+   - 边界处理：refresh 本身返回 401（refresh 失效）时队列全部请求直接抛出登录失效跳登录页，不无限等待
 
 2. **OAuth 登录没有 refresh_token**
    - 问题：OAuth 回调只返回 access_token，15 分钟后被踢
-   - 优化：OAuth 回调也签发 refresh_token，通过 URL 或 cookie 传给前端
+   - 优化：OAuth 回调也签发 refresh_token，通过 cookie 传给前端
 
 3. **旧 refresh_token 仍然有效（token_version 机制）**
    - 问题：refresh_token 续期后旧的没失效——被盗后无法撤销
@@ -514,6 +515,31 @@ db_setup.py init_database() 加迁移锁：
      - 需要加 CSRF 保护：refresh 端点校验 SameSite=Strict cookie + 自定义 header（X-Requested-With）
      - 登录时 Set-Cookie refresh_token（HttpOnly + Secure + SameSite=Strict + Path=/api/auth）
      - logout 时 Set-Cookie 清除 refresh_token cookie
+
+6. **滚动续期绝对上限（防 token 永久存活）**
+   - 问题：refresh_token 每次刷新续期 7 天，用户一直操作可能永久不重新登录——token 永久存活有安全风险
+   - 优化：设置最大绝对生命周期 30 天
+     - 相对滚动：每次刷新 exp = now + 7 天
+     - 绝对上限：不能超过首次签发 + 30 天，到时间强制登录
+     - 实现：JWT payload 加 `max_exp` 字段（首次签发时写入，refresh 时不更新），verify 时检查 max_exp 过期则拒绝
+
+7. **多 Tab token 同步**
+   - 问题：Tab A 刷新 token 成功，Tab B 还拿旧 access_token 触发 401 再次刷新——多 Tab 场景 token 不同步
+   - 优化：监听 storage 事件——Tab A 刷新 token 后其他 Tab 通过 storage event 同步新 token
+     - window.addEventListener('storage', ...) 监听 localStorage['token'] 变化
+     - 检测到变化时更新当前 Tab 的请求 header
+
+**性能优化（后续按需实施）：**
+
+8. **token_version 每次查数据库**
+   - 问题：每次 API 请求都查数据库 user_accounts.token_version——高 QPS 时有压力
+   - 优化：低 QPS B 端系统完全没问题；高 QPS 时加 Redis 缓存 user_id → token_version，TTL 60 秒
+   - 当前不改——B 端系统 QPS 不高，查一个整数字段很轻
+
+**不采纳的建议：**
+
+- access_token 改 HttpOnly cookie：会变成 multica 单 token 方案，所有请求都要 CSRF 保护，不能用 Bearer header，和现有架构不兼容。XSS 风险靠 CSP 策略 + access 15分钟短有效期缓解
+- CSRF 用独立 token 不用 X-Requested-With：X-Requested-With + SameSite=Strict 是有效的 CSRF 防护——跨站请求无法加自定义 header，B 端系统够用
 
 JWT_SECRET 安全（参照 multica）：
 - 生产环境不能用默认 secret
