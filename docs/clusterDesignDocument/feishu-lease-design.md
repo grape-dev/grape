@@ -207,11 +207,26 @@ BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 
 | # | 文件 | 改动内容 |
 |---|------|---------|
-| 1 | src/api/db_setup.py | global_im_bot_config DDL + migration 加 lease_token / lease_expires_at / lease_owner |
-| 2 | src/im/bot_lease.py（新增） | BotLeaseStore：try_acquire / renew / release / list_expired_or_unheld |
-| 3 | src/im/feishu_async.py | BotManager 改造：load_eligible_bots + lease_sweep_loop + run_bot 加续约 + stop 释放 lease |
+| 1 | src/api/db_setup.py | global_im_bot_config DDL 加 6 个字段 + migration ALTER TABLE + created_at 改 DATETIME |
+| 2 | src/im/bot_lease.py（新增） | BotLeaseStore：try_acquire / renew / release / list_expired_or_unheld，CAS SQL 含 lease_acquired_at |
+| 3 | src/im/feishu_async.py | load_eligible_bots 查询加 bot_name + _disable_bot 释放 lease + BotManager 改造 + run_bot 加续约 |
 | 4 | src/api/main.py | lifespan 改造：创建 lease_store + 启动 sweep_task + 关闭时 cancel + 释放 |
 | 5 | src/config.py | 新增 4 个环境变量读取 |
+| 6 | src/api/routes/chat.py | INSERT 加 bot_name 字段（先留空 ''） |
+| 7 | src/api/routes/agents.py | INSERT 加 bot_name 字段（先留空 ''） |
+| 8 | src/api/routes/feishu_onboard.py | INSERT 加 bot_name 字段（先留空 ''） |
+
+### INSERT OR REPLACE 副作用说明
+
+当前 3 个地方用 `INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?, ?)` 保存 bot 配置。INSERT OR REPLACE 的行为是：如果 bot_app_id 已存在，先删旧行再插新行。
+
+换绑时（同一个 app_id 换 app_secret）→ 旧行被删（lease 字段清空）→ 新行 lease 全是 NULL → 正在连着的 bot 的 lease 突然没了 → 其他实例可能抢锁。
+
+这个行为合理——换绑时断开重连没问题，不需要改。
+
+### bot_name 说明
+
+bot_name 字段先留空 ''。当前前端没有传 bot 名称，也没有展示 bot 列表的页面。后续如果需要可以补充。
 
 ## 九、遗漏修复（实施时必须处理）
 
