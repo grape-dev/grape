@@ -133,9 +133,16 @@ await bot_manager.stop()  # 停 bot + 释放所有 lease
 
 ## 五、单实例兼容
 
-BOT_LEASE_DISABLED=true 时退回原有模式（无条件启动所有 bot），不启动 sweep 循环。用于单实例部署或调试。
+默认 false（lease 默认开启）——方式 A。
 
-默认 false（lease 默认开启）——性能开销可忽略（约 5ms/10 秒，CPU 0.05%）。
+**方式 A：默认开启（BOT_LEASE_DISABLED=false）**
+- 升级后自动启用 lease
+- 单实例也能跑（无竞争，每次抢锁都成功）
+- 不需要改配置
+- 单实例多了 lease 开销（每 20 秒续约 + 每 10 秒 sweep）——性能消耗 < 0.05% CPU，可忽略
+- 集群部署时不需要额外配置——自动生效
+
+BOT_LEASE_DISABLED=true 时退回原有模式（无条件启动所有 bot），不启动 sweep 循环。用于调试场景。
 
 ## 六、参数
 
