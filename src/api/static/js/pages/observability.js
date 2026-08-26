@@ -196,15 +196,14 @@ function renderAnomalyTab(container, ops) {
     return;
   }
 
-  const _enc = s => encodeURIComponent(JSON.stringify({issue:s.issue_id,seq:s.event_seq,repo:(s.repo_key||'').replace('gitcode:',''),created:s.started_at}));
+  const _enc = s => encodeURIComponent(JSON.stringify({issue:s.issue_id,seq:s.event_seq,repo:(s.repo_key||'').replace('gitcode:',''),created:s.completed_at||s.started_at||''}));
   const _row = (s, showFailed) => {
     const is = (s.issue_id && s.event_seq) ? `${s.issue_id} #${s.event_seq}` : s.id.substring(0,12);
     const time = showFailed ? (s.completed_at||'') : (s.started_at||'');
-    const label = showFailed ? 'Failed' : 'Started';
     const badge = showFailed
       ? `<span class="ts t3" style="color:var(--r)">${(s.result_text||'').substring(0,80)}</span>`
       : `<span style="color:var(--r)">🔴 STUCK</span>`;
-    return [`<a onclick="openTaskLogModal('${s.id}','${_enc(s)}')" style="cursor:pointer;color:var(--a)"><b>${is}</b></a>`,
+    return [`<a onclick="openTaskLogModal('${s.id}','${_enc(s)}')" style="cursor:pointer;color:var(--a);text-decoration:underline"><b>${is}</b></a>`,
       s.agent_type || '-', (s.repo_key||'').replace('gitcode:','').substring(0,20),
       `<span class="ts t3">${time.substring(0,19)}</span>`, badge];
   };
