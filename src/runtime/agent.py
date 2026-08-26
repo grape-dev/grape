@@ -693,9 +693,24 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         now = asyncio.get_running_loop().time()
         if now - last_heartbeat >= heartbeat_interval:
             ok = await client.heartbeat(runtime_ids)
-            if ok:
+            # ⚠️ heartbeat 返回值从 bool 改为 dict——判断逻辑调整
+            # dict: None=网络错误 / {"status":"ok",...}=成功 / 其他=异常
+            if ok is not None and ok.get("status") == "ok":
                 heartbeat_fail_streak = 0
                 log.debug(f"heartbeat ok, ids={runtime_ids}")
+                # 检查取消信号——发现 cancelled 立即杀引擎进程
+                cancelled_tasks = ok.get("cancelled_tasks", [])
+                if cancelled_tasks:
+                    for _tid in cancelled_tasks:
+                        if _tid in active_tasks:
+                            _sid = active_tasks[_tid]
+                            _task = active_task_objs.get(_tid)
+                            log.warning(f"heartbeat: task {_tid} cancelled, killing engine")
+                            if _task:
+                                _kill_stale_engine(_task, _backend_for_engine(_task.get("_engine_name", "")))
+                            active_sessions.discard(_sid)
+                            active_tasks.pop(_tid, None)
+                            active_task_objs.pop(_tid, None)
             else:
                 heartbeat_fail_streak += 1
                 log.warning(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}), resetting session")

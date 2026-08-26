@@ -300,3 +300,27 @@
 .ev-result-panel strong,.ev-result-panel em,.ev-result-panel blockquote{color:var(--result-fg)}
 .ev-result-panel a{color:var(--result-link)}
 .ev-result-panel pre,.ev-result-panel code{color:var(--result-code)}
+
+/* ===== System Health 页面样式 ===== */
+.health-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;margin-bottom:20px}
+.health-card{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:18px 20px;box-shadow:var(--sh)}
+.health-card h3{font-size:14px;font-weight:600;margin-bottom:14px;color:var(--t)}
+.health-lights{display:flex;flex-direction:column;gap:8px}
+.health-light{display:flex;align-items:center;gap:6px;font-size:12px;padding:6px 10px;border-radius:7px;background:var(--bg)}
+.health-light.ok{color:var(--g)}
+.health-light.error{color:var(--r)}
+.health-ts{font-size:10px;color:var(--t3);margin-top:10px}
+.worker-stats{display:flex;flex-direction:column;gap:6px}
+.ws-row{display:flex;justify-content:space-between;font-size:12px;padding:6px 10px;border-radius:7px;background:var(--bg)}
+.ws-row b{font-weight:600}
+.ws-bar-wrap{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-top:4px}
+.ws-bar{height:100%;background:linear-gradient(90deg,var(--a),var(--pu));border-radius:4px;transition:width .3s}
+.ws-util{font-size:10px;color:var(--t3);margin-top:2px}
+.health-section{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:18px 20px;margin-bottom:14px;box-shadow:var(--sh)}
+.health-section h3{font-size:13px;font-weight:600;margin-bottom:12px;color:var(--t)}
+.stat-table{width:100%;border-collapse:collapse;font-size:12px}
+.stat-table th{text-align:left;padding:7px 10px;font-weight:500;color:var(--t2);border-bottom:1px solid var(--b);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+.stat-table td{padding:7px 10px;border-bottom:1px solid var(--b)}
+.stat-table tr:last-child td{border-bottom:none}
+.stat-table tr:hover td{background:#f8f9fb}
+.empty{text-align:center;padding:20px;color:var(--t3);font-size:12px}

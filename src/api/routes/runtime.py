@@ -175,9 +175,13 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
     归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
     防止已吊销设备的旧 runtime id 被其它 active 凭据的心跳刷回 online
     （revoke 只置 offline，不删行；无校验则吊销的设备行会被残留 agent 复活）。
+
+    响应携带 cancelled_tasks 列表——worker 收到后立即杀引擎进程，
+    实现任务取消实时感知（延迟 15 秒，覆盖 step 很长时 report_messages 410 不触发的场景）。
     """
     now = datetime.now(timezone.utc).isoformat()
     client_ip = _client_ip(request)
+    cancelled_tasks = []
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=? WHERE id=?", (now, client_ip, credential_id))
@@ -185,8 +189,15 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
                       [now] + body.runtime_ids + [credential_id])
+            # 查该 worker 的已取消任务——通知 worker 立即杀进程
+            ph2 = ",".join("?" for _ in body.runtime_ids)
+            rows = c.execute(
+                f"SELECT id FROM agent_tasks WHERE runtime_id IN ({ph2}) AND status='cancelled'",
+                body.runtime_ids
+            ).fetchall()
+            cancelled_tasks = [r[0] for r in rows]
         db.commit()
-    return {"status": "ok"}
+    return {"status": "ok", "cancelled_tasks": cancelled_tasks}
 
 
 class RuntimeClaimBody(BaseModel):

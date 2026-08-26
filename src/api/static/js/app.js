@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks','health'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -306,6 +306,19 @@ function loadAgentTypes() {
       // 技能包子技能详情（如 "38/huawei-ecs"）
       title.textContent = 'Sub Skill Detail';
       API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+    } else if (view === 'health') {
+      title.textContent = 'System Health';
+      const loadHealth = () => Promise.all([
+        API.get('/api/health/detail'),
+        API.get('/api/dashboard/runtime/status'),
+        API.get('/api/dashboard/task/daily?days=7'),
+        API.get('/api/dashboard/task/by-agent?days=7'),
+        API.get('/api/dashboard/failures/by-agent?days=7'),
+      ]).then(([health, runtime, taskDaily, taskByAgent, failuresByAgent]) => {
+        renderHealth({health, runtime, taskDaily, taskByAgent, failuresByAgent});
+      }).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+      loadHealth();
+      _refreshTimer = setInterval(loadHealth, 30000);
     }
   }
 
