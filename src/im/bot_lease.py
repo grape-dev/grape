@@ -38,6 +38,7 @@ class BotLeaseStore:
         self.ttl = ttl
         self.renew_interval = renew_interval
         self.sweep_interval = sweep_interval
+        self._disabled = False  # 问题 M：migration 失败时标记 disabled 退回旧模式
 
     def try_acquire(self, app_id: str) -> str | None:
         """CAS 抢锁。成功返回 lease_token，失败返回 None。
@@ -66,7 +67,9 @@ class BotLeaseStore:
                 log.info(f"[lease] bot {app_id} acquire failed, held by other instance")
                 return None
         except Exception as e:
-            log.warning(f"[lease] bot {app_id} acquire error: {e}")
+            # 问题 M：字段不存在等 DB 异常 → 标记 disabled 退回旧模式
+            self._disabled = True
+            log.error(f"[lease] bot {app_id} acquire error (lease fields may not exist): {e}")
             return None
 
     def renew(self, app_id: str, token: str) -> bool | None:
@@ -87,6 +90,7 @@ class BotLeaseStore:
                 )
                 db.commit()
                 if c.rowcount > 0:
+                    log.info(f"[lease] bot {app_id} renewed by {self.instance_id}")
                     return True
                 # CAS 失败——lease 被其他实例抢走或 is_active=0
                 log.info(f"[lease] bot {app_id} renew failed: CAS mismatch")
@@ -149,23 +153,58 @@ class BotLeaseStore:
             return []
 
     def batch_renew(self, held_bots: dict[str, str]) -> dict[str, bool]:
-        """批量续约所有持有的 lease。
+        """批量续约所有持有的 lease——一条 SQL 更新所有。
 
         held_bots = {app_id: token}
         返回 {app_id: success}，False 表示 CAS 失败需要断开。
+
+        一条 UPDATE 按 lease_owner + lease_token 批量更新，
+        然后查 DB 确认每个 bot 的 lease_token 是否还是自己的。
         """
         if not held_bots:
             return {}
         results = {}
-        for app_id, token in held_bots.items():
-            result = self.renew(app_id, token)
-            if result is None:
-                # DB 错误——保持连接等恢复（问题 D）
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                # 批量续约：更新本实例持有的所有 lease
+                c.execute(
+                    "UPDATE global_im_bot_config "
+                    "SET lease_expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL %s SECOND) "
+                    "WHERE lease_owner = %s AND is_active = 1",
+                    (self.ttl, self.instance_id),
+                )
+                db.commit()
+                log.info(f"[lease] batch renewed {c.rowcount} lease(s) by {self.instance_id}")
+                # 查 DB 确认每个 bot 的 lease_token 是否还是自己的
+                app_ids = list(held_bots.keys())
+                placeholders = ",".join(["%s"] * len(app_ids))
+                c.execute(
+                    f"SELECT bot_app_id, lease_token FROM global_im_bot_config "
+                    f"WHERE bot_app_id IN ({placeholders})",
+                    app_ids,
+                )
+                db_tokens = {r[0]: r[1] for r in c.fetchall()}
+                for app_id, my_token in held_bots.items():
+                    db_token = db_tokens.get(app_id)
+                    if db_token is None:
+                        # bot 不在 DB 里了（被删了）→ CAS 失败
+                        results[app_id] = False
+                        log.info(f"[lease] bot {app_id} renew failed: bot deleted")
+                    elif db_token != my_token:
+                        # lease 被其他实例抢走 → CAS 失败
+                        results[app_id] = False
+                        log.info(f"[lease] bot {app_id} renew failed: CAS mismatch")
+                    else:
+                        results[app_id] = True
+            return results
+        except Exception as e:
+            # DB 错误——保持连接等恢复（问题 D）
+            log.warning(f"[lease] batch_renew DB error: {e}, keeping all connections")
+            for app_id in held_bots:
                 results[app_id] = True  # 假设成功，不立即断开
-                log.warning(f"[lease] bot {app_id} renew DB error, keeping connection")
-            else:
-                results[app_id] = result
-        return results
+            return results
 
     def check_inactive_bots(self, held_bots: dict[str, str]) -> list[str]:
         """检查本实例持有但 is_active=0 的 bot——需要断开。

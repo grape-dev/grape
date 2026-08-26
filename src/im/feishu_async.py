@@ -126,6 +126,7 @@ class BotContext:
     _running: bool = False
     _handle_tasks: set = field(default_factory=set)
     _seen_msg_ids: set = field(default_factory=set)
+    _lease_token: str = ""  # 本实例持有的 lease token（问题 A：重连后检查）
 
     def __post_init__(self):
         if not self.name:
@@ -725,6 +726,25 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                 delay = ctx.reconnect_delay
                 log.info(f"[{ctx.name}] connected")
 
+                # 问题 A：重连后检查 lease 是否还在自己手里
+                if ctx._lease_token:
+                    try:
+                        from src.session_manager import db, db_lock
+                        with db_lock:
+                            c = db.cursor()
+                            c.execute(
+                                "SELECT lease_token FROM global_im_bot_config WHERE bot_app_id=%s",
+                                (ctx.app_id,),
+                            )
+                            row = c.fetchone()
+                            db_token = row[0] if row else None
+                        if db_token != ctx._lease_token:
+                            log.warning(f"[{ctx.name}] lease lost during reconnect, disconnecting")
+                            ctx._running = False
+                            break
+                    except Exception as e:
+                        log.warning(f"[{ctx.name}] lease check error: {e}")
+
                 # 主动 PING 保活（lark-oapi SDK 同款机制）：每 120 秒发应用层 PING 帧，
                 # 飞书收到后回 PONG 保持连接活跃。不发 PING → 飞书判定死连接 → 停止推消息。
                 _ws_service_id = 0
@@ -901,6 +921,7 @@ class BotManager:
         self._lease_store = lease_store  # BotLeaseStore 或 None（旧模式）
         self._held_leases: dict[str, str] = {}  # {app_id: lease_token} 本实例持有的 lease
         self._eligible_bots: dict[str, dict] = {}  # 登记的 bot 配置（IDLE，未连接）
+        self._grace_deadlines: dict[str, float] = {}  # {app_id: timestamp} 宽限期到期时间（问题 C）
 
     @property
     def api(self) -> FeishuAsync:
@@ -950,7 +971,20 @@ class BotManager:
                       bot_type: str = "chat_bot",
                       name: str = "",
                       max_concurrent: int = 0) -> BotContext:
-        """运行时动态添加Bot"""
+        """运行时动态添加Bot。
+
+        lease 模式下只登记到 _eligible_bots（IDLE），由 sweep 决定是否连接（待优化 3）。
+        旧模式直接连接 WebSocket。
+        """
+        # 待优化 3：lease 模式下只登记不连接
+        if self._lease_store:
+            self._eligible_bots[app_id] = {
+                "bot_type": bot_type,
+                "app_secret": app_secret,
+            }
+            log.info(f"BotManager: registered bot {app_id} as IDLE (lease mode)")
+            return None  # type: ignore
+
         if app_id in self._bots:
             log.warning(f"Bot {app_id} already exists, skip")
             return self._bots[app_id]
@@ -974,8 +1008,14 @@ class BotManager:
         return ctx
 
     async def remove_bot(self, app_id: str):
-        """运行时动态移除Bot"""
+        """运行时动态移除Bot。lease 模式下同时释放 lease（待优化 3）。"""
         ctx = self._bots.pop(app_id, None)
+        # lease 模式下释放 lease
+        if self._lease_store:
+            token = self._held_leases.pop(app_id, "")
+            if token:
+                self._lease_store.release(app_id, token)
+            self._eligible_bots.pop(app_id, None)
         if not ctx:
             return
         ctx._running = False
@@ -1099,17 +1139,25 @@ class BotManager:
         """
         if not self._lease_store:
             return
+        lease_store = self._lease_store  # 本地引用避免 Pyright None 检查
         import time as _time
         from src.config import BOT_LEASE_SWEEP_INTERVAL, BOT_LEASE_RENEW_INTERVAL
 
         sweep_count = 0
         while True:
             try:
+                # 问题 M：lease 字段不存在时退回旧模式（无条件连接所有 bot）
+                if lease_store._disabled:
+                    log.warning("[lease] lease disabled (migration may have failed), falling back to legacy mode")
+                    self._lease_store = None
+                    await self.load_from_db()
+                    return
+
                 sweep_count += 1
                 # 1. 游标分页查询可抢的 bot → try_acquire
                 cursor = ""
                 while True:
-                    candidates = self._lease_store.list_expired_or_unheld(cursor=cursor, limit=500)
+                    candidates = lease_store.list_expired_or_unheld(cursor=cursor, limit=500)
                     if not candidates:
                         break
                     for bot_info in candidates:
@@ -1119,16 +1167,19 @@ class BotManager:
                             continue
                         if app_id in self._bots:
                             continue  # 已经在连
-                        token = self._lease_store.try_acquire(app_id)
+                        token = lease_store.try_acquire(app_id)
                         if token:
                             self._held_leases[app_id] = token
                             eligible = self._eligible_bots[app_id]
                             try:
                                 await self.add_bot(app_id, eligible["app_secret"], eligible["bot_type"])
+                                # 问题 A：把 lease_token 设到 BotContext 供重连后检查
+                                if app_id in self._bots:
+                                    self._bots[app_id]._lease_token = token
                             except Exception as e:
                                 # 遗漏修复 1：连接失败要释放 lease
                                 log.warning(f"[lease] bot {app_id} connect failed: {e}, releasing lease")
-                                self._lease_store.release(app_id, token)
+                                lease_store.release(app_id, token)
                                 self._held_leases.pop(app_id, None)
                     cursor = candidates[-1]["bot_app_id"]
                     if len(candidates) < 500:
@@ -1136,27 +1187,36 @@ class BotManager:
 
                 # 2. 批量续约
                 if self._held_leases:
-                    renew_results = self._lease_store.batch_renew(self._held_leases)
+                    renew_results = lease_store.batch_renew(self._held_leases)
+                    now = _time.time()
                     for app_id, success in renew_results.items():
                         if not success:
-                            # 问题 C+I：续约失败（CAS 失败）→ 宽限期 30 秒后断开
-                            log.info(f"[lease] bot {app_id} renew failed, will disconnect after grace period")
-                            # 先释放 lease
-                            token = self._held_leases.pop(app_id, "")
-                            if token:
-                                self._lease_store.release(app_id, token)
-                            # 断开 bot（不等 stop timeout，用 remove_bot）
-                            if app_id in self._bots:
-                                await self.remove_bot(app_id)
+                            # 问题 C：续约失败（CAS 失败）→ 宽限期 30 秒后断开
+                            if app_id not in self._grace_deadlines:
+                                self._grace_deadlines[app_id] = now + 30
+                                log.info(f"[lease] bot {app_id} renew failed, grace period 30s started")
+                        else:
+                            # 续约成功 → 清除宽限期
+                            self._grace_deadlines.pop(app_id, None)
+                    # 检查宽限期到期 → 断开
+                    expired_grace = [aid for aid, dl in self._grace_deadlines.items() if now >= dl]
+                    for app_id in expired_grace:
+                        log.info(f"[lease] bot {app_id} grace period expired, disconnecting")
+                        token = self._held_leases.pop(app_id, "")
+                        if token:
+                            lease_store.release(app_id, token)
+                        self._grace_deadlines.pop(app_id, None)
+                        if app_id in self._bots:
+                            await self.remove_bot(app_id)
 
                 # 3. 检查 is_active=0 的 bot → 断开 + 释放 lease（问题 K）
                 if self._held_leases:
-                    inactive = self._lease_store.check_inactive_bots(self._held_leases)
+                    inactive = lease_store.check_inactive_bots(self._held_leases)
                     for app_id in inactive:
                         log.info(f"[lease] bot {app_id} is_active=0, disconnecting")
                         token = self._held_leases.pop(app_id, "")
                         if token:
-                            self._lease_store.release(app_id, token)
+                            lease_store.release(app_id, token)
                         if app_id in self._bots:
                             await self.remove_bot(app_id)
 
