@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     last_seen_at TEXT DEFAULT NULL,
     scope TEXT DEFAULT 'global',
     owner_id TEXT DEFAULT '',
+    repo_key TEXT DEFAULT NULL,          -- 关联项目 repo_key（注册时从凭据复制）
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id)
 )
@@ -346,6 +347,7 @@ CREATE TABLE IF NOT EXISTS runtime_credentials (
     scope        TEXT DEFAULT 'user',       -- user(个人)/repo(仓库)/global(全局)，默认个人
     owner_id     TEXT DEFAULT '',           -- 仓库 scope 时存 repo 全名（如 owner/repo）；个人/全局为 ''
     owner_name   TEXT DEFAULT '',           -- 归属用户 user_name（生成凭据的当前登录用户）
+    repo_key     TEXT DEFAULT NULL,         -- 关联项目 repo_key（scope=user 时存）
     status       TEXT DEFAULT 'active',     -- active / revoked
     last_seen_at TEXT DEFAULT NULL,
     last_ip      TEXT DEFAULT '',           -- 最近注册/心跳来源 IP（展示用，不入唯一键）
@@ -1004,6 +1006,9 @@ def _migrate_tables():
         # 2026-08-17 修复：DEFAULT '{}' 在 MySQL 上触发 metadata lock 卡启动——改为无默认；
         # 且 ALTER 仅在列非 MEDIUMTEXT 时执行（避免每次启动 DDL 触发元数据锁——启动变慢根因）
         _alter_skill_files_if_needed(),
+        # Worker 三级分类——repo_key 字段（scope=user 时关联项目）
+        "ALTER TABLE runtime_credentials ADD COLUMN repo_key TEXT DEFAULT NULL",
+        "ALTER TABLE agent_runtimes ADD COLUMN repo_key TEXT DEFAULT NULL",
     ]
     for sql in migrations:
         try:
