@@ -275,12 +275,34 @@ OBS 网络异常时回退本地 file_path。如果本地文件也不存在（容
 
 项目知识基线文件（project-graph.md / project-capabilities.md / .metadata.json）不在 agent_shared_knowledge 表里——它们由服务端 `src/project_info/builder.py` 的 `build_project_info()` 生成，直接写到工作区 `project-info/` 目录。
 
-涉及 3 个读写位置：
-1. **生成（写入）**：`src/project_info/builder.py` → `_write_file()` / `_write_meta()` → 本地 `open(w)`
-2. **读取（服务端）**：`src/runtime/service.py` → `load_project_info()` → 本地 `open(r)`
-3. **读取（VOD 注入）**：`src/im/vod_handler_async.py` 第 203 行 → 本地 `open(r)`
+集群后本地文件不可共享——需要也走 OBS + 落库。
 
-集群后这 3 个位置都读不到本地文件——需要 OBS 改造。
+### 方案：新增 scope=baseline 落到 agent_shared_knowledge 表
+
+不新建表——基线文件复用 agent_shared_knowledge 表，新增 scope=baseline：
+
+| scope | agent_type | issue_num | file_path | 含义 |
+|-------|-----------|-----------|-----------|------|
+| project | 空 | 0 | project-info/knowledge.md | 项目级共享知识（Agent 沉淀） |
+| issue | 空 | N | issues/{N}/knowledge.md | Issue 级共享知识 |
+| issue_agent | agent_type | N | issues/{N}/{agent}/knowledge.md | Agent 级共享知识 |
+| member | 空 | 0 | project-info/member/{user}/{file} | 成员上传文档 |
+| **baseline** | 空 | 0 | project-info/project-graph.md | 项目知识基线（VOD 生成） |
+| **baseline** | 空 | 0 | project-info/project-capabilities.md | 项目知识基线（VOD 生成） |
+| **baseline** | 空 | 0 | project-info/.metadata.json | 项目知识基线元数据 |
+
+每个 repo 的基线有 3 条记录（graph / capabilities / metadata），统一走 agent_shared_knowledge 表 + obs_key 字段。
+
+baseline 字段值：
+- scope = baseline
+- repo_key = gitcode:xxx/xxx
+- agent_type = ''（基线不分 Agent）
+- issue_num = 0（基线不关联 Issue）
+- file_path = project-info/project-graph.md（相对路径）
+- obs_key = project-info/{repo_key}/project-graph.md（OBS key）
+- status = accepted
+- source_seq = 0
+- created_by = vod
 
 ### OBS 对象键设计
 
@@ -292,7 +314,7 @@ project-info/{repo_key}/.metadata.json
 
 ### 改造点
 
-#### 1. src/project_info/builder.py（生成→写入 OBS）
+#### 1. src/project_info/builder.py（生成→写入 OBS + 落库）
 
 `_write_file()` 和 `_write_meta()` 改造：
 
@@ -300,56 +322,67 @@ project-info/{repo_key}/.metadata.json
 OBS 模式（storage 不为 None）：
   1. obs_key = f"project-info/{repo_key}/{filename}"
   2. storage.save_bytes(obs_key, content.encode())
-  3. 同时写本地（兼容老逻辑）—— open(w) 保留
+  3. INSERT INTO agent_shared_knowledge (scope, repo_key, file_path, obs_key, status, created_by)
+     VALUES ('baseline', repo_key, rel_path, obs_key, 'accepted', 'vod')
+  4. 同时写本地（兼容老逻辑）—— open(w) 保留
 
 本地模式（storage 为 None）：
   1. 走现有 open(w) 写本地
+  2. INSERT INTO agent_shared_knowledge (scope, repo_key, file_path, obs_key, ...)
+     VALUES ('baseline', repo_key, rel_path, '', 'accepted', 'vod')
 ```
 
-#### 2. src/runtime/service.py（读取→走 OBS）
+注意：基线文件每次重新生成时需要先 DELETE 旧的 baseline 记录再 INSERT 新的（或 INSERT OR REPLACE）。
+
+#### 2. src/runtime/service.py（读取→查 DB + 走 OBS）
 
 `load_project_info()` 改造：
 
 ```
-OBS 模式（storage 不为 None）：
-  1. obs_key_prefix = f"project-info/{repo_key}/"
-  2. storage.read_bytes(f"project-info/{repo_key}/project-graph.md")
-  3. storage.read_bytes(f"project-info/{repo_key}/project-capabilities.md")
-  4. storage.read_bytes(f"project-info/{repo_key}/.metadata.json")
-  5. OBS 读取失败 → try-except 回退本地 open(r)
+OBS 模式：
+  1. SELECT file_path, obs_key FROM agent_shared_knowledge
+     WHERE repo_key=? AND scope='baseline' AND status='accepted'
+  2. 对每条记录：
+     - obs_key 非空 → storage.read_bytes(obs_key) + try-except 回退本地
+     - obs_key 为空 → open(file_path) 读本地
 
-本地模式（storage 为 None）：
+本地模式：
   1. 走现有 open(r) 读本地
 ```
 
-#### 3. src/im/vod_handler_async.py（VOD 注入→走 OBS）
+#### 3. src/im/vod_handler_async.py（VOD 注入→查 DB + 走 OBS）
 
 第 203 行读 project-graph.md / project-capabilities.md：
 
 ```
 OBS 模式：
-  1. storage.read_bytes(f"project-info/{repo_key}/project-graph.md")
-  2. OBS 读取失败 → 回退本地 open(r)
+  1. SELECT obs_key FROM agent_shared_knowledge
+     WHERE repo_key=? AND scope='baseline' AND file_path LIKE '%project-graph.md'
+  2. storage.read_bytes(obs_key) + 回退本地
 
 本地模式：
   1. 走现有 open(r)
 ```
 
-### 不需要 DB 字段
+### 好处
 
-project-info 基线文件不在 agent_shared_knowledge 表里——OBS 对象键按固定规则生成（`project-info/{repo_key}/{filename}`），不需要 DB 字段存储。
+- 统一模式——所有知识文件都在 agent_shared_knowledge 表
+- 有 DB 索引——可以查询哪些 repo 有基线
+- 有 obs_key——OBS 改造和共享知识/成员文档同模式
+- 不需要新建表
+- 前端 Knowledge 页面可以展示 baseline 条目
 
 ### 兼容策略
 
 与共享知识同模式：
 - OBS 模式：先读 OBS，失败回退本地
 - 本地模式：走现有逻辑
-- 老数据：本地文件继续可用，新生成的同时写 OBS
+- 老数据：本地文件继续可用，新生成的同时写 OBS + 落库
 
 ### 改动文件清单（补充）
 
 | # | 文件 | 改动内容 |
 |---|------|---------|
-| 7 | src/project_info/builder.py | _write_file / _write_meta 加 OBS 写入 |
-| 8 | src/runtime/service.py | load_project_info 加 OBS 读取 + 回退本地 |
-| 9 | src/im/vod_handler_async.py | VOD 注入读基线加 OBS 读取 + 回退本地 |
+| 7 | src/project_info/builder.py | _write_file / _write_meta 加 OBS 写入 + INSERT baseline 记录 |
+| 8 | src/runtime/service.py | load_project_info 查 DB baseline + OBS 读取 + 回退本地 |
+| 9 | src/im/vod_handler_async.py | VOD 注入读基线查 DB + OBS 读取 + 回退本地 |
