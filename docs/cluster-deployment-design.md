@@ -107,7 +107,11 @@ grape 当前是单实例部署，缺少健康监控、任务取消实时性、�
   "server": "ok",
   "database": "ok",
   "obs": { "enabled": true, "reachable": true },
-  "workers": { "total": 3, "online": 2, "offline": 1, "busy_slots": 5, "max_concurrent": 12 },
+  "workers": {
+    "global": { "total": 3, "online": 2, "offline": 1, "busy_slots": 5, "max_concurrent": 12 },
+    "project": { "total": 2, "online": 2, "offline": 0, "busy_slots": 3, "max_concurrent": 8 },
+    "personal": { "total": 1, "online": 1, "offline": 0, "busy_slots": 1, "max_concurrent": 4 }
+  },
   "timestamp": "2026-08-25T12:00:00Z"
 }
 ```
@@ -117,7 +121,28 @@ grape 当前是单实例部署，缺少健康监控、任务取消实时性、�
 | 服务端 | 200 OK |
 | 数据库 | SELECT 1 |
 | OBS | OBS_ENABLED + get_storage() != None |
-| Worker | 查 agent_runtimes 表在线/离线数 |
+| Worker | 查 agent_runtimes 表——按三级分类（见下） |
+
+**Worker 三级分类（按凭据 scope 分级展示）：**
+
+Worker 通过 credential_id → runtime_credentials.scope + owner_id 确定归属范围。
+
+| 级别 | scope 值 | owner_id | 谁能看 | 说明 |
+|------|---------|---------|--------|------|
+| 全局 Worker | global | 空 | 所有人 | 系统级公共执行引擎 |
+| 项目 Worker | repo | repo_key | 项目成员 | 项目维护者为项目注册的 |
+| 个人 Worker | user | username | 用户自己 | 用户在自己虚机上注册的 |
+
+归属链：Worker → credential_id → runtime_credentials.scope/owner_id
+
+普通用户在 System Health 看到的 Worker：
+- 全局 Worker（scope=global）
+- 当前项目 Worker（scope=repo, owner_id=当前项目 repo_key）
+- 当前用户的个人 Worker（scope=user, owner_name=当前用户）
+
+**遗留问题：scope=user 的 Worker 注册时不指定项目——owner_id 只存 username 不存 repo_key。** 用户关联多个项目时无法区分 Worker 属于哪个项目。
+
+需要改注册逻辑：user scope 注册时也存 repo_key，Worker 只执行该项目的任务。当前暂不实现——System Health 先按 owner_name 归类展示个人 Worker。后续注册逻辑改造后精确按项目归类。
 
 **改动文件：** 新增 src/api/routes/health.py（2 个端点）
 
@@ -133,7 +158,7 @@ grape 当前是单实例部署，缺少健康监控、任务取消实时性、�
 
 | 端点 | SQL | 说明 |
 |------|-----|------|
-| GET /api/dashboard/runtime/status | SELECT COUNT(*), SUM(status='online') FROM agent_runtimes | Worker 在线/离线/槽位 |
+| GET /api/dashboard/runtime/status | 查 agent_runtimes 表——按三级分类（全局/项目/个人） | Worker 在线/离线/槽位 |
 | GET /api/dashboard/task/daily | SELECT DATE(created_at), agent_type, COUNT(*), SUM(status='completed'), SUM(status='failed'), AVG(duration) FROM events GROUP BY DATE(created_at), agent_type | 每日任务统计 |
 | GET /api/dashboard/task/by-agent | SELECT agent_type, COUNT(*), SUM(status='completed'), SUM(status='failed'), AVG(duration) FROM events GROUP BY agent_type | 按 agent 统计 |
 | GET /api/dashboard/failures/daily | SELECT DATE(created_at), exit_code, COUNT(*) FROM events WHERE status='failed' GROUP BY DATE(created_at), exit_code | 每日失败 |
