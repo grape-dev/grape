@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 .arts/
 .codeartsdoer/
+wheels/
 .pytest_cache/
 .venv/
 data/test_*
