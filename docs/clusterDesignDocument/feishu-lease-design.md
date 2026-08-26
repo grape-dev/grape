@@ -310,7 +310,7 @@ bot_name 字段先留空 ''。当前前端没有传 bot 名称，也没有展示
 - DB 错误（连接断/查询超时）→ 保持 WebSocket 连接，等 DB 恢复后重试续约
 - CAS 失败（lease 被其他实例抢走）→ release lease + 断开
 
-### 场景验证总结（21 个场景）
+### 场景验证总结（27 个场景）
 
 | # | 场景 | 结果 | 说明 |
 |---|------|:---:|------|
@@ -335,6 +335,40 @@ bot_name 字段先留空 ''。当前前端没有传 bot 名称，也没有展示
 | 19 | _periodic_cleanup | ✅ | DB DELETE 共享 MySQL |
 | 20 | bot 配置删除 | ✅ | sweep 5 分钟内重新加载 |
 | 21 | 多用户同 app_id 去重 | ✅ | 按 app_id 去重 + lease 按 app_id 管理 |
+| 22 | lifespan 关闭顺序 | ⚠️ | 问题 H——先 cancel lease_task 再 stop bot_manager |
+| 23 | stop timeout 和宽限期冲突 | ⚠️ | 问题 I——正常重启增大 timeout，lease 被抢用独立断开逻辑 |
+| 24 | sweeper 和 lease sweep 命名 | ⚠️ | 问题 J——变量名用 _lease_sweep_task |
+| 25 | bot_manager 启动失败 | ✅ | lease_store 创建在 try 块里，失败整体失败 |
+| 26 | webhook 和飞书 IM 关系 | ✅ | webhook 不直接调飞书 reply，不依赖 WebSocket |
+| 27 | 跨实例配置变更热加载 | ⚠️ | 问题 K——remove_bot 跨实例无效，sweep 检查 is_active=0 立即断开 |
+
+### 问题 H：lifespan 关闭顺序
+
+场景：实例关闭时先 cancel lease_task 还是先 stop bot_manager？如果先 stop bot_manager → stop 里释放 lease → 但 lease_task 还在跑可能又抢新锁。
+
+修复：关闭顺序——先 cancel lease_task（不再抢新锁）→ 再 stop bot_manager（停 bot + 释放 lease）→ 其他清理。
+
+### 问题 I：stop() timeout=10 和宽限期 30 秒冲突
+
+场景：问题 C 说续约失败后给宽限期 30 秒等消息处理完。但 stop() 的 timeout=10 会强制 cancel——宽限期内被 stop 强制 cancel。
+
+修复：区分两种场景：
+- 正常 stop（实例重启）：增大 timeout 到 30 秒，等消息处理完
+- lease 被抢（续约失败）：用独立的断开逻辑（宽限期 30 秒后断开），不走 stop()
+
+### 问题 J：变量名混淆
+
+场景：当前已有 _sweep_task（Issue workdir 清理），新增 lease sweep 也叫 sweep 容易混淆。
+
+修复：lease sweep 变量名用 _lease_sweep_task，和 _sweep_task 区分。
+
+### 问题 K：跨实例配置变更热加载
+
+场景：用户在前端改飞书配置 → 请求打到实例 A → 实例 A 调 bot_manager.remove_bot + add_bot。但 bot 在实例 B → 实例 A remove_bot 无操作（没有 bot）→ 实例 B 的 bot 还在连。
+
+修复：
+- add_bot 在 lease 模式下不直接连——登记 IDLE 由 sweep 决定（待优化 3 已覆盖）
+- remove_bot 跨实例无效——sweep 每 10 秒检查 is_active=0 的 bot 立即断开 + 释放 lease（不等 5 分钟重新加载）
 
 ## 十二、不需要改动
 
