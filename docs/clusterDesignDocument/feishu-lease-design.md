@@ -364,11 +364,17 @@ bot_name 字段先留空 ''。当前前端没有传 bot 名称，也没有展示
 
 ### 问题 K：跨实例配置变更热加载
 
-场景：用户在前端改飞书配置 → 请求打到实例 A → 实例 A 调 bot_manager.remove_bot + add_bot。但 bot 在实例 B → 实例 A remove_bot 无操作（没有 bot）→ 实例 B 的 bot 还在连。
+场景：用户在前端改飞书配置 → 请求打到 nginx → 随机分到实例 A → 实例 A 调 bot_manager.remove_bot + add_bot。但 bot 在实例 B → 实例 A remove_bot 无操作（没有 bot）→ 实例 B 的 bot 还在连。
 
-修复：
-- add_bot 在 lease 模式下不直接连——登记 IDLE 由 sweep 决定（待优化 3 已覆盖）
-- remove_bot 跨实例无效——sweep 每 10 秒检查 is_active=0 的 bot 立即断开 + 释放 lease（不等 5 分钟重新加载）
+三种场景的修复：
+
+| 场景 | 机制 | 恢复时间 |
+|------|------|:---:|
+| 删除 bot | sweep 每 10 秒检查 is_active=0 或行被删 → 立即断开 + 释放 lease | 10 秒 |
+| 新增 bot | add_bot 登记 IDLE → sweep try_acquire → 抢到就连 | 10 秒 |
+| 换绑 bot（换 secret） | INSERT OR REPLACE 清空 lease → 实例 B 续约 CAS 失败立即断开 → 实例 A sweep 10 秒抢到用新 secret 连 | 10 秒 |
+
+换绑场景关键：INSERT OR REPLACE 副作用清空 lease（前面确认合理），持有 bot 的实例下次续约发现 lease_token 不匹配（CAS 失败），按问题 D 修复方案立即断开。其他实例下次 sweep 抢到后用新 secret 连。不需要跨实例更新 BotContext。
 
 ## 十二、不需要改动
 
