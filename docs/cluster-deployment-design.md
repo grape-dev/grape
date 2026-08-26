@@ -366,13 +366,17 @@ db_setup.py init_database() 加迁移锁：
 
 ---
 
-### 阶段 3：多实例集群（加 Redis + JWT 会话共享）
+### 阶段 3：多实例集群（JWT 会话共享 + 可选 Redis）
 
 **目标：** Backend 水平扩展，支持高可用
 
-#### 3.1 会话共享（JWT 无状态——参照 multica）
+**基于本地验证结论：** 多实例核心能力（迁移锁/claim/取消感知/负载均衡）已验证通过——不需要 Redis 也能多实例运行。所有状态在 MySQL 共享数据库，实例间不需要通信。
+
+#### 3.1 会话共享（JWT 无状态——必须做）
 
 **问题：** 当前用户登录会话是进程内内存（`_user_tokens` dict）——多实例时用户在实例 A 登录，请求打到实例 B 会 401。
+
+**这是阶段 3 唯一必须做的改动。**
 
 **multica 的方案：** JWT 无状态会话
 - 登录时用 JWT_SECRET 签发 JWT（含 user_id + 过期时间）
@@ -384,12 +388,12 @@ db_setup.py init_database() 加迁移锁：
 
 | 会话类型 | 当前 | 改后 | 需要改？ |
 |---------|------|------|:---:|
-| 用户登录 | 进程内内存（_user_tokens） | JWT 无状态 | ❌ 改 |
-| Worker 认证 | 数据库（runtime_credentials） | 不变 | ✅ 不改 |
-| Agent 任务会话 | 数据库（agent_tasks.runtime_session_id） | 不变 | ✅ 不改 |
+| 用户登录 | 进程内内存（_user_tokens） | JWT 无状态 | 改 |
+| Worker 认证 | 数据库（runtime_credentials） | 不变 | 不改 |
+| Agent 任务会话 | 数据库（agent_tasks.runtime_session_id） | 不变 | 不改 |
 
 改动：
-1. `src/api/routes/auth.py` login()——改为签发 JWT（含 user_id + email + 过期时间）
+1. `src/api/routes/auth.py` login()——改为签发 JWT（含 user_id + 过期时间）
 2. `src/api/deps.py` get_current_user()——改为 JWT 验证（不查 _user_tokens）
 3. 新增 `JWT_SECRET` 环境变量（所有实例共享）
 4. 新增 `python-jose` 依赖（FastAPI JWT 库）
@@ -397,26 +401,34 @@ db_setup.py init_database() 加迁移锁：
 
 JWT_SECRET 安全（参照 multica）：
 - 生产环境不能用默认 secret
-- Helm Chart 里 existingSecret 包含 JWT_SECRET
 - 启动时校验——空值或已知默认值拒绝启动
 
 **不加 Redis、不加数据库表——JWT 无状态集群原生支持。**
 
-#### 3.2 引入 Redis
+#### 3.2 Redis（可选优化——规模上来再做）
 
-| 用途 | 说明 |
-|------|------|
-| 消息总线 | cancel 通知跨实例转发（Redis Stream） |
-| 任务回收 | ZSET 精确调度（替代 60 秒看门狗轮询） |
-| 缓存 | runtime/skill/model 数据缓存 |
+**不是多实例的必要条件。** grape 用 HTTP 短连接 + 共享 MySQL，不需要实例间通信。
 
-#### 3.3 WebSocket 端点（可选）
+multica 需要 Redis 是因为 WebSocket 长连接绑定实例——实例间必须通过 Redis 转发消息。grape 用 HTTP 不绑定实例——不需要。
 
-- 服务端加 WebSocket 端点（FastAPI WebSocket）
-- worker 连 WebSocket 接收实时通知（cancel/wakeup）
-- HTTP 作为兜底（WebSocket 断了回退 HTTP）
+| 用途 | 没有 Redis | 有 Redis | 什么时候需要 |
+|------|-----------|---------|------------|
+| 取消通知 | 15 秒（heartbeat 查 MySQL） | 0 秒（Redis Stream 转发） | 取消频繁且需实时 |
+| 任务回收 | 60 秒（看门狗轮询） | 精确调度（ZSET） | 任务量大时 |
+| 缓存 | 每次查数据库 | 缓存命中 | 查询量大时 |
 
-#### 3.4 Backend replicas>1
+**判断标准：** 数据库扛得住就不需要 Redis。等查询慢了或取消延迟不够用再加。
+
+#### 3.3 WebSocket 端点（可选优化——不推荐）
+
+**不推荐。** grape 用 HTTP 短连接比 WebSocket 长连接更适合多实例架构：
+- HTTP 不绑定实例——nginx 负载均衡自然分发
+- WebSocket 绑定实例——需要 Redis 转发实例间消息
+- HTTP 简单可靠——WebSocket 需要处理断线重连
+
+如果未来需要 0 秒取消延迟，优先加 Redis Stream（3.2）而不是 WebSocket。
+
+#### 3.4 Backend replicas>1（已验证可行）
 
 ```nginx
 upstream grape_backend {
@@ -426,32 +438,28 @@ upstream grape_backend {
 }
 ```
 
-- nginx 负载均衡多个 backend 实例
-- 共享 MySQL + Redis + OBS
-- 不需要 PVC（用 OBS 替代本地存储）
+本地验证已证明：nginx 负载均衡 + 多实例 + 共享 MySQL 工作正常。
 
-#### 3.5 集群兼容保证
+#### 3.5 集群兼容保证（已验证）
 
-| 操作 | 怎么保证 | 已有？ |
+| 操作 | 怎么保证 | 验证状态 |
 |------|---------|:---:|
 | 用户会话共享 | JWT 无状态（JWT_SECRET 共享） | 阶段 3 加 |
-| 任务不重复 claim | MySQL 行锁 UPDATE WHERE status='queued' | ✅ |
+| 任务不重复 claim | MySQL 行锁 UPDATE WHERE status='queued' | ✅ 已验证 |
 | 任务不重复完成 | UPDATE WHERE status='running' 幂等 | ✅ |
-| 取消通知跨实例 | Redis Stream 转发 | 阶段 3 加 |
+| 取消通知跨实例 | heartbeat 查 MySQL cancelled_tasks | ✅ 已验证 |
 | webhook 不重复 | nginx 随机打一个实例 | ✅ |
 | 心跳不冲突 | UPDATE last_seen_at 幂等 | ✅ |
-| 迁移不冲突 | MySQL GET_LOCK | 阶段 2 加 |
+| 迁移不冲突 | MySQL GET_LOCK | ✅ 已验证 |
 
 **改动文件：**
 - src/api/routes/auth.py（JWT 签发）
 - src/api/deps.py（JWT 验证）
 - 新增 JWT_SECRET 环境变量
 - 新增 python-jose 依赖
-- 新增 Redis 依赖
-- src/api/routes/ 加 WebSocket 端点
-- src/runtime/agent.py 加 WebSocket 客户端
-- docker-compose.yml 加 Redis
-- nginx.conf 加 upstream
+- .env.example 加 JWT_SECRET
+
+**不需要：** Redis / WebSocket / Redis Stream / docker-compose 加 Redis / nginx 改 upstream（已有）
 
 ---
 
