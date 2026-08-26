@@ -69,145 +69,19 @@ grape 当前是单实例部署，缺少健康监控、任务取消实时性、�
 
 ### 阶段 1：单机增强（零新依赖）——✅ 已完成+验证
 
-**目标：** 加健康监控 + 任务取消实时性 + 前端 Dashboard + Worker 三级分类
+**目标：** 任务取消实时性 + Worker repo_key 字段
 
-#### 1.1 健康端点（分两层）
+**注意：** System Health 监控页面已去掉——监控是独立展示层，不影响集群和 Worker 运行。仅保留 GET /api/health 免鉴权端点（Docker healthcheck / K8s livenessProbe 用）。
 
-**调用场景：**
+#### 1.1 健康端点（免鉴权——Docker/K8s 用）
 
-| 场景 | 频率 | 需要鉴权 |
-|------|------|:---:|
-| 前端系统监控页面 | 30 秒一次 | 需要（用户已登录） |
-| K8s livenessProbe/readinessProbe（阶段 4） | 10 秒一次 | 不需要（探针不带 token） |
-| nginx 健康检查 | 定期 | 不需要 |
-| 外部监控工具（Prometheus/Uptime Robot） | 定期 | 不需要 |
-| 运维手动 curl | 排查时 | 不需要 |
+GET /api/health（免鉴权）：返回 `{"server":"ok"}`
+- 供 Docker healthcheck / K8s livenessProbe / nginx 健康检查使用
+- 不查数据库、不暴露系统规模
 
-**冲突：** 免鉴权会暴露 Worker 数量等系统规模信息；需要鉴权则 K8s 探针/监控工具配置复杂（token 过期探针失败 → K8s 不断重启 pod）。
+**改动文件：** src/api/routes/health.py（1 个端点）
 
-**方案：分两层端点**
-
-| 端点 | 鉴权 | 返回内容 | 用途 |
-|------|:---:|---------|------|
-| GET /api/health | 免鉴权 | `{"server":"ok"}` | K8s 探针 / nginx / 监控工具 / 运维 curl |
-| GET /api/health/detail | 需要登录 | 完整状态（DB/OBS/Worker 数量/槽位） | 前端 Dashboard |
-
-**GET /api/health（免鉴权）：**
-```json
-{"server": "ok"}
-```
-- 不查数据库、不含凭据/版本/IP/路径
-- 比 grape 已有的 `GET /`（返回完整 HTML）暴露的信息更少
-- 不增加额外风险（攻击者能访问 /api/health 就能访问 /）
-- DDoS 影响小（只返回 JSON 字符串）
-
-**GET /api/health/detail（需登录）：**
-```json
-{
-  "server": "ok",
-  "database": "ok",
-  "obs": { "enabled": true, "reachable": true },
-  "workers": {
-    "global": { "total": 3, "online": 2, "offline": 1, "busy_slots": 5, "max_concurrent": 12 },
-    "project": { "total": 2, "online": 2, "offline": 0, "busy_slots": 3, "max_concurrent": 8 },
-    "personal": { "total": 1, "online": 1, "offline": 0, "busy_slots": 1, "max_concurrent": 4 }
-  },
-  "timestamp": "2026-08-25T12:00:00Z"
-}
-```
-
-| 网元 | 检查方式 |
-|------|---------|
-| 服务端 | 200 OK |
-| 数据库 | SELECT 1 |
-| OBS | OBS_ENABLED + get_storage() != None |
-| Worker | 查 agent_runtimes 表——按三级分类（见下） |
-
-**Worker 三级分类（按凭据 scope 分级展示）：**
-
-Worker 通过 credential_id → runtime_credentials.scope + owner_id 确定归属范围。
-
-| 级别 | scope 值 | owner_id | 谁能看 | 说明 |
-|------|---------|---------|--------|------|
-| 全局 Worker | global | 空 | 所有人 | 系统级公共执行引擎 |
-| 项目 Worker | repo | repo_key | 项目成员 | 项目维护者为项目注册的 |
-| 个人 Worker | user | username | 用户自己 | 用户在自己虚机上注册的 |
-
-归属链：Worker → credential_id → runtime_credentials.scope/owner_id
-
-普通用户在 System Health 看到的 Worker：
-- 全局 Worker（scope=global）
-- 当前项目 Worker（scope=repo, owner_id=当前项目 repo_key）
-- 当前用户的个人 Worker（scope=user, owner_name=当前用户）
-
-**遗留问题（当前实施）：scope=user 的 Worker 需要加项目字段。**
-
-当前 scope=user 的凭据只存 owner_name（用户名），不存 repo_key——用户关联多个项目时无法区分 Worker 属于哪个项目。
-
-**解决方案：现在就加 repo_key 字段，现有逻辑不感知。**
-
-数据库改动：
-1. runtime_credentials 表加 `repo_key VARCHAR(191) DEFAULT NULL`——记录凭据关联的项目
-2. agent_runtimes 表加 `repo_key VARCHAR(191) DEFAULT NULL`——记录 Worker 关联的项目（注册时从凭据复制）
-
-字段使用规则：
-- scope=global：repo_key=NULL（全局 Worker 不绑定项目）
-- scope=admin：repo_key=NULL（管理员 Worker 不绑定项目）
-- scope=repo：repo_key=项目 repo_key（已有 owner_id 存 repo_key，新字段冗余存储方便查询）
-- scope=user：repo_key=创建凭据时指定的项目 repo_key（新创建时写入，老数据留 NULL）
-
-改动点（凭据创建时写入 repo_key，Worker 注册时复制）：
-
-1. 前端 runtimes.js 创建凭据时，scope=user 也传 repo_key（从当前项目页面获取）
-   - 当前：scope=repo 才传 repo_key，scope=user 不传
-   - 改后：scope=user 也传当前项目的 repo_key
-
-2. settings.py create_runtime_credential 接口，scope=user 时也存 repo_key
-   - 当前第 421 行：`if scope == "repo": repo_key = body.repo_key`
-   - 改后：`if scope in ("repo", "user"): repo_key = body.repo_key`
-   - INSERT 语句加 repo_key 字段
-
-3. runtime.py runtime_register 接口，Worker 注册时从凭据复制 repo_key 到 agent_runtimes
-   - 当前第 130 行：注册时读凭据的 scope/owner_name/owner_id
-   - 改后：也读凭据的 repo_key，INSERT agent_runtimes 时写入
-
-4. health.py 和 dashboard.py System Health 展示时按 repo_key 过滤三级 Worker
-
-现有逻辑不感知：
-- claim/heartbeat/任务分配/cancel 等逻辑全部不改——不读 repo_key 字段
-- 老数据 repo_key=NULL——不影响现有 Worker 运行
-- 后续注册逻辑完整改造后（Worker 只执行关联项目任务），再让 claim 等逻辑感知 repo_key
-
-System Health 展示按 repo_key 过滤：
-- 全局 Worker：scope=global OR scope=admin
-- 当前项目 Worker：scope=repo AND repo_key=当前项目
-- 当前用户个人 Worker：scope=user AND owner_name=当前用户 AND repo_key=当前项目
-
-**改动文件：** 新增 src/api/routes/health.py（2 个端点）
-
-#### 1.2 Dashboard API（5 个聚合端点，需登录 + 用户隔离）
-
-对标 multica 的 6 个 Dashboard 端点，直接查 events/agent_tasks 表聚合。
-
-**鉴权：** 所有 Dashboard API 都需要登录（`Depends(get_current_user)`）。
-
-**用户隔离：** ?repo_key= 过滤时只返回用户有权限的仓库统计：
-- 用户管理的仓库（user_repos 表 user_id=当前用户）
-- 不传 repo_key 时返回全部仓库统计（已登录用户可见全局统计）
-
-| 端点 | SQL | 说明 |
-|------|-----|------|
-| GET /api/dashboard/runtime/status | 查 agent_runtimes 表——按三级分类（全局/项目/个人） | Worker 在线/离线/槽位 |
-| GET /api/dashboard/task/daily | SELECT DATE(created_at), agent_type, COUNT(*), SUM(status='completed'), SUM(status='failed'), AVG(duration) FROM events GROUP BY DATE(created_at), agent_type | 每日任务统计 |
-| GET /api/dashboard/task/by-agent | SELECT agent_type, COUNT(*), SUM(status='completed'), SUM(status='failed'), AVG(duration) FROM events GROUP BY agent_type | 按 agent 统计 |
-| GET /api/dashboard/failures/daily | SELECT DATE(created_at), exit_code, COUNT(*) FROM events WHERE status='failed' GROUP BY DATE(created_at), exit_code | 每日失败 |
-| GET /api/dashboard/failures/by-agent | SELECT agent_type, exit_code, COUNT(*) FROM events WHERE status='failed' GROUP BY agent_type, exit_code | 按 agent 失败 |
-
-参数：`?days=N`（默认 7，最大 30）+ `?repo_key=`（可选仓库过滤，只返回用户有权限的仓库）
-
-**改动文件：** 新增 src/api/routes/dashboard.py
-
-#### 1.3 任务取消实时性（方案 1+2 三层保险）
+#### 1.2 任务取消实时性（方案 1+2 三层保险）
 
 **问题：** 用户点终止后 worker 最长 60 秒才发现（看门狗轮询）。
 
@@ -235,71 +109,50 @@ System Health 展示按 repo_key 过滤：
 - src/runtime/agent.py（检查响应里的取消信号 + 杀进程）
 - src/runtime/client.py（report_messages + heartbeat 返回值解析）
 
-#### 1.4 前端系统监控页面
+#### 1.3 Worker repo_key 字段
 
-当前已有 nav-dash（仓库级 Dashboard——某个仓库的事件/任务统计）。
-新增 nav-health（系统级 System Health——跨仓库的网元健康/Worker 状态/全局任务统计）。
+Worker 通过 credential_id → runtime_credentials.scope + owner_id 确定归属范围。
 
-**不改动已有的 nav-dash。**
+数据库改动：
+1. runtime_credentials 表加 `repo_key VARCHAR(191) DEFAULT NULL`
+2. agent_runtimes 表加 `repo_key VARCHAR(191) DEFAULT NULL`
 
-| 模块 | 内容 |
-|------|------|
-| 系统健康概览 | 服务端/DB/OBS/Worker 状态灯（绿/红） |
-| 任务统计 | 成功率/失败率/平均时长图表（按天） |
-| Worker 列表 | 在线/离线/槽位利用率 |
-| 失败分析 | 按 agent/exit_code 分类的失败统计 |
+字段使用规则：
+- scope=global：repo_key=NULL
+- scope=admin：repo_key=NULL
+- scope=repo：repo_key=项目 repo_key
+- scope=user：repo_key=创建凭据时指定的项目 repo_key
 
-**改动文件：**
-- src/api/static/js/pages/health.js（新增——系统监控前端页面）
-- src/api/static/index.html（新增导航项"系统监控" nav-health，不改动已有 nav-dash）
-- src/api/static/js/app.js（新增 nav('health') 分支——调 /api/health + /api/dashboard/* + renderHealth）
-- src/api/static/css/apple-theme.css（系统监控页面样式）
+改动点：
+1. 前端 runtimes.js：scope=user 也传 repo_key
+2. settings.py create_runtime_credential：scope=user 时也存 repo_key
+3. runtime.py runtime_register：Worker 注册时从凭据复制 repo_key 到 agent_runtimes
+4. db_setup.py：DDL + migration 加 repo_key 字段
 
-**导航结构（改动后）：**
-```
-Workspace
-  ■ Dashboard（已有——仓库级）
-  ▶ Pipeline（已有）
+现有逻辑不感知：claim/heartbeat/任务分配/cancel 不读 repo_key，老数据留 NULL。
 
-DevOps Agents
-  ● VOD Agent（已有）
-  ● Issue Agent（已有）
-  ● Coding Agent（已有）
-  ● QA Agent（已有）
-  ● SRE Agent（已有）
+#### 1.4 改动汇总
 
-Knowledge
-  ◈ DevOps Skills（已有）
-  ❖ Project Knowledge（已有）
+**新增文件：**
+- src/api/routes/health.py——GET /api/health 免鉴权端点
 
-System（新增分组）
-  ⚕ System Health（新增——系统级健康监控）
-```
+**修改文件：**
 
-#### 1.5 改动汇总
+| # | 文件 | 改动内容 |
+|---|------|---------|
+| 1 | src/api/routes/runtime.py | report_messages 响应加 task_status + heartbeat 响应加 cancelled_tasks |
+| 2 | src/runtime/client.py | heartbeat 返回值从 bool 改为 dict + report_messages 解析 task_status |
+| 3 | src/runtime/agent.py | heartbeat 检查 cancelled_tasks + report_messages 检查 task_status + 杀进程 |
+| 4 | src/api/routes/settings.py | create_runtime_credential scope=user 时也存 repo_key |
+| 5 | src/api/routes/runtime.py | runtime_register 从凭据复制 repo_key 到 agent_runtimes |
+| 6 | src/api/db_setup.py | runtime_credentials + agent_runtimes DDL + migration 加 repo_key |
+| 7 | src/api/static/js/pages/runtimes.js | scope=user 也传 repo_key |
 
-**新增文件（4 个）：**
-
-| # | 文件 | 内容 |
-|---|------|------|
-| 1 | src/api/routes/health.py | GET /api/health——服务端+DB+OBS+Worker 健康状态 |
-| 2 | src/api/routes/dashboard.py | 5 个聚合端点（runtime/status + task/daily + task/by-agent + failures/daily + failures/by-agent） |
-| 3 | src/api/static/js/pages/health.js | 系统监控前端页面（健康概览 + 任务统计 + Worker 列表 + 失败分析） |
-| 4 | src/api/routes/main.py 注册路由（或 src/api/main.py） | 注册 health + dashboard 路由 |
-
-**修改文件（5 个）：**
-
-| # | 文件 | 改动位置 | 改动内容 |
-|---|------|---------|---------|
-| 5 | src/api/routes/runtime.py | 第 311 行 runtime_task_messages | 响应里加 task_status 字段（查数据库当前任务状态） |
-| 6 | src/api/routes/runtime.py | 第 172 行 runtime_heartbeat | 响应里加 cancelled_tasks 列表（查该 worker 的 active_tasks 有没有 cancelled） |
-| 7 | src/runtime/client.py | 第 127 行 report_messages | 返回值解析 task_status 字段 |
-| 8 | src/runtime/client.py | 第 104 行 heartbeat | 返回值解析 cancelled_tasks 字段 |
-| 9 | src/runtime/agent.py | 第 506 行 report_messages 调用后 | 检查 task_status，发现 cancelled → 调 _kill_stale_engine 杀进程 |
-| 10 | src/runtime/agent.py | heartbeat 调用后（第 544 行 _run_loop 内） | 检查 cancelled_tasks 列表，发现取消 → 杀进程 |
-| 11 | src/api/static/index.html | 导航栏 | 新增"System"分组 + "系统监控"导航项 nav-health |
-| 12 | src/api/static/js/app.js | nav() 函数 | 新增 nav('health') 分支——调 /api/health + /api/dashboard/* + renderHealth |
-| 13 | src/api/static/css/apple-theme.css | 样式 | 系统监控页面样式（状态灯/图表/Worker 列表） |
+**已去掉（不在本次需求范围）：**
+- ~~System Health 监控页面~~（health.js / nav('health') / System 导航菜单）
+- ~~Dashboard 系统级聚合端点~~（runtime/status / task/daily / task/by-agent / failures/*）
+- ~~health/detail 端点~~
+- dashboard.py 恢复 dev 分支原有仓库级路由
 
 **不改动：**
 - src/runtime/agent.py 第 718 行看门狗——保留作为第 3 层兜底
