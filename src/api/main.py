@@ -134,18 +134,67 @@ metrics_middleware(app)
 if metrics_enabled():
     start_metrics_server()
 
-# 可观察性：request_id 中间件（参考 multica middleware/request_logger.go）
-# 为每个请求注入 X-Request-ID，贯穿日志 + 响应头
+# 可观察性：request_id + HTTP 请求日志合并中间件（参考 multica middleware/request_logger.go）
+# request_id：注入 X-Request-ID + ContextVar，贯穿日志 + 响应头
+# 请求日志：结构化记录 method/path/status/duration/request_id，按状态码分级
 import uuid as _uuid
+import time as _time
+from src.config import request_id_var, log as _log
+
+
+# webhook 路径中的 token 需要 redact（参考 multica redactWebhookPath）
+_WEBHOOK_PREFIX = "/webhook/"
+
+
+def _redact_path(path: str) -> str:
+    """webhook 路径中的 token 段替换为 [redacted]。"""
+    if not path.startswith(_WEBHOOK_PREFIX):
+        return path
+    rest = path[len(_WEBHOOK_PREFIX):]
+    if "/" in rest:
+        return _WEBHOOK_PREFIX + "[redacted]" + rest[rest.index("/"):]
+    return _WEBHOOK_PREFIX + "[redacted]"
+
+
+# 健康探针路径不记请求日志（参考 multica isHealthProbePath）
+_LOG_SKIP_PATHS = frozenset({"/health", "/healthz", "/readyz", "/metrics"})
 
 
 @app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
+async def request_id_and_log_middleware(request: Request, call_next):
+    """request_id 注入 + HTTP 请求日志（合并为一个中间件，确保 ContextVar 贯穿日志）。
+
+    按状态码分级：5xx → ERROR, 4xx → WARN, 2xx/3xx → INFO。
+    健康探针路径跳过请求日志（但 request_id 仍注入）。
+    """
     rid = request.headers.get("X-Request-ID") or _uuid.uuid4().hex[:12]
     request.scope["request_id"] = rid
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = rid
-    return response
+    token = request_id_var.set(rid)
+
+    path = request.url.path
+    skip_log = path in _LOG_SKIP_PATHS
+    start = _time.time()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = rid
+        return response
+    except Exception:
+        raise
+    finally:
+        if not skip_log:
+            duration = (_time.time() - start) * 1000
+            redacted_path = _redact_path(path)
+            msg = (f"{request.method} {redacted_path} "
+                   f"status={status} duration={duration:.0f}ms")
+            if status >= 500:
+                _log.error(msg)
+            elif status >= 400:
+                _log.warning(msg)
+            else:
+                _log.info(msg)
+        request_id_var.reset(token)
 
 app.include_router(auth.router)
 app.include_router(repos.router)
@@ -190,8 +239,8 @@ _load_accounts()
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     from src.config import log
+    log.warning(f"API error: {exc}")
     rid = request.scope.get("request_id", "-")
-    log.warning(f"[{rid}] API error: {exc}")
     return JSONResponse(status_code=500, content={"code": 500, "message": str(exc), "request_id": rid})
 
 
