@@ -432,16 +432,39 @@ def agent_files(repo_key: str, agent_type: str = "") -> dict:
 
 
 async def knowledge_sync_loop():
-    """后台定时同步老数据到 OBS——每小时一次，分批 500 条。"""
-    import asyncio, hashlib
+    """后台定时同步老数据到 OBS——每小时一次，分批 500 条。
+
+    并发保护：通过 meta 表 knowledge_sync_running 标记 + 10 分钟超时，
+    防止多实例同时执行 sync_loop 导致重复写 OBS + DB。
+    """
+    import asyncio, hashlib, time
     from src.session_manager import db, db_lock
     from src.storage import get_storage
+    from src.user.db import get_meta_value, set_meta_value
 
     storage = get_storage()
     if not storage:
         return
 
+    SYNC_LOCK_KEY = "knowledge_sync_running"
+    SYNC_LOCK_TIMEOUT = 600  # 10 分钟超时（实例挂了自动恢复）
+
     while True:
+        # 并发保护：检查是否有其他实例正在执行
+        running = get_meta_value(SYNC_LOCK_KEY)
+        if running:
+            try:
+                running_ts = float(running)
+                if time.time() - running_ts < SYNC_LOCK_TIMEOUT:
+                    log.info("[knowledge] sync skipped: another instance is running")
+                    await asyncio.sleep(3600)
+                    continue
+            except ValueError:
+                pass  # 值不是时间戳 → 视为过期 → 继续执行
+
+        # 抢锁
+        set_meta_value(SYNC_LOCK_KEY, str(time.time()))
+
         try:
             cursor = 0
             while True:
@@ -515,6 +538,9 @@ async def knowledge_sync_loop():
                 log.error(f"[knowledge] sync baseline files error: {e}")
         except Exception as e:
             log.error(f"[knowledge] sync error: {e}")
+        finally:
+            # 释放锁
+            set_meta_value(SYNC_LOCK_KEY, "")
         await asyncio.sleep(3600)
 
 
