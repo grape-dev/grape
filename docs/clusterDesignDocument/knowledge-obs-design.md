@@ -1226,3 +1226,19 @@ sync_loop 只扫 agent_shared_knowledge 表里 obs_key 为空的记录。baselin
 - builder.py _write_to_obs — 不变（新 onboard 的 repo 已经会写 DB）
 - load_project_info — 不变（已有兜底逻辑）
 - _PROJECT_INFO_FILES — 不变
+
+### 方案调整（2026-08-27）
+
+原方案遍历 WORKSPACE_DIR 目录名作为 owner，但目录名格式不一致（有的带 `gitcode:` 前缀）。
+
+调整：从 `managed_repos` 表获取项目列表，不遍历目录。
+
+managed_repos 表有 36 条记录，每条有 repo_key（如 `gitcod.../...`）和 repo_owner / repo_name。
+
+调整后逻辑：
+1. 查 DB: `SELECT repo_key FROM managed_repos` → 拿到所有项目的 repo_key
+2. 对每个 repo_key:
+   - owner, repo = split_owner_repo(repo_key)
+   - pi_dir = WORKSPACE_DIR/owner/repo/project-info
+3. 检查 pi_dir 下的 3 个基线文件
+4. 查 DB baseline 记录 → 没有就写 OBS + INSERT / 有但 obs_key 空就 UPDATE / 有且非空跳过
