@@ -1357,3 +1357,22 @@ _sync_baseline_files 必须用同样的格式，确保 OBS 对象 key 一致。
 - 测试代码不带斜杠调用：307→200 变为直接 200 ✅
 - 子路由（/skills/upload 等）：不受影响 ✅
 - 后端内部调用：不受影响 ✅
+
+## 二十五、knowledge_files 集群丢共享知识修复（2026-08-27）
+
+### 问题
+
+knowledge_files 调 read_knowledge 从 OBS 拿到 content 后，又 open 本地文件读取。集群 B 实例没有本地 knowledge.md → open 失败 → except 跳过 → 共享知识丢失。
+
+### 修复
+
+OBS 模式下直接用 read_knowledge 返回的 content，不 open 本地文件。
+非 OBS 模式保持 open 读本地文件（和 dev 一致，保留原始 strip 行为）。
+
+### 逻辑完备性检查
+
+- agent_files OBS 分支 ✅（查 DB member+agent_type + OBS 读取）
+- load_project_info OBS 分支 ✅（查 baseline + OBS 读取 + 兜底本地）
+- knowledge_files OBS 分支 ✅（read_knowledge content + member_files OBS）
+- generate_file_urls agent 部分 ✅（查 DB + 直接用 file_path）
+- 所有 key 格式一致 ✅
