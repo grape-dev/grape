@@ -129,7 +129,8 @@ _TASK_COLUMNS = (
     "skill_id, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
-    "knowledge_files, attempts, pool_agent_type, affinity_runtime_id, "
+    "knowledge_files, project_info_file_urls, knowledge_file_urls, "
+    "attempts, pool_agent_type, affinity_runtime_id, "
     "status, exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
 )
@@ -257,12 +258,85 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
         return {}, {}
 
 
+def _build_file_urls(files: dict, repo_key: str, agent_type: str, issue_id: str,
+                     storage) -> dict:
+    """为 {rel_path: content} 生成 {rel_path: {url, storage_key}}（见 knowledge-obs-design §八）。
+
+    storage 为 None → 返回空 dict（本地模式无 OBS，file_urls 留空，worker 用 content 兜底）。
+    storage_key 生成按 rel_path 模式推导 scope（见 knowledge_storage_key / 设计文档 §二）：
+    - project-info/knowledge.md   → scope=project
+    - issues/{n}/knowledge.md     → scope=issue
+    - issues/{n}/{agent}/knowledge.md → scope=issue_agent
+    - member/... / agent/{type}/...   → 按 OBS key 规则 knowledge/{owner}/{repo}/member|agent/...
+    - 其他（project-graph.md 等）     → storage_key 留空（未存 OBS，worker 用 content）
+    """
+    if storage is None or not files:
+        return {}
+    from src.api.knowledge import knowledge_storage_key, _owner_repo
+    _inum = _issue_num(issue_id)
+    out: dict[str, dict] = {}
+    for rel_path in files:
+        storage_key = ""
+        url = ""
+        try:
+            rp = rel_path.replace("\\", "/")
+            # knowledge.md 文件 → knowledge_storage_key（scope 按 rel_path 推导）
+            if rp.endswith("knowledge.md"):
+                if "/project-info/" in rp and "/issues/" not in rp:
+                    storage_key = knowledge_storage_key(repo_key, "project")
+                elif "/issues/" in rp:
+                    # issues/{n}/knowledge.md 或 issues/{n}/{agent}/knowledge.md
+                    parts_after_issues = rp.split("/issues/", 1)[1]
+                    # parts_after_issues = "{n}/knowledge.md" 或 "{n}/{agent}/knowledge.md"
+                    sub_parts = parts_after_issues.split("/")
+                    # sub_parts[0] = issue_num, 然后可能 [1]=knowledge.md 或 [1]=agent, [2]=knowledge.md
+                    if len(sub_parts) == 2:
+                        # issues/{n}/knowledge.md → scope=issue
+                        storage_key = knowledge_storage_key(repo_key, "issue", issue_num=_inum)
+                    elif len(sub_parts) == 3:
+                        # issues/{n}/{agent}/knowledge.md → scope=issue_agent
+                        storage_key = knowledge_storage_key(repo_key, "issue_agent",
+                                                            agent_type=agent_type, issue_num=_inum)
+                else:
+                    # 不匹配已知模式 → 用 project scope 兜底
+                    storage_key = knowledge_storage_key(repo_key, "project")
+            elif "/member/" in rp or rp.startswith("member/"):
+                # 成员上传文档 → knowledge/{owner}/{repo}/member/{rest}
+                owner, rname = _owner_repo(repo_key)
+                if rp.startswith("member/"):
+                    rest = rp
+                else:
+                    # rel_path 可能是 {owner}/{repo}/project-info/member/... 或 project-info/member/...
+                    rest = rp.split("/member/", 1)[1] if "/member/" in rp else rp
+                    rest = "member/" + rest
+                storage_key = "/".join(["knowledge", owner, rname, rest])
+            elif "/agent/" in rp or rp.startswith("agent/"):
+                # Agent 专属文档 → knowledge/{owner}/{repo}/agent/{agent_type}/{rest}
+                owner, rname = _owner_repo(repo_key)
+                if rp.startswith("agent/"):
+                    rest = rp
+                else:
+                    rest = rp.split("/agent/", 1)[1] if "/agent/" in rp else rp
+                    rest = "agent/" + rest
+                storage_key = "/".join(["knowledge", owner, rname, rest])
+            # else: project-graph.md / project-capabilities.md / .metadata.json → 未存 OBS，storage_key=""
+            if storage_key:
+                url = storage.temporary_url(storage_key, expires=3600)
+        except Exception as e:
+            log.warning(f"_build_file_urls: storage_key/url failed for {rel_path}: {e}")
+            storage_key = ""
+            url = ""
+        out[rel_path] = {"url": url, "storage_key": storage_key}
+    return out
+
+
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
                  repo_gitcode_token="", env_extra=None,
                  event_seq=None, issue_id="", repo_key="", agent_type="",
                  skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
+                 project_info_file_urls=None, knowledge_file_urls=None,
                  pool_agent_type="", affinity_runtime_id=0):
     """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
 
@@ -342,6 +416,15 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         except Exception as e:
             log.warning(f"enqueue: knowledge pack failed for {repo_key}: {e}")
             knowledge_files = {}
+    # 生成 file_urls（url + storage_key，见 knowledge-obs-design §八：字段分开存 + 三级降级）
+    # storage 为 None（本地模式）时 file_urls 为空 dict，worker 用 content 兜底
+    try:
+        from src.storage import get_storage
+        _storage = get_storage()
+    except Exception:
+        _storage = None
+    project_info_file_urls = _build_file_urls(project_info_files, repo_key, agent_type, issue_id, _storage)
+    knowledge_file_urls = _build_file_urls(knowledge_files, repo_key, agent_type, issue_id, _storage)
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
@@ -364,6 +447,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
              json.dumps(knowledge_files),
+             json.dumps(project_info_file_urls), json.dumps(knowledge_file_urls),
              0, pool_agent_type or "", affinity_runtime_id or 0,
              "queued", None, "", "", "", "{}", None, None, datetime.now(timezone.utc).isoformat())
         )

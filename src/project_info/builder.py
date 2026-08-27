@@ -98,6 +98,7 @@ def _write_meta(repo_key: str, meta: dict):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
+        _write_to_obs(repo_key, _META_FILE, json.dumps(meta, ensure_ascii=False))
     except Exception as e:
         log.warning(f"project-info meta write failed {repo_key}: {e}")
 
@@ -108,8 +109,34 @@ def _write_file(repo_key: str, name: str, content: str):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
             f.write(content)
+        _write_to_obs(repo_key, name, content)
     except Exception as e:
         log.warning(f"project-info write failed {repo_key}/{name}: {e}")
+
+
+def _write_to_obs(repo_key: str, name: str, content: str):
+    """写 OBS + 落库 baseline 记录。OBS 写失败时只 log warning（降级到本地）。"""
+    import hashlib
+    try:
+        from src.storage import get_storage
+        storage = get_storage()
+        if not storage:
+            return  # OBS 未启用，只写本地
+        storage_key = f"project-info/{repo_key}/{name}"
+        storage.save_bytes(storage_key, content.encode("utf-8"))
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO agent_shared_knowledge "
+                "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by) "
+                "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'vod')",
+                (repo_key, f"project-info/{name}", storage_key, content_hash)
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"project-info OBS write failed {repo_key}/{name}: {e}")
 
 
 def _run(cmd: list, cwd: str = None, timeout: int = 300) -> tuple[int, str, str]:

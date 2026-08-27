@@ -91,6 +91,37 @@ class StorageBackend(ABC):
     def temporary_url(self, key: str, expires: int = 300) -> str:
         """签发临时签名 GET URL（有效期秒）。"""
 
+    def list_objects_with_meta(self, prefix: str, cursor: str = "", limit: int = 1000) -> tuple[list[dict], str | None]:
+        """枚举指定前缀下的对象，返回 (items, next_cursor)。
+
+        每个 item: {key, size, last_modified(ISO 8601)}。
+        next_cursor 非空表示还有更多——传入下次查询的 cursor。
+        默认实现：调 list_keys 拿 key 列表（不含 size/last_modified）。
+        子类（OBS）可重写以返回完整元数据。
+        """
+        keys = self.list_keys(prefix)
+        items = [{"key": k, "size": 0, "last_modified": ""} for k in keys]
+        return items, None
+
+    async def read_batch(self, keys: list[str]) -> dict[str, str]:
+        """批量并发读取——限制并发数防止触发存储限流。
+
+        返回 {key: content}，失败的返回空字符串。
+        """
+        import asyncio
+        sem = asyncio.Semaphore(10)
+
+        async def _read(key: str) -> tuple[str, str]:
+            async with sem:
+                try:
+                    data = self.read_bytes(key)
+                    return key, (data.decode("utf-8") if isinstance(data, bytes) else (data or ""))
+                except Exception:
+                    return key, ""
+
+        results = await asyncio.gather(*[_read(k) for k in keys])
+        return dict(results)
+
 
 # ===== 单例 =====
 

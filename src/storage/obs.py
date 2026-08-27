@@ -139,6 +139,52 @@ class ObsStorage(StorageBackend):
             log.warning(f"listObjects {prefix} failed: {e}")
         return keys
 
+    def list_objects_with_meta(self, prefix: str, cursor: str = "", limit: int = 1000) -> tuple[list[dict], str | None]:
+        """枚举指定前缀下的对象，返回 (items, next_cursor)。
+
+        OBS listObjects 已返回 size 和 lastModified——直接用。
+        每个 item: {key, size, last_modified(ISO 8601)}。
+        """
+        items: list[dict] = []
+        next_cursor: str | None = None
+        try:
+            marker = self._full(cursor) if cursor else None
+            while True:
+                kwargs = {"prefix": self._full(prefix), "max_keys": limit}
+                if marker:
+                    kwargs["marker"] = marker
+                resp = self.client.listObjects(self.bucket, **kwargs)
+                body = resp.get("body") if isinstance(resp, dict) else getattr(resp, "body", None)
+                if not isinstance(body, dict):
+                    break
+                for content in (body.get("contents") or []):
+                    if isinstance(content, dict):
+                        full_key = content.get("key", "")
+                        size = content.get("size", 0)
+                        last_mod = content.get("lastModified", "")
+                    else:
+                        full_key = getattr(content, "key", "")
+                        size = getattr(content, "size", 0)
+                        last_mod = getattr(content, "lastModified", "")
+                    if full_key:
+                        items.append({
+                            "key": self._strip_prefix(full_key),
+                            "size": int(size) if size else 0,
+                            "last_modified": str(last_mod) if last_mod else "",
+                        })
+                truncated = body.get("is_truncated") or body.get("isTruncated")
+                if truncated and items:
+                    marker = self._full(items[-1]["key"])
+                    next_cursor = items[-1]["key"]
+                    if len(items) >= limit:
+                        break  # 够了，下次从 cursor 继续
+                else:
+                    next_cursor = None
+                    break
+        except Exception as e:
+            log.warning(f"list_objects_with_meta {prefix} failed: {e}")
+        return items, next_cursor
+
     def delete_object(self, key: str) -> bool:
         """单对象删除（固定 key 模型：每技能仅 1 对象，删除 = 单对象）。"""
         try:

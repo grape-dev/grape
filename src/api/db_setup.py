@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     scope TEXT DEFAULT 'global',
     owner_id TEXT DEFAULT '',
     repo_key TEXT DEFAULT NULL,          -- 关联项目 repo_key（注册时从凭据复制）
+    worker_version TEXT DEFAULT '',      -- worker 自报版本号（心跳/兼容性检测，见 knowledge-obs-design）
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id)
 )
@@ -281,6 +282,8 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     project_info_files MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content}，repo 全局 project-info 随任务交付（§2.4）
     project_info_meta  MEDIUMTEXT DEFAULT '{}',   -- JSON: {last_commit_sha, branches, last_updated, degraded}
     knowledge_files    MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content}，共享知识快照交付（event-conversation-design.md §3.1.1）
+    project_info_file_urls TEXT DEFAULT '',       -- project-info 文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
+    knowledge_file_urls    TEXT DEFAULT '',       -- 知识文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/completed/failed/cancelled
     exit_code         INTEGER DEFAULT NULL,
     result_text       MEDIUMTEXT DEFAULT '',
@@ -416,7 +419,10 @@ CREATE TABLE IF NOT EXISTS agent_shared_knowledge (
     status      TEXT DEFAULT 'accepted',    -- accepted / rejected
     source_seq  INTEGER DEFAULT 0,
     created_by  TEXT DEFAULT '',
-    created_at  TEXT DEFAULT (datetime('now'))
+    created_at  TEXT DEFAULT (datetime('now')),
+    obs_key      VARCHAR(512) DEFAULT '',    -- OBS 对象键（正文已搬入对象存储，见 knowledge-obs-design）
+    content_hash VARCHAR(64) DEFAULT '',     -- 正文内容哈希（变更检测/增量同步）
+    updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP  -- 最近内容更新时间（OBS 同步审计）
 )
 """
 
@@ -1011,6 +1017,15 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
+        # ===== knowledge-obs-design：agent_shared_knowledge OBS 对象存储字段 =====
+        "ALTER TABLE agent_shared_knowledge ADD COLUMN obs_key VARCHAR(512) DEFAULT ''",
+        "ALTER TABLE agent_shared_knowledge ADD COLUMN content_hash VARCHAR(64) DEFAULT ''",
+        "ALTER TABLE agent_shared_knowledge ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        # ===== knowledge-obs-design：agent_tasks 知识/project-info OBS 临时 URL =====
+        "ALTER TABLE agent_tasks ADD COLUMN project_info_file_urls TEXT DEFAULT ''",
+        "ALTER TABLE agent_tasks ADD COLUMN knowledge_file_urls TEXT DEFAULT ''",
+        # ===== knowledge-obs-design：agent_runtimes worker 版本自报 =====
+        "ALTER TABLE agent_runtimes ADD COLUMN worker_version TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
