@@ -28,8 +28,27 @@ DDL 同步修改（新库建表时包含 obs_key + content_hash）。
 
 content_hash 作用：
 - 写入时计算 hash 存 DB（hashlib.sha256(content).hexdigest()[:64]）
-- 读取时查 DB hash 对比本地缓存 hash → 一样用缓存 / 不一样从 OBS 重新拉
+- 读取时查 DB hash 对比本地缓存 hash → 一样用缓存 / 不一样从存储重新拉
 - 保证集群多实例缓存一致性——DB hash 变了所有实例立即发现
+
+updated_at 作用：
+- 记录最后更新时间，排查用
+- DDL 加 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+
+本地缓存方案（hash 比对）：
+```python
+_knowledge_cache: dict[str, tuple[str, str]] = {}  # {storage_key: (content, hash)}
+
+def read_with_cache(storage_key, db_hash):
+    cached = _knowledge_cache.get(storage_key)
+    if cached and cached[1] == db_hash:
+        return cached[0]  # hash 一样，用缓存
+    content = storage.read_bytes(storage_key)  # hash 不一样或没缓存，从存储拉
+    _knowledge_cache[storage_key] = (content, db_hash)
+    return content
+```
+- 缓存命中：0.13ms（DB hash 查询 + hash 对比）vs 10-50ms（存储网络读取）→ 快 100 倍
+- 集群一致性：实例 A 写知识库 → DB hash 更新 → 实例 B 下次读发现 hash 不一样 → 从存储重新拉
 
 与 skill 表完全同模式：skill 用 skill_path（本地）+ file_path（OBS），knowledge 用 file_path（本地）+ obs_key（OBS）+ content_hash（缓存一致性）。
 
@@ -604,26 +623,63 @@ OBS 无 append，用读-合并-覆盖写。两个 agent 同时沉淀知识可能
 
 本地模式 open("a") 是原子追加，OBS 的读-合并-覆盖不是原子——OBS 模式并发风险比本地大。
 
-但知识文件写入频率低（Agent 完成任务时才写一次），实际并发概率很小。可接受。
+但知识文件写入频率低（Agent 完成任务时才写一次），实际并发概率很小。接受风险 + 并发写时 log warning。
 
 ### 2. _member_docs 的 lastModified 格式
 
-OBS 返回 "2026/08/23 05:34:43"，需要转成 "2026-08-23 05:34:43"。
+list_objects_with_meta 返回的 lastModified 是 OBS 的时间戳格式（RFC 1123），前端可能期望 Unix timestamp 或 ISO 8601。
+
+修复：list_objects_with_meta 统一返回 ISO 8601 格式。
 
 ### 3. list_objects_with_meta 性能
 
-知识文件数量少（每个 repo 几个到十几个），一次调用即可，不存在性能问题。
+OBS list_objects 每次最多 1000 条，成员文档多时需要分页。
+
+修复：list_objects_with_meta 支持分页，cursor 推进直到查完。
 
 ### 4. OBS 读取失败回退
 
 OBS 网络异常时回退本地 file_path。如果本地文件也不存在（容器化部署没有工作区），返回空字符串——Worker 拿不到知识但不崩溃。
 
+### 5. member_files 重复打包
+
+现有设计：member_files() 在两个地方被打包：
+- enqueue_task 里 member_files_pi() → 并入 project_info_files → Worker 落地到 .project-info/member/
+- knowledge_files() 里 member_files() → 并入 knowledge_files → Worker 落地到 .knowledge/owner/repo/.../member/
+
+两个函数读的是同一个目录 `workspace/{owner}/{repo}/project-info/member/`，只是 rel_path 格式不同。
+
+prompt 引导 Agent 读 `{{PROJECT_INFO_DIR}}/member/`，没有引导读 `{{KNOWLEDGE_DIR}}/member/`。第 2 个打包可能是无效的，但不确定是历史遗留还是兜底设计，贸然去掉有风险。
+
+OBS 改造处理：不去掉 member_files()（保持现有行为），但 OBS 只存一份——member_files 和 member_files_pi 共用同一个 storage_key。project_info_file_urls 和 knowledge_file_urls 里指向同一个 OBS 对象，Worker 两次下载同一个 URL（第二次走本地缓存）。
+
+### 6. temporary_url 1 小时过期
+
+enqueue_task 每次创建任务时重新生成 temporary_url（有效期 1 小时）。任务排队超过 1 小时时 URL 过期。
+
+影响不大——任务排队超过 1 小时的场景很少（Worker 空闲就 claim）。即使过期了还有 content 兜底，不会丢数据。接受降级。
+
+### 7. delete_knowledge OBS 删失败
+
+delete_object 失败时 OBS 里文件还在，如果 DB obs_key 已清空 → 残留孤儿对象。
+
+修复：先删 OBS 再清 DB——OBS 删失败时 DB 不清 obs_key，下次同步任务重试删除。log warning 记录失败。
+
+### 8. 后台同步和正常写入的并发
+
+后台同步任务读本地文件 → 写 OBS → 更新 DB obs_key。同时 Agent 调 write_knowledge 写本地文件 → 写 OBS → 更新 DB obs_key。
+
+两个都通过 db_lock 保护——不会并发写同一行。同步任务和 write_knowledge 不会同时操作同一行。
+
 ## 十三、数据库新增字段
 
 | # | 表.字段 | 类型 | 默认值 | 用途 |
 |---|---------|------|--------|------|
-| 1 | agent_shared_knowledge.obs_key | VARCHAR(512) | '' | OBS 对象键——非空走 OBS，空走本地 |
+| 1 | agent_shared_knowledge.obs_key | VARCHAR(512) | '' | 存储对象键——非空走存储，空走本地 |
 | 2 | agent_shared_knowledge.content_hash | VARCHAR(64) | '' | 内容 hash——缓存一致性比对 |
+| 3 | agent_shared_knowledge.updated_at | DATETIME | CURRENT_TIMESTAMP | 最后更新时间，排查用 |
+| 4 | agent_tasks.project_info_file_urls | TEXT | '' | JSON: {rel_path: {url, storage_key}} |
+| 5 | agent_tasks.knowledge_file_urls | TEXT | '' | JSON: {rel_path: {url, storage_key}} |
 
 ## 十四、项目知识基线文件 OBS 改造（补充）
 
