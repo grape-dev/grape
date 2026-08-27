@@ -235,6 +235,31 @@ class ObsStorage(StorageBackend):
                 else:
                     out[rel_path] = {"url": "", "storage_key": ""}
 
+            # Agent 专属文档：按 scope='member' AND agent_type != '' 查 DB obs_key
+            # agent_files 返回 {rel_path: content}——rel_path 相对 project-info 目录（agent/{agent_type}/{name}）
+            # upload_knowledge agent scope 存 DB scope='member' + agent_type={agent_type}
+            with db_lock:
+                if agent_type:
+                    rows = db.cursor().execute(
+                        "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                        "WHERE repo_key=? AND scope='member' AND agent_type=? AND obs_key!='' AND obs_key IS NOT NULL "
+                        "ORDER BY id DESC",
+                        (repo_key, agent_type)
+                    ).fetchall()
+                else:
+                    rows = []
+            from src.api.knowledge import agent_files
+            for rel_path in agent_files(repo_key, agent_type).keys():
+                obs_key = ""
+                for fp, ok in rows:
+                    if fp and ok and rel_path.endswith(os.path.basename(fp)):
+                        obs_key = ok
+                        break
+                if obs_key:
+                    out[rel_path] = {"url": self.temporary_url(obs_key, expires=3600), "storage_key": obs_key}
+                else:
+                    out[rel_path] = {"url": "", "storage_key": ""}
+
             # 基线文件：按 scope='baseline' 查 DB obs_key
             with db_lock:
                 rows = db.cursor().execute(
@@ -244,7 +269,7 @@ class ObsStorage(StorageBackend):
                     (repo_key,)
                 ).fetchall()
             # load_project_info 返回的 rel_path 只有文件名（project-graph.md 等）
-            # DB file_path 是 project-info/{filename}——用 basename 匹配
+            # DB file_path 是 WORKSPACE_DIR 相对（owner/repo/project-info/{filename}）——用 basename 匹配
             baseline_basename_map = {}
             for fp, ok in rows:
                 if fp and ok:

@@ -384,7 +384,7 @@ async def upload_knowledge(file: UploadFile = File(...),
         if storage is not None:
             from src.api.knowledge import _owner_repo
             _owner, _rname = _owner_repo(repo_key)
-            # 按文件名生成 storage_key（和 _build_file_urls 推导一致）
+            # 按文件名生成 storage_key（和 generate_file_urls 的 member 部分匹配逻辑一致）
             if scope == "agent":
                 storage_key = f"knowledge/{_owner}/{_rname}/agent/{agent_type}/{name}"
             else:
