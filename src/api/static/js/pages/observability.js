@@ -384,18 +384,27 @@ function _actionText(t) {
 
 function _buildSequence(iss) {
   const agents = [];
-  for (const ev of iss.events) { const a = ev.agentType || '\u2014'; if (!agents.includes(a)) agents.push(a); }
+  for (const ev of iss.events) { const a = ev.agentType || '—'; if (!agents.includes(a)) agents.push(a); }
   const lines = ['sequenceDiagram', 'autonumber'];
   for (const a of agents) lines.push('    participant ' + _mermaidId(a) + ' as ' + a);
-  const statuses = []; let prev = null;
+  const statuses = [];
+  let prev = null;
   for (const ev of iss.events) {
-    const a = _mermaidId(ev.agentType || '\u2014');
+    const a = _mermaidId(ev.agentType || '—');
     const t = ev.createdAt ? ev.createdAt.slice(11, 19) : '';
     const label = t ? t + ' ' + _actionText(ev.eventType) : _actionText(ev.eventType);
-    if (prev && a !== prev) { lines.push('    ' + prev + '->>' + a + ': ' + label); statuses.push(ev.status); }
-    lines.push('    ' + a + '->>' + a + ': ' + label); statuses.push(ev.status); prev = a;
+    if (prev && a !== prev) {
+      // 跨 agent 交互：prev -> a
+      lines.push('    ' + prev + '->>' + a + ': ' + label);
+      statuses.push(ev.status);
+    } else {
+      // 同 agent 连续事件或首个事件：用 Note 标注（不挤在一行）
+      lines.push('    Note over ' + a + ': ' + label);
+      statuses.push(ev.status);
+    }
+    prev = a;
   }
-  return { text: lines.join('\\n'), statuses };
+  return { text: lines.join('\n'), statuses };
 }
 
 function _applySequenceColors(svg, statuses) {
