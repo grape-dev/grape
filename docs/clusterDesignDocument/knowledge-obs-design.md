@@ -956,3 +956,44 @@ OBS 模式下部分函数仍然读本地磁盘，集群场景下其他实例没�
 - builder.py _write_to_obs() — 已加
 - vod_handler_async.py — 已查 DB baseline
 - _materialize_files() — Worker 侧三级降级
+
+
+## 十七、第七~九轮深度检查——兜底/去重/清理（2026-08-27）
+
+### 第七轮：兜底 + 去重
+
+1. load_project_info OBS 分支查不到 baseline 时回退本地读取（兜底）
+   - DB 查到 baseline → OBS 读取 → 返回
+   - DB 查不到 → 继续走本地逻辑（和 dev 一致）
+   
+2. member_files/member_files_pi/agent_files DB 查询去重
+   - 同一个 file_path 多条 DB 记录（upload_knowledge 每次上传 INSERT 一行）
+   - 需要按 file_path 去重只保留最新 obs_key
+
+### 第八轮：GROUP BY 改 Python 去重 + 扩展名过滤
+
+1. GROUP BY file_path 的 obs_key 取值不确定（MySQL GROUP BY 非聚合列）
+   - 改为 ORDER BY id DESC + Python 侧 seen set 去重
+   - 确保取最新 id 的 obs_key
+
+2. member_files/member_files_pi/agent_files OBS 分支加扩展名过滤
+   - 本地模式只读 .md/.txt/.json
+   - OBS 分支也加同样的扩展名过滤（行为一致）
+
+3. generate_file_urls member/agent 同样改为 Python 去重
+   - SELECT 加 id 列用于排序
+   - Python 侧 seen set 去重
+
+### 第九轮：无用 import 清理
+
+1. obs.py 删掉无用 import member_files
+   - generate_file_urls 改后不再调 member_files()
+   - import 了但没用到 → 删掉
+
+### 不修（dev 分支原有行为）
+
+- member_files 返回含 agent 专属文档（重复打包）
+  - dev 分支本地模式也遍历 agent 子目录
+  - 不是 OBS 改造引入的
+  - key 格式不同不会 dict 覆盖
+  - Worker 多落一份文件——不影响功能
