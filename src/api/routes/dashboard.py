@@ -165,6 +165,26 @@ async def get_ops_overview(repo: str = ""):
         if has_local:
             worker_total += 1
             worker_online += 1
+            # 把本机指标写入 runtime_credentials（name='本机' 虚拟记录），供运营管理台读取
+            try:
+                c.execute("SELECT id FROM runtime_credentials WHERE name='本机'")
+                _row = c.fetchone()
+                if _row:
+                    c.execute(
+                        "UPDATE runtime_credentials SET status='active', last_seen_at=?, last_ip='127.0.0.1', "
+                        "cpu_percent=?, memory_percent=?, disk_percent=?, load_avg=? WHERE name='本机'",
+                        (now_iso, _local_cpu, _local_mem, _local_disk, _local_load)
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO runtime_credentials (token_hash, name, device_name, status, last_seen_at, last_ip, "
+                        "cpu_percent, memory_percent, disk_percent, load_avg, scope, owner_name) "
+                        "VALUES ('local-virtual', '本机', '本机直连', 'active', ?, '127.0.0.1', ?, ?, ?, ?, 'global', '')",
+                        (now_iso, _local_cpu, _local_mem, _local_disk, _local_load)
+                    )
+                db.commit()
+            except Exception:
+                pass
             worker_list.append({
                 "id": 0, "name": "本机", "device_name": "本机直连",
                 "status": "online", "health": "online",
