@@ -1044,7 +1044,9 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
             if output and output.get("conclusion"):
                 _conclusion = output["conclusion"]
             update_event_complete(task["event_seq"], status, exit_code=exit_code,
-                                  duration=duration, result=_conclusion or (result_text or "")[:200])
+                                  duration=duration,
+                                  completed_at=datetime.now(timezone.utc).isoformat(),
+                                  result=_conclusion or (result_text or "")[:200])
         except Exception as e:
             log.warning(f"complete_task finalize failed: {e}")
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
@@ -1086,6 +1088,7 @@ def fail_task(task_id, error, exit_code=-1):
                                    tokens=[task.get("repo_gitcode_token") or ""],
                                    issue_num_hint=task.get("issue_id") or "")
             update_event_complete(task["event_seq"], "failed", exit_code=exit_code,
+                                  completed_at=datetime.now(timezone.utc).isoformat(),
                                   result=(error or "")[:200])
         except Exception as e:
             log.warning(f"fail_task finalize failed: {e}")

@@ -143,6 +143,8 @@ Content-Type: application/json
 {"body": "[Coding Agent] ✅ 已完成实现，请审查 PR [#{pr_number}](https://gitcode.com/{owner}/{repo}/pull/{pr_number})。"}
 ```
 
+> ⚠️ 网页 URL 是 `pull/`（单数），不是 API 路径的 `pulls/`（复数）。拼错会导致链接 404。
+
 **跳过此步 = 事件未完成处理。**
 
 ### 能力九：A2A 通知 QA Agent 代码审查
