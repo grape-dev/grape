@@ -72,6 +72,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Sweeper loop start failed: {e}")
 
+    # 知识库 OBS 同步：后台定时迁移老数据到 OBS（每小时一次）
+    _knowledge_sync_task = None
+    try:
+        async def _knowledge_sync_wrapper():
+            from src.storage import get_storage
+            if not get_storage():
+                return  # OBS 未启用，不需要同步
+            from src.api.knowledge import knowledge_sync_loop
+            await knowledge_sync_loop()
+        _knowledge_sync_task = asyncio.create_task(_knowledge_sync_wrapper())
+        log.info("Knowledge sync loop started")
+    except Exception as e:
+        log.warning(f"Knowledge sync loop start failed: {e}")
+
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
     _probe_task = None
@@ -82,9 +96,15 @@ async def lifespan(app: FastAPI):
             while True:
                 def _run():
                     from src.runtime.local_probe import probe_local_engines
+                    from src.runtime.agent import _scan_local_skills_with_detail
                     from src.user import db as user_db
                     probed = [r for r in probe_local_engines(discover_runtimes()) if r.get("installed")]
                     if probed:
+                        # 扫描本机 local_skills 详情并注入
+                        for r in probed:
+                            _name = (r.get("name") or "").strip().lower()
+                            r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
+                            r["local_skills"] = [s["name"] for s in r["local_skills_detail"]]
                         user_db.save_agent_runtimes(probed)
                     return len(probed)
                 try:
@@ -270,6 +290,17 @@ app.include_router(health.router)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    # Prevent browser from caching stale JS/CSS (version bump in ?v= is the primary cache-buster,
+    # but this header ensures even without ?v= change the browser revalidates)
+    from starlette.middleware.base import BaseHTTPMiddleware
+    class NoCacheStaticMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            resp = await call_next(request)
+            if request.url.path.startswith("/static/"):
+                resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            return resp
+    app.add_middleware(NoCacheStaticMiddleware)
 
     from fastapi.responses import FileResponse
     @app.get("/")

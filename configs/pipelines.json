@@ -1,0 +1,80 @@
+{
+  "scenes": {
+    "default": {
+      "name": "通用开发",
+      "nodes": [
+        {"id": "vod", "tag": "vod", "skill": "vod", "mode": "emit", "next": "issue", "handoff": "a2a"},
+        {"id": "issue", "tag": "issue", "skill": "issue-advance", "mode": "emit", "next": "coding", "handoff": "a2a"},
+        {"id": "coding", "tag": "coding", "skill": "implementation", "mode": "emit", "next": "qa", "handoff": "a2a"},
+        {"id": "qa", "tag": "qa", "skill": "pr", "mode": "emit", "next": "sre", "handoff": "a2a"},
+        {"id": "sre", "tag": "sre", "skill": "cloud-deploy", "mode": "emit", "next": "done", "handoff": "complete"}
+      ],
+      "onboarding": "repo-onboarding"
+    },
+    "cloud-native": {
+      "name": "云原生开发",
+      "nodes": [
+        {"id": "vod", "tag": "vod", "skill": "vod", "mode": "emit", "next": "issue", "handoff": "a2a"},
+        {"id": "issue", "tag": "issue", "skill": "issue-advance", "mode": "emit", "next": "coding", "handoff": "a2a"},
+        {"id": "coding", "tag": "coding", "skill": "implementation", "mode": "emit", "next": "qa", "handoff": "a2a"},
+        {"id": "qa", "tag": "qa", "skill": "pr", "mode": "emit", "next": "sre", "handoff": "a2a"},
+        {"id": "sre", "tag": "sre", "skill": "cloud-deploy", "mode": "emit", "next": "done", "handoff": "complete"}
+      ],
+      "onboarding": "repo-onboarding"
+    },
+    "iac": {
+      "name": "IaC开发",
+      "nodes": [
+        {"id": "vod", "tag": "vod", "skill": "iac-vod", "mode": "emit", "next": "issue", "handoff": "a2a"},
+        {"id": "issue", "tag": "issue", "skill": "iac-issue", "mode": "emit", "next": "coding", "handoff": "a2a"},
+        {"id": "coding", "tag": "coding", "skill": "iac-coding", "mode": "emit", "next": "qa", "handoff": "a2a"},
+        {"id": "qa", "tag": "qa", "skill": "iac-qa", "mode": "emit", "next": "sre", "handoff": "a2a"},
+        {"id": "sre", "tag": "sre", "skill": "iac-sre", "mode": "emit", "next": "done", "handoff": "complete"}
+      ],
+      "onboarding": "repo-onboarding"
+    },
+    "agent-dev": {
+      "name": "Agent开发",
+      "nodes": [
+        {"id": "vod", "tag": "vod", "skill": "vod", "mode": "emit", "next": "issue", "handoff": "a2a"},
+        {"id": "issue", "tag": "issue", "skill": "issue-advance", "mode": "emit", "next": "coding", "handoff": "a2a"},
+        {"id": "coding", "tag": "coding", "skill": "implementation", "mode": "emit", "next": "qa", "handoff": "a2a"},
+        {"id": "qa", "tag": "qa", "skill": "pr", "mode": "emit", "next": "sre", "handoff": "a2a"},
+        {"id": "sre", "tag": "sre", "skill": "cloud-deploy", "mode": "emit", "next": "done", "handoff": "complete"}
+      ],
+      "onboarding": "repo-onboarding"
+    },
+    "skill-dev": {
+      "name": "华为云Skill开发",
+      "nodes": [
+        {"id": "vod", "tag": "vod", "skill": "vod", "mode": "emit", "next": "issue", "handoff": "a2a"},
+        {"id": "issue", "tag": "issue", "skill": "skill-issue", "mode": "emit", "next": "coding", "handoff": "a2a"},
+        {"id": "coding", "tag": "coding", "skill": "skill-creator", "mode": "emit", "next": "qa", "handoff": "a2a"},
+        {"id": "qa", "tag": "qa", "skill": "skill-tester", "mode": "emit", "next": "sre", "handoff": "a2a"},
+        {"id": "sre", "tag": "sre", "skill": "skill-publish", "mode": "emit", "next": "done", "handoff": "complete"}
+      ],
+      "onboarding": "repo-onboarding"
+    },
+    "api-skill-dev": {
+      "name": "通用Skill开发",
+      "nodes": [
+        {"id": "vod", "tag": "vod", "skill": "vod", "mode": "emit", "next": "issue", "handoff": "a2a"},
+        {"id": "issue", "tag": "issue", "skill": "skill-issue", "mode": "emit", "next": "coding", "handoff": "a2a"},
+        {"id": "coding", "tag": "coding", "skill": "rest-api-skill-creator", "mode": "emit", "next": "qa", "handoff": "a2a"},
+        {"id": "qa", "tag": "qa", "skill": "rest-api-skill-tester", "mode": "emit", "next": "sre", "handoff": "a2a"},
+        {"id": "sre", "tag": "sre", "skill": "skill-publish", "mode": "emit", "next": "done", "handoff": "complete"}
+      ],
+      "onboarding": "repo-onboarding"
+    },
+    "blog-publish": {
+      "name": "博客发布",
+      "nodes": [
+        {"id": "vod", "tag": "vod", "skill": "blog-vod", "mode": "emit", "next": "issue", "handoff": "a2a"},
+        {"id": "issue", "tag": "issue", "skill": "blog-issue", "mode": "emit", "next": "coding", "handoff": "a2a"},
+        {"id": "coding", "tag": "coding", "skill": "ai-blog-generation", "mode": "emit", "next": "sre", "handoff": "a2a", "skip": ["qa"]},
+        {"id": "sre", "tag": "sre", "skill": "blog-publish", "mode": "emit", "next": "done", "handoff": "complete"}
+      ],
+      "onboarding": "repo-onboarding"
+    }
+  }
+}

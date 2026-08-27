@@ -44,12 +44,13 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee FROM issue_state WHERE repo_key=? AND issue_id=?",
+            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id FROM issue_state WHERE repo_key=? AND issue_id=?",
                       (repo_key, issue_id))
             row = c.fetchone()
             if row:
                 return {"id": row[0], "stage": row[1], "owner_agent": row[2],
-                        "a2a_seq": row[3], "updated_at": row[4], "assignee": row[5] or ""}
+                        "a2a_seq": row[3], "updated_at": row[4], "assignee": row[5] or "",
+                        "scene_id": row[6] or ""}
     except Exception:
         pass
     return None
@@ -98,6 +99,38 @@ def get_issue_assignee(repo_key: str, issue_id: str) -> str:
     """返回 Issue 责任人（GitCode assignee 用户名；无记录空）。"""
     st = get_issue_stage(repo_key, issue_id)
     return (st["assignee"] if st else "") or ""
+
+
+def get_issue_scene(repo_key: str, issue_id: str) -> str:
+    """读取 Issue 级开发场景。空则回退到仓库默认场景。"""
+    st = get_issue_stage(repo_key, issue_id)
+    if st and st.get("scene_id"):
+        return st["scene_id"]
+    try:
+        from src.user.db import get_repo_scene
+        return get_repo_scene(repo_key) or "default"
+    except Exception:
+        return "default"
+
+
+def set_issue_scene(repo_key: str, issue_id: str, scene_id: str):
+    """写入 Issue 级开发场景（VOD 判定后调用，幂等）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
+        row = c.fetchone()
+        if row:
+            c.execute("UPDATE issue_state SET scene_id=? WHERE id=?", (scene_id or "", row[0]))
+        else:
+            # 无记录时插入一行（stage 默认 vod），后续 set_issue_stage 会 UPDATE
+            c.execute(
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, scene_id, updated_at) "
+                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
+                (repo_key, issue_id, scene_id or ""),
+            )
+        db.commit()
+    from src.config import log
+    log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id}")
 
 
 def get_or_create_agent_session(repo_key: str, agent_type: str,

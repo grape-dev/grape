@@ -255,7 +255,8 @@ def _wheels_fingerprint() -> str:
 
 
 def package_version() -> str:
-    """当前包版本：git commit/manifest 指纹 + wheels 指纹 + 内置 python 指纹。"""
+    """当前包版本：git commit/manifest 指纹 + wheels 指纹 + 内置 python 指纹。
+    如有未提交改动，追加 -dirty 后缀强制重建包。"""
     base = ""
     try:
         if os.path.isdir(os.path.join(ROOT, ".git")) or os.path.isfile(os.path.join(ROOT, ".git")):
@@ -265,6 +266,13 @@ def package_version() -> str:
             )
             if r.returncode == 0 and r.stdout.strip():
                 base = "git-" + r.stdout.strip()
+                # 检测未提交改动（working directory dirty → 版本号变化 → 强制重建包）
+                d = subprocess.run(
+                    ["git", "-C", ROOT, "status", "--porcelain", "-uno"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if d.returncode == 0 and d.stdout.strip():
+                    base += "-dirty"
     except Exception:
         pass
     if not base:

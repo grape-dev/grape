@@ -6,6 +6,8 @@
 let _obsTab = 'overview';
 let _obsTimer = null;
 let _obsData = { ops: null, realtime: null, metrics: null };
+let _obsRendered = false;      // 概览/任务 Tab 是否已用 innerHTML 渲染过骨架
+let _obsRenderedTab = null;    // 已渲染骨架的 tab（切换 tab 时需重新建骨架）
 
 function renderObservability() {
   const pc = document.getElementById('pageContent');
@@ -17,7 +19,7 @@ function renderObservability() {
         <div style="display:flex;align-items:center;gap:10px">
           <span class="ts t3" id="obsLastUpdate">-</span>
           <button class="bt bt-o bt-s" onclick="refreshObs()">🔄 刷新</button>
-          <label class="ts t3" style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="obsAuto" onchange="toggleObsAuto()" style="margin:0">自动(10s)</label>
+          <label class="ts t3" style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="obsAuto" onchange="toggleObsAuto()" checked style="margin:0">自动(10s)</label>
         </div>
       </div>
       <div class="stabs" style="padding:0 20px;border-bottom:1px solid var(--b)">
@@ -30,15 +32,19 @@ function renderObservability() {
     </div>
   `;
   refreshObs();
+  startObsAuto();
 }
 
 function switchObsTab(tab, ev) {
   _obsTab = tab;
   document.querySelectorAll('.stabs a').forEach(a => a.classList.remove('ac'));
   if (ev) ev.target.classList.add('ac');
+  // 切换 tab 时重置渲染状态，强制重建 DOM 骨架
+  _obsRendered = false;
+  _obsRenderedTab = null;
   // 直接用缓存数据渲染，不重新 fetch
   if (_obsData.ops) {
-    renderObsContent();
+    renderObsContent(false);
   } else {
     refreshObs();
   }
@@ -46,14 +52,28 @@ function switchObsTab(tab, ev) {
 
 function toggleObsAuto() {
   const cb = document.getElementById('obsAuto');
-  if (cb && cb.checked) { _obsTimer = setInterval(refreshObs, 10000); }
-  else { clearInterval(_obsTimer); _obsTimer = null; }
+  if (cb && cb.checked) { startObsAuto(); }
+  else { stopObsAuto(); }
 }
 
-function refreshObs() {
+function startObsAuto() {
+  stopObsAuto();
+  _obsTimer = setInterval(() => refreshObs(true), 10000);
+}
+
+function stopObsAuto() {
+  clearInterval(_obsTimer);
+  _obsTimer = null;
+}
+
+// isAutoRefresh=true 表示由定时器静默触发（不显示"加载中"，走局部更新路径）
+function refreshObs(isAutoRefresh) {
   const c = document.getElementById('obsContent');
   if (!c) return;
-  c.innerHTML = '<div class="loading">加载中...</div>';
+  // 静默刷新（定时器触发）不显示"加载中"，保留旧数据直到新数据到达
+  if (!isAutoRefresh && !_obsRendered) {
+    c.innerHTML = '<div class="loading">加载中...</div>';
+  }
   // 获取当前选中仓库，过滤仅该仓库的任务
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
   const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
@@ -66,11 +86,11 @@ function refreshObs() {
     const now = new Date().toLocaleTimeString('zh-CN');
     const lu = document.getElementById('obsLastUpdate');
     if (lu) lu.textContent = now;
-    renderObsContent();
+    renderObsContent(isAutoRefresh);
   });
 }
 
-function renderObsContent() {
+function renderObsContent(isAutoRefresh) {
   const c = document.getElementById('obsContent');
   if (!c) return;
   const { ops, realtime, metricsText } = _obsData;
@@ -80,24 +100,65 @@ function renderObsContent() {
   const rt = realtime || {};
   const mt = metricsText || '';
 
-  if (_obsTab === 'overview') {
-    c.innerHTML = renderOverview(realOps, rt, mt);
+  // 错误日志 Tab: 独立异步加载，只首次加载 + 手动刷新，定时器不触发
+  if (_obsTab === 'errorlogs') {
+    if (!isAutoRefresh) loadErrorLogs(c);
+    return;
   }
-  else if (_obsTab === 'tasks') c.innerHTML = renderTasksTab(realOps, rt, mt);
-  else if (_obsTab === 'anomaly') renderAnomalyTab(c, realOps);
-  else if (_obsTab === 'errorlogs') loadErrorLogs(c);
+  // 异常任务 Tab: 数据量小，整体替换可接受
+  if (_obsTab === 'anomaly') {
+    renderAnomalyTab(c, realOps);
+    _obsRendered = false;  // anomaly 不走局部更新，每次重建
+    return;
+  }
+
+  // overview / tasks Tab: 首次用 innerHTML 建骨架，后续走局部更新
+  const canPartialUpdate = isAutoRefresh && _obsRendered && _obsRenderedTab === _obsTab;
+
+  if (_obsTab === 'overview') {
+    if (canPartialUpdate) {
+      // 尝试局部更新；元素缺失（如新增 worker）时回退到完整渲染
+      if (!updateOverview(realOps, rt, mt)) {
+        c.innerHTML = renderOverview(realOps, rt, mt);
+        _obsRendered = true;
+        _obsRenderedTab = _obsTab;
+      }
+    } else {
+      c.innerHTML = renderOverview(realOps, rt, mt);
+      _obsRendered = true;
+      _obsRenderedTab = _obsTab;
+    }
+  }
+  else if (_obsTab === 'tasks') {
+    if (canPartialUpdate) {
+      if (!updateTasks(realOps, rt, mt)) {
+        c.innerHTML = renderTasksTab(realOps, rt, mt);
+        _obsRendered = true;
+        _obsRenderedTab = _obsTab;
+      }
+    } else {
+      c.innerHTML = renderTasksTab(realOps, rt, mt);
+      _obsRendered = true;
+      _obsRenderedTab = _obsTab;
+    }
+  }
 }
 
 // ===== KPI 卡片行（仿 multica KpiCard grid）=====
-function kpiRow(cards) {
+// 带 id 的版本（value span 加 id 供局部更新）
+function _kpiRowHTML(cards) {
   return `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:0;border:1px solid var(--b);border-radius:10px;overflow:hidden;margin-bottom:16px;background:var(--c)">
     ${cards.map(k => `
       <div style="display:flex;flex-direction:column;gap:4px;padding:16px 18px;border-right:1px solid var(--b);border-bottom:1px solid var(--b)">
         <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--t3)">${k.label}</div>
-        <div style="font-size:22px;font-weight:700;line-height:1.2;color:${k.color||'var(--t)'};font-variant-numeric:tabular-nums">${k.value}</div>
+        <div ${k.id ? 'id="' + k.id + '"' : ''} style="font-size:22px;font-weight:700;line-height:1.2;color:${k.color||'var(--t)'};font-variant-numeric:tabular-nums">${k.value}</div>
         ${k.hint ? `<div style="font-size:10px;color:var(--t3)">${k.hint}</div>` : ''}
       </div>`).join('')}
   </div>`;
+}
+
+function kpiRow(cards) {
+  return _kpiRowHTML(cards);
 }
 
 function section(title, subtitle) {
@@ -109,74 +170,77 @@ function table(headers, rows) {
 }
 
 // ===== Tab: 概览 =====
+// 健康度 → 圆点/颜色映射（供 renderOverview 和 updateOverview 共享）
+const _OBS_HEALTH_DOT = { online: '🟢', idle: '⚪', normal: '🟢', busy: '🟡', overload: '🔴', recently_lost: '🟡', offline: '⚫', about_to_gc: '🔴' };
+const _OBS_HEALTH_COLOR = { online: 'var(--g)', idle: 'var(--t3)', normal: 'var(--g)', busy: 'var(--y)', overload: 'var(--r)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
+
+// 资源进度条（首次渲染时带 id，供后续局部更新）
+function _barHTML(label, pct, color, idPrefix) {
+  const c = pct > 80 ? 'var(--r)' : pct > 60 ? 'var(--y)' : color || 'var(--g)';
+  return `<div style="display:flex;align-items:center;gap:6px;font-size:10px">
+    <span style="color:var(--t3);min-width:32px">${label}</span>
+    <div style="flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden;min-width:60px">
+      <div id="${idPrefix}-bar" style="height:100%;width:${Math.min(pct,100)}%;background:${c};border-radius:4px;transition:width .3s"></div>
+    </div>
+    <span id="${idPrefix}-val" style="color:${c};font-weight:600;min-width:30px;text-align:right">${Math.round(pct)}%</span>
+  </div>`;
+}
+
 function renderOverview(ops, rt, mt) {
   const r = ops.runtimes || {};
   const w = ops.workers || {};
 
-  const HEALTH_DOT = { online: '🟢', idle: '⚪', normal: '🟢', busy: '🟡', overload: '🔴', recently_lost: '🟡', offline: '⚫', about_to_gc: '🔴' };
-  const HEALTH_COLOR = { online: 'var(--g)', idle: 'var(--t3)', normal: 'var(--g)', busy: 'var(--y)', overload: 'var(--r)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
-
-  // 资源进度条
-  function bar(label, pct, color) {
-    const c = pct > 80 ? 'var(--r)' : pct > 60 ? 'var(--y)' : color || 'var(--g)';
-    return `<div style="display:flex;align-items:center;gap:6px;font-size:10px">
-      <span style="color:var(--t3);min-width:32px">${label}</span>
-      <div style="flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden;min-width:60px">
-        <div style="height:100%;width:${Math.min(pct,100)}%;background:${c};border-radius:4px;transition:width .3s"></div>
-      </div>
-      <span style="color:${c};font-weight:600;min-width:30px;text-align:right">${Math.round(pct)}%</span>
-    </div>`;
-  }
-
-  // Worker 卡片
+  // Worker 卡片（带 id 供局部更新）
   let workerCards = '';
   const workers = w.list || [];
   if (workers.length === 0) {
     workerCards = '<div class="ts t2" style="padding:12px">无远端 Worker（仅本机直连引擎）</div>';
   } else {
     workers.forEach(wk => {
-      const dot = HEALTH_DOT[wk.health] || '⚫';
-      const hc = HEALTH_COLOR[wk.health] || 'var(--t3)';
-      workerCards += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
+      const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
+      const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
+      workerCards += `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span style="font-size:14px">${dot}</span>
+          <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
           <b style="font-size:13px">${wk.device_name || wk.name || 'Worker #' + wk.id}</b>
-          <span style="margin-left:auto;font-size:10px;color:${hc};font-weight:600">${wk.health}</span>
+          <span id="wk-${wid}-health" style="margin-left:auto;font-size:10px;color:${hc};font-weight:600">${wk.health}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:10px;color:var(--t3);margin-bottom:8px">
           <div>IP: ${wk.last_ip || '-'}</div>
-          <div>心跳: ${(wk.last_seen_at||'-').substring(11,19)}</div>
+          <div>心跳: <span id="wk-${wid}-seen">${(wk.last_seen_at||'-').substring(11,19)}</span></div>
         </div>
-        ${bar('CPU', wk.cpu_percent)}
-        ${bar('MEM', wk.memory_percent)}
-        ${bar('DISK', wk.disk_percent)}
+        ${_barHTML('CPU', wk.cpu_percent, null, 'wk-' + wid + '-cpu')}
+        ${_barHTML('MEM', wk.memory_percent, null, 'wk-' + wid + '-mem')}
+        ${_barHTML('DISK', wk.disk_percent, null, 'wk-' + wid + '-disk')}
       </div>`;
     });
   }
 
-  // Runtime 表格（引擎行可点击 → 打开任务列表）
+  // Runtime 表格（行带 id，各 td 带 id 供局部更新）
   const runtimes = r.list || [];
   let runtimeTable = '<div class="ts t2" style="padding:12px">无引擎</div>';
   if (runtimes.length) {
     runtimeTable = '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>模式</th><th>设备</th></tr></thead><tbody>';
-    runtimes.forEach(rt => {
-      const dot = HEALTH_DOT[rt.health] || '⚫';
-      const hc = HEALTH_COLOR[rt.health] || 'var(--t3)';
-      const running = rt.running || 0;
-      const maxC = rt.max_concurrent || 0;
+    runtimes.forEach(rti => {
+      const rid = rti.id;
+      const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
+      const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
+      const running = rti.running || 0;
+      const maxC = rti.max_concurrent || 0;
       const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
-      const modeTag = rt.mode === 'local' ? '<span class="tg tg-ch">本机</span>' : '<span class="tg tg-c">远端</span>';
-      const avgDur = rt.avg_duration || 0;
+      const modeTag = rti.mode === 'local' ? '<span class="tg tg-ch">本机</span>' : '<span class="tg tg-c">远端</span>';
+      const avgDur = rti.avg_duration || 0;
       const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
       const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
-      runtimeTable += `<tr style="cursor:pointer" onclick="openRuntimeSessionModal(${rt.id}, '${(rt.name||'').replace(/'/g,"")}')">
-         <td>${dot} <b>${rt.name}</b></td>
-        <td><span class="ts t3">${rt.version || '-'}</span></td>
-        <td><span style="color:${hc};font-weight:600">${rt.health}</span></td>
-        <td><span style="color:${loadColor}">${running}/${maxC}</span></td>
-        <td><span style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
+      runtimeTable += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
+        <td>${dot} <b>${rti.name}</b></td>
+        <td><span id="rt-${rid}-version" class="ts t3">${rti.version || '-'}</span></td>
+        <td><span id="rt-${rid}-health" style="color:${hc};font-weight:600">${rti.health}</span></td>
+        <td><span id="rt-${rid}-load" style="color:${loadColor}">${running}/${maxC}</span></td>
+        <td><span id="rt-${rid}-dur" style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
         <td>${modeTag}</td>
-        <td><span class="ts t3">${rt.device_name || '-'}</span></td>
+        <td><span id="rt-${rid}-device" class="ts t3">${rti.device_name || '-'}</span></td>
       </tr>`;
     });
     runtimeTable += '</tbody></table></div>';
@@ -184,18 +248,132 @@ function renderOverview(ops, rt, mt) {
 
   return `
     ${section('Worker 监控', `${w.online || 0}/${w.total || 0} 在线`)}
-    ${kpiRow([
-      { label: 'Worker 总数', value: w.total || 0, color: 'var(--a)' },
-      { label: '在线', value: w.online || 0, color: 'var(--g)' },
-      { label: '离线', value: w.offline || 0, color: 'var(--t3)' },
-      { label: '引擎总数', value: r.total || 0, color: 'var(--pu)' },
+    ${_kpiRowHTML([
+      { label: 'Worker 总数', value: w.total || 0, color: 'var(--a)', id: 'kpi-w-total' },
+      { label: '在线', value: w.online || 0, color: 'var(--g)', id: 'kpi-w-online' },
+      { label: '离线', value: w.offline || 0, color: 'var(--t3)', id: 'kpi-w-offline' },
+      { label: '引擎总数', value: r.total || 0, color: 'var(--pu)', id: 'kpi-r-total' },
     ])}
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:16px">
+    <div id="wk-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:16px">
       ${workerCards}
     </div>
     ${section('Runtime 引擎', `${r.online || 0}/${r.total || 0} 在线 — 点击引擎查看任务`)}
     ${runtimeTable}
   `;
+}
+
+// ===== 局部更新：概览 Tab =====
+// 返回 true=成功局部更新, false=元素缺失需回退到完整渲染
+function updateOverview(ops, rt, mt) {
+  const r = ops.runtimes || {};
+  const w = ops.workers || {};
+
+  // 1) 更新 Worker KPI 卡片数值
+  _setText('kpi-w-total', w.total || 0);
+  _setText('kpi-w-online', w.online || 0);
+  _setText('kpi-w-offline', w.offline || 0);
+  _setText('kpi-r-total', r.total || 0);
+
+  // 2) 更新 Worker 卡片
+  const workers = w.list || [];
+  if (workers.length) {
+    for (const wk of workers) {
+      const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const card = document.getElementById('wk-' + wid);
+      if (!card) return false;  // 新增 worker → 回退完整渲染
+
+      const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
+      const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
+
+      const dotEl = document.getElementById('wk-' + wid + '-dot');
+      if (dotEl) dotEl.textContent = dot;
+
+      const healthEl = document.getElementById('wk-' + wid + '-health');
+      if (healthEl) { healthEl.textContent = wk.health; healthEl.style.color = hc; }
+
+      const seenEl = document.getElementById('wk-' + wid + '-seen');
+      if (seenEl) seenEl.textContent = (wk.last_seen_at || '-').substring(11, 19);
+
+      // 进度条
+      _updateBar('wk-' + wid + '-cpu', wk.cpu_percent);
+      _updateBar('wk-' + wid + '-mem', wk.memory_percent);
+      _updateBar('wk-' + wid + '-disk', wk.disk_percent);
+    }
+  }
+
+  // 3) 更新 Runtime 表格行
+  const runtimes = r.list || [];
+  if (runtimes.length) {
+    for (const rti of runtimes) {
+      const rid = rti.id;
+      const tr = document.getElementById('rt-' + rid);
+      if (!tr) return false;  // 新增 runtime → 回退完整渲染
+
+      const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
+      const running = rti.running || 0;
+      const maxC = rti.max_concurrent || 0;
+      const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
+      const avgDur = rti.avg_duration || 0;
+      const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
+      const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
+
+      const healthEl = document.getElementById('rt-' + rid + '-health');
+      if (healthEl) { healthEl.textContent = rti.health; healthEl.style.color = hc; }
+
+      const loadEl = document.getElementById('rt-' + rid + '-load');
+      if (loadEl) { loadEl.textContent = running + '/' + maxC; loadEl.style.color = loadColor; }
+
+      const durEl = document.getElementById('rt-' + rid + '-dur');
+      if (durEl) { durEl.textContent = avgDur ? avgDurStr : '-'; durEl.style.color = avgDurColor; }
+
+      const versionEl = document.getElementById('rt-' + rid + '-version');
+      if (versionEl) versionEl.textContent = rti.version || '-';
+
+      const deviceEl = document.getElementById('rt-' + rid + '-device');
+      if (deviceEl) deviceEl.textContent = rti.device_name || '-';
+    }
+  }
+
+  return true;
+}
+
+// ===== 局部更新：任务 Tab =====
+// 返回 true=成功局部更新, false=需回退到完整渲染
+function updateTasks(ops, rt, mt) {
+  const t = ops.tasks || {};
+  const sc = t.status_counts || {};
+
+  _setText('kpi-t-queued', sc.queued || 0);
+  _setText('kpi-t-dispatched', sc.dispatched || 0);
+  _setText('kpi-t-running', sc.running || 0);
+  _setText('kpi-t-completed', sc.completed || 0);
+  _setText('kpi-t-failed', sc.failed || 0);
+  _setText('kpi-t-cancelled', sc.cancelled || 0);
+  _setText('kpi-t-inprogress', t.in_progress || 0);
+  _setText('kpi-t-stuck', t.stuck_count || 0);
+
+  // 更新 Failed/Stuck 颜色（根据计数动态变色）
+  const failedEl = document.getElementById('kpi-t-failed');
+  if (failedEl) failedEl.style.color = (sc.failed || 0) > 0 ? 'var(--r)' : 'var(--t3)';
+  const stuckEl = document.getElementById('kpi-t-stuck');
+  if (stuckEl) stuckEl.style.color = (t.stuck_count || 0) > 0 ? 'var(--r)' : 'var(--g)';
+
+  return true;
+}
+
+// ===== 局部更新辅助函数 =====
+function _setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function _updateBar(idPrefix, pct) {
+  const bar = document.getElementById(idPrefix + '-bar');
+  const val = document.getElementById(idPrefix + '-val');
+  if (bar) bar.style.width = Math.min(pct, 100) + '%';
+  const c = pct > 80 ? 'var(--r)' : pct > 60 ? 'var(--y)' : 'var(--g)';
+  if (bar) bar.style.background = c;
+  if (val) { val.textContent = Math.round(pct) + '%'; val.style.color = c; }
 }
 
 // A2A 健康检查（概览 tab 内异步加载）
@@ -286,9 +464,9 @@ function renderAnomalyTab(container, ops) {
     // 分页栏
     if (totalPages > 1) {
       html += `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0">
-        <button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;refreshObservability()">‹ 上一页</button>
+        <button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;refreshObs()">‹ 上一页</button>
         <span class="ts t3">${_anomalyPage+1} / ${totalPages}</span>
-        <button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;refreshObservability()">下一页 ›</button>
+        <button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;refreshObs()">下一页 ›</button>
       </div>`;
     }
   }
@@ -367,15 +545,15 @@ function renderTasksTab(ops, rt, mt) {
   const sc = t.status_counts || {};
   let html = '';
   html += section('任务状态分布');
-  html += kpiRow([
-    { label: 'Queued', value: sc.queued || 0, color: 'var(--y)' },
-    { label: 'Dispatched', value: sc.dispatched || 0, color: 'var(--a)' },
-    { label: 'Running', value: sc.running || 0, color: 'var(--sk)' },
-    { label: 'Completed', value: sc.completed || 0, color: 'var(--g)' },
-    { label: 'Failed', value: sc.failed || 0, color: (sc.failed||0) > 0 ? 'var(--r)' : 'var(--t3)' },
-    { label: 'Cancelled', value: sc.cancelled || 0, color: 'var(--t3)' },
-    { label: 'In Progress', value: t.in_progress || 0, color: 'var(--pu)' },
-    { label: 'Stuck', value: t.stuck_count || 0, color: (t.stuck_count||0) > 0 ? 'var(--r)' : 'var(--g)' },
+  html += _kpiRowHTML([
+    { label: 'Queued', value: sc.queued || 0, color: 'var(--y)', id: 'kpi-t-queued' },
+    { label: 'Dispatched', value: sc.dispatched || 0, color: 'var(--a)', id: 'kpi-t-dispatched' },
+    { label: 'Running', value: sc.running || 0, color: 'var(--sk)', id: 'kpi-t-running' },
+    { label: 'Completed', value: sc.completed || 0, color: 'var(--g)', id: 'kpi-t-completed' },
+    { label: 'Failed', value: sc.failed || 0, color: (sc.failed||0) > 0 ? 'var(--r)' : 'var(--t3)', id: 'kpi-t-failed' },
+    { label: 'Cancelled', value: sc.cancelled || 0, color: 'var(--t3)', id: 'kpi-t-cancelled' },
+    { label: 'In Progress', value: t.in_progress || 0, color: 'var(--pu)', id: 'kpi-t-inprogress' },
+    { label: 'Stuck', value: t.stuck_count || 0, color: (t.stuck_count||0) > 0 ? 'var(--r)' : 'var(--g)', id: 'kpi-t-stuck' },
   ]);
   html += '<div id="obs-timeline-container"><div class="loading">加载任务列表...</div></div>';
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;

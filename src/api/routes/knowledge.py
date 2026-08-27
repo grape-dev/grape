@@ -10,7 +10,7 @@
 import os, re
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Query
 from src.api.deps import get_current_user
-from src.config import log
+from src.config import log, WORKSPACE_DIR
 from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
@@ -57,14 +57,34 @@ def _repo_root_rel(ws_rel: str, repo_key: str) -> str:
 
 
 def _read_file(repo_key: str, rel: str) -> str:
-    base = _repo_base(repo_key)
     rel = _safe_rel(rel)
-    full = os.path.normpath(os.path.join(base, rel))
-    if full != base and not full.startswith(base + os.sep):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
     ext = os.path.splitext(rel)[1].lower()
     if ext not in ALLOWED_EXTS:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"仅支持 {sorted(ALLOWED_EXTS)}"})
+
+    # OBS 分支：查 DB obs_key，非空走 storage.read_bytes
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT obs_key FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? "
+                "ORDER BY id DESC LIMIT 1",
+                (repo_key, rel)).fetchone()
+        if row and row[0]:
+            from src.storage import get_storage
+            storage = get_storage()
+            if storage is not None:
+                data = storage.read_bytes(row[0])
+                if data is not None:
+                    return data.decode("utf-8", errors="replace")
+    except Exception as e:
+        log.warning(f"OBS read failed for {repo_key}/{rel}: {e} — fallback to local")
+
+    # 本地模式（storage 为 None 或 OBS miss）
+    base = _repo_base(repo_key)
+    full = os.path.normpath(os.path.join(base, rel))
+    if full != base and not full.startswith(base + os.sep):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
     if not os.path.isfile(full):
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"文件不存在: {rel}"})
     try:
@@ -91,6 +111,27 @@ def _read_ws_file(repo_key: str, ws_rel: str) -> str:
             return f.read()
     except Exception as e:
         raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
+
+
+def _read_entry_content(repo_key: str, obs_key: str, file_path: str) -> str:
+    """读取知识条目正文：obs_key 非空走 OBS，否则走本地文件。失败返回空串（不影响列表聚合）。"""
+    if obs_key:
+        try:
+            from src.storage import get_storage
+            storage = get_storage()
+            if storage is not None:
+                data = storage.read_bytes(obs_key)
+                if data is not None:
+                    return data.decode("utf-8", errors="replace")
+        except Exception as e:
+            log.warning(f"OBS read failed for entry {repo_key}/{obs_key}: {e} — fallback to local")
+    # 本地模式（storage 为 None / obs_key 为空 / OBS miss）
+    if file_path:
+        try:
+            return _read_ws_file(repo_key, file_path)
+        except HTTPException:
+            return ""
+    return ""
 
 
 def _member_docs(repo_key: str) -> list[dict]:
@@ -142,7 +183,7 @@ def _project_knowledge_entries(repo_key: str) -> list[dict]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT scope, agent_type, issue_num, file_path, status, source_seq, created_by, created_at "
+                "SELECT scope, agent_type, issue_num, file_path, status, source_seq, created_by, created_at, obs_key "
                 "FROM agent_shared_knowledge WHERE repo_key=? AND scope='project' ORDER BY id DESC LIMIT 100",
                 (repo_key,))
             rows = c.fetchall()
@@ -150,17 +191,13 @@ def _project_knowledge_entries(repo_key: str) -> list[dict]:
             rows = []
     out = []
     for r in rows:
-        content = ""
-        if r[3]:
-            try:
-                content = _read_ws_file(repo_key, r[3])
-            except HTTPException:
-                content = ""
+        content = _read_entry_content(repo_key, r[8], r[3])
         out.append({
             "scope": r[0], "agent_type": r[1] or "", "issue_num": r[2] or 0,
             "file_path": r[3] or "", "path": _repo_root_rel(r[3], repo_key),
             "status": r[4] or "", "source_seq": r[5] or 0,
-            "created_by": r[6] or "", "created_at": normalize_event_time(r[7] or ""), "content": content,
+            "created_by": r[6] or "", "created_at": normalize_event_time(r[7] or ""),
+            "content": content, "obs_key": r[8] or "",
         })
     return out
 
@@ -173,7 +210,7 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT scope, agent_type, issue_num, file_path, status, source_seq, created_by, created_at "
+                "SELECT scope, agent_type, issue_num, file_path, status, source_seq, created_by, created_at, obs_key "
                 "FROM agent_shared_knowledge WHERE repo_key=? AND scope IN ('issue','issue_agent') "
                 "ORDER BY agent_type, id DESC LIMIT 500",
                 (repo_key,))
@@ -183,17 +220,13 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
     groups: dict[str, list] = {}
     for r in rows:
         at = r[1] or ""
-        content = ""
-        if r[3]:
-            try:
-                content = _read_ws_file(repo_key, r[3])
-            except HTTPException:
-                content = ""
+        content = _read_entry_content(repo_key, r[8], r[3])
         groups.setdefault(at, []).append({
             "scope": r[0], "agent_type": at, "issue_num": r[2] or 0,
             "file_path": r[3] or "", "path": _repo_root_rel(r[3], repo_key),
             "status": r[4] or "", "source_seq": r[5] or 0,
-            "created_by": r[6] or "", "created_at": normalize_event_time(r[7] or ""), "content": content,
+            "created_by": r[6] or "", "created_at": normalize_event_time(r[7] or ""),
+            "content": content, "obs_key": r[8] or "",
         })
     # Agent 专属成员上传文档（§六：project-info/agent/{agent_type}/，定向给该 Agent）
     from src.api.knowledge import agent_files
@@ -342,15 +375,39 @@ async def upload_knowledge(file: UploadFile = File(...),
         f.write(text)
     rel = os.path.relpath(dest, _repo_base(repo_key)).replace("\\", "/")
 
+    # OBS 分支：启用时调 storage.save_bytes + 计算 content_hash
+    obs_key = ""
+    content_hash = ""
+    try:
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage is not None:
+            from src.api.knowledge import _owner_repo
+            _owner, _rname = _owner_repo(repo_key)
+            # 按文件名生成 storage_key（和 generate_file_urls 的 member 部分匹配逻辑一致）
+            if scope == "agent":
+                storage_key = f"knowledge/{_owner}/{_rname}/agent/{agent_type}/{name}"
+            else:
+                _username = str(user.get("username") or user.get("id") or "user")
+                storage_key = f"knowledge/{_owner}/{_rname}/member/{_username}/{name}"
+            obs_key = storage_key
+            storage.save_bytes(obs_key, content.encode("utf-8") if isinstance(content, str) else content)
+            import hashlib
+            content_hash = hashlib.sha256(content.encode("utf-8") if isinstance(content, str) else content).hexdigest()
+    except Exception as e:
+        log.warning(f"[knowledge] OBS save failed for {repo_key}/{rel}: {e} — local file unaffected")
+        obs_key = ""
+        content_hash = ""
+
     # 登记索引
     try:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
-                "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, status, source_seq, created_by) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                ("member", repo_key, agent_type, 0, rel, "accepted", 0,
+                "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("member", repo_key, agent_type, 0, rel, obs_key, content_hash, "accepted", 0,
                  str(user.get("username") or user.get("id") or "")))
             db.commit()
     except Exception as e:
@@ -386,10 +443,39 @@ async def delete_knowledge(repo: str = Query(""),
         me = str(user.get("username") or user.get("id") or "")
         if owner_part and owner_part != me:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "仅可删除本人上传的文档"})
+
+    # OBS 分支：先查 DB obs_key，非空先删 OBS 对象——删失败则中止（不清 DB）
+    obs_key = ""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT obs_key FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? AND scope='member' "
+                "ORDER BY id DESC LIMIT 1",
+                (repo_key, rel)).fetchone()
+        if row:
+            obs_key = row[0] or ""
+    except Exception:
+        pass
+    if obs_key:
+        try:
+            from src.storage import get_storage
+            storage = get_storage()
+            if storage is not None:
+                if not storage.delete_object(obs_key):
+                    raise HTTPException(status_code=500, detail={"code": 500, "message": "OBS 对象删除失败，已中止"})
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"OBS 删除失败: {e}"})
+
     try:
         os.remove(full)
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"code": 500, "message": f"删除失败: {e}"})
+        if obs_key:
+            log.warning(f"[knowledge] OBS 已删但本地文件删除失败: {full}: {e}")
+        else:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"删除失败: {e}"})
     try:
         from src.session_manager import db, db_lock
         with db_lock:

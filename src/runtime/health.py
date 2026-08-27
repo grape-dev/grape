@@ -24,7 +24,8 @@ def parse_dt(s: str) -> float | None:
 def derive_runtime_health(status: str, last_seen_at: str | None, now: float | None = None) -> str:
     _now = now if now is not None else datetime.now(timezone.utc).timestamp()
     ts = parse_dt(last_seen_at)
-    if status == "online":
+    # "active" 是 runtime_credentials 表的状态（等价于 online）
+    if status in ("online", "active"):
         if ts is None:
             return "recently_lost"      # 标 online 但无心跳记录 → 视为失联
         if _now - ts < 5 * 60:

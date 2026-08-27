@@ -224,6 +224,8 @@ class TestRunLoop:
     def test_periodic_reregister(self, monkeypatch):
         monkeypatch.setenv("RUNTIME_REREGISTER_INTERVAL", "0.01")
         client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
         client.claim.return_value = None
         client.heartbeat.return_value = {"status": "ok", "cancelled_tasks": []}
         with patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])) as m_rr:
@@ -233,7 +235,9 @@ class TestRunLoop:
 
     def test_claims_and_executes(self):
         client = AsyncMock()
-        client.claim.return_value = {"id": "t1", "issue_session_id": "s1", "agent_session_id": "a1"}
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = {"task": {"id": "t1", "issue_session_id": "s1", "agent_session_id": "a1"}, "scan_request": False}
         client.heartbeat.return_value = {"status": "ok", "cancelled_tasks": []}
         exec_mock = AsyncMock()
         asyncio.run(self._drive(ra._run_loop(
@@ -244,7 +248,9 @@ class TestRunLoop:
 
     def test_session_conflict_requeues(self):
         client = AsyncMock()
-        client.claim.return_value = {"id": "t1", "issue_session_id": "s_busy"}
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = {"task": {"id": "t1", "issue_session_id": "s_busy"}, "scan_request": False}
         client.heartbeat.return_value = {"status": "ok", "cancelled_tasks": []}
         exec_mock = AsyncMock()
         asyncio.run(self._drive(ra._run_loop(
@@ -255,7 +261,9 @@ class TestRunLoop:
 
     def test_max_concurrent_skips(self):
         client = AsyncMock()
-        client.claim.return_value = {"id": "t1", "issue_session_id": "s2"}
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = {"task": {"id": "t1", "issue_session_id": "s2"}, "scan_request": False}
         client.heartbeat.return_value = {"status": "ok", "cancelled_tasks": []}
         exec_mock = AsyncMock()
         asyncio.run(self._drive(ra._run_loop(
@@ -266,6 +274,8 @@ class TestRunLoop:
 
     def test_heartbeat_failure_triggers_reregister(self):
         client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
         client.claim.return_value = None
         client.heartbeat.return_value = None
         client.reset_session = AsyncMock()
@@ -278,6 +288,8 @@ class TestRunLoop:
 
     def test_claim_exception_counts_heartbeat_failure(self):
         client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
         client.claim.side_effect = RuntimeError("net")
         client.heartbeat.return_value = {"status": "ok", "cancelled_tasks": []}
         exec_mock = AsyncMock()

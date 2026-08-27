@@ -259,6 +259,25 @@ _BACKFILL_FLAG = "bindings_backfilled"
 
 # ===== 派发选择 =====
 
+def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
+    """过滤绑定集合，只保留标签匹配 agent_type 的引擎。"""
+    if not agent_type or not members:
+        return members
+    db, lock = _db()
+    result = []
+    with lock:
+        c = db.cursor()
+        for m in members:
+            rid = m.get("runtime_id")
+            if not rid:
+                continue
+            c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,))
+            tags = [r[0] for r in c.fetchall()] or ["all"]
+            if agent_type in tags or "all" in tags:
+                result.append(m)
+    return result
+
+
 def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) -> int | None:
     """按 专属→全局→本机直连 优先级从引擎集合选健康引擎；集合空回退会话主引擎（legacy）。
 
@@ -270,6 +289,9 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) ->
     repo = _norm_repo(repo_key)
     members = get_binding(repo_key, agent_type)
     if members:
+        # 标签过滤：排除不匹配 agent_type 的引擎
+        members = _filter_by_tags(members, agent_type)
+    if members:
         for scope in cfg.get("scopes") or ["repo", "global", "local"]:
             cand = _apply_filters([m for m in members if _member_scope(m, repo) == scope], cfg)
             if not cand:
@@ -280,6 +302,15 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) ->
         return None     # 集合存在但无健康成员 → engine_unavailable（不回退 fallback）
     if fallback_runtime_id:
         return int(fallback_runtime_id)
+    # Plugin 模式：不选具体引擎，返回 0 让任务以无主池任务入队（runtime_id=0 + pool_tag），
+    # 多个带匹配 tag 的引擎通过 claim_by_tag 竞争认领（广播路线）。
+    # 传统模式：无绑定 + 无 fallback → engine_unavailable（不调 resolve_default_engine，保持原行为）
+    try:
+        from src.api.event_pipeline import is_plugin_mode
+        if is_plugin_mode():
+            return 0
+    except Exception:
+        pass
     return None
 
 
@@ -310,7 +341,7 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
     if not cfg.get("enabled", True):
         return None
     for scope in cfg.get("scopes") or ["repo", "global", "local"]:
-        cand = query_engines(repo_key, scope)
+        cand = query_engines(repo_key, scope, agent_type=agent_type)
         cand = [dict(m, scope=scope) for m in cand]
         cand = _apply_filters(cand, cfg)
         if not cand:
@@ -323,8 +354,9 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
 
 # ===== 候选引擎查询（供绑定配置下拉 / 展示）=====
 
-def query_engines(repo_key: str, scope: str) -> list[dict]:
-    """返回某仓库在某档位的候选引擎：repo=仓库级；global=远端全局；local=本机直连。"""
+def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]:
+    """返回某仓库在某档位的候选引擎：repo=仓库级；global=远端全局；local=本机直连。
+    agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。"""
     repo = _norm_repo(repo_key)
     db, lock = _db()
     with lock:
@@ -333,17 +365,20 @@ def query_engines(repo_key: str, scope: str) -> list[dict]:
             if scope == "repo":
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,'') "
+                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
                 c.execute(
-                    "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '' "
+                    "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1) "
                     "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
             else:
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,'') "
+                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='global' AND rc.status='active' ORDER BY r.id")
             rows = c.fetchall()
@@ -355,6 +390,12 @@ def query_engines(repo_key: str, scope: str) -> list[dict]:
         if scope == "repo":
             from src.repo_key import from_repo_key
             if from_repo_key(r[9] or "") != repo:
+                continue
+        # agent_type 标签过滤（r[10] = GROUP_CONCAT(tag) from engine_capabilities, e.g. "all" or "all,coding"）
+        if agent_type:
+            tags_str = r[10] or ""
+            tags = [t.strip() for t in tags_str.split(",") if t.strip()] or ["all"]
+            if agent_type not in tags and "all" not in tags:
                 continue
         out.append({
             "runtime_id": r[0], "name": r[1], "status": r[2] or "offline", "healthy": bool(r[3]),

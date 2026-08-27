@@ -1,4 +1,5 @@
 """Settings 路由：凭据、通知偏好、GitCode Repo、Backend Runtimes"""
+import json
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
@@ -277,6 +278,14 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
             rt["owner"] = cred["owner_name"]
             rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
+        # 引擎标签（event-dispatch-redesign-v2.md §2.5）
+        try:
+            with db_lock:
+                _tc = db.cursor()
+                _tc.execute("SELECT tag, max_concurrent, priority, enabled FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rt["id"],))
+                rt["tags"] = [{"tag": r[0], "max_concurrent": r[1], "priority": r[2], "enabled": bool(r[3])} for r in _tc.fetchall()]
+        except Exception:
+            rt["tags"] = []
         visible_runtimes.append(rt)
 
     # 设备级视图（按 credential_id 分组：worker_name + 承载 CLI + 心跳）
@@ -288,14 +297,21 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
             cred = cred_map.get(cid) or {}
             if not _visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
                 continue
-            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at FROM agent_runtimes WHERE credential_id=?", (cid,))
+            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result FROM agent_runtimes WHERE credential_id=?", (cid,))
             runtimes = [
                 {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
                  "installed": bool(x[4]),
                  "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
-                 "health": derive_runtime_health(x[5], x[6], now)}
+                 "health": derive_runtime_health(x[5], x[6], now),
+                 "local_skills": json.loads(x[7] or "[]") if x[7] else [],
+                 "skill_scan_result": json.loads(x[8] or "[]") if x[8] else []}
                 for x in c.fetchall()
             ]
+            # tags from engine_capabilities
+            for rt in runtimes:
+                _tc2 = db.cursor()
+                _tc2.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
+                rt["agent_tags"] = [r[0] for r in _tc2.fetchall()] or ["all"]
             devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
                             "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
                             "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
@@ -317,7 +333,10 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
                                       "healthy": rt.get("healthy", False),
                                       "installed": rt.get("installed", False),
                                       "instance_name": rt.get("instance_name", rt.get("name", "")),
-                                      "health": rt.get("health", "offline")}]})
+                                      "health": rt.get("health", "offline"),
+                                      "local_skills": rt.get("local_skills", []),
+                                      "skill_scan_result": rt.get("skill_scan_result", []),
+                                      "agent_tags": rt.get("agent_tags", ["all"])}]})
     return {"runtimes": visible_runtimes, "devices": devices}
 
 
@@ -373,10 +392,17 @@ async def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
     """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）"""
     from src.runtime.registry import discover_runtimes
     from src.runtime.local_probe import probe_local_engines
+    from src.runtime.agent import _scan_local_skills
     from src.user import db as user_db
-
     discovered = discover_runtimes()
     results = probe_local_engines(discovered)
+
+    # 扫描本机 local_skills 详情并注入
+    from src.runtime.agent import _scan_local_skills_with_detail
+    for r in results:
+        _name = (r.get("name") or "").strip().lower()
+        r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
+        r["local_skills"] = [s["name"] for s in r["local_skills_detail"]]
 
     # Only persist runtimes that are actually installed
     results = [r for r in results if r["installed"]]
@@ -536,6 +562,22 @@ async def get_execution_mode_api(user: dict = Depends(get_current_user)):
     return {"mode": get_execution_mode()}
 
 
+@router.get("/pipeline-mode")
+async def get_pipeline_mode_api(user: dict = Depends(get_current_user)):
+    from src.api.event_pipeline import is_plugin_mode
+    return {"mode": "plugin" if is_plugin_mode() else "legacy"}
+
+
+@router.put("/pipeline-mode")
+async def set_pipeline_mode_api(body: dict, user: dict = Depends(get_current_user)):
+    from src.user.db import set_meta_value
+    mode = (body.get("mode") or "").strip().lower()
+    if mode not in ("plugin", "legacy"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 plugin 或 legacy"})
+    set_meta_value("pipeline_mode", mode)
+    return {"message": f"管线模式已切换为 {'插件模式' if mode == 'plugin' else '传统模式'}", "mode": mode}
+
+
 @router.put("/execution-mode")
 async def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_current_user)):
     from src.runtime.service import set_execution_mode
@@ -543,3 +585,128 @@ async def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_cu
         raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 auto/direct/queue_remote（queue_local 已废除）"})
     set_execution_mode(body.mode)
     return {"message": f"执行模式已切换为 {body.mode}", "mode": body.mode}
+
+
+# ===== 引擎标签管理（event-dispatch-redesign-v2.md §2.4）=====
+
+class EngineTagBody(BaseModel):
+    tag: str
+    max_concurrent: int = 1
+    priority: int = 50
+
+
+class EngineTagUpdateBody(BaseModel):
+    max_concurrent: int = 1
+    priority: int = 50
+    enabled: int = 1
+
+
+@router.get("/agent-runtimes/{rid}/tags")
+async def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
+    """获取引擎的标签列表"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT id, tag, max_concurrent, priority, enabled, created_at, updated_at "
+                "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
+                (rid,)
+            )
+            rows = c.fetchall()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    return {"tags": [
+        {"id": r[0], "tag": r[1], "max_concurrent": r[2], "priority": r[3],
+         "enabled": bool(r[4]), "created_at": r[5], "updated_at": r[6]}
+        for r in rows
+    ]}
+
+
+@router.post("/agent-runtimes/{rid}/tags")
+async def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get_current_user)):
+    """为引擎添加标签（幂等：已有则更新）"""
+    from src.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    tag = (body.tag or "").strip().lower()
+    if tag not in ("vod", "issue", "coding", "qa", "sre", "chat"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"无效标签: {tag}，可选: vod/issue/coding/qa/sre/chat"})
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (rid,))
+            if not c.fetchone():
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在"})
+            c.execute(
+                "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                "VALUES (?,?,?,?,1,?,?) "
+                "ON DUPLICATE KEY UPDATE max_concurrent=VALUES(max_concurrent), priority=VALUES(priority), updated_at=VALUES(updated_at)",
+                (rid, tag, body.max_concurrent, body.priority, now, now)
+            )
+            db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            # MySQL ON DUPLICATE KEY may not work with SQLite syntax; fallback
+            try:
+                c.execute(
+                    "REPLACE INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                    "VALUES (?,?,?,?,1,?,?)",
+                    (rid, tag, body.max_concurrent, body.priority, now, now)
+                )
+                db.commit()
+            except Exception as e2:
+                db.rollback()
+                raise HTTPException(status_code=500, detail={"code": 500, "message": str(e2)})
+    log.info(f"Engine tag added: runtime={rid} tag={tag} concurrent={body.max_concurrent} priority={body.priority}")
+    return {"message": f"标签 {tag} 已添加", "tag": tag}
+
+
+@router.put("/agent-runtimes/{rid}/tags/{tag}")
+async def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
+                            user: dict = Depends(get_current_user)):
+    """修改引擎标签配置"""
+    from src.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    tag = tag.strip().lower()
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "UPDATE engine_capabilities SET max_concurrent=?, priority=?, enabled=?, updated_at=? "
+                "WHERE runtime_id=? AND tag=?",
+                (body.max_concurrent, body.priority, body.enabled, now, rid, tag)
+            )
+            if c.rowcount == 0:
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
+            db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    return {"message": f"标签 {tag} 已更新"}
+
+
+@router.delete("/agent-runtimes/{rid}/tags/{tag}")
+async def delete_engine_tag(rid: int, tag: str, user: dict = Depends(get_current_user)):
+    """删除引擎标签"""
+    from src.session_manager import db, db_lock
+    tag = tag.strip().lower()
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag=?", (rid, tag))
+            if c.rowcount == 0:
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
+            db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    log.info(f"Engine tag deleted: runtime={rid} tag={tag}")
+    return {"message": f"标签 {tag} 已删除"}
