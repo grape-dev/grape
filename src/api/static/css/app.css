@@ -293,6 +293,10 @@
 @keyframes crFadeIn{from{opacity:0}to{opacity:1}}
 @keyframes crPopUp{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
 
+/* ===== Liquid Glass 重新派发弹窗 ===== */
+@keyframes rdpFade{from{opacity:0}to{opacity:1}}
+@keyframes rdpPop{from{opacity:0;transform:scale(0.9) translateY(-8px)}to{opacity:1;transform:scale(1) translateY(0)}}
+
 /* ===== Event Detail: 处理记录面板深色背景下的浅色文字 ===== */
 .ev-result-panel,.ev-result-panel p,.ev-result-panel h1,.ev-result-panel h2,.ev-result-panel h3,
 .ev-result-panel h4,.ev-result-panel h5,.ev-result-panel h6,.ev-result-panel li,.ev-result-panel ul,

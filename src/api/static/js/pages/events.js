@@ -356,10 +356,63 @@ document.addEventListener('keydown', function (e) {
 });
 
 function redispatchEvent(seq) {
-  if (!confirm('确认重新派发该事件任务？\n将把卡住的任务重新入队执行，可能产生重复执行。')) return;
+  _showRedispatchGlass(seq);
+}
+
+function _showRedispatchGlass(seq) {
+  // 移除已有弹窗
+  _closeRedispatchGlass();
+  // 遮罩（居中展示）
+  const overlay = document.createElement('div');
+  overlay.className = 'rdp-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px) saturate(150%);-webkit-backdrop-filter:blur(6px) saturate(150%);animation:rdpFade .2s ease';
+  // 弹窗 — 居中
+  const modal = document.createElement('div');
+  modal.className = 'rdp-glass';
+  modal.style.cssText = 'width:340px;background:rgba(255,255,255,0.72);backdrop-filter:blur(28px) saturate(200%);-webkit-backdrop-filter:blur(28px) saturate(200%);border-radius:18px;border:1px solid rgba(255,255,255,0.6);box-shadow:0 12px 40px rgba(0,0,0,0.12),0 2px 8px rgba(0,0,0,0.06);overflow:hidden;animation:rdpPop .25s cubic-bezier(0.34,1.56,0.64,1)';
+  modal.innerHTML = `
+    <div style="padding:18px 20px 14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div style="width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#ff9f0a,#ff6a00);display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;box-shadow:0 4px 12px rgba(255,159,10,0.3)">🔄</div>
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--t,#1d1d1f);letter-spacing:-0.2px">重新派发事件任务</div>
+          <div style="font-size:11px;color:var(--t3,#86868b)">Seq #${seq}</div>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--t2,#6e6e73);line-height:1.6;margin-bottom:14px">
+        将把卡住或失败的任务重新入队执行，可能产生重复执行。<br>建议在确认任务确实异常后再操作。
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="bt bt-o bt-s" style="padding:8px 16px;font-size:12px" onclick="_closeRedispatchGlass()">取消</button>
+        <button class="bt bt-s" style="padding:8px 16px;font-size:12px;background:linear-gradient(135deg,#ff9f0a,#ff6a00);color:#fff;border:none;box-shadow:0 4px 12px rgba(255,159,10,0.35)" onclick="_doRedispatch(${seq})">确认派发</button>
+      </div>
+    </div>`;
+  overlay.appendChild(modal);
+  // 点击遮罩关闭（mousedown 判断，避免 click 透传）
+  overlay.addEventListener('mousedown', function(e) {
+    if (e.target === overlay) _closeRedispatchGlass();
+  });
+  // Escape 关闭
+  const _escHandler = function(e) {
+    if (e.key === 'Escape') {
+      _closeRedispatchGlass();
+      document.removeEventListener('keydown', _escHandler);
+    }
+  };
+  document.addEventListener('keydown', _escHandler);
+  document.body.appendChild(overlay);
+}
+
+function _closeRedispatchGlass() {
+  const ex = document.querySelector('.rdp-overlay');
+  if (ex) ex.remove();
+}
+
+function _doRedispatch(seq) {
+  _closeRedispatchGlass();
   API.post('/events/' + seq + '/redispatch').then(d => {
     app.showToast('已重新派发，等待 worker 重新执行');
-    app.nav('event', seq);  // 刷新详情
+    app.nav('event', seq);
   }).catch(e => {
     const msg = (e.detail && e.detail.message) || e.message || e;
     app.showToast('重派失败: ' + msg);

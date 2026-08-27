@@ -368,6 +368,7 @@ CREATE TABLE IF NOT EXISTS issue_state (
     owner_agent  TEXT NOT NULL DEFAULT 'vod',   -- 当前归属 agent(= 最新被交办者)
     assignee     TEXT DEFAULT '',          -- Issue 责任人(GitCode assignee,可为 grape_bot 或用户)
     a2a_seq      INTEGER,                   -- 触发当前 stage 的 A2A 事件 seq
+    scene_id     TEXT DEFAULT '',          -- Issue 级开发场景（VOD 判定，空=回退仓库默认）
     updated_at   TEXT DEFAULT (datetime('now')),
     created_at   TEXT DEFAULT (datetime('now')),
     UNIQUE (repo_key, issue_id)
@@ -1617,3 +1618,12 @@ def _migrate_tables():
         log.info("Added last_scene column to user_accounts")
     except Exception as e:
         log.warning(f"Add last_scene column failed: {e}")
+    # ===== VOD auto-scene: issue_state.scene_id (vod-auto-scene-detection-design.md §3.1) =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "issue_state", "scene_id", "TEXT DEFAULT ''")
+            db.commit()
+        log.info("Added scene_id column to issue_state")
+    except Exception as e:
+        log.warning(f"Add issue_state.scene_id column failed: {e}")

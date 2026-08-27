@@ -168,7 +168,7 @@ function renderPipeline(data) {
   html += `${flowHtml}${pagerHtml}`;
 
   // 表格区域（独立滚动）
-  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>Duration</th><th>Agents</th><th>阶段</th><th>责任人</th></tr>`;
+  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>Duration</th><th>Agents</th><th>阶段</th><th>场景</th><th>责任人</th></tr>`;
   pagePipes.forEach((p, i) => {
     const realIdx = pipeStart + i;
     const s = realIdx === _pipeActiveIdx ? ' sel' : '';
@@ -182,14 +182,19 @@ function renderPipeline(data) {
     const _dur = p.duration;
     const dur = _dur ? (_dur >= 60 ? Math.floor(_dur/60) + 'm ' + Math.round(_dur%60) + 's' : _dur + 's') : '—';
     const owner = p.current_owner || '—';
+    const _sceneId = p.scene_id || '';
+    const _sceneLabels = {default:'通用开发','cloud-native':'云原生','iac':'IaC','agent-dev':'Agent开发','skill-dev':'Skill开发','api-skill-dev':'API Skill','blog-publish':'博客发布'};
+    const sceneLabel = _sceneId ? (_sceneLabels[_sceneId] || _sceneId) : '—';
+    const sceneBadge = _sceneId ? `<span class="tg tg-i" style="font-size:10px">${sceneLabel}</span>` : '<span class="ts t3">—</span>';
     const execBadge = p.executing
       ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ 执行中</span>'
       : '<span class="ts t2">空闲</span>';
-    html += `<tr class="pipe-row${s}" data-idx="${realIdx}" onclick="selPipe(${realIdx})">
+    html += `<tr class="pipe-row${s}" data-idx="${realIdx}" onclick="selPipe(${realIdx})" ondblclick="pipeRowDblClick(${realIdx})">
       <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
       <td>${dur}</td>
       <td>${agentTags}</td>
       <td><span class="${stageClass}">${stageName}</span></td>
+      <td>${sceneBadge}</td>
       <td>${owner}</td></tr>`;
   });
   html += `</table></div></div>`;
@@ -225,4 +230,47 @@ function triggerSREDeploy(repoFullName, issueNum, stage) {
   }).catch(e => {
     alert('触发 SRE 失败：' + (e.message || e));
   });
+}
+
+function pipeRowDblClick(idx) {
+  if (!_pipeData) return;
+  const active = _pipeData.active;
+  const history = _pipeData.history || [];
+  const allPipes = active ? [active, ...history] : history;
+  const p = allPipes[idx];
+  if (!p) return;
+  // 找到正在执行的 agent（status=1 running），跳转到其 Event Detail
+  const statuses = p.statuses || [];
+  const stages = p.stages || [];
+  for (let i = 0; i < statuses.length; i++) {
+    if (statuses[i] === 1) {
+      const ev = stages[i] && stages[i].latest_event;
+      if (ev && ev.seq) {
+        app.nav('event', ev.seq);
+        return;
+      }
+    }
+  }
+  // 没有 running 的 → 跳到最新完成的 agent 事件（最后一个 status>0 的）
+  for (let i = statuses.length - 1; i >= 0; i--) {
+    if (statuses[i] > 0) {
+      const ev = stages[i] && stages[i].latest_event;
+      if (ev && ev.seq) {
+        app.nav('event', ev.seq);
+        return;
+      }
+    }
+  }
+  // 全都没有 → 跳到 issue 对应的最新事件
+  const agentIds = ['vod','issue','coding','qa','sre'];
+  const issNum = String(p.issue_id || '').replace(/^#/, '');
+  const repo = (_pipeData.repo || '').replace(/^gitcode:/, '');
+  if (issNum && repo) {
+    API.get('/events/' + encodeURIComponent(repo) + '?page=1&page_size=50').then(function(d) {
+      const ev = (d.events || []).find(function(e) {
+        return String(e.issue_id || '').replace(/^#/,'') === issNum;
+      });
+      if (ev) app.nav('event', ev.seq);
+    });
+  }
 }

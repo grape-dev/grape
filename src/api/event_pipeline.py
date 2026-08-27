@@ -36,20 +36,20 @@ def is_plugin_mode() -> bool:
     return os.environ.get("GRAPE_PIPELINE_MODE", "").lower() == "plugin"
 
 
-def resolve_skill_from_pipeline(repo_key: str, agent_type: str) -> str:
+def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = "") -> str:
     """Look up skill name from pipelines.json (plugin mode).
 
-    Falls back to agent-skill-mapping.json if pipeline config not found.
+    scene_id 非空时优先使用（Issue 级场景），否则回退到仓库默认场景。
     Returns skill name or empty string.
     """
     try:
         from src.api.pipeline_config import get_node_by_tag
-        from src.user.db import get_repo_scene
-        scene_id = "default"
-        try:
-            scene_id = get_repo_scene(repo_key) or "default"
-        except Exception:
-            pass
+        if not scene_id:
+            try:
+                from src.user.db import get_repo_scene
+                scene_id = get_repo_scene(repo_key) or "default"
+            except Exception:
+                scene_id = "default"
         node = get_node_by_tag(scene_id, agent_type)
         if node:
             return node.get("skill", "")
@@ -693,33 +693,39 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.warning(f"Pipeline: agent session lookup failed: {e}")
 
     if not backend or not skill_name:
-        # Plugin mode: try pipelines.json first
+        # 提前解析 issue_id，供 Issue 级场景查找使用
+        _early_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+        if not _early_issue_id and event_type in PR_EVENT_TYPES:
+            _early_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}) or ""
+        # 读取 Issue 级开发场景（VOD 判定），回退到仓库默认
+        _issue_scene = "default"
+        if _early_issue_id:
+            try:
+                from src.api.session_store import get_issue_scene
+                _issue_scene = get_issue_scene(repo_key, _early_issue_id) or "default"
+            except Exception:
+                pass
+        # Plugin mode: try pipelines.json first（用 Issue 级场景）
         if is_plugin_mode():
-            _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type)
+            _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene)
             if _pipe_skill:
                 skill_name = _pipe_skill
                 backend = backend or ""
-                log.info(f"Pipeline (plugin): skill for {agent_type}={_pipe_skill}")
+                log.info(f"Pipeline (plugin): skill for {agent_type}={_pipe_skill} (scene={_issue_scene})")
         if not skill_name:
-            # Legacy fallback: agent-skill-mapping.json
+            # Legacy fallback: agent-skill-mapping.json（用 Issue 级场景）
             try:
                 _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
                 if os.path.exists(_defaults_path):
                     with open(_defaults_path, "r", encoding="utf-8") as _f:
                         _defaults = json.load(_f)
-                    _scene = _defaults.get("scenes", {}).get("default", {})
-                    try:
-                        from src.user.db import get_repo_scene
-                        _scene_id = get_repo_scene(repo_key) or "default"
-                        _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
-                    except Exception:
-                        pass
+                    _scene = _defaults.get("scenes", {}).get(_issue_scene, _defaults.get("scenes", {}).get("default", {}))
                     _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
                     _default_skill = _mapping.get(agent_type, "")
                     if _default_skill:
                         backend = ""
                         skill_name = _default_skill
-                        log.info(f"Pipeline: using default skill for {agent_type}={_default_skill}")
+                        log.info(f"Pipeline: using default skill for {agent_type}={_default_skill} (scene={_issue_scene})")
                     else:
                         log.info(f"Pipeline: no agent session and no default skill for {agent_type}, skip")
                         return result
@@ -1355,6 +1361,18 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 final_text = d.get("text", "")
                 new_oc_session_id = d.get("oc_session_id", "")
                 log.info(f"Agent done: [Agent:{agent_type}|repo:{repo_name}] exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
+                # VOD 场景推荐兜底：解析 JSON 中的 recommended_scene 并持久化
+                if agent_type == "vod" and final_text and issue_id:
+                    try:
+                        from src.api.event_store import parse_agent_output_json
+                        _scene_out = parse_agent_output_json(final_text)
+                        if _scene_out and _scene_out.get("recommended_scene"):
+                            _rec_scene = _scene_out["recommended_scene"]
+                            from src.api.session_store import set_issue_scene
+                            set_issue_scene(repo_key, issue_id, _rec_scene)
+                            log.info(f"VOD done: recommended_scene={_rec_scene} set for {issue_id}")
+                    except Exception as _se:
+                        log.warning(f"VOD done: scene parse failed: {_se}")
             elif evt_type == "error":
                 log.warning(f"Agent error: [Agent:{agent_type}|repo:{repo_name}] {data}")
             elif evt_type == "step_start":

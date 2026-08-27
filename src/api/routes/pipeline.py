@@ -130,6 +130,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
 
     # 生命周期阶段（issue_state.stage）：vod/issue/coding/qa/sre/done；无记录默认 vod
     stage = (_st.get("stage") if _st else "") or "vod"
+    # Issue 级开发场景（VOD 判定，空=仓库默认）
+    scene_id = (_st.get("scene_id") if _st else "") or ""
 
     # 总执行时长：所有已完成事件的 duration 之和
     total_duration = 0.0
@@ -145,6 +147,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         "statuses": stage_statuses,
         "result": result,
         "stage": stage,
+        "scene_id": scene_id,
         "agents": involved_agents,
         "current_owner": current_owner,
         "event_count": len(issue_events),

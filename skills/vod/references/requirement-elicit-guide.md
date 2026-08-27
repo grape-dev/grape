@@ -79,7 +79,7 @@ auto-submitted by VOD Agent（Feishu）
 
 ```bash
 curl -X POST {{SERVER_URL}}/api/a2a \
-  -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
+  -H "Authorization: Bearer $BOT_G...OKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "issue",
@@ -88,10 +88,13 @@ curl -X POST {{SERVER_URL}}/api/a2a \
       "account": "'"$ACCOUNT"'",
       "issue_number": "'"$ISSUE_NUMBER"'",
       "pr_number": "",
-      "context": "VOD 已完成需求收敛与结构化，请继续 spec 设计/打标签/排里程碑/分配责任人。结构化需求：<摘要>"
+      "context": "VOD 已完成需求收敛与结构化，请继续 spec 设计/打标签/排里程碑/分配责任人。结构化需求：<摘要>",
+      "recommended_scene": "skill-dev"
     }
   }'
 ```
+
+> `recommended_scene` 为 B5.5 判定的开发场景 ID，服务端据此写入 `issue_state.scene_id`，后续节点按此场景的流水线 skill 执行。无法确定时不传此字段（服务端回退到仓库默认场景）。
 
 > ⚠️ `issue_number` 必填；无法确定则不调 A2A，在评论中说明。交办后 Issue 生命周期进入 `issue` 阶段（`issue_state` 归属更新）。
 >

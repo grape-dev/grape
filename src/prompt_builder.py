@@ -151,6 +151,7 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
         if agent_type:
             lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
             lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
+        _inject_vod_scenes(lines, agent_type)
         return "\n".join(lines)
     _meta = meta or {}
     if _meta.get("degraded"):
@@ -170,7 +171,33 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
     if agent_type:
         lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
         lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
+    _inject_vod_scenes(lines, agent_type)
     return "\n".join(lines)
+
+
+def _inject_vod_scenes(lines: list, agent_type: str):
+    """VOD 专属：注入可用开发场景列表（供 VOD 判定 recommended_scene）。"""
+    if agent_type != "vod":
+        return
+    try:
+        from src.api.pipeline_config import get_scenes, get_pipeline_config
+        scenes = get_scenes()
+        if not scenes:
+            return
+        lines.append("\n## 可用开发场景（请根据需求特征选择最匹配的场景）")
+        lines.append("| scene_id | 名称 | 技能链 |")
+        lines.append("|----------|------|--------|")
+        for s in scenes:
+            cfg = get_pipeline_config(s["id"])
+            if cfg:
+                chain = " → ".join(n.get("skill", "") for n in cfg.get("nodes", []))
+                lines.append(f"| {s['id']} | {s['name']} | {chain} |")
+        lines.append("")
+        lines.append("> 请根据项目知识基线 + 成员上传文档 + 需求特征，判定最匹配的 scene_id。")
+        lines.append("> 在 JSON 产出中输出 `recommended_scene` 和 `scene_reason`。无法确定时留空（回退到仓库默认场景）。")
+    except Exception as _e:
+        from src.config import log as _log
+        _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")
 
 
 def build_role_definition(skills=None) -> str:

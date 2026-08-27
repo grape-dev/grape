@@ -302,6 +302,16 @@ async def a2a_endpoint(request: Request):
             except Exception as _de:
                 log.warning(f"A2A: duplicate check failed: {_de}")
 
+        # VOD A2A 交办时携带 recommended_scene → 持久化到 issue_state.scene_id
+        _recommended_scene = payload.get("recommended_scene", "")
+        if _recommended_scene and issue_number:
+            try:
+                from src.api.session_store import set_issue_scene
+                set_issue_scene(repo_key, f"#{issue_number}", _recommended_scene)
+                log.info(f"A2A: scene_id={_recommended_scene} set for issue=#{issue_number}")
+            except Exception as _sce:
+                log.warning(f"A2A: set_issue_scene failed: {_sce}")
+
         # 立即创建 event（status=running），Agent 执行完再更新
         from src.api.event_store import append_event
         seq = append_event(
@@ -313,7 +323,7 @@ async def a2a_endpoint(request: Request):
             agent_type=agent_name,
             actor="",
             summary=f"A2A: → {agent_name}",
-            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500]},
+            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "recommended_scene": _recommended_scene},
             status="running",
         )
         log.info(f"A2A: event created, seq={seq}")
