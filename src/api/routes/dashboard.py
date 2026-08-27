@@ -297,8 +297,33 @@ async def get_ops_overview(repo: str = ""):
     }
 
 
+@router.get("/ops/error-logs/sources")
+async def get_error_log_sources():
+    """返回可用的日志来源列表（主控 + 各 worker）。"""
+    import os as _os, glob as _glob2
+    from src.config import LOG_DIR
+    from src.session_manager import db, db_lock
+
+    sources = [{"source": "主控", "id": 0}]
+    _worker_dir = _os.path.join(LOG_DIR, "workers")
+    for _wf in sorted(_glob2.glob(_os.path.join(_worker_dir, "*.log"))):
+        _cred_id = _os.path.splitext(_os.path.basename(_wf))[0]
+        _wname = f"worker-{_cred_id}"
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (_cred_id,))
+                row = c.fetchone()
+                if row:
+                    _wname = row[1] or row[0] or _wname
+        except Exception:
+            pass
+        sources.append({"source": _wname, "id": int(_cred_id) if _cred_id.isdigit() else 0})
+    return {"sources": sources}
+
+
 @router.get("/ops/error-logs")
-async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user_id: str = ""):
+async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user_id: str = "", source: str = ""):
     """最近错误/警告日志。
 
     同时读取新旧两个日志文件：
@@ -450,6 +475,22 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
         if len(entries) >= limit:
             break
         _parse_text_log(rotated)
+
+    # 3. Worker 日志（data/logs/workers/*.log，JSON 格式，含 worker_id/worker_name）
+    _worker_dir = os.path.join(LOG_DIR, "workers")
+    for _wf in sorted(_glob.glob(os.path.join(_worker_dir, "*.log")), reverse=True):
+        if len(entries) >= limit:
+            break
+        _parse_json_log(_wf)
+
+    # 给主控日志加 source="主控"，worker 日志已有 worker_name
+    for e in entries:
+        if "source" not in e:
+            e["source"] = e.get("worker_name") or "主控"
+
+    # source 过滤
+    if source:
+        entries = [e for e in entries if e.get("source") == source or (source == "主控" and (e.get("source") == "主控"))]
 
     return {"entries": entries, "files": files_read, "count": len(entries)}
 

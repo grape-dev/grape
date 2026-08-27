@@ -295,25 +295,43 @@ function renderAnomalyTab(container, ops) {
 function loadErrorLogs(container) {
   if (!container) return;
   let currentLevel = _errorLogLevel || '';
+  let currentSource = _errorLogSource || '';
   container.innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
       <div style="display:flex;gap:0">
         <button class="bt bt-s ${currentLevel===''?'bt-p':'bt-o'}" onclick="_errorLogLevel='';loadErrorLogs(document.getElementById('obsContent'))">全部</button>
         <button class="bt bt-s ${currentLevel==='ERROR'?'bt-p':'bt-o'}" onclick="_errorLogLevel='ERROR';loadErrorLogs(document.getElementById('obsContent'))">仅 ERROR</button>
         <button class="bt bt-s ${currentLevel==='WARNING'?'bt-p':'bt-o'}" onclick="_errorLogLevel='WARNING';loadErrorLogs(document.getElementById('obsContent'))">仅 WARNING</button>
       </div>
+      <select id="errorLogSource" class="bt bt-s bt-o" style="padding:4px 8px" onchange="_errorLogSource=this.value;loadErrorLogs(document.getElementById('obsContent'))">
+        <option value="">全部来源</option>
+      </select>
       <span class="ts t3" id="errorLogCount"></span>
     </div>
     <div id="errorLogBody"><div class="loading">加载中...</div></div>
   `;
+  // 加载来源列表
+  fetch('/api/dashboard/ops/error-logs/sources').then(r => r.json()).then(d => {
+    const sel = document.getElementById('errorLogSource');
+    if (sel) {
+      (d.sources || []).forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.source;
+        opt.textContent = s.source;
+        if (currentSource === s.source) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    }
+  }).catch(() => {});
   const levelParam = currentLevel ? '&level=' + currentLevel : '';
+  const sourceParam = currentSource ? '&source=' + encodeURIComponent(currentSource) : '';
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
   const repoParam = repo && repo.fullName ? '&repo=' + encodeURIComponent(repo.fullName) : '';
-  fetch('/api/dashboard/ops/error-logs?limit=100' + levelParam + repoParam).then(r => r.json()).then(d => {
+  fetch('/api/dashboard/ops/error-logs?limit=100' + levelParam + sourceParam + repoParam).then(r => r.json()).then(d => {
     const entries = d.entries || [];
     const countEl = document.getElementById('errorLogCount');
     const bodyEl = document.getElementById('errorLogBody');
-    if (countEl) countEl.textContent = `${entries.length} 条（来自 ${d.files ? d.files.length : 1} 个日志文件）`;
+    if (countEl) countEl.textContent = entries.length + ' 条（来自 ' + (d.files ? d.files.length : 1) + ' 个日志文件）';
     if (!entries.length) {
       if (bodyEl) bodyEl.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">无匹配日志</div>';
       return;
@@ -323,9 +341,11 @@ function loadErrorLogs(container) {
       const level = e.level || '';
       const color = level === 'ERROR' ? '#dc2828' : '#d49c0f';
       const time = (e.ts || '').substring(0,19);
-      const rid = e.request_id && e.request_id !== '-' ? ` [${e.request_id}]` : '';
-      const extra = e.method ? ` ${e.method} ${e.path||''} ${e.status||''} ${e.duration_ms||0}ms` : '';
-      html += `<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">${time}</span>${rid} <span style="color:${color}"><b>${level}</b></span> <span style="color:#e0e6f0">${(e.message||'').substring(0,300)}</span><span style="color:#8d97a8">${extra}</span></div>`;
+      const src = e.source || '主控';
+      const srcTag = src !== '主控' ? '<span style="color:#5b9eff">[' + src + ']</span> ' : '';
+      const rid = e.request_id && e.request_id !== '-' ? ' [' + e.request_id + ']' : '';
+      const extra = e.method ? ' ' + e.method + ' ' + (e.path||'') + ' ' + (e.status||'') + ' ' + (e.duration_ms||0) + 'ms' : '';
+      html += '<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">' + time + '</span>' + srcTag + rid + ' <span style="color:' + color + '"><b>' + level + '</b></span> <span style="color:#e0e6f0">' + (e.message||'').substring(0,300) + '</span><span style="color:#8d97a8">' + extra + '</span></div>';
     });
     html += '</div>';
     if (bodyEl) bodyEl.innerHTML = html;
@@ -335,6 +355,7 @@ function loadErrorLogs(container) {
   });
 }
 let _errorLogLevel = '';
+let _errorLogSource = '';
 
 // ===== Tab: 任务 =====
 function renderTasksTab(ops, rt, mt) {

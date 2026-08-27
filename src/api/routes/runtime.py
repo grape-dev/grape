@@ -53,12 +53,19 @@ class RuntimeInfo(BaseModel):
     healthy: bool = True
 
 
+class LogLineBody(BaseModel):
+    ts: str = ""
+    level: str = ""
+    message: str = ""
+
+
 class HeartbeatBody(BaseModel):
     runtime_ids: list[int] = []
     cpu_percent: float = 0.0
     memory_percent: float = 0.0
     disk_percent: float = 0.0
     load_avg: str = ""
+    log_lines: list[LogLineBody] = []
 
 
 class TaskStartBody(BaseModel):
@@ -203,6 +210,38 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
             ).fetchall()
             cancelled_tasks = [r[0] for r in rows]
         db.commit()
+
+    # 写入 worker 上报的日志到 data/logs/workers/{credential_id}.log
+    if body.log_lines:
+        import os as _os, json as _json
+        from src.config import LOG_DIR
+        _worker_log_dir = _os.path.join(LOG_DIR, "workers")
+        _os.makedirs(_worker_log_dir, exist_ok=True)
+        # 查 worker 名称
+        _wname = ""
+        try:
+            with db_lock:
+                c2 = db.cursor()
+                c2.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (credential_id,))
+                row = c2.fetchone()
+                if row:
+                    _wname = row[1] or row[0] or f"worker-{credential_id}"
+        except Exception:
+            _wname = f"worker-{credential_id}"
+        _wf = _os.path.join(_worker_log_dir, f"{credential_id}.log")
+        with open(_wf, "a") as _wf_fp:
+            for ll in body.log_lines:
+                _entry = {
+                    "ts": ll.ts or now,
+                    "level": ll.level,
+                    "component": "worker",
+                    "request_id": "-",
+                    "message": ll.message,
+                    "worker_id": credential_id,
+                    "worker_name": _wname,
+                }
+                _wf_fp.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
+
     return {"status": "ok", "cancelled_tasks": cancelled_tasks}
 
 
