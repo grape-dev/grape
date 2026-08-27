@@ -279,7 +279,7 @@ def member_files(repo_key: str) -> dict:
             rows = db.cursor().execute(
                 "SELECT file_path, obs_key FROM agent_shared_knowledge "
                 "WHERE repo_key=? AND scope='member' AND obs_key!='' AND obs_key IS NOT NULL "
-                "ORDER BY id DESC",
+                "GROUP BY file_path ORDER BY MAX(id) DESC",
                 (repo_key,)
             ).fetchall()
         for fp, ok in rows:
@@ -329,7 +329,7 @@ def member_files_pi(repo_key: str) -> dict:
             rows = db.cursor().execute(
                 "SELECT file_path, obs_key FROM agent_shared_knowledge "
                 "WHERE repo_key=? AND scope='member' AND obs_key!='' AND obs_key IS NOT NULL "
-                "ORDER BY id DESC",
+                "GROUP BY file_path ORDER BY MAX(id) DESC",
                 (repo_key,)
             ).fetchall()
         for fp, ok in rows:
@@ -380,7 +380,7 @@ def agent_files(repo_key: str, agent_type: str = "") -> dict:
             rows = db.cursor().execute(
                 "SELECT file_path, obs_key FROM agent_shared_knowledge "
                 "WHERE repo_key=? AND scope='member' AND agent_type=? AND obs_key!='' AND obs_key IS NOT NULL "
-                "ORDER BY id DESC",
+                "GROUP BY file_path ORDER BY MAX(id) DESC",
                 (repo_key, agent_type or "")
             ).fetchall()
         for fp, ok in rows:

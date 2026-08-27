@@ -215,9 +215,9 @@ class ObsStorage(StorageBackend):
                 rows = db.cursor().execute(
                     "SELECT file_path, obs_key FROM agent_shared_knowledge "
                     "WHERE repo_key=? AND scope='member' AND obs_key!='' AND obs_key IS NOT NULL "
-                    "ORDER BY id DESC",
+                    "GROUP BY file_path ORDER BY MAX(id) DESC",
                     (repo_key,)
-                ).fetchall()
+                    ).fetchall()
             # 直接用 DB file_path 生成两种格式的 rel_path（不调 member_files）
             for fp, ok in rows:
                 if fp and ok:
@@ -234,7 +234,7 @@ class ObsStorage(StorageBackend):
                     rows = db.cursor().execute(
                         "SELECT file_path, obs_key FROM agent_shared_knowledge "
                         "WHERE repo_key=? AND scope='member' AND agent_type=? AND obs_key!='' AND obs_key IS NOT NULL "
-                        "ORDER BY id DESC",
+                        "GROUP BY file_path ORDER BY MAX(id) DESC",
                         (repo_key, agent_type)
                     ).fetchall()
                 else:

@@ -257,16 +257,18 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
                                 files[fname] = data.decode("utf-8", errors="replace")
                         except Exception:
                             continue
-            # .metadata.json 特殊处理
-            meta = {}
-            if ".metadata.json" in files:
-                try:
-                    meta = json.loads(files[".metadata.json"])
-                except Exception:
-                    meta = {}
             if files:
+                # .metadata.json 特殊处理
+                meta = {}
+                if ".metadata.json" in files:
+                    try:
+                        meta = json.loads(files[".metadata.json"])
+                    except Exception:
+                        meta = {}
                 files[".metadata.json"] = json.dumps(meta, ensure_ascii=False)
-            return files, meta
+                return files, meta
+            # DB 查不到 baseline → 回退本地读取（兜底）
+            # 继续走下面的本地逻辑
 
         # 本地模式（和 dev 一致）
         pi = os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
