@@ -101,13 +101,19 @@ class RuntimeClient:
         data = await self._request("GET", "/api/runtime/install/latest", retries=1)
         return (data or {}).get("version", "")
 
-    async def heartbeat(self, runtime_ids: list[int]) -> dict | None:
+    async def heartbeat(self, runtime_ids: list[int], log_lines: list = None) -> dict | None:
         """发送心跳。返回完整响应 dict（含 cancelled_tasks）或 None（网络错误/服务端不可达）。
 
         worker 调用后检查 result.get("status") == "ok" 判断成功，
         检查 result.get("cancelled_tasks", []) 发现取消任务并杀进程。
+
+        log_lines: worker 最近的 ERROR/WARNING 日志条目列表
+        [{ts, level, message}]，主控存入 data/logs/workers/{id}.log
         """
-        result = await self._request("POST", "/api/runtime/heartbeat", {"runtime_ids": runtime_ids}, retries=2)
+        payload = {"runtime_ids": runtime_ids}
+        if log_lines:
+            payload["log_lines"] = log_lines
+        result = await self._request("POST", "/api/runtime/heartbeat", payload, retries=2)
         return result
 
     async def claim(self, runtime_id: int, supports_obs_url: bool = False,

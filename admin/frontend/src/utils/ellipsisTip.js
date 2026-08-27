@@ -25,11 +25,26 @@ function isOverflowing(el) {
 }
 
 // 从目标元素向上找第一个截断的文本容器（td/span/div 等）
-// 排除顶部导航分组（其 textContent 含隐藏的下拉子菜单，且绝对定位子菜单会虚增 scrollWidth 造成误判）
+// 排除布局容器和导航分组（它们的 textContent 包含子元素全部文字，且子元素绝对定位会虚增 scrollWidth 造成误判）
+const EXCLUDE_CLASSES = new Set([
+  'topnav-dropdown', 'topnav', 'topnav-brand', 'topnav-links',
+  'app-layout', 'topnav-content', 'drawer', 'drawer-overlay'
+])
 function findOverflowTarget(el) {
   let p = el
   while (p && p !== document.body) {
-    if (p.classList && p.classList.contains('topnav-dropdown')) return null
+    if (p.classList) {
+      for (const c of p.classList) {
+        if (EXCLUDE_CLASSES.has(c)) return null
+      }
+    }
+    // 只对有文本内容且真实截断的元素触发（scrollWidth > clientWidth）
+    // 且排除 flex/grid 布局容器（它们不会截断文本，scrollWidth 虚高是子元素撑开导致）
+    const style = getComputedStyle(p)
+    if (style.display === 'flex' || style.display === 'inline-flex' || style.display === 'grid') {
+      p = p.parentElement
+      continue
+    }
     if (p.textContent && p.textContent.trim() && isOverflowing(p)) return p
     p = p.parentElement
   }

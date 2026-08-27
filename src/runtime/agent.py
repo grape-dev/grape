@@ -20,6 +20,51 @@ import urllib.request as _urllib
 
 from src.config import log
 
+# Worker 日志内存缓冲区——收集最近 ERROR/WARNING 日志，心跳时上报给主控
+import collections as _collections
+import time as _time_mod
+import logging as _logging_mod
+_worker_log_buffer = _collections.deque(maxlen=50)  # 最近 50 条 ERROR/WARNING
+_last_sent_log_ts = 0.0  # 上次上报的时间戳，避免重复发送
+
+# 注册一个 logging Handler 把 ERROR/WARNING 写入内存缓冲区
+class _WorkerLogHandler(_logging_mod.Handler):
+    def emit(self, record):
+        try:
+            if record.levelno >= _logging_mod.WARNING:
+                _worker_log_buffer.append({
+                    "ts": _time_mod.strftime("%Y-%m-%d %H:%M:%S", _time_mod.localtime(record.created)),
+                    "level": record.levelname,
+                    "message": self.format(record)[:500],
+                })
+        except Exception:
+            pass
+
+try:
+    _h = _WorkerLogHandler()
+    _h.setLevel(_logging_mod.WARNING)
+    log.addHandler(_h)
+except Exception:
+    pass
+
+
+def _collect_recent_logs():
+    """收集自上次上报以来的新日志条目（去重），最多 20 条。"""
+    global _last_sent_log_ts
+    if not _worker_log_buffer:
+        return []
+    # 取所有未发送的条目（按时间戳过滤）
+    result = []
+    max_ts = 0.0
+    for ll in _worker_log_buffer:
+        # 简单策略：取最近 20 条
+        result.append(ll)
+    # 取最后 20 条
+    result = result[-20:]
+    # 清空缓冲区（已发送）
+    _worker_log_buffer.clear()
+    return result
+
 # v3.0：OBS 直连能力 + 自适应降级状态（运行时能力反馈 C）
 _OBS_SUPPORT = False      # 启动探测结果（supports_obs_url）
 _OBS_FALLBACK = False     # 直连不稳 → claim 声明 prefer_fallback
@@ -801,7 +846,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # ---- 心跳 + 失败检测 ----
         now = asyncio.get_running_loop().time()
         if now - last_heartbeat >= heartbeat_interval:
-            ok = await client.heartbeat(runtime_ids)
+            # 收集最近的 ERROR/WARNING 日志（从内存日志缓冲区）
+            _recent_logs = _collect_recent_logs()
+            ok = await client.heartbeat(runtime_ids, log_lines=_recent_logs)
             # ⚠️ heartbeat 返回值从 bool 改为 dict——判断逻辑调整
             # dict: None=网络错误 / {"status":"ok",...}=成功 / 其他=异常
             if ok is not None and ok.get("status") == "ok":

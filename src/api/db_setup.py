@@ -1617,6 +1617,10 @@ def _migrate_tables():
             if "runtime_credentials" in _tables:
                 _ensure_column(c, "runtime_credentials", "last_ip", "TEXT DEFAULT ''")
                 _ensure_column(c, "runtime_credentials", "owner_name", "TEXT DEFAULT ''")
+                _ensure_column(c, "runtime_credentials", "cpu_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "memory_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "disk_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "load_avg", "TEXT DEFAULT ''")
                 # 凭据名全局唯一：先清重（同名多行仅保留最小 id），再建唯一索引
                 c.execute("""
                     DELETE FROM runtime_credentials WHERE id NOT IN (
