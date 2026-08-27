@@ -107,11 +107,13 @@ async def gitcode_webhook(request: Request):
 
     log.info(f"Webhook: token OK, repo={repo}, event={event_header}")
 
-    # 5. 处理事件
-    log.info(f"Webhook: calling run_pipeline for repo={repo}")
-    result = run_pipeline(body, dict(request.headers), account=repo, repo_key_override=f"gitcode:{repo}")
-    log.info(f"Webhook: pipeline done, seq={result.get('seq')}, event_type={result.get('event_type')}, ok={result.get('ok')}")
-    return {"status": "ok", "seq": result.get("seq", 0), "event_type": result.get("event_type", "")}
+    # 5. 处理事件 — 异步执行，立即返回 200 避免 GitCode webhook 超时 (503)
+    import asyncio as _aio
+    loop = _aio.get_event_loop()
+    _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(request.headers),
+                                     account=repo, repo_key_override=f"gitcode:{repo}"))
+    log.info(f"Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
+    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
 
 
 @router.post("/api/a2a")

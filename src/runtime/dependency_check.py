@@ -49,12 +49,11 @@ def validate_task_dependencies(task: dict, engine_name: str = "") -> None:
         # chat/vod may not need a skill file
         missing.append(f"skill not configured (skill_obs_url/skill_files/skill all empty, task={tid})")
 
-    # 3. cwd
+    # 3. cwd — check if can be created (don't require parent to exist, makedirs will create it)
     cwd = task.get("cwd") or ""
-    if cwd:
-        parent = os.path.dirname(cwd)
-        if parent and not os.path.isdir(parent) and not os.path.exists(parent):
-            missing.append(f"cwd parent dir does not exist: {parent}")
+    if cwd and not os.path.isdir(cwd):
+        # cwd doesn't exist yet but will be created by makedirs — this is OK
+        pass
 
     # 4. Repo token for git agents (coding/qa/sre need git access)
     _GIT_AGENTS = ("vod", "issue", "coding", "qa", "sre")

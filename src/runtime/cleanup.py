@@ -199,11 +199,111 @@ def sweep_once() -> int:
         return 0
 
 
+_POLL_INTERVAL = int(os.environ.get("GRAPE_POLL_INTERVAL_SECONDS", "60"))
+
+
+def _poll_gitcode_issues_once() -> int:
+    """Poll GitCode for new issues on managed repos (webhook fallback).
+
+    For each managed repo with a bot token, fetch recent open issues via GitCode API.
+    If an issue has no corresponding event in DB (no issue_opened event),
+    inject a synthetic webhook to trigger the pipeline.
+    """
+    import json as _json
+    import urllib.request as _urllib
+    try:
+        from src.session_manager import db, db_lock
+        from src.user.db import get_gitcode_token
+        from src.repo_key import to_repo_key
+    except Exception:
+        return 0
+
+    triggered = 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key, gitcode_webhook_token FROM managed_repos WHERE bot_gitcode_token != '' OR gitcode_webhook_token != ''")
+            repos = c.fetchall()
+        if not repos:
+            return 0
+
+        for repo_key, webhook_token in repos:
+            try:
+                owner, repo_name = repo_key.split(":")[-1].split("/")
+                tok = get_gitcode_token(repo_key=repo_key) or ""
+                if not tok:
+                    continue
+                # Fetch recent open issues (last 20)
+                req = _urllib.Request(
+                    f"https://api.gitcode.com/api/v5/repos/{owner}/{repo_name}/issues?state=open&per_page=20&direction=desc",
+                    headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
+                resp = _urllib.urlopen(req, timeout=15)
+                issues = _json.loads(resp.read())
+                if not issues:
+                    continue
+
+                for issue in issues:
+                    num = issue.get("number")
+                    if not num:
+                        continue
+                    issue_id = f"#{num}"
+
+                    # Check if this issue already has an event
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("SELECT 1 FROM events WHERE repo_key=? AND issue_id=? LIMIT 1", (repo_key, issue_id))
+                        if c.fetchone():
+                            continue  # already has events
+
+                    # New issue without events — inject synthetic webhook
+                    title = issue.get("title", "")
+                    body = issue.get("body", "")
+                    log.info(f"poll: new issue {issue_id} on {repo_key}: {title[:60]}, injecting webhook")
+
+                    # Call webhook endpoint internally
+                    payload = _json.dumps({
+                        "action": "open",
+                        "issue": {"number": num, "title": title, "body": body[:2000]},
+                        "repository": {"full_name": f"{owner}/{repo_name}", "name": repo_name}
+                    }).encode()
+
+                    webhook_req = _urllib.Request(
+                        f"http://127.0.0.1:38080/webhook/gitcode",
+                        data=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "X-GitCode-Token": webhook_token or "poll",
+                            "X-Gitcode-Event": "issue_opened",
+                        },
+                        method="POST")
+                    try:
+                        wh_resp = _urllib.urlopen(webhook_req, timeout=15)
+                        result = _json.loads(wh_resp.read())
+                        if result.get("seq"):
+                            triggered += 1
+                            log.info(f"poll: injected issue {issue_id} -> seq={result.get('seq')}")
+                    except Exception as e:
+                        log.warning(f"poll: inject failed for {issue_id}: {e}")
+
+            except Exception as e:
+                log.warning(f"poll: error checking {repo_key}: {e}")
+
+        if triggered:
+            log.info(f"poll: triggered {triggered} new issue(s)")
+    except Exception as e:
+        log.warning(f"poll_gitcode_issues failed: {e}")
+    return triggered
+
+
 async def sweep_loop():
-    """服务端后台周期清理（main.py lifespan 挂载）。"""
+    """服务端后台周期清理 + GitCode issue 轮询（main.py lifespan 挂载）。"""
     while True:
         try:
             sweep_once()
         except Exception as e:
             log.warning(f"sweeper loop error: {e}")
+        try:
+            _poll_gitcode_issues_once()
+        except Exception as e:
+            log.warning(f"poll loop error: {e}")
         await asyncio.sleep(_SWEEP_INTERVAL)
