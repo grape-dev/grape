@@ -21,6 +21,13 @@ function navEvent(seq) {
 }
 
 function renderEventDetail(data) {
+  // 切换事件时清理接收上下文全屏状态
+  if (_promptFs) {
+    const _fs = document.getElementById('promptFullscreen');
+    if (_fs) _fs.remove();
+    _promptFs = false;
+    _promptFsPlaceholder = null;
+  }
   const el = document.getElementById('pageContent');
   if (!el) return;
   const agent = data.agent_type || 'vod';
@@ -113,22 +120,23 @@ function renderEventDetail(data) {
           <span class="ev-arrow" style="font-size:10px;transition:transform .2s;display:inline-block">▶</span>
           <span style="font-size:12px;font-weight:600">📋 接收上下文</span>
           <span id="promptMeta" class="ts t3" style="font-size:11px;margin-left:auto"></span>
+          <button id="promptFsBtn" onclick="event.stopPropagation();_togglePromptFullscreen()" title="全屏/还原" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;display:none">⛶ 全屏</button>
         </div>
         <div id="promptBody" class="ev-section-body" style="display:none;max-height:400px;overflow-y:auto;background:#000;color:#fff;border-radius:8px;padding:14px 18px 28px;font-size:14px;font-family:JetBrains Mono,Fira Code,Cascadia Code,Consolas,Menlo,monospace;line-height:1.75;letter-spacing:0.2px;white-space:pre-wrap;word-break:break-all">
-          <span style="color:#a0aac0">点击展开加载…</span>
+          <div id="promptContent"><span style="color:#a0aac0">点击展开加载…</span></div>
         </div>
       </div>
       <!-- 区块3：Agent 处理记录与答复结论（统一标题，内置框+结论，整体滑动） -->
       <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">Agent 处理记录与答复结论</h3>
-      <div class="ev-result-panel" style="flex:1;overflow-y:auto;background:var(--s);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
-        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:rgba(128,128,128,0.08);border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>` : ''}
+      <div style="flex:1;overflow-y:auto;background:var(--bg);color:var(--t);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
+        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>` : ''}
         ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">（无结论）</div>'}
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
     <!-- 右栏：对话面板 -->
     <div id="convPanel" class="cd" style="padding:14px;display:flex;flex-direction:column;gap:8px;height:100%;overflow:hidden">
-      <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">💬 与 ${agentName} 对话 <button class="bt bt-o bt-s" onclick="toggleConvFullscreen()" title="全屏/还原" style="padding:2px 10px">⛶ 全屏</button></h3>
+      <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">💬 与 ${agentName} 对话 <button onclick="toggleConvFullscreen()" title="全屏/还原" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">⛶ 全屏</button></h3>
       <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
       <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
         <input id="convInput" placeholder="问一问 agent…（Enter 发送）" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
@@ -159,40 +167,59 @@ function _toggleEvSection(bodyId, headerEl) {
     body.style.display = 'none';
     if (arrow) { arrow.textContent = '▶'; arrow.style.transform = 'rotate(0deg)'; }
   }
+  // 接收上下文展开/折叠时同步显隐全屏按钮
+  if (bodyId === 'promptBody') {
+    const fsBtn = document.getElementById('promptFsBtn');
+    if (fsBtn) {
+      if (isHidden) {
+        fsBtn.style.transition = 'none';
+        fsBtn.style.display = 'inline-flex';
+        void fsBtn.offsetHeight;  // 强制 reflush，让 transition:none 生效
+        fsBtn.style.transition = '';
+      } else {
+        fsBtn.style.display = 'none';
+      }
+    }
+  }
 }
 
 // ===== 异步加载 event 的接收上下文（prompt） =====
 let _promptLoadedSeq = 0;
 function _loadEventPrompt(taskId, seq) {
+  const meta = document.getElementById('promptMeta');
+  function _pc(html) {
+    const c = document.getElementById('promptContent');
+    if (c) c.innerHTML = html;
+  }
+  function _pctext(text) {
+    const c = document.getElementById('promptContent');
+    if (c) c.textContent = text;
+  }
   if (!taskId) {
-    const body = document.getElementById('promptBody');
-    const meta = document.getElementById('promptMeta');
-    if (body) body.innerHTML = '<span style="color:#a0aac0">无关联任务（direct 模式或尚未执行）</span>';
+    _pc('<span style="color:#a0aac0">无关联任务（direct 模式或尚未执行）</span>');
     if (meta) meta.textContent = '';
     return;
   }
   // 同一 event 只加载一次
   if (_promptLoadedSeq === seq) return;
   _promptLoadedSeq = seq;
-  const body = document.getElementById('promptBody');
-  const meta = document.getElementById('promptMeta');
-  if (body) body.innerHTML = '<span style="color:#a0aac0">加载中…</span>';
+  _pc('<span style="color:#a0aac0">加载中…</span>');
   const token = localStorage.getItem('token') || '';
   fetch('/api/task-logs/' + encodeURIComponent(taskId) + '/info', {headers: {'Authorization': 'Bearer ' + token}})
     .then(r => r.ok ? r.json() : null)
     .then(info => {
-      if (!info) { if (body) body.innerHTML = '<span style="color:#ff5b5b">加载失败</span>'; return; }
+      if (!info) { _pc('<span style="color:#ff5b5b">加载失败</span>'); return; }
       const prompt = info.prompt || '';
       const fullLen = info.prompt_full_length || 0;
       if (meta) meta.textContent = fullLen > 0 ? fullLen + ' 字' : '';
       if (!prompt) {
-        if (body) body.innerHTML = '<span style="color:#a0aac0">（prompt 为空 — 任务可能通过 queue 模式创建但尚未执行，或 direct 模式 prompt 回写前执行失败）</span>';
+        _pc('<span style="color:#a0aac0">（prompt 为空 — 任务可能通过 queue 模式创建但尚未执行，或 direct 模式 prompt 回写前执行失败）</span>');
       } else {
         const truncated = fullLen > prompt.length ? '\n\n...(已截断，完整 ' + fullLen + ' 字)' : '';
-        if (body) body.textContent = prompt + truncated;
+        _pctext(prompt + truncated);
       }
     })
-    .catch(() => { if (body) body.innerHTML = '<span style="color:#ff5b5b">加载失败</span>'; });
+    .catch(() => { _pc('<span style="color:#ff5b5b">加载失败</span>'); });
 }
 
 function _convBubble(role, content, time, by) {
@@ -324,9 +351,9 @@ function toggleConvFullscreen() {
     const agentName = (_AGENT_TYPES[_convAgent] && _AGENT_TYPES[_convAgent].display_name) || _convAgent || '';
     title.textContent = '💬 与 ' + agentName + ' 对话';
     const btn = document.createElement('button');
-    btn.className = 'bt bt-o bt-s';
     btn.textContent = '⛶ 还原';
     btn.title = '退出全屏';
+    btn.style.cssText = 'border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer';
     btn.onclick = toggleConvFullscreen;
     bar.appendChild(title);
     bar.appendChild(btn);
@@ -350,9 +377,63 @@ function toggleConvFullscreen() {
     messages.scrollTop = messages.scrollHeight;
   }
 }
+// ===== 接收上下文全屏/还原 =====
+let _promptFs = false;
+let _promptFsPlaceholder = null;
+
+function _togglePromptFullscreen() {
+  const body = document.getElementById('promptBody');
+  if (!body) return;
+  if (!_promptFs) {
+    if (body.style.display === 'none') return; // 折叠状态不响应
+    _promptFsPlaceholder = document.createElement('div');
+    body.parentElement.insertBefore(_promptFsPlaceholder, body);
+    const fs = document.createElement('div');
+    fs.id = 'promptFullscreen';
+    fs.style.cssText = 'position:fixed;inset:0;z-index:999;background:#000;display:flex;flex-direction:column;box-sizing:border-box';
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #2a3140;flex-shrink:0';
+    const title = document.createElement('span');
+    title.style.cssText = 'font-size:13px;font-weight:600;color:#fff;margin-right:auto';
+    title.textContent = '📋 接收上下文';
+    bar.appendChild(title);
+    const btn = document.createElement('button');
+    btn.textContent = '⛶ 还原';
+    btn.title = '退出全屏';
+    btn.style.cssText = 'border:1px solid #3a4150;background:transparent;color:#c8d0e0;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer';
+    btn.onclick = _togglePromptFullscreen;
+    bar.appendChild(btn);
+    fs.appendChild(bar);
+    body.style.maxHeight = 'none';
+    body.style.flex = '1';
+    body.style.borderRadius = '0';
+    body.style.minHeight = '0';
+    fs.appendChild(body);
+    document.body.appendChild(fs);
+    _promptFs = true;
+  } else {
+    const fs = document.getElementById('promptFullscreen');
+    if (!fs) return;
+    if (_promptFsPlaceholder) {
+      _promptFsPlaceholder.parentElement.insertBefore(body, _promptFsPlaceholder);
+      _promptFsPlaceholder.remove();
+      _promptFsPlaceholder = null;
+    }
+    body.style.maxHeight = '400px';
+    body.style.flex = '';
+    body.style.borderRadius = '8px';
+    body.style.minHeight = '';
+    fs.remove();
+    _promptFs = false;
+  }
+}
+
 // ESC 键退出全屏
 document.addEventListener('keydown', function (e) {
-  if (e.key === 'Escape' && _convFs) toggleConvFullscreen();
+  if (e.key === 'Escape') {
+    if (_convFs) toggleConvFullscreen();
+    if (_promptFs) _togglePromptFullscreen();
+  }
 });
 
 function redispatchEvent(seq) {
