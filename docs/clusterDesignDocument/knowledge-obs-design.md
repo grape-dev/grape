@@ -435,12 +435,17 @@ if total_degraded > 0:
 ```python
 # storage 新增 read_batch 方法
 async def read_batch(self, keys: list[str]) -> dict[str, str]:
-    """批量并发读取——总耗时 = max(单个) 而不是 sum"""
+    """批量并发读取——总耗时 = max(单个) 而不是 sum。
+    限制并发数防止触发存储限流。
+    """
+    sem = asyncio.Semaphore(10)  # 最多 10 个并发
+
     async def _read(key):
-        try:
-            return key, self.read_bytes(key)
-        except:
-            return key, ""
+        async with sem:
+            try:
+                return key, self.read_bytes(key)
+            except:
+                return key, ""
     results = await asyncio.gather(*[_read(k) for k in keys])
     return dict(results)
 ```
@@ -448,8 +453,10 @@ async def read_batch(self, keys: list[str]) -> dict[str, str]:
 | 对比 | 逐个读取 | 批量读取 |
 |------|---------|---------|
 | 5 个失败 | 5 次串行 50-250ms | 1 批并发 10-50ms |
-| 网络请求 | N 次 | 1 批并发 |
-| 总耗时 | sum(单个) | max(单个) |
+| 100 个失败 | 100 次串行 1-5s | 10 批并发 0.1-0.5s |
+| 并发限制 | 无 | Semaphore(10) 防止限流 |
+| 网络请求 | N 次 | 1 批并发（最多 10） |
+| 总耗时 | sum(单个) | max(单个) × ceil(N/10) |
 
 ### 降级场景
 
@@ -680,6 +687,7 @@ delete_object 失败时 OBS 里文件还在，如果 DB obs_key 已清空 → �
 | 3 | agent_shared_knowledge.updated_at | DATETIME | CURRENT_TIMESTAMP | 最后更新时间，排查用 |
 | 4 | agent_tasks.project_info_file_urls | TEXT | '' | JSON: {rel_path: {url, storage_key}} |
 | 5 | agent_tasks.knowledge_file_urls | TEXT | '' | JSON: {rel_path: {url, storage_key}} |
+| 6 | agent_runtimes.worker_version | TEXT | '' | Worker 代码版本号 |
 
 ## 十四、项目知识基线文件 OBS 改造（补充）
 
@@ -791,10 +799,72 @@ OBS 模式：
 - 本地模式：走现有逻辑
 - 老数据：本地文件继续可用，新生成的同时写 OBS + 落库
 
+### OBS 写失败处理
+
+builder.py 生成基线文件时写 OBS + 落库。OBS 写失败时：
+- 只写本地文件 + log warning
+- DB obs_key 为空 → 和老数据同样的降级逻辑
+- 后台同步任务每小时迁移（第十一节）
+
+### baseline content_hash
+
+baseline 文件写入时也计算 content_hash 存 DB：
+- builder.py _write_file / _write_meta 写 OBS 时同时计算 hash
+- 读取时走 hash 缓存（和共享知识同模式）
+
 ### 改动文件清单（补充）
 
 | # | 文件 | 改动内容 |
 |---|------|---------|
-| 7 | src/project_info/builder.py | _write_file / _write_meta 加 OBS 写入 + INSERT baseline 记录 |
-| 8 | src/runtime/service.py | load_project_info 查 DB baseline + OBS 读取 + 回退本地 |
-| 9 | src/im/vod_handler_async.py | VOD 注入读基线查 DB + OBS 读取 + 回退本地 |
+| 7 | src/project_info/builder.py | _write_file / _write_meta 加 OBS 写入 + content_hash + INSERT baseline 记录 + OBS 写失败降级本地 |
+| 8 | src/runtime/service.py | load_project_info 查 DB baseline + OBS 读取 + hash 缓存 + 回退本地 |
+| 9 | src/im/vod_handler_async.py | VOD 注入读基线查 DB + OBS 读取 + hash 缓存 + 回退本地 |
+
+### Worker 版本号上报
+
+Worker register 时上报 worker_version 到 agent_runtimes 表：
+
+| # | 文件 | 改动内容 |
+|---|------|---------|
+| 10 | db_setup.py | agent_runtimes DDL + migration 加 worker_version TEXT DEFAULT '' |
+| 11 | runtime/agent.py | main() 调 register 时传 cli_version=_read_local_worker_version() |
+| 12 | api/routes/runtime.py | register 函数存 worker_version 到 DB |
+
+当前已有基础：
+- Worker 有 _read_local_worker_version() 读 /etc/grape/worker.version ✅
+- register 请求体有 cli_version 字段 ✅
+- 只是 main() 没传 + 服务端没存
+
+### 测试用例
+
+| # | 用例 | 测试步骤 | 预期结果 |
+|---|------|---------|---------|
+| TC-K01 | obs_key 为空走本地 | DB obs_key='' → read_knowledge | 读本地文件 |
+| TC-K02 | obs_key 非空走 OBS | DB obs_key 非空 → read_knowledge | 走 OBS + hash 缓存 |
+| TC-K03 | hash 缓存命中 | DB hash 和缓存 hash 一致 | 用缓存（0ms） |
+| TC-K04 | hash 缓存未命中 | DB hash 和缓存 hash 不一致 | 从 OBS 重新拉 |
+| TC-K05 | OBS 读取失败回退本地 | OBS 异常 → read_knowledge | 回退本地文件 |
+| TC-K06 | storage=None 全部回退本地 | OBS 未启用 | 全部走本地 |
+| TC-K07 | write_knowledge 写 OBS + DB | 调 write_knowledge | OBS 有文件 + DB 有 obs_key + content_hash |
+| TC-K08 | upload_knowledge 写 OBS + DB | 上传文件 | OBS 有文件 + DB 有 obs_key |
+| TC-K09 | delete_knowledge 先删 OBS 再清 DB | 删文件 | OBS 删成功 → DB 清空 |
+| TC-K10 | delete_knowledge OBS 删失败 | OBS 删失败 | DB 不清 + log warning |
+| TC-K11 | enqueue_task 生成 file_urls | 创建任务 | file_urls 有 url + storage_key |
+| TC-K12 | Worker URL 下载成功 | Worker 下载 url | 拿到 content |
+| TC-K13 | Worker URL 下载失败降级 content | URL 过期 | 用 content |
+| TC-K14 | Worker content 为空降级 storage_key | content 为空 | 直连存储读取 |
+| TC-K15 | Worker 批量读取 | 5 个文件降级 | 1 批并发 10-50ms |
+| TC-K16 | 后台同步迁移老数据 | obs_key 为空 → 同步 | OBS 有文件 + DB 有 obs_key |
+| TC-K17 | 后台同步跑完自动停止 | 没有 obs_key 为空 | 任务结束 |
+| TC-K18 | baseline 写 OBS + 落库 | builder.py 生成 | OBS 有文件 + DB baseline 记录 |
+| TC-K19 | baseline OBS 写失败降级本地 | OBS 写失败 | 只写本地 + log warning |
+| TC-K20 | Worker 版本号上报 | register | DB worker_version 有值 |
+| TC-K21 | read_batch 并发限制 | 100 个文件降级 | Semaphore(10) 限制 |
+| TC-K22 | member_files 共用 storage_key | 两处打包同一个文件 | OBS 只存一份 |
+
+### 监控告警
+
+health_check 加知识库 OBS 统计：
+- 后台同步任务状态（运行中/已完成/失败）
+- obs_key 为空的行数（待迁移）
+- 最近 1 小时降级次数（url_fail / storage_fail / empty）
