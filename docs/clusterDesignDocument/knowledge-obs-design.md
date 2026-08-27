@@ -1242,3 +1242,43 @@ managed_repos 表有 36 条记录，每条有 repo_key（如 `gitcod.../...`）�
    - pi_dir = WORKSPACE_DIR/owner/repo/project-info
 3. 检查 pi_dir 下的 3 个基线文件
 4. 查 DB baseline 记录 → 没有就写 OBS + INSERT / 有但 obs_key 空就 UPDATE / 有且非空跳过
+
+### 方案检查结果（2026-08-27）
+
+#### managed_repos 表结构
+
+- 无软删除字段（is_deleted）——36 条记录全部有效
+- 只有 1 个项目（xiaowu2119/hello-skill）有本地 project-info 目录
+- 35 个项目没有目录——os.path.isdir 返回 False 跳过，不影响功能
+
+#### storage_key 格式一致性
+
+builder.py 的 _write_to_obs 用：
+```python
+storage_key = f"project-info/{repo_key}/{name}"
+# → project-info/gitcode:xiaowu2119/hello-skill/project-graph.md
+```
+
+_sync_baseline_files 必须用同样的格式，确保 OBS 对象 key 一致。
+
+#### 最终实现逻辑
+
+1. 查 DB: `SELECT repo_key FROM managed_repos` → 拿到所有项目
+2. 对每个 repo_key:
+   - `owner, repo = split_owner_repo(repo_key)`
+   - `pi_dir = WORKSPACE_DIR/owner/repo/project-info`
+   - `os.path.isdir(pi_dir)` 为 False → 跳过
+3. 对 pi_dir 下的 3 个基线文件（project-graph.md / project-capabilities.md / .metadata.json）:
+   - 文件不存在 → 跳过
+   - 查 DB: `SELECT id, obs_key WHERE repo_key=? AND scope='baseline' AND file_path=?`
+   - DB 有记录且 obs_key 非空 → 跳过
+   - DB 有记录但 obs_key 空 → 写 OBS + UPDATE obs_key
+   - DB 无记录 → 写 OBS + INSERT
+4. storage_key 格式：`f"project-info/{repo_key}/{fname}"`（和 builder.py 一致）
+5. file_path 格式：`os.path.relpath(fpath, WORKSPACE_DIR)`（和 builder.py 一致）
+
+#### 注意事项
+
+- managed_repos 无软删除——35 个没目录的项目会跳过，不影响功能
+- 幂等——DB 有 obs_key 非空的记录就跳过
+- 每小时执行一次——和 sync_loop 同频率
