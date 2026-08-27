@@ -2,15 +2,14 @@ package com.grape.admin.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.grape.admin.service.HealthService;
-import com.sun.management.OperatingSystemMXBean;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.lang.management.ManagementFactory;
 import java.util.*;
 
 /**
@@ -42,50 +41,13 @@ public class HealthCenterController {
         List<Map<String, Object>> workerList = new ArrayList<>();
         java.util.concurrent.atomic.AtomicInteger workerOnline = new java.util.concurrent.atomic.AtomicInteger(0);
 
-        // 本机直连引擎作为虚拟 worker（CPU/MEM/DISK 用 OperatingSystemMXBean 实时采集）
-        boolean hasLocal = count("SELECT COUNT(*) FROM agent_runtimes WHERE credential_id=0") > 0;
-        if (hasLocal) {
-            double localCpu = 0, localMem = 0, localDisk = 0;
-            String localLoad = "";
-            try {
-                OperatingSystemMXBean os = (OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
-                localCpu = os.getSystemCpuLoad() * 100;  // 系统级 CPU（0-100）
-                if (localCpu < 0) localCpu = 0;
-                long totalMem = os.getTotalPhysicalMemorySize();
-                long freeMem = os.getFreePhysicalMemorySize();
-                localMem = totalMem > 0 ? (1.0 - (double) freeMem / totalMem) * 100 : 0;
-                java.io.File root = new java.io.File("/");
-                long totalDisk = root.getTotalSpace();
-                long freeDisk = root.getUsableSpace();
-                localDisk = totalDisk > 0 ? (1.0 - (double) freeDisk / totalDisk) * 100 : 0;
-                double loadAvg = os.getSystemLoadAverage();
-                int cores = os.getAvailableProcessors();
-                localLoad = cores > 0 ? String.format("%.2f/%d", loadAvg < 0 ? 0 : loadAvg, cores) : "";
-            } catch (Exception e) { /* ignore */ }
+        // 设备监控只显示远端 worker（本机作为运营管理平台不列入设备列表）
 
-            workerOnline.incrementAndGet();
-            String nowIso = java.time.OffsetDateTime.now().toString();
-            Map<String, Object> local = new LinkedHashMap<>();
-            local.put("id", 0);
-            local.put("name", "本机");
-            local.put("deviceName", "本机直连");
-            local.put("status", "online");
-            local.put("health", "online");
-            local.put("lastSeenAt", nowIso);
-            local.put("lastIp", "127.0.0.1");
-            local.put("cpuPercent", Math.round(localCpu * 10) / 10.0);
-            local.put("memoryPercent", Math.round(localMem * 10) / 10.0);
-            local.put("diskPercent", Math.round(localDisk * 10) / 10.0);
-            local.put("loadAvg", localLoad);
-            local.put("ownerName", "");
-            workerList.add(local);
-        }
-
-        // 远端 worker（runtime_credentials 表）
+        // 远端 worker（runtime_credentials 表，排除 name='本机' 虚拟记录）
         try {
             grapeJdbc.query("SELECT id, name, device_name, status, last_seen_at, last_ip, " +
                     "cpu_percent, memory_percent, disk_percent, load_avg, owner_name " +
-                    "FROM runtime_credentials ORDER BY id", rs -> {
+                    "FROM runtime_credentials WHERE name != '本机' ORDER BY id", rs -> {
                 Map<String, Object> w = new LinkedHashMap<>();
                 int wid = rs.getInt("id");
                 String wStatus = rs.getString("status");
@@ -115,11 +77,19 @@ public class HealthCenterController {
         result.put("workers", workers);
 
         // 2. Runtimes（引擎列表，关联 worker + running 任务数）
-        // 先查每个 runtime 的 running 任务数
+        // 先查每个 runtime 的 running 任务数 + 平均耗时
         Map<Integer, Integer> runningCounts = new HashMap<>();
         try {
             grapeJdbc.query("SELECT runtime_id, COUNT(*) FROM agent_tasks WHERE status='running' GROUP BY runtime_id",
                     (org.springframework.jdbc.core.RowCallbackHandler) rs -> runningCounts.put(rs.getInt(1), rs.getInt(2)));
+        } catch (Exception e) { /* ignore */ }
+
+        Map<Integer, Double> avgDurations = new HashMap<>();
+        try {
+            grapeJdbc.query("SELECT runtime_id, AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as avg_sec "
+                    + "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0 "
+                    + "AND started_at IS NOT NULL AND completed_at IS NOT NULL GROUP BY runtime_id",
+                    (org.springframework.jdbc.core.RowCallbackHandler) rs -> avgDurations.put(rs.getInt(1), Math.round(rs.getDouble(2) * 10) / 10.0));
         } catch (Exception e) { /* ignore */ }
 
         List<Map<String, Object>> runtimeList = new ArrayList<>();
@@ -153,6 +123,7 @@ public class HealthCenterController {
                         r.put("busySlots", rs.getInt("busy_slots"));
                         r.put("maxConcurrent", rs.getInt("max_concurrent"));
                         r.put("running", runningCounts.getOrDefault(rid, 0));
+                        r.put("avgDuration", avgDurations.getOrDefault(rid, 0.0));
                         r.put("lastSeenAt", lastSeen);
                         r.put("credentialId", cid);
                         r.put("scope", rs.getString("scope"));
@@ -506,6 +477,113 @@ public class HealthCenterController {
     private String truncate(String s, int max) {
         if (s == null) return "";
         return s.length() > max ? s.substring(0, max) + "..." : s;
+    }
+
+    // ===== 任务日志 =====
+    /** 任务日志消息列表（直读 task_messages 表） */
+    @GetMapping("/health-center/tasks/{taskId}/messages")
+    public List<Map<String, Object>> taskMessages(@PathVariable String taskId) {
+        List<Map<String, Object>> list = new ArrayList<>();
+        try {
+            grapeJdbc.query("SELECT seq, type, tool, content, input_json, output, created_at "
+                    + "FROM task_messages WHERE task_id=? ORDER BY seq",
+                    rs -> {
+                        Map<String, Object> m = new LinkedHashMap<>();
+                        m.put("seq", rs.getInt("seq"));
+                        m.put("type", rs.getString("type"));
+                        m.put("tool", rs.getString("tool"));
+                        m.put("content", rs.getString("content"));
+                        m.put("inputJson", rs.getString("input_json"));
+                        m.put("output", rs.getString("output"));
+                        m.put("createdAt", rs.getString("created_at"));
+                        list.add(m);
+                    }, taskId);
+        } catch (Exception e) { /* ignore */ }
+        return list;
+    }
+
+    /** 任务详情（含时间线信息） */
+    @GetMapping("/health-center/tasks/{taskId}/info")
+    public Map<String, Object> taskInfo(@PathVariable String taskId) {
+        Map<String, Object> info = new LinkedHashMap<>();
+        try {
+            grapeJdbc.query("SELECT id, repo_key, agent_type, status, issue_id, created_at, completed_at, "
+                    + "started_at, exit_code, result_text, errors, event_seq, skill, runtime_id "
+                    + "FROM agent_tasks WHERE id=?", rs -> {
+                info.put("id", rs.getString("id"));
+                info.put("repoKey", rs.getString("repo_key"));
+                info.put("agentType", rs.getString("agent_type"));
+                info.put("status", rs.getString("status"));
+                info.put("issueId", rs.getString("issue_id"));
+                info.put("createdAt", rs.getString("created_at"));
+                info.put("completedAt", rs.getString("completed_at"));
+                info.put("startedAt", rs.getString("started_at"));
+                info.put("exitCode", rs.getObject("exit_code"));
+                info.put("resultText", rs.getString("result_text"));
+                info.put("errors", rs.getString("errors"));
+                info.put("eventSeq", rs.getObject("event_seq"));
+                info.put("skill", rs.getString("skill"));
+            }, taskId);
+        } catch (Exception e) { /* ignore */ }
+        return info;
+    }
+
+    /** 引擎任务列表（正在运行 + 历史，对齐主服务 runtime sessions） */
+    @GetMapping("/health-center/runtimes/{runtimeId}/tasks")
+    public Map<String, Object> runtimeTasks(@PathVariable int runtimeId,
+                                            @RequestParam(required = false) String status,
+                                            @RequestParam(required = false, defaultValue = "50") int limit) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List<Map<String, Object>> tasks = new ArrayList<>();
+
+        StringBuilder sql = new StringBuilder("SELECT id, repo_key, agent_type, skill, status, exit_code, "
+                + "result_text, created_at, started_at, completed_at, issue_id, event_seq "
+                + "FROM agent_tasks WHERE runtime_id=?");
+        List<Object> params = new ArrayList<>();
+        params.add(runtimeId);
+        if (status != null && !status.isBlank()) {
+            sql.append(" AND status=?");
+            params.add(status);
+        }
+        sql.append(" ORDER BY created_at DESC LIMIT ?");
+        params.add(limit);
+
+        try {
+            grapeJdbc.query(sql.toString(), rs -> {
+                Map<String, Object> t = new LinkedHashMap<>();
+                t.put("id", rs.getString("id"));
+                t.put("repoKey", rs.getString("repo_key"));
+                t.put("agentType", rs.getString("agent_type"));
+                t.put("skill", rs.getString("skill"));
+                t.put("status", rs.getString("status"));
+                t.put("exitCode", rs.getObject("exit_code"));
+                t.put("resultText", truncate(rs.getString("result_text"), 200));
+                t.put("createdAt", rs.getString("created_at"));
+                t.put("startedAt", rs.getString("started_at"));
+                t.put("completedAt", rs.getString("completed_at"));
+                t.put("issueId", rs.getString("issue_id"));
+                t.put("eventSeq", rs.getObject("event_seq"));
+                tasks.add(t);
+            }, params.toArray());
+        } catch (Exception e) { /* ignore */ }
+
+        // 分为正在运行和已完成
+        List<Map<String, Object>> running = new ArrayList<>();
+        List<Map<String, Object>> history = new ArrayList<>();
+        for (Map<String, Object> t : tasks) {
+            String s = (String) t.get("status");
+            if ("running".equals(s) || "queued".equals(s) || "dispatched".equals(s)) {
+                running.add(t);
+            } else {
+                history.add(t);
+            }
+        }
+
+        result.put("runtimeId", runtimeId);
+        result.put("running", running);
+        result.put("history", history);
+        result.put("total", tasks.size());
+        return result;
     }
 
     private String formatDuration(String created, String completed) {

@@ -293,6 +293,10 @@
 @keyframes crFadeIn{from{opacity:0}to{opacity:1}}
 @keyframes crPopUp{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
 
+/* ===== Liquid Glass 重新派发弹窗 ===== */
+@keyframes rdpFade{from{opacity:0}to{opacity:1}}
+@keyframes rdpPop{from{opacity:0;transform:scale(0.9) translateY(-8px)}to{opacity:1;transform:scale(1) translateY(0)}}
+
 /* ===== Event Detail: 处理记录面板深色背景下的浅色文字 ===== */
 .ev-result-panel,.ev-result-panel p,.ev-result-panel h1,.ev-result-panel h2,.ev-result-panel h3,
 .ev-result-panel h4,.ev-result-panel h5,.ev-result-panel h6,.ev-result-panel li,.ev-result-panel ul,
@@ -324,3 +328,12 @@
 .stat-table tr:last-child td{border-bottom:none}
 .stat-table tr:hover td{background:#f8f9fb}
 .empty{text-align:center;padding:20px;color:var(--t3);font-size:12px}
+
+/* ===== Pipeline 节点雷达扫描动画 ===== */
+@keyframes radarSweep{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+@keyframes radarPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(1.3)}}
+@keyframes radarGlow{0%,100%{box-shadow:0 0 0 0 rgba(212,156,15,.3)}50%{box-shadow:0 0 12px 3px rgba(212,156,15,.15)}}
+.nd-radar{position:relative;overflow:hidden;animation:radarGlow 2s ease-in-out infinite}
+.nd-radar::before{content:"";position:absolute;top:0;left:0;width:100%;height:100%;background:conic-gradient(from 0deg,transparent 0deg,rgba(212,156,15,.12) 40deg,transparent 80deg);animation:radarSweep 3s linear infinite;pointer-events:none;z-index:0}
+.nd-radar>*{position:relative;z-index:1}
+.d-pulse{animation:radarPulse 1.2s ease-in-out infinite}

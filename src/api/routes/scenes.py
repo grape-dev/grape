@@ -26,6 +26,18 @@ async def list_scenes():
     return {"scenes": [{"id": k, "name": v.get("name", k)} for k, v in scenes.items()]}
 
 
+@router.get("/with-pipeline")
+async def list_scenes_with_pipeline():
+    """返回场景列表 + 各场景流水线配置（pipelines.json）"""
+    from src.api.pipeline_config import get_scenes, get_pipeline_config
+    scene_list = get_scenes()
+    result = []
+    for s in scene_list:
+        cfg = get_pipeline_config(s["id"])
+        result.append({"id": s["id"], "name": s["name"], "pipeline": cfg})
+    return {"scenes": result}
+
+
 class ApplySceneRequest(BaseModel):
     scene_id: str
 

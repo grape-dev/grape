@@ -285,19 +285,149 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
 
     # 3) 分支处理
     if task_id and task_status in ("dispatched", "running"):
-        # 非终态 → requeue 置回 queued，worker 重新 claim
-        requeue_task(task_id)
+        # 非终态 → requeue + reassign engine in one atomic operation
+        try:
+            from src.api.event_pipeline import is_plugin_mode
+            _is_plugin = is_plugin_mode()
+        except Exception:
+            _is_plugin = False
+
+        if _is_plugin:
+            # Plugin mode: requeue + reassign to an engine with the right tag atomically
+            _new_rid = 0
+            with db_lock:
+                c2 = db.cursor()
+                # Get pool_tag and requeue in one step
+                c2.execute("SELECT pool_tag FROM agent_tasks WHERE id=?", (task_id,))
+                _ptag_row = c2.fetchone()
+                _ptag = (_ptag_row[0] if _ptag_row else "") or ""
+                # Requeue
+                c2.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE id=? AND status IN ('dispatched','running')", (task_id,))
+                _requeued = c2.rowcount > 0
+                if _requeued:
+                    # Release busy slot on old runtime
+                    c2.execute("SELECT runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+                    _old_rid_row = c2.fetchone()
+                    if _old_rid_row and _old_rid_row[0]:
+                        c2.execute("UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?", (_old_rid_row[0],))
+                    # Reassign to an online engine with the right tag
+                    # Prefer remote (credential_id > 0) so workers can claim; fall back to local direct
+                    if _ptag:
+                        c2.execute(
+                            "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
+                            "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.tag=? AND ec.enabled=1 "
+                            "WHERE ar.status='online' AND ar.healthy=1 AND ar.credential_id > 0 "
+                            "ORDER BY ar.busy_slots ASC LIMIT 1",
+                            (_ptag,)
+                        )
+                        _new_rid_row = c2.fetchone()
+                        if not _new_rid_row:
+                            # No remote engine with this tag, try local direct
+                            c2.execute(
+                                "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
+                                "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.tag=? AND ec.enabled=1 "
+                                "WHERE ar.status='online' AND ar.healthy=1 "
+                                "ORDER BY ar.busy_slots ASC LIMIT 1",
+                                (_ptag,)
+                            )
+                            _new_rid_row = c2.fetchone()
+                        if _new_rid_row:
+                            _new_rid = _new_rid_row[0]
+                            c2.execute("UPDATE agent_tasks SET runtime_id=? WHERE id=?", (_new_rid, task_id))
+                            log.info(f"[redispatch] seq={seq} plugin: reassigned task {task_id} to rid={_new_rid} (tag={_ptag})")
+                        else:
+                            c2.execute("UPDATE agent_tasks SET runtime_id=0 WHERE id=?", (task_id,))
+                            log.warning(f"[redispatch] seq={seq} plugin: no engine with tag={_ptag}, cleared runtime_id")
+                db.commit()
+
+            # If reassigned to a local direct engine, trigger direct execution
+            if _new_rid:
+                try:
+                    from src.runtime.service import runtime_credential_id
+                    _cid = runtime_credential_id(_new_rid) or 0
+                    if _cid == 0:
+                        from src.api.event_pipeline import _execute_agent, start_direct_agent
+                        from src.runtime.engine_select import engine_name
+                        from src.repo_key import from_repo_key as _frk2
+                        _be = engine_name(_new_rid) or ""
+                        # Build a minimal evt for _execute_agent
+                        _evt = {
+                            "repo_key": evt.get("repo_key", ""),
+                            "repository": _frk2(evt.get("repo_key", "")),
+                            "source": (evt.get("repo_key", "").split(":", 1)[0] if ":" in evt.get("repo_key", "") else "gitcode"),
+                            "issue_id": evt.get("issue_id", ""),
+                            "agent_type": evt.get("agent_type", ""),
+                            "event_type": evt.get("event_type", ""),
+                            "type": evt.get("event_type", ""),
+                            "payload": {},
+                        }
+                        start_direct_agent(_execute_agent, (
+                            evt.get("repo_key", ""), seq, evt.get("agent_type", ""),
+                            _be, "", _evt, _new_rid, task_id,
+                        ), name=f"redispatch-{seq}")
+                        log.info(f"[redispatch] seq={seq} plugin: direct execution started on rid={_new_rid}")
+                except Exception as e:
+                    log.warning(f"[redispatch] seq={seq} direct execution trigger failed: {e}")
+        else:
+            requeue_task(task_id)
+
+        # Plugin mode: emit event
+        try:
+            from src.api.event_pipeline import is_plugin_mode
+            if is_plugin_mode():
+                import asyncio as _aio
+                from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
+                from src.api.pipeline_config import get_node_by_tag
+                scene_id = "default"
+                try:
+                    from src.user.db import get_repo_scene
+                    scene_id = get_repo_scene(evt["repo_key"]) or "default"
+                except Exception:
+                    pass
+                node = get_node_by_tag(scene_id, evt["agent_type"] or "")
+                _bus = get_event_bus()
+                _redispatch_event = GrapeEvent(
+                    domain=EventDomain.PIPELINE,
+                    type="pipeline/node/requeued",
+                    repo_key=evt["repo_key"],
+                    issue_id=evt["issue_id"],
+                    agent_type=evt["agent_type"],
+                    seq=seq,
+                    payload={"task_id": task_id, "tag": evt["agent_type"] or "",
+                             "scene_id": scene_id, "node_id": node["id"] if node else evt["agent_type"]},
+                )
+                loop = _aio.get_event_loop()
+                if loop.is_running():
+                    _aio.ensure_future(_bus.emit(_redispatch_event))
+                else:
+                    _aio.run(_bus.emit(_redispatch_event))
+                log.info(f"[redispatch] seq={seq} plugin: pipeline/node/requeued emitted, task={task_id}, tag={evt['agent_type']}")
+        except Exception as e:
+            log.warning(f"[redispatch] plugin event emit failed: {e}")
     else:
         # 终态/缺失 → 复用原 task 快照参数新建任务（新 task_id，清空 runtime_session_id）
+        from src.api.event_pipeline import is_plugin_mode
         if task_id:
             old = get_task(task_id)
+            # If prompt is empty (from _create_direct_task), find the last task with a prompt
+            if old and not (old.get("prompt") or "").strip():
+                try:
+                    with db_lock:
+                        c4 = db.cursor()
+                        c4.execute(
+                            "SELECT id FROM agent_tasks WHERE event_seq=? AND prompt != '' AND prompt IS NOT NULL "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            (seq,)
+                        )
+                        _good_row = c4.fetchone()
+                        if _good_row:
+                            old = get_task(_good_row[0])
+                            log.info(f"[redispatch] seq={seq} recovered prompt from task {_good_row[0]}")
+                except Exception:
+                    pass
             if old:
                 _sid = old.get("issue_session_id") or ""
                 _env = {}
-                try:
-                    _env = _json.loads(old.get("env_extra") or "{}")
-                except Exception:
-                    _env = {}
                 # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物，
                 # 触发 enqueue_task D3 校验失败）。复用 pipeline 同款路由逻辑（pick_engine：
                 # 引擎集合 → 专属/全局/本机；无则回退旧快照 runtime_id，仍无则拒派）。
@@ -307,16 +437,43 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                     _rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "", fallback_runtime_id=_rid) or 0
                 except Exception:
                     _rid = 0
+                # Plugin mode: prefer an engine that has the matching tag
+                if is_plugin_mode() and old.get("pool_tag"):
+                    try:
+                        with db_lock:
+                            c3 = db.cursor()
+                            c3.execute(
+                                "SELECT ar.id FROM agent_runtimes ar "
+                                "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.tag=? AND ec.enabled=1 "
+                                "WHERE ar.status='online' AND ar.healthy=1 "
+                                "ORDER BY ar.busy_slots ASC LIMIT 1",
+                                (old.get("pool_tag"),)
+                            )
+                            _tagged_rid = c3.fetchone()
+                            if _tagged_rid:
+                                _rid = _tagged_rid[0]
+                    except Exception:
+                        pass
                 if not _rid:
                     raise HTTPException(status_code=409, detail={"code": 409, "message": "无可用引擎，无法重派"})
-                # cwd 按 Issue 统一隔离重算（workdir-issue-centric-design.md §二），走新结构路径
+                # Determine engine type to choose execution path
+                # Check credential_id directly (not just runtime_execution_kind, which is affected by global mode)
+                try:
+                    from src.runtime.service import runtime_credential_id
+                    _cid = runtime_credential_id(_rid) or 0
+                except Exception:
+                    _cid = -1
+                _is_local_direct = (_cid == 0)
+                # cwd
                 try:
                     from src.api.event_pipeline import get_agent_workdir
                     _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
                                             old.get("issue_id") or "")
                 except Exception:
                     _cwd = old.get("cwd") or ""
-                enqueue_task(
+
+                # Always enqueue (stores full prompt + env), then trigger direct if local
+                _new_task_id = enqueue_task(
                     agent_session_id=old.get("agent_session_id") or "",
                     runtime_id=_rid,
                     event_seq=old.get("event_seq"),
@@ -327,24 +484,42 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                     skill_id=old.get("skill_id") or 0,
                     prompt=old.get("prompt") or "",
                     cwd=_cwd,
-                    # 从 issue_agent_session 读取 runtime_session_id（保留会话连续性），
-                    # 空时走全新会话。执行端检测连续失败后自动清空（smart-session-recovery-design.md）
                     runtime_session_id=old.get("runtime_session_id") or "",
                     event_type=old.get("event_type") or "",
                     account=old.get("account") or "",
                     user_id=old.get("user_id") or 0,
                     repo_gitcode_token=old.get("repo_gitcode_token") or "",
-                    env_extra=_env,
-                    # skill_files / project_info / knowledge 不传 → enqueue 内部重新打包
+                    env_extra={},
                     server_url=old.get("server_url") or "",
                     issue_session_id=_sid,
+                    pool_tag=old.get("agent_type") or "" if is_plugin_mode() else "",
                 )
-                # 取消旧任务（重派创建新任务后，旧任务不应保留 queued/running/dispatched——
-                # 否则 _running_issue_ids 仍会将其计入执行态，或以旧 runtime_id 被重复 claim）
-                try:
-                    update_task_status(task_id, "cancelled")
-                except Exception:
-                    pass
+                # If local direct engine, trigger direct execution (no worker will claim)
+                if _is_local_direct and _new_task_id:
+                    try:
+                        from src.api.event_pipeline import _execute_agent, start_direct_agent
+                        from src.runtime.engine_select import engine_name as _en
+                        from src.repo_key import from_repo_key as _frk
+                        _be = _en(_rid) or ""
+                        _skill_name = old.get("skill") or ""
+                        _rk = old.get("repo_key") or ""
+                        _evt = {
+                            "repo_key": _rk,
+                            "repository": _frk(_rk),
+                            "source": (_rk.split(":", 1)[0] if ":" in _rk else "gitcode"),
+                            "issue_id": old.get("issue_id") or "",
+                            "agent_type": old.get("agent_type") or "",
+                            "event_type": old.get("event_type") or "",
+                            "type": old.get("event_type") or "",
+                            "payload": {},
+                        }
+                        start_direct_agent(_execute_agent, (
+                            old.get("repo_key") or "", seq, old.get("agent_type") or "",
+                            _be, _skill_name, _evt, _rid, _new_task_id,
+                        ), name=f"redispatch-{seq}")
+                        log.info(f"[redispatch] seq={seq} direct execution started on rid={_rid}")
+                    except Exception as e:
+                        log.warning(f"[redispatch] seq={seq} direct execution failed: {e}")
             else:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
         else:

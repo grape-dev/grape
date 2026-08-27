@@ -228,7 +228,7 @@ function loadAgentTypes() {
   let _refreshTimer = null;
   function nav(view, param) {
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'observability') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability') { loadRepos(); return; }
 
     _pushHistory(view, param);
 
@@ -293,6 +293,11 @@ function loadAgentTypes() {
       renderKnowledge();
     } else if (view === 'runtimes') {
       title.textContent = 'Agent Runtimes';
+      if (typeof renderRuntimes !== 'function') {
+        // runtimes.js failed to load (stale cache) — force reload to fetch latest
+        window.location.reload();
+        return;
+      }
       API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
     } else if (view === 'observability') {
       title.textContent = '系统监控';
@@ -317,10 +322,28 @@ function loadAgentTypes() {
     const s = e.state;
     _replaying = true;
     try {
-      if (s && s.view === 'repos') goToRepos();          // 全屏仓库选择页（nav('repos') 有托管仓库时会跳 dash，不能复用）
+      if (s && s.view === 'repos') goToRepos();          // 全屏仓库选择页
       else if (s && s.view) nav(s.view, s.param);
-      else if (currentRepo()) nav('dash');               // 回到入口：有仓库则默认 Dashboard
-      else goToRepos();                                  // 无仓库则回到仓库选择
+      else {
+        // No state — try hash-based navigation
+        const hash = window.location.hash;
+        if (hash && hash.length > 1) {
+          const parts = hash.substring(1).split('/');
+          const view = parts[0];
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event'];
+          if (noRepoViews.includes(view) || currentRepo()) {
+            nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
+          } else if (currentRepo()) {
+            nav('dash');
+          } else {
+            goToRepos();
+          }
+        } else if (currentRepo()) {
+          nav('dash');               // 回到入口：有仓库则默认 Dashboard
+        } else {
+          goToRepos();                                  // 无仓库则回到仓库选择
+        }
+      }
     } finally {
       _replaying = false;
     }
@@ -392,7 +415,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '5');
+      localStorage.setItem('app_cache_ver', '7');
       if (p.get('first_login') === '1') {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
@@ -413,7 +436,7 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '5') {
+    if (localStorage.getItem('app_cache_ver') !== '7') {
       const oldRepo = localStorage.getItem('currentRepo');
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
@@ -421,12 +444,32 @@ function loadAgentTypes() {
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
       if (oldRepo) localStorage.setItem('currentRepo', oldRepo);
-      localStorage.setItem('app_cache_ver', '5');
+      localStorage.setItem('app_cache_ver', '7');
     }
 
     const token = localStorage.getItem('token');
-    if (token) { showApp(); }
-    else { showLogin(); }
+    if (token) {
+      showApp();
+      // Handle hash-based navigation (e.g., #runtimes, #settings) on page load
+      const hash = window.location.hash;
+      if (hash && hash.length > 1) {
+        const parts = hash.substring(1).split('/');
+        const view = parts[0];
+        const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
+        // Views that don't require a repo
+        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event'];
+        if (noRepoViews.includes(view) || currentRepo()) {
+          nav(view, param);
+        } else {
+          nav('dash');
+        }
+      } else if (currentRepo()) {
+        nav('dash');
+      } else {
+        // No repo selected and no hash — go to repo selection
+        goToRepos();
+      }
+    } else { showLogin(); }
   }
 
   // ── Theme Management (Apple Developer Theme) ──

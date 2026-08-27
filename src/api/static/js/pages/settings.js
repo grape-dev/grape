@@ -6,6 +6,7 @@ function renderSettings(tab) {
     {id:'credentials', label:'Credentials'},
     {id:'notifications', label:'Notifications'},
     {id:'appearance', label:'Appearance'},
+    {id:'advanced', label:'Advanced'},
   ];
 
   let html = `<div class="cd"><div class="cd-h"><h2>Settings</h2></div>
@@ -116,6 +117,32 @@ function renderSettings(tab) {
     </div>
     </div>`;
     el.innerHTML = html;
+  } else if (current === 'advanced') {
+    // Advanced settings — pipeline mode toggle
+    html += `<div id="sAdvanced"><div class="loading">加载中...</div></div></div>`;
+    el.innerHTML = html;
+    API.get('/settings/pipeline-mode').then(d => {
+      const mode = d.mode || 'legacy';
+      const isPlugin = mode === 'plugin';
+      document.getElementById('sAdvanced').innerHTML = `
+        <div class="cd">
+          <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">管线模式 / Pipeline Mode</h3>
+          <p class="tx t2" style="margin-bottom:16px;font-size:12px;line-height:1.6">
+            插件模式：使用 pipelines.json + 标签广播抢占，任务按 pool_tag 入队，空闲引擎 claim_by_tag 竞争认领。<br>
+            传统模式：使用 agent-skill-mapping.json + runtime_id 定向绑定，任务直接分配到指定引擎。
+          </p>
+          <div style="display:flex;align-items:center;gap:12px">
+            <button id="pipelineModeToggle" onclick="togglePipelineModeSetting()"
+              style="padding:10px 24px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid ${isPlugin?'var(--a)':'var(--b)'};background:${isPlugin?'var(--a)':'var(--c)'};color:${isPlugin?'#fff':'var(--t2)'};transition:all .2s">
+              ${isPlugin ? '插件模式 ✦' : '传统模式'}
+            </button>
+            <span style="font-size:11px;color:var(--t3)">${isPlugin ? '当前使用标签广播抢占' : '当前使用定向引擎分配'}</span>
+          </div>
+          <p style="font-size:11px;color:var(--t3);margin-top:12px">⚠️ 切换后立即生效，影响后续所有新事件的派发方式。正在执行的任务不受影响。</p>
+        </div>`;
+    }).catch(e => {
+      document.getElementById('sAdvanced').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    });
   } else if (current === 'gitcode') {
     // GitCode Repo 页面 — 需要已有仓库
     const repo = app.currentRepo();
@@ -254,4 +281,16 @@ function selectThemeMode(mode) {
   if (!app.setThemeMode) return;
   app.setThemeMode(mode);
   renderSettings('appearance');
+}
+
+// ── Pipeline mode toggle ──
+function togglePipelineModeSetting() {
+  const btn = document.getElementById('pipelineModeToggle');
+  if (!btn) return;
+  const isPlugin = btn.textContent.includes('插件');
+  const newMode = isPlugin ? 'legacy' : 'plugin';
+  API.put('/settings/pipeline-mode', {mode: newMode}).then(d => {
+    app.showToast(d.message);
+    renderSettings('advanced');
+  }).catch(e => app.showToast('切换失败: ' + (e.message || '未知错误')));
 }

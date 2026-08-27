@@ -100,15 +100,23 @@ function loadCfgOptions() {
   const skillSelect = document.querySelector('.cfg-skill');
 
   // Runtime 下拉多选（引擎集合）：仅未加载时加载；DevOps Agent 可选 仓库级/全局/本机直连（个人引擎不出现）
-  if (backendBox && !backendBox.dataset.loaded) {
-    backendBox.dataset.loaded = '1';
+  if (backendBox) {
+    // 每次打开都重新加载（标签可能已变更，不复用缓存）
+    backendBox.dataset.loaded = '';
     const panel = backendBox.querySelector('.cfg-backends-panel');
     const current = (backendBox.dataset.backends || '').split(',').map(s => s.trim()).filter(Boolean);
     API.get('/settings/agent-runtimes').then(d => {
       const runtimes = d.runtimes || [];
       const scopeLabel = sc => sc === 'global' ? '全局' : sc === 'repo' ? '仓库' : '个人';
       const localLabel = r => r.is_local ? '本机直连' : scopeLabel(r.scope);
-      const ok = runtimes.filter(r => r.scope === 'repo' || r.scope === 'global');
+      const agentType = backendBox.dataset.agent || '';
+      // 按标签过滤：只展示 tags 包含当前 agent_type 或 "all" 的引擎
+      const ok = runtimes.filter(r => {
+        if (r.scope !== 'repo' && r.scope !== 'global') return false;
+        const tags = r.agent_tags || ['all'];
+        return tags.includes('all') || tags.includes(agentType);
+      });
+      const tagLabels = {all: '全能', vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE'};
       const val = r => r.instance_name || r.name;
       const cb = (r, i) => {
         const v = val(r);
@@ -116,11 +124,12 @@ function loadCfgOptions() {
         const color = _beColor(i);
         const checked = current.includes(v) || current.includes(r.name) ? 'checked' : '';
         const rgb = _beRgb(color);
+        const tagStr = (r.agent_tags || ['all']).map(t => tagLabels[t]||t).join('/');
         return `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap;width:100%;flex-shrink:1;background:${checked ? `rgba(${rgb},.12)` : 'transparent'};${checked ? `box-shadow:inset 2px 0 0 ${color}` : ''};transition:background .12s">
           <input type="checkbox" class="cfg-backend-cb" value="${v}" data-color="${color}" ${checked} style="accent-color:${color};flex:0 0 auto;width:14px;height:14px;margin:0">
           <span style="width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0"></span>
           <span style="font-weight:600;color:${checked ? color : 'var(--t2)'};min-width:110px">${v}</span>
-          <span class="ts t3" style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${localLabel(r)}${online ? ' ✓' : ' ✗'}</span>
+          <span class="ts t3" style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${localLabel(r)}${online ? ' ✓' : ' ✗'} · ${tagStr}</span>
         </label>`;
       };
       panel.innerHTML = ok.map(cb).join('') || '<span class="ts t2">无可选引擎（仓库级/全局/本机直连）</span>';
@@ -228,7 +237,7 @@ function renderAgent(name, data) {
 <div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">
   <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Agent Configuration</h3>
   <div class="srow" style="align-items:flex-start"><label>Backend Engines<br><span class="ts t3" style="font-weight:400">下拉多选，任务将分配到空闲引擎</span></label>
-    <div class="cfg-backends" data-backends="${(data.backends || []).join(',')}" style="flex:1;position:relative">
+    <div class="cfg-backends" data-backends="${(data.backends || []).join(',')}" data-agent="${name}" style="flex:1;position:relative">
       <div class="cfg-backends-trigger" onclick="toggleBackendsDropdown(event)" style="min-height:34px;padding:5px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);cursor:pointer;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
         <span class="cfg-backends-ph ts t2" style="color:var(--t2)">选择引擎...</span>
       </div>

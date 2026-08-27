@@ -130,7 +130,7 @@ async def get_ops_overview(repo: str = ""):
         try:
             import psutil as _ps
             _local_cpu = _ps.cpu_percent(interval=None)
-            # MEM 用 /proc/meminfo 直接读取（匹配 top 口径，不含 buff/cache）
+            # MEM 用 /proc/meminfo 读取实际占用（total - MemAvailable，包含不可回收缓存）
             try:
                 with open("/proc/meminfo") as _mf:
                     _mi = {}
@@ -138,7 +138,12 @@ async def get_ops_overview(repo: str = ""):
                         _p = _line.split(":")
                         if len(_p) == 2:
                             _mi[_p[0]] = int(_p[1].strip().split()[0]) * 1024
-                    _local_mem = round((_mi["MemTotal"] - _mi["MemFree"] - _mi["Buffers"] - _mi["Cached"] - _mi.get("SReclaimable", 0)) / _mi["MemTotal"] * 100, 1)
+                    _total = _mi["MemTotal"]
+                    _available = _mi.get("MemAvailable", 0)
+                    if _available > 0:
+                        _local_mem = round((_total - _available) / _total * 100, 1)
+                    else:
+                        _local_mem = _ps.virtual_memory().percent
             except Exception:
                 _local_mem = _ps.virtual_memory().percent
             _local_disk = _ps.disk_usage("/").percent
@@ -160,6 +165,7 @@ async def get_ops_overview(repo: str = ""):
         if has_local:
             worker_total += 1
             worker_online += 1
+            # 本机指标只在 ops/overview 返回中展示，不写入 DB（运营管理台设备监控只显示远端 worker）
             worker_list.append({
                 "id": 0, "name": "本机", "device_name": "本机直连",
                 "status": "online", "health": "online",

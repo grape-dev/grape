@@ -87,8 +87,35 @@ Content-Type: application/json
 #### B5 结构化总结
 - `PATCH /issues/{number}` 将 body 收敛为模板结构（来源标注「VOD 审视结构化」）
 
+#### B5.5 开发场景判定
+
+综合以下信息判定当前 Issue 最匹配的开发场景：
+
+1. **项目知识基线**（prompt 注入的 Project Graph + Project Capabilities）
+   - 技术栈：Flask/FastAPI/Express → default；Terraform → iac；K8s → cloud-native
+   - 目录结构：有 skills/ → 可能 skill-dev；有 terraform/ → iac
+   - 现有能力：已有哪些 skill、API 端点
+
+2. **成员上传文档**（project-info/member/ 下的 md/txt/json）
+   - 架构决策文档、技术规范、API 设计文档
+   - 用 read tool 读取 {{PROJECT_INFO_DIR}}/member/ 下的文档
+
+3. **需求特征**（Issue title/body + 澄清结果）
+   - 关键词匹配：
+     - "SKILL"/"技能" → skill-dev / api-skill-dev
+     - "Terraform"/"资源编排"/"IaC" → iac
+     - "博客"/"文章" → blog-publish
+     - "Agent"/"智能体" → agent-dev
+     - "容器"/"K8s"/"微服务" → cloud-native
+     - 其他 → default
+
+4. **可用场景列表**（prompt 注入的场景表，见「可用开发场景」章节）
+
+判定后在 JSON 产出中输出 `recommended_scene` + `scene_reason`。
+若无法确定，留空——服务端回退到仓库默认场景。
+
 #### B6 A2A 交办 Issue Agent
-- 审视清晰后 `POST /api/a2a {"agent":"issue", ...}`
+- 审视清晰后 `POST /api/a2a {"agent":"issue", ...}`（payload 增加 `recommended_scene` 字段）
 - 交办后 Issue 进入 `issue` 阶段
 - ⚠️ **重复 A2A 检查（必须做）**：A2A 前先看 prompt 中的 Issue Pipeline 信息，如果当前 Issue 的 pipeline 中**已包含 `issue:a2a_event`**（即前一个 VOD 或其他 agent 已经 A2A 给了 Issue Agent），**不要重复 A2A**——只发评论回复即可，避免创建重复的 Issue Agent / Coding task。
 
@@ -126,6 +153,22 @@ Content-Type: application/json
 ## 输出格式
 
 始终输出分析摘要：分析数量、发现的问题、已创建/已审视 Issue 及交办情况。
+
+最终 JSON 块增加 `recommended_scene` 字段（B5.5 判定结果）：
+
+```json
+{
+  "recommended_scene": "skill-dev",
+  "scene_reason": "需求涉及为 Grape 新增一个 Hermes 技能，项目知识基线显示仓库含 skills/ 目录且已有同类技能，匹配 skill-dev 场景。",
+  "conclusion": "...",
+  "actions": ["..."],
+  "artifacts": ["..."],
+  "next_step": "...",
+  "issue_summary": "..."
+}
+```
+
+`recommended_scene` 为空时服务端回退到仓库默认场景。
 
 ## 参考
 

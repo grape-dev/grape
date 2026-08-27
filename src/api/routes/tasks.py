@@ -450,6 +450,7 @@ class TaskCreateBody(BaseModel):
     title: str = ""
     description: str = ""
     assignee: str = ""
+    scene_id: str = ""
 
 
 class TaskStatusBody(BaseModel):
@@ -559,6 +560,14 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee)
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
+    # 3) 如指定了开发场景 → 写入 issue_state.scene_id（后续 VOD/流水线按此场景执行）
+    if body.scene_id:
+        try:
+            from src.api.session_store import set_issue_scene
+            set_issue_scene(repo_key, f"#{issue_num}", body.scene_id)
+        except Exception as _e:
+            from src.config import log
+            log.warning(f"create_task: set_issue_scene failed: {_e}")
     return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
             "assignee": assignee, "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 
