@@ -200,6 +200,32 @@ async def get_ops_overview(repo: str = ""):
                 _running_counts[row[0]] = row[1]
         except Exception:
             pass
+        # 查每个引擎已完成任务的平均耗时（秒）
+        _avg_durations = {}
+        try:
+            c.execute(
+                "SELECT runtime_id, AVG(CASE "
+                "WHEN completed_at IS NOT NULL AND started_at IS NOT NULL "
+                "THEN (strftime('%s', completed_at) - strftime('%s', started_at)) "
+                "ELSE NULL END) as avg_sec "
+                "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0 "
+                "GROUP BY runtime_id"
+            )
+            for row in c.fetchall():
+                _avg_durations[row[0]] = round(row[1] or 0, 1) if row[1] else 0
+        except Exception:
+            try:
+                # MySQL 兼容（TIMESTAMPDIFF）
+                c.execute(
+                    "SELECT runtime_id, AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as avg_sec "
+                    "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0 "
+                    "AND started_at IS NOT NULL AND completed_at IS NOT NULL "
+                    "GROUP BY runtime_id"
+                )
+                for row in c.fetchall():
+                    _avg_durations[row[0]] = round(row[1] or 0, 1) if row[1] else 0
+            except Exception:
+                pass
         try:
             c.execute(
                 "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
@@ -249,7 +275,7 @@ async def get_ops_overview(repo: str = ""):
                     "health": health, "mode": mode,
                     "provider": rprovider or "", "last_seen_at": normalize_event_time(rlast_seen),
                     "healthy": bool(rhealthy), "busy_slots": rbusy or 0, "max_concurrent": max_conc,
-                    "running": running,
+                    "running": running, "avg_duration": _avg_durations.get(rid, 0),
                     "version": rver or "", "device_name": rdev or ("本机直连" if (cid or 0) == 0 else ""),
                 })
         except Exception:

@@ -561,7 +561,7 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
                 }
             # 查该 session 最近已完成的任务
             c.execute(
-                "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, completed_at "
+                "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, started_at, completed_at "
                 "FROM agent_tasks WHERE agent_session_id=? "
                 "AND status IN ('completed','failed','cancelled') ORDER BY event_seq DESC LIMIT 20",
                 (sid,)
@@ -572,7 +572,8 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
                     "id": tr[0], "issue_id": tr[1] or "", "event_seq": tr[2] or 0,
                     "agent_type": tr[3] or "", "status": tr[4] or "",
                     "exit_code": tr[5], "created_at": normalize_event_time(tr[6]),
-                    "completed_at": normalize_event_time(tr[7]),
+                    "started_at": normalize_event_time(tr[7]),
+                    "completed_at": normalize_event_time(tr[8]),
                 })
             sessions.append({
                 "id": sid,

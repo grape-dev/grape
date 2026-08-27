@@ -158,7 +158,7 @@ function renderOverview(ops, rt, mt) {
   const runtimes = r.list || [];
   let runtimeTable = '<div class="ts t2" style="padding:12px">无引擎</div>';
   if (runtimes.length) {
-    runtimeTable = '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>模式</th><th>设备</th></tr></thead><tbody>';
+    runtimeTable = '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>模式</th><th>设备</th></tr></thead><tbody>';
     runtimes.forEach(rt => {
       const dot = HEALTH_DOT[rt.health] || '⚫';
       const hc = HEALTH_COLOR[rt.health] || 'var(--t3)';
@@ -166,11 +166,15 @@ function renderOverview(ops, rt, mt) {
       const maxC = rt.max_concurrent || 0;
       const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
       const modeTag = rt.mode === 'local' ? '<span class="tg tg-ch">本机</span>' : '<span class="tg tg-c">远端</span>';
+      const avgDur = rt.avg_duration || 0;
+      const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
+      const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
       runtimeTable += `<tr style="cursor:pointer" onclick="openRuntimeSessionModal(${rt.id}, '${(rt.name||'').replace(/'/g,"")}')">
          <td>${dot} <b>${rt.name}</b></td>
         <td><span class="ts t3">${rt.version || '-'}</span></td>
         <td><span style="color:${hc};font-weight:600">${rt.health}</span></td>
         <td><span style="color:${loadColor}">${running}/${maxC}</span></td>
+        <td><span style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
         <td>${modeTag}</td>
         <td><span class="ts t3">${rt.device_name || '-'}</span></td>
       </tr>`;
@@ -706,14 +710,25 @@ function renderSessionList(container, sessions, rtName) {
     });
     allTasks.sort((a, b) => (b.event_seq || 0) - (a.event_seq || 0));
     if (!allTasks.length) return '<div class="ts t3" style="padding:8px">无已完成任务</div>';
-    let html = '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent</th><th>状态</th><th>Exit</th><th>完成时间</th></tr></thead><tbody>';
+    let html = '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent</th><th>状态</th><th>耗时</th><th>Exit</th><th>完成时间</th></tr></thead><tbody>';
     allTasks.forEach(t => {
       const is = (t.issue_id && t.event_seq) ? t.issue_id + ' #' + t.event_seq : (t.event_seq ? '#' + t.event_seq : t.id.substring(0,12));
       const enc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:'', created:t.completed_at||''}));
+      // 计算耗时
+      let durStr = '-';
+      let durColor = 'var(--t3)';
+      if (t.started_at && t.completed_at) {
+        const dur = Math.round((new Date(t.completed_at) - new Date(t.started_at)) / 1000);
+        if (dur > 0) {
+          durStr = dur > 60 ? Math.round(dur/60) + 'm' + Math.round(dur%60) + 's' : dur + 's';
+          durColor = dur > 300 ? 'var(--r)' : dur > 60 ? 'var(--y)' : 'var(--g)';
+        }
+      }
       html += '<tr style="cursor:pointer" onclick="openTaskLogModal(\'' + t.id + '\',\'' + enc + '\')">' +
         '<td class="ts"><b>' + is + '</b></td>' +
         '<td><b>' + (t.agent_type||'-') + '</b></td>' +
         '<td><span style="color:' + (taskStatusColor[t.status]||'var(--t3)') + '">' + (taskStatusIcon[t.status]||'') + ' ' + t.status + '</span></td>' +
+        '<td><span style="color:' + durColor + '">' + durStr + '</span></td>' +
         '<td>' + (t.exit_code != null ? t.exit_code : '-') + '</td>' +
         '<td class="ts t3">' + (t.completed_at||'').substring(0,16) + '</td>' +
         '</tr>';
