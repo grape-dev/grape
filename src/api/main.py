@@ -24,6 +24,13 @@ async def lifespan(app: FastAPI):
         from src.im.handler_async import process_chat_async
         from src.im.vod_handler_async import process_vod_async
 
+        # psutil CPU 基准预热：interval=None 模式需要先调一次建立基准
+        try:
+            import psutil as _ps_init
+            _ps_init.cpu_percent(interval=None)
+        except Exception:
+            pass
+
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
         from src.config import BOT_LEASE_DISABLED
         lease_store = None

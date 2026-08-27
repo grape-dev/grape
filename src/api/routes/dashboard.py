@@ -123,11 +123,13 @@ async def get_ops_overview(repo: str = ""):
 
         # --- worker（凭据）列表 + 资源指标 ---
         # 本机直连引擎（credential_id=0）用 psutil 采集本机资源
+        # interval=None 非阻塞：返回自上次调用以来的平均值（10s 刷新间隔内的 CPU 均值）
+        # 首次调用返回 0.0（无基准），后续调用返回真实值
         _local_cpu = _local_mem = _local_disk = 0.0
         _local_load = ""
         try:
             import psutil as _ps
-            _local_cpu = _ps.cpu_percent(interval=0.1)
+            _local_cpu = _ps.cpu_percent(interval=None)
             _local_mem = _ps.virtual_memory().percent
             _local_disk = _ps.disk_usage("/").percent
             _local_load = ",".join(f"{x:.2f}" for x in _ps.getloadavg())
