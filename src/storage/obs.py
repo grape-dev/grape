@@ -213,14 +213,16 @@ class ObsStorage(StorageBackend):
             owner, rname = _owner_repo(repo_key)
             with db_lock:
                 rows = db.cursor().execute(
-                    "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                    "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
                     "WHERE repo_key=? AND scope='member' AND obs_key!='' AND obs_key IS NOT NULL "
-                    "GROUP BY file_path ORDER BY MAX(id) DESC",
+                    "ORDER BY id DESC",
                     (repo_key,)
-                    ).fetchall()
-            # 直接用 DB file_path 生成两种格式的 rel_path（不调 member_files）
-            for fp, ok in rows:
-                if fp and ok:
+                ).fetchall()
+            # 直接用 DB file_path 生成两种格式的 rel_path（Python 侧去重，只保留最新 id）
+            seen = set()
+            for rid, fp, ok in rows:
+                if fp and ok and fp not in seen:
+                    seen.add(fp)
                     # WORKSPACE_DIR 相对格式（owner/repo/project-info/member/...）
                     ws_rel = _os.path.join(owner, rname, fp).replace("\\", "/")
                     out[ws_rel] = {"url": self.temporary_url(ok, expires=3600), "storage_key": ok}
@@ -232,15 +234,17 @@ class ObsStorage(StorageBackend):
             with db_lock:
                 if agent_type:
                     rows = db.cursor().execute(
-                        "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                        "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
                         "WHERE repo_key=? AND scope='member' AND agent_type=? AND obs_key!='' AND obs_key IS NOT NULL "
-                        "GROUP BY file_path ORDER BY MAX(id) DESC",
+                        "ORDER BY id DESC",
                         (repo_key, agent_type)
                     ).fetchall()
                 else:
                     rows = []
-            for fp, ok in rows:
-                if fp and ok:
+            seen = set()
+            for rid, fp, ok in rows:
+                if fp and ok and fp not in seen:
+                    seen.add(fp)
                     pi_rel = fp.replace("project-info/", "", 1).replace("\\", "/")
                     out[pi_rel] = {"url": self.temporary_url(ok, expires=3600), "storage_key": ok}
 

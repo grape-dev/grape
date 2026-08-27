@@ -277,13 +277,18 @@ def member_files(repo_key: str) -> dict:
     if storage is not None:
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
                 "WHERE repo_key=? AND scope='member' AND obs_key!='' AND obs_key IS NOT NULL "
-                "GROUP BY file_path ORDER BY MAX(id) DESC",
+                "ORDER BY id DESC",
                 (repo_key,)
             ).fetchall()
-        for fp, ok in rows:
-            if fp and ok:
+        seen = set()
+        for rid, fp, ok in rows:
+            if fp and ok and fp not in seen:
+                ext = os.path.splitext(fp)[1].lower()
+                if ext not in (".md", ".txt", ".json"):
+                    continue
+                seen.add(fp)
                 try:
                     data = storage.read_bytes(ok)
                     if data:
@@ -327,13 +332,18 @@ def member_files_pi(repo_key: str) -> dict:
     if storage is not None:
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
                 "WHERE repo_key=? AND scope='member' AND obs_key!='' AND obs_key IS NOT NULL "
-                "GROUP BY file_path ORDER BY MAX(id) DESC",
+                "ORDER BY id DESC",
                 (repo_key,)
             ).fetchall()
-        for fp, ok in rows:
-            if fp and ok:
+        seen = set()
+        for rid, fp, ok in rows:
+            if fp and ok and fp not in seen:
+                ext = os.path.splitext(fp)[1].lower()
+                if ext not in (".md", ".txt", ".json"):
+                    continue
+                seen.add(fp)
                 try:
                     data = storage.read_bytes(ok)
                     if data:
@@ -378,13 +388,18 @@ def agent_files(repo_key: str, agent_type: str = "") -> dict:
     if storage is not None:
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
                 "WHERE repo_key=? AND scope='member' AND agent_type=? AND obs_key!='' AND obs_key IS NOT NULL "
-                "GROUP BY file_path ORDER BY MAX(id) DESC",
+                "ORDER BY id DESC",
                 (repo_key, agent_type or "")
             ).fetchall()
-        for fp, ok in rows:
-            if fp and ok:
+        seen = set()
+        for rid, fp, ok in rows:
+            if fp and ok and fp not in seen:
+                ext = os.path.splitext(fp)[1].lower()
+                if ext not in (".md", ".txt", ".json"):
+                    continue
+                seen.add(fp)
                 try:
                     data = storage.read_bytes(ok)
                     if data:
