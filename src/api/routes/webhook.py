@@ -285,6 +285,23 @@ async def a2a_endpoint(request: Request):
             except Exception:
                 pass
 
+        # 同 issue + 同 agent_type 的未完成 A2A 去重：
+        # PR 合并后 QA 和 Issue Agent 可能同时触发 A2A → sre，导致重复创建部署任务。
+        # 检查是否已有 running/dispatched 状态的同 agent A2A 事件，有则跳过。
+        if issue_number:
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? AND event_type='a2a_event' AND status IN ('running','dispatched') ORDER BY seq DESC LIMIT 1",
+                        (repo_key, f"#{issue_number}", agent_name))
+                    _existing = c.fetchone()
+                    if _existing:
+                        log.info(f"A2A: duplicate skip — issue=#{issue_number} agent={agent_name} already has running event seq={_existing[0]}")
+                        return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "duplicate_a2a", "existing_seq": _existing[0]})
+            except Exception as _de:
+                log.warning(f"A2A: duplicate check failed: {_de}")
+
         # 立即创建 event（status=running），Agent 执行完再更新
         from src.api.event_store import append_event
         seq = append_event(
