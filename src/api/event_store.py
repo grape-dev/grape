@@ -152,7 +152,7 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
     has_output = False
     result = ""
 
-    # 通用：final_text 含 GitCode 产出链接
+    # 通用：final_text 含 GitCode 产出链接或 PR 引用
     import re
     if re.search(r'(merge_requests|pull/[^/]+/merge_requests|/pulls?)/?\d+', text):
         m = re.search(r'(?:merge_requests|/pulls?)/?(\d+)', text)
@@ -164,6 +164,12 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
         m = re.search(r'/issues/(\d+)', text)
         issue_num = m.group(1) if m else "?"
         result = f"涉及/创建了 Issue #{issue_num}"
+        has_output = True
+        return has_output, result
+    # PR #N 文本引用（如"PR #5 已创建"、"PR #4 已修复"），不依赖 URL 格式
+    m = re.search(r'PR\s*#\s*(\d+)', text)
+    if m:
+        result = f"创建/涉及了 PR #{m.group(1)}"
         has_output = True
         return has_output, result
 
