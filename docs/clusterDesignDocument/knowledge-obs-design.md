@@ -1023,3 +1023,24 @@ member_files / member_files_pi / generate_file_urls member 部分的 DB 查询�
 
 只返回普通 member 文件（agent_type 为空），不含 agent 专属文档（agent_type 非空）。
 和本地模式行为一致。
+
+
+## 十九、第十一轮深度检查——delete_knowledge 数据一致性（2026-08-27）
+
+### 问题
+
+delete_knowledge 删除顺序：
+1. 查 DB obs_key → 非空先删 OBS（delete_object）
+2. os.remove(full) 删本地文件
+3. DELETE FROM 清 DB
+
+OBS 删成功但本地文件删除失败时 raise 500 中止 → OBS 已删但 DB 还在 → 后续读取走 OBS 会 404。
+
+### 修复
+
+OBS 已删（obs_key 非空）时本地删除失败只 log warning 继续清 DB。
+本地模式（obs_key 为空）仍 raise 500 中止。
+
+### 不修
+
+_read_file 查 DB 不限 scope——当前 file_path 格式不同不会冲突，影响低。
