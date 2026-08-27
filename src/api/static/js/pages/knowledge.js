@@ -193,12 +193,12 @@ function loadKnowledgeContent(key) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   el.innerHTML = '<div class="loading">加载中...</div>';
-  // 如果 key 不是 project-info/ 开头，视为 obs_key 直接读 OBS
-  const isPath = key && (key.startsWith('project-info/') || key.startsWith('/'));
-  const params = isPath
-    ? 'file=' + encodeURIComponent(key)
-    : 'obs_key=' + encodeURIComponent(key);
-  API.get('/knowledge/content?repo=' + encodeURIComponent(_currentRepo()) + '&' + params).then(d => {
+  // 统一传 obs_key 和 file 两个参数，后端优先用 obs_key，查不到回退 file
+  // obs_key 和 file 可能是同一个值（非 OBS 模式下 obs_key 为空，前端传的是 path）
+  // 后端逻辑：有 obs_key 且非空 → 读 OBS；否则 → 走 _read_file
+  // 但 obs_key 格式为 project-info/gitcode:xxx/file.md 时也能当 file 用（_read_file 会查 DB）
+  // 所以直接传 obs_key 参数即可——后端 obs_key 为空时会回退 file 参数
+  API.get('/knowledge/content?repo=' + encodeURIComponent(_currentRepo()) + '&obs_key=' + encodeURIComponent(key)).then(d => {
     renderKnowledgeDetail(d);
   }).catch(e => {
     el.innerHTML = '<div class="error">加载知识详情失败: ' + e.message + '</div>';

@@ -427,12 +427,16 @@ async def read_knowledge_content(repo: str = Query(""),
                             "content": data.decode("utf-8", errors="replace")}
             except Exception as e:
                 log.warning(f"OBS read failed for obs_key={obs_key}: {e} — fallback to file")
-        # OBS miss → 回退 file 参数走 _read_file
+        # OBS miss → 回退走 _read_file（用 obs_key 值作为 file 参数，兼容本地文件模式）
 
-    # file 模式（原有逻辑，兼容非 OBS / OBS miss / 前端未传 obs_key）
+    # file 模式（原有逻辑，兼容非 OBS / OBS miss / 前端未传 file）
+    # 如果 file 为空但 obs_key 非空，用 obs_key 作为 file 回退
+    _file = file or obs_key
+    if not _file:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "file 或 obs_key 必填"})
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo)
-    return {"repo_key": repo_key, "file": file, "content": _read_file(repo_key, file)}
+    return {"repo_key": repo_key, "file": _file, "content": _read_file(repo_key, _file)}
 
 
 @router.get("/context")
