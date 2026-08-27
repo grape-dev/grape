@@ -1112,6 +1112,15 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # 引擎实例名（`{type}-{device}`，与 UI 同源）；查不到回退类型名
     inst_name = runtime_instance_name(runtime_id) or backend or ""
 
+    # direct 执行开始 → 更新 task status 为 running（direct 路径无 worker task_start 调用）
+    if task_id:
+        try:
+            from src.runtime.service import update_task_status
+            update_task_status(task_id, "running")
+            log.info(f"direct exec: task {task_id} status -> running")
+        except Exception as e:
+            log.warning(f"direct exec: failed to update task {task_id} to running: {e}")
+
     from src.repo_key import from_repo_key
     repository = evt.get("repository", from_repo_key(repo_key))
     issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
