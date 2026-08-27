@@ -6,25 +6,32 @@
 
 ## 一、DB 变更
 
-agent_shared_knowledge 表新增 1 个字段：
+agent_shared_knowledge 表新增 2 个字段：
 
 ```
 obs_key VARCHAR(512) DEFAULT ''
+content_hash VARCHAR(64) DEFAULT ''
 ```
 
 迁移语句（加到 db_setup.py migrations 列表）：
 ```sql
 ALTER TABLE agent_shared_knowledge ADD COLUMN obs_key VARCHAR(512) DEFAULT ''
+ALTER TABLE agent_shared_knowledge ADD COLUMN content_hash VARCHAR(64) DEFAULT ''
 ```
 
-DDL 同步修改（新库建表时包含 obs_key）。
+DDL 同步修改（新库建表时包含 obs_key + content_hash）。
 
 向前兼容逻辑：
 - obs_key 非空 → 走 OBS（storage.read_bytes(obs_key)）
 - obs_key 为空 → 走本地（open(file_path)，现有数据不破坏）
 - storage 为 None（OBS 未启用）→ 全部回退本地
 
-与 skill 表完全同模式：skill 用 skill_path（本地）+ file_path（OBS），knowledge 用 file_path（本地）+ obs_key（OBS）。
+content_hash 作用：
+- 写入时计算 hash 存 DB（hashlib.sha256(content).hexdigest()[:64]）
+- 读取时查 DB hash 对比本地缓存 hash → 一样用缓存 / 不一样从 OBS 重新拉
+- 保证集群多实例缓存一致性——DB hash 变了所有实例立即发现
+
+与 skill 表完全同模式：skill 用 skill_path（本地）+ file_path（OBS），knowledge 用 file_path（本地）+ obs_key（OBS）+ content_hash（缓存一致性）。
 
 ## 二、OBS 对象键设计
 
@@ -207,13 +214,84 @@ else:
 ### 6. src/runtime/service.py
 - `load_project_info()` — 加 obs_key 判断 + try-except 回退本地
 
-## 八、不需要改动的
+## 八、本地缓存方案（hash 比对）
+
+### 背景
+
+每次读知识库都走 OBS 网络（10-50ms），每个任务下发读 3-5 个文件 = 30-150ms。加本地缓存加快速度。
+
+### 方案：DB hash 比对 + 内存 LRU 缓存
+
+不用 TTL——用 DB hash 比对保证一致性，无旧数据窗口。
+
+**缓存结构：**
+```python
+_knowledge_cache: dict[str, tuple[str, str]] = {}  # {obs_key: (content, hash)}
+_knowledge_cache_lock = threading.Lock()
+```
+
+**读取流程：**
+```
+1. 查 DB 拿 content_hash（0.13ms——主键查询极快）
+2. 对比本地缓存的 hash：
+   - 一样 → 用缓存内容（0ms）
+   - 不一样 → 从 OBS 重新拉 → 更新缓存 + hash
+   - 缓存没有 → 从 OBS 拉 → 写入缓存 + hash
+```
+
+**写入流程：**
+```
+write_knowledge / upload_knowledge:
+  → 写 OBS
+  → 计算 hash 存 DB（hashlib.sha256(content).hexdigest()[:64]）
+  → 不需要主动清缓存——hash 变了下次读会发现不一致 → 自动更新
+```
+
+### 优势
+
+| 对比 | TTL 5 分钟 | hash 比对 |
+|------|-----------|----------|
+| 本实例 | 主动清 L1 | hash 变了自动更新 |
+| 其他实例 | 5 分钟内用旧数据 ⚠️ | 立即发现变更 ✅ |
+| 准确性 | 有旧数据窗口 | 无旧数据窗口 ✅ |
+| 额外开销 | 无 | 0.13ms DB 查询 |
+| 旧数据风险 | 有 | 无 ✅ |
+
+### 性能
+
+| 场景 | 耗时 | 说明 |
+|------|------|------|
+| 缓存命中 | 0.13ms | DB hash 查询 + hash 对比 |
+| 缓存未命中 | 10-50ms | DB hash 查询 + OBS 读取 |
+| 无缓存（原来） | 10-50ms | OBS 读取 |
+
+缓存命中时快 100 倍（0.13ms vs 10-50ms），未命中时和原来一样。
+
+### 集群一致性
+
+- 实例 A 写知识库 → DB hash 更新
+- 实例 B 下次读 → 查 DB hash → 发现和缓存 hash 不一样 → 从 OBS 重新拉
+- 所有实例立即一致——不需要等 TTL 过期
+
+### 新增改动文件
+
+| # | 文件 | 改动 |
+|---|------|------|
+| 新增 | src/api/knowledge_cache.py（或在 knowledge.py 里） | _knowledge_cache dict + LRU + hash 比对逻辑 |
+
+### DB 字段变更（更新第一节）
+
+agent_shared_knowledge 表新增 2 个字段（原来 1 个，加 content_hash）：
+- obs_key VARCHAR(512) DEFAULT ''
+- content_hash VARCHAR(64) DEFAULT ''
+
+## 九、不需要改动的
 
 - src/prompt_builder.py — 调 read_knowledge() / member_files()，随底层改造自动生效
 - src/runtime/agent.py（worker 侧）— knowledge_files JSON 随任务下发，worker 落地逻辑不变
 - 现有 save_bytes / read_bytes / delete_object / temporary_url — 够用，不需改
 
-## 九、兼容策略
+## 十、兼容策略
 
 读取统一逻辑（伪代码）：
 ```python
@@ -232,7 +310,7 @@ else:
 
 storage 为 None（OBS 未启用）时全部回退本地，与 skill 存储改造同模式。
 
-## 十、数据迁移（渐进式）
+## 十一、数据迁移（渐进式）
 
 不强制迁移现有数据。策略 A（渐进）：
 - 老数据 obs_key 为空继续走本地
@@ -241,7 +319,7 @@ storage 为 None（OBS 未启用）时全部回退本地，与 skill 存储改�
 
 零风险。
 
-## 十一、风险点
+## 十二、风险点
 
 ### 1. write_knowledge 并发写
 
@@ -263,13 +341,14 @@ OBS 返回 "2026/08/23 05:34:43"，需要转成 "2026-08-23 05:34:43"。
 
 OBS 网络异常时回退本地 file_path。如果本地文件也不存在（容器化部署没有工作区），返回空字符串——Worker 拿不到知识但不崩溃。
 
-## 十二、数据库新增字段
+## 十三、数据库新增字段
 
 | # | 表.字段 | 类型 | 默认值 | 用途 |
 |---|---------|------|--------|------|
 | 1 | agent_shared_knowledge.obs_key | VARCHAR(512) | '' | OBS 对象键——非空走 OBS，空走本地 |
+| 2 | agent_shared_knowledge.content_hash | VARCHAR(64) | '' | 内容 hash——缓存一致性比对 |
 
-## 十三、项目知识基线文件 OBS 改造（补充）
+## 十四、项目知识基线文件 OBS 改造（补充）
 
 ### 背景
 
