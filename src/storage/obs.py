@@ -194,7 +194,7 @@ class ObsStorage(StorageBackend):
         """
         import os as _os
         from src.config import WORKSPACE_DIR
-        from src.api.knowledge import knowledge_path, _query_knowledge_obs, _owner_repo, member_files
+        from src.api.knowledge import knowledge_path, _query_knowledge_obs, _owner_repo
         from src.session_manager import db, db_lock
         out: dict[str, dict] = {}
         try:
