@@ -919,3 +919,40 @@ health_check 加知识库 OBS 统计：
 **问题**：从 OBS 拉到内容后计算 actual_hash，但没和 db_hash 比对。如果 OBS 内容和 DB hash 不一致不会发现。
 
 **修复**：actual_hash != db_hash 时 log warning（不阻断返回——返回 OBS 内容兜底）。
+
+
+## 十六、第六轮深度检查——OBS 模式下完全走 DB/OBS（2026-08-27）
+
+### 问题
+
+OBS 模式下部分函数仍然读本地磁盘，集群场景下其他实例没有本地文件会漏数据：
+
+- `member_files()` — os.walk 本地 member 目录
+- `member_files_pi()` — os.walk 本地 member 目录
+- `agent_files()` — os.walk 本地 agent 目录
+- `load_project_info()` — 读本地 project-graph.md / project-capabilities.md
+- `generate_file_urls()` — 调 member_files() / agent_files() 遍历本地磁盘
+
+### 修复方案
+
+所有函数统一模式：`if storage: 查 DB + OBS 读取` `else: 读本地（和 dev 一致）`
+
+| # | 文件 | 函数 | 改动 |
+|---|------|------|------|
+| 1 | knowledge.py | member_files() | 加 OBS 分支：查 DB scope='member' + read_bytes |
+| 2 | knowledge.py | member_files_pi() | 加 OBS 分支：查 DB + read_bytes，rel_path 用 project-info 相对 |
+| 3 | knowledge.py | agent_files() | 加 OBS 分支：查 DB scope='member' AND agent_type + read_bytes |
+| 4 | knowledge.py | knowledge_files() | 恢复 open 读文件（修复 strip 差异，和 dev 一致） |
+| 5 | knowledge.py | sync_loop COUNT | 创建新 cursor（修复 cursor 复用） |
+| 6 | service.py | load_project_info() | 加 OBS 分支：查 DB scope='baseline' + read_bytes |
+| 7 | obs.py | generate_file_urls() | member/agent 部分不调 member_files/agent_files，直接用 DB 查询结果 |
+
+### 不改的（已经走 OBS）
+
+- knowledge_path() — 路径计算函数
+- read_knowledge() — 已加 OBS 分支
+- write_knowledge() — 已加双写
+- upload_knowledge() — 已加双写
+- builder.py _write_to_obs() — 已加
+- vod_handler_async.py — 已查 DB baseline
+- _materialize_files() — Worker 侧三级降级
