@@ -258,75 +258,6 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
         return {}, {}
 
 
-def _build_file_urls(files: dict, repo_key: str, agent_type: str, issue_id: str,
-                     storage) -> dict:
-    """为 {rel_path: content} 生成 {rel_path: {url, storage_key}}（见 knowledge-obs-design §八）。
-
-    storage 为 None → 返回空 dict（本地模式无 OBS，file_urls 留空，worker 用 content 兜底）。
-    storage_key 生成按 rel_path 模式推导 scope（见 knowledge_storage_key / 设计文档 §二）：
-    - project-info/knowledge.md   → scope=project
-    - issues/{n}/knowledge.md     → scope=issue
-    - issues/{n}/{agent}/knowledge.md → scope=issue_agent
-    - member/... / agent/{type}/...   → 按 OBS key 规则 knowledge/{owner}/{repo}/member|agent/...
-    - 其他（project-graph.md 等）     → storage_key 留空（未存 OBS，worker 用 content）
-    """
-    if storage is None or not files:
-        return {}
-    from src.api.knowledge import knowledge_storage_key, _owner_repo
-    _inum = _issue_num(issue_id)
-    out: dict[str, dict] = {}
-    for rel_path in files:
-        storage_key = ""
-        url = ""
-        try:
-            rp = rel_path.replace("\\", "/")
-            # knowledge.md 文件 → knowledge_storage_key（scope 按 rel_path 推导）
-            if rp.endswith("knowledge.md"):
-                if "/project-info/" in rp and "/issues/" not in rp:
-                    storage_key = knowledge_storage_key(repo_key, "project")
-                elif "/issues/" in rp:
-                    # issues/{n}/knowledge.md 或 issues/{n}/{agent}/knowledge.md
-                    parts_after_issues = rp.split("/issues/", 1)[1]
-                    sub_parts = parts_after_issues.split("/")
-                    if len(sub_parts) == 2:
-                        storage_key = knowledge_storage_key(repo_key, "issue", issue_num=_inum)
-                    elif len(sub_parts) == 3:
-                        storage_key = knowledge_storage_key(repo_key, "issue_agent",
-                                                            agent_type=agent_type, issue_num=_inum)
-                else:
-                    storage_key = ""
-            elif "/member/" in rp or rp.startswith("member/"):
-                owner, rname = _owner_repo(repo_key)
-                if rp.startswith("member/"):
-                    rest = rp
-                else:
-                    rest = rp.split("/member/", 1)[1] if "/member/" in rp else rp
-                    rest = "member/" + rest
-                storage_key = "/".join(["knowledge", owner, rname, rest])
-            elif "/agent/" in rp or rp.startswith("agent/"):
-                owner, rname = _owner_repo(repo_key)
-                if rp.startswith("agent/"):
-                    rest = rp
-                else:
-                    rest = rp.split("/agent/", 1)[1] if "/agent/" in rp else rp
-                    rest = "agent/" + rest
-                storage_key = "/".join(["knowledge", owner, rname, rest])
-            elif rp.endswith("project-graph.md") or rp.endswith("project-capabilities.md") or rp.endswith(".metadata.json"):
-                # 基线文件 → 和 builder.py _write_to_obs 的 storage_key 一致
-                _fname = os.path.basename(rp)
-                storage_key = f"project-info/{repo_key}/{_fname}"
-            else:
-                storage_key = ""
-            if storage_key:
-                url = storage.temporary_url(storage_key, expires=3600)
-        except Exception as e:
-            log.warning(f"_build_file_urls: storage_key/url failed for {rel_path}: {e}")
-            storage_key = ""
-            url = ""
-        out[rel_path] = {"url": url, "storage_key": storage_key}
-    return out
-
-
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
                  repo_gitcode_token="", env_extra=None,
@@ -420,8 +351,8 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         _storage = get_storage()
     except Exception:
         _storage = None
-    project_info_file_urls = _build_file_urls(project_info_files, repo_key, agent_type, issue_id, _storage)
-    knowledge_file_urls = _build_file_urls(knowledge_files, repo_key, agent_type, issue_id, _storage)
+    project_info_file_urls = _storage.generate_file_urls(project_info_files, repo_key) if _storage else {}
+    knowledge_file_urls = _storage.generate_file_urls(knowledge_files, repo_key) if _storage else {}
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)

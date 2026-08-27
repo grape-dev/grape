@@ -103,6 +103,14 @@ class StorageBackend(ABC):
         items = [{"key": k, "size": 0, "last_modified": ""} for k in keys]
         return items, None
 
+    def generate_file_urls(self, files: dict, repo_key: str) -> dict:
+        """为 {rel_path: content} 生成 {rel_path: {url, storage_key}}。
+
+        基类默认实现：返回空 dict（本地模式，Worker 走 content 兜底）。
+        OBS 实现重写：查 DB 拿 obs_key → 生成 temporary_url。
+        """
+        return {}
+
     async def read_batch(self, keys: list[str]) -> dict[str, str]:
         """批量并发读取——限制并发数防止触发存储限流。
 

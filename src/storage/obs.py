@@ -177,13 +177,52 @@ class ObsStorage(StorageBackend):
                     marker = self._full(items[-1]["key"])
                     next_cursor = items[-1]["key"]
                     if len(items) >= limit:
-                        break  # 够了，下次从 cursor 继续
+                        break
                 else:
                     next_cursor = None
                     break
         except Exception as e:
             log.warning(f"list_objects_with_meta {prefix} failed: {e}")
         return items, next_cursor
+
+    def generate_file_urls(self, files: dict, repo_key: str) -> dict:
+        """查 DB 拿 obs_key → 生成 {rel_path: {url, storage_key}}。
+
+        obs_key 是 write_knowledge / upload_knowledge / builder.py 写入时存的。
+        通过 knowledge_path / knowledge_storage_key 函数算出 storage_key——和原来读写逻辑一致。
+        """
+        if not files:
+            return {}
+        out: dict[str, dict] = {}
+        try:
+            from src.session_manager import db, db_lock
+            from src.api.knowledge import knowledge_storage_key, _owner_repo
+            from src.repo_key import split_owner_repo
+            owner, rname = split_owner_repo(repo_key)
+            with db_lock:
+                c = db.cursor()
+                rows = c.execute(
+                    "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND obs_key!='' AND obs_key IS NOT NULL "
+                    "ORDER BY id DESC",
+                    (repo_key,)
+                ).fetchall()
+            # file_path → obs_key 映射（用 basename 做索引——file_path 格式不一致但 basename 唯一）
+            obs_map = {}
+            for fp, ok in rows:
+                if fp and ok:
+                    obs_map[os.path.basename(fp)] = ok
+            for rel_path in files:
+                fname = os.path.basename(rel_path)
+                obs_key = obs_map.get(fname, "")
+                if obs_key:
+                    out[rel_path] = {"url": self.temporary_url(obs_key, expires=3600), "storage_key": obs_key}
+                else:
+                    out[rel_path] = {"url": "", "storage_key": ""}
+        except Exception as e:
+            log.warning(f"generate_file_urls failed: {e}")
+            out = {rel_path: {"url": "", "storage_key": ""} for rel_path in files}
+        return out
 
     def delete_object(self, key: str) -> bool:
         """单对象删除（固定 key 模型：每技能仅 1 对象，删除 = 单对象）。"""
