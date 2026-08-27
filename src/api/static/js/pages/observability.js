@@ -421,19 +421,29 @@ function _applySequenceColors(svg, statuses) {
 
 async function _renderMermaid(box, iss) {
   if (box.dataset.rendered) return;
-  box.dataset.rendered = '1'; box.innerHTML = '<span class="ts t3">渲染中\u2026</span>';
+  box.dataset.rendered = '1';
+  box.innerHTML = '<span class="ts t3">渲染中…</span>';
   try {
     const mmd = await _getMermaid();
     const uid = 'mmd-' + Math.random().toString(36).slice(2, 10);
     const { text, statuses } = _buildSequence(iss);
-    const { svg } = await mmd.render(uid, text);
+    // mermaid v11: 先 parse 验证语法，再 render
+    try { await mmd.parse(text); } catch(pe) { /* parse 失败也尝试 render */ }
+    const result = await mmd.render(uid, text);
+    const svg = result.svg || result;
     box.innerHTML = _applySequenceColors(svg, statuses);
-  } catch (err) { box.innerHTML = '<span class="ts t3">时序渲染失败: ' + (err.message || err) + '</span>'; }
+  } catch (err) {
+    box.innerHTML = '<div style="padding:12px;color:var(--r);font-size:12px">时序渲染失败: ' + (err.message || err) + '</div>';
+    // 显示原始 mermaid 文本供调试
+    const { text } = _buildSequence(iss);
+    box.innerHTML += '<pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">' + text.replace(/</g,'&lt;') + '</pre>';
+  }
 }
 
 function renderTimelineList(container, issues) {
   if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">暂无任务事件</div>'; return; }
-  let html = section('任务列表', issues.length + ' 个 Issue \u2014 点击展开时序图');
+  _timelineIssues = issues;
+  let html = section('任务列表', issues.length + ' 个 Issue \u2014 点击展开');
   html += '<div style="display:flex;flex-direction:column;gap:0">';
   issues.forEach(iss => {
     const expanded = _expandedIssues.has(iss.issueId);
@@ -448,39 +458,73 @@ function renderTimelineList(container, issues) {
     html += '<span class="ts t3">' + (iss.lastAt || '').substring(0,16) + '</span>';
     html += '</div>';
     html += '<div id="tl-body-' + iss.issueId + '" style="display:' + (expanded ? 'block' : 'none') + ';padding:10px 14px;border-top:1px solid var(--b)">';
-    html += '<div class="tl-mmd" data-iid="' + iss.issueId + '" style="overflow-x:auto"></div>';
-    html += '<div style="margin-top:8px"><table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead><tbody>';
-    html += iss.events.map(ev => '<tr><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + (ev.createdAt||'').substring(0,19) + '</td></tr>').join('');
-    html += '</tbody></table></div></div></div>';
+    // 切换按钮
+    html += '<div style="display:flex;gap:0;margin-bottom:10px">';
+    html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] !== 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'diagram\')">\u{1f4ca} 时序图</button>';
+    html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] === 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'events\')">\u{1f4cb} 事件列表</button>';
+    html += '</div>';
+    // 时序图容器
+    html += '<div id="tl-diagram-' + iss.issueId + '" class="tl-mmd" data-iid="' + iss.issueId + '" style="overflow-x:auto;' + (_issueViewMode[iss.issueId] === 'events' ? 'display:none' : '') + '"></div>';
+    // 事件列表容器
+    html += '<div id="tl-events-' + iss.issueId + '" style="' + (_issueViewMode[iss.issueId] !== 'events' ? 'display:none' : '') + '">';
+    html += '<table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead><tbody>';
+    html += iss.events.map(ev => '<tr><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + (ev.createdAt||'').substring(0,19) + '</td></tr>').join('');
+    html += '</tbody></table></div>';
+    html += '</div></div>';
   });
   html += '</div>';
   container.innerHTML = html;
+  // 渲染已展开的 mermaid
   issues.forEach(iss => {
-    if (_expandedIssues.has(iss.issueId)) {
-      const box = container.querySelector('.tl-mmd[data-iid="' + iss.issueId + '"]');
+    if (_expandedIssues.has(iss.issueId) && _issueViewMode[iss.issueId] !== 'events') {
+      const box = container.querySelector('#tl-diagram-' + iss.issueId);
       if (box) _renderMermaid(box, iss);
     }
   });
+}
+
+let _timelineIssues = [];
+let _issueViewMode = {};
+
+function switchIssueView(issueId, mode) {
+  _issueViewMode[issueId] = mode;
+  const diagram = document.getElementById('tl-diagram-' + issueId);
+  const events = document.getElementById('tl-events-' + issueId);
+  if (diagram) diagram.style.display = (mode === 'events' ? 'none' : 'block');
+  if (events) events.style.display = (mode === 'events' ? 'block' : 'none');
+  // 更新按钮高亮
+  const body = document.getElementById('tl-body-' + issueId);
+  if (body) {
+    const btns = body.querySelectorAll('.bt-s');
+    btns.forEach(b => { b.className = b.className.replace('bt-p','bt-o'); });
+    if (mode === 'events' && btns[1]) btns[1].className = btns[1].className.replace('bt-o','bt-p');
+    else if (btns[0]) btns[0].className = btns[0].className.replace('bt-o','bt-p');
+  }
+  // 如果切换到时序图且未渲染，则渲染
+  if (mode === 'diagram' && diagram && !diagram.dataset.rendered) {
+    const iss = _timelineIssues.find(i => i.issueId === issueId);
+    if (iss) _renderMermaid(diagram, iss);
+  }
 }
 
 function toggleIssueTimeline(issueId) {
   const body = document.getElementById('tl-body-' + issueId);
   if (!body) return;
   if (body.style.display === 'none') {
-    body.style.display = 'block'; _expandedIssues.add(issueId);
-    const box = body.querySelector('.tl-mmd');
-    if (box && !box.dataset.rendered) {
-      const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
-      const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
-      fetch('/api/dashboard/ops/timeline' + repoParam).then(r => r.json()).then(d => {
-        const iss = (d.issues || []).find(i => i.issueId === issueId);
-        if (iss) _renderMermaid(box, iss);
-      }).catch(() => {});
+    body.style.display = 'block';
+    _expandedIssues.add(issueId);
+    // 默认显示时序图
+    if (!_issueViewMode[issueId]) _issueViewMode[issueId] = 'diagram';
+    const box = document.getElementById('tl-diagram-' + issueId);
+    if (box && !box.dataset.rendered && _issueViewMode[issueId] === 'diagram') {
+      const iss = _timelineIssues.find(i => i.issueId === issueId);
+      if (iss) _renderMermaid(box, iss);
     }
     const toggle = body.previousElementSibling;
     if (toggle) toggle.querySelector('span').textContent = '\u25be';
   } else {
-    body.style.display = 'none'; _expandedIssues.delete(issueId);
+    body.style.display = 'none';
+    _expandedIssues.delete(issueId);
     const toggle = body.previousElementSibling;
     if (toggle) toggle.querySelector('span').textContent = '\u25b8';
   }
