@@ -261,7 +261,6 @@ _BACKFILL_FLAG = "bindings_backfilled"
 
 def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
     """过滤绑定集合，只保留标签匹配 agent_type 的引擎。"""
-    import json as _json
     if not agent_type or not members:
         return members
     db, lock = _db()
@@ -272,9 +271,8 @@ def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
             rid = m.get("runtime_id")
             if not rid:
                 continue
-            c.execute("SELECT agent_tags FROM agent_runtimes WHERE id=?", (rid,))
-            row = c.fetchone()
-            tags = _json.loads(row[0] or '["all"]') if row else ["all"]
+            c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,))
+            tags = [r[0] for r in c.fetchall()] or ["all"]
             if agent_type in tags or "all" in tags:
                 result.append(m)
     return result
@@ -360,7 +358,6 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
 def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]:
     """返回某仓库在某档位的候选引擎：repo=仓库级；global=远端全局；local=本机直连。
     agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。"""
-    import json as _json
     repo = _norm_repo(repo_key)
     db, lock = _db()
     with lock:
@@ -369,17 +366,20 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
             if scope == "repo":
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''), r.agent_tags "
+                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
                 c.execute(
-                    "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '', agent_tags "
+                    "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1) "
                     "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
             else:
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''), r.agent_tags "
+                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='global' AND rc.status='active' ORDER BY r.id")
             rows = c.fetchall()
@@ -392,9 +392,10 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
             from src.repo_key import from_repo_key
             if from_repo_key(r[9] or "") != repo:
                 continue
-        # agent_type 标签过滤
+        # agent_type 标签过滤（r[10] = GROUP_CONCAT(tag) from engine_capabilities, e.g. "all" or "all,coding"）
         if agent_type:
-            tags = _json.loads(r[10] or '["all"]') if r[10] else ["all"]
+            tags_str = r[10] or ""
+            tags = [t.strip() for t in tags_str.split(",") if t.strip()] or ["all"]
             if agent_type not in tags and "all" not in tags:
                 continue
         out.append({

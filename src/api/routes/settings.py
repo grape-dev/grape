@@ -297,17 +297,21 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
             cred = cred_map.get(cid) or {}
             if not _visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
                 continue
-            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, agent_tags FROM agent_runtimes WHERE credential_id=?", (cid,))
+            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result FROM agent_runtimes WHERE credential_id=?", (cid,))
             runtimes = [
                 {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
                  "installed": bool(x[4]),
                  "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
                  "health": derive_runtime_health(x[5], x[6], now),
                  "local_skills": json.loads(x[7] or "[]") if x[7] else [],
-                 "skill_scan_result": json.loads(x[8] or "[]") if x[8] else [],
-                 "agent_tags": json.loads(x[9] or '["all"]') if x[9] else ["all"]}
+                 "skill_scan_result": json.loads(x[8] or "[]") if x[8] else []}
                 for x in c.fetchall()
             ]
+            # tags from engine_capabilities
+            for rt in runtimes:
+                _tc2 = db.cursor()
+                _tc2.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
+                rt["agent_tags"] = [r[0] for r in _tc2.fetchall()] or ["all"]
             devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
                             "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
                             "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
@@ -624,10 +628,6 @@ async def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get
                 "ON DUPLICATE KEY UPDATE max_concurrent=VALUES(max_concurrent), priority=VALUES(priority), updated_at=VALUES(updated_at)",
                 (rid, tag, body.max_concurrent, body.priority, now, now)
             )
-            # Sync tags column on agent_runtimes
-            c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? ORDER BY tag", (rid,))
-            tags_str = ",".join(r[0] for r in c.fetchall())
-            c.execute("UPDATE agent_runtimes SET tags=? WHERE id=?", (tags_str, rid))
             db.commit()
         except HTTPException:
             raise
@@ -640,9 +640,6 @@ async def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get
                     "VALUES (?,?,?,?,1,?,?)",
                     (rid, tag, body.max_concurrent, body.priority, now, now)
                 )
-                c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? ORDER BY tag", (rid,))
-                tags_str = ",".join(r[0] for r in c.fetchall())
-                c.execute("UPDATE agent_runtimes SET tags=? WHERE id=?", (tags_str, rid))
                 db.commit()
             except Exception as e2:
                 db.rollback()
@@ -689,10 +686,6 @@ async def delete_engine_tag(rid: int, tag: str, user: dict = Depends(get_current
             c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag=?", (rid, tag))
             if c.rowcount == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
-            # Sync tags column
-            c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? ORDER BY tag", (rid,))
-            tags_str = ",".join(r[0] for r in c.fetchall())
-            c.execute("UPDATE agent_runtimes SET tags=? WHERE id=?", (tags_str, rid))
             db.commit()
         except HTTPException:
             raise

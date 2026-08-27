@@ -151,22 +151,22 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
                            datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, rid))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, agent_tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, '["all"]'))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json))
                 rid = c.lastrowid
-            # Engine tags (event-dispatch-redesign-v2.md 2.3): optional, not enforced
-            _rt_tags = (rt.get("tags") or "").strip()
-            if _rt_tags:
-                for _t in [t.strip().lower() for t in _rt_tags.split(",") if t.strip()]:
-                    try:
-                        c.execute(
-                            "REPLACE INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
-                            (rid, _t, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()))
-                    except Exception:
-                        pass
-                c.execute("UPDATE agent_runtimes SET tags=? WHERE id=?", (_rt_tags, rid))
+            # 服务端默认写入 "all" 标签到 engine_capabilities（worker 不需要传 tags）
+            # 后续标签增删改全部来自 WebUI 操作
+            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
+            if not c.fetchone():
+                _now = datetime.now(timezone.utc).isoformat()
+                try:
+                    c.execute(
+                        "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
+                        (rid, "all", _now, _now))
+                except Exception:
+                    pass
             registered.append({"id": rid, "name": name})
         db.commit()
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，
