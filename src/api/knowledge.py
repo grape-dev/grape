@@ -391,12 +391,14 @@ async def knowledge_sync_loop():
                             storage.save_bytes(storage_key, content.encode("utf-8"))
                             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
                             with db_lock:
-                                c.execute(
-                                    "UPDATE agent_shared_knowledge SET obs_key=*** content_hash=? WHERE id=***",
+                                c2 = db.cursor()
+                                c2.execute(
+                                    "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=? WHERE id=?",
                                     (storage_key, content_hash, rid)
                                 )
                                 db.commit()
                     except Exception as e:
+                        
                         log.warning(f"[knowledge] sync failed id={rid}: {e}")
                     cursor = rid
                 if len(rows) < 500:
