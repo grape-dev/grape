@@ -1176,3 +1176,247 @@ agent_files OBS 分支：
 - hash 缓存 + LRU
 - 集群 Lease 隔离
 - 删除/上传/任务打包全链路数据一致
+
+
+## 二十三、sync_loop 补扫 baseline 文件方案（2026-08-27）
+
+### 问题
+
+sync_loop 只扫 agent_shared_knowledge 表里 obs_key 为空的记录。baseline 文件（project-graph.md / project-capabilities.md / .metadata.json）在 OBS 代码之前 onboard 的 repo 没有 DB baseline 记录 → sync_loop 扫不到 → 不会迁移。
+
+集群场景下 B 实例没有本地文件 → load_project_info 查 DB 查不到 → 回退本地也没有 → 基线缺失。
+
+### 基线文件清单（builder.py 硬编码常量）
+
+| 文件 | 常量 | 说明 |
+|------|------|------|
+| project-graph.md | _GRAPH_FILE | 项目架构图 |
+| project-capabilities.md | _CAP_FILE | 项目能力描述 |
+| .metadata.json | _META_FILE | 元数据（commit sha / branches / last_updated） |
+
+### 修复方案
+
+新增 `_sync_baseline_files()` 函数，在 sync_loop 外层循环末尾调用。
+
+逻辑：
+1. 遍历 WORKSPACE_DIR 下所有 repo 的 project-info 目录
+2. 对每个 repo 检查 3 个基线文件（project-graph.md / project-capabilities.md / .metadata.json）
+3. 查 DB 是否已有 scope='baseline' 记录
+4. 没有记录 → 写 OBS + INSERT DB
+5. 有记录但 obs_key 为空 → 写 OBS + UPDATE obs_key
+6. 有记录且 obs_key 非空 → 跳过
+
+### 改动点
+
+| 文件 | 函数 | 改动 |
+|------|------|------|
+| knowledge.py | knowledge_sync_loop() | 外层循环末尾加 _sync_baseline_files() 调用 |
+| knowledge.py | 新增 _sync_baseline_files() | 扫描本地 project-info + 写 OBS + DB |
+
+### 设计原则
+
+1. 和 sync_loop 同样的模式：查 DB → 没有就写 OBS + DB
+2. 不依赖配置项——用硬编码的 BASELINE_FILES（和 builder.py 一致）
+3. 幂等——DB 有 obs_key 非空的记录就跳过
+4. 不影响现有 sync_loop 逻辑——在现有循环之后执行
+5. 文件不存在就跳过——不报错
+
+### 不改的
+
+- builder.py _write_to_obs — 不变（新 onboard 的 repo 已经会写 DB）
+- load_project_info — 不变（已有兜底逻辑）
+- _PROJECT_INFO_FILES — 不变
+
+### 方案调整（2026-08-27）
+
+原方案遍历 WORKSPACE_DIR 目录名作为 owner，但目录名格式不一致（有的带 `gitcode:` 前缀）。
+
+调整：从 `managed_repos` 表获取项目列表，不遍历目录。
+
+managed_repos 表有 36 条记录，每条有 repo_key（如 `gitcod.../...`）和 repo_owner / repo_name。
+
+调整后逻辑：
+1. 查 DB: `SELECT repo_key FROM managed_repos` → 拿到所有项目的 repo_key
+2. 对每个 repo_key:
+   - owner, repo = split_owner_repo(repo_key)
+   - pi_dir = WORKSPACE_DIR/owner/repo/project-info
+3. 检查 pi_dir 下的 3 个基线文件
+4. 查 DB baseline 记录 → 没有就写 OBS + INSERT / 有但 obs_key 空就 UPDATE / 有且非空跳过
+
+### 方案检查结果（2026-08-27）
+
+#### managed_repos 表结构
+
+- 无软删除字段（is_deleted）——36 条记录全部有效
+- 只有 1 个项目（xiaowu2119/hello-skill）有本地 project-info 目录
+- 35 个项目没有目录——os.path.isdir 返回 False 跳过，不影响功能
+
+#### storage_key 格式一致性
+
+builder.py 的 _write_to_obs 用：
+```python
+storage_key = f"project-info/{repo_key}/{name}"
+# → project-info/gitcode:xiaowu2119/hello-skill/project-graph.md
+```
+
+_sync_baseline_files 必须用同样的格式，确保 OBS 对象 key 一致。
+
+#### 最终实现逻辑
+
+1. 查 DB: `SELECT repo_key FROM managed_repos` → 拿到所有项目
+2. 对每个 repo_key:
+   - `owner, repo = split_owner_repo(repo_key)`
+   - `pi_dir = WORKSPACE_DIR/owner/repo/project-info`
+   - `os.path.isdir(pi_dir)` 为 False → 跳过
+3. 对 pi_dir 下的 3 个基线文件（project-graph.md / project-capabilities.md / .metadata.json）:
+   - 文件不存在 → 跳过
+   - 查 DB: `SELECT id, obs_key WHERE repo_key=? AND scope='baseline' AND file_path=?`
+   - DB 有记录且 obs_key 非空 → 跳过
+   - DB 有记录但 obs_key 空 → 写 OBS + UPDATE obs_key
+   - DB 无记录 → 写 OBS + INSERT
+4. storage_key 格式：`f"project-info/{repo_key}/{fname}"`（和 builder.py 一致）
+5. file_path 格式：`os.path.relpath(fpath, WORKSPACE_DIR)`（和 builder.py 一致）
+
+#### 注意事项
+
+- managed_repos 无软删除——35 个没目录的项目会跳过，不影响功能
+- 幂等——DB 有 obs_key 非空的记录就跳过
+- 每小时执行一次——和 sync_loop 同频率
+
+### 并发保护（2026-08-27）
+
+多实例同时启动 sync_loop 会导致重复写 OBS + DB。
+
+方案 3：meta 表标记 + 10 分钟超时
+
+- sync_loop 开始前查 meta 表 `knowledge_sync_running`
+- 没有记录或时间戳超过 10 分钟 → 写入当前时间戳 → 执行
+- 有记录且 10 分钟内 → 跳过本次（log info）
+- sync_loop 完成后清空标记（finally 块）
+- 实例挂了 10 分钟后自动恢复
+
+优点：不加字段（用现有 meta 表）、不加锁、超时保护、和飞书 lease 思路一致。
+
+### 并发保护验证证据（2026-08-27）
+
+8 个验证全部通过：
+
+1. 清空 baseline 记录 + meta 锁标记 → 3 条删除 + 锁清空 ✅
+2. _sync_baseline_files 执行 → 3 个文件写入 OBS + DB ✅
+3. DB baseline 记录 → 3 条，obs_key/content_hash 有值，created_by=sync ✅
+4. OBS 对象 → 3 个对象，内容和 DB 记录对应 ✅
+5. 幂等 → 第二次执行 baseline 记录还是 3 条，无新增 ✅
+6. 并发保护 → A 抢锁 B 跳过 (elapsed=0.0s < 600s)，A 释放后 B 继续 ✅
+7. 超时恢复 → 11 分钟前的锁过期 (660s > 600s) 继续执行 ✅
+8. load_project_info → 3 个文件从 OBS 读取，内容正确 ✅
+
+### 影响分析
+
+7 个检查点全部通过，对系统无伤害：
+- INSERT 字段和表结构匹配 ✅
+- storage_key 格式和 builder.py 一致 ✅
+- file_path 格式和 builder.py 一致 ✅
+- finally set_meta_value 内部有 try/except 不抛异常 ✅
+- managed_repos 查询无占位符问题 ✅
+- meta 表临时标记 finally 清空 + 10 分钟超时 ✅
+- 36 个项目遍历 35 次跳过微不足道 ✅
+
+## 二十四、307 重定向优化方案（2026-08-27）
+
+### 问题
+
+前端请求 `/api/knowledge?repo=xxx`（不带尾斜杠），但 FastAPI 路由定义 `@router.get("/")`（带尾斜杠），导致 307 Temporary Redirect。dev 分支原有行为，不是 OBS 改造引入。
+
+### 方案
+
+只改路由 `"/"` → `""`，不改 `redirect_slashes=False`。
+
+| 方案 | 不带斜杠 | 带斜杠 | 改前端？ | 风险 |
+|------|:---:|:---:|:---:|:---:|
+| 只改路由 `""`，保留 `redirect_slashes=True` | 直接 200 ✅ | 307→200（能工作）✅ | 不用改 ✅ | 低 |
+| 改 `redirect_slashes=False` + 路由 `""` | 直接 200 ✅ | 404 ❌ | 必须改 | 高 |
+
+选择只改路由——更安全，前端和测试都不用动。
+
+### 改动清单（6 处，5 个文件）
+
+| # | 文件 | 行号 | 当前 | 改为 |
+|---|------|:---:|------|------|
+| 1 | routes/knowledge.py | 249 | `@router.get("/")` | `@router.get("")` |
+| 2 | routes/knowledge.py | 331 | `@router.post("/")` | `@router.post("")` |
+| 3 | routes/knowledge.py | 420 | `@router.delete("/")` | `@router.delete("")` |
+| 4 | routes/search.py | 9 | `@router.get("/")` | `@router.get("")` |
+| 5 | routes/skills.py | 35 | `@router.get("/")` | `@router.get("")` |
+
+不改：main.py `redirect_slashes`、前端 JS、测试代码。
+
+### 影响分析
+
+- 前端不带斜杠调用（knowledge / skills）：307→200 变为直接 200 ✅
+- 前端带斜杠调用（search）：307→200 仍能工作 ✅
+- 测试代码不带斜杠调用：307→200 变为直接 200 ✅
+- 子路由（/skills/upload 等）：不受影响 ✅
+- 后端内部调用：不受影响 ✅
+
+## 二十五、knowledge_files 集群丢共享知识修复（2026-08-27）
+
+### 问题
+
+knowledge_files 调 read_knowledge 从 OBS 拿到 content 后，又 open 本地文件读取。集群 B 实例没有本地 knowledge.md → open 失败 → except 跳过 → 共享知识丢失。
+
+### 修复
+
+OBS 模式下直接用 read_knowledge 返回的 content，不 open 本地文件。
+非 OBS 模式保持 open 读本地文件（和 dev 一致，保留原始 strip 行为）。
+
+### 逻辑完备性检查
+
+- agent_files OBS 分支 ✅（查 DB member+agent_type + OBS 读取）
+- load_project_info OBS 分支 ✅（查 baseline + OBS 读取 + 兜底本地）
+- knowledge_files OBS 分支 ✅（read_knowledge content + member_files OBS）
+- generate_file_urls agent 部分 ✅（查 DB + 直接用 file_path）
+- 所有 key 格式一致 ✅
+
+## 二十六、第十六轮深度检查——集群 B 实例可用性（2026-08-27）
+
+### 检查范围
+
+逐个检查所有"OBS 优先 + 回退本地"的函数在集群 B 实例（无本地文件）的行为。
+
+### 检查结果
+
+| # | 函数 | OBS 分支 | 回退本地 | 集群 B 可用？ |
+|---|------|:---:|:---:|:---:|
+| 1 | knowledge_files | ✅ 用 content | 不需要 | ✅ |
+| 2 | member_files | ✅ DB+OBS | 不需要 | ✅ |
+| 3 | member_files_pi | ✅ DB+OBS | 不需要 | ✅ |
+| 4 | agent_files | ✅ DB+OBS | 不需要 | ✅ |
+| 5 | load_project_info | ✅ DB+OBS | 兜底本地 | ✅（DB 有就行） |
+| 6 | vod_handler_async | ✅ DB+OBS | 兜底本地 | ⚠️（A 挂了才有问题） |
+| 7 | _read_entry_content | ✅ OBS | 兜底本地 | ✅（返回空不报错） |
+| 8 | _read_file | ✅ DB+OBS | 兜底本地 | ✅（obs_key 非空走 OBS） |
+
+### 任务打包链路
+
+enqueue_task → knowledge_files + member_files_pi + agent_files + load_project_info + generate_file_urls
+
+全部走 OBS，不依赖本地磁盘 ✅
+
+### vod_handler_async 集群限制
+
+vod_handler_async 读基线文件逻辑：
+1. 查 DB scope='baseline' + OBS 读取 → _baseline_content
+2. OBS 没有 → 读本地文件 os.path.exists(_f) + open(_f)
+
+集群 B 实例（无本地文件）+ OBS 读取失败时：
+- _baseline_content 为空
+- os.path.exists 返回 False
+- 基线缺失 → VOD Agent 拿不到 project-graph.md / project-capabilities.md
+- 不会报错 → _has_baseline 为 False 时直接跳过基线部分
+
+实际不会发生：
+1. 飞书 lease 隔离 → 只有 A 处理 webhook → VOD 任务只在 A 上执行
+2. A 有本地文件 → OBS 失败也能兜底
+3. 只有 A 挂了 + OBS 同时挂了才会出问题——概率极低
+
+这是设计上的已知限制，不是 bug。

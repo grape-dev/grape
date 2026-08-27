@@ -246,7 +246,7 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
     return groups
 
 
-@router.get("/")
+@router.get("")
 async def list_knowledge(user: dict = Depends(get_current_user),
                          repo: str = Query("", description="repo_key，如 gitcode:org/test 或 org/test")):
     """聚合返回项目级 + Agent 维度知识清单。"""
@@ -328,7 +328,7 @@ async def knowledge_context(repo: str = Query(""),
     return {"repo_key": repo_key, "context": "\n\n".join(lines)}
 
 
-@router.post("/")
+@router.post("")
 async def upload_knowledge(file: UploadFile = File(...),
                            repo: str = Form(""),
                            scope: str = Form("project"),
@@ -417,7 +417,7 @@ async def upload_knowledge(file: UploadFile = File(...),
     return {"message": f"知识文档 {os.path.basename(rel)} 上传成功", "file_path": rel, "scope": scope}
 
 
-@router.delete("/")
+@router.delete("")
 async def delete_knowledge(repo: str = Query(""),
                            file: str = Query(""),
                            user: dict = Depends(get_current_user)):

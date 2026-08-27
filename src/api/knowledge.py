@@ -252,13 +252,21 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
 def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0) -> dict:
     """任务级交付快照：{rel_path: content}（参照 project_info_files，供远端 worker materialize）。"""
     files = {}
+    # OBS 模式：read_knowledge 返回的 content 已从 OBS 获取，直接用（不依赖本地磁盘）
+    # 非 OBS 模式：open 读本地文件（和 dev 一致，保留原始 strip 行为）
+    from src.storage import get_storage
+    _storage = get_storage()
     for scope, content in read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num).items():
         p = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-        try:
-            with open(p, encoding="utf-8") as f:
-                files[os.path.relpath(p, WORKSPACE_DIR)] = f.read()
-        except Exception:
-            continue
+        rel = os.path.relpath(p, WORKSPACE_DIR)
+        if _storage is not None and content:
+            files[rel] = content
+        else:
+            try:
+                with open(p, encoding="utf-8") as f:
+                    files[rel] = f.read()
+            except Exception:
+                continue
     # 成员上传文档（project-info/member/**）一并交付远端 worker（见 knowledge-board-design.md §2.5）
     for rel, content in member_files(repo_key).items():
         files.setdefault(rel, content)
@@ -432,16 +440,39 @@ def agent_files(repo_key: str, agent_type: str = "") -> dict:
 
 
 async def knowledge_sync_loop():
-    """后台定时同步老数据到 OBS——每小时一次，分批 500 条。"""
-    import asyncio, hashlib
+    """后台定时同步老数据到 OBS——每小时一次，分批 500 条。
+
+    并发保护：通过 meta 表 knowledge_sync_running 标记 + 10 分钟超时，
+    防止多实例同时执行 sync_loop 导致重复写 OBS + DB。
+    """
+    import asyncio, hashlib, time
     from src.session_manager import db, db_lock
     from src.storage import get_storage
+    from src.user.db import get_meta_value, set_meta_value
 
     storage = get_storage()
     if not storage:
         return
 
+    SYNC_LOCK_KEY = "knowledge_sync_running"
+    SYNC_LOCK_TIMEOUT = 600  # 10 分钟超时（实例挂了自动恢复）
+
     while True:
+        # 并发保护：检查是否有其他实例正在执行
+        running = get_meta_value(SYNC_LOCK_KEY)
+        if running:
+            try:
+                running_ts = float(running)
+                if time.time() - running_ts < SYNC_LOCK_TIMEOUT:
+                    log.info("[knowledge] sync skipped: another instance is running")
+                    await asyncio.sleep(3600)
+                    continue
+            except ValueError:
+                pass  # 值不是时间戳 → 视为过期 → 继续执行
+
+        # 抢锁
+        set_meta_value(SYNC_LOCK_KEY, str(time.time()))
+
         try:
             cursor = 0
             while True:
@@ -508,6 +539,93 @@ async def knowledge_sync_loop():
             if remaining == 0:
                 log.info("[knowledge] sync complete, all data migrated to OBS")
                 # 不 return——继续每小时检查新增的 obs_key 为空的记录
+            # 补扫本地 project-info 基线文件（OBS 代码之前 onboard 的 repo 没有 DB baseline 记录）
+            try:
+                _sync_baseline_files()
+            except Exception as e:
+                log.error(f"[knowledge] sync baseline files error: {e}")
         except Exception as e:
             log.error(f"[knowledge] sync error: {e}")
+        finally:
+            # 释放锁
+            set_meta_value(SYNC_LOCK_KEY, "")
         await asyncio.sleep(3600)
+
+
+def _sync_baseline_files():
+    """扫描本地 project-info 目录，把缺失的 baseline 文件写入 OBS + DB。
+
+    从 managed_repos 表获取项目列表，检查每个项目的 project-info 目录下
+    3 个基线文件（project-graph.md / project-capabilities.md / .metadata.json）
+    是否已在 DB 有 baseline 记录。没有就写 OBS + INSERT DB。
+    """
+    import hashlib as _hl
+    from src.repo_key import split_owner_repo
+    from src.storage import get_storage
+
+    storage = get_storage()
+    if not storage:
+        return
+
+    BASELINE_FILES = ("project-graph.md", "project-capabilities.md", ".metadata.json")
+
+    # 从 managed_repos 表获取所有项目
+    with db_lock:
+        rows = db.cursor().execute("SELECT repo_key FROM managed_repos").fetchall()
+
+    for (repo_key,) in rows:
+        owner, repo = split_owner_repo(repo_key)
+        if not owner or not repo:
+            continue
+        pi_dir = os.path.join(WORKSPACE_DIR, owner, repo, "project-info")
+        if not os.path.isdir(pi_dir):
+            continue
+
+        for fname in BASELINE_FILES:
+            fpath = os.path.join(pi_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+
+            file_path = os.path.relpath(fpath, WORKSPACE_DIR)
+
+            # 查 DB 是否已有 baseline 记录
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT id, obs_key FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope='baseline' AND file_path=? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (repo_key, file_path)
+                ).fetchone()
+
+            if row and row[1]:  # DB 有记录且 obs_key 非空 → 跳过
+                continue
+
+            # 写 OBS + DB
+            try:
+                with open(fpath, "rb") as f:
+                    content_bytes = f.read()
+                storage_key = f"project-info/{repo_key}/{fname}"
+                storage.save_bytes(storage_key, content_bytes)
+                content_hash = _hl.sha256(content_bytes).hexdigest()[:64]
+
+                if row:  # DB 有记录但 obs_key 为空 → UPDATE
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute(
+                            "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=? WHERE id=?",
+                            (storage_key, content_hash, row[0])
+                        )
+                        db.commit()
+                else:  # DB 无记录 → INSERT
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute(
+                            "INSERT INTO agent_shared_knowledge "
+                            "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by) "
+                            "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync')",
+                            (repo_key, file_path, storage_key, content_hash)
+                        )
+                        db.commit()
+                log.info(f"[knowledge] sync baseline {repo_key}/{fname} → OBS")
+            except Exception as e:
+                log.warning(f"[knowledge] sync baseline failed {repo_key}/{fname}: {e}")
