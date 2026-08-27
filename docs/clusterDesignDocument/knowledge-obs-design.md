@@ -1176,3 +1176,53 @@ agent_files OBS 分支：
 - hash 缓存 + LRU
 - 集群 Lease 隔离
 - 删除/上传/任务打包全链路数据一致
+
+
+## 二十三、sync_loop 补扫 baseline 文件方案（2026-08-27）
+
+### 问题
+
+sync_loop 只扫 agent_shared_knowledge 表里 obs_key 为空的记录。baseline 文件（project-graph.md / project-capabilities.md / .metadata.json）在 OBS 代码之前 onboard 的 repo 没有 DB baseline 记录 → sync_loop 扫不到 → 不会迁移。
+
+集群场景下 B 实例没有本地文件 → load_project_info 查 DB 查不到 → 回退本地也没有 → 基线缺失。
+
+### 基线文件清单（builder.py 硬编码常量）
+
+| 文件 | 常量 | 说明 |
+|------|------|------|
+| project-graph.md | _GRAPH_FILE | 项目架构图 |
+| project-capabilities.md | _CAP_FILE | 项目能力描述 |
+| .metadata.json | _META_FILE | 元数据（commit sha / branches / last_updated） |
+
+### 修复方案
+
+新增 `_sync_baseline_files()` 函数，在 sync_loop 外层循环末尾调用。
+
+逻辑：
+1. 遍历 WORKSPACE_DIR 下所有 repo 的 project-info 目录
+2. 对每个 repo 检查 3 个基线文件（project-graph.md / project-capabilities.md / .metadata.json）
+3. 查 DB 是否已有 scope='baseline' 记录
+4. 没有记录 → 写 OBS + INSERT DB
+5. 有记录但 obs_key 为空 → 写 OBS + UPDATE obs_key
+6. 有记录且 obs_key 非空 → 跳过
+
+### 改动点
+
+| 文件 | 函数 | 改动 |
+|------|------|------|
+| knowledge.py | knowledge_sync_loop() | 外层循环末尾加 _sync_baseline_files() 调用 |
+| knowledge.py | 新增 _sync_baseline_files() | 扫描本地 project-info + 写 OBS + DB |
+
+### 设计原则
+
+1. 和 sync_loop 同样的模式：查 DB → 没有就写 OBS + DB
+2. 不依赖配置项——用硬编码的 BASELINE_FILES（和 builder.py 一致）
+3. 幂等——DB 有 obs_key 非空的记录就跳过
+4. 不影响现有 sync_loop 逻辑——在现有循环之后执行
+5. 文件不存在就跳过——不报错
+
+### 不改的
+
+- builder.py _write_to_obs — 不变（新 onboard 的 repo 已经会写 DB）
+- load_project_info — 不变（已有兜底逻辑）
+- _PROJECT_INFO_FILES — 不变
