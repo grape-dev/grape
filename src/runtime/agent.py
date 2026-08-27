@@ -17,12 +17,76 @@ import asyncio, json, os, random, time
 import base64 as _b64
 import zipfile as _zf
 import urllib.request as _urllib
+import shutil as _shutil
 
 from src.config import log
 
 # Worker 日志内存缓冲区——收集最近 ERROR/WARNING 日志，心跳时上报给主控
 import collections as _collections
 import time as _time_mod
+
+
+def _collect_worker_metrics() -> dict:
+    """采集 worker 机器的系统资源指标（用标准库，不依赖 psutil）。
+
+    返回 {cpu_percent, memory_percent, disk_percent, load_avg}。
+    采集失败的字段保持 0.0 / 空字符串。
+    CPU 使用两次调用的差值计算，首次调用返回 0.0（无基准）。
+    """
+    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "load_avg": ""}
+
+    # CPU: 读 /proc/stat，用上次缓存值计算差值（无 sleep，非阻塞）
+    try:
+        with open("/proc/stat") as f:
+            parts = f.readline().split()[1:]
+        total = sum(int(x) for x in parts)
+        idle = int(parts[3])
+        if hasattr(_collect_worker_metrics, "_prev"):
+            pt, pi = _collect_worker_metrics._prev
+            dt = total - pt
+            di = idle - pi
+            if dt > 0:
+                metrics["cpu_percent"] = round((1 - di / dt) * 100, 1)
+        _collect_worker_metrics._prev = (total, idle)
+    except Exception:
+        pass
+
+    # MEM: 读 /proc/meminfo（匹配 top 口径，不含 buff/cache）
+    try:
+        mi = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                p = line.split(":")
+                if len(p) == 2:
+                    mi[p[0]] = int(p[1].strip().split()[0]) * 1024
+        total_mem = mi.get("MemTotal", 0)
+        if total_mem > 0:
+            free = mi.get("MemFree", 0)
+            buffers = mi.get("Buffers", 0)
+            cached = mi.get("Cached", 0)
+            sreclaimable = mi.get("SReclaimable", 0)
+            used = total_mem - free - buffers - cached - sreclaimable
+            metrics["memory_percent"] = round(used / total_mem * 100, 1)
+    except Exception:
+        pass
+
+    # DISK: shutil.disk_usage
+    try:
+        du = _shutil.disk_usage("/")
+        if du.total > 0:
+            metrics["disk_percent"] = round(du.used / du.total * 100, 1)
+    except Exception:
+        pass
+
+    # load_avg: 读 /proc/loadavg
+    try:
+        with open("/proc/loadavg") as f:
+            parts = f.read().split()
+            metrics["load_avg"] = ",".join(parts[:3])
+    except Exception:
+        pass
+
+    return metrics
 import logging as _logging_mod
 _worker_log_buffer = _collections.deque(maxlen=50)  # 最近 50 条 ERROR/WARNING
 _last_sent_log_ts = 0.0  # 上次上报的时间戳，避免重复发送
@@ -968,7 +1032,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         if now - last_heartbeat >= heartbeat_interval:
             # 收集最近的 ERROR/WARNING 日志（从内存日志缓冲区）
             _recent_logs = _collect_recent_logs()
-            ok = await client.heartbeat(runtime_ids, log_lines=_recent_logs)
+            _metrics = _collect_worker_metrics()
+            ok = await client.heartbeat(runtime_ids, log_lines=_recent_logs, metrics=_metrics)
             # ⚠️ heartbeat 返回值从 bool 改为 dict——判断逻辑调整
             # dict: None=网络错误 / {"status":"ok",...}=成功 / 其他=异常
             if ok is not None and ok.get("status") == "ok":
