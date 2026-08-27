@@ -15,6 +15,7 @@ const HEALTH_BADGE = {
 let _runtimeTab = 'engines';
 let __runtimeData = null;
 let __runtimeDevices = null;
+let _skillScanDirty = false;  // skills 扫描成功后标记，关闭弹窗时刷新引擎列表
 
 function _currentUser() {
   try {
@@ -328,6 +329,11 @@ function closeEngineDetail(event) {
   if (event && event.target && event.target.id !== 'engineDetailOverlay') return;
   const el = document.getElementById('engineDetailOverlay');
   if (el) el.remove();
+  // skills 扫描成功后关闭弹窗 → 刷新引擎列表卡片（更新 skills 数量）
+  if (_skillScanDirty) {
+    _skillScanDirty = false;
+    refreshRuntimes();
+  }
 }
 
 function refreshEngineSkills(runtimeId) {
@@ -363,6 +369,7 @@ function _pollSkillScan(runtimeId, btn, attempt, isFirst) {
     const listEl = document.getElementById('engineSkillList');
     if (!listEl) return;
     const skills = d.skills || [];
+    _skillScanDirty = true;  // 标记：关闭弹窗时刷新引擎列表卡片
     if (!skills.length) {
       listEl.innerHTML = '<div style="color:var(--t3);font-size:12px;padding:8px">无本地 skill</div>';
     } else {

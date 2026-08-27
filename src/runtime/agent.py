@@ -760,28 +760,37 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         for rid in runtime_ids:
             try:
                 # Tags from server DB (single source of truth, managed via console)
-                task = None
+                # claim_by_tag 和 claim 都返回完整 dict {task, scan_request}
+                _claim_resp = None
+                _db_tags = []
                 try:
                     _db_tags = await client.get_tags(rid)
                 except Exception:
                     _db_tags = []
                 if _db_tags:
                     for _tag in _db_tags:
-                        task = await client.claim_by_tag(rid, _tag,
+                        _resp = await client.claim_by_tag(rid, _tag,
                                                           supports_obs_url=_OBS_SUPPORT,
                                                           prefer_fallback=_OBS_FALLBACK)
-                        if task:
+                        if _resp and _resp.get("task"):
+                            _claim_resp = _resp
                             break
-                if not task:
+                        # 无 task 但有 scan_request → 也要处理（空闲扫描）
+                        if _resp and _resp.get("scan_request") and not _claim_resp:
+                            _claim_resp = _resp
+                if not _claim_resp or not _claim_resp.get("task"):
                     # Legacy claim (fallback: no tags or no tagged task)
-                    task = await client.claim(rid, supports_obs_url=_OBS_SUPPORT,
+                    _legacy_resp = await client.claim(rid, supports_obs_url=_OBS_SUPPORT,
                                               prefer_fallback=_OBS_FALLBACK)
+                    if _legacy_resp and _legacy_resp.get("task"):
+                        _claim_resp = _legacy_resp
+                    elif _legacy_resp and _legacy_resp.get("scan_request") and not _claim_resp:
+                        _claim_resp = _legacy_resp
             except Exception as e:
                 log.warning(f"claim rid={rid} failed: {e}")
                 heartbeat_fail_streak += 1
                 continue
             # 处理 scan_request 指令（服务端通过 claim 响应下发）
-            _claim_resp = task if isinstance(task, dict) else None
             if _claim_resp and _claim_resp.get("scan_request"):
                 try:
                     _engine_name = engine_by_rid.get(rid, "")

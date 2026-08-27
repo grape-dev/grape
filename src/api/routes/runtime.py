@@ -343,12 +343,25 @@ async def runtime_claim_by_tag(runtime_id: int, tag: str,
     Workers with engine tags can claim tasks matching their tag and scope.
     """
     task = service.claim_by_tag(tag, runtime_id)
+    # 检查是否有 pending skill scan 指令（与 claim 端点一致）
+    scan_request = False
+    if not task:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT pending_skill_scan FROM agent_runtimes WHERE id=? AND credential_id=?",
+                          (runtime_id, credential_id))
+                _row = c.fetchone()
+                if _row and _row[0]:
+                    scan_request = True
+        except Exception:
+            pass
     if task:
         if body and body.prefer_fallback:
             task["mode"] = "server-fetch"
         else:
             _attach_skill_obs(task)
-    return {"task": task}
+    return {"task": task, "scan_request": scan_request}
 
 
 @router.post("/tasks/{task_id}/skill-zip")

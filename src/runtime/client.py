@@ -124,14 +124,18 @@ class RuntimeClient:
     async def claim_by_tag(self, runtime_id: int, tag: str,
                            supports_obs_url: bool = False,
                            prefer_fallback: bool = False) -> dict | None:
-        """Claim task by tag + scope isolation (plugin mode)."""
+        """Claim task by tag + scope isolation (plugin mode).
+
+        返回完整响应 dict（含 task 和 scan_request 字段），与 claim() 一致。
+        调用方通过 .get("task") 取任务、.get("scan_request") 取扫描指令。
+        """
         data = await self._request("POST",
                                    f"/api/runtime/runtimes/{runtime_id}/tasks/claim-by-tag/{tag}",
                                    {"supports_obs_url": supports_obs_url, "prefer_fallback": prefer_fallback},
                                    retries=1)
         if not data:
             return None
-        return data.get("task")
+        return data
 
     async def get_tags(self, runtime_id: int) -> list[str]:
         """Fetch this engine's claimable tags from server DB (replaces ENGINE_TAGS env).
@@ -164,13 +168,32 @@ class RuntimeClient:
                             {"summary": summary, "step": step, "total": total}, retries=1)
 
     async def report_messages(self, task_id: str, messages: list):
-        """返回 dict（正常响应）或 None（网络错误/410 task 已终态）。
+        """返回 dict（正常/网络错误）或 None（410 task 已终态）。
 
         410 Gone 表示 task 已被服务端标终态（用户终止/超时），worker 应中断执行。
+        网络错误（服务重启等）返回空 dict 让 worker 继续执行，
+        避免服务短暂中断导致正在执行的 task 被误标 failed。
         """
-        data = await self._request("POST", f"/api/runtime/tasks/{task_id}/messages",
-                                   {"messages": messages}, retries=1)
-        return data
+        try:
+            data = await self._request("POST", f"/api/runtime/tasks/{task_id}/messages",
+                                       {"messages": messages}, retries=3)
+            if data is None:
+                # Distinguish 410 (task terminated) from network error:
+                # _request returns None for both — do a lightweight GET to check task state
+                try:
+                    state = await self._request("GET", f"/api/runtime/tasks/{task_id}/state", retries=1)
+                    if state and state.get("status") in ("failed", "cancelled", "completed"):
+                        log.info(f"report_messages: task {task_id} is {state.get('status')} on server, returning None")
+                        return None  # task truly terminated
+                except Exception:
+                    pass
+                # Network error (server restart) — don't abort, let worker continue
+                log.warning(f"report_messages: task {task_id} network error (not 410), returning empty dict to continue")
+                return {}
+            return data
+        except Exception as e:
+            log.warning(f"report_messages: task {task_id} exception: {e}, returning empty dict to continue")
+            return {}
 
     async def report_usage(self, task_id: str, usage: dict):
         await self._request("POST", f"/api/runtime/tasks/{task_id}/usage", usage, retries=1)
