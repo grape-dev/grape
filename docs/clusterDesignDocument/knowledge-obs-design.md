@@ -884,3 +884,38 @@ health_check 加知识库 OBS 统计：
 - 后台同步任务状态（运行中/已完成/失败）
 - obs_key 为空的行数（待迁移）
 - 最近 1 小时降级次数（url_fail / storage_fail / empty）
+
+
+## 十五、第五轮深度检查——5 个优化点（2026-08-27）
+
+### 优化 1：file_urls 路径穿越修复 ❌ 必须修复
+
+**问题**：generate_file_urls 生成双格式 key 时，`_os.path.relpath(rel_path, project-info 目录)` 在 rel_path 不在 project-info 目录下时产生 `../../../../` 路径穿越。
+
+**影响**：Worker 落地时 `../../../../grape/xxx` 路径会写到 workdir 外面，存在安全风险。
+
+**修复**：双格式 key 生成前检查 rel_path 是否在 project-info 目录下，不在则跳过不生成双格式 key。
+
+### 优化 2：knowledge_files OBS 模式重复读取 ⚠️ 性能优化
+
+**问题**：read_knowledge 已经从 OBS 拿到 content 并返回，但 knowledge_files 没用返回的 content，又 `open(p)` 读本地文件。OBS 模式下读了两遍。
+
+**修复**：knowledge_files 直接用 read_knowledge 返回的 content，不再 open 读文件。本地模式行为不变（read_knowledge 本地模式也是 open 读文件返回 content）。
+
+### 优化 3：enqueue_task 调两次 generate_file_urls ⚠️ 性能优化
+
+**问题**：project_info_file_urls 和 knowledge_file_urls 调两次同样的 generate_file_urls，查 6 次 DB（每次 3 查）。生成结果完全一样。
+
+**修复**：调一次 generate_file_urls，结果同时赋给 project_info_file_urls 和 knowledge_file_urls。
+
+### 优化 4：sync_loop 跑完就停 ⚠️ 逻辑优化
+
+**问题**：`remaining == 0 → return`。新增的 obs_key 为空的记录不会被处理。sync_loop 只在启动时跑一次。
+
+**修复**：去掉 return，改为每小时继续跑（await asyncio.sleep(3600) 循环）。处理新增的老数据。
+
+### 优化 5：read_with_cache 缓存 miss 后 hash 校验 ⚠️ 数据一致性
+
+**问题**：从 OBS 拉到内容后计算 actual_hash，但没和 db_hash 比对。如果 OBS 内容和 DB hash 不一致不会发现。
+
+**修复**：actual_hash != db_hash 时 log warning（不阻断返回——返回 OBS 内容兜底）。
