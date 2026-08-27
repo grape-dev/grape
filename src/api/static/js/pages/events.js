@@ -57,8 +57,8 @@ function renderEventDetail(data) {
   const arch = data.archive || null;
   if (arch && arch.output) {
     const o = arch.output;
-    const actions = (o.actions || []).map(a => `<div>• ${a}</div>`).join('');
-    const arts = (o.artifacts || []).map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('');
+    const actions = Array.isArray(o.actions) ? o.actions.map(a => `<div>• ${a}</div>`).join('') : '';
+    const arts = Array.isArray(o.artifacts) ? o.artifacts.map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('') : '';
     structuredHtml = `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>结论:</b> ${o.conclusion}</div>` : ''}
       ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>动作:</b> ${actions}</div>` : ''}
       ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>产出:</b> ${arts}</div>` : ''}
