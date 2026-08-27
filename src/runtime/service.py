@@ -287,31 +287,23 @@ def _build_file_urls(files: dict, repo_key: str, agent_type: str, issue_id: str,
                 elif "/issues/" in rp:
                     # issues/{n}/knowledge.md 或 issues/{n}/{agent}/knowledge.md
                     parts_after_issues = rp.split("/issues/", 1)[1]
-                    # parts_after_issues = "{n}/knowledge.md" 或 "{n}/{agent}/knowledge.md"
                     sub_parts = parts_after_issues.split("/")
-                    # sub_parts[0] = issue_num, 然后可能 [1]=knowledge.md 或 [1]=agent, [2]=knowledge.md
                     if len(sub_parts) == 2:
-                        # issues/{n}/knowledge.md → scope=issue
                         storage_key = knowledge_storage_key(repo_key, "issue", issue_num=_inum)
                     elif len(sub_parts) == 3:
-                        # issues/{n}/{agent}/knowledge.md → scope=issue_agent
                         storage_key = knowledge_storage_key(repo_key, "issue_agent",
                                                             agent_type=agent_type, issue_num=_inum)
                 else:
-                    # 不匹配已知模式 → 用 project scope 兜底
-                    storage_key = knowledge_storage_key(repo_key, "project")
+                    storage_key = ""
             elif "/member/" in rp or rp.startswith("member/"):
-                # 成员上传文档 → knowledge/{owner}/{repo}/member/{rest}
                 owner, rname = _owner_repo(repo_key)
                 if rp.startswith("member/"):
                     rest = rp
                 else:
-                    # rel_path 可能是 {owner}/{repo}/project-info/member/... 或 project-info/member/...
                     rest = rp.split("/member/", 1)[1] if "/member/" in rp else rp
                     rest = "member/" + rest
                 storage_key = "/".join(["knowledge", owner, rname, rest])
             elif "/agent/" in rp or rp.startswith("agent/"):
-                # Agent 专属文档 → knowledge/{owner}/{repo}/agent/{agent_type}/{rest}
                 owner, rname = _owner_repo(repo_key)
                 if rp.startswith("agent/"):
                     rest = rp
@@ -319,7 +311,12 @@ def _build_file_urls(files: dict, repo_key: str, agent_type: str, issue_id: str,
                     rest = rp.split("/agent/", 1)[1] if "/agent/" in rp else rp
                     rest = "agent/" + rest
                 storage_key = "/".join(["knowledge", owner, rname, rest])
-            # else: project-graph.md / project-capabilities.md / .metadata.json → 未存 OBS，storage_key=""
+            elif rp.endswith("project-graph.md") or rp.endswith("project-capabilities.md") or rp.endswith(".metadata.json"):
+                # 基线文件 → 和 builder.py _write_to_obs 的 storage_key 一致
+                _fname = os.path.basename(rp)
+                storage_key = f"project-info/{repo_key}/{_fname}"
+            else:
+                storage_key = ""
             if storage_key:
                 url = storage.temporary_url(storage_key, expires=3600)
         except Exception as e:
