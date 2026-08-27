@@ -787,12 +787,16 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 return None  # 已满载
 
             # 3. 构建任务查询（加 scope 过滤）
-            params = [tag]
+            # tag="all" → 匹配任意 pool_tag（广播）；其他 tag → 精确匹配 pool_tag
+            # 只认领无主池任务（runtime_id=0），不抢已定向的任务
+            _tag_match = "(t.pool_tag!='' AND t.runtime_id=0)" if tag == "all" else "(t.pool_tag=? AND t.runtime_id=0)"
+            _tag_match_noprefix = "(pool_tag!='' AND runtime_id=0)" if tag == "all" else "(pool_tag=? AND runtime_id=0)"
+            params = [] if tag == "all" else [tag]
             if scope == "repo":
                 params.append(owner_id)
                 sql = (
                     "SELECT t.id FROM agent_tasks t "
-                    "WHERE t.pool_tag=? AND t.status='queued' AND t.repo_key=? "
+                    f"WHERE { _tag_match} AND t.status='queued' AND t.repo_key=? "
                     "AND NOT EXISTS ("
                     "  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
                     "    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
@@ -806,7 +810,7 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 params.append(uid)
                 sql = (
                     "SELECT t.id FROM agent_tasks t "
-                    "WHERE t.pool_tag=? AND t.status='queued' AND t.user_id=? "
+                    f"WHERE { _tag_match} AND t.status='queued' AND t.user_id=? "
                     "AND NOT EXISTS ("
                     "  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
                     "    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
@@ -816,7 +820,7 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             else:
                 sql = (
                     "SELECT id FROM agent_tasks "
-                    "WHERE pool_tag=? AND status='queued' "
+                    f"WHERE {_tag_match_noprefix} AND status='queued' "
                     "AND NOT EXISTS ("
                     "  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
                     "    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"

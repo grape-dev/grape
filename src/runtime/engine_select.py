@@ -302,14 +302,13 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) ->
         return None     # 集合存在但无健康成员 → engine_unavailable（不回退 fallback）
     if fallback_runtime_id:
         return int(fallback_runtime_id)
-    # Plugin mode fallback: try resolve_default_engine (event-dispatch-redesign-v2.md)
-    # In legacy mode this returns None (engine_unavailable) as before
+    # Plugin 模式：不选具体引擎，返回 0 让任务以无主池任务入队（runtime_id=0 + pool_tag），
+    # 多个带匹配 tag 的引擎通过 claim_by_tag 竞争认领（广播路线）。
+    # 传统模式：无绑定 + 无 fallback → engine_unavailable（不调 resolve_default_engine，保持原行为）
     try:
         from src.api.event_pipeline import is_plugin_mode
         if is_plugin_mode():
-            _default = resolve_default_engine(repo_key, agent_type)
-            if _default:
-                return _default
+            return 0
     except Exception:
         pass
     return None

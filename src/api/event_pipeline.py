@@ -826,14 +826,31 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
     # 选中 remote → 入队该引擎（queue_remote）；选中本机 → direct 就地执行。
     from src.runtime.engine_select import pick_engine, engine_name
-    from src.runtime.service import runtime_execution_kind, enqueue_task, EXEC_MODE_DIRECT
+    from src.runtime.service import runtime_execution_kind, enqueue_task, EXEC_MODE_DIRECT, get_execution_mode
     engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0)
-    if not engine_id:
+    if engine_id is None:
         log.info(f"Pipeline: no available engine for repo={repo_key} agent={agent_type}, seq={seq}, skip")
         _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
         return result
+    # Plugin 模式 + engine_id=0：无主池任务（广播），多个引擎通过 claim_by_tag 竞争认领。
+    # 但强制 direct 模式（DEVOPS_EXECUTION_MODE=direct）不走广播，走本机 direct。
+    # backend 取 pipelines.json 配置的引擎类型（兜底 agent_type）；入队后由认领引擎覆盖。
+    if engine_id == 0 and is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
+        _be = backend or "opencode"
+        log.info(f"Pipeline (plugin broadcast): engine_id=0 pool_tag={agent_type} seq={seq}")
+        if _be and skill_name and seq > 0:
+            _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
+                                   skill_id, skill_path, engine_id, issue_id)
+        return result
     # backend 必须取已注册引擎的类型名（不沿用会话/字面默认），确保执行 CLI 与选中引擎一致
     _be = engine_name(engine_id) or backend
+    if not _be or not skill_name or seq <= 0:
+        return result
+    # engine_id=0 且无可用引擎（plugin direct 兜底 / legacy 无绑定）→ 跳过执行，不创建空任务
+    if not engine_id:
+        log.info(f"Pipeline: engine_id=0 no engine to execute, seq={seq}, skip")
+        _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
+        return result
     kind = runtime_execution_kind(engine_id)
     if kind != EXEC_MODE_DIRECT and _be and skill_name and seq > 0:
         _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
@@ -950,11 +967,18 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     import os as _os
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
-    # 1) 确定路由：派发已选定具体引擎（runtime_id>0）；为 0 说明派发失败，直接 fail
-    #    （不再走 agent_type 级引擎池 / opencode 兜底，见 engine-selection-design.md v2）
+    # 1) 路由判定：
+    #    runtime_id>0 → 确定性路由（指定引擎）
+    #    runtime_id=0 + plugin 模式 → 无主池任务（广播），设 pool_agent_type 让引擎竞争认领
+    #    runtime_id=0 + 传统模式 → 派发失败
+    _pool_agent_type = ""
     if not runtime_id:
-        _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
-        return
+        if is_plugin_mode():
+            _pool_agent_type = agent_type
+            log.info(f"Pipeline enqueue (broadcast): runtime_id=0 pool_agent_type={agent_type} seq={seq}")
+        else:
+            _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
+            return
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名。
     # 注意：engine_select v2 派发已选定具体引擎（runtime_id>0），无 pool_mode 路径；
     # 历史 pool 模式（runtime_id=0 + pool_agent_type）由 service.claim 兼容处理。
@@ -1060,6 +1084,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             skill_path=skill_path,
             skill_id=skill_id,
             pool_tag=_pool_tag,
+            pool_agent_type=_pool_agent_type,
         )
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")

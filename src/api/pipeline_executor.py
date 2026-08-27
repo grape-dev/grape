@@ -224,11 +224,13 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
                     log.info(f"Pipeline emit: runtime_id={runtime_id} not online, dropping to pool task (agent={agent_type})")
                     runtime_id = 0
 
-        # In plugin mode, pick_engine has resolve_default_engine fallback
+        # In plugin mode, pick_engine returns 0 for broadcast (no binding → pool task)
+        # None means no engine available at all
         if not runtime_id:
-            runtime_id = pick_engine(repo_key, agent_type, fallback_runtime_id=0) or 0
-        if not runtime_id:
-            return {"error": "no engine available"}
+            _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0)
+            if _picked is None:
+                return {"error": "no engine available"}
+            runtime_id = _picked
 
         _enqueue_pipeline_task(
             repo_key, seq, agent_type, "", skill_name, evt,

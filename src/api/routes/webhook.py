@@ -330,9 +330,11 @@ async def a2a_endpoint(request: Request):
 
         # Plugin mode: emit agent/handoff event → event bus → pipeline_executor dispatches
         # (event-dispatch-redesign-v2.md Phase 4: A2A upgraded to event-driven)
+        # 但强制 direct 模式不走 event bus，走 legacy direct dispatch
         try:
             from src.api.event_pipeline import is_plugin_mode
-            if is_plugin_mode():
+            from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT
+            if is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
                 import asyncio as _aio
                 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
                 from src.api.pipeline_config import get_pipeline_config, get_node_by_tag
@@ -389,7 +391,7 @@ async def a2a_endpoint(request: Request):
         from src.runtime.engine_select import pick_engine, engine_name
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
         engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0)
-        if not engine_id:
+        if engine_id is None:
             log.info(f"A2A: no available engine for repo={repo_key} agent={agent_name}, seq={seq}, skip")
             try:
                 from src.api.event_store import update_event_status
@@ -397,8 +399,30 @@ async def a2a_endpoint(request: Request):
             except Exception:
                 pass
             return {"status": "ok", "seq": 0, "agent": agent_name}
+        # Plugin 模式 + engine_id=0：无主池任务（广播），多个引擎通过 claim_by_tag 竞争认领
+        # 但强制 direct 模式（DEVOPS_EXECUTION_MODE=direct）不走广播，走本机 direct
+        from src.api.event_pipeline import is_plugin_mode as _is_plugin
+        from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT
+        if engine_id == 0 and _is_plugin() and get_execution_mode() != EXEC_MODE_DIRECT:
+            from src.api.event_pipeline import _enqueue_pipeline_task
+            _be = backend or "opencode"
+            _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
+                                   skill_name or agent_name, evt,
+                                   skill_id, skill_path or "", engine_id,
+                                   f"#{issue_number}" if issue_number else "")
+            log.info(f"A2A (plugin broadcast): enqueued pool task for {agent_name}, seq={seq}")
+            return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "broadcast"}
         # backend 取已注册引擎的类型名（不沿用字面默认，engine-selection-design.md v2）
         _be = engine_name(engine_id) or backend
+        # engine_id=0 且无可用引擎 → 跳过执行，不创建空任务
+        if not engine_id or not _be:
+            log.info(f"A2A: engine_id=0 no engine to execute for {agent_name}, seq={seq}, skip")
+            try:
+                from src.api.event_store import update_event_status
+                update_event_status(seq, "failed")
+            except Exception:
+                pass
+            return {"status": "ok", "seq": 0, "agent": agent_name}
         kind = runtime_execution_kind(engine_id)
         if kind == EXEC_MODE_DIRECT:
             from src.api.event_pipeline import start_direct_agent, _create_direct_task
