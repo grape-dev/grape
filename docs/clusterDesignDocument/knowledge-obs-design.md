@@ -1320,3 +1320,40 @@ _sync_baseline_files 必须用同样的格式，确保 OBS 对象 key 一致。
 - managed_repos 查询无占位符问题 ✅
 - meta 表临时标记 finally 清空 + 10 分钟超时 ✅
 - 36 个项目遍历 35 次跳过微不足道 ✅
+
+## 二十四、307 重定向优化方案（2026-08-27）
+
+### 问题
+
+前端请求 `/api/knowledge?repo=xxx`（不带尾斜杠），但 FastAPI 路由定义 `@router.get("/")`（带尾斜杠），导致 307 Temporary Redirect。dev 分支原有行为，不是 OBS 改造引入。
+
+### 方案
+
+只改路由 `"/"` → `""`，不改 `redirect_slashes=False`。
+
+| 方案 | 不带斜杠 | 带斜杠 | 改前端？ | 风险 |
+|------|:---:|:---:|:---:|:---:|
+| 只改路由 `""`，保留 `redirect_slashes=True` | 直接 200 ✅ | 307→200（能工作）✅ | 不用改 ✅ | 低 |
+| 改 `redirect_slashes=False` + 路由 `""` | 直接 200 ✅ | 404 ❌ | 必须改 | 高 |
+
+选择只改路由——更安全，前端和测试都不用动。
+
+### 改动清单（6 处，5 个文件）
+
+| # | 文件 | 行号 | 当前 | 改为 |
+|---|------|:---:|------|------|
+| 1 | routes/knowledge.py | 249 | `@router.get("/")` | `@router.get("")` |
+| 2 | routes/knowledge.py | 331 | `@router.post("/")` | `@router.post("")` |
+| 3 | routes/knowledge.py | 420 | `@router.delete("/")` | `@router.delete("")` |
+| 4 | routes/search.py | 9 | `@router.get("/")` | `@router.get("")` |
+| 5 | routes/skills.py | 35 | `@router.get("/")` | `@router.get("")` |
+
+不改：main.py `redirect_slashes`、前端 JS、测试代码。
+
+### 影响分析
+
+- 前端不带斜杠调用（knowledge / skills）：307→200 变为直接 200 ✅
+- 前端带斜杠调用（search）：307→200 仍能工作 ✅
+- 测试代码不带斜杠调用：307→200 变为直接 200 ✅
+- 子路由（/skills/upload 等）：不受影响 ✅
+- 后端内部调用：不受影响 ✅
