@@ -509,8 +509,9 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
     """引擎 session 列表（devops_agent_session 表）。
 
     返回该引擎下的所有 session，按 repo 过滤。
-    每个 session 携带关联的已完成任务列表（按 event_seq 倒序）。
-    session 的 status: idle（空闲）/ running（运行中）。
+    每个 session 携带:
+    - current_task: 当前正在运行的 task（status=running/queued/dispatched），无则 null
+    - tasks: 最近已完成的 task 列表（按 event_seq 倒序，最多 20 条）
     """
     from src.session_manager import db, db_lock
 
@@ -525,8 +526,8 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
         c = db.cursor()
         c.execute(
             f"SELECT id, agent_type, repo_key, status, skill, created_at, last_active_at, "
-            f"im_provider, im_app_id, enable, subscribe_events "
-            f"FROM devops_agent_session WHERE {' AND '.join(clauses)} ORDER BY status DESC, last_active_at DESC",
+            f"runtime_session_id "
+            f"FROM devops_agent_session WHERE {' AND '.join(clauses)} ORDER BY last_active_at DESC",
             params
         )
         sessions = []
@@ -534,12 +535,28 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
             sid = r[0]
             agent_type = r[1] or ""
             repo_key_raw = r[2] or ""
-            # 查该 session 关联的已完成任务（agent_type + repo_key 匹配）
+            # 查该 session 当前正在运行的 task
+            c.execute(
+                "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, started_at "
+                "FROM agent_tasks WHERE agent_session_id=? "
+                "AND status IN ('running','queued','dispatched') ORDER BY created_at DESC LIMIT 1",
+                (sid,)
+            )
+            current = None
+            cr = c.fetchone()
+            if cr:
+                current = {
+                    "id": cr[0], "issue_id": cr[1] or "", "event_seq": cr[2] or 0,
+                    "agent_type": cr[3] or "", "status": cr[4] or "",
+                    "created_at": normalize_event_time(cr[5]),
+                    "started_at": normalize_event_time(cr[6]),
+                }
+            # 查该 session 最近已完成的任务
             c.execute(
                 "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, completed_at "
-                "FROM agent_tasks WHERE agent_type=? AND repo_key=? "
+                "FROM agent_tasks WHERE agent_session_id=? "
                 "AND status IN ('completed','failed','cancelled') ORDER BY event_seq DESC LIMIT 20",
-                (agent_type, repo_key_raw)
+                (sid,)
             )
             tasks = []
             for tr in c.fetchall():
@@ -553,10 +570,12 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
                 "id": sid,
                 "agent_type": agent_type,
                 "repo_key": repo_key_raw.replace("gitcode:", ""),
-                "status": r[3] or "idle",
+                "status": "running" if current else "idle",
                 "skill": r[4] or "",
                 "created_at": normalize_event_time(r[5]),
                 "last_active_at": normalize_event_time(r[6]),
+                "runtime_session_id": r[7] or "",
+                "current_task": current,
                 "tasks": tasks,
             })
         return {"sessions": sessions, "total": len(sessions)}

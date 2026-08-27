@@ -667,49 +667,44 @@ function renderSessionList(container, sessions, rtName) {
     return;
   }
 
-  // 所有 session 显示在运行中区域（idle=空闲绑定，running=正在执行任务）
-  // 已完成任务从各 session 的 tasks 中收集
-  const running = sessions;
-  const idle = sessions;
+  // 运行中 = 有 current_task 的 session
+  // 空闲 = 没有 current_task 的 session（显示在已完成区域上方）
+  const running = sessions.filter(s => s.current_task);
+  const idle = sessions.filter(s => !s.current_task);
 
-  const statusIcon = { running: '🔄', idle: '💤' };
-  const statusColor = { running: 'var(--a)', idle: 'var(--t3)' };
-  const taskStatusIcon = { completed: '✅', failed: '❌', cancelled: '⛔' };
-  const taskStatusColor = { completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)' };
+  const taskStatusIcon = { completed: '✅', failed: '❌', cancelled: '⛔', running: '🔄', queued: '⏳', dispatched: '🔄' };
+  const taskStatusColor = { completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)', running: 'var(--a)', queued: 'var(--y)', dispatched: 'var(--a)' };
 
-  // 运行中 session 表格
+  // 运行中 session 表格（显示 agent + 正在执行的 issue#/seq）
   function runningTable(list) {
     if (!list.length) return '<div class="ts t3" style="padding:8px">无运行中 session</div>';
-    let html = '<div class="tw"><table><thead><tr><th>Agent</th><th>仓库</th><th>Skill</th><th>状态</th><th>最后活跃</th></tr></thead><tbody>';
+    let html = '<div class="tw"><table><thead><tr><th>Agent</th><th>Issue / Seq</th><th>Skill</th><th>状态</th><th>开始时间</th></tr></thead><tbody>';
     list.forEach(s => {
-      html += '<tr>' +
+      const ct = s.current_task;
+      const is = (ct.issue_id && ct.event_seq) ? ct.issue_id + ' #' + ct.event_seq : (ct.event_seq ? '#' + ct.event_seq : ct.id.substring(0,12));
+      const enc = encodeURIComponent(JSON.stringify({issue:ct.issue_id||'', seq:ct.event_seq||0, repo:s.repo_key, created:ct.started_at||''}));
+      html += '<tr style="cursor:pointer" onclick="openTaskLogModal(\'' + ct.id + '\',\'' + enc + '\')">' +
         '<td><b>' + (s.agent_type||'-') + '</b></td>' +
-        '<td class="ts t3">' + (s.repo_key||'-').substring(0,25) + '</td>' +
+        '<td class="ts"><b>' + is + '</b></td>' +
         '<td class="ts t3">' + (s.skill||'-') + '</td>' +
-        '<td><span style="color:' + (statusColor[s.status]||'var(--t3)') + '">' + (statusIcon[s.status]||'') + ' ' + s.status + '</span></td>' +
-        '<td class="ts t3">' + (s.last_active_at||'').substring(0,16) + '</td>' +
+        '<td><span style="color:' + (taskStatusColor[ct.status]||'var(--a)') + '">' + (taskStatusIcon[ct.status]||'🔄') + ' ' + ct.status + '</span></td>' +
+        '<td class="ts t3">' + (ct.started_at||'').substring(0,16) + '</td>' +
         '</tr>';
     });
     html += '</tbody></table></div>';
     return html;
   }
 
-  // 已完成 task 列表（从所有 idle session 的 tasks 中收集，按 seq 倒序）
-  function completedTable(sessions) {
-    // 收集所有 task 并去重（同一个 task 可能出现在多个 session 中）
+  // 已完成 task 列表（从所有 session 的 tasks 中收集，按 seq 倒序）
+  function completedTable(allSessions) {
     const seen = new Set();
     const allTasks = [];
-    sessions.forEach(s => {
+    allSessions.forEach(s => {
       (s.tasks || []).forEach(t => {
-        if (!seen.has(t.id)) {
-          seen.add(t.id);
-          allTasks.push(t);
-        }
+        if (!seen.has(t.id)) { seen.add(t.id); allTasks.push(t); }
       });
     });
-    // 按 event_seq 倒序
     allTasks.sort((a, b) => (b.event_seq || 0) - (a.event_seq || 0));
-
     if (!allTasks.length) return '<div class="ts t3" style="padding:8px">无已完成任务</div>';
     let html = '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent</th><th>状态</th><th>Exit</th><th>完成时间</th></tr></thead><tbody>';
     allTasks.forEach(t => {
@@ -727,8 +722,7 @@ function renderSessionList(container, sessions, rtName) {
     return html;
   }
 
-  // 统计已完成 task 总数
-  const completedCount = idle.reduce((sum, s) => sum + (s.tasks ? s.tasks.length : 0), 0);
+  const completedCount = sessions.reduce((sum, s) => sum + (s.tasks ? s.tasks.length : 0), 0);
 
   let html = '';
   // 运行中（默认展开）
@@ -748,7 +742,7 @@ function renderSessionList(container, sessions, rtName) {
   html += '<b style="font-size:12px">📋 已完成任务</b>';
   html += '<span class="ts t3" style="margin-left:auto">' + completedCount + ' 个任务</span>';
   html += '</div>';
-  html += '<div id="rtSessionIdle" style="padding:8px 12px;border-top:1px solid var(--b);display:none">' + completedTable(idle) + '</div>';
+  html += '<div id="rtSessionIdle" style="padding:8px 12px;border-top:1px solid var(--b);display:none">' + completedTable(sessions) + '</div>';
   html += '</div>';
 
   container.innerHTML = html;
