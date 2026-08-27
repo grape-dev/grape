@@ -139,7 +139,7 @@ if metrics_enabled():
 # 请求日志：结构化记录 method/path/status/duration/request_id，按状态码分级
 import uuid as _uuid
 import time as _time
-from src.config import request_id_var, log as _log
+from src.config import request_id_var, repo_var, user_var, log as _log
 
 
 # webhook 路径中的 token 需要 redact（参考 multica redactWebhookPath）
@@ -169,9 +169,46 @@ async def request_id_and_log_middleware(request: Request, call_next):
     """
     rid = request.headers.get("X-Request-ID") or _uuid.uuid4().hex[:12]
     request.scope["request_id"] = rid
-    token = request_id_var.set(rid)
+    token_rid = request_id_var.set(rid)
 
+    # 从请求路径提取 repo_key（如 /api/dashboard/requiredsa/hello-flask → requiredsa/hello-flask）
     path = request.url.path
+    _repo = ""
+    # 路径模式：/api/dashboard/{owner}/{repo} 或 /api/pipeline/{owner}/{repo} 等
+    _path_parts = path.strip("/").split("/")
+    if len(_path_parts) >= 4 and _path_parts[0] == "api":
+        _candidate = f"{_path_parts[2]}/{_path_parts[3]}"
+        # 排除已知的非仓库路径段
+        _non_repo_segments = {"ops", "settings", "health", "healthz", "readyz",
+                              "metrics", "auth", "skills", "repos", "scenes",
+                              "search", "webhook", "runtime", "task-logs", "static",
+                              "dashboard", "agents", "events", "chat", "pipeline",
+                              "tasks", "knowledge"}
+        if ("/" in _candidate
+                and _path_parts[2] not in _non_repo_segments
+                and _path_parts[3] not in _non_repo_segments
+                and "." not in _path_parts[2]):
+            _repo = f"gitcode:{_candidate}"
+    # query param 中的 repo（如 ?repo=requiredsa/hello-flask）
+    if not _repo:
+        _qp = request.query_params.get("repo", "")
+        if _qp:
+            _repo = f"gitcode:{_qp}" if not _qp.startswith("gitcode:") else _qp
+    token_repo = repo_var.set(_repo)
+
+    # 从 Authorization header 提取 user_id
+    _uid = ""
+    _auth = request.headers.get("Authorization", "")
+    if _auth.startswith("Bearer "):
+        try:
+            from src.user.db import validate_token
+            _uid_val = validate_token(_auth[7:])
+            if _uid_val:
+                _uid = str(_uid_val)
+        except Exception:
+            pass
+    token_uid = user_var.set(_uid)
+
     skip_log = path in _LOG_SKIP_PATHS
     start = _time.time()
     status = 500
@@ -200,7 +237,9 @@ async def request_id_and_log_middleware(request: Request, call_next):
                 _log.warning(msg, extra=extra)
             else:
                 _log.info(msg, extra=extra)
-        request_id_var.reset(token)
+        request_id_var.reset(token_rid)
+        repo_var.reset(token_repo)
+        user_var.reset(token_uid)
 
 app.include_router(auth.router)
 app.include_router(repos.router)

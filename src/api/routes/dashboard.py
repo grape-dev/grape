@@ -185,7 +185,7 @@ async def get_ops_overview(repo: str = ""):
 
 
 @router.get("/ops/error-logs")
-async def get_error_logs(limit: int = 100, level: str = ""):
+async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user_id: str = ""):
     """最近错误/警告日志。
 
     同时读取新旧两个日志文件：
@@ -195,6 +195,8 @@ async def get_error_logs(limit: int = 100, level: str = ""):
     参数：
     - limit: 最多返回条数（默认 100）
     - level: 过滤级别 — ""（ERROR+WARNING）/"ERROR"/"WARNING"
+    - repo: 仓库名（requiredsa/hello-flask），过滤仅该仓库的日志
+    - user_id: 用户 ID，过滤仅该用户的日志
 
     无认证：运维诊断数据，与 /health/realtime 同级。
     """
@@ -205,8 +207,37 @@ async def get_error_logs(limit: int = 100, level: str = ""):
     if level and level.upper() in allowed_levels:
         allowed_levels = {level.upper()}
 
+    # repo/user_id 过滤条件
+    _repo_filter = ""
+    if repo:
+        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
+        _repo_filter = repo_key
+
     entries = []
     files_read = []
+
+    def _match_repo(entry):
+        """检查日志条目是否匹配指定的 repo"""
+        if not _repo_filter:
+            return True
+        entry_repo = entry.get("repo_key", "")
+        if entry_repo and entry_repo == _repo_filter:
+            return True
+        # 旧格式日志无 repo_key 字段，检查 message 中是否包含仓库名
+        msg = entry.get("message", "")
+        repo_short = _repo_filter.replace("gitcode:", "")
+        if repo_short in msg:
+            return True
+        return False
+
+    def _match_user(entry):
+        """检查日志条目是否匹配指定的 user_id"""
+        if not user_id:
+            return True
+        entry_uid = str(entry.get("user_id", ""))
+        if entry_uid and entry_uid == str(user_id):
+            return True
+        return False
 
     def _parse_json_log(filepath):
         """解析 JSON 行格式日志"""
@@ -223,7 +254,7 @@ async def get_error_logs(limit: int = 100, level: str = ""):
                     continue
                 try:
                     entry = _json.loads(line)
-                    if entry.get("level", "") in allowed_levels:
+                    if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry):
                         entries.append(entry)
                         if len(entries) >= limit:
                             return
@@ -259,7 +290,7 @@ async def get_error_logs(limit: int = 100, level: str = ""):
                 if _re_json.match(line):
                     try:
                         entry = _json.loads(line)
-                        if entry.get("level", "") in allowed_levels:
+                        if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry):
                             entries.append(entry)
                             if len(entries) >= limit:
                                 return
@@ -273,13 +304,13 @@ async def get_error_logs(limit: int = 100, level: str = ""):
                     if lvl == "WARN":
                         lvl = "WARNING"
                     if lvl in allowed_levels:
-                        entries.append({
-                            "ts": m.group(1), "level": lvl,
+                        _e = {"ts": m.group(1), "level": lvl,
                             "component": m.group(3), "request_id": "-",
-                            "message": m.group(4)[:500],
-                        })
-                        if len(entries) >= limit:
-                            return
+                            "message": m.group(4)[:500]}
+                        if _match_repo(_e) and _match_user(_e):
+                            entries.append(_e)
+                            if len(entries) >= limit:
+                                return
                     continue
                 m2 = _re_simple.match(line)
                 if m2:
@@ -287,10 +318,10 @@ async def get_error_logs(limit: int = 100, level: str = ""):
                     if lvl == "WARN":
                         lvl = "WARNING"
                     if lvl in allowed_levels:
-                        entries.append({
-                            "ts": "", "level": lvl, "component": "",
-                            "request_id": "-", "message": m2.group(2)[:500],
-                        })
+                        _e = {"ts": "", "level": lvl, "component": "",
+                            "request_id": "-", "message": m2.group(2)[:500]}
+                        if _match_repo(_e) and _match_user(_e):
+                            entries.append(_e)
                         if len(entries) >= limit:
                             return
         except Exception:

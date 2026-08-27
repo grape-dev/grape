@@ -271,7 +271,9 @@ function loadErrorLogs(container) {
     <div id="errorLogBody"><div class="loading">加载中...</div></div>
   `;
   const levelParam = currentLevel ? '&level=' + currentLevel : '';
-  fetch('/api/dashboard/ops/error-logs?limit=100' + levelParam).then(r => r.json()).then(d => {
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const repoParam = repo && repo.fullName ? '&repo=' + encodeURIComponent(repo.fullName) : '';
+  fetch('/api/dashboard/ops/error-logs?limit=100' + levelParam + repoParam).then(r => r.json()).then(d => {
     const entries = d.entries || [];
     const countEl = document.getElementById('errorLogCount');
     const bodyEl = document.getElementById('errorLogBody');

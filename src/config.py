@@ -11,13 +11,17 @@ import os, json, logging, logging.handlers, urllib.request, socket
 import contextvars
 
 request_id_var: contextvars.ContextVar = contextvars.ContextVar("request_id", default="-")
+repo_var: contextvars.ContextVar = contextvars.ContextVar("repo_key", default="")
+user_var: contextvars.ContextVar = contextvars.ContextVar("user_id", default="")
 
 
 class _RequestIdFilter(logging.Filter):
-    """把 ContextVar 中的 request_id 注入到每条 LogRecord 中。"""
+    """把 ContextVar 中的 request_id / repo_key / user_id 注入到每条 LogRecord 中。"""
 
     def filter(self, record):
         record.request_id = request_id_var.get()
+        record.repo_key = repo_var.get()
+        record.user_id = user_var.get()
         return True
 
 
@@ -33,7 +37,7 @@ class _JsonFormatter(logging.Formatter):
     """
 
     # extra 字段白名单：只有这些 LogRecord 属性会被提升为顶层 JSON 字段
-    _EXTRA_FIELDS = ("method", "path", "status", "duration_ms", "user_id")
+    _EXTRA_FIELDS = ("method", "path", "status", "duration_ms", "user_id", "repo_key")
 
     def format(self, record):
         import time as _t
