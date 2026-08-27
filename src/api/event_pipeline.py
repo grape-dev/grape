@@ -19,11 +19,20 @@ _DIRECT_FUTURES_LOCK = threading.Lock()
 
 
 def is_plugin_mode() -> bool:
-    """Check if GRAPE_PIPELINE_MODE is set to 'plugin'.
+    """Check if pipeline is in plugin mode.
 
     plugin mode: uses pipelines.json + tag-based enqueue/claim
     legacy mode (default): uses agent-skill-mapping.json + runtime_id binding
+
+    Priority: meta table `pipeline_mode` > env var GRAPE_PIPELINE_MODE > default (legacy)
     """
+    try:
+        from src.user.db import get_meta_value
+        _mode = (get_meta_value("pipeline_mode") or "").strip().lower()
+        if _mode:
+            return _mode == "plugin"
+    except Exception:
+        pass
     return os.environ.get("GRAPE_PIPELINE_MODE", "").lower() == "plugin"
 
 

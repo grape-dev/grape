@@ -562,6 +562,22 @@ async def get_execution_mode_api(user: dict = Depends(get_current_user)):
     return {"mode": get_execution_mode()}
 
 
+@router.get("/pipeline-mode")
+async def get_pipeline_mode_api(user: dict = Depends(get_current_user)):
+    from src.api.event_pipeline import is_plugin_mode
+    return {"mode": "plugin" if is_plugin_mode() else "legacy"}
+
+
+@router.put("/pipeline-mode")
+async def set_pipeline_mode_api(body: dict, user: dict = Depends(get_current_user)):
+    from src.user.db import set_meta_value
+    mode = (body.get("mode") or "").strip().lower()
+    if mode not in ("plugin", "legacy"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 plugin 或 legacy"})
+    set_meta_value("pipeline_mode", mode)
+    return {"message": f"管线模式已切换为 {'插件模式' if mode == 'plugin' else '传统模式'}", "mode": mode}
+
+
 @router.put("/execution-mode")
 async def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_current_user)):
     from src.runtime.service import set_execution_mode
