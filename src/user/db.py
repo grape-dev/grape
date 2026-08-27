@@ -1618,16 +1618,20 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             name = (a.get("name", "") or "").strip().lower()
             if not name:
                 continue
+            # 本机直连 engine 的 local_skills + skill 详情
+            _ls_json = json.dumps(a.get("local_skills", []), ensure_ascii=False)
+            _detail = a.get("local_skills_detail")
+            _detail_json = json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
             # 仅操作本机未绑定凭据的行（credential_id=0）；凭据绑定行由边端 register 独占管理
             c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0", (name, scope, owner_id))
             row = c.fetchone()
             if row:
                 c.execute(
-                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now') WHERE id=?",
+                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
                     (a.get("display_name", name),
                      1 if a.get("installed") else 0, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
-                     a.get("pip_package", ""), row[0])
+                     a.get("pip_package", ""), _ls_json, _detail_json, row[0])
                 )
             else:
                 # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。
@@ -1637,11 +1641,11 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                 if not a.get("installed"):
                     continue
                 c.execute(
-                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (name, a.get("display_name", name),
                      1, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
-                     a.get("pip_package", ""), scope, owner_id)
+                     a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json)
                 )
         # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）。
         # 仅清理未绑定凭据的本机行（credential_id=0）；凭据绑定的远端/边端注册行一律保留
@@ -1667,14 +1671,17 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     with db_lock:
         c = db.cursor()
         if scope is None:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at FROM agent_runtimes ORDER BY name")
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags FROM agent_runtimes ORDER BY name")
         else:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
              "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
              "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10],
-             "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13]}
+             "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13],
+             "local_skills": json.loads(r[14] or "[]") if r[14] else [],
+             "skill_scan_result": json.loads(r[15] or "[]") if r[15] else [],
+             "agent_tags": json.loads(r[16] or '["all"]') if r[16] else ["all"]}
             for r in c.fetchall()
         ]
 

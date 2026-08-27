@@ -171,7 +171,9 @@ class TestBusinessMethods:
 
     def test_claim_returns_task(self):
         c = _client(_Ctx(_FakeResp(200, {"task": {"id": "t1"}})))
-        assert _run(c.claim(7)) == {"id": "t1"}
+        result = _run(c.claim(7))
+        assert result is not None
+        assert result.get("task") == {"id": "t1"}
 
     def test_claim_no_task(self):
         c = _client(_Ctx(_FakeResp(200, {})))

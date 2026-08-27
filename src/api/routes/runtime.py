@@ -45,6 +45,7 @@ class RuntimeRegBody(BaseModel):
     device_name: str = ""
     cli_version: str = ""
     runtimes: list[dict] = []
+    local_skills: list[dict] = []
 
 
 class RuntimeInfo(BaseModel):
@@ -129,24 +130,31 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
                     owner_id = str(urow[0])
             except Exception:
                 pass
+        # local_skills：per-engine skill 列表，按 engine name 匹配 runtime 行
+        skills_by_name = {}
+        for ls in body.local_skills or []:
+            eng = (ls.get("engine") or "").strip().lower()
+            if eng:
+                skills_by_name[eng] = json.dumps(ls.get("skills") or [], ensure_ascii=False)
         for rt in body.runtimes or []:
             name = (rt.get("name") or "").strip().lower()
             if not name:
                 continue
+            _ls_json = skills_by_name.get(name, "[]")
             c.execute("SELECT id FROM agent_runtimes WHERE credential_id=? AND lower(name)=? AND scope=? AND owner_id=? LIMIT 1",
                       (credential_id, name, cred_scope, owner_id))
             row = c.fetchone()
             if row:
                 rid = row[0]
-                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=? WHERE id=?",
+                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=? WHERE id=?",
                           (rt.get("version", ""), 1 if rt.get("healthy", True) else 0,
-                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), rid))
+                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, rid))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, agent_tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, '["all"]'))
                 rid = c.lastrowid
             registered.append({"id": rid, "name": name})
         db.commit()
@@ -243,12 +251,26 @@ async def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
     worker 直接给 mode=server-fetch（跳过 URL 直连尝试）。
     """
     task = service.claim(runtime_id)
+    # 检查是否有 pending skill scan 指令
+    scan_request = False
+    if not task:
+        # 空闲时检查 scan 指令（有 task 时不打扰执行流程，下次空闲 claim 再带）
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT pending_skill_scan FROM agent_runtimes WHERE id=? AND credential_id=?",
+                          (runtime_id, credential_id))
+                _row = c.fetchone()
+                if _row and _row[0]:
+                    scan_request = True
+        except Exception:
+            pass
     if task:
         if body and body.prefer_fallback:
-            task["mode"] = "server-fetch"   # 直连不稳 → worker 直接代拉
+            task["mode"] = "server-fetch"
         else:
             _attach_skill_obs(task)
-    return {"task": task}
+    return {"task": task, "scan_request": scan_request}
 
 
 @router.post("/tasks/{task_id}/skill-zip")
@@ -541,3 +563,202 @@ async def runtime_install_package(credential_id: int = Depends(_require_credenti
     if not pkg or not os.path.isfile(pkg):
         raise HTTPException(status_code=500, detail={"code": 500, "message": "worker package not found"})
     return FileResponse(pkg, media_type="application/gzip", filename="grape-worker.tar.gz")
+
+
+# ===== Engine local_skills 刷新 =====
+
+def _scan_engine_skills_detail(engine_name: str) -> list[dict]:
+    """本机扫描指定 engine 的 skill 详情（description / 路径 / 文件数）。"""
+    from src.runtime.agent import _scan_local_skills
+    import os as _os
+
+    all_skills = _scan_local_skills()
+    engine_key = (engine_name or "").strip().lower()
+    skill_names = []
+    for entry in all_skills:
+        if (entry.get("engine") or "").strip().lower() == engine_key:
+            skill_names = entry.get("skills") or []
+            break
+
+    home = _os.path.expanduser("~")
+    engine_dirs = {
+        "hermes": [_os.path.join(home, ".hermes", "skills")],
+        "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
+        "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
+    }
+    extra = _os.environ.get("RUNTIME_EXTRA_SKILL_DIRS", "")
+    scan_dirs = list(engine_dirs.get(engine_key, []))
+    if extra:
+        for d in extra.split(":"):
+            d = d.strip()
+            if d and _os.path.isdir(d):
+                scan_dirs.append(d)
+
+    skill_details = []
+    for sname in skill_names:
+        detail = {"name": sname, "description": "", "path": "", "file_count": 0, "provider": engine_name}
+        for base_dir in scan_dirs:
+            p1 = _os.path.join(base_dir, sname)
+            if _os.path.isfile(_os.path.join(p1, "SKILL.md")):
+                detail["path"] = p1
+                break
+            if _os.path.isdir(base_dir):
+                for cat in _os.listdir(base_dir):
+                    p2 = _os.path.join(base_dir, cat, sname)
+                    if _os.path.isfile(_os.path.join(p2, "SKILL.md")):
+                        detail["path"] = p2
+                        break
+                if detail["path"]:
+                    break
+        if detail["path"]:
+            try:
+                with open(_os.path.join(detail["path"], "SKILL.md"), "r", encoding="utf-8") as f:
+                    content = f.read()
+                if content.startswith("---"):
+                    end = content.find("---", 3)
+                    if end > 0:
+                        fm = content[3:end]
+                        for line in fm.split("\n"):
+                            if line.strip().startswith("description:"):
+                                desc = line.split("description:", 1)[1].strip()
+                                desc = desc.strip("\"'")
+                                if desc:
+                                    detail["description"] = desc[:200]
+                                break
+            except Exception:
+                pass
+            try:
+                detail["file_count"] = sum(1 for _ in _os.walk(detail["path"]))
+            except Exception:
+                pass
+        skill_details.append(detail)
+    return skill_details
+
+
+@router.post("/runtimes/{runtime_id}/refresh-skills")
+async def runtime_refresh_skills(runtime_id: int, force: bool = False, user: dict = Depends(get_current_user)):
+    """重新扫描指定 engine 的本地 skill 并返回详情列表。
+
+    本机直连引擎（credential_id=0）：直接扫描本机目录，立即返回结果。
+    远端 worker 引擎（credential_id>0）：标记 pending_skill_scan=1，
+    worker 下次 claim 时收到 scan_request 指令，执行扫描后回报。
+    前端需轮询本接口获取结果（返回 status=pending 时继续轮询）。
+    """
+    from src.session_manager import db, db_lock
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT name, credential_id, pending_skill_scan, skill_scan_result FROM agent_runtimes WHERE id=?", (runtime_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+    engine_name, cred_id, pending, scan_result = row[0], row[1], row[2], row[3]
+
+    # 本机直连：直接扫描
+    if cred_id == 0:
+        skill_details = _scan_engine_skills_detail(engine_name)
+        _ls_json = json.dumps([s["name"] for s in skill_details], ensure_ascii=False)
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE agent_runtimes SET local_skills=?, skill_scan_result=?, pending_skill_scan=0 WHERE id=?",
+                      (_ls_json, json.dumps(skill_details, ensure_ascii=False), runtime_id))
+            db.commit()
+        return {"skills": skill_details, "count": len(skill_details), "status": "done"}
+
+    # 远端 worker：标记扫描指令，等待 worker 回报
+    if pending:
+        # 已有 pending 标记 — 检查是否已有结果
+        if scan_result:
+            return {"skills": json.loads(scan_result), "count": len(json.loads(scan_result)),
+                    "status": "done", "cached": True}
+        return {"status": "pending", "skills": [], "count": 0}
+
+    # pending=0：如果已有缓存结果且非 force，直接返回（轮询场景下 worker 已回报）
+    if scan_result and not force:
+        _cached = json.loads(scan_result)
+        return {"skills": _cached, "count": len(_cached), "status": "done", "cached": True}
+
+    # 首次扫描或 force 重新扫描：标记 pending
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE agent_runtimes SET pending_skill_scan=1, skill_scan_result='' WHERE id=?", (runtime_id,))
+        db.commit()
+    return {"status": "pending", "skills": [], "count": 0}
+
+
+@router.post("/runtimes/{runtime_id}/skills-report")
+async def runtime_skills_report(runtime_id: int, body: dict, credential_id: int = Depends(_require_credential)):
+    """worker 回报 skill 扫描结果。
+
+    worker claim 时收到 scan_request → 执行扫描 → 调本接口回报。
+    """
+    from src.session_manager import db, db_lock
+
+    # 校验 runtime 归属
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
+        row = c.fetchone()
+    if not row or row[0] != credential_id:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "runtime not owned by credential"})
+
+    skills = body.get("skills") or []
+    skill_names = [s.get("name", "") for s in skills if s.get("name")]
+    _ls_json = json.dumps(skill_names, ensure_ascii=False)
+    _result_json = json.dumps(skills, ensure_ascii=False)
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE agent_runtimes SET local_skills=?, skill_scan_result=?, pending_skill_scan=0 WHERE id=?",
+                  (_ls_json, _result_json, runtime_id))
+        db.commit()
+    return {"status": "ok"}
+
+
+# ===== Engine 角色标签 =====
+
+def _apply_tag_rules(tags: list[str]) -> list[str]:
+    """应用标签互斥规则。
+    - 全能与其他互斥：有其他标签时去掉全能。
+    - 5 个角色全选时自动替换为全能。
+    - 允许空标签（不自动回全能）。
+    """
+    AGENT_TAGS = {"vod", "issue", "coding", "qa", "sre"}
+    tag_set = set(tags)
+    has_all = "all" in tag_set
+    has_others = tag_set & AGENT_TAGS
+
+    if has_all and has_others:
+        tag_set.discard("all")
+    elif has_others and len(has_others) == len(AGENT_TAGS):
+        tag_set = {"all"}
+
+    return sorted(tag_set)
+
+
+@router.get("/runtimes/{runtime_id}/tags")
+async def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_user)):
+    """返回 engine 的角色标签列表。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT agent_tags FROM agent_runtimes WHERE id=?", (runtime_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+    return {"tags": json.loads(row[0] or '["all"]') if row[0] else ["all"]}
+
+
+@router.put("/runtimes/{runtime_id}/tags")
+async def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_current_user)):
+    """设置 engine 的角色标签。应用互斥规则后写入。"""
+    from src.session_manager import db, db_lock
+    tags = _apply_tag_rules(body.get("tags") or [])
+    tags_json = json.dumps(tags, ensure_ascii=False)
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (tags_json, runtime_id))
+        if c.rowcount == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        db.commit()
+    return {"tags": tags}

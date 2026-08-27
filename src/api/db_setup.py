@@ -163,6 +163,10 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     last_seen_at TEXT DEFAULT NULL,
     scope TEXT DEFAULT 'global',
     owner_id TEXT DEFAULT '',
+    local_skills TEXT DEFAULT '[]',
+    pending_skill_scan INTEGER DEFAULT 0,
+    skill_scan_result TEXT DEFAULT '',
+    agent_tags TEXT DEFAULT '["all"]',
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id)
 )
@@ -1524,6 +1528,18 @@ def _migrate_tables():
             log.info("Added cluster columns: agent_runtimes.busy_slots/max_concurrent, agent_tasks.attempts/pool_agent_type/affinity_runtime_id")
     except Exception as e:
         log.warning(f"Add cluster columns failed: {e}")
+    # ===== worker engine local_skills 列（老库升级）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "agent_runtimes", "local_skills", "TEXT DEFAULT '[]'")
+            _ensure_column(c, "agent_runtimes", "pending_skill_scan", "INTEGER DEFAULT 0")
+            _ensure_column(c, "agent_runtimes", "skill_scan_result", "TEXT DEFAULT ''")
+            _ensure_column(c, "agent_runtimes", "agent_tags", "TEXT DEFAULT '[\"all\"]'")
+            db.commit()
+            log.info("Added local_skills / pending_skill_scan / skill_scan_result / agent_tags columns to agent_runtimes")
+    except Exception as e:
+        log.warning(f"Add local_skills column failed: {e}")
     # ===== engine-selection-design.md §4.4：绑定表索引（repo, agent 前缀查询加速）=====
     try:
         with db_lock:

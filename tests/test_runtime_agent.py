@@ -233,7 +233,7 @@ class TestRunLoop:
 
     def test_claims_and_executes(self):
         client = AsyncMock()
-        client.claim.return_value = {"id": "t1", "issue_session_id": "s1", "agent_session_id": "a1"}
+        client.claim.return_value = {"task": {"id": "t1", "issue_session_id": "s1", "agent_session_id": "a1"}, "scan_request": False}
         client.heartbeat.return_value = True
         exec_mock = AsyncMock()
         asyncio.run(self._drive(ra._run_loop(
@@ -244,7 +244,7 @@ class TestRunLoop:
 
     def test_session_conflict_requeues(self):
         client = AsyncMock()
-        client.claim.return_value = {"id": "t1", "issue_session_id": "s_busy"}
+        client.claim.return_value = {"task": {"id": "t1", "issue_session_id": "s_busy"}, "scan_request": False}
         client.heartbeat.return_value = True
         exec_mock = AsyncMock()
         asyncio.run(self._drive(ra._run_loop(
@@ -255,7 +255,7 @@ class TestRunLoop:
 
     def test_max_concurrent_skips(self):
         client = AsyncMock()
-        client.claim.return_value = {"id": "t1", "issue_session_id": "s2"}
+        client.claim.return_value = {"task": {"id": "t1", "issue_session_id": "s2"}, "scan_request": False}
         client.heartbeat.return_value = True
         exec_mock = AsyncMock()
         asyncio.run(self._drive(ra._run_loop(

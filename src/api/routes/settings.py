@@ -1,4 +1,5 @@
 """Settings 路由：凭据、通知偏好、GitCode Repo、Backend Runtimes"""
+import json
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
@@ -288,12 +289,15 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
             cred = cred_map.get(cid) or {}
             if not _visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
                 continue
-            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at FROM agent_runtimes WHERE credential_id=?", (cid,))
+            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, agent_tags FROM agent_runtimes WHERE credential_id=?", (cid,))
             runtimes = [
                 {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
                  "installed": bool(x[4]),
                  "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
-                 "health": derive_runtime_health(x[5], x[6], now)}
+                 "health": derive_runtime_health(x[5], x[6], now),
+                 "local_skills": json.loads(x[7] or "[]") if x[7] else [],
+                 "skill_scan_result": json.loads(x[8] or "[]") if x[8] else [],
+                 "agent_tags": json.loads(x[9] or '["all"]') if x[9] else ["all"]}
                 for x in c.fetchall()
             ]
             devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
@@ -317,7 +321,10 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
                                       "healthy": rt.get("healthy", False),
                                       "installed": rt.get("installed", False),
                                       "instance_name": rt.get("instance_name", rt.get("name", "")),
-                                      "health": rt.get("health", "offline")}]})
+                                      "health": rt.get("health", "offline"),
+                                      "local_skills": rt.get("local_skills", []),
+                                      "skill_scan_result": rt.get("skill_scan_result", []),
+                                      "agent_tags": rt.get("agent_tags", ["all"])}]})
     return {"runtimes": visible_runtimes, "devices": devices}
 
 
@@ -373,10 +380,17 @@ async def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
     """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）"""
     from src.runtime.registry import discover_runtimes
     from src.runtime.local_probe import probe_local_engines
+    from src.runtime.agent import _scan_local_skills
     from src.user import db as user_db
-
     discovered = discover_runtimes()
     results = probe_local_engines(discovered)
+
+    # 扫描本机 local_skills 详情并注入
+    from src.runtime.agent import _scan_local_skills_with_detail
+    for r in results:
+        _name = (r.get("name") or "").strip().lower()
+        r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
+        r["local_skills"] = [s["name"] for s in r["local_skills_detail"]]
 
     # Only persist runtimes that are actually installed
     results = [r for r in results if r["installed"]]

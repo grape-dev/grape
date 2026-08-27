@@ -69,7 +69,7 @@ class FakeClient:
 
     async def claim(self, rid, **kwargs):
         if self.queue:
-            return self.queue.pop(0)
+            return {"task": self.queue.pop(0), "scan_request": False}
         return None
 
     async def heartbeat(self, runtime_ids):
@@ -213,7 +213,7 @@ class FakeRegClient:
     async def reset_session(self):
         self.resets += 1
 
-    async def register(self, runtimes, device_name=""):
+    async def register(self, runtimes, device_name="", local_skills=None):
         return self.ids, "probe-url"
 
     async def recover_orphans(self, runtime_id):

@@ -60,9 +60,15 @@ async def lifespan(app: FastAPI):
             while True:
                 def _run():
                     from src.runtime.local_probe import probe_local_engines
+                    from src.runtime.agent import _scan_local_skills_with_detail
                     from src.user import db as user_db
                     probed = [r for r in probe_local_engines(discover_runtimes()) if r.get("installed")]
                     if probed:
+                        # 扫描本机 local_skills 详情并注入
+                        for r in probed:
+                            _name = (r.get("name") or "").strip().lower()
+                            r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
+                            r["local_skills"] = [s["name"] for s in r["local_skills_detail"]]
                         user_db.save_agent_runtimes(probed)
                     return len(probed)
                 try:

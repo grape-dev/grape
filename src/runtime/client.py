@@ -87,10 +87,14 @@ class RuntimeClient:
                 delay = min(delay * 2, 64)
                 attempt += 1
 
-    async def register(self, runtimes: list[dict], device_name: str = "", cli_version: str = "") -> tuple[list[int], str]:
-        """注册引擎，返回 (runtime_ids, probe_url)。probe_url：v3.0 启动可达性探测地址。"""
-        data = await self._request("POST", "/api/runtime/register",
-                                   {"device_name": device_name, "cli_version": cli_version, "runtimes": runtimes})
+    async def register(self, runtimes: list[dict], device_name: str = "",
+                       cli_version: str = "", local_skills: list[dict] | None = None) -> tuple[list[int], str]:
+        """注册引擎，返回 (runtime_ids, probe_url)。probe_url：v3.0 启动可达性探测地址。
+        local_skills：per-engine 本地 skill 列表（可选，向后兼容）。"""
+        payload = {"device_name": device_name, "cli_version": cli_version, "runtimes": runtimes}
+        if local_skills is not None:
+            payload["local_skills"] = local_skills
+        data = await self._request("POST", "/api/runtime/register", payload)
         if not data:
             return [], ""
         ids = [r["id"] for r in (data.get("runtimes") or [])]
@@ -108,13 +112,14 @@ class RuntimeClient:
 
     async def claim(self, runtime_id: int, supports_obs_url: bool = False,
                     prefer_fallback: bool = False) -> dict | None:
-        """claim（v3.0：携带能力声明——supports_obs_url/prefer_fallback 动态声明零落库）。"""
+        """claim（v3.0：携带能力声明——supports_obs_url/prefer_fallback 动态声明零落库）。
+        返回值可能含 task 和 scan_request 两个字段。"""
         data = await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/tasks/claim",
                                    {"supports_obs_url": supports_obs_url, "prefer_fallback": prefer_fallback},
                                    retries=1)
         if not data:
             return None
-        return data.get("task")
+        return data
 
     async def task_start(self, task_id: str):
         """标记任务 running。返回 _request 结果（None=失败），调用方据此判断是否成功。"""
@@ -168,6 +173,11 @@ class RuntimeClient:
 
     async def recover_orphans(self, runtime_id: int):
         await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/recover-orphans", {}, retries=2)
+
+    async def report_skills(self, runtime_id: int, skills: list[dict]):
+        """回报 skill 扫描结果给服务端（scan_request 指令的响应）。"""
+        await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/skills-report",
+                            {"skills": skills}, retries=2)
 
     async def close(self):
         if self._session and not self._session.closed:

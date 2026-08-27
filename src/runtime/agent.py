@@ -106,6 +106,149 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
     return "opencode"
 
 
+def _scan_local_skills() -> list[dict]:
+    """扫描 worker 上各 engine 本地物理存在的 skill，返回 per-engine skill 列表。
+
+    每个 engine 扫描其标准 skill 目录。
+    每个含 SKILL.md 的子目录视为一个 skill（支持一级和二级目录结构）。
+    不扫描 ~/grape/skills（grape 项目自带 skill，Web 端已纳管可见）。
+    不扫描 grape-workspaces 下的临时 .skills 目录（task 物化的，非持久）。
+    """
+    import os as _os
+
+    home = _os.path.expanduser("~")
+
+    # per-engine 专属 skill 目录
+    engine_dirs = {
+        "hermes": [_os.path.join(home, ".hermes", "skills")],
+        "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
+        "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
+    }
+
+    # 用户自建 skill 目录（通过环境变量配置，可选）
+    extra_dirs = []
+    extra = _os.environ.get("RUNTIME_EXTRA_SKILL_DIRS", "")
+    if extra:
+        for d in extra.split(":"):
+            d = d.strip()
+            if d and _os.path.isdir(d):
+                extra_dirs.append(d)
+
+    def _scan_dir(base_dir: str) -> list[str]:
+        """扫描目录下含 SKILL.md 的子目录，返回 skill_name 列表。
+        支持一级（base/skill/SKILL.md）和二级（base/category/skill/SKILL.md）结构。"""
+        skills = []
+        if not _os.path.isdir(base_dir):
+            return skills
+        try:
+            for entry in _os.listdir(base_dir):
+                entry_path = _os.path.join(base_dir, entry)
+                if not _os.path.isdir(entry_path):
+                    continue
+                # 一级：base/entry/SKILL.md
+                if _os.path.isfile(_os.path.join(entry_path, "SKILL.md")):
+                    skills.append(entry)
+                else:
+                    # 二级：base/entry/sub/SKILL.md
+                    try:
+                        for sub in _os.listdir(entry_path):
+                            sub_path = _os.path.join(entry_path, sub)
+                            if _os.path.isdir(sub_path) and _os.path.isfile(_os.path.join(sub_path, "SKILL.md")):
+                                skills.append(sub)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return skills
+
+    # 扫描用户自建目录（合并到所有 engine）
+    common_skills: set[str] = set()
+    for d in extra_dirs:
+        common_skills.update(_scan_dir(d))
+
+    # 扫描 per-engine 目录 + 合用用户自建
+    result = []
+    for engine, dirs in engine_dirs.items():
+        engine_skills: set[str] = set()
+        for d in dirs:
+            engine_skills.update(_scan_dir(d))
+        engine_skills |= common_skills
+        if engine_skills:
+            result.append({"engine": engine, "skills": sorted(engine_skills)})
+
+    return result
+
+
+def _scan_local_skills_with_detail(engine_type: str) -> list[dict]:
+    """扫描指定 engine 的 skill 详情（name/description/path/file_count/provider）。
+
+    worker 端执行，扫描结果通过 skills-report API 回报给服务端。
+    """
+    import os as _os
+
+    all_skills = _scan_local_skills()
+    engine_key = (engine_type or "").strip().lower()
+    skill_names = []
+    for entry in all_skills:
+        if (entry.get("engine") or "").strip().lower() == engine_key:
+            skill_names = entry.get("skills") or []
+            break
+
+    home = _os.path.expanduser("~")
+    engine_dirs = {
+        "hermes": [_os.path.join(home, ".hermes", "skills")],
+        "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
+        "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
+    }
+    extra = _os.environ.get("RUNTIME_EXTRA_SKILL_DIRS", "")
+    scan_dirs = list(engine_dirs.get(engine_key, []))
+    if extra:
+        for d in extra.split(":"):
+            d = d.strip()
+            if d and _os.path.isdir(d):
+                scan_dirs.append(d)
+
+    skill_details = []
+    for sname in skill_names:
+        detail = {"name": sname, "description": "", "path": "", "file_count": 0, "provider": engine_type}
+        for base_dir in scan_dirs:
+            p1 = _os.path.join(base_dir, sname)
+            if _os.path.isfile(_os.path.join(p1, "SKILL.md")):
+                detail["path"] = p1
+                break
+            if _os.path.isdir(base_dir):
+                for cat in _os.listdir(base_dir):
+                    p2 = _os.path.join(base_dir, cat, sname)
+                    if _os.path.isfile(_os.path.join(p2, "SKILL.md")):
+                        detail["path"] = p2
+                        break
+                if detail["path"]:
+                    break
+        if detail["path"]:
+            try:
+                with open(_os.path.join(detail["path"], "SKILL.md"), "r", encoding="utf-8") as f:
+                    content = f.read()
+                if content.startswith("---"):
+                    end = content.find("---", 3)
+                    if end > 0:
+                        fm = content[3:end]
+                        for line in fm.split("\n"):
+                            if line.strip().startswith("description:"):
+                                desc = line.split("description:", 1)[1].strip()
+                                desc = desc.strip("\"'")
+                                if desc:
+                                    detail["description"] = desc[:200]
+                                break
+            except Exception:
+                pass
+            try:
+                detail["file_count"] = sum(1 for _ in _os.walk(detail["path"]))
+            except Exception:
+                pass
+        skill_details.append(detail)
+    return skill_details
+
+
 def _cleanup_task_tmp(task: dict):
     """task 完成后清理 agent 在 /tmp 下产生的工作残留。
     agent 执行过程中会在 /tmp 创建临时目录（tf-deploy-*/blog-build-*/blog-deploy.*
@@ -529,7 +672,8 @@ async def _reregister(client, installed, device_name) -> list[int] | None:
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
-        ids, _probe = await client.register(installed, device_name=device_name)
+        _ls = _scan_local_skills()
+        ids, _probe = await client.register(installed, device_name=device_name, local_skills=_ls)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
@@ -577,12 +721,23 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
         for rid in runtime_ids:
             try:
-                task = await client.claim(rid, supports_obs_url=_OBS_SUPPORT,
+                claim_resp = await client.claim(rid, supports_obs_url=_OBS_SUPPORT,
                                           prefer_fallback=_OBS_FALLBACK)
             except Exception as e:
                 log.warning(f"claim rid={rid} failed: {e}")
                 heartbeat_fail_streak += 1
                 continue
+            # 处理 scan_request 指令（服务端通过 claim 响应下发）
+            if claim_resp and claim_resp.get("scan_request"):
+                try:
+                    _engine_name = engine_by_rid.get(rid, "")
+                    _engine_type = _backend_for_engine(_engine_name)
+                    _skill_details = _scan_local_skills_with_detail(_engine_type)
+                    await client.report_skills(rid, _skill_details)
+                    log.info(f"skill scan completed for rid={rid}, reported {len(_skill_details)} skills")
+                except Exception as _se:
+                    log.warning(f"skill scan failed for rid={rid}: {_se}")
+            task = (claim_resp or {}).get("task") if claim_resp else None
             if not task:
                 continue
             tid = task.get("id", "")
@@ -792,7 +947,8 @@ def main():
         if not installed:
             log.warning("No runtimes installed locally, registering empty")
         device = os.environ.get("RUNTIME_DEVICE_NAME", os.uname().nodename if hasattr(os, "uname") else "host")
-        ids, probe_url = await client.register(installed, device_name=device)
+        _local_skills = _scan_local_skills()
+        ids, probe_url = await client.register(installed, device_name=device, local_skills=_local_skills)
         if not ids:
             log.error("Register failed (check RUNTIME_TOKEN / server URL)")
             return
