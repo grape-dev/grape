@@ -1092,3 +1092,87 @@ read_with_cache 缓存存的是 actual_hash（OBS 内容的 hash），但命中�
 - _sync_not_found 模块级 set ✅（单实例有效，重启清空）
 - member_files OBS rel_path ✅（和本地模式格式一致）
 - baseline key 一致性 ✅（VOD / generate_file_urls / load_project_info 三者一致）
+
+
+## 二十二、最终验证——集群 OBS 模式全流程（2026-08-27）
+
+### 部署环境
+
+- A 服务：127.0.0.1:3001（OBS 模式 + Lease 集群）
+- B 服务：127.0.0.1:3002（OBS 模式 + Lease 集群）
+- nginx 80 负载均衡到 3001+3002
+- MySQL：127.0.0.1:3306/rds-grape-dev
+- OBS：obs-grape-dev-file 桶，prefix=grape/prod
+
+### 验证结果
+
+#### 全流程验证（11 个环节）
+
+| # | 环节 | 结果 |
+|---|------|------|
+| 1 | 环境 | ObsStorage ✅ |
+| 2 | 知识写入 | 双写（本地+OBS），DB obs_key+content_hash 有值 ✅ |
+| 3 | OBS 读取 + 缓存 | 第一次 miss→OBS，第二次 hit→0ms，一致 ✅ |
+| 4 | member_files OBS 分支 | 8 个（不含 agent），agent 泄漏=0 ✅ |
+| 5 | member_files_pi OBS 分支 | 8 个 ✅ |
+| 6 | agent_files OBS 分支 | 2 个 ✅ |
+| 7 | knowledge_files | 9 个 ✅ |
+| 8 | generate_file_urls | 23 个，有 URL=19，路径穿越=0 ✅ |
+| 9 | load_project_info | 3 个文件（兜底本地）✅ |
+| 10 | Worker 三级降级 | URL 有效→URL 下载 ✅ |
+| 11 | 集群 Lease | A=8 connected, B=0, 隔离 OK ✅ |
+
+#### 删除验证
+
+删除 3 个 member 文件（BLOG_USE_BASE-1787435478.json / blog-config-1787820597.json / blog_pub-1787435356.json）：
+- HTTP 200 OK ✅
+- 本地文件已删 ✅
+- DB 记录已删 ✅
+- OBS 对象已删 ✅
+- 删除顺序：先删 OBS → 再删本地 → 再清 DB ✅
+
+#### 上传验证
+
+上传 2 个文件（member/blog-config-1787833552.json + agent/issue/blog-config.json）：
+- HTTP 200 OK ✅
+- 本地文件已写 ✅
+- DB 记录有 obs_key + content_hash ✅
+- OBS 对象已写 ✅
+- 集群负载均衡：A 处理 1 个，B 处理 1 个 ✅
+
+#### Issue 任务知识注入验证
+
+task=t_a3f650fa194a, agent=issue, status=running：
+- knowledge_files: 7 个（删除后减少，上传后含新增）✅
+- project_info_files: 10 个（含 agent/issue 文档）✅
+- knowledge_file_urls: 18 个，有 URL=14，路径穿越=0 ✅
+- 已删文件不在打包列表 ✅
+- 新上传文件在打包列表 ✅
+
+#### Agent 知识验证
+
+agent_files OBS 分支：
+- agent_files(issue): 1 个（agent/issue/blog-config.json）✅
+- agent_files(coding): 2 个 ✅
+- OBS 读取内容一致 ✅
+
+### sync_loop 优化验证
+
+- 文件不存在的记录（id=1, songspace/shelldev）：log error 后跳过，不重复处理 ✅
+- _sync_not_found 集合生效 ✅
+
+### 缓存验证
+
+- read_with_cache 存 db_hash → 下次 DB hash 没变就命中 ✅
+- hash mismatch 时 log warning 但不阻断 ✅
+
+### 总结
+
+15 轮深度检查 + 集群 OBS 模式全流程验证通过。代码实现符合设计文档：
+- OBS 模式完全走 DB/OBS（不依赖本地磁盘）
+- 本地模式保持和 dev 一致
+- 向前兼容（所有新字段默认空值，storage=None 回退本地）
+- 三级降级（URL → content → storage_key）
+- hash 缓存 + LRU
+- 集群 Lease 隔离
+- 删除/上传/任务打包全链路数据一致
