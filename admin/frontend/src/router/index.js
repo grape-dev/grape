@@ -15,6 +15,7 @@ const routes = [
   { path: '/skill/manage', name: 'skill.manage', component: () => import('../views/SkillManage.vue'), meta: { title: 'Skill 管理' } },
   { path: '/repos/manage', name: 'repos.manage', component: () => import('../views/ReposManage.vue'), meta: { title: '托管代码仓' } },
   { path: '/templates/manage', name: 'templates.manage', component: () => import('../views/TemplatesManage.vue'), meta: { title: '模板代码仓' } },
+  { path: '/health/center', name: 'health.center', component: () => import('../views/HealthCenter.vue'), meta: { title: '健康中心' } },
   { path: '/ai/assistant', name: 'ai.assistant', component: () => import('../views/AiAssistant.vue'), meta: { title: 'AI 助手' } },
   { path: '/ai/history', name: 'ai.history', component: () => import('../views/ChatHistory.vue'), meta: { title: 'AI 历史' } },
   { path: '/sys/users', name: 'sys.users', component: () => import('../views/UserManage.vue'), meta: { title: '用户管理' } },
