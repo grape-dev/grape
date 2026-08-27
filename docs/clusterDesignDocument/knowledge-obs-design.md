@@ -997,3 +997,29 @@ OBS 模式下部分函数仍然读本地磁盘，集群场景下其他实例没�
   - 不是 OBS 改造引入的
   - key 格式不同不会 dict 覆盖
   - Worker 多落一份文件——不影响功能
+
+
+## 十八、第十轮深度检查——member_files 排除 agent 专属文档（2026-08-27）
+
+### 问题
+
+member_files / member_files_pi / generate_file_urls 的 OBS 分支查 DB `scope='member'` 时没有排除 `agent_type` 非空的记录：
+
+- 本地模式 `os.walk(project-info/member/)` 只遍历 member 目录，不含 agent 目录
+- OBS 分支查 DB `scope='member'` 返回了 `agent_type='coding'` 的记录（file_path 是 `project-info/agent/coding/xxx`）
+- 行为不一致：本地模式返回 9 个文件，OBS 分支返回 11 个文件（多 2 个 agent 专属）
+
+### 影响
+
+OBS 模式下 agent 专属文档被打包两次：
+1. knowledge_files 调 member_files → 返回含 agent 文件（WORKSPACE_DIR 相对 key）
+2. enqueue_task 调 agent_files → 返回 agent 文件（project-info 相对 key）
+key 不同不会 dict 覆盖 → Worker 落地两个不同路径的相同文件
+
+### 修复
+
+member_files / member_files_pi / generate_file_urls member 部分的 DB 查询加：
+`AND (agent_type='' OR agent_type IS NULL)`
+
+只返回普通 member 文件（agent_type 为空），不含 agent 专属文档（agent_type 非空）。
+和本地模式行为一致。
