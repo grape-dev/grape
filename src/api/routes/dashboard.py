@@ -416,6 +416,77 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
     return {"entries": entries, "files": files_read, "count": len(entries)}
 
 
+@router.get("/ops/timeline")
+async def get_ops_timeline(repo: str = ""):
+    """任务时序图数据：按 issue 分组的事件链（参考 admin RepoService.timeline）。
+
+    无认证：运维只读数据。
+    返回 {repoKey, issues: [{issueId, title, eventCount, firstAt, lastAt, events: [...]}]}
+    """
+    from src.session_manager import db, db_lock
+    import json as _json
+
+    repo_key = ""
+    if repo:
+        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
+
+    with db_lock:
+        c = db.cursor()
+        if repo_key:
+            c.execute(
+                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload "
+                "FROM events WHERE repo_key=? AND issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at",
+                (repo_key,)
+            )
+        else:
+            c.execute(
+                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload "
+                "FROM events WHERE issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at"
+            )
+        rows = c.fetchall()
+
+    # 按 issue_id 分组
+    group = {}
+    for row in rows:
+        seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload = row
+        if issue_id not in group:
+            group[issue_id] = []
+        group[issue_id].append({
+            "seq": seq, "eventType": event_type, "agentType": agent_type or "",
+            "skill": skill or "", "status": status or "",
+            "duration": duration or 0, "createdAt": normalize_event_time(created_at),
+            "actor": actor or "", "title": title or "",
+            "_payload": payload or "",
+        })
+
+    issues = []
+    for issue_id, evs in group.items():
+        # 从 payload 提取 issue 标题
+        issue_title = ""
+        for ev in evs:
+            if ev["_payload"]:
+                try:
+                    attrs = _json.loads(ev["_payload"])
+                    oa = attrs.get("object_attributes", {})
+                    issue_title = oa.get("title", "")
+                    if issue_title:
+                        break
+                except Exception:
+                    pass
+        # 清理 _payload 字段
+        for ev in evs:
+            del ev["_payload"]
+        issues.append({
+            "issueId": issue_id, "title": issue_title,
+            "eventCount": len(evs),
+            "firstAt": evs[0]["createdAt"] if evs else "",
+            "lastAt": evs[-1]["createdAt"] if evs else "",
+            "events": evs,
+        })
+
+    return {"repoKey": repo_key, "issues": issues}
+
+
 @router.get("/ops/a2a-health")
 async def get_a2a_health():
     """A2A 健康检查：server_base_url 可达性 + 最近 A2A 调用记录。

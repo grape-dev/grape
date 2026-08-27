@@ -333,10 +333,6 @@ let _errorLogLevel = '';
 function renderTasksTab(ops, rt, mt) {
   const t = ops.tasks || {};
   const sc = t.status_counts || {};
-  const stuck = t.stuck_tasks || [];
-  const bySource = t.by_source || {};
-  const today = t.today || {};
-
   let html = '';
   html += section('任务状态分布');
   html += kpiRow([
@@ -349,82 +345,145 @@ function renderTasksTab(ops, rt, mt) {
     { label: 'In Progress', value: t.in_progress || 0, color: 'var(--pu)' },
     { label: 'Stuck', value: t.stuck_count || 0, color: (t.stuck_count||0) > 0 ? 'var(--r)' : 'var(--g)' },
   ]);
+  html += '<div id="obs-timeline-container"><div class="loading">加载任务列表...</div></div>';
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
+  fetch('/api/dashboard/ops/timeline' + repoParam).then(r => r.json()).then(d => {
+    renderTimelineList(document.getElementById('obs-timeline-container'), d.issues || []);
+  }).catch(e => {
+    const c = document.getElementById('obs-timeline-container');
+    if (c) c.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+  });
+  return html;
+}
 
-  html += section('今日统计');
-  html += kpiRow([
-    { label: 'Created', value: today.created || 0, color: 'var(--a)' },
-    { label: 'Completed', value: today.completed || 0, color: 'var(--g)' },
-    { label: 'Failed', value: today.failed || 0, color: (today.failed||0) > 0 ? 'var(--r)' : 'var(--t3)' },
-  ]);
+// ===== Issue 任务列表 + Mermaid 时序图 =====
+let _mermaidEngine = null;
+let _expandedIssues = new Set();
 
-  // 任务生命周期累计指标（从 /metrics 解析，Counter/Histogram，服务重启后归零）
-  if (mt) {
-    const enqueued = parseLabeledSum(mt, 'grape_agent_task_enqueued_total');
-    const dispatched = parseLabeledSum(mt, 'grape_agent_task_dispatched_total');
-    const terminal = parseLabeledSum(mt, 'grape_agent_task_terminal_total');
-    const failed = parseLabeledSum(mt, 'grape_agent_task_failed_total');
-    const qWaitSum = parseLabeledSum(mt, 'grape_agent_task_queue_wait_seconds_sum');
-    const qWaitCnt = parseLabeledSum(mt, 'grape_agent_task_queue_wait_seconds_count');
-    const runSum = parseLabeledSum(mt, 'grape_agent_task_run_seconds_sum');
-    const runCnt = parseLabeledSum(mt, 'grape_agent_task_run_seconds_count');
-    const totalSum = parseLabeledSum(mt, 'grape_agent_task_total_seconds_sum');
-    const totalCnt = parseLabeledSum(mt, 'grape_agent_task_total_seconds_count');
-    const avgQueueWait = qWaitCnt > 0 ? (qWaitSum / qWaitCnt).toFixed(1) + 's' : '-';
-    const avgRun = runCnt > 0 ? (runSum / runCnt).toFixed(1) + 's' : '-';
-    const avgTotal = totalCnt > 0 ? (totalSum / totalCnt).toFixed(1) + 's' : '-';
-    const failRate = terminal > 0 ? (failed / terminal * 100).toFixed(0) + '%' : '-';
+async function _getMermaid() {
+  if (!_mermaidEngine) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+      s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+    _mermaidEngine = window.mermaid;
+    _mermaidEngine.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'base', fontFamily: 'inherit', sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 40, noteMargin: 10, boxMargin: 8 } });
+  }
+  return _mermaidEngine;
+}
 
-    html += section('任务生命周期累计', 'from /metrics — 服务重启后归零');
-    html += kpiRow([
-      { label: 'Enqueued', value: enqueued, color: 'var(--a)' },
-      { label: 'Dispatched', value: dispatched, color: 'var(--sk)' },
-      { label: 'Terminal', value: terminal, color: 'var(--g)' },
-      { label: 'Failed', value: failed, color: failed > 0 ? 'var(--r)' : 'var(--t3)', hint: `失败率 ${failRate}` },
-    ]);
-    html += kpiRow([
-      { label: '平均排队等待', value: avgQueueWait, color: 'var(--y)' },
-      { label: '平均执行时长', value: avgRun, color: 'var(--pu)' },
-      { label: '平均总时长', value: avgTotal, color: 'var(--or)' },
-    ]);
+function _mermaidId(a) { return (a || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_'); }
 
-    // 按来源分组的实时 + 累计合并表格
-    const sources = parseLabeledKeys(mt, 'grape_agent_task_enqueued_total', 'source');
-    // 合并 ops/overview 的 bySource（实时 queued/running）和 /metrics 的累计数据
-    const allSources = new Set([...sources, ...Object.keys(bySource)]);
-    if (allSources.size > 0) {
-      html += section('按来源分组', '实时排队/运行 + 累计统计');
-      html += table(['Source', 'Queued', 'Running', 'Enqueued', 'Terminal', 'Failed'],
-        Array.from(allSources).sort().map(src => [
-          `<b>${src}</b>`,
-          (bySource[src] || {}).queued || 0,
-          (bySource[src] || {}).running || 0,
-          parseLabeledSumByLabel(mt, 'grape_agent_task_enqueued_total', 'source', src),
-          parseLabeledSumByLabel(mt, 'grape_agent_task_terminal_total', 'source', src),
-          parseLabeledSumByLabel(mt, 'grape_agent_task_failed_total', 'source', src),
-        ])
-      );
+function _actionText(t) {
+  if (t === 'a2a_event') return 'A2A 交办';
+  return { issue_opened: 'issue 打开', issue_comment: '评论', issue_updated: 'issue 更新', pull_request_opened: 'PR 打开', note_hook_pr: 'PR 评论', issue_closed: 'issue 关闭', push: '推送' }[t] || t;
+}
+
+function _buildSequence(iss) {
+  const agents = [];
+  for (const ev of iss.events) { const a = ev.agentType || '\u2014'; if (!agents.includes(a)) agents.push(a); }
+  const lines = ['sequenceDiagram', 'autonumber'];
+  for (const a of agents) lines.push('    participant ' + _mermaidId(a) + ' as ' + a);
+  const statuses = []; let prev = null;
+  for (const ev of iss.events) {
+    const a = _mermaidId(ev.agentType || '\u2014');
+    const t = ev.createdAt ? ev.createdAt.slice(11, 19) : '';
+    const label = t ? t + ' ' + _actionText(ev.eventType) : _actionText(ev.eventType);
+    if (prev && a !== prev) { lines.push('    ' + prev + '->>' + a + ': ' + label); statuses.push(ev.status); }
+    lines.push('    ' + a + '->>' + a + ': ' + label); statuses.push(ev.status); prev = a;
+  }
+  return { text: lines.join('\\n'), statuses };
+}
+
+function _applySequenceColors(svg, statuses) {
+  try {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    const root = doc.documentElement; const defs = root.querySelector('defs');
+    if (!defs) return svg;
+    const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'pending' ? '#94a3b8' : '#2e9e5b');
+    const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'));
+    lines.forEach((line, i) => {
+      const markerId = root.id + '-seqnum-' + i;
+      const marker = doc.createElementNS('http://www.w3.org/2000/svg', 'marker');
+      marker.setAttribute('id', markerId); marker.setAttribute('refX', '15'); marker.setAttribute('refY', '15');
+      marker.setAttribute('markerWidth', '60'); marker.setAttribute('markerHeight', '40'); marker.setAttribute('orient', 'auto');
+      const circle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', '15'); circle.setAttribute('cy', '15'); circle.setAttribute('r', '6');
+      circle.setAttribute('fill', colorOf(statuses[i] || '')); marker.appendChild(circle);
+      defs.appendChild(marker); line.setAttribute('marker-start', 'url(#' + markerId + ')');
+    });
+    return new XMLSerializer().serializeToString(doc);
+  } catch (e) { return svg; }
+}
+
+async function _renderMermaid(box, iss) {
+  if (box.dataset.rendered) return;
+  box.dataset.rendered = '1'; box.innerHTML = '<span class="ts t3">渲染中\u2026</span>';
+  try {
+    const mmd = await _getMermaid();
+    const uid = 'mmd-' + Math.random().toString(36).slice(2, 10);
+    const { text, statuses } = _buildSequence(iss);
+    const { svg } = await mmd.render(uid, text);
+    box.innerHTML = _applySequenceColors(svg, statuses);
+  } catch (err) { box.innerHTML = '<span class="ts t3">时序渲染失败: ' + (err.message || err) + '</span>'; }
+}
+
+function renderTimelineList(container, issues) {
+  if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">暂无任务事件</div>'; return; }
+  let html = section('任务列表', issues.length + ' 个 Issue \u2014 点击展开时序图');
+  html += '<div style="display:flex;flex-direction:column;gap:0">';
+  issues.forEach(iss => {
+    const expanded = _expandedIssues.has(iss.issueId);
+    const hasFailed = iss.events.some(e => e.status === 'failed');
+    const statusBadge = hasFailed ? '<span style="color:var(--r);font-size:10px;font-weight:600">\u274c 有失败</span>' : '<span style="color:var(--g);font-size:10px;font-weight:600">\u2713 正常</span>';
+    html += '<div style="border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:8px">';
+    html += '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;background:var(--c)" onclick="toggleIssueTimeline(\'' + iss.issueId + '\')">';
+    html += '<span style="font-size:12px">' + (expanded ? '\u25be' : '\u25b8') + '</span>';
+    html += '<b style="font-size:13px">' + iss.issueId + '</b>';
+    html += iss.title ? '<span class="ts t3" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + iss.title + '</span>' : '<span style="flex:1"></span>';
+    html += '<span class="ts t3">' + iss.eventCount + ' 事件</span>' + statusBadge;
+    html += '<span class="ts t3">' + (iss.lastAt || '').substring(0,16) + '</span>';
+    html += '</div>';
+    html += '<div id="tl-body-' + iss.issueId + '" style="display:' + (expanded ? 'block' : 'none') + ';padding:10px 14px;border-top:1px solid var(--b)">';
+    html += '<div class="tl-mmd" data-iid="' + iss.issueId + '" style="overflow-x:auto"></div>';
+    html += '<div style="margin-top:8px"><table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead><tbody>';
+    html += iss.events.map(ev => '<tr><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + (ev.createdAt||'').substring(0,19) + '</td></tr>').join('');
+    html += '</tbody></table></div></div></div>';
+  });
+  html += '</div>';
+  container.innerHTML = html;
+  issues.forEach(iss => {
+    if (_expandedIssues.has(iss.issueId)) {
+      const box = container.querySelector('.tl-mmd[data-iid="' + iss.issueId + '"]');
+      if (box) _renderMermaid(box, iss);
     }
-  } else if (Object.keys(bySource).length > 0) {
-    // /metrics 无数据时仅展示实时
-    html += section('按来源分组', '排队 / 运行中');
-    html += table(['Source', 'Queued', 'Running'],
-      Object.entries(bySource).map(([src, c]) => [
-        `<b>${src}</b>`, c.queued || 0, c.running || 0
-      ])
-    );
-  }
+  });
+}
 
-  if (stuck.length > 0) {
-    html += section('⚠ 卡住的任务', 'running > 15min（超时前 5min 预警）');
-    html += table(['Task ID', 'Agent', 'Runtime', 'Started', 'Repo'],
-      stuck.map(s => [
-        `<span class="ts">${s.id}</span>`, s.agent_type || '-', s.runtime_id || '-',
-        `<span class="ts">${s.started_at || '-'}</span>`, `<span class="ts">${s.repo_key || '-'}</span>`
-      ])
-    );
+function toggleIssueTimeline(issueId) {
+  const body = document.getElementById('tl-body-' + issueId);
+  if (!body) return;
+  if (body.style.display === 'none') {
+    body.style.display = 'block'; _expandedIssues.add(issueId);
+    const box = body.querySelector('.tl-mmd');
+    if (box && !box.dataset.rendered) {
+      const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+      const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
+      fetch('/api/dashboard/ops/timeline' + repoParam).then(r => r.json()).then(d => {
+        const iss = (d.issues || []).find(i => i.issueId === issueId);
+        if (iss) _renderMermaid(box, iss);
+      }).catch(() => {});
+    }
+    const toggle = body.previousElementSibling;
+    if (toggle) toggle.querySelector('span').textContent = '\u25be';
+  } else {
+    body.style.display = 'none'; _expandedIssues.delete(issueId);
+    const toggle = body.previousElementSibling;
+    if (toggle) toggle.querySelector('span').textContent = '\u25b8';
   }
-
-  return html || '<div class="loading">无数据</div>';
 }
 
 // ===== 辅助函数 =====
