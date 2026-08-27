@@ -39,7 +39,7 @@
 
 | 领域 | 表 | 说明 |
 |------|----|------|
-| **用户体系** | `user_accounts`, `user_credentials`, `user_vms`, `user_vm_repos`, `user_repos`, `oauth_states` | 用户、凭据、云主机、仓库缓存、OAuth |
+| **用户体系** | `user_accounts`, `user_credentials`, `user_repos`, `oauth_states` | 用户、凭据、仓库缓存、OAuth |
 | **仓库托管** | `managed_repos` | 用户-仓库关联 + 仓库级配置 |
 | **Agent Runtime 执行** | `agent_runtimes`, `runtime_credentials`, `agent_tasks`, `devops_agent_runtime_binding`, `agent_type_runtime_pool` | 引擎注册/健康态、凭据、任务队列、引擎集合绑定、~~引擎池（弃用）~~ |
 | **Issue 级执行** | `issue_agent_session`, `issue_state` | Issue 级执行会话、生命周期状态机（**new-version2 核心**） |
@@ -84,25 +84,8 @@ updated_at TEXT DEFAULT (datetime('now')),
 PRIMARY KEY (user_id, provider)
 ```
 
-#### `user_vms` — 云主机
-```sql
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-user_id INTEGER NOT NULL,
-name TEXT NOT NULL, host TEXT NOT NULL,
-port INTEGER DEFAULT 22, ssh_user TEXT NOT NULL,
-ssh_password TEXT NOT NULL, status TEXT DEFAULT '',
-created_at TEXT DEFAULT (datetime('now')),
-UNIQUE (user_id, name)
-```
-
-#### `user_vm_repos` — 云主机关联仓库
-```sql
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-vm_id INTEGER NOT NULL,               -- → user_vms.id
-repo_key TEXT NOT NULL, deploy_dir TEXT DEFAULT '',
-service_name TEXT DEFAULT '', branch TEXT DEFAULT 'master',
-UNIQUE (vm_id, repo_key)
-```
+#### `user_vms` / `user_vm_repos` — ⚠️ 已废弃（2026-08-26 移除代码）
+> 云主机部署功能遗留表（`user_vms` 云主机 + `user_vm_repos` 云主机关联仓库），**无任何生产代码调用**，CRUD 函数与测试已删除。生产存量库若存在该表可忽略（不再创建）。
 
 #### `user_repos` — 用户仓库缓存（OAuth 拉取）
 ```sql

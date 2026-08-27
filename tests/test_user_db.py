@@ -162,29 +162,6 @@ class TestCredentials:
         assert udb.get_credentials(999999) == []
 
 
-class TestVms:
-    def test_vm_crud(self):
-        u, uname = _mk_user()
-        try:
-            vm_id = udb.add_vm(u["id"], "vm1", "10.0.0.5", "root", "pw", port=22)
-            assert vm_id
-            vms = udb.get_vms(u["id"])
-            assert len(vms) == 1 and vms[0]["host"] == "10.0.0.5"
-            assert udb.update_vm_status(vm_id, "running") is True
-            assert udb.update_vm_status(999999, "x") is False
-            assert udb.add_vm_repo(vm_id, "org/repo", deploy_dir="/app", service_name="svc", branch="main") is True
-            repos = udb.get_vm_repos(vm_id)
-            assert len(repos) == 1 and repos[0]["branch"] == "main"
-            assert udb.delete_vm_repo(vm_id, "org/repo") is True
-            assert udb.delete_vm_repo(vm_id, "org/repo") is False
-            assert udb.add_vm_repo(vm_id, "org/repo2") is True
-            assert udb.clear_vm_repos(vm_id) is True
-            assert udb.get_vm_repos(vm_id) == []
-            assert udb.delete_vm(vm_id) is True
-        finally:
-            _cleanup_user(uname)
-
-
 # ====== 托管仓库 ======
 
 
