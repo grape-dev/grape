@@ -130,7 +130,17 @@ async def get_ops_overview(repo: str = ""):
         try:
             import psutil as _ps
             _local_cpu = _ps.cpu_percent(interval=None)
-            _local_mem = _ps.virtual_memory().percent
+            # MEM 用 /proc/meminfo 直接读取（匹配 top 口径，不含 buff/cache）
+            try:
+                with open("/proc/meminfo") as _mf:
+                    _mi = {}
+                    for _line in _mf:
+                        _p = _line.split(":")
+                        if len(_p) == 2:
+                            _mi[_p[0]] = int(_p[1].strip().split()[0]) * 1024
+                    _local_mem = round((_mi["MemTotal"] - _mi["MemFree"] - _mi["Buffers"] - _mi["Cached"] - _mi.get("SReclaimable", 0)) / _mi["MemTotal"] * 100, 1)
+            except Exception:
+                _local_mem = _ps.virtual_memory().percent
             _local_disk = _ps.disk_usage("/").percent
             _local_load = ",".join(f"{x:.2f}" for x in _ps.getloadavg())
         except Exception:
