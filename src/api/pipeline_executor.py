@@ -210,6 +210,19 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
     try:
         from src.api.event_pipeline import _enqueue_pipeline_task
         from src.runtime.engine_select import pick_engine
+        from src.session_manager import db, db_lock
+
+        # Validate runtime_id: if the engine no longer exists or is offline,
+        # drop it to 0 so the task becomes a pool task (claim_by_tag can pick it up).
+        # This prevents stale devops_agent_session.runtime_id from pinning tasks
+        # to non-existent engines.
+        if runtime_id:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT 1 FROM agent_runtimes WHERE id=? AND status='online'", (runtime_id,))
+                if not c.fetchone():
+                    log.info(f"Pipeline emit: runtime_id={runtime_id} not online, dropping to pool task (agent={agent_type})")
+                    runtime_id = 0
 
         # In plugin mode, pick_engine has resolve_default_engine fallback
         if not runtime_id:

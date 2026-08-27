@@ -79,9 +79,19 @@ def _remap_cwd(path: str) -> str:
     import os as _os
     mapping = _os.environ.get("RUNTIME_CWD_PREFIX_MAP", "")
     if not mapping:
-        # 默认映射：/home/grape → 当前用户 home
-        default_src = "/home/grape"
         local_home = _os.path.expanduser("~")
+        if path.startswith(local_home):
+            # 已是本机路径（服务端和 worker 同用户，或本地 direct 执行）
+            return path
+        # 1. grape-workspaces 标记段匹配（event pipeline 路径）
+        #    /home/{任意用户}/grape-workspaces → local_home/grape-workspaces
+        marker = "/grape-workspaces"
+        idx = path.find(marker)
+        if idx > 0:
+            return local_home + path[idx:]
+        # 2. /home/grape 前缀匹配（chat 逻辑路径，chat.py CHAT_CWD_BASE）
+        #    /home/grape/chat/... → local_home/chat/...
+        default_src = "/home/grape"
         if path.startswith(default_src) and local_home != default_src:
             return local_home + path[len(default_src):]
         return path
@@ -463,6 +473,7 @@ async def _execute_task(client, task, engine_name: str = ""):
     import os as _os
     tid = task.get("id", "")
     cwd = _remap_cwd(task.get("cwd") or _os.getcwd())
+    task["cwd"] = cwd
     _engine_tag = f"|engine:{engine_name}" if engine_name else ""
 
     # TaskResourceStack: unified resource lifecycle for this task
@@ -477,6 +488,13 @@ async def _execute_task(client, task, engine_name: str = ""):
     ]:
         _res.track_tmp_pattern(pat)
 
+    # Ensure cwd exists before dependency check (remote worker: server creates
+    # the dir on its side, but worker needs its own local copy after _remap_cwd)
+    try:
+        _os.makedirs(cwd, exist_ok=True)
+    except Exception:
+        pass
+
     # Pre-execution dependency validation (Cordis inject pattern)
     from src.runtime.dependency_check import validate_task_dependencies, DependencyError
     try:
@@ -488,10 +506,6 @@ async def _execute_task(client, task, engine_name: str = ""):
     # Context compaction: will check batch size before flush
     from src.runtime.context_compaction import should_compact, compact_messages
 
-    try:
-        _os.makedirs(cwd, exist_ok=True)
-    except Exception:
-        pass
     env = {}
     try:
         env = json.loads(task.get("env_extra") or "{}")
