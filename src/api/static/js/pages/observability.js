@@ -667,9 +667,10 @@ function renderSessionList(container, sessions, rtName) {
     return;
   }
 
-  // 分为运行中和空闲两组
-  const running = sessions.filter(s => s.status === 'running');
-  const idle = sessions.filter(s => s.status !== 'running');
+  // 所有 session 显示在运行中区域（idle=空闲绑定，running=正在执行任务）
+  // 已完成任务从各 session 的 tasks 中收集
+  const running = sessions;
+  const idle = sessions;
 
   const statusIcon = { running: '🔄', idle: '💤' };
   const statusColor = { running: 'var(--a)', idle: 'var(--t3)' };
