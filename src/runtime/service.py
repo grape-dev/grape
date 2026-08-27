@@ -352,8 +352,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     except Exception:
         _storage = None
     _inum = _issue_num(issue_id)
-    project_info_file_urls = _storage.generate_file_urls(repo_key, agent_type, _inum) if _storage else {}
-    knowledge_file_urls = _storage.generate_file_urls(repo_key, agent_type, _inum) if _storage else {}
+    _file_urls = _storage.generate_file_urls(repo_key, agent_type, _inum) if _storage else {}
+    project_info_file_urls = _file_urls
+    knowledge_file_urls = _file_urls
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)

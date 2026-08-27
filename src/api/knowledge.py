@@ -50,6 +50,8 @@ def read_with_cache(storage_key: str, db_hash: str) -> str | None:
         return None
     content = data.decode("utf-8", errors="replace")
     actual_hash = hashlib.sha256(data).hexdigest()
+    if actual_hash != db_hash:
+        log.warning(f"[knowledge] hash mismatch: storage_key={storage_key} db_hash={db_hash[:16]}... actual_hash={actual_hash[:16]}... (OBS content may be stale)")
     with _knowledge_cache_lock:
         _knowledge_cache[storage_key] = (content, actual_hash)
         # LRU 淘汰：超过最大条数时淘汰最旧的
@@ -250,11 +252,8 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0) -> 
     files = {}
     for scope, content in read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num).items():
         p = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-        try:
-            with open(p, encoding="utf-8") as f:
-                files[os.path.relpath(p, WORKSPACE_DIR)] = f.read()
-        except Exception:
-            continue
+        # 直接用 read_knowledge 返回的 content（OBS 模式已从 OBS 拿到，不再重复读本地文件）
+        files[os.path.relpath(p, WORKSPACE_DIR)] = content
     # 成员上传文档（project-info/member/**）一并交付远端 worker（见 knowledge-board-design.md §2.5）
     for rel, content in member_files(repo_key).items():
         files.setdefault(rel, content)
@@ -409,7 +408,7 @@ async def knowledge_sync_loop():
                 ).fetchone()[0]
             if remaining == 0:
                 log.info("[knowledge] sync complete, all data migrated to OBS")
-                return
+                # 不 return——继续每小时检查新增的 obs_key 为空的记录
         except Exception as e:
             log.error(f"[knowledge] sync error: {e}")
         await asyncio.sleep(3600)

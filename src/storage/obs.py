@@ -229,9 +229,11 @@ class ObsStorage(StorageBackend):
                         break
                 if obs_key:
                     out[rel_path] = {"url": self.temporary_url(obs_key, expires=3600), "storage_key": obs_key}
-                    # 同时生成 project-info 相对格式（member_files_pi 格式）
-                    _pi_rel = _os.path.relpath(rel_path, _os.path.join(WORKSPACE_DIR, owner, rname, "project-info"))
-                    out[_pi_rel] = {"url": self.temporary_url(obs_key, expires=3600), "storage_key": obs_key}
+                    # 同时生成 project-info 相对格式（member_files_pi 格式）——仅当 rel_path 在 project-info 目录下
+                    _pi_base = _os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
+                    if rel_path.startswith(_pi_base + _os.sep):
+                        _pi_rel = _os.path.relpath(rel_path, _pi_base)
+                        out[_pi_rel] = {"url": self.temporary_url(obs_key, expires=3600), "storage_key": obs_key}
                 else:
                     out[rel_path] = {"url": "", "storage_key": ""}
 
