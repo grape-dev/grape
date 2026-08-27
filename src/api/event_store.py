@@ -118,6 +118,22 @@ def parse_agent_output_json(final_text: str) -> dict | None:
     return None
 
 
+def _extract_tool_command(t) -> str:
+    """从 tool_use 项中安全提取 command 字符串。
+
+    input 可能是 dict（标准）、str（hermes JSON 解析结果）、或其他类型。
+    hermes.py:132 json.loads 成功时可能返回 str 而非 dict，需兼容。
+    """
+    if not isinstance(t, dict):
+        return ""
+    inp = t.get("input", {})
+    if isinstance(inp, dict):
+        return str(inp.get("command", ""))
+    if isinstance(inp, str):
+        return inp
+    return str(inp)
+
+
 def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> tuple:
     """判定 Agent 是否有明确答复产出，返回 (has_output: bool, result: str)
 
@@ -155,7 +171,7 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
     if agent_type == "coding":
         # 检测创建 PR 的写操作
         for t in tool_uses:
-            cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+            cmd = _extract_tool_command(t)
             if "POST" in cmd.upper() and ("pulls" in cmd or "merge_requests" in cmd):
                 result = "提交了代码变更（PR）"
                 has_output = True
@@ -163,7 +179,7 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
     elif agent_type == "issue":
         # issue skill 的最终步骤是"必须回复评论"——final_text 非空即视为已处理（有答复产出）
         for t in tool_uses:
-            cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+            cmd = _extract_tool_command(t)
             upper = cmd.upper()
             if "POST" in upper and ("/comments" in cmd or "labels" in cmd):
                 result = "对 Issue 执行了写操作（评论/标签）"
@@ -181,7 +197,7 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
         # pr skill 强制"发送评论是最终步骤"——final_text 非空即视为审查完成（有答复产出）
         # tool_use 检测发布审查评论的写操作作为补充
         for t in tool_uses:
-            cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+            cmd = _extract_tool_command(t)
             if "POST" in cmd.upper() and ("comments" in cmd or "pulls" in cmd or "issues" in cmd):
                 result = "发布了审查评论"
                 has_output = True
@@ -197,7 +213,7 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
                 has_output = True
     elif agent_type == "sre":
         for t in tool_uses:
-            cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+            cmd = _extract_tool_command(t)
             if "DEPLOY" in cmd.upper() or ("POST" in cmd.upper() and "deploy" in cmd.lower()):
                 result = "执行了部署/构建操作"
                 has_output = True
@@ -209,7 +225,7 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
             has_output = True
         if not has_output:
             for t in tool_uses:
-                cmd = str(t.get("input", {}).get("command", "")) if isinstance(t, dict) else ""
+                cmd = _extract_tool_command(t)
                 if "POST" in cmd.upper() and ("/comments" in cmd or "labels" in cmd):
                     result = "对 Issue 执行了写操作（评论/标签）"
                     has_output = True

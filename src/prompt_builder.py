@@ -40,12 +40,25 @@ def get_skill_capabilities() -> str:
         return "我是 DevOps Bot，专注于 DevOps 相关领域。"
 
 
-def _resolve_server_url() -> str:
-    """返回服务端可达地址（A2A/tasks 等对外调用用）。取 meta.server_base_url（仅基址），
-    无则从 webhook_url 剥后缀兜底；再兜底 localhost:8080。"""
+def _resolve_server_url(runtime_id: int = 0) -> str:
+    """返回服务端可达地址（A2A/tasks 等对外调用用）。
+
+    本地引擎（credential_id=0）走 localhost 直连，避免 NAT 回环不通
+    （服务端无法通过自己的公网 IP 访问自己）；
+    远程 worker 走 meta.server_base_url（公网地址）。
+    """
     try:
         from src.user.db import get_server_base_url
-        return get_server_base_url()
+        public_url = get_server_base_url()
+        if runtime_id and runtime_id > 0:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
+                row = c.fetchone()
+                if row and row[0] == 0:
+                    return "http://127.0.0.1:3000"
+        return public_url
     except Exception:
         pass
     return "http://localhost:8080"
@@ -544,7 +557,7 @@ context 是传给下一个 Agent 的接力说明，应包含：
 不要继续思考、不要等待用户输入、不要追加额外内容；任务以你的最终输出为终点。
 """)
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
-    return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url())
+    return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
 
 
 def build_general_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "",
