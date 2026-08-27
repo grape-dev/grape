@@ -1067,3 +1067,28 @@ sync_loop 处理 obs_key 为空的记录时，文件不存在的记录（老 rep
 - _read_entry_content file_path 格式：只处理 write_knowledge 的记录，格式正确 ✅
 - upload_knowledge save_bytes：正确 ✅
 - agent_files OBS 查询条件：正确 ✅
+
+
+## 二十一、第十四轮深度检查——read_with_cache 缓存命中修复（2026-08-27）
+
+### 问题
+
+read_with_cache 缓存存的是 actual_hash（OBS 内容的 hash），但命中条件是 `cached[1] == db_hash`。
+
+如果 actual_hash != db_hash（OBS 内容和 DB hash 不一致）：
+- 每次都 miss → 每次都从 OBS 读 → 缓存形同虚设
+- hash mismatch warning 每次都打
+
+### 修复
+
+缓存存 db_hash 而不是 actual_hash：
+- 下次 DB hash 没变 → 命中（content 是上次从 OBS 拉的）
+- DB hash 变了 → miss → 从 OBS 重新拉
+- hash mismatch 仍然 log warning 但不会反复打
+
+### 第十四轮其他检查项
+
+- sync_loop except 块 ✅（文件不存在 + 读取失败都不影响其他数据）
+- _sync_not_found 模块级 set ✅（单实例有效，重启清空）
+- member_files OBS rel_path ✅（和本地模式格式一致）
+- baseline key 一致性 ✅（VOD / generate_file_urls / load_project_info 三者一致）
