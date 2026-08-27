@@ -202,12 +202,44 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
         _pi = os.path.join(WORKSPACE_DIR, _owner, _rname, "project-info")
         _g = os.path.join(_pi, "project-graph.md")
         _c = os.path.join(_pi, "project-capabilities.md")
-        if os.path.exists(_g) or os.path.exists(_c):
+        # OBS 优先：查 DB baseline + OBS 读取，失败回退本地
+        _baseline_content = {}
+        try:
+            from src.session_manager import db, db_lock
+            from src.storage import get_storage
+            _storage = get_storage()
+            if _storage:
+                with db_lock:
+                    c = db.cursor()
+                    rows = c.execute(
+                        "SELECT file_path, obs_key, content_hash FROM agent_shared_knowledge "
+                        "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL",
+                        (repo_key,)
+                    ).fetchall()
+                for row in rows:
+                    _fp, _ok, _ch = row
+                    _fname = os.path.basename(_fp) if _fp else ""
+                    if _fname and _ok:
+                        try:
+                            data = _storage.read_bytes(_ok)
+                            if data:
+                                _baseline_content[_fname] = data.decode("utf-8") if isinstance(data, bytes) else data
+                        except Exception:
+                            pass  # OBS 读取失败，回退本地
+        except Exception:
+            pass  # DB 查询失败，回退本地
+
+        _has_baseline = bool(_baseline_content) or os.path.exists(_g) or os.path.exists(_c)
+        if _has_baseline:
             parts.append("\n## 项目知识基线")
             for _f, _label in ((_g, "project-graph"), (_c, "project-capabilities")):
-                if os.path.exists(_f):
-                    _content = open(_f, encoding="utf-8").read()[:2500]
-                    parts.append(f"\n### {_label}\n{_content}")
+                _fname = os.path.basename(_f)
+                # 优先 OBS 内容，降级本地文件
+                _content = _baseline_content.get(_fname, "")
+                if not _content and os.path.exists(_f):
+                    _content = open(_f, encoding="utf-8").read()
+                if _content:
+                    parts.append(f"\n### {_label}\n{_content[:2500]}")
             parts.append("\n> 若知识基线缺失或过期，请按 issue-advance/references/codegraph-project-analysis.md 生成/更新。")
         # 当前 Issue 生命周期阶段（若有）
         _iid = evt.get("issue_id", "") or ""
