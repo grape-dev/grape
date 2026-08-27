@@ -63,7 +63,7 @@ body {
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  margin-right: 32px;
+  margin-right: 20px;
   flex-shrink: 0;
 }
 .topnav-brand .brand-logo { width: 26px; height: 26px; border-radius: 7px; display: block; }
@@ -79,12 +79,13 @@ body {
 .topnav-links {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   flex: 1;
+  min-width: 0;
 }
 
 .topnav-link {
-  padding: 6px 14px;
+  padding: 6px 10px;
   font-size: 13px;
   color: var(--text-secondary);
   border-radius: 6px;

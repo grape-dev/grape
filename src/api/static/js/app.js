@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -228,7 +228,7 @@ function loadAgentTypes() {
   let _refreshTimer = null;
   function nav(view, param) {
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability') { loadRepos(); return; }
 
     _pushHistory(view, param);
 
@@ -299,6 +299,9 @@ function loadAgentTypes() {
         return;
       }
       API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>');
+    } else if (view === 'observability') {
+      title.textContent = '系统监控';
+      if (typeof renderObservability === 'function') renderObservability();
     } else if (view === 'repos') {
       title.textContent = '选择仓库';
       loadRepos();
@@ -377,16 +380,18 @@ function loadAgentTypes() {
     if (!u || !p) return showToast('请输入用户名和密码');
     API.post('/auth/login', {username: u, password: p}).then(d => {
       localStorage.setItem('token', d.token);
+      // refresh_token 在 HttpOnly cookie 里——不需要存 localStorage
       localStorage.setItem('user', JSON.stringify(d.user));
       showApp();
     }).catch(e => showToast('登录失败: ' + e.message));
   }
 
   function logout() {
-    const t = localStorage.getItem('token');
-    if (t) API.post('/auth/logout', {}).catch(() => {});
+    API.post('/auth/logout', {}).catch(() => {});
     // 保留 currentRepo（记录上次选择的仓库），下次登录恢复；只清登录态
-    localStorage.removeItem('token'); localStorage.removeItem('user');
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    // refresh_token cookie 由服务端 logout 清除
     showLogin();
   }
 

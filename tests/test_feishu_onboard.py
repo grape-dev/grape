@@ -22,6 +22,11 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.user import db as user_db
 from src.session_manager import db, db_lock
+# JWT access token helper（替代旧的 create_session_token）
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    from src.user.db import get_token_version
+    return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
 
@@ -48,7 +53,7 @@ def setup_module():
     _uid = user_db.create_user(_username, "pw123")
     if not _uid:
         _uid = user_db.get_user_by_username(_username)
-    _token = user_db.create_session_token(_uid["id"])
+    _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
 
 
@@ -351,7 +356,7 @@ class TestStatusEndpoint:
         user_b = user_db.create_user("onboard_b_" + uuid.uuid4().hex[:6], "pw123")
         task_id = _await_run("chat_bot", patched=_patch_register(_fake_success))
         # 换用 user_b 查询
-        token_b = user_db.create_session_token(user_b["id"])
+        token_b = _jwt_access_token(user_b["id"], user_b["username"])
         r = client.get(
             f"/api/feishu/onboard/status?task_id={task_id}",
             headers={"Authorization": f"Bearer {token_b}"},

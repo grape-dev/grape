@@ -12,6 +12,11 @@ from fastapi.testclient import TestClient
 from src.session_manager import db, db_lock
 from src.runtime import service
 from src.runtime.task_log_stream import subscribe, unsubscribe, fanout, _subscribers
+# JWT access token helper（替代旧的 create_session_token）
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    from src.user.db import get_token_version
+    return create_access_token(user_id, username, get_token_version(user_id))
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +46,7 @@ def _mk_user_token():
     import uuid
     from src.user import db as user_db
     u = user_db.create_user(f"tasklog_{uuid.uuid4().hex[:8]}", "pw123456")
-    return user_db.create_session_token(u["id"])
+    return _jwt_access_token(u["id"], u["username"])
 
 
 # ---------- 结构化落库 ----------

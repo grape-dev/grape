@@ -167,6 +167,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     pending_skill_scan INTEGER DEFAULT 0,
     skill_scan_result TEXT DEFAULT '',
     agent_tags TEXT DEFAULT '["all"]',
+    repo_key TEXT DEFAULT NULL,          -- 关联项目 repo_key（注册时从凭据复制）
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id)
 )
@@ -200,11 +201,17 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 
 _GLOBAL_IM_BOT_CONFIG_DDL = """
 CREATE TABLE IF NOT EXISTS global_im_bot_config (
-    bot_app_id TEXT PRIMARY KEY,
-    bot_type TEXT NOT NULL,
-    im_provider TEXT DEFAULT 'feishu',
-    is_active INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now'))
+    bot_app_id        VARCHAR(191) PRIMARY KEY,
+    bot_type          VARCHAR(32) NOT NULL,
+    im_provider       VARCHAR(32) DEFAULT 'feishu',
+    is_active         INTEGER DEFAULT 1,
+    bot_name          VARCHAR(128) DEFAULT '',
+    lease_token       VARCHAR(128) DEFAULT NULL,
+    lease_expires_at  DATETIME DEFAULT NULL,
+    lease_owner       VARCHAR(128) DEFAULT NULL,
+    lease_acquired_at DATETIME DEFAULT NULL,
+    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 """
 
@@ -350,6 +357,7 @@ CREATE TABLE IF NOT EXISTS runtime_credentials (
     scope        TEXT DEFAULT 'user',       -- user(个人)/repo(仓库)/global(全局),默认个人
     owner_id     TEXT DEFAULT '',           -- 仓库 scope 时存 repo 全名(如 owner/repo);个人/全局为 ''
     owner_name   TEXT DEFAULT '',           -- 归属用户 user_name(生成凭据的当前登录用户)
+    repo_key     TEXT DEFAULT NULL,         -- 关联项目 repo_key（scope=user 时存）
     status       TEXT DEFAULT 'active',     -- active / revoked
     last_seen_at TEXT DEFAULT NULL,
     last_ip      TEXT DEFAULT '',           -- 最近注册/心跳来源 IP(展示用,不入唯一键)
@@ -698,20 +706,51 @@ def _insert_seed_data(table: str, data: dict):
 
 def init_database():
     """初始化所有新表(幂等),启动时调用"""
-    _create_tables()
-    _migrate_tables()
-    _create_indexes()
-    _seed_from_json()
-    _sync_official_skills()
-    _align_agent_enable()
-    _cleanup_stale_meta()
-    _cleanup_chat_shared_worker_runtime()
-    # engine-selection-design.md §4.4/§12:存量会话 runtime_id>0 -> 回填绑定集合(单成员,幂等)
-    try:
-        from src.runtime.engine_select import backfill_existing_bindings
-        backfill_existing_bindings()
-    except Exception as e:
-        log.warning(f"Backfill existing runtime bindings failed: {e}")
+    # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移
+    # SQLite 不支持 GET_LOCK，跳过（单实例不需要）
+    from src.mysql_compat import get_db_backend
+    if get_db_backend() == "mysql":
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT GET_LOCK('grape_migrate', 300)")
+            lock_acquired = c.fetchone()[0]
+            if not lock_acquired:
+                log.warning("Could not acquire migrate lock, waiting...")
+            try:
+                # 迁移逻辑在同一个 with db_lock 块内——同一个连接
+                # db_lock 是 RLock（可重入）——_create_tables() 等内部 with db_lock 不会死锁
+                _create_tables()
+                _migrate_tables()
+                _create_indexes()
+                _seed_from_json()
+                _sync_official_skills()
+                _align_agent_enable()
+                _cleanup_stale_meta()
+                _cleanup_chat_shared_worker_runtime()
+                # engine-selection-design.md §4.4/§12:存量会话 runtime_id>0 -> 回填绑定集合(单成员,幂等)
+                try:
+                    from src.runtime.engine_select import backfill_existing_bindings
+                    backfill_existing_bindings()
+                except Exception as e:
+                    log.warning(f"Backfill existing runtime bindings failed: {e}")
+            finally:
+                c.execute("SELECT RELEASE_LOCK('grape_migrate')")
+    else:
+        # SQLite——单实例不需要锁
+        _create_tables()
+        _migrate_tables()
+        _create_indexes()
+        _seed_from_json()
+        _sync_official_skills()
+        _align_agent_enable()
+        _cleanup_stale_meta()
+        _cleanup_chat_shared_worker_runtime()
+        # engine-selection-design.md §4.4/§12:存量会话 runtime_id>0 -> 回填绑定集合(单成员,幂等)
+        try:
+            from src.runtime.engine_select import backfill_existing_bindings
+            backfill_existing_bindings()
+        except Exception as e:
+            log.warning(f"Backfill existing runtime bindings failed: {e}")
 
 
 def _sync_official_skills():
@@ -994,6 +1033,18 @@ def _migrate_tables():
         # 2026-08-17 修复:DEFAULT '{}' 在 MySQL 上触发 metadata lock 卡启动--改为无默认;
         # 且 ALTER 仅在列非 MEDIUMTEXT 时执行(避免每次启动 DDL 触发元数据锁--启动变慢根因)
         _alter_skill_files_if_needed(),
+        # Worker 三级分类——repo_key 字段（scope=user 时关联项目）
+        "ALTER TABLE runtime_credentials ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
+        "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
+        # JWT 撤销——token_version 字段（改密码/logout 时 +1）
+        "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
+        # 飞书 Bot Lease——集群部署保证同一 bot 同一时刻只有一个实例连 WebSocket
+        "ALTER TABLE global_im_bot_config ADD COLUMN bot_name VARCHAR(128) DEFAULT ''",
+        "ALTER TABLE global_im_bot_config ADD COLUMN lease_token VARCHAR(128) DEFAULT NULL",
+        "ALTER TABLE global_im_bot_config ADD COLUMN lease_expires_at DATETIME DEFAULT NULL",
+        "ALTER TABLE global_im_bot_config ADD COLUMN lease_owner VARCHAR(128) DEFAULT NULL",
+        "ALTER TABLE global_im_bot_config ADD COLUMN lease_acquired_at DATETIME DEFAULT NULL",
+        "ALTER TABLE global_im_bot_config ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
     ]
     for sql in migrations:
         try:
@@ -1584,6 +1635,10 @@ def _migrate_tables():
             if "runtime_credentials" in _tables:
                 _ensure_column(c, "runtime_credentials", "last_ip", "TEXT DEFAULT ''")
                 _ensure_column(c, "runtime_credentials", "owner_name", "TEXT DEFAULT ''")
+                _ensure_column(c, "runtime_credentials", "cpu_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "memory_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "disk_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "load_avg", "TEXT DEFAULT ''")
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute("""
                     DELETE FROM runtime_credentials WHERE id NOT IN (

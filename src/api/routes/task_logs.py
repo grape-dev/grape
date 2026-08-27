@@ -30,15 +30,18 @@ def _require_task_exists(task_id: str):
 async def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_user)):
     """任务关联的执行引擎/机器信息 + 接收上下文（prompt）。
 
-    返回：{agent_name, agent_version, device_name, last_ip, owner_name, prompt, prompt_full_length}
+    返回：{agent_name, agent_version, device_name, last_ip, owner_name, prompt, prompt_full_length,
+           created_at, started_at, completed_at, status, issue_id, event_seq, repo_key}
     agent_runtimes.name/version（引擎名+版本号）、runtime_credentials.device_name/last_ip/owner_name。
     prompt 为 agent 接收到的完整上下文（截断至 8000 字符），prompt_full_length 为原始长度。
     """
     from src.session_manager import db, db_lock
+    from src.api.time_utils import normalize_event_time
     with db_lock:
         c = db.cursor()
         c.execute(
-            """SELECT ar.name, ar.version, rc.device_name, rc.last_ip, rc.owner_name, t.prompt
+            """SELECT ar.name, ar.version, rc.device_name, rc.last_ip, rc.owner_name, t.prompt,
+                      t.created_at, t.started_at, t.completed_at, t.status, t.issue_id, t.event_seq, t.repo_key
                FROM agent_tasks t
                LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id
                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
@@ -48,8 +51,8 @@ async def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_u
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
-    agent_name, agent_version, device_name, last_ip, owner_name, prompt = row
-    # 版本取纯数字版本号（opencode 1.18.18 / hermes "Hermes Agent v0.11.0 (2026.4.23) · upstream" → 0.11.0）
+    agent_name, agent_version, device_name, last_ip, owner_name, prompt = row[:6]
+    created_at, started_at, completed_at, status, issue_id, event_seq, repo_key = row[6:]
     import re as _re
     _m = _re.search(r"(\d+\.\d+\.\d+)", str(agent_version or ""))
     ver = _m.group(1) if _m else str(agent_version or "")
@@ -63,6 +66,13 @@ async def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_u
         "owner_name": owner_name or "",
         "prompt": _prompt[:_PROMPT_CAP],
         "prompt_full_length": len(_prompt),
+        "created_at": normalize_event_time(created_at),
+        "started_at": normalize_event_time(started_at),
+        "completed_at": normalize_event_time(completed_at),
+        "status": status or "",
+        "issue_id": issue_id or "",
+        "event_seq": event_seq or 0,
+        "repo_key": repo_key or "",
     }
 
 

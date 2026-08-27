@@ -85,6 +85,7 @@ const GROUP_ICONS = {
   runtime: '🖥️',
   skill: '🧩',
   repos: '📦',
+  health: '💓',
   ai: '🤖',
   sys: '⚙️'
 }

@@ -17,6 +17,7 @@ configs/login-whitelist.json
 configs/db-backend.json
 configs/db-backend.json.bak-*
 configs/server-config.json
+configs/SETUP-GUIDE.md
 skills/custom/
 skills/repo/
 DEPLOYMENT-REMOTE.md

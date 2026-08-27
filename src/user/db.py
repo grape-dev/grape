@@ -1,11 +1,10 @@
 """用户系统数据库：users/credentials/vms/skills 表管理"""
-import json, hashlib, time, os, threading
+import json, hashlib, time, os
 from src.session_manager import db, db_lock
 from src.config import log
 
 # OAuth state 存储（内存，不依赖 SQLite 跨线程事务）
-_oauth_store = {}
-_oauth_lock = threading.Lock()
+# OAuth state 已改为 DB 共享存储（oauth_states 表），不再用进程内存
 
 
 # ====== 用户账户表（合并 users + bot_accounts） ======
@@ -26,6 +25,7 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     gitcode_publish_repo TEXT DEFAULT '',
     github_publish_repo TEXT DEFAULT '',
     password TEXT DEFAULT '',
+    token_version INTEGER DEFAULT 0,  -- JWT 撤销版本号——改密码/logout 时 +1
     created_by INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 )
@@ -106,13 +106,33 @@ def update_password(user_id: int, new_password: str) -> bool:
 
 
 def verify_user(username: str, password: str) -> dict | None:
-    """验证用户名密码，成功返回用户信息，失败返回 None"""
+    """验证用户名密码，成功返回用户信息（含 token_version），失败返回 None"""
     user = get_user_by_username(username)
     if not user:
         return None
     if user["password_hash"] != _hash_password(password):
         return None
-    return {"id": user["id"], "username": user["username"], "created_by": user["created_by"], "created_at": user["created_at"]}
+    token_version = get_token_version(user["id"])
+    return {"id": user["id"], "username": user["username"], "created_by": user["created_by"], "created_at": user["created_at"], "token_version": token_version}
+
+
+# ====== JWT token_version 管理 ======
+
+def get_token_version(user_id: int) -> int:
+    """获取用户的 token_version——JWT verify 时对比，不匹配则 token 失效"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT token_version FROM user_accounts WHERE id=?", (user_id,))
+        row = c.fetchone()
+    return (row[0] if row and row[0] is not None else 0)
+
+
+def increment_token_version(user_id: int) -> None:
+    """token_version+1——改密码/logout 时调用，使所有旧 token 失效"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE user_accounts SET token_version=token_version+1 WHERE id=?", (user_id,))
+        db.commit()
 
 
 # ====== Token 管理 ======
@@ -154,27 +174,46 @@ def _cleanup_expired_oauth_states():
 
 
 def save_oauth_state(state: str, provider: str, data: dict | None = None):
-    """保存 OAuth state（防 CSRF，10 分钟过期，内存存储）"""
+    """保存 OAuth state（防 CSRF，10 分钟过期，DB 共享存储——集群多实例可用）。"""
+    import json as _json
     expires = time.time() + 600
-    with _oauth_lock:
-        _oauth_store[state] = {"provider": provider, "data": data or {}, "expires": expires}
-    log.info(f"save_oauth_state: state={state[:20]}... saved OK, total={len(_oauth_store)}")
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO oauth_states (state, provider, data_json, expires) VALUES (?,?,?,?)",
+                (state, provider, _json.dumps(data or {}), expires),
+            )
+            db.commit()
+        log.info(f"save_oauth_state: state={state[:20]}... saved OK")
+    except Exception as e:
+        log.warning(f"save_oauth_state failed: {e}")
 
 
 def validate_oauth_state(state: str, provider: str) -> dict | None:
-    """验证并消耗 OAuth state（查 + 删），返回 data 或 None"""
-    with _oauth_lock:
-        entry = _oauth_store.pop(state, None)
-    if entry is None:
-        log.warning(f"validate_oauth_state: state={state[:20]}... NOT FOUND")
+    """验证并消耗 OAuth state（查 + 删），返回 data 或 None。"""
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT provider, data_json, expires FROM oauth_states WHERE state=?", (state,))
+            row = c.fetchone()
+            if row:
+                c.execute("DELETE FROM oauth_states WHERE state=?", (state,))
+                db.commit()
+        if not row:
+            log.warning(f"validate_oauth_state: state={state[:20]}... NOT FOUND")
+            return None
+        if row[0] != provider:
+            log.warning(f"validate_oauth_state: provider mismatch")
+            return None
+        if time.time() > row[2]:
+            log.warning(f"validate_oauth_state: state expired")
+            return None
+        return _json.loads(row[1] or "{}")
+    except Exception as e:
+        log.warning(f"validate_oauth_state failed: {e}")
         return None
-    if entry["provider"] != provider:
-        log.warning(f"validate_oauth_state: provider mismatch")
-        return None
-    if time.time() > entry["expires"]:
-        log.warning(f"validate_oauth_state: state expired")
-        return None
-    return entry["data"]
 
 
 

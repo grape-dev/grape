@@ -162,12 +162,13 @@ class TestBusinessMethods:
         assert _run(c.latest_version()) == ""
 
     def test_heartbeat_true(self):
-        c = _client(_Ctx(_FakeResp(200, {})))
-        assert _run(c.heartbeat([1])) is True
+        c = _client(_Ctx(_FakeResp(200, {"status": "ok", "cancelled_tasks": []})))
+        result = _run(c.heartbeat([1]))
+        assert result is not None and result.get("status") == "ok"
 
     def test_heartbeat_false(self):
         c = _client(_Ctx(_FakeResp(400, text="x")))
-        assert _run(c.heartbeat([1])) is False
+        assert _run(c.heartbeat([1])) is None
 
     def test_claim_returns_task(self):
         c = _client(_Ctx(_FakeResp(200, {"task": {"id": "t1"}})))

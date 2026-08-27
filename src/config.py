@@ -2,15 +2,97 @@
 import os, json, logging, logging.handlers, urllib.request, socket
 
 # ====== 日志 ======
+# 结构化 JSON 日志（参考 multica logger/logger.go）：
+# - LOG_LEVEL 环境变量控制级别（debug/info/warn/error，默认 info）
+# - JSON 格式输出，字段：timestamp, level, component, request_id, message
+# - request_id 通过 ContextVar 注入（request_id_middleware 设置）
+# - 保留 TimedRotatingFileHandler（按天轮转，保留30天）+ stderr 双输出
+
+import contextvars
+
+request_id_var: contextvars.ContextVar = contextvars.ContextVar("request_id", default="-")
+repo_var: contextvars.ContextVar = contextvars.ContextVar("repo_key", default="")
+user_var: contextvars.ContextVar = contextvars.ContextVar("user_id", default="")
+
+
+class _RequestIdFilter(logging.Filter):
+    """把 ContextVar 中的 request_id / repo_key / user_id 注入到每条 LogRecord 中。"""
+
+    def filter(self, record):
+        record.request_id = request_id_var.get()
+        record.repo_key = repo_var.get()
+        record.user_id = user_var.get()
+        return True
+
+
+class _JsonFormatter(logging.Formatter):
+    """JSON 行格式日志输出器。
+
+    兼容已有 log.info("f-string") 调用——message 字段放原始文本，
+    其余字段从 LogRecord / ContextVar 提取。
+
+    HTTP 请求日志中间件通过 log.info(..., extra={...}) 注入结构化字段：
+    method, path, status, duration_ms — 这些会作为独立 JSON 字段输出，
+    而非塞在 message 文本中，便于 Loki/ELK 按字段过滤/聚合。
+    """
+
+    # extra 字段白名单：只有这些 LogRecord 属性会被提升为顶层 JSON 字段
+    _EXTRA_FIELDS = ("method", "path", "status", "duration_ms", "user_id", "repo_key")
+
+    def format(self, record):
+        import time as _t
+        log_entry = {
+            "ts": _t.strftime("%Y-%m-%dT%H:%M:%S.", _t.gmtime(record.created))
+                  + f"{record.msecs:03.0f}Z",
+            "level": record.levelname,
+            "component": record.name,
+            "request_id": getattr(record, "request_id", "-"),
+            "message": record.getMessage(),
+        }
+        # 提取 extra 字段（HTTP 请求日志中间件注入的结构化维度）
+        for field in self._EXTRA_FIELDS:
+            val = getattr(record, field, None)
+            if val is not None:
+                log_entry[field] = val
+        if record.exc_info and record.exc_info[1]:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry, ensure_ascii=False)
+
+
+def _parse_level(s: str) -> int:
+    s = (s or "").strip().lower()
+    if s == "debug":
+        return logging.DEBUG
+    if s in ("warn", "warning"):
+        return logging.WARNING
+    if s == "error":
+        return logging.ERROR
+    return logging.INFO
+
+
+_LOG_LEVEL = _parse_level(os.environ.get("LOG_LEVEL", ""))
+_LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/logs"))
+os.makedirs(_LOG_DIR, exist_ok=True)
+
+_file_handler = logging.handlers.TimedRotatingFileHandler(
+    os.path.join(_LOG_DIR, "devops-bot.log"),
+    when="midnight", interval=1, backupCount=30, encoding="utf-8",
+)
+_file_handler.setLevel(_LOG_LEVEL)
+_file_handler.setFormatter(_JsonFormatter())
+_file_handler.addFilter(_RequestIdFilter())
+
+_stream_handler = logging.StreamHandler()
+_stream_handler.setLevel(_LOG_LEVEL)
+_stream_handler.setFormatter(_JsonFormatter())
+_stream_handler.addFilter(_RequestIdFilter())
+
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.handlers.TimedRotatingFileHandler(
-        os.path.join(os.path.dirname(__file__), "..", "data/devops-bot.log"),
-        when="midnight", interval=1, backupCount=30, encoding="utf-8"
-    ), logging.StreamHandler()]
+    level=_LOG_LEVEL,
+    handlers=[_file_handler, _stream_handler],
 )
 log = logging.getLogger("devops-bot")
+log.addFilter(_RequestIdFilter())
 
 # ====== 目录常量 ======
 SKILLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills"))
@@ -51,8 +133,17 @@ OBS_ACCESS_KEY = os.environ.get("OBS_ACCESS_KEY", "")
 OBS_SECRET_KEY = os.environ.get("OBS_SECRET_KEY", "")
 OBS_PREFIX = os.environ.get("OBS_PREFIX", "grape/prod")
 OBS_URL_EXPIRES = int(os.environ.get("OBS_URL_EXPIRES", "300"))
+
+# ── 飞书 Bot Lease（集群部署，保证同一 bot 同一时刻只有一个实例连 WebSocket）──
+BOT_LEASE_DISABLED = os.environ.get("BOT_LEASE_DISABLED", "false").lower() in ("1", "true", "yes")
+BOT_LEASE_TTL = int(os.environ.get("BOT_LEASE_TTL", "60"))
+BOT_LEASE_RENEW_INTERVAL = int(os.environ.get("BOT_LEASE_RENEW_INTERVAL", "20"))
+BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 # 本地缓存根（磁盘 LRU zip 缓存；默认 data/cache/storage）
 OBS_LOCAL_CACHE = os.environ.get("OBS_LOCAL_CACHE", "")
+
+# Cookie 安全——生产 HTTPS 默认 secure=True，开发 HTTP 配 COOKIE_SECURE=false
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "true", "yes")
 
 # ====== 数据库路径（可通过环境变量指向独立测试库，防止测试污染生产库）======
 DB_PATH = os.environ.get("DEVOPS_DB_PATH", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/sessions.db")))

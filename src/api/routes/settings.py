@@ -444,16 +444,16 @@ async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(
     scope = _normalize_scope(body.scope)
     owner = user.get("username") or ""
     repo_key = ""
-    if scope == "repo":
+    if scope in ("repo", "user"):
         repo_key = (body.repo_key or "").strip()
-        if not repo_key:
+        if scope == "repo" and not repo_key:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库范围凭据必须指定 repo_key"})
     token = "rta_" + secrets.token_urlsafe(32)
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name) VALUES (?,?,?,?,?)",
-                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key, owner))
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key) VALUES (?,?,?,?,?,?)",
+                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key))
             db.commit()
         except Exception as e:
             msg = str(e)

@@ -139,7 +139,7 @@ def _apply_chat_credentials(user_id: int, app_id: str, app_secret: str) -> tuple
             c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
             log.info(f"Feishu onboard: replaced old app_id={old_app_id[:20]} with {app_id[:20]}")
         c.execute(
-            "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?,?)",
+            "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, bot_name) VALUES (?, ?, '')",
             (app_id, "chat_bot"),
         )
         db.commit()

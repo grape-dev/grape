@@ -54,8 +54,19 @@ class RuntimeInfo(BaseModel):
     healthy: bool = True
 
 
+class LogLineBody(BaseModel):
+    ts: str = ""
+    level: str = ""
+    message: str = ""
+
+
 class HeartbeatBody(BaseModel):
     runtime_ids: list[int] = []
+    cpu_percent: float = 0.0
+    memory_percent: float = 0.0
+    disk_percent: float = 0.0
+    load_avg: str = ""
+    log_lines: list[LogLineBody] = []
 
 
 class TaskStartBody(BaseModel):
@@ -117,10 +128,11 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
         # 凭据作用域决定 runtime 归属：user scope 的个人 worker 注册为 user scope + owner_id；
         # repo scope 用凭据行 owner_id（仓库全名），否则 set_chat_config / Engines 视图的
         # scope 判定失效（个人/仓库级引擎永远选不中，见 engine-selection §7.1）
-        c.execute("SELECT scope, owner_name, owner_id FROM runtime_credentials WHERE id=?", (credential_id,))
+        c.execute("SELECT scope, owner_name, owner_id, repo_key FROM runtime_credentials WHERE id=?", (credential_id,))
         cred_row = c.fetchone()
         cred_scope = (cred_row[0] if cred_row and cred_row[0] else "global").strip().lower()
         owner_id = (cred_row[2] or "") if cred_row else ""
+        cred_repo_key = (cred_row[3] or "") if cred_row else ""
         if cred_scope == "user" and cred_row and cred_row[1]:
             # owner_id 与 user_accounts.id 对齐（按用户名），找不到保持空
             try:
@@ -151,10 +163,10 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
                            datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, rid))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key))
                 rid = c.lastrowid
             # 服务端默认写入 "all" 标签到 engine_capabilities（worker 不需要传 tags）
             # 后续标签增删改全部来自 WebUI 操作
@@ -189,11 +201,67 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
 
 @router.post("/heartbeat")
 async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
-    """Consolidated heartbeat (Phase 5): worker-level, updates credential + all runtimes."""
-    from src.runtime.service import heartbeat_consolidated
+    """更新 runtime 在线态 / last_seen_at。
+
+    归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
+    防止已吊销设备的旧 runtime id 被其它 active 凭据的心跳刷回 online
+    （revoke 只置 offline，不删行；无校验则吊销的设备行会被残留 agent 复活）。
+
+    响应携带 cancelled_tasks 列表——worker 收到后立即杀引擎进程，
+    实现任务取消实时感知（延迟 15 秒，覆盖 step 很长时 report_messages 410 不触发的场景）。
+    """
+    now = datetime.now(timezone.utc).isoformat()
     client_ip = _client_ip(request)
-    result = heartbeat_consolidated(credential_id, body.runtime_ids or [], client_ip)
-    return result
+    cancelled_tasks = []
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, load_avg=? WHERE id=?",
+                  (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.load_avg, credential_id))
+        if body.runtime_ids:
+            ph = ",".join("?" for _ in body.runtime_ids)
+            c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
+                      [now] + body.runtime_ids + [credential_id])
+            # 查该 worker 的已取消任务——通知 worker 立即杀进程
+            ph2 = ",".join("?" for _ in body.runtime_ids)
+            rows = c.execute(
+                f"SELECT id FROM agent_tasks WHERE runtime_id IN ({ph2}) AND status='cancelled'",
+                body.runtime_ids
+            ).fetchall()
+            cancelled_tasks = [r[0] for r in rows]
+        db.commit()
+
+    # 写入 worker 上报的日志到 data/logs/workers/{credential_id}.log
+    if body.log_lines:
+        import os as _os, json as _json
+        from src.config import LOG_DIR
+        _worker_log_dir = _os.path.join(LOG_DIR, "workers")
+        _os.makedirs(_worker_log_dir, exist_ok=True)
+        # 查 worker 名称
+        _wname = ""
+        try:
+            with db_lock:
+                c2 = db.cursor()
+                c2.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (credential_id,))
+                row = c2.fetchone()
+                if row:
+                    _wname = row[1] or row[0] or f"worker-{credential_id}"
+        except Exception:
+            _wname = f"worker-{credential_id}"
+        _wf = _os.path.join(_worker_log_dir, f"{credential_id}.log")
+        with open(_wf, "a") as _wf_fp:
+            for ll in body.log_lines:
+                _entry = {
+                    "ts": ll.ts or now,
+                    "level": ll.level,
+                    "component": "worker",
+                    "request_id": "-",
+                    "message": ll.message,
+                    "worker_id": credential_id,
+                    "worker_name": _wname,
+                }
+                _wf_fp.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
+
+    return {"status": "ok", "cancelled_tasks": cancelled_tasks}
 
 
 @router.get("/admin/event-bus")
@@ -427,6 +495,14 @@ async def runtime_task_messages(task_id: str, body: MessagesBody, credential_id:
     task = service.get_task(task_id)
     if task and task.get("status") in ("failed", "cancelled", "completed"):
         raise HTTPException(status_code=410, detail={"code": 410, "message": f"task already {task.get('status')}"})
+    # 自动修复：worker 上报了消息说明已在执行，但 task_start 可能调用失败
+    # 导致 status 仍为 queued/dispatched → 自动更新为 running
+    if task and task.get("status") in ("queued", "dispatched"):
+        try:
+            service.update_task_status(task_id, "running")
+            log.info(f"auto-fix: task {task_id} status {task.get('status')} -> running (messages reported)")
+        except Exception as e:
+            log.warning(f"auto-fix: failed to update task {task_id} to running: {e}")
     service.enqueue_async_report("messages", task_id, body.messages)
     return {"status": "ok"}
 
@@ -438,6 +514,12 @@ async def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int =
         c.execute("UPDATE agent_tasks SET usage_json=? WHERE id=?",
                   (json.dumps(body.model_dump()), task_id))
         db.commit()
+    # 可观察性埋点：LLM token 用量
+    try:
+        from src.observability import record_llm_usage
+        record_llm_usage(body.provider, body.model, body.input, body.output, body.cache)
+    except Exception:
+        pass
     return {"status": "ok"}
 
 
@@ -529,7 +611,7 @@ async def cancel_task(task_id: str, user: dict = Depends(get_current_user)):
 
 @router.get("/runtimes/{runtime_id}/tasks")
 async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
-                             status: str = "", limit: int = 50):
+                             status: str = "", limit: int = 50, repo: str = ""):
     """设备任务列表（M4 前端设备 [查看任务]）。"""
     from src.session_manager import db, db_lock
     clauses = ["runtime_id=?"]
@@ -537,16 +619,100 @@ async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_u
     if status:
         clauses.append("status=?")
         params.append(status)
+    if repo:
+        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
+        clauses.append("repo_key=?")
+        params.append(repo_key)
     with db_lock:
         c = db.cursor()
-        c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
+        c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at, issue_id, event_seq FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
                   params + [limit])
         return {"tasks": [
             {"id": r[0], "repo_key": r[1], "agent_type": r[2], "skill": r[3],
              "status": r[4], "exit_code": r[5], "result_text": (r[6] or "")[:200],
-             "created_at": normalize_event_time(r[7]), "started_at": normalize_event_time(r[8]), "completed_at": normalize_event_time(r[9])}
+             "created_at": normalize_event_time(r[7]), "started_at": normalize_event_time(r[8]), "completed_at": normalize_event_time(r[9]),
+             "issue_id": r[10] or "", "event_seq": r[11] or 0}
             for r in c.fetchall()
         ]}
+
+
+@router.get("/runtimes/{runtime_id}/sessions")
+async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user),
+                                repo: str = ""):
+    """引擎 session 列表（devops_agent_session 表）。
+
+    返回该引擎下的所有 session，按 repo 过滤。
+    每个 session 携带:
+    - current_task: 当前正在运行的 task（status=running/queued/dispatched），无则 null
+    - tasks: 最近已完成的 task 列表（按 event_seq 倒序，最多 20 条）
+    """
+    from src.session_manager import db, db_lock
+
+    clauses = ["runtime_id=?"]
+    params: list = [runtime_id]
+    if repo:
+        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
+        clauses.append("repo_key=?")
+        params.append(repo_key)
+
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            f"SELECT id, agent_type, repo_key, status, skill, created_at, last_active_at, "
+            f"runtime_session_id "
+            f"FROM devops_agent_session WHERE {' AND '.join(clauses)} ORDER BY last_active_at DESC",
+            params
+        )
+        sessions = []
+        for r in c.fetchall():
+            sid = r[0]
+            agent_type = r[1] or ""
+            repo_key_raw = r[2] or ""
+            # 查该 session 当前正在运行的 task
+            c.execute(
+                "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, started_at "
+                "FROM agent_tasks WHERE agent_session_id=? "
+                "AND status IN ('running','queued','dispatched') ORDER BY created_at DESC LIMIT 1",
+                (sid,)
+            )
+            current = None
+            cr = c.fetchone()
+            if cr:
+                current = {
+                    "id": cr[0], "issue_id": cr[1] or "", "event_seq": cr[2] or 0,
+                    "agent_type": cr[3] or "", "status": cr[4] or "",
+                    "created_at": normalize_event_time(cr[5]),
+                    "started_at": normalize_event_time(cr[6]),
+                }
+            # 查该 session 最近已完成的任务
+            c.execute(
+                "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, started_at, completed_at "
+                "FROM agent_tasks WHERE agent_session_id=? "
+                "AND status IN ('completed','failed','cancelled') ORDER BY event_seq DESC LIMIT 20",
+                (sid,)
+            )
+            tasks = []
+            for tr in c.fetchall():
+                tasks.append({
+                    "id": tr[0], "issue_id": tr[1] or "", "event_seq": tr[2] or 0,
+                    "agent_type": tr[3] or "", "status": tr[4] or "",
+                    "exit_code": tr[5], "created_at": normalize_event_time(tr[6]),
+                    "started_at": normalize_event_time(tr[7]),
+                    "completed_at": normalize_event_time(tr[8]),
+                })
+            sessions.append({
+                "id": sid,
+                "agent_type": agent_type,
+                "repo_key": repo_key_raw.replace("gitcode:", ""),
+                "status": "running" if current else "idle",
+                "skill": r[4] or "",
+                "created_at": normalize_event_time(r[5]),
+                "last_active_at": normalize_event_time(r[6]),
+                "runtime_session_id": r[7] or "",
+                "current_task": current,
+                "tasks": tasks,
+            })
+        return {"sessions": sessions, "total": len(sessions)}
 
 
 @router.get("/credentials/{cid}/tasks")
