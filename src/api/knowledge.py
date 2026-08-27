@@ -36,8 +36,9 @@ def read_with_cache(storage_key: str, db_hash: str) -> str | None:
     if not db_hash:
         return None
     with _knowledge_cache_lock:
-        cached = _knowledge_cache.get(storage_key)
+        cached = _knowledge_cache.pop(storage_key, None)
         if cached and cached[1] == db_hash:
+            _knowledge_cache[storage_key] = cached  # 重新插入到末尾（LRU）
             return cached[0]
     # 缓存 miss 或 hash 不一致 → 从存储拉
     from src.storage import get_storage
@@ -365,7 +366,12 @@ async def knowledge_sync_loop():
                 for row in rows:
                     rid, file_path, scope, repo_key, agent_type, issue_num = row
                     try:
-                        full_path = os.path.join(WORKSPACE_DIR, file_path)
+                        # 兼容新老 file_path 格式：老格式相对 WORKSPACE_DIR（owner/repo/...），新格式相对 repo_base（project-info/...）
+                        owner, rname = _owner_repo(repo_key)
+                        if file_path.startswith(f"{owner}/{rname}/"):
+                            full_path = os.path.join(WORKSPACE_DIR, file_path)  # 老格式
+                        else:
+                            full_path = os.path.join(WORKSPACE_DIR, owner, rname, file_path)  # 新格式
                         content = ""
                         with open(full_path, encoding="utf-8") as f:
                             content = f.read()

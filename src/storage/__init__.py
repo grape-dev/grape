@@ -103,11 +103,11 @@ class StorageBackend(ABC):
         items = [{"key": k, "size": 0, "last_modified": ""} for k in keys]
         return items, None
 
-    def generate_file_urls(self, files: dict, repo_key: str) -> dict:
-        """为 {rel_path: content} 生成 {rel_path: {url, storage_key}}。
+    def generate_file_urls(self, repo_key: str, agent_type: str = "", issue_num: int = 0) -> dict:
+        """为知识文件生成 {rel_path: {url, storage_key}}。
 
         基类默认实现：返回空 dict（本地模式，Worker 走 content 兜底）。
-        OBS 实现重写：查 DB 拿 obs_key → 生成 temporary_url。
+        OBS 实现重写：按 scope 查 DB obs_key → 生成 temporary_url。
         """
         return {}
 

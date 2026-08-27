@@ -633,12 +633,12 @@ async def _execute_task(client, task, engine_name: str = ""):
         return {"_error": str(e), "_started": started}
 
 
-async def _reregister(client, installed, device_name) -> list[int] | None:
+async def _reregister(client, installed, device_name, cli_version: str = "") -> list[int] | None:
     """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。"""
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
-        ids, _probe = await client.register(installed, device_name=device_name)
+        ids, _probe = await client.register(installed, device_name=device_name, cli_version=cli_version)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
@@ -678,7 +678,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # ---- 定期重注册（防 id 静默失效）----
         now = asyncio.get_running_loop().time()
         if now - last_reregister >= RE_REGISTER_INTERVAL:
-            new_ids = await _reregister(client, installed, device_name)
+            new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
             if new_ids:
                 runtime_ids = new_ids
                 heartbeat_fail_streak = 0
@@ -828,7 +828,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
-                new_ids = await _reregister(client, installed, device_name)
+                new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
                 if new_ids:
                     runtime_ids = new_ids
                     heartbeat_fail_streak = 0
