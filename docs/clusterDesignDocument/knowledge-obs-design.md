@@ -1376,3 +1376,47 @@ OBS 模式下直接用 read_knowledge 返回的 content，不 open 本地文件�
 - knowledge_files OBS 分支 ✅（read_knowledge content + member_files OBS）
 - generate_file_urls agent 部分 ✅（查 DB + 直接用 file_path）
 - 所有 key 格式一致 ✅
+
+## 二十六、第十六轮深度检查——集群 B 实例可用性（2026-08-27）
+
+### 检查范围
+
+逐个检查所有"OBS 优先 + 回退本地"的函数在集群 B 实例（无本地文件）的行为。
+
+### 检查结果
+
+| # | 函数 | OBS 分支 | 回退本地 | 集群 B 可用？ |
+|---|------|:---:|:---:|:---:|
+| 1 | knowledge_files | ✅ 用 content | 不需要 | ✅ |
+| 2 | member_files | ✅ DB+OBS | 不需要 | ✅ |
+| 3 | member_files_pi | ✅ DB+OBS | 不需要 | ✅ |
+| 4 | agent_files | ✅ DB+OBS | 不需要 | ✅ |
+| 5 | load_project_info | ✅ DB+OBS | 兜底本地 | ✅（DB 有就行） |
+| 6 | vod_handler_async | ✅ DB+OBS | 兜底本地 | ⚠️（A 挂了才有问题） |
+| 7 | _read_entry_content | ✅ OBS | 兜底本地 | ✅（返回空不报错） |
+| 8 | _read_file | ✅ DB+OBS | 兜底本地 | ✅（obs_key 非空走 OBS） |
+
+### 任务打包链路
+
+enqueue_task → knowledge_files + member_files_pi + agent_files + load_project_info + generate_file_urls
+
+全部走 OBS，不依赖本地磁盘 ✅
+
+### vod_handler_async 集群限制
+
+vod_handler_async 读基线文件逻辑：
+1. 查 DB scope='baseline' + OBS 读取 → _baseline_content
+2. OBS 没有 → 读本地文件 os.path.exists(_f) + open(_f)
+
+集群 B 实例（无本地文件）+ OBS 读取失败时：
+- _baseline_content 为空
+- os.path.exists 返回 False
+- 基线缺失 → VOD Agent 拿不到 project-graph.md / project-capabilities.md
+- 不会报错 → _has_baseline 为 False 时直接跳过基线部分
+
+实际不会发生：
+1. 飞书 lease 隔离 → 只有 A 处理 webhook → VOD 任务只在 A 上执行
+2. A 有本地文件 → OBS 失败也能兜底
+3. 只有 A 挂了 + OBS 同时挂了才会出问题——概率极低
+
+这是设计上的已知限制，不是 bug。
