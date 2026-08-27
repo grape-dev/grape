@@ -59,11 +59,11 @@ function selPipe(idx) {
     var label = (node.id || tag).charAt(0).toUpperCase() + (node.id || tag).slice(1);
     var modeIcon = _MODE_ICONS[node.mode] || _MODE_ICONS.emit;
     var dimStyle = sc === 0 ? 'background:#eef0f4;border-top-color:#d5d9e0;filter:grayscale(0.6)' : 'background:' + (sc === 1 ? '#fff8e8' : '#fff') + ';border-top-color:' + color;
-    flowHtml += `<div class="nd" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${tag}')">
+    flowHtml += `<div class="nd${sc === 1 ? ' nd-radar' : ''}" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${tag}')">
       <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : color}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${label} <span style="font-size:9px;color:var(--t3)">${modeIcon}</span></h4></div>
       <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? evTitle || ev.event_type || '\u2014' : '\u2014'}</div>
       <div class="nds" style="margin-bottom:1px;font-size:9px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev && ev.actor ? '@' + ev.actor : ' '}</div>
-      <div class="ns"><span class="d" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : 'Pending'}</div>
+      <div class="ns"><span class="d${sc === 1 ? ' d-pulse' : ''}" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : 'Pending'}</div>
     </div>`;
   });
   flowHtml += `</div>`;
@@ -131,11 +131,11 @@ function renderPipeline(data) {
       var dimStyle = sc === 0
         ? 'background:#eef0f4;border-top-color:#d5d9e0;filter:grayscale(0.6)'
         : 'background:' + (sc === 1 ? '#fff8e8' : '#fff') + ';border-top-color:' + color;
-      flowHtml += `<div class="nd" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${tag}')">
+      flowHtml += `<div class="nd${sc === 1 ? ' nd-radar' : ''}" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${tag}')">
         <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : color}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${label} <span style="font-size:9px;color:var(--t3)">${modeIcon}</span></h4></div>
         <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? evTitle || ev.event_type || '\u2014' : '\u2014'}</div>
         <div class="nds" style="margin-bottom:1px;font-size:9px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev && ev.actor ? '@' + ev.actor : ' '}</div>
-        <div class="ns"><span class="d" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : 'Pending'}</div>
+        <div class="ns"><span class="d${sc === 1 ? ' d-pulse' : ''}" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : 'Pending'}</div>
       </div>`;
     });
     flowHtml += `</div></div>`;
