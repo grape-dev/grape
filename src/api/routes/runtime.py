@@ -509,6 +509,7 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
     """引擎 session 列表（devops_agent_session 表）。
 
     返回该引擎下的所有 session，按 repo 过滤。
+    每个 session 携带关联的已完成任务列表（按 event_seq 倒序）。
     session 的 status: idle（空闲）/ running（运行中）。
     """
     from src.session_manager import db, db_lock
@@ -530,18 +531,33 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
         )
         sessions = []
         for r in c.fetchall():
+            sid = r[0]
+            agent_type = r[1] or ""
+            repo_key_raw = r[2] or ""
+            # 查该 session 关联的已完成任务（agent_type + repo_key 匹配）
+            c.execute(
+                "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, completed_at "
+                "FROM agent_tasks WHERE agent_type=? AND repo_key=? "
+                "AND status IN ('completed','failed','cancelled') ORDER BY event_seq DESC LIMIT 20",
+                (agent_type, repo_key_raw)
+            )
+            tasks = []
+            for tr in c.fetchall():
+                tasks.append({
+                    "id": tr[0], "issue_id": tr[1] or "", "event_seq": tr[2] or 0,
+                    "agent_type": tr[3] or "", "status": tr[4] or "",
+                    "exit_code": tr[5], "created_at": normalize_event_time(tr[6]),
+                    "completed_at": normalize_event_time(tr[7]),
+                })
             sessions.append({
-                "id": r[0],
-                "agent_type": r[1] or "",
-                "repo_key": (r[2] or "").replace("gitcode:", ""),
+                "id": sid,
+                "agent_type": agent_type,
+                "repo_key": repo_key_raw.replace("gitcode:", ""),
                 "status": r[3] or "idle",
                 "skill": r[4] or "",
                 "created_at": normalize_event_time(r[5]),
                 "last_active_at": normalize_event_time(r[6]),
-                "im_provider": r[7] or "",
-                "im_app_id": r[8] or "",
-                "enable": bool(r[9]),
-                "subscribe_events": r[10] or "",
+                "tasks": tasks,
             })
         return {"sessions": sessions, "total": len(sessions)}
 

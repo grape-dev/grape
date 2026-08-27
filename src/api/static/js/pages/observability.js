@@ -673,13 +673,15 @@ function renderSessionList(container, sessions, rtName) {
 
   const statusIcon = { running: '🔄', idle: '💤' };
   const statusColor = { running: 'var(--a)', idle: 'var(--t3)' };
+  const taskStatusIcon = { completed: '✅', failed: '❌', cancelled: '⛔' };
+  const taskStatusColor = { completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)' };
 
-  function sessionTable(list) {
-    if (!list.length) return '<div class="ts t3" style="padding:8px">无</div>';
+  // 运行中 session 表格
+  function runningTable(list) {
+    if (!list.length) return '<div class="ts t3" style="padding:8px">无运行中 session</div>';
     let html = '<div class="tw"><table><thead><tr><th>Agent</th><th>仓库</th><th>Skill</th><th>状态</th><th>最后活跃</th></tr></thead><tbody>';
     list.forEach(s => {
-      const enc = encodeURIComponent(JSON.stringify({agent:s.agent_type, repo:s.repo_key, status:s.status, last:s.last_active_at, sid:s.id.substring(0,12)}));
-      html += '<tr style="cursor:pointer" onclick="openSessionLogModal(\'' + s.id + '\',\'' + enc + '\')">' +
+      html += '<tr>' +
         '<td><b>' + (s.agent_type||'-') + '</b></td>' +
         '<td class="ts t3">' + (s.repo_key||'-').substring(0,25) + '</td>' +
         '<td class="ts t3">' + (s.skill||'-') + '</td>' +
@@ -691,25 +693,61 @@ function renderSessionList(container, sessions, rtName) {
     return html;
   }
 
+  // 已完成 task 列表（从所有 idle session 的 tasks 中收集，按 seq 倒序）
+  function completedTable(sessions) {
+    // 收集所有 task 并去重（同一个 task 可能出现在多个 session 中）
+    const seen = new Set();
+    const allTasks = [];
+    sessions.forEach(s => {
+      (s.tasks || []).forEach(t => {
+        if (!seen.has(t.id)) {
+          seen.add(t.id);
+          allTasks.push(t);
+        }
+      });
+    });
+    // 按 event_seq 倒序
+    allTasks.sort((a, b) => (b.event_seq || 0) - (a.event_seq || 0));
+
+    if (!allTasks.length) return '<div class="ts t3" style="padding:8px">无已完成任务</div>';
+    let html = '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent</th><th>状态</th><th>Exit</th><th>完成时间</th></tr></thead><tbody>';
+    allTasks.forEach(t => {
+      const is = (t.issue_id && t.event_seq) ? t.issue_id + ' #' + t.event_seq : (t.event_seq ? '#' + t.event_seq : t.id.substring(0,12));
+      const enc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:'', created:t.completed_at||''}));
+      html += '<tr style="cursor:pointer" onclick="openTaskLogModal(\'' + t.id + '\',\'' + enc + '\')">' +
+        '<td class="ts"><b>' + is + '</b></td>' +
+        '<td><b>' + (t.agent_type||'-') + '</b></td>' +
+        '<td><span style="color:' + (taskStatusColor[t.status]||'var(--t3)') + '">' + (taskStatusIcon[t.status]||'') + ' ' + t.status + '</span></td>' +
+        '<td>' + (t.exit_code != null ? t.exit_code : '-') + '</td>' +
+        '<td class="ts t3">' + (t.completed_at||'').substring(0,16) + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  // 统计已完成 task 总数
+  const completedCount = idle.reduce((sum, s) => sum + (s.tasks ? s.tasks.length : 0), 0);
+
   let html = '';
   // 运行中（默认展开）
   html += '<div style="border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:10px">';
   html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;background:var(--c)" onclick="toggleSessionGroup(\'rtSessionRunning\')">';
   html += '<span id="rtSessionRunning-arrow" style="font-size:12px">▾</span>';
   html += '<b style="font-size:12px">🔄 运行中</b>';
-  html += '<span class="ts t3" style="margin-left:auto">' + running.length + ' 个</span>';
+  html += '<span class="ts t3" style="margin-left:auto">' + running.length + ' 个 session</span>';
   html += '</div>';
-  html += '<div id="rtSessionRunning" style="padding:8px 12px;border-top:1px solid var(--b)">' + sessionTable(running) + '</div>';
+  html += '<div id="rtSessionRunning" style="padding:8px 12px;border-top:1px solid var(--b)">' + runningTable(running) + '</div>';
   html += '</div>';
 
-  // 已完成/空闲（默认收起）
+  // 已完成任务（默认收起）
   html += '<div style="border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:10px">';
   html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;background:var(--c)" onclick="toggleSessionGroup(\'rtSessionIdle\')">';
   html += '<span id="rtSessionIdle-arrow" style="font-size:12px">▸</span>';
-  html += '<b style="font-size:12px">💤 空闲 / 已完成</b>';
-  html += '<span class="ts t3" style="margin-left:auto">' + idle.length + ' 个</span>';
+  html += '<b style="font-size:12px">📋 已完成任务</b>';
+  html += '<span class="ts t3" style="margin-left:auto">' + completedCount + ' 个任务</span>';
   html += '</div>';
-  html += '<div id="rtSessionIdle" style="padding:8px 12px;border-top:1px solid var(--b);display:none">' + sessionTable(idle) + '</div>';
+  html += '<div id="rtSessionIdle" style="padding:8px 12px;border-top:1px solid var(--b);display:none">' + completedTable(idle) + '</div>';
   html += '</div>';
 
   container.innerHTML = html;
