@@ -126,7 +126,9 @@ function openRuntimeTaskModal(rtId, rtName) {
   </div>`;
   document.body.appendChild(modal);
 
-  API.get('/runtime/runtimes/' + rtId + '/tasks?limit=50').then(d => {
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const repoParam = repo && repo.fullName ? '&repo=' + encodeURIComponent(repo.fullName) : '';
+  API.get('/runtime/runtimes/' + rtId + '/tasks?limit=50' + repoParam).then(d => {
     renderRuntimeTaskList(document.getElementById('rtTaskModalBody'), d.tasks || [], rtName);
   }).catch(e => {
     document.getElementById('rtTaskModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';

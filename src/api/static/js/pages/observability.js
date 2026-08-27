@@ -49,8 +49,11 @@ function refreshObs() {
   const c = document.getElementById('obsContent');
   if (!c) return;
   c.innerHTML = '<div class="loading">加载中...</div>';
+  // 获取当前选中仓库，过滤仅该仓库的任务
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
   Promise.all([
-    API.get('/dashboard/ops/overview').catch(() => null),
+    API.get('/dashboard/ops/overview' + repoParam).catch(() => null),
     fetch('/health/realtime').then(r => r.json()).catch(() => null),
     fetch('/metrics').then(r => r.text()).catch(() => null),
   ]).then(([ops, realtime, metricsText]) => {

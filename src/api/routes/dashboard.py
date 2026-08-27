@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("/ops/overview")
-async def get_ops_overview():
+async def get_ops_overview(repo: str = ""):
     """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
 
     参考 multica BusinessSampler（metrics/business_sampler.go）的实时采样设计，
@@ -19,6 +19,7 @@ async def get_ops_overview():
 
     无认证：运维只读数据，不涉及敏感信息（与 /health/realtime 同级）。
     数据全部来自 agent_tasks / agent_runtimes 表的实时 SQL 查询。
+    repo 参数：仓库名（requiredsa/hello-flask），过滤仅该仓库的任务。
     """
     from src.session_manager import db, db_lock
     from src.runtime.health import derive_runtime_health
@@ -27,6 +28,14 @@ async def get_ops_overview():
 
     now_ts = _time.time()
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    # repo 过滤条件
+    _repo_filter = ""
+    _repo_params = []
+    if repo:
+        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
+        _repo_filter = " AND repo_key=?"
+        _repo_params = [repo_key]
     # stuck 阈值：running 超 15 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=1200s=20min，15min 能在超时前预警）
     stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
 
@@ -37,7 +46,7 @@ async def get_ops_overview():
         task_status_counts = {"queued": 0, "dispatched": 0, "running": 0,
                               "completed": 0, "failed": 0, "cancelled": 0}
         try:
-            c.execute("SELECT status, COUNT(*) FROM agent_tasks GROUP BY status")
+            c.execute(f"SELECT status, COUNT(*) FROM agent_tasks WHERE 1=1{_repo_filter} GROUP BY status", tuple(_repo_params))
             for status, count in c.fetchall():
                 if status in task_status_counts:
                     task_status_counts[status] = count
@@ -52,9 +61,10 @@ async def get_ops_overview():
         try:
             c.execute(
                 "SELECT id, agent_type, runtime_id, started_at, repo_key, issue_id, event_seq "
-                "FROM agent_tasks WHERE status='running' AND started_at IS NOT NULL AND started_at < ? "
-                "ORDER BY started_at ASC LIMIT 100",
-                (stuck_cutoff,),
+                "FROM agent_tasks WHERE status='running' AND started_at IS NOT NULL AND started_at < ?"
+                + _repo_filter +
+                " ORDER BY started_at ASC LIMIT 100",
+                (stuck_cutoff,) + tuple(_repo_params),
             )
             for r in c.fetchall():
                 stuck_tasks.append({
@@ -70,7 +80,8 @@ async def get_ops_overview():
         try:
             c.execute(
                 "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, event_seq, result_text, exit_code, errors "
-                "FROM agent_tasks WHERE status='failed' ORDER BY completed_at DESC"
+                "FROM agent_tasks WHERE status='failed'" + _repo_filter + " ORDER BY completed_at DESC",
+                tuple(_repo_params),
             )
             for r in c.fetchall():
                 # errors 字段是 JSON 数组字符串，解析后取前 3 条
@@ -96,7 +107,8 @@ async def get_ops_overview():
         try:
             c.execute(
                 "SELECT agent_type, status, COUNT(*) FROM agent_tasks "
-                "WHERE status IN ('queued','dispatched','running') GROUP BY agent_type, status"
+                "WHERE status IN ('queued','dispatched','running')" + _repo_filter + " GROUP BY agent_type, status",
+                tuple(_repo_params),
             )
             for atype, status, count in c.fetchall():
                 key = atype or "unknown"
@@ -142,8 +154,8 @@ async def get_ops_overview():
         try:
             c.execute(
                 "SELECT status, COUNT(*) FROM agent_tasks "
-                "WHERE created_at LIKE ? GROUP BY status",
-                (today_prefix + "%",),
+                "WHERE created_at LIKE ?" + _repo_filter + " GROUP BY status",
+                (today_prefix + "%",) + tuple(_repo_params),
             )
             for status, count in c.fetchall():
                 if status in today_stats:

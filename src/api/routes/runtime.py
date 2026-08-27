@@ -434,7 +434,7 @@ async def cancel_task(task_id: str, user: dict = Depends(get_current_user)):
 
 @router.get("/runtimes/{runtime_id}/tasks")
 async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
-                             status: str = "", limit: int = 50):
+                             status: str = "", limit: int = 50, repo: str = ""):
     """设备任务列表（M4 前端设备 [查看任务]）。"""
     from src.session_manager import db, db_lock
     clauses = ["runtime_id=?"]
@@ -442,6 +442,10 @@ async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_u
     if status:
         clauses.append("status=?")
         params.append(status)
+    if repo:
+        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
+        clauses.append("repo_key=?")
+        params.append(repo_key)
     with db_lock:
         c = db.cursor()
         c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at, issue_id, event_seq FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
