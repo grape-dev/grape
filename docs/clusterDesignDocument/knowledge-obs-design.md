@@ -214,133 +214,168 @@ else:
 ### 6. src/runtime/service.py
 - `load_project_info()` — 加 obs_key 判断 + try-except 回退本地
 
-## 八、知识交付方式——OBS URL + 三级降级（统一结构）
+## 八、知识交付方式——文件 URL + 三级降级（通用设计，不绑死 OBS）
 
 ### 背景
 
 当前方式：服务端读知识库内容 → 打成 JSON `{rel_path: content}` → 存到 agent_tasks 表 → Worker 解析 JSON → 落地到本地文件。
 
-问题：知识库内容大时 JSON 膨胀 → agent_tasks 表字段太大 → claim 查询变慢。集群后 Worker 和服务端不在同一台机器，但 Worker 有 OBS AK/SK 可以直接访问 OBS 桶。
+问题：知识库内容大时 JSON 膨胀 → agent_tasks 表字段太大 → claim 查询变慢。集群后 Worker 和服务端不在同一台机器，但 Worker 有存储 AK/SK 可以直接访问存储桶。
 
-### 方案：统一结构 + 三级降级
+### 方案：字段分开存 + 三级降级（通用设计）
 
-把 knowledge_files 从 `{rel_path: content}` 改为 `{rel_path: {content, obs_url, obs_key}}`，Worker 按优先级取。
+现有 `project_info_files` / `knowledge_files` 保持 `{rel_path: content}` 不变 → 老 Worker 不受影响。
 
-**统一结构：**
+新增 2 个字段存文件 URL + storage_key（通用命名，不绑死 OBS）：
+
+**通用结构：**
 ```json
-knowledge_files = {
-    "project-info/knowledge.md": {
-        "content": "知识正文...",           // 兜底
-        "obs_url": "https://obs.xxx/...",    // 优先用（temporary_url，有效期 1 小时）
-        "obs_key": "knowledge/xxx/yyy.md"    // 直连 OBS 用（read_bytes）
-    },
-    "project-info/member/user1/design.md": {
-        "content": "设计文档...",
-        "obs_url": "https://obs.xxx/...",
-        "obs_key": "knowledge/xxx/member/user1/design.md"
+project_info_file_urls = {
+    "owner/repo/project-info/project-graph.md": {
+        "url": "https://obs.xxx/...",         // 优先用（HTTP 下载地址，当前是 OBS temporary_url）
+        "storage_key": "project-info/xxx/project-graph.md"  // 直连存储用（当前是 OBS key）
+    }
+}
+
+knowledge_file_urls = {
+    "owner/repo/project-info/knowledge.md": {
+        "url": "https://obs.xxx/...",
+        "storage_key": "knowledge/xxx/knowledge.md"
     }
 }
 ```
 
+- `url` —— 任何 HTTP 下载地址（当前是 OBS temporary_url，以后可以是 MinIO / OSS 的 URL）
+- `storage_key` —— 存储对象键（当前是 OBS key，以后可以是任意存储的 key）
+
 **服务端 enqueue_task 打包逻辑：**
 ```python
-for rel_path, content in knowledge_files(repo_key, agent_type, issue_num).items():
-    obs_key = knowledge_obs_key(repo_key, scope, ...)
-    obs_url = ""
-    if obs_key and storage:
-        obs_url = storage.temporary_url(obs_key, expires=3600)  # 1 小时有效
-    knowledge_files[rel_path] = {
-        "content": content,        # 兜底
-        "obs_url": obs_url,        # 优先用
-        "obs_key": obs_key or "",  # 直连 OBS
+# project_info_file_urls
+project_info_file_urls = {}
+for rel_path, content in project_info_files.items():
+    storage_key = knowledge_obs_key(repo_key, scope, ...)
+    url = ""
+    if storage_key and storage:
+        url = storage.temporary_url(storage_key, expires=3600)  # 1 小时有效
+    project_info_file_urls[rel_path] = {
+        "url": url,
+        "storage_key": storage_key or "",
+    }
+
+# knowledge_file_urls（同上）
+knowledge_file_urls = {}
+for rel_path, content in knowledge_files.items():
+    storage_key = knowledge_obs_key(repo_key, scope, ...)
+    url = ""
+    if storage_key and storage:
+        url = storage.temporary_url(storage_key, expires=3600)
+    knowledge_file_urls[rel_path] = {
+        "url": url,
+        "storage_key": storage_key or "",
     }
 ```
 
-**Worker 侧三级降级逻辑：**
+**Worker 侧三级降级逻辑（通用，不绑死 OBS）：**
 ```python
-for rel_path, info in knowledge_files.items():
-    content = None
+def _resolve_file_content(rel_path, content, file_urls):
+    """三级降级：url 下载 → content 兜底 → storage_key 直连存储"""
+    meta = file_urls.get(rel_path, {})
 
-    # 1. 优先 obs_url 下载
-    url = info.get("obs_url", "")
+    # 1. 优先 url 下载（HTTP GET，通用）
+    url = meta.get("url", "")
     if url:
         try:
-            content = http_download(url)  # aiohttp.get(url)
+            downloaded = http_download(url)  # urllib/aiohttp
+            if downloaded:
+                return downloaded
         except:
-            content = None  # 下载失败，降级
+            pass  # 下载失败，降级
 
     # 2. 降级到 content（服务端兜底打包）
-    if not content:
-        content = info.get("content", "")
+    if content:
+        return content
 
-    # 3. 降级到 Worker 直连 OBS 桶
-    if not content:
-        obs_key = info.get("obs_key", "")
-        if obs_key:
-            try:
-                content = storage.read_bytes(obs_key)  # Worker 用 AK/SK 直连
-            except:
-                content = ""  # OBS 也读不到，空内容兜底
+    # 3. 降级到 Worker 直连存储（storage_key + 统一存储接口）
+    storage_key = meta.get("storage_key", "")
+    if storage_key:
+        try:
+            return storage.read_bytes(storage_key)  # 统一接口，OBS 只是当前实现
+        except:
+            pass
 
-    # 4. 落地到本地文件
-    write_file(know_dir / rel_path, content)
+    # 4. 空内容
+    return ""
+
+# project_info_files 降落
+proj_urls = json.loads(task.get("project_info_file_urls") or "{}")
+for rel, content in proj_files.items():
+    write_file(proj_dir / rel, _resolve_file_content(rel, content, proj_urls))
+
+# knowledge_files 降落
+know_urls = json.loads(task.get("knowledge_file_urls") or "{}")
+for rel, content in know_files.items():
+    write_file(know_dir / rel, _resolve_file_content(rel, content, know_urls))
 ```
 
 ### 降级场景
 
-| 场景 | obs_url | content | obs_key | Worker 用什么 | 说明 |
+| 场景 | url | content | storage_key | Worker 用什么 | 说明 |
 |------|:---:|:---:|:---:|------|------|
-| 正常 | 有 | 有 | 有 | obs_url 下载 | 最常用，任务表轻量 |
-| URL 过期 | 过期 | 有 | 有 | content | URL 1 小时后过期，Worker 用 content |
-| URL + content 都空 | 空 | 空 | 有 | obs_key 直连 OBS | Worker 用 AK/SK 直读 OBS |
-| OBS 也不可用 | 空 | 空 | 有 | 空内容 | 不崩溃 |
-| OBS 未启用 | 空 | 有 | 空 | content | OBS 未配置时回退当前方式 |
+| 正常 | 有 | 有 | 有 | url 下载 | 最常用 |
+| URL 过期 | 过期 | 有 | 有 | content | URL 1 小时后过期 |
+| URL + content 都空 | 空 | 空 | 有 | storage_key 直连存储 | Worker 用 AK/SK 直读 |
+| 存储也不可用 | 空 | 空 | 有 | 空内容 | 不崩溃 |
+| 存储未启用 | 空 | 有 | 空 | content | 回退当前方式 |
 
 ### 向后兼容
 
-老 Worker 只读 `info.get("content")` —— 不认识 obs_url / obs_key 时不影响：
-```python
-# 老 Worker 代码（向后兼容）
-for rel_path, content in knowledge_files.items():
-    if isinstance(content, str):       # 老格式 {rel_path: content}
-        write_file(rel_path, content)
-    else:                               # 新格式 {rel_path: {content, obs_url, obs_key}}
-        write_file(rel_path, content.get("content", ""))
-```
+老 Worker 只读 `project_info_files` / `knowledge_files` → 不读 `file_urls` → 不受影响。
+
+| 服务端 | Worker | 结果 | 说明 |
+|--------|--------|:---:|------|
+| 老格式 | 老 Worker | ✅ | 直接用 content |
+| 老格式 | 新 Worker | ✅ | content 不为空直接用 |
+| 新格式 | 老 Worker | ✅ | 只读 content 不受影响 |
+| 新格式 | 新 Worker | ✅ | 三级降级 |
+
+4 种场景全部兼容，无部署顺序要求。
+
+### 通用性（不绑死 OBS）
+
+| 层 | 当前实现 | 换存储时改什么 |
+|----|---------|--------------|
+| DB 字段名 | file_urls / url / storage_key | 不改（通用命名） |
+| 服务端 | storage.temporary_url() | 换 storage driver |
+| Worker 下载 | HTTP GET url | 不改（通用 HTTP） |
+| Worker 直连 | storage.read_bytes(key) | 换 storage driver |
+
+换存储（比如 MinIO / 阿里云 OSS）时只换 `src/storage/` 下的 driver，字段名和 Worker 逻辑不用改。
 
 ### 优势
 
 | 对比 | 当前方式 | 新方式 |
 |------|---------|--------|
-| 任务表大小 | 存全部 content | 存 content + URL + key（content 兜底） |
+| 任务表大小 | 存全部 content | content 兜底 + URL + key（content 可后续优化去掉） |
 | Worker 取内容 | 直接用 content | 优先 URL 下载，失败降级 |
-| URL 过期 | 不适用 | 降级到 content |
-| OBS 不可用 | 不适用 | 降级到空内容 |
-| 网络 | Worker 不需网络 | Worker 需访问 OBS（有 AK/SK） |
-| 兼容性 | — | 老 Worker 只读 content 不受影响 |
+| 存储 | 绑死本地文件 | 通用存储接口，不绑死 OBS |
+| 兼容性 | — | 老 Worker 不受影响 |
+| 扩展性 | — | 换存储只换 driver |
 
 ### 改动文件（更新第七节）
 
 | # | 文件 | 改动内容 |
 |---|------|---------|
-| 3 | knowledge.py | knowledge_files() 返回值从 `{rel_path: content}` 改为 `{rel_path: {content, obs_url, obs_key}}` |
-| 6 | runtime/service.py | enqueue_task 打包时生成 obs_url + obs_key |
-| — | runtime/agent.py | Worker 侧三级降级逻辑 |
+| 3 | knowledge.py | 新增 knowledge_obs_key() 生成 storage_key |
+| 6 | runtime/service.py | enqueue_task 打包时生成 file_urls（url + storage_key） |
+| — | runtime/agent.py | Worker 侧三级降级逻辑（通用，_resolve_file_content） |
+| — | db_setup.py | agent_tasks DDL + migration 加 file_urls 字段 |
 
-### project_info_files 也走同样结构
+### DB 新增字段
 
-project_info_files（基线文件 project-graph.md 等）也改为统一结构：
-```json
-project_info_files = {
-    "project-graph.md": {
-        "content": "...",
-        "obs_url": "https://obs.xxx/...",
-        "obs_key": "project-info/xxx/project-graph.md"
-    }
-}
-```
-
-Worker 侧 project_info_files 和 knowledge_files 用同一个降级逻辑。
+| # | 表.字段 | 类型 | 默认值 | 用途 |
+|---|---------|------|--------|------|
+| 1 | agent_tasks.project_info_file_urls | TEXT | '' | JSON: {rel_path: {url, storage_key}} |
+| 2 | agent_tasks.knowledge_file_urls | TEXT | '' | JSON: {rel_path: {url, storage_key}} |
 
 ## 九、不需要改动的
 
