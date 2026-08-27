@@ -77,10 +77,16 @@ def get_scenes() -> list[dict]:
     return [{"id": k, "name": v.get("name", k)} for k, v in data.get("scenes", {}).items()]
 
 
-def get_pipeline_config(scene_id: str = "default") -> Optional[dict]:
-    """Return pipeline config for a scene: {name, nodes: [...], onboarding}."""
+def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
+    """Return pipeline config for a scene: {name, nodes: [...], onboarding}.
+
+    查找顺序：内置 pipelines.json → 成员上传的 pipelines-user.json → default 回退。
+    """
     data = _load_pipelines()
     scene = data.get("scenes", {}).get(scene_id)
+    # 内置没有 → 尝试从成员上传的 pipelines-user.json 加载
+    if not scene and repo_key:
+        scene = _load_user_scene(repo_key, scene_id)
     if not scene:
         scene = data.get("scenes", {}).get("default")
     if not scene:
@@ -92,9 +98,30 @@ def get_pipeline_config(scene_id: str = "default") -> Optional[dict]:
     }
 
 
-def get_node_by_tag(scene_id: str, tag: str) -> Optional[dict]:
+def _load_user_scene(repo_key: str, scene_id: str) -> Optional[dict]:
+    """从成员上传的 pipelines-user.json 加载指定场景。"""
+    try:
+        from src.api.knowledge import member_files
+        _mf = member_files(repo_key)
+        for rel, content in _mf.items():
+            if not rel.endswith("pipelines-user.json"):
+                continue
+            import json as _json
+            try:
+                _user_pipes = _json.loads(content)
+            except Exception:
+                continue
+            _scene = _user_pipes.get("scenes", {}).get(scene_id)
+            if _scene:
+                return _scene
+    except Exception:
+        pass
+    return None
+
+
+def get_node_by_tag(scene_id: str, tag: str, repo_key: str = "") -> Optional[dict]:
     """Find a node by tag in a scene's pipeline."""
-    cfg = get_pipeline_config(scene_id)
+    cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         return None
     for node in cfg.get("nodes", []):

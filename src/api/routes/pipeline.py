@@ -64,6 +64,18 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         return None
 
     title = issue_events[0].get("title", "") or issue_id
+    # 优先从 tasks 表获取 Issue 真实标题（event title 常为 issue_opened 等类型名）
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        _iss_num = int(str(issue_id).lstrip("#"))
+        with _dl:
+            _c = _db.cursor()
+            _c.execute("SELECT title FROM tasks WHERE repo_key=? AND issue_number=?", (repo_key, _iss_num))
+            _t = _c.fetchone()
+            if _t and _t[0]:
+                title = _t[0]
+    except Exception:
+        pass
     stages = []
     stage_statuses = []
 
@@ -132,6 +144,15 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
     stage = (_st.get("stage") if _st else "") or "vod"
     # Issue 级开发场景（VOD 判定，空=仓库默认）
     scene_id = (_st.get("scene_id") if _st else "") or ""
+    # 解析场景名称（内置 + 成员自定义）
+    scene_name = ""
+    issue_pipeline_config = None
+    if scene_id:
+        from src.api.pipeline_config import get_pipeline_config
+        _cfg = get_pipeline_config(scene_id, repo_key=repo_key)
+        if _cfg:
+            scene_name = _cfg.get("name", scene_id)
+            issue_pipeline_config = _cfg
 
     # 总执行时长：所有已完成事件的 duration 之和
     total_duration = 0.0
@@ -148,6 +169,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         "result": result,
         "stage": stage,
         "scene_id": scene_id,
+        "scene_name": scene_name,
+        "pipeline_config": issue_pipeline_config,
         "agents": involved_agents,
         "current_owner": current_owner,
         "event_count": len(issue_events),

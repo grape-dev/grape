@@ -219,6 +219,10 @@ function openTaskCreateModal() {
   const defaultRepo = repo ? repo.fullName : '';
   if (_taskCreateModal) _taskCreateModal.remove();
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  // 异步加载可用场景列表
+  let _sceneOptions = '<option value="">不指定（由 VOD 自动识别）</option>';
+
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
@@ -231,6 +235,9 @@ function openTaskCreateModal() {
       <label style="display:flex;flex-direction:column;gap:4px;color:#333">描述
         <textarea id="tcCreateDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical" placeholder="任务描述"></textarea>
       </label>
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">开发场景 <span style="font-size:11px;color:#888">不选则由 VOD 审视时自动识别</span>
+        <select id="tcCreateScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
+      </label>
       <div style="font-size:11px;color:#888">Issue 责任人 = 系统 General Settings 的 Account（当前登录账号）</div>
       <div id="tcError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
     </div>
@@ -242,8 +249,21 @@ function openTaskCreateModal() {
   ov.id = 'taskCreateOverlay';
   document.body.appendChild(ov);
   _taskCreateModal = ov;
-  // 点击遮罩空白处关闭：需 mousedown 和 click 都落在 ov 上才关闭，
-  // 防止在输入框拖选文字（mousedown 在 input、mouseup 落到 ov）时误关。
+
+  // 异步加载场景列表填充下拉框
+  API.get('/scenes/with-pipeline').then(function(d) {
+    const sel = document.getElementById('tcCreateScene');
+    if (!sel) return;
+    const scenes = d.scenes || [];
+    scenes.forEach(function(s) {
+      const opt = document.createElement('option');
+      opt.value = s.id;
+      opt.textContent = s.name || s.id;
+      sel.appendChild(opt);
+    });
+  }).catch(function(){});
+
+  // 点击遮罩空白处关闭
   let _modalDownOnOverlay = false;
   ov.addEventListener('mousedown', e => { _modalDownOnOverlay = (e.target === ov); });
   ov.addEventListener('click', e => { if (e.target === ov && _modalDownOnOverlay) ov.remove(); });
@@ -254,13 +274,14 @@ function createTaskSubmit() {
   const repoKey = repo ? repo.fullName : '';
   const title = (document.getElementById('tcCreateTitle') || {}).value || '';
   const desc = (document.getElementById('tcCreateDesc') || {}).value || '';
+  const sceneId = (document.getElementById('tcCreateScene') || {}).value || '';
   const errEl = document.getElementById('tcError');
   const showErr = (msg) => { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
   if (!repoKey.trim()) { showErr('请先在仓库页选择仓库，再创建任务'); return; }
   if (!title.trim()) { showErr('请填写任务标题'); return; }
   const btn = document.getElementById('tcSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
-  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim()})
+  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
     .then(d => {
       const ov = document.getElementById('taskCreateOverlay');
       if (ov) ov.remove();

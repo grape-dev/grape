@@ -50,7 +50,7 @@ def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = 
                 scene_id = get_repo_scene(repo_key) or "default"
             except Exception:
                 scene_id = "default"
-        node = get_node_by_tag(scene_id, agent_type)
+        node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key)
         if node:
             return node.get("skill", "")
     except Exception as e:

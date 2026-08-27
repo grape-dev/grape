@@ -9,9 +9,13 @@ const stageLabels = {vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE',d
 const _TAG_COLORS = {vod:'var(--pk)',issue:'var(--r)',coding:'var(--a)',qa:'var(--pu)',sre:'var(--or)',chat:'var(--sk)'};
 const _MODE_ICONS = {emit:'\u2192',waterfall:'\u25c7',serial:'\u21bb',parallel:'\u21c4'};
 
-function _getPipeNodes(data) {
-  // Use pipeline_config from API if available, else fallback to hardcoded
-  var cfg = data && data.pipeline_config;
+function _getPipeNodes(data, pipe) {
+  // 优先用 Issue 级 pipeline_config（按 scene_id 对应的节点列表）
+  var cfg = pipe && pipe.pipeline_config;
+  if (!cfg || !cfg.nodes || cfg.nodes.length === 0) {
+    // 回退到仓库级 pipeline_config
+    cfg = data && data.pipeline_config;
+  }
   if (cfg && cfg.nodes && cfg.nodes.length > 0) return cfg.nodes;
   // Fallback: construct from hardcoded arrays
   return agentIds.map(function(id, i) {
@@ -41,10 +45,10 @@ function selPipe(idx) {
   const owner = displayPipe.current_owner || '';
   const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>' : ' &nbsp;<span class="ts t2">空闲</span>';
 
-  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 \u5f53\u524d\u8d23\u4efb\u4eba: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
+  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 \u5f53\u524d\u8d23\u4efb\u4eba: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
   // Dynamic pipeline nodes (event-dispatch-redesign-v2.md Phase 2)
-  var pipeNodes = _getPipeNodes(data);
+  var pipeNodes = _getPipeNodes(data, displayPipe);
   pipeNodes.forEach(function(node, i) {
     var tag = node.tag || node.id;
     var sc = statuses[i] || 0;
@@ -112,9 +116,9 @@ function renderPipeline(data) {
     const _repoFullName = (data.repo || '').replace(/^gitcode:/, '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
-    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 \u5f53\u524d\u8d23\u4efb\u4eba: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
+    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 \u5f53\u524d\u8d23\u4efb\u4eba: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
-    var pipeNodes2 = _getPipeNodes(data);
+    var pipeNodes2 = _getPipeNodes(data, displayPipe);
     pipeNodes2.forEach(function(node, i) {
       var tag = node.tag || node.id;
       var sc = statuses[i] || 0;
@@ -168,7 +172,7 @@ function renderPipeline(data) {
   html += `${flowHtml}${pagerHtml}`;
 
   // 表格区域（独立滚动）
-  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>Duration</th><th>Agents</th><th>阶段</th><th>场景</th><th>责任人</th></tr>`;
+  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>标题</th><th>Duration</th><th>Agents</th><th>阶段</th><th>场景</th><th>责任人</th></tr>`;
   pagePipes.forEach((p, i) => {
     const realIdx = pipeStart + i;
     const s = realIdx === _pipeActiveIdx ? ' sel' : '';
@@ -184,13 +188,18 @@ function renderPipeline(data) {
     const owner = p.current_owner || '—';
     const _sceneId = p.scene_id || '';
     const _sceneLabels = {default:'通用开发','cloud-native':'云原生','iac':'IaC','agent-dev':'Agent开发','skill-dev':'Skill开发','api-skill-dev':'API Skill','blog-publish':'博客发布'};
-    const sceneLabel = _sceneId ? (_sceneLabels[_sceneId] || _sceneId) : '—';
+    const sceneLabel = _sceneId ? (p.scene_name || _sceneLabels[_sceneId] || _sceneId) : '—';
     const sceneBadge = _sceneId ? `<span class="tg tg-i" style="font-size:10px">${sceneLabel}</span>` : '<span class="ts t3">—</span>';
+    const _issueNum = String(p.issue_id || '').replace(/^#/, '');
+    const _repoParts2 = (data.repo || '').replace(/^gitcode:/, '').split('/');
+    const _issueUrl = (_issueNum && _repoParts2.length === 2) ? `https://gitcode.com/${_repoParts2[0]}/${_repoParts2[1]}/issues/${_issueNum}` : '';
+    const _esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const execBadge = p.executing
       ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ 执行中</span>'
       : '<span class="ts t2">空闲</span>';
     html += `<tr class="pipe-row${s}" data-idx="${realIdx}" onclick="selPipe(${realIdx})" ondblclick="pipeRowDblClick(${realIdx})">
       <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
+      <td><a href="${_issueUrl || '#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${_esc(p.title || '—')}</a></td>
       <td>${dur}</td>
       <td>${agentTags}</td>
       <td><span class="${stageClass}">${stageName}</span></td>
