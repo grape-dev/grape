@@ -845,6 +845,7 @@ def _fail_event(seq: int, reason: str):
 
     事件在 append_event 时即为 running，若后续入队/启动失败而不更新，
     事件将永远 running（无任务支撑、无详细记录）。所有失败路径统一走这里收口。
+    同步更新 agent_tasks 表 status=failed（防止 events 已 failed 但 agent_tasks 仍 running）。
     """
     if not seq:
         return
@@ -854,6 +855,21 @@ def _fail_event(seq: int, reason: str):
         update_event_complete(seq, "failed", exit_code=1,
                               completed_at=datetime.now(timezone.utc).isoformat(),
                               result=reason)
+        # 同步更新 agent_tasks 表（如果有关联的 task）
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE agent_tasks SET status='failed', completed_at=?, "
+                "exit_code=COALESCE(exit_code, 1), "
+                "errors=COALESCE(errors, ?) "
+                "WHERE event_seq=? AND status IN ('running','queued','dispatched')",
+                (datetime.now(timezone.utc).isoformat(),
+                 json.dumps([reason][:500]) if reason else None, seq)
+            )
+            db.commit()
+            if c.rowcount > 0:
+                log.info(f"Pipeline: synced agent_tasks event_seq={seq} -> failed")
         log.info(f"Pipeline: event {seq} -> failed ({reason[:80]})")
     except Exception as e:
         log.warning(f"Pipeline: _fail_event failed for seq={seq}: {e}")
