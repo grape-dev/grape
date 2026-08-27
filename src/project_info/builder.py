@@ -125,6 +125,8 @@ def _write_to_obs(repo_key: str, name: str, content: str):
         storage_key = f"project-info/{repo_key}/{name}"
         storage.save_bytes(storage_key, content.encode("utf-8"))
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
+        # file_path 用 WORKSPACE_DIR 相对路径——和 write_knowledge 格式一致
+        file_path = os.path.relpath(os.path.join(_pi_dir(repo_key), name), WORKSPACE_DIR)
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
@@ -132,7 +134,7 @@ def _write_to_obs(repo_key: str, name: str, content: str):
                 "INSERT OR REPLACE INTO agent_shared_knowledge "
                 "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by) "
                 "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'vod')",
-                (repo_key, f"project-info/{name}", storage_key, content_hash)
+                (repo_key, file_path, storage_key, content_hash)
             )
             db.commit()
     except Exception as e:

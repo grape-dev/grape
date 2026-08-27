@@ -366,12 +366,7 @@ async def knowledge_sync_loop():
                 for row in rows:
                     rid, file_path, scope, repo_key, agent_type, issue_num = row
                     try:
-                        # 兼容新老 file_path 格式：老格式相对 WORKSPACE_DIR（owner/repo/...），新格式相对 repo_base（project-info/...）
-                        owner, rname = _owner_repo(repo_key)
-                        if file_path.startswith(f"{owner}/{rname}/"):
-                            full_path = os.path.join(WORKSPACE_DIR, file_path)  # 老格式
-                        else:
-                            full_path = os.path.join(WORKSPACE_DIR, owner, rname, file_path)  # 新格式
+                        full_path = os.path.join(WORKSPACE_DIR, file_path)
                         content = ""
                         with open(full_path, encoding="utf-8") as f:
                             content = f.read()
