@@ -503,6 +503,49 @@ async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_u
         ]}
 
 
+@router.get("/runtimes/{runtime_id}/sessions")
+async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user),
+                                repo: str = ""):
+    """引擎 session 列表（devops_agent_session 表）。
+
+    返回该引擎下的所有 session，按 repo 过滤。
+    session 的 status: idle（空闲）/ running（运行中）。
+    """
+    from src.session_manager import db, db_lock
+
+    clauses = ["runtime_id=?"]
+    params: list = [runtime_id]
+    if repo:
+        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
+        clauses.append("repo_key=?")
+        params.append(repo_key)
+
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            f"SELECT id, agent_type, repo_key, status, skill, created_at, last_active_at, "
+            f"im_provider, im_app_id, enable, subscribe_events "
+            f"FROM devops_agent_session WHERE {' AND '.join(clauses)} ORDER BY status DESC, last_active_at DESC",
+            params
+        )
+        sessions = []
+        for r in c.fetchall():
+            sessions.append({
+                "id": r[0],
+                "agent_type": r[1] or "",
+                "repo_key": (r[2] or "").replace("gitcode:", ""),
+                "status": r[3] or "idle",
+                "skill": r[4] or "",
+                "created_at": normalize_event_time(r[5]),
+                "last_active_at": normalize_event_time(r[6]),
+                "im_provider": r[7] or "",
+                "im_app_id": r[8] or "",
+                "enable": bool(r[9]),
+                "subscribe_events": r[10] or "",
+            })
+        return {"sessions": sessions, "total": len(sessions)}
+
+
 @router.get("/credentials/{cid}/tasks")
 async def list_credential_tasks(cid: int, user: dict = Depends(get_current_user),
                                 status: str = "", limit: int = 50):

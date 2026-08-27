@@ -166,8 +166,8 @@ function renderOverview(ops, rt, mt) {
       const maxC = rt.max_concurrent || 0;
       const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
       const modeTag = rt.mode === 'local' ? '<span class="tg tg-ch">本机</span>' : '<span class="tg tg-c">远端</span>';
-      runtimeTable += `<tr style="cursor:pointer" onclick="openRuntimeTaskModal(${rt.id}, '${(rt.name||'').replace(/'/g,"")}')">
-        <td>${dot} <b>${rt.name}</b></td>
+      runtimeTable += `<tr style="cursor:pointer" onclick="openRuntimeSessionModal(${rt.id}, '${(rt.name||'').replace(/'/g,"")}')">
+         <td>${dot} <b>${rt.name}</b></td>
         <td><span class="ts t3">${rt.version || '-'}</span></td>
         <td><span style="color:${hc};font-weight:600">${rt.health}</span></td>
         <td><span style="color:${loadColor}">${running}/${maxC}</span></td>
@@ -633,6 +633,157 @@ function parseLabeledKeys(text, name, labelKey) {
 }
 
 // ===== Runtime 任务列表 + 日志弹窗（从 runtimes.js 迁移）=====
+
+// ===== Runtime Session 列表弹窗 =====
+function openRuntimeSessionModal(rtId, rtName) {
+  const old = document.getElementById('rtSessionModal');
+  if (old) old.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'rtSessionModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  modal.innerHTML = '<div class="cd" style="width:760px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
+    '<h3 style="font-size:14px;font-weight:600">' + rtName + ' · Session 列表</h3>' +
+    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtSessionModal\').remove()">✕ 关闭</button>' +
+    '</div>' +
+    '<div id="rtSessionModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载 session...</div></div>' +
+    '</div>';
+  document.body.appendChild(modal);
+
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
+  API.get('/runtime/runtimes/' + rtId + '/sessions' + repoParam).then(d => {
+    renderSessionList(document.getElementById('rtSessionModalBody'), d.sessions || [], rtName);
+  }).catch(e => {
+    document.getElementById('rtSessionModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+  });
+}
+
+function renderSessionList(container, sessions, rtName) {
+  if (!sessions.length) {
+    container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">该引擎在此仓库下暂无 session</div>';
+    return;
+  }
+
+  // 分为运行中和空闲两组
+  const running = sessions.filter(s => s.status === 'running');
+  const idle = sessions.filter(s => s.status !== 'running');
+
+  const statusIcon = { running: '🔄', idle: '💤' };
+  const statusColor = { running: 'var(--a)', idle: 'var(--t3)' };
+
+  function sessionTable(list) {
+    if (!list.length) return '<div class="ts t3" style="padding:8px">无</div>';
+    let html = '<div class="tw"><table><thead><tr><th>Agent</th><th>仓库</th><th>Skill</th><th>状态</th><th>最后活跃</th></tr></thead><tbody>';
+    list.forEach(s => {
+      const enc = encodeURIComponent(JSON.stringify({agent:s.agent_type, repo:s.repo_key, status:s.status, last:s.last_active_at, sid:s.id.substring(0,12)}));
+      html += '<tr style="cursor:pointer" onclick="openSessionLogModal(\'' + s.id + '\',\'' + enc + '\')">' +
+        '<td><b>' + (s.agent_type||'-') + '</b></td>' +
+        '<td class="ts t3">' + (s.repo_key||'-').substring(0,25) + '</td>' +
+        '<td class="ts t3">' + (s.skill||'-') + '</td>' +
+        '<td><span style="color:' + (statusColor[s.status]||'var(--t3)') + '">' + (statusIcon[s.status]||'') + ' ' + s.status + '</span></td>' +
+        '<td class="ts t3">' + (s.last_active_at||'').substring(0,16) + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  let html = '';
+  // 运行中（默认展开）
+  html += '<div style="border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:10px">';
+  html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;background:var(--c)" onclick="toggleSessionGroup(\'rtSessionRunning\')">';
+  html += '<span id="rtSessionRunning-arrow" style="font-size:12px">▾</span>';
+  html += '<b style="font-size:12px">🔄 运行中</b>';
+  html += '<span class="ts t3" style="margin-left:auto">' + running.length + ' 个</span>';
+  html += '</div>';
+  html += '<div id="rtSessionRunning" style="padding:8px 12px;border-top:1px solid var(--b)">' + sessionTable(running) + '</div>';
+  html += '</div>';
+
+  // 已完成/空闲（默认收起）
+  html += '<div style="border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:10px">';
+  html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;background:var(--c)" onclick="toggleSessionGroup(\'rtSessionIdle\')">';
+  html += '<span id="rtSessionIdle-arrow" style="font-size:12px">▸</span>';
+  html += '<b style="font-size:12px">💤 空闲 / 已完成</b>';
+  html += '<span class="ts t3" style="margin-left:auto">' + idle.length + ' 个</span>';
+  html += '</div>';
+  html += '<div id="rtSessionIdle" style="padding:8px 12px;border-top:1px solid var(--b);display:none">' + sessionTable(idle) + '</div>';
+  html += '</div>';
+
+  container.innerHTML = html;
+}
+
+function toggleSessionGroup(groupId) {
+  const body = document.getElementById(groupId);
+  if (!body) return;
+  const arrow = document.getElementById(groupId + '-arrow');
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+    if (arrow) arrow.textContent = '▾';
+  } else {
+    body.style.display = 'none';
+    if (arrow) arrow.textContent = '▸';
+  }
+}
+
+// 点击 session 行 → 打开日志弹窗（复用 openTaskLogModal 样式）
+// session 没有直接的 task_id，但可以通过 agent_tasks 中的 issue_id + event_seq 关联
+// 这里用 session 的 agent_type + repo_key 查最近的任务日志
+function openSessionLogModal(sessionId, infoEnc) {
+  let info = {};
+  try { info = JSON.parse(decodeURIComponent(infoEnc || '')); } catch(e) {}
+
+  const old = document.getElementById('rtLogModal');
+  if (old) old.remove();
+
+  const titleParts = [];
+  if (info.repo) titleParts.push('<span class="ts t3">' + info.repo + '</span>');
+  if (info.agent) titleParts.push('<b>' + info.agent + '</b>');
+  if (info.sid) titleParts.push('<span class="ts">' + info.sid + '</span>');
+  if (info.last) titleParts.push('<span class="ts t3">' + info.last.substring(0,16) + '</span>');
+  const titleHtml = titleParts.length ? titleParts.join(' · ') : 'Session 日志';
+
+  const modal = document.createElement('div');
+  modal.id = 'rtLogModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000';
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  modal.innerHTML = '<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
+    '<h3 style="font-size:13px;font-weight:600">' + titleHtml + '</h3>' +
+    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtLogModal\').remove()">✕ 关闭</button>' +
+    '</div>' +
+    '<div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>' +
+    '</div>';
+  document.body.appendChild(modal);
+
+  // session 没有直接 task_id，查该 session 最近的任务
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const repoParam = repo && repo.fullName ? '&repo=' + encodeURIComponent(repo.fullName) : '';
+  // 先查该引擎 + 该仓库最近的任务
+  // 使用 runtime tasks 端点找到最近的 task_id
+  fetch('/api/runtime/runtimes/1/tasks?limit=10' + repoParam, {
+    headers: { 'Authorization': 'Bearer ' + (localStorage.token || '') }
+  }).then(r => r.json()).then(d => {
+    const tasks = d.tasks || [];
+    if (!tasks.length) {
+      document.getElementById('rtLogModalBody').innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">该 session 无关联任务日志</div>';
+      return;
+    }
+    // 取最近一个任务
+    const task = tasks[0];
+    const taskEnc = encodeURIComponent(JSON.stringify({issue:task.issue_id||'', seq:task.event_seq||0, repo:(task.repo_key||'').replace('gitcode:',''), created:task.created_at||''}));
+    // 加载该任务的日志
+    API.get('/task-logs/' + task.id + '/messages?since=0').then(msgs => {
+      renderTaskLogMessages(document.getElementById('rtLogModalBody'), msgs || [], JSON.parse(decodeURIComponent(taskEnc)));
+    }).catch(e => {
+      document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    });
+  }).catch(e => {
+    document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+  });
+}
 
 function openRuntimeTaskModal(rtId, rtName) {
   const old = document.getElementById('rtTaskModal');
