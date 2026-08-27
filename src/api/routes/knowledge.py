@@ -382,11 +382,18 @@ async def upload_knowledge(file: UploadFile = File(...),
         from src.storage import get_storage
         storage = get_storage()
         if storage is not None:
-            from src.api.knowledge import knowledge_storage_key
-            obs_key = knowledge_storage_key(repo_key, scope, agent_type=agent_type if scope == "agent" else "")
-            storage.save_bytes(obs_key, content)
+            from src.api.knowledge import _owner_repo
+            _owner, _rname = _owner_repo(repo_key)
+            # 按文件名生成 storage_key（和 _build_file_urls 推导一致）
+            if scope == "agent":
+                storage_key = f"knowledge/{_owner}/{_rname}/agent/{agent_type}/{name}"
+            else:
+                _username = str(user.get("username") or user.get("id") or "user")
+                storage_key = f"knowledge/{_owner}/{_rname}/member/{_username}/{name}"
+            obs_key = storage_key
+            storage.save_bytes(obs_key, content.encode("utf-8") if isinstance(content, str) else content)
             import hashlib
-            content_hash = hashlib.sha256(content).hexdigest()
+            content_hash = hashlib.sha256(content.encode("utf-8") if isinstance(content, str) else content).hexdigest()
     except Exception as e:
         log.warning(f"[knowledge] OBS save failed for {repo_key}/{rel}: {e} — local file unaffected")
         obs_key = ""
