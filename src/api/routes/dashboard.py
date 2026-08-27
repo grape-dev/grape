@@ -483,6 +483,15 @@ async def get_ops_timeline(repo: str = ""):
             )
         rows = c.fetchall()
 
+        # 查 agent_tasks 建立 (issue_id, event_seq) → task_id 映射
+        c.execute(
+            "SELECT issue_id, event_seq, id FROM agent_tasks "
+            "WHERE issue_id IS NOT NULL AND issue_id <> ''"
+        )
+        task_map = {}
+        for row in c.fetchall():
+            task_map[(row[0], row[1])] = row[2]
+
     # 按 issue_id 分组
     group = {}
     for row in rows:
@@ -494,6 +503,7 @@ async def get_ops_timeline(repo: str = ""):
             "skill": skill or "", "status": status or "",
             "duration": duration or 0, "createdAt": normalize_event_time(created_at),
             "actor": actor or "", "title": title or "",
+            "taskId": task_map.get((issue_id, seq), ""),
             "_payload": payload or "",
         })
 
