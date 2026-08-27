@@ -377,7 +377,17 @@ async def knowledge_sync_loop():
                         with open(full_path, encoding="utf-8") as f:
                             content = f.read()
                         if content:
-                            storage_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
+                            # 按 scope 生成 storage_key——member/baseline 不走 knowledge_storage_key
+                            if scope == "member":
+                                # member 文档：用 file_path 生成（和 upload_knowledge 一致）
+                                storage_key = f"knowledge/{owner}/{rname}/{file_path.replace('project-info/', '', 1)}"
+                            elif scope == "baseline":
+                                # 基线文件：用 file_path 生成（和 builder.py 一致）
+                                _fname = os.path.basename(file_path)
+                                storage_key = f"project-info/{repo_key}/{_fname}"
+                            else:
+                                # 共享知识：project/issue/issue_agent
+                                storage_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
                             storage.save_bytes(storage_key, content.encode("utf-8"))
                             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
                             with db_lock:
