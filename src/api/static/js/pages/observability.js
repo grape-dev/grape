@@ -874,6 +874,8 @@ let _taskLogCache = {};  // taskId -> {msgs, info, ts} — 60s TTL
 function openTaskLogModal(taskId, infoEnc) {
   const old = document.getElementById('rtLogModal');
   if (old) old.remove();
+  // 清理旧的轮询定时器
+  if (_taskLogPollTimer) { clearInterval(_taskLogPollTimer); _taskLogPollTimer = null; }
 
   let info = {};
   try { info = JSON.parse(decodeURIComponent(infoEnc || '')); } catch(e) {}
@@ -887,39 +889,103 @@ function openTaskLogModal(taskId, infoEnc) {
   const modal = document.createElement('div');
   modal.id = 'rtLogModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000';
-  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  modal.onclick = (e) => {
+    if (e.target === modal) {
+      if (_taskLogPollTimer) { clearInterval(_taskLogPollTimer); _taskLogPollTimer = null; }
+      modal.remove();
+    }
+  };
   modal.innerHTML = '<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
     '<h3 style="font-size:13px;font-weight:600">' + titleHtml + '</h3>' +
-    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtLogModal\').remove()">✕ 关闭</button>' +
+    '<div style="display:flex;align-items:center;gap:8px"><span id="rtLogLiveTag" style="font-size:10px;color:var(--g);display:none">● 实时</span><button class="bt bt-o bt-s" onclick="closeTaskLogModal()">✕ 关闭</button></div>' +
     '</div>' +
     '<div id="rtLogTimeline" style="padding:10px 18px;border-bottom:1px solid var(--b);display:none"></div>' +
     '<div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>' +
     '</div>';
   document.body.appendChild(modal);
 
-  // 使用缓存的日志数据（60s TTL）
-  const cached = _taskLogCache[taskId];
-  if (cached && (Date.now() - cached.ts) < 60000) {
-    renderTaskLogMessages(document.getElementById('rtLogModalBody'), cached.msgs || [], info);
-    if (cached.infoData) renderTaskTimeline(document.getElementById('rtLogTimeline'), cached.infoData);
-    return;
+  // 关闭按钮清理定时器
+  window.closeTaskLogModal = function() {
+    if (_taskLogPollTimer) { clearInterval(_taskLogPollTimer); _taskLogPollTimer = null; }
+    const m = document.getElementById('rtLogModal');
+    if (m) m.remove();
+  };
+
+  // 加载日志 + 启动增量轮询
+  let _lastSeq = 0;
+  let _allMsgs = [];
+
+  function loadInitial() {
+    API.get('/task-logs/' + taskId + '/messages?since=0').then(msgs => {
+      _allMsgs = msgs || [];
+      _lastSeq = _allMsgs.length ? _allMsgs[_allMsgs.length - 1].seq : 0;
+      _taskLogCache[taskId] = { msgs: _allMsgs, infoData: null, ts: Date.now() };
+      renderTaskLogMessages(document.getElementById('rtLogModalBody'), _allMsgs, info);
+      // 检查任务是否还在运行 → 启动增量轮询
+      API.get('/task-logs/' + taskId + '/info').then(infoData => {
+        if (_taskLogCache[taskId]) _taskLogCache[taskId].infoData = infoData;
+        renderTaskTimeline(document.getElementById('rtLogTimeline'), infoData);
+        if (infoData && (infoData.status === 'running' || infoData.status === 'queued' || infoData.status === 'dispatched')) {
+          startPolling();
+        }
+      }).catch(() => {});
+    }).catch(e => {
+      document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    });
   }
 
-  // 并行加载日志和时间线
-  API.get('/task-logs/' + taskId + '/messages?since=0').then(msgs => {
-    _taskLogCache[taskId] = { msgs: msgs || [], infoData: null, ts: Date.now() };
-    renderTaskLogMessages(document.getElementById('rtLogModalBody'), msgs || [], info);
-  }).catch(e => {
-    document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
-  });
+  function startPolling() {
+    const tag = document.getElementById('rtLogLiveTag');
+    if (tag) tag.style.display = 'inline';
+    _taskLogPollTimer = setInterval(() => {
+      // 弹窗已关闭则停止
+      if (!document.getElementById('rtLogModal')) {
+        clearInterval(_taskLogPollTimer);
+        _taskLogPollTimer = null;
+        return;
+      }
+      API.get('/task-logs/' + taskId + '/messages?since=' + _lastSeq).then(newMsgs => {
+        if (newMsgs && newMsgs.length) {
+          _allMsgs = _allMsgs.concat(newMsgs);
+          _lastSeq = _allMsgs[_allMsgs.length - 1].seq;
+          if (_taskLogCache[taskId]) _taskLogCache[taskId].msgs = _allMsgs;
+          renderTaskLogMessages(document.getElementById('rtLogModalBody'), _allMsgs, info);
+          // 自动滚动到底部
+          const body = document.getElementById('rtLogModalBody');
+          if (body) body.scrollTop = body.scrollHeight;
+        }
+      }).catch(() => {});
+      // 同时检查任务状态 → 终态时停止轮询
+      API.get('/task-logs/' + taskId + '/info').then(infoData => {
+        if (infoData && infoData.status && !['running','queued','dispatched'].includes(infoData.status)) {
+          if (_taskLogPollTimer) { clearInterval(_taskLogPollTimer); _taskLogPollTimer = null; }
+          const t = document.getElementById('rtLogLiveTag');
+          if (t) { t.style.display = 'none'; }
+          renderTaskTimeline(document.getElementById('rtLogTimeline'), infoData);
+        }
+      }).catch(() => {});
+    }, 3000);
+  }
 
-  API.get('/task-logs/' + taskId + '/info').then(infoData => {
-    // 存入缓存
-    if (_taskLogCache[taskId]) _taskLogCache[taskId].infoData = infoData;
-    renderTaskTimeline(document.getElementById('rtLogTimeline'), infoData);
-  }).catch(e => {});
+  // 使用缓存的日志数据（60s TTL）— 但如果任务还在运行则重新加载+轮询
+  const cached = _taskLogCache[taskId];
+  if (cached && (Date.now() - cached.ts) < 60000) {
+    // 先用缓存快速渲染
+    _allMsgs = cached.msgs || [];
+    _lastSeq = _allMsgs.length ? _allMsgs[_allMsgs.length - 1].seq : 0;
+    renderTaskLogMessages(document.getElementById('rtLogModalBody'), _allMsgs, info);
+    if (cached.infoData) renderTaskTimeline(document.getElementById('rtLogTimeline'), cached.infoData);
+    // 检查是否还在运行 → 是则启动轮询
+    if (cached.infoData && ['running','queued','dispatched'].includes(cached.infoData.status || '')) {
+      startPolling();
+    }
+  } else {
+    loadInitial();
+  }
 }
+
+let _taskLogPollTimer = null;
 
 function renderTaskTimeline(container, info) {
   if (!container || !info) return;
