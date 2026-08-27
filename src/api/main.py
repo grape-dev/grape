@@ -24,7 +24,16 @@ async def lifespan(app: FastAPI):
         from src.im.handler_async import process_chat_async
         from src.im.vod_handler_async import process_vod_async
 
-        bot_manager = BotManager(max_concurrent_per_bot=10)
+        # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
+        from src.config import BOT_LEASE_DISABLED
+        lease_store = None
+        if not BOT_LEASE_DISABLED:
+            from src.im.bot_lease import BotLeaseStore, generate_instance_id
+            instance_id = generate_instance_id()
+            lease_store = BotLeaseStore(instance_id=instance_id)
+            log.info(f"IM WS: lease enabled, instance_id={instance_id}")
+
+        bot_manager = BotManager(max_concurrent_per_bot=10, lease_store=lease_store)
         await bot_manager.start()
 
         async def _on_message(ctx, parsed):
@@ -40,6 +49,12 @@ async def lifespan(app: FastAPI):
         log.info(f"IM WS: {hc['total_bots']} bot(s), {hc['connected']} connected")
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
+
+    # lease sweep 循环（问题 J：变量名 _lease_sweep_task 区分）
+    _lease_sweep_task = None
+    if bot_manager and bot_manager._lease_store:
+        _lease_sweep_task = asyncio.create_task(bot_manager.lease_sweep_loop())
+        log.info("Lease sweep loop started")
 
     # sweeper：Issue done 后清理 workdir（见 multi-issue-isolation-design.md §3.4.2）
     _sweep_task = None
@@ -94,6 +109,13 @@ async def lifespan(app: FastAPI):
     yield
 
     log.info("IM WS: stopping...")
+    # 问题 H：先 cancel lease_sweep_task（不再抢新锁）→ 再 stop bot_manager（停 bot + 释放 lease）
+    if _lease_sweep_task:
+        _lease_sweep_task.cancel()
+        try:
+            await asyncio.wait_for(_lease_sweep_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
     if bot_manager:
         await bot_manager.stop()
     if _sweep_task:

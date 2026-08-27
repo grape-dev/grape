@@ -910,7 +910,7 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user),
             app_secret = feishu.get("app_secret", "")
             if app_secret and app_secret != "********":
                 c.execute(
-                    "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?,?)",
+                    "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, bot_name) VALUES (?, ?, '')",
                     (app_id, "chat_bot")
                 )
                 db.commit()

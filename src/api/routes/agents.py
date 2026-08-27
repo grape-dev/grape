@@ -308,7 +308,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     log.info(f"VOD IM: cleaned conversations for {repo_key}")
 
                 c.execute(
-                    "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?,?)",
+                    "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, bot_name) VALUES (?, ?, '')",
                     (body.im_app_id, "vod_bot")
                 )
                 db.commit()

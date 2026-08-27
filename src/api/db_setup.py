@@ -198,11 +198,17 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 
 _GLOBAL_IM_BOT_CONFIG_DDL = """
 CREATE TABLE IF NOT EXISTS global_im_bot_config (
-    bot_app_id TEXT PRIMARY KEY,
-    bot_type TEXT NOT NULL,
-    im_provider TEXT DEFAULT 'feishu',
-    is_active INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now'))
+    bot_app_id        VARCHAR(191) PRIMARY KEY,
+    bot_type          VARCHAR(32) NOT NULL,
+    im_provider       VARCHAR(32) DEFAULT 'feishu',
+    is_active         INTEGER DEFAULT 1,
+    bot_name          VARCHAR(128) DEFAULT '',
+    lease_token       VARCHAR(128) DEFAULT NULL,
+    lease_expires_at  DATETIME DEFAULT NULL,
+    lease_owner       VARCHAR(128) DEFAULT NULL,
+    lease_acquired_at DATETIME DEFAULT NULL,
+    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 """
 
@@ -1017,6 +1023,13 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
+        # 飞书 Bot Lease——集群部署保证同一 bot 同一时刻只有一个实例连 WebSocket
+        "ALTER TABLE global_im_bot_config ADD COLUMN bot_name VARCHAR(128) DEFAULT ''",
+        "ALTER TABLE global_im_bot_config ADD COLUMN lease_token VARCHAR(128) DEFAULT NULL",
+        "ALTER TABLE global_im_bot_config ADD COLUMN lease_expires_at DATETIME DEFAULT NULL",
+        "ALTER TABLE global_im_bot_config ADD COLUMN lease_owner VARCHAR(128) DEFAULT NULL",
+        "ALTER TABLE global_im_bot_config ADD COLUMN lease_acquired_at DATETIME DEFAULT NULL",
+        "ALTER TABLE global_im_bot_config ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
         # ===== knowledge-obs-design：agent_shared_knowledge OBS 对象存储字段 =====
         "ALTER TABLE agent_shared_knowledge ADD COLUMN obs_key VARCHAR(512) DEFAULT ''",
         "ALTER TABLE agent_shared_knowledge ADD COLUMN content_hash VARCHAR(64) DEFAULT ''",
