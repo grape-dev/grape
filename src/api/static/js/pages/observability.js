@@ -77,7 +77,6 @@ function renderObsContent() {
 
   if (_obsTab === 'overview') {
     c.innerHTML = renderOverview(realOps, rt, mt);
-    loadA2aHealth();
   }
   else if (_obsTab === 'tasks') c.innerHTML = renderTasksTab(realOps, rt, mt);
   else if (_obsTab === 'anomaly') renderAnomalyTab(c, realOps);
@@ -106,16 +105,8 @@ function table(headers, rows) {
 
 // ===== Tab: 概览 =====
 function renderOverview(ops, rt, mt) {
-  const t = ops.tasks || {};
-  const sc = t.status_counts || {};
   const r = ops.runtimes || {};
   const w = ops.workers || {};
-  const db = parseMetrics(mt, ['grape_db_threads_connected', 'grape_db_threads_running', 'grape_db_max_used_connections']);
-  const httpReq = parseMetric(mt, 'grape_http_in_flight_requests');
-  const httpTotal = parseLabeledSum(mt, 'grape_http_requests_total');
-  const httpDurSum = parseLabeledSum(mt, 'grape_http_request_duration_seconds_sum');
-  const httpDurCount = parseLabeledSum(mt, 'grape_http_request_duration_seconds_count');
-  const httpAvgMs = httpDurCount > 0 ? Math.round(httpDurSum / httpDurCount * 1000) : 0;
 
   const HEALTH_DOT = { online: '🟢', recently_lost: '🟡', offline: '⚫', about_to_gc: '🔴' };
   const HEALTH_COLOR = { online: 'var(--g)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
@@ -170,7 +161,6 @@ function renderOverview(ops, rt, mt) {
       `<span style="color:${busyColor}">${rt.busy_slots}/${rt.max_concurrent}</span>`,
       rt.mode === 'local' ? '<span class="tg tg-ch">本机</span>' : '<span class="tg tg-c">远端</span>',
       `<span class="ts t3">${rt.device_name || '-'}</span>`,
-      `${bar('CPU', rt.cpu_percent)}`,
     ];
   }) : [];
 
@@ -186,21 +176,7 @@ function renderOverview(ops, rt, mt) {
       ${workerCards}
     </div>
     ${section('Runtime 引擎', `${r.online || 0}/${r.total || 0} 在线`)}
-    ${runtimeRows.length ? table(['引擎', '版本', '健康度', '繁忙', '模式', '设备', 'CPU'], runtimeRows) : '<div class="ts t2" style="padding:12px">无引擎</div>'}
-    ${section('任务概览')}
-    ${kpiRow([
-      { label: '排队中', value: sc.queued || 0, color: 'var(--y)' },
-      { label: '执行中', value: (t.in_progress || 0), color: 'var(--a)' },
-      { label: '卡住 (>15min)', value: t.stuck_count || 0, color: (t.stuck_count||0) > 0 ? 'var(--r)' : 'var(--g)' },
-      { label: '已完成', value: sc.completed || 0, color: 'var(--g)' },
-    ])}
-    ${section('HTTP 请求')}
-    ${kpiRow([
-      { label: '在途', value: httpReq || 0, color: 'var(--sk)' },
-      { label: '累计请求', value: fmtNum(httpTotal), color: 'var(--a)' },
-      { label: '平均延迟', value: httpAvgMs + 'ms', color: httpAvgMs > 500 ? 'var(--r)' : httpAvgMs > 100 ? 'var(--y)' : 'var(--g)' },
-    ])}
-    <div id="obs-a2a-health"></div>
+    ${runtimeRows.length ? table(['引擎', '版本', '健康度', '繁忙', '模式', '设备'], runtimeRows) : '<div class="ts t2" style="padding:12px">无引擎</div>'}
   `;
 }
 
