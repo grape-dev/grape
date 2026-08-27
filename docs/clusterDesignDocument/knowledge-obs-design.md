@@ -1296,3 +1296,27 @@ _sync_baseline_files 必须用同样的格式，确保 OBS 对象 key 一致。
 - 实例挂了 10 分钟后自动恢复
 
 优点：不加字段（用现有 meta 表）、不加锁、超时保护、和飞书 lease 思路一致。
+
+### 并发保护验证证据（2026-08-27）
+
+8 个验证全部通过：
+
+1. 清空 baseline 记录 + meta 锁标记 → 3 条删除 + 锁清空 ✅
+2. _sync_baseline_files 执行 → 3 个文件写入 OBS + DB ✅
+3. DB baseline 记录 → 3 条，obs_key/content_hash 有值，created_by=sync ✅
+4. OBS 对象 → 3 个对象，内容和 DB 记录对应 ✅
+5. 幂等 → 第二次执行 baseline 记录还是 3 条，无新增 ✅
+6. 并发保护 → A 抢锁 B 跳过 (elapsed=0.0s < 600s)，A 释放后 B 继续 ✅
+7. 超时恢复 → 11 分钟前的锁过期 (660s > 600s) 继续执行 ✅
+8. load_project_info → 3 个文件从 OBS 读取，内容正确 ✅
+
+### 影响分析
+
+7 个检查点全部通过，对系统无伤害：
+- INSERT 字段和表结构匹配 ✅
+- storage_key 格式和 builder.py 一致 ✅
+- file_path 格式和 builder.py 一致 ✅
+- finally set_meta_value 内部有 try/except 不抛异常 ✅
+- managed_repos 查询无占位符问题 ✅
+- meta 表临时标记 finally 清空 + 10 分钟超时 ✅
+- 36 个项目遍历 35 次跳过微不足道 ✅
