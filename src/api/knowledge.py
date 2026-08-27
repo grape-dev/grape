@@ -54,7 +54,8 @@ def read_with_cache(storage_key: str, db_hash: str) -> str | None:
     if actual_hash != db_hash:
         log.warning(f"[knowledge] hash mismatch: storage_key={storage_key} db_hash={db_hash[:16]}... actual_hash={actual_hash[:16]}... (OBS content may be stale)")
     with _knowledge_cache_lock:
-        _knowledge_cache[storage_key] = (content, actual_hash)
+        # 存 db_hash 而不是 actual_hash——下次 DB hash 没变就命中缓存
+        _knowledge_cache[storage_key] = (content, db_hash)
         # LRU 淘汰：超过最大条数时淘汰最旧的
         if len(_knowledge_cache) > KNOWLEDGE_CACHE_MAX:
             oldest_key = next(iter(_knowledge_cache))
