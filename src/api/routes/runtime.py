@@ -370,6 +370,14 @@ async def runtime_task_messages(task_id: str, body: MessagesBody, credential_id:
     task = service.get_task(task_id)
     if task and task.get("status") in ("failed", "cancelled", "completed"):
         raise HTTPException(status_code=410, detail={"code": 410, "message": f"task already {task.get('status')}"})
+    # 自动修复：worker 上报了消息说明已在执行，但 task_start 可能调用失败
+    # 导致 status 仍为 queued/dispatched → 自动更新为 running
+    if task and task.get("status") in ("queued", "dispatched"):
+        try:
+            service.update_task_status(task_id, "running")
+            log.info(f"auto-fix: task {task_id} status {task.get('status')} -> running (messages reported)")
+        except Exception as e:
+            log.warning(f"auto-fix: failed to update task {task_id} to running: {e}")
     service.enqueue_async_report("messages", task_id, body.messages)
     return {"status": "ok"}
 
