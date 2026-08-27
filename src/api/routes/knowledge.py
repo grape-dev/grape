@@ -472,7 +472,10 @@ async def delete_knowledge(repo: str = Query(""),
     try:
         os.remove(full)
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"code": 500, "message": f"删除失败: {e}"})
+        if obs_key:
+            log.warning(f"[knowledge] OBS 已删但本地文件删除失败: {full}: {e}")
+        else:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"删除失败: {e}"})
     try:
         from src.session_manager import db, db_lock
         with db_lock:
