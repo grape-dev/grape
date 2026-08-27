@@ -24,6 +24,7 @@ from src.session_manager import db, db_lock
 _knowledge_cache: dict[str, tuple[str, str]] = {}  # storage_key -> (content, content_hash)
 _knowledge_cache_lock = threading.Lock()
 KNOWLEDGE_CACHE_MAX = int(os.environ.get("KNOWLEDGE_CACHE_MAX", "1000"))  # 最大缓存条数，可配置
+_sync_not_found: set[int] = set()  # sync_loop 文件不存在的记录 ID（跳过重复处理）
 
 
 def read_with_cache(storage_key: str, db_hash: str) -> str | None:
@@ -454,6 +455,8 @@ async def knowledge_sync_loop():
                     break
                 for row in rows:
                     rid, file_path, scope, repo_key, agent_type, issue_num = row
+                    if rid in _sync_not_found:
+                        continue
                     try:
                         # 兼容 file_path 格式：write_knowledge/builder 用 WORKSPACE_DIR 相对（owner/repo/...），
                         # upload_knowledge 用 repo_base 相对（project-info/...）
@@ -462,6 +465,10 @@ async def knowledge_sync_loop():
                             full_path = os.path.join(WORKSPACE_DIR, file_path)
                         else:
                             full_path = os.path.join(WORKSPACE_DIR, owner, rname, file_path)
+                        if not os.path.isfile(full_path):
+                            _sync_not_found.add(rid)
+                            log.error(f"[knowledge] sync skip id={rid}: file not found {full_path} (repo may be deleted)")
+                            continue
                         content = ""
                         with open(full_path, encoding="utf-8") as f:
                             content = f.read()
