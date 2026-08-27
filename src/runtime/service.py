@@ -230,6 +230,45 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
         from src.config import WORKSPACE_DIR
         from src.repo_key import split_owner_repo
         owner, rname = split_owner_repo(repo_key)
+
+        # OBS 分支：查 DB scope='baseline' + OBS 读取（不依赖本地磁盘）
+        try:
+            from src.storage import get_storage
+            _storage = get_storage()
+        except Exception:
+            _storage = None
+        if _storage is not None:
+            files = {}
+            from src.session_manager import db, db_lock
+            with db_lock:
+                rows = db.cursor().execute(
+                    "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
+                    "ORDER BY id DESC",
+                    (repo_key,)
+                ).fetchall()
+            for fp, ok in rows:
+                if fp and ok:
+                    fname = os.path.basename(fp)
+                    if fname in _PROJECT_INFO_FILES or fname == ".metadata.json":
+                        try:
+                            data = _storage.read_bytes(ok)
+                            if data:
+                                files[fname] = data.decode("utf-8", errors="replace")
+                        except Exception:
+                            continue
+            # .metadata.json 特殊处理
+            meta = {}
+            if ".metadata.json" in files:
+                try:
+                    meta = json.loads(files[".metadata.json"])
+                except Exception:
+                    meta = {}
+            if files:
+                files[".metadata.json"] = json.dumps(meta, ensure_ascii=False)
+            return files, meta
+
+        # 本地模式（和 dev 一致）
         pi = os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
         if not os.path.isdir(pi):
             return {}, {}

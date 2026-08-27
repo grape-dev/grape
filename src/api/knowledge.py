@@ -252,8 +252,11 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0) -> 
     files = {}
     for scope, content in read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num).items():
         p = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-        # 直接用 read_knowledge 返回的 content（OBS 模式已从 OBS 拿到，不再重复读本地文件）
-        files[os.path.relpath(p, WORKSPACE_DIR)] = content
+        try:
+            with open(p, encoding="utf-8") as f:
+                files[os.path.relpath(p, WORKSPACE_DIR)] = f.read()
+        except Exception:
+            continue
     # 成员上传文档（project-info/member/**）一并交付远端 worker（见 knowledge-board-design.md §2.5）
     for rel, content in member_files(repo_key).items():
         files.setdefault(rel, content)
@@ -264,10 +267,33 @@ def member_files(repo_key: str) -> dict:
     """成员上传文档快照：{rel_path: content}（project-info/member/ 下 md/txt/json）。
 
     rel 相对 WORKSPACE_DIR（与 knowledge_files 交付语义一致，供 worker materialize 到 .knowledge/）。
+    OBS 模式：查 DB scope='member' + OBS 读取（不依赖本地磁盘）。
     """
     owner, rname = _owner_repo(repo_key)
-    base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "member")
     files = {}
+    # OBS 分支：查 DB + OBS 读取
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage is not None:
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope='member' AND obs_key!='' AND obs_key IS NOT NULL "
+                "ORDER BY id DESC",
+                (repo_key,)
+            ).fetchall()
+        for fp, ok in rows:
+            if fp and ok:
+                try:
+                    data = storage.read_bytes(ok)
+                    if data:
+                        rel = os.path.join(owner, rname, fp).replace("\\", "/")
+                        files[rel] = data.decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+        return files
+    # 本地模式（和 dev 一致）
+    base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "member")
     if not os.path.isdir(base):
         return files
     for root, _dirs, names in os.walk(base):
@@ -291,8 +317,32 @@ def member_files_pi(repo_key: str) -> dict:
     `member/{username}/{name}`，与 load_project_info / agent_files 的 key 语义一致，
     供 enqueue_task 并入 project_info_files → worker 物化到 `.project-info/member/`。
     见 knowledge-board-design.md §6.7（方案 A：项目级全 Agent 共享）。
+    OBS 模式：查 DB scope='member' + OBS 读取（不依赖本地磁盘）。
     """
     owner, rname = _owner_repo(repo_key)
+    files = {}
+    # OBS 分支：查 DB + OBS 读取
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage is not None:
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope='member' AND obs_key!='' AND obs_key IS NOT NULL "
+                "ORDER BY id DESC",
+                (repo_key,)
+            ).fetchall()
+        for fp, ok in rows:
+            if fp and ok:
+                try:
+                    data = storage.read_bytes(ok)
+                    if data:
+                        # rel_path 相对 project-info 目录（member/user1/design.md）
+                        files[fp.replace("project-info/", "", 1).replace("\\", "/")] = data.decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+        return files
+    # 本地模式（和 dev 一致）
     base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "member")
     files = {}
     if not os.path.isdir(base):
@@ -318,8 +368,31 @@ def agent_files(repo_key: str, agent_type: str = "") -> dict:
     key 相对 project-info 目录（`agent/{agent_type}/{name}`，与 load_project_info 的 files key 语义一致），
     供 enqueue_task 定向打包到 project_info_files → worker 物化到 `.project-info/agent/{agent_type}/`。
     见 knowledge-board-design.md §六。
+    OBS 模式：查 DB scope='member' AND agent_type + OBS 读取（不依赖本地磁盘）。
     """
     owner, rname = _owner_repo(repo_key)
+    files = {}
+    # OBS 分支：查 DB + OBS 读取
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage is not None:
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope='member' AND agent_type=? AND obs_key!='' AND obs_key IS NOT NULL "
+                "ORDER BY id DESC",
+                (repo_key, agent_type or "")
+            ).fetchall()
+        for fp, ok in rows:
+            if fp and ok:
+                try:
+                    data = storage.read_bytes(ok)
+                    if data:
+                        files[fp.replace("project-info/", "", 1).replace("\\", "/")] = data.decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+        return files
+    # 本地模式（和 dev 一致）
     base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "agent", agent_type or "")
     files = {}
     if not os.path.isdir(base):
@@ -403,7 +476,8 @@ async def knowledge_sync_loop():
                 if len(rows) < 500:
                     break
             with db_lock:
-                remaining = c.execute(
+                c3 = db.cursor()
+                remaining = c3.execute(
                     "SELECT COUNT(*) FROM agent_shared_knowledge WHERE obs_key='' OR obs_key IS NULL"
                 ).fetchone()[0]
             if remaining == 0:
