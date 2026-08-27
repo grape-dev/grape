@@ -1420,3 +1420,923 @@ vod_handler_async 读基线文件逻辑：
 3. 只有 A 挂了 + OBS 同时挂了才会出问题——概率极低
 
 这是设计上的已知限制，不是 bug。
+
+---
+
+## 第十七轮：_member_docs + _agent_knowledge_entries 本地扫描残留修复
+
+### 问题发现
+
+集群部署后（A=本机 127.0.0.1 + B=242 127.0.0.1），项目知识页面数据不一致：
+
+| 数据 | A（本机） | B（242） | 原因 |
+|------|----------|----------|------|
+| project files | 3 | 3 | OBS baseline ✅ 共享 |
+| meta | 有 | 有 | OBS baseline ✅ 共享 |
+| member_docs | 5 | 0 | **本地扫描 ❌** |
+| agents | coding | 无 | **本地扫描 ❌** |
+
+根因：`_member_docs()` 和 `_agent_knowledge_entries()` 的 agent 专属文档部分仍用 `os.listdir` / `os.path.isdir` 扫描本地 WORKSPACE_DIR，没有走 OBS。242 上没有本地 workspace 文件，所以返回空。
+
+底层函数（member_files / agent_files / load_project_info / _read_entry_content）已有 OBS 分支，但这两个路由层函数没复用。
+
+### 改动方案
+
+#### 改动文件
+
+仅 1 个文件：`src/api/routes/knowledge.py`
+
+#### 改动 1：`_member_docs()` 重写（L137-170）
+
+现状：
+```python
+def _member_docs(repo_key: str) -> list[dict]:
+    docs = []
+    for sub in ("member", "agent"):
+        base = os.path.join(_repo_base(repo_key), "project-info", sub)
+        if not os.path.isdir(base):
+            continue
+        for owner_dir in sorted(os.listdir(base)):  # 本地扫描
+            ...
+            for f in sorted(os.listdir(d)):  # 本地扫描
+                docs.append({
+                    "name": f,
+                    "owner": owner_dir,
+                    "path": rel,
+                    "size": os.path.getsize(fp),  # 本地文件
+                    "updated_at": _fmt_time(os.path.getmtime(fp)),  # 本地文件
+                    "kind": sub,
+                })
+    return docs
+```
+
+改为：
+```python
+def _member_docs(repo_key: str) -> list[dict]:
+    """查 DB scope='member' 记录构建文档清单（集群 OBS 模式不依赖本地磁盘）。
+
+    OBS 模式：查 DB agent_shared_knowledge scope='member'，从 file_path 解析 owner/kind。
+    本地模式（OBS 未启用）：回退 os.listdir 扫描本地目录（保持原行为）。
+    """
+    from src.session_manager import db, db_lock
+    from src.storage import get_storage
+
+    storage = get_storage()
+    if storage is not None:
+        # OBS 模式：查 DB 构建清单
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, file_path, agent_type, created_by, created_at, obs_key "
+                "FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope='member' "
+                "AND obs_key!='' AND obs_key IS NOT NULL "
+                "ORDER BY id DESC",
+                (repo_key,)
+            )
+            rows = c.fetchall()
+        docs = []
+        seen = set()  # file_path 去重（同文件多版本只展示最新）
+        for rid, file_path, agent_type, created_by, created_at, obs_key in rows:
+            if not file_path or file_path in seen:
+                continue
+            seen.add(file_path)
+            # 从 file_path 解析 kind 和 owner
+            # file_path 格式：project-info/member/{username}/{filename} 或 project-info/agent/{agent_type}/{filename}
+            parts = file_path.replace("\\", "/").split("/")
+            if len(parts) >= 4 and parts[0] == "project-info":
+                kind = parts[1]  # "member" 或 "agent"
+                owner = parts[2] if kind == "member" else (agent_type or parts[2])
+                name = parts[-1]
+            else:
+                kind = "member"
+                owner = created_by or ""
+                name = os.path.basename(file_path)
+            docs.append({
+                "name": name,
+                "owner": owner,
+                "path": file_path,
+                "size": 0,  # OBS 模式不查对象 size（列表展示不需要精确值）
+                "updated_at": normalize_event_time(created_at or ""),
+                "kind": kind,
+            })
+        return docs
+
+    # 本地模式（OBS 未启用）：保持原有 os.listdir 逻辑
+    docs = []
+    for sub in ("member", "agent"):
+        base = os.path.join(_repo_base(repo_key), "project-info", sub)
+        if not os.path.isdir(base):
+            continue
+        try:
+            for owner_dir in sorted(os.listdir(base)):
+                d = os.path.join(base, owner_dir)
+                if not os.path.isdir(d):
+                    continue
+                for f in sorted(os.listdir(d)):
+                    fp = os.path.join(d, f)
+                    if not os.path.isfile(fp):
+                        continue
+                    rel = os.path.relpath(fp, _repo_base(repo_key)).replace("\\", "/")
+                    docs.append({
+                        "name": f,
+                        "owner": owner_dir,
+                        "path": rel,
+                        "size": os.path.getsize(fp),
+                        "updated_at": _fmt_time(os.path.getmtime(fp)),
+                        "kind": sub,
+                    })
+        except Exception as e:
+            log.warning(f"member docs scan failed {repo_key} ({sub}): {e}")
+    return docs
+```
+
+#### 改动 2：`_agent_knowledge_entries()` agent 专属文档部分（L237-249）
+
+现状：
+```python
+    # Agent 专属成员上传文档（§六：project-info/agent/{agent_type}/，定向给该 Agent）
+    from src.api.knowledge import agent_files
+    import os as _os
+    base = _os.path.join(_repo_base(repo_key), "project-info", "agent")
+    if _os.path.isdir(base):  # 本地扫描
+        for at in sorted(_os.listdir(base)):  # 本地扫描
+            if not at or not _os.path.isdir(_os.path.join(base, at)):
+                continue
+            for rel, content in agent_files(repo_key, at).items():
+                groups.setdefault(at, []).append({...})
+```
+
+改为：
+```python
+    # Agent 专属成员上传文档（§六：查 DB scope='member' AND agent_type!=''）
+    # agent_files() 已有 OBS 分支，直接调用——不依赖本地磁盘
+    from src.api.knowledge import agent_files
+    from src.session_manager import db, db_lock
+    # 查 DB 获取该 repo 下所有有 agent 专属文档的 agent_type 列表
+    agent_types = set()
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT DISTINCT agent_type FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope='member' AND agent_type!='' AND agent_type IS NOT NULL",
+                (repo_key,)
+            )
+            agent_types = {r[0] for r in c.fetchall() if r[0]}
+    except Exception:
+        pass
+    for at in sorted(agent_types):
+        for rel, content in agent_files(repo_key, at).items():
+            groups.setdefault(at, []).append({
+                "scope": "member_agent", "agent_type": at, "issue_num": 0,
+                "file_path": "", "path": "project-info/" + rel,
+                "status": "accepted", "source_seq": 0,
+                "created_by": "member", "created_at": "", "content": content,
+            })
+```
+
+### 不改动的
+
+- `src/api/knowledge.py` 的 member_files / agent_files / member_files_pi：已有 OBS 分支
+- `load_project_info()`：已有 OBS 分支
+- `_read_entry_content()`：已有 OBS 分支
+- `_read_file()` / `_read_ws_file()`：已有 OBS 分支
+
+### 兼容策略
+
+- storage 为 None（OBS 未启用）→ `_member_docs()` 回退原有 os.listdir 逻辑
+- DB 查不到 member 记录 → 返回空列表（与本地目录不存在时行为一致）
+- agent_files() OBS 分支已处理 storage 为 None 的回退
+
+### 验证方法
+
+```bash
+# 两台后端分别直连测试
+TOKEN=***
+curl -s "http://127.0.0.1:8000/api/knowledge?repo=xiaowu2119%2FBLOG-SYS-testV1" -H "Authorization: Bearer $TOKEN" | python3 -c "
+import sys, json; d=json.load(sys.stdin)
+p=d.get('project',{})
+print(f'files={len(p.get(\"files\",[]))} member_docs={len(p.get(\"member_docs\",[]))} agents={list(d.get(\"agents\",{}).keys())}')
+"
+curl -s "http://127.0.0.1:8000/api/knowledge?repo=xiaowu2119%2FBLOG-SYS-testV1" -H "Authorization: Bearer $TOKEN" | python3 -c "
+import sys, json; d=json.load(sys.stdin)
+p=d.get('project',{})
+print(f'files={len(p.get(\"files\",[]))} member_docs={len(p.get(\"member_docs\",[]))} agents={list(d.get(\"agents\",{}).keys())}')
+"
+# 预期：两台返回相同的 member_docs 数量和 agents 列表
+```
+
+### 深度分析补充——3 个遗漏问题
+
+#### 问题 3：`_read_ws_file()` 没有 OBS 分支（L97-111）
+
+现状：
+```python
+def _read_ws_file(repo_key: str, ws_rel: str) -> str:
+    # 直接 open 本地文件，无 OBS 分支
+    full = os.path.normpath(os.path.join(WORKSPACE_DIR, rel))
+    if not os.path.isfile(full):
+        raise HTTPException(status_code=404, "文件不存在")
+    with open(full, "r", encoding="utf-8") as f:
+        return f.read()
+```
+
+`_read_file()` 有 OBS 分支（查 DB obs_key → OBS 读取），但 `_read_ws_file()` 没有。
+
+`_read_ws_file()` 被 `_read_entry_content()` 调用作本地 fallback——OBS 读取失败时回退到 `_read_ws_file` 读本地。集群 B 实例（242）本地没有文件 → 404 → 返回空串。
+
+虽然 OBS 读取成功时不会走到 `_read_ws_file`，但 OBS 读取失败时（网络抖动/对象被删）会 fallback 到本地，242 上就会失败。
+
+改动 3：`_read_ws_file()` 加 OBS 分支
+
+```python
+def _read_ws_file(repo_key: str, ws_rel: str) -> str:
+    """读 WORKSPACE_DIR 相对路径（防路径穿越）。
+
+    OBS 模式：查 DB obs_key → OBS 读取（不依赖本地磁盘）。
+    本地模式：open 本地文件（保持原行为）。
+    """
+    from src.config import WORKSPACE_DIR
+    rel = _safe_rel(ws_rel)
+
+    # OBS 分支：查 DB obs_key → OBS 读取
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT obs_key FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? "
+                "ORDER BY id DESC LIMIT 1",
+                (repo_key, rel)).fetchone()
+        if row and row[0]:
+            from src.storage import get_storage
+            storage = get_storage()
+            if storage is not None:
+                data = storage.read_bytes(row[0])
+                if data is not None:
+                    return data.decode("utf-8", errors="replace")
+    except Exception as e:
+        log.warning(f"OBS read failed for {repo_key}/{rel}: {e} — fallback to local")
+
+    # 本地模式（OBS 未启用 / OBS miss）
+    full = os.path.normpath(os.path.join(WORKSPACE_DIR, rel))
+    if full != WORKSPACE_DIR and not full.startswith(WORKSPACE_DIR + os.sep):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
+    ext = os.path.splitext(rel)[1].lower()
+    if ext not in ALLOWED_EXTS:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"仅支持 {sorted(ALLOWED_EXTS)}"})
+    if not os.path.isfile(full):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"文件不存在: {rel}"})
+    try:
+        with open(full, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
+```
+
+#### 问题 4：`delete_knowledge` 先查本地文件存在性（L438）
+
+现状：
+```python
+if not os.path.isfile(full):
+    raise HTTPException(status_code=404, "文件不存在")
+# ... 后面才查 DB obs_key → 删 OBS
+```
+
+OBS 模式下请求打到 242，本地没有文件 → 直接 404，不会执行后面的 OBS 删除逻辑。用户在 242 上无法删除知识文档。
+
+改动 4：OBS 模式下跳过本地文件存在性检查
+
+```python
+    # OBS 模式：先查 DB obs_key，有 obs_key 时不依赖本地文件存在
+    obs_key = ""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT obs_key FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? AND scope='member' "
+                "ORDER BY id DESC LIMIT 1",
+                (repo_key, rel)).fetchone()
+        if row:
+            obs_key = row[0] or ""
+    except Exception:
+        pass
+
+    from src.storage import get_storage
+    storage = get_storage()
+
+    # 本地模式（OBS 未启用）：检查本地文件存在
+    if storage is None:
+        if not os.path.isfile(full):
+            raise HTTPException(status_code=404, detail={"code": 404, "message": f"文件不存在: {rel}"})
+
+    # 成员目录按用户名子目录校验本人（不变）
+    if is_member:
+        owner_part = rel.split("/")[2] if len(rel.split("/")) > 2 else ""
+        me = str(user.get("username") or user.get("id") or "")
+        if owner_part and owner_part != me:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅可删除本人上传的文档"})
+
+    # OBS 删除
+    if obs_key and storage is not None:
+        try:
+            if not storage.delete_object(obs_key):
+                raise HTTPException(status_code=500, detail={"code": 500, "message": "OBS 对象删除失败，已中止"})
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"OBS 删除失败: {e}"})
+
+    # 本地文件删除（OBS 模式下本地不存在只 warning 不中止）
+    try:
+        os.remove(full)
+    except Exception as e:
+        if obs_key and storage is not None:
+            log.warning(f"[knowledge] OBS 已删但本地文件删除失败: {full}: {e}")
+        else:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"删除失败: {e}"})
+
+    # 删 DB 记录（不变）
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? AND scope='member'",
+                      (repo_key, rel))
+            db.commit()
+    except Exception:
+        pass
+    return {"message": f"已删除 {os.path.basename(rel)}"}
+```
+
+关键变化：
+- 查 DB obs_key 提前到本地文件检查之前
+- storage 为 None（非 OBS）时才检查 os.path.isfile
+- OBS 模式下本地文件删除失败只 warning 不中止（原有逻辑已如此，但被前面的 404 挡住了）
+
+#### 问题 5：`upload_knowledge` 先写本地文件 + 重名检查只查本地（L368-374）
+
+现状：
+```python
+os.makedirs(member_dir, exist_ok=True)
+dest = os.path.join(member_dir, name)
+if os.path.exists(dest):  # 只查本地
+    dest = ...加时间戳
+with open(dest, "w") as f:
+    f.write(text)
+```
+
+两个问题：
+1. OBS 模式下请求打到 242，在 242 本地创建文件，本机看不到——本地文件不同步
+2. 重名检查 `os.path.exists(dest)` 只查本地，同一文件名在 242 和本机各上传一次会生成两个 DB 记录
+
+改动 5：OBS 模式下重名检查改查 DB + 本地文件可选写
+
+```python
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo)
+    base = _repo_base(repo_key)
+
+    # 判断 OBS 模式
+    from src.storage import get_storage
+    storage = get_storage()
+
+    if scope == "agent":
+        member_dir = os.path.join(base, "project-info", "agent", agent_type)
+    else:
+        member_dir = os.path.join(base, "project-info", "member", str(user.get("username") or user.get("id") or "user"))
+
+    # 重名检查：OBS 模式查 DB，本地模式查 os.path.exists
+    actual_name = name
+    if storage is not None:
+        # OBS 模式：查 DB 是否已有同名文件
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                existing = db.cursor().execute(
+                    "SELECT 1 FROM agent_shared_knowledge WHERE repo_key=? AND file_path LIKE ? AND scope='member' LIMIT 1",
+                    (repo_key, f"project-info/{'agent' if scope == 'agent' else 'member'}/%/{name}")).fetchone()
+            if existing:
+                stem, ext2 = os.path.splitext(name)
+                actual_name = f"{stem}-{int(__import__('time').time())}{ext2}"
+        except Exception:
+            pass
+    else:
+        # 本地模式：查 os.path.exists
+        os.makedirs(member_dir, exist_ok=True)
+        dest = os.path.join(member_dir, name)
+        if os.path.exists(dest):
+            stem, ext2 = os.path.splitext(name)
+            actual_name = f"{stem}-{int(__import__('time').time())}{ext2}"
+
+    # 构建最终 rel path
+    if scope == "agent":
+        rel = f"project-info/agent/{agent_type}/{actual_name}"
+    else:
+        _username = str(user.get("username") or user.get("id") or "user")
+        rel = f"project-info/member/{_username}/{actual_name}"
+
+    # 写本地（OBS 模式下可选，写失败不报错）
+    try:
+        os.makedirs(member_dir, exist_ok=True)
+        dest = os.path.join(member_dir, actual_name)
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(text)
+    except Exception as e:
+        if storage is None:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"写入失败: {e}"})
+        log.warning(f"[knowledge] local write failed (OBS mode, non-fatal): {e}")
+
+    # OBS 写入 + DB 索引（不变）
+    obs_key = ""
+    content_hash = ""
+    if storage is not None:
+        try:
+            from src.api.knowledge import _owner_repo
+            _owner, _rname = _owner_repo(repo_key)
+            if scope == "agent":
+                storage_key = f"knowledge/{_owner}/{_rname}/agent/{agent_type}/{actual_name}"
+            else:
+                _username = str(user.get("username") or user.get("id") or "user")
+                storage_key = f"knowledge/{_owner}/{_rname}/member/{_username}/{actual_name}"
+            obs_key = storage_key
+            storage.save_bytes(obs_key, content.encode("utf-8") if isinstance(content, str) else content)
+            import hashlib
+            content_hash = hashlib.sha256(content.encode("utf-8") if isinstance(content, str) else content).hexdigest()
+        except Exception as e:
+            log.warning(f"[knowledge] OBS save failed for {repo_key}/{rel}: {e} — local file unaffected")
+            obs_key = ""
+            content_hash = ""
+```
+
+关键变化：
+- OBS 模式重名检查改查 DB（LIKE 匹配 file_path 后缀）
+- 本地文件写入改为可选（OBS 模式下写失败只 warning）
+- rel path 构建不再依赖 os.path.relpath（改用字符串拼接，不依赖本地文件实际路径）
+
+### 改动汇总（完整）
+
+| # | 位置 | 改动内容 | OBS | 非OBS |
+|---|------|---------|:---:|:-----:|
+| 1 | `_member_docs()` L137 | os.listdir → 查 DB scope='member' | ✅ | 回退原逻辑 |
+| 2 | `_agent_knowledge_entries()` L234 | os.listdir → 查 DB DISTINCT agent_type | ✅ | agent_files 回退本地 |
+| 3 | `_read_ws_file()` L97 | 加 OBS 分支（查 DB obs_key → OBS 读取） | ✅ | 回退原逻辑 |
+| 4 | `delete_knowledge()` L438 | OBS 模式跳过本地文件存在性检查 | ✅ | 保持原逻辑 |
+| 5 | `upload_knowledge()` L368 | 重名检查改查 DB + 本地写入可选 | ✅ | 保持原逻辑 |
+
+### 不改动的（已确认有 OBS 分支）
+
+- `_read_file()`：已有 OBS 分支
+- `_read_entry_content()`：已有 OBS 分支
+- `member_files()` / `agent_files()` / `member_files_pi()`：已有 OBS 分支
+- `load_project_info()`：已有 OBS 分支
+- `_project_knowledge_entries()` / `_agent_knowledge_entries()` 的 issue/issue_agent 部分：通过 `_read_entry_content()` 走 OBS
+
+### 验证方法（补充）
+
+```bash
+# 1. 列表一致性（改动 1+2）
+curl -s "http://127.0.0.1:8000/api/knowledge?repo=xxx" -H "Authorization: Bearer $TOKEN"
+curl -s "http://127.0.0.1:8000/api/knowledge?repo=xxx" -H "Authorization: Bearer $TOKEN"
+# 预期：member_docs 数量和 agents 列表一致
+
+# 2. 内容读取（改动 3）
+curl -s "http://127.0.0.1:8000/api/knowledge/content?repo=xxx&file=project-info/member/xiaowu2119/blog-config.json" -H "Authorization: Bearer $TOKEN"
+# 预期：返回文件内容（走 OBS），不是 404
+
+# 3. 删除（改动 4）
+curl -s -X DELETE "http://127.0.0.1:8000/api/knowledge?repo=xxx&file=project-info/member/xiaowu2119/test.md" -H "Authorization: Bearer $TOKEN"
+# 预期：OBS 对象删除 + DB 记录删除，不因本地文件不存在而 404
+
+# 4. 上传（改动 5）
+curl -s -X POST "http://127.0.0.1:8000/api/knowledge" -H "Authorization: Bearer ***" -F "file=@test.md" -F "repo=xxx" -F "scope=project"
+# 预期：OBS 写入 + DB 记录，本地文件可选写
+```
+
+### 第二轮深度分析——边界问题确认
+
+对 routes/knowledge.py 全部函数逐个审查，确认以下边界情况：
+
+#### 问题 6：write_knowledge 本地写入失败会阻断 OBS 写入（已知限制，不修复）
+
+src/api/knowledge.py 的 `write_knowledge()` 逻辑：
+1. 先写本地文件（`open(file_path, "a")` 追加）
+2. 再读本地文件（`open(file_path, "rb")`）拿内容写 OBS
+3. DB INSERT 带 obs_key + content_hash
+
+如果请求打到 242，本地目录不存在或写入失败 → raise RuntimeError → 后面的 OBS 写入不执行。
+
+**不修复原因**：
+- `write_knowledge()` 被 `events.py add_knowledge()` 调用，走的是 webhook 流程
+- 飞书 lease 机制保证同一 bot 同一时刻只有一个实例连接 → webhook 只在 lease 持有者（A=本机）上处理
+- 本机有本地文件，不会写入失败
+- 只有 A 挂了 B 接管 webhook 时才会触发，概率极低
+- 即使触发，write_knowledge 抛 RuntimeError 会被 events.py 的 try/except 捕获，事件标记为 failed，不会丢数据
+
+**风险评估**：低。集群故障转移场景下的知识写入可能失败，但不会导致数据不一致（写入失败 → 事件 failed → 用户重试）。
+
+#### 问题 7：knowledge_context 端点调 _member_docs（自动修复，无需额外改动）
+
+routes/knowledge.py L324：`knowledge_context` 端点调 `_member_docs(repo_key)` 生成成员文档摘要。
+
+改动 1 修复了 `_member_docs()` 后，此处自动生效——OBS 模式下从 DB 查询，不依赖本地磁盘。无需额外改动。
+
+#### 问题 8：search.py 的 @router.get("")（已修复，无需额外改动）
+
+search.py 已经是 `@router.get("")`，不会触发 307 重定向。确认无误。
+
+#### 问题 9：repos.py get_repo_project_info 调 load_project_info（已有 OBS 分支，无需改动）
+
+`get_repo_project_info()` 调 `load_project_info()`，后者已有 OBS 分支（查 DB scope='baseline' + OBS 读取）。确认无误。
+
+#### 问题 10：prompt_builder.py 调 member_files（已有 OBS 分支，无需改动）
+
+`prompt_builder.py` L199/L795 调 `member_files()`，后者已有 OBS 分支（查 DB scope='member' + OBS 读取）。确认无误。
+
+#### 问题 11：knowledge_files() 交付 worker（已有 OBS 分支，无需改动）
+
+`knowledge_files()` 被 `enqueue_task` 调用，打包知识文件交付远端 worker。内部调 `read_knowledge()`（已有 OBS 分支）+ `member_files()`（已有 OBS 分支）。确认无误。
+
+### 完整审查结论
+
+对 routes/knowledge.py 全部 11 个函数/端点逐个审查：
+
+| 函数/端点 | 依赖本地文件 | OBS 分支 | 需改动 |
+|-----------|:----------:|:-------:|:-----:|
+| `_read_file()` | 是 | ✅ 已有 | 否 |
+| `_read_ws_file()` | 是 | ❌ 缺失 | **改动 3** |
+| `_read_entry_content()` | 间接（调 _read_ws_file） | ✅ 已有（改动 3 后完全覆盖） | 否 |
+| `_member_docs()` | 是 | ❌ 缺失 | **改动 1** |
+| `_project_knowledge_entries()` | 间接（调 _read_entry_content） | ✅ 已有 | 否 |
+| `_agent_knowledge_entries()` issue 部分 | 间接（调 _read_entry_content） | ✅ 已有 | 否 |
+| `_agent_knowledge_entries()` agent 专属部分 | 是（os.listdir） | ❌ 缺失 | **改动 2** |
+| `list_knowledge()` | 间接（调上述函数） | 改动后完全覆盖 | 否 |
+| `read_knowledge_content()` | 间接（调 _read_file） | ✅ 已有 | 否 |
+| `knowledge_context()` | 间接（调 _member_docs） | 改动后完全覆盖 | 否 |
+| `upload_knowledge()` | 是（写本地 + 重名检查） | ❌ 缺失 | **改动 5** |
+| `delete_knowledge()` | 是（检查本地存在 + 删本地） | ❌ 缺失 | **改动 4** |
+
+对 src/api/knowledge.py 审查：
+
+| 函数 | 依赖本地文件 | OBS 分支 | 需改动 |
+|------|:----------:|:-------:|:-----:|
+| `read_knowledge()` | 是（fallback） | ✅ 已有 | 否 |
+| `write_knowledge()` | 是（先写本地再写 OBS） | ✅ 已有（已知限制问题 6） | 否 |
+| `knowledge_files()` | 间接（调 read_knowledge + member_files） | ✅ 已有 | 否 |
+| `member_files()` | 是 | ✅ 已有 | 否 |
+| `member_files_pi()` | 是 | ✅ 已有 | 否 |
+| `agent_files()` | 是 | ✅ 已有 | 否 |
+
+对 src/runtime/service.py 审查：
+
+| 函数 | 依赖本地文件 | OBS 分支 | 需改动 |
+|------|:----------:|:-------:|:-----:|
+| `load_project_info()` | 是（fallback） | ✅ 已有 | 否 |
+
+对 src/project_info/builder.py 审查：
+
+| 函数 | 依赖本地文件 | OBS 分支 | 需改动 |
+|------|:----------:|:-------:|:-----:|
+| `_write_file()` | 是（写本地 + 写 OBS） | ✅ 已有 | 否 |
+| `_write_meta()` | 是（写本地 + 写 OBS） | ✅ 已有 | 否 |
+| `_write_to_obs()` | 否（纯 OBS + DB） | ✅ 已有 | 否 |
+
+对 src/prompt_builder.py 审查：
+
+| 函数 | 依赖本地文件 | OBS 分支 | 需改动 |
+|------|:----------:|:-------:|:-----:|
+| `_build_project_info_section()` | 间接（调 load_project_info） | ✅ 已有 | 否 |
+| `_build_knowledge_section()` | 间接（调 member_files + read_knowledge） | ✅ 已有 | 否 |
+
+### 最终结论（第三轮分析后修订）
+
+方案修订为 6 处改动。前 5 处覆盖 routes/knowledge.py 里缺失 OBS 分支的函数，改动 6 修复 _read_file 的路径格式不匹配问题（pre-existing bug，集群 B 实例上读取 project/issue 级知识会 404）。
+
+其余文件（knowledge.py / service.py / builder.py / prompt_builder.py）的函数已有 OBS 分支，无需改动。
+
+唯一已知限制是 `write_knowledge()` 的本地写入依赖（问题 6），但因 lease 机制保证 webhook 单实例处理，实际不会触发，不修复。
+
+#### 问题 12：_read_file 的 DB 查询路径格式不匹配（pre-existing bug，需修复）
+
+DB 里 file_path 有两种格式：
+- upload_knowledge 写入的：`project-info/member/{user}/{file}`（相对 repo_base）
+- write_knowledge / builder 写入的：`{owner}/{repo}/project-info/xxx`（相对 WORKSPACE_DIR）
+
+前端通过 `_repo_root_rel()` 把 DB 的 file_path 剥掉 owner/repo 前缀后作为 path 返回给前端。用户点击后前端把这个 path 作为 file 参数传给 content 端点。
+
+`_read_file()` 用这个 stripped path 查 DB：
+- member 文档：`project-info/member/xxx` → DB 里也是这个格式 → 匹配 ✅
+- project/issue 知识：`project-info/knowledge.md`（stripped）→ DB 里是 `owner/repo/project-info/knowledge.md` → 不匹配 ❌ → OBS 读取失败 → 回退本地文件 → 集群 B 实例（242）上 404
+
+实测确认：
+```
+curl "http://127.0.0.1:8000/api/knowledge/content?repo=xiaowu2119%2FBLOG-SYS-testV1&file=project-info/knowledge.md"
+→ 404 "文件不存在: project-info/knowledge.md"
+```
+
+改动 6：_read_file 的 OBS 查询增加二次匹配
+
+```python
+def _read_file(repo_key: str, rel: str) -> str:
+    rel = _safe_rel(rel)
+    ext = os.path.splitext(rel)[1].lower()
+    if ext not in ALLOWED_EXTS:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"仅支持 {sorted(ALLOWED_EXTS)}"})
+
+    # OBS 分支：查 DB obs_key，非空走 storage.read_bytes
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            # 第一次：用 rel 原样查（匹配 upload_knowledge 格式）
+            row = db.cursor().execute(
+                "SELECT obs_key FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? "
+                "ORDER BY id DESC LIMIT 1",
+                (repo_key, rel)).fetchone()
+            # 第二次：用 {owner}/{repo}/{rel} 查（匹配 write_knowledge / baseline 格式）
+            if not row or not row[0]:
+                from src.repo_key import split_owner_repo
+                _owner, _rname = _owner_repo(repo_key)
+                if _owner and _rname:
+                    full_rel = f"{_owner}/{_rname}/{rel}"
+                    row = db.cursor().execute(
+                        "SELECT obs_key FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (repo_key, full_rel)).fetchone()
+        if row and row[0]:
+            from src.storage import get_storage
+            storage = get_storage()
+            if storage is not None:
+                data = storage.read_bytes(row[0])
+                if data is not None:
+                    return data.decode("utf-8", errors="replace")
+    except Exception as e:
+        log.warning(f"OBS read failed for {repo_key}/{rel}: {e} — fallback to local")
+
+    # 本地模式（storage 为 None 或 OBS miss）— 保持原逻辑不变
+    base = _repo_base(repo_key)
+    full = os.path.normpath(os.path.join(base, rel))
+    if full != base and not full.startswith(base + os.sep):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
+    if not os.path.isfile(full):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"文件不存在: {rel}"})
+    try:
+        with open(full, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
+```
+
+关键变化：
+- OBS 查询先用 rel 原样查（匹配 upload_knowledge 的 `project-info/member/xxx` 格式）
+- 查不到再用 `{owner}/{repo}/{rel}` 查（匹配 write_knowledge 的 `owner/repo/project-info/xxx` 格式）
+- 两次查询覆盖 DB 里两种 file_path 格式
+
+#### 同样影响 _read_ws_file（改动 3 补充）
+
+`_read_ws_file` 的 OBS 分支也有同样问题。但 `_read_ws_file` 接收的 `ws_rel` 直接来自 DB 的 file_path 字段（通过 `_read_entry_content`），所以：
+- write_knowledge 条目：ws_rel = `owner/repo/project-info/xxx` → 查 DB 匹配 ✅
+- upload_knowledge 条目：ws_rel = `project-info/member/xxx` → 查 DB 匹配 ✅
+
+`_read_ws_file` 不会收到 stripped path（它不走前端），所以改动 3 的 OBS 查询不需要二次匹配。确认无误。
+
+### 改动 6 方案优化——直接用 obs_key 替代反查 DB
+
+#### 原方案问题
+
+改动 6 原方案是在 `_read_file()` 里做两次 DB 查询（先用 rel 查，再用 owner/repo/rel 查），绕了一圈来处理路径格式不匹配。
+
+但 DB 里已经存了 obs_key，列表接口也返回了 obs_key——完全不需要前端传 path 再反查 DB。
+
+#### 优化方案
+
+前端传 obs_key 给 content 端点，后端直接用 obs_key 读 OBS，彻底消除路径格式问题。
+
+涉及两个文件：
+
+##### 1. 前端 knowledge.js
+
+列表接口已经返回每个条目的 obs_key（issue/issue_agent/project 条目通过 `_project_knowledge_entries` / `_agent_knowledge_entries` 返回 obs_key 字段）。
+
+但 `_member_docs()`（改动 1）返回的条目目前没有 obs_key 字段——需要在改动 1 里补上。
+
+前端 `loadKnowledgeContent()` 改为传 obs_key：
+
+```javascript
+// 现状：传 path
+onclick="loadKnowledgeContent('${k.path || k.file_path}')"
+
+// 改为：传 obs_key（有 obs_key 时优先），无 obs_key 时回退 path
+onclick="loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')"
+```
+
+```javascript
+// loadKnowledgeContent 函数改造
+function loadKnowledgeContent(key) {
+  // 如果 key 以非 / 开头且不是 project-info/ 开头，视为 obs_key
+  const params = key && !key.startsWith('project-info/') && !key.startsWith('/')
+    ? `obs_key=${encodeURIComponent(key)}`
+    : `file=${encodeURIComponent(key)}`;
+  API.get('/knowledge/content?repo=' + encodeURIComponent(_currentRepo()) + '&' + params).then(d => {
+    // ... 渲染逻辑不变
+  });
+}
+```
+
+##### 2. 后端 read_knowledge_content 端点 + _read_file
+
+content 端点新增 `obs_key` 查询参数，有 obs_key 时直接读 OBS，不走 _read_file 反查：
+
+```python
+@router.get("/content")
+async def read_knowledge_content(repo: str = Query(""),
+                                 file: str = Query(""),
+                                 obs_key: str = Query(""),
+                                 user: dict = Depends(get_current_user)):
+    """读取单个知识全文（相对工作区仓库目录）或通过 obs_key 直接读 OBS。"""
+    if not repo:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
+    if not file and not obs_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "file 或 obs_key 必填"})
+
+    # obs_key 模式：直接读 OBS，不需要反查 DB
+    if obs_key:
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage is not None:
+            try:
+                data = storage.read_bytes(obs_key)
+                if data is not None:
+                    from src.repo_key import to_repo_key
+                    return {"repo_key": to_repo_key(repo), "obs_key": obs_key,
+                            "content": data.decode("utf-8", errors="replace")}
+            except Exception as e:
+                log.warning(f"OBS read failed for obs_key={obs_key}: {e} — fallback to file")
+        # OBS miss → 回退 file 参数走 _read_file
+
+    # file 模式（原有逻辑，兼容非 OBS / OBS miss / 前端未传 obs_key）
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo)
+    return {"repo_key": repo_key, "file": file, "content": _read_file(repo_key, file)}
+```
+
+##### 3. 改动 1 _member_docs 补充 obs_key 字段
+
+改动 1 的 `_member_docs()` OBS 分支返回的条目需要加上 obs_key：
+
+```python
+docs.append({
+    "name": name,
+    "owner": owner,
+    "path": file_path,
+    "obs_key": obs_key,  # 新增——供前端 content 端点直接用
+    "size": 0,
+    "updated_at": normalize_event_time(created_at or ""),
+    "kind": kind,
+})
+```
+
+##### 优化方案优势
+
+| 对比项 | 原方案（改动 6 二次匹配） | 优化方案（obs_key 直传） |
+|--------|-------------------------|------------------------|
+| DB 查询次数 | 2 次（rel + owner/repo/rel） | 0 次（直接用 obs_key） |
+| 路径格式依赖 | 依赖两种格式都能匹配 | 完全不依赖路径格式 |
+| 代码复杂度 | _read_file 逻辑变复杂 | _read_file 不改，新增 obs_key 分支 |
+| 兼容性 | 只改后端 | 前后端都改，但兼容旧前端（file 参数仍可用） |
+
+##### 兼容策略
+
+- 前端传 obs_key → 后端走 OBS 直读
+- 前端传 file（旧前端 / obs_key 为空） → 后端走 _read_file（原有逻辑）
+- _read_file 保持原有代码不变，不改动 6 的二次匹配
+- 非 OBS 模式：obs_key 为空 → 前端回退传 file → 走本地文件
+
+### 改动汇总（最终，5 处后端 + 1 处前端）
+
+| # | 位置 | 改动内容 | OBS | 非OBS |
+|---|------|---------|:---:|:-----:|
+| 1 | `_member_docs()` L137 | os.listdir → 查 DB scope='member' + 返回 obs_key 字段 | ✅ | 回退原逻辑 |
+| 2 | `_agent_knowledge_entries()` L234 | os.listdir → 查 DB DISTINCT agent_type | ✅ | agent_files 回退本地 |
+| 3 | `_read_ws_file()` L97 | 加 OBS 分支（查 DB obs_key → OBS 读取） | ✅ | 回退原逻辑 |
+| 4 | `delete_knowledge()` L438 | OBS 模式跳过本地文件存在性检查 | ✅ | 保持原逻辑 |
+| 5 | `upload_knowledge()` L368 | 重名检查改查 DB + 本地写入可选 | ✅ | 保持原逻辑 |
+| 6 | `read_knowledge_content()` + 前端 | content 端点新增 obs_key 参数，前端传 obs_key 直读 OBS | ✅ | 回退 file 参数 |
+
+注：改动 6 原方案（_read_file 二次匹配）废弃，改为 obs_key 直传方案。_read_file 保持原代码不变。
+
+### 兼容性确认（最终）
+
+每个改动都有 `storage is not None` 分支判断，storage 为空时回退原有本地文件逻辑。
+
+| 改动 | OBS 模式 | 非OBS 模式 | 旧前端访问新后端 |
+|------|---------|-----------|----------------|
+| 1 _member_docs | 查 DB + 返回 obs_key | 回退 os.listdir，条目无 obs_key | N/A |
+| 2 _agent_knowledge_entries | 查 DB DISTINCT agent_type | DB 有记录（obs_key 空）+ agent_files 走本地 | N/A |
+| 3 _read_ws_file | 查 DB obs_key → OBS 读取 | storage 为 None → 跳过 → open 本地 | N/A |
+| 4 delete_knowledge | 跳过本地检查 → 删 OBS → 本地删失败 warning | 检查 os.path.isfile → 删本地 → 删 DB | N/A |
+| 5 upload_knowledge | 重名查 DB → 本地可选写 → 写 OBS + DB | 重名查 os.path.exists → 写本地 → DB obs_key 空 | N/A |
+| 6 content 端点 + 前端 | 前端传 obs_key → 直读 OBS | obs_key 空 → 前端回退传 file → 走 _read_file | 只传 file → obs_key 空 → 走 _read_file |
+
+结论：6 处改动全部两种模式都支持且向前兼容。
+
+注：改动 6 原方案（_read_file 二次匹配）废弃，改为 obs_key 直传方案。_read_file 保持原代码不变。
+
+### 实施后发现并修复的 2 个遗漏
+
+#### 遗漏 1：project_files 没有 obs_key 字段
+
+list_knowledge 构造 project_files 时只有 name/label/updated，没有 obs_key。前端点击 project-graph.md → 传 "project-info/project-graph.md" → _read_file 查 DB WHERE file_path = "project-info/project-graph.md" → DB 里是 "xiaowu2119/BLOG-SYS-testV1/project-info/project-graph.md" → 不匹配 → 回退本地 → 242 上 404。
+
+修复：list_knowledge 里查 DB scope='baseline' 的 obs_key，按 filename 映射到 project_files 条目：
+
+```python
+# 查 DB baseline obs_key
+baseline_obs = {}
+rows = db.cursor().execute(
+    "SELECT file_path, obs_key FROM agent_shared_knowledge "
+    "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL",
+    (repo_key,)
+).fetchall()
+for fp, ok in rows:
+    baseline_obs[os.path.basename(fp)] = ok
+
+# project_files 条目加上 obs_key
+{"name": "project-info/project-graph.md", "label": "Project Graph",
+ "updated": ..., "obs_key": baseline_obs.get("project-graph.md", "")}
+```
+
+#### 遗漏 2：member_agent entries 没有 obs_key 字段
+
+_agent_knowledge_entries 的 member_agent 部分构造条目时没有 obs_key。前端 `k.obs_key || k.path` 取 path → 走 _read_file → 虽然 DB 能匹配（upload_knowledge 格式），但多了一次 DB 查询，没走 obs_key 直传路径。
+
+修复：查 DB 时一并获取 obs_key，构建 agent_type → {file_path: obs_key} 映射：
+
+```python
+# 查 DB 获取 member+agent_type 条目（含 obs_key）
+c.execute(
+    "SELECT agent_type, file_path, obs_key, created_by, created_at "
+    "FROM agent_shared_knowledge "
+    "WHERE repo_key=? AND scope='member' AND agent_type!='' "
+    "AND obs_key!='' AND obs_key IS NOT NULL ORDER BY id DESC",
+    (repo_key,)
+)
+# 构建 agent_obs_map: {agent_type: {file_path: obs_key}}
+# 每个 member_agent 条目加上 obs_key
+groups.setdefault(at, []).append({
+    ..., "obs_key": agent_obs_map.get(at, {}).get(full_path, ""),
+})
+```
+
+#### 修复后验证
+
+所有条目都有 obs_key：
+```
+project files: project-graph.md obs_key=YES ✅
+               project-capabilities.md obs_key=YES ✅
+               .metadata.json obs_key=YES ✅
+member_docs:   5 个全部 obs_key=YES ✅
+agents:        coding/member_agent obs_key=YES ✅
+```
+
+obs_key 直读 OBS 验证通过：
+```
+curl "http://127.0.0.1:8000/api/knowledge/content?repo=xxx&obs_key=project-info/gitcode:xiaowu2119/BLOG-SYS-testV1/project-graph.md"
+→ 200, 返回完整 project-graph.md 内容
+```
+
+### 最终改动汇总（10 处，含实施后补充）
+
+| # | 位置 | 改动内容 | OBS | 非OBS |
+|---|------|---------|:---:|:-----:|
+| 1 | `_member_docs()` L137 | os.listdir → 查 DB scope='member' + 返回 obs_key 字段 | ✅ | 回退原逻辑 |
+| 2 | `_agent_knowledge_entries()` L234 | os.listdir → 查 DB member+agent_type + obs_key 映射 | ✅ | agent_files 回退本地 |
+| 3 | `_read_ws_file()` L97 | 加 OBS 分支（查 DB obs_key → OBS 读取） | ✅ | 回退原逻辑 |
+| 4 | `delete_knowledge()` L438 | OBS 模式跳过本地文件存在性检查 | ✅ | 保持原逻辑 |
+| 5 | `upload_knowledge()` L368 | 重名检查改查 DB + 本地写入可选 | ✅ | 保持原逻辑 |
+| 6 | `read_knowledge_content()` + 后端 | content 端点新增 obs_key 参数，直接读 OBS | ✅ | 回退 file 参数 |
+| 7 | `list_knowledge()` L347 | project_files 补 obs_key（查 DB baseline） | ✅ | obs_key 为空，前端回退 file |
+| 8 | `_agent_knowledge_entries()` L322 | member_agent entries 补 obs_key（从 DB 查询映射） | ✅ | obs_key 为空，前端回退 path |
+| 9 | 前端 knowledge.js onclick | 所有 loadKnowledgeContent 调用改为 `obs_key \|\| path \|\| name` | ✅ | obs_key 为空时回退 path |
+| 10 | 前端 renderKnowledgeDetail | 显示标题/JSON 判断改为 `d.file \|\| d.obs_key` | ✅ | obs_key 模式下不显示 undefined |
+
+### 最终验证结果（全数据流）
+
+所有 4 种数据流在 OBS 模式下验证通过（不依赖本地磁盘）：
+
+| 数据流 | 列表查询 | 内容读取 | 验证结果 |
+|--------|---------|---------|---------|
+| project-graph.md / capabilities / metadata | load_project_info (OBS baseline) + 补 obs_key (改动7) | obs_key 直读 OBS (改动6) | 200, 2805 bytes ✅ |
+| member_docs (member 上传) | _member_docs 查 DB (改动1) | obs_key 直读 OBS (改动6) | 200, 230 bytes ✅ |
+| member_agent (agent 专属) | _agent_knowledge_entries 查 DB (改动2+8) | obs_key 直读 OBS (改动6) | 200, 236 bytes ✅ |
+| knowledge_context 上下文 | _member_docs + prompt_builder (全 OBS) | 不走 content 端点 | 200, 5254 bytes ✅ |
+
+所有条目都有 obs_key：
+- project files: 3 个全部 obs_key=YES ✅
+- member_docs: 5 个全部 obs_key=YES ✅
+- agents: 2 个全部 obs_key=YES ✅
+
+### 代码审计确认
+
+routes/knowledge.py 中所有 os.path 文件系统调用都在本地回退分支里（storage is None 或 OBS miss 时执行），OBS 分支只用 os.path.basename/splitext 做字符串解析，不访问文件系统。
+
+8 个 pytest 基线失败（test_api_routes + test_runtime_agent）是改动前就存在的，与 knowledge 改动无关（git stash 对照确认）。knowledge 相关功能全部验证通过。

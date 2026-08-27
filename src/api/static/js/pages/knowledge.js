@@ -71,15 +71,15 @@ function _renderProjectTab(d) {
   } else {
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     files.forEach(f => {
-html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${f.label}" onclick="event.stopPropagation();loadKnowledgeContent('${f.name}')">
+html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${f.label}" onclick="event.stopPropagation();loadKnowledgeContent('${f.obs_key || f.name}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:var(--a)">${f.label === 'metadata' ? '🗂' : '📄'}</span>
           <span style="font-size:12px;font-weight:600">${f.label}</span>
           <span class="tg tg-c" style="margin-left:auto;font-size:9px">project-info</span>
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4">${f.name.split('/').pop()}</div>
-        <div style="font-size:10px;color:var(--t3);margin-top:6px">${(f.updated || '—').replace('T',' ').substring(0,16)}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${f.name}')">View</button>
+        <div style="font-size:10px;color:var(--t3);margin-top:4px">${f.updated || ''}</div>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${f.obs_key || f.name}')">View</button>
       </div>`;
     });
     html += '</div>';
@@ -92,7 +92,7 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     krows.forEach(k => {
       const preview = (k.content || '').split('\n').filter(l => l.trim()).slice(-3).map(l => l.replace(/^- \[[^\]]*\]\s*/, '')).join(' · ');
-      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="知识沉淀" onclick="loadKnowledgeContent('${k.path || k.file_path}')">
+      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="知识沉淀" onclick="loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:var(--pk)">📄</span>
           <span style="font-size:12px;font-weight:600">knowledge.md</span>
@@ -100,7 +100,7 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:6px">${preview ? escapeHtml(preview).substring(0,120) : '(空)'}</div>
         <div style="font-size:10px;color:var(--t3)">${k.created_by || ''} · ${fmtLocalTime(k.created_at).substring(0,16)} · seq ${k.source_seq || 0}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.path || k.file_path}')">View</button>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">View</button>
       </div>`;
     });
     html += '</div>';
@@ -116,7 +116,7 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
     docs.forEach(doc => {
       const me = (() => { try { return JSON.parse(localStorage.getItem('user')||'{}').username || ''; } catch { return ''; } })();
       const canDel = !doc.owner || doc.owner === me;
-      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${doc.name}" onclick="loadKnowledgeContent('${doc.path}')">
+      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${doc.name}" onclick="loadKnowledgeContent('${doc.obs_key || doc.path}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:var(--a)">📄</span>
           <span style="font-size:12px;font-weight:600">${doc.name}</span>
@@ -125,7 +125,7 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
         <div style="font-size:11px;color:var(--t2);line-height:1.4">@${doc.owner} · ${doc.size} bytes</div>
         <div style="font-size:10px;color:var(--t3);margin-top:4px">${doc.updated_at || ''}</div>
         <div style="display:flex;gap:6px;margin-top:8px">
-          <button class="bt bt-o bt-s" onclick="event.stopPropagation();loadKnowledgeContent('${doc.path}')">View</button>
+          <button class="bt bt-o bt-s" onclick="event.stopPropagation();loadKnowledgeContent('${doc.obs_key || doc.path}')">View</button>
           ${canDel ? `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteKnowledgeDoc('${doc.path}')">Delete</button>` : ''}
         </div>
       </div>`;
@@ -160,7 +160,7 @@ function _renderAgentTab(d) {
       const preview = (k.content || '').split('\n').filter(l => l.trim()).slice(-2).map(l => l.replace(/^- \[[^\]]*\]\s*/, '')).join(' · ');
       const scopeLabel = k.scope === 'member_agent' ? '成员上传' : (k.scope === 'issue_agent' ? 'Agent 级' : 'Issue 级');
       const issueTag = (k.scope !== 'member_agent' && k.issue_num) ? ' · Issue #' + k.issue_num : '';
-      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer;margin-bottom:8px" data-name="${label}" onclick="loadKnowledgeContent('${k.path || k.file_path}')">
+      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer;margin-bottom:8px" data-name="${label}" onclick="loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:${color}">${ico}</span>
           <span style="font-size:12px;font-weight:600">${scopeLabel}${issueTag}</span>
@@ -168,7 +168,7 @@ function _renderAgentTab(d) {
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4">${preview ? escapeHtml(preview).substring(0,140) : '(空)'}</div>
 <div style="font-size:10px;color:var(--t3);margin-top:4px">${k.scope === 'member_agent' ? '成员上传 · 定向该 Agent' : 'seq ' + (k.source_seq || 0) + ' · ' + fmtLocalTime(k.created_at).substring(0,16)}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.path || k.file_path}')">View</button>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">View</button>
       </div>`;
     });
     html += '</div>';
@@ -189,11 +189,16 @@ function filterKnowledge(input) {
   });
 }
 
-function loadKnowledgeContent(file) {
+function loadKnowledgeContent(key) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   el.innerHTML = '<div class="loading">加载中...</div>';
-  API.get('/knowledge/content?repo=' + encodeURIComponent(_currentRepo()) + '&file=' + encodeURIComponent(file)).then(d => {
+  // 如果 key 不是 project-info/ 开头，视为 obs_key 直接读 OBS
+  const isPath = key && (key.startsWith('project-info/') || key.startsWith('/'));
+  const params = isPath
+    ? 'file=' + encodeURIComponent(key)
+    : 'obs_key=' + encodeURIComponent(key);
+  API.get('/knowledge/content?repo=' + encodeURIComponent(_currentRepo()) + '&' + params).then(d => {
     renderKnowledgeDetail(d);
   }).catch(e => {
     el.innerHTML = '<div class="error">加载知识详情失败: ' + e.message + '</div>';
@@ -203,7 +208,8 @@ function loadKnowledgeContent(file) {
 function renderKnowledgeDetail(d) {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  const isJson = (d.file || '').toLowerCase().endsWith('.json');
+  const fileLabel = d.file || d.obs_key || '';
+  const isJson = fileLabel.toLowerCase().endsWith('.json');
   const content = d.content || '';
   const rendered = isJson
     ? '<pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">' + escapeHtml(content) + '</pre>'
@@ -213,12 +219,12 @@ function renderKnowledgeDetail(d) {
     <button class="bt bt-o bt-s" onclick="app.nav('knowledge')" style="margin-bottom:12px">← 返回 Project Knowledge</button>
     <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
       <div class="cd" style="padding:16px 20px;overflow-y:auto">
-        <h3 style="font-size:15px;font-weight:600;margin-bottom:12px">📄 ${d.file}</h3>
+        <h3 style="font-size:15px;font-weight:600;margin-bottom:12px">📄 ${fileLabel}</h3>
         ${rendered || '<div class="ts t2">(空)</div>'}
       </div>
       <div class="cd" style="padding:16px 20px;font-size:12px">
         <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">Knowledge Info</h3>
-        <div class="srow"><label>File</label><span>${d.file}</span></div>
+        <div class="srow"><label>File</label><span>${fileLabel}</span></div>
         <div class="srow"><label>Repo</label><span>${d.repo_key || ''}</span></div>
       </div>
     </div>`;
