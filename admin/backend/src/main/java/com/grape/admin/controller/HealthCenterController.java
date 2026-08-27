@@ -41,42 +41,9 @@ public class HealthCenterController {
         List<Map<String, Object>> workerList = new ArrayList<>();
         java.util.concurrent.atomic.AtomicInteger workerOnline = new java.util.concurrent.atomic.AtomicInteger(0);
 
-        // 本机直连引擎作为虚拟 worker（CPU/MEM/DISK 从 runtime_credentials id=0 读取，
-        // 由主服务 ops/overview 每次 psutil 采集写入，口径一致）
-        boolean hasLocal = count("SELECT COUNT(*) FROM agent_runtimes WHERE credential_id=0") > 0;
-        if (hasLocal) {
-            double localCpu = 0, localMem = 0, localDisk = 0;
-            String localLoad = "";
-            String localLastSeen = null;
-            try {
-                Map<String, Object> row = grapeJdbc.queryForMap(
-                    "SELECT cpu_percent, memory_percent, disk_percent, load_avg, last_seen_at " +
-                    "FROM runtime_credentials WHERE name='本机'");
-                localCpu = ((Number) row.get("cpu_percent")).doubleValue();
-                localMem = ((Number) row.get("memory_percent")).doubleValue();
-                localDisk = ((Number) row.get("disk_percent")).doubleValue();
-                localLoad = (String) row.get("load_avg");
-                localLastSeen = (String) row.get("last_seen_at");
-                if (localLoad == null) localLoad = "";
-            } catch (Exception e) { /* id=0 记录可能还未创建 */ }
-            String nowIso = localLastSeen != null ? localLastSeen : java.time.OffsetDateTime.now().toString();
-            Map<String, Object> local = new LinkedHashMap<>();
-            local.put("id", 0);
-            local.put("name", "本机");
-            local.put("deviceName", "本机直连");
-            local.put("status", "online");
-            local.put("health", "online");
-            local.put("lastSeenAt", nowIso);
-            local.put("lastIp", "127.0.0.1");
-            local.put("cpuPercent", Math.round(localCpu * 10) / 10.0);
-            local.put("memoryPercent", Math.round(localMem * 10) / 10.0);
-            local.put("diskPercent", Math.round(localDisk * 10) / 10.0);
-            local.put("loadAvg", localLoad);
-            local.put("ownerName", "");
-            workerList.add(local);
-        }
+        // 设备监控只显示远端 worker（本机作为运营管理平台不列入设备列表）
 
-        // 远端 worker（runtime_credentials 表）
+        // 远端 worker（runtime_credentials 表，排除 name='本机' 虚拟记录）
         try {
             grapeJdbc.query("SELECT id, name, device_name, status, last_seen_at, last_ip, " +
                     "cpu_percent, memory_percent, disk_percent, load_avg, owner_name " +
