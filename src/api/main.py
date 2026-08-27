@@ -134,6 +134,17 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    # Prevent browser from caching stale JS/CSS (version bump in ?v= is the primary cache-buster,
+    # but this header ensures even without ?v= change the browser revalidates)
+    from starlette.middleware.base import BaseHTTPMiddleware
+    class NoCacheStaticMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            resp = await call_next(request)
+            if request.url.path.startswith("/static/"):
+                resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            return resp
+    app.add_middleware(NoCacheStaticMiddleware)
+
     from fastapi.responses import FileResponse
     @app.get("/")
     async def serve_spa():

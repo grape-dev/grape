@@ -14,6 +14,7 @@ const HEALTH_BADGE = {
 
 let _runtimeTab = 'engines';
 let __runtimeData = null;
+let __runtimeDevices = null;
 
 function _currentUser() {
   try {
@@ -414,18 +415,18 @@ function closeSkillDetail(event) {
 }
 
 // ===== Engine 角色标签 =====
-const _TAG_COLORS = {all: '#6366f1', vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7', sre: '#f59e0b'};
-const _TAG_LABELS = {all: '全能', vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE'};
-const _TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
+const _RT_TAG_COLORS = {all: '#6366f1', vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7', sre: '#f59e0b'};
+const _RT_TAG_LABELS = {all: '全能', vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE'};
+const _RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
 
 function _engineTagCheckboxes(tags) {
-  return _TAG_OPTIONS.map(t => {
+  return _RT_TAG_OPTIONS.map(t => {
     const checked = tags.includes(t) ? 'checked' : '';
-    const desc = t === 'all' ? '可作为所有角色' : '仅 ' + _TAG_LABELS[t] + ' 角色';
-    return `<label style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;user-select:none">
+    const desc = t === 'all' ? '可作为所有角色' : '仅 ' + _RT_TAG_LABELS[t] + ' 角色';
+    return `<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;padding:2px 6px">
       <input type="checkbox" id="engineTagCb_${t}" value="${t}" ${checked} onchange="onEngineTagChange('${t}')"
-             style="width:14px;height:14px;accent-color:${_TAG_COLORS[t]}">
-      <span style="font-size:10px;padding:2px 8px;border-radius:999px;color:#fff;background:${_TAG_COLORS[t]}">${_TAG_LABELS[t]}</span>
+             style="width:14px;height:14px;accent-color:${_RT_TAG_COLORS[t]}">
+      <span style="font-size:10px;padding:2px 8px;border-radius:999px;color:#fff;background:${_RT_TAG_COLORS[t]}">${_RT_TAG_LABELS[t]}</span>
       <span style="color:var(--t3);font-size:11px">${desc}</span>
     </label>`;
   }).join('');
@@ -433,7 +434,7 @@ function _engineTagCheckboxes(tags) {
 
 function _engineTagSummary(tags) {
   if (!tags || tags.length === 0) return '<span style="color:var(--t3);font-size:10px">未分配</span>';
-  return tags.map(t => `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color:#fff;background:${_TAG_COLORS[t]||'#999'};margin:0 2px">${_TAG_LABELS[t]||t}</span>`).join('');
+  return tags.map(t => `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color:#fff;background:${_RT_TAG_COLORS[t]||'#999'};margin:0 2px">${_RT_TAG_LABELS[t]||t}</span>`).join('');
 }
 
 function onEngineTagChange(tag) {
@@ -458,7 +459,7 @@ function onEngineTagChange(tag) {
 
 function saveEngineTags(runtimeId) {
   const tags = [];
-  _TAG_OPTIONS.forEach(t => {
+  _RT_TAG_OPTIONS.forEach(t => {
     const cb = document.getElementById('engineTagCb_'+t);
     if (cb && cb.checked) tags.push(t);
   });

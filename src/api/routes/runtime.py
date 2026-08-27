@@ -156,6 +156,17 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
                      1 if rt.get("healthy", True) else 0, 1, "online",
                      datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, '["all"]'))
                 rid = c.lastrowid
+            # Engine tags (event-dispatch-redesign-v2.md 2.3): optional, not enforced
+            _rt_tags = (rt.get("tags") or "").strip()
+            if _rt_tags:
+                for _t in [t.strip().lower() for t in _rt_tags.split(",") if t.strip()]:
+                    try:
+                        c.execute(
+                            "REPLACE INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
+                            (rid, _t, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()))
+                    except Exception:
+                        pass
+                c.execute("UPDATE agent_runtimes SET tags=? WHERE id=?", (_rt_tags, rid))
             registered.append({"id": rid, "name": name})
         db.commit()
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，
@@ -178,23 +189,31 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
 
 @router.post("/heartbeat")
 async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
-    """更新 runtime 在线态 / last_seen_at。
-
-    归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
-    防止已吊销设备的旧 runtime id 被其它 active 凭据的心跳刷回 online
-    （revoke 只置 offline，不删行；无校验则吊销的设备行会被残留 agent 复活）。
-    """
-    now = datetime.now(timezone.utc).isoformat()
+    """Consolidated heartbeat (Phase 5): worker-level, updates credential + all runtimes."""
+    from src.runtime.service import heartbeat_consolidated
     client_ip = _client_ip(request)
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=? WHERE id=?", (now, client_ip, credential_id))
-        if body.runtime_ids:
-            ph = ",".join("?" for _ in body.runtime_ids)
-            c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
-                      [now] + body.runtime_ids + [credential_id])
-        db.commit()
-    return {"status": "ok"}
+    result = heartbeat_consolidated(credential_id, body.runtime_ids or [], client_ip)
+    return result
+
+
+@router.get("/admin/event-bus")
+async def event_bus_debug(user: dict = Depends(get_current_user)):
+    """Debug endpoint: show event bus history and listeners."""
+    from src.api.event_bus import get_event_bus
+    bus = get_event_bus()
+    return {
+        "history": bus.get_history(),
+        "listeners": {k: len(v) for k, v in bus._listeners.items()},
+        "total_events": len(bus.get_history()),
+    }
+
+
+@router.post("/admin/batch-recover")
+async def batch_recover_stale_tasks_api(user: dict = Depends(get_current_user)):
+    """Manually trigger batch stale task recovery (Phase 5)."""
+    from src.runtime.service import batch_recover_stale_tasks
+    result = batch_recover_stale_tasks()
+    return result
 
 
 class RuntimeClaimBody(BaseModel):
@@ -271,6 +290,65 @@ async def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
         else:
             _attach_skill_obs(task)
     return {"task": task, "scan_request": scan_request}
+
+
+@router.get("/runtimes/{runtime_id}/tags")
+async def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_credential)):
+    """Return this engine's claimable tags from DB (worker polls this instead of ENGINE_TAGS env).
+
+    Tags are managed by users via the console (settings.py CRUD endpoints).
+    Workers call this endpoint to get their current tag list, enabling real-time
+    tag updates without restart.
+    """
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
+                (runtime_id,)
+            )
+            tags = [r[0] for r in c.fetchall()]
+        except Exception:
+            tags = []
+    return {"tags": tags}
+
+
+@router.get("/tasks/{task_id}/env")
+async def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credential)):
+    """Return latest env (AK/SK + credentials) for a task from DB.
+
+    Workers call this before executing to get fresh credentials,
+    instead of relying on the env_extra snapshot from task creation time.
+    """
+    from src.session_manager import db, db_lock
+    from src.runtime.service import _collect_server_env
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT user_id, account FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+    if not row:
+        return {"env": {}}
+    user_id, account = row[0] or 0, row[1] or ""
+    env = _collect_server_env(user_id, account)
+    return {"env": env}
+
+
+@router.post("/runtimes/{runtime_id}/tasks/claim-by-tag/{tag}")
+async def runtime_claim_by_tag(runtime_id: int, tag: str,
+                               body: RuntimeClaimBody | None = None,
+                               credential_id: int = Depends(_require_credential)):
+    """Claim task by tag + scope isolation (event-dispatch-redesign-v2.md 2.4).
+
+    Workers with engine tags can claim tasks matching their tag and scope.
+    """
+    task = service.claim_by_tag(tag, runtime_id)
+    if task:
+        if body and body.prefer_fallback:
+            task["mode"] = "server-fetch"
+        else:
+            _attach_skill_obs(task)
+    return {"task": task}
 
 
 @router.post("/tasks/{task_id}/skill-zip")

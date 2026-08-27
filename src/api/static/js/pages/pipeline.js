@@ -6,6 +6,18 @@ const agentColors = ['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
 const agentLabels = ['VOD','Issue','Coding','QA','SRE'];
 const agentIds = ['vod','issue','coding','qa','sre'];
 const stageLabels = {vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE',done:'Done'};
+const _TAG_COLORS = {vod:'var(--pk)',issue:'var(--r)',coding:'var(--a)',qa:'var(--pu)',sre:'var(--or)',chat:'var(--sk)'};
+const _MODE_ICONS = {emit:'\u2192',waterfall:'\u25c7',serial:'\u21bb',parallel:'\u21c4'};
+
+function _getPipeNodes(data) {
+  // Use pipeline_config from API if available, else fallback to hardcoded
+  var cfg = data && data.pipeline_config;
+  if (cfg && cfg.nodes && cfg.nodes.length > 0) return cfg.nodes;
+  // Fallback: construct from hardcoded arrays
+  return agentIds.map(function(id, i) {
+    return {id: id, tag: id, skill: '', mode: 'emit', next: i < agentIds.length-1 ? agentIds[i+1] : 'done', handoff: i < agentIds.length-1 ? 'a2a' : 'complete'};
+  });
+}
 
 function selPipe(idx) {
   _pipeActiveIdx = idx;
@@ -29,19 +41,25 @@ function selPipe(idx) {
   const owner = displayPipe.current_owner || '';
   const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>' : ' &nbsp;<span class="ts t2">空闲</span>';
 
-  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
+  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 \u5f53\u524d\u8d23\u4efb\u4eba: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
-  stages.forEach((stage, i) => {
-    const sc = statuses[i];
-    const ev = stage.latest_event || {};
-    const evTitle = ev.title || '';
-    const dotc = sc === 2 ? 'var(--g)' : sc === 1 ? 'var(--y)' : sc === 3 ? 'var(--r)' : sc === 0 ? 'var(--t3)' : '#ddd';
-    const dimStyle = sc === 0 ? 'background:#eef0f4;border-top-color:#d5d9e0;filter:grayscale(0.6)' : `background:${sc === 1 ? '#fff8e8' : '#fff'};border-top-color:${agentColors[i]}`;
-    flowHtml += `<div class="nd" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${agentIds[i]}')">
-      <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : agentColors[i]}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${agentLabels[i]}</h4></div>
-      <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? evTitle || ev.event_type || '—' : '—'}</div>
+  // Dynamic pipeline nodes (event-dispatch-redesign-v2.md Phase 2)
+  var pipeNodes = _getPipeNodes(data);
+  pipeNodes.forEach(function(node, i) {
+    var tag = node.tag || node.id;
+    var sc = statuses[i] || 0;
+    var ev = (stages[i] && stages[i].latest_event) || {};
+    var evTitle = ev.title || '';
+    var dotc = sc === 2 ? 'var(--g)' : sc === 1 ? 'var(--y)' : sc === 3 ? 'var(--r)' : 'var(--t3)';
+    var color = _TAG_COLORS[tag] || agentColors[i % agentColors.length];
+    var label = (node.id || tag).charAt(0).toUpperCase() + (node.id || tag).slice(1);
+    var modeIcon = _MODE_ICONS[node.mode] || _MODE_ICONS.emit;
+    var dimStyle = sc === 0 ? 'background:#eef0f4;border-top-color:#d5d9e0;filter:grayscale(0.6)' : 'background:' + (sc === 1 ? '#fff8e8' : '#fff') + ';border-top-color:' + color;
+    flowHtml += `<div class="nd" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${tag}')">
+      <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : color}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${label} <span style="font-size:9px;color:var(--t3)">${modeIcon}</span></h4></div>
+      <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? evTitle || ev.event_type || '\u2014' : '\u2014'}</div>
       <div class="nds" style="margin-bottom:1px;font-size:9px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev && ev.actor ? '@' + ev.actor : ' '}</div>
-      <div class="ns"><span class="d" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : sc === 0 ? 'Pending' : '—'}</div>
+      <div class="ns"><span class="d" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : 'Pending'}</div>
     </div>`;
   });
   flowHtml += `</div>`;
@@ -94,21 +112,26 @@ function renderPipeline(data) {
     const _repoFullName = (data.repo || '').replace(/^gitcode:/, '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
-    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;·&nbsp; 👤 当前责任人: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
+    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 \u5f53\u524d\u8d23\u4efb\u4eba: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
-    stages.forEach((stage, i) => {
-      const sc = statuses[i];
-      const ev = stage.latest_event || {};
-      const evTitle = ev.title || '';
-      const dotc = sc === 2 ? 'var(--g)' : sc === 1 ? 'var(--y)' : sc === 3 ? 'var(--r)' : sc === 0 ? 'var(--t3)' : '#ddd';
-      const dimStyle = sc === 0
+    var pipeNodes2 = _getPipeNodes(data);
+    pipeNodes2.forEach(function(node, i) {
+      var tag = node.tag || node.id;
+      var sc = statuses[i] || 0;
+      var ev = (stages[i] && stages[i].latest_event) || {};
+      var evTitle = ev.title || '';
+      var dotc = sc === 2 ? 'var(--g)' : sc === 1 ? 'var(--y)' : sc === 3 ? 'var(--r)' : 'var(--t3)';
+      var color = _TAG_COLORS[tag] || agentColors[i % agentColors.length];
+      var label = (node.id || tag).charAt(0).toUpperCase() + (node.id || tag).slice(1);
+      var modeIcon = _MODE_ICONS[node.mode] || _MODE_ICONS.emit;
+      var dimStyle = sc === 0
         ? 'background:#eef0f4;border-top-color:#d5d9e0;filter:grayscale(0.6)'
-        : `background:${sc === 1 ? '#fff8e8' : '#fff'};border-top-color:${agentColors[i]}`;
-      flowHtml += `<div class="nd" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${agentIds[i]}')">
-        <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : agentColors[i]}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${agentLabels[i]}</h4></div>
-        <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? evTitle || ev.event_type || '—' : '—'}</div>
+        : 'background:' + (sc === 1 ? '#fff8e8' : '#fff') + ';border-top-color:' + color;
+      flowHtml += `<div class="nd" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${tag}')">
+        <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : color}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${label} <span style="font-size:9px;color:var(--t3)">${modeIcon}</span></h4></div>
+        <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? evTitle || ev.event_type || '\u2014' : '\u2014'}</div>
         <div class="nds" style="margin-bottom:1px;font-size:9px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev && ev.actor ? '@' + ev.actor : ' '}</div>
-        <div class="ns"><span class="d" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : sc === 0 ? 'Pending' : '—'}</div>
+        <div class="ns"><span class="d" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : 'Pending'}</div>
       </div>`;
     });
     flowHtml += `</div></div>`;

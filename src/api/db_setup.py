@@ -1,4 +1,4 @@
-"""数据库初始化：新增 events、agent_sessions、配置表 + JSON 种子数据导入"""
+"""数据库初始化:新增 events,agent_sessions,配置表 + JSON 种子数据导入"""
 import json, os, threading
 from src.session_manager import db, db_lock
 from src.config import log
@@ -143,9 +143,9 @@ CREATE TABLE IF NOT EXISTS backend_agents (
 )
 """
 
-# new-version2：backend_agents → agent_runtimes（术语重构，见 agent-runtime-design.md §5.2）
-# 多实例键（multi-runtime-instance-design §2.1）：注册键 = (credential_id, name, scope, owner_id)，
-# 使每台 worker（凭据）对每个引擎独占一行、同时在线。老库由迁移重建（_rebuild_agent_runtimes_inst_key）。
+# new-version2:backend_agents -> agent_runtimes(术语重构,见 agent-runtime-design.md §5.2)
+# 多实例键(multi-runtime-instance-design §2.1):注册键 = (credential_id, name, scope, owner_id),
+# 使每台 worker(凭据)对每个引擎独占一行,同时在线.老库由迁移重建(_rebuild_agent_runtimes_inst_key).
 _AGENT_RUNTIMES_DDL = """
 CREATE TABLE IF NOT EXISTS agent_runtimes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,13 +258,13 @@ CREATE TABLE IF NOT EXISTS tasks (
 )
 """
 
-# ===== new-version2 M1：agent_tasks 任务队列（确定路由 + 事件档案快照）=====
+# ===== new-version2 M1:agent_tasks 任务队列(确定路由 + 事件档案快照)=====
 # 见 agent-runtime-event-full-design.md §4.3 / concurrency-design.md / skill-delivery-remote.md
 _AGENT_TASKS_DDL = """
 CREATE TABLE IF NOT EXISTS agent_tasks (
     id                TEXT PRIMARY KEY,
-    agent_session_id  TEXT NOT NULL,        -- 外键 → devops_agent_session.id
-    runtime_id        INTEGER NOT NULL,     -- 确定路由 → agent_runtimes.id
+    agent_session_id  TEXT NOT NULL,        -- 外键 -> devops_agent_session.id
+    runtime_id        INTEGER NOT NULL,     -- 确定路由 -> agent_runtimes.id
     event_seq         INTEGER,              -- 关联 events 表 seq
     issue_id          TEXT DEFAULT '',      -- 关联 event.json pipeline 段
     repo_key          TEXT DEFAULT '',
@@ -277,13 +277,13 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     account           TEXT DEFAULT '',
     user_id           INTEGER DEFAULT 0,
     repo_gitcode_token TEXT DEFAULT '',
-    env_extra         MEDIUMTEXT DEFAULT '{}',    -- JSON（含服务端已注入的账号/用户凭据，见 skill-delivery-remote.md）
-    skill_files       MEDIUMTEXT,    -- JSON: {skill_name: {rel_path: content}}，远端交付技能包（MySQL 不允许 MEDIUMTEXT 默认值——无默认）
-    server_url        TEXT DEFAULT '',      -- A2A 外呼地址，worker 替换 {{SERVER_URL}}
-    issue_session_id  TEXT DEFAULT '',      -- 外键 → issue_agent_session.id（Issue 级执行会话，串行粒度，见 multi-issue-isolation-design.md §3.3）
-    project_info_files MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content}，repo 全局 project-info 随任务交付（§2.4）
+    env_extra         MEDIUMTEXT DEFAULT '{}',    -- JSON(含服务端已注入的账号/用户凭据,见 skill-delivery-remote.md)
+    skill_files       MEDIUMTEXT,    -- JSON: {skill_name: {rel_path: content}},远端交付技能包(MySQL 不允许 MEDIUMTEXT 默认值--无默认)
+    server_url        TEXT DEFAULT '',      -- A2A 外呼地址,worker 替换 {{SERVER_URL}}
+    issue_session_id  TEXT DEFAULT '',      -- 外键 -> issue_agent_session.id(Issue 级执行会话,串行粒度,见 multi-issue-isolation-design.md §3.3)
+    project_info_files MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content},repo 全局 project-info 随任务交付(§2.4)
     project_info_meta  MEDIUMTEXT DEFAULT '{}',   -- JSON: {last_commit_sha, branches, last_updated, degraded}
-    knowledge_files    MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content}，共享知识快照交付（event-conversation-design.md §3.1.1）
+    knowledge_files    MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content},共享知识快照交付(event-conversation-design.md §3.1.1)
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/completed/failed/cancelled
     exit_code         INTEGER DEFAULT NULL,
     result_text       MEDIUMTEXT DEFAULT '',
@@ -296,77 +296,77 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
 )
 """
 
-# ===== 运行日志：task_messages 结构化消息表（实时日志功能，对齐 multica TaskMessage 模型）=====
+# ===== 运行日志:task_messages 结构化消息表(实时日志功能,对齐 multica TaskMessage 模型)=====
 _TASK_MESSAGES_DDL = """
 CREATE TABLE IF NOT EXISTS task_messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id    TEXT NOT NULL,           -- agent_tasks.id
-    seq        INTEGER NOT NULL,        -- worker 侧单调序号（顺序/去重/增量拉取三合一）
+    seq        INTEGER NOT NULL,        -- worker 侧单调序号(顺序/去重/增量拉取三合一)
     type       TEXT NOT NULL,           -- step_start|text|reasoning|tool_use|step_finish|error|done
     tool       TEXT DEFAULT '',         -- tool_use 工具名
     content    MEDIUMTEXT DEFAULT '',         -- text/reasoning/error 内容
-    input_json MEDIUMTEXT DEFAULT '',         -- tool_use 入参 JSON（服务端已脱敏）
-    output     TEXT DEFAULT '',         -- tool_result 输出（worker 截断 8192）
+    input_json MEDIUMTEXT DEFAULT '',         -- tool_use 入参 JSON(服务端已脱敏)
+    output     TEXT DEFAULT '',         -- tool_result 输出(worker 截断 8192)
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(task_id, seq)
 )
 """
 
-# ===== agent-cluster-design.md §4.1：Agent 类型 → 引擎池绑定（1..N）=====
+# ===== agent-cluster-design.md §4.1:Agent 类型 -> 引擎池绑定(1..N)=====
 _AGENT_TYPE_RUNTIME_POOL_DDL = """
 CREATE TABLE IF NOT EXISTS agent_type_runtime_pool (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_type   TEXT NOT NULL,              -- vod / issue / coding / qa / sre
-    runtime_id   INTEGER NOT NULL,           -- agent_runtimes.id（Worker 上的引擎实例）
-    weight       INTEGER NOT NULL DEFAULT 1, -- 调度权重（≥1）
-    priority     INTEGER NOT NULL DEFAULT 5, -- 池内优先级（1 高）
-    enabled      INTEGER NOT NULL DEFAULT 1, -- 软摘除（保留绑定但不参与调度）
+    runtime_id   INTEGER NOT NULL,           -- agent_runtimes.id(Worker 上的引擎实例)
+    weight       INTEGER NOT NULL DEFAULT 1, -- 调度权重(≥1)
+    priority     INTEGER NOT NULL DEFAULT 5, -- 池内优先级(1 高)
+    enabled      INTEGER NOT NULL DEFAULT 1, -- 软摘除(保留绑定但不参与调度)
     remark       TEXT DEFAULT '',
     created_at   TEXT DEFAULT (datetime('now')),
     UNIQUE (agent_type, runtime_id)
 )
 """
 
-# ===== engine-selection-design.md §4.4：每 (仓库, agent) 引擎集合绑定 =====
+# ===== engine-selection-design.md §4.4:每 (仓库, agent) 引擎集合绑定 =====
 _DEVOPS_AGENT_RUNTIME_BINDING_DDL = """
 CREATE TABLE IF NOT EXISTS devops_agent_runtime_binding (
-    repo_key    TEXT NOT NULL,              -- 仓库全名（owner/repo，归一化）
+    repo_key    TEXT NOT NULL,              -- 仓库全名(owner/repo,归一化)
     agent_type  TEXT NOT NULL,              -- vod / issue / coding / qa / sre / chat
-    runtime_id  INTEGER NOT NULL,           -- agent_runtimes.id（本机直连或远端引擎）
-    priority    INTEGER NOT NULL DEFAULT 50, -- 小=高优先；默认按 scope：repo=10 / global=50 / local=90
+    runtime_id  INTEGER NOT NULL,           -- agent_runtimes.id(本机直连或远端引擎)
+    priority    INTEGER NOT NULL DEFAULT 50, -- 小=高优先;默认按 scope:repo=10 / global=50 / local=90
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (repo_key, agent_type, runtime_id)
 )
 """
 
-# ===== new-version2 M3：runtime_credentials 独立凭据（rta_ token，见 agent-runtime-event-full-design.md §4.1）=====
+# ===== new-version2 M3:runtime_credentials 独立凭据(rta_ token,见 agent-runtime-event-full-design.md §4.1)=====
 _RUNTIME_CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS runtime_credentials (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_hash   TEXT NOT NULL,             -- sha256(rta_xxx)，不存明文
-    name         TEXT NOT NULL UNIQUE,      -- 凭据名=worker 名，全局唯一（可改名）
-    device_name  TEXT DEFAULT '',           -- 首次注册时回填（边端自报，辅助展示）
-    scope        TEXT DEFAULT 'user',       -- user(个人)/repo(仓库)/global(全局)，默认个人
-    owner_id     TEXT DEFAULT '',           -- 仓库 scope 时存 repo 全名（如 owner/repo）；个人/全局为 ''
-    owner_name   TEXT DEFAULT '',           -- 归属用户 user_name（生成凭据的当前登录用户）
+    token_hash   TEXT NOT NULL,             -- sha256(rta_xxx),不存明文
+    name         TEXT NOT NULL UNIQUE,      -- 凭据名=worker 名,全局唯一(可改名)
+    device_name  TEXT DEFAULT '',           -- 首次注册时回填(边端自报,辅助展示)
+    scope        TEXT DEFAULT 'user',       -- user(个人)/repo(仓库)/global(全局),默认个人
+    owner_id     TEXT DEFAULT '',           -- 仓库 scope 时存 repo 全名(如 owner/repo);个人/全局为 ''
+    owner_name   TEXT DEFAULT '',           -- 归属用户 user_name(生成凭据的当前登录用户)
     status       TEXT DEFAULT 'active',     -- active / revoked
     last_seen_at TEXT DEFAULT NULL,
-    last_ip      TEXT DEFAULT '',           -- 最近注册/心跳来源 IP（展示用，不入唯一键）
+    last_ip      TEXT DEFAULT '',           -- 最近注册/心跳来源 IP(展示用,不入唯一键)
     created_at   TEXT DEFAULT (datetime('now')),
     UNIQUE (token_hash)
 )
 """
 
-# ===== new-version2 VOD：Issue 生命周期状态机（权威阶段，见 vod-skill-upgrade-plan.md §3.0.2）=====
+# ===== new-version2 VOD:Issue 生命周期状态机(权威阶段,见 vod-skill-upgrade-plan.md §3.0.2)=====
 _ISSUE_STATE_DDL = """
 CREATE TABLE IF NOT EXISTS issue_state (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_key     TEXT NOT NULL,
     issue_id     TEXT NOT NULL,             -- 如 "#5"
     stage        TEXT NOT NULL DEFAULT 'vod',   -- vod/issue/coding/qa/sre/done
-    owner_agent  TEXT NOT NULL DEFAULT 'vod',   -- 当前归属 agent（= 最新被交办者）
-    assignee     TEXT DEFAULT '',          -- Issue 责任人（GitCode assignee，可为 grape_bot 或用户）
+    owner_agent  TEXT NOT NULL DEFAULT 'vod',   -- 当前归属 agent(= 最新被交办者)
+    assignee     TEXT DEFAULT '',          -- Issue 责任人(GitCode assignee,可为 grape_bot 或用户)
     a2a_seq      INTEGER,                   -- 触发当前 stage 的 A2A 事件 seq
     updated_at   TEXT DEFAULT (datetime('now')),
     created_at   TEXT DEFAULT (datetime('now')),
@@ -374,15 +374,15 @@ CREATE TABLE IF NOT EXISTS issue_state (
 )
 """
 
-# ===== new-version2 Issue 级执行会话（多 Issue 并行，见 multi-issue-isolation-design.md §3.3）=====
-# 配置层（devops_agent_session，repo+agent）与执行层（issue_agent_session，repo+agent+issue）分离。
+# ===== new-version2 Issue 级执行会话(多 Issue 并行,见 multi-issue-isolation-design.md §3.3)=====
+# 配置层(devops_agent_session,repo+agent)与执行层(issue_agent_session,repo+agent+issue)分离.
 _ISSUE_AGENT_SESSION_DDL = """
 CREATE TABLE IF NOT EXISTS issue_agent_session (
-    id                TEXT PRIMARY KEY,          -- uuid，agent_tasks.issue_session_id 外键
+    id                TEXT PRIMARY KEY,          -- uuid,agent_tasks.issue_session_id 外键
     repo_key          TEXT NOT NULL,
     agent_type        TEXT NOT NULL,
-    issue_id          TEXT NOT NULL,             -- 如 "#5"（对应 event.json 的 issue_num）
-    runtime_session_id TEXT DEFAULT '',          -- opencode --session 续接指针（Issue 级）
+    issue_id          TEXT NOT NULL,             -- 如 "#5"(对应 event.json 的 issue_num)
+    runtime_session_id TEXT DEFAULT '',          -- opencode --session 续接指针(Issue 级)
     status            TEXT DEFAULT 'idle',       -- idle / running / failed
     last_active_at    TEXT DEFAULT (datetime('now')),
     created_at        TEXT DEFAULT (datetime('now')),
@@ -390,13 +390,13 @@ CREATE TABLE IF NOT EXISTS issue_agent_session (
 )
 """
 
-# new-version2 Event 对话（event-conversation-design.md）：以事件为锚点、与处理该事件的 agent 对话
+# new-version2 Event 对话(event-conversation-design.md):以事件为锚点,与处理该事件的 agent 对话
 _EVENT_THREAD_DDL = """
 CREATE TABLE IF NOT EXISTS event_thread (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    anchor_seq  INTEGER NOT NULL,           -- 锚点事件 seq（对话对象 = 处理该事件的 agent）
+    anchor_seq  INTEGER NOT NULL,           -- 锚点事件 seq(对话对象 = 处理该事件的 agent)
     repo_key    TEXT NOT NULL,
-    issue_id    TEXT DEFAULT '',            -- 关联 Issue（如 '#5'；无关联事件为 ''）
+    issue_id    TEXT DEFAULT '',            -- 关联 Issue(如 '#5';无关联事件为 '')
     agent_type  TEXT NOT NULL,              -- vod/issue/coding/qa/sre
     role        TEXT NOT NULL,              -- user / agent
     content     MEDIUMTEXT NOT NULL,
@@ -405,8 +405,8 @@ CREATE TABLE IF NOT EXISTS event_thread (
 )
 """
 
-# 共享知识索引：正文=工作区文件（project-info/knowledge.md、issues/{n}/knowledge.md、
-# {agent}/issues/{n}/knowledge.md），本表仅存索引/状态/审计（见 event-conversation-design.md §3.1.1）
+# 共享知识索引:正文=工作区文件(project-info/knowledge.md,issues/{n}/knowledge.md,
+# {agent}/issues/{n}/knowledge.md),本表仅存索引/状态/审计(见 event-conversation-design.md §3.1.1)
 _AGENT_SHARED_KNOWLEDGE_DDL = """
 CREATE TABLE IF NOT EXISTS agent_shared_knowledge (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -414,11 +414,26 @@ CREATE TABLE IF NOT EXISTS agent_shared_knowledge (
     repo_key    TEXT NOT NULL,
     agent_type  TEXT DEFAULT '',            -- scope=issue_agent 时必填
     issue_num   INTEGER DEFAULT 0,          -- scope=issue / issue_agent 时必填
-    file_path   TEXT NOT NULL,              -- 知识正文文件（相对 WORKSPACE_DIR）
+    file_path   TEXT NOT NULL,              -- 知识正文文件(相对 WORKSPACE_DIR)
     status      TEXT DEFAULT 'accepted',    -- accepted / rejected
     source_seq  INTEGER DEFAULT 0,
     created_by  TEXT DEFAULT '',
     created_at  TEXT DEFAULT (datetime('now'))
+)
+"""
+
+# ===== engine tagging (event-dispatch-redesign-v2.md 2.2) =====
+_ENGINE_CAPABILITIES_DDL = """
+CREATE TABLE IF NOT EXISTS engine_capabilities (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    runtime_id  INTEGER NOT NULL,
+    tag         TEXT NOT NULL,
+    max_concurrent INTEGER DEFAULT 1,
+    priority    INTEGER DEFAULT 50,
+    enabled     INTEGER DEFAULT 1,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE(runtime_id, tag)
 )
 """
 
@@ -434,6 +449,7 @@ _NEW_TABLES = [
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
     ("events", _EVENTS_TABLE_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
+    ("engine_capabilities", _ENGINE_CAPABILITIES_DDL),
     ("chat_conversations", _CHAT_CONVERSATIONS_DDL),
     ("chat_messages", _CHAT_MESSAGES_DDL),
     ("devops_agent_session", _AGENT_SESSIONS_TABLE_DDL),
@@ -477,9 +493,9 @@ def _create_tables():
 
 
 def _ensure_column(c, tbl: str, col: str, ddl: str):
-    """幂等补列：PRAGMA 检查列不存在才 ALTER。
+    """Idempotent column add: PRAGMA check if column missing then ALTER.
 
-    列名以反引号包裹（`` `col` ``），兼容 MySQL（如 `binary` 为保留字）与 SQLite。
+    Column name wrapped in backticks for MySQL compatibility (e.g. `binary` is reserved).
     """
     cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
     if col not in cols:
@@ -487,10 +503,10 @@ def _ensure_column(c, tbl: str, col: str, ddl: str):
 
 
 def _rename_column_if_exists(c, tbl: str, old: str, new: str):
-    """幂等改名：旧列存在才处理（SQLite 3.25+）。
-    - 若 new 不存在：RENAME COLUMN（保数据）
-    - 若 new 已存在（如 session_manager 模块级 ALTER 预建的兼容列）且 old 仍有数据：
-      把 old 数据并入 new，再 DROP old，避免双列并存丢数据
+    """幂等改名:旧列存在才处理(SQLite 3.25+).
+    - 若 new 不存在:RENAME COLUMN(保数据)
+    - 若 new 已存在(如 session_manager 模块级 ALTER 预建的兼容列)且 old 仍有数据:
+      把 old 数据并入 new,再 DROP old,避免双列并存丢数据
     """
     cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
     if old not in cols:
@@ -498,7 +514,7 @@ def _rename_column_if_exists(c, tbl: str, old: str, new: str):
     if new not in cols:
         c.execute(f"ALTER TABLE {tbl} RENAME COLUMN {old} TO {new}")
         return
-    # 双列并存：按列类型归并 old → new（new 为默认值才填 old，避免覆盖新值）
+    # 双列并存:按列类型归并 old -> new(new 为默认值才填 old,避免覆盖新值)
     try:
         otype = [r[2] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall() if r[1] == old][0].upper()
     except Exception:
@@ -514,8 +530,8 @@ def _rename_column_if_exists(c, tbl: str, old: str, new: str):
 
 
 def _copy_backend_to_runtime(c):
-    """backend_agents → agent_runtimes 数据搬迁（保留 id；若 agent_runtimes 已有同 name 行——
-    如历史迁移 ensure_default_runtime 预置的空行——则用老库数据补全缺失字段，老库为权威）。"""
+    """backend_agents -> agent_runtimes 数据搬迁(保留 id;若 agent_runtimes 已有同 name 行--
+    如历史迁移 ensure_default_runtime 预置的空行--则用老库数据补全缺失字段,老库为权威)."""
     cols = [r[1] for r in c.execute("PRAGMA table_info(backend_agents)").fetchall()]
     if "name" not in cols:
         return
@@ -526,7 +542,7 @@ def _copy_backend_to_runtime(c):
         existing = c.execute("SELECT id FROM agent_runtimes WHERE lower(name)=? AND scope=? AND owner_id=? LIMIT 1",
                              (name.lower() if name else name, scope or "global", owner or "")).fetchone()
         if existing:
-            # 已存在（如 ensure 预置空行）：补全缺失字段，保留其 id
+            # 已存在(如 ensure 预置空行):补全缺失字段,保留其 id
             c.execute("""UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=?
                          WHERE id=? AND (display_name='' OR installed=0 OR cli_path='' OR version='' OR healthy=0 OR pip_package='')""",
                       (display or name, 1 if installed else 0, cli or "", ver or "", 1 if healthy else 0, pip or "", updated or "", existing[0]))
@@ -574,7 +590,7 @@ def _seed_from_json():
 
     for seed_key, json_file, db_table in _SEED_FILES:
         if seed_key in seeded_keys and seed_key != "agent_type":
-            # 已 seed 过：skill_official 仍需幂等补种缺失技能；其余跳过
+            # 已 seed 过:skill_official 仍需幂等补种缺失技能;其余跳过
             if seed_key != "skill_official":
                 log.info(f"Seed key '{seed_key}' already run, skip")
                 continue
@@ -587,13 +603,13 @@ def _seed_from_json():
         with db_lock:
             c = db.cursor()
             if seed_key == "skill_official":
-                # 官方技能：scope='official' 行
+                # 官方技能:scope='official' 行
                 c.execute("SELECT COUNT(*) FROM skill WHERE scope='official'")
             else:
                 c.execute(f"SELECT COUNT(*) FROM {db_table}")
             count = c.fetchone()[0]
             if count > 0 and db_table != "agent_type":
-                # 表已有数据：跳过全量 seed，但对 skill-description.json 中缺失的官方技能幂等补种
+                # 表已有数据:跳过全量 seed,但对 skill-description.json 中缺失的官方技能幂等补种
                 if seed_key == "skill_official":
                     with open(filepath, "r", encoding="utf-8") as f:
                         data = json.load(f)
@@ -646,8 +662,8 @@ def _insert_seed_data(table: str, data: dict):
 
         elif table == "agent_type":
             # agent-description.json: {"agent_type": {"name": "...", ...}}
-            # default_runtime_id 不再写死 opencode（engine-selection-design.md v2 §8.2）：
-            # 绑定一律由 pick_engine 按 (仓库, agent) 引擎集合运行时解析，种子只留 0（未绑定）。
+            # default_runtime_id 不再写死 opencode(engine-selection-design.md v2 §8.2):
+            # 绑定一律由 pick_engine 按 (仓库, agent) 引擎集合运行时解析,种子只留 0(未绑定).
             for agent_type, info in data.items():
                 display_name = info.get("name", agent_type)
                 description = info.get("description", "")
@@ -673,14 +689,14 @@ def _insert_seed_data(table: str, data: dict):
                 )
 
         elif table == "agent_registry":
-            # agent-routing.json 已废弃（agent_registry 表移除），backend 统一用 backend_agents
+            # agent-routing.json 已废弃(agent_registry 表移除),backend 统一用 backend_agents
             pass
 
         db.commit()
 
 
 def init_database():
-    """初始化所有新表（幂等），启动时调用"""
+    """初始化所有新表(幂等),启动时调用"""
     _create_tables()
     _migrate_tables()
     _create_indexes()
@@ -689,7 +705,7 @@ def init_database():
     _align_agent_enable()
     _cleanup_stale_meta()
     _cleanup_chat_shared_worker_runtime()
-    # engine-selection-design.md §4.4/§12：存量会话 runtime_id>0 → 回填绑定集合（单成员，幂等）
+    # engine-selection-design.md §4.4/§12:存量会话 runtime_id>0 -> 回填绑定集合(单成员,幂等)
     try:
         from src.runtime.engine_select import backfill_existing_bindings
         backfill_existing_bindings()
@@ -698,11 +714,11 @@ def init_database():
 
 
 def _sync_official_skills():
-    """启动时从 configs/skill-description.json 同步官方技能到 skill 表（幂等）。
+    """启动时从 configs/skill-description.json 同步官方技能到 skill 表(幂等).
 
-    与 /api/skills/sync-official 逻辑一致：新增 INSERT + 已有 UPDATE 元信息
-   （display_name/description/agent_type）。_seed_from_json 只补种缺失技能，
-    不更新已有技能的元信息——配置文件中改名/改描述后需要此步骤同步。
+    与 /api/skills/sync-official 逻辑一致:新增 INSERT + 已有 UPDATE 元信息
+   (display_name/description/agent_type)._seed_from_json 只补种缺失技能,
+    不更新已有技能的元信息--配置文件中改名/改描述后需要此步骤同步.
     """
     try:
         import json as _json
@@ -745,10 +761,10 @@ def _sync_official_skills():
 
 
 def _cleanup_stale_meta():
-    """删除单 bot 时代遗留的全局 meta.ws_feishu_app_id。
+    """删除单 bot 时代遗留的全局 meta.ws_feishu_app_id.
 
-    该 key 由旧 WebSocket 启动流程写入，多 bot 化后已无写入方、无业务用途；曾被未绑定仓库
-    兜底误用导致把 Jason7602 的仓库发给其它用户（2026-08-17，见 feishu-web-chat-unified-design.md §10）。
+    该 key 由旧 WebSocket 启动流程写入,多 bot 化后已无写入方,无业务用途;曾被未绑定仓库
+    兜底误用导致把 Jason7602 的仓库发给其它用户(2026-08-17,见 feishu-web-chat-unified-design.md §10).
     """
     try:
         c = db.cursor()
@@ -760,13 +776,13 @@ def _cleanup_stale_meta():
 
 
 def _cleanup_chat_shared_worker_runtime():
-    """把 chat 配置中指向共享全局 worker（scope='global' 且 credential_id>0）的 runtime_id
-    回落为本机直连（同名 credential_id=0），修复 backend 名解析被共享 worker 劫持
-    （chat-agent-backend-resolution-fix.md 方案 C）。幂等，启动时执行。"""
-    # queue_remote 下本机直连行（credential_id=0）无 claim 方 = 黑洞
-    #（chat-task-blackhole-local-direct-2026-08.md）：回落会把用户配置重置为死引擎，
-    # 每次重启覆盖管理员/用户改绑（2026-08-18 实测 sess-cfg-* 全被重置为 1），跳过；
-    # direct 模式保留原防劫持语义。
+    """把 chat 配置中指向共享全局 worker(scope='global' 且 credential_id>0)的 runtime_id
+    回落为本机直连(同名 credential_id=0),修复 backend 名解析被共享 worker 劫持
+    (chat-agent-backend-resolution-fix.md 方案 C).幂等,启动时执行."""
+    # queue_remote 下本机直连行(credential_id=0)无 claim 方 = 黑洞
+    #(chat-task-blackhole-local-direct-2026-08.md):回落会把用户配置重置为死引擎,
+    # 每次重启覆盖管理员/用户改绑(2026-08-18 实测 sess-cfg-* 全被重置为 1),跳过;
+    # direct 模式保留原防劫持语义.
     try:
         from src.runtime.service import get_execution_mode, EXEC_MODE_REMOTE
         if get_execution_mode() == EXEC_MODE_REMOTE:
@@ -797,11 +813,11 @@ def _cleanup_chat_shared_worker_runtime():
 
 
 def _align_agent_enable():
-    """存量会话 enable 对齐 agent_type 默认值（仅执行一次，幂等）。
+    """存量会话 enable 对齐 agent_type 默认值(仅执行一次,幂等).
 
-    依赖：须在 _seed_from_json 之后调用（agent_type.enable 已由 JSON seed 写入正确默认值，
-    如 sre=0）。用 meta 标记 'enable_aligned' 保证只跑一次，避免覆盖用户后续在
-    Dashboard 手动设置的仓库级 enable。
+    依赖:须在 _seed_from_json 之后调用(agent_type.enable 已由 JSON seed 写入正确默认值,
+    如 sre=0).用 meta 标记 'enable_aligned' 保证只跑一次,避免覆盖用户后续在
+    Dashboard 手动设置的仓库级 enable.
     """
     try:
         with db_lock:
@@ -809,7 +825,7 @@ def _align_agent_enable():
             done = c.execute("SELECT COUNT(*) FROM meta WHERE key='enable_aligned'").fetchone()[0]
             if done:
                 return
-            # 先确保 enable 列存在（新库可能无）
+            # 先确保 enable 列存在(新库可能无)
             _ensure_column(c, "agent_type", "enable", "INTEGER DEFAULT 1")
             _ensure_column(c, "devops_agent_session", "enable", "INTEGER DEFAULT 1")
             c.execute(
@@ -823,15 +839,15 @@ def _align_agent_enable():
 
 
 def _drop_chat_session_repo_unique(c):
-    """幂等修复：重建 chat_agent_session，去掉陈旧的 `repo_key TEXT UNIQUE` 约束。
+    """幂等修复:重建 chat_agent_session,去掉陈旧的 `repo_key TEXT UNIQUE` 约束.
 
-    背景：chat_agent_session 由旧 `sessions` 表 `ALTER TABLE ... RENAME` 而来，SQLite RENAME
-    保留了旧表 `repo_key TEXT UNIQUE`；而代码 DDL（session_manager.py）意图为 per-user
-    （repo_key TEXT DEFAULT ''，无 UNIQUE）。陈旧约束使全局 chat 配置（repo_key=''）只能有一行，
-    多用户配置互相 INSERT OR REPLACE 顶掉，导致 chat bot secret 丢失、断连。
+    背景:chat_agent_session 由旧 `sessions` 表 `ALTER TABLE ... RENAME` 而来,SQLite RENAME
+    保留了旧表 `repo_key TEXT UNIQUE`;而代码 DDL(session_manager.py)意图为 per-user
+    (repo_key TEXT DEFAULT '',无 UNIQUE).陈旧约束使全局 chat 配置(repo_key='')只能有一行,
+    多用户配置互相 INSERT OR REPLACE 顶掉,导致 chat bot secret 丢失,断连.
 
-    检测 sqlite_master 中该表定义含 `repo_key TEXT UNIQUE` → 按当前 PRAGMA 列定义重建表
-    （保留数据与全部列，仅去掉 UNIQUE）。返回是否执行了重建。
+    检测 sqlite_master 中该表定义含 `repo_key TEXT UNIQUE` -> 按当前 PRAGMA 列定义重建表
+    (保留数据与全部列,仅去掉 UNIQUE).返回是否执行了重建.
     """
     row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_agent_session'").fetchone()
     if not row or not row[0]:
@@ -859,12 +875,12 @@ def _drop_chat_session_repo_unique(c):
 
 
 def _rebuild_agent_runtimes_inst_key(c):
-    """多实例键迁移（multi-runtime-instance-design §7）：把 agent_runtimes 的旧唯一约束
-    `UNIQUE (name, scope, owner_id)` 升级为 `UNIQUE (credential_id, name, scope, owner_id)`。
+    """多实例键迁移(multi-runtime-instance-design §7):把 agent_runtimes 的旧唯一约束
+    `UNIQUE (name, scope, owner_id)` 升级为 `UNIQUE (credential_id, name, scope, owner_id)`.
 
-    SQLite 无法直接改约束 → 检测到旧约束时重建表（用新 DDL，保留数据）。重建前清理
-    `credential_id=0` 的同名重复行（历史迁移遗留，仅保留 id 最小的一行），避免新唯一键冲突。
-    返回是否执行了重建（幂等：已是新键则跳过）。
+    SQLite 无法直接改约束 -> 检测到旧约束时重建表(用新 DDL,保留数据).重建前清理
+    `credential_id=0` 的同名重复行(历史迁移遗留,仅保留 id 最小的一行),避免新唯一键冲突.
+    返回是否执行了重建(幂等:已是新键则跳过).
     """
     row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_runtimes'").fetchone()
     if not row or not row[0]:
@@ -887,11 +903,11 @@ def _rebuild_agent_runtimes_inst_key(c):
 
 
 def _alter_skill_files_if_needed() -> str:
-    """agent_tasks.skill_files 仅非 MEDIUMTEXT 时返回 ALTER（避免每次启动 DDL 触发元数据锁）。
+    """agent_tasks.skill_files 仅非 MEDIUMTEXT 时返回 ALTER(避免每次启动 DDL 触发元数据锁).
 
-    MySQL 元数据锁（metadata lock）在并发/残留 Sleep 连接下会等待——
-    无条件每次 MODIFY 是启动变慢根因（2026-08-17 修复）。
-    SQLite 下无长度概念，直接返回空串（无害）。
+    MySQL 元数据锁(metadata lock)在并发/残留 Sleep 连接下会等待--
+    无条件每次 MODIFY 是启动变慢根因(2026-08-17 修复).
+    SQLite 下无长度概念,直接返回空串(无害).
     """
     try:
         from src.session_manager import db
@@ -909,10 +925,10 @@ def _alter_skill_files_if_needed() -> str:
 
 def _migrate_tables():
     """已有数据库的 schema 迁移"""
-    # ===== new-version2 数据安全：迁移前自动备份（仅在有改动性迁移时触发一次）=====
+    # ===== new-version2 数据安全:迁移前自动备份(仅在有改动性迁移时触发一次)=====
     try:
         from src.session_manager import _backup_db, _db_path
-        # 仅当存在旧结构（backend_* 表/列）时备份，避免无谓备份
+        # 仅当存在旧结构(backend_* 表/列)时备份,避免无谓备份
         with db_lock:
             c = db.cursor()
             _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
@@ -926,7 +942,7 @@ def _migrate_tables():
                             break
             if _need_backup:
                 _backup_db(_db_path, tag="pre-m0")
-                # 记录已备份，避免多进程重复备份
+                # 记录已备份,避免多进程重复备份
                 try:
                     c.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('m0_backup_done', '1')")
                     db.commit()
@@ -964,18 +980,18 @@ def _migrate_tables():
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
         "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
-        # ===== 发布配置（skill-publish v1.1）=====
-        # ===== OBS 技能库（obs-skill-storage-design.md §4）=====
-        # v2.4 去版本化：DROP current_version（本期新增列，无历史依赖；列不存在时 SQLite 忽略报错）
+        # ===== 发布配置(skill-publish v1.1)=====
+        # ===== OBS 技能库(obs-skill-storage-design.md §4)=====
+        # v2.4 去版本化:DROP current_version(本期新增列,无历史依赖;列不存在时 SQLite 忽略报错)
         "ALTER TABLE skill DROP COLUMN current_version",
-        # v2.5：file_path（真实存储路径 OBS 对象键，VARCHAR(512)）+ created_by/updated_by（审计/删除权限，VARCHAR(64)）
+        # v2.5:file_path(真实存储路径 OBS 对象键,VARCHAR(512))+ created_by/updated_by(审计/删除权限,VARCHAR(64))
         "ALTER TABLE skill ADD COLUMN file_path VARCHAR(512) DEFAULT ''",
         "ALTER TABLE skill ADD COLUMN created_by VARCHAR(64) DEFAULT ''",
         "ALTER TABLE skill ADD COLUMN updated_by VARCHAR(64) DEFAULT ''",
-        # skill_zip 已移除（本次需求新增、未上线，无包袱直砍——见 obs-skill-storage-design.md §5.7 v3 决策）
-        # MySQL 下 skill_files 升级（SQLite 无长度限制，MODIFY 语句报错被忽略无害）
-        # 2026-08-17 修复：DEFAULT '{}' 在 MySQL 上触发 metadata lock 卡启动——改为无默认；
-        # 且 ALTER 仅在列非 MEDIUMTEXT 时执行（避免每次启动 DDL 触发元数据锁——启动变慢根因）
+        # skill_zip 已移除(本次需求新增,未上线,无包袱直砍--见 obs-skill-storage-design.md §5.7 v3 决策)
+        # MySQL 下 skill_files 升级(SQLite 无长度限制,MODIFY 语句报错被忽略无害)
+        # 2026-08-17 修复:DEFAULT '{}' 在 MySQL 上触发 metadata lock 卡启动--改为无默认;
+        # 且 ALTER 仅在列非 MEDIUMTEXT 时执行(避免每次启动 DDL 触发元数据锁--启动变慢根因)
         _alter_skill_files_if_needed(),
     ]
     for sql in migrations:
@@ -989,7 +1005,7 @@ def _migrate_tables():
     try:
         with db_lock:
             c = db.cursor()
-            # 迁移旧表 im_bot_config → global_im_bot_config（保留 bot_type，secret 移入 devops_agent_session）
+            # 迁移旧表 im_bot_config -> global_im_bot_config(保留 bot_type,secret 移入 devops_agent_session)
             _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
             if "im_bot_config" in _tables and "global_im_bot_config" not in _tables:
                 c.execute("ALTER TABLE im_bot_config RENAME TO global_im_bot_config")
@@ -1004,7 +1020,7 @@ def _migrate_tables():
                 log.info("Migrated im_bot_config -> global_im_bot_config (data moved)")
     except Exception as e:
         log.info(f"Migrate global_im_bot_config skipped: {e}")
-    # 迁移旧表 chat_config → chat_agent_session（合并 user 配置）
+    # 迁移旧表 chat_config -> chat_agent_session(合并 user 配置)
     try:
         with db_lock:
             c = db.cursor()
@@ -1021,7 +1037,7 @@ def _migrate_tables():
                 log.info("Migrated chat_config -> chat_agent_session")
     except Exception as e:
         log.warning(f"Migrate chat_config failed: {e}")
-    # 重建 backend_agents 表（旧结构 name 主键 → 新结构 id+scope+owner_id）
+    # 重建 backend_agents 表(旧结构 name 主键 -> 新结构 id+scope+owner_id)
     try:
         with db_lock:
             c = db.cursor()
@@ -1057,7 +1073,7 @@ def _migrate_tables():
                 log.info("Rebuilt backend_agents table (id+scope+owner_id)")
     except Exception as e:
         log.warning(f"Rebuild backend_agents failed: {e}")
-    # 迁移 backend → backend_id（引用 backend_agents.id，预置默认 backend）
+    # 迁移 backend -> backend_id(引用 backend_agents.id,预置默认 backend)
     try:
         with db_lock:
             c = db.cursor()
@@ -1092,7 +1108,7 @@ def _migrate_tables():
             log.info("Migrated backend -> backend_id across agent tables")
     except Exception as e:
         log.warning(f"Migrate backend->backend_id failed: {e}")
-    # 同步 skill 归属：从 skill-description.json 更新 skill 表 agent_type（确保 pr→qa 等归属一致）
+    # 同步 skill 归属:从 skill-description.json 更新 skill 表 agent_type(确保 pr->qa 等归属一致)
     try:
         _skill_desc_path = os.path.join(_CONFIG_DIR, "skill-description.json")
         if os.path.exists(_skill_desc_path):
@@ -1113,7 +1129,7 @@ def _migrate_tables():
                     log.info(f"Synced {_updated} skill agent_type mappings from skill-description.json")
     except Exception as e:
         log.warning(f"Sync skill agent_type failed: {e}")
-    # backend_agents 大小写去重（合并为小写 name，保留最小 id，更新引用）
+    # backend_agents 大小写去重(合并为小写 name,保留最小 id,更新引用)
     try:
         with db_lock:
             c = db.cursor()
@@ -1138,7 +1154,7 @@ def _migrate_tables():
             db.commit()
     except Exception as e:
         log.warning(f"backend_agents dedup failed: {e}")
-    # 清理旧表（如果存在）
+    # 清理旧表(如果存在)
     try:
         with db_lock:
             c = db.cursor()
@@ -1147,20 +1163,20 @@ def _migrate_tables():
             db.commit()
     except Exception:
         pass
-    # 迁移 repo_im_group_binding 列规范化：chat_id→im_chat_id，account→im_app_id（旧 feishu_bindings 遗留）
+    # 迁移 repo_im_group_binding 列规范化:chat_id->im_chat_id,account->im_app_id(旧 feishu_bindings 遗留)
     try:
         with db_lock:
             c = db.cursor()
             _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
             if "repo_im_group_binding" in _tables:
                 bcols = [r[1] for r in c.execute("PRAGMA table_info(repo_im_group_binding)").fetchall()]
-                # account → im_app_id（补空）
+                # account -> im_app_id(补空)
                 if "account" in bcols and "im_app_id" in bcols:
                     c.execute("UPDATE repo_im_group_binding SET im_app_id=account WHERE (im_app_id IS NULL OR im_app_id='') AND account IS NOT NULL AND account!=''")
                     c.execute("ALTER TABLE repo_im_group_binding DROP COLUMN account")
                     db.commit()
                     log.info("Migrated repo_im_group_binding: account -> im_app_id (dropped account)")
-                # chat_id → im_chat_id
+                # chat_id -> im_chat_id
                 bcols2 = [r[1] for r in c.execute("PRAGMA table_info(repo_im_group_binding)").fetchall()]
                 if "chat_id" in bcols2 and "im_chat_id" not in bcols2:
                     c.execute("ALTER TABLE repo_im_group_binding RENAME COLUMN chat_id TO im_chat_id")
@@ -1168,7 +1184,7 @@ def _migrate_tables():
                     log.info("Migrated repo_im_group_binding: chat_id -> im_chat_id")
     except Exception as e:
         log.warning(f"Migrate repo_im_group_binding columns failed: {e}")
-    # 迁移 repo_im_group_binding 的 im_app_id='default' → Chat Bot app_id（清理 default 兜底账户）
+    # 迁移 repo_im_group_binding 的 im_app_id='default' -> Chat Bot app_id(清理 default 兜底账户)
     try:
         with db_lock:
             c = db.cursor()
@@ -1185,7 +1201,7 @@ def _migrate_tables():
                         log.info(f"Migrated {cnt} repo_im_group_binding im_app_id='default' -> {row[0]}")
     except Exception as e:
         log.warning(f"Migrate repo_im_group_binding im_app_id failed: {e}")
-    # 清理历史 bot_username 占位值：'devops-bot' → 全局 bot 实际用户名（configs/global-bot-token.json）
+    # 清理历史 bot_username 占位值:'devops-bot' -> 全局 bot 实际用户名(configs/global-bot-token.json)
     try:
         import json as _gbt_json, os as _gbt_os
         _gbt_path = _gbt_os.path.join(_CONFIG_DIR, "global-bot-token.json")
@@ -1198,15 +1214,15 @@ def _migrate_tables():
         if _global_bot_username:
             with db_lock:
                 c = db.cursor()
-                # 历史占位值 'devops-bot'（非实际 GitCode 用户名）→ 替换为全局 bot 用户名
+                # 历史占位值 'devops-bot'(非实际 GitCode 用户名)-> 替换为全局 bot 用户名
                 c.execute("UPDATE managed_repos SET bot_username=? WHERE bot_username='devops-bot' OR bot_username='' OR bot_username IS NULL",
                           (_global_bot_username,))
                 db.commit()
                 log.info(f"Migrated managed_repos.bot_username legacy placeholder -> {_global_bot_username} ({c.rowcount} rows)")
     except Exception as e:
         log.warning(f"Migrate bot_username placeholder failed: {e}")
-    # 首次运行加载配置：从 global-bot-token.json 将 OAuth 配置写入 meta 表（仅 meta 无该 key 时）
-    # 兼容旧版：若存在 user_accounts default 账户，仍尝试从其中迁移 OAuth 配置到 meta 表
+    # 首次运行加载配置:从 global-bot-token.json 将 OAuth 配置写入 meta 表(仅 meta 无该 key 时)
+    # 兼容旧版:若存在 user_accounts default 账户,仍尝试从其中迁移 OAuth 配置到 meta 表
     try:
         import json as _cfg_json, os as _cfg_os
         _cfg_path = _cfg_os.path.join(_CONFIG_DIR, "global-bot-token.json")
@@ -1230,7 +1246,7 @@ def _migrate_tables():
                     if c.fetchone()[0] == 0:
                         c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
                         migrated = True
-            # 2. 兼容旧版 default 账户（OAuth 配置曾存于 user_accounts）
+            # 2. 兼容旧版 default 账户(OAuth 配置曾存于 user_accounts)
             c.execute("SELECT * FROM user_accounts WHERE username='default'")
             row = c.fetchone()
             if row:
@@ -1243,7 +1259,7 @@ def _migrate_tables():
                         if c.fetchone()[0] == 0:
                             c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
                             migrated = True
-                # 3. 删除 default 账户（OAuth 已收敛到 meta 表）
+                # 3. 删除 default 账户(OAuth 已收敛到 meta 表)
                 c.execute("DELETE FROM user_accounts WHERE username='default'")
             db.commit()
             if migrated:
@@ -1252,7 +1268,7 @@ def _migrate_tables():
                 log.info("Deleted default account (no config to migrate)")
     except Exception as e:
         log.warning(f"Migrate/delete default account failed: {e}")
-    # 迁移旧表 agent_sessions → devops_agent_session（幂等）
+    # 迁移旧表 agent_sessions -> devops_agent_session(幂等)
     try:
         with db_lock:
             c = db.cursor()
@@ -1262,27 +1278,27 @@ def _migrate_tables():
                 db.commit()
                 log.info("Migrated table agent_sessions -> devops_agent_session")
             elif "agent_sessions" in _tables and "devops_agent_session" in _tables:
-                # 新表已被创建但旧表仍存在（历史库），迁移数据后删除旧表
+                # 新表已被创建但旧表仍存在(历史库),迁移数据后删除旧表
                 c.execute("INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at, im_provider, im_app_id, im_app_secret) SELECT id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at, im_provider, im_app_id, im_app_secret FROM agent_sessions")
                 c.execute("DROP TABLE agent_sessions")
                 db.commit()
                 log.info("Migrated agent_sessions data into devops_agent_session and dropped agent_sessions")
     except Exception as e:
         log.warning(f"Migrate agent_sessions table failed: {e}")
-    # 迁移 agent_type_config → agent_type + skill（旧架构拆分）
+    # 迁移 agent_type_config -> agent_type + skill(旧架构拆分)
     try:
         with db_lock:
             c = db.cursor()
             _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
             if "agent_type_config" in _tables:
-                # 1. Agent 类型（order_num>0）→ agent_type 表
+                # 1. Agent 类型(order_num>0)-> agent_type 表
                 c.execute("SELECT agent_type, display_name, description, default_backend, icon, order_num, subscribe_events FROM agent_type_config WHERE order_num>0")
                 for r in c.fetchall():
                     c.execute(
                         "INSERT OR IGNORE INTO agent_type (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
                         (r[0], r[1], r[2] or "", r[3] or "opencode", r[4] or "", r[5] or 0, r[6] or '[]')
                     )
-                # 2. 官方技能（parent_agent_type!=''）→ skill 表（scope=official）
+                # 2. 官方技能(parent_agent_type!='')-> skill 表(scope=official)
                 c.execute("SELECT agent_type, display_name, description, parent_agent_type, skill_path FROM agent_type_config WHERE parent_agent_type!=''")
                 for r in c.fetchall():
                     c.execute(
@@ -1293,7 +1309,7 @@ def _migrate_tables():
                 log.info("Migrated agent_type_config -> agent_type + skill")
     except Exception as e:
         log.warning(f"Migrate agent_type_config failed: {e}")
-    # 迁移 user_skills → skill 表（scope=user）
+    # 迁移 user_skills -> skill 表(scope=user)
     try:
         with db_lock:
             c = db.cursor()
@@ -1309,7 +1325,7 @@ def _migrate_tables():
                 log.info("Migrated user_skills -> skill (scope=user)")
     except Exception as e:
         log.warning(f"Migrate user_skills failed: {e}")
-    # 删除旧表（agent_type_config / user_skills / repo_skill_mapping）
+    # 删除旧表(agent_type_config / user_skills / repo_skill_mapping)
     try:
         with db_lock:
             c = db.cursor()
@@ -1319,13 +1335,13 @@ def _migrate_tables():
             log.info("Dropped legacy tables: agent_type_config, user_skills, repo_skill_mapping")
     except Exception as e:
         log.warning(f"Drop legacy skill tables failed: {e}")
-    # 迁移 devops_agent_session：vod_bot_app_id → im_app_id（通用化，保留 im_* 通用字段）
+    # 迁移 devops_agent_session:vod_bot_app_id -> im_app_id(通用化,保留 im_* 通用字段)
     try:
         with db_lock:
             c = db.cursor()
             cols = [r[1] for r in c.execute("PRAGMA table_info(devops_agent_session)").fetchall()]
             if "vod_bot_app_id" in cols:
-                # 1. vod_bot_app_id → im_app_id + im_provider='feishu' + im_app_secret 补齐
+                # 1. vod_bot_app_id -> im_app_id + im_provider='feishu' + im_app_secret 补齐
                 c.execute("UPDATE devops_agent_session SET im_app_id=vod_bot_app_id, im_provider='feishu' WHERE vod_bot_app_id!='' AND vod_bot_app_id IS NOT NULL")
                 _tables2 = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
                 if "im_bot_config" in _tables2:
@@ -1340,7 +1356,7 @@ def _migrate_tables():
                     log.warning("DROP COLUMN vod_bot_app_id failed (may need rebuild)")
     except Exception as e:
         log.warning(f"Migrate vod_bot_app_id -> im_app_id failed: {e}")
-    # 迁移 devops_agent_session.oc_session_id → backend_session_id
+    # 迁移 devops_agent_session.oc_session_id -> backend_session_id
     try:
         with db_lock:
             c = db.cursor()
@@ -1351,7 +1367,7 @@ def _migrate_tables():
                 log.info("Migrated devops_agent_session oc_session_id -> backend_session_id")
     except Exception as e:
         log.warning(f"Migrate devops_agent_session oc_session_id failed: {e}")
-    # 迁移 vod_conversations 字段（feishu_chat_id→im_chat_id, oc_session_id→backend_session_id）
+    # 迁移 vod_conversations 字段(feishu_chat_id->im_chat_id, oc_session_id->backend_session_id)
     try:
         with db_lock:
             c = db.cursor()
@@ -1378,7 +1394,7 @@ def _migrate_tables():
             log.info("Migrated vod_conversations fields to im_* / backend_session_id")
     except Exception as e:
         log.warning(f"Migrate vod_conversations fields failed: {e}")
-    # 迁移 chat_conversations.session_id → backend_session_id
+    # 迁移 chat_conversations.session_id -> backend_session_id
     try:
         with db_lock:
             c = db.cursor()
@@ -1389,8 +1405,8 @@ def _migrate_tables():
                 log.info("Migrated chat_conversations session_id -> backend_session_id")
     except Exception as e:
         log.warning(f"Migrate chat_conversations session_id failed: {e}")
-    # 迁移 devops_agent_session / chat_agent_session：skill_name(TEXT) → skill_id(INTEGER)
-    # 按 skill_name 匹配 skill 表（official 优先）拿 id，匹配不到则保留 skill_name（兼容旧数据）
+    # 迁移 devops_agent_session / chat_agent_session:skill_name(TEXT) -> skill_id(INTEGER)
+    # 按 skill_name 匹配 skill 表(official 优先)拿 id,匹配不到则保留 skill_name(兼容旧数据)
     try:
         with db_lock:
             c = db.cursor()
@@ -1398,7 +1414,7 @@ def _migrate_tables():
                 _cols = [r[1] for r in c.execute(f"PRAGMA table_info({_tbl})").fetchall()]
                 if "skill" not in _cols or "skill_id" not in _cols:
                     continue
-                # 先构建 skill_name → id 映射（official 优先）
+                # 先构建 skill_name -> id 映射(official 优先)
                 c.execute("SELECT id, skill_name FROM skill WHERE scope='official'")
                 _name2id = {r[1]: r[0] for r in c.fetchall()}
                 c.execute(f"SELECT id, skill FROM {_tbl} WHERE skill IS NOT NULL AND skill!='' AND (skill_id IS NULL OR skill_id=0)")
@@ -1415,19 +1431,19 @@ def _migrate_tables():
                     log.info(f"Migrated {_tbl}.skill_name -> skill_id ({_updated} rows)")
     except Exception as e:
         log.warning(f"Migrate skill_name -> skill_id failed: {e}")
-    # ===== new-version2 M0：backend_agents → agent_runtimes（术语重构，须在所有 backend_agents 历史迁移之后）=====
+    # ===== new-version2 M0:backend_agents -> agent_runtimes(术语重构,须在所有 backend_agents 历史迁移之后)=====
     try:
         with db_lock:
             c = db.cursor()
             _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
             if "backend_agents" in _tables and "agent_runtimes" in _tables:
-                # 双表并存：老库升级时 _create_tables 已建空 agent_runtimes → 搬迁数据后删旧表
+                # 双表并存:老库升级时 _create_tables 已建空 agent_runtimes -> 搬迁数据后删旧表
                 _copy_backend_to_runtime(c)
                 c.execute("DROP TABLE backend_agents")
                 db.commit()
                 log.info("Migrated backend_agents -> agent_runtimes (data copied, old dropped)")
             elif "backend_agents" in _tables and "agent_runtimes" not in _tables:
-                # 仅有旧表：直接 rename 保数据（理论上不发生，_create_tables 总建新表；防御分支）
+                # 仅有旧表:直接 rename 保数据(理论上不发生,_create_tables 总建新表;防御分支)
                 c.execute("ALTER TABLE backend_agents RENAME TO agent_runtimes")
                 _ensure_column(c, "agent_runtimes", "credential_id", "INTEGER DEFAULT 0")
                 _ensure_column(c, "agent_runtimes", "provider", "TEXT DEFAULT ''")
@@ -1438,7 +1454,7 @@ def _migrate_tables():
                 log.info("Migrated backend_agents -> agent_runtimes (rename)")
     except Exception as e:
         log.warning(f"Migrate backend_agents -> agent_runtimes failed: {e}")
-    # ===== new-version2 M0：引用列改名（SQLite 3.25+ RENAME COLUMN，幂等）=====
+    # ===== new-version2 M0:引用列改名(SQLite 3.25+ RENAME COLUMN,幂等)=====
     try:
         with db_lock:
             c = db.cursor()
@@ -1460,8 +1476,8 @@ def _migrate_tables():
             log.info("Renamed backend* -> runtime* columns (M0)")
     except Exception as e:
         log.warning(f"Rename backend* -> runtime* columns failed: {e}")
-    # ===== new-version2：Agent 启用开关 enable（见 agent-enable-toggle-design.md）=====
-    # 仅加列；存量会话对齐在 seed 之后执行（_align_agent_enable），因为对齐依赖 agent_type.enable 已由 seed 写入
+    # ===== new-version2:Agent 启用开关 enable(见 agent-enable-toggle-design.md)=====
+    # 仅加列;存量会话对齐在 seed 之后执行(_align_agent_enable),因为对齐依赖 agent_type.enable 已由 seed 写入
     try:
         with db_lock:
             c = db.cursor()
@@ -1471,7 +1487,7 @@ def _migrate_tables():
             log.info("Added enable column to agent_type / devops_agent_session")
     except Exception as e:
         log.warning(f"Add enable column failed: {e}")
-    # ===== new-version2：Agent 事件订阅（仓库级，见 agent-event-subscription-design.md）=====
+    # ===== new-version2:Agent 事件订阅(仓库级,见 agent-event-subscription-design.md)=====
     try:
         with db_lock:
             c = db.cursor()
@@ -1480,7 +1496,7 @@ def _migrate_tables():
             log.info("Added subscribe_events column to devops_agent_session")
     except Exception as e:
         log.warning(f"Add subscribe_events column failed: {e}")
-    # ===== new-version2：Chat 任务对话场景（见 template-onboarding-task-full-chain-design.md §5.4）=====
+    # ===== new-version2:Chat 任务对话场景(见 template-onboarding-task-full-chain-design.md §5.4)=====
     try:
         with db_lock:
             c = db.cursor()
@@ -1490,8 +1506,8 @@ def _migrate_tables():
             log.info("Added conv_type / issue_number to chat_conversations")
     except Exception as e:
         log.warning(f"Add chat conversation type failed: {e}")
-    # ===== new-version2 多 Issue 隔离（见 multi-issue-isolation-design.md）：agent_tasks 新列 + issue_agent_session 表 =====
-    # 表由 _create_tables 建；此处仅幂等补列（老库升级）
+    # ===== new-version2 多 Issue 隔离(见 multi-issue-isolation-design.md):agent_tasks 新列 + issue_agent_session 表 =====
+    # 表由 _create_tables 建;此处仅幂等补列(老库升级)
     try:
         with db_lock:
             c = db.cursor()
@@ -1504,7 +1520,7 @@ def _migrate_tables():
             log.info("Added issue_session_id / project_info_* / knowledge_files / skill_id columns to agent_tasks")
     except Exception as e:
         log.warning(f"Add agent_tasks issue isolation columns failed: {e}")
-    # ===== user_accounts 发布仓库列（老库升级；CREATE TABLE 只影响新库，存量库须幂等补列）=====
+    # ===== user_accounts 发布仓库列(老库升级;CREATE TABLE 只影响新库,存量库须幂等补列)=====
     try:
         with db_lock:
             c = db.cursor()
@@ -1514,8 +1530,8 @@ def _migrate_tables():
             log.info("Added gitcode_publish_repo / github_publish_repo columns to user_accounts")
     except Exception as e:
         log.warning(f"Add user_accounts publish repo columns failed: {e}")
-    # ===== agent-cluster-design.md §4.1/§4.2：引擎池数据面（池表 + 槽位列 + 任务池标记）=====
-    # 老库升级：agent_runtimes 补 busy_slots/max_concurrent；agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
+    # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
+    # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:
         with db_lock:
             c = db.cursor()
@@ -1540,7 +1556,7 @@ def _migrate_tables():
             log.info("Added local_skills / pending_skill_scan / skill_scan_result / agent_tags columns to agent_runtimes")
     except Exception as e:
         log.warning(f"Add local_skills column failed: {e}")
-    # ===== engine-selection-design.md §4.4：绑定表索引（repo, agent 前缀查询加速）=====
+    # ===== engine-selection-design.md §4.4：绑定表索引（repo, agent 前缀查询加速）===== Stashed changes
     try:
         with db_lock:
             c = db.cursor()
@@ -1549,7 +1565,7 @@ def _migrate_tables():
             log.info("Binding index idx_binding_repo_agent ready")
     except Exception as e:
         log.warning(f"Create binding index failed: {e}")
-    # ===== 修复 chat_agent_session 陈旧 UNIQUE(repo_key) 约束（多用户 chat 配置互斥顶掉，见 session_manager 注释）=====
+    # ===== 修复 chat_agent_session 陈旧 UNIQUE(repo_key) 约束(多用户 chat 配置互斥顶掉,见 session_manager 注释)=====
     try:
         with db_lock:
             c = db.cursor()
@@ -1558,8 +1574,8 @@ def _migrate_tables():
                 log.info("Rebuilt chat_agent_session: removed stale UNIQUE(repo_key) constraint")
     except Exception as e:
         log.warning(f"Drop chat_agent_session UNIQUE(repo_key) failed: {e}")
-    # ===== multi-runtime-instance-design §7：agent_runtimes 多实例唯一键 + runtime_credentials.last_ip =====
-    # 注册键 (name, scope, owner_id) → (credential_id, name, scope, owner_id)，使多 worker 同名引擎并存。
+    # ===== multi-runtime-instance-design §7:agent_runtimes 多实例唯一键 + runtime_credentials.last_ip =====
+    # 注册键 (name, scope, owner_id) -> (credential_id, name, scope, owner_id),使多 worker 同名引擎并存.
     try:
         with db_lock:
             c = db.cursor()
@@ -1567,7 +1583,7 @@ def _migrate_tables():
             if "runtime_credentials" in _tables:
                 _ensure_column(c, "runtime_credentials", "last_ip", "TEXT DEFAULT ''")
                 _ensure_column(c, "runtime_credentials", "owner_name", "TEXT DEFAULT ''")
-                # 凭据名全局唯一：先清重（同名多行仅保留最小 id），再建唯一索引
+                # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute("""
                     DELETE FROM runtime_credentials WHERE id NOT IN (
                         SELECT MIN(id) FROM runtime_credentials GROUP BY name
@@ -1582,3 +1598,22 @@ def _migrate_tables():
             db.commit()
     except Exception as e:
         log.warning(f"Migrate agent_runtimes instance unique key failed: {e}")
+    # ===== 引擎标签化:agent_runtimes.tags + agent_tasks.pool_tag(event-dispatch-redesign-v2.md §2.2/§2.5)=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "agent_runtimes", "tags", "TEXT DEFAULT ''")
+            _ensure_column(c, "agent_tasks", "pool_tag", "TEXT DEFAULT ''")
+            db.commit()
+        log.info("Added tags/pool_tag columns for engine tagging")
+    except Exception as e:
+        log.warning(f"Add engine tagging columns failed: {e}")
+    # ===== Phase 2: user_accounts.last_scene (event-dispatch-redesign-v2.md 3.1) =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "user_accounts", "last_scene", "TEXT DEFAULT 'default'")
+            db.commit()
+        log.info("Added last_scene column to user_accounts")
+    except Exception as e:
+        log.warning(f"Add last_scene column failed: {e}")

@@ -121,6 +121,40 @@ class RuntimeClient:
             return None
         return data
 
+    async def claim_by_tag(self, runtime_id: int, tag: str,
+                           supports_obs_url: bool = False,
+                           prefer_fallback: bool = False) -> dict | None:
+        """Claim task by tag + scope isolation (plugin mode)."""
+        data = await self._request("POST",
+                                   f"/api/runtime/runtimes/{runtime_id}/tasks/claim-by-tag/{tag}",
+                                   {"supports_obs_url": supports_obs_url, "prefer_fallback": prefer_fallback},
+                                   retries=1)
+        if not data:
+            return None
+        return data.get("task")
+
+    async def get_tags(self, runtime_id: int) -> list[str]:
+        """Fetch this engine's claimable tags from server DB (replaces ENGINE_TAGS env).
+
+        Called periodically by the claim loop to get the current tag list.
+        Enables real-time tag updates via console without worker restart.
+        """
+        data = await self._request("GET", f"/api/runtime/runtimes/{runtime_id}/tags", retries=1)
+        if not data:
+            return []
+        return data.get("tags") or []
+
+    async def get_task_env(self, task_id: str) -> dict:
+        """Fetch latest env (AK/SK + credentials) for a task from server DB.
+
+        Called before executing a task to get fresh credentials,
+        instead of relying on the env_extra snapshot from task creation time.
+        """
+        data = await self._request("GET", f"/api/runtime/tasks/{task_id}/env", retries=1)
+        if not data:
+            return {}
+        return data.get("env") or {}
+
     async def task_start(self, task_id: str):
         """标记任务 running。返回 _request 结果（None=失败），调用方据此判断是否成功。"""
         return await self._request("POST", f"/api/runtime/tasks/{task_id}/start", {})

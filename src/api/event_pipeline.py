@@ -18,6 +18,37 @@ _DIRECT_FUTURES: dict[int, Future] = {}
 _DIRECT_FUTURES_LOCK = threading.Lock()
 
 
+def is_plugin_mode() -> bool:
+    """Check if GRAPE_PIPELINE_MODE is set to 'plugin'.
+
+    plugin mode: uses pipelines.json + tag-based enqueue/claim
+    legacy mode (default): uses agent-skill-mapping.json + runtime_id binding
+    """
+    return os.environ.get("GRAPE_PIPELINE_MODE", "").lower() == "plugin"
+
+
+def resolve_skill_from_pipeline(repo_key: str, agent_type: str) -> str:
+    """Look up skill name from pipelines.json (plugin mode).
+
+    Falls back to agent-skill-mapping.json if pipeline config not found.
+    Returns skill name or empty string.
+    """
+    try:
+        from src.api.pipeline_config import get_node_by_tag
+        from src.user.db import get_repo_scene
+        scene_id = "default"
+        try:
+            scene_id = get_repo_scene(repo_key) or "default"
+        except Exception:
+            pass
+        node = get_node_by_tag(scene_id, agent_type)
+        if node:
+            return node.get("skill", "")
+    except Exception as e:
+        log.warning(f"resolve_skill_from_pipeline failed: {e}")
+    return ""
+
+
 def start_direct_agent(fn, args, name=""):
     """提交一个本机 direct 执行任务到有界池（webhook / run_pipeline 共用）。"""
     future = _DIRECT_POOL.submit(fn, *args)
@@ -66,7 +97,7 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
                 (task_id, agent_session_id, engine_id, seq, issue_id, repo_key or "",
                  agent_type or "", skill_name or "", skill_id or 0,
                  "", "", "", "", "", 0, "", "{}",
-                 "{}", "", "", "{}", "{}", "{}", 0, "", 0,
+                 "{}", "", "", "{}", "{}", "{}", 0, "", 0, "",
                  "queued", None, "", "", "", "{}", now, None, now)
             )
             db.commit()
@@ -399,9 +430,16 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                     if _br and _br[0]:
                         backend = _br[0]
         if not skill_name:
-            # 回退默认映射
-            import json as _json
-            _mapping_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
+            # Plugin mode: try pipelines.json first
+            if is_plugin_mode():
+                _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type)
+                if _pipe_skill:
+                    skill_name = _pipe_skill
+                    log.info(f"Pipeline subscription (plugin): skill for {agent_type}={_pipe_skill}")
+            if not skill_name:
+                # Legacy fallback: agent-skill-mapping.json
+                import json as _json
+                _mapping_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
             if os.path.exists(_mapping_path):
                 with open(_mapping_path, "r", encoding="utf-8") as _f:
                     _defaults = _json.load(_f)
@@ -646,35 +684,42 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.warning(f"Pipeline: agent session lookup failed: {e}")
 
     if not backend or not skill_name:
-        # 从默认映射配置文件加载 skill（会话缺 skill 时回退默认映射，防事件卡 running）
-        try:
-            _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
-            if os.path.exists(_defaults_path):
-                with open(_defaults_path, "r", encoding="utf-8") as _f:
-                    _defaults = json.load(_f)
-                _scene = _defaults.get("scenes", {}).get("default", {})
-                # 读仓库开发场景（managed_repos.dev_scene），按场景读映射——skill-dev 仓库回退到 skill-creator 而非 implementation
-                try:
-                    from src.user.db import get_repo_scene
-                    _scene_id = get_repo_scene(repo_key) or "default"
-                    _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
-                except Exception:
-                    pass
-                _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
-                _default_skill = _mapping.get(agent_type, "")
-                if _default_skill:
-                    backend = ""
-                    skill_name = _default_skill
-                    log.info(f"Pipeline: using default skill for {agent_type}={_default_skill}")
+        # Plugin mode: try pipelines.json first
+        if is_plugin_mode():
+            _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type)
+            if _pipe_skill:
+                skill_name = _pipe_skill
+                backend = backend or ""
+                log.info(f"Pipeline (plugin): skill for {agent_type}={_pipe_skill}")
+        if not skill_name:
+            # Legacy fallback: agent-skill-mapping.json
+            try:
+                _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
+                if os.path.exists(_defaults_path):
+                    with open(_defaults_path, "r", encoding="utf-8") as _f:
+                        _defaults = json.load(_f)
+                    _scene = _defaults.get("scenes", {}).get("default", {})
+                    try:
+                        from src.user.db import get_repo_scene
+                        _scene_id = get_repo_scene(repo_key) or "default"
+                        _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
+                    except Exception:
+                        pass
+                    _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
+                    _default_skill = _mapping.get(agent_type, "")
+                    if _default_skill:
+                        backend = ""
+                        skill_name = _default_skill
+                        log.info(f"Pipeline: using default skill for {agent_type}={_default_skill}")
+                    else:
+                        log.info(f"Pipeline: no agent session and no default skill for {agent_type}, skip")
+                        return result
                 else:
-                    log.info(f"Pipeline: no agent session and no default skill for {agent_type}, skip")
+                    log.info(f"Pipeline: no agent session for repo={repo_name}, agent={agent_type}, skip")
                     return result
-            else:
-                log.info(f"Pipeline: no agent session for repo={repo_name}, agent={agent_type}, skip")
+            except Exception as e:
+                log.warning(f"Pipeline: failed to load default skill config: {e}")
                 return result
-        except Exception as e:
-            log.warning(f"Pipeline: failed to load default skill config: {e}")
-            return result
 
     # 5. 提取 Issue ID
     payload = evt.get("payload", {})
@@ -861,8 +906,11 @@ def _fail_event(seq: int, reason: str):
 
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                            skill_id, skill_path, runtime_id, issue_id=""):
-    """触发点三连的入队侧（M2，见 agent-runtime-event-tech-impl.md §2.3）：
-    init_event_json → enqueue_task（确定路由 runtime_id）。本地 worker/远端 RuntimeAgent 消费。
+    """init_event_json -> enqueue_task (deterministic routing runtime_id).
+    Local worker / remote RuntimeAgent consume.
+
+    Plugin mode (GRAPE_PIPELINE_MODE=plugin): sets pool_tag on enqueue
+    so workers with matching engine tags can claim via claim_by_tag.
     """
     from src.api.event_archive import init_event_json
     from src.runtime.service import enqueue_task, get_execution_mode
@@ -965,6 +1013,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         pass
 
     try:
+        _pool_tag = agent_type if is_plugin_mode() else ""
         tid = enqueue_task(
             agent_session_id=session.get("id") or "",
             runtime_id=runtime_id,
@@ -979,12 +1028,14 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             env_extra=env_extra,
             skill_path=skill_path,
             skill_id=skill_id,
+            pool_tag=_pool_tag,
         )
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
-        _fail_event(seq, f"入队失败：enqueue_task 异常 {str(e)[:150]}")
+        _fail_event(seq, f"enqueue_task error {str(e)[:150]}")
         return
-    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
+    _mode_tag = "plugin" if is_plugin_mode() else "legacy"
+    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
 
 
 def _inject_cloud_credentials(env_extra: dict, repo_key: str) -> dict:

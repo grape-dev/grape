@@ -72,6 +72,12 @@ class FakeClient:
             return {"task": self.queue.pop(0), "scan_request": False}
         return None
 
+    async def get_tags(self, rid):
+        return []
+
+    async def claim_by_tag(self, rid, tag, **kwargs):
+        return None
+
     async def heartbeat(self, runtime_ids):
         pass
 

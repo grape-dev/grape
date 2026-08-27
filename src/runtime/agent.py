@@ -464,6 +464,30 @@ async def _execute_task(client, task, engine_name: str = ""):
     tid = task.get("id", "")
     cwd = _remap_cwd(task.get("cwd") or _os.getcwd())
     _engine_tag = f"|engine:{engine_name}" if engine_name else ""
+
+    # TaskResourceStack: unified resource lifecycle for this task
+    from src.runtime.resource_stack import TaskResourceStack
+    _res = TaskResourceStack(task_id=tid, cwd=cwd)
+    # Register known tmp patterns for cleanup on any exit path
+    for pat in [
+        "/tmp/tf-deploy-*", "/tmp/tf-sys-xhy*", "/tmp/blog-build-*",
+        "/tmp/blog-deploy*", "/tmp/blog-gen*", "/tmp/blog-publish-*",
+        "/tmp/blog-sys-*.tar.gz", "/tmp/ptmpl_*", "/tmp/tf-state-backup.json",
+        "/tmp/inventory_state.json", "/tmp/inventory*.json", "/tmp/.39ee*.so",
+    ]:
+        _res.track_tmp_pattern(pat)
+
+    # Pre-execution dependency validation (Cordis inject pattern)
+    from src.runtime.dependency_check import validate_task_dependencies, DependencyError
+    try:
+        validate_task_dependencies(task, engine_name)
+    except DependencyError as _de:
+        _res.dispose()
+        return {"_error": str(_de), "_started": False}
+
+    # Context compaction: will check batch size before flush
+    from src.runtime.context_compaction import should_compact, compact_messages
+
     try:
         _os.makedirs(cwd, exist_ok=True)
     except Exception:
@@ -471,6 +495,13 @@ async def _execute_task(client, task, engine_name: str = ""):
     env = {}
     try:
         env = json.loads(task.get("env_extra") or "{}")
+    except Exception:
+        pass
+    # Fetch latest env (AK/SK) from server DB — overrides stale snapshot
+    try:
+        _fresh_env = await client.get_task_env(tid)
+        if _fresh_env:
+            env.update(_fresh_env)
     except Exception:
         pass
     # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
@@ -643,6 +674,9 @@ async def _execute_task(client, task, engine_name: str = ""):
             elif evt_type == "step_finish":
                 log.info(f"  [{_esq}] ✅ {data}")
             batch.append({"type": evt_type, "data": data if not isinstance(data, str) else data})
+            # Context compaction: compact batch if it grows too large (prevents context overflow)
+            if should_compact(batch):
+                batch = compact_messages(batch)
             # 双触发批量上报（实时日志实时性关键）：50 条或 500ms 时间窗任一满足即 flush
             _now = time.monotonic()
             if len(batch) >= 50 or (_last_flush and _now - _last_flush >= 0.5):
@@ -651,6 +685,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                     # task 已被服务端标终态（410 Gone / 网络错误）→ 中断执行，杀引擎进程
                     log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
                     _kill_stale_engine(task, _backend_for_engine(engine_name))
+                    _res.dispose()
                     return {"_error": "task terminated by server (aborted during execution)", "_started": started}
                 batch = []
                 _last_flush = _now
@@ -659,11 +694,14 @@ async def _execute_task(client, task, engine_name: str = ""):
             if _resp is None:
                 log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
                 _kill_stale_engine(task, _backend_for_engine(engine_name))
+                _res.dispose()
                 return {"_error": "task terminated by server (aborted at final flush)", "_started": started}
         # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
+        _res.dispose()
         return done
     except Exception as e:
         log.warning(f"task {tid} stream failed: {e}")
+        _res.dispose()
         return {"_error": str(e), "_started": started}
 
 
@@ -721,14 +759,30 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
         for rid in runtime_ids:
             try:
-                claim_resp = await client.claim(rid, supports_obs_url=_OBS_SUPPORT,
-                                          prefer_fallback=_OBS_FALLBACK)
+                # Tags from server DB (single source of truth, managed via console)
+                task = None
+                try:
+                    _db_tags = await client.get_tags(rid)
+                except Exception:
+                    _db_tags = []
+                if _db_tags:
+                    for _tag in _db_tags:
+                        task = await client.claim_by_tag(rid, _tag,
+                                                          supports_obs_url=_OBS_SUPPORT,
+                                                          prefer_fallback=_OBS_FALLBACK)
+                        if task:
+                            break
+                if not task:
+                    # Legacy claim (fallback: no tags or no tagged task)
+                    task = await client.claim(rid, supports_obs_url=_OBS_SUPPORT,
+                                              prefer_fallback=_OBS_FALLBACK)
             except Exception as e:
                 log.warning(f"claim rid={rid} failed: {e}")
                 heartbeat_fail_streak += 1
                 continue
             # 处理 scan_request 指令（服务端通过 claim 响应下发）
-            if claim_resp and claim_resp.get("scan_request"):
+            _claim_resp = task if isinstance(task, dict) else None
+            if _claim_resp and _claim_resp.get("scan_request"):
                 try:
                     _engine_name = engine_by_rid.get(rid, "")
                     _engine_type = _backend_for_engine(_engine_name)
@@ -737,7 +791,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     log.info(f"skill scan completed for rid={rid}, reported {len(_skill_details)} skills")
                 except Exception as _se:
                     log.warning(f"skill scan failed for rid={rid}: {_se}")
-            task = (claim_resp or {}).get("task") if claim_resp else None
+            task = (_claim_resp or {}).get("task") if _claim_resp else None
             if not task:
                 continue
             tid = task.get("id", "")
@@ -832,10 +886,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             await client.fail(_tid, "no done event")
                     except Exception as _ce:
                         log.warning(f"task {_tid} complete/fail callback error: {_ce}")
-                    # 清理 agent 在 /tmp 下的工作残留（tf-deploy/blog-build/ptmpl 等），
-                    # 避免多 task 叠加撑满 tmpfs 导致后续 git clone/template push 失败。
-                    # 按 cwd 的 owner/repo 前缀匹配，只清当前 task 产生的，不误删其他 task 的。
-                    _cleanup_task_tmp(t)
+                    # tmp cleanup handled by TaskResourceStack.dispose() in _execute_task
                 active_sessions.discard(s)
                 active_tasks.pop(_tid, None)
                 active_task_objs.pop(_tid, None)

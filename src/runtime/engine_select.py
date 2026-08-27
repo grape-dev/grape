@@ -304,6 +304,16 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) ->
         return None     # 集合存在但无健康成员 → engine_unavailable（不回退 fallback）
     if fallback_runtime_id:
         return int(fallback_runtime_id)
+    # Plugin mode fallback: try resolve_default_engine (event-dispatch-redesign-v2.md)
+    # In legacy mode this returns None (engine_unavailable) as before
+    try:
+        from src.api.event_pipeline import is_plugin_mode
+        if is_plugin_mode():
+            _default = resolve_default_engine(repo_key, agent_type)
+            if _default:
+                return _default
+    except Exception:
+        pass
     return None
 
 

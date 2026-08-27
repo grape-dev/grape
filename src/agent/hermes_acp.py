@@ -112,6 +112,12 @@ class HermesACPBackend:
             _track_proc = _untrack_proc = lambda p: None
             _terminate_proc = lambda p, l: None
 
+        # TaskResourceStack: unified resource lifecycle (effect/dispose pattern)
+        from src.runtime.resource_stack import TaskResourceStack
+        _res = TaskResourceStack(task_id="", cwd=cwd)
+        _res.track_overlay(iso_home)
+        _res.track_proc(proc)
+
         collected_text = []
         new_session_id = session_id
         error_events = []
@@ -291,8 +297,6 @@ class HermesACPBackend:
             if init_err:
                 error_events.append(f"initialize failed: {init_err}")
                 yield ("done", _done_result(-1, "", session_id, error_events, ""))
-                _untrack_proc(proc)
-                _cleanup_overlay(iso_home)
                 return
 
             log.info(f"{label}hermes ACP initialized")
@@ -302,12 +306,24 @@ class HermesACPBackend:
             cwd_arg = cwd if cwd else "."
 
             if session_id:
-                # 尝试 resume
-                result, err = client.request("session/resume", {
-                    "cwd": cwd_arg,
-                    "sessionId": session_id,
-                    "mcpServers": [],
-                }, timeout=30)
+                # Context compaction: check state.db size before resume
+                # If state.db is too large (context bloat), skip resume and create new session
+                from src.runtime.context_compaction import check_state_db_size
+                _skip_resume = check_state_db_size(iso_home, threshold_mb=50.0)
+                if _skip_resume:
+                    log.warning(f"{label}hermes ACP state.db too large, skipping resume to avoid context overflow")
+                    session_id = ""  # Force new session
+                    result, err = client.request("session/new", {
+                        "cwd": cwd_arg,
+                        "mcpServers": [],
+                    }, timeout=30)
+                else:
+                    # 尝试 resume
+                    result, err = client.request("session/resume", {
+                        "cwd": cwd_arg,
+                        "sessionId": session_id,
+                        "mcpServers": [],
+                    }, timeout=30)
                 if err:
                     log.warning(f"{label}hermes ACP resume {session_id[:12]}... failed: {err}, creating new")
                     result, err = client.request("session/new", {
@@ -317,8 +333,6 @@ class HermesACPBackend:
                     if err:
                         error_events.append(f"session/new failed: {err}")
                         yield ("done", _done_result(-1, "", session_id, error_events, ""))
-                        _untrack_proc(proc)
-                        _cleanup_overlay(iso_home)
                         return
                     new_session_id = _extract_session_id(result) or ""
                 else:
@@ -331,8 +345,6 @@ class HermesACPBackend:
                 if err:
                     error_events.append(f"session/new failed: {err}")
                     yield ("done", _done_result(-1, "", session_id, error_events, ""))
-                    _untrack_proc(proc)
-                    _cleanup_overlay(iso_home)
                     return
                 new_session_id = _extract_session_id(result) or ""
 
@@ -471,14 +483,14 @@ class HermesACPBackend:
                 "errors": error_events, "stderr": "",
             })
         finally:
-            _untrack_proc(proc)
+            # Unified cleanup via TaskResourceStack (replaces scattered _untrack_proc + _cleanup_overlay)
             try:
                 proc.stdin.close()
             except Exception:
                 pass
             if proc.poll() is None:
                 _terminate_proc(proc, f"{label}hermes ACP")
-            _cleanup_overlay(iso_home)
+            _res.dispose(kill_procs=False)  # proc already terminated above
 
 
 # ══════════════════════════════════════════════════════════════

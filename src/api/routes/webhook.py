@@ -8,6 +8,55 @@ from src.api.event_pipeline import run_pipeline
 router = APIRouter(tags=["webhook"])
 
 
+async def _on_handoff_dispatch(event):
+    """Event-driven A2A dispatch listener (Phase 4).
+
+    Listens on 'agent/handoff' events emitted by the A2A endpoint.
+    Uses pipeline_executor.dispatch_node to route through the configured event mode.
+    """
+    import asyncio
+    from src.api.pipeline_executor import dispatch_node
+    from src.config import log
+
+    payload = event.payload or {}
+    target_agent = payload.get("target_agent", event.agent_type)
+    skill_name = payload.get("skill", "")
+    skill_id = payload.get("skill_id", 0)
+    skill_path = payload.get("skill_path", "")
+    runtime_id = payload.get("runtime_id", 0)
+    scene_id = payload.get("scene_id", "default")
+    node_id = payload.get("node_id", target_agent)
+    evt = payload.get("evt", {})
+
+    log.info(f"agent/handoff listener: dispatching {target_agent} (node={node_id}, scene={scene_id})")
+
+    try:
+        result = await dispatch_node(
+            scene_id=scene_id,
+            node_id=node_id,
+            repo_key=event.repo_key,
+            issue_id=event.issue_id,
+            event_seq=event.seq,
+            evt=evt,
+            skill_name=skill_name,
+            skill_id=skill_id,
+            skill_path=skill_path,
+            runtime_id=runtime_id,
+            pool_tag=target_agent,
+        )
+        log.info(f"agent/handoff listener: result={result}")
+        if result.get("status") == "failed":
+            from src.api.event_store import update_event_status
+            update_event_status(event.seq, "failed")
+    except Exception as e:
+        log.warning(f"agent/handoff listener failed: {e}")
+        try:
+            from src.api.event_store import update_event_status
+            update_event_status(event.seq, "failed")
+        except Exception:
+            pass
+
+
 @router.post("/webhook/gitcode")
 async def gitcode_webhook(request: Request):
     """接收 GitCode Webhook 事件"""
@@ -152,27 +201,39 @@ async def a2a_endpoint(request: Request):
         except Exception:
             pass
 
-        # 回退：DB 未配置 skill 时从 agent-skill-mapping.json 获取默认 skill
+        # 回退：DB 未配置 skill 时从 pipelines.json (plugin) 或 agent-skill-mapping.json (legacy) 获取默认 skill
         if not skill_name:
+            # Plugin mode: try pipelines.json first
             try:
-                _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "agent-skill-mapping.json")
-                if os.path.exists(_defaults_path):
-                    with open(_defaults_path, "r", encoding="utf-8") as _f:
-                        _defaults = json.load(_f)
-                    _scene = _defaults.get("scenes", {}).get("default", {})
-                    try:
-                        from src.user.db import get_repo_scene
-                        _scene_id = get_repo_scene(repo_key) or "default"
-                        _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
-                    except Exception:
-                        pass
-                    _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
-                    _default_skill = _mapping.get(agent_name, "")
-                    if _default_skill:
-                        skill_name = _default_skill
-                        log.info(f"A2A: fallback skill for {agent_name}={_default_skill}")
+                from src.api.event_pipeline import is_plugin_mode, resolve_skill_from_pipeline
+                if is_plugin_mode():
+                    _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_name)
+                    if _pipe_skill:
+                        skill_name = _pipe_skill
+                        log.info(f"A2A (plugin): skill for {agent_name}={_pipe_skill}")
             except Exception as e:
-                log.warning(f"A2A: fallback skill lookup failed: {e}")
+                log.warning(f"A2A: plugin skill lookup failed: {e}")
+            if not skill_name:
+                # Legacy fallback: agent-skill-mapping.json
+                try:
+                    _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "agent-skill-mapping.json")
+                    if os.path.exists(_defaults_path):
+                        with open(_defaults_path, "r", encoding="utf-8") as _f:
+                            _defaults = json.load(_f)
+                        _scene = _defaults.get("scenes", {}).get("default", {})
+                        try:
+                            from src.user.db import get_repo_scene
+                            _scene_id = get_repo_scene(repo_key) or "default"
+                            _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
+                        except Exception:
+                            pass
+                        _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
+                        _default_skill = _mapping.get(agent_name, "")
+                        if _default_skill:
+                            skill_name = _default_skill
+                            log.info(f"A2A: fallback skill for {agent_name}={_default_skill}")
+                except Exception as e:
+                    log.warning(f"A2A: fallback skill lookup failed: {e}")
 
         evt = {
             "type": "a2a_event",
@@ -238,8 +299,64 @@ async def a2a_endpoint(request: Request):
         )
         log.info(f"A2A: event created, seq={seq}")
 
-        # 执行分派：与 run_pipeline 一致——从引擎集合选引擎（专属→全局→本机）；
-        # 选中 remote → 入队该引擎；选中本机 → direct 就地线程（见 engine-selection-design.md v2）
+        # Plugin mode: emit agent/handoff event → event bus → pipeline_executor dispatches
+        # (event-dispatch-redesign-v2.md Phase 4: A2A upgraded to event-driven)
+        try:
+            from src.api.event_pipeline import is_plugin_mode
+            if is_plugin_mode():
+                import asyncio as _aio
+                from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
+                from src.api.pipeline_config import get_pipeline_config, get_node_by_tag
+
+                # Determine scene and node config
+                scene_id = "default"
+                try:
+                    from src.user.db import get_repo_scene
+                    scene_id = get_repo_scene(repo_key) or "default"
+                except Exception:
+                    pass
+
+                node = get_node_by_tag(scene_id, agent_name)
+                mode = node.get("mode", "emit") if node else "emit"
+
+                handoff_event = GrapeEvent(
+                    domain=EventDomain.AGENT,
+                    type="agent/handoff",
+                    repo_key=repo_key,
+                    issue_id=f"#{issue_number}" if issue_number else "",
+                    agent_type=agent_name,
+                    seq=seq,
+                    payload={
+                        "target_agent": agent_name,
+                        "skill": skill_name,
+                        "skill_id": skill_id,
+                        "skill_path": skill_path,
+                        "runtime_id": runtime_id,
+                        "mode": mode,
+                        "scene_id": scene_id,
+                        "node_id": node["id"] if node else agent_name,
+                        "evt": evt,
+                    },
+                )
+
+                # Register the dispatch listener (idempotent — only once)
+                bus = get_event_bus()
+                if not bus.has_listeners("agent/handoff"):
+                    bus.on_sync("agent/handoff", _on_handoff_dispatch)
+
+                # Emit the handoff event (async, run in background thread for sync endpoint)
+                loop = _aio.get_event_loop()
+                if loop.is_running():
+                    _aio.ensure_future(bus.emit(handoff_event))
+                else:
+                    _aio.run(bus.emit(handoff_event))
+
+                log.info(f"A2A (plugin): agent/handoff emitted for {agent_name}, seq={seq}, mode={mode}")
+                return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "event-driven"}
+        except Exception as e:
+            log.warning(f"A2A plugin event-driven path failed: {e}, falling back to legacy dispatch")
+
+        # Legacy dispatch (also serves as fallback for plugin mode)
         from src.runtime.engine_select import pick_engine, engine_name
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
         engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0)
