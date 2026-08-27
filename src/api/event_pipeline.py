@@ -1402,7 +1402,15 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         return
 
     # 有产出 → 更新该 event（写入配置 + 结果 + 结论 + 执行日志）
-    new_status = "completed" if exit_code == 0 else "failed"
+    # exit_code < 0 表示进程被信号终止（如 -15=SIGTERM, -9=SIGKILL），
+    # 但 has_output=True 说明 Agent 已完成业务产出（PR/测试/评论/结构化 conclusion），
+    # 信号终止常发生在引擎完成输出后的进程清理阶段，不应判为失败。
+    if exit_code == 0 or (has_output and exit_code < 0):
+        new_status = "completed"
+        if exit_code < 0:
+            log.info(f"Exec agent: seq={seq} exit_code={exit_code} but has_output=True, mark completed (signal death after work done)")
+    else:
+        new_status = "failed"
     _update_direct_task(seq, new_status, exit_code=exit_code, result_text=result_text)
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,

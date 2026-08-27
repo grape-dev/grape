@@ -297,13 +297,14 @@ def _poll_gitcode_issues_once() -> int:
 
 async def sweep_loop():
     """服务端后台周期清理 + GitCode issue 轮询（main.py lifespan 挂载）。"""
+    import asyncio as _aio
     while True:
         try:
-            sweep_once()
+            await _aio.to_thread(sweep_once)
         except Exception as e:
             log.warning(f"sweeper loop error: {e}")
         try:
-            _poll_gitcode_issues_once()
+            await _aio.to_thread(_poll_gitcode_issues_once)
         except Exception as e:
             log.warning(f"poll loop error: {e}")
-        await asyncio.sleep(_SWEEP_INTERVAL)
+        await asyncio.sleep(min(_SWEEP_INTERVAL, _POLL_INTERVAL))
