@@ -1044,3 +1044,26 @@ OBS 已删（obs_key 非空）时本地删除失败只 log warning 继续清 DB�
 ### 不修
 
 _read_file 查 DB 不限 scope——当前 file_path 格式不同不会冲突，影响低。
+
+
+## 二十、第十二~十三轮深度检查——sync_loop 文件不存在优化（2026-08-27）
+
+### 问题
+
+sync_loop 处理 obs_key 为空的记录时，文件不存在的记录（老 repo 已删除）每次循环都会重新查到 → 反复尝试 → 浪费 DB 查询 + 日志。
+
+### 修复
+
+- 加 `_sync_not_found` 集合记录文件不存在的 rid
+- 进入循环时先检查 rid 是否在集合中 → 跳过
+- 文件不存在时 log error 告警 + 加入集合 + continue
+- 不影响其他正常数据的处理
+- 进程重启后集合清空（内存集合，不持久化）——重启后会重新尝试一次，仍然不存在则跳过
+
+### 第十二~十三轮其他检查项
+
+- cursor 使用：全部正确，无跨 db_lock 块复用 ✅
+- write_knowledge rejected 场景：open 在 if accepted 内，不报错 ✅
+- _read_entry_content file_path 格式：只处理 write_knowledge 的记录，格式正确 ✅
+- upload_knowledge save_bytes：正确 ✅
+- agent_files OBS 查询条件：正确 ✅
