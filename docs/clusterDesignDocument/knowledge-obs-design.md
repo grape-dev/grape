@@ -517,14 +517,84 @@ else:
 
 storage 为 None（OBS 未启用）时全部回退本地，与 skill 存储改造同模式。
 
-## 十一、数据迁移（渐进式）
+## 十一、老数据迁移（后台定时同步）
 
-不强制迁移现有数据。策略 A（渐进）：
-- 老数据 obs_key 为空继续走本地
-- 新数据写 OBS
-- 随使用自然淘汰
+### 背景
 
-零风险。
+OBS 改造后新数据写入时同时写 OBS + DB obs_key。但老数据 obs_key 为空——需要同步到 OBS。
+
+### 方案：后台定时同步
+
+不需要启动时同步（数据多影响启动性能），不需要懒同步（读操作不应该有写副作用），不需要手动触发（当前不需要管理员操作）。
+
+| 时机 | 触发 | 做什么 |
+|------|------|--------|
+| 后台定时 | 每小时 | 扫描 obs_key 为空的行（LIMIT 500）→ 读本地文件 → 写 OBS → 更新 obs_key + content_hash |
+
+**实现逻辑：**
+```python
+async def knowledge_sync_loop():
+    """后台定时同步老数据到 OBS——每小时一次，分批 500 条"""
+    while True:
+        try:
+            cursor = 0
+            while True:
+                with db_lock:
+                    c = db.cursor()
+                    rows = c.execute(
+                        "SELECT id, file_path, scope, repo_key, agent_type, issue_num "
+                        "FROM agent_shared_knowledge WHERE obs_key='' AND id>? ORDER BY id LIMIT 500",
+                        (cursor,)
+                    ).fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    content = read_local_file(row["file_path"])
+                    if content:
+                        storage_key = knowledge_obs_key(row["repo_key"], row["scope"], ...)
+                        storage.save_bytes(storage_key, content)
+                        content_hash = hashlib.sha256(content.encode()).hexdigest()[:64]
+                        with db_lock:
+                            c.execute(
+                                "UPDATE agent_shared_knowledge SET obs_key=*** content_hash=? WHERE id=***",
+                                (storage_key, content_hash, row["id"])
+                            )
+                            db.commit()
+                    cursor = row["id"]
+                if len(rows) < 500:
+                    break  # 没有更多了
+            # 检查是否还有未同步的
+            with db_lock:
+                remaining = c.execute(
+                    "SELECT COUNT(*) FROM agent_shared_knowledge WHERE obs_key=***"
+                ).fetchone()[0]
+            if remaining == 0:
+                log.info("[knowledge] sync complete, all data migrated to OBS")
+                return  # 全部同步完，停止任务
+        except Exception as e:
+            log.error(f"[knowledge] sync error: {e}")
+        await asyncio.sleep(3600)  # 1 小时
+```
+
+**特性：**
+- 每小时跑一次，每次最多 500 条（游标分页，和 lease sweep 同模式）
+- 不影响启动——后台 asyncio task
+- 跑完（没有 obs_key 为空的行）自动停止
+- 同步时计算 content_hash 一并写入 DB
+
+**老数据 obs_key 为空时 Worker 怎么处理：**
+- Worker 拿不到 url / storage_key → 直接用 content 兜底（当前方式）
+- 不影响功能——老数据照样能通过 content 下发给 Worker
+- 后台同步完成后自动切换到 OBS 读取
+
+### 改动文件
+
+| # | 文件 | 改动 |
+|---|------|------|
+| — | src/api/knowledge.py | 新增 knowledge_sync_loop() |
+| — | src/api/main.py | lifespan 启动 knowledge_sync_loop 后台任务 |
+
+零风险——老数据 obs_key 为空时 Worker 用 content 兜底，不影响功能。
 
 ## 十二、风险点
 
