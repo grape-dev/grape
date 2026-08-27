@@ -108,8 +108,8 @@ function renderOverview(ops, rt, mt) {
   const r = ops.runtimes || {};
   const w = ops.workers || {};
 
-  const HEALTH_DOT = { online: '🟢', recently_lost: '🟡', offline: '⚫', about_to_gc: '🔴' };
-  const HEALTH_COLOR = { online: 'var(--g)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
+  const HEALTH_DOT = { online: '🟢', idle: '⚪', normal: '🟢', busy: '🟡', overload: '🔴', recently_lost: '🟡', offline: '⚫', about_to_gc: '🔴' };
+  const HEALTH_COLOR = { online: 'var(--g)', idle: 'var(--t3)', normal: 'var(--g)', busy: 'var(--y)', overload: 'var(--r)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
 
   // 资源进度条
   function bar(label, pct, color) {
@@ -157,13 +157,15 @@ function renderOverview(ops, rt, mt) {
     runtimes.forEach(rt => {
       const dot = HEALTH_DOT[rt.health] || '⚫';
       const hc = HEALTH_COLOR[rt.health] || 'var(--t3)';
-      const busyColor = rt.busy_slots >= rt.max_concurrent ? 'var(--r)' : rt.busy_slots > 0 ? 'var(--y)' : 'var(--g)';
+      const running = rt.running || 0;
+      const maxC = rt.max_concurrent || 0;
+      const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
       const modeTag = rt.mode === 'local' ? '<span class="tg tg-ch">本机</span>' : '<span class="tg tg-c">远端</span>';
       runtimeTable += `<tr style="cursor:pointer" onclick="openRuntimeTaskModal(${rt.id}, '${(rt.name||'').replace(/'/g,"")}')">
         <td>${dot} <b>${rt.name}</b></td>
         <td><span class="ts t3">${rt.version || '-'}</span></td>
         <td><span style="color:${hc};font-weight:600">${rt.health}</span></td>
-        <td><span style="color:${busyColor}">${rt.busy_slots}/${rt.max_concurrent}</span></td>
+        <td><span style="color:${loadColor}">${running}/${maxC}</span></td>
         <td>${modeTag}</td>
         <td><span class="ts t3">${rt.device_name || '-'}</span></td>
       </tr>`;

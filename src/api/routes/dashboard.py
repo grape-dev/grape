@@ -189,6 +189,17 @@ async def get_ops_overview(repo: str = ""):
         runtimes_total = 0
         runtime_by_mode = {"local": 0, "remote": 0, "unknown": 0}
         runtime_list = []
+        # 查每个 runtime 当前 running 任务数（实时负载）
+        _running_counts = {}
+        try:
+            c.execute(
+                "SELECT runtime_id, COUNT(*) FROM agent_tasks "
+                "WHERE status='running' GROUP BY runtime_id"
+            )
+            for row in c.fetchall():
+                _running_counts[row[0]] = row[1]
+        except Exception:
+            pass
         try:
             c.execute(
                 "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
@@ -201,17 +212,44 @@ async def get_ops_overview(repo: str = ""):
             for r in c.fetchall():
                 rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev = r
                 runtimes_total += 1
-                health = derive_runtime_health(rstatus or "offline", rlast_seen, now_ts)
+                base_health = derive_runtime_health(rstatus or "offline", rlast_seen, now_ts)
                 mode = "remote" if (cid or 0) > 0 else "local"
-                is_online = health == "online"
+                # 本机直连引擎始终算在线
+                is_online = (cid or 0) == 0 or base_health == "online"
                 if is_online:
                     runtimes_online += 1
                     runtime_by_mode[mode] = runtime_by_mode.get(mode, 0) + 1
+                # running 任务数（实时负载）
+                running = _running_counts.get(rid, 0)
+                max_conc = rmax or 0
+                # 本机直连引擎（credential_id=0）始终可用，不看心跳
+                if (cid or 0) == 0:
+                    if running == 0:
+                        health = "idle"
+                    elif running < max_conc:
+                        health = "normal"
+                    elif running < max_conc * 2:
+                        health = "busy"
+                    else:
+                        health = "overload"
+                # 远端引擎：先看心跳，online 时再看负载
+                elif base_health == "online":
+                    if running == 0:
+                        health = "idle"
+                    elif running < max_conc:
+                        health = "normal"
+                    elif running < max_conc * 2:
+                        health = "busy"
+                    else:
+                        health = "overload"
+                else:
+                    health = base_health
                 runtime_list.append({
                     "id": rid, "name": rname or "", "status": rstatus or "offline",
                     "health": health, "mode": mode,
                     "provider": rprovider or "", "last_seen_at": normalize_event_time(rlast_seen),
-                    "healthy": bool(rhealthy), "busy_slots": rbusy or 0, "max_concurrent": rmax or 0,
+                    "healthy": bool(rhealthy), "busy_slots": rbusy or 0, "max_concurrent": max_conc,
+                    "running": running,
                     "version": rver or "", "device_name": rdev or ("本机直连" if (cid or 0) == 0 else ""),
                 })
         except Exception:
