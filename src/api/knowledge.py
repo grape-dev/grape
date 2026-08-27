@@ -252,13 +252,21 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
 def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0) -> dict:
     """任务级交付快照：{rel_path: content}（参照 project_info_files，供远端 worker materialize）。"""
     files = {}
+    # OBS 模式：read_knowledge 返回的 content 已从 OBS 获取，直接用（不依赖本地磁盘）
+    # 非 OBS 模式：open 读本地文件（和 dev 一致，保留原始 strip 行为）
+    from src.storage import get_storage
+    _storage = get_storage()
     for scope, content in read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num).items():
         p = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-        try:
-            with open(p, encoding="utf-8") as f:
-                files[os.path.relpath(p, WORKSPACE_DIR)] = f.read()
-        except Exception:
-            continue
+        rel = os.path.relpath(p, WORKSPACE_DIR)
+        if _storage is not None and content:
+            files[rel] = content
+        else:
+            try:
+                with open(p, encoding="utf-8") as f:
+                    files[rel] = f.read()
+            except Exception:
+                continue
     # 成员上传文档（project-info/member/**）一并交付远端 worker（见 knowledge-board-design.md §2.5）
     for rel, content in member_files(repo_key).items():
         files.setdefault(rel, content)
