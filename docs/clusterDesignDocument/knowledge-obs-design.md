@@ -1282,3 +1282,17 @@ _sync_baseline_files 必须用同样的格式，确保 OBS 对象 key 一致。
 - managed_repos 无软删除——35 个没目录的项目会跳过，不影响功能
 - 幂等——DB 有 obs_key 非空的记录就跳过
 - 每小时执行一次——和 sync_loop 同频率
+
+### 并发保护（2026-08-27）
+
+多实例同时启动 sync_loop 会导致重复写 OBS + DB。
+
+方案 3：meta 表标记 + 10 分钟超时
+
+- sync_loop 开始前查 meta 表 `knowledge_sync_running`
+- 没有记录或时间戳超过 10 分钟 → 写入当前时间戳 → 执行
+- 有记录且 10 分钟内 → 跳过本次（log info）
+- sync_loop 完成后清空标记（finally 块）
+- 实例挂了 10 分钟后自动恢复
+
+优点：不加字段（用现有 meta 表）、不加锁、超时保护、和飞书 lease 思路一致。
