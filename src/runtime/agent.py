@@ -574,6 +574,121 @@ async def _stream_runtime_async(*args, **kwargs):
         yield evt
 
 
+async def _materialize_files(client, tid, files_dict, file_urls, dest_dir, tag="files"):
+    """三级降级物化文件到 dest_dir（project-info / knowledge 共用）。
+
+    降级顺序：① file_urls 优先 URL 下载（urllib HTTP GET）
+              ② URL 失败/无 URL → content（服务端兜底打包的内联内容）
+              ③ content 为空 → storage_key 直连 storage.read_batch 并发读取
+    file_urls 为空（老任务 / OBS 未启用）→ 纯走 content 老逻辑不变。
+
+    files_dict: {rel_path: content_str}
+    file_urls:  {rel_path: {"url": "https://...", "storage_key": "knowledge/..."}}
+    """
+    import os as _os
+    if not files_dict and not file_urls:
+        return
+
+    # file_urls 为空 → 走 content 老逻辑（直接写）
+    if not file_urls:
+        for rel, content in (files_dict or {}).items():
+            if rel == ".metadata.json":
+                continue
+            dest = _os.path.join(dest_dir, rel)
+            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(content)
+        return
+
+    stats = {"url_fail": 0, "storage_fail": 0, "empty": 0}
+    # 收集需要 storage_key 直连的文件：{storage_key: rel_path}
+    need_storage = {}
+
+    for rel, content in (files_dict or {}).items():
+        if rel == ".metadata.json":
+            continue
+        meta = file_urls.get(rel, {})
+        url = meta.get("url", "")
+        got_content = None  # 最终拿到的内容
+
+        # ① 优先 URL 下载
+        if url:
+            try:
+                with _urllib.urlopen(url, timeout=10) as resp:
+                    raw = resp.read()
+                got_content = raw.decode("utf-8") if isinstance(raw, bytes) else (raw or "")
+                if not got_content:
+                    raise ValueError("empty response")
+            except Exception as e:
+                log.warning(f"[{tag}] url download failed: rel={rel}, err={type(e).__name__}")
+                stats["url_fail"] += 1
+                got_content = None  # 降级
+
+        # ② URL 失败/无 URL → content
+        if got_content is None and content:
+            got_content = content
+
+        # ③ content 为空 → 收集到 need_storage，稍后批量读取
+        if got_content is None:
+            storage_key = meta.get("storage_key", "")
+            if storage_key:
+                need_storage[storage_key] = rel
+            else:
+                # 无 url 无 content 无 storage_key → 空内容
+                stats["empty"] += 1
+                log.error(f"[{tag}] all fallback failed, empty content: rel={rel}")
+            continue
+
+        # 写入文件
+        dest = _os.path.join(dest_dir, rel)
+        _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(got_content)
+
+    # 批量并发读取存储直连文件
+    if need_storage:
+        try:
+            from src.storage import get_storage
+            storage = get_storage()
+        except Exception as e:
+            storage = None
+            log.error(f"[{tag}] get_storage failed: {e}")
+
+        if storage is not None:
+            keys = list(need_storage.keys())
+            results = await storage.read_batch(keys)
+            log.info(f"[{tag}] batch read: {sum(1 for v in results.values() if v)}/{len(keys)} succeeded")
+            for key, rel in need_storage.items():
+                content = results.get(key, "")
+                if content:
+                    dest = _os.path.join(dest_dir, rel)
+                    _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+                    with open(dest, "w", encoding="utf-8") as f:
+                        f.write(content)
+                else:
+                    stats["storage_fail"] += 1
+                    log.error(f"[{tag}] storage read failed: rel={rel}, key={key}")
+        else:
+            # storage 不可用，全部记 storage_fail
+            for key, rel in need_storage.items():
+                stats["storage_fail"] += 1
+                log.error(f"[{tag}] storage unavailable, read failed: rel={rel}, key={key}")
+
+    # 降级统计上报
+    total_degraded = stats["url_fail"] + stats["storage_fail"] + stats["empty"]
+    if total_degraded > 0:
+        log.warning(f"[{tag}] degraded: url_fail={stats['url_fail']}, "
+                    f"storage_fail={stats['storage_fail']}, empty={stats['empty']}")
+        try:
+            await client.report_messages(tid, [{
+                "type": "text",
+                "data": f"⚠️ {tag} 文件降级：URL下载失败 {stats['url_fail']} 个，"
+                        f"存储直连失败 {stats['storage_fail']} 个，空内容 {stats['empty']} 个"
+            }])
+        except Exception:
+            pass
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -711,13 +826,9 @@ async def _execute_task(client, task, engine_name: str = ""):
     proj_dir = _os.path.join(cwd, ".project-info")
     try:
         proj_files = json.loads(task.get("project_info_files") or "{}")
-        for rel, content in (proj_files or {}).items():
-            if rel == ".metadata.json":
-                continue
-            dest = _os.path.join(proj_dir, rel)
-            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-            with open(dest, "w", encoding="utf-8") as f:
-                f.write(content)
+        proj_file_urls = json.loads(task.get("project_info_file_urls") or "{}")
+        await _materialize_files(client, tid, proj_files, proj_file_urls, proj_dir,
+                                 tag="project-info")
         prompt = prompt.replace("{{PROJECT_INFO_DIR}}", proj_dir)
     except Exception as e:
         log.warning(f"project-info materialize failed: {e}")
@@ -725,11 +836,9 @@ async def _execute_task(client, task, engine_name: str = ""):
     know_dir = _os.path.join(cwd, ".knowledge")
     try:
         know_files = json.loads(task.get("knowledge_files") or "{}")
-        for rel, content in (know_files or {}).items():
-            dest = _os.path.join(know_dir, rel)
-            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-            with open(dest, "w", encoding="utf-8") as f:
-                f.write(content)
+        know_file_urls = json.loads(task.get("knowledge_file_urls") or "{}")
+        await _materialize_files(client, tid, know_files, know_file_urls, know_dir,
+                                 tag="knowledge")
         prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
     except Exception as e:
         log.warning(f"knowledge materialize failed: {e}")
@@ -828,13 +937,13 @@ async def _execute_task(client, task, engine_name: str = ""):
         return {"_error": str(e), "_started": started}
 
 
-async def _reregister(client, installed, device_name) -> list[int] | None:
+async def _reregister(client, installed, device_name, cli_version: str = "") -> list[int] | None:
     """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。"""
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
         _ls = _scan_local_skills()
-        ids, _probe = await client.register(installed, device_name=device_name, local_skills=_ls)
+        ids, _probe = await client.register(installed, device_name=device_name, cli_version=cli_version, local_skills=_ls)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
@@ -874,7 +983,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # ---- 定期重注册（防 id 静默失效）----
         now = asyncio.get_running_loop().time()
         if now - last_reregister >= RE_REGISTER_INTERVAL:
-            new_ids = await _reregister(client, installed, device_name)
+            new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
             if new_ids:
                 runtime_ids = new_ids
                 heartbeat_fail_streak = 0
@@ -1060,7 +1169,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
-                new_ids = await _reregister(client, installed, device_name)
+                new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
                 if new_ids:
                     runtime_ids = new_ids
                     heartbeat_fail_streak = 0
@@ -1149,7 +1258,9 @@ def main():
             log.warning("No runtimes installed locally, registering empty")
         device = os.environ.get("RUNTIME_DEVICE_NAME", os.uname().nodename if hasattr(os, "uname") else "host")
         _local_skills = _scan_local_skills()
-        ids, probe_url = await client.register(installed, device_name=device, local_skills=_local_skills)
+        ids, probe_url = await client.register(installed, device_name=device,
+                                               cli_version=_read_local_worker_version(),
+                                               local_skills=_local_skills)
         if not ids:
             log.error("Register failed (check RUNTIME_TOKEN / server URL)")
             return

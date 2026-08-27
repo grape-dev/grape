@@ -129,7 +129,7 @@ _TASK_COLUMNS = (
     "skill_id, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
-    "knowledge_files, attempts, pool_agent_type, affinity_runtime_id, pool_tag, "
+    "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, "
     "status, exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
 )
@@ -239,6 +239,47 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
         from src.config import WORKSPACE_DIR
         from src.repo_key import split_owner_repo
         owner, rname = split_owner_repo(repo_key)
+
+        # OBS 分支：查 DB scope='baseline' + OBS 读取（不依赖本地磁盘）
+        try:
+            from src.storage import get_storage
+            _storage = get_storage()
+        except Exception:
+            _storage = None
+        if _storage is not None:
+            files = {}
+            from src.session_manager import db, db_lock
+            with db_lock:
+                rows = db.cursor().execute(
+                    "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
+                    "ORDER BY id DESC",
+                    (repo_key,)
+                ).fetchall()
+            for fp, ok in rows:
+                if fp and ok:
+                    fname = os.path.basename(fp)
+                    if fname in _PROJECT_INFO_FILES or fname == ".metadata.json":
+                        try:
+                            data = _storage.read_bytes(ok)
+                            if data:
+                                files[fname] = data.decode("utf-8", errors="replace")
+                        except Exception:
+                            continue
+            if files:
+                # .metadata.json 特殊处理
+                meta = {}
+                if ".metadata.json" in files:
+                    try:
+                        meta = json.loads(files[".metadata.json"])
+                    except Exception:
+                        meta = {}
+                files[".metadata.json"] = json.dumps(meta, ensure_ascii=False)
+                return files, meta
+            # DB 查不到 baseline → 回退本地读取（兜底）
+            # 继续走下面的本地逻辑
+
+        # 本地模式（和 dev 一致）
         pi = os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
         if not os.path.isdir(pi):
             return {}, {}
@@ -273,6 +314,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  event_seq=None, issue_id="", repo_key="", agent_type="",
                  skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
+                 project_info_file_urls=None, knowledge_file_urls=None,
                  pool_agent_type="", affinity_runtime_id=0, pool_tag=""):
     """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
 
@@ -352,6 +394,17 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         except Exception as e:
             log.warning(f"enqueue: knowledge pack failed for {repo_key}: {e}")
             knowledge_files = {}
+    # 生成 file_urls（url + storage_key，见 knowledge-obs-design §八：字段分开存 + 三级降级）
+    # storage 为 None（本地模式）时 file_urls 为空 dict，worker 用 content 兜底
+    try:
+        from src.storage import get_storage
+        _storage = get_storage()
+    except Exception:
+        _storage = None
+    _inum = _issue_num(issue_id)
+    _file_urls = _storage.generate_file_urls(repo_key, agent_type, _inum) if _storage else {}
+    project_info_file_urls = _file_urls
+    knowledge_file_urls = _file_urls
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
@@ -374,7 +427,8 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
              json.dumps(knowledge_files),
-             0, pool_agent_type or "", affinity_runtime_id or 0, pool_tag or "",
+            json.dumps(project_info_file_urls), json.dumps(knowledge_file_urls),
+            0, pool_agent_type or "", affinity_runtime_id or 0, pool_tag or "",
              "queued", None, "", "", "", "{}", None, None, datetime.now(timezone.utc).isoformat())
         )
         db.commit()

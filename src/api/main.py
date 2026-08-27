@@ -72,6 +72,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Sweeper loop start failed: {e}")
 
+    # 知识库 OBS 同步：后台定时迁移老数据到 OBS（每小时一次）
+    _knowledge_sync_task = None
+    try:
+        async def _knowledge_sync_wrapper():
+            from src.storage import get_storage
+            if not get_storage():
+                return  # OBS 未启用，不需要同步
+            from src.api.knowledge import knowledge_sync_loop
+            await knowledge_sync_loop()
+        _knowledge_sync_task = asyncio.create_task(_knowledge_sync_wrapper())
+        log.info("Knowledge sync loop started")
+    except Exception as e:
+        log.warning(f"Knowledge sync loop start failed: {e}")
+
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
     _probe_task = None
