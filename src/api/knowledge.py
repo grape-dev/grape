@@ -23,6 +23,7 @@ from src.session_manager import db, db_lock
 # ===== 内存缓存（hash 比对——不用 TTL，全实例立即一致） =====
 _knowledge_cache: dict[str, tuple[str, str]] = {}  # storage_key -> (content, content_hash)
 _knowledge_cache_lock = threading.Lock()
+KNOWLEDGE_CACHE_MAX = int(os.environ.get("KNOWLEDGE_CACHE_MAX", "1000"))  # 最大缓存条数，可配置
 
 
 def read_with_cache(storage_key: str, db_hash: str) -> str | None:
@@ -50,6 +51,10 @@ def read_with_cache(storage_key: str, db_hash: str) -> str | None:
     actual_hash = hashlib.sha256(data).hexdigest()
     with _knowledge_cache_lock:
         _knowledge_cache[storage_key] = (content, actual_hash)
+        # LRU 淘汰：超过最大条数时淘汰最旧的
+        if len(_knowledge_cache) > KNOWLEDGE_CACHE_MAX:
+            oldest_key = next(iter(_knowledge_cache))
+            _knowledge_cache.pop(oldest_key, None)
     return content
 
 
