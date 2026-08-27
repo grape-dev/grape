@@ -55,6 +55,10 @@ class RuntimeInfo(BaseModel):
 
 class HeartbeatBody(BaseModel):
     runtime_ids: list[int] = []
+    cpu_percent: float = 0.0
+    memory_percent: float = 0.0
+    disk_percent: float = 0.0
+    load_avg: str = ""
 
 
 class TaskStartBody(BaseModel):
@@ -185,7 +189,8 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
     cancelled_tasks = []
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=? WHERE id=?", (now, client_ip, credential_id))
+        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, load_avg=? WHERE id=?",
+                  (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.load_avg, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",

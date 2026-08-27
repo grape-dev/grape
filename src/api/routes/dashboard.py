@@ -126,13 +126,59 @@ async def get_ops_overview(repo: str = ""):
         runtimes_total = 0
         runtime_by_mode = {"local": 0, "remote": 0, "unknown": 0}
         runtime_list = []
+        # --- worker（凭据）列表 + 资源指标 ---
+        worker_list = []
+        worker_online = 0
+        worker_total = 0
+        try:
+            # 查所有 worker（凭据）
+            c.execute(
+                "SELECT id, name, device_name, status, last_seen_at, last_ip, "
+                "cpu_percent, memory_percent, disk_percent, load_avg, owner_name "
+                "FROM runtime_credentials ORDER BY id"
+            )
+            for w in c.fetchall():
+                wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wload, wowner = w
+                worker_total += 1
+                w_health = derive_runtime_health(wstatus or "offline", wlast_seen, now_ts)
+                w_online = w_health == "online"
+                if w_online:
+                    worker_online += 1
+                worker_list.append({
+                    "id": wid, "name": wname or "", "device_name": wdevice or "",
+                    "status": wstatus or "offline", "health": w_health,
+                    "last_seen_at": normalize_event_time(wlast_seen), "last_ip": wip or "",
+                    "cpu_percent": wcpu or 0, "memory_percent": wmem or 0,
+                    "disk_percent": wdisk or 0, "load_avg": wload or "",
+                    "owner_name": wowner or "",
+                })
+        except Exception:
+            pass
+
+        # 本机直连引擎（credential_id=0）的资源指标用 psutil 采集
+        _local_cpu = _local_mem = _local_disk = 0.0
+        _local_load = ""
+        try:
+            import psutil as _ps
+            _local_cpu = _ps.cpu_percent(interval=0.1)
+            _local_mem = _ps.virtual_memory().percent
+            _local_disk = _ps.disk_usage("/").percent
+            _local_load = ",".join(f"{x:.2f}" for x in _ps.getloadavg())
+        except Exception:
+            pass
+
+        # 查所有 runtime（引擎），关联 worker 信息
         try:
             c.execute(
-                "SELECT id, name, credential_id, status, last_seen_at, provider "
-                "FROM agent_runtimes ORDER BY id"
+                "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
+                "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, "
+                "rc.device_name, rc.cpu_percent, rc.memory_percent, rc.disk_percent "
+                "FROM agent_runtimes ar "
+                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id "
+                "ORDER BY ar.id"
             )
             for r in c.fetchall():
-                rid, rname, cid, rstatus, rlast_seen, rprovider = r
+                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcpu, rmem, rdisk = r
                 runtimes_total += 1
                 health = derive_runtime_health(rstatus or "offline", rlast_seen, now_ts)
                 mode = "remote" if (cid or 0) > 0 else "local"
@@ -140,10 +186,16 @@ async def get_ops_overview(repo: str = ""):
                 if is_online:
                     runtimes_online += 1
                     runtime_by_mode[mode] = runtime_by_mode.get(mode, 0) + 1
+                # 本机引擎用 psutil 数据，远端用 worker 上报数据
+                if (cid or 0) == 0:
+                    rcpu, rmem, rdisk = _local_cpu, _local_mem, _local_disk
                 runtime_list.append({
                     "id": rid, "name": rname or "", "status": rstatus or "offline",
                     "health": health, "mode": mode,
                     "provider": rprovider or "", "last_seen_at": normalize_event_time(rlast_seen),
+                    "healthy": bool(rhealthy), "busy_slots": rbusy or 0, "max_concurrent": rmax or 0,
+                    "version": rver or "", "device_name": rdev or "",
+                    "cpu_percent": rcpu or 0, "memory_percent": rmem or 0, "disk_percent": rdisk or 0,
                 })
         except Exception:
             pass
@@ -180,6 +232,12 @@ async def get_ops_overview(repo: str = ""):
             "offline": runtimes_total - runtimes_online,
             "by_mode": runtime_by_mode,
             "list": runtime_list,
+        },
+        "workers": {
+            "total": worker_total,
+            "online": worker_online,
+            "offline": worker_total - worker_online,
+            "list": worker_list,
         },
     }
 
