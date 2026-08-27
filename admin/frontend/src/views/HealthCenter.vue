@@ -123,24 +123,37 @@
                 <span class="tl-issue-status" :class="issueHasFailed(iss) ? 'fail' : 'ok'">{{ issueHasFailed(iss) ? '✗ 有失败' : '✓ 正常' }}</span>
                 <span class="t3 tl-issue-time">{{ (iss.lastAt || '').substring(0, 16) }}</span>
               </div>
-              <!-- 展开的事件列表 -->
+              <!-- 展开的详情：时序图 + 事件列表 -->
               <div v-if="expandedIssues.has(iss.issueId)" class="tl-issue-body">
-                <table class="vod-table">
-                  <thead>
-                    <tr><th>Seq</th><th>事件</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="ev in iss.events" :key="ev.seq" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed' }">
-                      <td class="t3">#{{ ev.seq }}</td>
-                      <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
-                      <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
-                      <td class="t3">{{ ev.skill || '—' }}</td>
-                      <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']">{{ ev.status }}</span></td>
-                      <td class="t3">{{ formatDuration2(ev.duration) }}</td>
-                      <td class="t3">{{ formatTime(ev.createdAt) }}</td>
-                    </tr>
-                  </tbody>
-                </table>
+                <!-- 切换按钮 -->
+                <div class="tl-view-tabs">
+                  <button class="tl-view-btn" :class="{ active: issueViewMode(iss.issueId) !== 'events' }" @click="setIssueView(iss.issueId, 'diagram')">📊 时序图</button>
+                  <button class="tl-view-btn" :class="{ active: issueViewMode(iss.issueId) === 'events' }" @click="setIssueView(iss.issueId, 'events')">📋 事件列表</button>
+                </div>
+                <!-- 时序图容器（v-html 让 Vue 管理 DOM，不直接操作 innerHTML） -->
+                <div v-show="issueViewMode(iss.issueId) !== 'events'" class="tl-diagram-container">
+                  <div v-if="!issueRendered(iss.issueId)" class="tl-diagram-loading">渲染中...</div>
+                  <div v-else v-html="issueSvg(iss.issueId)" class="tl-diagram-svg"></div>
+                </div>
+                <!-- 事件列表 -->
+                <div v-show="issueViewMode(iss.issueId) === 'events'">
+                  <table class="vod-table">
+                    <thead>
+                      <tr><th>Seq</th><th>事件</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="ev in iss.events" :key="ev.seq" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId }" @click="ev.taskId ? openLogModal(ev.taskId, iss) : null">
+                        <td class="t3">#{{ ev.seq }}</td>
+                        <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
+                        <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
+                        <td class="t3">{{ ev.skill || '—' }}</td>
+                        <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']">{{ ev.status }}</span></td>
+                        <td class="t3">{{ formatDuration2(ev.duration) }}</td>
+                        <td class="t3">{{ formatTime(ev.createdAt) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           </div>
@@ -200,20 +213,21 @@
           <div class="hc-section-title">Runtime 引擎</div>
           <table class="vod-table">
             <thead>
-              <tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>模式</th><th>范围</th><th>最后心跳</th></tr>
+              <tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>模式</th><th>范围</th><th>最后心跳</th></tr>
             </thead>
             <tbody>
-              <tr v-for="rt in runtimesList" :key="rt.id">
+              <tr v-for="rt in runtimesList" :key="rt.id" class="tl-row-clickable" @click="openRtTasksModal(rt)">
                 <td><span class="hc-health-dot" :style="{ background: healthColor(rt.health) }"></span> <b>{{ rt.name }}</b></td>
                 <td class="t3">{{ rt.version || '—' }}</td>
                 <td><span :style="{ color: healthColor(rt.health), fontWeight: 600 }">{{ rt.health }}</span></td>
                 <td><span :style="{ color: loadColor(rt.running, rt.maxConcurrent) }">{{ rt.running }}/{{ rt.maxConcurrent }}</span></td>
+                <td><span :style="{ color: avgDurColor(rt.avgDuration) }">{{ formatAvgDur(rt.avgDuration) }}</span></td>
                 <td><span :class="['status-tag', rt.mode === 'local' ? 'info' : 'default']" style="font-size:11px">{{ rt.mode === 'local' ? '本机' : '远端' }}</span></td>
                 <td><span class="status-tag default" style="font-size:11px">{{ rt.scope || 'global' }}</span></td>
                 <td class="t3">{{ formatTime(rt.lastSeenAt) }}</td>
               </tr>
               <tr v-if="runtimesList.length === 0">
-                <td colspan="7" style="text-align:center;padding:32px;color:var(--text-tertiary)">暂无引擎数据</td>
+                <td colspan="8" style="text-align:center;padding:32px;color:var(--text-tertiary)">暂无引擎数据</td>
               </tr>
             </tbody>
           </table>
@@ -245,10 +259,101 @@
       </div>
     </div>
   </div>
+
+  <!-- 任务日志弹窗（z-index 高于 Runtime 任务弹窗，后打开的在上层） -->
+  <div v-if="logModal.show" class="log-modal-overlay log-layer" @click.self="closeLogModal">
+    <div class="log-modal-dialog">
+      <div class="log-modal-head">
+        <h3 class="log-modal-title">
+          <span class="t3" v-if="logModal.info.repoKey">{{ logModal.info.repoKey.replace('gitcode:', '') }}</span>
+          <b v-if="logModal.info.issueId">{{ logModal.info.issueId }}</b>
+          <span class="t3" v-if="logModal.info.eventSeq">#{{ logModal.info.eventSeq }}</span>
+          <span class="t3" v-if="logModal.info.createdAt">{{ formatTime(logModal.info.createdAt) }}</span>
+        </h3>
+        <button class="btn btn-sm" @click="closeLogModal">✕ 关闭</button>
+      </div>
+      <!-- 时间线 -->
+      <div class="log-timeline" v-if="logModal.info.status">
+        <span class="log-tl-dot" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'"></span>
+        <span class="log-tl-text">入队 {{ formatTime(logModal.info.createdAt).slice(11, 19) }}</span>
+        <span class="log-tl-arrow" v-if="logModal.info.startedAt">→</span>
+        <span class="log-tl-text" v-if="logModal.info.startedAt">开始 {{ formatTime(logModal.info.startedAt).slice(11, 19) }}</span>
+        <span class="log-tl-arrow" v-if="logModal.info.completedAt">→</span>
+        <span class="log-tl-text" v-if="logModal.info.completedAt">完成 {{ formatTime(logModal.info.completedAt).slice(11, 19) }}</span>
+        <span class="log-tl-status" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'">{{ logModal.info.status.toUpperCase() }}</span>
+      </div>
+      <!-- 日志列表 -->
+      <div class="log-modal-body">
+        <div v-if="logModal.loading" class="tl-diagram-loading">加载日志...</div>
+        <div v-else-if="logModal.messages.length === 0" class="log-empty">
+          <div v-if="logModal.info.resultText || logModal.info.errors" class="log-error-info">
+            <div v-if="logModal.info.resultText" class="log-error-row">结果: {{ logModal.info.resultText }}</div>
+            <div v-if="logModal.info.exitCode != null" class="log-error-row" :style="{ color: logModal.info.exitCode !== 0 ? 'var(--danger)' : 'var(--success)' }">Exit Code: {{ logModal.info.exitCode }}</div>
+            <div v-if="logModal.info.errors" class="log-error-row" style="color:var(--danger)">{{ logModal.info.errors }}</div>
+          </div>
+          <div v-else>暂无日志记录</div>
+        </div>
+        <div v-else class="log-terminal">
+          <div v-for="msg in logModal.messages" :key="msg.seq" :class="['log-line', 'log-type-' + msg.type]">
+            <span class="log-time t3">{{ (msg.createdAt || '').slice(11, 19) }}</span>
+            <span class="log-icon">{{ logTypeIcon(msg.type) }}</span>
+            <span class="log-content">{{ msg.content || msg.tool || '' }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Runtime 任务弹窗（z-index 低于日志弹窗） -->
+  <div v-if="rtTasksModal.show" class="log-modal-overlay rt-layer" @click.self="closeRtTasksModal">
+    <div class="log-modal-dialog">
+      <div class="log-modal-head">
+        <h3 class="log-modal-title"><b>{{ rtTasksModal.rtName }}</b> · 任务列表</h3>
+        <button class="btn btn-sm" @click="closeRtTasksModal">✕ 关闭</button>
+      </div>
+      <div class="log-modal-body">
+        <div v-if="rtTasksModal.loading" class="tl-diagram-loading">加载任务...</div>
+        <template v-else>
+          <!-- 正在运行 -->
+          <div class="hc-section-title" style="padding-left:0">🔄 正在运行 ({{ rtTasksModal.running.length }})</div>
+          <table class="vod-table" v-if="rtTasksModal.running.length > 0">
+            <thead><tr><th>Issue</th><th>Agent</th><th>Skill</th><th>状态</th><th>开始时间</th></tr></thead>
+            <tbody>
+              <tr v-for="t in rtTasksModal.running" :key="t.id" class="tl-row-clickable" @click="openLogModal(t.id, { issueId: t.issueId, repoName: (t.repoKey||'').replace('gitcode:','') })">
+                <td><b>{{ t.issueId || '—' }}</b> <span class="t3">#{{ t.eventSeq }}</span></td>
+                <td><span class="status-tag info" style="font-size:11px">{{ t.agentType }}</span></td>
+                <td class="t3">{{ t.skill || '—' }}</td>
+                <td><span :class="['status-tag', t.status === 'running' ? 'warning' : 'default']">{{ t.status }}</span></td>
+                <td class="t3">{{ formatTime(t.startedAt) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="hc-empty" style="padding:8px 0">无运行中任务</div>
+
+          <!-- 历史任务 -->
+          <div class="hc-section-title" style="padding-left:0;padding-top:16px">📋 历史任务 ({{ rtTasksModal.history.length }})</div>
+          <table class="vod-table" v-if="rtTasksModal.history.length > 0">
+            <thead><tr><th>Issue</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
+            <tbody>
+              <tr v-for="t in rtTasksModal.history" :key="t.id" class="tl-row-clickable" @click="openLogModal(t.id, { issueId: t.issueId, repoName: (t.repoKey||'').replace('gitcode:','') })">
+                <td><b>{{ t.issueId || '—' }}</b> <span class="t3">#{{ t.eventSeq }}</span></td>
+                <td><span class="status-tag info" style="font-size:11px">{{ t.agentType }}</span></td>
+                <td class="t3">{{ t.skill || '—' }}</td>
+                <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : 'default']">{{ t.status }}</span></td>
+                <td class="t3">{{ formatTaskDur(t) }}</td>
+                <td class="t3">{{ formatTime(t.createdAt) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="hc-empty" style="padding:8px 0">无历史任务</div>
+        </template>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref, computed } from 'vue'
+import { onMounted, onUnmounted, ref, computed, nextTick } from 'vue'
 import http from '../api'
 
 const activeTab = ref('tasks')
@@ -270,6 +375,14 @@ const timelineIssues = ref([])
 const timelineLoading = ref(false)
 const timelineRepo = ref('')
 const expandedIssues = ref(new Set())
+const issueViewModes = ref({})  // {issueId: 'diagram' | 'events'}
+const renderedIssues = ref(new Set())  // 已渲染 mermaid 的 issue
+const issueSvgs = ref({})  // {issueId: svgHtml}
+const renderingIssues = ref(new Set())  // 正在渲染中的 issue
+
+function issueSvg(issueId) {
+  return issueSvgs.value[issueId] || ''
+}
 
 // 设备概览（Worker + Runtime）
 const workers = ref({ total: 0, online: 0, offline: 0 })
@@ -374,9 +487,148 @@ async function loadTimeline() {
 
 function toggleIssue(issueId) {
   const s = new Set(expandedIssues.value)
-  if (s.has(issueId)) s.delete(issueId)
-  else s.add(issueId)
+  if (s.has(issueId)) {
+    s.delete(issueId)
+  } else {
+    s.add(issueId)
+    if (!issueViewModes.value[issueId]) {
+      issueViewModes.value = { ...issueViewModes.value, [issueId]: 'diagram' }
+    }
+  }
   expandedIssues.value = s
+  // 延迟渲染 mermaid，让浏览器先完成 DOM 更新和 display 切换
+  if (s.has(issueId) && issueViewModes.value[issueId] !== 'events') {
+    setTimeout(() => renderMermaidForIssue(issueId), 50)
+  }
+}
+
+function issueViewMode(issueId) {
+  return issueViewModes.value[issueId] || 'diagram'
+}
+
+function issueRendered(issueId) {
+  return renderedIssues.value.has(issueId)
+}
+
+function setIssueView(issueId, mode) {
+  issueViewModes.value = { ...issueViewModes.value, [issueId]: mode }
+  // 切到时序图时，如果还没渲染过就触发渲染
+  if (mode === 'diagram' && !renderedIssues.value.has(issueId)) {
+    setTimeout(() => renderMermaidForIssue(issueId), 50)
+  }
+}
+
+// ===== Mermaid 时序图渲染 =====
+let mermaidEngine = null
+
+async function getMermaid() {
+  if (!mermaidEngine) {
+    const mod = await import('mermaid')
+    mermaidEngine = mod.default
+    mermaidEngine.initialize({
+      startOnLoad: false,
+      securityLevel: 'loose',
+      theme: 'base',
+      fontFamily: 'inherit',
+      sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 40, noteMargin: 10, boxMargin: 8 }
+    })
+  }
+  return mermaidEngine
+}
+
+function mermaidId(agent) {
+  return (agent || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_')
+}
+
+function actionText(t) {
+  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号', issue_closed: 'Issue关闭' }
+  return map[t] || t || '事件'
+}
+
+function buildSequence(iss) {
+  const agents = []
+  for (const ev of iss.events) {
+    const a = ev.agentType || '—'
+    if (!agents.includes(a)) agents.push(a)
+  }
+  const lines = ['sequenceDiagram', 'autonumber']
+  for (const a of agents) lines.push(`    participant ${mermaidId(a)} as ${a}`)
+
+  const statuses = []
+  let prev = null
+  for (const ev of iss.events) {
+    const a = mermaidId(ev.agentType || '—')
+    const t = ev.createdAt ? ev.createdAt.slice(11, 19) : ''
+    const label = (t ? t + ' ' : '') + actionText(ev.eventType)
+    if (prev && a !== prev) {
+      lines.push(`    ${prev}->>${a}: ${label}`)
+      statuses.push(ev.status || '')
+    } else {
+      lines.push(`    Note over ${a}: ${label}`)
+      statuses.push(ev.status || '')
+    }
+    prev = a
+  }
+  return { text: lines.join('\n'), statuses }
+}
+
+function applySequenceColors(svg, statuses) {
+  try {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+    const root = doc.documentElement
+    const defs = root.querySelector('defs')
+    if (!defs) return svg
+    const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'completed' ? '#2e9e5b' : '#94a3b8')
+    const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
+    lines.forEach((line, i) => {
+      const markerId = root.id + '-seqnum-' + i
+      const marker = doc.createElementNS('http://www.w3.org/2000/svg', 'marker')
+      marker.setAttribute('id', markerId)
+      marker.setAttribute('refX', '15'); marker.setAttribute('refY', '15')
+      marker.setAttribute('markerWidth', '60'); marker.setAttribute('markerHeight', '40')
+      marker.setAttribute('orient', 'auto')
+      const circle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle')
+      circle.setAttribute('cx', '15'); circle.setAttribute('cy', '15'); circle.setAttribute('r', '6')
+      circle.setAttribute('fill', colorOf(statuses[i] || ''))
+      marker.appendChild(circle)
+      defs.appendChild(marker)
+      line.setAttribute('marker-start', 'url(#' + markerId + ')')
+    })
+    return new XMLSerializer().serializeToString(doc)
+  } catch (e) {
+    return svg
+  }
+}
+
+async function renderMermaidForIssue(issueId) {
+  // 防止并发渲染同一个 issue
+  if (renderingIssues.value.has(issueId)) return
+  if (renderedIssues.value.has(issueId)) return
+
+  const iss = timelineIssues.value.find(i => i.issueId === issueId)
+  if (!iss) return
+
+  renderingIssues.value = new Set([...renderingIssues.value, issueId])
+
+  try {
+    const mmd = await getMermaid()
+    const { text, statuses } = buildSequence(iss)
+    const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
+    try { await mmd.parse(text) } catch (e) { /* parse 失败也尝试 render */ }
+    const result = await mmd.render(uid, text)
+    const svg = result.svg || result
+    // 存 SVG 字符串到响应式 ref，让 Vue 通过 v-html 渲染（不直接操作 DOM）
+    issueSvgs.value = { ...issueSvgs.value, [issueId]: applySequenceColors(svg, statuses) }
+    renderedIssues.value = new Set([...renderedIssues.value, issueId])
+  } catch (err) {
+    const { text } = buildSequence(iss)
+    issueSvgs.value = { ...issueSvgs.value, [issueId]: `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${err.message || err}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>` }
+    renderedIssues.value = new Set([...renderedIssues.value, issueId])
+  } finally {
+    const s = new Set(renderingIssues.value)
+    s.delete(issueId)
+    renderingIssues.value = s
+  }
 }
 function issueHasFailed(iss) { return iss.events.some(e => e.status === 'failed') }
 function eventTypeText(t) {
@@ -421,6 +673,72 @@ function loadColor(running, max) {
 function toggleAuto() {
   if (autoRefresh.value) { timer = setInterval(load, 15000) }
   else { clearInterval(timer); timer = null }
+}
+
+// ===== 任务日志弹窗 =====
+const logModal = ref({ show: false, loading: false, messages: [], info: {} })
+
+async function openLogModal(taskId, issue) {
+  logModal.value = { show: true, loading: true, messages: [], info: { issueId: issue.issueId, repoKey: issue.repoName ? 'gitcode:' + issue.repoName : '' } }
+  try {
+    const [msgsResp, infoResp] = await Promise.all([
+      http.get(`/health-center/tasks/${taskId}/messages`),
+      http.get(`/health-center/tasks/${taskId}/info`),
+    ])
+    const info = infoResp.data || {}
+    if (!info.repoKey && issue.repoName) info.repoKey = 'gitcode:' + issue.repoName
+    logModal.value = { show: true, loading: false, messages: msgsResp.data || [], info }
+  } catch (e) {
+    console.error('[HealthCenter] loadLog failed', e)
+    logModal.value = { show: true, loading: false, messages: [], info: { error: e.message } }
+  }
+}
+
+function closeLogModal() {
+  logModal.value = { show: false, loading: false, messages: [], info: {} }
+}
+
+function logTypeIcon(t) {
+  const map = { step_start: '▶', step_finish: '✓', text: '💬', reasoning: '🤔', tool_use: '🔧', error: '❌', done: '✅' }
+  return map[t] || '•'
+}
+
+// ===== Runtime 任务弹窗 =====
+const rtTasksModal = ref({ show: false, loading: false, rtName: '', running: [], history: [] })
+
+async function openRtTasksModal(rt) {
+  rtTasksModal.value = { show: true, loading: true, rtName: rt.name, running: [], history: [] }
+  try {
+    const { data } = await http.get(`/health-center/runtimes/${rt.id}/tasks`, { params: { limit: 50 } })
+    rtTasksModal.value = { show: true, loading: false, rtName: rt.name, running: data.running || [], history: data.history || [] }
+  } catch (e) {
+    console.error('[HealthCenter] loadRtTasks failed', e)
+    rtTasksModal.value = { show: true, loading: false, rtName: rt.name, running: [], history: [] }
+  }
+}
+
+function closeRtTasksModal() {
+  rtTasksModal.value = { show: false, loading: false, rtName: '', running: [], history: [] }
+}
+
+function formatAvgDur(d) {
+  if (!d || d <= 0) return '—'
+  if (d < 60) return Math.round(d) + 's'
+  return Math.floor(d / 60) + 'm' + Math.round(d % 60) + 's'
+}
+
+function avgDurColor(d) {
+  if (!d || d <= 0) return 'var(--text-tertiary)'
+  if (d > 300) return 'var(--danger)'
+  if (d > 60) return 'var(--warning)'
+  return 'var(--success)'
+}
+
+function formatTaskDur(t) {
+  if (!t.startedAt || !t.completedAt) return '—'
+  const s = (new Date(t.completedAt) - new Date(t.startedAt)) / 1000
+  if (isNaN(s) || s <= 0) return '—'
+  return formatDuration2(s)
 }
 onMounted(load)
 onUnmounted(() => { if (timer) clearInterval(timer) })
@@ -503,6 +821,13 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .tl-issue-status.ok { color: var(--success); }
 .tl-issue-time { font-size: 11px; white-space: nowrap; }
 .tl-issue-body { border-top: 1px solid var(--border-color); padding: 10px 14px; }
+.tl-view-tabs { display: flex; gap: 0; margin-bottom: 10px; }
+.tl-view-btn { padding: 5px 12px; font-size: 12px; border: 1px solid var(--border-color); background: #fff; color: var(--text-secondary); cursor: pointer; }
+.tl-view-btn:first-child { border-radius: 6px 0 0 6px; }
+.tl-view-btn:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.tl-view-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+.tl-diagram-container { overflow-x: auto; padding: 8px 0; min-height: 60px; }
+.tl-diagram-loading { padding: 20px; text-align: center; color: var(--text-tertiary); font-size: 12px; }
 .tl-row-fail td { background: #fff1f0 !important; }
 .tl-row-ok td { background: #f6ffed !important; }
 
@@ -525,4 +850,35 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .hc-resource-track { flex: 1; height: 8px; background: #f0f0f0; border-radius: 4px; overflow: hidden; min-width: 60px; }
 .hc-resource-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
 .hc-resource-val { font-weight: 600; min-width: 30px; text-align: right; }
+
+/* 任务日志弹窗 */
+.log-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.log-modal-overlay.rt-layer { z-index: 1100; }
+.log-modal-overlay.log-layer { z-index: 1200; }
+.log-modal-dialog { width: 860px; max-width: 94vw; max-height: 85vh; background: #fff; border-radius: var(--radius-lg); display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.2); }
+.log-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border-color); }
+.log-modal-title { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.log-timeline { display: flex; align-items: center; gap: 6px; padding: 8px 18px; border-bottom: 1px solid var(--border-soft); font-size: 11px; }
+.log-tl-dot { width: 8px; height: 8px; border-radius: 50%; }
+.log-tl-dot.ok { background: var(--success); } .log-tl-dot.fail { background: var(--danger); } .log-tl-dot.run { background: var(--warning); }
+.log-tl-arrow { color: var(--text-tertiary); }
+.log-tl-status { margin-left: auto; font-weight: 600; }
+.log-tl-status.ok { color: var(--success); } .log-tl-status.fail { color: var(--danger); } .log-tl-status.run { color: var(--warning); }
+.log-modal-body { flex: 1; overflow-y: auto; padding: 14px 18px; }
+.log-empty { text-align: center; padding: 32px; color: var(--text-tertiary); }
+.log-error-info { text-align: left; background: #fff1f0; border: 1px solid #ffa39e; border-radius: 8px; padding: 12px; }
+.log-error-row { font-size: 12px; margin-bottom: 4px; font-family: monospace; }
+.log-terminal { background: #0c1222; border-radius: 8px; padding: 12px; max-height: 60vh; overflow-y: auto; }
+.log-line { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; font-size: 12px; line-height: 1.6; border-bottom: 1px solid rgba(255,255,255,0.04); font-family: Menlo, Monaco, Consolas, monospace; }
+.log-time { color: #5b667b; font-size: 10px; min-width: 55px; flex-shrink: 0; }
+.log-icon { min-width: 16px; flex-shrink: 0; }
+.log-content { color: #e0e6f0; word-break: break-all; white-space: pre-wrap; }
+.log-type-step_start .log-content { color: #5b9eff; } .log-type-step_finish .log-content { color: #1ca44c; }
+.log-type-text .log-content { color: #e0e6f0; } .log-type-reasoning .log-content { color: #b388ff; }
+.log-type-tool_use .log-content { color: #ea5a0c; } .log-type-error .log-content { color: #dc2828; }
+.log-type-done .log-content { color: #1ca44c; }
+
+/* 事件行可点击 */
+.tl-row-clickable { cursor: pointer; }
+.tl-row-clickable:hover td { background: #f0f5ff !important; }
 </style>
