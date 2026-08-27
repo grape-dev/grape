@@ -214,76 +214,133 @@ else:
 ### 6. src/runtime/service.py
 - `load_project_info()` — 加 obs_key 判断 + try-except 回退本地
 
-## 八、本地缓存方案（hash 比对）
+## 八、知识交付方式——OBS URL + 三级降级（统一结构）
 
 ### 背景
 
-每次读知识库都走 OBS 网络（10-50ms），每个任务下发读 3-5 个文件 = 30-150ms。加本地缓存加快速度。
+当前方式：服务端读知识库内容 → 打成 JSON `{rel_path: content}` → 存到 agent_tasks 表 → Worker 解析 JSON → 落地到本地文件。
 
-### 方案：DB hash 比对 + 内存 LRU 缓存
+问题：知识库内容大时 JSON 膨胀 → agent_tasks 表字段太大 → claim 查询变慢。集群后 Worker 和服务端不在同一台机器，但 Worker 有 OBS AK/SK 可以直接访问 OBS 桶。
 
-不用 TTL——用 DB hash 比对保证一致性，无旧数据窗口。
+### 方案：统一结构 + 三级降级
 
-**缓存结构：**
+把 knowledge_files 从 `{rel_path: content}` 改为 `{rel_path: {content, obs_url, obs_key}}`，Worker 按优先级取。
+
+**统一结构：**
+```json
+knowledge_files = {
+    "project-info/knowledge.md": {
+        "content": "知识正文...",           // 兜底
+        "obs_url": "https://obs.xxx/...",    // 优先用（temporary_url，有效期 1 小时）
+        "obs_key": "knowledge/xxx/yyy.md"    // 直连 OBS 用（read_bytes）
+    },
+    "project-info/member/user1/design.md": {
+        "content": "设计文档...",
+        "obs_url": "https://obs.xxx/...",
+        "obs_key": "knowledge/xxx/member/user1/design.md"
+    }
+}
+```
+
+**服务端 enqueue_task 打包逻辑：**
 ```python
-_knowledge_cache: dict[str, tuple[str, str]] = {}  # {obs_key: (content, hash)}
-_knowledge_cache_lock = threading.Lock()
+for rel_path, content in knowledge_files(repo_key, agent_type, issue_num).items():
+    obs_key = knowledge_obs_key(repo_key, scope, ...)
+    obs_url = ""
+    if obs_key and storage:
+        obs_url = storage.temporary_url(obs_key, expires=3600)  # 1 小时有效
+    knowledge_files[rel_path] = {
+        "content": content,        # 兜底
+        "obs_url": obs_url,        # 优先用
+        "obs_key": obs_key or "",  # 直连 OBS
+    }
 ```
 
-**读取流程：**
-```
-1. 查 DB 拿 content_hash（0.13ms——主键查询极快）
-2. 对比本地缓存的 hash：
-   - 一样 → 用缓存内容（0ms）
-   - 不一样 → 从 OBS 重新拉 → 更新缓存 + hash
-   - 缓存没有 → 从 OBS 拉 → 写入缓存 + hash
+**Worker 侧三级降级逻辑：**
+```python
+for rel_path, info in knowledge_files.items():
+    content = None
+
+    # 1. 优先 obs_url 下载
+    url = info.get("obs_url", "")
+    if url:
+        try:
+            content = http_download(url)  # aiohttp.get(url)
+        except:
+            content = None  # 下载失败，降级
+
+    # 2. 降级到 content（服务端兜底打包）
+    if not content:
+        content = info.get("content", "")
+
+    # 3. 降级到 Worker 直连 OBS 桶
+    if not content:
+        obs_key = info.get("obs_key", "")
+        if obs_key:
+            try:
+                content = storage.read_bytes(obs_key)  # Worker 用 AK/SK 直连
+            except:
+                content = ""  # OBS 也读不到，空内容兜底
+
+    # 4. 落地到本地文件
+    write_file(know_dir / rel_path, content)
 ```
 
-**写入流程：**
-```
-write_knowledge / upload_knowledge:
-  → 写 OBS
-  → 计算 hash 存 DB（hashlib.sha256(content).hexdigest()[:64]）
-  → 不需要主动清缓存——hash 变了下次读会发现不一致 → 自动更新
+### 降级场景
+
+| 场景 | obs_url | content | obs_key | Worker 用什么 | 说明 |
+|------|:---:|:---:|:---:|------|------|
+| 正常 | 有 | 有 | 有 | obs_url 下载 | 最常用，任务表轻量 |
+| URL 过期 | 过期 | 有 | 有 | content | URL 1 小时后过期，Worker 用 content |
+| URL + content 都空 | 空 | 空 | 有 | obs_key 直连 OBS | Worker 用 AK/SK 直读 OBS |
+| OBS 也不可用 | 空 | 空 | 有 | 空内容 | 不崩溃 |
+| OBS 未启用 | 空 | 有 | 空 | content | OBS 未配置时回退当前方式 |
+
+### 向后兼容
+
+老 Worker 只读 `info.get("content")` —— 不认识 obs_url / obs_key 时不影响：
+```python
+# 老 Worker 代码（向后兼容）
+for rel_path, content in knowledge_files.items():
+    if isinstance(content, str):       # 老格式 {rel_path: content}
+        write_file(rel_path, content)
+    else:                               # 新格式 {rel_path: {content, obs_url, obs_key}}
+        write_file(rel_path, content.get("content", ""))
 ```
 
 ### 优势
 
-| 对比 | TTL 5 分钟 | hash 比对 |
-|------|-----------|----------|
-| 本实例 | 主动清 L1 | hash 变了自动更新 |
-| 其他实例 | 5 分钟内用旧数据 ⚠️ | 立即发现变更 ✅ |
-| 准确性 | 有旧数据窗口 | 无旧数据窗口 ✅ |
-| 额外开销 | 无 | 0.13ms DB 查询 |
-| 旧数据风险 | 有 | 无 ✅ |
+| 对比 | 当前方式 | 新方式 |
+|------|---------|--------|
+| 任务表大小 | 存全部 content | 存 content + URL + key（content 兜底） |
+| Worker 取内容 | 直接用 content | 优先 URL 下载，失败降级 |
+| URL 过期 | 不适用 | 降级到 content |
+| OBS 不可用 | 不适用 | 降级到空内容 |
+| 网络 | Worker 不需网络 | Worker 需访问 OBS（有 AK/SK） |
+| 兼容性 | — | 老 Worker 只读 content 不受影响 |
 
-### 性能
+### 改动文件（更新第七节）
 
-| 场景 | 耗时 | 说明 |
-|------|------|------|
-| 缓存命中 | 0.13ms | DB hash 查询 + hash 对比 |
-| 缓存未命中 | 10-50ms | DB hash 查询 + OBS 读取 |
-| 无缓存（原来） | 10-50ms | OBS 读取 |
+| # | 文件 | 改动内容 |
+|---|------|---------|
+| 3 | knowledge.py | knowledge_files() 返回值从 `{rel_path: content}` 改为 `{rel_path: {content, obs_url, obs_key}}` |
+| 6 | runtime/service.py | enqueue_task 打包时生成 obs_url + obs_key |
+| — | runtime/agent.py | Worker 侧三级降级逻辑 |
 
-缓存命中时快 100 倍（0.13ms vs 10-50ms），未命中时和原来一样。
+### project_info_files 也走同样结构
 
-### 集群一致性
+project_info_files（基线文件 project-graph.md 等）也改为统一结构：
+```json
+project_info_files = {
+    "project-graph.md": {
+        "content": "...",
+        "obs_url": "https://obs.xxx/...",
+        "obs_key": "project-info/xxx/project-graph.md"
+    }
+}
+```
 
-- 实例 A 写知识库 → DB hash 更新
-- 实例 B 下次读 → 查 DB hash → 发现和缓存 hash 不一样 → 从 OBS 重新拉
-- 所有实例立即一致——不需要等 TTL 过期
-
-### 新增改动文件
-
-| # | 文件 | 改动 |
-|---|------|------|
-| 新增 | src/api/knowledge_cache.py（或在 knowledge.py 里） | _knowledge_cache dict + LRU + hash 比对逻辑 |
-
-### DB 字段变更（更新第一节）
-
-agent_shared_knowledge 表新增 2 个字段（原来 1 个，加 content_hash）：
-- obs_key VARCHAR(512) DEFAULT ''
-- content_hash VARCHAR(64) DEFAULT ''
+Worker 侧 project_info_files 和 knowledge_files 用同一个降级逻辑。
 
 ## 九、不需要改动的
 
