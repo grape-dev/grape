@@ -806,6 +806,22 @@ builder.py 生成基线文件时写 OBS + 落库。OBS 写失败时：
 - DB obs_key 为空 → 和老数据同样的降级逻辑
 - 后台同步任务每小时迁移（第十一节）
 
+**注意点（7 个）：**
+
+1. **后台线程执行**——builder.py 通过 `threading.Thread` 后台执行，OBS 写失败时 log warning 不影响 webhook 响应 ✅
+
+2. **并发防重**——`maybe_refresh_project_info` 用 `_lock_guard` + `_building` set 防重，同一个 repo_key 不会并发执行 ✅
+
+3. **OBS 写失败后本地文件已写入**——builder.py 先写本地文件再写 OBS，OBS 失败时本地文件已经有了，obs_key 为空走本地读取 ✅
+
+4. **重复执行**——issue_updated 再次触发 builder.py 时覆盖本地文件 + OBS 重写，OBS 写成功后 DB obs_key 有值 ✅
+
+5. **同步任务和 builder 同时执行**——后台同步任务可能读到 builder.py 写了一半的文件。`_write_file` 用 `open("w")` 写入几毫秒完成，同步任务每小时跑一次，时间窗口极小。同步任务有 try-except 保护，读失败跳过下一轮再读。可接受。
+
+6. **DB INSERT 失败**——OBS 写成功但 DB 写失败会产生孤儿对象（OBS 有文件 DB 没记录）。MySQL 在本地，写失败概率极低。后续可加定期清理任务扫描孤儿对象。
+
+7. **content_hash 计算时机**——写 OBS 时同时计算 hash 存 DB。OBS 写失败时不计算 hash（不写 DB）。DB 写失败时 hash 丢失但 OBS 有文件，后台同步任务迁移时重新计算 hash ✅
+
 ### baseline content_hash
 
 baseline 文件写入时也计算 content_hash 存 DB：
