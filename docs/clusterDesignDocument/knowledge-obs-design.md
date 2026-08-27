@@ -277,8 +277,10 @@ for rel_path, content in knowledge_files.items():
 
 **Worker 侧三级降级逻辑（通用，不绑死 OBS）：**
 ```python
-def _resolve_file_content(rel_path, content, file_urls):
-    """三级降级：url 下载 → content 兜底 → storage_key 直连存储"""
+def _resolve_file_content(rel_path, content, file_urls, stats):
+    """三级降级：url 下载 → content 兜底 → storage_key 直连存储。
+    stats 收集降级统计用于日志上报。
+    """
     meta = file_urls.get(rel_path, {})
 
     # 1. 优先 url 下载（HTTP GET，通用）
@@ -289,7 +291,8 @@ def _resolve_file_content(rel_path, content, file_urls):
             if downloaded:
                 return downloaded
         except:
-            pass  # 下载失败，降级
+            log.warning(f"[knowledge] url download failed: rel={rel_path}, url={url[:50]}")
+            stats["url_fail"] += 1  # 降级统计
 
     # 2. 降级到 content（服务端兜底打包）
     if content:
@@ -299,23 +302,135 @@ def _resolve_file_content(rel_path, content, file_urls):
     storage_key = meta.get("storage_key", "")
     if storage_key:
         try:
-            return storage.read_bytes(storage_key)  # 统一接口，OBS 只是当前实现
+            return storage.read_bytes(storage_key)  # 统一接口
         except:
-            pass
+            log.error(f"[knowledge] storage read failed: rel={rel_path}, key={storage_key}")
+            stats["storage_fail"] += 1
 
     # 4. 空内容
+    log.error(f"[knowledge] all fallback failed, empty content: rel={rel_path}")
+    stats["empty"] += 1
     return ""
 
-# project_info_files 降落
-proj_urls = json.loads(task.get("project_info_file_urls") or "{}")
-for rel, content in proj_files.items():
-    write_file(proj_dir / rel, _resolve_file_content(rel, content, proj_urls))
+# 批量降级：先收集所有需要直连存储的文件，一次并发读取
+async def _batch_resolve(know_files, know_urls, stats):
+    """收集 URL 下载失败 + content 为空的文件，批量并发读取存储"""
+    failed = {}  # {rel_path: storage_key}
+    for rel_path, content in know_files.items():
+        meta = know_urls.get(rel_path, {})
+        url = meta.get("url", "")
+        # URL 下载失败或没有 URL
+        downloaded = None
+        if url:
+            try:
+                downloaded = http_download(url)
+            except:
+                log.warning(f"[knowledge] url download failed: rel={rel_path}")
+                stats["url_fail"] += 1
+        if downloaded:
+            continue  # URL 下载成功
+        if content:
+            continue  # content 不为空
+        # 降级到 storage_key
+        storage_key = meta.get("storage_key", "")
+        if storage_key:
+            failed[rel_path] = storage_key
 
-# knowledge_files 降落
+    # 批量并发读取存储
+    if failed:
+        results = await storage.read_batch(list(failed.values()))
+        success = sum(1 for v in results.values() if v)
+        log.info(f"[knowledge] batch read: {success}/{len(failed)} succeeded")
+        for rel_path, key in failed.items():
+            content = results.get(key, "")
+            if not content:
+                log.error(f"[knowledge] storage read failed: rel={rel_path}, key={key}")
+                stats["storage_fail"] += 1
+        return results
+    return {}
+
+# 主逻辑
+stats = {"url_fail": 0, "storage_fail": 0, "empty": 0}
+proj_urls = json.loads(task.get("project_info_file_urls") or "{}")
 know_urls = json.loads(task.get("knowledge_file_urls") or "{}")
+
+# 先批量处理降级文件
+proj_batch = await _batch_resolve(proj_files, proj_urls, stats)
+know_batch = await _batch_resolve(know_files, know_urls, stats)
+
+# 逐个落地
+for rel, content in proj_files.items():
+    if content:
+        write_file(proj_dir / rel, content)
+    elif proj_batch.get(proj_urls.get(rel, {}).get("storage_key", "")):
+        write_file(proj_dir / rel, proj_batch[proj_urls[rel]["storage_key"]])
+    else:
+        write_file(proj_dir / rel, "")
+        stats["empty"] += 1
+
 for rel, content in know_files.items():
-    write_file(know_dir / rel, _resolve_file_content(rel, content, know_urls))
+    if content:
+        write_file(know_dir / rel, content)
+    elif know_batch.get(know_urls.get(rel, {}).get("storage_key", "")):
+        write_file(know_dir / rel, know_batch[know_urls[rel]["storage_key"]])
+    else:
+        write_file(know_dir / rel, "")
+        stats["empty"] += 1
+
+# 上报降级统计到任务日志
+total_degraded = stats["url_fail"] + stats["storage_fail"] + stats["empty"]
+if total_degraded > 0:
+    log.warning(f"[knowledge] degraded: url_fail={stats['url_fail']}, "
+                f"storage_fail={stats['storage_fail']}, empty={stats['empty']}")
+    report_messages([{
+        "type": "text",
+        "content": f"⚠️ 知识文件降级：URL下载失败 {stats['url_fail']} 个，"
+                   f"存储直连 {stats['storage_fail']} 个，空内容 {stats['empty']} 个"
+    }])
 ```
+
+### 日志和上报
+
+**日志级别：**
+
+| 场景 | 级别 | 格式 |
+|------|------|------|
+| URL 下载失败 | warning | `[knowledge] url download failed: rel={rel_path}` |
+| 存储直连失败 | error | `[knowledge] storage read failed: rel={rel_path}, key={key}` |
+| 全部失败（空内容） | error | `[knowledge] all fallback failed, empty content: rel={rel_path}` |
+| 批量读取完成 | info | `[knowledge] batch read: {success}/{total} succeeded` |
+| 降级统计汇总 | warning | `[knowledge] degraded: url_fail=N, storage_fail=N, empty=N` |
+
+**上报到任务日志（task_messages）：**
+
+降级次数 > 0 时，通过 report_messages 上报降级统计到任务日志，服务端在事件对话里可见：
+
+```
+⚠️ 知识文件降级：URL下载失败 2 个，存储直连 1 个，空内容 0 个
+```
+
+### 批量读取
+
+降级到第 3 级（Worker 直连存储）时，先收集所有失败的 storage_key，一次并发读取：
+
+```python
+# storage 新增 read_batch 方法
+async def read_batch(self, keys: list[str]) -> dict[str, str]:
+    """批量并发读取——总耗时 = max(单个) 而不是 sum"""
+    async def _read(key):
+        try:
+            return key, self.read_bytes(key)
+        except:
+            return key, ""
+    results = await asyncio.gather(*[_read(k) for k in keys])
+    return dict(results)
+```
+
+| 对比 | 逐个读取 | 批量读取 |
+|------|---------|---------|
+| 5 个失败 | 5 次串行 50-250ms | 1 批并发 10-50ms |
+| 网络请求 | N 次 | 1 批并发 |
+| 总耗时 | sum(单个) | max(单个) |
 
 ### 降级场景
 
