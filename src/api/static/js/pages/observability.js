@@ -36,7 +36,12 @@ function switchObsTab(tab, ev) {
   _obsTab = tab;
   document.querySelectorAll('.stabs a').forEach(a => a.classList.remove('ac'));
   if (ev) ev.target.classList.add('ac');
-  renderObsContent();
+  // 直接用缓存数据渲染，不重新 fetch
+  if (_obsData.ops) {
+    renderObsContent();
+  } else {
+    refreshObs();
+  }
 }
 
 function toggleObsAuto() {
@@ -349,13 +354,21 @@ function renderTasksTab(ops, rt, mt) {
   ]);
   html += '<div id="obs-timeline-container"><div class="loading">加载任务列表...</div></div>';
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
-  const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
-  fetch('/api/dashboard/ops/timeline' + repoParam).then(r => r.json()).then(d => {
-    renderTimelineList(document.getElementById('obs-timeline-container'), d.issues || []);
-  }).catch(e => {
-    const c = document.getElementById('obs-timeline-container');
-    if (c) c.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
-  });
+  const repoFullName = repo && repo.fullName ? repo.fullName : '';
+  // 使用缓存的 timeline 数据（同仓库且 30s 内）
+  if (_timelineCache && _timelineCache.repo === repoFullName && (Date.now() - _timelineCache.ts) < 30000) {
+    setTimeout(() => renderTimelineList(document.getElementById('obs-timeline-container'), _timelineCache.issues), 0);
+  } else {
+    const repoParam = repoFullName ? '?repo=' + encodeURIComponent(repoFullName) : '';
+    fetch('/api/dashboard/ops/timeline' + repoParam).then(r => r.json()).then(d => {
+      _timelineCache = { repo: repoFullName, ts: Date.now(), issues: d.issues || [] };
+      _timelineIssues = d.issues || [];
+      renderTimelineList(document.getElementById('obs-timeline-container'), d.issues || []);
+    }).catch(e => {
+      const c = document.getElementById('obs-timeline-container');
+      if (c) c.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    });
+  }
   return html;
 }
 
@@ -501,6 +514,7 @@ function renderTimelineList(container, issues) {
 
 let _timelineIssues = [];
 let _issueViewMode = {};
+let _timelineCache = null;  // {repo, ts, issues} — 30s TTL 避免重复 fetch
 
 function switchIssueView(issueId, mode) {
   _issueViewMode[issueId] = mode;
@@ -650,6 +664,8 @@ function renderRuntimeTaskList(container, tasks, rtName) {
   container.innerHTML = html;
 }
 
+let _taskLogCache = {};  // taskId -> {msgs, info, ts} — 60s TTL
+
 function openTaskLogModal(taskId, infoEnc) {
   const old = document.getElementById('rtLogModal');
   if (old) old.remove();
@@ -657,34 +673,46 @@ function openTaskLogModal(taskId, infoEnc) {
   let info = {};
   try { info = JSON.parse(decodeURIComponent(infoEnc || '')); } catch(e) {}
   const titleParts = [];
-  if (info.repo) titleParts.push(`<span class="ts t3">${info.repo}</span>`);
-  if (info.issue) titleParts.push(`<b>${info.issue}</b>`);
-  if (info.seq) titleParts.push(`<span class="ts">#${info.seq}</span>`);
-  if (info.created) titleParts.push(`<span class="ts t3">${info.created.substring(0,19)}</span>`);
+  if (info.repo) titleParts.push('<span class="ts t3">' + info.repo + '</span>');
+  if (info.issue) titleParts.push('<b>' + info.issue + '</b>');
+  if (info.seq) titleParts.push('<span class="ts">#' + info.seq + '</span>');
+  if (info.created) titleParts.push('<span class="ts t3">' + info.created.substring(0,19) + '</span>');
   const titleHtml = titleParts.length ? titleParts.join(' · ') : '任务日志';
 
   const modal = document.createElement('div');
   modal.id = 'rtLogModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
-  modal.innerHTML = `<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
-      <h3 style="font-size:13px;font-weight:600">${titleHtml}</h3>
-      <button class="bt bt-o bt-s" onclick="document.getElementById('rtLogModal').remove()">✕ 关闭</button>
-    </div>
-    <div id="rtLogTimeline" style="padding:10px 18px;border-bottom:1px solid var(--b);display:none"></div>
-    <div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>
-  </div>`;
+  modal.innerHTML = '<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
+    '<h3 style="font-size:13px;font-weight:600">' + titleHtml + '</h3>' +
+    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtLogModal\').remove()">✕ 关闭</button>' +
+    '</div>' +
+    '<div id="rtLogTimeline" style="padding:10px 18px;border-bottom:1px solid var(--b);display:none"></div>' +
+    '<div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>' +
+    '</div>';
   document.body.appendChild(modal);
 
+  // 使用缓存的日志数据（60s TTL）
+  const cached = _taskLogCache[taskId];
+  if (cached && (Date.now() - cached.ts) < 60000) {
+    renderTaskLogMessages(document.getElementById('rtLogModalBody'), cached.msgs || [], info);
+    if (cached.infoData) renderTaskTimeline(document.getElementById('rtLogTimeline'), cached.infoData);
+    return;
+  }
+
+  // 并行加载日志和时间线
   API.get('/task-logs/' + taskId + '/messages?since=0').then(msgs => {
+    _taskLogCache[taskId] = { msgs: msgs || [], infoData: null, ts: Date.now() };
     renderTaskLogMessages(document.getElementById('rtLogModalBody'), msgs || [], info);
   }).catch(e => {
     document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
   });
 
-  API.get('/task-logs/' + taskId + '/info').then(info => {
-    renderTaskTimeline(document.getElementById('rtLogTimeline'), info);
+  API.get('/task-logs/' + taskId + '/info').then(infoData => {
+    // 存入缓存
+    if (_taskLogCache[taskId]) _taskLogCache[taskId].infoData = infoData;
+    renderTaskTimeline(document.getElementById('rtLogTimeline'), infoData);
   }).catch(e => {});
 }
 
