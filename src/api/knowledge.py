@@ -366,7 +366,13 @@ async def knowledge_sync_loop():
                 for row in rows:
                     rid, file_path, scope, repo_key, agent_type, issue_num = row
                     try:
-                        full_path = os.path.join(WORKSPACE_DIR, file_path)
+                        # 兼容 file_path 格式：write_knowledge/builder 用 WORKSPACE_DIR 相对（owner/repo/...），
+                        # upload_knowledge 用 repo_base 相对（project-info/...）
+                        owner, rname = _owner_repo(repo_key)
+                        if file_path.startswith(f"{owner}/{rname}/"):
+                            full_path = os.path.join(WORKSPACE_DIR, file_path)
+                        else:
+                            full_path = os.path.join(WORKSPACE_DIR, owner, rname, file_path)
                         content = ""
                         with open(full_path, encoding="utf-8") as f:
                             content = f.read()

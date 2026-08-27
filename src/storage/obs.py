@@ -210,6 +210,7 @@ class ObsStorage(StorageBackend):
                     out[rel_path] = {"url": "", "storage_key": ""}
 
             # 成员上传文档：按 scope='member' 查 DB obs_key
+            owner, rname = _owner_repo(repo_key)
             with db_lock:
                 rows = db.cursor().execute(
                     "SELECT file_path, obs_key FROM agent_shared_knowledge "
@@ -217,16 +218,20 @@ class ObsStorage(StorageBackend):
                     "ORDER BY id DESC",
                     (repo_key,)
                 ).fetchall()
-            # member_files 返回 {rel_path: content}——rel_path 相对 WORKSPACE_DIR
-            # DB file_path 相对 repo_base——用 os.path.basename 精确匹配（member 文件名唯一）
-            member_basename_map = {}
-            for fp, ok in rows:
-                if fp and ok:
-                    member_basename_map[_os.path.basename(fp)] = ok
+            # member_files 返回 {rel_path: content}——rel_path 相对 WORKSPACE_DIR（owner/repo/project-info/member/...）
+            # DB file_path 相对 repo_base（project-info/member/...）——file_path 是 rel_path 的后缀
+            # 同时也生成 member_files_pi 格式的 key（member/user1/design.md）供 project_info_files 匹配
             for rel_path in member_files(repo_key):
-                obs_key = member_basename_map.get(_os.path.basename(rel_path), "")
+                obs_key = ""
+                for fp, ok in rows:
+                    if fp and ok and rel_path.endswith(fp):
+                        obs_key = ok
+                        break
                 if obs_key:
                     out[rel_path] = {"url": self.temporary_url(obs_key, expires=3600), "storage_key": obs_key}
+                    # 同时生成 project-info 相对格式（member_files_pi 格式）
+                    _pi_rel = _os.path.relpath(rel_path, _os.path.join(WORKSPACE_DIR, owner, rname, "project-info"))
+                    out[_pi_rel] = {"url": self.temporary_url(obs_key, expires=3600), "storage_key": obs_key}
                 else:
                     out[rel_path] = {"url": "", "storage_key": ""}
 
