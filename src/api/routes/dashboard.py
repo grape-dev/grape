@@ -372,9 +372,9 @@ async def probe_engines_now():
     import time, threading
     now = time.time()
     last = _last_probe_time if _last_probe_time else 0
-    if now - last < 60:
-        # 防抖窗口内，返回上次结果
-        return {"status": "throttled", "wait": int(60 - (now - last)), "results": get_probe_results()}
+    if now - last < 300:
+        # 防抖窗口内（5分钟），返回上次结果
+        return {"status": "throttled", "wait": int(300 - (now - last)), "results": get_probe_results()}
     # 防抖窗口外：后台线程异步执行探测，立即返回（不阻塞当前请求）
     def _bg_probe():
         try:
