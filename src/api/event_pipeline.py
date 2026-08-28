@@ -636,8 +636,22 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         from src.user.db import get_all_bot_usernames
         bot_usernames = get_all_bot_usernames()
         if actor in bot_usernames:
-            log.info(f"Pipeline skip: self-comment from bot={actor}")
-            return result
+            # 多任务模式豁免：bot 创建的子任务 issue_opened（body 含「## 父任务」）不跳过
+            _allow_through = False
+            if event_type == "issue_opened":
+                try:
+                    _payload = evt.get("payload", {}) or {}
+                    _oa = _payload.get("object_attributes", {}) or {}
+                    _body = _oa.get("description", "") or ""
+                    if "## 父任务" in _body:
+                        _allow_through = True
+                except Exception:
+                    pass
+            if _allow_through:
+                log.info(f"Pipeline: bot={actor} created subtask issue, allow through")
+            else:
+                log.info(f"Pipeline skip: self-comment from bot={actor}")
+                return result
         log.info(f"Pipeline: comment from {actor}, not a bot ({bot_usernames})")
 
     # 2.1 issue_updated 纯标签变更（changes.labels 有变化、其余内容未动）→ bot 打标签回声，跳过
