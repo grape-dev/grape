@@ -556,3 +556,188 @@ function selectLang(lang) {
 5. **按模块拆分** — 语言包按页面/功能模块拆分，便于维护
 6. **缓存控制** — JSON 文件带版本号（`?v=1`），更新语言包时 bump 版本
 7. **新增语言不改代码** — 加一个 JSON 目录即可
+
+
+## 十、方案深度检查——遗漏和待优化点修复（2026-08-27）
+
+### 问题 1：后端只有 @app.get("/") 没有 catch-all ❌ 必须修
+
+**问题：** 后端只注册了 `@app.get("/")` 返回 index.html。`/en` 或 `/en/` 没有对应路由 → 404。
+
+方案里说"catch-all 路由已支持 /en/..."——但实际上没有 catch-all 路由。
+
+**修复：** 在 `src/api/main.py` 新增 `/en` 路由：
+
+```python
+@app.get("/en")
+@app.get("/en/{path:path}")
+async def serve_spa_en(path: str = ""):
+    resp = FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+```
+
+注意：`/en/{path:path}` 不能匹配 `/api/...` 和 `/static/...`——这些在 `serve_spa_en` 之前已被 FastAPI 路由注册匹配。
+
+### 问题 2：JS 同步加载 vs i18n 异步初始化竞态 ⚠️
+
+**问题：** 现有 index.html 用同步 `<script>` 标签加载所有 JS。方案改为异步加载 i18n.js → init → 再加载 app.js。但 pages/*.js 在 app.js 之前同步执行，如果模块级代码调 t() → i18n 还没初始化 → 报错。
+
+**修复：** i18n.js 用同步 `<script>` 加载（不加 async/defer），放在所有 JS 之前。语言包加载改为同步 XHR 或内联到 index.html。
+
+方案调整：i18n.js 内联最小语言包（common + app login 相关 key），其他语言包用 fetch 异步加载（加载完成后调 applyI18nToDOM() 刷新）。
+
+```javascript
+// i18n.js 同步加载，内联最小语言包
+const _INLINE_PACKS = {
+  zh: {
+    common: { loading: "加载中...", load_failed: "加载失败", /* ... */ },
+    app: { login: { gitcode_login: "使用 GitCode 登录", /* ... */ } }
+  },
+  en: {
+    common: { loading: "Loading...", load_failed: "Load failed", /* ... */ },
+    app: { login: { gitcode_login: "Sign in with GitCode", /* ... */ } }
+  }
+};
+
+// init 同步用内联包，异步加载完整包
+function init(cacheVer) {
+  _CACHE_VER = cacheVer || '1';
+  _lang = detectLang();
+  _packs[_lang] = _INLINE_PACKS[_lang] || {};
+  if (_lang !== DEFAULT_LANG) {
+    _packs[DEFAULT_LANG] = _INLINE_PACKS[DEFAULT_LANG] || {};
+  }
+  // 异步加载完整语言包（不阻塞页面渲染）
+  loadPacks(_lang).then(() => {
+    // 加载完成后刷新 DOM 文案
+    if (typeof applyI18nToDOM === 'function') applyI18nToDOM();
+  });
+}
+```
+
+index.html 调整：
+```html
+<!-- i18n.js 同步加载，放在所有 JS 之前 -->
+<script src="/static/js/i18n.js?v=1"></script>
+<script>
+// 同步初始化（用内联包，不阻塞）
+I18N.init('1');
+</script>
+<!-- 其他 JS 正常同步加载 -->
+<script src="/static/js/vendor/marked.min.js?v=1"></script>
+<script src="/static/js/api.js?v=14"></script>
+<!-- ... pages/*.js ... -->
+<script src="/static/js/app.js?v=33"></script>
+```
+
+### 问题 3：OAuth 回调丢语言前缀 ❌ 必须修
+
+**问题：** OAuth 回调 `RedirectResponse(url=f"/?token=xxx")` → 跳到 `/`。如果用户选了英文（localStorage.grapeLang=en），OAuth 回调后跳到 `/`（中文）→ 丢失语言偏好。
+
+**修复（前端处理，后端不改）：** app.js init() 检测到 URL 有 token 参数后，检查 localStorage.grapeLang：
+
+```javascript
+// app.js init() 里 OAuth token 处理
+const p = new URLSearchParams(window.location.search);
+const urlToken = p.get('token');
+if (urlToken) {
+  localStorage.setItem('token', urlToken);
+  // ... 现有逻辑 ...
+
+  // 保留语言前缀
+  const lang = localStorage.getItem('grapeLang') || 'zh';
+  const langPrefix = lang === 'en' ? '/en' : '';
+  if (window.history.replaceState) {
+    window.history.replaceState(null, '', langPrefix + '/');
+  }
+  return;
+}
+```
+
+### 问题 4：replaceState('') 清掉 /en 前缀 ❌ 必须修
+
+**问题：** app.js 第 432-433 行 `window.history.replaceState(null, '', '/')` 清掉语言前缀。
+
+**修复：** 保留语言前缀：
+
+```javascript
+// 之前
+window.history.replaceState(null, '');
+
+// 之后
+const _lang = I18N.getLang();
+const _prefix = _lang === 'en' ? '/en' : '';
+window.history.replaceState(null, '', _prefix + '/');
+```
+
+### 问题 5：hash 路由兼容性 ✅ 无需修
+
+`/en` path 部分不受 hash 路由影响。history.pushState/replaceState 改的是 hash（#xxx），不改 path。`/en` 前缀保持稳定。
+
+### 问题 6：语言包加载失败处理 ⚠️
+
+**修复：** i18n.js 加超时 + 重试 + 降级：
+
+```javascript
+async function loadPack(lang, mod) {
+  const maxRetries = 2;
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const resp = await fetch(`/static/locales/${lang}/${mod}.json?v=${_CACHE_VER}`, {
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      if (resp.ok) return await resp.json();
+    } catch (e) {
+      if (i < maxRetries) continue;
+      console.warn(`i18n: failed to load ${lang}/${mod}.json after ${maxRetries + 1} attempts`, e);
+    }
+  }
+  return null;  // 降级：用内联包或回退到默认语言
+}
+```
+
+### 问题 7：缓存版本管理 ⚠️
+
+**修复：** i18n.js init(cacheVer) 接收版本号，和 index.html 的 JS 版本号联动：
+
+```html
+<!-- index.html -->
+<script>I18N.init('34');</script>  <!-- 和 app.js?v=34 版本同步 -->
+```
+
+### 问题 8：登录页中文闪动 ⚠️
+
+**修复：** index.html 用 data-i18n 属性 + 默认空文案，i18n.js 同步初始化后立即填充：
+
+```html
+<!-- 之前 -->
+<button class="obtn" id="gitBtn" onclick="app.oauthLogin()">
+  使用 GitCode 登录
+</button>
+
+<!-- 之后 -->
+<button class="obtn" id="gitBtn" onclick="app.oauthLogin()">
+  <span data-i18n="app.login.gitcode_login">使用 GitCode 登录</span>
+</button>
+```
+
+i18n.js init() 同步执行后立即调 applyI18nToDOM() 填充文案——因为内联包已加载，不需要等 fetch。
+
+### 修复总结
+
+| # | 问题 | 严重度 | 修复方案 | 改动文件 |
+|---|------|:---:|------|------|
+| 1 | 后端没有 /en 路由 | ❌ | 新增 /en + /en/{path:path} 路由 | main.py |
+| 2 | JS 同步加载竞态 | ⚠️ | 内联最小语言包 + 异步加载完整包 | i18n.js + index.html |
+| 3 | OAuth 回调丢语言 | ❌ | 前端 init() 检测 grapeLang 保留前缀 | app.js |
+| 4 | replaceState 清 /en | ❌ | 保留语言前缀 | app.js |
+| 5 | hash 路由兼容 | ✅ | 无需修 | — |
+| 6 | 语言包加载失败 | ⚠️ | 超时 + 重试 + 降级 | i18n.js |
+| 7 | 缓存版本管理 | ⚠️ | init(cacheVer) 联动 | i18n.js + index.html |
+| 8 | 登录页闪动 | ⚠️ | data-i18n + 内联包同步填充 | index.html + i18n.js |
