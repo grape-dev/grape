@@ -65,7 +65,6 @@ class HeartbeatBody(BaseModel):
     cpu_percent: float = 0.0
     memory_percent: float = 0.0
     disk_percent: float = 0.0
-    tmp_percent: float = 0.0
     load_avg: str = ""
     log_lines: list[LogLineBody] = []
 
@@ -159,15 +158,15 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
             row = c.fetchone()
             if row:
                 rid = row[0]
-                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=?, worker_version=? WHERE id=?",
+                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=? WHERE id=?",
                           (rt.get("version", ""), 1 if rt.get("healthy", True) else 0,
-                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, body.cli_version, rid))
+                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, rid))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key))
                 rid = c.lastrowid
             # 服务端默认写入 "all" 标签到 engine_capabilities（worker 不需要传 tags）
             # 后续标签增删改全部来自 WebUI 操作
@@ -216,8 +215,8 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
     cancelled_tasks = []
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
-                  (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, credential_id))
+        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, load_avg=? WHERE id=?",
+                  (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.load_avg, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
@@ -1011,30 +1010,32 @@ async def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_use
 async def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_current_user)):
     """设置 engine 的角色标签。应用互斥规则后写入。
 
-    同步 engine_capabilities 表：WebUI 设置 agent_tags 时，claim_by_tag 实际读的是
-    engine_capabilities.tag，两处必须一致，否则 0003 设了 agent_tags=['sre'] 但 ec.tag
-    仍为 'all' → 0003 用 tag='all' 抢所有类型任务。
+    以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
+    写入顺序：先写 engine_capabilities，再 _sync_agent_tags 回写 agent_tags。
     """
     from src.session_manager import db, db_lock
     from datetime import datetime, timezone
+    from src.api.routes.settings import _sync_agent_tags
     tags = _apply_tag_rules(body.get("tags") or [])
-    tags_json = json.dumps(tags, ensure_ascii=False)
     now = datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()
         c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
         if not c.fetchone():
             raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
-        c.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (tags_json, runtime_id))
-        # 同步 engine_capabilities：删除旧标签行，按新 agent_tags 重建
+        # 先写 engine_capabilities：先删旧标签，再插新标签
         c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (runtime_id,))
-        for _tag in tags:
+        for tag in (tags or ["all"]):
             try:
                 c.execute(
                     "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                    "VALUES (?,?,4,50,1,?,?)",
-                    (runtime_id, _tag, now, now))
+                    "VALUES (?,?,1,50,1,?,?)",
+                    (runtime_id, tag, now, now)
+                )
             except Exception:
                 pass
+        # 再回写 agent_tags（派生缓存，保持与 engine_capabilities 一致）
+        _sync_agent_tags(runtime_id, c)
         db.commit()
+    log.info(f"Runtime tags set: rid={runtime_id} tags={tags} (engine_capabilities → agent_tags synced)")
     return {"tags": tags}

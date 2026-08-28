@@ -239,7 +239,7 @@ def _get_issue_title(repo_key: str, issue_number: int) -> str:
     """从 events 表取该 issue 最新事件的标题（零 API 调用）。
     
     跳过 title 为事件类型名（如 issue_opened/issue_updated）或 A2A 占位标题的行，
-    这些不是 Issue 真实标题。
+    这些不是 Issue 真实标题。回退到 issue_opened 事件的 payload 中提取标题。
     """
     _EVENT_TYPE_NAMES = {
         "issue_opened", "issue_updated", "issue_comment", "issue_labeled",
@@ -248,6 +248,8 @@ def _get_issue_title(repo_key: str, issue_number: int) -> str:
         "note_hook_pr", "vod_signal", "a2a_event", "build_start", "build_failure",
         "deploy_start", "deploy_failure", "deploy_finish",
     }
+    def _is_placeholder(t):
+        return not t or t in _EVENT_TYPE_NAMES or t.startswith("A2A:") or t.startswith("A2A (订阅):")
     with db_lock:
         c = db.cursor()
         try:
@@ -259,8 +261,30 @@ def _get_issue_title(repo_key: str, issue_number: int) -> str:
             row = c.fetchone()
             if row:
                 t = row[0] or ""
-                if t not in _EVENT_TYPE_NAMES and not t.startswith("A2A:") and not t.startswith("A2A (订阅):"):
+                if not _is_placeholder(t):
                     return t
+            # payload 兜底：从 issue_opened 事件的 payload 中提取真实标题
+            c.execute(
+                "SELECT payload FROM events WHERE repo_key=? AND issue_id=? AND event_type='issue_opened' "
+                "ORDER BY seq ASC LIMIT 1",
+                (repo_key, f"#{issue_number}")
+            )
+            prow = c.fetchone()
+            if prow:
+                import json as _json
+                try:
+                    _pl = _json.loads(prow[0] or "{}")
+                except Exception:
+                    _pl = {}
+                _obj = _pl.get("object_attributes", {})
+                _iss = _pl.get("issue", {})
+                _pt = ""
+                if isinstance(_obj, dict):
+                    _pt = _obj.get("title", "") or ""
+                if not _pt and isinstance(_iss, dict):
+                    _pt = _iss.get("title", "") or ""
+                if _pt and not _is_placeholder(_pt):
+                    return _pt
             return ""
         except Exception:
             return ""

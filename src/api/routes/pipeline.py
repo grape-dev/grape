@@ -93,7 +93,31 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
             if not _is_placeholder(_et):
                 title = _et
                 break
-    # GitCode API 兜底：tasks/events 都没真实标题 → 调 API 获取并回写 tasks 表
+    # payload 兜底：events title 都是占位符 → 从 issue_opened 事件的 payload 中提取真实标题
+    if _is_placeholder(title):
+        import json as _json
+        for _e in issue_events:
+            if _e.get("event_type") != "issue_opened":
+                continue
+            _pl = _e.get("payload", "")
+            if isinstance(_pl, str):
+                try:
+                    _pl = _json.loads(_pl)
+                except Exception:
+                    _pl = {}
+            if not isinstance(_pl, dict):
+                continue
+            _obj = _pl.get("object_attributes", {})
+            _iss = _pl.get("issue", {})
+            _pt = ""
+            if isinstance(_obj, dict):
+                _pt = _obj.get("title", "") or ""
+            if not _pt and isinstance(_iss, dict):
+                _pt = _iss.get("title", "") or ""
+            if _pt and not _is_placeholder(_pt):
+                title = _pt
+                break
+    # GitCode API 兜底：tasks/events/payload 都没真实标题 → 调 API 获取并回写 tasks 表
     if _is_placeholder(title):
         try:
             _iss_num_api = int(str(issue_id).lstrip("#"))
@@ -259,14 +283,16 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
     ]
 
     issue_ids = list(dict.fromkeys(e["issue_id"] for e in events if e["issue_id"]))
-    pipelines = [_get_issue_pipeline(repo_key, iid, events) for iid in issue_ids]
+    # 预建 issue_id → events 列表索引（避免 _get_issue_pipeline 内部反复遍历全量 events）
+    _events_by_issue = {}
+    for e in events:
+        _events_by_issue.setdefault(e["issue_id"], []).append(e)
+    pipelines = [_get_issue_pipeline(repo_key, iid, _events_by_issue.get(iid, [])) for iid in issue_ids]
     pipelines = [p for p in pipelines if p is not None]
 
-    # 按 Issue 最新活动倒序：最新的 issue 排最前（原为 issue 首次出现顺序，最早 issue 恒在前）
-    # 用每个 issue 的最新 event seq 作为排序键（seq 单调递增，最新 seq = 最新活动）
-    def _latest_seq(p):
-        return max((e["seq"] for e in events if e["issue_id"] == p["issue_id"]), default=0)
-    pipelines.sort(key=_latest_seq, reverse=True)
+    # 按 Issue 最新活动倒序：用预建索引中的最大 seq 排序（O(N)，避免反复遍历全量 events）
+    _max_seq_cache = {iid: max((e["seq"] for e in evts), default=0) for iid, evts in _events_by_issue.items()}
+    pipelines.sort(key=lambda p: _max_seq_cache.get(p["issue_id"], 0), reverse=True)
 
     # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，
     # 不维护 issue_agent_session.status 双份记账，避免状态漂移
