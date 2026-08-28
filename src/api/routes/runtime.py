@@ -1008,14 +1008,34 @@ async def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_use
 
 @router.put("/runtimes/{runtime_id}/tags")
 async def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_current_user)):
-    """设置 engine 的角色标签。应用互斥规则后写入。"""
+    """设置 engine 的角色标签。应用互斥规则后写入。
+
+    以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
+    写入顺序：先写 engine_capabilities，再 _sync_agent_tags 回写 agent_tags。
+    """
     from src.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    from src.api.routes.settings import _sync_agent_tags
     tags = _apply_tag_rules(body.get("tags") or [])
-    tags_json = json.dumps(tags, ensure_ascii=False)
+    now = datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (tags_json, runtime_id))
-        if c.rowcount == 0:
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
+        if not c.fetchone():
             raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        # 先写 engine_capabilities：先删旧标签，再插新标签
+        c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (runtime_id,))
+        for tag in (tags or ["all"]):
+            try:
+                c.execute(
+                    "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                    "VALUES (?,?,1,50,1,?,?)",
+                    (runtime_id, tag, now, now)
+                )
+            except Exception:
+                pass
+        # 再回写 agent_tags（派生缓存，保持与 engine_capabilities 一致）
+        _sync_agent_tags(runtime_id, c)
         db.commit()
+    log.info(f"Runtime tags set: rid={runtime_id} tags={tags} (engine_capabilities → agent_tags synced)")
     return {"tags": tags}

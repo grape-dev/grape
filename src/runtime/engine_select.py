@@ -174,6 +174,36 @@ def _default_priority(runtime_id: int, repo: str, cfg: dict) -> int:
     return int(cfg.get("local_priority", _PRIO_LOCAL)) if scope == "local" else _PRIO_GLOBAL
 
 
+def _busy_slots(runtime_id: int) -> int:
+    """返回引擎当前实际活跃任务数（实时 COUNT，与 claim_by_tag 并发检查一致）。
+
+    不使用 busy_slots 字段（该字段在 kill -9/崩溃/快速失败场景下只增不减导致脏数据）。
+    """
+    db, lock = _db()
+    with lock:
+        try:
+            c = db.cursor()
+            c.execute(
+                "SELECT COUNT(*) FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
+                (runtime_id,)
+            )
+            row = c.fetchone()
+            return row[0] if row else 0
+        except Exception:
+            return 0
+
+
+def _pick_least_busy(cand: list[dict]) -> dict:
+    """从候选引擎中选繁忙度最低的（同档位内负载均衡）。
+
+    排序键：(priority, actual_busy, runtime_id)
+    - priority 优先（repo < global < local 档位）
+    - actual_busy 次之（实时 COUNT 活跃任务数，选空闲最多的）
+    - runtime_id 末位（稳定排序兜底）
+    """
+    return min(cand, key=lambda r: (r.get("priority", 0), _busy_slots(r["runtime_id"]), r["runtime_id"]))
+
+
 def set_binding(repo_key: str, agent_type: str, runtime_ids: list[int], priorities: dict | None = None):
     """替换 (repo, agent) 的引擎集合（先删后插，单事务）。空列表 = 清空集合。"""
     repo = _norm_repo(repo_key)
@@ -297,8 +327,12 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) ->
             if not cand:
                 continue
             if cfg.get("rule") == "order":
-                return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
-            return random.choice(cand)["runtime_id"]
+                return _pick_least_busy(cand)["runtime_id"]
+            # random 模式：优先选实际空闲引擎（active=0），无空闲则选最少的
+            _idle = [m for m in cand if _busy_slots(m["runtime_id"]) == 0]
+            if _idle:
+                return random.choice(_idle)["runtime_id"]
+            return _pick_least_busy(cand)["runtime_id"]
         return None     # 集合存在但无健康成员 → engine_unavailable（不回退 fallback）
     if fallback_runtime_id:
         return int(fallback_runtime_id)
@@ -348,7 +382,7 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
         if not cand:
             continue
         if cfg.get("rule") == "order":
-            return min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
+            return _pick_least_busy(cand)["runtime_id"]
         return random.choice(cand)["runtime_id"]
     return None
 

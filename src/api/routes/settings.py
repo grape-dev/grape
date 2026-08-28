@@ -601,6 +601,17 @@ class EngineTagUpdateBody(BaseModel):
     enabled: int = 1
 
 
+def _sync_agent_tags(rid: int, cursor):
+    """engine_capabilities 变更后，回写 agent_runtimes.agent_tags（JSON 快照）。
+
+    agent_tags 是 engine_capabilities 中 enabled=1 的 tag 列表的 JSON 表示，
+    供前端展示用。此函数确保两表一致。
+    """
+    cursor.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rid,))
+    tags = [r[0] for r in cursor.fetchall()] or ["all"]
+    cursor.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (json.dumps(tags, ensure_ascii=False), rid))
+
+
 @router.get("/agent-runtimes/{rid}/tags")
 async def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
     """获取引擎的标签列表"""
@@ -644,6 +655,7 @@ async def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get
                 "ON DUPLICATE KEY UPDATE max_concurrent=VALUES(max_concurrent), priority=VALUES(priority), updated_at=VALUES(updated_at)",
                 (rid, tag, body.max_concurrent, body.priority, now, now)
             )
+            _sync_agent_tags(rid, c)
             db.commit()
         except HTTPException:
             raise
@@ -656,6 +668,7 @@ async def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get
                     "VALUES (?,?,?,?,1,?,?)",
                     (rid, tag, body.max_concurrent, body.priority, now, now)
                 )
+                _sync_agent_tags(rid, c)
                 db.commit()
             except Exception as e2:
                 db.rollback()
@@ -682,6 +695,7 @@ async def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
             )
             if c.rowcount == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
+            _sync_agent_tags(rid, c)
             db.commit()
         except HTTPException:
             raise
@@ -702,6 +716,7 @@ async def delete_engine_tag(rid: int, tag: str, user: dict = Depends(get_current
             c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag=?", (rid, tag))
             if c.rowcount == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
+            _sync_agent_tags(rid, c)
             db.commit()
         except HTTPException:
             raise

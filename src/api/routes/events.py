@@ -523,7 +523,46 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
             else:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
         else:
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "该事件无关联任务，无法重派"})
+            # 无关联任务（引擎不可用时未创建 task 快照的历史事件）→ 从 events 表恢复参数重走 run_pipeline
+            # 构建最小 webhook evt，复用 run_pipeline 路由+引擎选择+入队/执行
+            try:
+                from src.api.event_pipeline import run_pipeline as _rp
+                _payload = evt.get("payload_raw") or evt.get("payload") or "{}"
+                if isinstance(_payload, str):
+                    try:
+                        _payload = _json.loads(_payload)
+                    except Exception:
+                        _payload = {}
+                _event_type = evt.get("event_type", "unknown")
+                # 构造 normalize_event 格式的 evt dict
+                _fake_raw = _json.dumps(_payload).encode() if isinstance(_payload, dict) else b"{}"
+                # 反推 event_header：issue_opened → Issue Hook, pull_request_merged → Merge Request Hook
+                _header_map = {"issue_opened": "Issue Hook", "issue_updated": "Issue Hook",
+                               "issue_comment": "Note Hook", "pull_request_merged": "Merge Request Hook",
+                               "pull_request_opened": "Merge Request Hook", "push": "push"}
+                _header = _header_map.get(_event_type, _event_type)
+                _rp_result = _rp(_fake_raw, {"X-GitCode-Event": _header},
+                                 account=evt.get("account", ""), repo_key_override=evt.get("repo_key", ""))
+                if _rp_result.get("ok"):
+                    log.info(f"[redispatch] seq={seq} re-run_pipeline ok, new seq={_rp_result.get('seq')}")
+                    # 原 seq 事件标记 failed（保持历史记录），新 seq 接管执行
+                    update_event_status(seq, "failed")
+                    try:
+                        from src.user.db import set_meta_value as _smv
+                        import time as _tm
+                        _smv(f"redispatch:{seq}", str(_tm.time()))
+                    except Exception:
+                        pass
+                    return {"status": "redispatched", "task_id": "(new)", "event_seq": _rp_result.get("seq", 0),
+                            "original_seq": seq}
+                else:
+                    raise HTTPException(status_code=409, detail={"code": 409,
+                        "message": f"重派失败：run_pipeline 未成功（{_rp_result.get('event_type', 'unknown')}）"})
+            except HTTPException:
+                raise
+            except Exception as e:
+                log.warning(f"[redispatch] seq={seq} re-run_pipeline failed: {e}")
+                raise HTTPException(status_code=500, detail={"code": 500, "message": f"重派异常: {str(e)[:100]}"})
 
     # 4) 事件状态回写 running
     update_event_status(seq, "running")
@@ -562,7 +601,7 @@ def _load_event(seq: int) -> dict:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, repo_key, issue_id, agent_type, event_type, title, result, status FROM events WHERE seq=?",
+                "SELECT seq, repo_key, issue_id, agent_type, event_type, title, result, status, payload, source, actor FROM events WHERE seq=?",
                 (seq,))
             row = c.fetchone()
         except Exception:
@@ -576,7 +615,9 @@ def _load_event(seq: int) -> dict:
             max_seq = 0
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到", "max_seq": max_seq})
     return {"seq": row[0], "repo_key": row[1], "issue_id": row[2] or "", "agent_type": row[3] or "",
-            "event_type": row[4] or "", "title": row[5] or "", "result": row[6] or "", "status": row[7] or ""}
+            "event_type": row[4] or "", "title": row[5] or "", "result": row[6] or "", "status": row[7] or "",
+            "payload": row[8] or "", "source": row[9] or "gitcode", "actor": row[10] or "",
+            "account": row[1].replace("gitcode:", "") if row[1] else ""}
 
 
 def _thread_gate(repo_key: str, issue_id: str) -> dict:

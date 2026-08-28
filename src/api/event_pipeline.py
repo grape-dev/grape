@@ -117,6 +117,83 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     return task_id
 
 
+def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
+                        skill_path, skill_id, evt, issue_id="", runtime_id=0):
+    """引擎不可用时创建 failed 状态的 task 快照（供重派复用参数）。
+
+    重派逻辑查 agent_tasks WHERE event_seq=?，无记录则报"无关联任务"。
+    此函数确保引擎不可用时也有一条 failed task 记录，重派可走"终态→复用快照重建"路径。
+    """
+    from src.runtime.service import _TASK_COLUMNS_LIST
+    from src.api.session_store import get_or_create_agent_session
+    from datetime import datetime, timezone
+    import os
+
+    # 查 agent_session_id（重派需要）
+    session = get_or_create_agent_session(repo_key, agent_type, backend or "")
+    agent_session_id = session.get("id", "")
+    if not agent_session_id:
+        log.warning(f"create_failed_task: no agent_session_id for {repo_key}/{agent_type}")
+        return
+
+    task_id = "t_" + uuid.uuid4().hex[:12]
+    if not issue_id:
+        issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
+
+    # 构建 prompt（重派复用）
+    prompt = ""
+    try:
+        from src.prompt_builder import build_prompt
+        evt["_skill_path"] = skill_path
+        evt["_skill_id"] = skill_id
+        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
+                              skill_path=skill_path, runtime_id=runtime_id, agent_type=agent_type)
+    except Exception as e:
+        log.warning(f"create_failed_task: prompt build failed: {e}")
+
+    # cwd
+    try:
+        cwd = get_agent_workdir(repo_key, agent_type, issue_id)
+        os.makedirs(cwd, exist_ok=True)
+    except Exception:
+        cwd = ""
+
+    # env_extra
+    repository = evt.get("repository", "")
+    env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
+    _inject_cloud_credentials(env_extra, repo_key)
+
+    # repo_gitcode_token
+    repo_gitcode_token = ""
+    try:
+        from src.user.db import get_gitcode_token
+        repo_gitcode_token = get_gitcode_token(repo_key=repo_key) or ""
+    except Exception:
+        pass
+
+    now = datetime.now(timezone.utc).isoformat()
+    _reason = json.dumps(["无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎"][:500])
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"INSERT INTO agent_tasks ({','.join(_TASK_COLUMNS_LIST)}) VALUES "
+                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
+                (task_id, agent_session_id, runtime_id, seq, issue_id, repo_key or "",
+                 agent_type or "", skill_name or "", skill_id or 0,
+                 prompt, cwd, "",
+                 evt.get("type", "") or "", repository or evt.get("account", "") or "", 0, repo_gitcode_token,
+                 json.dumps(env_extra), "{}", "",
+                 "", "{}", "{}", "{}", 0,
+                 agent_type or "" if is_plugin_mode() else "", 0, agent_type or "" if is_plugin_mode() else "",
+                 "failed", 1, "", _reason, "", "{}", now, now, now)
+            )
+            db.commit()
+        log.info(f"Failed task snapshot created: {task_id} seq={seq} agent={agent_type} (engine_unavailable)")
+    except Exception as e:
+        log.warning(f"create_failed_task failed for seq={seq}: {e}")
+
+
 def _update_direct_task(seq, status, exit_code=0, result_text=""):
     """direct 执行完成后更新 agent_tasks 状态（通过 event_seq 反查）。"""
     try:
@@ -852,6 +929,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0)
     if not engine_id:
         log.info(f"Pipeline: no available engine for repo={repo_key} agent={agent_type}, seq={seq}, skip")
+        # 创建 failed 状态的 task 快照（供重派复用参数，否则重派报"无关联任务"）
+        _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
+                            skill_path, skill_id, evt, issue_id, runtime_id or 0)
         _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
         return result
     # backend 必须取已注册引擎的类型名（不沿用会话/字面默认），确保执行 CLI 与选中引擎一致
