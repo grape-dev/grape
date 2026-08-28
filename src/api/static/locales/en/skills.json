@@ -76,7 +76,12 @@
     "package_name": "Huawei Cloud Skills",
     "loading_sub": "⏳ Loading sub-skills...",
     "loading": "⏳ Loading...",
-    "files_count": "{{count}} files"
+    "files_count": "{{count}} files",
+    "back": "Back to Huawei Cloud Skills",
+    "no_detail": "(No detail content)",
+    "no_sub_skill": "(No sub-skills)",
+    "no_content": "(No content)",
+    "reference_docs": "Reference Documents"
   },
   "label": {
     "reference_docs": "📎 Reference Docs"

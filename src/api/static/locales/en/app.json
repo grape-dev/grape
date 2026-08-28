@@ -32,12 +32,14 @@
     "login_btn": "Sign In",
     "back_gitcode": "← Back to GitCode login",
     "failed": "Login failed",
-    "oauth_not_configured": "OAuth not configured"
+    "oauth_not_configured": "OAuth not configured",
+    "empty_input": "Please enter username and password"
   },
   "repo": {
     "select": "Select repository...",
     "load_failed": "Failed to load repositories, please check your GitCode Token",
-    "back_to_select": "Back to repository selection"
+    "back_to_select": "Back to repository selection",
+    "add_new": "Add new repository"
   },
   "toast": {
     "theme_switched_default": "Switched to Default theme",

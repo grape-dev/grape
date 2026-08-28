@@ -32,12 +32,14 @@
     "login_btn": "登录",
     "back_gitcode": "← 返回 GitCode 登录",
     "failed": "登录失败",
-    "oauth_not_configured": "OAuth 未配置"
+    "oauth_not_configured": "OAuth 未配置",
+    "empty_input": "请输入用户名和密码"
   },
   "repo": {
     "select": "选择仓库...",
     "load_failed": "无法加载仓库列表，请确认 GitCode Token 是否有效",
-    "back_to_select": "返回仓库选择"
+    "back_to_select": "返回仓库选择",
+    "add_new": "新增仓库托管"
   },
   "toast": {
     "theme_switched_default": "已切换到默认风格",

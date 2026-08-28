@@ -153,7 +153,7 @@ function loadAgentTypes() {
       const current = currentRepo();
       sel.innerHTML = repos.map(r =>
         `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
-      ).join('') + '<option value="__add__">＋ 新增仓库托管</option>';
+      ).join('') + '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
     }).catch(() => {});
   }
 
@@ -194,7 +194,7 @@ function loadAgentTypes() {
       ov = document.createElement('div');
       ov.id = 'gotoReposOverlay';
       ov.style.cssText = 'position:fixed;inset:0;z-index:9998;background:rgba(255,255,255,.45);display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--t2)';
-      ov.textContent = '加载中...';
+      ov.textContent = I18N.t('common.loading');
       document.body.appendChild(ov);
     }
 
@@ -244,7 +244,7 @@ function loadAgentTypes() {
     const title = $('pageTitle');
     const repoTitle = $('repoTitle');
     const pc = $('pageContent');
-    pc.innerHTML = '<div class="loading">加载中...</div>';
+    pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
 
@@ -300,7 +300,7 @@ function loadAgentTypes() {
       }
       API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'observability') {
-      title.textContent = '系统监控';
+      title.textContent = I18N.t('app.nav.observability');
       if (typeof renderObservability === 'function') renderObservability();
     } else if (view === 'repos') {
       title.textContent = I18N.t('app.select_repo');
@@ -377,7 +377,7 @@ function loadAgentTypes() {
   function pwdLogin() {
     const u = $('loginUser').value.trim();
     const p = $('loginPass').value.trim();
-    if (!u || !p) return showToast('请输入用户名和密码');
+    if (!u || !p) return showToast(I18N.t('app.login.empty_input'));
     API.post('/auth/login', {username: u, password: p}).then(d => {
       localStorage.setItem('token', d.token);
       // refresh_token 在 HttpOnly cookie 里——不需要存 localStorage

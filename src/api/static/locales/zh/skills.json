@@ -76,7 +76,12 @@
     "package_name": "华为云技能包",
     "loading_sub": "⏳ 加载子技能...",
     "loading": "⏳ 加载中...",
-    "files_count": "{{count}} 个文件"
+    "files_count": "{{count}} 个文件",
+    "back": "返回华为云技能包",
+    "no_detail": "(无详细内容)",
+    "no_sub_skill": "（无子技能）",
+    "no_content": "(无内容)",
+    "reference_docs": "参考文档"
   },
   "label": {
     "reference_docs": "📎 参考文档"
