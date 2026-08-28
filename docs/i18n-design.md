@@ -1152,3 +1152,47 @@ if (window.history.replaceState) {
 | 密码登录 | 不走后端跳转 | 前端 init 处理 | ✅ |
 | 退出登录 | grapeLang cookie 不清 | 下次登录保持 | ✅ |
 | 跨标签页 | cookie 共享 | — | ✅ |
+
+### 第四轮深度检查（2026-08-27）
+
+#### i18n init 时序 ✅
+
+i18n.js 在 index.html 里同步加载 + 同步调用 `I18N.init()`（用内联包），在 app.js 之前执行。app.js DOMContentLoaded → app.init() → t() 可用。完整语言包异步 fetch，加载后 applyI18nToDOM 刷新。
+
+#### apple-theme.css 中文 ✅
+
+788 个中文字符全部在 CSS 注释里（`/* 中文注释 */`），不是 `content:` 属性 → 不影响国际化。
+
+#### option 中文 ✅
+
+observability.js / chat.js 里的 `<option>` 中文在 JS 动态生成 → 已在逐页改造覆盖。
+
+#### 后端路由注册顺序 ✅
+
+include_router 在前 → `/api/xxx` 先匹配。`/en/{path:path}` 加防护排除 `api/` 和 `static/`。前端用 `BASE='/api'` 绝对路径不请求 `/en/api/xxx`。
+
+#### key 命名冲突 ✅
+
+模块名作为 key 第一段（`common.loading` / `app.nav.loading`）→ 天然隔离，不冲突。
+
+#### 缓存版本号 ⚠️
+
+i18n.js 用独立版本号（`i18n.js?v=1`），语言包 JSON 用同一版本号（`?v=1`）。更新语言包时 bump i18n.js 版本号。
+
+#### 密码登录语言处理 ✅
+
+密码登录返回 JSON 不走 RedirectResponse → URL 不变 → 不丢语言。app.init() replaceState 保留 /en 前缀（已在问题 4 覆盖）。
+
+#### 第四轮总结
+
+| # | 检查项 | 结果 |
+|---|--------|:---:|
+| 24 | i18n init 时序 | ✅ 同步内联包不阻塞 |
+| 25 | apple-theme.css 中文 | ✅ 全在注释里 |
+| 26 | option 中文 | ✅ 已在逐页改造覆盖 |
+| 27 | 后端路由注册顺序 | ✅ include_router 在前 |
+| 28 | key 命名冲突 | ✅ 模块名隔离 |
+| 29 | 缓存版本号 | ⚠️ i18n.js 独立版本号 |
+| 30 | 密码登录语言处理 | ✅ 不走后端跳转 |
+
+无新遗漏。四轮检查共 30 项，方案完备。
