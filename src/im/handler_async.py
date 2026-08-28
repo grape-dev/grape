@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import get_or_create_session, update_session, db
-from src.prompt_builder import build_chat_prompt, get_skill_capabilities
+from src.prompt_builder import build_chat_prompt
 from src.runtime.executor import consume_stream_async
 from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
@@ -521,16 +521,6 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                                 return
             except Exception as e:
                 log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
-
-        capability_patterns = [
-            r'(?:你|您)(?:有|会|能|可以)?\s*什么\s*(?:能力|功能|本领|技能|用处|作用)',
-            r'(?:你|您)(?:会|能|可以)\s*(?:做|干|处理|干嘛)\s*(?:什么|哪些)',
-            r'what\s*(?:can|are)\s*(?:you|your)\s*(?:do|capabilities|skills|features)',
-            r'(?:介绍|说说|告诉)(?:一下|下)?\s*(?:你|你自己)',
-        ]
-        if any(re.search(p, text, re.IGNORECASE) for p in capability_patterns):
-            await api.reply_text(ctx, msg_id, get_skill_capabilities())
-            return
 
         if detect_clean_intent(text):
             result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id)

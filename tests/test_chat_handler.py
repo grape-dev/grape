@@ -39,14 +39,6 @@ class TestProcessChatAsync:
         api.reply_text.assert_not_called()
         api.reply_card.assert_not_called()
 
-    def test_capability_query_returns_skills(self):
-        """User asking 'what can you do' should return capabilities."""
-        import asyncio
-        api = asyncio.run(_run("你有什么能力"))
-        api.reply_text.assert_called_once()
-        args = api.reply_text.call_args[0]
-        assert "能力" in args[2] or "DevOps" in args[2]
-
     def test_command_routing(self):
         """/command should route to async process_command."""
         import asyncio

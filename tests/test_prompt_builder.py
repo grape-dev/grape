@@ -65,13 +65,6 @@ class TestBuildChatRoleDefinition:
         assert "Code review" in role  # domain list, not capabilities list
 
 
-class TestGetSkillCapabilities:
-    def test_returns_skills_list(self, pb):
-        caps = pb.get_skill_capabilities()
-        assert "能力" in caps
-        assert "DevOps" in caps
-
-
 class TestBuildChatPrompt:
     def test_basic(self, pb):
         prompt = pb.build_chat_prompt("test query", "owner/repo", [])

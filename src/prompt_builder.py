@@ -1,54 +1,9 @@
-"""Prompt 构建：角色定义、技能能力列表、事件 prompt、飞书 prompt"""
+"""Prompt 构建：角色定义、事件 prompt、飞书 prompt"""
 import json, os, re
 from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH, resolve_official_skill_path
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
-
-EMOJI_MAP = {
-    "code-review": "📦 代码审查", "build-debug": "🔧 构建诊断",
-    "deploy-guard": "🛡️ 部署守卫", "incident-triage": "🚨 事件分诊",
-    "security-scan": "🔒 安全扫描", "changelog-gen": "📝 变更日志",
-    "comment": "💬 仓库评论回复",
-    "chat": "🗨️ 飞书对话", "issue": "📋 Issue 运营", "pr": "🔄 PR 运营",
-}
-
-
-def get_skill_capabilities() -> str:
-    lines = ["我是 DevOps Bot，专注于以下领域：\n"]
-
-    def _add_skill(skill_dir: str, entry: str):
-        md_path = os.path.join(skill_dir, "SKILL.md")
-        if not os.path.exists(md_path):
-            return
-        display = EMOJI_MAP.get(entry, entry)
-        desc = ""
-        with open(md_path, encoding="utf-8") as f:
-            content = f.read()
-        if "description: |" in content:
-            desc_block = content.split("description: |", 1)[1].split("---", 1)[0].strip()
-            desc = desc_block.split("\n")[0].strip().rstrip(".。").strip('"').strip("'")
-        lines.append(f"  {display}")
-        if desc:
-            lines[-1] += f" — {desc}"
-
-    try:
-        for entry in sorted(os.listdir(SKILLS_DIR)):
-            skill_dir = os.path.join(SKILLS_DIR, entry)
-            if not os.path.isdir(skill_dir) or entry.startswith("."):
-                continue
-            if os.path.exists(os.path.join(skill_dir, "SKILL.md")):
-                _add_skill(skill_dir, entry)
-            else:
-                # 新布局：skills/<agent_type>/<skill>/SKILL.md，agent_type 目录下再扫一层
-                for sub in sorted(os.listdir(skill_dir)):
-                    sub_dir = os.path.join(skill_dir, sub)
-                    if os.path.isdir(sub_dir) and os.path.exists(os.path.join(sub_dir, "SKILL.md")):
-                        _add_skill(sub_dir, sub)
-        lines.append("\n我的能力范围仅限于 DevOps 相关领域。")
-        return "\n".join(lines)
-    except Exception as e:
-        return "我是 DevOps Bot，专注于 DevOps 相关领域。"
 
 
 def _resolve_server_url() -> str:
@@ -231,16 +186,13 @@ Use Python to save discovered mappings in the bot's sessions.db:
 
 
 def build_chat_role_definition() -> str:
-    caps = get_skill_capabilities()
-    return f"""You are a DevOps operations assistant. Your domain:
+    return """You are a DevOps operations assistant. Your domain:
 - Code review, build diagnosis, deployment guard, incident triage
 - Issue/PR analysis, changelog generation, repository management
 - Repository (GitCode/GitHub) API operations
 - 任务处理：接收用户任务需求，分析、追问、创建 Issue 转交流水线
 
 You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, writing, meetings, voice, etc.).
-Your capabilities:
-{caps}
 
 ## 任务处理（超出你直接能力范围的请求）
 当你收到创建资源、部署服务、开发功能等不能直接执行的任务请求时，按以下流程处理：
@@ -258,7 +210,7 @@ Your capabilities:
 
 Reply rules:
 1. DevOps topic: analyze and reply
-2. NOT DevOps topic: politely explain you only handle DevOps, list your capabilities above
+2. NOT DevOps topic: politely explain you only handle DevOps
 3. Never write code, modify files, or execute git commands
 4. Always reply in Chinese. Never include internal reasoning or process steps.
 
