@@ -29,7 +29,7 @@
   },
   "login": {
     "gitcode_login": "Sign in with GitCode",
-    "pwd_login": "Sign in with username",
+    "pwd_login": "← Sign in with username",
     "username": "Username",
     "password": "Password",
     "login_btn": "Sign In",

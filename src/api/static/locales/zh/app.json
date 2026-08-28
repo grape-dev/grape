@@ -29,7 +29,7 @@
   },
   "login": {
     "gitcode_login": "使用 GitCode 登录",
-    "pwd_login": "用户名密码登录",
+    "pwd_login": "← 用户名密码登录",
     "username": "用户名",
     "password": "密码",
     "login_btn": "登录",
