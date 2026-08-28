@@ -21,7 +21,7 @@
   "scope_issue_agent": "Agent 级",
   "scope_issue": "Issue 级",
   "scope_member_directed": "成员上传 · 定向该 Agent",
-  "scope_seq_time": "seq {{seq}} · {{time}}",
+  "scope_seq_time": "序号 {{seq}} · {{time}}",
   "load_detail_failed": "加载知识详情失败: {{msg}}",
   "back_to_knowledge": "← 返回 Project Knowledge",
   "upload_modal_title": "上传项目知识",
