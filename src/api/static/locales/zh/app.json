@@ -15,7 +15,10 @@
     "events": "Events",
     "repos": "Repos",
     "tasks": "Task Center",
-    "observability": "系统监控"
+    "observability": "系统监控",
+    "event_detail": "事件详情",
+    "skill_detail": "技能详情",
+    "sub_skill_detail": "子技能详情"
   },
   "sidebar": {
     "workspace": "Workspace",

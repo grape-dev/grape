@@ -387,7 +387,7 @@ function loadA2aHealth() {
       : `<span style="color:var(--r)">${I18N.t('observability.a2a_unreachable')}</span> ${d.error ? '<span class="ts t3">'+d.error.substring(0,80)+'</span>' : ''}`;
     let html = section(I18N.t('observability.a2a_health'), I18N.t('observability.a2a_health_subtitle'));
     html += kpiRow([
-      { label: 'Server URL', value: `<span class="ts" style="font-size:10px">${d.server_base_url}</span>`, color: 'var(--a)' },
+      { label: I18N.t('observability.server_url'), value: `<span class="ts" style="font-size:10px">${d.server_base_url}</span>`, color: 'var(--a)' },
       { label: I18N.t('observability.col_status'), value: status, color: d.reachable ? 'var(--g)' : 'var(--r)' },
       { label: I18N.t('observability.col_latency'), value: d.latency_ms ? d.latency_ms + 'ms' : '-', color: 'var(--sk)' },
     ]);
@@ -546,14 +546,14 @@ function renderTasksTab(ops, rt, mt) {
   let html = '';
   html += section(I18N.t('observability.task_status_dist'));
   html += _kpiRowHTML([
-    { label: 'Queued', value: sc.queued || 0, color: 'var(--y)', id: 'kpi-t-queued' },
-    { label: 'Dispatched', value: sc.dispatched || 0, color: 'var(--a)', id: 'kpi-t-dispatched' },
-    { label: 'Running', value: sc.running || 0, color: 'var(--sk)', id: 'kpi-t-running' },
-    { label: 'Completed', value: sc.completed || 0, color: 'var(--g)', id: 'kpi-t-completed' },
-    { label: 'Failed', value: sc.failed || 0, color: (sc.failed||0) > 0 ? 'var(--r)' : 'var(--t3)', id: 'kpi-t-failed' },
-    { label: 'Cancelled', value: sc.cancelled || 0, color: 'var(--t3)', id: 'kpi-t-cancelled' },
-    { label: 'In Progress', value: t.in_progress || 0, color: 'var(--pu)', id: 'kpi-t-inprogress' },
-    { label: 'Stuck', value: t.stuck_count || 0, color: (t.stuck_count||0) > 0 ? 'var(--r)' : 'var(--g)', id: 'kpi-t-stuck' },
+    { label: I18N.t('observability.queued'), value: sc.queued || 0, color: 'var(--y)', id: 'kpi-t-queued' },
+    { label: I18N.t('observability.dispatched'), value: sc.dispatched || 0, color: 'var(--a)', id: 'kpi-t-dispatched' },
+    { label: I18N.t('observability.running'), value: sc.running || 0, color: 'var(--sk)', id: 'kpi-t-running' },
+    { label: I18N.t('observability.completed'), value: sc.completed || 0, color: 'var(--g)', id: 'kpi-t-completed' },
+    { label: I18N.t('observability.failed'), value: sc.failed || 0, color: (sc.failed||0) > 0 ? 'var(--r)' : 'var(--t3)', id: 'kpi-t-failed' },
+    { label: I18N.t('observability.cancelled'), value: sc.cancelled || 0, color: 'var(--t3)', id: 'kpi-t-cancelled' },
+    { label: I18N.t('observability.in_progress'), value: t.in_progress || 0, color: 'var(--pu)', id: 'kpi-t-inprogress' },
+    { label: I18N.t('observability.stuck'), value: t.stuck_count || 0, color: (t.stuck_count||0) > 0 ? 'var(--r)' : 'var(--g)', id: 'kpi-t-stuck' },
   ]);
   html += '<div id="obs-timeline-container"><div class="loading">' + I18N.t('observability.loading_tasks') + '</div></div>';
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;

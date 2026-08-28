@@ -255,7 +255,7 @@ function loadAgentTypes() {
     }
 
     if (view === 'dash') {
-      title.textContent = 'Dashboard';
+      title.textContent = I18N.t('app.nav.dashboard');
       const loadDash = () => Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes'),
@@ -268,31 +268,31 @@ function loadAgentTypes() {
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
-      title.textContent = 'Pipeline';
+      title.textContent = I18N.t('app.nav.pipeline');
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = (_AGENT_TYPES[view] && _AGENT_TYPES[view].display_name) ? (function(){var k='agents.type.'+view+'.name';var v=I18N.t(k);return v!==k?v:_AGENT_TYPES[view].display_name;})() : view;
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'event') {
-      title.textContent = 'Event Detail';
+      title.textContent = I18N.t('app.nav.event_detail');
       API.get('/events/detail/' + param).then(renderEventDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'chat') {
-      title.textContent = 'Chat Agent';
+      title.textContent = I18N.t('app.nav.chat');
       renderChat(param || null);
     } else if (view === 'tasks') {
-      title.textContent = 'Task Center';
+      title.textContent = I18N.t('app.nav.tasks');
       renderTasks();
     } else if (view === 'settings') {
-      title.textContent = 'General Settings';
+      title.textContent = I18N.t('app.nav.settings');
       renderSettings(param || 'credentials');
     } else if (view === 'skills') {
-      title.textContent = 'DevOps Skills';
+      title.textContent = I18N.t('app.nav.skills');
       renderSkills();
     } else if (view === 'knowledge') {
-      title.textContent = 'Project Knowledge';
+      title.textContent = I18N.t('app.nav.knowledge');
       renderKnowledge();
     } else if (view === 'runtimes') {
-      title.textContent = 'Agent Runtimes';
+      title.textContent = I18N.t('app.nav.runtimes');
       if (typeof renderRuntimes !== 'function') {
         // runtimes.js failed to load (stale cache) — force reload to fetch latest
         window.location.reload();
@@ -306,13 +306,13 @@ function loadAgentTypes() {
       title.textContent = I18N.t('app.select_repo');
       loadRepos();
     } else if (view === 'skill') {
-      title.textContent = 'Skill Detail';
+      title.textContent = I18N.t('app.nav.skill_detail');
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
       API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'skill-sub') {
       // 技能包子技能详情（如 "38/huawei-ecs"）
-      title.textContent = 'Sub Skill Detail';
+      title.textContent = I18N.t('app.nav.sub_skill_detail');
       API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     }
   }

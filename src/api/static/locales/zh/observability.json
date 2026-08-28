@@ -101,5 +101,13 @@
   "error_messages": "错误信息",
   "stage_queued": "入队",
   "stage_start": "开始执行",
-  "stage_complete": "完成"
+  "stage_complete": "完成",
+  "server_url": "服务地址",
+  "queued": "排队中",
+  "dispatched": "已派发",
+  "completed": "已完成",
+  "failed": "失败",
+  "cancelled": "已取消",
+  "in_progress": "进行中",
+  "stuck": "卡住"
 }

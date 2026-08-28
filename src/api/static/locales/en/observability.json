@@ -101,5 +101,13 @@
   "error_messages": "Error Messages",
   "stage_queued": "Queued",
   "stage_start": "Started",
-  "stage_complete": "Completed"
+  "stage_complete": "Completed",
+  "server_url": "Server URL",
+  "queued": "Queued",
+  "dispatched": "Dispatched",
+  "completed": "Completed",
+  "failed": "Failed",
+  "cancelled": "Cancelled",
+  "in_progress": "In Progress",
+  "stuck": "Stuck"
 }

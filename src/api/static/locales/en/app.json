@@ -15,7 +15,10 @@
     "events": "Events",
     "repos": "Repos",
     "tasks": "Task Center",
-    "observability": "Observability"
+    "observability": "Observability",
+    "event_detail": "Event Detail",
+    "skill_detail": "Skill Detail",
+    "sub_skill_detail": "Sub Skill Detail"
   },
   "sidebar": {
     "workspace": "Workspace",
