@@ -59,5 +59,6 @@
     "waiting_countdown": "Waiting for confirmation… QR code will expire in {{time}}",
     "error_access_denied": "The user denied the authorization request",
     "error_unknown": "Unknown error"
-  }
+  },
+  "local_direct": "Local Direct"
 }

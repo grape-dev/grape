@@ -59,5 +59,6 @@
     "waiting_countdown": "等待确认… 二维码将在 {{time}} 后过期",
     "error_access_denied": "用户拒绝了授权请求",
     "error_unknown": "未知错误"
-  }
+  },
+  "local_direct": "本机直连"
 }

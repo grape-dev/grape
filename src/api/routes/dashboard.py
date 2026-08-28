@@ -167,7 +167,7 @@ async def get_ops_overview(repo: str = ""):
             worker_online += 1
             # 本机指标只在 ops/overview 返回中展示，不写入 DB（运营管理台设备监控只显示远端 worker）
             worker_list.append({
-                "id": 0, "name": "本机", "device_name": "本机直连",
+                "id": 0, "name": "Local", "device_name": "Local Direct",
                 "status": "online", "health": "online",
                 "last_seen_at": now_iso, "last_ip": "127.0.0.1",
                 "cpu_percent": _local_cpu, "memory_percent": _local_mem,
@@ -292,7 +292,7 @@ async def get_ops_overview(repo: str = ""):
                     "provider": rprovider or "", "last_seen_at": normalize_event_time(rlast_seen),
                     "healthy": bool(rhealthy), "busy_slots": rbusy or 0, "max_concurrent": max_conc,
                     "running": running, "avg_duration": _avg_durations.get(rid, 0),
-                    "version": rver or "", "device_name": rdev or ("本机直连" if (cid or 0) == 0 else ""),
+                    "version": rver or "", "device_name": rdev or ("Local Direct" if (cid or 0) == 0 else ""),
                 })
         except Exception:
             pass

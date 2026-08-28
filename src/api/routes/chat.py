@@ -276,10 +276,10 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 
     # 无任何引擎（未配置本机直连/远端）→ 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
     if not backend_name:
-        _warn = "⚠️ 无可用引擎（未配置本机直连或远端引擎）"
+        _warn = "⚠️ No available engine (local direct or remote not configured)"
         add_message(conv_id, "agent", _warn)
         await _push_reply_to_feishu(conv, user, _warn)
-        return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
+        return {"reply": "⚠️ No available engine, please configure in Agent Runtimes page", "conversation_id": conv_id}
 
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
     kind = runtime_execution_kind(cfg.get("runtime_id") or 0)
@@ -613,7 +613,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
     # 无引擎 → 明确不可用（engine-selection-design.md v2），不隐式跑 opencode
     if not backend_name:
-        return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
+        return {"reply": "⚠️ No available engine, please configure in Agent Runtimes page", "conversation_id": conv_id}
     # 优先用用户配置的 runtime_id（chat_agent_session），未配置按本机直连兜底（engine-selection-design.md §8.2）
     runtime_id = cfg.get("runtime_id") or 0
     if not runtime_id:
@@ -801,7 +801,7 @@ async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""
                 _rid, ename, ver = r
                 if not is_known_engine_name(ename or ""):
                     continue
-                backends.append({"name": ename, "display_name": f"{ename} v{ver or ''}（本机直连）", "scope": "local", "owner": "", "runtime_id": _rid})
+                backends.append({"name": ename, "display_name": f"{ename} v{ver or ''}", "scope": "local", "owner": "", "runtime_id": _rid})
         except Exception:
             pass
         # 个人引擎（scope=user）
