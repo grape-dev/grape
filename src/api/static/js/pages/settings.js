@@ -50,6 +50,7 @@ function renderSettings(tab) {
     // Appearance / Theme selection
     const curTheme = app.getTheme ? app.getTheme() : (localStorage.getItem('grapeTheme') || 'default');
     const curMode = app.getThemeMode ? app.getThemeMode() : (localStorage.getItem('grapeThemeMode') || 'light');
+    const curLang = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
     html += `
     <div class="cd">
       <h3 style="font-size:13px;font-weight:600;margin-bottom:16px">界面风格 / Interface Theme</h3>
@@ -112,6 +113,20 @@ function renderSettings(tab) {
         <button onclick="selectThemeMode('auto')"
           style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curMode==='auto'?'var(--a)':'var(--c)'};color:${curMode==='auto'?'#fff':'var(--t2)'};transition:all .2s">
           🌓 跟随系统
+        </button>
+      </div>
+    </div>
+    <div class="cd mt16">
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.language.title')}</h3>
+      <p class="tx t2" style="margin-bottom:14px;font-size:12px">${I18N.t('settings.language.desc')}</p>
+      <div style="display:flex;gap:10px">
+        <button onclick="selectLang('zh')"
+          style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curLang==='zh'?'var(--a)':'var(--c)'};color:${curLang==='zh'?'#fff':'var(--t2)'};transition:all .2s">
+          ${I18N.t('settings.language.zh')}
+        </button>
+        <button onclick="selectLang('en')"
+          style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curLang==='en'?'var(--a)':'var(--c)'};color:${curLang==='en'?'#fff':'var(--t2)'};transition:all .2s">
+          ${I18N.t('settings.language.en')}
         </button>
       </div>
     </div>
@@ -281,6 +296,11 @@ function selectThemeMode(mode) {
   if (!app.setThemeMode) return;
   app.setThemeMode(mode);
   renderSettings('appearance');
+}
+
+function selectLang(lang) {
+  if (lang === I18N.getLang()) return;
+  I18N.setLang(lang);
 }
 
 // ── Pipeline mode toggle ──

@@ -1,9 +1,18 @@
 {
+  "page_title": "设置",
   "tab": {
     "credentials": "Credentials",
     "notifications": "Notifications",
     "appearance": "Appearance",
     "advanced": "Advanced"
+  },
+  "common": {
+    "loading": "加载中...",
+    "load_failed": "加载失败: {{msg}}",
+    "save": "保存",
+    "update_failed": "更新失败",
+    "config_updated": "配置已更新",
+    "cred_updated": "凭据已更新"
   },
   "appearance": {
     "title": "界面风格 / Interface Theme",
@@ -12,11 +21,17 @@
     "default_desc": "深色侧栏 + 浅色内容区",
     "apple": "Liquid Glass",
     "apple_desc": "毛玻璃侧栏 + 系统字体栈",
-    "current": "当前",
+    "current": "✓ 当前",
     "mode_title": "外观模式 / Appearance Mode",
     "mode_desc": "Liquid Glass 风格专属 — 跟随系统自动切换深浅色。",
     "light": "☀️ 浅色",
     "auto": "🌓 跟随系统"
+  },
+  "theme": {
+    "switch_unavailable": "主题切换不可用",
+    "switched_default": "已切换到默认风格",
+    "switched_apple": "已切换到 Liquid Glass 风格",
+    "show_hide": "显示/隐藏明文"
   },
   "language": {
     "title": "国际化配置 / Language",
@@ -29,7 +44,12 @@
     "plugin_desc": "插件模式：使用 pipelines.json + 标签广播抢占，任务按 pool_tag 入队，空闲引擎 claim_by_tag 竞争认领。",
     "traditional_desc": "传统模式：使用 agent-skill-mapping.json + runtime_id 定向绑定，任务直接分配到指定引擎。",
     "plugin": "插件模式 ✦",
-    "traditional": "传统模式"
+    "traditional": "传统模式",
+    "status_plugin": "当前使用标签广播抢占",
+    "status_legacy": "当前使用定向引擎分配",
+    "warning": "⚠️ 切换后立即生效，影响后续所有新事件的派发方式。正在执行的任务不受影响。",
+    "switch_failed": "切换失败: {{msg}}",
+    "unknown_error": "未知错误"
   },
   "credentials": {
     "gitcode_token": "GitCode Token",
@@ -39,10 +59,31 @@
     "remove": "移除",
     "test": "测试",
     "token_invalid": "Token 无效",
-    "token_valid": "Token 有效"
+    "token_valid": "Token 有效",
+    "gitcode_api_title": "GitCode API（OAuth 登录自动填充）",
+    "gitcode_token_placeholder": "未配置",
+    "gitcode_account_suffix": " · 登录时自动填充",
+    "huawei_cloud_title": "Huawei Cloud",
+    "huawei_cloud_desc": "Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.",
+    "devops_bot_title": "DevOps Bot Token",
+    "bot_token_placeholder_configured": "已配置，留空保持不变",
+    "bot_token_placeholder_empty": "不设置，将默认使用Grape官方机器人",
+    "bot_configured": "✓ 已配置",
+    "repo_config_updated": "GitCode Repo 配置已更新"
   },
   "host": {
     "title": "托管仓库",
-    "confirm_remove": "⚠️ 确定要解除托管 {{name}} 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。\n\n如需保留历史数据，请谨慎操作。"
+    "unhost_title": "解除托管",
+    "unhost_warning": "⚠️ 解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。",
+    "confirm_remove": "⚠️ 确定要解除托管 {{name}} 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。\n\n如需保留历史数据，请谨慎操作。",
+    "unhost_done": "已解除托管",
+    "unhost_failed": "解除托管失败: {{msg}}",
+    "select_repo_first": "请先选择一个仓库",
+    "select_repo": "选择仓库"
+  },
+  "scene": {
+    "select_first": "请选择一个场景",
+    "applied": "场景已应用",
+    "apply_failed": "应用场景失败: {{msg}}"
   }
 }
