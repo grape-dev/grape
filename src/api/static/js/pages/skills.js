@@ -328,7 +328,7 @@ function renderHuaweiCloudPackage(el, data) {
     var grid = document.getElementById('subSkillsGrid');
     if (!grid) return;
     if (!subs.length) {
-      grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t3)">' + I18N.t('skills.huawei.no_sub') + '</div>';
+      grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t3)">' + I18N.t('skills.huawei.no_sub_skill') + '</div>';
       return;
     }
     var html = '';
