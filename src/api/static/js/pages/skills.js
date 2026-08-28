@@ -367,7 +367,7 @@ function loadSubSkillDetail(pkgId, subName) {
     var safeContent = (data.content || '').replace(/`/g, '\\`').replace(/\${/g, '\\${');
 
     el.innerHTML = `
-      <button class="bt bt-o bt-s" onclick="renderHuaweiCloudPackage(document.getElementById('pageContent'), {id:${pkgId},name:'huawei-cloud',display_name:'华为云技能包',description:'',agent_type:'sre',scope:'official'})" style="margin-bottom:12px">← 返回华为云技能包</button>
+      <button class="bt bt-o bt-s" onclick="renderHuaweiCloudPackage(document.getElementById('pageContent'), {id:${pkgId},name:'huawei-cloud',display_name:'${I18N.t('skills.huawei.package_name')}',description:'',agent_type:'sre',scope:'official'})" style="margin-bottom:12px">← ${I18N.t('skills.huawei.back')}</button>
       <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
         <div class="cd" style="padding:16px 20px;overflow-y:auto">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px">
@@ -381,7 +381,7 @@ function loadSubSkillDetail(pkgId, subName) {
           </div>
           <div style="font-size:12px;color:var(--t2);margin-bottom:14px;line-height:1.5">${data.description}</div>
           <h3 style="font-size:13px;font-weight:600;margin-bottom:6px">SKILL.md</h3>
-          <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${safeContent || '(无详细内容)'}</pre>
+          <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${safeContent || I18N.t('skills.huawei.no_detail')}</pre>
         </div>
         <div class="cd" style="padding:16px 20px;font-size:12px">
           <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">Skill Info</h3>
@@ -453,7 +453,7 @@ function toggleSkillFolder(skillId, headerEl) {
   API.get('/skills/' + skillId + '/sub').then(d => {
     const subs = d.sub_skills || [];
     if (!subs.length) {
-      subEl.innerHTML = '<div style="font-size:11px;color:var(--t3);padding:8px">（无子技能）</div>';
+      subEl.innerHTML = '<div style="font-size:11px;color:var(--t3);padding:8px">' + I18N.t('skills.huawei.no_sub_skill') + '</div>';
       return;
     }
     var html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px">';
@@ -487,7 +487,7 @@ function showSubSkillContent(skillId, subName, displayName) {
     + '<div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">'
     + '<span style="font-size:13px;font-weight:600">📄 ' + (displayName || subName) + '</span>'
     + '<span style="font-size:10px;color:var(--t3)">' + subName + '</span>'
-    + '<button onclick="closeSubSkillModal()" style="margin-left:auto;border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>'
+    + '<button onclick="closeSubSkillModal()" style="margin-left:auto;border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ ' + I18N.t('common.close') + '</button>'
     + '</div>'
     + '<div id="subSkillContent" style="flex:1;min-height:0;overflow-y:auto;padding:14px;font-size:13px;line-height:1.7;white-space:pre-wrap;font-family:monospace;color:var(--t)">' + I18N.t('common.loading') + '</div>'
     + '</div>';
@@ -497,11 +497,11 @@ function showSubSkillContent(skillId, subName, displayName) {
   API.get('/skills/' + skillId + '/sub/' + subName).then(function(data) {
     var contentEl = document.getElementById('subSkillContent');
     if (contentEl) {
-      var md = data.content || '(无内容)';
+      var md = data.content || I18N.t('skills.huawei.no_content');
       var html = '<div style="background:#0b0e14;color:#c2cad6;padding:14px;border-radius:8px;font-size:12px;font-family:monospace;line-height:1.7;white-space:pre-wrap">' + _escHtml(md) + '</div>';
       // 如果有 references 文件
       if (data.references && data.references.length) {
-        html += '<h3 style="font-size:12px;font-weight:600;margin:14px 0 8px">📎 参考文档</h3>';
+        html += '<h3 style="font-size:12px;font-weight:600;margin:14px 0 8px">📎 ' + I18N.t('skills.huawei.reference_docs') + '</h3>';
         data.references.forEach(function(ref) {
           html += '<div style="margin-bottom:8px;background:#0b0e14;border-radius:6px;padding:10px;border:1px solid var(--b,#2a3140)">'
             + '<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--a)">' + _escHtml(ref.name) + '</div>'
