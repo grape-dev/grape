@@ -221,7 +221,7 @@ function renderOverview(ops, rt, mt) {
   const runtimes = r.list || [];
   let runtimeTable = '<div class="ts t2" style="padding:12px">无引擎</div>';
   if (runtimes.length) {
-    runtimeTable = '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>模式</th><th>设备</th></tr></thead><tbody>';
+    runtimeTable = '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>探测</th><th>模式</th><th>设备</th></tr></thead><tbody>';
     runtimes.forEach(rti => {
       const rid = rti.id;
       const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
@@ -233,12 +233,21 @@ function renderOverview(ops, rt, mt) {
       const avgDur = rti.avg_duration || 0;
       const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
       const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
+      // 探测状态
+      const ps = rti.probe_status || 'pending';
+      const pl = rti.probe_latency || 0;
+      const pe = rti.probe_error || '';
+      const probeIcon = { ok: '✅', fail: '❌', skip: '⏭', pending: '⏳' }[ps] || '⏳';
+      const probeColor = ps === 'ok' ? 'var(--g)' : ps === 'fail' ? 'var(--r)' : 'var(--t3)';
+      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? '等待' : ps === 'skip' ? '跳过' : '失败';
+      const probeTitle = pe ? ' title="' + pe.replace(/"/g, '&quot;') + '"' : '';
       runtimeTable += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
         <td>${dot} <b>${rti.name}</b></td>
         <td><span id="rt-${rid}-version" class="ts t3">${rti.version || '-'}</span></td>
         <td><span id="rt-${rid}-health" style="color:${hc};font-weight:600">${rti.health}</span></td>
         <td><span id="rt-${rid}-load" style="color:${loadColor}">${running}/${maxC}</span></td>
         <td><span id="rt-${rid}-dur" style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
+        <td><span${probeTitle} style="color:${probeColor}">${probeIcon} ${probeStr}</span></td>
         <td>${modeTag}</td>
         <td><span id="rt-${rid}-device" class="ts t3">${rti.device_name || '-'}</span></td>
       </tr>`;

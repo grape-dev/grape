@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends
 from src.user import db as user_db
 from src.api.deps import get_current_user
 from src.api.time_utils import normalize_event_time
+from src.observability.engine_probe import get_probe_results
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -218,6 +219,8 @@ async def get_ops_overview(repo: str = ""):
             pass
         # 查每个引擎已完成任务的平均耗时（秒）
         _avg_durations = {}
+        # 引擎探测结果（每 10 分钟 CLI 测试对话）
+        _probe_results = get_probe_results()
         try:
             c.execute(
                 "SELECT runtime_id, AVG(CASE "
@@ -286,6 +289,8 @@ async def get_ops_overview(repo: str = ""):
                         health = "overload"
                 else:
                     health = base_health
+                # 引擎探测结果（每 10 分钟 CLI 测试对话）
+                _probe = _probe_results.get(rname or "", {})
                 runtime_list.append({
                     "id": rid, "name": rname or "", "status": rstatus or "offline",
                     "health": health, "mode": mode,
@@ -293,6 +298,10 @@ async def get_ops_overview(repo: str = ""):
                     "healthy": bool(rhealthy), "busy_slots": rbusy or 0, "max_concurrent": max_conc,
                     "running": running, "avg_duration": _avg_durations.get(rid, 0),
                     "version": rver or "", "device_name": rdev or ("本机直连" if (cid or 0) == 0 else ""),
+                    "probe_status": _probe.get("status", "pending"),
+                    "probe_latency": _probe.get("latency", 0),
+                    "probe_last": _probe.get("last_probe", ""),
+                    "probe_error": _probe.get("error", ""),
                 })
         except Exception:
             pass

@@ -31,6 +31,13 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
+        # 启动引擎健康探测线程（每 10 分钟对引擎发起 CLI 测试对话）
+        try:
+            from src.observability.engine_probe import start_probe
+            start_probe()
+        except Exception as e:
+            log.warning(f"Engine probe start failed: {e}")
+
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
         from src.config import BOT_LEASE_DISABLED
         lease_store = None
