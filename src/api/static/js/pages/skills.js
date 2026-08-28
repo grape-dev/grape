@@ -11,13 +11,13 @@ function _currentRepo() {
 function renderSkills() {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  el.innerHTML = '<div class="loading">加载中...</div>';
+  el.innerHTML = '<div class="loading">' + I18N.t('skills.loading') + '</div>';
 
   // 官方技能页签：先异步检查 configs/skill-description.json 是否有新增官方技能，有则同步后再加载
   if (_skillTab === 'official') {
     API.post('/skills/sync-official', {}).then(syncRes => {
       if (syncRes && syncRes.added > 0) {
-        if (app && app.showToast) app.showToast(syncRes.message || '发现新增官方技能，已同步');
+        if (app && app.showToast) app.showToast(syncRes.message || I18N.t('skills.toast.sync_found'));
       }
       _loadSkills();
     }).catch(() => {
@@ -37,11 +37,11 @@ function _loadSkills() {
     const skills = d.skills || [];
     const META = _AGENT_TYPES || {};
     const LABELS = {vod:'VOD Agent',issue:'Issue Agent',coding:'Coding Agent',qa:'QA Agent',sre:'SRE Agent',chat:'Chat Agent'};
-    const SCOPE_NAMES = {official:'官方技能', repo:'仓库技能', user:'个人技能'};
+    const SCOPE_NAMES = {official:I18N.t('skills.scope.official'), repo:I18N.t('skills.scope.repo'), user:I18N.t('skills.scope.user')};
 
     // 页签
     let html = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
-      <input placeholder="搜索技能..." id="skillSearch" onkeyup="filterSkills(this)" style="padding:8px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);width:220px">`;
+      <input placeholder="${I18N.t('skills.search.placeholder')}" id="skillSearch" onkeyup="filterSkills(this)" style="padding:8px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);width:220px">`;
 
     ['official','repo','user'].forEach(tab => {
       const active = _skillTab === tab ? 'background:var(--a);color:#fff' : '';
@@ -50,13 +50,13 @@ function _loadSkills() {
 
     // 新增技能按钮（仓库/个人页签）
     if (_skillTab === 'repo' || _skillTab === 'user') {
-      html += `<button onclick="showSkillUpload()" style="padding:7px 14px;border:1px solid var(--a);border-radius:var(--rd);font-size:12px;cursor:pointer;color:var(--a);margin-left:auto">＋ 新增技能</button>`;
+      html += `<button onclick="showSkillUpload()" style="padding:7px 14px;border:1px solid var(--a);border-radius:var(--rd);font-size:12px;cursor:pointer;color:var(--a);margin-left:auto">${I18N.t('skills.action.add_skill')}</button>`;
     }
     html += `</div>`;
 
     // 仓库技能需当前仓库；无仓库时提示
     if (_skillTab === 'repo' && !repo) {
-      html += '<div class="ts t2" style="padding:12px">未选择仓库，请先在仓库页面选择当前仓库。</div>';
+      html += '<div class="ts t2" style="padding:12px">' + I18N.t('skills.empty.no_repo_selected') + '</div>';
       el.innerHTML = html;
       return;
     }
@@ -105,7 +105,7 @@ function _loadSkills() {
           <div style="display:flex;gap:6px">
             <button class="bt bt-o bt-s" onclick="event.stopPropagation();app.nav('skill','${s.id}')">View</button>
             ${s.scope !== 'official' ? `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteSkill('${s.name}','${s.scope}')">Delete</button>` : ''}
-            ${s.scope === 'user' && _currentRepo() ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}')">转为仓库技能</button>` : ''}
+            ${s.scope === 'user' && _currentRepo() ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}')">${I18N.t('skills.action.convert_to_repo')}</button>` : ''}
           </div>
         </div>`;
       });
@@ -113,12 +113,12 @@ function _loadSkills() {
     });
 
     if (Object.keys(groups).length === 0) {
-      html += '<div class="ts t2" style="padding:12px">当前页签暂无技能。</div>';
+      html += '<div class="ts t2" style="padding:12px">' + I18N.t('skills.empty.no_skills') + '</div>';
     }
 
     el.innerHTML = html;
   }).catch(() => {
-    el.innerHTML = '<div class="error">加载技能列表失败</div>';
+    el.innerHTML = '<div class="error">' + I18N.t('skills.error.load_list_failed') + '</div>';
   });
 }
 
@@ -126,42 +126,42 @@ function showSkillUpload() {
   const repo = _currentRepo();
   const scope = _skillTab;  // repo / user
   const AGENT_OPTS = [
-    {v:'vod', label:'VOD Agent (♫ 声音分析)'},
-    {v:'issue', label:'Issue Agent (⚠ 需求管理)'},
-    {v:'coding', label:'Coding Agent (⚙ 代码实现)'},
-    {v:'qa', label:'QA Agent (✔ 审查验证)'},
-    {v:'sre', label:'SRE Agent (♡ 构建部署)'},
-    {v:'chat', label:'Chat Agent (☎ 对话助手)'},
+    {v:'vod', label:I18N.t('skills.agent_type.vod')},
+    {v:'issue', label:I18N.t('skills.agent_type.issue')},
+    {v:'coding', label:I18N.t('skills.agent_type.coding')},
+    {v:'qa', label:I18N.t('skills.agent_type.qa')},
+    {v:'sre', label:I18N.t('skills.agent_type.sre')},
+    {v:'chat', label:I18N.t('skills.agent_type.chat')},
   ];
   const modal = document.createElement('div');
   modal.id = 'skillUploadModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
   modal.innerHTML = `<div class="cd" style="width:480px;padding:20px;border-radius:10px">
-    <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">上传技能 (ZIP)</h3>
-    <div class="srow" style="margin-bottom:10px"><label>类型</label><span>${scope === 'repo' ? '仓库技能' : '个人技能'}</span></div>
-    ${scope === 'repo' ? `<div class="srow" style="margin-bottom:10px"><label>仓库</label><span>${repo}</span></div>` : ''}
-    <div class="srow" style="margin-bottom:10px"><label>技能类型 *</label>
+    <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">${I18N.t('skills.upload.title')}</h3>
+    <div class="srow" style="margin-bottom:10px"><label>${I18N.t('skills.upload.type')}</label><span>${scope === 'repo' ? I18N.t('skills.scope.repo') : I18N.t('skills.scope.user')}</span></div>
+    ${scope === 'repo' ? `<div class="srow" style="margin-bottom:10px"><label>${I18N.t('skills.upload.repo')}</label><span>${repo}</span></div>` : ''}
+    <div class="srow" style="margin-bottom:10px"><label>${I18N.t('skills.upload.agent_type')}</label>
       <select id="skillAgentType" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">
-        <option value="">-- 请选择技能所属 Agent --</option>
+        <option value="">${I18N.t('skills.upload.select_agent')}</option>
         ${AGENT_OPTS.map(o => `<option value="${o.v}">${o.label}</option>`).join('')}
       </select>
     </div>
     <div style="margin-bottom:14px">
-      <label style="font-size:11px;color:var(--t2);display:block;margin-bottom:6px">选择技能 ZIP 文件（目录名 = 技能名，内含 SKILL.md）</label>
+      <label style="font-size:11px;color:var(--t2);display:block;margin-bottom:6px">${I18N.t('skills.upload.file_label')}</label>
       <input type="file" id="skillFile" accept=".zip" style="font-size:12px">
     </div>
     <div class="srow" style="margin-bottom:12px"><label></label>
-      <span style="font-size:11px;color:var(--t2)">格式要求：<a href="javascript:void(0)" onclick="downloadSkillTemplate()" style="color:var(--a);cursor:pointer">📄 下载技能模板 ZIP</a></span>
+      <span style="font-size:11px;color:var(--t2)">${I18N.t('skills.upload.format_req')}<a href="javascript:void(0)" onclick="downloadSkillTemplate()" style="color:var(--a);cursor:pointer">${I18N.t('skills.action.download_template')}</a></span>
     </div>
     <div id="skillUploadProgress" style="display:none;margin-bottom:12px">
-      <div style="font-size:11px;color:var(--t2);margin-bottom:4px">上传中... <span id="skillUploadPct">0%</span></div>
+      <div style="font-size:11px;color:var(--t2);margin-bottom:4px">${I18N.t('skills.upload.uploading')} <span id="skillUploadPct">0%</span></div>
       <div style="background:var(--bg);border-radius:8px;height:8px;overflow:hidden">
         <div id="skillUploadBar" style="background:var(--a);height:100%;width:0%;transition:width .2s"></div>
       </div>
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button class="bt bt-o bt-s" onclick="document.getElementById('skillUploadModal').remove()">取消</button>
-      <button class="bt bt-p bt-s" onclick="doSkillUpload()">上传</button>
+      <button class="bt bt-o bt-s" onclick="document.getElementById('skillUploadModal').remove()">${I18N.t('skills.action.cancel')}</button>
+      <button class="bt bt-p bt-s" onclick="doSkillUpload()">${I18N.t('skills.action.upload')}</button>
     </div>
   </div>`;
   document.body.appendChild(modal);
@@ -194,12 +194,12 @@ function _setSkillUploadProgress(pct, done) {
 function doSkillUpload() {
   const fileInput = document.getElementById('skillFile');
   if (!fileInput || !fileInput.files || !fileInput.files[0]) {
-    if (app && app.showToast) app.showToast('请选择技能 ZIP 文件');
+    if (app && app.showToast) app.showToast(I18N.t('skills.toast.select_zip'));
     return;
   }
   const agentType = document.getElementById('skillAgentType')?.value || '';
   if (!agentType) {
-    if (app && app.showToast) app.showToast('请选择技能类型（所属 Agent）');
+    if (app && app.showToast) app.showToast(I18N.t('skills.toast.select_agent_type'));
     return;
   }
   const scope = _skillTab;
@@ -214,43 +214,43 @@ function doSkillUpload() {
   API.upload('/skills/upload', fd, (pct) => _setSkillUploadProgress(pct, false)).then(r => {
     _setSkillUploadProgress(100, true);
     document.getElementById('skillUploadModal')?.remove();
-    if (app && app.showToast) app.showToast(r.message || '上传成功');
+    if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.upload_success'));
     renderSkills();
   }).catch(e => {
     _setSkillUploadProgress(0, true);
     if (e && e.errors && e.errors.length) {
-      if (app && app.showToast) app.showToast('Skill 校验失败（' + e.errors.length + ' 项）：\n' + e.errors.join('\n'));
+      if (app && app.showToast) app.showToast(I18N.t('skills.toast.validation_failed', {count: e.errors.length, errors: e.errors.join('\n')}));
     } else if (app && app.showToast) {
-      app.showToast('上传失败: ' + e.message);
+      app.showToast(I18N.t('skills.toast.upload_failed', {msg: e.message}));
     }
   });
 }
 
 function deleteSkill(name, scope) {
-  if (!confirm('确定删除技能 ' + name + ' 吗？')) return;
+  if (!confirm(I18N.t('skills.confirm.delete_skill', {name: name}))) return;
   const repo = _currentRepo();
   let qs = '?scope=' + scope;
   if (scope === 'repo' && repo) qs += '&repo=' + encodeURIComponent(repo);
   API.del('/skills/' + encodeURIComponent(name) + qs).then(r => {
-    if (app && app.showToast) app.showToast(r.message || '已删除');
+    if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.deleted'));
     renderSkills();
   }).catch(e => {
-    if (app && app.showToast) app.showToast('删除失败: ' + e.message);
+    if (app && app.showToast) app.showToast(I18N.t('skills.toast.delete_failed', {msg: e.message}));
   });
 }
 
 function convertSkill(skillName) {
   const repo = _currentRepo();
   if (!repo) {
-    if (app && app.showToast) app.showToast('请先选择当前仓库');
+    if (app && app.showToast) app.showToast(I18N.t('skills.toast.select_repo_first'));
     return;
   }
-  if (!confirm('将个人技能「' + skillName + '」复制到仓库 ' + repo + '？\n\n原个人技能保留，复制后可在该仓库的 DevOps/Chat Agent 中配置。')) return;
+  if (!confirm(I18N.t('skills.confirm.convert_skill', {name: skillName, repo: repo}))) return;
   API.post('/skills/convert', {skill_name: skillName, repo}).then(r => {
-    if (app && app.showToast) app.showToast(r.message || '转换成功');
+    if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.convert_success'));
     renderSkills();
   }).catch(e => {
-    if (app && app.showToast) app.showToast('转换失败: ' + e.message);
+    if (app && app.showToast) app.showToast(I18N.t('skills.toast.convert_failed', {msg: e.message}));
   });
 }
 
@@ -268,12 +268,12 @@ function renderSkillDetail(data) {
   const meta = META[data.agent_type] || {};
   const color = meta.color || 'var(--t2)';
   const ico = meta.icon || '◈';
-  const SCOPE_NAMES = {official:'官方技能', repo:'仓库技能', user:'个人技能'};
+  const SCOPE_NAMES = {official:I18N.t('skills.scope.official'), repo:I18N.t('skills.scope.repo'), user:I18N.t('skills.scope.user')};
   const tagClass = data.scope === 'official' ? 'tg-c' : data.scope === 'repo' ? 'tg-i' : 'tg-d';
 
   const content = (data.content || '').replace(/`/g, '\\`').replace(/\${/g, '\\${');
   el.innerHTML = `
-    <button class="bt bt-o bt-s" onclick="app.nav('skills')" style="margin-bottom:12px">← 返回 Skills Library</button>
+    <button class="bt bt-o bt-s" onclick="app.nav('skills')" style="margin-bottom:12px">${I18N.t('skills.action.back_to_library')}</button>
     <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
       <div class="cd" style="padding:16px 20px;overflow-y:auto">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px">
@@ -284,11 +284,11 @@ function renderSkillDetail(data) {
               <span class="tg ${tagClass}" style="font-size:9px">${SCOPE_NAMES[data.scope] || data.scope}</span>
             </div>
           </div>
-          ${data.is_obs ? `<button class="bt bt-o bt-s" onclick="downloadSkillZip('${data.id}')" title="下载技能包 zip">⬇ 下载技能</button>` : ''}
+          ${data.is_obs ? `<button class="bt bt-o bt-s" onclick="downloadSkillZip('${data.id}')" title="${I18N.t('skills.action.download_skill_title')}">${I18N.t('skills.action.download_skill')}</button>` : ''}
         </div>
         <div style="font-size:12px;color:var(--t2);margin-bottom:14px;line-height:1.5">${data.description}</div>
         <h3 style="font-size:13px;font-weight:600;margin-bottom:6px">SKILL.md</h3>
-        <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${content || '(无详细内容)'}</pre>
+        <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${content || I18N.t('skills.empty.no_detail')}</pre>
       </div>
       <div class="cd" style="padding:16px 20px;font-size:12px">
         <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">Skill Info</h3>
@@ -302,11 +302,11 @@ function renderSkillDetail(data) {
 
 // ===== 华为云技能包：独立页面展示子技能卡片 =====
 function renderHuaweiCloudPackage(el, data) {
-  const SCOPE_NAMES = {official:'官方技能', repo:'仓库技能', user:'个人技能'};
+  const SCOPE_NAMES = {official:I18N.t('skills.scope.official'), repo:I18N.t('skills.scope.repo'), user:I18N.t('skills.scope.user')};
   const tagClass = data.scope === 'official' ? 'tg-c' : data.scope === 'repo' ? 'tg-i' : 'tg-d';
 
   el.innerHTML = `
-      <button class="bt bt-o bt-s" onclick="app.nav('skills')" style="margin-bottom:12px">← 返回 Skills Library</button>
+      <button class="bt bt-o bt-s" onclick="app.nav('skills')" style="margin-bottom:12px">${I18N.t('skills.action.back_to_library')}</button>
       <div class="cd" style="padding:16px 20px;margin-bottom:14px">
         <div style="display:flex;align-items:center;gap:10px">
           <span style="font-size:28px">📁</span>
@@ -315,7 +315,7 @@ function renderHuaweiCloudPackage(el, data) {
             <div style="font-size:12px;color:var(--t2);margin-top:4px">${data.description}</div>
           </div>
           <span class="tg ${tagClass}" style="margin-left:auto;font-size:10px">${SCOPE_NAMES[data.scope] || data.scope}</span>
-          <button class="bt bt-o bt-s" onclick="togglePkgSkillMd(${data.id})" style="font-size:11px">📖 查看 SKIL.md</button>
+          <button class="bt bt-o bt-s" onclick="togglePkgSkillMd(${data.id})" style="font-size:11px">${I18N.t('skills.action.view_skill_md')}</button>
         </div>
       </div>
       <div id="subSkillsGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">
@@ -354,14 +354,14 @@ function renderHuaweiCloudPackage(el, data) {
 function loadSubSkillDetail(pkgId, subName) {
   var el = document.getElementById('pageContent');
   if (!el) return;
-  el.innerHTML = '<div class="loading">加载中...</div>';
+  el.innerHTML = '<div class="loading">' + I18N.t('skills.loading') + '</div>';
 
   API.get('/skills/package-sub/' + pkgId + '/' + subName).then(function(data) {
     var META = typeof _AGENT_TYPES !== 'undefined' ? _AGENT_TYPES : {};
     var meta = META[data.agent_type] || {};
     var color = meta.color || 'var(--t2)';
     var ico = meta.icon || '◈';
-    var SCOPE_NAMES = {official:'官方技能', repo:'仓库技能', user:'个人技能'};
+    var SCOPE_NAMES = {official:I18N.t('skills.scope.official'), repo:I18N.t('skills.scope.repo'), user:I18N.t('skills.scope.user')};
     var tagClass = data.scope === 'official' ? 'tg-c' : data.scope === 'repo' ? 'tg-i' : 'tg-d';
     // 转义模板字面量特殊字符
     var safeContent = (data.content || '').replace(/`/g, '\\`').replace(/\${/g, '\\${');

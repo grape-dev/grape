@@ -20,7 +20,8 @@
     "download_skill": "⬇ 下载技能",
     "download_template": "📄 下载技能模板 ZIP",
     "back_to_library": "← 返回 Skills Library",
-    "back_to_huawei": "← 返回华为云技能包"
+    "back_to_huawei": "← 返回华为云技能包",
+    "download_skill_title": "下载技能包 zip"
   },
   "toast": {
     "sync_found": "发现新增官方技能，已同步",

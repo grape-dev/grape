@@ -20,7 +20,8 @@
     "download_skill": "⬇ Download Skill",
     "download_template": "📄 Download Skill Template ZIP",
     "back_to_library": "← Back to Skills Library",
-    "back_to_huawei": "← Back to Huawei Cloud Skills"
+    "back_to_huawei": "← Back to Huawei Cloud Skills",
+    "download_skill_title": "Download skill package zip"
   },
   "toast": {
     "sync_found": "New official skills found, synced",
