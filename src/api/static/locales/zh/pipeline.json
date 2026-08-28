@@ -3,7 +3,7 @@
   "idle": "空闲",
   "current_owner": "当前责任人",
   "pagination_total": "共 {{total}} 条 · {{page}}/{{pages}} 页",
-  "page_title": "Pipeline",
+  "page_title": "流水线",
   "label_active": "活跃：",
   "label_today": "今日：",
   "issue_prefix": "Issue",
