@@ -69,7 +69,8 @@
     "bot_token_placeholder_configured": "Configured, leave empty to keep",
     "bot_token_placeholder_empty": "Not set, will use Grape official bot by default",
     "bot_configured": "✓ Configured",
-    "repo_config_updated": "GitCode Repo config updated"
+    "repo_config_updated": "GitCode Repo config updated",
+    "scope": "Scope"
   },
   "host": {
     "title": "Hosted Repositories",

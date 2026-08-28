@@ -300,7 +300,7 @@ function openEngineDetail(runtimeId) {
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.engine_type')}</span> ${rt.name}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.version')}</span> v${rt.version || '—'}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.health_status')}</span> ${rt.healthy ? I18N.t('runtimes.label.healthy') : I18N.t('runtimes.label.unhealthy')}</div>
-        <div><span style="color:var(--t3);display:inline-block;min-width:70px">Worker</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.worker')}</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">IP</span> ${rt.worker_ip || '—'}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.scope_label')}</span> ${_scopeLabel(rt.scope)}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.owner')}</span> ${rt.owner || '—'}</div>

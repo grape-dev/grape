@@ -63,6 +63,7 @@
   "search": {
     "events": "事件",
     "repos": "仓库",
-    "agents": "Agent"
+    "agents": "Agent",
+    "title": "搜索"
   }
 }

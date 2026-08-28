@@ -63,6 +63,7 @@
   "search": {
     "events": "Events",
     "repos": "Repos",
-    "agents": "Agents"
+    "agents": "Agents",
+    "title": "Search"
   }
 }

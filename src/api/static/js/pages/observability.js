@@ -236,7 +236,7 @@ function renderOverview(ops, rt, mt) {
       runtimeTable += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
         <td>${dot} <b>${rti.name}</b></td>
         <td><span id="rt-${rid}-version" class="ts t3">${rti.version || '-'}</span></td>
-        <td><span id="rt-${rid}-health" style="color:${hc};font-weight:600">${rti.health}</span></td>
+        <td><span id="rt-${rid}-health" style="color:${hc};font-weight:600">${I18N.t('observability.' + (rti.health || 'offline'))}</span></td>
         <td><span id="rt-${rid}-load" style="color:${loadColor}">${running}/${maxC}</span></td>
         <td><span id="rt-${rid}-dur" style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
         <td>${modeTag}</td>

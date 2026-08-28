@@ -176,7 +176,7 @@ function renderSettings(tab) {
         document.getElementById('sGitcode').innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.devops_bot_title')}</h3>
           <div class="srow"><label>Bot Token</label><input type="password" id="gitcodeBotToken" value="" placeholder="${d.devops_bot_token_exists ? I18N.t('settings.credentials.bot_token_placeholder_configured') : I18N.t('settings.credentials.bot_token_placeholder_empty')}">${d.devops_bot_token_exists ? '<span class="ts" style="color:var(--g);font-size:10px">'+I18N.t('settings.credentials.bot_configured')+'</span>' : ''}</div>
-          <div class="srow"><label>Scope</label><input type="text" value="read_repo, write_repo, manage_webhook" disabled style="background:#f1f5f9;font-size:10px"></div>
+          <div class="srow"><label>${I18N.t('settings.credentials.scope')}</label><input type="text" value="read_repo, write_repo, manage_webhook" disabled style="background:#f1f5f9;font-size:10px"></div>
           <button class="bt bt-p mt8" onclick="saveGitcodeRepoConfig()">${I18N.t('settings.common.save')}</button>
         </div>
         <div class="cd mt16" style="border-color:var(--r)">

@@ -138,7 +138,7 @@ function loadSideConfig() {
         <div style="margin-bottom:4px"><span class="t3">App Secret</span></div>
         <input id="cfgImSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
         <button class="bt bt-o bt-s" onclick="startFeishuOnboard('chat_bot')" style="width:100%;margin-bottom:6px">${I18N.t('chat.scan_config')}</button>
-        <button class="bt bt-p bt-s" onclick="saveChatConfig()" style="width:100%">Save</button>
+        <button class="bt bt-p bt-s" onclick="saveChatConfig()" style="width:100%">${I18N.t('common.save')}</button>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
         <div style="font-weight:600;margin-bottom:6px">Agents</div>

@@ -37,7 +37,8 @@
     "total": "事件总量",
     "completed": "已完成",
     "running": "进行中",
-    "recent_n": "最近 {{n}} 条"
+    "recent_n": "最近 {{n}} 条",
+    "history_title": "事件历史"
   },
   "config": {
     "im_title": "IM 配置",
@@ -48,7 +49,10 @@
     "clean_session_hint": "清空会话后，下一次事件将创建全新的 Agent 上下文（不延续历史对话）。",
     "clean_session_btn": "🧹 清理会话",
     "saved": "配置已保存",
-    "save_failed": "保存失败: {{msg}}"
+    "save_failed": "保存失败: {{msg}}",
+    "title": "Agent 配置",
+    "bot_app_id": "Bot App ID",
+    "bot_secret": "Bot Secret"
   },
   "subscription": {
     "title": "事件订阅",

@@ -246,7 +246,7 @@ function renderAgent(name, data) {
   </div>
 </div>
 <div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">
-  <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Agent Configuration</h3>
+  <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('agents.config.title')}</h3>
   <div class="srow" style="align-items:flex-start"><label>Backend Engines<br><span class="ts t3" style="font-weight:400">${I18N.t('agents.engine.backend_engines_hint')}</span></label>
     <div class="cfg-backends" data-backends="${(data.backends || []).join(',')}" data-agent="${name}" style="flex:1;position:relative">
       <div class="cfg-backends-trigger" onclick="toggleBackendsDropdown(event)" style="min-height:34px;padding:5px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);cursor:pointer;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
@@ -276,8 +276,8 @@ function renderAgent(name, data) {
       <h3 style="font-size:13px;font-weight:600">${I18N.t('agents.config.im_title')}</h3>
       <span class="ts t3">${data.im && data.im.connected ? I18N.t('agents.config.im_configured') : ''}</span>
     </div>
-    <div class="srow"><label>Bot App ID</label><input id="vodImAppId" value="${(data.im && data.im.im_app_id) || ''}" placeholder="cli_xxxxxxxx" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
-    <div class="srow"><label>Bot Secret</label><input id="vodImSecret" type="password" value="${data.im && data.im.connected ? '********' : ''}" placeholder="${I18N.t('agents.config.bot_secret_placeholder')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
+    <div class="srow"><label>${I18N.t('agents.config.bot_app_id')}</label><input id="vodImAppId" value="${(data.im && data.im.im_app_id) || ''}" placeholder="cli_xxxxxxxx" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
+    <div class="srow"><label>${I18N.t('agents.config.bot_secret')}</label><input id="vodImSecret" type="password" value="${data.im && data.im.connected ? '********' : ''}" placeholder="${I18N.t('agents.config.bot_secret_placeholder')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
     <div class="srow"><label></label><button class="bt bt-o bt-s" onclick="startVodOnboard()" style="padding:7px 14px">${I18N.t('agents.config.scan_config')}</button></div>
     ${data.im && data.im.conversations && data.im.conversations.length > 0 ? `
     <div style="margin-top:8px">
@@ -285,7 +285,7 @@ function renderAgent(name, data) {
       ${data.im.conversations.map(c => `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--b)">${c.chat_name || c.chat_id} <span class="ts t3">${c.status}</span></div>`).join('')}
     </div>` : ''}
   </div>` : ''}
-  <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg(false)">Cancel</button></div>
+  <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">${I18N.t('common.save')}</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg(false)">${I18N.t('common.cancel')}</button></div>
   <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
     <div class="ts t3" style="margin-bottom:6px">${I18N.t('agents.config.clean_session_hint')}</div>
     <button class="bt bt-r bt-s" onclick="cleanAgentSession('${name}')">${I18N.t('agents.config.clean_session_btn')}</button>
@@ -296,7 +296,7 @@ function renderAgent(name, data) {
   <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${ef}</div><div class="l">${I18N.t('agents.event.completed')}</div></div>
   <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${er}</div><div class="l">${I18N.t('agents.event.running')}</div></div>
 </div>
-<div class="cd"><div class="cd-h"><h2>Event History</h2><span class="ts t3">${I18N.t('agents.event.recent_n', {n: events.length})}</span></div>${evtHtml}</div>`;
+<div class="cd"><div class="cd-h"><h2>${I18N.t('agents.event.history_title')}</h2><span class="ts t3">${I18N.t('agents.event.recent_n', {n: events.length})}</span></div>${evtHtml}</div>`;
 
   el.innerHTML = html;
   // 根据已配置 skill 的 scope 设置初始页签（避免回显时看不到已配置的 skill）
