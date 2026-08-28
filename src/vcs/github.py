@@ -23,6 +23,7 @@ class GitHubBackend(VcsBackend):
             "branch": branch,
             "actor": actor,
             "payload": payload,
+            "title": self._extract_title(payload, event_header),
         }
 
     def _map_event_type(self, header: str) -> str:
@@ -67,4 +68,18 @@ class GitHubBackend(VcsBackend):
             base = pull.get("base", {})
             if isinstance(base, dict):
                 return base.get("ref", "")
+        return ""
+
+    def _extract_title(self, payload: dict, event_header: str) -> str:
+        """从 GitHub webhook payload 提取 Issue/PR 标题"""
+        issue = payload.get("issue", {})
+        if isinstance(issue, dict):
+            t = issue.get("title", "")
+            if t:
+                return t
+        pull = payload.get("pull_request", {})
+        if isinstance(pull, dict):
+            t = pull.get("title", "")
+            if t:
+                return t
         return ""

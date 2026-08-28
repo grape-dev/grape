@@ -44,13 +44,15 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id FROM issue_state WHERE repo_key=? AND issue_id=?",
+            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, parent_issue_id, is_subtask_mode FROM issue_state WHERE repo_key=? AND issue_id=?",
                       (repo_key, issue_id))
             row = c.fetchone()
             if row:
                 return {"id": row[0], "stage": row[1], "owner_agent": row[2],
                         "a2a_seq": row[3], "updated_at": row[4], "assignee": row[5] or "",
-                        "scene_id": row[6] or ""}
+                        "scene_id": row[6] or "",
+                        "parent_issue_id": row[7] or "",
+                        "is_subtask_mode": row[8] or 0}
     except Exception:
         pass
     return None
@@ -131,6 +133,74 @@ def set_issue_scene(repo_key: str, issue_id: str, scene_id: str):
         db.commit()
     from src.config import log
     log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id}")
+
+
+def set_parent_issue(repo_key: str, issue_id: str, parent_issue_id: str):
+    """标记 Issue 为子任务（设置 parent_issue_id）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
+        row = c.fetchone()
+        if row:
+            c.execute("UPDATE issue_state SET parent_issue_id=? WHERE id=?", (parent_issue_id or "", row[0]))
+        else:
+            c.execute(
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, parent_issue_id, updated_at) "
+                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
+                (repo_key, issue_id, parent_issue_id or ""),
+            )
+        db.commit()
+    from src.config import log
+    log.info(f"ParentIssue: repo={repo_key} issue={issue_id} parent={parent_issue_id}")
+
+
+def get_parent_issue(repo_key: str, issue_id: str) -> str:
+    """返回 Issue 的 parent_issue_id（空=普通任务）。"""
+    st = get_issue_stage(repo_key, issue_id)
+    return (st or {}).get("parent_issue_id", "")
+
+
+def set_subtask_mode(repo_key: str, issue_id: str, enabled: bool = True):
+    """标记 Issue 为多任务模式（父任务）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
+        row = c.fetchone()
+        val = 1 if enabled else 0
+        if row:
+            c.execute("UPDATE issue_state SET is_subtask_mode=? WHERE id=?", (val, row[0]))
+        else:
+            c.execute(
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, is_subtask_mode, updated_at) "
+                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
+                (repo_key, issue_id, val),
+            )
+        db.commit()
+    from src.config import log
+    log.info(f"SubtaskMode: repo={repo_key} issue={issue_id} enabled={enabled}")
+
+
+def is_subtask(repo_key: str, issue_id: str) -> bool:
+    """判断 Issue 是否为子任务（parent_issue_id 非空）。"""
+    return bool(get_parent_issue(repo_key, issue_id))
+
+
+def is_subtask_mode_enabled(repo_key: str, issue_id: str) -> bool:
+    """判断 Issue 是否启用了多任务模式（父任务标记）。"""
+    st = get_issue_stage(repo_key, issue_id)
+    return bool((st or {}).get("is_subtask_mode", 0))
+
+
+def get_subtask_issues(repo_key: str, parent_issue_id: str) -> list[dict]:
+    """查询父任务的所有子任务 issue_state 记录。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT issue_id, stage, owner_agent FROM issue_state "
+            "WHERE repo_key=? AND parent_issue_id=? ORDER BY issue_id",
+            (repo_key, parent_issue_id),
+        )
+        return [{"issue_id": r[0], "stage": r[1], "owner_agent": r[2]} for r in c.fetchall()]
 
 
 def get_or_create_agent_session(repo_key: str, agent_type: str,

@@ -381,6 +381,8 @@ CREATE TABLE IF NOT EXISTS issue_state (
     assignee     TEXT DEFAULT '',          -- Issue 责任人(GitCode assignee,可为 grape_bot 或用户)
     a2a_seq      INTEGER,                   -- 触发当前 stage 的 A2A 事件 seq
     scene_id     TEXT DEFAULT '',          -- Issue 级开发场景（VOD 判定，空=回退仓库默认）
+    parent_issue_id TEXT DEFAULT '',      -- 父任务 Issue ID（如 "#20"，空=普通任务）
+    is_subtask_mode INTEGER DEFAULT 0,    -- 1=多任务模式（Issue Agent 应拆分子任务）
     updated_at   TEXT DEFAULT (datetime('now')),
     created_at   TEXT DEFAULT (datetime('now')),
     UNIQUE (repo_key, issue_id)
@@ -1700,3 +1702,15 @@ def _migrate_tables():
         log.info("Added scene_id column to issue_state")
     except Exception as e:
         log.warning(f"Add issue_state.scene_id column failed: {e}")
+    # ===== multi-task mode: issue_state.parent_issue_id + is_subtask_mode =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "issue_state", "parent_issue_id", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue_state", "is_subtask_mode", "INTEGER DEFAULT 0")
+            _ensure_column(c, "tasks", "parent_issue_number", "INTEGER DEFAULT 0")
+            _ensure_column(c, "tasks", "is_subtask_mode", "INTEGER DEFAULT 0")
+            db.commit()
+        log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + tasks")
+    except Exception as e:
+        log.warning(f"Add multi-task columns failed: {e}")

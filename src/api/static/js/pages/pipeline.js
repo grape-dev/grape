@@ -172,7 +172,7 @@ function renderPipeline(data) {
   html += `${flowHtml}${pagerHtml}`;
 
   // 表格区域（独立滚动）
-  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>标题</th><th>Duration</th><th>Agents</th><th>阶段</th><th>场景</th><th>责任人</th></tr>`;
+  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>标题</th><th>父任务</th><th>Duration</th><th>Agents</th><th>阶段</th><th>场景</th><th>责任人</th></tr>`;
   pagePipes.forEach((p, i) => {
     const realIdx = pipeStart + i;
     const s = realIdx === _pipeActiveIdx ? ' sel' : '';
@@ -193,6 +193,9 @@ function renderPipeline(data) {
     const _issueNum = String(p.issue_id || '').replace(/^#/, '');
     const _repoParts2 = (data.repo || '').replace(/^gitcode:/, '').split('/');
     const _issueUrl = (_issueNum && _repoParts2.length === 2) ? `https://gitcode.com/${_repoParts2[0]}/${_repoParts2[1]}/issues/${_issueNum}` : '';
+    const _parentIssueId = String(p.parent_issue_id || '').replace(/^#/, '');
+    const _parentIssueUrl = (_parentIssueId && _repoParts2.length === 2) ? `https://gitcode.com/${_repoParts2[0]}/${_repoParts2[1]}/issues/${_parentIssueId}` : '';
+    const _parentIssueHtml = _parentIssueId ? `<a href="${_parentIssueUrl}" target="_blank" rel="noopener" style="color:var(--pu);text-decoration:underline;font-size:11px">#${_parentIssueId}</a>` : '<span class="ts t3">—</span>';
     const _esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const execBadge = p.executing
       ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ 执行中</span>'
@@ -200,6 +203,7 @@ function renderPipeline(data) {
     html += `<tr class="pipe-row${s}" data-idx="${realIdx}" onclick="selPipe(${realIdx})" ondblclick="pipeRowDblClick(${realIdx})">
       <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
       <td><a href="${_issueUrl || '#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${_esc(p.title || '—')}</a></td>
+      <td>${_parentIssueHtml}</td>
       <td>${dur}</td>
       <td>${agentTags}</td>
       <td><span class="${stageClass}">${stageName}</span></td>

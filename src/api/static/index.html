@@ -44,7 +44,8 @@
 <div class="sb-sel"><select id="repoSelect" onchange="app.switchRepo(this.value)"><option value="">选择仓库...</option></select></div>
 <div class="sb-nav">
 <div class="grp">Workspace</div>
-<a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span>Dashboard</a>
+<a id="nav-tasks" onclick="app.nav('tasks')"><span class="ic">📋</span>Task Center</a>
+<a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span>Scene Center</a>
 <a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">▶</span>Pipeline</a>
 
 <div class="grp">DevOps Agents</div>
@@ -60,7 +61,6 @@
 
 <div class="grp">Account</div>
 <a id="nav-chat" onclick="app.nav('chat')"><span class="ic">☎</span>Chat Agent</a>
-<a id="nav-tasks" onclick="app.nav('tasks')"><span class="ic">📋</span>Task Center</a>
 
 <div class="grp">Settings</div>
 <a id="nav-settings-credentials" onclick="app.nav('settings','credentials')"><span class="ic">⚙</span>General Settings</a>
@@ -89,18 +89,18 @@
 <script src="/static/js/vendor/qrcode.min.js?v=1"></script>
 <script src="/static/js/api.js?v=14"></script>
 <script src="/static/js/pages/dashboard.js?v=11"></script>
-<script src="/static/js/pages/pipeline.js?v=23"></script>
+<script src="/static/js/pages/pipeline.js?v=24"></script>
 <script src="/static/js/pages/agents.js?v=20"></script>
 <script src="/static/js/pages/events.js?v=35"></script>
 <script src="/static/js/pages/chat.js?v=20"></script>
 <script src="/static/js/pages/repos.js?v=28"></script>
 <script src="/static/js/pages/templates.js?v=8"></script>
-<script src="/static/js/pages/tasks.js?v=24"></script>
+<script src="/static/js/pages/tasks.js?v=26"></script>
 <script src="/static/js/pages/settings.js?v=12"></script>
 <script src="/static/js/pages/skills.js?v=15"></script>
 <script src="/static/js/pages/knowledge.js?v=7"></script>
 <script src="/static/js/pages/runtimes.js?v=22"></script>
 <script src="/static/js/pages/observability.js?v=35"></script>
-<script src="/static/js/app.js?v=33"></script>
+<script src="/static/js/pages/app.js?v=34"></script>
 </body>
 </html>
