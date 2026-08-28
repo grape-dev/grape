@@ -803,3 +803,48 @@ showToast(msg) 接收参数，本身无中文硬编码。调用方传 t() 结果
 | 16 | showToast | ✅ | 接收参数，无硬编码 |
 
 无新遗漏。方案完备。
+
+### 第三轮深度检查（2026-08-27）
+
+#### 15 个 JSON 并发加载性能 ⚠️ → 调整为初始化全加载
+
+**问题：** 浏览器对同一域名并发连接限制 6 个 → 15 个 JSON 需要 3 轮。
+
+**方案调整：** 初始化时加载所有 15 个 JSON（不按需加载），原因：
+1. HTTP/2 下并发请求不受 6 连接限制（nginx 已支持）
+2. 按需加载需要 nav() 改 async → 改动大 + 闪动
+3. 15 个 JSON 总大小预估 < 50KB → 一次加载可接受
+4. 内联最小包（common + app login）保证首屏不闪动，完整包异步加载后刷新
+
+#### document.title ✅
+
+`<title>Grape — Multi-Agent DevOps</title>` 是英文 → 不需要翻译。
+
+events.js 里的动态 title（`btn.title = '退出全屏'`）→ 已在逐页改造覆盖。
+
+#### html lang 属性 ✅
+
+`<html lang="zh-CN">` → i18n.js applyI18nToDOM() 动态设置 `document.documentElement.lang`。
+
+#### confirm() / alert() 中文 ✅
+
+6 个页面的 confirm/alert 中文 → 已在逐页改造计划覆盖（改为 t()）。
+
+#### CSS 无中文 ✅
+
+CSS content 属性用 Unicode 转义（`\2192` → →）→ 不需要翻译。
+
+#### placeholder 中文 ✅
+
+JS 动态生成的 placeholder（如 `搜索知识...`）→ 已在逐页改造覆盖。
+
+#### 语言包加载策略最终方案
+
+```
+i18n.js init():
+  1. 同步：用内联最小包（common + app login key）填充 _packs
+  2. 同步：applyI18nToDOM() 填充 index.html 首屏文案（登录页、侧边栏）
+  3. 异步：fetch 15 个 JSON 完整包 → 加载完成后刷新 DOM（如果页面已渲染）
+```
+
+首屏不闪动（内联包同步填充），完整包异步加载不阻塞页面。
