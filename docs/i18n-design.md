@@ -1,3 +1,10 @@
+# 前端 UI 国际化方案
+
+> **范围声明：本阶段只做前端页面国际化（JS + HTML + JSON 语言包 + 后端 /en 路由）。**
+> **后端 API 返回的中文（chat.py 错误消息 / dashboard.py device_name / DB skill display_name/description / configs/project-templates.json 配置数据等）属于二期后端国际化，本阶段不处理。**
+
+---
+
 # Grape 前端 UI 国际化设计方案
 
 > 分支：`feat/i18n`（基于 dev 最新代码 `40b1c6f9`）
@@ -1474,3 +1481,23 @@ en:
 
 后端 API 根据请求头 Accept-Language 或 cookie grapeLang 返回对应语言的文案。
 配置文件加 name_en/description_en 字段，DB 加 display_name_en/description_en 列。
+
+### 二期后端国际化问题清单（不在本阶段处理）
+
+以下问题属于后端 API 返回的中文，前端直接渲染无法翻译，需要二期后端国际化处理：
+
+| # | 文件/来源 | 中文内容 | 说明 |
+|---|----------|---------|------|
+| 1 | configs/project-templates.json | category name: "Hello World 新手模板"/"Agent 最佳实践" 等 | 后端配置文件 |
+| 2 | configs/project-templates.json | template name: "小红书自动化运营助手" 等 | 后端配置文件 |
+| 3 | configs/project-templates.json | template description: "极简 Flask Web 应用..." 等 | 后端配置文件 |
+| 4 | DB skill 表 | display_name: "AI 博客生成"/"IaC 代码实现" 等 | 后端数据 |
+| 5 | DB skill 表 | description: "AI 博客生成：学习参考..." 等 | 后端数据 |
+| 6 | DB agent_type 表 | display_name + description | 后端数据 |
+| 7 | chat.py | API 错误消息（"无可用引擎"/"对话未找到"/"创建会话失败" 等） | 后端硬编码 |
+| 8 | chat.py | display_name 拼接"（本机直连）" | 后端硬编码 |
+| 9 | dashboard.py | device_name "本机直连" 等 | 后端硬编码 |
+| 10 | vod_handler_async.py | 错误消息"无可用引擎" | 后端硬编码 |
+| 11 | chat.py | stream 消息"思考中"/"生成中"/"后端错误" 等 | 后端硬编码 |
+
+注：第 8 项前端已做兼容——chat.js 用 `b.scope === 'local'` 判断后加 `I18N.t('chat.local_direct')` 翻译后缀。但后端 display_name 里仍包含"（本机直连）"，需要二期从后端去掉。
