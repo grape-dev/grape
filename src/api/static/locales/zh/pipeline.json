@@ -9,6 +9,7 @@
   "issue_prefix": "Issue",
   "th_issue": "问题",
   "th_title": "标题",
+  "th_parent_issue": "父任务",
   "th_duration": "耗时",
   "th_agents": "Agent",
   "th_stage": "阶段",

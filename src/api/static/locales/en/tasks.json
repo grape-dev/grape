@@ -49,6 +49,8 @@
     "scene_hint": "If not selected, VOD will auto-detect during review",
     "scene_none": "Not specified (auto-detected by VOD)",
     "assignee_hint": "Issue assignee = Account in General Settings (current logged-in account)",
+    "subtask_mode_label": "Multi-Task Mode",
+    "subtask_mode_hint": "When enabled, Issue Agent will split the task into multiple subtasks for separate execution",
     "btn_cancel": "Cancel",
     "btn_create": "Create Task",
     "btn_creating": "Creating…",

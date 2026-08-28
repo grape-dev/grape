@@ -49,6 +49,8 @@
     "scene_hint": "不选则由 VOD 审视时自动识别",
     "scene_none": "不指定（由 VOD 自动识别）",
     "assignee_hint": "Issue 责任人 = 系统 General Settings 的 Account（当前登录账号）",
+    "subtask_mode_label": "多任务模式",
+    "subtask_mode_hint": "启用后，Issue Agent 会将任务拆分为多个子任务分别执行",
     "btn_cancel": "取消",
     "btn_create": "创建任务",
     "btn_creating": "创建中…",

@@ -9,6 +9,7 @@
   "issue_prefix": "Issue",
   "th_issue": "Issue",
   "th_title": "Title",
+  "th_parent_issue": "Parent",
   "th_duration": "Duration",
   "th_agents": "Agents",
   "th_stage": "Stage",

@@ -170,7 +170,7 @@ function renderPipeline(data) {
   html += `${flowHtml}${pagerHtml}`;
 
   // 表格区域（独立滚动）
-  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>${I18N.t('pipeline.th_issue')}</th><th>${I18N.t('pipeline.th_title')}</th><th>${I18N.t('pipeline.th_duration')}</th><th>${I18N.t('pipeline.th_agents')}</th><th>${I18N.t('pipeline.th_stage')}</th><th>${I18N.t('pipeline.th_scene')}</th><th>${I18N.t('pipeline.th_owner')}</th></tr>`;
+  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>${I18N.t('pipeline.th_issue')}</th><th>${I18N.t('pipeline.th_title')}</th><th>${I18N.t('pipeline.th_parent_issue')}</th><th>${I18N.t('pipeline.th_duration')}</th><th>${I18N.t('pipeline.th_agents')}</th><th>${I18N.t('pipeline.th_stage')}</th><th>${I18N.t('pipeline.th_scene')}</th><th>${I18N.t('pipeline.th_owner')}</th></tr>`;
   pagePipes.forEach((p, i) => {
     const realIdx = pipeStart + i;
     const s = realIdx === _pipeActiveIdx ? ' sel' : '';

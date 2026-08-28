@@ -239,6 +239,10 @@ function openTaskCreateModal() {
       <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.scene_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.scene_hint')}</span>
         <select id="tcCreateScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
       </label>
+      <label style="display:flex;align-items:flex-start;gap:8px;color:#333;cursor:pointer;padding:4px 0">
+        <input type="checkbox" id="tcCreateSubtaskMode" style="margin-top:3px;width:16px;height:16px;cursor:pointer;accent-color:#667eea">
+        <span><b>${I18N.t('tasks.create.subtask_mode_label')}</b><br><span style="font-size:11px;color:#888">${I18N.t('tasks.create.subtask_mode_hint')}</span></span>
+      </label>
       <div style="font-size:11px;color:#888">${I18N.t('tasks.create.assignee_hint')}</div>
       <div id="tcError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
     </div>
@@ -276,13 +280,14 @@ function createTaskSubmit() {
   const title = (document.getElementById('tcCreateTitle') || {}).value || '';
   const desc = (document.getElementById('tcCreateDesc') || {}).value || '';
   const sceneId = (document.getElementById('tcCreateScene') || {}).value || '';
+  const subtaskMode = (document.getElementById('tcCreateSubtaskMode') || {}).checked ? 1 : 0;
   const errEl = document.getElementById('tcError');
   const showErr = (msg) => { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
   if (!repoKey.trim()) { showErr(I18N.t('tasks.create.err_no_repo')); return; }
   if (!title.trim()) { showErr(I18N.t('tasks.create.err_no_title')); return; }
   const btn = document.getElementById('tcSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.create.btn_creating'); }
-  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
+  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId, is_subtask_mode: subtaskMode})
     .then(d => {
       const ov = document.getElementById('taskCreateOverlay');
       if (ov) ov.remove();
