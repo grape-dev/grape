@@ -970,3 +970,102 @@ if (window.history.replaceState) {
 2. 不依赖 localStorage——语言偏好在 OAuth state 里传递
 3. 改动小——auth.py 加 3 行 + 前端 oauthLogin 改 1 行 + init replaceState 改 1 行
 4. 首次登录用户没有 lang 参数 → 默认 zh → 跳 / → 正确
+
+### 语言偏好存储方案修正——cookie + localStorage 双写（2026-08-27）
+
+#### 修正原因
+
+原方案 C（OAuth state 带语言）把语言偏好混入 OAuth state，语义不干净。参考 multica 的 cookie 方案，改为 cookie + localStorage 双写。
+
+#### multica 做法
+
+multica 用 `browser-cookie-adapter` 把语言偏好写入 cookie（`multica-locale=en; max-age=1年`），后端 `request-locale.ts` 读 cookie 确定语言。SSR 直接渲染对应语言，不存在 OAuth 回调丢语言的问题。
+
+grape 是 SPA，后端不需要读 cookie 渲染——但 OAuth 回调时后端需要读 cookie 确定跳转 URL 的语言前缀。
+
+#### 最终方案：cookie + localStorage 双写
+
+```
+用户选英文 → setLang('en')
+  → localStorage.setItem('grapeLang', 'en')   ← 前端 i18n.js 读
+  → document.cookie = 'grapeLang=en; max-age=31536000; path=/'  ← 后端 auth.py 读
+```
+
+#### OAuth 回调简化
+
+```
+1. 用户点"GitCode 登录"
+   → 跳转 GitCode 授权页（不需要传 lang 参数）
+
+2. GitCode 回调 → /api/auth/callback/gitcode?code=xxx&state=xxx
+   → 后端读 cookie grapeLang=en
+   → RedirectResponse(f"/en/?token=xxx")  ← 直接跳正确 URL
+
+3. 前端 init() → i18n.js detectLang() 从 URL 检测 /en → 英文
+   → replaceState 保留 /en 前缀
+```
+
+#### i18n.js setLang 改为双写
+
+```javascript
+async function setLang(lang) {
+  if (!SUPPORTED.includes(lang)) lang = DEFAULT_LANG;
+  // localStorage（前端读）
+  localStorage.setItem(STORAGE_KEY, lang);
+  // cookie（后端读 + 跨标签页共享）
+  const secure = location.protocol === 'https:' ? ';Secure' : '';
+  document.cookie = STORAGE_KEY + '=' + encodeURIComponent(lang) + ';max-age=31536000;path=/' + secure;
+  _lang = lang;
+  await loadPacks(lang);
+  _applyUrlLang(lang);
+}
+```
+
+#### 后端 gitcode_oauth_callback() 读 cookie
+
+```python
+@router.get("/callback/gitcode")
+async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "",
+                                 request: Request = None):
+    # ... 现有逻辑（验证 state / 换 token / 创建用户 / 签 JWT）...
+
+    # 从 cookie 读语言偏好
+    lang = "zh"
+    cookie_header = request.headers.get("cookie", "")
+    for item in cookie_header.split(";"):
+        item = item.strip()
+        if item.startswith("grapeLang="):
+            lang = item.split("=", 1)[1]
+            break
+    prefix = f"/{lang}" if lang != "zh" else ""
+
+    resp = RedirectResponse(
+        url=f"{prefix}/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}",
+        status_code=302
+    )
+    _set_refresh_cookie(resp, jwt_refresh_token)
+    return resp
+```
+
+#### 改动对比
+
+| 改动 | 方案 C（state 带语言） | cookie 方案（最终） |
+|------|:---:|:---:|
+| 前端 oauthLogin | 传 lang 参数 | 不需要改 |
+| 后端 gitcode_oauth_login | 存 lang 到 state | 不需要改 |
+| 后端 gitcode_oauth_callback | 从 state 取 lang | 从 cookie 读 lang |
+| 前端 setLang | 只写 localStorage | 写 localStorage + cookie |
+| 前端 init replaceState | 保留 /en 前缀 | 保留 /en 前缀（不变） |
+| OAuth state 语义 | 混入语言（不干净） | 只管 CSRF（干净） |
+| 和 multica 一致 | 不一致 | 一致 |
+| 跨标签页 | 不保证 | cookie 共享 ✅ |
+
+#### 场景验证
+
+| 场景 | cookie | 后端跳转 | 结果 |
+|------|:---:|------|:---:|
+| 首次登录（未选语言） | 无 cookie | `/?token=xxx` | 中文 ✅ |
+| 中文用户重新登录 | grapeLang=zh | `/?token=xxx` | 中文 ✅ |
+| 英文用户重新登录 | grapeLang=en | `/en/?token=xxx` | 英文 ✅ |
+| 英文用户首次登录后选英文 | 无 cookie → 选英文后写 cookie | `/en/#dash` | 英文 ✅ |
+| 跨标签页 | cookie 共享 | — | ✅ |
