@@ -242,7 +242,7 @@ function renderAgent(name, data) {
   <div class="flex fc gap12">
     <div style="width:44px;height:44px;border-radius:10px;background:${meta.color || 'var(--b)'}22;display:flex;align-items:center;justify-content:center;font-size:20px">${meta.icon || '?'}</div>
     <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${_agentTypeDisplay(name, meta)}</h2><div class="ts t2">${_agentTypeDesc(name, meta)}</div>${engineBadge}</div>
-    <div class="flex gap6"><button id="btnConfigure" class="bt bt-o bt-s" onclick="toggleAgentCfg(true)">Configure</button><button id="btnEvents" class="bt bt-p bt-s" onclick="toggleAgentCfg(false)">Events</button></div>
+    <div class="flex gap6"><button id="btnConfigure" class="bt bt-o bt-s" onclick="toggleAgentCfg(true)">${I18N.t('agents.btn_configure')}</button><button id="btnEvents" class="bt bt-p bt-s" onclick="toggleAgentCfg(false)">${I18N.t('agents.btn_events')}</button></div>
   </div>
 </div>
 <div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">

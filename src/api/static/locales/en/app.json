@@ -59,5 +59,10 @@
   },
   "loading": "Loading...",
   "select_repo": "Select Repository",
-  "logout": "Logout"
+  "logout": "Logout",
+  "search": {
+    "events": "Events",
+    "repos": "Repos",
+    "agents": "Agents"
+  }
 }

@@ -87,5 +87,7 @@
       "name": "SRE Agent",
       "desc": "Build deployment, release management, monitoring, troubleshooting"
     }
-  }
+  },
+  "btn_configure": "Configure",
+  "btn_events": "Events"
 }

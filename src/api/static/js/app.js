@@ -354,7 +354,7 @@ function loadAgentTypes() {
     const pc = $('pageContent');
     API.get('/search/?q=' + encodeURIComponent(q) + '&type=all').then(d => {
       let html = '<div class="cd"><div class="cd-h"><h2>Search: "' + q + '"</h2></div>';
-      html += '<div class="ts t2">Events: ' + (d.events || []).length + ' / Repos: ' + (d.repos || []).length + ' / Agents: ' + (d.agents || []).length + '</div>';
+      html += '<div class="ts t2">' + I18N.t('app.search.events') + ': ' + (d.events || []).length + ' / ' + I18N.t('app.search.repos') + ': ' + (d.repos || []).length + ' / ' + I18N.t('app.search.agents') + ': ' + (d.agents || []).length + '</div>';
       (d.events || []).forEach(ev => { html += '<div class="ai" onclick="app.nav(\'event\',' + ev.seq + ')" style="cursor:pointer"><div class="ac"><b>' + (ev.title || '') + '</b><span class="ts t3"> ' + (ev.repo_key || '') + '</span></div></div>'; });
       (d.agents || []).forEach(a => { html += '<div class="cl" onclick="app.nav(\'' + a.name + '\')"><div class="cx"><h4>' + a.display_name + '</h4></div></div>'; });
       html += '</div>';

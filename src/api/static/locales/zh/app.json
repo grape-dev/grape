@@ -59,5 +59,10 @@
   },
   "loading": "加载中...",
   "select_repo": "选择仓库",
-  "logout": "登出"
+  "logout": "登出",
+  "search": {
+    "events": "事件",
+    "repos": "仓库",
+    "agents": "Agent"
+  }
 }

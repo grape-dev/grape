@@ -87,5 +87,7 @@
       "name": "SRE Agent",
       "desc": "构建部署、发布管理、监控运维、故障排查"
     }
-  }
+  },
+  "btn_configure": "配置",
+  "btn_events": "事件"
 }
