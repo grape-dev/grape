@@ -83,15 +83,19 @@ class TestExecutionModeSwitch:
         assert events >= 1, "应写 events 表"
 
     def test_direct_mode_executes(self):
-        """direct：默认模式，run_pipeline 就地执行（不新增 task）。"""
+        """direct：默认模式，run_pipeline 就地执行（不新增 task）。
+
+        注意：测试环境无引擎配置，pick_engine 返回 0 → 创建 failed task 快照（供重派）。
+        断言改为：不应有 queued/running 任务（direct 模式不入队等待执行），只允许 failed。
+        """
         self._clean()
         os.environ["DEVOPS_EXECUTION_MODE"] = "direct"
         raw = json.dumps(_evt_body()).encode()
         headers = {"X-GitCode-Event": "Issue Hook"}
         ep_result = event_pipeline.run_pipeline(raw, headers, account="owner/repo")
         with db_lock:
-            tasks = db.cursor().execute("SELECT COUNT(*) FROM agent_tasks").fetchone()[0]
-        assert tasks == 0, "direct 模式不应入队 agent_tasks"
+            tasks = db.cursor().execute("SELECT COUNT(*) FROM agent_tasks WHERE status NOT IN ('failed')").fetchone()[0]
+        assert tasks == 0, "direct 模式不应有非 failed 的 agent_tasks（引擎不可用时只创建 failed 快照）"
 
 
 class TestTaskStatusAPI:

@@ -74,6 +74,10 @@ function refreshObs(isAutoRefresh) {
   if (!isAutoRefresh && !_obsRendered) {
     c.innerHTML = '<div class="loading">' + I18N.t('observability.loading') + '</div>';
   }
+  // 手动刷新（非自动）时触发引擎探测（60s 防抖由后端控制）
+  if (!isAutoRefresh) {
+    API.get('/dashboard/ops/probe-now').catch(() => null);
+  }
   // 获取当前选中仓库，过滤仅该仓库的任务
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
   const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
@@ -171,8 +175,8 @@ function table(headers, rows) {
 
 // ===== Tab: 概览 =====
 // 健康度 → 圆点/颜色映射（供 renderOverview 和 updateOverview 共享）
-const _OBS_HEALTH_DOT = { online: '🟢', idle: '⚪', normal: '🟢', busy: '🟡', overload: '🔴', recently_lost: '🟡', offline: '⚫', about_to_gc: '🔴' };
-const _OBS_HEALTH_COLOR = { online: 'var(--g)', idle: 'var(--t3)', normal: 'var(--g)', busy: 'var(--y)', overload: 'var(--r)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
+const _OBS_HEALTH_DOT = { online: '🟢', idle: '🟢', normal: '🟢', busy: '🟡', overload: '🔴', recently_lost: '🟡', offline: '⚫', about_to_gc: '🔴' };
+const _OBS_HEALTH_COLOR = { online: 'var(--g)', idle: 'var(--g)', normal: 'var(--g)', busy: 'var(--y)', overload: 'var(--r)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
 
 // 资源进度条（首次渲染时带 id，供后续局部更新）
 function _barHTML(label, pct, color, idPrefix) {
@@ -190,9 +194,13 @@ function renderOverview(ops, rt, mt) {
   const r = ops.runtimes || {};
   const w = ops.workers || {};
 
-  // Worker 卡片（带 id 供局部更新）
+  // Worker 卡片（带 id 供局部更新）— 按 device_name 排序保证位置稳定
   let workerCards = '';
-  const workers = w.list || [];
+  const workers = (w.list || []).slice().sort((a, b) => {
+    const na = (a.device_name || a.name || '').toLowerCase();
+    const nb = (b.device_name || b.name || '').toLowerCase();
+    return na < nb ? -1 : na > nb ? 1 : 0;
+  });
   if (workers.length === 0) {
     workerCards = '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_remote_worker') + '</div>';
   } else {
@@ -200,6 +208,8 @@ function renderOverview(ops, rt, mt) {
       const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
       const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
       const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
+      const isMain = wk.last_ip === '127.0.0.1' || (wk.name || '').startsWith('grape-main');
+      const mainTag = isMain ? '<span style="font-size:9px;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 6px;margin-left:4px">主控</span>' : '';
       workerCards += `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
@@ -212,6 +222,7 @@ function renderOverview(ops, rt, mt) {
         </div>
         ${_barHTML(I18N.t('observability.cpu'), wk.cpu_percent, null, 'wk-' + wid + '-cpu')}
         ${_barHTML(I18N.t('observability.mem'), wk.memory_percent, null, 'wk-' + wid + '-mem')}
+        ${_barHTML(I18N.t('observability.tmp'), wk.tmp_percent, null, 'wk-' + wid + '-tmp')}
         ${_barHTML(I18N.t('observability.disk'), wk.disk_percent, null, 'wk-' + wid + '-disk')}
       </div>`;
     });
@@ -233,12 +244,21 @@ function renderOverview(ops, rt, mt) {
       const avgDur = rti.avg_duration || 0;
       const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
       const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
+      // 探测状态
+      const ps = rti.probe_status || 'pending';
+      const pl = rti.probe_latency || 0;
+      const pe = rti.probe_error || '';
+      const probeIcon = { ok: '✅', fail: '❌', skip: '⏭', pending: '⏳' }[ps] || '⏳';
+      const probeColor = ps === 'ok' ? 'var(--g)' : ps === 'fail' ? 'var(--r)' : 'var(--t3)';
+      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? '等待' : ps === 'skip' ? '跳过' : '失败';
+      const probeTitle = pe ? ' title="' + pe.replace(/"/g, '&quot;') + '"' : '';
       runtimeTable += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
         <td>${dot} <b>${rti.name}</b></td>
         <td><span id="rt-${rid}-version" class="ts t3">${rti.version || '-'}</span></td>
         <td><span id="rt-${rid}-health" style="color:${hc};font-weight:600">${I18N.t('observability.' + (rti.health || 'offline'))}</span></td>
         <td><span id="rt-${rid}-load" style="color:${loadColor}">${running}/${maxC}</span></td>
         <td><span id="rt-${rid}-dur" style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
+        <td><span${probeTitle} style="color:${probeColor}">${probeIcon} ${probeStr}</span></td>
         <td>${modeTag}</td>
         <td><span id="rt-${rid}-device" class="ts t3">${rti.device_name || '-'}</span></td>
       </tr>`;
@@ -297,6 +317,7 @@ function updateOverview(ops, rt, mt) {
       // 进度条
       _updateBar('wk-' + wid + '-cpu', wk.cpu_percent);
       _updateBar('wk-' + wid + '-mem', wk.memory_percent);
+      _updateBar('wk-' + wid + '-tmp', wk.tmp_percent);
       _updateBar('wk-' + wid + '-disk', wk.disk_percent);
     }
   }

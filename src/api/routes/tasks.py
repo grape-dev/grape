@@ -161,6 +161,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         if row:
             task_id = row[0]
             linked = row[1]
+            # 标题更新：webhook 带了真实标题 → 覆盖旧标题（可能为 issue_opened 等类型名）
+            if title:
+                c.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
+                db.commit()
         else:
             if not title:
                 title = _get_issue_title(repo_key, issue_number)
@@ -232,7 +236,20 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
 
 
 def _get_issue_title(repo_key: str, issue_number: int) -> str:
-    """从 events 表取该 issue 最新事件的标题（零 API 调用）"""
+    """从 events 表取该 issue 最新事件的标题（零 API 调用）。
+    
+    跳过 title 为事件类型名（如 issue_opened/issue_updated）或 A2A 占位标题的行，
+    这些不是 Issue 真实标题。回退到 issue_opened 事件的 payload 中提取标题。
+    """
+    _EVENT_TYPE_NAMES = {
+        "issue_opened", "issue_updated", "issue_comment", "issue_labeled",
+        "issue_closed", "push", "tag_created", "release_created",
+        "pull_request_opened", "pull_request_updated", "pull_request_merged",
+        "note_hook_pr", "vod_signal", "a2a_event", "build_start", "build_failure",
+        "deploy_start", "deploy_failure", "deploy_finish",
+    }
+    def _is_placeholder(t):
+        return not t or t in _EVENT_TYPE_NAMES or t.startswith("A2A:") or t.startswith("A2A (订阅):")
     with db_lock:
         c = db.cursor()
         try:
@@ -242,7 +259,33 @@ def _get_issue_title(repo_key: str, issue_number: int) -> str:
                 (repo_key, f"#{issue_number}")
             )
             row = c.fetchone()
-            return row[0] if row else ""
+            if row:
+                t = row[0] or ""
+                if not _is_placeholder(t):
+                    return t
+            # payload 兜底：从 issue_opened 事件的 payload 中提取真实标题
+            c.execute(
+                "SELECT payload FROM events WHERE repo_key=? AND issue_id=? AND event_type='issue_opened' "
+                "ORDER BY seq ASC LIMIT 1",
+                (repo_key, f"#{issue_number}")
+            )
+            prow = c.fetchone()
+            if prow:
+                import json as _json
+                try:
+                    _pl = _json.loads(prow[0] or "{}")
+                except Exception:
+                    _pl = {}
+                _obj = _pl.get("object_attributes", {})
+                _iss = _pl.get("issue", {})
+                _pt = ""
+                if isinstance(_obj, dict):
+                    _pt = _obj.get("title", "") or ""
+                if not _pt and isinstance(_iss, dict):
+                    _pt = _iss.get("title", "") or ""
+                if _pt and not _is_placeholder(_pt):
+                    return _pt
+            return ""
         except Exception:
             return ""
 
@@ -451,6 +494,7 @@ class TaskCreateBody(BaseModel):
     description: str = ""
     assignee: str = ""
     scene_id: str = ""
+    is_subtask_mode: int = 0
 
 
 class TaskStatusBody(BaseModel):
@@ -523,6 +567,19 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
 
 
+def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
+    """PATCH Issue body（追加多任务模式标记）。"""
+    import urllib.request as _ur, urllib.error as _uerr, json as _json
+    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_num}?access_token={api_token}"
+    data = _json.dumps({"body": body_text}).encode()
+    req = _ur.Request(url, data=data, headers={"Content-Type": "application/json", "Accept": "application/json"}, method="PATCH")
+    try:
+        with _ur.urlopen(req, timeout=15) as resp:
+            return _json.loads(resp.read().decode()) if resp.read else {}
+    except Exception:
+        raise
+
+
 @router.post("/create")
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
@@ -568,6 +625,21 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         except Exception as _e:
             from src.config import log
             log.warning(f"create_task: set_issue_scene failed: {_e}")
+    # 4) 多任务模式 → Issue body 追加标记 + issue_state 标记
+    if body.is_subtask_mode:
+        try:
+            from src.api.session_store import set_subtask_mode
+            set_subtask_mode(repo_key, f"#{issue_num}", True)
+        except Exception as _e:
+            from src.config import log
+            log.warning(f"create_task: set_subtask_mode failed: {_e}")
+        # 追加标记到 Issue body（让 VOD 识别）
+        try:
+            _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 拆分为子任务执行。"
+            _patch_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
+        except Exception as _e:
+            from src.config import log
+            log.warning(f"create_task: patch issue body for multi-task-mode failed: {_e}")
     return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
             "assignee": assignee, "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 

@@ -25,7 +25,7 @@ tools:
 5. token 不得写入任何文件/日志/评论。
 6. AK/SK 必须从 Grape 控制台配置获取，严禁从数据库/configs/日志/历史/其他文件中寻找或硬编码凭证。
 7. 如 Grape 控制台未配置 AK/SK，立即停止操作并回复用户「请在 Grape 控制台中配置华为云 AK/SK 后重试」，严禁尝试其他来源或绕行手段。
-8. ⚠️ **严禁 `hcloud configure set` 改 default profile**（2026-08-25 seq#2493 事故）：hcloud configure 写的是全局文件（~/.hcloud/configure/），同一 worker 上并发的多个 SRE task（分属不同华为云账号）会互相覆盖 default profile 的 AK/SK/projectId，导致 A 账号的资源创建到 B 账号下。**必须用 `--cli-profile="task-$$"` 创建 task 专属 profile**，所有 hcloud 命令通过 `hc()` 包装函数带 `--cli-profile` 参数执行，部署结束后 `hcloud configure delete` 清理。obsutil 同理用 `-i/-k` 直接传 AK/SK，不写全局 .obsutilconfig。
+8. ⚠️ **严禁 `hcloud configure set` 改 default profile**：必须用 `--cli-profile` 创建 task 专属 profile，详见 §3.1。
 
 
 
@@ -216,7 +216,7 @@ else
   # 等待 ECS running，拿公网浮动 IP（hcloud ECS ListServersDetails 按名称查）
   ECS_IP=$(...按 INSTANCE_NAME 过滤出浮动 IP...)
 fi
-# 复用场景也要确保免密可用：公钥没进去就补推一次
+# 确保免密 SSH（复用场景补推/新建场景确认 keypair 已生效）
 ssh-copy-id -o StrictHostKeyChecking=no root@"$ECS_IP" 2>/dev/null || true
 
 # 3.3 部署代码到 ECS（实测流程，2026-08-14 验证）
@@ -224,10 +224,7 @@ ssh-copy-id -o StrictHostKeyChecking=no root@"$ECS_IP" 2>/dev/null || true
 ssh -o StrictHostKeyChecking=no root@"$ECS_IP" "mkdir -p /opt/$REPO_NAME"
 scp -o StrictHostKeyChecking=no -r "$WORKDIR"/* root@"$ECS_IP":/opt/$REPO_NAME/
 
-#   b) 免密 SSH：推送 worker 公钥到 ECS（之后所有命令免密执行，避免 expect 密码交互卡超时）
-ssh-copy-id -o StrictHostKeyChecking=no root@"$ECS_IP"  # 若 ECS 创建时已注入密钥对则跳过
-
-#   c) 一次性完成：系统依赖 → venv → 依赖 → 启动（**单条 SSH 会话**，勿拆多条，防超时）
+#   b) 一次性完成：系统依赖 → venv → 依赖 → 启动（**单条 SSH 会话**，勿拆多条，防超时）
 #      注意：把下方 __REPO_NAME__ 替换为实际仓库名；heredoc 内无变量展开，环境变量需在此处预置
 ssh -o StrictHostKeyChecking=no root@"$ECS_IP" 'bash -s' << 'DEPLOY_EOF'
 set -e
@@ -238,25 +235,24 @@ echo 'nameserver 8.8.8.8' > /etc/resolv.conf
 echo 'nameserver 223.5.5.5' >> /etc/resolv.conf
 
 cd /opt/__REPO_NAME__
-# 镜像加速（2026-08-22 规则更新）：所有下载资源优先使用国内镜像源，
-# 减少跨境网络延迟与超时。以下按优先级排列：
-#   apt: 阿里云镜像
-#   pip: 阿里云镜像
-#   npm: 阿里云镜像（若为 Node.js 项目）
-#   docker: 华为云 SWR 镜像（若为容器化项目）
+# 镜像加速：所有下载资源优先使用国内镜像源。优先级：阿里云 > 华为云 > 官方源
+#   apt: mirrors.aliyun.com
+#   pip: mirrors.aliyun.com/pypi/simple
+#   npm: registry.npmmirror.com
+#   docker: swr.cn-north-4.myhuaweicloud.com（华为云 SWR）
 
-# 系统依赖 + apt 镜像源（华为云 ecs region cn-north-4 内网加速）
-sed -i 's|http://archive.ubuntu.com|http://mirrors.huaweicloud.com|g' /etc/apt/sources.list 2>/dev/null || true
-sed -i 's|http://security.ubuntu.com|http://mirrors.huaweicloud.com|g' /etc/apt/sources.list 2>/dev/null || true
+# 系统依赖 + apt 镜像源
+sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
+sed -i 's|http://security.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
 apt-get update -qq
 apt-get install -y -qq python3 python3-pip python3-venv python3.10-venv 2>/dev/null || apt-get install -y -qq python3 python3-pip python3-venv
-# venv + 依赖（pip 网络超时是常态，阿里云镜像优先，回退到官方源重试 3 次）
+# venv + 依赖（阿里云镜像优先，回退到华为云镜像，最后官方源重试 3 次）
 rm -rf venv
 python3 -m venv venv
-venv/bin/pip install -q --upgrade pip -i https://mirrors.huaweicloud.com/repository/pypi/simple --trusted-host mirrors.huaweicloud.com || true
+venv/bin/pip install -q --upgrade pip -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com || true
 for i in 1 2 3; do
   venv/bin/pip install -q -r requirements.txt gunicorn \
-    -i https://mirrors.huaweicloud.com/repository/pypi/simple --trusted-host mirrors.huaweicloud.com && break
+    -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com && break
   echo "pip retry $i/3"
   sleep 5
 done
@@ -289,16 +285,10 @@ curl -s -o /dev/null -w '%{http_code}' "http://$ECS_IP:5000/post/1"  # Flask 示
 - 如果部署失败，输出错误信息并建议回滚
 
 > ⚠️ 部署阶段实测坑（持续积累）：
-> 1. **Ubuntu 22.04 精简镜像缺 python3-venv** → venv 建不出 pip，必须 `apt-get install python3-venv python3.10-venv`
-> 2. **pip 连 files.pythonhosted.org 经常 ReadTimeout** → 优先使用华为云 PyPI 镜像（`mirrors.huaweicloud.com/repository/pypi/simple`），仅镜像不可用时回退官方源重试
-> 3. **SSH 部署务必用单条 ssh 会话跑完所有命令**（或先 ssh-copy-id 免密）——expect 密码交互多命令叠加会超 600s 任务上限
-> 4. **创建 ECS 必须带 keypair + 创建前先查已有实例**——否则建完 SSH 连不上，Agent 会反复试错重建（每跑一次多一台机器、多一份费用）
-> 5. **可用区 cn-north-4g 不可用**（2026-08-20 实测）：该 AZ 使用 DPDK/vhostuser 高性能网卡，不走标准内核网络栈，SSH 永远连不上。必须指定 `--server.availability_zone=cn-north-4a` 或 `cn-north-4b`。
-> 6. **Ecs.0707 规格找不到**（2026-08-20 实测）：`s6.small.1` 等硬编码 flavor 在 postPaid 模式下可能不售卖。用 `hcloud ECS ListFlavors` + `ListFlavorSellPolicies` 动态查询最小可用规格，确认 sell_status=available 再使用。
-> 7. **DNS 解析失败**（2026-08-20 实测）：Ubuntu 22.04 的 systemd-resolved（127.0.0.53）可能无法解析 GitCode 等外部域名（SERVFAIL）。部署 SSH 脚本内先设 `echo 'nameserver 8.8.8.8' > /etc/resolv.conf`。
-> 8. **EIP 必须自动创建**（2026-08-20 实测）：创建 ECS 时必须用 `--server.publicip.eip.*` 参数让 API 自动创建并关联 EIP，不要先建 ECS 再手动关联，否则可能因 VPC 缺少 Internet Gateway 而无法通信。
-> 9. **国内镜像优先**（2026-08-22 规则）：所有下载资源（apt/pip/npm/docker）必须优先使用华为云国内镜像源加速：apt 换 `mirrors.huaweicloud.com`，pip 加 `-i https://mirrors.huaweicloud.com/repository/pypi/simple`，npm 设 `registry=https://mirrors.huaweicloud.com/repository/npm/`，docker pull 用 `swr.cn-north-4.myhuaweicloud.com`。镜像不可用时才回退官方源。
-> 10. **hcloud 全局配置竞态**（2026-08-25 seq#2493 实测事故）：同一 worker 上并发的多个 SRE task 调 `hcloud configure set` 改 default profile，互相覆盖 AK/SK/projectId，导致 songspace 的 task 用了 mm6667 的 AK 创建资源。必须用 `--cli-profile="task-$$"` 隔离，所有命令通过 `hc()` 包装函数执行。
+> 1. **架构/隐私声明/下载超时**（2026-08-14）：见 §3.0 注释。
+> 2. **hcloud 全局配置竞态**（2026-08-25 seq#2493 事故）：见 §3.1 注释。
+> 3. **ECS 幂等 + 可用区 cn-north-4g 不可用 + 动态选规格 + EIP 自动创建 + keypair**（2026-08-14/20）：见 §3.2 注释。
+> 4. **DNS 修复 + 镜像加速 + pip 重试 + pkill 自杀风险**（2026-08-20/22）：见 §3.3 注释。
 
 ## 环境变量
 
@@ -315,8 +305,8 @@ curl -s -o /dev/null -w '%{http_code}' "http://$ECS_IP:5000/post/1"  # Flask 示
 - ✅ 仅执行当前 PR 合并后的部署流程
 - ✅ 部署前先理解项目结构
 - ✅ 部署失败时输出错误信息，不自动回滚
-- ✅ **下载资源优先使用国内镜像加速**：apt/pip/npm/docker 等包管理器及运行时下载均优先使用华为云国内镜像源，仅在镜像不可用时回退官方源，减少跨境网络延迟与超时
-- ❌ **禁止 `hcloud configure set` 改 default profile**：必须用 `--cli-profile` 创建 task 专属 profile，通过 `hc()` 包装函数执行所有 hcloud 命令（见 §3.1）
+- ❌ **禁止 `hcloud configure set` 改 default profile**：必须用 `--cli-profile` 隔离，详见 §3.1
+- ✅ **下载资源优先使用阿里云国内镜像**：apt/pip/npm/docker，详见 §3.3
 
 ## 资源释放流程
 
@@ -344,7 +334,7 @@ curl -s -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \
 **先查询再释放，确认每个资源存在后再操作。释放后验证已删除。**
 
 ```bash
-# 确认 hcloud 可用 + 创建 task 专属 profile（与部署流程相同的隔离机制）
+# profile 隔离 + hc/obs 包装函数 + trap 清理（与 §3.1 相同，此处复用）
 HC_PROFILE="task-$$"
 hcloud configure set --cli-profile="$HC_PROFILE" \
   --cli-access-key="$HUAWEICLOUD_SDK_AK" --cli-secret-key="$HUAWEICLOUD_SDK_SK" \

@@ -123,5 +123,6 @@
   "col_agent_skill": "Agent / Skill",
   "col_repo": "Repo",
   "col_exit": "Exit",
-  "col_created": "Created"
+  "col_created": "Created",
+  "tmp": "TMP"
 }

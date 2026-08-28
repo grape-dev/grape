@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends
 from src.user import db as user_db
 from src.api.deps import get_current_user
 from src.api.time_utils import normalize_event_time
+from src.observability.engine_probe import get_probe_results
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -36,8 +37,8 @@ async def get_ops_overview(repo: str = ""):
         repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
         _repo_filter = " AND repo_key=?"
         _repo_params = [repo_key]
-    # stuck 阈值：running 超 15 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=1200s=20min，15min 能在超时前预警）
-    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+    # stuck 阈值：running 超 22 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=1800s=30min，22min 能在超时前预警）
+    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=22)).isoformat()
 
     with db_lock:
         c = db.cursor()
@@ -125,12 +126,12 @@ async def get_ops_overview(repo: str = ""):
         # 本机直连引擎（credential_id=0）用 psutil 采集本机资源
         # interval=None 非阻塞：返回自上次调用以来的平均值（10s 刷新间隔内的 CPU 均值）
         # 首次调用返回 0.0（无基准），后续调用返回真实值
-        _local_cpu = _local_mem = _local_disk = 0.0
+        _local_cpu = _local_mem = _local_disk = _local_tmp = 0.0
         _local_load = ""
         try:
             import psutil as _ps
             _local_cpu = _ps.cpu_percent(interval=None)
-            # MEM 用 /proc/meminfo 读取实际占用（total - MemAvailable，包含不可回收缓存）
+            # MEM 用 /proc/meminfo 读取实际进程占用（total - free - buffers - cached，不含缓存）
             try:
                 with open("/proc/meminfo") as _mf:
                     _mi = {}
@@ -139,14 +140,22 @@ async def get_ops_overview(repo: str = ""):
                         if len(_p) == 2:
                             _mi[_p[0]] = int(_p[1].strip().split()[0]) * 1024
                     _total = _mi["MemTotal"]
-                    _available = _mi.get("MemAvailable", 0)
-                    if _available > 0:
-                        _local_mem = round((_total - _available) / _total * 100, 1)
+                    _free = _mi.get("MemFree", 0)
+                    _buffers = _mi.get("Buffers", 0)
+                    _cached = _mi.get("Cached", 0)
+                    _used = _total - _free - _buffers - _cached
+                    if _total > 0:
+                        _local_mem = round(_used / _total * 100, 1)
                     else:
                         _local_mem = _ps.virtual_memory().percent
             except Exception:
                 _local_mem = _ps.virtual_memory().percent
             _local_disk = _ps.disk_usage("/").percent
+            # TMP: /tmp 目录使用率（tmpfs 内存文件系统，独立于根分区）
+            try:
+                _local_tmp = _ps.disk_usage("/tmp").percent
+            except Exception:
+                _local_tmp = 0.0
             _local_load = ",".join(f"{x:.2f}" for x in _ps.getloadavg())
         except Exception:
             pass
@@ -155,35 +164,42 @@ async def get_ops_overview(repo: str = ""):
         worker_online = 0
         worker_total = 0
 
-        # 检查是否有本机直连引擎
-        has_local = False
+        # 本机主控机：按 hostname 匹配 runtime_credentials 记录，采集指标后写入 DB
+        _local_hostname = ""
         try:
-            c.execute("SELECT COUNT(*) FROM agent_runtimes WHERE credential_id=0")
-            has_local = (c.fetchone()[0] or 0) > 0
+            import socket as _sock
+            _local_hostname = _sock.gethostname()
         except Exception:
             pass
-        if has_local:
-            worker_total += 1
-            worker_online += 1
-            # 本机指标只在 ops/overview 返回中展示，不写入 DB（运营管理台设备监控只显示远端 worker）
-            worker_list.append({
-                "id": 0, "name": "本机", "device_name": "本机直连",
-                "status": "online", "health": "online",
-                "last_seen_at": now_iso, "last_ip": "127.0.0.1",
-                "cpu_percent": _local_cpu, "memory_percent": _local_mem,
-                "disk_percent": _local_disk, "load_avg": _local_load,
-                "owner_name": "",
-            })
+        _local_cred_id = None
+        if _local_hostname:
+            try:
+                c.execute("SELECT id FROM runtime_credentials WHERE device_name=?", (_local_hostname,))
+                row = c.fetchone()
+                if row:
+                    _local_cred_id = row[0]
+            except Exception:
+                pass
+        if _local_cred_id is not None:
+            # 写入本机指标到 DB（admin 健康中心读同一张表即可看到）
+            try:
+                c.execute(
+                    "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
+                    "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
+                    (now_iso, "127.0.0.1", _local_cpu, _local_mem, _local_disk, _local_tmp, _local_load, _local_cred_id))
+                db.commit()
+            except Exception:
+                pass
 
-        # 查远端 worker（凭据）
+        # 查所有 worker（凭据），排除已注销（revoked）；主控机记录也含在其中
         try:
             c.execute(
                 "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                "cpu_percent, memory_percent, disk_percent, load_avg, owner_name "
-                "FROM runtime_credentials ORDER BY id"
+                "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
+                "FROM runtime_credentials WHERE status != 'revoked' ORDER BY id"
             )
             for w in c.fetchall():
-                wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wload, wowner = w
+                wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wload, wowner = w
                 worker_total += 1
                 w_health = derive_runtime_health(wstatus or "offline", wlast_seen, now_ts)
                 w_online = w_health == "online"
@@ -194,7 +210,8 @@ async def get_ops_overview(repo: str = ""):
                     "status": wstatus or "offline", "health": w_health,
                     "last_seen_at": normalize_event_time(wlast_seen), "last_ip": wip or "",
                     "cpu_percent": wcpu or 0, "memory_percent": wmem or 0,
-                    "disk_percent": wdisk or 0, "load_avg": wload or "",
+                    "disk_percent": wdisk or 0, "tmp_percent": wtmp or 0,
+                    "load_avg": wload or "",
                     "owner_name": wowner or "",
                 })
         except Exception:
@@ -218,6 +235,8 @@ async def get_ops_overview(repo: str = ""):
             pass
         # 查每个引擎已完成任务的平均耗时（秒）
         _avg_durations = {}
+        # 引擎探测结果（每 10 分钟 CLI 测试对话）
+        _probe_results = get_probe_results()
         try:
             c.execute(
                 "SELECT runtime_id, AVG(CASE "
@@ -246,13 +265,17 @@ async def get_ops_overview(repo: str = ""):
             c.execute(
                 "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
                 "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, "
-                "rc.device_name "
+                "rc.device_name, rc.status AS cred_status, ar.host_name, "
+                "ar.probe_status, ar.probe_latency, ar.probe_last, ar.probe_error "
                 "FROM agent_runtimes ar "
                 "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id "
                 "ORDER BY ar.id"
             )
             for r in c.fetchall():
-                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev = r
+                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcred_status, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error = r
+                # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）
+                if (cid or 0) > 0 and rcred_status == 'revoked':
+                    continue
                 runtimes_total += 1
                 base_health = derive_runtime_health(rstatus or "offline", rlast_seen, now_ts)
                 mode = "remote" if (cid or 0) > 0 else "local"
@@ -286,13 +309,31 @@ async def get_ops_overview(repo: str = ""):
                         health = "overload"
                 else:
                     health = base_health
+                # 引擎探测结果：本机用内存（engine_probe），远端用 DB（心跳上报）
+                if (cid or 0) == 0:
+                    _probe = _probe_results.get(rname or "", {})
+                else:
+                    _probe = {
+                        "status": rprobe_status or "pending",
+                        "latency": rprobe_latency or 0,
+                        "last_probe": rprobe_last or "",
+                        "error": rprobe_error or "",
+                    }
+                # 本机直连引擎的 device_name 用 host_name（区分多台主控机）
+                _dev_name = rdev or ""
+                if (cid or 0) == 0:
+                    _dev_name = rhost or "本机直连"
                 runtime_list.append({
                     "id": rid, "name": rname or "", "status": rstatus or "offline",
                     "health": health, "mode": mode,
                     "provider": rprovider or "", "last_seen_at": normalize_event_time(rlast_seen),
                     "healthy": bool(rhealthy), "busy_slots": rbusy or 0, "max_concurrent": max_conc,
                     "running": running, "avg_duration": _avg_durations.get(rid, 0),
-                    "version": rver or "", "device_name": rdev or ("本机直连" if (cid or 0) == 0 else ""),
+                    "version": rver or "", "device_name": _dev_name,
+                    "probe_status": _probe.get("status", "pending"),
+                    "probe_latency": _probe.get("latency", 0),
+                    "probe_last": _probe.get("last_probe", ""),
+                    "probe_error": _probe.get("error", ""),
                 })
         except Exception:
             pass
@@ -337,6 +378,28 @@ async def get_ops_overview(repo: str = ""):
             "list": worker_list,
         },
     }
+
+
+@router.get("/ops/probe-now")
+async def probe_engines_now():
+    """手动触发引擎探测（60s 防抖：窗口内重复请求返回上次结果，不重新探测）。"""
+    from src.observability.engine_probe import get_probe_results, _last_probe_time
+    import time, threading
+    now = time.time()
+    last = _last_probe_time if _last_probe_time else 0
+    if now - last < 300:
+        # 防抖窗口内（5分钟），返回上次结果
+        return {"status": "throttled", "wait": int(300 - (now - last)), "results": get_probe_results()}
+    # 防抖窗口外：后台线程异步执行探测，立即返回（不阻塞当前请求）
+    def _bg_probe():
+        try:
+            from src.observability.engine_probe import probe_all_now
+            probe_all_now()
+        except Exception as e:
+            import logging
+            logging.getLogger("devops-bot").warning(f"bg probe error: {e}")
+    threading.Thread(target=_bg_probe, daemon=True).start()
+    return {"status": "accepted", "results": get_probe_results()}
 
 
 @router.get("/ops/error-logs/sources")

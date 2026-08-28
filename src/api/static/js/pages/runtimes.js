@@ -88,10 +88,11 @@ function renderEngines(data, devices) {
       const localBadge = rt.is_local
         ? `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 8px;white-space:nowrap;vertical-align:middle">${I18N.t('runtimes.label.local_direct')}</span>`
         : '';
+      const hostTag = rt.is_local && rt.host_name ? `<span style="font-size:10px;color:var(--t3);margin-left:4px">${rt.host_name}</span>` : '';
       html += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh);cursor:pointer" onclick="openEngineDetail(${rt.id})">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
           ${_healthBadge(rt.health)}
-          <span style="font-weight:600;font-size:14px">${rt.instance_name || rt.name} ${localBadge}</span>
+          <span style="font-weight:600;font-size:14px">${rt.instance_name || rt.name} ${localBadge}${hostTag}</span>
           <span style="font-weight:400;color:var(--t3);font-size:12px;margin-left:auto">${rt.name} v${rt.version || ''}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">

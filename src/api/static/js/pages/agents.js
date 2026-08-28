@@ -110,9 +110,9 @@ function loadCfgOptions() {
       const scopeLabel = sc => sc === 'global' ? I18N.t('agents.scope.global') : sc === 'repo' ? I18N.t('agents.scope.repo') : I18N.t('agents.scope.personal');
       const localLabel = r => r.is_local ? I18N.t('agents.scope.local_direct') : scopeLabel(r.scope);
       const agentType = backendBox.dataset.agent || '';
-      // 按标签过滤：只展示 tags 包含当前 agent_type 或 "all" 的引擎
+      // 按标签过滤：展示仓库级/全局/个人引擎（个人引擎仅 owner 自己可见，后端已过滤）
       const ok = runtimes.filter(r => {
-        if (r.scope !== 'repo' && r.scope !== 'global') return false;
+        if (r.scope !== 'repo' && r.scope !== 'global' && r.scope !== 'user') return false;
         const tags = r.agent_tags || ['all'];
         return tags.includes('all') || tags.includes(agentType);
       });

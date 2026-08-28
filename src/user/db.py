@@ -262,42 +262,11 @@ CREATE TABLE IF NOT EXISTS user_credentials (
 )
 """
 
-# ====== 云主机表 ======
-_VMS_DDL = """
-CREATE TABLE IF NOT EXISTS user_vms (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    host TEXT NOT NULL,
-    port INTEGER DEFAULT 22,
-    ssh_user TEXT NOT NULL,
-    ssh_password TEXT NOT NULL,
-    status TEXT DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (user_id, name)
-)
-"""
-
-_VM_REPOS_DDL = """
-CREATE TABLE IF NOT EXISTS user_vm_repos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    vm_id INTEGER NOT NULL,
-    repo_key TEXT NOT NULL,
-    deploy_dir TEXT DEFAULT '',
-    service_name TEXT DEFAULT '',
-    branch TEXT DEFAULT 'master',
-    UNIQUE (vm_id, repo_key)
-)
-"""
-
-
 def init_db():
     """初始化用户相关表（幂等）"""
     with db_lock:
         db.execute(_USERS_DDL)
         db.execute(_CREDENTIALS_DDL)
-        db.execute(_VMS_DDL)
-        db.execute(_VM_REPOS_DDL)
         for col in ["created_by"]:
             try:
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -375,98 +344,6 @@ def delete_credential(user_id: int, provider: str) -> bool:
             return c.rowcount > 0
     except Exception as e:
         log.warning(f"Delete credential failed: {e}")
-        return False
-
-
-# ====== 云主机 CRUD ======
-
-def add_vm(user_id: int, name: str, host: str, ssh_user: str, ssh_password: str, port: int = 22) -> int | None:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT INTO user_vms (user_id, name, host, port, ssh_user, ssh_password) VALUES (?,?,?,?,?,?)",
-                      (user_id, name, host, port, ssh_user, ssh_password))
-            db.commit()
-            return c.lastrowid
-    except Exception as e:
-        log.warning(f"Add VM failed: {e}")
-        return None
-
-
-def get_vms(user_id: int) -> list[dict]:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, name, host, port, ssh_user, ssh_password, status FROM user_vms WHERE user_id=? ORDER BY id", (user_id,))
-        return [{"id": r[0], "name": r[1], "host": r[2], "port": r[3], "ssh_user": r[4], "ssh_password": r[5], "status": r[6]} for r in c.fetchall()]
-
-
-def update_vm_status(vm_id: int, status: str) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE user_vms SET status=? WHERE id=?", (status, vm_id))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Update VM status failed: {e}")
-        return False
-
-
-def delete_vm(vm_id: int) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM user_vm_repos WHERE vm_id=?", (vm_id,))
-            c.execute("DELETE FROM user_vms WHERE id=?", (vm_id,))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Delete VM failed: {e}")
-        return False
-
-
-def add_vm_repo(vm_id: int, repo_key: str, deploy_dir: str = "", service_name: str = "", branch: str = "master") -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO user_vm_repos (vm_id, repo_key, deploy_dir, service_name, branch) VALUES (?,?,?,?,?)",
-                      (vm_id, repo_key, deploy_dir, service_name, branch))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Add VM repo failed: {e}")
-        return False
-
-
-def get_vm_repos(vm_id: int) -> list[dict]:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT repo_key, deploy_dir, service_name, branch FROM user_vm_repos WHERE vm_id=?", (vm_id,))
-        return [{"repo_key": r[0], "deploy_dir": r[1], "service_name": r[2], "branch": r[3]} for r in c.fetchall()]
-
-
-def delete_vm_repo(vm_id: int, repo_key: str) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM user_vm_repos WHERE vm_id=? AND repo_key=?", (vm_id, repo_key))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Delete VM repo failed: {e}")
-        return False
-
-
-def clear_vm_repos(vm_id: int) -> bool:
-    """清除指定云主机的所有仓库映射"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM user_vm_repos WHERE vm_id=?", (vm_id,))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Clear VM repos failed: {e}")
         return False
 
 
@@ -604,7 +481,6 @@ def _migrate_repo_key_tables():
         _REPO_KEY_TABLES = (
             "events", "event_skipped", "devops_agent_session", "tasks",
             "chat_conversations", "chat_agent_session", "repo_im_group_binding",
-            "user_vm_repos",
         )
         for _tbl in _REPO_KEY_TABLES:
             try:
@@ -689,8 +565,6 @@ def init_db():
             except Exception:
                 pass
         db.execute(_CREDENTIALS_DDL)
-        db.execute(_VMS_DDL)
-        db.execute(_VM_REPOS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
         # repo_key 统一整改迁移（managed_repos 去 user_id + user_repos 加前缀/is_join）
@@ -820,10 +694,6 @@ def init_db():
             db.commit()
         except Exception as e:
             log.warning(f"Migrate user_accounts deprecated fields failed: {e}")
-        try:
-            db.execute("ALTER TABLE user_vms ADD COLUMN status TEXT DEFAULT ''")
-        except Exception:
-            pass
         # 收敛 user_accounts：移除废弃列（须在所有读取迁移之后执行）
         try:
             c = db.cursor()
@@ -1640,16 +1510,17 @@ init_user_repos_table()
 
 # ====== Agent Runtimes 缓存表 ======
 
-def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = ""):
+def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """[兼容别名] 见 save_agent_runtimes"""
-    return save_agent_runtimes(agents, scope, owner_id)
+    return save_agent_runtimes(agents, scope, owner_id, host_name)
 
 
-def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = ""):
+def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """批量写入 agent runtimes 缓存（scope: global/repo/user）
 
-    幂等 upsert：按 name+scope+owner_id 匹配，存在则更新（保留 id），不存在才插入。
+    幂等 upsert：按 name+scope+owner_id+host_name 匹配，存在则更新（保留 id），不存在才插入。
     保证跨刷新 id 稳定，供各表 runtime_id 引用。
+    host_name：本机直连引擎（credential_id=0）归属的主控机 hostname，区分多台主控机。
     """
     with db_lock:
         c = db.cursor()
@@ -1662,7 +1533,7 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             _detail = a.get("local_skills_detail")
             _detail_json = json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
             # 仅操作本机未绑定凭据的行（credential_id=0）；凭据绑定行由边端 register 独占管理
-            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0", (name, scope, owner_id))
+            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 AND host_name=?", (name, scope, owner_id, host_name))
             row = c.fetchone()
             if row:
                 c.execute(
@@ -1680,11 +1551,11 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                 if not a.get("installed"):
                     continue
                 c.execute(
-                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result, host_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (name, a.get("display_name", name),
                      1, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
-                     a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json)
+                     a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json, host_name)
                 )
                 # 本机引擎首次创建时补写默认 "all" 标签到 engine_capabilities
                 _new_rid = c.lastrowid
@@ -1704,7 +1575,7 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
         current_names = [(a.get("name", "") or "").strip().lower() for a in agents if a.get("name")]
         if current_names:
             placeholders = ",".join("?" for _ in current_names)
-            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND lower(name) NOT IN ({placeholders})", (scope, owner_id, *current_names))
+            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND host_name=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, host_name, *current_names))
         db.commit()
 
 
@@ -1722,9 +1593,9 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     with db_lock:
         c = db.cursor()
         if scope is None:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags FROM agent_runtimes ORDER BY name")
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name FROM agent_runtimes ORDER BY name")
         else:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
              "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
@@ -1732,7 +1603,8 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
              "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13],
              "local_skills": json.loads(r[14] or "[]") if r[14] else [],
              "skill_scan_result": json.loads(r[15] or "[]") if r[15] else [],
-             "agent_tags": json.loads(r[16] or '["all"]') if r[16] else ["all"]}
+             "agent_tags": json.loads(r[16] or '["all"]') if r[16] else ["all"],
+             "host_name": r[17] or ""}
             for r in c.fetchall()
         ]
 

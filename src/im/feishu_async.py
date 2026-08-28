@@ -273,6 +273,12 @@ class FeishuAsync:
         try:
             async with session.post(url, json=payload, headers=headers) as resp:
                 data = await resp.json()
+                _code = data.get("code", 0)
+                if _code != 0:
+                    ctx.metrics.messages_failed += 1
+                    ctx.metrics.last_error = f"reply_text api code={_code}: {data.get('msg','')}"
+                    log.warning(f"[{ctx.name}] reply_text api error: code={_code} msg={data.get('msg','')} msg_id={message_id}")
+                    return ""
                 reply_id = data.get("data", {}).get("message_id", "")
                 ctx.metrics.messages_sent += 1
                 log.debug(f"[{ctx.name}] reply_text: {text[:50]}")
@@ -303,6 +309,12 @@ class FeishuAsync:
         try:
             async with session.post(url, json=payload, headers=headers) as resp:
                 data = await resp.json()
+                _code = data.get("code", 0)
+                if _code != 0:
+                    ctx.metrics.messages_failed += 1
+                    ctx.metrics.last_error = f"reply_card api code={_code}: {data.get('msg','')}"
+                    log.warning(f"[{ctx.name}] reply_card api error: code={_code} msg={data.get('msg','')} msg_id={message_id}")
+                    return ""
                 reply_id = data.get("data", {}).get("message_id", "")
                 ctx.metrics.messages_sent += 1
                 log.debug(f"[{ctx.name}] reply_card: {text[:50]}")

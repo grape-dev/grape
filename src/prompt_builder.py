@@ -485,6 +485,30 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     parts.append(_build_history_file_guide(repo_key, account, runtime_id))
     parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else "")))
 
+    # 子任务/多任务模式上下文注入
+    _issue_id = evt.get("issue_id", "")
+    if _issue_id and repo_key:
+        try:
+            from src.api.session_store import get_parent_issue, is_subtask_mode_enabled
+            _parent = get_parent_issue(repo_key, _issue_id)
+            if _parent:
+                parts.append(
+                    f"\n## 子任务上下文\n"
+                    f"本 Issue 是父任务 {_parent} 的子任务。\n"
+                    f"父任务已完成需求澄清和方案设计，你不需要重复澄清。\n"
+                    f"{'VOD Agent：请直接 A2A 交办 Issue Agent（payload: is_subtask=true, parent_issue=' + _parent + '）。' if agent_type == 'vod' else ''}\n"
+                    f"{'Issue Agent：请跳过方案设计，直接从父 Issue body 中提取本子任务的目标和验收标准，生成精简 Spec 后 A2A 交办 coding。' if agent_type == 'issue' else ''}"
+                )
+            elif is_subtask_mode_enabled(repo_key, _issue_id):
+                parts.append(
+                    f"\n## 多任务模式\n"
+                    f"本任务启用了多任务模式（[multi-task-mode]）。\n"
+                    f"{'VOD Agent：正常澄清需求后 A2A 交办 Issue Agent，payload 中增加 is_subtask_mode=true。' if agent_type == 'vod' else ''}\n"
+                    f"{'Issue Agent：方案设计后评估可拆分性，创建子 Issue（每个 body 含父任务链接），更新父 Issue body 子任务列表。不 A2A coding——子 Issue 创建后 webhook 自动触发流水线。' if agent_type == 'issue' else ''}"
+                )
+        except Exception:
+            pass
+
     if skills:
         # 技能路径占位符：worker 替换为随任务下发的物化目录；direct 由 executor 替换为服务端 SKILLS_DIR
         _sp = f"{{{{SKILL_DIR}}}}/{skills[0]}/SKILL.md"

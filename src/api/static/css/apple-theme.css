@@ -68,6 +68,15 @@
 }
 [data-theme="apple"] ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.25); }
 
+/* 日志框（黑底）滚动条：使用亮色，避免黑底黑滚动条不可见 */
+[data-theme="apple"] #tlBody::-webkit-scrollbar { width: 6px; }
+[data-theme="apple"] #tlBody::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
+[data-theme="apple"] #tlBody::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.25);
+  border-radius: 3px;
+}
+[data-theme="apple"] #tlBody::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.4); }
+
 /* ── 3. Login Screen ── */
 [data-theme="apple"] .ln {
   background: linear-gradient(180deg, #1d1d1f 0%, #000000 100%);

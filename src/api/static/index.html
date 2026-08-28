@@ -44,7 +44,8 @@
 <div class="sb-sel"><select id="repoSelect" onchange="app.switchRepo(this.value)"><option value="" data-i18n="app.repo.select">选择仓库...</option></select></div>
 <div class="sb-nav">
 <div class="grp" data-i18n="app.sidebar.workspace">工作区</div>
-<a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span><span data-i18n="app.nav.dashboard">仪表盘</span></a>
+<a id="nav-tasks" onclick="app.nav('tasks')"><span class="ic">📋</span><span data-i18n="app.nav.tasks">任务中心</span></a>
+<a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span><span data-i18n="app.nav.scene_center">场景中心</span></a>
 <a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">▶</span><span data-i18n="app.nav.pipeline">流水线</span></a>
 
 <div class="grp" data-i18n="app.sidebar.devops_agents">DevOps 助手</div>
@@ -60,7 +61,6 @@
 
 <div class="grp" data-i18n="app.sidebar.account">账户</div>
 <a id="nav-chat" onclick="app.nav('chat')"><span class="ic">☎</span><span data-i18n="app.nav.chat">Chat Agent</span></a>
-<a id="nav-tasks" onclick="app.nav('tasks')"><span class="ic">📋</span><span data-i18n="app.nav.tasks">任务中心</span></a>
 
 <div class="grp" data-i18n="app.sidebar.settings">设置</div>
 <a id="nav-settings-credentials" onclick="app.nav('settings','credentials')"><span class="ic">⚙</span><span data-i18n="app.nav.settings">通用设置</span></a>
@@ -91,8 +91,8 @@
 <script src="/static/js/vendor/qrcode.min.js?v=1"></script>
 <script src="/static/js/api.js?v=14"></script>
 <script src="/static/js/pages/dashboard.js?v=11"></script>
-<script src="/static/js/pages/pipeline.js?v=23"></script>
-<script src="/static/js/pages/agents.js?v=20"></script>
+<script src="/static/js/pages/pipeline.js?v=26"></script>
+<script src="/static/js/pages/agents.js?v=21"></script>
 <script src="/static/js/pages/events.js?v=35"></script>
 <script src="/static/js/pages/chat.js?v=20"></script>
 <script src="/static/js/pages/repos.js?v=28"></script>

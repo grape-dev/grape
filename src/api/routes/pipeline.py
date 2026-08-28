@@ -64,7 +64,17 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         return None
 
     title = issue_events[0].get("title", "") or issue_id
-    # 优先从 tasks 表获取 Issue 真实标题（event title 常为 issue_opened 等类型名）
+    # 优先从 tasks 表获取 Issue 真实标题（event title 常为 issue_opened 等类型名或 A2A 占位标题）
+    _EVENT_TYPE_NAMES = {
+        "issue_opened", "issue_updated", "issue_comment", "issue_labeled",
+        "issue_closed", "push", "tag_created", "release_created",
+        "pull_request_opened", "pull_request_updated", "pull_request_merged",
+        "note_hook_pr", "vod_signal", "a2a_event", "build_start", "build_failure",
+        "deploy_start", "deploy_failure", "deploy_finish",
+    }
+    def _is_placeholder(t):
+        """判断 title 是否为占位符（事件类型名或 A2A 占位标题），不是 Issue 真实标题"""
+        return not t or t in _EVENT_TYPE_NAMES or t.startswith("A2A:") or t.startswith("A2A (订阅):")
     try:
         from src.session_manager import db as _db, db_lock as _dl
         _iss_num = int(str(issue_id).lstrip("#"))
@@ -72,10 +82,61 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
             _c = _db.cursor()
             _c.execute("SELECT title FROM tasks WHERE repo_key=? AND issue_number=?", (repo_key, _iss_num))
             _t = _c.fetchone()
-            if _t and _t[0]:
+            if _t and _t[0] and not _is_placeholder(_t[0]):
                 title = _t[0]
     except Exception:
         pass
+    # events 表中找一条非占位符标题做兜底
+    if _is_placeholder(title):
+        for _e in issue_events:
+            _et = _e.get("title", "") or ""
+            if not _is_placeholder(_et):
+                title = _et
+                break
+    # payload 兜底：events title 都是占位符 → 从 issue_opened 事件的 payload 中提取真实标题
+    if _is_placeholder(title):
+        import json as _json
+        for _e in issue_events:
+            if _e.get("event_type") != "issue_opened":
+                continue
+            _pl = _e.get("payload", "")
+            if isinstance(_pl, str):
+                try:
+                    _pl = _json.loads(_pl)
+                except Exception:
+                    _pl = {}
+            if not isinstance(_pl, dict):
+                continue
+            _obj = _pl.get("object_attributes", {})
+            _iss = _pl.get("issue", {})
+            _pt = ""
+            if isinstance(_obj, dict):
+                _pt = _obj.get("title", "") or ""
+            if not _pt and isinstance(_iss, dict):
+                _pt = _iss.get("title", "") or ""
+            if _pt and not _is_placeholder(_pt):
+                title = _pt
+                break
+    # GitCode API 兜底：tasks/events/payload 都没真实标题 → 调 API 获取并回写 tasks 表
+    if _is_placeholder(title):
+        try:
+            _iss_num_api = int(str(issue_id).lstrip("#"))
+            from src.api.event_pipeline import _fetch_issue_title_via_api
+            _api_title = _fetch_issue_title_via_api(repo_key, issue_id)
+            if _api_title:
+                title = _api_title
+                # 回写 tasks 表（后续不再调 API）
+                try:
+                    from src.session_manager import db as _db2, db_lock as _dl2
+                    with _dl2:
+                        _c2 = _db2.cursor()
+                        _c2.execute("UPDATE tasks SET title=? WHERE repo_key=? AND issue_number=? AND (title='' OR title IS NULL)",
+                                    (_api_title, repo_key, _iss_num_api))
+                        _db2.commit()
+                except Exception:
+                    pass
+        except Exception:
+            pass
     stages = []
     stage_statuses = []
 
@@ -161,6 +222,9 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         if d and isinstance(d, (int, float)):
             total_duration += d
 
+    # 父任务 ID（子任务场景，issue_state.parent_issue_id）
+    parent_issue_id = (_st.get("parent_issue_id") if _st else "") or ""
+
     return {
         "issue_id": issue_id,
         "title": title,
@@ -175,6 +239,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         "current_owner": current_owner,
         "event_count": len(issue_events),
         "duration": round(total_duration, 1) if total_duration > 0 else None,
+        "parent_issue_id": parent_issue_id,
     }
 
 
@@ -218,14 +283,16 @@ async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_u
     ]
 
     issue_ids = list(dict.fromkeys(e["issue_id"] for e in events if e["issue_id"]))
-    pipelines = [_get_issue_pipeline(repo_key, iid, events) for iid in issue_ids]
+    # 预建 issue_id → events 列表索引（避免 _get_issue_pipeline 内部反复遍历全量 events）
+    _events_by_issue = {}
+    for e in events:
+        _events_by_issue.setdefault(e["issue_id"], []).append(e)
+    pipelines = [_get_issue_pipeline(repo_key, iid, _events_by_issue.get(iid, [])) for iid in issue_ids]
     pipelines = [p for p in pipelines if p is not None]
 
-    # 按 Issue 最新活动倒序：最新的 issue 排最前（原为 issue 首次出现顺序，最早 issue 恒在前）
-    # 用每个 issue 的最新 event seq 作为排序键（seq 单调递增，最新 seq = 最新活动）
-    def _latest_seq(p):
-        return max((e["seq"] for e in events if e["issue_id"] == p["issue_id"]), default=0)
-    pipelines.sort(key=_latest_seq, reverse=True)
+    # 按 Issue 最新活动倒序：用预建索引中的最大 seq 排序（O(N)，避免反复遍历全量 events）
+    _max_seq_cache = {iid: max((e["seq"] for e in evts), default=0) for iid, evts in _events_by_issue.items()}
+    pipelines.sort(key=lambda p: _max_seq_cache.get(p["issue_id"], 0), reverse=True)
 
     # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，
     # 不维护 issue_agent_session.status 双份记账，避免状态漂移

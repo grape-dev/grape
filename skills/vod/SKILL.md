@@ -119,6 +119,22 @@ Content-Type: application/json
 - 交办后 Issue 进入 `issue` 阶段
 - ⚠️ **重复 A2A 检查（必须做）**：A2A 前先看 prompt 中的 Issue Pipeline 信息，如果当前 Issue 的 pipeline 中**已包含 `issue:a2a_event`**（即前一个 VOD 或其他 agent 已经 A2A 给了 Issue Agent），**不要重复 A2A**——只发评论回复即可，避免创建重复的 Issue Agent / Coding task。
 
+#### B7 多任务模式识别
+
+检查 Issue body 或 prompt 上下文是否包含 `[multi-task-mode]` 标记或「多任务模式」上下文：
+- **是**：正常澄清需求后 A2A 交办 Issue Agent，payload 中增加 `is_subtask_mode: true`
+  - Issue Agent 将根据方案拆分为子任务
+  - VOD 不需要额外处理，正常走澄清 → A2A 流程
+- **否**：正常流程
+
+#### B8 子任务快速通道
+
+检查 prompt 上下文是否包含「子任务上下文」（Issue body 含「## 父任务」+ Issue 链接，或 prompt 注入了 parent_issue）：
+- **是子任务**：跳过需求澄清（父任务已澄清），直接 A2A 交办 Issue Agent
+  - A2A payload 中增加 `is_subtask: true, parent_issue: "#20"`
+  - Issue Agent 将跳过方案设计，直接基于父任务 Spec 生成子任务 Spec → A2A coding
+- **否**：正常流程
+
 ## 需求引导漏斗规则（A3/B4 通用）
 
 见 `references/requirement-elicit-guide.md` §二：
