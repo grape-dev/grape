@@ -884,3 +884,89 @@ api.js 用 `const BASE = '/api'` 绝对路径，不管用户在 `/` 还是 `/en/
 if path.startswith("api/") or path.startswith("static/"):
     raise HTTPException(status_code=404)
 ```
+
+### OAuth 回调语言前缀方案修正（2026-08-27）
+
+#### 原方案问题
+
+原方案 A（前端 init 跳转）：OAuth 回调后跳到 `/?token=xxx`，前端 init() 检测 grapeLang=en 再跳 `/en/?token=xxx` → 多一次页面刷新 → 闪动 + 慢。
+
+#### 修正方案：OAuth state 带语言（方案 C）
+
+把语言偏好存在 OAuth state 里，后端回调时直接跳正确 URL，不多一次刷新。
+
+#### 完整链路
+
+```
+1. 前端点"GitCode 登录" → API.get('/auth/login/gitcode?lang=en')
+2. 后端把 lang=en 存到 OAuth state → save_oauth_state(state, "gitcode", {"lang": "en"})
+3. 用户在 GitCode 授权
+4. GitCode 回调 → GET /api/auth/callback/gitcode?code=xxx&state=xxx
+5. 后端 validate_oauth_state 拿到 state_data → 取 lang=en
+6. 后端 RedirectResponse(f"/en/?token=xxx")  ← 直接跳正确 URL
+7. 前端 init() → 检测 token → replaceState 保留 /en 前缀
+```
+
+#### 改动清单
+
+**前端 oauthLogin()：**
+```javascript
+function oauthLogin() {
+  const lang = localStorage.getItem('grapeLang') || 'zh';
+  API.get('/auth/login/gitcode?lang=' + lang)
+    .then(d => { if (d.redirect_url) window.location.href = d.redirect_url; })
+    .catch(e => showToast(I18N.t('app.login.oauth_not_configured')));
+}
+```
+
+**后端 gitcode_oauth_login()：**
+```python
+@router.get("/login/gitcode")
+async def gitcode_oauth_login(request: Request, lang: str = "zh"):
+    # ... 现有逻辑 ...
+    # 把 lang 存到 OAuth state
+    user_db.save_oauth_state(state, "gitcode", {"lang": lang})
+    # ... 返回授权 URL ...
+```
+
+**后端 gitcode_oauth_callback()：**
+```python
+@router.get("/callback/gitcode")
+async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = ""):
+    # ... 现有逻辑 ...
+    state_data = user_db.validate_oauth_state(state, "gitcode")
+    # 从 state 取语言偏好
+    lang = "zh"
+    if state_data and isinstance(state_data, dict):
+        lang = state_data.get("lang", "zh")
+    prefix = f"/{lang}" if lang != "zh" else ""
+    # ... 换 token / 创建用户 / 签 JWT ...
+    resp = RedirectResponse(url=f"{prefix}/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}", status_code=302)
+    _set_refresh_cookie(resp, jwt_refresh_token)
+    return resp
+```
+
+**前端 init() replaceState：**
+```javascript
+if (window.history.replaceState) {
+  const lang = I18N.getLang();
+  const prefix = lang === 'en' ? '/en' : '';
+  window.history.replaceState(null, '', prefix + '/');
+}
+```
+
+#### 场景验证
+
+| 场景 | 前端传 lang | 后端跳转 | 结果 |
+|------|:---:|------|:---:|
+| 首次登录（未选语言） | zh | `/?token=xxx` | 中文 ✅ |
+| 中文用户重新登录 | zh | `/?token=xxx` | 中文 ✅ |
+| 英文用户重新登录 | en | `/en/?token=xxx` | 英文 ✅ |
+| 英文用户首次登录后选英文 | zh → 选英文后刷新 | `/en/#dash` | 英文 ✅ |
+
+#### 优点
+
+1. 无额外页面刷新——后端直接跳正确 URL
+2. 不依赖 localStorage——语言偏好在 OAuth state 里传递
+3. 改动小——auth.py 加 3 行 + 前端 oauthLogin 改 1 行 + init replaceState 改 1 行
+4. 首次登录用户没有 lang 参数 → 默认 zh → 跳 / → 正确
