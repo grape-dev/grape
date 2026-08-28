@@ -22,18 +22,18 @@ function renderDashboard(data) {
       <div style="font-size:26px">■</div>
       <div class="f1">
         <div style="font-size:14px;font-weight:600">${owner}/${name} <span class="tg tg-c" style="font-size:9px;vertical-align:middle">${role === 'Maintainer' ? I18N.t('dashboard.maintainer') : I18N.t('dashboard.member')}</span></div>
-        <div class="ts t2">${role === 'Maintainer' ? I18N.t('dashboard.maintainer') : I18N.t('dashboard.member')} · ★ ' + I18N.t('dashboard.main_branch') + ' · ' + I18N.t('dashboard.webhook_ok') + '</div>
+        <div class="ts t2">${role === 'Maintainer' ? I18N.t('dashboard.maintainer') : I18N.t('dashboard.member')} · ★ ${I18N.t('dashboard.main_branch')} · ${I18N.t('dashboard.webhook_ok')}</div>
       </div>
       <div class="stats">
-        <div class="st"><div class="v" style="color:var(--g)">${m.auto_resolution || '98.5'}%</div><div class="l">' + I18N.t('dashboard.auto_resolution') + '</div></div>
-        <div class="st"><div class="v" style="color:var(--a)">${m.total_events || '47'}</div><div class="l">' + I18N.t('dashboard.events_week') + '</div></div>
-        <div class="st"><div class="v" style="color:var(--pu)">${m.avg_response || '12'}s</div><div class="l">' + I18N.t('dashboard.avg_response') + '</div></div>
+        <div class="st"><div class="v" style="color:var(--g)">${m.auto_resolution || '98.5'}%</div><div class="l">${I18N.t('dashboard.auto_resolution')}</div></div>
+        <div class="st"><div class="v" style="color:var(--a)">${m.total_events || '47'}</div><div class="l">${I18N.t('dashboard.events_week')}</div></div>
+        <div class="st"><div class="v" style="color:var(--pu)">${m.avg_response || '12'}s</div><div class="l">${I18N.t('dashboard.avg_response')}</div></div>
       </div>
     </div>
   </div>`;
 
   html += `<div class="cd">
-    <div class="cd-h"><h2>' + I18N.t('dashboard.workflow_title') + '</h2>
+    <div class="cd-h"><h2>${I18N.t('dashboard.workflow_title')}</h2>
       <div class="flex fc gap8">
         <span class="ts t2">${I18N.t('dashboard.dev_scene')}</span>
         <select id="sceneSelect" style="padding:4px 8px;border-radius:6px;border:1px solid var(--b);font-size:11px;background:var(--bg);color:var(--t);outline:none">${sceneOpts}</select>
@@ -111,13 +111,13 @@ function renderDashboard(data) {
   html += `</div>
     <div class="cl" onclick="app.nav('chat')">
       <div class="ci">☎</div>
-      <div class="cx"><h4>' + I18N.t('dashboard.chat_title') + '</h4><p>' + I18N.t('dashboard.chat_desc') + '</p></div>
+      <div class="cx"><h4>${I18N.t('dashboard.chat_title')}</h4><p>${I18N.t('dashboard.chat_desc')}</p></div>
       <div class="flex gap6"><span class="tg tg-ch">↔ VOD</span><span class="tg tg-ch">↔ Issue</span><span class="tg tg-ch">↔ Coding</span><span class="tg tg-ch">↔ QA</span><span class="tg tg-ch">↔ SRE</span></div>
     </div>
   </div>`;
 
   if (act.length > 0) {
-    html += `<div class="cd"><div class="cd-h"><h2>' + I18N.t('dashboard.recent_activity') + '</h2><span class="ts t3">${owner}/${name} · ' + I18N.t('dashboard.last_24h') + '</span></div>`;
+    html += `<div class="cd"><div class="cd-h"><h2>${I18N.t('dashboard.recent_activity')}</h2><span class="ts t3">${owner}/${name} · ${I18N.t('dashboard.last_24h')}</span></div>`;
     act.forEach(ev => {
       const colorClass = ev.agent_type === 'vod' ? 'tg-v' : ev.agent_type === 'issue' ? 'tg-i' : ev.agent_type === 'coding' ? 'tg-c' : ev.agent_type === 'qa' ? 'tg-q' : ev.agent_type === 'sre' ? 'tg-s' : 'tg-d';
       html += `<div class="ai" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
