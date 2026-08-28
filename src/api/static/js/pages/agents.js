@@ -176,6 +176,17 @@ function loadCfgOptions() {
   }
 }
 
+function _agentTypeDisplay(type, meta) {
+  var tKey = 'agents.type.' + type + '.name';
+  var tVal = I18N.t(tKey);
+  return tVal !== tKey ? tVal : (meta.display_name || type);
+}
+function _agentTypeDesc(type, meta) {
+  var tKey = 'agents.type.' + type + '.desc';
+  var tVal = I18N.t(tKey);
+  return tVal !== tKey ? tVal : (meta.description || '');
+}
+
 function renderAgent(name, data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -230,7 +241,7 @@ function renderAgent(name, data) {
 <div class="cd" style="background:${meta.bg || 'var(--bg)'};border-color:${meta.color || 'var(--b)'}33">
   <div class="flex fc gap12">
     <div style="width:44px;height:44px;border-radius:10px;background:${meta.color || 'var(--b)'}22;display:flex;align-items:center;justify-content:center;font-size:20px">${meta.icon || '?'}</div>
-    <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${meta.display_name || name}</h2><div class="ts t2">${meta.description || ''}</div>${engineBadge}</div>
+    <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${_agentTypeDisplay(name, meta)}</h2><div class="ts t2">${_agentTypeDesc(name, meta)}</div>${engineBadge}</div>
     <div class="flex gap6"><button id="btnConfigure" class="bt bt-o bt-s" onclick="toggleAgentCfg(true)">Configure</button><button id="btnEvents" class="bt bt-p bt-s" onclick="toggleAgentCfg(false)">Events</button></div>
   </div>
 </div>

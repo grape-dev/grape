@@ -65,5 +65,27 @@
   },
   "toast": {
     "select_repo_first": "请先选择仓库"
+  },
+  "type": {
+    "vod": {
+      "name": "VOD Agent",
+      "desc": "从开发者声音中收集反馈、聚类分析共性、提炼价值、自动创建 Issue"
+    },
+    "issue": {
+      "name": "Issue Agent",
+      "desc": "Issue 分类、标签、指派、A2A 触发 Coding Agent"
+    },
+    "coding": {
+      "name": "Coding Agent",
+      "desc": "代码实现、PR 创建、自我审查（通过 A2A 由 Issue/QA Agent 触发，不直接感知 PR 事件）"
+    },
+    "qa": {
+      "name": "QA Agent",
+      "desc": "代码审查、自动化测试、功能验证、安全检查（由 Coding Agent 通过 A2A 事件触发审查，不直接监听 PR 事件）"
+    },
+    "sre": {
+      "name": "SRE Agent",
+      "desc": "构建部署、发布管理、监控运维、故障排查"
+    }
   }
 }

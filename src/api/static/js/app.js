@@ -271,7 +271,7 @@ function loadAgentTypes() {
       title.textContent = 'Pipeline';
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
-      title.textContent = (_AGENT_TYPES[view] && _AGENT_TYPES[view].display_name) || view;
+      title.textContent = (_AGENT_TYPES[view] && _AGENT_TYPES[view].display_name) ? (function(){var k='agents.type.'+view+'.name';var v=I18N.t(k);return v!==k?v:_AGENT_TYPES[view].display_name;})() : view;
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'event') {
       title.textContent = 'Event Detail';

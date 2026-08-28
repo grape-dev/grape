@@ -65,5 +65,27 @@
   },
   "toast": {
     "select_repo_first": "Please select a repository first"
+  },
+  "type": {
+    "vod": {
+      "name": "VOD Agent",
+      "desc": "Collect feedback from developer voices, cluster analysis, extract value, auto-create Issues"
+    },
+    "issue": {
+      "name": "Issue Agent",
+      "desc": "Issue classification, labeling, assignment, A2A triggers Coding Agent"
+    },
+    "coding": {
+      "name": "Coding Agent",
+      "desc": "Code implementation, PR creation, self-review (triggered via A2A by Issue/QA Agent, does not directly sense PR events)"
+    },
+    "qa": {
+      "name": "QA Agent",
+      "desc": "Code review, automated testing, functional verification, security checks (triggered by Coding Agent via A2A events, does not directly listen to PR events)"
+    },
+    "sre": {
+      "name": "SRE Agent",
+      "desc": "Build deployment, release management, monitoring, troubleshooting"
+    }
   }
 }

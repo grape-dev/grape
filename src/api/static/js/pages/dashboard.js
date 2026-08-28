@@ -86,7 +86,7 @@ function renderDashboard(data) {
       title="${enabled ? I18N.t('dashboard.toggle_disable') : I18N.t('dashboard.toggle_enable')}">${enabled ? I18N.t('dashboard.toggle_on') : I18N.t('dashboard.toggle_off')}</button>`;
 
     html += `<div class="nd" style="border-top:3px solid ${borderColor};${enabled ? '' : 'opacity:0.55'}" onclick="app.nav('${at}')">
-      <div class="nh"><span class="n" style="background:${dotColor}"></span><h4>${meta.display_name || agentLabels[i]}</h4>${toggleBtn}</div>
+      <div class="nh"><span class="n" style="background:${dotColor}"></span><h4>${(function(){var k='agents.type.'+at+'.name';var v=I18N.t(k);return v!==k?v:(meta.display_name||agentLabels[i]);})()}</h4>${toggleBtn}</div>
       ${enabled ? `<div class="nds">${desc}</div>` : '<div class="t2" style="font-size:10px;margin:4px 0">' + I18N.t('dashboard.agent_disabled') + '</div>'}
       <div class="nm"><span class="ml">Backend</span>${backendHtml}</div>
       <div class="ns"><span class="d" style="background:${statusDot}"></span>${nsText}</div>
