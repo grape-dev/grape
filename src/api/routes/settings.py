@@ -353,6 +353,10 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
     # 过滤掉没有承载引擎的 device（如主控机在 runtime_credentials 中的心跳记录，
     # credential_id=130/131 但无 agent_runtimes 行绑定 → runtimes 为空）
     devices = [d for d in devices if d.get("runtimes")]
+    # 本机设备的 health：至少一个引擎 online 则设备 online（主控机本身不会掉线）
+    for d in devices:
+        if (d.get("credential_id") or 0) == 0:
+            d["health"] = "online" if any(rt.get("health") == "online" for rt in d.get("runtimes", [])) else "offline"
     return {"runtimes": visible_runtimes, "devices": devices}
 
 
