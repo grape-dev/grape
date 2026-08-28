@@ -1069,3 +1069,86 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
 | 英文用户重新登录 | grapeLang=en | `/en/?token=xxx` | 英文 ✅ |
 | 英文用户首次登录后选英文 | 无 cookie → 选英文后写 cookie | `/en/#dash` | 英文 ✅ |
 | 跨标签页 | cookie 共享 | — | ✅ |
+
+### cookie 方案深度分析确认（2026-08-27）
+
+#### 确认合理——3 个调整点
+
+1. **callback 用 request.cookies.get()** — FastAPI Request 对象自带 .cookies 属性，比手动解析 cookie header 干净
+2. **grapeLang cookie 不需要 httponly/secure/samesite** — 前端 JS 要读写，普通 cookie 即可
+3. **不改 oauthLogin / gitcode_oauth_login / password_login / logout** — 只有 OAuth callback 需要读 cookie
+
+#### 最终改动只有 3 处
+
+**i18n.js setLang — 双写：**
+```javascript
+async function setLang(lang) {
+  if (!SUPPORTED.includes(lang)) lang = DEFAULT_LANG;
+  // localStorage（前端读）
+  localStorage.setItem(STORAGE_KEY, lang);
+  // cookie（后端 OAuth callback 读 + 跨标签页共享）
+  const secure = location.protocol === 'https:' ? ';Secure' : '';
+  document.cookie = STORAGE_KEY + '=' + encodeURIComponent(lang) + ';max-age=31536000;path=/' + secure;
+  _lang = lang;
+  await loadPacks(lang);
+  _applyUrlLang(lang);
+}
+```
+
+**auth.py callback — 读 cookie 跳转：**
+```python
+@router.get("/callback/gitcode")
+async def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    # ... 现有逻辑（验证 state / 换 token / 创建用户 / 签 JWT）...
+
+    # 从 cookie 读语言偏好
+    lang = request.cookies.get("grapeLang", "zh")
+    prefix = f"/{lang}" if lang != "zh" else ""
+
+    resp = RedirectResponse(
+        url=f"{prefix}/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}",
+        status_code=302
+    )
+    _set_refresh_cookie(resp, jwt_refresh_token)
+    return resp
+```
+
+**app.js init replaceState — 保留前缀：**
+```javascript
+if (window.history.replaceState) {
+  const lang = I18N.getLang();
+  const prefix = lang === 'en' ? '/en' : '';
+  window.history.replaceState(null, '', prefix + '/');
+}
+```
+
+#### 不需要改的
+
+| 函数 | 原因 |
+|------|------|
+| oauthLogin | 不需要传 lang 参数 |
+| gitcode_oauth_login | 不需要存 lang 到 state |
+| password_login | 返回 JSON 不跳转，前端 init 处理 |
+| logout | 不清 grapeLang cookie（语言偏好保持） |
+
+#### cookie 属性
+
+- key: grapeLang
+- value: zh / en
+- max-age: 31536000（1 年）
+- path: /
+- Secure: HTTPS 时加（开发环境 HTTP 不加）
+- 不设 httponly（前端 JS 要读写）
+- 不设 samesite（普通 cookie，浏览器顶层导航 302 回调会发送）
+
+#### 场景验证
+
+| 场景 | cookie | 后端跳转 | 结果 |
+|------|:---:|------|:---:|
+| 首次登录（未选语言） | 无 cookie | `/?token=xxx` | 中文 ✅ |
+| 中文用户重新登录 | grapeLang=zh | `/?token=xxx` | 中文 ✅ |
+| 英文用户重新登录 | grapeLang=en | `/en/?token=xxx` | 英文 ✅ |
+| 英文用户首次登录后选英文 | 无 → 选英文后写 cookie | `/en/#dash` | 英文 ✅ |
+| 密码登录 | 不走后端跳转 | 前端 init 处理 | ✅ |
+| 退出登录 | grapeLang cookie 不清 | 下次登录保持 | ✅ |
+| 跨标签页 | cookie 共享 | — | ✅ |
