@@ -1053,7 +1053,7 @@ function renderRuntimeTaskList(container, tasks, rtName) {
       <td class="ts"><b>${issueSeq}</b></td>
       <td><b>${t.agent_type || '-'}</b><br><span class="ts t3">${t.skill || '-'}</span></td>
       <td class="ts t3">${(t.repo_key || '').replace('gitcode:','').substring(0,20)}</td>
-      <td><span style="color:${statusColor[t.status] || 'var(--t3)'}">${statusIcon[t.status] || ''} ${t.status}</span></td>
+      <td><span style="color:${statusColor[t.status] || 'var(--t3)'}">${statusIcon[t.status] || ''} ${I18N.t('common.status.' + t.status) !== ('common.status.' + t.status) ? I18N.t('common.status.' + t.status) : t.status}</span></td>
       <td>${t.exit_code ?? '-'}</td>
       <td class="ts t3">${(t.created_at || '').substring(0,16)}</td>
     </tr>`;

@@ -27,7 +27,17 @@
   "none": "无",
   "select_all": "全选",
   "actions": "操作",
-  "status": "状态",
+  "status": {
+    "label": "状态",
+    "completed": "完成",
+    "failed": "失败",
+    "running": "运行中",
+    "queued": "排队中",
+    "dispatched": "已派发",
+    "cancelled": "已取消",
+    "pending": "待处理",
+    "timeout": "超时"
+  },
   "type": "类型",
   "name": "名称",
   "description": "描述",

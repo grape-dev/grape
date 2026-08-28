@@ -242,7 +242,7 @@ function openDeviceTasks(credId) {
     const statusIcon = { queued: '⏳', dispatched: '🔄', running: '🔄', completed: '✅', failed: '❌', cancelled: '⛔' };
     const rows = tasks.length ? tasks.map(t =>
       `<tr><td>${t.id}</td><td>${t.repo_key || ''}<br><span class="ts t2">${t.agent_type || ''} / ${t.skill || ''}</span></td>
-       <td>${statusIcon[t.status] || ''} ${t.status}</td><td>${t.exit_code ?? ''}</td><td class="ts t2">${(t.result_text || '').slice(0, 60)}</td></tr>`).join('')
+       <td>${statusIcon[t.status] || ''} ${I18N.t('common.status.' + t.status) !== ('common.status.' + t.status) ? I18N.t('common.status.' + t.status) : t.status}</td><td>${t.exit_code ?? ''}</td><td class="ts t2">${(t.result_text || '').slice(0, 60)}</td></tr>`).join('')
       : `<tr><td colspan="5" style="text-align:center;color:var(--t3)">${I18N.t('runtimes.empty.no_tasks')}</td></tr>`;
     const html = `<div class="cd" style="margin-top:12px">
       <h3 style="font-size:14px;margin-bottom:10px">${I18N.t('runtimes.credential.tasks_title', {id: credId})}</h3>

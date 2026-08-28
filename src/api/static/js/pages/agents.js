@@ -222,7 +222,7 @@ function renderAgent(name, data) {
           <td style="padding:8px 10px;font-size:10px;color:var(--t2)">${ev.actor ? '@'+ev.actor : '—'}</td>
           <td style="padding:8px 10px;text-align:center;font-size:10px;color:var(--t3)">${ev.duration ? ev.duration + 's' : '—'}</td>
           <td style="padding:8px 10px;font-size:10px;color:var(--t3);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-clamp:2;word-break:break-all">${ev.backend || '—'}</td>
-          <td style="padding:8px 10px;text-align:right"><span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}" style="font-size:10px;font-weight:600">${ev.status}</span></td>
+          <td style="padding:8px 10px;text-align:right"><span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}" style="font-size:10px;font-weight:600">${I18N.t('common.status.' + ev.status) !== ('common.status.' + ev.status) ? I18N.t('common.status.' + ev.status) : ev.status}</span></td>
         </tr>`;
         }).join('')}
       </tbody>
@@ -282,7 +282,7 @@ function renderAgent(name, data) {
     ${data.im && data.im.conversations && data.im.conversations.length > 0 ? `
     <div style="margin-top:8px">
       <span class="ts t3">${I18N.t('agents.config.bound_chats', {n: data.im.conversations.length})}</span>
-      ${data.im.conversations.map(c => `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--b)">${c.chat_name || c.chat_id} <span class="ts t3">${c.status}</span></div>`).join('')}
+      ${data.im.conversations.map(c => `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--b)">${c.chat_name || c.chat_id} <span class="ts t3">${I18N.t('common.status.' + c.status) !== ('common.status.' + c.status) ? I18N.t('common.status.' + c.status) : c.status}</span></div>`).join('')}
     </div>` : ''}
   </div>` : ''}
   <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">${I18N.t('common.save')}</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg(false)">${I18N.t('common.cancel')}</button></div>

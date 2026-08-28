@@ -27,7 +27,17 @@
   "none": "None",
   "select_all": "Select all",
   "actions": "Actions",
-  "status": "Status",
+  "status": {
+    "label": "Status",
+    "completed": "Completed",
+    "failed": "Failed",
+    "running": "Running",
+    "queued": "Queued",
+    "dispatched": "Dispatched",
+    "cancelled": "Cancelled",
+    "pending": "Pending",
+    "timeout": "Timeout"
+  },
   "type": "Type",
   "name": "Name",
   "description": "Description",
