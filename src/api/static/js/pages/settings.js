@@ -41,12 +41,12 @@ function renderSettings(tab) {
 `;
     }).catch(e => document.getElementById('sCredentials').innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}));
   } else if (current === 'notifications') {
-    html += `<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Notification Preferences</h3>
-      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> Issue events</label>
-      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> PR events</label>
-      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox"> Build failures</label>
-      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> Release events</label>
-      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox"> VOD signals</label>
+    html += `<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.notifications.title')}</h3>
+      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> ${I18N.t('settings.notifications.issue_events')}</label>
+      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> ${I18N.t('settings.notifications.pr_events')}</label>
+      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox"> ${I18N.t('settings.notifications.build_failures')}</label>
+      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> ${I18N.t('settings.notifications.release_events')}</label>
+      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox"> ${I18N.t('settings.notifications.vod_signals')}</label>
     </div></div>`;
     el.innerHTML = html;
   } else if (current === 'appearance') {

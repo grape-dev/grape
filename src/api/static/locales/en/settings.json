@@ -86,5 +86,13 @@
     "select_first": "Please select a scene",
     "applied": "Scene applied",
     "apply_failed": "Failed to apply scene: {{msg}}"
+  },
+  "notifications": {
+    "title": "Notification Preferences",
+    "issue_events": "Issue events",
+    "pr_events": "PR events",
+    "build_failures": "Build failures",
+    "release_events": "Release events",
+    "vod_signals": "VOD signals"
   }
 }

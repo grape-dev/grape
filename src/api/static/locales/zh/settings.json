@@ -86,5 +86,13 @@
     "select_first": "请选择一个场景",
     "applied": "场景已应用",
     "apply_failed": "应用场景失败: {{msg}}"
+  },
+  "notifications": {
+    "title": "通知偏好",
+    "issue_events": "Issue 事件",
+    "pr_events": "PR 事件",
+    "build_failures": "构建失败",
+    "release_events": "发布事件",
+    "vod_signals": "VOD 信号"
   }
 }
