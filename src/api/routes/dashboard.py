@@ -265,13 +265,14 @@ async def get_ops_overview(repo: str = ""):
             c.execute(
                 "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
                 "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, "
-                "rc.device_name, rc.status AS cred_status, ar.host_name "
+                "rc.device_name, rc.status AS cred_status, ar.host_name, "
+                "ar.probe_status, ar.probe_latency, ar.probe_last, ar.probe_error "
                 "FROM agent_runtimes ar "
                 "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id "
                 "ORDER BY ar.id"
             )
             for r in c.fetchall():
-                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcred_status, rhost = r
+                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcred_status, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error = r
                 # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）
                 if (cid or 0) > 0 and rcred_status == 'revoked':
                     continue
@@ -308,8 +309,16 @@ async def get_ops_overview(repo: str = ""):
                         health = "overload"
                 else:
                     health = base_health
-                # 引擎探测结果（每 10 分钟 CLI 测试对话）
-                _probe = _probe_results.get(rname or "", {})
+                # 引擎探测结果：本机用内存（engine_probe），远端用 DB（心跳上报）
+                if (cid or 0) == 0:
+                    _probe = _probe_results.get(rname or "", {})
+                else:
+                    _probe = {
+                        "status": rprobe_status or "pending",
+                        "latency": rprobe_latency or 0,
+                        "last_probe": rprobe_last or "",
+                        "error": rprobe_error or "",
+                    }
                 # 本机直连引擎的 device_name 用 host_name（区分多台主控机）
                 _dev_name = rdev or ""
                 if (cid or 0) == 0:

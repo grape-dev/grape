@@ -24,6 +24,98 @@ from src.config import log
 # Worker 日志内存缓冲区——收集最近 ERROR/WARNING 日志，心跳时上报给主控
 import collections as _collections
 import time as _time_mod
+import threading as _threading
+import subprocess as _subprocess
+import datetime as _datetime
+
+
+# ===== 引擎探测（worker 端，每 10 分钟对本机引擎发起 CLI 测试对话）=====
+
+_PROBE_COMMANDS = {
+    "opencode": ["opencode", "run", "hello"],
+    "hermes": ["hermes", "chat", "-q", "hello", "--yolo"],
+    "codearts": ["codearts", "run", "hello"],
+    "cursor": ["cursor", "run", "hello"],
+}
+_PROBE_TIMEOUT = 30
+_PROBE_INTERVAL = 600  # 10 分钟
+
+_worker_probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
+_worker_probe_lock = _threading.Lock()
+_worker_probe_thread = None
+_worker_probe_started = False
+
+
+def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
+    """对本机引擎发起 CLI 测试对话，返回探测结果。"""
+    cmd = _PROBE_COMMANDS.get(engine_name)
+    if not cmd:
+        return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
+    if cli_path:
+        cmd = [cli_path] + cmd[1:]
+    start = _time_mod.time()
+    try:
+        result = _subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=_PROBE_TIMEOUT, stdin=_subprocess.DEVNULL,
+        )
+        latency = round(_time_mod.time() - start, 1)
+        if result.returncode == 0:
+            return {"status": "ok", "latency": latency, "error": ""}
+        else:
+            err = (result.stderr or result.stdout or "").strip()[:200]
+            return {"status": "fail", "latency": latency, "error": f"exit={result.returncode}: {err}"}
+    except _subprocess.TimeoutExpired:
+        latency = round(_time_mod.time() - start, 1)
+        return {"status": "fail", "latency": latency, "error": f"timeout ({_PROBE_TIMEOUT}s)"}
+    except FileNotFoundError:
+        return {"status": "fail", "latency": 0, "error": "CLI not found"}
+    except Exception as e:
+        latency = round(_time_mod.time() - start, 1)
+        return {"status": "fail", "latency": latency, "error": str(e)[:200]}
+
+
+def _worker_probe_loop():
+    """后台探测循环：每 10 分钟对所有本机引擎发起测试对话。"""
+    global _worker_probe_started
+    while True:
+        try:
+            engines = _discover_local_runtimes()
+            for eng in engines:
+                if not eng.get("installed"):
+                    with _worker_probe_lock:
+                        _worker_probe_results[eng["name"]] = {
+                            "status": "skip", "latency": 0,
+                            "last_probe": _datetime.datetime.utcnow().isoformat() + "Z",
+                            "error": "not installed",
+                        }
+                    continue
+                log.info(f"worker engine probe: testing {eng['name']}...")
+                result = _probe_engine_worker(eng["name"], eng.get("cli_path", ""))
+                result["last_probe"] = _datetime.datetime.utcnow().isoformat() + "Z"
+                with _worker_probe_lock:
+                    _worker_probe_results[eng["name"]] = result
+                log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
+        except Exception as e:
+            log.warning(f"worker engine probe loop error: {e}")
+        _time_mod.sleep(_PROBE_INTERVAL)
+
+
+def _start_worker_probe():
+    """启动后台探测线程。"""
+    global _worker_probe_thread, _worker_probe_started
+    if _worker_probe_started:
+        return
+    _worker_probe_started = True
+    _worker_probe_thread = _threading.Thread(target=_worker_probe_loop, daemon=True, name="worker-engine-probe")
+    _worker_probe_thread.start()
+    log.info("Worker engine probe thread started (10min interval)")
+
+
+def _collect_worker_probe_results() -> dict:
+    """返回当前探测结果快照（供心跳上报）。"""
+    with _worker_probe_lock:
+        return dict(_worker_probe_results)
 
 
 def _collect_worker_metrics() -> dict:
@@ -981,6 +1073,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
     hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
     last_heartbeat = 0.0
+
+    # 启动 worker 引擎探测线程（每 10 分钟对本机引擎发起 CLI 测试对话）
+    _start_worker_probe()
     heartbeat_fail_streak = 0
     HEARTBEAT_FAIL_THRESHOLD = 3
     RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
@@ -1153,7 +1248,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             # 收集最近的 ERROR/WARNING 日志（从内存日志缓冲区）
             _recent_logs = _collect_recent_logs()
             _metrics = _collect_worker_metrics()
-            ok = await client.heartbeat(runtime_ids, log_lines=_recent_logs, metrics=_metrics)
+            _probe_results = _collect_worker_probe_results()
+            ok = await client.heartbeat(runtime_ids, log_lines=_recent_logs, metrics=_metrics, probe_results=_probe_results)
             # ⚠️ heartbeat 返回值从 bool 改为 dict——判断逻辑调整
             # dict: None=网络错误 / {"status":"ok",...}=成功 / 其他=异常
             if ok is not None and ok.get("status") == "ok":
