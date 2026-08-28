@@ -1262,3 +1262,36 @@ i18n.js 检测 URL 有 /en → 加载英文语言包 → 英文页面
 ```
 
 三个一起修才能保证英文用户登录 → 刷新 → 始终英文。
+
+### pipeline scene_name 国际化修复（2026-08-28）
+
+#### 问题
+
+pipeline.js 第 191 行优先用后端返回的 `p.scene_name`（来自 configs/pipelines.json 的中文硬编码），导致英文模式下 scene 标签仍显示中文。
+
+链路：
+```
+configs/pipelines.json: scenes.blog-publish.name = "博客发布"（中文）
+  → 后端 get_pipeline_config() 返回 scene_name="博客发布"
+  → 前端 pipeline.js: p.scene_name || _sceneLabels[_sceneId]
+  → 优先用后端中文 scene_name，不用前端语言包翻译
+```
+
+#### 修复
+
+只改前端 pipeline.js 1 处——优先用前端语言包翻译，后端 scene_name 做 fallback：
+
+```javascript
+// 改前：优先用后端的 scene_name
+const sceneLabel = _sceneId ? (p.scene_name || _sceneLabels[_sceneId] || _sceneId) : '—';
+
+// 改后：优先用前端语言包，后端 scene_name 做 fallback
+const sceneLabel = _sceneId ? (_sceneLabels[_sceneId] || p.scene_name || _sceneId) : '—';
+```
+
+#### 影响范围
+
+- 只改前端 pipeline.js 1 处
+- 后端不改——照常返回 scene_name
+- 如果语言包没有对应 key（比如新增 scene），回退用后端 scene_name
+- 不影响现有功能——中文模式语言包里 scene_default="通用开发" 和后端 scene_name="通用开发" 一样
