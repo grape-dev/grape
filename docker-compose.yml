@@ -8,6 +8,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./configs:/app/configs
+      # 官方技能由独立技能仓库构建期铺入宿主 ./skills（scripts/sync_skills.sh），卷挂载免重建镜像
+      - ./skills:/app/skills
     environment:
       - OAUTH_REDIRECT_URI=https://your-domain.com/api/auth/callback/gitcode
     restart: unless-stopped
