@@ -31,6 +31,7 @@ _probe_lock = threading.Lock()
 _probe_thread = None
 _probe_started = False
 _last_probe_time: float = 0  # 上次探测完成的时间戳（用于防抖）
+_probing: bool = False  # 是否正在探测中（防止并发探测）
 
 
 def _probe_engine(engine_name: str, cli_path: str) -> dict:
@@ -71,7 +72,13 @@ def _probe_engine(engine_name: str, cli_path: str) -> dict:
 
 def _probe_loop():
     """后台探测循环：每 10 分钟对所有本机引擎发起测试对话。"""
+    global _last_probe_time, _probing
     while True:
+        if _probing:
+            time.sleep(_PROBE_INTERVAL)
+            continue
+        with _probe_lock:
+            _probing = True
         try:
             from src.agent.executor import discover_backends
             engines = discover_backends()
@@ -90,10 +97,12 @@ def _probe_loop():
                 with _probe_lock:
                     _probe_results[eng["name"]] = result
                 log.info(f"engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
-            global _last_probe_time
             _last_probe_time = time.time()
         except Exception as e:
             log.warning(f"engine probe loop error: {e}")
+        finally:
+            with _probe_lock:
+                _probing = False
         time.sleep(_PROBE_INTERVAL)
 
 
@@ -133,22 +142,30 @@ def probe_now(engine_name: str = "") -> dict:
 
 def probe_all_now():
     """手动触发所有引擎探测（同步阻塞，各引擎串行探测）。"""
-    global _last_probe_time
-    from src.agent.executor import discover_backends
-    engines = discover_backends()
-    for eng in engines:
-        if not eng.get("installed"):
+    global _last_probe_time, _probing
+    if _probing:
+        return  # 已有探测在进行，直接返回
+    with _probe_lock:
+        _probing = True
+    try:
+        from src.agent.executor import discover_backends
+        engines = discover_backends()
+        for eng in engines:
+            if not eng.get("installed"):
+                with _probe_lock:
+                    _probe_results[eng["name"]] = {
+                        "status": "skip", "latency": 0,
+                        "last_probe": datetime.now(timezone.utc).isoformat(),
+                        "error": "not installed",
+                    }
+                continue
+            log.info(f"engine probe (manual): testing {eng['name']}...")
+            result = _probe_engine(eng["name"], eng.get("cli_path", ""))
+            result["last_probe"] = datetime.now(timezone.utc).isoformat()
             with _probe_lock:
-                _probe_results[eng["name"]] = {
-                    "status": "skip", "latency": 0,
-                    "last_probe": datetime.now(timezone.utc).isoformat(),
-                    "error": "not installed",
-                }
-            continue
-        log.info(f"engine probe (manual): testing {eng['name']}...")
-        result = _probe_engine(eng["name"], eng.get("cli_path", ""))
-        result["last_probe"] = datetime.now(timezone.utc).isoformat()
+                _probe_results[eng["name"]] = result
+            log.info(f"engine probe (manual): {eng['name']} -> {result['status']} ({result['latency']}s)")
+        _last_probe_time = time.time()
+    finally:
         with _probe_lock:
-            _probe_results[eng["name"]] = result
-        log.info(f"engine probe (manual): {eng['name']} -> {result['status']} ({result['latency']}s)")
-    _last_probe_time = time.time()
+            _probing = False
