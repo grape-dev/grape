@@ -1196,3 +1196,69 @@ i18n.js 用独立版本号（`i18n.js?v=1`），语言包 JSON 用同一版本�
 | 30 | 密码登录语言处理 | ✅ 不走后端跳转 |
 
 无新遗漏。四轮检查共 30 项，方案完备。
+
+### 三个必须修的问题详解（2026-08-27）
+
+#### 问题 1：后端新增 /en 路由
+
+现在后端只有 `@app.get("/")` 返回 index.html。英文模式下用户刷新页面，浏览器请求 `/en/` → 后端找不到 → 404。
+
+需要加 `/en` 路由也返回同一个 index.html：
+
+```
+http://domain/      → @app.get("/")      → index.html → i18n 检测无 /en → 中文
+http://domain/en/   → @app.get("/en")    → index.html → i18n 检测有 /en → 英文
+```
+
+返回的是同一个 index.html，区别只在前端 i18n.js 从 URL 检测语言。
+
+#### 问题 2：OAuth 回调读 cookie 带语言前缀
+
+用户选了英文后重新登录：
+
+```
+1. 用户选英文 → cookie 写入 grapeLang=en
+2. 用户退出登录（cookie grapeLang=en 不清）
+3. 用户点"GitCode 登录" → 跳转 GitCode 授权
+4. GitCode 授权完成 → 回调后端 /api/auth/callback/gitcode
+5. 后端签发 JWT → RedirectResponse 跳转
+
+现在后端硬编码跳 /：
+  RedirectResponse(url=f"/?token=xxx") → 中文页面 → 丢语言
+
+改为读 cookie 跳正确 URL：
+  lang = request.cookies.get("grapeLang", "zh") → 读到 en
+  RedirectResponse(url=f"/en/?token=xxx") → 英文页面 → 语言保持
+```
+
+#### 问题 3：replaceState 保留 /en 前缀
+
+OAuth 登录成功后，前端 init() 清 URL 里的 token 参数：
+
+```javascript
+// 现在：清 token 后直接跳到 / → 丢了 /en
+window.history.replaceState(null, '', '/');
+
+// 改为：清 token 但保留语言前缀
+const lang = I18N.getLang();  // → 'en'
+const prefix = lang === 'en' ? '/en' : '';
+window.history.replaceState(null, '', prefix + '/');
+```
+
+#### 三个问题的关联
+
+```
+用户选英文 → cookie + localStorage 写入 en
+  ↓
+用户重新登录 → GitCode 授权
+  ↓
+GitCode 回调后端 → 后端读 cookie → 跳 /en/?token=xxx     （问题 2）
+  ↓
+前端 init() → 存 token → 清 URL 参数但保留 /en 前缀        （问题 3）
+  ↓
+用户刷新页面 → 浏览器请求 /en/ → 后端 /en 路由返回 index.html  （问题 1）
+  ↓
+i18n.js 检测 URL 有 /en → 加载英文语言包 → 英文页面
+```
+
+三个一起修才能保证英文用户登录 → 刷新 → 始终英文。
