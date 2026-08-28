@@ -199,16 +199,26 @@ EOF
 if [ -n "$_PRESERVED_KEYS" ]; then
   printf '%s\n' "$_PRESERVED_KEYS" >> "$ENV_FILE"
 fi
-# opencode 模型 provider 引用 {env:HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY}（worker 侧 opencode.json）。
+# opencode 模型 provider 引用 {env:HERMES_CUSTOM_*}（worker 侧 opencode.json）。
 # worker 以 systemd/nohup 运行时无交互 shell 环境变量，安装时若环境存在该变量则一并写入，
-# 避免重装后 opencode 模型调用 401（2026-08-17 事故链之二）。key 值不硬编码进脚本，
-# 安装时通过环境变量传入：export HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY=xxx && curl ... | bash
-if [ -n "${HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY:-}" ]; then
-  # 去重：旧文件已有同名 key 则不重复写
-  if ! grep -q '^HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY=' "$ENV_FILE" 2>/dev/null; then
-    printf 'HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY=%s\n' "$HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY" >> "$ENV_FILE"
+# 避免重装后 opencode 模型调用 401（2026-08-17 事故链之二 / 2026-08-28 OPENGW key 缺失）。
+# key 值不硬编码进脚本，安装时通过环境变量传入：
+#   export HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY=xxx HERMES_CUSTOM_OPENGW_CLOUDDEVELOPER_CLUB_API_KEY=yyy && curl ... | bash
+# 支持的 key 列表（新增 key 只需在此数组追加一行）：
+_HERMES_API_KEYS=(
+  HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY
+  HERMES_CUSTOM_OPENGW_CLOUDDEVELOPER_CLUB_API_KEY
+)
+for _key_name in "${_HERMES_API_KEYS[@]}"; do
+  _key_value="${!_key_name:-}"
+  if [ -n "$_key_value" ]; then
+    # 去重：旧文件已有同名 key 则不重复写
+    if ! grep -q "^${_key_name}=" "$ENV_FILE" 2>/dev/null; then
+      printf '%s=%s\n' "$_key_name" "$_key_value" >> "$ENV_FILE"
+    fi
   fi
-fi
+done
+unset _key_name _key_value
 chmod 600 "$ENV_FILE" 2>/dev/null || true
 log "接入配置已写入 $ENV_FILE（token + 主控地址）"
 

@@ -274,6 +274,11 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
         if cid == 0:
             rt["owner"] = cred["owner_name"]
             rt["scope"] = rt.get("scope", cred["scope"]) or "global"
+            # 本机直连引擎的 worker_name/device_name 用 host_name（区分多台主控机）
+            _hn = rt.get("host_name") or ""
+            if _hn:
+                rt["worker_name"] = _hn
+                rt["worker_ip"] = "127.0.0.1"
         else:
             rt["owner"] = cred["owner_name"]
             rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
@@ -318,25 +323,36 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
                             "owner": cred.get("owner_name", ""),
                             "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
                             "runtimes": runtimes})
-    # 本机直连引擎（credential_id=0，本地 runtime）：始终追加到设备列表。
-    # 旧逻辑用 `if not devices:` 哨兵，但存在远端 worker credential 时
-    # 本机引擎会被整体隐藏（mlc 反馈 2026-08-19）。
+    # 本机直连引擎（credential_id=0，本地 runtime）：按 host_name 分组为设备列表。
+    # 多台主控机各自探测的引擎行通过 host_name 区分，每台主控机一个设备条目。
+    # 主控机在 runtime_credentials 中的心跳记录（如 grape-main-001/007）没有绑定引擎，
+    # 上面循环会创建空 runtimes 的 device 条目——这里统一过滤掉。
+    _local_devices = {}  # host_name -> {runtimes: [...], scope, owner_id, ...}
     for rt in visible_runtimes:
         if (rt.get("credential_id") or 0) != 0:
             continue
-        devices.append({"credential_id": 0, "name": "本机 Runtime", "device_name": "本机",
-                        "credential_status": "active", "last_seen_at": None,
-                        "worker_ip": "", "scope": rt.get("scope") or "global", "owner": "",
-                        "owner_id": rt.get("owner_id", ""),  # 引擎所属用户 id，区分全局/个人
-                        "health": rt.get("health", "offline"),
-                        "runtimes": [{"id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
-                                      "healthy": rt.get("healthy", False),
-                                      "installed": rt.get("installed", False),
-                                      "instance_name": rt.get("instance_name", rt.get("name", "")),
-                                      "health": rt.get("health", "offline"),
-                                      "local_skills": rt.get("local_skills", []),
-                                      "skill_scan_result": rt.get("skill_scan_result", []),
-                                      "agent_tags": rt.get("agent_tags", ["all"])}]})
+        _hn = rt.get("host_name") or "本机"
+        if _hn not in _local_devices:
+            _local_devices[_hn] = {
+                "credential_id": 0, "name": _hn, "device_name": _hn,
+                "credential_status": "active", "last_seen_at": None,
+                "worker_ip": "127.0.0.1", "scope": rt.get("scope") or "global", "owner": "",
+                "owner_id": rt.get("owner_id", ""),
+                "health": rt.get("health", "offline"),
+                "runtimes": [],
+            }
+        _local_devices[_hn]["runtimes"].append({
+            "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
+            "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
+            "instance_name": rt.get("instance_name", rt.get("name", "")),
+            "health": rt.get("health", "offline"),
+            "local_skills": rt.get("local_skills", []),
+            "skill_scan_result": rt.get("skill_scan_result", []),
+            "agent_tags": rt.get("agent_tags", ["all"])})
+    devices.extend(_local_devices.values())
+    # 过滤掉没有承载引擎的 device（如主控机在 runtime_credentials 中的心跳记录，
+    # credential_id=130/131 但无 agent_runtimes 行绑定 → runtimes 为空）
+    devices = [d for d in devices if d.get("runtimes")]
     return {"runtimes": visible_runtimes, "devices": devices}
 
 
@@ -394,6 +410,8 @@ async def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
     from src.runtime.local_probe import probe_local_engines
     from src.runtime.agent import _scan_local_skills
     from src.user import db as user_db
+    import socket as _sock
+    _hostname = _sock.gethostname()
     discovered = discover_runtimes()
     results = probe_local_engines(discovered)
 
@@ -406,7 +424,7 @@ async def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
 
     # Only persist runtimes that are actually installed
     results = [r for r in results if r["installed"]]
-    user_db.save_agent_runtimes(results)
+    user_db.save_agent_runtimes(results, host_name=_hostname)
     return {"runtimes": results}
 
 # 兼容别名：旧路径 /backend-agents/refresh

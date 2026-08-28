@@ -169,8 +169,9 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     agent_tags TEXT DEFAULT '["all"]',
     repo_key TEXT DEFAULT NULL,          -- 关联项目 repo_key（注册时从凭据复制）
     worker_version TEXT DEFAULT '',      -- worker 自报版本号（心跳/兼容性检测，见 knowledge-obs-design）
+    host_name VARCHAR(191) DEFAULT '',   -- 本机直连引擎归属主控机 hostname（credential_id=0 时区分多台主控）
     updated_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (credential_id, name, scope, owner_id)
+    UNIQUE (credential_id, name, scope, owner_id, host_name)
 )
 """
 
@@ -1060,6 +1061,8 @@ def _migrate_tables():
         "ALTER TABLE agent_tasks ADD COLUMN knowledge_file_urls TEXT DEFAULT ''",
         # ===== knowledge-obs-design：agent_runtimes worker 版本自报 =====
         "ALTER TABLE agent_runtimes ADD COLUMN worker_version TEXT DEFAULT ''",
+        # ===== 多主控机：本机直连引擎按 host_name 区分（credential_id=0 不再全局唯一）=====
+        "ALTER TABLE agent_runtimes ADD COLUMN host_name VARCHAR(191) DEFAULT ''",
     ]
     for sql in migrations:
         try:

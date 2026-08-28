@@ -175,8 +175,8 @@ function table(headers, rows) {
 
 // ===== Tab: 概览 =====
 // 健康度 → 圆点/颜色映射（供 renderOverview 和 updateOverview 共享）
-const _OBS_HEALTH_DOT = { online: '🟢', idle: '⚪', normal: '🟢', busy: '🟡', overload: '🔴', recently_lost: '🟡', offline: '⚫', about_to_gc: '🔴' };
-const _OBS_HEALTH_COLOR = { online: 'var(--g)', idle: 'var(--t3)', normal: 'var(--g)', busy: 'var(--y)', overload: 'var(--r)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
+const _OBS_HEALTH_DOT = { online: '🟢', idle: '🟢', normal: '🟢', busy: '🟡', overload: '🔴', recently_lost: '🟡', offline: '⚫', about_to_gc: '🔴' };
+const _OBS_HEALTH_COLOR = { online: 'var(--g)', idle: 'var(--g)', normal: 'var(--g)', busy: 'var(--y)', overload: 'var(--r)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
 
 // 资源进度条（首次渲染时带 id，供后续局部更新）
 function _barHTML(label, pct, color, idPrefix) {
@@ -194,20 +194,26 @@ function renderOverview(ops, rt, mt) {
   const r = ops.runtimes || {};
   const w = ops.workers || {};
 
-  // Worker 卡片（带 id 供局部更新）
+  // Worker 卡片（带 id 供局部更新）— 按 device_name 排序保证位置稳定
   let workerCards = '';
-  const workers = w.list || [];
+  const workers = (w.list || []).slice().sort((a, b) => {
+    const na = (a.device_name || a.name || '').toLowerCase();
+    const nb = (b.device_name || b.name || '').toLowerCase();
+    return na < nb ? -1 : na > nb ? 1 : 0;
+  });
   if (workers.length === 0) {
-    workerCards = '<div class="ts t2" style="padding:12px">无远端 Worker（仅本机直连引擎）</div>';
+    workerCards = '<div class="ts t2" style="padding:12px">无 Worker</div>';
   } else {
     workers.forEach(wk => {
       const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
       const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
       const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
+      const isMain = wk.last_ip === '127.0.0.1' || (wk.name || '').startsWith('grape-main');
+      const mainTag = isMain ? '<span style="font-size:9px;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 6px;margin-left:4px">主控</span>' : '';
       workerCards += `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
-          <b style="font-size:13px">${wk.device_name || wk.name || 'Worker #' + wk.id}</b>
+          <b style="font-size:13px">${wk.device_name || wk.name || 'Worker #' + wk.id}</b>${mainTag}
           <span id="wk-${wid}-health" style="margin-left:auto;font-size:10px;color:${hc};font-weight:600">${wk.health}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:10px;color:var(--t3);margin-bottom:8px">

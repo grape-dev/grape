@@ -1640,16 +1640,17 @@ init_user_repos_table()
 
 # ====== Agent Runtimes 缓存表 ======
 
-def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = ""):
+def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """[兼容别名] 见 save_agent_runtimes"""
-    return save_agent_runtimes(agents, scope, owner_id)
+    return save_agent_runtimes(agents, scope, owner_id, host_name)
 
 
-def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = ""):
+def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """批量写入 agent runtimes 缓存（scope: global/repo/user）
 
-    幂等 upsert：按 name+scope+owner_id 匹配，存在则更新（保留 id），不存在才插入。
+    幂等 upsert：按 name+scope+owner_id+host_name 匹配，存在则更新（保留 id），不存在才插入。
     保证跨刷新 id 稳定，供各表 runtime_id 引用。
+    host_name：本机直连引擎（credential_id=0）归属的主控机 hostname，区分多台主控机。
     """
     with db_lock:
         c = db.cursor()
@@ -1662,7 +1663,7 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             _detail = a.get("local_skills_detail")
             _detail_json = json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
             # 仅操作本机未绑定凭据的行（credential_id=0）；凭据绑定行由边端 register 独占管理
-            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0", (name, scope, owner_id))
+            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 AND host_name=?", (name, scope, owner_id, host_name))
             row = c.fetchone()
             if row:
                 c.execute(
@@ -1680,11 +1681,11 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                 if not a.get("installed"):
                     continue
                 c.execute(
-                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result, host_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (name, a.get("display_name", name),
                      1, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
-                     a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json)
+                     a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json, host_name)
                 )
                 # 本机引擎首次创建时补写默认 "all" 标签到 engine_capabilities
                 _new_rid = c.lastrowid
@@ -1704,7 +1705,7 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
         current_names = [(a.get("name", "") or "").strip().lower() for a in agents if a.get("name")]
         if current_names:
             placeholders = ",".join("?" for _ in current_names)
-            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND lower(name) NOT IN ({placeholders})", (scope, owner_id, *current_names))
+            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND host_name=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, host_name, *current_names))
         db.commit()
 
 
@@ -1722,9 +1723,9 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     with db_lock:
         c = db.cursor()
         if scope is None:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags FROM agent_runtimes ORDER BY name")
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name FROM agent_runtimes ORDER BY name")
         else:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
              "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
@@ -1732,7 +1733,8 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
              "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13],
              "local_skills": json.loads(r[14] or "[]") if r[14] else [],
              "skill_scan_result": json.loads(r[15] or "[]") if r[15] else [],
-             "agent_tags": json.loads(r[16] or '["all"]') if r[16] else ["all"]}
+             "agent_tags": json.loads(r[16] or '["all"]') if r[16] else ["all"],
+             "host_name": r[17] or ""}
             for r in c.fetchall()
         ]
 

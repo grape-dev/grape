@@ -97,6 +97,14 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
         issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
     from src.repo_key import from_repo_key
 
+    # 获取 bot token（统一走 get_gitcode_token：devops_agent_session → managed_repos → 全局）
+    repo_gitcode_token = ""
+    try:
+        from src.user.db import get_gitcode_token
+        repo_gitcode_token = get_gitcode_token(repo_key=repo_key) or ""
+    except Exception as e:
+        log.warning(f"create_direct_task: get_gitcode_token failed: {e}")
+
     try:
         with db_lock:
             c = db.cursor()
@@ -105,7 +113,7 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
                 f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
                 (task_id, agent_session_id, engine_id, seq, issue_id, repo_key or "",
                  agent_type or "", skill_name or "", skill_id or 0,
-                 "", "", "", "", "", 0, "", "{}",
+                 "", "", "", "", "", 0, repo_gitcode_token or "", "{}",
                  "{}", "", "", "{}", "{}", "{}", 0, "", 0, "",
                  "queued", None, "", "", "", "{}", now, None, now)
             )

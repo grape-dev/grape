@@ -543,13 +543,14 @@ def claim(runtime_id) -> dict | None:
             # ---- 兜底回收（M1：dispatched 超时自动重排，防 worker 丢弃任务死循环）----
             # worker 端 max_concurrent 满时 claim 后可能丢弃任务（不 start 不释放），
             # 导致 dispatched 任务永久卡死、busy_slots 泄漏。这里在每次 claim 前
-            # 将超时(120s)未 start 的任务回池重排；attempts>=3 直接置 failed。
+            # 将超时未 start 的任务回池重排；attempts>=3 直接置 failed。
             try:
-                # 回收窗口 300s：hermes -z 冷启动+模型响应常 >120s 才产出首事件，
-                # 120s 会误杀执行中长任务（回收→重跑→attempts 累加 3 次 failed）。
+                # 回收窗口 600s：SRE 执行 terraform apply 等长命令可达 900s，
+                # 期间无事件产出→task_messages 无新增→活跃度检查失败→误回收重跑。
+                # 300s 窗口会误杀执行中长任务；600s 窗口让长命令有足够时间完成。
                 # worker 端 claim 后 task_start 置 running 可彻底规避；本窗口作为
-                # 不依赖 worker 端的兜底（真死任务 5 分钟内恢复重排）。
-                _stale = (datetime.now(timezone.utc) - timedelta(seconds=300)).isoformat()
+                # 不依赖 worker 端的兜底（真死任务 10 分钟内恢复重排）。
+                _stale = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
                 c.execute(
                     "SELECT id, runtime_id, event_seq FROM agent_tasks "
                     "WHERE status='dispatched' AND started_at < ? AND started_at IS NOT NULL",
@@ -558,10 +559,11 @@ def claim(runtime_id) -> dict | None:
                 _actually_recovered = []
                 for _tid, _rid, _seq in _stale_rows:
                     # 活跃度检查（2026-08-21 修复）：task_start 失败时 status 留在 dispatched
-                    # 但 agent 实际在跑（有 task_messages 产出）。查最近 60s 是否有消息，
+                    # 但 agent 实际在跑（有 task_messages 产出）。查最近 600s 是否有消息，
                     # 有则跳过回收——agent 活跃说明只是 task_start 回调丢了，不该重跑。
+                    # 600s 窗口兼容长命令（terraform apply 可达 900s 无事件产出）。
                     try:
-                        _active_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+                        _active_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
                         c.execute(
                             "SELECT 1 FROM task_messages WHERE task_id=? AND created_at > ? LIMIT 1",
                             (_tid, _active_cutoff))
@@ -635,6 +637,9 @@ def claim(runtime_id) -> dict | None:
             # 确定路由：① 定向任务（runtime_id=?）② 池任务（runtime_id=0 + pool_agent_type，
             # 该 agent_type 的引擎集合（devops_agent_runtime_binding）含本引擎即可领；
             # 回收逻辑会把 dispatched 超时任务归零转池任务，claim 必须兼容，否则永久死任务）
+            #
+            # 插件模式：广播任务只能走 claim_by_tag（标签匹配），legacy claim 不认领广播任务，
+            # 避免标签不匹配的机器通过兜底渠道抢到任务。
             c.execute("""
                 SELECT id FROM agent_tasks
                 WHERE runtime_id=? AND status='queued'
@@ -651,25 +656,32 @@ def claim(runtime_id) -> dict | None:
             """, (runtime_id,))
             row = c.fetchone()
             if not row:
-                c.execute("""
-                    SELECT id FROM agent_tasks
-                    WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued'
-                      AND pool_agent_type IN (
-                        SELECT b.agent_type FROM devops_agent_runtime_binding b
-                        WHERE b.runtime_id=? AND b.enabled=1
-                      )
-                      AND NOT EXISTS (
-                        SELECT 1 FROM agent_tasks a2
-                        WHERE a2.status IN ('dispatched','running')
-                          AND (
-                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
-                            OR
-                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                _is_plugin = False
+                try:
+                    from src.api.event_pipeline import is_plugin_mode
+                    _is_plugin = is_plugin_mode()
+                except Exception:
+                    pass
+                if not _is_plugin:
+                    c.execute("""
+                        SELECT id FROM agent_tasks
+                        WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued'
+                          AND pool_agent_type IN (
+                            SELECT b.agent_type FROM devops_agent_runtime_binding b
+                            WHERE b.runtime_id=? AND b.enabled=1
                           )
-                      )
-                    ORDER BY created_at ASC LIMIT 1
-                """, (runtime_id,))
-                row = c.fetchone()
+                          AND NOT EXISTS (
+                            SELECT 1 FROM agent_tasks a2
+                            WHERE a2.status IN ('dispatched','running')
+                              AND (
+                                (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                                OR
+                                (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                              )
+                          )
+                        ORDER BY created_at ASC LIMIT 1
+                    """, (runtime_id,))
+                    row = c.fetchone()
             if not row:
                 db.commit()
                 return None

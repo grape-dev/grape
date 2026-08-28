@@ -47,7 +47,7 @@ public class HealthCenterController {
         try {
             grapeJdbc.query("SELECT id, name, device_name, status, last_seen_at, last_ip, " +
                     "cpu_percent, memory_percent, disk_percent, load_avg, owner_name " +
-                    "FROM runtime_credentials WHERE name != '本机' ORDER BY id", rs -> {
+                    "FROM runtime_credentials ORDER BY id", rs -> {
                 Map<String, Object> w = new LinkedHashMap<>();
                 int wid = rs.getInt("id");
                 String wStatus = rs.getString("status");
