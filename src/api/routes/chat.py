@@ -363,8 +363,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     touch_conversation(conv_id)
     # web→飞书推送：该对话已被飞书接入时推送给用户（feishu-web-chat-unified-design.md §3.2）
     await _push_reply_to_feishu(conv, user, reply)
-    # Save opencode session ID for continuity
-    if new_runtime_session_id and not runtime_session_id:
+    # Save opencode session ID for continuity：恒回写新 session
+    # （旧值可能已过期（opencode 静默 EOF），必须用本次成功的新 session 覆盖）
+    if new_runtime_session_id:
         update_conversation(conv_id, runtime_session_id=new_runtime_session_id)
     return {"reply": reply, "conversation_id": conv_id}
 
@@ -420,7 +421,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         return StreamingResponse(
             iter([f"data: {json.dumps({'type': 'done', 'text': _reply, 'conversation_id': conv_id})}\n\n"]),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
@@ -463,7 +464,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             return StreamingResponse(
                 iter([f"data: {json.dumps({'type': 'done', 'text': _reply, 'conversation_id': conv_id})}\n\n"]),
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache"},
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
         # M2 D5 入队 + 轮询：任务由远端 RuntimeAgent claim 执行，SSE 以终态结果返回
         import json as _json
@@ -518,7 +519,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
     from src.runtime.executor import stream_agent
@@ -609,15 +610,16 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         touch_conversation(conv_id)
         # web→飞书推送（feishu-web-chat-unified-design.md §3.2）
         await _push_reply_to_feishu(conv, user, final_text)
-        # Save opencode session ID for continuity
-        if captured_session and not runtime_session_id:
+        # Save opencode session ID for continuity：恒回写新 session（覆盖可能过期的旧值）
+        if captured_session:
             update_conversation(conv_id, runtime_session_id=captured_session)
         yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no"},
     )
 
 
