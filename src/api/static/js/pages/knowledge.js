@@ -223,9 +223,9 @@ function renderKnowledgeDetail(d) {
         ${rendered || '<div class="ts t2">' + I18N.t('knowledge.empty') + '</div>'}
       </div>
       <div class="cd" style="padding:16px 20px;font-size:12px">
-        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">Knowledge Info</h3>
-        <div class="srow"><label>File</label><span>${fileLabel}</span></div>
-        <div class="srow"><label>Repo</label><span>${d.repo_key || ''}</span></div>
+        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">${I18N.t('knowledge.info_title')}</h3>
+        <div class="srow"><label>${I18N.t('knowledge.info_file')}</label><span>${fileLabel}</span></div>
+        <div class="srow"><label>${I18N.t('knowledge.info_repo')}</label><span>${d.repo_key || ''}</span></div>
       </div>
     </div>`;
 }
@@ -246,7 +246,7 @@ function showKnowledgeUpload() {
         <label style="cursor:pointer"><input type="radio" name="kScope" value="agent" onchange="toggleKnowledgeAgentSel()"> ${I18N.t('knowledge.tab_agent')}</label>
       </span>
     </div>
-    <div class="srow" style="margin-bottom:10px" id="knowledgeAgentRow" style="display:none"><label>Agent *</label>
+    <div class="srow" style="margin-bottom:10px" id="knowledgeAgentRow" style="display:none"><label>${I18N.t('knowledge.agent_label')}</label>
       <select id="knowledgeAgentType" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">
         <option value="">${I18N.t('knowledge.select_agent')}</option>
         <option value="vod">VOD Agent</option>

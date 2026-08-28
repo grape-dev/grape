@@ -93,5 +93,6 @@
     }
   },
   "btn_configure": "Configure",
-  "btn_events": "Events"
+  "btn_events": "Events",
+  "skill_label": "Skill"
 }

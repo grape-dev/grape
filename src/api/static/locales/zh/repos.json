@@ -79,5 +79,9 @@
     "success": "项目创建成功: {{name}}",
     "err_create_failed": "创建失败: {{msg}}",
     "err_check_failed": "检查失败: {{msg}}"
-  }
+  },
+  "brand_sub": "Agentic DevOps",
+  "repositories": "仓库",
+  "sync_from_gitcode": "从 GitCode 同步",
+  "hosted": "已托管"
 }

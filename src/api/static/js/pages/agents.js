@@ -257,7 +257,7 @@ function renderAgent(name, data) {
       </div>
     </div>
   </div>
-    <div class="srow" style="align-items:flex-start"><label>Skill</label>
+    <div class="srow" style="align-items:flex-start"><label>${I18N.t('agents.skill_label')}</label>
     <div style="flex:1;display:flex;gap:8px">
       <select class="cfg-skill-scope" onchange="_switchSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:7px 6px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--bg);outline:none">
         <option value="official">${I18N.t('agents.scope_short.global')}</option>

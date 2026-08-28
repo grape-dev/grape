@@ -85,5 +85,9 @@
   },
   "label": {
     "reference_docs": "📎 Reference Docs"
-  }
+  },
+  "info_title": "Skill Info",
+  "info_name": "Name",
+  "info_agent_type": "Agent Type",
+  "info_type": "Type"
 }

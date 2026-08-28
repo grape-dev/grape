@@ -15,7 +15,7 @@ function renderSelectionShell(tab, innerHtml) {
       <div class="lobby-brand">
         <img class="lobby-logo" src="/static/logo.png" alt="Grape">
         <span class="lobby-brand-name">Grape</span>
-        <span class="lobby-brand-sub">Agentic DevOps</span>
+        <span class="lobby-brand-sub">${I18N.t('repos.brand_sub')}</span>
       </div>
       <nav class="lobby-tabs">
         <a class="${tabCls('projects')}" onclick="switchSidebarTab('projects')">${I18N.t('repos.tab.projects')}</a>
@@ -152,11 +152,11 @@ function renderRepos() {
     const availableRepos = allRepos.filter(r => !r.is_joined && !r.is_hosted);
 
     let html = `<div class="flex fc jbtw" style="margin-bottom:20px">
-      <h2 style="font-size:15px;font-weight:600">Repositories</h2>
-      <button class="bt bt-p bt-s" onclick="syncRepos()">↻ Sync from GitCode</button>
+      <h2 style="font-size:15px;font-weight:600">${I18N.t('repos.repositories')}</h2>
+      <button class="bt bt-p bt-s" onclick="syncRepos()">↻ ${I18N.t('repos.sync_from_gitcode')}</button>
     </div>`;
 
-    html += `<div class="cd"><div class="cd-h"><h2>Hosted <span class="c">${managedRepos.length}</span></h2></div>`;
+    html += `<div class="cd"><div class="cd-h"><h2>${I18N.t('repos.hosted')} <span class="c">${managedRepos.length}</span></h2></div>`;
     if (managedRepos.length === 0) {
       html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_hosted') + '</div>';
     } else {

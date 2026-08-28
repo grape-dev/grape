@@ -39,5 +39,9 @@
   "upload_failed": "上传失败: {{msg}}",
   "delete_confirm": "确定删除该知识文档吗？",
   "deleted": "已删除",
-  "delete_failed": "删除失败: {{msg}}"
+  "delete_failed": "删除失败: {{msg}}",
+  "info_title": "知识信息",
+  "info_file": "文件",
+  "info_repo": "仓库",
+  "agent_label": "Agent *"
 }

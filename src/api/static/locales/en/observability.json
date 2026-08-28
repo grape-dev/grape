@@ -118,5 +118,10 @@
   "busy": "Busy",
   "overload": "Overload",
   "recently_lost": "Recently Lost",
-  "about_to_gc": "About to GC"
+  "about_to_gc": "About to GC",
+  "col_issue_seq": "Issue / Seq",
+  "col_agent_skill": "Agent / Skill",
+  "col_repo": "Repo",
+  "col_exit": "Exit",
+  "col_created": "Created"
 }

@@ -60,5 +60,13 @@
     "error_access_denied": "用户拒绝了授权请求",
     "error_unknown": "未知错误"
   },
-  "local_direct": "本机直连"
+  "local_direct": "本机直连",
+  "skill_label": "技能",
+  "app_id": "App ID",
+  "app_secret": "App Secret",
+  "agents": "Agent",
+  "thinking": "思考中...",
+  "backend": "后端",
+  "placeholder": "问我任何问题...",
+  "send": "发送"
 }

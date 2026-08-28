@@ -1045,7 +1045,7 @@ function renderRuntimeTaskList(container, tasks, rtName) {
   const statusIcon = { queued: '⏳', dispatched: '🔄', running: '🔄', completed: '✅', failed: '❌', cancelled: '⛔' };
   const statusColor = { queued: 'var(--y)', dispatched: 'var(--a)', running: 'var(--a)', completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)' };
   let html = `<div style="font-size:11px;color:var(--t3);margin-bottom:8px">${I18N.t('observability.task_list_hint', {name: rtName, count: tasks.length})}</div>`;
-  html += '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent / Skill</th><th>Repo</th><th>Status</th><th>Exit</th><th>Created</th></tr></thead><tbody>';
+  html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_issue_seq') + '</th><th>' + I18N.t('observability.col_agent_skill') + '</th><th>' + I18N.t('observability.col_repo') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_exit') + '</th><th>' + I18N.t('observability.col_created') + '</th></tr></thead><tbody>';
   tasks.forEach(t => {
     const issueSeq = (t.issue_id && t.event_seq) ? `${t.issue_id} #${t.event_seq}` : (t.event_seq ? `#${t.event_seq}` : t.id.substring(0,12));
     const infoEnc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:(t.repo_key||'').replace('gitcode:',''), created:t.created_at||''}));

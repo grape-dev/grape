@@ -118,5 +118,10 @@
   "busy": "繁忙",
   "overload": "过载",
   "recently_lost": "最近失联",
-  "about_to_gc": "即将回收"
+  "about_to_gc": "即将回收",
+  "col_issue_seq": "Issue / 序号",
+  "col_agent_skill": "Agent / 技能",
+  "col_repo": "仓库",
+  "col_exit": "退出码",
+  "col_created": "创建时间"
 }

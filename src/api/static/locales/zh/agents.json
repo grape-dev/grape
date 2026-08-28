@@ -93,5 +93,6 @@
     }
   },
   "btn_configure": "配置",
-  "btn_events": "事件"
+  "btn_events": "事件",
+  "skill_label": "技能"
 }

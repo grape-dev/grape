@@ -79,5 +79,9 @@
     "success": "Project created successfully: {{name}}",
     "err_create_failed": "Create failed: {{msg}}",
     "err_check_failed": "Check failed: {{msg}}"
-  }
+  },
+  "brand_sub": "Agentic DevOps",
+  "repositories": "Repositories",
+  "sync_from_gitcode": "Sync from GitCode",
+  "hosted": "Hosted"
 }

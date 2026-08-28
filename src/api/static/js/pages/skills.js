@@ -291,10 +291,10 @@ function renderSkillDetail(data) {
         <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${content || I18N.t('skills.empty.no_detail')}</pre>
       </div>
       <div class="cd" style="padding:16px 20px;font-size:12px">
-        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">Skill Info</h3>
-        <div class="srow"><label>Name</label><span>${data.name}</span></div>
-        <div class="srow"><label>Agent Type</label><span>${data.agent_type}</span></div>
-        <div class="srow"><label>Type</label><span>${SCOPE_NAMES[data.scope] || data.scope}</span></div>
+        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">${I18N.t('skills.info_title')}</h3>
+        <div class="srow"><label>${I18N.t('skills.info_name')}</label><span>${data.name}</span></div>
+        <div class="srow"><label>${I18N.t('skills.info_agent_type')}</label><span>${data.agent_type}</span></div>
+        <div class="srow"><label>${I18N.t('skills.info_type')}</label><span>${SCOPE_NAMES[data.scope] || data.scope}</span></div>
         <div class="srow"><label>Description</label><span class="t2">${data.description || '—'}</span></div>
       </div>
     </div>`;
@@ -384,10 +384,10 @@ function loadSubSkillDetail(pkgId, subName) {
           <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${safeContent || I18N.t('skills.huawei.no_detail')}</pre>
         </div>
         <div class="cd" style="padding:16px 20px;font-size:12px">
-          <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">Skill Info</h3>
-          <div class="srow"><label>Name</label><span>${data.name}</span></div>
-          <div class="srow"><label>Agent Type</label><span>${data.agent_type}</span></div>
-          <div class="srow"><label>Type</label><span>${SCOPE_NAMES[data.scope] || data.scope}</span></div>
+          <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">${I18N.t('skills.info_title')}</h3>
+          <div class="srow"><label>${I18N.t('skills.info_name')}</label><span>${data.name}</span></div>
+          <div class="srow"><label>${I18N.t('skills.info_agent_type')}</label><span>${data.agent_type}</span></div>
+          <div class="srow"><label>${I18N.t('skills.info_type')}</label><span>${SCOPE_NAMES[data.scope] || data.scope}</span></div>
           <div class="srow"><label>Description</label><span class="t2">${data.description || '—'}</span></div>
         </div>
       </div>`;

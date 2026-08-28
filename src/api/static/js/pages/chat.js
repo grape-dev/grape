@@ -42,7 +42,7 @@ function renderChat(openConvId) {
       <div class="chat-body" id="chatBody">
         <div style="text-align:center;color:var(--t3);padding:60px 20px">${I18N.t('common.loading')}</div>
       </div>
-      <div class="chat-in"><input id="chatInput" placeholder="Ask me anything..." style="flex:1"><button class="bt bt-p" onclick="sendChatStream()">Send</button></div>
+      <div class="chat-in"><input id="chatInput" placeholder="${I18N.t('chat.placeholder')}" style="flex:1"><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
     </div>
     <div class="chat-side" id="chatSide"></div>
   </div>`;
@@ -110,12 +110,12 @@ function loadSideConfig() {
     _chatSkillScope = (d.skill_scope === 'repo') ? 'repo' : (d.skill_scope === 'user') ? 'user' : 'official';
     side.innerHTML = `
       <div class="cd" style="padding:12px;font-size:11px">
-        <div style="font-weight:600;margin-bottom:8px">Backend</div>
+        <div style="font-weight:600;margin-bottom:8px">${I18N.t('chat.backend')}</div>
         <select id="cfgBackend" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${backendsOpts}</select>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span style="font-weight:600;flex-shrink:0">Skill</span>
+          <span style="font-weight:600;flex-shrink:0">${I18N.t('chat.skill_label')}</span>
           <select id="cfgSkillScope" onchange="_switchChatSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:5px 6px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg);outline:none">
             <option value="official">${I18N.t('chat.scope_short.global')}</option>
             <option value="repo">${I18N.t('chat.scope_short.repo')}</option>
@@ -133,15 +133,15 @@ function loadSideConfig() {
           <option value="wecom" ${d.im?.wecom?.app_id ? 'selected' : ''}>WeCom</option>
           <option value="dingtalk" ${d.im?.dingtalk?.app_id ? 'selected' : ''}>DingTalk</option>
         </select>
-        <div style="margin-bottom:4px"><span class="t3">App ID</span></div>
+        <div style="margin-bottom:4px"><span class="t3">${I18N.t('chat.app_id')}</span></div>
         <input id="cfgImAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:4px">
-        <div style="margin-bottom:4px"><span class="t3">App Secret</span></div>
+        <div style="margin-bottom:4px"><span class="t3">${I18N.t('chat.app_secret')}</span></div>
         <input id="cfgImSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
         <button class="bt bt-o bt-s" onclick="startFeishuOnboard('chat_bot')" style="width:100%;margin-bottom:6px">${I18N.t('chat.scan_config')}</button>
         <button class="bt bt-p bt-s" onclick="saveChatConfig()" style="width:100%">${I18N.t('common.save')}</button>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
-        <div style="font-weight:600;margin-bottom:6px">Agents</div>
+        <div style="font-weight:600;margin-bottom:6px">${I18N.t('chat.agents')}</div>
         <div class="chat-agents" id="chatAgents"></div>
       </div>`;
     // 设置 scope 下拉框初始值
@@ -304,7 +304,7 @@ function doSend(input, body) {
   input.value = '';
   body.innerHTML += '<div class="msg l">' + msg.replace(/</g,'&lt;') + '</div>';
   const tid = 't' + Date.now();
-  body.innerHTML += '<div class="msg r" id="' + tid + '">Thinking...</div>';
+  body.innerHTML += '<div class="msg r" id="' + tid + '">' + I18N.t('chat.thinking') + '</div>';
   body.scrollTop = body.scrollHeight;
 
   const repo = app.currentRepo();
