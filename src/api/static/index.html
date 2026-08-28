@@ -9,8 +9,8 @@
 <link rel="stylesheet" href="/static/css/apple-theme.css?v=6">
 <script>
 // Early theme application — prevents flash of unstyled content (FOUC).
-// Reads localStorage 'grapeTheme' before DOM renders.
-(function(){var t=localStorage.getItem('grapeTheme');if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
+// Reads localStorage 'grapeTheme' before DOM renders. Default: Liquid Glass (apple).
+(function(){var t=localStorage.getItem('grapeTheme');if(!t){t='apple';}if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
 </script>
 </head>
 <body>

@@ -15,14 +15,14 @@
     "cred_updated": "凭据已更新"
   },
   "appearance": {
-    "title": "界面风格 / Interface Theme",
+    "title": "界面风格",
     "theme_desc": "选择 Grape 控台的视觉风格。Liquid Glass 风格采用毛玻璃侧栏、系统字体栈、精致圆角和 pill 按钮，整体简洁通透。",
     "default": "Grape Default",
     "default_desc": "深色侧栏 + 浅色内容区",
     "apple": "Liquid Glass",
     "apple_desc": "毛玻璃侧栏 + 系统字体栈",
     "current": "✓ 当前",
-    "mode_title": "外观模式 / Appearance Mode",
+    "mode_title": "外观模式",
     "mode_desc": "Liquid Glass 风格专属 — 跟随系统自动切换深浅色。",
     "light": "☀️ 浅色",
     "auto": "🌓 跟随系统"
@@ -36,11 +36,11 @@
   "language": {
     "title": "国际化配置 / Language",
     "desc": "选择界面显示语言。切换后页面将自动刷新。",
-    "zh": "🇨🇳 中文",
-    "en": "🇺🇸 English"
+    "zh": "中文",
+    "en": "English"
   },
   "pipeline": {
-    "title": "管线模式 / Pipeline Mode",
+    "title": "管线模式",
     "plugin_desc": "插件模式：使用 pipelines.json + 标签广播抢占，任务按 pool_tag 入队，空闲引擎 claim_by_tag 竞争认领。",
     "traditional_desc": "传统模式：使用 agent-skill-mapping.json + runtime_id 定向绑定，任务直接分配到指定引擎。",
     "plugin": "插件模式 ✦",

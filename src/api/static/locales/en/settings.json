@@ -36,8 +36,8 @@
   "language": {
     "title": "Language",
     "desc": "Select the interface language. The page will refresh automatically.",
-    "zh": "🇨🇳 中文",
-    "en": "🇺🇸 English"
+    "zh": "中文",
+    "en": "English"
   },
   "pipeline": {
     "title": "Pipeline Mode",

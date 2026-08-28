@@ -476,7 +476,7 @@ function loadAgentTypes() {
 
   // ── Theme Management (Apple Developer Theme) ──
   // Theme: 'default' | 'apple'  Mode: 'light' | 'auto' (dark adapt)
-  function getTheme() { return localStorage.getItem('grapeTheme') || 'default'; }
+  function getTheme() { return localStorage.getItem('grapeTheme') || 'apple'; }
   function getThemeMode() { return localStorage.getItem('grapeThemeMode') || 'light'; }
 
   function setTheme(theme) {

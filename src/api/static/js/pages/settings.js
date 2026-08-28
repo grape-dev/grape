@@ -51,7 +51,7 @@ function renderSettings(tab) {
     el.innerHTML = html;
   } else if (current === 'appearance') {
     // Appearance / Theme selection
-    const curTheme = app.getTheme ? app.getTheme() : (localStorage.getItem('grapeTheme') || 'default');
+    const curTheme = app.getTheme ? app.getTheme() : (localStorage.getItem('grapeTheme') || 'apple');
     const curMode = app.getThemeMode ? app.getThemeMode() : (localStorage.getItem('grapeThemeMode') || 'light');
     const curLang = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
     html += `
