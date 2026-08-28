@@ -203,16 +203,16 @@ function renderOverview(ops, rt, mt) {
       workerCards += `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
-          <b style="font-size:13px">${wk.device_name || wk.name || 'Worker #' + wk.id}</b>
-          <span id="wk-${wid}-health" style="margin-left:auto;font-size:10px;color:${hc};font-weight:600">${wk.health}</span>
+          <b style="font-size:13px">${wk.device_name || wk.name || I18N.t('observability.worker_id', {id: wk.id})}</b>
+          <span id="wk-${wid}-health" style="margin-left:auto;font-size:10px;color:${hc};font-weight:600">${I18N.t("observability." + (wk.health || "offline"))}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:10px;color:var(--t3);margin-bottom:8px">
           <div>IP: ${wk.last_ip || '-'}</div>
           <div>${I18N.t('observability.heartbeat')}: <span id="wk-${wid}-seen">${(wk.last_seen_at||'-').substring(11,19)}</span></div>
         </div>
-        ${_barHTML('CPU', wk.cpu_percent, null, 'wk-' + wid + '-cpu')}
-        ${_barHTML('MEM', wk.memory_percent, null, 'wk-' + wid + '-mem')}
-        ${_barHTML('DISK', wk.disk_percent, null, 'wk-' + wid + '-disk')}
+        ${_barHTML(I18N.t('observability.cpu'), wk.cpu_percent, null, 'wk-' + wid + '-cpu')}
+        ${_barHTML(I18N.t('observability.mem'), wk.memory_percent, null, 'wk-' + wid + '-mem')}
+        ${_barHTML(I18N.t('observability.disk'), wk.disk_percent, null, 'wk-' + wid + '-disk')}
       </div>`;
     });
   }
@@ -289,7 +289,7 @@ function updateOverview(ops, rt, mt) {
       if (dotEl) dotEl.textContent = dot;
 
       const healthEl = document.getElementById('wk-' + wid + '-health');
-      if (healthEl) { healthEl.textContent = wk.health; healthEl.style.color = hc; }
+      if (healthEl) { healthEl.textContent = I18N.t("observability." + (wk.health || "offline")); healthEl.style.color = hc; }
 
       const seenEl = document.getElementById('wk-' + wid + '-seen');
       if (seenEl) seenEl.textContent = (wk.last_seen_at || '-').substring(11, 19);
@@ -318,7 +318,7 @@ function updateOverview(ops, rt, mt) {
       const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
 
       const healthEl = document.getElementById('rt-' + rid + '-health');
-      if (healthEl) { healthEl.textContent = rti.health; healthEl.style.color = hc; }
+      if (healthEl) { healthEl.textContent = I18N.t("observability." + (rti.health || "offline")); healthEl.style.color = hc; }
 
       const loadEl = document.getElementById('rt-' + rid + '-load');
       if (loadEl) { loadEl.textContent = running + '/' + maxC; loadEl.style.color = loadColor; }

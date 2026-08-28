@@ -109,5 +109,14 @@
   "failed": "Failed",
   "cancelled": "Cancelled",
   "in_progress": "In Progress",
-  "stuck": "Stuck"
+  "stuck": "Stuck",
+  "cpu": "CPU",
+  "mem": "MEM",
+  "disk": "DISK",
+  "worker_id": "Worker #{{id}}",
+  "idle": "Idle",
+  "busy": "Busy",
+  "overload": "Overload",
+  "recently_lost": "Recently Lost",
+  "about_to_gc": "About to GC"
 }

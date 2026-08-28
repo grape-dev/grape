@@ -109,5 +109,14 @@
   "failed": "失败",
   "cancelled": "已取消",
   "in_progress": "进行中",
-  "stuck": "卡住"
+  "stuck": "卡住",
+  "cpu": "CPU",
+  "mem": "内存",
+  "disk": "磁盘",
+  "worker_id": "Worker #{{id}}",
+  "idle": "空闲",
+  "busy": "繁忙",
+  "overload": "过载",
+  "recently_lost": "最近失联",
+  "about_to_gc": "即将回收"
 }
