@@ -144,7 +144,7 @@ class TestSend:
         with patch("src.api.routes.chat._get_chat_config", return_value={"backend": ""}):
             r = _client.post("/api/chat/send", json={"message": "hi"})
         assert r.status_code == 200
-        assert "No available engine" in r.json()["reply"]
+        assert "无可用引擎" in r.json()["reply"]
 
     def test_direct_mode_streams(self, _client):
         rid = _local_engine_id()
@@ -193,7 +193,7 @@ class TestSendStream:
         with patch("src.api.routes.chat._get_chat_config", return_value={"backend": ""}):
             r = _client.post("/api/chat/send/stream", json={"message": "hi", "conversation_id": cid})
         assert r.status_code == 200
-        assert "No available engine" in _sse_done_text(r.text)
+        assert "无可用引擎" in _sse_done_text(r.text)
 
     def test_direct_streams_events(self, _client):
         rid = _local_engine_id()

@@ -102,7 +102,7 @@ function loadSideConfig() {
     const feishu = d.im?.feishu || {};
     const backend = d.backend || {};
     const backendsOpts = (d._backends || []).map(b =>
-      `<option value="${b.name}" data-rid="${b.runtime_id || ''}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${(b.display_name || b.name) + (b.scope === 'local' ? ' (' + I18N.t('chat.local_direct') + ')' : '')}</option>`
+      `<option value="${b.name}" data-rid="${b.runtime_id || ''}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${b.display_name || b.name}</option>`
     ).join('') || '<option value="">Default</option>';
     const side = document.getElementById('chatSide');
     if (!side) return;

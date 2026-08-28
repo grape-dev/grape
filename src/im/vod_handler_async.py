@@ -326,7 +326,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     engine_id = pick_engine(repo_key, "vod", fallback_runtime_id=agent_session.get("runtime_id") or 0) or 0
     if not engine_id:
         log.warning(f"[VOD agent|repo:{repo_key}] no available engine, skip")
-        return "⚠️ No available engine (VOD Agent local direct or remote not configured), please configure in Agent settings."
+        return "⚠️ 无可用引擎（该仓库 VOD Agent 未配置本机直连或远端引擎），请先在 Agent 配置中设置引擎。"
     _be = engine_name(engine_id) or backend
     kind = runtime_execution_kind(engine_id)
     if kind != EXEC_MODE_DIRECT:
