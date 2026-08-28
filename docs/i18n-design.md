@@ -1388,3 +1388,37 @@ function _agentTypeDesc(type, meta) {
 - #4 repos description → 无法翻译（外部数据）
 - #5 skill display_name → 无法翻译（用户输入）
 - #6 templates description → 可翻译，二期处理
+
+### GitCode Repo 页面 tabs 标签栏修复（2026-08-28）
+
+#### 问题
+
+renderSettings() 函数不管传什么 tab，都先无条件渲染 tabs 标签栏（凭据/通知/外观/高级），然后再渲染对应内容。
+
+当用户点"GitCode 仓库"菜单时：
+  app.nav('settings','gitcode') → renderSettings('gitcode')
+  → 先渲染 tabs 标签栏（凭据/通知/外观/高级）
+  → 再渲染 gitcode 内容
+
+但 gitcode 不在 tabs 列表里，所以标签栏显示但没有选中项——GitCode 仓库是独立页面，不应该显示通用设置的 tabs。
+
+#### 根因
+
+从第一个版本 c229d0a5 开始就是这样的设计——tabs 在 if/else 链之前无条件渲染。dev 原有的设计缺陷，不是国际化引入的。
+
+#### 修复方案
+
+gitcode 页面跳过 tabs 标签栏渲染：
+
+```javascript
+// gitcode 是独立页面，不显示通用设置的 tabs 标签栏
+if (current !== 'gitcode') {
+  html += `<div class="stabs">...tabs...</div>`;
+}
+```
+
+#### 影响范围
+
+- 只改 settings.js 1 处
+- 不影响 credentials/notifications/appearance/advanced 页面
+- gitcode 页面不再显示多余的 tabs 标签栏
