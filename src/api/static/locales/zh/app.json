@@ -1,31 +1,31 @@
 {
   "nav": {
-    "dashboard": "Dashboard",
-    "pipeline": "Pipeline",
+    "dashboard": "仪表盘",
+    "pipeline": "流水线",
     "vod": "VOD Agent",
     "issue": "Issue Agent",
     "coding": "Coding Agent",
     "qa": "QA Agent",
     "sre": "SRE Agent",
     "chat": "Chat Agent",
-    "settings": "General Settings",
-    "skills": "DevOps Skills",
-    "knowledge": "Project Knowledge",
-    "runtimes": "Agent Runtimes",
-    "events": "Events",
-    "repos": "Repos",
-    "tasks": "Task Center",
+    "settings": "通用设置",
+    "skills": "DevOps 技能",
+    "knowledge": "项目知识库",
+    "runtimes": "Agent 运行时",
+    "events": "事件",
+    "repos": "仓库",
+    "tasks": "任务中心",
     "observability": "系统监控",
     "event_detail": "事件详情",
     "skill_detail": "技能详情",
     "sub_skill_detail": "子技能详情"
   },
   "sidebar": {
-    "workspace": "Workspace",
-    "devops_agents": "DevOps Agents",
-    "knowledge": "Knowledge",
-    "account": "Account",
-    "settings": "Settings"
+    "workspace": "工作区",
+    "devops_agents": "DevOps Agent",
+    "knowledge": "知识库",
+    "account": "账户",
+    "settings": "设置"
   },
   "login": {
     "gitcode_login": "使用 GitCode 登录",
@@ -50,11 +50,11 @@
     "lang_switched": "语言已切换"
   },
   "nav_groups": {
-    "workspace": "Workspace",
-    "devops_agents": "DevOps Agents",
-    "knowledge": "Knowledge",
-    "account": "Account",
-    "settings": "Settings"
+    "workspace": "工作区",
+    "devops_agents": "DevOps Agent",
+    "knowledge": "知识库",
+    "account": "账户",
+    "settings": "设置"
   },
   "loading": "加载中...",
   "select_repo": "选择仓库",
