@@ -4,15 +4,15 @@ let _tmplState = {categories: [], activeCat: 0, page: 0};
 function renderTemplates() {
   const d = document.getElementById('pageContent');
   if (!d) return;
-  renderSelectionShell('templates', '<div class="loading">加载中...</div>');
+  renderSelectionShell('templates', '<div class="loading">' + I18N.t('templates.loading') + '</div>');
   API.get('/project-templates').then(data => {
     const rawCats = data.categories || [];
     const allTemplates = rawCats.flatMap(cat =>
       (cat.templates || []).map(t => ({...t, _cat_name: cat.name, _cat_icon: cat.icon || '📦'}))
     );
     _tmplState.categories = [{
-      id: 'all', name: '全部', icon: '📋',
-      description: '浏览所有可用项目模板，一键创建你的 DevOps 项目',
+      id: 'all', name: I18N.t('templates.all'), icon: '📋',
+      description: I18N.t('templates.all_desc'),
       scene_id: 'default', page_size: 9, templates: allTemplates,
     }, ...rawCats];
     _tmplState.activeCat = 0;
@@ -20,7 +20,7 @@ function renderTemplates() {
     renderTemplateCategory();
   }).catch(e => {
     const c = document.getElementById('ptContent');
-    if (c) c.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    if (c) c.innerHTML = '<div class="error">' + I18N.t('templates.load_failed', {msg: e.message}) + '</div>';
   });
 }
 
@@ -66,7 +66,7 @@ function renderTemplateCategory() {
   const c = document.getElementById('ptContent');
   if (!c) return;
   if (!cats || cats.length === 0) {
-    c.innerHTML = '<div class="lobby-empty" style="border:none;background:none;color:var(--t2)"><div class="lobby-empty-ic">📦</div><h3>暂无项目模板</h3><p>等待管理员配置项目模板。</p></div>';
+    c.innerHTML = '<div class="lobby-empty" style="border:none;background:none;color:var(--t2)"><div class="lobby-empty-ic">📦</div><h3>' + I18N.t('templates.no_templates_title') + '</h3><p>' + I18N.t('templates.no_templates_desc') + '</p></div>';
     return;
   }
   const cat = cats[_tmplState.activeCat] || cats[0];
@@ -93,7 +93,7 @@ function renderTemplateCategory() {
     // 本地模板：来源标签；GitCode 模板：真实 star
     let statsHtml;
     if (t.source === 'local' || stats.show === false) {
-      statsHtml = `<div class="tmpl-card-stats"><span class="tmpl-stat tmpl-stat-local"><b>◎</b>本地自写 · 简洁示例</span></div>`;
+      statsHtml = `<div class="tmpl-card-stats"><span class="tmpl-stat tmpl-stat-local"><b>◎</b>${I18N.t('templates.local_source')}</span></div>`;
     } else {
       const stars = stats.stars || 0;
       const uses = stats.uses || Math.max(1, Math.round(stars * 3.2));
@@ -112,11 +112,11 @@ function renderTemplateCategory() {
       </div>
       ${catLine}
       <h3 title="${t.name}">${t.name}</h3>
-      <p>${t.description || '暂无描述'}</p>
+      <p>${t.description || I18N.t('templates.no_description')}</p>
       <div class="tmpl-tags">${tags}</div>
       ${statsHtml}
       <div class="tmpl-card-foot">
-        <button class="tmpl-btn" onclick="event.stopPropagation();createFromTemplate('${t.id}','${t.default_repo_name || t.id}')">一键创建 <span class="tmpl-btn-ar">→</span></button>
+        <button class="tmpl-btn" onclick="event.stopPropagation();createFromTemplate('${t.id}','${t.default_repo_name || t.id}')">${I18N.t('templates.create_from_template')} <span class="tmpl-btn-ar">→</span></button>
       </div>
     </div>`;
   }).join('');
@@ -140,19 +140,19 @@ function renderTemplateCategory() {
   // 创建新项目卡片（从零开始，不使用模板）
   const createCard = `<div class="lobby-card lobby-card-add" onclick="openCreateRepoModal()">
     <div class="lobby-card-plus">＋</div>
-    <h3>创建新项目</h3>
-    <p>在系统内直接新建 GitCode 项目，从零开始搭建你的 DevOps 流水线。</p>
+    <h3>${I18N.t('templates.create_new_project')}</h3>
+    <p>${I18N.t('templates.create_new_project_desc')}</p>
   </div>`;
 
   c.innerHTML = `
     <div class="tmpl-hero tmpl-hero-${scCls}">
       <div class="lobby-eyebrow"><i></i>TEMPLATE GALLERY<i></i></div>
       <h1 class="lobby-title">${cat.icon || '📦'} <span>${cat.name}</span></h1>
-      <p class="lobby-sub">${cat.description || '选择一个模板，快速创建你的 DevOps 项目。'}</p>
+      <p class="lobby-sub">${cat.description || I18N.t('templates.default_desc')}</p>
       <div class="lobby-stats-inline">
-        <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${totalAll}</b><span>模板总数</span></div>
-        <div class="lobby-stat"><span class="lobby-stat-ic">▦</span><b>${allT.length}</b><span>当前分类</span></div>
-        <div class="lobby-stat"><span class="lobby-stat-ic">⬡</span><b>${realCats.length}</b><span>分类</span></div>
+        <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${totalAll}</b><span>${I18N.t('templates.stat_total')}</span></div>
+        <div class="lobby-stat"><span class="lobby-stat-ic">▦</span><b>${allT.length}</b><span>${I18N.t('templates.stat_category')}</span></div>
+        <div class="lobby-stat"><span class="lobby-stat-ic">⬡</span><b>${realCats.length}</b><span>${I18N.t('templates.stat_categories')}</span></div>
       </div>
     </div>
     <div class="tmpl-tabs">${tabs}</div>
@@ -177,13 +177,13 @@ function renderRandomExplorer(cat) {
       <span class="tmpl-card-ic">${t.icon || '📦'}<i></i></span>
       <span class="tmpl-random-badge">🎲 ${_tmplState.randIdx + 1}/${tmpls.length}</span>
     </div>
-    <div class="tmpl-random-eyebrow">随机小项目 · 快速上手</div>
+    <div class="tmpl-random-eyebrow">${I18N.t('templates.random_eyebrow')}</div>
     <h3 title="${t.name}">${t.name}</h3>
-    <p>${t.description || '暂无描述'}</p>
+    <p>${t.description || I18N.t('templates.no_description')}</p>
     <div class="tmpl-tags">${tags}</div>
     <div class="tmpl-random-actions">
-      <button class="tmpl-btn tmpl-btn-shuffle" onclick="event.stopPropagation();randomPickTemplate(${tmpls.length})">🎲 换一个</button>
-      <button class="tmpl-btn" onclick="event.stopPropagation();createFromTemplate('${t.id}','${t.default_repo_name || t.id}')">创建 <span class="tmpl-btn-ar">→</span></button>
+      <button class="tmpl-btn tmpl-btn-shuffle" onclick="event.stopPropagation();randomPickTemplate(${tmpls.length})">🎲 ${I18N.t('templates.shuffle')}</button>
+      <button class="tmpl-btn" onclick="event.stopPropagation();createFromTemplate('${t.id}','${t.default_repo_name || t.id}')">${I18N.t('templates.create_btn')} <span class="tmpl-btn-ar">→</span></button>
     </div>
   </div>`;
 }
@@ -208,13 +208,13 @@ function createFromTemplate(templateId, defaultName) {
   modal.id = 'ptCreateModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
   modal.innerHTML = `<div class="cd" style="width:440px;padding:20px;border-radius:10px">
-    <h3 style="font-size:14px;font-weight:600;margin-bottom:6px">一键创建项目</h3>
-    <p class="ts t2" style="margin-bottom:14px">将在你的 GitCode 个人账号下创建同名仓库，并自动加入项目托管、应用对应的开发场景。</p>
-    <label class="ts t2" style="display:block;margin-bottom:4px">仓库名</label>
+    <h3 style="font-size:14px;font-weight:600;margin-bottom:6px">${I18N.t('templates.create_modal_title')}</h3>
+    <p class="ts t2" style="margin-bottom:14px">${I18N.t('templates.create_modal_desc')}</p>
+    <label class="ts t2" style="display:block;margin-bottom:4px">${I18N.t('templates.repo_name')}</label>
     <input id="ptRepoName" value="${defaultName}" style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c)">
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
-      <button class="bt bt-o bt-s" onclick="document.getElementById('ptCreateModal').remove()">取消</button>
-      <button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate('${templateId}')">创建</button>
+      <button class="bt bt-o bt-s" onclick="document.getElementById('ptCreateModal').remove()">${I18N.t('templates.cancel')}</button>
+      <button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate('${templateId}')">${I18N.t('templates.create_btn')}</button>
     </div>
   </div>`;
   document.body.appendChild(modal);
@@ -225,13 +225,13 @@ function doCreateFromTemplate(templateId) {
   const repoName = (document.getElementById('ptRepoName').value || '').trim();
   const btn = document.getElementById('ptCreateBtn');
   btn.disabled = true;
-  btn.textContent = '创建中...';
+  btn.textContent = I18N.t('templates.creating');
   API.get('/repos/check-name?name=' + encodeURIComponent(repoName))
     .then(check => {
       if (check.exists) {
         btn.disabled = false;
-        btn.textContent = '创建';
-        app.showToast('⚠️ 仓库 ' + check.full_name + ' 已存在，请更换仓库名');
+        btn.textContent = I18N.t('templates.create_btn');
+        app.showToast(I18N.t('templates.repo_exists', {full_name: check.full_name}));
         const input = document.getElementById('ptRepoName');
         if (input) { input.focus(); input.select(); }
         return;
@@ -239,18 +239,18 @@ function doCreateFromTemplate(templateId) {
       API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}).then(r => {
         const modal = document.getElementById('ptCreateModal');
         if (modal) modal.remove();
-        app.showToast('✅ ' + (r.message || '创建成功'));
+        app.showToast(I18N.t('templates.create_success', {msg: (r.message || I18N.t('templates.create_btn'))}));
         const parts = (r.full_name || '').split('/');
         selectRepo(r.full_name, parts[0], parts[1]);
       }).catch(e => {
         btn.disabled = false;
-        btn.textContent = '创建';
-        app.showToast('创建失败: ' + e.message);
+        btn.textContent = I18N.t('templates.create_btn');
+        app.showToast(I18N.t('templates.create_failed', {msg: e.message}));
       });
     })
     .catch(err => {
       btn.disabled = false;
-      btn.textContent = '创建';
-      app.showToast('检查失败: ' + (err.message || err));
+      btn.textContent = I18N.t('templates.create_btn');
+      app.showToast(I18N.t('templates.check_failed', {msg: (err.message || err)}));
     });
 }

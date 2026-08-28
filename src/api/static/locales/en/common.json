@@ -95,5 +95,8 @@
   "save_failed": "Save failed",
   "delete_failed": "Delete failed",
   "update_failed": "Update failed",
-  "create_failed": "Create failed"
+  "create_failed": "Create failed",
+  "session_expired": "Session expired, please log in again",
+  "request_failed": "Request failed ({{status}})",
+  "network_upload_error": "Network error, upload failed"
 }

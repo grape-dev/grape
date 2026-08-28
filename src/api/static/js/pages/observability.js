@@ -15,20 +15,20 @@ function renderObservability() {
   pc.innerHTML = `
     <div class="cd" style="padding:0;overflow:hidden">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--b)">
-        <h2 style="font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px">📊 系统监控</h2>
+        <h2 style="font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px">${I18N.t('observability.title')}</h2>
         <div style="display:flex;align-items:center;gap:10px">
           <span class="ts t3" id="obsLastUpdate">-</span>
-          <button class="bt bt-o bt-s" onclick="refreshObs()">🔄 刷新</button>
-          <label class="ts t3" style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="obsAuto" onchange="toggleObsAuto()" checked style="margin:0">自动(10s)</label>
+          <button class="bt bt-o bt-s" onclick="refreshObs()">${I18N.t('observability.refresh')}</button>
+          <label class="ts t3" style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="obsAuto" onchange="toggleObsAuto()" checked style="margin:0">${I18N.t('observability.auto_refresh')}</label>
         </div>
       </div>
       <div class="stabs" style="padding:0 20px;border-bottom:1px solid var(--b)">
-        <a class="${_obsTab==='overview'?'ac':''}" onclick="switchObsTab('overview',event)">概览</a>
-        <a class="${_obsTab==='tasks'?'ac':''}" onclick="switchObsTab('tasks',event)">任务</a>
-        <a class="${_obsTab==='anomaly'?'ac':''}" onclick="switchObsTab('anomaly',event)">异常任务</a>
-        <a class="${_obsTab==='errorlogs'?'ac':''}" onclick="switchObsTab('errorlogs',event)">错误日志</a>
+        <a class="${_obsTab==='overview'?'ac':''}" onclick="switchObsTab('overview',event)">${I18N.t('observability.tab.overview')}</a>
+        <a class="${_obsTab==='tasks'?'ac':''}" onclick="switchObsTab('tasks',event)">${I18N.t('observability.tab.tasks')}</a>
+        <a class="${_obsTab==='anomaly'?'ac':''}" onclick="switchObsTab('anomaly',event)">${I18N.t('observability.tab.anomaly')}</a>
+        <a class="${_obsTab==='errorlogs'?'ac':''}" onclick="switchObsTab('errorlogs',event)">${I18N.t('observability.tab.errorlogs')}</a>
       </div>
-      <div id="obsContent" style="padding:20px"><div class="loading">加载中...</div></div>
+      <div id="obsContent" style="padding:20px"><div class="loading">${I18N.t('observability.loading')}</div></div>
     </div>
   `;
   refreshObs();
@@ -72,7 +72,7 @@ function refreshObs(isAutoRefresh) {
   if (!c) return;
   // 静默刷新（定时器触发）不显示"加载中"，保留旧数据直到新数据到达
   if (!isAutoRefresh && !_obsRendered) {
-    c.innerHTML = '<div class="loading">加载中...</div>';
+    c.innerHTML = '<div class="loading">' + I18N.t('observability.loading') + '</div>';
   }
   // 获取当前选中仓库，过滤仅该仓库的任务
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
@@ -194,7 +194,7 @@ function renderOverview(ops, rt, mt) {
   let workerCards = '';
   const workers = w.list || [];
   if (workers.length === 0) {
-    workerCards = '<div class="ts t2" style="padding:12px">无远端 Worker（仅本机直连引擎）</div>';
+    workerCards = '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_remote_worker') + '</div>';
   } else {
     workers.forEach(wk => {
       const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -208,7 +208,7 @@ function renderOverview(ops, rt, mt) {
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:10px;color:var(--t3);margin-bottom:8px">
           <div>IP: ${wk.last_ip || '-'}</div>
-          <div>心跳: <span id="wk-${wid}-seen">${(wk.last_seen_at||'-').substring(11,19)}</span></div>
+          <div>${I18N.t('observability.heartbeat')}: <span id="wk-${wid}-seen">${(wk.last_seen_at||'-').substring(11,19)}</span></div>
         </div>
         ${_barHTML('CPU', wk.cpu_percent, null, 'wk-' + wid + '-cpu')}
         ${_barHTML('MEM', wk.memory_percent, null, 'wk-' + wid + '-mem')}
@@ -219,9 +219,9 @@ function renderOverview(ops, rt, mt) {
 
   // Runtime 表格（行带 id，各 td 带 id 供局部更新）
   const runtimes = r.list || [];
-  let runtimeTable = '<div class="ts t2" style="padding:12px">无引擎</div>';
+  let runtimeTable = '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_engine') + '</div>';
   if (runtimes.length) {
-    runtimeTable = '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>模式</th><th>设备</th></tr></thead><tbody>';
+    runtimeTable = '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
     runtimes.forEach(rti => {
       const rid = rti.id;
       const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
@@ -229,7 +229,7 @@ function renderOverview(ops, rt, mt) {
       const running = rti.running || 0;
       const maxC = rti.max_concurrent || 0;
       const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
-      const modeTag = rti.mode === 'local' ? '<span class="tg tg-ch">本机</span>' : '<span class="tg tg-c">远端</span>';
+      const modeTag = rti.mode === 'local' ? '<span class="tg tg-ch">' + I18N.t('observability.mode_local') + '</span>' : '<span class="tg tg-c">' + I18N.t('observability.mode_remote') + '</span>';
       const avgDur = rti.avg_duration || 0;
       const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
       const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
@@ -247,17 +247,17 @@ function renderOverview(ops, rt, mt) {
   }
 
   return `
-    ${section('Worker 监控', `${w.online || 0}/${w.total || 0} 在线`)}
+    ${section(I18N.t('observability.worker_monitor'), I18N.t('observability.online_count', {count: (w.online || 0) + '/' + (w.total || 0)}))}
     ${_kpiRowHTML([
-      { label: 'Worker 总数', value: w.total || 0, color: 'var(--a)', id: 'kpi-w-total' },
-      { label: '在线', value: w.online || 0, color: 'var(--g)', id: 'kpi-w-online' },
-      { label: '离线', value: w.offline || 0, color: 'var(--t3)', id: 'kpi-w-offline' },
-      { label: '引擎总数', value: r.total || 0, color: 'var(--pu)', id: 'kpi-r-total' },
+      { label: I18N.t('observability.worker_total'), value: w.total || 0, color: 'var(--a)', id: 'kpi-w-total' },
+      { label: I18N.t('observability.online'), value: w.online || 0, color: 'var(--g)', id: 'kpi-w-online' },
+      { label: I18N.t('observability.offline'), value: w.offline || 0, color: 'var(--t3)', id: 'kpi-w-offline' },
+      { label: I18N.t('observability.engine_total'), value: r.total || 0, color: 'var(--pu)', id: 'kpi-r-total' },
     ])}
     <div id="wk-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:16px">
       ${workerCards}
     </div>
-    ${section('Runtime 引擎', `${r.online || 0}/${r.total || 0} 在线 — 点击引擎查看任务`)}
+    ${section(I18N.t('observability.runtime_engine'), I18N.t('observability.runtime_subtitle', {online: (r.online || 0), total: (r.total || 0)}))}
     ${runtimeTable}
   `;
 }
@@ -380,16 +380,16 @@ function _updateBar(idPrefix, pct) {
 function loadA2aHealth() {
   const container = document.getElementById('obs-a2a-health');
   if (!container) return;
-  container.innerHTML = section('A2A 健康检查', 'server_base_url 可达性') + '<div class="loading">检查中...</div>';
+  container.innerHTML = section(I18N.t('observability.a2a_health'), I18N.t('observability.a2a_health_subtitle')) + '<div class="loading">' + I18N.t('observability.checking') + '</div>';
   fetch('/api/dashboard/ops/a2a-health').then(r => r.json()).then(d => {
     const status = d.reachable
-      ? `<span style="color:var(--g)">✓ 可达</span> (${d.latency_ms}ms)`
-      : `<span style="color:var(--r)">✗ 不可达</span> ${d.error ? '<span class="ts t3">'+d.error.substring(0,80)+'</span>' : ''}`;
-    let html = section('A2A 健康检查', 'server_base_url 可达性');
+      ? `<span style="color:var(--g)">${I18N.t('observability.a2a_reachable')}</span> (${d.latency_ms}ms)`
+      : `<span style="color:var(--r)">${I18N.t('observability.a2a_unreachable')}</span> ${d.error ? '<span class="ts t3">'+d.error.substring(0,80)+'</span>' : ''}`;
+    let html = section(I18N.t('observability.a2a_health'), I18N.t('observability.a2a_health_subtitle'));
     html += kpiRow([
       { label: 'Server URL', value: `<span class="ts" style="font-size:10px">${d.server_base_url}</span>`, color: 'var(--a)' },
-      { label: '状态', value: status, color: d.reachable ? 'var(--g)' : 'var(--r)' },
-      { label: '延迟', value: d.latency_ms ? d.latency_ms + 'ms' : '-', color: 'var(--sk)' },
+      { label: I18N.t('observability.col_status'), value: status, color: d.reachable ? 'var(--g)' : 'var(--r)' },
+      { label: I18N.t('observability.col_latency'), value: d.latency_ms ? d.latency_ms + 'ms' : '-', color: 'var(--sk)' },
     ]);
     if (d.recent_a2a && d.recent_a2a.length) {
       html += table(['Seq', 'Type', 'Repo', 'Issue', 'Status', 'Time'],
@@ -401,7 +401,7 @@ function loadA2aHealth() {
     }
     container.innerHTML = html;
   }).catch(e => {
-    container.innerHTML = section('A2A 健康检查') + '<div class="error">加载失败: ' + e.message + '</div>';
+    container.innerHTML = section(I18N.t('observability.a2a_health')) + '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
   });
 }
 
@@ -413,7 +413,7 @@ function renderAnomalyTab(container, ops) {
   const stuck = (ops.tasks || {}).stuck_tasks || [];
   const failed = (ops.tasks || {}).failed_tasks || [];
   if (!stuck.length && !failed.length) {
-    container.innerHTML = '<div class="ts t2" style="padding:40px;text-align:center">🎉 无异常任务</div>';
+    container.innerHTML = '<div class="ts t2" style="padding:40px;text-align:center">' + I18N.t('observability.no_anomaly') + '</div>';
     return;
   }
 
@@ -443,8 +443,8 @@ function renderAnomalyTab(container, ops) {
 
   // Stuck 任务（通常很少，不分页）
   if (stuck.length) {
-    html += section('🔴 卡住的任务', `${stuck.length} 个 — running > 15min`);
-    html += table(['Issue/Seq', 'Agent', 'Repo', 'Started', '状态'],
+    html += section(I18N.t('observability.stuck_tasks'), I18N.t('observability.stuck_tasks_subtitle', {count: stuck.length}));
+    html += table(['Issue/Seq', 'Agent', 'Repo', 'Started', I18N.t('observability.col_status')],
       stuck.map(s => _row(s, false))
     );
   }
@@ -456,17 +456,17 @@ function renderAnomalyTab(container, ops) {
     const start = _anomalyPage * _ANOMALY_PAGE_SIZE;
     const pageItems = failed.slice(start, start + _ANOMALY_PAGE_SIZE);
 
-    html += section('❌ 失败的任务', `共 ${failed.length} 条 — 第 ${_anomalyPage+1}/${totalPages} 页`);
-    html += table(['Issue/Seq', 'Agent', 'Repo', 'Failed', '结果'],
+    html += section(I18N.t('observability.failed_tasks'), I18N.t('observability.failed_tasks_subtitle', {total: failed.length, page: (_anomalyPage+1), pages: totalPages}));
+    html += table(['Issue/Seq', 'Agent', 'Repo', 'Failed', I18N.t('observability.col_result')],
       pageItems.map(s => _row(s, true))
     );
 
     // 分页栏
     if (totalPages > 1) {
       html += `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0">
-        <button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;refreshObs()">‹ 上一页</button>
+        <button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;refreshObs()">' + I18N.t('observability.prev_page') + '</button>
         <span class="ts t3">${_anomalyPage+1} / ${totalPages}</span>
-        <button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;refreshObs()">下一页 ›</button>
+        <button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;refreshObs()">' + I18N.t('observability.next_page') + '</button>
       </div>`;
     }
   }
@@ -481,16 +481,16 @@ function loadErrorLogs(container) {
   container.innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
       <div style="display:flex;gap:0">
-        <button class="bt bt-s ${currentLevel===''?'bt-p':'bt-o'}" onclick="_errorLogLevel='';loadErrorLogs(document.getElementById('obsContent'))">全部</button>
-        <button class="bt bt-s ${currentLevel==='ERROR'?'bt-p':'bt-o'}" onclick="_errorLogLevel='ERROR';loadErrorLogs(document.getElementById('obsContent'))">仅 ERROR</button>
-        <button class="bt bt-s ${currentLevel==='WARNING'?'bt-p':'bt-o'}" onclick="_errorLogLevel='WARNING';loadErrorLogs(document.getElementById('obsContent'))">仅 WARNING</button>
+        <button class="bt bt-s ${currentLevel===''?'bt-p':'bt-o'}" onclick="_errorLogLevel='';loadErrorLogs(document.getElementById('obsContent'))">' + I18N.t('observability.log_all') + '</button>
+        <button class="bt bt-s ${currentLevel==='ERROR'?'bt-p':'bt-o'}" onclick="_errorLogLevel='ERROR';loadErrorLogs(document.getElementById('obsContent'))">' + I18N.t('observability.log_only_error') + '</button>
+        <button class="bt bt-s ${currentLevel==='WARNING'?'bt-p':'bt-o'}" onclick="_errorLogLevel='WARNING';loadErrorLogs(document.getElementById('obsContent'))">' + I18N.t('observability.log_only_warning') + '</button>
       </div>
       <select id="errorLogSource" class="bt bt-s bt-o" style="padding:4px 8px" onchange="_errorLogSource=this.value;loadErrorLogs(document.getElementById('obsContent'))">
-        <option value="">全部来源</option>
+        <option value="">' + I18N.t('observability.log_all_sources') + '</option>
       </select>
       <span class="ts t3" id="errorLogCount"></span>
     </div>
-    <div id="errorLogBody"><div class="loading">加载中...</div></div>
+    <div id="errorLogBody"><div class="loading">' + I18N.t('observability.loading') + '</div></div>
   `;
   // 加载来源列表
   fetch('/api/dashboard/ops/error-logs/sources').then(r => r.json()).then(d => {
@@ -513,9 +513,9 @@ function loadErrorLogs(container) {
     const entries = d.entries || [];
     const countEl = document.getElementById('errorLogCount');
     const bodyEl = document.getElementById('errorLogBody');
-    if (countEl) countEl.textContent = entries.length + ' 条（来自 ' + (d.files ? d.files.length : 1) + ' 个日志文件）';
+    if (countEl) countEl.textContent = I18N.t('observability.log_count', {count: entries.length, files: (d.files ? d.files.length : 1)});
     if (!entries.length) {
-      if (bodyEl) bodyEl.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">无匹配日志</div>';
+      if (bodyEl) bodyEl.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_matching_log') + '</div>';
       return;
     }
     let html = '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.5;border-radius:8px;overflow:hidden;max-height:70vh;overflow-y:auto">';
@@ -523,8 +523,8 @@ function loadErrorLogs(container) {
       const level = e.level || '';
       const color = level === 'ERROR' ? '#dc2828' : '#d49c0f';
       const time = (e.ts || '').substring(0,19);
-      const src = e.source || '主控';
-      const srcTag = src !== '主控' ? '<span style="color:#5b9eff">[' + src + ']</span> ' : '';
+      const src = e.source || I18N.t('observability.source_master');
+      const srcTag = src !== I18N.t('observability.source_master') ? '<span style="color:#5b9eff">[' + src + ']</span> ' : '';
       const rid = e.request_id && e.request_id !== '-' ? ' [' + e.request_id + ']' : '';
       const extra = e.method ? ' ' + e.method + ' ' + (e.path||'') + ' ' + (e.status||'') + ' ' + (e.duration_ms||0) + 'ms' : '';
       html += '<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">' + time + '</span>' + srcTag + rid + ' <span style="color:' + color + '"><b>' + level + '</b></span> <span style="color:#e0e6f0">' + (e.message||'').substring(0,300) + '</span><span style="color:#8d97a8">' + extra + '</span></div>';
@@ -533,7 +533,7 @@ function loadErrorLogs(container) {
     if (bodyEl) bodyEl.innerHTML = html;
   }).catch(e => {
     const bodyEl = document.getElementById('errorLogBody');
-    if (bodyEl) bodyEl.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    if (bodyEl) bodyEl.innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
   });
 }
 let _errorLogLevel = '';
@@ -544,7 +544,7 @@ function renderTasksTab(ops, rt, mt) {
   const t = ops.tasks || {};
   const sc = t.status_counts || {};
   let html = '';
-  html += section('任务状态分布');
+  html += section(I18N.t('observability.task_status_dist'));
   html += _kpiRowHTML([
     { label: 'Queued', value: sc.queued || 0, color: 'var(--y)', id: 'kpi-t-queued' },
     { label: 'Dispatched', value: sc.dispatched || 0, color: 'var(--a)', id: 'kpi-t-dispatched' },
@@ -555,7 +555,7 @@ function renderTasksTab(ops, rt, mt) {
     { label: 'In Progress', value: t.in_progress || 0, color: 'var(--pu)', id: 'kpi-t-inprogress' },
     { label: 'Stuck', value: t.stuck_count || 0, color: (t.stuck_count||0) > 0 ? 'var(--r)' : 'var(--g)', id: 'kpi-t-stuck' },
   ]);
-  html += '<div id="obs-timeline-container"><div class="loading">加载任务列表...</div></div>';
+  html += '<div id="obs-timeline-container"><div class="loading">' + I18N.t('observability.loading_tasks') + '</div></div>';
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
   const repoFullName = repo && repo.fullName ? repo.fullName : '';
   // 使用缓存的 timeline 数据（同仓库且 30s 内）
@@ -569,7 +569,7 @@ function renderTasksTab(ops, rt, mt) {
       renderTimelineList(document.getElementById('obs-timeline-container'), d.issues || []);
     }).catch(e => {
       const c = document.getElementById('obs-timeline-container');
-      if (c) c.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+      if (c) c.innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
     });
   }
   return html;
@@ -596,8 +596,8 @@ async function _getMermaid() {
 function _mermaidId(a) { return (a || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_'); }
 
 function _actionText(t) {
-  if (t === 'a2a_event') return 'A2A 交办';
-  return { issue_opened: 'issue 打开', issue_comment: '评论', issue_updated: 'issue 更新', pull_request_opened: 'PR 打开', note_hook_pr: 'PR 评论', issue_closed: 'issue 关闭', push: '推送' }[t] || t;
+  if (t === 'a2a_event') return I18N.t('observability.action_a2a_event');
+  return { issue_opened: I18N.t('observability.action_issue_opened'), issue_comment: I18N.t('observability.action_issue_comment'), issue_updated: I18N.t('observability.action_issue_updated'), pull_request_opened: I18N.t('observability.action_pull_request_opened'), note_hook_pr: I18N.t('observability.action_note_hook_pr'), issue_closed: I18N.t('observability.action_issue_closed'), push: I18N.t('observability.action_push') }[t] || t;
 }
 
 function _buildSequence(iss) {
@@ -649,7 +649,7 @@ function _applySequenceColors(svg, statuses) {
 async function _renderMermaid(box, iss) {
   if (box.dataset.rendered) return;
   box.dataset.rendered = '1';
-  box.innerHTML = '<span class="ts t3">渲染中…</span>';
+  box.innerHTML = '<span class="ts t3">' + I18N.t('observability.rendering') + '</span>';
   try {
     const mmd = await _getMermaid();
     const uid = 'mmd-' + Math.random().toString(36).slice(2, 10);
@@ -660,7 +660,7 @@ async function _renderMermaid(box, iss) {
     const svg = result.svg || result;
     box.innerHTML = _applySequenceColors(svg, statuses);
   } catch (err) {
-    box.innerHTML = '<div style="padding:12px;color:var(--r);font-size:12px">时序渲染失败: ' + (err.message || err) + '</div>';
+    box.innerHTML = '<div style="padding:12px;color:var(--r);font-size:12px">' + I18N.t('observability.sequence_render_failed', {msg: (err.message || err)}) + '</div>';
     // 显示原始 mermaid 文本供调试
     const { text } = _buildSequence(iss);
     box.innerHTML += '<pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">' + text.replace(/</g,'&lt;') + '</pre>';
@@ -668,33 +668,33 @@ async function _renderMermaid(box, iss) {
 }
 
 function renderTimelineList(container, issues) {
-  if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">暂无任务事件</div>'; return; }
+  if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_task_events') + '</div>'; return; }
   _timelineIssues = issues;
-  let html = section('任务列表', issues.length + ' 个 Issue \u2014 点击展开');
+  let html = section(I18N.t('observability.task_list'), I18N.t('observability.task_list_subtitle', {count: issues.length}));
   html += '<div style="display:flex;flex-direction:column;gap:0">';
   issues.forEach(iss => {
     const expanded = _expandedIssues.has(iss.issueId);
     const hasFailed = iss.events.some(e => e.status === 'failed');
-    const statusBadge = hasFailed ? '<span style="color:var(--r);font-size:10px;font-weight:600">\u274c 有失败</span>' : '<span style="color:var(--g);font-size:10px;font-weight:600">\u2713 正常</span>';
+    const statusBadge = hasFailed ? '<span style="color:var(--r);font-size:10px;font-weight:600">' + I18N.t('observability.has_failure') + '</span>' : '<span style="color:var(--g);font-size:10px;font-weight:600">' + I18N.t('observability.normal') + '</span>';
     html += '<div style="border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:8px">';
     html += '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;background:var(--c)" onclick="toggleIssueTimeline(\'' + iss.issueId + '\')">';
     html += '<span style="font-size:12px">' + (expanded ? '\u25be' : '\u25b8') + '</span>';
     html += '<b style="font-size:13px">' + iss.issueId + '</b>';
     html += iss.title ? '<span class="ts t3" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + iss.title + '</span>' : '<span style="flex:1"></span>';
-    html += '<span class="ts t3">' + iss.eventCount + ' 事件</span>' + statusBadge;
+    html += '<span class="ts t3">' + I18N.t('observability.events_count', {count: iss.eventCount}) + '</span>' + statusBadge;
     html += '<span class="ts t3">' + (iss.lastAt || '').substring(0,16) + '</span>';
     html += '</div>';
     html += '<div id="tl-body-' + iss.issueId + '" style="display:' + (expanded ? 'block' : 'none') + ';padding:10px 14px;border-top:1px solid var(--b)">';
     // 切换按钮
     html += '<div style="display:flex;gap:0;margin-bottom:10px">';
-    html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] !== 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'diagram\')">\u{1f4ca} 时序图</button>';
-    html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] === 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'events\')">\u{1f4cb} 事件列表</button>';
+    html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] !== 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'diagram\')">' + I18N.t('observability.sequence_diagram') + '</button>';
+    html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] === 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'events\')">' + I18N.t('observability.event_list') + '</button>';
     html += '</div>';
     // 时序图容器
     html += '<div id="tl-diagram-' + iss.issueId + '" class="tl-mmd" data-iid="' + iss.issueId + '" style="overflow-x:auto;' + (_issueViewMode[iss.issueId] === 'events' ? 'display:none' : '') + '"></div>';
     // 事件列表容器
     html += '<div id="tl-events-' + iss.issueId + '" style="' + (_issueViewMode[iss.issueId] !== 'events' ? 'display:none' : '') + '">';
-    html += '<table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead><tbody>';
+    html += '<table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>' + I18N.t('observability.col_event') + '</th><th>Agent</th><th>Skill</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
     html += iss.events.map(ev => {
       const enc = ev.taskId ? encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''})) : '';
       const clickable = ev.taskId ? 'cursor:pointer' : '';
@@ -827,10 +827,10 @@ function openRuntimeSessionModal(rtId, rtName) {
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   modal.innerHTML = '<div class="cd" style="width:760px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
-    '<h3 style="font-size:14px;font-weight:600">' + rtName + ' · Session 列表</h3>' +
-    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtSessionModal\').remove()">✕ 关闭</button>' +
+    '<h3 style="font-size:14px;font-weight:600">' + rtName + ' · ' + I18N.t('observability.session_list') + '</h3>' +
+    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtSessionModal\').remove()">' + I18N.t('observability.close') + '</button>' +
     '</div>' +
-    '<div id="rtSessionModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载 session...</div></div>' +
+    '<div id="rtSessionModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">' + I18N.t('observability.loading_session') + '</div></div>' +
     '</div>';
   document.body.appendChild(modal);
 
@@ -839,13 +839,13 @@ function openRuntimeSessionModal(rtId, rtName) {
   API.get('/runtime/runtimes/' + rtId + '/sessions' + repoParam).then(d => {
     renderSessionList(document.getElementById('rtSessionModalBody'), d.sessions || [], rtName);
   }).catch(e => {
-    document.getElementById('rtSessionModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    document.getElementById('rtSessionModalBody').innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
   });
 }
 
 function renderSessionList(container, sessions, rtName) {
   if (!sessions.length) {
-    container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">该引擎在此仓库下暂无 session</div>';
+    container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_session') + '</div>';
     return;
   }
 
@@ -859,8 +859,8 @@ function renderSessionList(container, sessions, rtName) {
 
   // 运行中 session 表格（显示 agent + 正在执行的 issue#/seq）
   function runningTable(list) {
-    if (!list.length) return '<div class="ts t3" style="padding:8px">无运行中 session</div>';
-    let html = '<div class="tw"><table><thead><tr><th>Agent</th><th>Issue / Seq</th><th>Skill</th><th>状态</th><th>开始时间</th></tr></thead><tbody>';
+    if (!list.length) return '<div class="ts t3" style="padding:8px">' + I18N.t('observability.no_running_session') + '</div>';
+    let html = '<div class="tw"><table><thead><tr><th>Agent</th><th>Issue / Seq</th><th>Skill</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_start_time') + '</th></tr></thead><tbody>';
     list.forEach(s => {
       const ct = s.current_task;
       const is = (ct.issue_id && ct.event_seq) ? ct.issue_id + ' #' + ct.event_seq : (ct.event_seq ? '#' + ct.event_seq : ct.id.substring(0,12));
@@ -887,8 +887,8 @@ function renderSessionList(container, sessions, rtName) {
       });
     });
     allTasks.sort((a, b) => (b.event_seq || 0) - (a.event_seq || 0));
-    if (!allTasks.length) return '<div class="ts t3" style="padding:8px">无已完成任务</div>';
-    let html = '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent</th><th>状态</th><th>耗时</th><th>Exit</th><th>完成时间</th></tr></thead><tbody>';
+    if (!allTasks.length) return '<div class="ts t3" style="padding:8px">' + I18N.t('observability.no_completed_tasks') + '</div>';
+    let html = '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>Exit</th><th>' + I18N.t('observability.col_complete_time') + '</th></tr></thead><tbody>';
     allTasks.forEach(t => {
       const is = (t.issue_id && t.event_seq) ? t.issue_id + ' #' + t.event_seq : (t.event_seq ? '#' + t.event_seq : t.id.substring(0,12));
       const enc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:'', created:t.completed_at||''}));
@@ -922,8 +922,8 @@ function renderSessionList(container, sessions, rtName) {
   html += '<div style="border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:10px">';
   html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;background:var(--c)" onclick="toggleSessionGroup(\'rtSessionRunning\')">';
   html += '<span id="rtSessionRunning-arrow" style="font-size:12px">▾</span>';
-  html += '<b style="font-size:12px">🔄 运行中</b>';
-  html += '<span class="ts t3" style="margin-left:auto">' + running.length + ' 个 session</span>';
+  html += '<b style="font-size:12px">' + I18N.t('observability.running') + '</b>';
+  html += '<span class="ts t3" style="margin-left:auto">' + I18N.t('observability.session_count', {count: running.length}) + '</span>';
   html += '</div>';
   html += '<div id="rtSessionRunning" style="padding:8px 12px;border-top:1px solid var(--b)">' + runningTable(running) + '</div>';
   html += '</div>';
@@ -932,8 +932,8 @@ function renderSessionList(container, sessions, rtName) {
   html += '<div style="border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:10px">';
   html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;background:var(--c)" onclick="toggleSessionGroup(\'rtSessionIdle\')">';
   html += '<span id="rtSessionIdle-arrow" style="font-size:12px">▸</span>';
-  html += '<b style="font-size:12px">📋 已完成任务</b>';
-  html += '<span class="ts t3" style="margin-left:auto">' + completedCount + ' 个任务</span>';
+  html += '<b style="font-size:12px">' + I18N.t('observability.completed_tasks') + '</b>';
+  html += '<span class="ts t3" style="margin-left:auto">' + I18N.t('observability.task_count', {count: completedCount}) + '</span>';
   html += '</div>';
   html += '<div id="rtSessionIdle" style="padding:8px 12px;border-top:1px solid var(--b);display:none">' + completedTable(sessions) + '</div>';
   html += '</div>';
@@ -969,7 +969,7 @@ function openSessionLogModal(sessionId, infoEnc) {
   if (info.agent) titleParts.push('<b>' + info.agent + '</b>');
   if (info.sid) titleParts.push('<span class="ts">' + info.sid + '</span>');
   if (info.last) titleParts.push('<span class="ts t3">' + info.last.substring(0,16) + '</span>');
-  const titleHtml = titleParts.length ? titleParts.join(' · ') : 'Session 日志';
+  const titleHtml = titleParts.length ? titleParts.join(' · ') : I18N.t('observability.session_log');
 
   const modal = document.createElement('div');
   modal.id = 'rtLogModal';
@@ -978,9 +978,9 @@ function openSessionLogModal(sessionId, infoEnc) {
   modal.innerHTML = '<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
     '<h3 style="font-size:13px;font-weight:600">' + titleHtml + '</h3>' +
-    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtLogModal\').remove()">✕ 关闭</button>' +
+    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtLogModal\').remove()">' + I18N.t('observability.close') + '</button>' +
     '</div>' +
-    '<div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>' +
+    '<div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">' + I18N.t('observability.loading_logs') + '</div></div>' +
     '</div>';
   document.body.appendChild(modal);
 
@@ -994,7 +994,7 @@ function openSessionLogModal(sessionId, infoEnc) {
   }).then(r => r.json()).then(d => {
     const tasks = d.tasks || [];
     if (!tasks.length) {
-      document.getElementById('rtLogModalBody').innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">该 session 无关联任务日志</div>';
+      document.getElementById('rtLogModalBody').innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_session_task_log') + '</div>';
       return;
     }
     // 取最近一个任务
@@ -1004,10 +1004,10 @@ function openSessionLogModal(sessionId, infoEnc) {
     API.get('/task-logs/' + task.id + '/messages?since=0').then(msgs => {
       renderTaskLogMessages(document.getElementById('rtLogModalBody'), msgs || [], JSON.parse(decodeURIComponent(taskEnc)));
     }).catch(e => {
-      document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+      document.getElementById('rtLogModalBody').innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
     });
   }).catch(e => {
-    document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    document.getElementById('rtLogModalBody').innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
   });
 }
 
@@ -1021,10 +1021,10 @@ function openRuntimeTaskModal(rtId, rtName) {
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   modal.innerHTML = `<div class="cd" style="width:720px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
-      <h3 style="font-size:14px;font-weight:600">${rtName} · 任务列表</h3>
-      <button class="bt bt-o bt-s" onclick="document.getElementById('rtTaskModal').remove()">✕ 关闭</button>
+      <h3 style="font-size:14px;font-weight:600">${I18N.t('observability.task_list_modal_title', {name: rtName})}</h3>
+      <button class="bt bt-o bt-s" onclick="document.getElementById('rtTaskModal').remove()">${I18N.t('observability.close')}</button>
     </div>
-    <div id="rtTaskModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载任务...</div></div>
+    <div id="rtTaskModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">${I18N.t('observability.loading_task')}</div></div>
   </div>`;
   document.body.appendChild(modal);
 
@@ -1033,18 +1033,18 @@ function openRuntimeTaskModal(rtId, rtName) {
   API.get('/runtime/runtimes/' + rtId + '/tasks?limit=50' + repoParam).then(d => {
     renderRuntimeTaskList(document.getElementById('rtTaskModalBody'), d.tasks || [], rtName);
   }).catch(e => {
-    document.getElementById('rtTaskModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    document.getElementById('rtTaskModalBody').innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
   });
 }
 
 function renderRuntimeTaskList(container, tasks, rtName) {
   if (!tasks.length) {
-    container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">暂无任务</div>';
+    container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_tasks') + '</div>';
     return;
   }
   const statusIcon = { queued: '⏳', dispatched: '🔄', running: '🔄', completed: '✅', failed: '❌', cancelled: '⛔' };
   const statusColor = { queued: 'var(--y)', dispatched: 'var(--a)', running: 'var(--a)', completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)' };
-  let html = `<div style="font-size:11px;color:var(--t3);margin-bottom:8px">${rtName} · ${tasks.length} 个任务（点击行查看日志）</div>`;
+  let html = `<div style="font-size:11px;color:var(--t3);margin-bottom:8px">${I18N.t('observability.task_list_hint', {name: rtName, count: tasks.length})}</div>`;
   html += '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent / Skill</th><th>Repo</th><th>Status</th><th>Exit</th><th>Created</th></tr></thead><tbody>';
   tasks.forEach(t => {
     const issueSeq = (t.issue_id && t.event_seq) ? `${t.issue_id} #${t.event_seq}` : (t.event_seq ? `#${t.event_seq}` : t.id.substring(0,12));
@@ -1077,7 +1077,7 @@ function openTaskLogModal(taskId, infoEnc) {
   if (info.issue) titleParts.push('<b>' + info.issue + '</b>');
   if (info.seq) titleParts.push('<span class="ts">#' + info.seq + '</span>');
   if (info.created) titleParts.push('<span class="ts t3">' + info.created.substring(0,19) + '</span>');
-  const titleHtml = titleParts.length ? titleParts.join(' · ') : '任务日志';
+  const titleHtml = titleParts.length ? titleParts.join(' · ') : I18N.t('observability.task_log');
 
   const modal = document.createElement('div');
   modal.id = 'rtLogModal';
@@ -1091,10 +1091,10 @@ function openTaskLogModal(taskId, infoEnc) {
   modal.innerHTML = '<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
     '<h3 style="font-size:13px;font-weight:600">' + titleHtml + '</h3>' +
-    '<div style="display:flex;align-items:center;gap:8px"><span id="rtLogLiveTag" style="font-size:10px;color:var(--g);display:none">● 实时</span><button class="bt bt-o bt-s" onclick="closeTaskLogModal()">✕ 关闭</button></div>' +
+    '<div style="display:flex;align-items:center;gap:8px"><span id="rtLogLiveTag" style="font-size:10px;color:var(--g);display:none">' + I18N.t('observability.live') + '</span><button class="bt bt-o bt-s" onclick="closeTaskLogModal()">' + I18N.t('observability.close') + '</button></div>' +
     '</div>' +
     '<div id="rtLogTimeline" style="padding:10px 18px;border-bottom:1px solid var(--b);display:none"></div>' +
-    '<div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>' +
+    '<div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">' + I18N.t('observability.loading_logs') + '</div></div>' +
     '</div>';
   document.body.appendChild(modal);
 
@@ -1124,7 +1124,7 @@ function openTaskLogModal(taskId, infoEnc) {
         }
       }).catch(() => {});
     }).catch(e => {
-      document.getElementById('rtLogModalBody').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+      document.getElementById('rtLogModalBody').innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
     });
   }
 
@@ -1183,9 +1183,9 @@ let _taskLogPollTimer = null;
 function renderTaskTimeline(container, info) {
   if (!container || !info) return;
   const stages = [];
-  if (info.created_at) stages.push({ label: '入队', time: info.created_at, color: 'var(--y)' });
-  if (info.started_at) stages.push({ label: '开始执行', time: info.started_at, color: 'var(--a)' });
-  if (info.completed_at) stages.push({ label: '完成', time: info.completed_at, color: info.status === 'failed' ? 'var(--r)' : 'var(--g)' });
+  if (info.created_at) stages.push({ label: I18N.t('observability.stage_queued'), time: info.created_at, color: 'var(--y)' });
+  if (info.started_at) stages.push({ label: I18N.t('observability.stage_start'), time: info.started_at, color: 'var(--a)' });
+  if (info.completed_at) stages.push({ label: I18N.t('observability.stage_complete'), time: info.completed_at, color: info.status === 'failed' ? 'var(--r)' : 'var(--g)' });
   if (!stages.length) return;
   const durations = [];
   for (let i = 1; i < stages.length; i++) {
@@ -1213,12 +1213,12 @@ function renderTaskTimeline(container, info) {
 function renderTaskLogMessages(container, msgs, errorInfo) {
   if (!msgs.length) {
     let html = '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;border-radius:8px;overflow:hidden">';
-    html += '<div style="padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.06);color:#8d97a8">无执行日志</div>';
+    html += '<div style="padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.06);color:#8d97a8">' + I18N.t('observability.no_exec_log') + '</div>';
     if (errorInfo) {
-      if (errorInfo.result_text) html += `<div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#d49c0f">结果</span> <span style="color:#e0e6f0">${errorInfo.result_text}</span></div>`;
+      if (errorInfo.result_text) html += `<div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#d49c0f">${I18N.t('observability.result')}</span> <span style="color:#e0e6f0">${errorInfo.result_text}</span></div>`;
       if (errorInfo.exit_code != null) html += `<div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#d49c0f">Exit Code</span> <span style="color:${errorInfo.exit_code !== 0 ? '#dc2828' : '#1ca44c'}">${errorInfo.exit_code}</span></div>`;
       if (errorInfo.errors && errorInfo.errors.length) {
-        html += '<div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#d49c0f">错误信息</span></div>';
+        html += '<div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#d49c0f">' + I18N.t('observability.error_messages') + '</span></div>';
         errorInfo.errors.forEach(e => { html += `<div style="padding:4px 14px 4px 28px;color:#dc2828">${e}</div>`; });
       }
     }

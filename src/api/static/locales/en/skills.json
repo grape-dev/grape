@@ -1,1 +1,83 @@
-{}
+{
+  "loading": "Loading...",
+  "scope": {
+    "official": "Official Skills",
+    "repo": "Repo Skills",
+    "user": "Personal Skills"
+  },
+  "search": {
+    "placeholder": "Search skills..."
+  },
+  "action": {
+    "add_skill": "＋ Add Skill",
+    "convert_to_repo": "Convert to Repo Skill",
+    "view": "View",
+    "delete": "Delete",
+    "cancel": "Cancel",
+    "upload": "Upload",
+    "close": "✕ Close",
+    "view_skill_md": "📖 View SKILL.md",
+    "download_skill": "⬇ Download Skill",
+    "download_template": "📄 Download Skill Template ZIP",
+    "back_to_library": "← Back to Skills Library",
+    "back_to_huawei": "← Back to Huawei Cloud Skills"
+  },
+  "toast": {
+    "sync_found": "New official skills found, synced",
+    "upload_success": "Uploaded successfully",
+    "upload_failed": "Upload failed: {{msg}}",
+    "validation_failed": "Skill validation failed ({{count}} items):\n{{errors}}",
+    "select_zip": "Please select a skill ZIP file",
+    "select_agent_type": "Please select skill type (Agent)",
+    "deleted": "Deleted",
+    "delete_failed": "Delete failed: {{msg}}",
+    "select_repo_first": "Please select a current repo first",
+    "convert_success": "Converted successfully",
+    "convert_failed": "Convert failed: {{msg}}",
+    "download_failed": "Failed to download skill, please try again later",
+    "load_failed": "Failed to load"
+  },
+  "empty": {
+    "no_repo_selected": "No repo selected. Please select a current repo on the Repos page.",
+    "no_skills": "No skills in this tab.",
+    "no_sub_skills": "(No sub-skills)",
+    "no_content": "(No content)",
+    "no_detail": "(No detailed content)"
+  },
+  "error": {
+    "load_list_failed": "Failed to load skill list",
+    "load_detail_failed": "Failed to load: {{msg}}",
+    "load_failed": "Failed to load"
+  },
+  "confirm": {
+    "delete_skill": "Are you sure you want to delete skill {{name}}?",
+    "convert_skill": "Copy personal skill \"{{name}}\" to repo {{repo}}?\n\nThe original personal skill is preserved. After copying, it can be configured in the DevOps/Chat Agent of that repo."
+  },
+  "upload": {
+    "title": "Upload Skill (ZIP)",
+    "type": "Type",
+    "repo": "Repo",
+    "agent_type": "Skill Type *",
+    "select_agent": "-- Select Agent Type --",
+    "file_label": "Select skill ZIP file (directory name = skill name, contains SKILL.md)",
+    "format_req": "Format requirements:",
+    "uploading": "Uploading..."
+  },
+  "agent_type": {
+    "vod": "VOD Agent (♫ Audio Analysis)",
+    "issue": "Issue Agent (⚠ Issue Management)",
+    "coding": "Coding Agent (⚙ Code Implementation)",
+    "qa": "QA Agent (✔ Review & Verification)",
+    "sre": "SRE Agent (♡ Build & Deploy)",
+    "chat": "Chat Agent (☎ Chat Assistant)"
+  },
+  "huawei": {
+    "package_name": "Huawei Cloud Skills",
+    "loading_sub": "⏳ Loading sub-skills...",
+    "loading": "⏳ Loading...",
+    "files_count": "{{count}} files"
+  },
+  "label": {
+    "reference_docs": "📎 Reference Docs"
+  }
+}

@@ -95,5 +95,8 @@
   "save_failed": "保存失败",
   "delete_failed": "删除失败",
   "update_failed": "更新失败",
-  "create_failed": "创建失败"
+  "create_failed": "创建失败",
+  "session_expired": "会话过期，请重新登录",
+  "request_failed": "请求失败 ({{status}})",
+  "network_upload_error": "网络错误，上传失败"
 }

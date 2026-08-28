@@ -107,7 +107,7 @@ const API = (() => {
       localStorage.removeItem('token');
       localStorage.removeItem('user');
       if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
-      throw new Error('会话过期，请重新登录');
+      throw new Error(I18N.t('common.session_expired'));
     });
   }
 
@@ -124,7 +124,7 @@ const API = (() => {
         if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
       }
       return r.json().then(err => {
-        const e = new Error(err?.detail?.message || `请求失败 (${r.status})`);
+        const e = new Error(err?.detail?.message || I18N.t('common.request_failed', {status: r.status}));
         e.status = r.status;
         e.errors = err?.detail?.errors || null;
         throw e;
@@ -175,12 +175,12 @@ const API = (() => {
               localStorage.removeItem('user');
               if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
             }
-            const err = new Error(json?.detail?.message || `请求失败 (${xhr.status})`);
+            const err = new Error(json?.detail?.message || I18N.t('common.request_failed', {status: xhr.status}));
             err.errors = json?.detail?.errors || null;
             reject(err);
           }
         };
-        xhr.onerror = () => reject(new Error('网络错误，上传失败'));
+        xhr.onerror = () => reject(new Error(I18N.t('common.network_upload_error')));
         xhr.send(formData);
       });
     },

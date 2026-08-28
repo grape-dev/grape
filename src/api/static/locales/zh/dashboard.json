@@ -1,1 +1,21 @@
-{}
+{
+  "dev_scene": "开发场景:",
+  "apply": "应用",
+  "no_engine": "无 engine，不可用",
+  "no_events": "暂无事件",
+  "agent_disabled": "已停用",
+  "toggle_enable": "点击启用",
+  "toggle_disable": "点击停用",
+  "toggle_on": "✓ 开启",
+  "toggle_off": "○ 停用",
+  "only_maintainer_toggle": "仅 Maintainer 可切换 Agent 开关",
+  "please_select_repo": "请先选择仓库",
+  "enabled_prefix": "已启用 ",
+  "disabled_prefix": "已停用 ",
+  "toggle_failed": "切换失败: {{msg}}",
+  "desc_vod": "从开发者声音中收集反馈、聚类分析共性、提炼价值、自动创建 Issue",
+  "desc_issue": "Issue 分类、标签、指派、A2A 触发 Coding Agent",
+  "desc_coding": "代码实现、PR 创建、自我审查",
+  "desc_qa": "代码审查、自动化测试、功能验证、安全检查",
+  "desc_sre": "构建部署、发布管理、监控运维、故障排查"
+}

@@ -35,9 +35,9 @@ function renderDashboard(data) {
   html += `<div class="cd">
     <div class="cd-h"><h2>DevOps Agent Workflow</h2>
       <div class="flex fc gap8">
-        <span class="ts t2">开发场景:</span>
+        <span class="ts t2">${I18N.t('dashboard.dev_scene')}</span>
         <select id="sceneSelect" style="padding:4px 8px;border-radius:6px;border:1px solid var(--b);font-size:11px;background:var(--bg);color:var(--t);outline:none">${sceneOpts}</select>
-        <button class="bt bt-p bt-s" onclick="applyScene('${owner}', '${name}')">应用</button>
+        <button class="bt bt-p bt-s" onclick="applyScene('${owner}', '${name}')">${I18N.t('dashboard.apply')}</button>
       </div>
     </div>
     <div class="af">`;
@@ -52,12 +52,12 @@ function renderDashboard(data) {
     const backend = ag.backend || '';   // 无硬编码默认（engine-selection-design.md v2）；空 = 无 engine
     const backendHtml = backend
       ? `<span class="mv">${backend}</span>`
-      : `<span class="mv" style="color:var(--r);font-weight:700">无 engine，不可用</span>`;
+      : `<span class="mv" style="color:var(--r);font-weight:700">${I18N.t('dashboard.no_engine')}</span>`;
     const count = agentCounts[at] || 0;
     const nsText = count > 0 ? count + ' events today' : hasSession ? (st === 'running' ? 'Processing...' : 'Idle') : '—';
     const ntCls = at === 'vod' ? 'tg-v' : at === 'issue' ? 'tg-i' : at === 'coding' ? 'tg-c' : at === 'qa' ? 'tg-q' : 'tg-s';
     const colors = {vod:'var(--pk)',issue:'var(--r)',coding:'var(--a)',qa:'var(--pu)',sre:'var(--or)'};
-    const descs = {vod:'从开发者声音中收集反馈、聚类分析共性、提炼价值、自动创建 Issue',issue:'Issue 分类、标签、指派、A2A 触发 Coding Agent',coding:'代码实现、PR 创建、自我审查',qa:'代码审查、自动化测试、功能验证、安全检查',sre:'构建部署、发布管理、监控运维、故障排查'};
+    const descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
     const borderColor = meta.color || colors[at] || 'var(--t2)';
     const dotColor = meta.color || colors[at] || 'var(--t2)';
     const desc = meta.description || descs[at] || '';
@@ -76,18 +76,18 @@ function renderDashboard(data) {
         </div>`;
       }).join('');
     } else {
-      evHtml = '<div class="t2" style="font-size:9px">暂无事件</div>';
+      evHtml = '<div class="t2" style="font-size:9px">' + I18N.t('dashboard.no_events') + '</div>';
     }
 
     // Agent 启用开关（仅 Maintainer 可切换）
     const toggleBtn = `<button onclick="event.stopPropagation();toggleAgentEnable('${at}', ${!enabled})"
       style="cursor:pointer;border:1px solid var(--b);border-radius:10px;padding:1px 8px;font-size:9px;
              background:${enabled ? 'var(--g)' : 'var(--t3)'};color:#fff;margin-left:auto"
-      title="${enabled ? '点击停用' : '点击启用'}">${enabled ? '✓ 开启' : '○ 停用'}</button>`;
+      title="${enabled ? I18N.t('dashboard.toggle_disable') : I18N.t('dashboard.toggle_enable')}">${enabled ? I18N.t('dashboard.toggle_on') : I18N.t('dashboard.toggle_off')}</button>`;
 
     html += `<div class="nd" style="border-top:3px solid ${borderColor};${enabled ? '' : 'opacity:0.55'}" onclick="app.nav('${at}')">
       <div class="nh"><span class="n" style="background:${dotColor}"></span><h4>${meta.display_name || agentLabels[i]}</h4>${toggleBtn}</div>
-      ${enabled ? `<div class="nds">${desc}</div>` : '<div class="t2" style="font-size:10px;margin:4px 0">已停用</div>'}
+      ${enabled ? `<div class="nds">${desc}</div>` : '<div class="t2" style="font-size:10px;margin:4px 0">' + I18N.t('dashboard.agent_disabled') + '</div>'}
       <div class="nm"><span class="ml">Backend</span>${backendHtml}</div>
       <div class="ns"><span class="d" style="background:${statusDot}"></span>${nsText}</div>
       <div class="nt ${ntCls}">${evHtml}</div>
@@ -97,15 +97,15 @@ function renderDashboard(data) {
   // 开关交互
   window.toggleAgentEnable = function(agentType, enable) {
     const role = (data.role || '').toLowerCase();
-    if (role !== 'maintainer' && role !== 'admin') { app.showToast('仅 Maintainer 可切换 Agent 开关'); return; }
+    if (role !== 'maintainer' && role !== 'admin') { app.showToast(I18N.t('dashboard.only_maintainer_toggle')); return; }
     const repo = app.currentRepo();
-    if (!repo) { app.showToast('请先选择仓库'); return; }
+    if (!repo) { app.showToast(I18N.t('dashboard.please_select_repo')); return; }
     const body = { enable: enable };
     API.put('/agents/' + agentType + '/' + repo.owner + '/' + repo.name, body).then(() => {
-      app.showToast((enable ? '已启用 ' : '已停用 ') + (agentLabels[agentOrder.indexOf(agentType)] || agentType));
+      app.showToast((enable ? I18N.t('dashboard.enabled_prefix') : I18N.t('dashboard.disabled_prefix')) + (agentLabels[agentOrder.indexOf(agentType)] || agentType));
       renderDashboard(data);   // 刷新卡片态（重新拉取）
       API.get('/dashboard/' + repo.owner + '/' + repo.name).then(renderDashboard).catch(() => {});
-    }).catch(e => app.showToast('切换失败: ' + (e.detail?.message || e.message)));
+    }).catch(e => app.showToast(I18N.t('dashboard.toggle_failed', {msg: (e.detail?.message || e.message)})));
   };
 
   html += `</div>

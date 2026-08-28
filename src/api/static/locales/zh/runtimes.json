@@ -1,1 +1,122 @@
-{}
+{
+  "scope": {
+    "global": "全局",
+    "repo": "仓库",
+    "user": "个人"
+  },
+  "health": {
+    "online": "在线",
+    "recently_lost": "刚失联",
+    "offline": "离线",
+    "about_to_gc": "待回收"
+  },
+  "tab": {
+    "engines": "Engines 引擎",
+    "workers": "Workers 设备"
+  },
+  "action": {
+    "gen_credential": "＋ 生成凭据",
+    "refresh": "⟳ Refresh",
+    "rename": "改名",
+    "revoke": "吊销",
+    "tasks": "任务",
+    "close": "关闭",
+    "save_tags": "保存标签",
+    "refresh_skills": "⟳ 刷新",
+    "cancel": "取消",
+    "generate": "生成",
+    "copy_one_cmd": "📋 复制一键命令",
+    "copy_token": "📋 复制 token"
+  },
+  "label": {
+    "local_direct": "本机直连",
+    "local": "本机",
+    "remote": "远端",
+    "skills_count": "{{count}} 个",
+    "tags": "标签",
+    "credential": "凭据",
+    "hosted_engines": "承载引擎",
+    "cred_name": "凭据名称",
+    "cred_name_placeholder": "如 CI-Worker-01",
+    "owner_user": "归属用户",
+    "scope": "范围",
+    "repo_key": "仓库 (owner/repo)",
+    "engine_type": "引擎类型",
+    "version": "版本",
+    "health_status": "健康状态",
+    "healthy": "✓ 健康",
+    "unhealthy": "✗ 异常",
+    "worker": "Worker",
+    "ip": "IP",
+    "scope_label": "Scope",
+    "owner": "Owner",
+    "installed": "已安装",
+    "yes": "是",
+    "no": "否",
+    "role_tags": "角色标签",
+    "local_skill_list": "本地 Skill 列表",
+    "skill_count_paren": "（{{count}} 个）",
+    "description": "描述",
+    "provider": "提供方",
+    "local_path": "本地路径",
+    "file_count": "文件数",
+    "task_id": "Task ID",
+    "repo_agent": "仓库/Agent",
+    "status": "状态",
+    "exit": "Exit",
+    "result": "结果"
+  },
+  "empty": {
+    "no_engines": "暂无引擎",
+    "no_workers": "暂无 Worker",
+    "no_tasks": "暂无任务",
+    "no_local_skill": "无本地 skill",
+    "unassigned": "未分配"
+  },
+  "time": {
+    "not_online": "未上线",
+    "seconds_ago": "{{n}}s 前",
+    "minutes_ago": "{{n}}m 前",
+    "hours_ago": "{{n}}h 前"
+  },
+  "credential": {
+    "gen_title": "生成凭据",
+    "toast_name_required": "请填写凭据名称",
+    "toast_repo_required": "仓库范围需填写仓库 owner/repo",
+    "token_warning": "⚠️ token 仅展示一次，请立即保存（凭据名: {{name}}，范围: {{scope}}）：",
+    "install_hint": "📦 在 Worker 机器（普通用户）一键安装接入：",
+    "install_desc": "该命令从主控下载运行包（grape-worker.tar.gz）解压到用户家目录，自动写入凭据与主控地址并后台启动注册；免 root。重复执行可升级。",
+    "manual_start": "或手动启动 RuntimeAgent：",
+    "toast_generated": "凭据已生成",
+    "toast_gen_failed": "生成失败: {{msg}}",
+    "rename_prompt": "新的凭据名称（全局唯一）：",
+    "toast_renamed": "已改名",
+    "toast_rename_failed": "改名失败: {{msg}}",
+    "toast_copied": "已复制",
+    "revoke_confirm": "确认吊销并删除该凭据？此操作不可恢复，此后该 worker 将无法接入，凭据名可重新使用。",
+    "toast_revoked": "已吊销并删除",
+    "toast_revoke_failed": "吊销失败: {{msg}}",
+    "tasks_title": "凭据 #{{id}} · 任务"
+  },
+  "toast": {
+    "load_tasks_failed": "加载任务失败: {{msg}}",
+    "refreshing": "刷新中...",
+    "refresh_success": "刷新成功",
+    "refresh_failed": "刷新失败: {{msg}}",
+    "scan_timeout": "扫描超时，请稍后重试",
+    "scan_complete": "扫描完成：{{count}} 个 skill",
+    "tags_saved": "标签已保存",
+    "save_failed": "保存失败: {{msg}}",
+    "scanning": "扫描中..."
+  },
+  "skill": {
+    "no_desc": "无描述",
+    "click_detail": "点击查看详情",
+    "detail_unavailable": "详情不可用（点击刷新按钮获取详情）"
+  },
+  "tag": {
+    "all": "全能",
+    "all_desc": "可作为所有角色",
+    "single_desc": "仅 {{label}} 角色"
+  }
+}

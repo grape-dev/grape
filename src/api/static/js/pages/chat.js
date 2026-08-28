@@ -1,7 +1,7 @@
 let _currentConvId = null;
 let _chatAbort = null;
 let _openConvId = null;
-const _NO_REPLY = '⚠️ 未收到回复，连接可能中断，请重试。';
+const _NO_REPLY = I18N.t('chat.no_reply');
 
 /**
  * 将 "Issue #N" 文本渲染为 GitCode Issue 超链接。
@@ -38,9 +38,9 @@ function renderChat(openConvId) {
   el.innerHTML = `<div class="chat-wrap" style="height:calc(100vh - 96px)">
     <div class="chat-convlist" id="convList"></div>
     <div class="chat-main">
-      <div class="chat-hdr"><h2>Chat Agent · Personal Assistant</h2><button class="chat-cfg-btn" id="chatCfgBtn" onclick="toggleChatSide()">⚙ 配置</button></div>
+      <div class="chat-hdr"><h2>${I18N.t('chat.header.title')}</h2><button class="chat-cfg-btn" id="chatCfgBtn" onclick="toggleChatSide()">${I18N.t('chat.header.config_btn')}</button></div>
       <div class="chat-body" id="chatBody">
-        <div style="text-align:center;color:var(--t3);padding:60px 20px">加载中...</div>
+        <div style="text-align:center;color:var(--t3);padding:60px 20px">${I18N.t('common.loading')}</div>
       </div>
       <div class="chat-in"><input id="chatInput" placeholder="Ask me anything..." style="flex:1"><button class="bt bt-p" onclick="sendChatStream()">Send</button></div>
     </div>
@@ -82,14 +82,14 @@ function _loadChatSkillOptions() {
     const allSkills = d.skills || [];
     const filtered = allSkills.filter(s => s.agent_type === 'chat');
     const matchCurrent = filtered.find(s => String(s.id) === currentSkillId);
-    const defaultOpt = scope === 'official' ? '<option value="0">默认官方技能（自动）</option>' : '';
+    const defaultOpt = scope === 'official' ? '<option value="0">' + I18N.t('chat.skill.default_official') + '</option>' : '';
     let html = defaultOpt +
       filtered.map((s, i) => {
         const selected = matchCurrent ? (String(s.id) === currentSkillId) : (i === 0);
         return `<option value="${s.id}" ${selected ? 'selected' : ''}>${s.display_name || s.name}</option>`;
       }).join('');
     if (filtered.length === 0) {
-      html = `<option value="0" disabled>${scope === 'repo' ? '该仓库暂无项目技能' : '暂无个人技能'}</option>`;
+      html = `<option value="0" disabled>${scope === 'repo' ? I18N.t('chat.skill.no_repo_skill') : I18N.t('chat.skill.no_personal_skill')}</option>`;
     }
     skillSelect.innerHTML = html;
   }).catch(() => {});
@@ -117,13 +117,13 @@ function loadSideConfig() {
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <span style="font-weight:600;flex-shrink:0">Skill</span>
           <select id="cfgSkillScope" onchange="_switchChatSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:5px 6px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg);outline:none">
-            <option value="official">全局</option>
-            <option value="repo">项目</option>
-            <option value="user">个人</option>
+            <option value="official">${I18N.t('chat.scope_short.global')}</option>
+            <option value="repo">${I18N.t('chat.scope_short.repo')}</option>
+            <option value="user">${I18N.t('chat.scope_short.user')}</option>
           </select>
         </div>
         <select id="cfgSkill" data-skill-id="${d.skill_id || 0}" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">
-          <option value="0">默认官方技能（自动）</option>
+          <option value="0">${I18N.t('chat.skill.default_official')}</option>
         </select>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
@@ -137,7 +137,7 @@ function loadSideConfig() {
         <input id="cfgImAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:4px">
         <div style="margin-bottom:4px"><span class="t3">App Secret</span></div>
         <input id="cfgImSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
-        <button class="bt bt-o bt-s" onclick="startFeishuOnboard('chat_bot')" style="width:100%;margin-bottom:6px">扫码配置</button>
+        <button class="bt bt-o bt-s" onclick="startFeishuOnboard('chat_bot')" style="width:100%;margin-bottom:6px">${I18N.t('chat.scan_config')}</button>
         <button class="bt bt-p bt-s" onclick="saveChatConfig()" style="width:100%">Save</button>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
@@ -182,10 +182,10 @@ function loadConversations(autoSelect) {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
     if (!list) return;
-    let html = '<div style="padding:10px 12px;border-bottom:1px solid var(--b)"><button class="bt bt-p bt-s" onclick="newConversation()" style="width:100%">＋ 新对话</button></div>';
+    let html = '<div style="padding:10px 12px;border-bottom:1px solid var(--b)"><button class="bt bt-p bt-s" onclick="newConversation()" style="width:100%">' + I18N.t('chat.conversation.new') + '</button></div>';
     convs.forEach(c => {
       const active = c.id === _currentConvId ? ' style="background:var(--b)"' : '';
-      const titleHtml = c.title ? linkifyIssueNumbers(c.title, c.repo_key) : '新对话';
+      const titleHtml = c.title ? linkifyIssueNumbers(c.title, c.repo_key) : I18N.t('chat.conversation.default_title');
       html += `<div class="conv-item" data-id="${c.id}"${active}>
         <div class="conv-title">${titleHtml}</div>
         <div class="conv-meta">${fmtLocalTime(c.created_at).substring(0,16)}</div>
@@ -193,8 +193,8 @@ function loadConversations(autoSelect) {
       </div>`;
     });
     if (convs.length === 0) {
-      html += '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">暂无对话，开始输入即可自动创建</div>';
-      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">输入消息即可开始新对话</div>';
+      html += '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">' + I18N.t('chat.conversation.empty_hint') + '</div>';
+      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
     }
     list.innerHTML = html;
     list.querySelectorAll('.conv-item').forEach(item => {
@@ -228,20 +228,20 @@ function newConversation() {
     document.getElementById('chatInput').disabled = false;
     document.querySelector('.chat-in button').disabled = false;
     const hdr = document.querySelector('.chat-hdr h2');
-    if (hdr) hdr.textContent = 'Chat Agent · Personal Assistant';
-  }).catch(e => app.showToast('创建失败: ' + e.message));
+    if (hdr) hdr.textContent = I18N.t('chat.header.title');
+  }).catch(e => app.showToast(I18N.t('chat.conversation.create_failed', {msg: e.message})));
 }
 
 function deleteConversation(convId) {
-  if (!confirm('确定删除此对话及其所有消息？')) return;
+  if (!confirm(I18N.t('chat.conversation.delete_confirm'))) return;
   API.del('/chat/conversations/' + convId).then(() => {
     if (_currentConvId === convId) {
       _currentConvId = null;
-      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">输入消息即可开始新对话</div>';
+      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
     }
     loadConversations();
-    app.showToast('对话已删除');
-  }).catch(e => app.showToast('删除失败: ' + e.message));
+    app.showToast(I18N.t('chat.conversation.deleted'));
+  }).catch(e => app.showToast(I18N.t('chat.conversation.delete_failed', {msg: e.message})));
 }
 
 function switchConversation(convId) {
@@ -249,7 +249,7 @@ function switchConversation(convId) {
   loadConversations();
   const body = document.getElementById('chatBody');
   const input = document.getElementById('chatInput');
-  body.innerHTML = '<div class="loading">加载中...</div>';
+  body.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
   API.get('/chat/messages/' + convId).then(d => {
     const msgs = d.messages || [];
     // 更新会话标题（如 Issue #4）到页头，Issue #N 渲染为 GitCode 超链接
@@ -268,13 +268,13 @@ function switchConversation(convId) {
       // 消息内容中的 "Issue #N" 渲染为 GitCode 超链接
       const repoKey = conv.repo_key || '';
       return `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${linkifyIssueNumbers(rendered, repoKey)}</div>`;
-    }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">开始新对话</div>';
+    }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_new') + '</div>';
     body.scrollTop = body.scrollHeight;
     if (input) input.disabled = false;
     const sendBtn = document.querySelector('.chat-in button');
     if (sendBtn) sendBtn.disabled = false;
   }).catch(() => {
-    body.innerHTML = '<div class="error">加载失败</div>';
+    body.innerHTML = '<div class="error">' + I18N.t('chat.load_failed') + '</div>';
   });
 }
 
@@ -293,7 +293,7 @@ function sendChatStream() {
       _currentConvId = d.conversation_id;
       loadConversations();
       doSend(input, body);
-    }).catch(e => app.showToast('创建对话失败: ' + e.message));
+    }).catch(e => app.showToast(I18N.t('chat.conversation.create_conv_failed', {msg: e.message})));
     return;
   }
   doSend(input, body);
@@ -383,7 +383,7 @@ function doSend(input, body) {
 }
 
 function pollTaskStatus(taskId, el, body, tid) {
-  if (el) el.innerHTML = '⏳ 任务执行中…';
+  if (el) el.innerHTML = I18N.t('chat.task.running');
   const token = localStorage.getItem('token');
   let attempts = 0;
   const timer = setInterval(() => {
@@ -395,15 +395,15 @@ function pollTaskStatus(taskId, el, body, tid) {
       if (d.status === 'completed' || d.status === 'failed' || d.status === 'cancelled') {
         clearInterval(timer);
         _chatAbort = null;
-        const text = d.result_text || (d.status === 'completed' ? 'Done' : '任务' + d.status);
+        const text = d.result_text || (d.status === 'completed' ? 'Done' : I18N.t('chat.task.status_prefix', {status: d.status}));
         if (el) el.innerHTML = renderMarkdown(text);
         body.scrollTop = body.scrollHeight;
         loadConversations();
       } else if (d.status === 'running' || d.status === 'dispatched') {
-        if (el) el.innerHTML = '⏳ 任务执行中… (' + Math.round(attempts * 1) + 's)';
+        if (el) el.innerHTML = I18N.t('chat.task.running_with_time', {sec: Math.round(attempts * 1)});
       }
     }).catch(() => {});
-    if (attempts > 180) { clearInterval(timer); _chatAbort = null; if (el) el.innerHTML = '⏱ 等待超时'; }
+    if (attempts > 180) { clearInterval(timer); _chatAbort = null; if (el) el.innerHTML = I18N.t('chat.task.timeout'); }
   }, 1000);
 }
 
@@ -415,7 +415,7 @@ function saveChatConfig() {
   const skillId = parseInt(skillVal) || 0;
   // 项目/个人 scope 下不允许保存空值（无"默认技能"选项）
   if (_chatSkillScope !== 'official' && !skillId) {
-    if (app && app.showToast) app.showToast('请选择技能');
+    if (app && app.showToast) app.showToast(I18N.t('chat.skill.select_required'));
     return;
   }
   const provider = document.getElementById('cfgImProvider')?.value || 'feishu';
@@ -429,8 +429,8 @@ function saveChatConfig() {
   const _body = {backend, skill_id: skillId, im};
   if (rid) _body.runtime_id = parseInt(rid, 10);
   API.put('/chat/config' + _qs, _body).then(() => {
-    app.showToast('配置已保存');
-  }).catch(e => app.showToast('保存失败: ' + e.message));
+    app.showToast(I18N.t('chat.config.saved'));
+  }).catch(e => app.showToast(I18N.t('chat.config.save_failed', {msg: e.message})));
 }
 
 function switchImProvider() {
@@ -461,8 +461,8 @@ function startFeishuOnboard(botType, repoKey) {
     pollOnboardStatus();
   }).catch(e => {
     // 409：已有进行中的任务
-    if (e.status === 409) app.showToast(e.message || '已有扫码配置正在进行，请稍候');
-    else app.showToast('启动扫码配置失败: ' + e.message);
+    if (e.status === 409) app.showToast(e.message || I18N.t('chat.onboard.in_progress'));
+    else app.showToast(I18N.t('chat.onboard.start_failed', {msg: e.message}));
   });
 }
 
@@ -474,10 +474,10 @@ function showOnboardModal() {
   mask.innerHTML = `
     <div style="width:340px;background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:20px;box-shadow:0 8px 32px rgba(0,0,0,.25);font-size:12px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-        <b style="font-size:14px">🔗 飞书扫码配置</b>
+        <b style="font-size:14px">${I18N.t('chat.onboard.modal_title')}</b>
         <span style="cursor:pointer;color:var(--t3)" onclick="cancelOnboard()">✕</span>
       </div>
-      <div id="onboardBody" style="text-align:center;color:var(--t3);padding:30px 0">正在生成二维码…</div>
+      <div id="onboardBody" style="text-align:center;color:var(--t3);padding:30px 0">${I18N.t('chat.onboard.generating_qr')}</div>
     </div>`;
   document.body.appendChild(mask);
   mask.addEventListener('click', e => { if (e.target === mask) cancelOnboard(); });
@@ -505,7 +505,7 @@ function renderOnboardStatus(d) {
   const body = document.getElementById('onboardBody');
   if (!body) return;
   const map = {
-    pending: () => { body.innerHTML = '⏳ 正在生成二维码…'; },
+    pending: () => { body.innerHTML = I18N.t('chat.onboard.generating_qr'); },
     waiting_confirm: () => {
       if (!d.qr_url) return;
       // 仅在二维码首次就绪时初始化过期时间与渲染二维码；
@@ -515,9 +515,9 @@ function renderOnboardStatus(d) {
         _onboardExpireAt = d.expire_in ? Date.now() + d.expire_in * 1000 : 0;
         body.innerHTML = `
           <div style="background:#fff;border:1px solid var(--b);border-radius:8px;padding:12px;display:inline-block;margin-bottom:10px" id="onboardQr"></div>
-          <div style="color:var(--t);margin-bottom:4px">1. 打开飞书 App，扫描上方二维码</div>
-          <div style="color:var(--t3);margin-bottom:10px">2. 在飞书内确认「创建应用/授权」页面</div>
-          <div style="color:var(--pk);font-size:11px" id="onboardCountdown">等待确认…</div>`;
+          <div style="color:var(--t);margin-bottom:4px">${I18N.t('chat.onboard.step1_scan')}</div>
+          <div style="color:var(--t3);margin-bottom:10px">${I18N.t('chat.onboard.step2_confirm')}</div>
+          <div style="color:var(--pk);font-size:11px" id="onboardCountdown">${I18N.t('chat.onboard.waiting_confirm')}</div>`;
         new QRCode(document.getElementById('onboardQr'), {text: d.qr_url, width: 200, height: 200});
         startCountdown();
       }
@@ -525,21 +525,21 @@ function renderOnboardStatus(d) {
     connected: () => {
       body.innerHTML = `
         <div style="font-size:34px;margin-bottom:8px">✅</div>
-        <div style="color:var(--t);font-weight:600;margin-bottom:8px">配置成功</div>
+        <div style="color:var(--t);font-weight:600;margin-bottom:8px">${I18N.t('chat.onboard.success_title')}</div>
         <div style="color:var(--t2);font-size:11px;margin-bottom:2px">App ID: <span style="font-family:monospace">${d.app_id || ''}</span></div>
-        <div style="color:var(--t2);font-size:11px;margin-bottom:4px">App Secret 已保存（回显为 ******）</div>
-        <div style="color:var(--pk);font-size:11px;margin-bottom:12px">Bot 已连接 · 🟢 在线</div>
-        <button class="bt bt-p bt-s" onclick="closeOnboardModal(true)" style="width:100%">关闭</button>`;
+        <div style="color:var(--t2);font-size:11px;margin-bottom:4px">${I18N.t('chat.onboard.secret_saved')}</div>
+        <div style="color:var(--pk);font-size:11px;margin-bottom:12px">${I18N.t('chat.onboard.bot_connected')}</div>
+        <button class="bt bt-p bt-s" onclick="closeOnboardModal(true)" style="width:100%">${I18N.t('chat.onboard.close')}</button>`;
     },
     failed: () => {
       const msg = onboardErrorText(d.error || '');
       body.innerHTML = `
         <div style="font-size:34px;margin-bottom:8px">❌</div>
-        <div style="color:var(--r);font-weight:600;margin-bottom:8px">配置失败</div>
+        <div style="color:var(--r);font-weight:600;margin-bottom:8px">${I18N.t('chat.onboard.failed_title')}</div>
         <div style="color:var(--t2);font-size:11px;margin-bottom:12px">${msg}</div>
         <div style="display:flex;gap:8px">
-          <button class="bt bt-o bt-s" onclick="restartOnboard()" style="flex:1">重新扫码</button>
-          <button class="bt bt-p bt-s" onclick="closeOnboardModal()" style="flex:1">取消</button>
+          <button class="bt bt-o bt-s" onclick="restartOnboard()" style="flex:1">${I18N.t('chat.onboard.rescan')}</button>
+          <button class="bt bt-p bt-s" onclick="closeOnboardModal()" style="flex:1">${I18N.t('chat.onboard.cancel')}</button>
         </div>`;
     },
   };
@@ -549,10 +549,10 @@ function renderOnboardStatus(d) {
 
 function onboardErrorText(err) {
   const t = String(err || '');
-  if (t.includes('access_denied')) return '用户拒绝了授权请求';
-  if (t.includes('expired') || t.includes('timeout')) return '二维码已过期，请重新扫码';
+  if (t.includes('access_denied')) return I18N.t('chat.onboard.error_access_denied');
+  if (t.includes('expired') || t.includes('timeout')) return I18N.t('chat.onboard.qr_expired');
   if (t.includes('已被')) return t;
-  return t || '未知错误';
+  return t || I18N.t('chat.onboard.error_unknown');
 }
 
 function startCountdown() {
@@ -562,12 +562,12 @@ function startCountdown() {
     if (!_onboardExpireAt) return;
     const remain = Math.max(0, Math.round((_onboardExpireAt - Date.now()) / 1000));
     if (remain <= 0) {
-      el.textContent = '二维码已过期，请重新扫码';
+      el.textContent = I18N.t('chat.onboard.qr_expired');
       return;
     }
     const mm = String(Math.floor(remain / 60)).padStart(2, '0');
     const ss = String(remain % 60).padStart(2, '0');
-    el.textContent = `等待确认… 二维码将在 ${mm}:${ss} 后过期`;
+    el.textContent = I18N.t('chat.onboard.waiting_countdown', {time: mm + ':' + ss});
     setTimeout(tick, 1000);
   };
   tick();

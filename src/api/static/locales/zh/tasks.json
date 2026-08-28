@@ -1,1 +1,72 @@
-{}
+{
+  "page_title": "Task Center",
+  "loading": "加载中...",
+  "load_failed": "加载失败: {{msg}}",
+  "tab": {
+    "all": "全部",
+    "active": "待处理",
+    "completed": "已完成"
+  },
+  "status": {
+    "pending": "待处理",
+    "processing": "处理中",
+    "completed": "已完成",
+    "tag_pending": "<b></b>待处理",
+    "tag_processing": "<b></b>处理中",
+    "tag_completed": "<b></b>已完成",
+    "detail_completed": "✓ 已完成 · ",
+    "detail_processing": "⏳ 处理中",
+    "detail_pending": "● 待处理",
+    "reason_issue_closed": "Issue 已关闭",
+    "reason_reassigned": "已转派",
+    "reason_bot_takeover": "Bot 已接管"
+  },
+  "section": {
+    "pending": "待处理",
+    "processing": "处理中",
+    "completed": "已完成"
+  },
+  "empty": {
+    "no_tasks_title": "暂无任务",
+    "no_tasks_desc": "当前筛选下没有匹配的任务。",
+    "select_task_title": "选择一项任务",
+    "select_task_desc": "从左侧列表选择任务查看详情。"
+  },
+  "pager": {
+    "summary": "共 {{total}} 条 · {{page}}/{{pages}} 页"
+  },
+  "create": {
+    "btn_new": "+ 新建任务",
+    "modal_title": "+ 新建任务",
+    "repo_label": "仓库：",
+    "repo_empty": "—（请先进入仓库页再创建）",
+    "title_label": "标题",
+    "title_hint": "将作为 GitCode Issue 标题（同仓库同名 open Issue 自动复用，不重复创建）",
+    "title_placeholder": "任务标题（必填）",
+    "desc_label": "描述",
+    "desc_placeholder": "任务描述",
+    "scene_label": "开发场景",
+    "scene_hint": "不选则由 VOD 审视时自动识别",
+    "scene_none": "不指定（由 VOD 自动识别）",
+    "assignee_hint": "Issue 责任人 = 系统 General Settings 的 Account（当前登录账号）",
+    "btn_cancel": "取消",
+    "btn_create": "创建任务",
+    "btn_creating": "创建中…",
+    "err_no_repo": "请先在仓库页选择仓库，再创建任务",
+    "err_no_title": "请填写任务标题",
+    "err_create_failed": "创建失败: {{msg}}",
+    "success_prefix": "✅ "
+  },
+  "detail": {
+    "status": "状态",
+    "task_id": "任务编号",
+    "repo": "仓库",
+    "created_at": "创建时间",
+    "completed_at": "完成时间",
+    "no_description": "暂无任务描述。",
+    "view_issue": "查看 Issue ↗",
+    "go_conversation": "去对话 ↗"
+  },
+  "search_placeholder": "搜索任务...",
+  "change_status_failed": "状态更新失败: {{msg}}"
+}

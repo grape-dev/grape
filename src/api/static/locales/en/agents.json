@@ -1,1 +1,69 @@
-{}
+{
+  "scope": {
+    "global": "Global",
+    "repo": "Repo",
+    "personal": "Personal",
+    "local_direct": "Local Direct"
+  },
+  "scope_short": {
+    "global": "Global",
+    "repo": "Project",
+    "user": "Personal"
+  },
+  "tag": {
+    "all": "All"
+  },
+  "engine": {
+    "none_available": "No engines available (repo-level/global/local direct)",
+    "load_failed": "Failed to load engine list",
+    "label": "Engine: {{text}}",
+    "no_engine": "No engine, unavailable",
+    "select_placeholder": "Select engines...",
+    "backend_engines_hint": "Multi-select; tasks will be assigned to idle engines"
+  },
+  "skill": {
+    "default_official": "Default official skill (auto)",
+    "no_repo_skill": "No project skills for this repo",
+    "no_personal_skill": "No personal skills",
+    "select_required": "Please select a skill"
+  },
+  "event": {
+    "table_time": "Time",
+    "table_content": "Content",
+    "table_duration": "Duration",
+    "table_engine": "Engine",
+    "table_status": "Status",
+    "none": "No events",
+    "total": "Total Events",
+    "completed": "Completed",
+    "running": "Running",
+    "recent_n": "Recent {{n}}"
+  },
+  "config": {
+    "im_title": "IM Configuration",
+    "im_configured": "🟢 Configured",
+    "bot_secret_placeholder": "Leave blank to keep unchanged",
+    "scan_config": "Scan to Configure",
+    "bound_chats": "Bound chats ({{n}})",
+    "clean_session_hint": "After clearing the session, the next event will create a fresh agent context (previous conversation history will not continue).",
+    "clean_session_btn": "🧹 Clean Session",
+    "saved": "Configuration saved",
+    "save_failed": "Save failed: {{msg}}"
+  },
+  "subscription": {
+    "title": "Event Subscription",
+    "hint": "Not configured by default; check to receive tasks on trigger",
+    "pr_merged": "PR Merged (pull_request_merged)",
+    "merge_branch": "Merge Branch",
+    "merge_branch_placeholder": "main, dev… (blank = any branch)",
+    "branch_hint": "When a PR is merged into the above branches, {{name}} will automatically receive a task; leave blank to trigger on any branch."
+  },
+  "session": {
+    "clean_confirm": "Confirm clearing the {{name}} Agent session?\n\nThis will clear backend_session_id. The next event will create a fresh session context (previous conversation history will not continue).",
+    "cleaned": "Session cleared",
+    "clean_failed": "Clear failed: {{msg}}"
+  },
+  "toast": {
+    "select_repo_first": "Please select a repository first"
+  }
+}

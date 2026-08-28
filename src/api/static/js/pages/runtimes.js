@@ -2,9 +2,9 @@
    见 runtime-admin-two-view-design.md。卡片式布局：状态徽章置顶，异常引擎优先捕捉。 */
 const RUNTIME_ICON = { online: '●', recently_lost: '◐', offline: '○', about_to_gc: '⚠' };
 const RUNTIME_COLOR = { online: 'var(--g)', recently_lost: 'var(--or)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
-const SCOPE_NAMES = { global: '全局', repo: '仓库', user: '个人' };
+const SCOPE_NAMES = { global: 'global', repo: 'repo', user: 'user' };
 const SCOPE_ORDER = ['global', 'repo', 'user'];
-const HEALTH_NAMES = { online: '在线', recently_lost: '刚失联', offline: '离线', about_to_gc: '待回收' };
+const HEALTH_NAMES = { online: 'online', recently_lost: 'recently_lost', offline: 'offline', about_to_gc: 'about_to_gc' };
 const HEALTH_BADGE = {
   online: { color: 'var(--g)', bg: '#dcfce7' },
   recently_lost: { color: 'var(--or)', bg: '#fef3c7' },
@@ -25,8 +25,8 @@ function _currentUser() {
 }
 
 function _healthDot(h) { return `<span style="color:${RUNTIME_COLOR[h] || 'var(--t3)'}">${RUNTIME_ICON[h] || '○'}</span>`; }
-function _healthLabel(h) { return HEALTH_NAMES[h] || h || '离线'; }
-function _scopeLabel(s) { return SCOPE_NAMES[s] || s || '全局'; }
+function _healthLabel(h) { return I18N.t('runtimes.health.' + (HEALTH_NAMES[h] || 'offline')); }
+function _scopeLabel(s) { return I18N.t('runtimes.scope.' + (SCOPE_NAMES[s] || 'global')); }
 
 function _healthBadge(h, suffix) {
   const st = HEALTH_BADGE[h] || HEALTH_BADGE.offline;
@@ -35,14 +35,14 @@ function _healthBadge(h, suffix) {
 
 function _scopeBar(sc, n, localN) {
   // global 分组额外标注本机直连/远端数量（engine-selection-design.md §4.3）
-  const sub = (sc === 'global' && localN) ? ` <span style="color:#0e7490;font-weight:600">· 本机直连 ${localN} / 远端 ${(n || 0) - localN}</span>` : '';
+  const sub = (sc === 'global' && localN) ? ` <span style="color:#0e7490;font-weight:600">· ${I18N.t('runtimes.label.local_direct')} ${localN} / ${I18N.t('runtimes.label.remote')} ${(n || 0) - localN}</span>` : '';
   return `<div style="display:inline-flex;align-items:center;gap:8px;background:#e3edfd;color:#235ec7;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;margin:16px 0 10px">${_scopeLabel(sc)} <span style="background:rgba(35,94,199,.12);border-radius:10px;padding:0 8px;font-size:11px">${n}</span>${sub}</div>`;
 }
 
 function _legendHtml() {
   return `<div style="display:flex;gap:14px;flex-wrap:wrap;padding:12px 0;font-size:11px;color:var(--t3);border-top:1px dashed var(--b)">
     ${Object.entries(HEALTH_NAMES).map(([k, v]) =>
-      `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:${(HEALTH_BADGE[k] || {}).color || 'var(--t3)'}"></span>${v}${k === 'recently_lost' ? '(<5min)' : k === 'about_to_gc' ? '(>6d)' : ''}</span>`).join('')}
+      `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:${(HEALTH_BADGE[k] || {}).color || 'var(--t3)'}"></span>${I18N.t('runtimes.health.' + v)}${k === 'recently_lost' ? '(<5min)' : k === 'about_to_gc' ? '(>6d)' : ''}</span>`).join('')}
   </div>`;
 }
 
@@ -52,18 +52,18 @@ function renderRuntimes(data) {
   __runtimeData = data;
   const devices = (data.devices && data.devices.length)
     ? data.devices
-    : (data.runtimes || []).map(rt => ({ name: rt.worker_name || rt.name, device_name: '本机', health: rt.health || 'offline',
+    : (data.runtimes || []).map(rt => ({ name: rt.worker_name || rt.name, device_name: I18N.t('runtimes.label.local'), health: rt.health || 'offline',
       scope: 'global', owner: rt.owner || '', worker_ip: rt.worker_ip || '', credential_id: 0, runtimes: [rt] }));
   __runtimeDevices = devices;
 
   const tabBtn = t => {
     const active = _runtimeTab === t;
-    return `<button class="bt ${active ? 'bt-p' : 'bt-o'}" onclick="_runtimeTab='${t}';renderRuntimes(__runtimeData)">${t === 'engines' ? 'Engines 引擎' : 'Workers 设备'}</button>`;
+    return `<button class="bt ${active ? 'bt-p' : 'bt-o'}" onclick="_runtimeTab='${t}';renderRuntimes(__runtimeData)">${I18N.t('runtimes.tab.' + t)}</button>`;
   };
   let html = `<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
       ${tabBtn('engines')}${tabBtn('workers')}
       <div class="sp"></div>
-      ${_runtimeTab === 'workers' ? '<button class="bt bt-p" onclick="openGenCredential()">＋ 生成凭据</button>' : ''}
+      ${_runtimeTab === 'workers' ? `<button class="bt bt-p" onclick="openGenCredential()">${I18N.t('runtimes.action.gen_credential')}</button>` : ''}
       <button class="bt bt-o" onclick="refreshRuntimes()">⟳ Refresh</button>
     </div>`;
   html += _runtimeTab === 'engines' ? renderEngines(data, devices) : renderWorkers(data, devices);
@@ -86,7 +86,7 @@ function renderEngines(data, devices) {
     html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">`;
     list.forEach(rt => {
       const localBadge = rt.is_local
-        ? `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 8px;white-space:nowrap;vertical-align:middle">本机直连</span>`
+        ? `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 8px;white-space:nowrap;vertical-align:middle">${I18N.t('runtimes.label.local_direct')}</span>`
         : '';
       html += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh);cursor:pointer" onclick="openEngineDetail(${rt.id})">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
@@ -95,16 +95,16 @@ function renderEngines(data, devices) {
           <span style="font-weight:400;color:var(--t3);font-size:12px;margin-left:auto">${rt.name} v${rt.version || ''}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">worker</span> ${rt.worker_name || (rt.is_local ? '本机' : '—')}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">worker</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${rt.owner || '—'} ${rt.is_local ? `<span style="color:var(--t3);font-size:10px">(${rt.owner_id || 'global'})</span>` : ''}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">skills</span> ${(rt.local_skills || []).length} 个</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">标签</span> ${_engineTagSummary(rt.agent_tags)}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">skills</span> ${I18N.t('runtimes.label.skills_count', {count: (rt.local_skills || []).length})}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.tags')}</span> ${_engineTagSummary(rt.agent_tags)}</div>
         </div>
       </div>`;
     });
     html += `</div>`;
   });
-  return html || '<div class="ts t2" style="padding:12px">暂无引擎</div>';
+  return html || `<div class="ts t2" style="padding:12px">${I18N.t('runtimes.empty.no_engines')}</div>`;
 }
 
 function renderWorkers(data, devices) {
@@ -121,37 +121,37 @@ function renderWorkers(data, devices) {
       const credColor = d.credential_status === 'revoked' ? 'var(--r)' : 'var(--g)';
       html += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
-          ${_healthBadge(d.health, d.credential_id ? relTime(d.last_seen_at) : '本机直连')}
+          ${_healthBadge(d.health, d.credential_id ? relTime(d.last_seen_at) : I18N.t('runtimes.label.local_direct'))}
           <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'}</span>
           <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span>
-          ${d.credential_id ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;margin-left:auto" onclick="renameCredential(${d.credential_id})">改名</button>` : ''}
+          ${d.credential_id ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;margin-left:auto" onclick="renameCredential(${d.credential_id})">${I18N.t('runtimes.action.rename')}</button>` : ''}
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:12px;color:var(--t2)">
           <div style="display:flex;gap:16px;flex:1;min-width:0">
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">owner</span> ${d.owner || '—'} ${d.credential_id === 0 ? `<span style="color:var(--t3);font-size:10px">(${d.owner_id || 'global'})</span>` : ''}</div>
-            <div><span style="color:var(--t3);display:inline-block;min-width:46px">凭据</span> <b style="color:${credColor}">${d.credential_status || ''}</b></div>
+            <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.credential')}</span> <b style="color:${credColor}">${d.credential_status || ''}</b></div>
           </div>
-          ${d.credential_id ? `<button class="bt bt-r" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="revokeCredential(${d.credential_id})">吊销</button>` : ''}
+          ${d.credential_id ? `<button class="bt bt-r" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="revokeCredential(${d.credential_id})">${I18N.t('runtimes.action.revoke')}</button>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--t2)">
-          <span style="color:var(--t3);white-space:nowrap;flex-shrink:0">承载引擎</span>
+          <span style="color:var(--t3);white-space:nowrap;flex-shrink:0">${I18N.t('runtimes.label.hosted_engines')}</span>
           <span style="flex:1;min-width:0;word-break:break-all">${clis || '—'}</span>
-          ${d.credential_id ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="openDeviceTasks(${d.credential_id})">任务</button>` : ''}
+          ${d.credential_id ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="openDeviceTasks(${d.credential_id})">${I18N.t('runtimes.action.tasks')}</button>` : ''}
         </div>
       </div>`;
     });
     html += `</div>`;
   });
-  return html || '<div class="ts t2" style="padding:12px">暂无 Worker</div>';
+  return html || `<div class="ts t2" style="padding:12px">${I18N.t('runtimes.empty.no_workers')}</div>`;
 }
 
 function relTime(iso) {
-  if (!iso) return '未上线';
+  if (!iso) return I18N.t('runtimes.time.not_online');
   try {
     const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-    if (diff < 60) return Math.round(diff) + 's 前';
-    if (diff < 3600) return Math.round(diff / 60) + 'm 前';
-    return Math.round(diff / 3600) + 'h 前';
+    if (diff < 60) return I18N.t('runtimes.time.seconds_ago', {n: Math.round(diff)});
+    if (diff < 3600) return I18N.t('runtimes.time.minutes_ago', {n: Math.round(diff / 60)});
+    return I18N.t('runtimes.time.hours_ago', {n: Math.round(diff / 3600)});
   } catch (e) { return iso; }
 }
 
@@ -160,12 +160,12 @@ function openGenCredential() {
   if (!el) return;
   const cur = _currentUser();
   const html = `<div class="cd" id="genCredPanel" style="margin-bottom:12px;padding:14px 18px">
-    <h3 style="font-size:14px;margin-bottom:10px">生成凭据</h3>
-    <div class="srow"><label>凭据名称</label><input id="credName" placeholder="如 CI-Worker-01" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
-    <div class="srow"><label>归属用户</label><input value="${cur}" disabled style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:#f1f5f9"></div>
-    <div class="srow"><label>范围</label><select id="credScope" onchange="toggleRepoKey()" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"><option value="user">个人</option><option value="repo">仓库</option><option value="global">全局</option></select></div>
-    <div class="srow" id="repoKeyRow" style="display:none"><label>仓库 (owner/repo)</label><input id="credRepoKey" placeholder="owner/repo" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
-    <div class="flex gap6" style="margin-top:12px"><button class="bt bt-p" onclick="doCreateCredential()">生成</button><button class="bt bt-o" onclick="closeGenCredential()">取消</button></div>
+    <h3 style="font-size:14px;margin-bottom:10px">${I18N.t('runtimes.credential.gen_title')}</h3>
+    <div class="srow"><label>${I18N.t('runtimes.label.cred_name')}</label><input id="credName" placeholder="${I18N.t('runtimes.label.cred_name_placeholder')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
+    <div class="srow"><label>${I18N.t('runtimes.label.owner_user')}</label><input value="${cur}" disabled style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:#f1f5f9"></div>
+    <div class="srow"><label>${I18N.t('runtimes.label.scope')}</label><select id="credScope" onchange="toggleRepoKey()" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"><option value="user">${I18N.t('runtimes.scope.user')}</option><option value="repo">${I18N.t('runtimes.scope.repo')}</option><option value="global">${I18N.t('runtimes.scope.global')}</option></select></div>
+    <div class="srow" id="repoKeyRow" style="display:none"><label>${I18N.t('runtimes.label.repo_key')}</label><input id="credRepoKey" placeholder="owner/repo" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
+    <div class="flex gap6" style="margin-top:12px"><button class="bt bt-p" onclick="doCreateCredential()">${I18N.t('runtimes.action.generate')}</button><button class="bt bt-o" onclick="closeGenCredential()">${I18N.t('runtimes.action.cancel')}</button></div>
   </div>`;
   el.insertAdjacentHTML('afterbegin', html);
 }
@@ -182,58 +182,58 @@ function closeGenCredential() {
 
 function doCreateCredential() {
   const name = (document.getElementById('credName') || {}).value || '';
-  if (!name) { app.showToast('请填写凭据名称'); return; }
+  if (!name) { app.showToast(I18N.t('runtimes.credential.toast_name_required')); return; }
   const scope = document.getElementById('credScope').value;
   const repo_key = (scope === 'repo' || scope === 'user') ? ((document.getElementById('credRepoKey') || {}).value || '').trim() : '';
-  if (scope === 'repo' && !repo_key) { app.showToast('仓库范围需填写仓库 owner/repo'); return; }
+  if (scope === 'repo' && !repo_key) { app.showToast(I18N.t('runtimes.credential.toast_repo_required')); return; }
   API.post('/settings/runtime-credentials', { name, scope, repo_key }).then(d => {
     const token = d.token || '';
     const runCmd = `RUNTIME_TOKEN=${token} python -m runtime.agent`;
     const oneCmd = `curl -fsSL ${window.location.origin}/api/runtime/install | bash -s -- --token ${token} --server ${window.location.origin}`;
     closeGenCredential();
     const box = `<div class="cd" style="margin-top:12px;padding:16px">
-      <div style="font-size:13px;margin-bottom:8px">⚠️ token 仅展示一次，请立即保存（凭据名: ${name}，范围: ${_scopeLabel(scope)}）：</div>
+      <div style="font-size:13px;margin-bottom:8px">${I18N.t('runtimes.credential.token_warning', {name: name, scope: _scopeLabel(scope)})}</div>
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px">${token}</code>
-      <div style="margin-top:10px;font-size:12px">📦 在 Worker 机器（普通用户）一键安装接入：</div>
+      <div style="margin-top:10px;font-size:12px">${I18N.t('runtimes.credential.install_hint')}</div>
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-top:4px">${oneCmd}</code>
-      <button class="bt bt-p" style="margin-top:8px" onclick="copyText('${oneCmd.replace(/'/g, "\\'")}')">📋 复制一键命令</button>
-      <div style="margin-top:8px;font-size:11px;color:var(--t2)">该命令从主控下载运行包（grape-worker.tar.gz）解压到用户家目录，自动写入凭据与主控地址并后台启动注册；免 root。重复执行可升级。</div>
-      <div style="margin-top:10px;font-size:12px">或手动启动 RuntimeAgent：</div>
+      <button class="bt bt-p" style="margin-top:8px" onclick="copyText('${oneCmd.replace(/'/g, "\\'")}')">${I18N.t('runtimes.action.copy_one_cmd')}</button>
+      <div style="margin-top:8px;font-size:11px;color:var(--t2)">${I18N.t('runtimes.credential.install_desc')}</div>
+      <div style="margin-top:10px;font-size:12px">${I18N.t('runtimes.credential.manual_start')}</div>
       <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-top:4px">${runCmd}</code>
-      <button class="bt bt-o" style="margin-top:8px" onclick="copyText('${token}')">📋 复制 token</button>
+      <button class="bt bt-o" style="margin-top:8px" onclick="copyText('${token}')">${I18N.t('runtimes.action.copy_token')}</button>
     </div>`;
     const el = document.getElementById('pageContent');
     el.insertAdjacentHTML('afterbegin', box);
-    app.showToast('凭据已生成');
-  }).catch(e => app.showToast('生成失败: ' + e.message));
+    app.showToast(I18N.t('runtimes.credential.toast_generated'));
+  }).catch(e => app.showToast(I18N.t('runtimes.credential.toast_gen_failed', {msg: e.message})));
 }
 
 function renameCredential(cid) {
-  const nn = prompt('新的凭据名称（全局唯一）：');
+  const nn = prompt(I18N.t('runtimes.credential.rename_prompt'));
   if (!nn) return;
   API.put('/settings/runtime-credentials/' + cid, { name: nn.trim() }).then(() => {
-    app.showToast('已改名');
+    app.showToast(I18N.t('runtimes.credential.toast_renamed'));
     refreshRuntimes();
-  }).catch(e => app.showToast('改名失败: ' + e.message));
+  }).catch(e => app.showToast(I18N.t('runtimes.credential.toast_rename_failed', {msg: e.message})));
 }
 
 function copyText(t) {
   try {
-    navigator.clipboard.writeText(t).then(() => app.showToast('已复制'));
+    navigator.clipboard.writeText(t).then(() => app.showToast(I18N.t('runtimes.credential.toast_copied')));
   } catch (e) {
     const ta = document.createElement('textarea');
     ta.value = t; document.body.appendChild(ta); ta.select();
     document.execCommand('copy'); document.body.removeChild(ta);
-    app.showToast('已复制');
+    app.showToast(I18N.t('runtimes.credential.toast_copied'));
   }
 }
 
 function revokeCredential(cid) {
-  if (!confirm('确认吊销并删除该凭据？此操作不可恢复，此后该 worker 将无法接入，凭据名可重新使用。')) return;
+  if (!confirm(I18N.t('runtimes.credential.revoke_confirm'))) return;
   API.post('/settings/runtime-credentials/' + cid + '/revoke').then(() => {
-    app.showToast('已吊销并删除');
+    app.showToast(I18N.t('runtimes.credential.toast_revoked'));
     refreshRuntimes();
-  }).catch(e => app.showToast('吊销失败: ' + e.message));
+  }).catch(e => app.showToast(I18N.t('runtimes.credential.toast_revoke_failed', {msg: e.message})));
 }
 
 function openDeviceTasks(credId) {
@@ -243,25 +243,25 @@ function openDeviceTasks(credId) {
     const rows = tasks.length ? tasks.map(t =>
       `<tr><td>${t.id}</td><td>${t.repo_key || ''}<br><span class="ts t2">${t.agent_type || ''} / ${t.skill || ''}</span></td>
        <td>${statusIcon[t.status] || ''} ${t.status}</td><td>${t.exit_code ?? ''}</td><td class="ts t2">${(t.result_text || '').slice(0, 60)}</td></tr>`).join('')
-      : '<tr><td colspan="5" style="text-align:center;color:var(--t3)">暂无任务</td></tr>';
+      : `<tr><td colspan="5" style="text-align:center;color:var(--t3)">${I18N.t('runtimes.empty.no_tasks')}</td></tr>`;
     const html = `<div class="cd" style="margin-top:12px">
-      <h3 style="font-size:14px;margin-bottom:10px">凭据 #${credId} · 任务</h3>
+      <h3 style="font-size:14px;margin-bottom:10px">${I18N.t('runtimes.credential.tasks_title', {id: credId})}</h3>
       <table style="width:100%;font-size:12px;border-collapse:collapse">
-        <thead><tr style="color:var(--t3)"><th align="left">Task ID</th><th align="left">仓库/Agent</th><th align="left">状态</th><th align="left">Exit</th><th align="left">结果</th></tr></thead>
+        <thead><tr style="color:var(--t3)"><th align="left">${I18N.t('runtimes.label.task_id')}</th><th align="left">${I18N.t('runtimes.label.repo_agent')}</th><th align="left">${I18N.t('runtimes.label.status')}</th><th align="left">${I18N.t('runtimes.label.exit')}</th><th align="left">${I18N.t('runtimes.label.result')}</th></tr></thead>
         <tbody>${rows}</tbody></table>
     </div>`;
     const el = document.getElementById('pageContent');
     el.insertAdjacentHTML('afterbegin', html);
-  }).catch(e => app.showToast('加载任务失败: ' + e.message));
+  }).catch(e => app.showToast(I18N.t('runtimes.toast.load_tasks_failed', {msg: e.message})));
 }
 
 function refreshRuntimes() {
   const el = document.getElementById('pageContent');
-  if (el) el.innerHTML = '<div class="loading">刷新中...</div>';
+  if (el) el.innerHTML = `<div class="loading">${I18N.t('runtimes.toast.refreshing')}</div>`;
   API.post('/settings/agent-runtimes/refresh').then(() => {
     API.get('/settings/agent-runtimes').then(renderRuntimes).catch(() => {});
-    app.showToast('刷新成功');
-  }).catch(e => app.showToast('刷新失败: ' + e.message));
+    app.showToast(I18N.t('runtimes.toast.refresh_success'));
+  }).catch(e => app.showToast(I18N.t('runtimes.toast.refresh_failed', {msg: e.message})));
 }
 
 function renderRuntimesLegacy(data) { renderRuntimes(data); }
@@ -278,7 +278,7 @@ function openEngineDetail(runtimeId) {
   const skillListHtml = skills.length
     ? skills.map(s => {
         const detail = skillDetails.find(d => d.name === s);
-        const desc = detail ? (detail.description || '无描述') : '点击查看详情';
+        const desc = detail ? (detail.description || I18N.t('runtimes.skill.no_desc')) : I18N.t('runtimes.skill.click_detail');
         const detailArg = detail ? JSON.stringify(detail).replace(/'/g, '&#39;').replace(/"/g, '&quot;') : '';
         return `
         <div style="padding:8px 12px;border:1px solid var(--b);border-radius:8px;cursor:pointer;transition:background .15s" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''" onclick="openSkillDetail('${s}', ${runtimeId}, ${detailArg})">

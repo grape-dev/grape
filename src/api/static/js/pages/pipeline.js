@@ -43,9 +43,9 @@ function selPipe(idx) {
   const stages = displayPipe.stages || [];
   const statuses = displayPipe.statuses || [];
   const owner = displayPipe.current_owner || '';
-  const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>' : ' &nbsp;<span class="ts t2">空闲</span>';
+  const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">' + I18N.t('pipeline.executing') + '</span>' : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
 
-  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 \u5f53\u524d\u8d23\u4efb\u4eba: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
+  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 ' + I18N.t('pipeline.current_owner') + ': <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
   // Dynamic pipeline nodes (event-dispatch-redesign-v2.md Phase 2)
   var pipeNodes = _getPipeNodes(data, displayPipe);
@@ -109,14 +109,14 @@ function renderPipeline(data) {
     const statuses = displayPipe.statuses || [];
     const owner = displayPipe.current_owner || '';
     const execBadge = displayPipe.executing
-      ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>'
-      : ' &nbsp;<span class="ts t2">空闲</span>';
+      ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">' + I18N.t('pipeline.executing') + '</span>'
+      : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
     // 触发 SRE 部署按钮：stage 非 done 时显示
     const _issueNum = String(iss).replace(/^#/, '');
     const _repoFullName = (data.repo || '').replace(/^gitcode:/, '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
-    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 \u5f53\u524d\u8d23\u4efb\u4eba: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
+    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 ' + I18N.t('pipeline.current_owner') + ': <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
     var pipeNodes2 = _getPipeNodes(data, displayPipe);
     pipeNodes2.forEach(function(node, i) {
@@ -165,14 +165,14 @@ function renderPipeline(data) {
       ${pBtn('‹', _pipePage - 1, _pipePage <= 1, false)}
       ${btns}
       ${pBtn('›', _pipePage + 1, _pipePage >= totalPages, false)}
-      <span class="ts t3" style="margin-left:8px;font-size:10px">共 ${totalPipes} 条 · ${_pipePage}/${totalPages} 页</span>
+      <span class="ts t3" style="margin-left:8px;font-size:10px">${I18N.t('pipeline.pagination_total', {total: totalPipes, page: _pipePage, pages: totalPages})}</span>
     </div>`;
   }
 
   html += `${flowHtml}${pagerHtml}`;
 
   // 表格区域（独立滚动）
-  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>标题</th><th>Duration</th><th>Agents</th><th>阶段</th><th>场景</th><th>责任人</th></tr>`;
+  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>${I18N.t('pipeline.th_title')}</th><th>Duration</th><th>Agents</th><th>${I18N.t('pipeline.th_stage')}</th><th>${I18N.t('pipeline.th_scene')}</th><th>${I18N.t('pipeline.th_owner')}</th></tr>`;
   pagePipes.forEach((p, i) => {
     const realIdx = pipeStart + i;
     const s = realIdx === _pipeActiveIdx ? ' sel' : '';
@@ -187,7 +187,7 @@ function renderPipeline(data) {
     const dur = _dur ? (_dur >= 60 ? Math.floor(_dur/60) + 'm ' + Math.round(_dur%60) + 's' : _dur + 's') : '—';
     const owner = p.current_owner || '—';
     const _sceneId = p.scene_id || '';
-    const _sceneLabels = {default:'通用开发','cloud-native':'云原生','iac':'IaC','agent-dev':'Agent开发','skill-dev':'Skill开发','api-skill-dev':'API Skill','blog-publish':'博客发布'};
+    const _sceneLabels = {default:I18N.t('pipeline.scene_default'),'cloud-native':I18N.t('pipeline.scene_cloud_native'),'iac':'IaC','agent-dev':I18N.t('pipeline.scene_agent_dev'),'skill-dev':I18N.t('pipeline.scene_skill_dev'),'api-skill-dev':'API Skill','blog-publish':I18N.t('pipeline.scene_blog_publish')};
     const sceneLabel = _sceneId ? (p.scene_name || _sceneLabels[_sceneId] || _sceneId) : '—';
     const sceneBadge = _sceneId ? `<span class="tg tg-i" style="font-size:10px">${sceneLabel}</span>` : '<span class="ts t3">—</span>';
     const _issueNum = String(p.issue_id || '').replace(/^#/, '');
@@ -195,8 +195,8 @@ function renderPipeline(data) {
     const _issueUrl = (_issueNum && _repoParts2.length === 2) ? `https://gitcode.com/${_repoParts2[0]}/${_repoParts2[1]}/issues/${_issueNum}` : '';
     const _esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const execBadge = p.executing
-      ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ 执行中</span>'
-      : '<span class="ts t2">空闲</span>';
+      ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ ' + I18N.t('pipeline.executing') + '</span>'
+      : '<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
     html += `<tr class="pipe-row${s}" data-idx="${realIdx}" onclick="selPipe(${realIdx})" ondblclick="pipeRowDblClick(${realIdx})">
       <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
       <td><a href="${_issueUrl || '#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${_esc(p.title || '—')}</a></td>
@@ -207,17 +207,17 @@ function renderPipeline(data) {
       <td>${owner}</td></tr>`;
   });
   html += `</table></div></div>`;
-  html += `</div><div class="tx t2 mt8">点击历史表中的 Issue 会切换上方工作流状态展示</div>`;
+  html += `</div><div class="tx t2 mt8">${I18N.t('pipeline.click_issue_hint')}</div>`;
 
   el.innerHTML = html;
 }
 
 function triggerSREDeploy(repoFullName, issueNum, stage) {
-  if (!confirm(`确认触发 SRE Agent 处理 Issue #${issueNum}？\n\n仓库：${repoFullName}\n当前阶段：${stage}\n\nSRE Agent 将根据 Issue 内容自动判断部署或资源释放。`))
+  if (!confirm(I18N.t('pipeline.sre_confirm_title', {issueNum: issueNum}) + I18N.t('pipeline.sre_confirm_body', {repoFullName: repoFullName, stage: stage})))
     return;
   const ctx = stage === 'sre'
-    ? `手动触发 SRE 处理 Issue #${issueNum}（当前阶段 sre，可能需要部署或资源释放）`
-    : `手动触发 SRE 部署 Issue #${issueNum}（从 ${stage} 阶段跳转）`;
+    ? I18N.t('pipeline.sre_context_sre', {issueNum: issueNum})
+    : I18N.t('pipeline.sre_context_jump', {issueNum: issueNum, stage: stage});
   API.post('/a2a', {
     agent: 'sre',
     payload: {
@@ -228,16 +228,16 @@ function triggerSREDeploy(repoFullName, issueNum, stage) {
     }
   }).then(d => {
     if (d.skipped) {
-      alert(`SRE 任务被跳过：${d.skipped}\n\n可能原因：SRE 已配置订阅且本次请求被判定为重复。请检查 SRE Agent 订阅配置。`);
+      alert(I18N.t('pipeline.sre_skipped', {skipped: d.skipped}));
     } else if (d.seq > 0) {
-      alert(`✅ SRE Agent 已触发！\n\n事件编号：seq=${d.seq}\n可在 Events 页面查看执行进度。`);
+      alert(I18N.t('pipeline.sre_triggered', {seq: d.seq}));
       // 刷新 pipeline
       if (typeof loadPipeline === 'function') loadPipeline();
     } else {
-      alert(`SRE 触发结果：${JSON.stringify(d)}`);
+      alert(I18N.t('pipeline.sre_result', {result: JSON.stringify(d)}));
     }
   }).catch(e => {
-    alert('触发 SRE 失败：' + (e.message || e));
+    alert(I18N.t('pipeline.sre_trigger_failed', {msg: (e.message || e)}));
   });
 }
 
