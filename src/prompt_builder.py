@@ -69,65 +69,6 @@ def _build_history_file_guide(repo_key: str = "", account: str = "", runtime_id:
     return ""
 
 
-def _build_recent_chat_history(history: list, repo_key: str = "", max_turns: int = 6) -> str:
-    """构建近期对话摘要，注入 general chat prompt。
-
-    数据来源：chat_messages 表（按 repo_key 查所有 conversation 的最近消息，含用户消息+agent回复），
-    补充 chat_agent_session.event_history（agent 回复的 stdout）。
-    使 agent 感知用户之前的对话上下文，避免重复追问已确认的信息。
-    """
-    lines = ["## 近期对话历史（请勿重复追问以下已确认的信息）"]
-    found = False
-
-    # 优先从 chat_messages 表拉用户+agent 消息（跨 general/task 对话）
-    if repo_key:
-        try:
-            from src.session_manager import db, db_lock
-            from src.repo_key import to_repo_key
-            rk = to_repo_key(repo_key)
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT cm.role, cm.content, cm.created_at, cc.conv_type, cc.issue_number "
-                    "FROM chat_messages cm JOIN chat_conversations cc ON cm.conversation_id = cc.id "
-                    "WHERE cc.repo_key=? ORDER BY cm.created_at DESC LIMIT ?",
-                    (rk, max_turns * 2)
-                )
-                rows = c.fetchall()
-            if rows:
-                found = True
-                for r in reversed(rows):  # 时间正序展示
-                    role, content, created_at, conv_type, issue_num = r
-                    tag = "用户" if role == "user" else "助手"
-                    ctx = f" [Issue #{issue_num}]" if issue_num else ""
-                    snippet = (content or "")[:300]
-                    if len(content or "") > 300:
-                        snippet += "…"
-                    t = (created_at or "")[:19]
-                    lines.append(f"[{t} {tag}{ctx}] {snippet}")
-        except Exception:
-            pass
-
-    # 补充：event_history 里的 agent 回复（当 chat_messages 无数据时兜底）
-    if not found and history:
-        recent = history[-max_turns:]
-        for h in recent:
-            stdout = (h.get("stdout") or "").strip()
-            if not stdout:
-                continue
-            snippet = stdout[:300]
-            if len(stdout) > 300:
-                snippet += "…"
-            t = (h.get("time") or "")[:19].replace("T", " ")
-            success = "✓" if h.get("success") else "✗"
-            lines.append(f"[{t} 助手 {success}] {snippet}")
-            found = True
-
-    if not found:
-        return ""
-    return "\n".join(lines)
-
-
 _PROJECT_INFO_MAX_CHARS = 2500
 
 
@@ -606,11 +547,6 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
                 parts.append(f"\nRepository event context:\n{summary}")
         except Exception:
             pass
-    # 近期对话历史（来自 chat_messages，与 web/飞书一致）
-    if history:
-        _recent = _build_recent_chat_history(history, repo_key=repo_key)
-        if _recent:
-            parts.append(_recent)
     # 使用技能：优先 skill_name/skill_id，其次 skills[0]（飞书/tasks 传入）。
     # 兼容旧位置签名：第4参曾为 skills(list)，若收到 list 取其首元素。
     if isinstance(skill_name, list):
