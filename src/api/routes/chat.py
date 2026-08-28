@@ -390,7 +390,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
     # 无引擎 → 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
     if not backend_name:
-        _reply = "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎"
+        _reply = "⚠️ No available engine, please configure in Agent Runtimes page"
         add_message(conv_id, "agent", _reply)
         await _push_reply_to_feishu(conv, user, _reply)
         return StreamingResponse(
@@ -623,7 +623,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
         except Exception:
             runtime_id = 0
     if not runtime_id:
-        return {"reply": "⚠️ 无可用 runtime，请先在 Agent Runtimes 页刷新", "conversation_id": conv_id}
+        return {"reply": "⚠️ No available runtime, please refresh in Agent Runtimes page", "conversation_id": conv_id}
     # 本机直连（credential_id=0）无 claim 方：队列任务端点不能投递到本机，需走 direct 会话
     from src.runtime.service import runtime_credential_id
     if (runtime_credential_id(runtime_id) or 0) == 0 and backend_name:
