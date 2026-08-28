@@ -11,8 +11,8 @@
   "action": {
     "add_skill": "＋ 新增技能",
     "convert_to_repo": "转为仓库技能",
-    "view": "View",
-    "delete": "Delete",
+    "view": "查看",
+    "delete": "删除",
     "cancel": "取消",
     "upload": "上传",
     "close": "✕ 关闭",

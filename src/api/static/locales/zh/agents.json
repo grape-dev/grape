@@ -46,7 +46,7 @@
     "scan_config": "扫码配置",
     "bound_chats": "已绑定的群 ({{n}})",
     "clean_session_hint": "清空会话后，下一次事件将创建全新的 Agent 上下文（不延续历史对话）。",
-    "clean_session_btn": "🧹 Clean Session",
+    "clean_session_btn": "🧹 清理会话",
     "saved": "配置已保存",
     "save_failed": "保存失败: {{msg}}"
   },

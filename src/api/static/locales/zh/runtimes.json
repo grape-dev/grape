@@ -16,7 +16,7 @@
   },
   "action": {
     "gen_credential": "＋ 生成凭据",
-    "refresh": "⟳ Refresh",
+    "refresh": "⟳ 刷新",
     "rename": "改名",
     "revoke": "吊销",
     "tasks": "任务",

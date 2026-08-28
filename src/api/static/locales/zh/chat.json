@@ -1,7 +1,7 @@
 {
   "no_reply": "⚠️ 未收到回复，连接可能中断，请重试。",
   "header": {
-    "title": "Chat Agent · Personal Assistant",
+    "title": "Chat Agent · 个人助手",
     "config_btn": "⚙ 配置"
   },
   "loading": "加载中...",

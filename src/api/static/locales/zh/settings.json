@@ -1,10 +1,10 @@
 {
   "page_title": "设置",
   "tab": {
-    "credentials": "Credentials",
-    "notifications": "Notifications",
-    "appearance": "Appearance",
-    "advanced": "Advanced"
+    "credentials": "凭据",
+    "notifications": "通知",
+    "appearance": "外观",
+    "advanced": "高级"
   },
   "common": {
     "loading": "加载中...",
@@ -64,7 +64,7 @@
     "gitcode_token_placeholder": "未配置",
     "gitcode_account_suffix": " · 登录时自动填充",
     "huawei_cloud_title": "Huawei Cloud",
-    "huawei_cloud_desc": "Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.",
+    "huawei_cloud_desc": "Huawei Cloud CodeArts 为 Coding Agent 提供免费云端开发环境。",
     "devops_bot_title": "DevOps Bot Token",
     "bot_token_placeholder_configured": "已配置，留空保持不变",
     "bot_token_placeholder_empty": "不设置，将默认使用Grape官方机器人",
