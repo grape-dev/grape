@@ -286,37 +286,37 @@ function openEngineDetail(runtimeId) {
           <div style="font-size:11px;color:var(--t3);margin-top:2px">${desc}</div>
         </div>`;
       }).join('')
-    : '<div style="color:var(--t3);font-size:12px;padding:8px">无本地 skill</div>';
+    : `<div style="color:var(--t3);font-size:12px;padding:8px">${I18N.t('runtimes.empty.no_local_skill')}</div>`;
 
   const html = `<div id="engineDetailOverlay" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center" onclick="closeEngineDetail(event)">
     <div style="background:var(--c);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);max-width:680px;width:90%;max-height:85vh;overflow:auto;padding:24px" onclick="event.stopPropagation()">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
         ${_healthBadge(rt.health)}
         <span style="font-weight:700;font-size:18px">${rt.instance_name || rt.name}</span>
-        ${rt.is_local ? '<span style="font-size:11px;font-weight:600;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 8px">本机直连</span>' : ''}
-        <button class="bt bt-o" style="margin-left:auto" onclick="closeEngineDetail()">关闭</button>
+        ${rt.is_local ? `<span style="font-size:11px;font-weight:600;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 8px">${I18N.t('runtimes.label.local_direct')}</span>` : ''}
+        <button class="bt bt-o" style="margin-left:auto" onclick="closeEngineDetail()">${I18N.t('runtimes.action.close')}</button>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 20px;font-size:13px;color:var(--t2);margin-bottom:20px">
-        <div><span style="color:var(--t3);display:inline-block;min-width:70px">引擎类型</span> ${rt.name}</div>
-        <div><span style="color:var(--t3);display:inline-block;min-width:70px">版本</span> v${rt.version || '—'}</div>
-        <div><span style="color:var(--t3);display:inline-block;min-width:70px">健康状态</span> ${rt.healthy ? '✓ 健康' : '✗ 异常'}</div>
-        <div><span style="color:var(--t3);display:inline-block;min-width:70px">Worker</span> ${rt.worker_name || (rt.is_local ? '本机' : '—')}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.engine_type')}</span> ${rt.name}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.version')}</span> v${rt.version || '—'}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.health_status')}</span> ${rt.healthy ? I18N.t('runtimes.label.healthy') : I18N.t('runtimes.label.unhealthy')}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">Worker</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">IP</span> ${rt.worker_ip || '—'}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">Scope</span> ${_scopeLabel(rt.scope)}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">Owner</span> ${rt.owner || '—'}</div>
-        <div><span style="color:var(--t3);display:inline-block;min-width:70px">已安装</span> ${rt.installed ? '是' : '否'}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.installed')}</span> ${rt.installed ? I18N.t('runtimes.label.yes') : I18N.t('runtimes.label.no')}</div>
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-          <span style="font-weight:600;font-size:14px">角色标签</span>
-          <button class="bt bt-p" style="font-size:11px;padding:4px 10px;border-radius:4px" onclick="saveEngineTags(${runtimeId})">保存标签</button>
+          <span style="font-weight:600;font-size:14px">${I18N.t('runtimes.label.role_tags')}</span>
+          <button class="bt bt-p" style="font-size:11px;padding:4px 10px;border-radius:4px" onclick="saveEngineTags(${runtimeId})">${I18N.t('runtimes.action.save_tags')}</button>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:4px">${_engineTagCheckboxes(rt.agent_tags || ['all'])}</div>
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-          <span style="font-weight:600;font-size:14px">本地 Skill 列表 <span style="font-weight:400;color:var(--t3);font-size:12px">（${skills.length} 个）</span></span>
-          <button id="refreshSkillsBtn" class="bt bt-o" style="padding:4px 10px;font-size:12px" onclick="refreshEngineSkills(${runtimeId})">⟳ 刷新</button>
+          <span style="font-weight:600;font-size:14px">${I18N.t('runtimes.label.local_skill_list')} <span style="font-weight:400;color:var(--t3);font-size:12px">${I18N.t('runtimes.label.skill_count_paren', {count: skills.length})}</span></span>
+          <button id="refreshSkillsBtn" class="bt bt-o" style="padding:4px 10px;font-size:12px" onclick="refreshEngineSkills(${runtimeId})">${I18N.t('runtimes.action.refresh_skills')}</button>
         </div>
         <div id="engineSkillList" style="display:flex;flex-direction:column;gap:6px">${skillListHtml}</div>
       </div>
@@ -340,7 +340,7 @@ function refreshEngineSkills(runtimeId) {
   const btn = document.getElementById('refreshSkillsBtn');
   if (!btn) return;
   btn.disabled = true;
-  btn.innerHTML = '<span style="display:inline-block;animation:spin 0.8s linear infinite">⟳</span> 扫描中...';
+  btn.innerHTML = '<span style="display:inline-block;animation:spin 0.8s linear infinite">⟳</span> ' + I18N.t('runtimes.toast.scanning');
   if (!document.getElementById('spinKeyframes')) {
     const style = document.createElement('style');
     style.id = 'spinKeyframes';
@@ -353,8 +353,8 @@ function refreshEngineSkills(runtimeId) {
 function _pollSkillScan(runtimeId, btn, attempt, isFirst) {
   if (attempt > 30) {  // 最多轮询 30 次 × 2s = 60s 超时
     btn.disabled = false;
-    btn.innerHTML = '⟳ 刷新';
-    app.showToast('扫描超时，请稍后重试');
+    btn.innerHTML = I18N.t('runtimes.action.refresh_skills');
+    app.showToast(I18N.t('runtimes.toast.scan_timeout'));
     return;
   }
   const url = '/runtime/runtimes/' + runtimeId + '/refresh-skills' + (isFirst ? '?force=true' : '');
@@ -365,27 +365,27 @@ function _pollSkillScan(runtimeId, btn, attempt, isFirst) {
       return;
     }
     btn.disabled = false;
-    btn.innerHTML = '⟳ 刷新';
+    btn.innerHTML = I18N.t('runtimes.action.refresh_skills');
     const listEl = document.getElementById('engineSkillList');
     if (!listEl) return;
     const skills = d.skills || [];
     _skillScanDirty = true;  // 标记：关闭弹窗时刷新引擎列表卡片
     if (!skills.length) {
-      listEl.innerHTML = '<div style="color:var(--t3);font-size:12px;padding:8px">无本地 skill</div>';
+      listEl.innerHTML = '<div style="color:var(--t3);font-size:12px;padding:8px">' + I18N.t('runtimes.empty.no_local_skill') + '</div>';
     } else {
       listEl.innerHTML = skills.map(s => `
         <div style="padding:8px 12px;border:1px solid var(--b);border-radius:8px;cursor:pointer;transition:background .15s" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''" onclick="openSkillDetail('${s.name}', ${runtimeId}, ${JSON.stringify(s).replace(/'/g, '&#39;').replace(/"/g, '&quot;')})">
           <div style="font-weight:600;font-size:13px;color:var(--t1)">${s.name}</div>
-          <div style="font-size:11px;color:var(--t3);margin-top:2px">${s.description || '无描述'}</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:2px">${s.description || I18N.t('runtimes.skill.no_desc')}</div>
         </div>`).join('');
     }
     const titleEl = document.querySelector('#engineDetailOverlay span[style*="font-weight:400"]');
-    if (titleEl) titleEl.textContent = '（' + skills.length + ' 个）';
-    app.showToast('扫描完成：' + skills.length + ' 个 skill');
+    if (titleEl) titleEl.textContent = I18N.t('runtimes.label.skill_count_paren', {count: skills.length});
+    app.showToast(I18N.t('runtimes.toast.scan_complete', {count: skills.length}));
   }).catch(e => {
     btn.disabled = false;
-    btn.innerHTML = '⟳ 刷新';
-    app.showToast('刷新失败: ' + e.message);
+    btn.innerHTML = I18N.t('runtimes.action.refresh_skills');
+    app.showToast(I18N.t('runtimes.toast.refresh_failed', {msg: e.message}));
   });
 }
 
@@ -400,15 +400,15 @@ function openSkillDetail(skillName, runtimeId, cachedDetail) {
     <div style="background:var(--c);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.25);max-width:520px;width:90%;max-height:80vh;overflow:auto;padding:24px" onclick="event.stopPropagation()">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
         <span style="font-weight:700;font-size:16px">${skillName}</span>
-        <button class="bt bt-o" style="margin-left:auto" onclick="closeSkillDetail()">关闭</button>
+        <button class="bt bt-o" style="margin-left:auto" onclick="closeSkillDetail()">${I18N.t('runtimes.action.close')}</button>
       </div>
       <div style="display:grid;gap:8px;font-size:13px;color:var(--t2)">
         ${detail ? `
-          <div><span style="color:var(--t3);display:inline-block;min-width:80px">描述</span> ${detail.description || '—'}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:80px">提供方</span> ${detail.provider || '—'}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:80px">本地路径</span> <code style="font-size:11px;background:var(--bg);padding:2px 6px;border-radius:4px;word-break:break-all">${detail.path || '—'}</code></div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:80px">文件数</span> ${detail.file_count || 0}</div>
-        ` : '<div style="color:var(--t3)">详情不可用（点击刷新按钮获取详情）</div>'}
+          <div><span style="color:var(--t3);display:inline-block;min-width:80px">${I18N.t('runtimes.label.description')}</span> ${detail.description || '—'}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:80px">${I18N.t('runtimes.label.provider')}</span> ${detail.provider || '—'}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:80px">${I18N.t('runtimes.label.local_path')}</span> <code style="font-size:11px;background:var(--bg);padding:2px 6px;border-radius:4px;word-break:break-all">${detail.path || '—'}</code></div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:80px">${I18N.t('runtimes.label.file_count')}</span> ${detail.file_count || 0}</div>
+        ` : '<div style="color:var(--t3)">' + I18N.t('runtimes.skill.detail_unavailable') + '</div>'}
       </div>
     </div>
   </div>`;
@@ -423,25 +423,25 @@ function closeSkillDetail(event) {
 
 // ===== Engine 角色标签 =====
 const _RT_TAG_COLORS = {all: '#6366f1', vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7', sre: '#f59e0b'};
-const _RT_TAG_LABELS = {all: '全能', vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE'};
+function _rtTagLabel(t) { return t === 'all' ? I18N.t('runtimes.tag.all') : ({vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE'})[t] || t; }
 const _RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
 
 function _engineTagCheckboxes(tags) {
   return _RT_TAG_OPTIONS.map(t => {
     const checked = tags.includes(t) ? 'checked' : '';
-    const desc = t === 'all' ? '可作为所有角色' : '仅 ' + _RT_TAG_LABELS[t] + ' 角色';
+    const desc = t === 'all' ? I18N.t('runtimes.tag.all_desc') : I18N.t('runtimes.tag.single_desc', {label: _rtTagLabel(t)});
     return `<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;padding:2px 6px">
       <input type="checkbox" id="engineTagCb_${t}" value="${t}" ${checked} onchange="onEngineTagChange('${t}')"
              style="width:14px;height:14px;accent-color:${_RT_TAG_COLORS[t]}">
-      <span style="font-size:10px;padding:2px 8px;border-radius:999px;color:#fff;background:${_RT_TAG_COLORS[t]}">${_RT_TAG_LABELS[t]}</span>
+      <span style="font-size:10px;padding:2px 8px;border-radius:999px;color:#fff;background:${_RT_TAG_COLORS[t]}">${_rtTagLabel(t)}</span>
       <span style="color:var(--t3);font-size:11px">${desc}</span>
     </label>`;
   }).join('');
 }
 
 function _engineTagSummary(tags) {
-  if (!tags || tags.length === 0) return '<span style="color:var(--t3);font-size:10px">未分配</span>';
-  return tags.map(t => `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color:#fff;background:${_RT_TAG_COLORS[t]||'#999'};margin:0 2px">${_RT_TAG_LABELS[t]||t}</span>`).join('');
+  if (!tags || tags.length === 0) return '<span style="color:var(--t3);font-size:10px">' + I18N.t('runtimes.empty.unassigned') + '</span>';
+  return tags.map(t => `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color:#fff;background:${_RT_TAG_COLORS[t]||'#999'};margin:0 2px">${_rtTagLabel(t)||t}</span>`).join('');
 }
 
 function onEngineTagChange(tag) {
@@ -480,8 +480,8 @@ function saveEngineTags(runtimeId) {
         if (r) r.agent_tags = d.tags;
       }
     }
-    app.showToast('标签已保存');
+    app.showToast(I18N.t('runtimes.toast.tags_saved'));
     // 重新渲染列表页（立即生效，无需手动刷新）
     if (__runtimeData) renderRuntimes(__runtimeData);
-  }).catch(e => app.showToast('保存失败: ' + e.message));
+  }).catch(e => app.showToast(I18N.t('runtimes.toast.save_failed', {msg: e.message})));
 }
