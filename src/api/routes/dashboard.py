@@ -36,8 +36,8 @@ async def get_ops_overview(repo: str = ""):
         repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
         _repo_filter = " AND repo_key=?"
         _repo_params = [repo_key]
-    # stuck 阈值：running 超 15 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=1200s=20min，15min 能在超时前预警）
-    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+    # stuck 阈值：running 超 22 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=1800s=30min，22min 能在超时前预警）
+    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=22)).isoformat()
 
     with db_lock:
         c = db.cursor()

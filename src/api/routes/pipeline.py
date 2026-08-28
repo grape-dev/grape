@@ -198,6 +198,9 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         if d and isinstance(d, (int, float)):
             total_duration += d
 
+    # 父任务 ID（子任务场景，issue_state.parent_issue_id）
+    parent_issue_id = (_st.get("parent_issue_id") if _st else "") or ""
+
     return {
         "issue_id": issue_id,
         "title": title,
@@ -212,6 +215,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         "current_owner": current_owner,
         "event_count": len(issue_events),
         "duration": round(total_duration, 1) if total_duration > 0 else None,
+        "parent_issue_id": parent_issue_id,
     }
 
 
