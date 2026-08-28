@@ -61,7 +61,7 @@ function loadAgentTypes() {
       const displayName = d.nickname || d.username || 'User';
       $('userName').textContent = displayName;
       $('userAvatar').textContent = (displayName || 'U')[0].toUpperCase();
-      $('userRole').textContent = (d.managed_repos && d.managed_repos.length > 0) ? 'Admin' : 'Member';
+      $('userRole').textContent = (d.managed_repos && d.managed_repos.length > 0) ? I18N.t('dashboard.admin') : I18N.t('dashboard.member');
       localStorage.setItem('user', JSON.stringify(d));
       // 如果当前在仓库选择页，更新 Welcome 消息
       const welcomeEl = document.getElementById('welcomeUser');

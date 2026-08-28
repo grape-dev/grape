@@ -64,7 +64,8 @@
     "repo_agent": "Repo/Agent",
     "status": "Status",
     "exit": "Exit",
-    "result": "Result"
+    "result": "Result",
+    "skills_label": "Skills"
   },
   "empty": {
     "no_engines": "No engines",

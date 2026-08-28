@@ -64,7 +64,8 @@
     "repo_agent": "仓库/Agent",
     "status": "状态",
     "exit": "Exit",
-    "result": "结果"
+    "result": "结果",
+    "skills_label": "技能"
   },
   "empty": {
     "no_engines": "暂无引擎",

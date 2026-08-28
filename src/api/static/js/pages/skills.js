@@ -103,8 +103,8 @@ function _loadSkills() {
           </div>
           <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:8px">${s.description}</div>
           <div style="display:flex;gap:6px">
-            <button class="bt bt-o bt-s" onclick="event.stopPropagation();app.nav('skill','${s.id}')">View</button>
-            ${s.scope !== 'official' ? `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteSkill('${s.name}','${s.scope}')">Delete</button>` : ''}
+            <button class="bt bt-o bt-s" onclick="event.stopPropagation();app.nav('skill','${s.id}')">${I18N.t('skills.action.view')}</button>
+            ${s.scope !== 'official' ? `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteSkill('${s.name}','${s.scope}')">${I18N.t('skills.action.delete')}</button>` : ''}
             ${s.scope === 'user' && _currentRepo() ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}')">${I18N.t('skills.action.convert_to_repo')}</button>` : ''}
           </div>
         </div>`;

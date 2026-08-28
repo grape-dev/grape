@@ -22,7 +22,7 @@
   },
   "sidebar": {
     "workspace": "工作区",
-    "devops_agents": "DevOps Agent",
+    "devops_agents": "DevOps 助手",
     "knowledge": "知识库",
     "account": "账户",
     "settings": "设置"
@@ -51,7 +51,7 @@
   },
   "nav_groups": {
     "workspace": "工作区",
-    "devops_agents": "DevOps Agent",
+    "devops_agents": "DevOps 助手",
     "knowledge": "知识库",
     "account": "账户",
     "settings": "设置"
