@@ -131,6 +131,58 @@ PR body / commit message / 评论里的 `fixes #N`、`tests pass`、`small fix` 
 - ⚠️ **A2A 必须携带真实 `issue_number`（必填）**：无法确定则不调用，评论说明。`pr_number` 有则填，无则不填，严禁混用。
 - ⚠️ **重复 A2A 检查（必须做）**：A2A 前先看 prompt 中的 Issue Pipeline 信息，如果当前 Issue 的 pipeline 中**已包含目标 agent 的 `a2a_event`**（如已有 `coding:a2a_event` 则不再 A2A 给 coding），**不要重复 A2A**——只发评论回复即可，避免创建重复的下游 task。
 
+### 8. 多任务模式——子任务拆分
+
+当 prompt 上下文包含「多任务模式」或 Issue body 含 `[multi-task-mode]` 标记时：
+
+#### 8.1 方案设计后评估可拆分性
+
+基于 Spec 评估：
+- 任务总预估时间 > 20 分钟/节点？
+- 是否可拆分为独立的子任务（每个子任务可独立 PR）？
+- 子任务之间是否有强依赖？（有依赖 → 按依赖顺序创建，无依赖 → 并行创建）
+
+#### 8.2 创建子 Issue
+
+对每个子任务，调用 GitCode API 创建 Issue：
+
+```bash
+curl -X POST "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?access_token=$BOT_G...OKEN" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "title=子任务：数据库迁移 SQLite → MySQL" \
+  -d "body=## 父任务\n[Issue #20](https://gitcode.com/{owner}/{repo}/issues/20)\n\n## 目标\n{从 Spec 中提取的子任务目标}\n\n## 验收标准\n{子任务验收标准}\n\n## 依赖\n{如有前置子任务，注明}" \
+  -d "assignee=grape_bot"
+```
+
+每个子 Issue body 必须包含：
+- `## 父任务` + GitCode Issue 链接
+- 子任务目标 / 验收标准 / 依赖
+
+#### 8.3 更新父 Issue
+
+在父 Issue body 中追加子任务列表：
+
+```bash
+curl -X PATCH "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/20?access_token=$BOT_G...OKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"body": "{原 body}\n\n---\n## 子任务\n- [ ] [#21 数据库迁移](issues/21)\n- [ ] [#22 模板分离](issues/22)\n- [ ] [#23 测试覆盖](issues/23)"}'
+```
+
+#### 8.4 不 A2A 交办 coding
+
+多任务模式下，Issue Agent **不 A2A 交给 coding**。子 Issue 创建后 webhook 自动触发 VOD 审视，进入正常流水线。
+
+父 Issue 的流水线到此结束（服务端会自动设置 stage=done）。
+
+### 9. 子任务快速通道
+
+当 prompt 上下文包含「子任务上下文」（Issue body 含「## 父任务」或 A2A payload `is_subtask=true`）时：
+
+1. **跳过可开发性分析**（父任务已确认）
+2. **跳过 Spec 生成**——直接从父 Issue body 中提取本子任务的目标和验收标准
+3. **生成本子任务的精简 Spec**（仅目标 + 验收标准 + 实现建议）
+4. **A2A 交办 coding**（正常流程）
+
 ```
 处理结论示例：
 - 事件意图：评论补充需求信息

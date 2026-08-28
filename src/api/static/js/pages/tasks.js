@@ -238,6 +238,11 @@ function openTaskCreateModal() {
       <label style="display:flex;flex-direction:column;gap:4px;color:#333">开发场景 <span style="font-size:11px;color:#888">不选则由 VOD 审视时自动识别</span>
         <select id="tcCreateScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
       </label>
+      <label style="display:flex;align-items:center;gap:8px;color:#333;cursor:pointer">
+        <input type="checkbox" id="tcMultiTaskMode" style="width:16px;height:16px;cursor:pointer">
+        <span style="font-size:13px">多任务模式</span>
+        <span style="font-size:11px;color:#888">大任务自动拆分为多个子 Issue，每个独立走流水线（≤20min/节点）</span>
+      </label>
       <div style="font-size:11px;color:#888">Issue 责任人 = 系统 General Settings 的 Account（当前登录账号）</div>
       <div id="tcError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
     </div>
@@ -281,7 +286,7 @@ function createTaskSubmit() {
   if (!title.trim()) { showErr('请填写任务标题'); return; }
   const btn = document.getElementById('tcSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
-  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
+  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId, is_subtask_mode: document.getElementById('tcMultiTaskMode') && document.getElementById('tcMultiTaskMode').checked ? 1 : 0})
     .then(d => {
       const ov = document.getElementById('taskCreateOverlay');
       if (ov) ov.remove();

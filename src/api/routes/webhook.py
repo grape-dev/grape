@@ -312,6 +312,26 @@ async def a2a_endpoint(request: Request):
             except Exception as _sce:
                 log.warning(f"A2A: set_issue_scene failed: {_sce}")
 
+        # 多任务模式：VOD A2A 交办时携带 is_subtask_mode → 持久化
+        _is_subtask_mode = payload.get("is_subtask_mode", False)
+        if _is_subtask_mode and issue_number:
+            try:
+                from src.api.session_store import set_subtask_mode
+                set_subtask_mode(repo_key, f"#{issue_number}", True)
+                log.info(f"A2A: subtask_mode enabled for issue=#{issue_number}")
+            except Exception as _stm:
+                log.warning(f"A2A: set_subtask_mode failed: {_stm}")
+
+        # 子任务快速通道：A2A 携带 parent_issue → 持久化
+        _parent_issue = payload.get("parent_issue", "")
+        if _parent_issue and issue_number:
+            try:
+                from src.api.session_store import set_parent_issue
+                set_parent_issue(repo_key, f"#{issue_number}", _parent_issue)
+                log.info(f"A2A: parent_issue={_parent_issue} set for issue=#{issue_number}")
+            except Exception as _pi:
+                log.warning(f"A2A: set_parent_issue failed: {_pi}")
+
         # 立即创建 event（status=running），Agent 执行完再更新
         from src.api.event_store import append_event
         seq = append_event(
@@ -323,7 +343,7 @@ async def a2a_endpoint(request: Request):
             agent_type=agent_name,
             actor="",
             summary=f"A2A: → {agent_name}",
-            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "recommended_scene": _recommended_scene},
+            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "recommended_scene": _recommended_scene, "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue},
             status="running",
         )
         log.info(f"A2A: event created, seq={seq}")

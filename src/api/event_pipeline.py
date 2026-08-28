@@ -609,6 +609,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _asg = _fetch_issue_assignee(repo_key, _rid)
             set_issue_stage(repo_key, _rid, "vod", "vod", assignee=_asg)
             log.info(f"Pipeline: issue_state init vod for {_rid} assignee={_asg or 'none'}")
+            # 子任务识别：Issue body 含 "## 父任务" + Issue 链接 → 标记 parent_issue_id
+            _parent = _parse_parent_issue_from_payload(evt.get("payload", {}) or {})
+            if _parent:
+                try:
+                    from src.api.session_store import set_parent_issue
+                    set_parent_issue(repo_key, _rid, _parent)
+                    log.info(f"Pipeline: subtask detected, issue={_rid} parent={_parent}")
+                except Exception:
+                    pass
     elif agent_type == "vod":
         from src.api.session_store import get_issue_stage
         _rid2 = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
@@ -884,6 +893,26 @@ def _issue_num_from(issue_id: str) -> str:
     """"#5" / "5" → "5"；#0/空 → ''（无关联 Issue，按 repo 级兜底）。"""
     s = (issue_id or "").strip().lstrip("#")
     return s if s and s != "0" else ""
+
+
+def _parse_parent_issue_from_payload(payload: dict) -> str:
+    """Parse parent issue ID from Issue body."""
+    import re
+    body = ""
+    obj = payload.get("object_attributes") or payload.get("issue") or {}
+    if isinstance(obj, dict):
+        body = obj.get("description") or obj.get("body") or ""
+    if not body and isinstance(payload, dict):
+        body = payload.get("description") or payload.get("body") or ""
+    if not body:
+        return ""
+    m = re.search(r'父任务.{0,30}?#?(\d+)', body, re.I | re.S)
+    if m:
+        return f"#{m.group(1)}"
+    m2 = re.search(r'parent.?issue.{0,30}?#?(\d+)', body, re.I | re.S)
+    if m2:
+        return f"#{m2.group(1)}"
+    return ""
 
 
 def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str:
@@ -1469,11 +1498,39 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text)
     log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")
 
+    # 多任务模式：父任务 Issue Agent 完成后 → stage=done（不 A2A coding，子任务由 webhook 自动触发）
+    if new_status == "completed" and agent_type == "issue" and issue_id:
+        try:
+            from src.api.session_store import is_subtask_mode_enabled, set_issue_stage
+            if is_subtask_mode_enabled(repo_key, issue_id):
+                set_issue_stage(repo_key, issue_id, "done", "issue")
+                log.info(f"Multi-task mode: parent issue {issue_id} stage=done (subtasks will trigger independently)")
+        except Exception as _e:
+            log.warning(f"Multi-task mode stage=done check failed: {_e}")
+
     # 执行完成 → 自动回帖到 Issue（仅 sre 等有实质产出的 Agent，且有关联 Issue）
     if new_status == "completed" and result_text and issue_id:
         _issue_num = _issue_num_from(issue_id)
         if _issue_num and repo_gitcode_token:
             _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type)
+
+    # 子任务 SRE 完成后 → 登记完成情况到父 Issue
+    if new_status == "completed" and agent_type == "sre" and issue_id:
+        try:
+            from src.api.session_store import get_parent_issue, get_subtask_issues
+            _parent = get_parent_issue(repo_key, issue_id)
+            if _parent and repo_gitcode_token:
+                _parent_num = _issue_num_from(_parent)
+                _sub_num = _issue_num_from(issue_id)
+                if _parent_num and _sub_num:
+                    _post_subtask_completion_to_parent(repository, _sub_num, _parent_num, result_text, repo_gitcode_token)
+                    # 检查所有子任务是否全部完成
+                    _subs = get_subtask_issues(repo_key, _parent)
+                    _all_done = all(s.get("stage") == "done" or s.get("issue_id") == issue_id for s in _subs)
+                    if _all_done and len(_subs) > 0:
+                        _post_all_subtasks_done(repository, _parent_num, _subs, repo_gitcode_token)
+        except Exception as _e:
+            log.warning(f"Subtask completion post failed: {_e}")
 
     # 执行完成 → 同步 agent 结果到任务会话（用户「去对话」可见 agent 澄清/报告）
     # 独立于 _post_result_to_issue：agent 可能自己用 curl 发了 Issue 评论，
@@ -1542,6 +1599,47 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
     except Exception as e:
         log.warning(f"Exec agent: sync to task conversation failed: {e}")
 
+
+
+def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, parent_issue_num: str,
+                                        result_text: str, bot_token: str):
+    """子任务完成后，在父 Issue 评论登记完成情况。"""
+    try:
+        import urllib.request, json as _json
+        from src.api.event_store import parse_agent_output_json
+        _out = parse_agent_output_json(result_text)
+        _summary = (_out.get("conclusion", "") if _out else "") or result_text[:200]
+        _comment = f"### \u5b50\u4efb\u52a1 #{sub_issue_num} \u5df2\u5b8c\u6210\n\n{_summary}\n\n---\n\u5b50\u4efb\u52a1\u6d41\u6c34\u7ebf\u5df2\u5168\u90e8\u5b8c\u6210\u3002"
+        _data = _json.dumps({"body": _comment}).encode("utf-8")
+        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
+        _req = urllib.request.Request(_url, data=_data,
+            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(_req, timeout=15)
+        log.info(f"Subtask #{sub_issue_num} completion posted to parent #{parent_issue_num}")
+    except Exception as e:
+        log.warning(f"Post subtask completion failed: {e}")
+
+
+def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: list, bot_token: str):
+    """所有子任务完成后，在父 Issue 发汇总报告。"""
+    try:
+        import urllib.request, json as _json
+        _lines = [f"### \u5168\u90e8\u5b50\u4efb\u52a1\u5df2\u5b8c\u6210\n"]
+        for s in subtasks:
+            _sid = s.get("issue_id", "?")
+            _stage = s.get("stage", "?")
+            _status = "\u2705" if _stage == "done" else "\u274c"
+            _lines.append(f"- {_status} {_sid} ({_stage})")
+        _lines.append(f"\n\u7236\u4efb\u52a1 #{parent_issue_num} \u7684\u6240\u6709\u5b50\u4efb\u52a1\u5df2\u5b8c\u6210\u3002")
+        _comment = "\n".join(_lines)
+        _data = _json.dumps({"body": _comment}).encode("utf-8")
+        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
+        _req = urllib.request.Request(_url, data=_data,
+            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(_req, timeout=15)
+        log.info(f"All subtasks done summary posted to parent #{parent_issue_num}")
+    except Exception as e:
+        log.warning(f"Post all subtasks done failed: {e}")
 
 def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token: str,
                                          agent_type: str = "", repository: str = ""):
