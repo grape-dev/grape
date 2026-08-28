@@ -24,7 +24,7 @@ function renderSettings(tab) {
       const _skVal = d.huawei_cloud ? _esc(d.huawei_cloud.sk || '') : '';
       document.getElementById('sCredentials').innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.gitcode_api_title')}</h3>
-          <div class="srow"><label>API Token</label><input type="password" value="${d.gitcode && d.gitcode.api_token_exists ? '********' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? '' : 'placeholder="' + I18N.t('settings.credentials.gitcode_token_placeholder') + '"'} style="${d.gitcode && d.gitcode.api_token_exists ? 'background:#f1f5f9' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? 'disabled' : ''}></div>
+          <div class="srow"><label>API Token</label><input type="password" value="${d.gitcode && d.gitcode.api_token_exists ? '********' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? '' : `placeholder="${I18N.t('settings.credentials.gitcode_token_placeholder')}"`} style="${d.gitcode && d.gitcode.api_token_exists ? 'background:#f1f5f9' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? 'disabled' : ''}></div>
           <div class="srow"><label>Account</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account + I18N.t('settings.credentials.gitcode_account_suffix') : '—'}" disabled style="background:#f1f5f9;font-size:10px"></div>
         </div>
         <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.huawei_cloud_title')}</h3>

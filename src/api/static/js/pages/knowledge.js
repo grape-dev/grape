@@ -62,7 +62,7 @@ function _renderProjectTab(d) {
   const updated = meta.last_updated ? (meta.last_updated || '').replace('T',' ').substring(0,19) : '—';
 
   let html = '<div class="grp-title" style="font-size:13px;font-weight:600;margin:14px 0 10px;color:var(--t)">📦 ' + I18N.t('knowledge.project_baseline_title') + '</div>';
-  if (degraded) html += `<div class="ts" style="padding:6px 10px;margin-bottom:8px;font-size:11px;color:var(--or)">${degraded} ${meta.note || ''} · ' + I18N.t('knowledge.updated_commit', {updated: updated, sha: (meta.last_commit_sha || '-')}) + '</div>`;
+  if (degraded) html += `<div class="ts" style="padding:6px 10px;margin-bottom:8px;font-size:11px;color:var(--or)">${degraded} ${meta.note || ''} · ${I18N.t('knowledge.updated_commit', {updated: updated, sha: (meta.last_commit_sha || '-')})}</div>`;
   else if (updated && updated !== '—') html += `<div class="ts t3" style="padding:2px 0 8px;font-size:11px">${I18N.t('knowledge.updated_commit', {updated: updated, sha: (meta.last_commit_sha || '-')})}</div>`;
 
   const files = d.project.files || [];
@@ -92,7 +92,7 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     krows.forEach(k => {
       const preview = (k.content || '').split('\n').filter(l => l.trim()).slice(-3).map(l => l.replace(/^- \[[^\]]*\]\s*/, '')).join(' · ');
-      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="' + I18N.t('knowledge.knowledge_sediment_title') + '" onclick="loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">
+      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${I18N.t('knowledge.knowledge_sediment_title')}" onclick="loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:var(--pk)">📄</span>
           <span style="font-size:12px;font-weight:600">knowledge.md</span>
