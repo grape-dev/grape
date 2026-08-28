@@ -32,9 +32,9 @@
     "no_hosted": "暂无已托管的仓库",
     "no_available": "没有可加入的仓库",
     "unhost_btn": "解除托管",
-    "th_repository": "Repository",
-    "th_role": "Role",
-    "th_description": "Description"
+    "th_repository": "仓库",
+    "th_role": "角色",
+    "th_description": "描述"
   },
   "available_btn": {
     "hosted": "已托管",
