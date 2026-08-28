@@ -234,6 +234,27 @@ def _resolve_gitcode_token(conv: dict | None, conv_id: str, user_token: str, rep
     return ""
 
 
+def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
+    """构建 Web Chat prompt 的用户基本信息（与飞书 user_info 格式一致）。
+
+    user 为 FastAPI 当前用户 dict（username 即 GitCode 登录名）；
+    acc 为 user_accounts 行（含 nickname/gitcode_id）。注入后使 Web Agent
+    感知说话者身份（chat-prompt-overview.md §2.1，补 Web Chat 无 user_info 缺口）。
+    """
+    try:
+        username = (user.get("username") or "").strip()
+        if not username:
+            return ""
+        lines = ["## 用户基本信息"]
+        lines.append(f"  GitCode login: {username}")
+        nickname = (acc or {}).get("nickname") or ""
+        if nickname and nickname != username:
+            lines.append(f"  GitCode 昵称：{nickname}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
@@ -267,7 +288,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         from src.prompt_builder import build_task_chat_prompt
         prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0))
     else:
-        prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id, backend_name=backend_name)
+        prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id,
+                                           backend_name=backend_name, user_info=_build_web_user_info(user, acc))
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
@@ -381,7 +403,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         from src.prompt_builder import build_task_chat_prompt
         prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0))
     else:
-        prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id, backend_name=backend_name)
+        prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id,
+                                           backend_name=backend_name, user_info=_build_web_user_info(user, acc))
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
@@ -607,6 +630,8 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     from src.api.session_store import get_or_create_agent_session
     from src.config import log as _log
     import os as _os
+    import src.user.db as _user_db
+    acc = _user_db.get_user_account(user.get("username") or "") or {}
 
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "")
@@ -647,7 +672,8 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
         from src.prompt_builder import build_task_chat_prompt
         prompt = build_task_chat_prompt(message, repo_key, history, conv, account=user.get("username") or "", runtime_id=runtime_id)
     else:
-        prompt = build_general_chat_prompt(message, repo_key, history, skill_name, skill_id)
+        prompt = build_general_chat_prompt(message, repo_key, history, skill_name, skill_id,
+                                           user_info=_build_web_user_info(user, acc))
     tid = enqueue_task(
         agent_session_id=session.get("id") or "",
         runtime_id=runtime_id,
