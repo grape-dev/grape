@@ -1,0 +1,48 @@
+{
+  "tab": {
+    "credentials": "Credentials",
+    "notifications": "Notifications",
+    "appearance": "Appearance",
+    "advanced": "Advanced"
+  },
+  "appearance": {
+    "title": "Interface Theme",
+    "theme_desc": "Choose the visual style of the Grape console. Liquid Glass features a frosted sidebar, system font stack, refined corners and pill buttons for a clean, transparent feel.",
+    "default": "Grape Default",
+    "default_desc": "Dark sidebar + light content",
+    "apple": "Liquid Glass",
+    "apple_desc": "Frosted sidebar + system fonts",
+    "current": "Current",
+    "mode_title": "Appearance Mode",
+    "mode_desc": "Liquid Glass only — follows system dark/light preference.",
+    "light": "☀️ Light",
+    "auto": "🌓 Follow System"
+  },
+  "language": {
+    "title": "Language",
+    "desc": "Select the interface language. The page will refresh automatically.",
+    "zh": "🇨🇳 中文",
+    "en": "🇺🇸 English"
+  },
+  "pipeline": {
+    "title": "Pipeline Mode",
+    "plugin_desc": "Plugin mode: uses pipelines.json + tag broadcast preemption, tasks enqueued by pool_tag, idle engines claim_by_tag.",
+    "traditional_desc": "Traditional mode: uses agent-skill-mapping.json + runtime_id binding, tasks assigned directly to specific engines.",
+    "plugin": "Plugin ✦",
+    "traditional": "Traditional"
+  },
+  "credentials": {
+    "gitcode_token": "GitCode Token",
+    "feishu_config": "Feishu Config",
+    "bot_config": "Bot Config",
+    "add": "Add",
+    "remove": "Remove",
+    "test": "Test",
+    "token_invalid": "Token invalid",
+    "token_valid": "Token valid"
+  },
+  "host": {
+    "title": "Hosted Repositories",
+    "confirm_remove": "⚠️ Are you sure you want to unhost {{name}}?\n\nThis will delete all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files). This cannot be undone.\n\nPlease proceed with caution if you need to keep historical data."
+  }
+}

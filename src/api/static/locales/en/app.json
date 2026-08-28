@@ -1,0 +1,57 @@
+{
+  "nav": {
+    "dashboard": "Dashboard",
+    "pipeline": "Pipeline",
+    "vod": "VOD Agent",
+    "issue": "Issue Agent",
+    "coding": "Coding Agent",
+    "qa": "QA Agent",
+    "sre": "SRE Agent",
+    "chat": "Chat Agent",
+    "settings": "General Settings",
+    "skills": "DevOps Skills",
+    "knowledge": "Project Knowledge",
+    "runtimes": "Agent Runtimes",
+    "events": "Events",
+    "repos": "Repos",
+    "tasks": "Task Center",
+    "observability": "Observability"
+  },
+  "sidebar": {
+    "workspace": "Workspace",
+    "devops_agents": "DevOps Agents",
+    "knowledge": "Knowledge",
+    "account": "Account",
+    "settings": "Settings"
+  },
+  "login": {
+    "gitcode_login": "Sign in with GitCode",
+    "pwd_login": "Sign in with username",
+    "username": "Username",
+    "password": "Password",
+    "login_btn": "Sign In",
+    "back_gitcode": "← Back to GitCode login",
+    "failed": "Login failed",
+    "oauth_not_configured": "OAuth not configured"
+  },
+  "repo": {
+    "select": "Select repository...",
+    "load_failed": "Failed to load repositories, please check your GitCode Token",
+    "back_to_select": "Back to repository selection"
+  },
+  "toast": {
+    "theme_switched_default": "Switched to Default theme",
+    "theme_switched_apple": "Switched to Liquid Glass theme",
+    "lang_switched": "Language switched"
+  },
+  "nav_groups": {
+    "workspace": "Workspace",
+    "devops_agents": "DevOps Agents",
+    "knowledge": "Knowledge",
+    "account": "Account",
+    "settings": "Settings"
+  },
+  "loading": "Loading...",
+  "select_repo": "Select Repository",
+  "logout": "Logout"
+}

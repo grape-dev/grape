@@ -1,0 +1,48 @@
+{
+  "tab": {
+    "credentials": "Credentials",
+    "notifications": "Notifications",
+    "appearance": "Appearance",
+    "advanced": "Advanced"
+  },
+  "appearance": {
+    "title": "界面风格 / Interface Theme",
+    "theme_desc": "选择 Grape 控台的视觉风格。Liquid Glass 风格采用毛玻璃侧栏、系统字体栈、精致圆角和 pill 按钮，整体简洁通透。",
+    "default": "Grape Default",
+    "default_desc": "深色侧栏 + 浅色内容区",
+    "apple": "Liquid Glass",
+    "apple_desc": "毛玻璃侧栏 + 系统字体栈",
+    "current": "当前",
+    "mode_title": "外观模式 / Appearance Mode",
+    "mode_desc": "Liquid Glass 风格专属 — 跟随系统自动切换深浅色。",
+    "light": "☀️ 浅色",
+    "auto": "🌓 跟随系统"
+  },
+  "language": {
+    "title": "国际化配置 / Language",
+    "desc": "选择界面显示语言。切换后页面将自动刷新。",
+    "zh": "🇨🇳 中文",
+    "en": "🇺🇸 English"
+  },
+  "pipeline": {
+    "title": "管线模式 / Pipeline Mode",
+    "plugin_desc": "插件模式：使用 pipelines.json + 标签广播抢占，任务按 pool_tag 入队，空闲引擎 claim_by_tag 竞争认领。",
+    "traditional_desc": "传统模式：使用 agent-skill-mapping.json + runtime_id 定向绑定，任务直接分配到指定引擎。",
+    "plugin": "插件模式 ✦",
+    "traditional": "传统模式"
+  },
+  "credentials": {
+    "gitcode_token": "GitCode Token",
+    "feishu_config": "飞书配置",
+    "bot_config": "Bot 配置",
+    "add": "添加",
+    "remove": "移除",
+    "test": "测试",
+    "token_invalid": "Token 无效",
+    "token_valid": "Token 有效"
+  },
+  "host": {
+    "title": "托管仓库",
+    "confirm_remove": "⚠️ 确定要解除托管 {{name}} 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。\n\n如需保留历史数据，请谨慎操作。"
+  }
+}

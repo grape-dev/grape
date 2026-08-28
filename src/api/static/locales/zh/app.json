@@ -1,0 +1,57 @@
+{
+  "nav": {
+    "dashboard": "Dashboard",
+    "pipeline": "Pipeline",
+    "vod": "VOD Agent",
+    "issue": "Issue Agent",
+    "coding": "Coding Agent",
+    "qa": "QA Agent",
+    "sre": "SRE Agent",
+    "chat": "Chat Agent",
+    "settings": "General Settings",
+    "skills": "DevOps Skills",
+    "knowledge": "Project Knowledge",
+    "runtimes": "Agent Runtimes",
+    "events": "Events",
+    "repos": "Repos",
+    "tasks": "Task Center",
+    "observability": "系统监控"
+  },
+  "sidebar": {
+    "workspace": "Workspace",
+    "devops_agents": "DevOps Agents",
+    "knowledge": "Knowledge",
+    "account": "Account",
+    "settings": "Settings"
+  },
+  "login": {
+    "gitcode_login": "使用 GitCode 登录",
+    "pwd_login": "用户名密码登录",
+    "username": "用户名",
+    "password": "密码",
+    "login_btn": "登录",
+    "back_gitcode": "← 返回 GitCode 登录",
+    "failed": "登录失败",
+    "oauth_not_configured": "OAuth 未配置"
+  },
+  "repo": {
+    "select": "选择仓库...",
+    "load_failed": "无法加载仓库列表，请确认 GitCode Token 是否有效",
+    "back_to_select": "返回仓库选择"
+  },
+  "toast": {
+    "theme_switched_default": "已切换到默认风格",
+    "theme_switched_apple": "已切换到 Liquid Glass 风格",
+    "lang_switched": "语言已切换"
+  },
+  "nav_groups": {
+    "workspace": "Workspace",
+    "devops_agents": "DevOps Agents",
+    "knowledge": "Knowledge",
+    "account": "Account",
+    "settings": "Settings"
+  },
+  "loading": "加载中...",
+  "select_repo": "选择仓库",
+  "logout": "登出"
+}
