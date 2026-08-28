@@ -18,7 +18,8 @@
     "observability": "系统监控",
     "event_detail": "事件详情",
     "skill_detail": "技能详情",
-    "sub_skill_detail": "子技能详情"
+    "sub_skill_detail": "子技能详情",
+    "gitcode_repo": "GitCode 仓库"
   },
   "sidebar": {
     "workspace": "工作区",

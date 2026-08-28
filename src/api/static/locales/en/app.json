@@ -18,7 +18,8 @@
     "observability": "Observability",
     "event_detail": "Event Detail",
     "skill_detail": "Skill Detail",
-    "sub_skill_detail": "Sub Skill Detail"
+    "sub_skill_detail": "Sub Skill Detail",
+    "gitcode_repo": "GitCode Repo"
   },
   "sidebar": {
     "workspace": "Workspace",
