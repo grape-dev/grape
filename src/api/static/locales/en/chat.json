@@ -60,5 +60,13 @@
     "error_access_denied": "The user denied the authorization request",
     "error_unknown": "Unknown error"
   },
-  "local_direct": "Local Direct"
+  "local_direct": "Local Direct",
+  "skill_label": "Skill",
+  "app_id": "App ID",
+  "app_secret": "App Secret",
+  "agents": "Agents",
+  "thinking": "Thinking...",
+  "backend": "Backend",
+  "placeholder": "Ask me anything...",
+  "send": "Send"
 }

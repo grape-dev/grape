@@ -1501,3 +1501,56 @@ en:
 | 11 | chat.py | stream 消息"思考中"/"生成中"/"后端错误" 等 | 后端硬编码 |
 
 注：第 8 项前端已做兼容——chat.js 用 `b.scope === 'local'` 判断后加 `I18N.t('chat.local_direct')` 翻译后缀。但后端 display_name 里仍包含"（本机直连）"，需要二期从后端去掉。
+
+### 国际化过程错误总结与经验教训（2026-08-28）
+
+#### 犯过的错误
+
+1. **模板字面量里的字符串拼接（最严重）**
+   - 错误：在反引号模板字面量里用 `' + I18N.t('key') + '` 拼接
+   - 结果：页面上直接显示代码文本 `'+ I18N.t('xxx') +'` 而不是翻译值
+   - 正确：模板字面量里必须用 `${I18N.t('key')}`
+   - 影响范围：runtimes.js(5处) / observability.js(6处) / pipeline.js(2处) / dashboard.js(7处) / knowledge.js(2处) / settings.js(1处) = 23 处
+
+2. **超范围改后端**
+   - 错误：把 chat.py / dashboard.py / vod_handler_async.py 的中文硬编码改成英文
+   - 结果：改了测试断言导致测试失败，且超出"只做前端国际化"的范围
+   - 教训：后端 API 返回的中文属于二期，前端阶段不处理。只记录到设计文档
+
+3. **回退后端改动时误删前端 key**
+   - 错误：`git checkout dev -- chat.json` 把回退前补充的 8 个前端 key 也删了
+   - 结果：chat.agents/backend/send/skill_label/app_id/app_secret/thinking/placeholder 丢失
+   - 教训：回退后端文件时要排除前端语言包文件，只回退 .py 和测试文件
+
+4. **浏览器验证白名单过宽**
+   - 错误：把 Account/Save/Skill/Backend 等需要翻译的 UI 文案放进了白名单
+   - 结果：浏览器验证"0 个遗漏"但实际还有英文未翻译
+   - 教训：白名单只放产品专有名词（VOD Agent / GitCode / hermes 等），不放通用英文词
+
+5. **代码搜索比浏览器验证更彻底**
+   - 浏览器只取叶子节点文本，有些 `<th>` / `<label>` 里的短英文被白名单排除
+   - 代码搜索 `grep -rn '>[A-Z][a-z][^<]*<'` 能发现所有 HTML 标签间的硬编码英文
+   - 教训：代码搜索 + 浏览器双重验证
+
+#### 遗漏检查清单（按发现顺序）
+
+| 轮次 | 发现的问题 | 数量 |
+|------|-----------|:---:|
+| 第 1 轮 | 模板字面量字符串拼接 | 23 处 |
+| 第 2 轮 | HTML 标签间硬编码英文（Notification Preferences/Issue events 等） | 15 处 |
+| 第 3 轮 | 按钮/label 硬编码（Refresh/View/Delete/API Token/Account 等） | 8 处 |
+| 第 4 轮 | 枚举状态值直接渲染（completed/failed/running 等） | 5 处 |
+| 第 5 轮 | 项目模板分类名（后端配置数据，前端用 name 做 key 翻译） | 3 处 |
+| 第 6 轮 | chat.json 回退丢失 key + Chat 页面欢迎语中文 | 8+key |
+
+#### 前端国际化检查方法
+
+1. **代码搜索**：`grep -rn '>[A-Z][a-z][^<]*<' src/api/static/js/` 找 HTML 标签间英文
+2. **浏览器渲染**：playwright 渲染每个页面，提取叶子节点文本，找中文模式下的纯英文
+3. **语言包对齐**：zh/en key 数量一致，中文包无纯英文值（排除品牌名）
+4. **代码残留检测**：浏览器渲染后搜索 "I18N.t" / "' +" / "${" 是否出现在页面上
+5. **枚举值翻译**：后端返回的固定枚举（status/health/scope）用 `I18N.t('module.' + value)` 翻译，有则翻译无则 fallback
+
+#### 二期后端国际化问题（不在本阶段处理）
+
+已记录在上方"二期后端国际化问题清单"——11 项后端中文硬编码/配置数据。
