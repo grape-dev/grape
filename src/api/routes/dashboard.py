@@ -351,16 +351,23 @@ async def get_ops_overview(repo: str = ""):
 @router.get("/ops/probe-now")
 async def probe_engines_now():
     """手动触发引擎探测（60s 防抖：窗口内重复请求返回上次结果，不重新探测）。"""
-    from src.observability.engine_probe import get_probe_results, probe_all_now, _last_probe_time
-    import time
+    from src.observability.engine_probe import get_probe_results, _last_probe_time
+    import time, threading
     now = time.time()
     last = _last_probe_time if _last_probe_time else 0
     if now - last < 60:
         # 防抖窗口内，返回上次结果
         return {"status": "throttled", "wait": int(60 - (now - last)), "results": get_probe_results()}
-    # 触发新探测
-    probe_all_now()
-    return {"status": "ok", "results": get_probe_results()}
+    # 防抖窗口外：后台线程异步执行探测，立即返回（不阻塞当前请求）
+    def _bg_probe():
+        try:
+            from src.observability.engine_probe import probe_all_now
+            probe_all_now()
+        except Exception as e:
+            import logging
+            logging.getLogger("devops-bot").warning(f"bg probe error: {e}")
+    threading.Thread(target=_bg_probe, daemon=True).start()
+    return {"status": "accepted", "results": get_probe_results()}
 
 
 @router.get("/ops/error-logs/sources")
