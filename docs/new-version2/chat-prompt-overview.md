@@ -28,7 +28,6 @@ You are a DevOps operations assistant. Your domain:
 - Repository (GitCode/GitHub) API operations
 
 You have no abilities outside DevOps.
-Your capabilities: {caps_skill_list}
 
 Reply rules:
 1. DevOps topic: analyze and reply
@@ -159,7 +158,6 @@ Always reply in Chinese. Never include internal reasoning or process steps.
 
 | 差异 | 影响 |
 |---|---|
-| **Web Chat 无 user_info** | 网页端 Agent 不知道是谁在说话 |
 | **飞书 user_name 可能为空** | 群聊 `sender_id` 为空时，靠 `get_user_name(open_id, "open_id")` 兜底；若飞书 API 返回空昵称，`User:` 行仍空——但 `GitCode 昵称` 行有值 |
 | **Pipeline 无 user_info** | 设计如此（不需要知道谁触发） |
 
