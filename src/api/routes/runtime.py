@@ -1008,14 +1008,32 @@ async def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_use
 
 @router.put("/runtimes/{runtime_id}/tags")
 async def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_current_user)):
-    """设置 engine 的角色标签。应用互斥规则后写入。"""
+    """设置 engine 的角色标签。应用互斥规则后写入。
+
+    同步 engine_capabilities 表：WebUI 设置 agent_tags 时，claim_by_tag 实际读的是
+    engine_capabilities.tag，两处必须一致，否则 0003 设了 agent_tags=['sre'] 但 ec.tag
+    仍为 'all' → 0003 用 tag='all' 抢所有类型任务。
+    """
     from src.session_manager import db, db_lock
+    from datetime import datetime, timezone
     tags = _apply_tag_rules(body.get("tags") or [])
     tags_json = json.dumps(tags, ensure_ascii=False)
+    now = datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (tags_json, runtime_id))
-        if c.rowcount == 0:
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
+        if not c.fetchone():
             raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        c.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (tags_json, runtime_id))
+        # 同步 engine_capabilities：删除旧标签行，按新 agent_tags 重建
+        c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (runtime_id,))
+        for _tag in tags:
+            try:
+                c.execute(
+                    "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                    "VALUES (?,?,4,50,1,?,?)",
+                    (runtime_id, _tag, now, now))
+            except Exception:
+                pass
         db.commit()
     return {"tags": tags}

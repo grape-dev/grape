@@ -282,6 +282,10 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) ->
     """按 专属→全局→本机直连 优先级从引擎集合选健康引擎；集合空回退会话主引擎（legacy）。
 
     返回 None = engine_unavailable（调用方跳过执行，禁止回落硬编码默认引擎）。
+
+    Plugin 模式下绑定表为空时优先走广播（return 0），不走 fallback_runtime_id：
+    fallback 来自 devops_agent_session.runtime_id（历史会话引擎），会绕过广播直接定向
+    到旧引擎（如 0003 的 rt=54 有 121 个历史会话），导致 tag 限制失效。
     """
     cfg = load_engine_selection()
     if not cfg.get("enabled", True):
@@ -300,17 +304,17 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) ->
                 return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
             return random.choice(cand)["runtime_id"]
         return None     # 集合存在但无健康成员 → engine_unavailable（不回退 fallback）
-    if fallback_runtime_id:
-        return int(fallback_runtime_id)
-    # Plugin 模式：不选具体引擎，返回 0 让任务以无主池任务入队（runtime_id=0 + pool_tag），
-    # 多个带匹配 tag 的引擎通过 claim_by_tag 竞争认领（广播路线）。
-    # 传统模式：无绑定 + 无 fallback → engine_unavailable（不调 resolve_default_engine，保持原行为）
+    # Plugin 模式：绑定表为空 → 直接走广播（return 0），不走 fallback_runtime_id。
+    # fallback 来自历史会话，会绕过 tag 限制定向到旧引擎，破坏广播负载均衡。
     try:
         from src.api.event_pipeline import is_plugin_mode
         if is_plugin_mode():
             return 0
     except Exception:
         pass
+    # 传统模式：无绑定 → 回退会话主引擎（legacy），无则 engine_unavailable
+    if fallback_runtime_id:
+        return int(fallback_runtime_id)
     return None
 
 
