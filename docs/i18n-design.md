@@ -1295,3 +1295,67 @@ const sceneLabel = _sceneId ? (_sceneLabels[_sceneId] || p.scene_name || _sceneI
 - 后端不改——照常返回 scene_name
 - 如果语言包没有对应 key（比如新增 scene），回退用后端 scene_name
 - 不影响现有功能——中文模式语言包里 scene_default="通用开发" 和后端 scene_name="通用开发" 一样
+
+### agent_type display_name + description 国际化修复（2026-08-28）
+
+#### 问题
+
+和 pipeline scene_name 同类问题。后端 agent_type 表的 display_name 和 description 是中文硬编码，前端直接渲染，英文模式下仍显示中文。
+
+后端 DB 数据：
+```
+vod: display_name=VOD Agent | description=从开发者声音中收集反馈、聚类分析共性、提炼价值、自动创建 Issue
+issue: display_name=Issue Agent | description=Issue 分类、标签、指派、A2A 触发 Coding Agent
+coding: display_name=Coding Agent | description=代码实现、PR 创建、自我审查...
+qa: display_name=QA Agent | description=代码审查、自动化测试、功能验证、安全检查...
+sre: display_name=SRE Agent | description=构建部署、发布管理、监控运维、故障排查
+```
+
+前端直接用后端返回值渲染：
+- agents.js L233: ${meta.display_name} + ${meta.description}
+- dashboard.js L89: ${meta.display_name}
+- app.js L274: title.textContent = _AGENT_TYPES[view].display_name
+
+#### 修复方案
+
+和 scene_name 一样——前端用 agent_type 做 key 查语言包翻译，后端返回值做 fallback。
+
+语言包补充 agents.json：
+```json
+"type": {
+    "vod": {"name": "VOD Agent", "desc": "从开发者声音中收集反馈..."},
+    "issue": {"name": "Issue Agent", "desc": "Issue 分类、标签..."},
+    "coding": {"name": "Coding Agent", "desc": "代码实现、PR 创建..."},
+    "qa": {"name": "QA Agent", "desc": "代码审查、自动化测试..."},
+    "sre": {"name": "SRE Agent", "desc": "构建部署、发布管理..."}
+}
+```
+
+前端封装 helper 函数：
+```javascript
+function _agentTypeDisplay(type, meta) {
+    var tKey = 'agents.type.' + type + '.name';
+    var tVal = I18N.t(tKey);
+    return tVal !== tKey ? tVal : (meta.display_name || type);
+}
+function _agentTypeDesc(type, meta) {
+    var tKey = 'agents.type.' + type + '.desc';
+    var tVal = I18N.t(tKey);
+    return tVal !== tKey ? tVal : (meta.description || '');
+}
+```
+
+#### 影响范围
+
+- 只改前端：agents.js / dashboard.js / app.js
+- 后端不改——照常返回 display_name / description
+- 语言包没有对应 key 时回退用后端值
+- 不影响现有功能——中文模式语言包和后端 DB 值一样
+
+#### 不在本次范围内的动态数据
+
+以下后端返回的中文属于二期后端国际化，不在本次前端 UI 国际化范围内：
+- events summary/title（动态生成）
+- repos description（GitCode API 返回）
+- skill display_name/description（用户/官方上传）
+- templates/runtimes description（配置文件/DB）
