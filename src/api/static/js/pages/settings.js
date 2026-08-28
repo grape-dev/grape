@@ -27,12 +27,12 @@ function renderSettings(tab) {
       const _skVal = d.huawei_cloud ? _esc(d.huawei_cloud.sk || '') : '';
       document.getElementById('sCredentials').innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.gitcode_api_title')}</h3>
-          <div class="srow"><label>API Token</label><input type="password" value="${d.gitcode && d.gitcode.api_token_exists ? '********' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? '' : `placeholder="${I18N.t('settings.credentials.gitcode_token_placeholder')}"`} style="${d.gitcode && d.gitcode.api_token_exists ? 'background:#f1f5f9' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? 'disabled' : ''}></div>
-          <div class="srow"><label>Account</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account + I18N.t('settings.credentials.gitcode_account_suffix') : '—'}" disabled style="background:#f1f5f9;font-size:10px"></div>
+          <div class="srow"><label>${I18N.t('settings.credentials.api_token')}</label><input type="password" value="${d.gitcode && d.gitcode.api_token_exists ? '********' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? '' : `placeholder="${I18N.t('settings.credentials.gitcode_token_placeholder')}"`} style="${d.gitcode && d.gitcode.api_token_exists ? 'background:#f1f5f9' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? 'disabled' : ''}></div>
+          <div class="srow"><label>${I18N.t('settings.credentials.account')}</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account + I18N.t('settings.credentials.gitcode_account_suffix') : '—'}" disabled style="background:#f1f5f9;font-size:10px"></div>
         </div>
         <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.huawei_cloud_title')}</h3>
-          <div class="srow"><label>Access Key</label><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="Access Key"><button class="bt bt-o bt-s" id="huaweiToggleAk" onclick="toggleHuaweiSecret()" title="${I18N.t('settings.theme.show_hide')}" style="padding:2px 8px">👁</button></div>
-          <div class="srow"><label>Secret Key</label><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="Secret Key"><button class="bt bt-o bt-s" id="huaweiToggleSk" onclick="toggleHuaweiSecret()" title="${I18N.t('settings.theme.show_hide')}" style="padding:2px 8px">👁</button></div>
+          <div class="srow"><label>${I18N.t('settings.credentials.access_key')}</label><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.access_key')}"><button class="bt bt-o bt-s" id="huaweiToggleAk" onclick="toggleHuaweiSecret()" title="${I18N.t('settings.theme.show_hide')}" style="padding:2px 8px">👁</button></div>
+          <div class="srow"><label>${I18N.t('settings.credentials.secret_key')}</label><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.secret_key')}"><button class="bt bt-o bt-s" id="huaweiToggleSk" onclick="toggleHuaweiSecret()" title="${I18N.t('settings.theme.show_hide')}" style="padding:2px 8px">👁</button></div>
           <p class="tx t2 mt8">${I18N.t('settings.credentials.huawei_cloud_desc')}</p>
           <button class="bt bt-p mt8" onclick="saveCredentials()">${I18N.t('settings.common.save')}</button>
         </div>
@@ -175,7 +175,7 @@ function renderSettings(tab) {
     API.get('/settings/gitcode-repo/' + repo.owner + '/' + repo.name).then(d => {
         document.getElementById('sGitcode').innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.devops_bot_title')}</h3>
-          <div class="srow"><label>Bot Token</label><input type="password" id="gitcodeBotToken" value="" placeholder="${d.devops_bot_token_exists ? I18N.t('settings.credentials.bot_token_placeholder_configured') : I18N.t('settings.credentials.bot_token_placeholder_empty')}">${d.devops_bot_token_exists ? '<span class="ts" style="color:var(--g);font-size:10px">'+I18N.t('settings.credentials.bot_configured')+'</span>' : ''}</div>
+          <div class="srow"><label>${I18N.t('settings.credentials.bot_token')}</label><input type="password" id="gitcodeBotToken" value="" placeholder="${d.devops_bot_token_exists ? I18N.t('settings.credentials.bot_token_placeholder_configured') : I18N.t('settings.credentials.bot_token_placeholder_empty')}">${d.devops_bot_token_exists ? '<span class="ts" style="color:var(--g);font-size:10px">'+I18N.t('settings.credentials.bot_configured')+'</span>' : ''}</div>
           <div class="srow"><label>${I18N.t('settings.credentials.scope')}</label><input type="text" value="read_repo, write_repo, manage_webhook" disabled style="background:#f1f5f9;font-size:10px"></div>
           <button class="bt bt-p mt8" onclick="saveGitcodeRepoConfig()">${I18N.t('settings.common.save')}</button>
         </div>

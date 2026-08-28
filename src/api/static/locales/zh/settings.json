@@ -70,7 +70,12 @@
     "bot_token_placeholder_empty": "不设置，将默认使用Grape官方机器人",
     "bot_configured": "✓ 已配置",
     "repo_config_updated": "GitCode Repo 配置已更新",
-    "scope": "权限范围"
+    "scope": "权限范围",
+    "api_token": "API Token",
+    "account": "账户",
+    "access_key": "Access Key",
+    "secret_key": "Secret Key",
+    "bot_token": "Bot Token"
   },
   "host": {
     "title": "托管仓库",

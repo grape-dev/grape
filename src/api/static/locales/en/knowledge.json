@@ -43,5 +43,7 @@
   "info_title": "Knowledge Info",
   "info_file": "File",
   "info_repo": "Repo",
-  "agent_label": "Agent *"
+  "agent_label": "Agent *",
+  "view": "View",
+  "delete": "Delete"
 }

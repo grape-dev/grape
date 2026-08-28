@@ -79,7 +79,7 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4">${f.name.split('/').pop()}</div>
         <div style="font-size:10px;color:var(--t3);margin-top:4px">${f.updated || ''}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${f.obs_key || f.name}')">View</button>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${f.obs_key || f.name}')">${I18N.t('knowledge.view')}</button>
       </div>`;
     });
     html += '</div>';
@@ -100,7 +100,7 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:6px">${preview ? escapeHtml(preview).substring(0,120) : I18N.t('knowledge.empty')}</div>
         <div style="font-size:10px;color:var(--t3)">${k.created_by || ''} · ${fmtLocalTime(k.created_at).substring(0,16)} · seq ${k.source_seq || 0}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">View</button>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">${I18N.t('knowledge.view')}</button>
       </div>`;
     });
     html += '</div>';
@@ -125,8 +125,8 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
         <div style="font-size:11px;color:var(--t2);line-height:1.4">@${doc.owner} · ${doc.size} bytes</div>
         <div style="font-size:10px;color:var(--t3);margin-top:4px">${doc.updated_at || ''}</div>
         <div style="display:flex;gap:6px;margin-top:8px">
-          <button class="bt bt-o bt-s" onclick="event.stopPropagation();loadKnowledgeContent('${doc.obs_key || doc.path}')">View</button>
-          ${canDel ? `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteKnowledgeDoc('${doc.path}')">Delete</button>` : ''}
+          <button class="bt bt-o bt-s" onclick="event.stopPropagation();loadKnowledgeContent('${doc.obs_key || doc.path}')">${I18N.t('knowledge.view')}</button>
+          ${canDel ? `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteKnowledgeDoc('${doc.path}')">${I18N.t('knowledge.delete')}</button>` : ''}
         </div>
       </div>`;
     });
@@ -168,7 +168,7 @@ function _renderAgentTab(d) {
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4">${preview ? escapeHtml(preview).substring(0,140) : I18N.t('knowledge.empty')}</div>
 <div style="font-size:10px;color:var(--t3);margin-top:4px">${k.scope === 'member_agent' ? '' + I18N.t('knowledge.scope_member_directed') + '' : 'seq ' + (k.source_seq || 0) + ' · ' + fmtLocalTime(k.created_at).substring(0,16)}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">View</button>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">${I18N.t('knowledge.view')}</button>
       </div>`;
     });
     html += '</div>';

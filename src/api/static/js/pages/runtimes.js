@@ -64,7 +64,7 @@ function renderRuntimes(data) {
       ${tabBtn('engines')}${tabBtn('workers')}
       <div class="sp"></div>
       ${_runtimeTab === 'workers' ? `<button class="bt bt-p" onclick="openGenCredential()">${I18N.t('runtimes.action.gen_credential')}</button>` : ''}
-      <button class="bt bt-o" onclick="refreshRuntimes()">⟳ Refresh</button>
+      <button class="bt bt-o" onclick="refreshRuntimes()">⟳ ${I18N.t('runtimes.refresh')}</button>
     </div>`;
   html += _runtimeTab === 'engines' ? renderEngines(data, devices) : renderWorkers(data, devices);
   html += _legendHtml();

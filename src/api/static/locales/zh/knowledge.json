@@ -43,5 +43,7 @@
   "info_title": "知识信息",
   "info_file": "文件",
   "info_repo": "仓库",
-  "agent_label": "Agent *"
+  "agent_label": "Agent *",
+  "view": "查看",
+  "delete": "删除"
 }

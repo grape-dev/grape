@@ -70,7 +70,12 @@
     "bot_token_placeholder_empty": "Not set, will use Grape official bot by default",
     "bot_configured": "✓ Configured",
     "repo_config_updated": "GitCode Repo config updated",
-    "scope": "Scope"
+    "scope": "Scope",
+    "api_token": "API Token",
+    "account": "Account",
+    "access_key": "Access Key",
+    "secret_key": "Secret Key",
+    "bot_token": "Bot Token"
   },
   "host": {
     "title": "Hosted Repositories",
