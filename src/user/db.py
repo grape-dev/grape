@@ -262,42 +262,11 @@ CREATE TABLE IF NOT EXISTS user_credentials (
 )
 """
 
-# ====== 云主机表 ======
-_VMS_DDL = """
-CREATE TABLE IF NOT EXISTS user_vms (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    host TEXT NOT NULL,
-    port INTEGER DEFAULT 22,
-    ssh_user TEXT NOT NULL,
-    ssh_password TEXT NOT NULL,
-    status TEXT DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (user_id, name)
-)
-"""
-
-_VM_REPOS_DDL = """
-CREATE TABLE IF NOT EXISTS user_vm_repos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    vm_id INTEGER NOT NULL,
-    repo_key TEXT NOT NULL,
-    deploy_dir TEXT DEFAULT '',
-    service_name TEXT DEFAULT '',
-    branch TEXT DEFAULT 'master',
-    UNIQUE (vm_id, repo_key)
-)
-"""
-
-
 def init_db():
     """初始化用户相关表（幂等）"""
     with db_lock:
         db.execute(_USERS_DDL)
         db.execute(_CREDENTIALS_DDL)
-        db.execute(_VMS_DDL)
-        db.execute(_VM_REPOS_DDL)
         for col in ["created_by"]:
             try:
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -375,98 +344,6 @@ def delete_credential(user_id: int, provider: str) -> bool:
             return c.rowcount > 0
     except Exception as e:
         log.warning(f"Delete credential failed: {e}")
-        return False
-
-
-# ====== 云主机 CRUD ======
-
-def add_vm(user_id: int, name: str, host: str, ssh_user: str, ssh_password: str, port: int = 22) -> int | None:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT INTO user_vms (user_id, name, host, port, ssh_user, ssh_password) VALUES (?,?,?,?,?,?)",
-                      (user_id, name, host, port, ssh_user, ssh_password))
-            db.commit()
-            return c.lastrowid
-    except Exception as e:
-        log.warning(f"Add VM failed: {e}")
-        return None
-
-
-def get_vms(user_id: int) -> list[dict]:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, name, host, port, ssh_user, ssh_password, status FROM user_vms WHERE user_id=? ORDER BY id", (user_id,))
-        return [{"id": r[0], "name": r[1], "host": r[2], "port": r[3], "ssh_user": r[4], "ssh_password": r[5], "status": r[6]} for r in c.fetchall()]
-
-
-def update_vm_status(vm_id: int, status: str) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE user_vms SET status=? WHERE id=?", (status, vm_id))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Update VM status failed: {e}")
-        return False
-
-
-def delete_vm(vm_id: int) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM user_vm_repos WHERE vm_id=?", (vm_id,))
-            c.execute("DELETE FROM user_vms WHERE id=?", (vm_id,))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Delete VM failed: {e}")
-        return False
-
-
-def add_vm_repo(vm_id: int, repo_key: str, deploy_dir: str = "", service_name: str = "", branch: str = "master") -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO user_vm_repos (vm_id, repo_key, deploy_dir, service_name, branch) VALUES (?,?,?,?,?)",
-                      (vm_id, repo_key, deploy_dir, service_name, branch))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Add VM repo failed: {e}")
-        return False
-
-
-def get_vm_repos(vm_id: int) -> list[dict]:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT repo_key, deploy_dir, service_name, branch FROM user_vm_repos WHERE vm_id=?", (vm_id,))
-        return [{"repo_key": r[0], "deploy_dir": r[1], "service_name": r[2], "branch": r[3]} for r in c.fetchall()]
-
-
-def delete_vm_repo(vm_id: int, repo_key: str) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM user_vm_repos WHERE vm_id=? AND repo_key=?", (vm_id, repo_key))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Delete VM repo failed: {e}")
-        return False
-
-
-def clear_vm_repos(vm_id: int) -> bool:
-    """清除指定云主机的所有仓库映射"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM user_vm_repos WHERE vm_id=?", (vm_id,))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Clear VM repos failed: {e}")
         return False
 
 
@@ -604,7 +481,6 @@ def _migrate_repo_key_tables():
         _REPO_KEY_TABLES = (
             "events", "event_skipped", "devops_agent_session", "tasks",
             "chat_conversations", "chat_agent_session", "repo_im_group_binding",
-            "user_vm_repos",
         )
         for _tbl in _REPO_KEY_TABLES:
             try:
@@ -689,8 +565,6 @@ def init_db():
             except Exception:
                 pass
         db.execute(_CREDENTIALS_DDL)
-        db.execute(_VMS_DDL)
-        db.execute(_VM_REPOS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
         # repo_key 统一整改迁移（managed_repos 去 user_id + user_repos 加前缀/is_join）
@@ -820,10 +694,6 @@ def init_db():
             db.commit()
         except Exception as e:
             log.warning(f"Migrate user_accounts deprecated fields failed: {e}")
-        try:
-            db.execute("ALTER TABLE user_vms ADD COLUMN status TEXT DEFAULT ''")
-        except Exception:
-            pass
         # 收敛 user_accounts：移除废弃列（须在所有读取迁移之后执行）
         try:
             c = db.cursor()

@@ -53,7 +53,6 @@ function selPipe(idx) {
     var tag = node.tag || node.id;
     var sc = statuses[i] || 0;
     var ev = (stages[i] && stages[i].latest_event) || {};
-    var evTitle = ev.title || '';
     var dotc = sc === 2 ? 'var(--g)' : sc === 1 ? 'var(--y)' : sc === 3 ? 'var(--r)' : 'var(--t3)';
     var color = _TAG_COLORS[tag] || agentColors[i % agentColors.length];
     var label = (node.id || tag).charAt(0).toUpperCase() + (node.id || tag).slice(1);
@@ -61,7 +60,7 @@ function selPipe(idx) {
     var dimStyle = sc === 0 ? 'background:#eef0f4;border-top-color:#d5d9e0;filter:grayscale(0.6)' : 'background:' + (sc === 1 ? '#fff8e8' : '#fff') + ';border-top-color:' + color;
     flowHtml += `<div class="nd${sc === 1 ? ' nd-radar' : ''}" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${tag}')">
       <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : color}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${label} <span style="font-size:9px;color:var(--t3)">${modeIcon}</span></h4></div>
-      <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? evTitle || ev.event_type || '\u2014' : '\u2014'}</div>
+      <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? ev.event_type || '\u2014' : '\u2014'}</div>
       <div class="nds" style="margin-bottom:1px;font-size:9px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev && ev.actor ? '@' + ev.actor : ' '}</div>
       <div class="ns"><span class="d${sc === 1 ? ' d-pulse' : ''}" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : 'Pending'}</div>
     </div>`;
@@ -123,8 +122,7 @@ function renderPipeline(data) {
       var tag = node.tag || node.id;
       var sc = statuses[i] || 0;
       var ev = (stages[i] && stages[i].latest_event) || {};
-      var evTitle = ev.title || '';
-      var dotc = sc === 2 ? 'var(--g)' : sc === 1 ? 'var(--y)' : sc === 3 ? 'var(--r)' : 'var(--t3)';
+        var dotc = sc === 2 ? 'var(--g)' : sc === 1 ? 'var(--y)' : sc === 3 ? 'var(--r)' : 'var(--t3)';
       var color = _TAG_COLORS[tag] || agentColors[i % agentColors.length];
       var label = (node.id || tag).charAt(0).toUpperCase() + (node.id || tag).slice(1);
       var modeIcon = _MODE_ICONS[node.mode] || _MODE_ICONS.emit;
@@ -133,7 +131,7 @@ function renderPipeline(data) {
         : 'background:' + (sc === 1 ? '#fff8e8' : '#fff') + ';border-top-color:' + color;
       flowHtml += `<div class="nd${sc === 1 ? ' nd-radar' : ''}" style="padding:10px;width:150px;cursor:pointer;${dimStyle}${sc === 0 ? ';opacity:.55' : ''}" onclick="app.nav('${tag}')">
         <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : color}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${label} <span style="font-size:9px;color:var(--t3)">${modeIcon}</span></h4></div>
-        <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? evTitle || ev.event_type || '\u2014' : '\u2014'}</div>
+        <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? ev.event_type || '\u2014' : '\u2014'}</div>
         <div class="nds" style="margin-bottom:1px;font-size:9px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev && ev.actor ? '@' + ev.actor : ' '}</div>
         <div class="ns"><span class="d${sc === 1 ? ' d-pulse' : ''}" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : 'Pending'}</div>
       </div>`;
@@ -172,7 +170,7 @@ function renderPipeline(data) {
   html += `${flowHtml}${pagerHtml}`;
 
   // 表格区域（独立滚动）
-  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>标题</th><th>Duration</th><th>Agents</th><th>阶段</th><th>场景</th><th>责任人</th></tr>`;
+  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>标题</th><th>父任务</th><th>Duration</th><th>Agents</th><th>阶段</th><th>场景</th><th>责任人</th></tr>`;
   pagePipes.forEach((p, i) => {
     const realIdx = pipeStart + i;
     const s = realIdx === _pipeActiveIdx ? ' sel' : '';
@@ -193,6 +191,9 @@ function renderPipeline(data) {
     const _issueNum = String(p.issue_id || '').replace(/^#/, '');
     const _repoParts2 = (data.repo || '').replace(/^gitcode:/, '').split('/');
     const _issueUrl = (_issueNum && _repoParts2.length === 2) ? `https://gitcode.com/${_repoParts2[0]}/${_repoParts2[1]}/issues/${_issueNum}` : '';
+    const _parentIssueId = String(p.parent_issue_id || '').replace(/^#/, '');
+    const _parentIssueUrl = (_parentIssueId && _repoParts2.length === 2) ? `https://gitcode.com/${_repoParts2[0]}/${_repoParts2[1]}/issues/${_parentIssueId}` : '';
+    const _parentIssueHtml = _parentIssueId ? `<a href="${_parentIssueUrl}" target="_blank" rel="noopener" style="color:var(--pu);text-decoration:underline;font-size:11px">#${_parentIssueId}</a>` : '<span class="ts t3">—</span>';
     const _esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const execBadge = p.executing
       ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ 执行中</span>'
@@ -200,6 +201,7 @@ function renderPipeline(data) {
     html += `<tr class="pipe-row${s}" data-idx="${realIdx}" onclick="selPipe(${realIdx})" ondblclick="pipeRowDblClick(${realIdx})">
       <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
       <td><a href="${_issueUrl || '#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${_esc(p.title || '—')}</a></td>
+      <td>${_parentIssueHtml}</td>
       <td>${dur}</td>
       <td>${agentTags}</td>
       <td><span class="${stageClass}">${stageName}</span></td>

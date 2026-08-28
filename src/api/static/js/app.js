@@ -135,7 +135,7 @@ function loadAgentTypes() {
     $('mainView').style.position = '';
     $('mainView').style.inset = '';
     $('mainView').style.zIndex = '';
-    $('pageTitle').textContent = 'Dashboard';
+    $('pageTitle').textContent = 'Scene Center';
 
     if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
       const r = managedRepos[0];
@@ -255,7 +255,7 @@ function loadAgentTypes() {
     }
 
     if (view === 'dash') {
-      title.textContent = 'Dashboard';
+      title.textContent = 'Scene Center';
       const loadDash = () => Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes'),

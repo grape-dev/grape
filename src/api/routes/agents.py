@@ -329,9 +329,6 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                 _rid = get_runtime_id_by_name(bn)
             if not _rid:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"未知引擎: {bn}"})
-            _scope = scope_of_runtime(_rid)
-            if _scope == "user":
-                raise HTTPException(status_code=400, detail={"code": 400, "message": f"DevOps Agent 只能绑定仓库/全局引擎，所选为个人引擎: {bn}"})
             rids.append(_rid)
         _es.set_binding(repo_key, name, rids)
         pool_mode = True
@@ -351,10 +348,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                 # 优先按唯一引擎名（engine name / instance_name）解析；否则按类型名（S2 健康选择）兜底
                 runtime_id = resolve_instance_id(body.backend)
                 if runtime_id is not None:
-                    _scope = scope_of_runtime(runtime_id)
-                    # DevOps Agent 只能绑定 仓库/全局 引擎（个人引擎仅 Chat 可用，见 runtime-admin-two-view-design §5.1）
-                    if _scope == "user":
-                        raise HTTPException(status_code=400, detail={"code": 400, "message": f"DevOps Agent 只能绑定仓库/全局引擎，所选为个人引擎: {body.backend}"})
+                    pass  # 个人引擎（scope=user）也允许绑定 DevOps Agent
                 else:
                     runtime_id = get_runtime_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
             # 精确解析 skill_id：
