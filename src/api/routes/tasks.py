@@ -161,6 +161,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         if row:
             task_id = row[0]
             linked = row[1]
+            # 标题更新：webhook 带了真实标题 → 覆盖旧标题（可能为 issue_opened 等类型名）
+            if title:
+                c.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
+                db.commit()
         else:
             if not title:
                 title = _get_issue_title(repo_key, issue_number)
@@ -232,7 +236,18 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
 
 
 def _get_issue_title(repo_key: str, issue_number: int) -> str:
-    """从 events 表取该 issue 最新事件的标题（零 API 调用）"""
+    """从 events 表取该 issue 最新事件的标题（零 API 调用）。
+    
+    跳过 title 为事件类型名（如 issue_opened/issue_updated）或 A2A 占位标题的行，
+    这些不是 Issue 真实标题。
+    """
+    _EVENT_TYPE_NAMES = {
+        "issue_opened", "issue_updated", "issue_comment", "issue_labeled",
+        "issue_closed", "push", "tag_created", "release_created",
+        "pull_request_opened", "pull_request_updated", "pull_request_merged",
+        "note_hook_pr", "vod_signal", "a2a_event", "build_start", "build_failure",
+        "deploy_start", "deploy_failure", "deploy_finish",
+    }
     with db_lock:
         c = db.cursor()
         try:
@@ -242,7 +257,11 @@ def _get_issue_title(repo_key: str, issue_number: int) -> str:
                 (repo_key, f"#{issue_number}")
             )
             row = c.fetchone()
-            return row[0] if row else ""
+            if row:
+                t = row[0] or ""
+                if t not in _EVENT_TYPE_NAMES and not t.startswith("A2A:") and not t.startswith("A2A (订阅):"):
+                    return t
+            return ""
         except Exception:
             return ""
 

@@ -473,9 +473,20 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         # 创建事件
         from src.api.event_store import append_event
         issue_id = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "") or "#0"
+        # 从 tasks 表获取 Issue 真实标题（避免 Pipeline 列表显示 "A2A (订阅): xxx"）
+        _sub_title = ""
+        _sub_iss_num = str(issue_id).lstrip("#")
+        if _sub_iss_num and _sub_iss_num.isdigit():
+            try:
+                from src.api.routes.tasks import _get_issue_title
+                _sub_title = _get_issue_title(repo_key, int(_sub_iss_num)) or ""
+            except Exception:
+                pass
+        if not _sub_title:
+            _sub_title = f"A2A (订阅): {agent_type}"
         seq = append_event(
             repo_key=repo_key, event_type="a2a_event",
-            title=f"A2A (订阅): {agent_type}", issue_id=issue_id, source="a2a",
+            title=_sub_title, issue_id=issue_id, source="a2a",
             agent_type=agent_type, actor=evt.get("actor", ""),
             summary=f"订阅触发: {event_type} → {agent_type}（主路由: {main_agent}）",
             payload=evt.get("payload", {}), status="running",
@@ -655,6 +666,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                         except Exception:
                             pass
                     _t3 = str(_o3.get("title", "") or "") if isinstance(_o3, dict) else ""
+                    if not _t3:
+                        _t3 = evt.get("title", "") or ""
                     ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3, event_type=event_type)
                     log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or '(owner)'}")
     except Exception as _e:
@@ -890,9 +903,35 @@ def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
 
 
 def _issue_num_from(issue_id: str) -> str:
-    """"#5" / "5" → "5"；#0/空 → ''（无关联 Issue，按 repo 级兜底）。"""
     s = (issue_id or "").strip().lstrip("#")
     return s if s and s != "0" else ""
+
+
+def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
+    """调 GitCode API 获取 Issue 标题。失败返回空。
+
+    用于 pipeline 展示兜底：当 tasks/events 表中 title 均为占位符时，
+    通过 API 获取真实标题并回写。
+    """
+    num = _issue_num_from(issue_id)
+    if not num:
+        return ""
+    try:
+        from src.repo_key import split_owner_repo
+        owner, rname = split_owner_repo(repo_key)
+        import urllib.request
+        from src.user.db import get_gitcode_token
+        tok = get_gitcode_token(repo_key=repo_key) or ""
+        if not tok:
+            return ""
+        req = urllib.request.Request(
+            f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
+            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
+        import json as _json
+        d = _json.load(urllib.request.urlopen(req, timeout=15))
+        return d.get("title", "") or ""
+    except Exception:
+        return ""
 
 
 def _parse_parent_issue_from_payload(payload: dict) -> str:

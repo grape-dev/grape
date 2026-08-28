@@ -334,10 +334,20 @@ async def a2a_endpoint(request: Request):
 
         # 立即创建 event（status=running），Agent 执行完再更新
         from src.api.event_store import append_event
+        # 从 tasks 表获取 Issue 真实标题（A2A 标题不能用 "A2A: agent" — Pipeline 列表需要显示 Issue 标题）
+        _a2a_title = ""
+        if issue_number:
+            try:
+                from src.api.routes.tasks import _get_issue_title
+                _a2a_title = _get_issue_title(repo_key, int(issue_number)) or ""
+            except Exception:
+                pass
+        if not _a2a_title:
+            _a2a_title = f"A2A: {agent_name}"
         seq = append_event(
             repo_key=repo_key,
             event_type="a2a_event",
-            title=f"A2A: {agent_name}",
+            title=_a2a_title,
             issue_id=f"#{issue_number}" if issue_number else "#0",
             source="a2a",
             agent_type=agent_name,
