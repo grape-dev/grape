@@ -9,8 +9,11 @@ function renderSettings(tab) {
     {id:'advanced', label:I18N.t('settings.tab.advanced')},
   ];
 
-  let html = `<div class="cd"><div class="cd-h"><h2>${I18N.t('settings.page_title')}</h2></div>
-  <div class="stabs">${tabs.map(t => `<a class="${t.id === current ? 'ac' : ''}" onclick="renderSettings('${t.id}')">${t.label}</a>`).join('')}</div>`;
+  let html = `<div class="cd"><div class="cd-h"><h2>${I18N.t('settings.page_title')}</h2></div>`;
+  // gitcode 是独立页面，不显示通用设置的 tabs 标签栏
+  if (current !== 'gitcode') {
+    html += `<div class="stabs">${tabs.map(t => `<a class="${t.id === current ? 'ac' : ''}" onclick="renderSettings('${t.id}')">${t.label}</a>`).join('')}</div>`;
+  }
 
   if (current === 'credentials') {
     html += `<div id="sCredentials"><div class="loading">${I18N.t('settings.common.loading')}</div></div></div>`;
