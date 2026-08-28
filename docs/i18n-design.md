@@ -1422,3 +1422,35 @@ if (current !== 'gitcode') {
 - 只改 settings.js 1 处
 - 不影响 credentials/notifications/appearance/advanced 页面
 - gitcode 页面不再显示多余的 tabs 标签栏
+
+### 设置页 UI 优化（2026-08-28）
+
+#### 问题
+
+1. 界面风格标题 `界面风格 / Interface Theme` 中英文混写——英文模式应只显示 `Interface Theme`
+2. 外观模式标题 `外观模式 / Appearance Mode` 同样中英文混写
+3. 管线模式标题 `管线模式 / Pipeline Mode` 同样中英文混写
+4. 语言按钮 `🇨🇳 中文` / `🇺🇸 English` 带国旗 emoji——去掉国旗更简洁
+5. 界面风格默认选 Grape Default——改为默认选 Liquid Glass
+
+#### 修复方案
+
+1. 标题去掉中英文混写，中文模式显示中文，英文模式显示英文
+2. 语言按钮去掉国旗 emoji：`中文` / `English`
+3. 界面风格默认选 Liquid Glass（settings.js 里 curTheme 默认值改为 'apple'）
+
+#### 语言包调整
+
+zh: 
+  appearance.title = "界面风格"
+  appearance.mode_title = "外观模式"
+  pipeline.title = "管线模式"
+  language.zh = "中文"
+  language.en = "English"
+
+en:
+  appearance.title = "Interface Theme"
+  appearance.mode_title = "Appearance Mode"
+  pipeline.title = "Pipeline Mode"
+  language.zh = "中文"
+  language.en = "English"
