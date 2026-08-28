@@ -1181,9 +1181,16 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             prompt = prompt.replace("{{SKILL_DIR}}", os.path.dirname(os.path.dirname(_full)))
             else:
                 # 向后兼容：无 skill_id 时走老逻辑
-                _real_skill_dir = os.path.dirname(evt.get("_skill_path", "")) if evt.get("_skill_path") else ""
-                if _real_skill_dir:
-                    prompt = prompt.replace("{{SKILL_DIR}}", _real_skill_dir)
+                from src.config import resolve_official_skill_path as _resolve_skill_path
+                _sp = evt.get("_skill_path", "") or ""
+                _skill_name_only = os.path.basename(_sp) if _sp else ""
+                _real_skill_md = _resolve_skill_path(_skill_name_only) if _skill_name_only else ""
+                if _real_skill_md:
+                    prompt = prompt.replace("{{SKILL_DIR}}", os.path.dirname(_real_skill_md))
+                else:
+                    _real_skill_dir = os.path.dirname(_sp) if _sp else ""
+                    if _real_skill_dir:
+                        prompt = prompt.replace("{{SKILL_DIR}}", _real_skill_dir)
         except Exception:
             pass
         log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")

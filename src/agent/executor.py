@@ -165,10 +165,10 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
     if env_extra:
         env.update(env_extra)
 
-    # 技能路径占位符替换
+    # 技能路径占位符替换（direct 模式：按 skills/<agent_type>/<skill>/ 结构解析）
     try:
-        from src.config import SKILLS_DIR
-        prompt = prompt.replace("{{SKILL_DIR}}", SKILLS_DIR)
+        from src.config import replace_skill_dir_placeholders
+        prompt = replace_skill_dir_placeholders(prompt)
     except Exception:
         pass
 
@@ -279,10 +279,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         env.update(env_extra)
 
     # 技能路径占位符：worker 侧已在物化时把 {{SKILL_DIR}} 替换为随任务下发的目录；
-    # direct（服务端本地）执行在此替换为服务端 SKILLS_DIR，使 read tool 能找到技能文件。
+    # direct（服务端本地）执行在此按 skills/<agent_type>/<skill>/ 结构解析，使 read tool 能找到技能文件。
     try:
-        from src.config import SKILLS_DIR
-        prompt = prompt.replace("{{SKILL_DIR}}", SKILLS_DIR)
+        from src.config import replace_skill_dir_placeholders
+        prompt = replace_skill_dir_placeholders(prompt)
     except Exception:
         pass
 

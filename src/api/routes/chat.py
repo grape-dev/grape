@@ -707,7 +707,7 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
             from src.user.db import get_skill_path
             skill_path = get_skill_path(skill_id)
         if not skill_path:
-            # fallback：按 skill_name 查 DB skill_path
+            # fallback：按 skill_name 查 DB skill_path；无则按 config 解析（skills/<agent_type>/<skill>/）
             skill_dir = skill_name
             try:
                 from src.session_manager import db, db_lock
@@ -719,8 +719,12 @@ def _build_chat_prompt(message: str, repo_key: str, history: list, skill_name: s
                         skill_dir = row[0]
             except Exception:
                 pass
-            from src.config import SKILLS_DIR
-            skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
+            from src.config import SKILLS_DIR, resolve_official_skill_path
+            resolved = resolve_official_skill_path(skill_name)
+            if resolved:
+                skill_path = resolved
+            else:
+                skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
         parts.append(f"\n## Current Skill: {skill_name or skill_id}\nSkill file: {skill_path}\nRead this file and follow its instructions.")
     # GitCode API 访问说明
     parts.append("""

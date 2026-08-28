@@ -6,8 +6,8 @@
 import os
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
-CHAT_SKILL = os.path.join(ROOT, "skills", "chat", "SKILL.md")
-TASK_HANDLING = os.path.join(ROOT, "skills", "chat", "references", "task-handling.md")
+CHAT_SKILL = os.path.join(ROOT, "skills", "chat", "chat", "SKILL.md")
+TASK_HANDLING = os.path.join(ROOT, "skills", "chat", "chat", "references", "task-handling.md")
 
 
 def _read(p):

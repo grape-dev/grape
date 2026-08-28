@@ -722,10 +722,22 @@ def _sync_official_skills():
                     (skill_name,)
                 ).fetchone()[0]
                 if existed:
-                    c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, skill_name)
-                    )
+                    # 更新元信息；本地（非 OBS 集群模式，file_path 为空）同时刷新 skill_path，
+                    # 保证目录按 agent_type 分组后（skills/<agent_type>/<skill>/）DB 路径与磁盘一致。
+                    _fp = c.execute(
+                        "SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''",
+                        (skill_name,)
+                    ).fetchone()
+                    if _fp:
+                        c.execute(
+                            "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, skill_name)
+                        )
+                    else:
+                        c.execute(
+                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=? WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, skill_path, skill_name)
+                        )
                     updated += 1
                 else:
                     c.execute(

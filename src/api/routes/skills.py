@@ -117,12 +117,19 @@ async def sync_official_skills(user: dict = Depends(get_current_user)):
             # 检查是否已存在
             existed = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'", (skill_name,)).fetchone()[0]
             if existed:
-                # 已存在：仅更新元信息，【保留 skill_path】（转集群模式的对象键不能被重置，
-                # 否则转集群标记丢失 → 前端按钮反复回到「转集群模式」）
-                c.execute(
-                    "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
-                    (display_name, description, agent_type, skill_name)
-                )
+                # 已存在：仅更新元信息。OBS 集群模式（file_path 非空）保留 skill_path（对象键不能被重置）；
+                # 本地技能刷新 skill_path，保证目录按 agent_type 分组后 DB 路径与磁盘一致。
+                _fp = c.execute("SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''", (skill_name,)).fetchone()
+                if _fp:
+                    c.execute(
+                        "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, skill_name)
+                    )
+                else:
+                    c.execute(
+                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, skill_path, skill_name)
+                    )
             else:
                 c.execute(
                     "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
@@ -304,7 +311,9 @@ async def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current
         from src.repo_key import from_repo_key
         skill_path = os.path.join(SKILLS_DIR, "repo", from_repo_key(owner_id), skill_dir, "SKILL.md")
     else:
-        skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
+        from src.config import resolve_official_skill_path
+        _r = resolve_official_skill_path(row[0])
+        skill_path = _r or os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
     content = ""
     if os.path.exists(skill_path):
         with open(skill_path, encoding="utf-8") as f:
@@ -636,8 +645,11 @@ async def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user))
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
     skill_name, skill_path = row[0], row[1] or ""
-    from src.config import SKILLS_DIR
+    from src.config import SKILLS_DIR, resolve_official_skill_path
     base_dir = os.path.join(SKILLS_DIR, skill_path) if skill_path else ""
+    _r = resolve_official_skill_path(skill_name)
+    if _r:
+        base_dir = os.path.dirname(_r)
     ref_dir = os.path.join(base_dir, "references")
 
     if not os.path.isdir(ref_dir):
@@ -688,8 +700,11 @@ async def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
-    from src.config import SKILLS_DIR
+    from src.config import SKILLS_DIR, resolve_official_skill_path
     base_dir = os.path.join(SKILLS_DIR, row[1] or "") if row[1] else ""
+    _r = resolve_official_skill_path(row[0])
+    if _r:
+        base_dir = os.path.dirname(_r)
     sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
 
     if not os.path.isfile(sub_md):
@@ -730,8 +745,11 @@ async def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "父技能未找到"})
 
-    from src.config import SKILLS_DIR
+    from src.config import SKILLS_DIR, resolve_official_skill_path
     base_dir = os.path.join(SKILLS_DIR, row[1] or "") if row[1] else ""
+    _r = resolve_official_skill_path(row[0])
+    if _r:
+        base_dir = os.path.dirname(_r)
     sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
     if not os.path.isfile(sub_md):
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})

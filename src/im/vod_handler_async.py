@@ -6,7 +6,7 @@ import json, os, re, asyncio, time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from src.config import log, WORKSPACE_DIR, SKILLS_DIR
+from src.config import log, WORKSPACE_DIR, SKILLS_DIR, resolve_official_skill_path
 from src.session_manager import db, db_lock
 from src.runtime.executor import consume_stream_async
 from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
@@ -230,7 +230,8 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     except Exception:
         pass
 
-    _sp = skill_path or os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
+    _sp = skill_path or resolve_official_skill_path(skill_name) \
+        or os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
     parts.append(
         f"## Skill: {skill_name}\n"
         f"Skill 文件：{_sp}\n"

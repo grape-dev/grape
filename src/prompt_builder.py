@@ -1,6 +1,6 @@
 """Prompt 构建：角色定义、技能能力列表、事件 prompt、飞书 prompt"""
-import json, os
-from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH
+import json, os, re
+from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH, resolve_official_skill_path
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
@@ -16,24 +16,35 @@ EMOJI_MAP = {
 
 def get_skill_capabilities() -> str:
     lines = ["我是 DevOps Bot，专注于以下领域：\n"]
+
+    def _add_skill(skill_dir: str, entry: str):
+        md_path = os.path.join(skill_dir, "SKILL.md")
+        if not os.path.exists(md_path):
+            return
+        display = EMOJI_MAP.get(entry, entry)
+        desc = ""
+        with open(md_path, encoding="utf-8") as f:
+            content = f.read()
+        if "description: |" in content:
+            desc_block = content.split("description: |", 1)[1].split("---", 1)[0].strip()
+            desc = desc_block.split("\n")[0].strip().rstrip(".。").strip('"').strip("'")
+        lines.append(f"  {display}")
+        if desc:
+            lines[-1] += f" — {desc}"
+
     try:
         for entry in sorted(os.listdir(SKILLS_DIR)):
             skill_dir = os.path.join(SKILLS_DIR, entry)
             if not os.path.isdir(skill_dir) or entry.startswith("."):
                 continue
-            md_path = os.path.join(skill_dir, "SKILL.md")
-            if not os.path.exists(md_path):
-                continue
-            display = EMOJI_MAP.get(entry, entry)
-            desc = ""
-            with open(md_path, encoding="utf-8") as f:
-                content = f.read()
-            if "description: |" in content:
-                desc_block = content.split("description: |", 1)[1].split("---", 1)[0].strip()
-                desc = desc_block.split("\n")[0].strip().rstrip(".。").strip('"').strip("'")
-            lines.append(f"  {display}")
-            if desc:
-                lines[-1] += f" — {desc}"
+            if os.path.exists(os.path.join(skill_dir, "SKILL.md")):
+                _add_skill(skill_dir, entry)
+            else:
+                # 新布局：skills/<agent_type>/<skill>/SKILL.md，agent_type 目录下再扫一层
+                for sub in sorted(os.listdir(skill_dir)):
+                    sub_dir = os.path.join(skill_dir, sub)
+                    if os.path.isdir(sub_dir) and os.path.exists(os.path.join(sub_dir, "SKILL.md")):
+                        _add_skill(sub_dir, sub)
         lines.append("\n我的能力范围仅限于 DevOps 相关领域。")
         return "\n".join(lines)
     except Exception as e:
@@ -699,7 +710,7 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
 
     parts.append(f"\n## 本次用户消息\n{user_text}")
 
-    _sp = f"{{{{SKILL_DIR}}}}/chat/SKILL.md"
+    _sp = "{{SKILL_DIR}}/chat/SKILL.md"
     parts.append(
         f"## 使用技能\n"
         f"Skills: chat\n"
