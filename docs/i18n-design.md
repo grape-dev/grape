@@ -1359,3 +1359,32 @@ function _agentTypeDesc(type, meta) {
 - repos description（GitCode API 返回）
 - skill display_name/description（用户/官方上传）
 - templates/runtimes description（配置文件/DB）
+
+### 待修复：后端硬编码中文（二期后端国际化）
+
+#### 已发现的问题清单
+
+| # | 位置 | 中文内容 | 类型 | 修复方式 |
+|---|------|---------|------|---------|
+| 1 | chat.py L804 | `（本机直连）` 拼到 display_name | 后端硬编码 | 后端去掉中文，前端用 b.scope=='local' 加翻译后缀 |
+| 2 | chat.py L279 | `⚠️ 无可用引擎（未配置本机直连或远端引擎）` | 后端硬编码 | 后端改为返回 error_code，前端翻译 |
+| 3 | events summary/title | `@xxx 评论了 Issue #2` | 后端动态生成 | 后端改为返回 event_type + 参数，前端拼接翻译 |
+| 4 | repos description | GitCode API 返回的仓库描述 | 外部数据 | 无法翻译（原始数据） |
+| 5 | skill display_name/description | 用户/官方上传的 skill 名称和描述 | DB 动态数据 | 无法翻译（用户输入内容） |
+| 6 | templates description | 模板配置文件里的描述 | 配置文件 | 可翻译但数量多，二期处理 |
+| 7 | pipelines.json scenes.name | `通用开发`/`云原生开发`/`博客发布` 等 | 配置文件硬编码 | 已通过前端语言包优先翻译解决 ✅ |
+| 8 | agent_type 表 description | `从开发者声音中收集反馈...` | DB 硬编码 | 已通过前端语言包优先翻译解决 ✅ |
+
+#### 已修复 ✅
+
+- #7 pipeline scene_name → 前端语言包优先
+- #8 agent_type display_name + description → 前端语言包优先
+
+#### 待修复（二期后端国际化）
+
+- #1 chat.py 本机直连 → 后端 + 前端各改 1 处
+- #2 chat.py 无可用引擎 → 后端改 error_code
+- #3 events summary → 后端改返回结构
+- #4 repos description → 无法翻译（外部数据）
+- #5 skill display_name → 无法翻译（用户输入）
+- #6 templates description → 可翻译，二期处理
