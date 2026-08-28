@@ -464,9 +464,9 @@ function renderAnomalyTab(container, ops) {
     // 分页栏
     if (totalPages > 1) {
       html += `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0">
-        <button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;refreshObs()">' + I18N.t('observability.prev_page') + '</button>
+        <button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;refreshObs()">${I18N.t('observability.prev_page')}</button>
         <span class="ts t3">${_anomalyPage+1} / ${totalPages}</span>
-        <button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;refreshObs()">' + I18N.t('observability.next_page') + '</button>
+        <button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;refreshObs()">${I18N.t('observability.next_page')}</button>
       </div>`;
     }
   }
@@ -481,12 +481,12 @@ function loadErrorLogs(container) {
   container.innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
       <div style="display:flex;gap:0">
-        <button class="bt bt-s ${currentLevel===''?'bt-p':'bt-o'}" onclick="_errorLogLevel='';loadErrorLogs(document.getElementById('obsContent'))">' + I18N.t('observability.log_all') + '</button>
-        <button class="bt bt-s ${currentLevel==='ERROR'?'bt-p':'bt-o'}" onclick="_errorLogLevel='ERROR';loadErrorLogs(document.getElementById('obsContent'))">' + I18N.t('observability.log_only_error') + '</button>
-        <button class="bt bt-s ${currentLevel==='WARNING'?'bt-p':'bt-o'}" onclick="_errorLogLevel='WARNING';loadErrorLogs(document.getElementById('obsContent'))">' + I18N.t('observability.log_only_warning') + '</button>
+        <button class="bt bt-s ${currentLevel===''?'bt-p':'bt-o'}" onclick="_errorLogLevel='';loadErrorLogs(document.getElementById('obsContent'))">${I18N.t('observability.log_all')}</button>
+        <button class="bt bt-s ${currentLevel==='ERROR'?'bt-p':'bt-o'}" onclick="_errorLogLevel='ERROR';loadErrorLogs(document.getElementById('obsContent'))">${I18N.t('observability.log_only_error')}</button>
+        <button class="bt bt-s ${currentLevel==='WARNING'?'bt-p':'bt-o'}" onclick="_errorLogLevel='WARNING';loadErrorLogs(document.getElementById('obsContent'))">${I18N.t('observability.log_only_warning')}</button>
       </div>
       <select id="errorLogSource" class="bt bt-s bt-o" style="padding:4px 8px" onchange="_errorLogSource=this.value;loadErrorLogs(document.getElementById('obsContent'))">
-        <option value="">' + I18N.t('observability.log_all_sources') + '</option>
+        <option value="">${I18N.t('observability.log_all_sources')}</option>
       </select>
       <span class="ts t3" id="errorLogCount"></span>
     </div>

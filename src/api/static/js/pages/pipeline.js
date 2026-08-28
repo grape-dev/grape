@@ -45,7 +45,7 @@ function selPipe(idx) {
   const owner = displayPipe.current_owner || '';
   const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">' + I18N.t('pipeline.executing') + '</span>' : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
 
-  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">${I18N.t('pipeline.label_active')} ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 ' + I18N.t('pipeline.current_owner') + ': <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
+  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">${I18N.t('pipeline.label_active')} ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 ${I18N.t('pipeline.current_owner')}: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
   // Dynamic pipeline nodes (event-dispatch-redesign-v2.md Phase 2)
   var pipeNodes = _getPipeNodes(data, displayPipe);
@@ -116,7 +116,7 @@ function renderPipeline(data) {
     const _repoFullName = (data.repo || '').replace(/^gitcode:/, '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
-    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">${I18N.t('pipeline.label_active')} ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 ' + I18N.t('pipeline.current_owner') + ': <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
+    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">${I18N.t('pipeline.label_active')} ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 ${I18N.t('pipeline.current_owner')}: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
     var pipeNodes2 = _getPipeNodes(data, displayPipe);
     pipeNodes2.forEach(function(node, i) {

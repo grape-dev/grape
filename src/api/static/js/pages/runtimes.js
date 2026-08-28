@@ -95,9 +95,9 @@ function renderEngines(data, devices) {
           <span style="font-weight:400;color:var(--t3);font-size:12px;margin-left:auto">${rt.name} v${rt.version || ''}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">' + I18N.t('runtimes.label.worker') + '</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">' + I18N.t('runtimes.label.owner') + '</span> ${rt.owner || '—'} ${rt.is_local ? `<span style="color:var(--t3);font-size:10px">(' + I18N.t('runtimes.scope.global') + '</span>` : ''}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">' + I18N.t('runtimes.label.skills_label') + '</span> ${I18N.t('runtimes.label.skills_count', {count: (rt.local_skills || []).length})}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.worker')}</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.owner')}</span> ${rt.owner || '—'} ${rt.is_local ? `<span style="color:var(--t3);font-size:10px">(${I18N.t('runtimes.scope.global')})</span>` : ''}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.skills_label')}</span> ${I18N.t('runtimes.label.skills_count', {count: (rt.local_skills || []).length})}</div>
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.tags')}</span> ${_engineTagSummary(rt.agent_tags)}</div>
         </div>
       </div>`;
@@ -128,7 +128,7 @@ function renderWorkers(data, devices) {
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:12px;color:var(--t2)">
           <div style="display:flex;gap:16px;flex:1;min-width:0">
-            <div><span style="color:var(--t3);display:inline-block;min-width:46px">' + I18N.t('runtimes.label.owner') + '</span> ${d.owner || '—'} ${d.credential_id === 0 ? `<span style="color:var(--t3);font-size:10px">(' + I18N.t('runtimes.scope.global') + '</span>` : ''}</div>
+            <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.owner')}</span> ${d.owner || '—'} ${d.credential_id === 0 ? `<span style="color:var(--t3);font-size:10px">(${I18N.t('runtimes.scope.global')})</span>` : ''}</div>
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.credential')}</span> <b style="color:${credColor}">${d.credential_status || ''}</b></div>
           </div>
           ${d.credential_id ? `<button class="bt bt-r" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="revokeCredential(${d.credential_id})">${I18N.t('runtimes.action.revoke')}</button>` : ''}
@@ -302,8 +302,8 @@ function openEngineDetail(runtimeId) {
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.health_status')}</span> ${rt.healthy ? I18N.t('runtimes.label.healthy') : I18N.t('runtimes.label.unhealthy')}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">Worker</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">IP</span> ${rt.worker_ip || '—'}</div>
-        <div><span style="color:var(--t3);display:inline-block;min-width:70px">' + I18N.t('runtimes.label.scope_label') + '</span> ${_scopeLabel(rt.scope)}</div>
-        <div><span style="color:var(--t3);display:inline-block;min-width:70px">' + I18N.t('runtimes.label.owner') + '</span> ${rt.owner || '—'}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.scope_label')}</span> ${_scopeLabel(rt.scope)}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.owner')}</span> ${rt.owner || '—'}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.installed')}</span> ${rt.installed ? I18N.t('runtimes.label.yes') : I18N.t('runtimes.label.no')}</div>
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
