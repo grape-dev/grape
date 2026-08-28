@@ -25,5 +25,13 @@
   "repo_exists": "⚠️ Repository {{full_name}} already exists, please choose another name",
   "create_success": "✅ {{msg}}",
   "create_failed": "Create failed: {{msg}}",
-  "check_failed": "Check failed: {{msg}}"
+  "check_failed": "Check failed: {{msg}}",
+  "cat": {
+    "Hello World 新手模板": "Hello World Starter",
+    "Agent 最佳实践": "Agent Best Practices",
+    "Skills 项目模板": "Skills Project Templates",
+    "AI office 项目模板": "AI Office Templates",
+    "云原生项目模板": "Cloud Native Templates",
+    "IaC 项目模板": "IaC Templates"
+  }
 }

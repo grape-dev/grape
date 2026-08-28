@@ -25,5 +25,13 @@
   "repo_exists": "⚠️ 仓库 {{full_name}} 已存在，请更换仓库名",
   "create_success": "✅ {{msg}}",
   "create_failed": "创建失败: {{msg}}",
-  "check_failed": "检查失败: {{msg}}"
+  "check_failed": "检查失败: {{msg}}",
+  "cat": {
+    "Hello World 新手模板": "Hello World 新手模板",
+    "Agent 最佳实践": "Agent 最佳实践",
+    "Skills 项目模板": "Skills 项目模板",
+    "AI office 项目模板": "AI office 项目模板",
+    "云原生项目模板": "云原生项目模板",
+    "IaC 项目模板": "IaC 项目模板"
+  }
 }

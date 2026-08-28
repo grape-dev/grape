@@ -1454,3 +1454,23 @@ en:
   pipeline.title = "Pipeline Mode"
   language.zh = "中文"
   language.en = "English"
+
+### 待修复：后端配置文件中文硬编码（二期）
+
+#### 已发现的问题
+
+| # | 文件 | 中文内容 | 类型 |
+|---|------|---------|------|
+| 1 | configs/project-templates.json | category name: "Hello World 新手模板"/"Agent 最佳实践"/"Skills 项目模板"/"AI office 项目模板"/"云原生项目模板"/"IaC 项目模板" | 后端配置 |
+| 2 | configs/project-templates.json | template name: "小红书自动化运营助手"/"AI面试天团"/"Harmony 电商应用" 等 | 后端配置 |
+| 3 | configs/project-templates.json | template description: "极简 Flask Web 应用..." 等 | 后端配置 |
+| 4 | DB skill 表 | display_name: "AI 博客生成"/"IaC 代码实现" 等 | 后端数据 |
+| 5 | DB skill 表 | description: "AI 博客生成：学习参考文章样式..." 等 | 后端数据 |
+| 6 | DB agent_type 表 | display_name + description | 后端数据 |
+| 7 | chat.py | API 错误消息（对话未找到/创建会话失败/思考中/生成中等） | 后端硬编码 |
+| 8 | dashboard.py | device_name "Local Direct" 等 | 后端硬编码 |
+
+#### 二期修复方向
+
+后端 API 根据请求头 Accept-Language 或 cookie grapeLang 返回对应语言的文案。
+配置文件加 name_en/description_en 字段，DB 加 display_name_en/description_en 列。

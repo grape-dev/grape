@@ -76,7 +76,7 @@ function renderTemplateCategory() {
   const tabs = cats.map((x, i) => {
     const cnt = (x.templates || []).length;
     const act = i === _tmplState.activeCat ? ' tmpl-tab-act' : '';
-    return `<button class="tmpl-tab${act}" onclick="switchTemplateCat(${i})"><span class="tmpl-tab-ic">${x.icon || '📦'}</span><span class="tmpl-tab-name">${x.name}</span><span class="tmpl-tab-cnt">${cnt}</span></button>`;
+    return `<button class="tmpl-tab${act}" onclick="switchTemplateCat(${i})"><span class="tmpl-tab-ic">${x.icon || '📦'}</span><span class="tmpl-tab-name">${I18N.t('templates.cat.' + x.name) !== ('templates.cat.' + x.name) ? I18N.t('templates.cat.' + x.name) : x.name}</span><span class="tmpl-tab-cnt">${cnt}</span></button>`;
   }).join('');
   // 分页（固定卡片：创建新项目 + 随机，占用网格位置，计入每页上限 9）
   const allT = cat.templates || [];
@@ -87,7 +87,7 @@ function renderTemplateCategory() {
 
   const cards = pageT.map(t => {
     const tags = (t.tags || []).map(x => `<span class="tmpl-tag">${x}</span>`).join('');
-    const catLine = t._cat_name ? `<div class="tmpl-card-cat">${t._cat_icon || '📦'} ${t._cat_name}</div>` : '';
+    const catLine = t._cat_name ? `<div class="tmpl-card-cat">${t._cat_icon || '📦'} ${I18N.t('templates.cat.' + t._cat_name) !== ('templates.cat.' + t._cat_name) ? I18N.t('templates.cat.' + t._cat_name) : t._cat_name}</div>` : '';
     const tSc = _sceneClass(t.scene_id || cat.scene_id);
     const stats = t.stats || {};
     // 本地模板：来源标签；GitCode 模板：真实 star
@@ -147,7 +147,7 @@ function renderTemplateCategory() {
   c.innerHTML = `
     <div class="tmpl-hero tmpl-hero-${scCls}">
       <div class="lobby-eyebrow"><i></i>TEMPLATE GALLERY<i></i></div>
-      <h1 class="lobby-title">${cat.icon || '📦'} <span>${cat.name}</span></h1>
+      <h1 class="lobby-title">${cat.icon || '📦'} <span>${I18N.t('templates.cat.' + cat.name) !== ('templates.cat.' + cat.name) ? I18N.t('templates.cat.' + cat.name) : cat.name}</span></h1>
       <p class="lobby-sub">${cat.description || I18N.t('templates.default_desc')}</p>
       <div class="lobby-stats-inline">
         <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${totalAll}</b><span>${I18N.t('templates.stat_total')}</span></div>
