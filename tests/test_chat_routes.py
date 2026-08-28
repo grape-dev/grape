@@ -283,8 +283,8 @@ class TestConfig:
 
 class TestHelpers:
     def test_build_chat_prompt(self):
-        from src.api.routes.chat import _build_chat_prompt
-        prompt = _build_chat_prompt("帮我看看", "org/repo", [{"role": "user", "content": "x"}])
+        from src.prompt_builder import build_general_chat_prompt
+        prompt = build_general_chat_prompt("帮我看看", "org/repo", [{"role": "user", "content": "x"}])
         assert "帮我看看" in prompt
 
     def test_resolve_token_refreshes_conv(self):

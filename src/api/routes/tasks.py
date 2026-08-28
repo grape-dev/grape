@@ -277,7 +277,7 @@ def _build_task_prompt(task_description: str, repo_key: str, issue_number: int, 
     ctx += f"\n\n## 任务描述\n{task_description}"
     from src.repo_key import split_owner_repo
     _owner, _repo = split_owner_repo(repo_key)
-    return build_chat_prompt(ctx, repo_key, [], ["chat"], account=_owner)
+    return build_chat_prompt(ctx, repo_key, [], skills=["chat"], account=_owner)
 
 
 async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,

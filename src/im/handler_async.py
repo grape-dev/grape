@@ -336,7 +336,8 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
             conv_history = []
         body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info)
     else:
-        body = build_chat_prompt(text, repo_key, history, skills, exec_account, runtime_id=chat_runtime_id, user_info=user_info)
+        body = build_chat_prompt(text, repo_key, history, skills=skills,
+                                 runtime_id=chat_runtime_id, user_info=user_info)
     return body
 
 
