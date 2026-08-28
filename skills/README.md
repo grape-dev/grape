@@ -16,7 +16,7 @@ skills/
 ```
 
 > **重要**：官方技能内容（`vod/ issue/ coding/ qa/ sre/ chat/ _template`）已拆分至
-> **独立技能仓库** `https://gitcode.com/grape-dev/grape-skills.git`，由构建/部署脚本
+> **独立技能仓库** [grape-skills](https://gitcode.com/grape-dev/grape-skills)，由构建/部署脚本
 > `scripts/sync_skills.sh` 拉取铺入本目录（方案见
 > `docs/new-version2/skills-standalone-repo-build-time-pull.md`）。本仓库不再直接维护
 > 官方技能文件。
