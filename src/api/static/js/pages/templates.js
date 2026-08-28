@@ -146,7 +146,7 @@ function renderTemplateCategory() {
 
   c.innerHTML = `
     <div class="tmpl-hero tmpl-hero-${scCls}">
-      <div class="lobby-eyebrow"><i></i>TEMPLATE GALLERY<i></i></div>
+      <div class="lobby-eyebrow"><i></i>${I18N.t('templates.gallery_title')}<i></i></div>
       <h1 class="lobby-title">${cat.icon || '📦'} <span>${I18N.t('templates.cat.' + cat.name) !== ('templates.cat.' + cat.name) ? I18N.t('templates.cat.' + cat.name) : cat.name}</span></h1>
       <p class="lobby-sub">${cat.description || I18N.t('templates.default_desc')}</p>
       <div class="lobby-stats-inline">

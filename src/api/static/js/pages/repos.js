@@ -84,7 +84,7 @@ function renderRepoSelection(repos) {
 
   let inner = `<button class="lobby-refresh-btn" onclick="refreshRepos(this)" title="${I18N.t('repos.lobby.refresh_title')}">${I18N.t('repos.lobby.refresh_btn')}</button>
   <div class="lobby-hero">
-    <div class="lobby-eyebrow"><i></i>WELCOME TO GRAPE<i></i></div>
+    <div class="lobby-eyebrow"><i></i>${I18N.t('repos.lobby.welcome_to_grape')}<i></i></div>
     <h1 class="lobby-title">${I18N.t('repos.lobby.hello')}<span>${name}</span><span class="lobby-hello">👋</span></h1>
     <p class="lobby-sub">${I18N.t('repos.lobby.welcome_sub')}</p>
     <div class="lobby-stats-inline">
@@ -251,7 +251,7 @@ function selectRepo(fullName, owner, name) {
   }
   if (sidebar) sidebar.style.display = 'flex';
   if (tb) tb.style.display = 'flex';
-  if (title) title.textContent = 'Dashboard';
+  if (title) title.textContent = I18N.t('app.nav.dashboard');
   app.initSidebarRepos();
   app.nav('dash');
 }

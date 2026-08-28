@@ -261,7 +261,7 @@ function switchConversation(convId) {
       // 先转义 HTML，再链接化 Issue #N（renderMarkdown 已转义，这里需手动处理）
       const safeTitle = String(titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
       const linkedTitle = linkifyIssueNumbers(safeTitle, repoKey);
-      hdr.innerHTML = 'Chat Agent · ' + linkedTitle;
+      hdr.innerHTML = I18N.t('chat.header.title_prefix') + linkedTitle;
     }
     body.innerHTML = msgs.map(m => {
       const rendered = renderMarkdown(m.content);
@@ -331,7 +331,7 @@ function doSend(input, body) {
     }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      if (el) el.innerHTML = 'Error: ' + (err.detail?.message || resp.statusText);
+      if (el) el.innerHTML = I18N.t('common.error') + (err.detail?.message || resp.statusText);
       return;
     }
     if (!resp.body) {
@@ -376,10 +376,10 @@ function doSend(input, body) {
         });
         body.scrollTop = body.scrollHeight;
         read();
-      }).catch(e => { if (e.name !== 'AbortError' && el) el.innerHTML = 'Error: ' + e.message; });
+      }).catch(e => { if (e.name !== 'AbortError' && el) el.innerHTML = I18N.t('common.error') + e.message; });
     }
     read();
-  }).catch(e => { const el = document.getElementById(tid); if (el) el.innerHTML = 'Request failed: ' + e.message; });
+  }).catch(e => { const el = document.getElementById(tid); if (el) el.innerHTML = I18N.t('common.request_failed') + e.message; });
 }
 
 function pollTaskStatus(taskId, el, body, tid) {

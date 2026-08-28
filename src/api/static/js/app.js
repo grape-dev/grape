@@ -135,7 +135,7 @@ function loadAgentTypes() {
     $('mainView').style.position = '';
     $('mainView').style.inset = '';
     $('mainView').style.zIndex = '';
-    $('pageTitle').textContent = 'Dashboard';
+    $('pageTitle').textContent = I18N.t('app.nav.dashboard');
 
     if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
       const r = managedRepos[0];
