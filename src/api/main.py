@@ -303,14 +303,25 @@ if os.path.isdir(STATIC_DIR):
     app.add_middleware(NoCacheStaticMiddleware)
 
     from fastapi.responses import FileResponse
-    @app.get("/")
-    async def serve_spa():
-        from fastapi.responses import FileResponse
+    def _spa_response():
         resp = FileResponse(os.path.join(STATIC_DIR, "index.html"))
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
         return resp
+
+    @app.get("/")
+    async def serve_spa():
+        return _spa_response()
+
+    @app.get("/en")
+    @app.get("/en/{path:path}")
+    async def serve_spa_en(path: str = ""):
+        """英文国际化路由——返回同一个 index.html，前端 i18n.js 从 URL /en 检测语言。"""
+        if path.startswith("api/") or path.startswith("static/"):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404)
+        return _spa_response()
 
 from src.api.db_setup import init_database
 init_database()

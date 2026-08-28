@@ -128,7 +128,7 @@ async def gitcode_oauth_login(request: Request):
 
 
 @router.get("/callback/gitcode")
-async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = ""):
+async def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     if error:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"GitCode 授权失败: {error}"})
 
@@ -224,8 +224,11 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
     # 仅真正首次登录（无任何托管仓库）才 first_login=1（前端清 currentRepo 进仓库选择页）；
     # 已有托管仓库则保留上次选择的仓库（first_login=0），恢复上次的 repo
     has_repos = bool(user_db.get_managed_repos(local_user["id"]))
+    # 从 cookie 读语言偏好（i18n.js setLang 时双写 localStorage + cookie）
+    lang = request.cookies.get("grapeLang", "zh")
+    prefix = f"/{lang}" if lang != "zh" else ""
     # refresh_token 通过 cookie 传递（HttpOnly）——URL 只带 access_token
-    resp = RedirectResponse(url=f"/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}", status_code=302)
+    resp = RedirectResponse(url=f"{prefix}/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}", status_code=302)
     _set_refresh_cookie(resp, jwt_refresh_token)
     return resp
 
