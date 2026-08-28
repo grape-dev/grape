@@ -221,7 +221,7 @@ function loadAgentTypes() {
       mv.style.zIndex = '100';
       $('pageTitle').textContent = I18N.t('app.select_repo');
       const pc = $('pageContent');
-      if (pc) pc.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">I18N.t('common.load_failed') + ': ' + e.message + '</div></div>';
+      if (pc) pc.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div></div>';
     });
   }
 
@@ -264,18 +264,18 @@ function loadAgentTypes() {
         dashData._owner = repo.owner;
         dashData._name = repo.name;
         renderDashboard(dashData);
-      }).catch(e => pc.innerHTML = '<div class="error">I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      }).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = 'Pipeline';
-      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = (_AGENT_TYPES[view] && _AGENT_TYPES[view].display_name) || view;
-      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'event') {
       title.textContent = 'Event Detail';
-      API.get('/events/detail/' + param).then(renderEventDetail).catch(e => pc.innerHTML = '<div class="error">I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/events/detail/' + param).then(renderEventDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'chat') {
       title.textContent = 'Chat Agent';
       renderChat(param || null);
@@ -298,7 +298,7 @@ function loadAgentTypes() {
         window.location.reload();
         return;
       }
-      API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'observability') {
       title.textContent = '系统监控';
       if (typeof renderObservability === 'function') renderObservability();
@@ -309,11 +309,11 @@ function loadAgentTypes() {
       title.textContent = 'Skill Detail';
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
-      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'skill-sub') {
       // 技能包子技能详情（如 "38/huawei-ecs"）
       title.textContent = 'Sub Skill Detail';
-      API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     }
   }
 
