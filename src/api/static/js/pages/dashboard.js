@@ -60,7 +60,7 @@ function renderDashboard(data) {
     const descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
     const borderColor = meta.color || colors[at] || 'var(--t2)';
     const dotColor = meta.color || colors[at] || 'var(--t2)';
-    const desc = meta.description || descs[at] || '';
+    const desc = descs[at] || meta.description || '';
     const enabled = ag.enable !== false;   // 默认启用；仓库级 enable
 
     // 该 Agent 最近 2 个事件（替代假数据）
