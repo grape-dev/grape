@@ -30,6 +30,7 @@ ADD-WHITELIST.md
 opencode-incident-*.md
 OPENCODE-CUSTOM-PROVIDER-CONFIG.md
 temp/
+.grape/
 .skills/
 .hermes/
 .venv/
