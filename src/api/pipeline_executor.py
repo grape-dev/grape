@@ -208,7 +208,7 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
                           runtime_id, issue_id, pool_tag, skill_id=0, skill_path=""):
     """Sync wrapper: calls _enqueue_pipeline_task from event_pipeline.py."""
     try:
-        from src.api.event_pipeline import _enqueue_pipeline_task
+        from src.api.event_pipeline import _enqueue_pipeline_task, is_plugin_mode
         from src.runtime.engine_select import pick_engine
         from src.session_manager import db, db_lock
 
@@ -224,9 +224,16 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
                     log.info(f"Pipeline emit: runtime_id={runtime_id} not online, dropping to pool task (agent={agent_type})")
                     runtime_id = 0
 
-        # In plugin mode, pick_engine returns 0 for broadcast (no binding → pool task)
-        # None means no engine available at all
-        if not runtime_id:
+        # Plugin 模式：始终走 pick_engine（返回 0=广播），忽略上游传入的 runtime_id。
+        # 上游 runtime_id 来自发起 A2A 的 agent 自己运行的引擎（如 QA 跑在 0003 的 rt=54 上，
+        # 传 54 给 coding），直接用它会绕过 tag 限制把任务定向到 0003。
+        # 非 plugin 模式：保留原逻辑（有 runtime_id 直接用，无则 pick_engine）。
+        if is_plugin_mode():
+            _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0)
+            if _picked is None:
+                return {"error": "no engine available"}
+            runtime_id = _picked
+        elif not runtime_id:
             _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0)
             if _picked is None:
                 return {"error": "no engine available"}
