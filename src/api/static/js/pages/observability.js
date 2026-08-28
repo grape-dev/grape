@@ -250,7 +250,7 @@ function renderOverview(ops, rt, mt) {
       const pe = rti.probe_error || '';
       const probeIcon = { ok: '✅', fail: '❌', skip: '⏭', pending: '⏳' }[ps] || '⏳';
       const probeColor = ps === 'ok' ? 'var(--g)' : ps === 'fail' ? 'var(--r)' : 'var(--t3)';
-      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? '等待' : ps === 'skip' ? '跳过' : '失败';
+      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? I18N.t('observability.probe_pending') : ps === 'skip' ? I18N.t('observability.probe_skip') : I18N.t('observability.probe_fail');
       const probeTitle = pe ? ' title="' + pe.replace(/"/g, '&quot;') + '"' : '';
       runtimeTable += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
         <td>${dot} <b>${rti.name}</b></td>

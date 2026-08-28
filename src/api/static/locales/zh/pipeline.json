@@ -39,5 +39,6 @@
   "sre_skipped": "SRE 任务被跳过：{{skipped}}\n\n可能原因：SRE 已配置订阅且本次请求被判定为重复。请检查 SRE Agent 订阅配置。",
   "sre_triggered": "✅ SRE Agent 已触发！\n\n事件编号：seq={{seq}}\n可在 Events 页面查看执行进度。",
   "sre_result": "SRE 触发结果：{{result}}",
-  "sre_trigger_failed": "触发 SRE 失败：{{msg}}"
+  "sre_trigger_failed": "触发 SRE 失败：{{msg}}",
+  "th_parent": "父任务"
 }

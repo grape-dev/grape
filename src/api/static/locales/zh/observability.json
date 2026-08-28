@@ -124,5 +124,9 @@
   "col_repo": "仓库",
   "col_exit": "退出码",
   "col_created": "创建时间",
-  "tmp": "TMP"
+  "tmp": "TMP",
+  "col_probe": "探活",
+  "probe_pending": "等待",
+  "probe_skip": "跳过",
+  "probe_fail": "失败"
 }

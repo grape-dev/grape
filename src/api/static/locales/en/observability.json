@@ -124,5 +124,9 @@
   "col_repo": "Repo",
   "col_exit": "Exit",
   "col_created": "Created",
-  "tmp": "TMP"
+  "tmp": "TMP",
+  "col_probe": "Probe",
+  "probe_pending": "Pending",
+  "probe_skip": "Skip",
+  "probe_fail": "Fail"
 }

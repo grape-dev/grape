@@ -39,5 +39,6 @@
   "sre_skipped": "SRE task skipped: {{skipped}}\n\nPossible reason: SRE has subscribed and this request was deemed a duplicate. Please check SRE Agent subscription config.",
   "sre_triggered": "✅ SRE Agent triggered!\n\nEvent seq: seq={{seq}}\nView progress in the Events page.",
   "sre_result": "SRE trigger result: {{result}}",
-  "sre_trigger_failed": "Failed to trigger SRE: {{msg}}"
+  "sre_trigger_failed": "Failed to trigger SRE: {{msg}}",
+  "th_parent": "Parent"
 }
