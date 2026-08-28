@@ -989,7 +989,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 heartbeat_fail_streak = 0
             last_reregister = asyncio.get_running_loop().time()
 
-        for rid in runtime_ids:
+        # 随机打乱引擎轮询顺序，避免固定靠前引擎包揽所有广播任务
+        _shuffled_ids = list(runtime_ids)
+        random.shuffle(_shuffled_ids)
+        for rid in _shuffled_ids:
             try:
                 # Tags from server DB (single source of truth, managed via console)
                 # claim_by_tag 和 claim 都返回完整 dict {task, scan_request}
@@ -1226,6 +1229,54 @@ def _read_local_worker_version() -> str:
         return ""
 
 
+def _check_opencode_api_keys():
+    """启动时检测 opencode.json 中的 {env:XXX} 引用，若环境变量缺失则告警。
+
+    opencode provider 配置 apiKey 为 "{env:VAR_NAME}" 时，opencode 运行时
+    从子进程环境变量解析 VAR_NAME。worker 以 systemd/nohup 运行时环境变量
+    只来自 /etc/grape/runtime.env，若该文件缺少对应 key → 每个模型调用返回
+    "Unauthorized: API key is required"，任务 3 秒即 failed 且无 stderr。
+
+    本函数在 main() 启动早期运行，发现缺失时输出醒目告警和修复指引，
+    让运维在任务失败前发现问题（2026-08-28 事故：5 台 worker 全缺 OPENGW key）。
+    """
+    import re as _re
+    oc_path = os.path.expanduser("~/.config/opencode/opencode.json")
+    if not os.path.isfile(oc_path):
+        return
+    try:
+        with open(oc_path, encoding="utf-8") as f:
+            raw = f.read()
+    except Exception:
+        return
+    # 匹配 {env:VAR_NAME} 模式
+    env_refs = set(_re.findall(r'\{env:([A-Z_][A-Z0-9_]*)\}', raw))
+    if not env_refs:
+        return  # opencode.json 用的是明文 key，不需要环境变量
+    missing = [name for name in env_refs if not os.environ.get(name)]
+    if not missing:
+        log.info(f"opencode.json API key 环境变量检查通过: {', '.join(sorted(env_refs))}")
+        return
+    log.warning(
+        f"⚠ opencode.json 引用了 {len(missing)} 个环境变量但 runtime.env 中缺失: "
+        f"{', '.join(sorted(missing))}"
+    )
+    log.warning(
+        "  所有模型调用将返回 'Unauthorized: API key is required'，任务会秒级失败。"
+    )
+    log.warning(
+        "  修复方法（任选一）:"
+    )
+    log.warning(
+        "  ① 追加 key 到 runtime.env: "
+        f"echo '{missing[0]}=<your-key>' >> /etc/grape/runtime.env && systemctl restart runtime-agent"
+    )
+    log.warning(
+        "  ② 重装时传入 key: export " + "=xxx ".join(missing) +
+        "=xxx && curl -sSL <server>/api/runtime/install | bash -s -- --token <token>"
+    )
+
+
 def main():
     token = os.environ.get("RUNTIME_TOKEN", "")
     server = os.environ.get("RUNTIME_SERVER_URL", "http://localhost:3000")
@@ -1236,6 +1287,9 @@ def main():
     if not token:
         print("RUNTIME_TOKEN not set", file=sys.stderr)
         sys.exit(1)
+
+    # 启动早期检测 opencode API key 环境变量缺失（2026-08-28 事故预防）
+    _check_opencode_api_keys()
 
     from src.runtime.client import RuntimeClient
 

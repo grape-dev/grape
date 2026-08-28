@@ -461,7 +461,12 @@ class HermesACPBackend:
             except Exception:
                 pass
 
-            exit_code = proc.returncode if proc.returncode is not None else -1
+            # 任务已完成（stopReason=end_turn）时，进程被 SIGTERM 清理不影响 exit_code
+            # 2026-08-25 seq#2632 实例：任务成功完成但进程 5s 内未退出 → SIGTERM → returncode=-15 → 误标 failed
+            if stop_reason == "end_turn" and not error_events:
+                exit_code = 0
+            else:
+                exit_code = proc.returncode if proc.returncode is not None else -1
             full_text = "\n".join(collected_text)
 
             yield ("step_finish", f"Step 1 done (stopReason={stop_reason})")

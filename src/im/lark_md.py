@@ -39,7 +39,9 @@ def _table_fallback_lines(block: list[str]) -> list[str]:
 
 def to_lark_md(text: str, max_len: int = 2000) -> str:
     """标准 Markdown → 飞书 lark_md 子集，按行边界截断到 max_len。"""
-    lines = (text or "").split("\n")
+    # 清洗无效 <at> 标签：飞书卡片校验 ou_xxx 等占位符不是有效用户 → code=230099 卡片发送失败
+    text = re.sub(r"<at\s+id=[^>]+>\s*</at>\s*", "", text or "")
+    lines = text.split("\n")
     out: list[str] = []
     i, n = 0, len(lines)
     in_code = False

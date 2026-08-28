@@ -130,7 +130,7 @@ async def get_ops_overview(repo: str = ""):
         try:
             import psutil as _ps
             _local_cpu = _ps.cpu_percent(interval=None)
-            # MEM 用 /proc/meminfo 读取实际占用（total - MemAvailable，包含不可回收缓存）
+            # MEM 用 /proc/meminfo 读取实际进程占用（total - free - buffers - cached，不含缓存）
             try:
                 with open("/proc/meminfo") as _mf:
                     _mi = {}
@@ -139,9 +139,12 @@ async def get_ops_overview(repo: str = ""):
                         if len(_p) == 2:
                             _mi[_p[0]] = int(_p[1].strip().split()[0]) * 1024
                     _total = _mi["MemTotal"]
-                    _available = _mi.get("MemAvailable", 0)
-                    if _available > 0:
-                        _local_mem = round((_total - _available) / _total * 100, 1)
+                    _free = _mi.get("MemFree", 0)
+                    _buffers = _mi.get("Buffers", 0)
+                    _cached = _mi.get("Cached", 0)
+                    _used = _total - _free - _buffers - _cached
+                    if _total > 0:
+                        _local_mem = round(_used / _total * 100, 1)
                     else:
                         _local_mem = _ps.virtual_memory().percent
             except Exception:
@@ -155,32 +158,39 @@ async def get_ops_overview(repo: str = ""):
         worker_online = 0
         worker_total = 0
 
-        # 检查是否有本机直连引擎
-        has_local = False
+        # 本机主控机：按 hostname 匹配 runtime_credentials 记录，采集指标后写入 DB
+        _local_hostname = ""
         try:
-            c.execute("SELECT COUNT(*) FROM agent_runtimes WHERE credential_id=0")
-            has_local = (c.fetchone()[0] or 0) > 0
+            import socket as _sock
+            _local_hostname = _sock.gethostname()
         except Exception:
             pass
-        if has_local:
-            worker_total += 1
-            worker_online += 1
-            # 本机指标只在 ops/overview 返回中展示，不写入 DB（运营管理台设备监控只显示远端 worker）
-            worker_list.append({
-                "id": 0, "name": "本机", "device_name": "本机直连",
-                "status": "online", "health": "online",
-                "last_seen_at": now_iso, "last_ip": "127.0.0.1",
-                "cpu_percent": _local_cpu, "memory_percent": _local_mem,
-                "disk_percent": _local_disk, "load_avg": _local_load,
-                "owner_name": "",
-            })
+        _local_cred_id = None
+        if _local_hostname:
+            try:
+                c.execute("SELECT id FROM runtime_credentials WHERE device_name=?", (_local_hostname,))
+                row = c.fetchone()
+                if row:
+                    _local_cred_id = row[0]
+            except Exception:
+                pass
+        if _local_cred_id is not None:
+            # 写入本机指标到 DB（admin 健康中心读同一张表即可看到）
+            try:
+                c.execute(
+                    "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
+                    "cpu_percent=?, memory_percent=?, disk_percent=?, load_avg=? WHERE id=?",
+                    (now_iso, "127.0.0.1", _local_cpu, _local_mem, _local_disk, _local_load, _local_cred_id))
+                db.commit()
+            except Exception:
+                pass
 
-        # 查远端 worker（凭据）
+        # 查所有 worker（凭据），排除已注销（revoked）；主控机记录也含在其中
         try:
             c.execute(
                 "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                 "cpu_percent, memory_percent, disk_percent, load_avg, owner_name "
-                "FROM runtime_credentials ORDER BY id"
+                "FROM runtime_credentials WHERE status != 'revoked' ORDER BY id"
             )
             for w in c.fetchall():
                 wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wload, wowner = w
@@ -246,13 +256,16 @@ async def get_ops_overview(repo: str = ""):
             c.execute(
                 "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
                 "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, "
-                "rc.device_name "
+                "rc.device_name, rc.status AS cred_status, ar.host_name "
                 "FROM agent_runtimes ar "
                 "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id "
                 "ORDER BY ar.id"
             )
             for r in c.fetchall():
-                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev = r
+                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcred_status, rhost = r
+                # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）
+                if (cid or 0) > 0 and rcred_status == 'revoked':
+                    continue
                 runtimes_total += 1
                 base_health = derive_runtime_health(rstatus or "offline", rlast_seen, now_ts)
                 mode = "remote" if (cid or 0) > 0 else "local"
@@ -286,13 +299,17 @@ async def get_ops_overview(repo: str = ""):
                         health = "overload"
                 else:
                     health = base_health
+                # 本机直连引擎的 device_name 用 host_name（区分多台主控机）
+                _dev_name = rdev or ""
+                if (cid or 0) == 0:
+                    _dev_name = rhost or "本机直连"
                 runtime_list.append({
                     "id": rid, "name": rname or "", "status": rstatus or "offline",
                     "health": health, "mode": mode,
                     "provider": rprovider or "", "last_seen_at": normalize_event_time(rlast_seen),
                     "healthy": bool(rhealthy), "busy_slots": rbusy or 0, "max_concurrent": max_conc,
                     "running": running, "avg_duration": _avg_durations.get(rid, 0),
-                    "version": rver or "", "device_name": rdev or ("本机直连" if (cid or 0) == 0 else ""),
+                    "version": rver or "", "device_name": _dev_name,
                 })
         except Exception:
             pass

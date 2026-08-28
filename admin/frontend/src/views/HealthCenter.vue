@@ -183,7 +183,8 @@
             <div class="hc-worker-card" v-for="wk in workersList" :key="wk.id">
               <div class="hc-worker-head">
                 <span class="hc-health-dot" :style="{ background: healthColor(wk.health) }"></span>
-                <b class="hc-worker-name">{{ wk.deviceName || wk.name || 'Worker #' + wk.id }}</b>
+                <b class="hc-worker-name">{{ wk.name || wk.deviceName || 'Worker #' + wk.id }}</b>
+                <span v-if="wk.deviceName && wk.deviceName !== wk.name" class="hc-worker-subname">{{ wk.deviceName }}</span>
                 <span class="hc-worker-health" :style="{ color: healthColor(wk.health) }">{{ wk.health }}</span>
               </div>
               <div class="hc-worker-meta">
@@ -843,6 +844,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .hc-worker-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .hc-health-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
 .hc-worker-name { font-size: 13px; }
+.hc-worker-subname { font-size: 10px; color: var(--text-tertiary); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hc-worker-health { margin-left: auto; font-size: 10px; font-weight: 600; }
 .hc-worker-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font-size: 10px; color: var(--text-tertiary); margin-bottom: 8px; }
 .hc-resource-bar { display: flex; align-items: center; gap: 6px; font-size: 10px; margin-bottom: 4px; }
