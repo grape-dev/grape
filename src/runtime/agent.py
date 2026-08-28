@@ -33,7 +33,7 @@ def _collect_worker_metrics() -> dict:
     采集失败的字段保持 0.0 / 空字符串。
     CPU 使用两次调用的差值计算，首次调用返回 0.0（无基准）。
     """
-    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "load_avg": ""}
+    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "load_avg": ""}
 
     # CPU: 读 /proc/stat，用上次缓存值计算差值（无 sleep，非阻塞）
     try:
@@ -75,6 +75,14 @@ def _collect_worker_metrics() -> dict:
         du = _shutil.disk_usage("/")
         if du.total > 0:
             metrics["disk_percent"] = round(du.used / du.total * 100, 1)
+    except Exception:
+        pass
+
+    # TMP: /tmp 目录使用率（tmpfs 内存文件系统，独立于根分区）
+    try:
+        tu = _shutil.disk_usage("/tmp")
+        if tu.total > 0:
+            metrics["tmp_percent"] = round(tu.used / tu.total * 100, 1)
     except Exception:
         pass
 

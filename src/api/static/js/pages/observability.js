@@ -222,6 +222,7 @@ function renderOverview(ops, rt, mt) {
         </div>
         ${_barHTML('CPU', wk.cpu_percent, null, 'wk-' + wid + '-cpu')}
         ${_barHTML('MEM', wk.memory_percent, null, 'wk-' + wid + '-mem')}
+        ${_barHTML('TMP', wk.tmp_percent, null, 'wk-' + wid + '-tmp')}
         ${_barHTML('DISK', wk.disk_percent, null, 'wk-' + wid + '-disk')}
       </div>`;
     });
@@ -316,6 +317,7 @@ function updateOverview(ops, rt, mt) {
       // 进度条
       _updateBar('wk-' + wid + '-cpu', wk.cpu_percent);
       _updateBar('wk-' + wid + '-mem', wk.memory_percent);
+      _updateBar('wk-' + wid + '-tmp', wk.tmp_percent);
       _updateBar('wk-' + wid + '-disk', wk.disk_percent);
     }
   }
