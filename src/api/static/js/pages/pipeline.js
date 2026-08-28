@@ -188,7 +188,7 @@ function renderPipeline(data) {
     const owner = p.current_owner || '—';
     const _sceneId = p.scene_id || '';
     const _sceneLabels = {default:I18N.t('pipeline.scene_default'),'cloud-native':I18N.t('pipeline.scene_cloud_native'),'iac':I18N.t('pipeline.scene_iac'),'agent-dev':I18N.t('pipeline.scene_agent_dev'),'skill-dev':I18N.t('pipeline.scene_skill_dev'),'api-skill-dev':I18N.t('pipeline.scene_api_skill_dev'),'blog-publish':I18N.t('pipeline.scene_blog_publish')};
-    const sceneLabel = _sceneId ? (p.scene_name || _sceneLabels[_sceneId] || _sceneId) : '—';
+    const sceneLabel = _sceneId ? (_sceneLabels[_sceneId] || p.scene_name || _sceneId) : '—';
     const sceneBadge = _sceneId ? `<span class="tg tg-i" style="font-size:10px">${sceneLabel}</span>` : '<span class="ts t3">—</span>';
     const _issueNum = String(p.issue_id || '').replace(/^#/, '');
     const _repoParts2 = (data.repo || '').replace(/^gitcode:/, '').split('/');
