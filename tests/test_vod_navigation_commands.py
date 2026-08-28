@@ -189,5 +189,5 @@ def test_v13_no_engine_explicit_message():
     _seed(["gitcode:owner/vod-repo-a"])
     api = _run("你好")
     texts = "".join(a[0][2] for a in api.reply_card.call_args_list)
-    assert "无可用引擎" in texts
+    assert "No available engine" in texts
     _clean()
