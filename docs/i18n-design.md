@@ -741,3 +741,65 @@ i18n.js init() 同步执行后立即调 applyI18nToDOM() 填充文案——因�
 | 6 | 语言包加载失败 | ⚠️ | 超时 + 重试 + 降级 | i18n.js |
 | 7 | 缓存版本管理 | ⚠️ | init(cacheVer) 联动 | i18n.js + index.html |
 | 8 | 登录页闪动 | ⚠️ | data-i18n + 内联包同步填充 | index.html + i18n.js |
+
+### 第二轮深度检查（2026-08-27）
+
+#### /en/{path:path} 路由安全性 ⚠️
+
+**问题：** `/en/{path:path}` 理论上会匹配 `/en/api/xxx` 和 `/en/static/xxx`。
+
+**实际不影响：** api.js 用 `const BASE = '/api'` 绝对路径 → 请求 `/api/xxx` 不带 `/en` → 不会被拦截。
+
+**防护措施：** 后端 `/en/{path:path}` 里排除 api/static，防止意外请求：
+
+```python
+@app.get("/en")
+@app.get("/en/{path:path}")
+async def serve_spa_en(path: str = ""):
+    if path.startswith("api/") or path.startswith("static/"):
+        raise HTTPException(status_code=404)
+    resp = FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+```
+
+#### api.js 请求路径确认 ✅
+
+`const BASE = '/api'` → 绝对路径，不受 `/en` 前缀影响。所有 API 请求走 `/api/xxx`，不经过 `/en/{path:path}`。
+
+#### replaceState 只有一处 ✅
+
+grep 确认 `replaceState` 只在 app.js 第 432 行一处调用。修复只需改这一处。
+
+#### pages/*.js 模块级代码不调 t() ✅
+
+pages/*.js 模块级代码都是变量声明（`let _knowledgeTab = 'project'`），不调 t()。所有 t() 调用都在函数内部（renderXXX），运行时才执行 → 不会在 i18n 初始化前报错。
+
+#### logout 不清 grapeLang ✅
+
+logout() 只清 `token` 和 `user`，不清 `grapeLang` → 语言偏好在退出登录后保持。
+
+#### window.location.origin 不含 /en ✅
+
+runtimes.js 用 `window.location.origin` 拼 URL（`origin = 协议+域名+端口`，不含 path）→ `/api/runtime/install` 不受 `/en` 影响。
+
+#### showToast 无硬编码 ✅
+
+showToast(msg) 接收参数，本身无中文硬编码。调用方传 t() 结果即可。
+
+### 第二轮检查总结
+
+| # | 检查项 | 结果 | 说明 |
+|---|--------|:---:|------|
+| 9 | /en/{path:path} 拦截 api/static | ⚠️ 防护 | api.js 绝对路径不影响，后端加防护排除 |
+| 10 | api.js 请求路径 | ✅ | `const BASE = '/api'` 绝对路径 |
+| 11 | replaceState 调用 | ✅ | 只有一处（第 432 行） |
+| 12 | pages/*.js 模块级代码 | ✅ | 变量声明，不调 t() |
+| 13 | OAuth 跳转 | ✅ | 已在问题 3 覆盖 |
+| 14 | logout 清 localStorage | ✅ | 只清 token/user，不清 grapeLang |
+| 15 | window.location.origin | ✅ | 不含 /en，不影响 |
+| 16 | showToast | ✅ | 接收参数，无硬编码 |
+
+无新遗漏。方案完备。
