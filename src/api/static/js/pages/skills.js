@@ -319,7 +319,7 @@ function renderHuaweiCloudPackage(el, data) {
         </div>
       </div>
       <div id="subSkillsGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">
-        <div style="padding:20px;text-align:center;color:var(--t3);font-size:13px">⏳ 加载子技能...</div>
+        <div style="padding:20px;text-align:center;color:var(--t3);font-size:13px">I18N.t('skills.huawei.loading_sub')</div>
       </div>`;
 
   // 加载子技能列表
@@ -328,7 +328,7 @@ function renderHuaweiCloudPackage(el, data) {
     var grid = document.getElementById('subSkillsGrid');
     if (!grid) return;
     if (!subs.length) {
-      grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t3)">（暂无子技能）</div>';
+      grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t3)">' + I18N.t('skills.huawei.no_sub') + '</div>';
       return;
     }
     var html = '';
@@ -340,13 +340,13 @@ function renderHuaweiCloudPackage(el, data) {
         + '</div>'
         + '<div style="font-size:10px;color:var(--t3);margin-bottom:6px">' + sub.name + '</div>'
         + '<div style="font-size:11px;color:var(--t2);line-height:1.5;flex:1">' + (sub.description || '').substring(0, 200) + '</div>'
-        + '<div style="font-size:10px;color:var(--t3);margin-top:6px">' + sub.file_count + ' 个文件</div>'
+        + '<div style="font-size:10px;color:var(--t3);margin-top:6px">' + I18N.t('skills.huawei.files_count', {count: sub.file_count}) + '</div>'
         + '</div>';
     });
     grid.innerHTML = html;
   }).catch(function() {
     var grid = document.getElementById('subSkillsGrid');
-    if (grid) grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--tr)">加载失败</div>';
+    if (grid) grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--tr)">' + I18N.t('common.load_failed') + '</div>';
   });
 }
 
@@ -392,7 +392,7 @@ function loadSubSkillDetail(pkgId, subName) {
         </div>
       </div>`;
   }).catch(function(e) {
-    el.innerHTML = '<div class="error">加载失败: ' + (e.message || '') + '</div>';
+    el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + (e.message || '') + '</div>';
   });
 }
 
@@ -417,7 +417,7 @@ function downloadSkillZip(id) {
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     });
-  }).catch(() => showToast('下载技能失败，请稍后重试'));
+  }).catch(() => showToast(I18N.t('skills.toast.download_failed')));
 }
 
 function filterSkills(input) {
@@ -448,7 +448,7 @@ function toggleSkillFolder(skillId, headerEl) {
 
   // 已加载过的直接显示
   if (subEl.dataset.loaded) return;
-  subEl.innerHTML = '<div style="font-size:11px;color:var(--t3);padding:8px">加载子技能...</div>';
+  subEl.innerHTML = '<div style="font-size:11px;color:var(--t3);padding:8px">' + I18N.t('skills.huawei.loading_sub') + '</div>';
 
   API.get('/skills/' + skillId + '/sub').then(d => {
     const subs = d.sub_skills || [];
@@ -462,14 +462,14 @@ function toggleSkillFolder(skillId, headerEl) {
         + '<div style="font-size:12px;font-weight:600;margin-bottom:3px">📄 ' + (sub.display_name || sub.name) + '</div>'
         + '<div style="font-size:10px;color:var(--t3);margin-bottom:4px">' + sub.name + '</div>'
         + '<div style="font-size:11px;color:var(--t2);line-height:1.4">' + (sub.description || '').substring(0, 150) + '</div>'
-        + '<div style="font-size:10px;color:var(--t3);margin-top:4px">' + sub.file_count + ' 个文件</div>'
+        + '<div style="font-size:10px;color:var(--t3);margin-top:4px">' + I18N.t('skills.huawei.files_count', {count: sub.file_count}) + '</div>'
         + '</div>';
     });
     html += '</div>';
     subEl.innerHTML = html;
     subEl.dataset.loaded = '1';
   }).catch(function() {
-    subEl.innerHTML = '<div style="font-size:11px;color:var(--tr);padding:8px">加载失败</div>';
+    subEl.innerHTML = '<div style="font-size:11px;color:var(--tr);padding:8px">' + I18N.t('common.load_failed') + '</div>';
   });
 }
 
@@ -489,7 +489,7 @@ function showSubSkillContent(skillId, subName, displayName) {
     + '<span style="font-size:10px;color:var(--t3)">' + subName + '</span>'
     + '<button onclick="closeSubSkillModal()" style="margin-left:auto;border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>'
     + '</div>'
-    + '<div id="subSkillContent" style="flex:1;min-height:0;overflow-y:auto;padding:14px;font-size:13px;line-height:1.7;white-space:pre-wrap;font-family:monospace;color:var(--t)">⏳ 加载中...</div>'
+    + '<div id="subSkillContent" style="flex:1;min-height:0;overflow-y:auto;padding:14px;font-size:13px;line-height:1.7;white-space:pre-wrap;font-family:monospace;color:var(--t)">' + I18N.t('common.loading') + '</div>'
     + '</div>';
   document.body.appendChild(ov);
   ov.addEventListener('click', function(e) { if (e.target === ov) closeSubSkillModal(); });
@@ -513,7 +513,7 @@ function showSubSkillContent(skillId, subName, displayName) {
     }
   }).catch(function() {
     var contentEl = document.getElementById('subSkillContent');
-    if (contentEl) contentEl.innerHTML = '<div style="color:var(--tr)">加载失败</div>';
+    if (contentEl) contentEl.innerHTML = '<div style="color:var(--tr)">' + I18N.t('common.load_failed') + '</div>';
   });
 }
 
