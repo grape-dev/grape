@@ -30,6 +30,7 @@ _probe_results: dict = {}
 _probe_lock = threading.Lock()
 _probe_thread = None
 _probe_started = False
+_last_probe_time: float = 0  # 上次探测完成的时间戳（用于防抖）
 
 
 def _probe_engine(engine_name: str, cli_path: str) -> dict:
@@ -89,6 +90,8 @@ def _probe_loop():
                 with _probe_lock:
                     _probe_results[eng["name"]] = result
                 log.info(f"engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
+            global _last_probe_time
+            _last_probe_time = time.time()
         except Exception as e:
             log.warning(f"engine probe loop error: {e}")
         time.sleep(_PROBE_INTERVAL)
@@ -126,3 +129,26 @@ def probe_now(engine_name: str = "") -> dict:
             _probe_results[eng["name"]] = result
         return result
     return {"status": "skip", "latency": 0, "error": "engine not found"}
+
+
+def probe_all_now():
+    """手动触发所有引擎探测（同步阻塞，各引擎串行探测）。"""
+    global _last_probe_time
+    from src.agent.executor import discover_backends
+    engines = discover_backends()
+    for eng in engines:
+        if not eng.get("installed"):
+            with _probe_lock:
+                _probe_results[eng["name"]] = {
+                    "status": "skip", "latency": 0,
+                    "last_probe": datetime.now(timezone.utc).isoformat(),
+                    "error": "not installed",
+                }
+            continue
+        log.info(f"engine probe (manual): testing {eng['name']}...")
+        result = _probe_engine(eng["name"], eng.get("cli_path", ""))
+        result["last_probe"] = datetime.now(timezone.utc).isoformat()
+        with _probe_lock:
+            _probe_results[eng["name"]] = result
+        log.info(f"engine probe (manual): {eng['name']} -> {result['status']} ({result['latency']}s)")
+    _last_probe_time = time.time()

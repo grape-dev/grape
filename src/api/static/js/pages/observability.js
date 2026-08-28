@@ -74,6 +74,10 @@ function refreshObs(isAutoRefresh) {
   if (!isAutoRefresh && !_obsRendered) {
     c.innerHTML = '<div class="loading">加载中...</div>';
   }
+  // 手动刷新（非自动）时触发引擎探测（60s 防抖由后端控制）
+  if (!isAutoRefresh) {
+    API.get('/dashboard/ops/probe-now').catch(() => null);
+  }
   // 获取当前选中仓库，过滤仅该仓库的任务
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
   const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
