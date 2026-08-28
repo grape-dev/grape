@@ -848,3 +848,39 @@ i18n.js init():
 ```
 
 首屏不闪动（内联包同步填充），完整包异步加载不阻塞页面。
+
+### /en 路由与 API 请求关系说明（2026-08-27）
+
+#### /en 路由只负责返回 index.html
+
+```python
+@app.get("/")
+@app.get("/en")
+@app.get("/en/{path:path}")
+async def serve_spa(path: str = ""):
+    if path.startswith("api/") or path.startswith("static/"):
+        raise HTTPException(status_code=404)
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+```
+
+`/` 和 `/en` 返回同一个 index.html —— 区别只在前端：i18n.js 从 URL 检测到 `/en` → 加载英文语言包 → 渲染英文文案。
+
+#### API 请求不受 /en 影响
+
+api.js 用 `const BASE = '/api'` 绝对路径，不管用户在 `/` 还是 `/en/` 页面，API 请求始终是 `/api/xxx`。
+
+| 用户 URL | 页面请求 | API 请求 | 后端路由 |
+|---------|---------|---------|---------|
+| `http://domain/#dash` | `/` → index.html | `/api/knowledge` | `@app.get("/")` + `include_router(/api)` |
+| `http://domain/en/#dash` | `/en/` → index.html | `/api/knowledge` | `@app.get("/en/{path}")` + `include_router(/api)` |
+
+`/en` 路由只负责返回前端页面（index.html），API 请求走 `/api/...` 不经过 `/en` 路由。两者完全独立。
+
+#### /en/{path:path} 防护
+
+虽然前端用绝对路径不会请求 `/en/api/xxx`，但后端加防护防止意外：
+
+```python
+if path.startswith("api/") or path.startswith("static/"):
+    raise HTTPException(status_code=404)
+```
