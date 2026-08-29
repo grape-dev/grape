@@ -1,7 +1,7 @@
-# 工作台用户详情页设计方案（最终版）
+# 工作台用户详情页设计方案（最终版 V2）
 
 > 分支：`feat/admin-style-optimization`
-> 最后更新：2026-08-29
+> 最后更新：2026-08-29（审查修复后）
 
 ## 页面结构
 
@@ -40,9 +40,15 @@
 | 任务总数 | `issue_id IS NOT NULL AND issue_id<>''` |
 | 已完成 | `exit_code=0 AND completed_at IS NOT NULL AND issue_id非空` |
 | 进行中 | `(exit_code IS NULL OR completed_at IS NULL) AND issue_id非空` |
-| 失败 | `exit_code>0 AND issue_id非空` |
+| 失败 | `exit_code<>0 AND exit_code IS NOT NULL AND issue_id非空` |
 | Issue 数 | `COUNT(DISTINCT CASE WHEN issue_id非空 THEN issue_id END)` |
 | 对话任务 | 单独统计 `chatTaskCount`，不纳入主统计 |
+
+### 失败判断（审查修复）
+
+`exit_code<>0 AND exit_code IS NOT NULL`（不是 `exit_code>0`）
+
+原因：`agent_tasks.exit_code` 有负值（-1），表示 A2A 链路中被取消/超时/中断的任务。`exit_code>0` 会漏掉这些。
 
 ### 关联方式
 
@@ -55,6 +61,20 @@ INNER JOIN user_accounts u ON u.username = m.repo_owner
 WHERE u.id = ?
 ```
 
+### repoKey 匹配（审查修复）
+
+前端传 `gitcode:owner/repo` 格式的 repoKey，后端精确匹配 `m.repo_key=?`（不再三路 OR）。
+
+## 在线状态（审查修复）
+
+用 MySQL SQL 计算，不用 Java 时间判断：
+
+```sql
+(last_active_at IS NOT NULL AND last_active_at >= NOW() - INTERVAL 30 MINUTE) as is_online
+```
+
+原因：Java `LocalDateTime.now()` 和 MySQL `NOW()` 时区可能不一致（容器化部署后 JVM 默认 UTC），用 SQL 计算保证一致。
+
 ## 页面分区
 
 ### 1. Page Header
@@ -65,143 +85,83 @@ WHERE u.id = ?
 
 ### 2. 基本信息 + 凭证配置（同一卡片）
 
-**基本信息**：紧凑横排，一行展示
+**基本信息**：紧凑横排
 - 用户名 / 昵称 / 来源（GitCode登录/其他）/ 创建时间 / 最后场景 / 发布仓库
 
-**凭证配置**：4 个横排 chip
+**凭证配置**：4 个横排 chip（按平台统计 X/4）
 - GitCode / 华为云 / 飞书 / CodeArts
-- 每个 chip 显示"已配置"/"未配置"
-- 右上角汇总"已配置 X / 4"
 
-### 3. 活动统计（左卡片）+ 最近活动（右卡片）
+### 3. 活动统计（左）+ 最近活动（右）
 
 #### 活动统计 — 两个 tab
 
 **任务统计 tab**（默认）— 5 个统计卡：
-- 任务总数 / 已完成 / 进行中 / 失败 / 成功率
-- 全局统计（所有仓库合计，只统计 Issue 任务）
+任务总数 / 已完成 / 进行中 / 失败 / 成功率
 
 **仓库与 Issue tab**：
-1. 下拉框选仓库（只显示仓库名，不显示任务数）
-2. 选中后显示仓库总体统计 — 6 个卡：
-   - 任务总数 / Issue 总数 / 已完成 / 进行中 / 失败 / 成功率
-3. 下方 Issue 分页表格：
-   - 列：Issue / 任务 / 完成 / 进行中 / 失败 / 成功率 / 最近活动
-   - Issue 号可点击跳转 GitCode（`https://gitcode.com/{owner}/{repo}/issues/{num}`）
-   - 按 `MAX(started_at) DESC` 排序（最近活动的 Issue 排前面）
-   - 后端分页（`GET /repo-issues?repoKey=xxx&page=0&size=5`）
-   - 分页选项：5 / 10（默认 5）
+1. 下拉框选仓库（只显示仓库名）
+2. 仓库总体统计 6 卡：任务总数 / Issue 总数 / 已完成 / 进行中 / 失败 / 成功率
+3. Issue 分页表格：Issue / 任务 / 完成 / 进行中 / 失败 / 成功率 / 最近活动
+   - Issue 号可点击跳转 GitCode
+   - 按 `MAX(started_at) DESC` 排序
+   - 后端分页（5/10，默认5）
 
 #### 最近活动 — 三个 tab
 
-**最近执行**（默认）— 最近 5 条 Issue 任务（按时间倒序）
-**进行中** — 最近 5 条进行中 Issue 任务（`exit_code IS NULL OR completed_at IS NULL`）
-**最近失败** — 最近 5 条失败 Issue 任务（`exit_code>0`）
+**最近执行**（默认）/ **进行中** / **最近失败**
 
-每条任务显示：
-- 状态圆点（绿=完成 红=失败 橙=进行中）
-- 仓库名
-- Issue 号（可点击跳转 GitCode）
-- 状态标签
-- Agent · Skill
-- 时间
+每条最近 5 条，只显示有 issue_id 的任务。
 
 ## 后端 API
 
 ### `GET /api/admin/console-users/{id}` — 用户详情
 
-返回：
-```
-{
-  id, username, nickname, gitcodeId, online, lastActiveAt, createdAt, lastScene,
-  gitcodePublishRepo, githubPublishRepo,
-  hasGitcodeToken, hasHuaweiAk, hasHuaweiSk, hasFeishu, hasFeishuSecret,
-  hasCodeartsAk, hasCodeartsSk,
-  
-  // 任务总览统计（只统计 Issue 任务）
-  taskCount, completedCount, pendingCount, failedCount, successRate,
-  chatTaskCount,  // 对话任务数（单独统计）
-  
-  // 仓库 × Issue 矩阵
-  repoMatrix: [{ fullName, repoKey, taskCount, issueCount, completed, failed, pending }],
-  issueDetails: [{ repoKey, fullName, issueId, taskCount, completed, failed, pending }],
-  repoCount,
-  
-  // 最近活动（只统计 Issue 任务）
-  recentTasks: [{ id, repoName, issueId, exitCode, agentType, skill, startedAt, completedAt, status }],
-  recentPendingTasks: [...],
-  recentFailedTasks: [...]
-}
-```
+返回用户信息 + 凭证状态 + 任务统计（排除对话任务）+ repoMatrix + 最近活动（3组×5条）
 
 ### `GET /api/admin/console-users/{id}/repo-issues?repoKey=xxx&page=0&size=5` — 仓库 Issue 分页
 
-返回：
-```
-{
-  content: [{ issueId, taskCount, completed, failed, pending, lastTaskAt }],
-  totalElements, totalPages, page, size
-}
-```
-
-- `repoKey` 用 query 参数（不用路径参数，因为 repoKey 含 `/`）
+- `repoKey` 用 query 参数（含 `/`，不能用路径参数）
+- 精确匹配 `m.repo_key=?`
+- total count 用 `COUNT(DISTINCT t.issue_id)`（joinSql 已过滤 issue_id）
 - 按 `MAX(started_at) DESC` 排序
-- 只统计有 issue_id 的任务
 
 ### `POST /api/admin/console-users/{id}/reset-token` — 强制下线
 
-- `token_version + 1`（旧 token 失效）
-- 清空 `last_active_at`（状态变离线）
+## 审查修复的 6 个问题
 
-## 在线状态机制
+| # | 问题 | 修复 |
+|---|------|------|
+| 1 | exit_code=-1 被漏统计（49个任务） | `exit_code>0` → `exit_code<>0 AND exit_code IS NOT NULL`（6处SQL） |
+| 2 | issueDetails 后端查询但前端不用 | 删除后端 issueDetails 全量查询 |
+| 3 | repo-issues total SQL 条件重复 | `COUNT(DISTINCT CASE WHEN...)` → `COUNT(DISTINCT t.issue_id)` |
+| 4 | isOnline Java时区不一致风险 | 改为 MySQL SQL 计算 `NOW() - INTERVAL 30 MINUTE` |
+| 5 | 前端死代码 | 删除 expandedRepos/toggleRepoExpand/issuesByRepo |
+| 6 | repoKey 三路OR匹配效率低 | 改为精确匹配 `m.repo_key=?` |
 
-### 原理
+## 已删除的冗余代码
 
-grape 主服务每次 API 请求 → `get_current_user` → `_pending_active.add(uid)` → 后台每 30 秒批量 flush → `UPDATE user_accounts SET last_active_at=datetime('now') WHERE id IN (...)`
+- 后端 `issueDetails` 全量查询（前端改后端分页后不再使用）
+- 后端 `isOnline` Java 方法（改为 SQL 计算）
+- 前端 `expandedRepos` / `toggleRepoExpand` / `issuesByRepo`
 
-### 判断
+## 其他修复
 
-- `last_active_at >= NOW() - 30分钟` → 在线
-- 否则 → 离线
-
-### 集群安全
-
-- 多实例各自 flush，`last_active_at=NOW()` 幂等无冲突
-- 内存 set 只存活跃用户 uid（18 用户 = 72 字节）
+- 点击"Grape运营管理系统"标题跳转到 `/overview`（之前跳 `/runtime/devices`）
 
 ## 改动文件
 
 | # | 文件 | 改动 |
 |---|------|------|
 | 1 | `ConsoleUserDetail.vue` | 详情页完整重写 |
-| 2 | `ConsoleUsers.vue` | 列表页行点击跳转详情页（去掉弹窗） |
-| 3 | `ConsoleUserController.java` | detail API + repo-issues API + reset-token API |
+| 2 | `ConsoleUsers.vue` | 列表页行点击跳转详情页 |
+| 3 | `ConsoleUserController.java` | detail/repo-issues/reset-token API |
 | 4 | `router/index.js` | 路由 `/sys/console/:id` |
-| 5 | `src/api/deps.py` | `_pending_active` set + `mark_user_active` |
-| 6 | `src/user/db.py` | `batch_update_last_active` + `create_user` 写 `created_at` |
-| 7 | `src/api/main.py` | 定时 flush `active_user_tracker` |
+| 5 | `App.vue` | 标题跳转改为 `/overview` |
+| 6 | `src/api/deps.py` | `_pending_active` set + `mark_user_active` |
+| 7 | `src/user/db.py` | `batch_update_last_active` + `create_user` 写 `created_at` |
+| 8 | `src/api/main.py` | 定时 flush `active_user_tracker` |
 
-## 已解决的问题
+## commit 历史（本次审查修复）
 
-| 问题 | 根因 | 修复 |
-|------|------|------|
-| Issue 数量对不上 | `COUNT(DISTINCT issue_id)` 包含空字符串 | 加 `CASE WHEN issue_id非空` 条件 |
-| 进行中数量对不上 | 仓库统计含对话任务，Issue 列表不含 | 全部统计加 `issue_id非空` 过滤 |
-| 任务总数对不上 | repoMatrix 的 taskCount/completed/failed 含对话任务 | COUNT/SUM 都加 `issue_id非空` 条件 |
-| 关联查不到数据 | `agent_tasks.user_id` 大量为 0 | 改用 `repo_owner` 三表 JOIN |
-| repo-issues API 404 | repoKey 含 `/` 被当路径分隔符 | 改用 query 参数 |
-| create_user 导致测试失败 | `NOW()` 在 SQLite 不支持 | 改为 `datetime('now')`，mysql_compat 自动转换 |
-| 最近活动看到对话任务 | recentTasks/recentPending/recentFailed 没过滤 | 三个 SQL 都加 `issue_id非空` 条件 |
-
-## commit 历史
-
-- `1f99659d` 来源筛选改为来源维度
-- `898bd747` create_user 写入 created_at
-- `1617eae8` 仓库与Issue改为下拉框+后端分页
-- `e9ab519e` 下拉框只显示仓库名+统计卡加Issue总数+分页改为5/10
-- `acd4a6c4` 仓库统计和Issue列表加进行中状态
-- `44790bc2` 最近活动改为三个tab——最近执行/进行中/最近失败
-- `45bade03` Issue数量统计排除空字符串
-- `c4700c39` 仓库统计pending排除对话任务
-- `e78f14da` 全量排除对话任务——任务总览+最近活动都只统计Issue任务
-- `72f6689c` repoMatrix的taskCount/completed/failed也排除对话任务
+- `dc3c776d` 6个问题修复——exit_code负值+死代码清理+SQL优化+时区一致性
+- `3470bd92` 点击Grape运营管理系统标题跳转到总览页面
