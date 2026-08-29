@@ -227,6 +227,13 @@ public class RuntimeDeviceService {
         taskFilterOptions.put("skill", countBy(engineTasks, AgentTaskRo::getSkill));
         taskFilterOptions.put("agentType", countBy(engineTasks, AgentTaskRo::getAgentType));
 
+        // runtimeId → 引擎名映射（设备详情任务列表显示引擎列）
+        Map<Integer, String> engineNameById = engines.stream()
+                .collect(Collectors.toMap(AgentRuntimeRo::getId,
+                        r -> r.getName() + (r.getDisplayName() != null && !r.getDisplayName().isBlank()
+                                ? "(" + r.getDisplayName() + ")" : ""),
+                        (a, b) -> a));
+
         List<AgentTaskRo> allTasks = engineTasks.stream()
                 .filter(t -> taskStatus == null || taskStatus.isBlank() || taskStatus.equals(t.getStatus()))
                 .filter(t -> taskType == null || taskType.isBlank() || taskType.equals(t.getAgentType()))
@@ -241,7 +248,8 @@ public class RuntimeDeviceService {
         int from = Math.min(taskPage * taskSize, total);
         int to = Math.min(from + taskSize, total);
         Map<String, Object> taskPageObj = new LinkedHashMap<>();
-        taskPageObj.put("content", allTasks.subList(from, to).stream().map(this::toTaskMap).collect(Collectors.toList()));
+        taskPageObj.put("content", allTasks.subList(from, to).stream()
+                .map(t -> toTaskMap(t, engineNameById)).collect(Collectors.toList()));
         taskPageObj.put("totalElements", total);
         taskPageObj.put("totalPages", taskSize > 0 ? (total + taskSize - 1) / taskSize : 0);
         taskPageObj.put("page", taskPage);
@@ -456,6 +464,10 @@ public class RuntimeDeviceService {
     }
 
     private Map<String, Object> toTaskMap(AgentTaskRo t) {
+        return toTaskMap(t, null);
+    }
+
+    private Map<String, Object> toTaskMap(AgentTaskRo t, Map<Integer, String> engineNameById) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", t.getId());
         m.put("runtimeId", t.getRuntimeId());
@@ -468,6 +480,9 @@ public class RuntimeDeviceService {
         m.put("repoKey", t.getRepoKey());
         m.put("issueId", t.getIssueId());
         m.put("eventSeq", t.getEventSeq());
+        if (engineNameById != null && t.getRuntimeId() != null) {
+            m.put("engineName", engineNameById.getOrDefault(t.getRuntimeId(), null));
+        }
         return m;
     }
 
