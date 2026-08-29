@@ -57,7 +57,7 @@
       </div>
 
       <!-- 仓库与 Issue + 最近活动 -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
+      <div style="display:grid;grid-template-columns:minmax(420px,1fr) minmax(420px,1fr);gap:20px;margin-bottom:20px">
       <!-- 仓库与 Issue -->
       <div class="card" style="padding:0">
           <div class="section-header">
