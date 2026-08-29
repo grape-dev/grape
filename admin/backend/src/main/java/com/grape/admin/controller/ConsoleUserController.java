@@ -56,7 +56,7 @@ public class ConsoleUserController {
                     + "huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>'' as has_huawei_ak, "
                     + "feishu_app_id IS NOT NULL AND feishu_app_id<>'' as has_feishu, "
                     + "gitcode_api_token IS NOT NULL AND gitcode_api_token<>'' as has_gitcode_token "
-                    + "FROM user_accounts" + where + " ORDER BY id DESC LIMIT ? OFFSET ?";
+                    + "FROM user_accounts" + where + " ORDER BY last_active_at DESC, id DESC LIMIT ? OFFSET ?";
             params.add(size);
             params.add(page * size);
             grapeJdbc.query(sql, rs -> {
@@ -99,7 +99,7 @@ public class ConsoleUserController {
     public Map<String, Object> detail(@PathVariable int id) {
         Map<String, Object> info = new LinkedHashMap<>();
         try {
-            grapeJdbc.query("SELECT id, username, nickname, gitcode_id, created_at, "
+            grapeJdbc.query("SELECT id, username, nickname, gitcode_id, created_at, last_active_at, "
                     + "huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>'' as has_huawei_ak, "
                     + "huawei_cloud_sk IS NOT NULL AND huawei_cloud_sk<>'' as has_huawei_sk, "
                     + "feishu_app_id IS NOT NULL AND feishu_app_id<>'' as has_feishu, "
@@ -113,6 +113,9 @@ public class ConsoleUserController {
                 info.put("username", rs.getString("username"));
                 info.put("nickname", rs.getString("nickname"));
                 info.put("gitcodeId", rs.getString("gitcode_id"));
+                String lastActive = rs.getString("last_active_at");
+                info.put("lastActiveAt", lastActive);
+                info.put("online", isOnline(lastActive));
                 info.put("createdAt", rs.getString("created_at"));
                 info.put("hasHuaweiAk", rs.getBoolean("has_huawei_ak"));
                 info.put("hasHuaweiSk", rs.getBoolean("has_huawei_sk"));

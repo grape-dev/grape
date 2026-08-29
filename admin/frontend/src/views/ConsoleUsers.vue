@@ -36,7 +36,7 @@
             <tr><th style="width:60px">ID</th><th>用户名</th><th>昵称</th><th>GitCode ID</th><th>登录状态</th><th>凭证配置</th><th>最后活跃</th><th style="width:60px">操作</th></tr>
           </thead>
           <tbody>
-            <tr v-for="u in list" :key="u.id" class="tl-row-clickable" @click="showDetail(u.id)">
+            <tr v-for="u in list" :key="u.id" class="tl-row-clickable" @click="$router.push(`/sys/console/${u.id}`)">
               <td class="t3">{{ u.id }}</td>
               <td><b>{{ u.username }}</b></td>
               <td class="t3">{{ u.nickname || '—' }}</td>
@@ -50,7 +50,7 @@
               </td>
               <td class="t3">{{ u.lastActiveAt || '—' }}</td>
               <td @click.stop>
-                <button class="act-icon-btn" @click="showDetail(u.id)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+                <button class="act-icon-btn" @click.stop="$router.push(`/sys/console/${u.id}`)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
               </td>
             </tr>
             <tr v-if="list.length === 0">
@@ -68,38 +68,6 @@
       <PaginationBar v-if="total > 0" v-model:page="page" v-model:size="size" :total="total" :total-pages="totalPages" :size-options="sizeOptions" @change="load" />
     </div>
 
-    <!-- 详情弹窗 -->
-    <div v-if="detail.show" class="modal-overlay" @click.self="detail.show = false">
-      <div class="modal-dialog" style="max-width:560px">
-        <div class="modal-header">
-          <span class="modal-icon">👤</span>
-          <span class="modal-title">{{ detail.info.username }} · 工作台用户详情</span>
-        </div>
-        <div class="modal-body">
-          <div v-if="detail.loading" class="loading-spinner">加载中...</div>
-          <div v-else class="cu-detail-grid">
-            <div class="cu-detail-row"><span>用户名</span><b>{{ detail.info.username || '—' }}</b></div>
-            <div class="cu-detail-row"><span>昵称</span>{{ detail.info.nickname || '—' }}</div>
-            <div class="cu-detail-row"><span>GitCode ID</span>{{ detail.info.gitcodeId || '—' }}</div>
-            <div class="cu-detail-row"><span>创建时间</span>{{ detail.info.createdAt || '—' }}</div>
-            <div class="cu-detail-row"><span>GitCode 发布仓库</span>{{ detail.info.gitcodePublishRepo || '—' }}</div>
-            <div class="cu-detail-row"><span>GitHub 发布仓库</span>{{ detail.info.githubPublishRepo || '—' }}</div>
-            <div class="cu-detail-row"><span>最后场景</span>{{ detail.info.lastScene || '—' }}</div>
-            <div class="cu-detail-section">凭证配置状态</div>
-            <div class="cu-detail-row"><span>GitCode Token</span><span :class="['status-tag', detail.info.hasGitcodeToken ? 'success' : 'default']" style="font-size:11px">{{ detail.info.hasGitcodeToken ? '已配置' : '未配置' }}</span></div>
-            <div class="cu-detail-row"><span>华为云 AK</span><span :class="['status-tag', detail.info.hasHuaweiAk ? 'success' : 'default']" style="font-size:11px">{{ detail.info.hasHuaweiAk ? '已配置' : '未配置' }}</span></div>
-            <div class="cu-detail-row"><span>华为云 SK</span><span :class="['status-tag', detail.info.hasHuaweiSk ? 'success' : 'default']" style="font-size:11px">{{ detail.info.hasHuaweiSk ? '已配置' : '未配置' }}</span></div>
-            <div class="cu-detail-row"><span>飞书 App ID</span><span :class="['status-tag', detail.info.hasFeishu ? 'success' : 'default']" style="font-size:11px">{{ detail.info.hasFeishu ? '已配置' : '未配置' }}</span></div>
-            <div class="cu-detail-row"><span>飞书 App Secret</span><span :class="['status-tag', detail.info.hasFeishuSecret ? 'success' : 'default']" style="font-size:11px">{{ detail.info.hasFeishuSecret ? '已配置' : '未配置' }}</span></div>
-            <div class="cu-detail-row"><span>CodeArts AK</span><span :class="['status-tag', detail.info.hasCodeartsAk ? 'success' : 'default']" style="font-size:11px">{{ detail.info.hasCodeartsAk ? '已配置' : '未配置' }}</span></div>
-            <div class="cu-detail-row"><span>CodeArts SK</span><span :class="['status-tag', detail.info.hasCodeartsSk ? 'success' : 'default']" style="font-size:11px">{{ detail.info.hasCodeartsSk ? '已配置' : '未配置' }}</span></div>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button class="btn" @click="detail.show = false">关闭</button>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -116,7 +84,6 @@ const totalPages = ref(0)
 const keyword = ref('')
 const source = ref('')
 const loading = ref(false)
-const detail = ref({ show: false, loading: false, info: {} })
 const sizeOptions = [10, 20, 50]
 const stats = ref({})
 
@@ -145,16 +112,6 @@ async function load() {
 function search() { page.value = 0; load() }
 function reset() { keyword.value = ''; source.value = ''; page.value = 0; load() }
 function setSource(s) { source.value = s; page.value = 0; load() }
-
-async function showDetail(id) {
-  detail.value = { show: true, loading: true, info: {} }
-  try {
-    const { data } = await http.get(`/console-users/${id}`)
-    detail.value = { show: true, loading: false, info: data }
-  } catch (e) {
-    detail.value = { show: true, loading: false, info: { error: e.message } }
-  }
-}
 
 onMounted(() => load())
 </script>
