@@ -787,6 +787,12 @@ def get_skill_path(skill_id) -> str:
     if skill.get("scope") == "repo":
         from src.repo_key import from_repo_key
         return os.path.join(SKILLS_DIR, "repo", from_repo_key(skill.get("owner_id") or ""), sp, "SKILL.md")
+    # 官方技能：优先按 configs/skill-description.json 的 path 解析（skills/<agent_type>/<skill>/SKILL.md），
+    # 兼容旧平铺布局（skills/<skill>/SKILL.md）
+    from src.config import resolve_official_skill_path
+    resolved = resolve_official_skill_path(skill.get("skill_name") or sp)
+    if resolved:
+        return resolved
     return os.path.join(SKILLS_DIR, sp, "SKILL.md")
 
 

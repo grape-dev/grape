@@ -1,43 +1,9 @@
-"""Prompt 构建：角色定义、技能能力列表、事件 prompt、飞书 prompt"""
-import json, os
-from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH
+"""Prompt 构建：角色定义、事件 prompt、飞书 prompt"""
+import json, os, re
+from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH, resolve_official_skill_path
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
-
-EMOJI_MAP = {
-    "code-review": "📦 代码审查", "build-debug": "🔧 构建诊断",
-    "deploy-guard": "🛡️ 部署守卫", "incident-triage": "🚨 事件分诊",
-    "security-scan": "🔒 安全扫描", "changelog-gen": "📝 变更日志",
-    "comment": "💬 仓库评论回复",
-    "chat": "🗨️ 飞书对话", "issue": "📋 Issue 运营", "pr": "🔄 PR 运营",
-}
-
-
-def get_skill_capabilities() -> str:
-    lines = ["我是 DevOps Bot，专注于以下领域：\n"]
-    try:
-        for entry in sorted(os.listdir(SKILLS_DIR)):
-            skill_dir = os.path.join(SKILLS_DIR, entry)
-            if not os.path.isdir(skill_dir) or entry.startswith("."):
-                continue
-            md_path = os.path.join(skill_dir, "SKILL.md")
-            if not os.path.exists(md_path):
-                continue
-            display = EMOJI_MAP.get(entry, entry)
-            desc = ""
-            with open(md_path, encoding="utf-8") as f:
-                content = f.read()
-            if "description: |" in content:
-                desc_block = content.split("description: |", 1)[1].split("---", 1)[0].strip()
-                desc = desc_block.split("\n")[0].strip().rstrip(".。").strip('"').strip("'")
-            lines.append(f"  {display}")
-            if desc:
-                lines[-1] += f" — {desc}"
-        lines.append("\n我的能力范围仅限于 DevOps 相关领域。")
-        return "\n".join(lines)
-    except Exception as e:
-        return "我是 DevOps Bot，专注于 DevOps 相关领域。"
 
 
 def _resolve_server_url(runtime_id: int = 0) -> str:
@@ -69,65 +35,6 @@ def _build_history_file_guide(repo_key: str = "", account: str = "", runtime_id:
     DevOps Agent 上下文由事件 payload + A2A context 承载，不再通过文件列表引导 Agent 读取历史。
     """
     return ""
-
-
-def _build_recent_chat_history(history: list, repo_key: str = "", max_turns: int = 6) -> str:
-    """构建近期对话摘要，注入 general chat prompt。
-
-    数据来源：chat_messages 表（按 repo_key 查所有 conversation 的最近消息，含用户消息+agent回复），
-    补充 chat_agent_session.event_history（agent 回复的 stdout）。
-    使 agent 感知用户之前的对话上下文，避免重复追问已确认的信息。
-    """
-    lines = ["## 近期对话历史（请勿重复追问以下已确认的信息）"]
-    found = False
-
-    # 优先从 chat_messages 表拉用户+agent 消息（跨 general/task 对话）
-    if repo_key:
-        try:
-            from src.session_manager import db, db_lock
-            from src.repo_key import to_repo_key
-            rk = to_repo_key(repo_key)
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT cm.role, cm.content, cm.created_at, cc.conv_type, cc.issue_number "
-                    "FROM chat_messages cm JOIN chat_conversations cc ON cm.conversation_id = cc.id "
-                    "WHERE cc.repo_key=? ORDER BY cm.created_at DESC LIMIT ?",
-                    (rk, max_turns * 2)
-                )
-                rows = c.fetchall()
-            if rows:
-                found = True
-                for r in reversed(rows):  # 时间正序展示
-                    role, content, created_at, conv_type, issue_num = r
-                    tag = "用户" if role == "user" else "助手"
-                    ctx = f" [Issue #{issue_num}]" if issue_num else ""
-                    snippet = (content or "")[:300]
-                    if len(content or "") > 300:
-                        snippet += "…"
-                    t = (created_at or "")[:19]
-                    lines.append(f"[{t} {tag}{ctx}] {snippet}")
-        except Exception:
-            pass
-
-    # 补充：event_history 里的 agent 回复（当 chat_messages 无数据时兜底）
-    if not found and history:
-        recent = history[-max_turns:]
-        for h in recent:
-            stdout = (h.get("stdout") or "").strip()
-            if not stdout:
-                continue
-            snippet = stdout[:300]
-            if len(stdout) > 300:
-                snippet += "…"
-            t = (h.get("time") or "")[:19].replace("T", " ")
-            success = "✓" if h.get("success") else "✗"
-            lines.append(f"[{t} 助手 {success}] {snippet}")
-            found = True
-
-    if not found:
-        return ""
-    return "\n".join(lines)
 
 
 _PROJECT_INFO_MAX_CHARS = 2500
@@ -344,34 +251,16 @@ Use Python to save discovered mappings in the bot's sessions.db:
 
 
 def build_chat_role_definition() -> str:
-    caps = get_skill_capabilities()
-    return f"""You are a DevOps operations assistant. Your domain:
+    return """You are a DevOps operations assistant. Your domain:
 - Code review, build diagnosis, deployment guard, incident triage
 - Issue/PR analysis, changelog generation, repository management
 - Repository (GitCode/GitHub) API operations
-- 任务处理：接收用户任务需求，分析、追问、创建 Issue 转交流水线
 
 You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, writing, meetings, voice, etc.).
-Your capabilities:
-{caps}
-
-## 任务处理（超出你直接能力范围的请求）
-当你收到创建资源、部署服务、开发功能等不能直接执行的任务请求时，按以下流程处理：
-1. 分析需求，提取已知参数（如规格/镜像/网络/磁盘等），明确这是一个什么任务
-2. 如果缺少关键参数（如 ECS 要什么规格、部署到什么环境等），追问用户补充（最多2轮）
-3. 信息足够后 → 用 GitCode API 创建 Issue：
-   - API: POST /repos/{{owner}}/{{repo}}/issues
-   - 标题：简明描述需求（如"创建 2C4G Ubuntu 22.04 ECS"）
-   - 正文：将用户已提供的参数整理为结构化清单（核对表格式），标注来源"飞书用户需求"
-   - 标签：按类型打标签 — sre-deploy（云资源创建/部署运维）、sre-release（资源释放/销毁/回收）、feature（新功能/开发）、bug（缺陷修复）
-4. 创建后告知用户 Issue 编号（附链接）和后续流程预期（VOD 审视 → 开发/部署流水线）
-5. 用户询问进度时（如"ECS 建好了吗"），用 GitCode API 查询 Issue 状态：
-   - GET /repos/{{owner}}/{{repo}}/issues/{{number}} 看当前状态和标签
-   - 也有权查看 Issue 评论了解最新处理进展
 
 Reply rules:
 1. DevOps topic: analyze and reply
-2. NOT DevOps topic: politely explain you only handle DevOps, list your capabilities above
+2. NOT DevOps topic: politely explain you only handle DevOps
 3. Never write code, modify files, or execute git commands
 4. Always reply in Chinese. Never include internal reasoning or process steps.
 
@@ -379,10 +268,34 @@ SECURITY (MUST FOLLOW):
 1. Use ONLY the GitCode token provided in this prompt (USER_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.
 2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.
 3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in GitCode). NEVER try other tokens or workarounds.
-4. NEVER write any token into files, logs, or comments.
+4. NEVER write any token into files, logs, or comments."""
 
-ISSUE COMMENT FORMAT (MUST FOLLOW):
-When posting comments to GitCode Issues, the comment body MUST start with `[RoleName Agent]` prefix (e.g. `[Coding Agent]`, `[QA Agent]`, `[SRE Agent]`, `[Issue Agent]`, `[VOD Agent]`). Role name capitalized. NEVER use skill name, repo name, or other custom prefixes."""
+
+def build_task_role_definition() -> str:
+    """Task 会话专属 Role（task-vs-general-chat-flow-analysis.md §2.1）。
+
+    与 general 的 build_chat_role_definition 不同：task 会话是**已被分配 Issue** 的对话，
+    职责是澄清该 Issue 需求并回帖，不是"收到任务再创建新 Issue"。因此去掉
+    general 的「创建 Issue 转交流水线」流程，突出澄清+回帖边界（对齐 chat-prompt-overview §2.2）。
+    """
+    return """You are a DevOps operations assistant. Your domain:
+- Code review, build diagnosis, deployment guard, incident triage
+- Issue/PR analysis, changelog generation, repository management
+- Repository (GitCode/GitHub) API operations
+
+You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, writing, meetings, voice, etc.).
+
+## 当前职责（任务对话）
+你正参与一个**已被分配 Issue** 的需求澄清对话。你的职责：
+1. 围绕该 Issue 的需求与用户多轮沟通，澄清关键参数与实现方案；
+2. 将澄清结论回帖到对应 Issue（GitCode 评论）；
+3. 不实施 / 不部署 / 不写代码、不执行 git 命令——实现由 pipeline（coding/sre）在回帖后执行。
+
+SECURITY (MUST FOLLOW):
+1. 只使用本 prompt 提供的 GitCode token（USER_GITCODE_TOKEN）。
+2. 绝不访问 bot 内部 data/、configs/、sessions.db、user_accounts。
+3. GitCode API 403：停止并用政策性话术告知用户需要权限。
+4. 绝不把 token 写入文件、日志、评论。"""
 
 
 def extract_event_number(payload):
@@ -636,58 +549,111 @@ context 是传给下一个 Agent 的接力说明，应包含：
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
 
 
-def build_general_chat_prompt(user_text: str, repo_key: str, history: list, skills: list = None, account: str = "",
-                      runtime_id: int = 0, user_info: str = "") -> str:
-    parts = []
+_AGENT_TAG_RE = None
 
-    # Role Definition 放在最前面
-    parts.append(build_chat_role_definition())
 
-    # 用户基本信息（飞书侧前置，见 docs/new-version2/chat-prompt-overview.md §2.1）
-    if user_info:
-        parts.append(user_info)
+def _agent_tag_pattern():
+    """匹配 [XXX Agent] 标记（如 [QA Agent]、[Coding Agent][Issue Agent]）。"""
+    global _AGENT_TAG_RE
+    if _AGENT_TAG_RE is None:
+        import re as _re
+        _AGENT_TAG_RE = _re.compile(r'\[[A-Za-z_]+?\s+Agent\]', _re.IGNORECASE)
+    return _AGENT_TAG_RE
 
-    # 项目知识基线
-    parts.append(_build_project_info_section(repo_key, agent_type=skills[0] if skills else "chat"))
-    # Chat messages don't have `evt`, so A2A context is not injected here
-    # 注入近期 Chat 对话历史（用户消息 + agent 回复），使 agent 感知用户已说过的内容，
-    # 避免重复追问已确认的信息（如部署规格、云平台选择等）。
-    _recent_chat = _build_recent_chat_history(history, repo_key=repo_key)
-    if _recent_chat:
-        parts.append(_recent_chat)
 
-    # 注入当前执行的 runtime 引擎信息（供 agent 回答"你是什么runtime"之类的问题）
-    if runtime_id:
+def _append_chat_history(parts: list, history: list = None, has_valid_session: bool = False):
+    """注入对话历史（chat-prompt-history-injection-design.md §3）。
+
+    - 无有效 session → 注入完整「对话历史」（最近 10 条，每条截 500 字符）；
+    - 有 session → 普通对话历史由 opencode session 承载，**不再重复注入**；
+    - 无论 session，**含 [XXX Agent] 的 Issue 进展始终注入**为「Issue Agent 进展」段。
+    """
+    history = history or []
+    if not history:
+        return
+    agent_items = [m for m in history if _agent_tag_pattern().search((m.get("content") or ""))]
+    if agent_items:
+        parts.append("\n## Issue Agent 进展")
+        for m in agent_items[-10:]:
+            parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
+    if not has_valid_session:
+        norm = [m for m in history if m.get("role") in ("user", "agent")]
+        if norm:
+            parts.append("\n## 对话历史")
+            for m in norm[-10:]:
+                parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
+
+
+def build_general_chat_prompt(message: str, repo_key: str = "", history: list = None,
+                              skill_name: str = "", skill_id: int = 0,
+                              runtime_id: int = 0, backend_name: str = "",
+                              user_info: str = "", skills: list = None,
+                              account: str = "", has_valid_session: bool = False) -> str:
+    """统一通用 Chat prompt（Web / 飞书共用，方案 B：以简洁英文结构为准）。
+
+    原 _build_chat_prompt（web）与旧 build_general_chat_prompt（飞书）二合一：
+    - Role 与 §2.1 文档一致（build_chat_role_definition）；
+    - 不含全量技能枚举/中文标题（不在 Role 里展开 get_skill_capabilities）；
+    - 注入项目知识基线（§2.1 要求）。
+    """
+    parts = [build_chat_role_definition()]
+    if backend_name:
+        parts.append(f"Runtime engine: {backend_name}")
+    elif runtime_id:
         try:
             from src.runtime.engine_select import engine_name
             _be = engine_name(runtime_id) or ""
             if _be:
-                parts.append(f"Runtime engine: {_be} (runtime_id={runtime_id})")
+                parts.append(f"Runtime engine: {_be}")
         except Exception:
             pass
-
-    try:
-        from src.api.event_store import get_issue_summary
-        issue_summary = get_issue_summary(repo_key)
-        if issue_summary:
-            parts.append(issue_summary)
-    except Exception:
-        pass
-
-    parts.append(_build_history_file_guide(repo_key, account, runtime_id))
-
-    # 本次用户消息
-    parts.append(f"## 本次用户消息\nUser asks about {repo_key}: {user_text}")
-
-    # 使用技能
-    if skills:
-        _sp = f"{{{{SKILL_DIR}}}}/{skills[0]}/SKILL.md"
-        parts.append(
-            f"## 使用技能\n"
-            f"Skills: {', '.join(skills)}\n"
-            f"Skill 文件：{_sp}\n"
-            f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令去完成任务（不得跳过读取或凭空猜测）。"
-        )
+    if user_info:
+        parts.append(user_info)
+    if repo_key:
+        parts.append(f"\nIMPORTANT: You are working in repository: {repo_key}")
+    # 添加事件上下文
+    if repo_key:
+        try:
+            from src.api.event_store import get_issue_summary
+            summary = get_issue_summary(repo_key)
+            if summary:
+                parts.append(f"\nRepository event context:\n{summary}")
+        except Exception:
+            pass
+    # 项目知识基线（chat-prompt-overview.md §2.1）
+    parts.append(_build_project_info_section(repo_key, agent_type="chat"))
+    # 对话历史 / Issue Agent 进展（chat-prompt-history-injection-design.md §3）
+    _append_chat_history(parts, history, has_valid_session)
+    # 使用技能：优先 skill_name/skill_id，其次 skills[0]（飞书/tasks 传入）。
+    # 兼容旧位置签名：第4参曾为 skills(list)，若收到 list 取其首元素。
+    if isinstance(skill_name, list):
+        skill_name = skill_name[0] if skill_name else ""
+    _sn = skill_name or (skills[0] if skills else "")
+    if _sn or skill_id:
+        # 官方技能 → {{SKILL_DIR}}/<skill>/SKILL.md 占位指引（worker/direct 由 executor 解析，§2.1）；
+        # skill_id 明确指定（custom/repo scope 用户技能）→ 解析真实绝对路径。
+        if skill_id and not resolve_official_skill_path(_sn):
+            from src.user.db import get_skill_path
+            _abs = get_skill_path(skill_id)
+            skill_path = _abs or os.path.join(SKILLS_DIR, _sn, "SKILL.md")
+            parts.append(f"\n## Current Skill: {_sn or skill_id}\nSkill file: {skill_path}\nRead this file and follow its instructions.")
+        else:
+            parts.append(
+                f"## 使用技能\n"
+                f"Skills: {_sn}\n"
+                f"Skill 文件：{{{{SKILL_DIR}}}}/{_sn}/SKILL.md\n"
+                f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令去完成任务（不得跳过读取或凭空猜测）。"
+            )
+    # GitCode API 访问说明
+    parts.append("""
+## GitCode API Access
+Your token is available as the USER_GITCODE_TOKEN environment variable.
+  curl -s -H "Authorization: Bearer $USER_GITCODE_TOKEN" \\
+    https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues
+Never print or reveal the token value.
+""")
+    repo_note = f" (in {repo_key})" if repo_key else ""
+    parts.append(f"\nUser{repo_note}: {message}\nAssistant:")
     return "\n".join(parts)
 
 
@@ -722,7 +688,8 @@ def _get_task_description(conv: dict | None) -> str:
 
 
 def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: dict = None,
-                           account: str = "", runtime_id: int = 0, user_info: str = "") -> str:
+                           account: str = "", runtime_id: int = 0, user_info: str = "",
+                           has_valid_session: bool = False) -> str:
     """任务对话独立 prompt：注入 Issue 上下文 + `场景: task`，Agent 直接走任务处理流程。
 
     见 template-onboarding-task-full-chain-design.md §5.7.1。用于任务中心「去对话」会话
@@ -732,14 +699,17 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     issue_number = conv.get("issue_number") or 0
     parts = []
 
-    # Role Definition（docs/new-version2/chat-prompt-overview.md §2.2）
-    parts.append(build_chat_role_definition())
+    # Role Definition（task 专属，见 task-vs-general-chat-flow-analysis.md §2.1；
+    # 与 general 不同：去掉"创建 Issue 转交流水线"，突出澄清+回帖）
+    parts.append(build_task_role_definition())
 
     # 用户基本信息（飞书侧前置）
     if user_info:
         parts.append(user_info)
 
     parts.extend([f"## 场景: task", f"## 任务背景", f"仓库: {repo_key}", f"Issue: #{issue_number}"])
+    if conv.get("title"):
+        parts.append(f"标题: {conv['title']}")
     # 注入当前执行的 runtime 引擎信息
     if runtime_id:
         try:
@@ -749,23 +719,7 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
                 parts.append(f"Runtime engine: {_be} (runtime_id={runtime_id})")
         except Exception:
             pass
-    # 任务边界（最高优先级，随每轮 prompt 强注入）：澄清+回帖，绝不亲自执行任务。
-    # 见 skills/chat/references/task-handling.md §0 与 coding-worktree-skill-collision.md §4.5。
-    parts.append(
-        "### 任务边界\n"
-        "本对话的职责是【澄清被分配 Issue 的需求并回帖】，不是实施/部署/写代码。\n"
-        "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\\n"
-        "严禁 clone/部署/起服务/修改文件/执行 git 命令。\\n"
-        "### A2A 交办规则\\n"
-        "需求澄清完成后，根据 Issue 标签决定 A2A 目标：\\n"
-        "- 标签含 `sre-deploy` → A2A 给 `sre`，context 写明「部署」+ 资源规格\\n"
-        "- 标签含 `sre-release` → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\\n"
-        "- 标签含 `feature`/`bug` → A2A 给 `coding`\\n"
-        "A2A 时 `pr_number` 仅在当前任务有直接关联的 PR（如 PR 审查后交办）时传入。纯部署/资源释放类请求不传 `pr_number`，否则会触发订阅去重导致 SRE 任务被跳过。"
-    )
-    if conv.get("title"):
-        parts.append(f"标题: {conv['title']}")
-    # 任务描述
+    # 任务描述（tasks 表，职责边界已并入 Role「当前职责」）
     task_desc = _get_task_description(conv)
     if task_desc:
         parts.append(f"\n### 任务描述\n{task_desc}")
@@ -781,14 +735,12 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     # 项目知识基线
     parts.append(_build_project_info_section(repo_key, agent_type="chat"))
 
-    if history:
-        parts.append("\n## 对话历史")
-        for m in history[-10:]:
-            parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
+    # 对话历史 / Issue Agent 进展（chat-prompt-history-injection-design.md §3）
+    _append_chat_history(parts, history, has_valid_session)
 
     parts.append(f"\n## 本次用户消息\n{user_text}")
 
-    _sp = f"{{{{SKILL_DIR}}}}/chat/SKILL.md"
+    _sp = "{{SKILL_DIR}}/chat/SKILL.md"
     parts.append(
         f"## 使用技能\n"
         f"Skills: chat\n"

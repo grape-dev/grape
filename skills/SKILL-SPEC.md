@@ -58,6 +58,8 @@ Agent 输出应遵循的格式。
 
 - 目录名和 `name` 字段使用 kebab-case：`code-review`、`build-debug`
 - 每个 Skill 目录只包含一个 `SKILL.md`，如需附带资源文件可放在同目录下
+- 官方技能在 `skills/<agent_type>/<skill>` 两层结构下（agent_type = vod/issue/coding/qa/sre/chat），
+  `skill-description.json` 中 `path` 字段 = `<agent_type>/<skill>`
 
 ## 发现与触发机制
 

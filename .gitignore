@@ -23,6 +23,15 @@ configs/server-config.json
 configs/SETUP-GUIDE.md
 skills/custom/
 skills/repo/
+# 官方技能由独立仓库供给（scripts/sync_skills.sh 铺入，不入 git）
+skills/vod/
+skills/issue/
+skills/coding/
+skills/qa/
+skills/sre/
+skills/chat/
+skills/_template/
+configs/skill-description.json
 DEPLOYMENT-REMOTE.md
 DEPLOYMENT-WORKER.md
 DEPLOYMENT-TEST.md

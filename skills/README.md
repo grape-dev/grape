@@ -1,82 +1,61 @@
-# DevOps Grape Skills 库
+# DevOps Grape Skills
 
-本目录是 DevOps Grape 的**技能库**，每个子目录对应一个 Skill，包含 `SKILL.md`（技能指令）和 `references/`（参考文档）。
-
-Grape 通过事件路由（`configs/event-routing.json`）将事件分发到对应 Skill，Grape 读取 `SKILL.md` 拼入 Prompt 后交给 Agent 执行。
-
-## 技能列表
-
-| Skill | 说明 | 触发事件 | 后端 |
-|-------|------|---------|------|
-| `issue` | Issue 分诊、标签、CODEOWNERS 分配 | `issue_opened`、`issue_comment` | opencode |
-| `pr` | PR 审查（代码审查、IaC 扫描、合并检查） | `pull_request_opened`、`pull_request_updated`、`note_hook_pr` | opencode |
-| `qa` | PR 审查 + 工作流质量审查（pr 的增强版备选：Agent Work Loop 五维模型，按仓库启用） | `pull_request_opened`、`pull_request_updated`、`note_hook_pr` | opencode |
-| `skill-pr` | Skill 仓库专用 PR 审查（同 pr 技能，用于 huaweicloud-skills） | `pull_request_opened`、`pull_request_updated` | opencode |
-| `implementation` | 自主开发实现（spec → plan → TDD → 增量代码 → PR） | `issue_labeled` | opencode |
-| `build-debug` | 构建失败诊断与修复建议 | `build_failure` | opencode |
-| `deploy-guard` | 部署安全守卫与合规检查 | `deploy_start`、`deploy_failure` | opencode |
-| `incident-triage` | 事件分诊与定级 | 手动触发 | opencode |
-| `changelog-gen` | 变更日志生成与发布说明 | `release_created` | opencode |
-| `cloud-deploy` | 云部署自动化 | `pull_request_merged` | opencode |
-| `im-notify` | 飞书通知 — 接收 GitCode 事件，按事件类型决策发送通知 | 所有非 IM 事件自动前置路由 | opencode |
-| `chat` | 飞书 IM 对话、意见反馈、实施审批 | 飞书消息 | opencode |
-| `agent` | 5 个 agent-skills 子技能（spec-driven-dev / planning / TDD / incremental-impl / code-review） | 被其他技能引用 | opencode |
-
-## 路由机制
-
-```
-事件 → event_processor.py
-  → event-routing.json（事件类型 → Skill 映射）
-    → 支持 repo_routing（按仓库名覆盖技能）
-      → 读取 skills/{skill}/SKILL.md → 拼入 Prompt → Agent 执行
-```
-
-## 仓库特定路由
-
-`configs/event-routing.json` 中的 `repo_routing` 支持按仓库名指定不同技能：
-
-```json
-"repo_routing": {
-  "Jason7602/huaweicloud-skills": {
-    "pull_request_opened": "skill-pr",
-    "pull_request_updated": "skill-pr"
-  }
-}
-```
-
-未配置的仓库走全局 `routing` 映射。
-
-## 目录结构
+本目录是 DevOps Grape 的**官方技能库**，技能按 `agent_type` 一层分组存放：
 
 ```
 skills/
-├── README.md                    # 本文件
-├── SKILL-SPEC.md                # Skill 规范定义
-├── agent/                       # 子技能集
-├── build-debug/                 # 构建诊断
-├── changelog-gen/               # 变更日志
-├── chat/                        # 飞书对话
-├── cloud-deploy/                # 云部署
-├── deploy-guard/                # 部署守卫
-├── im-notify/                   # 飞书通知
-├── implementation/              # 自主开发
-├── incident-triage/             # 事件分诊
-├── issue/                       # Issue 运营
-├── pr/                          # PR 审查
-├── qa/                          # PR 审查 + 工作流质量审查（pr 增强版）
-└── skill-pr/                    # Skill 仓库 PR 审查
+├── vod/            # VOD Agent 技能（开发者声音分析）
+├── issue/          # Issue Agent 技能（Issue 运营）
+├── coding/         # Coding Agent 技能（代码实现）
+├── qa/             # QA Agent 技能（审查验证）
+├── sre/            # SRE Agent 技能（构建部署/运维）
+├── chat/           # Chat Agent 技能（对话/IM 通知）
+├── custom/         # 运行时：用户上传技能（不入 git）
+├── repo/           # 运行时：仓库技能（不入 git）
+└── _template/      # 技能模板
 ```
 
-每个技能目录包含：
-- `SKILL.md` — 技能指令
-- `references/` — 参考文档（API 参考、审查规范等）
+> **重要**：官方技能内容（`vod/ issue/ coding/ qa/ sre/ chat/ _template`）已拆分至
+> **独立技能仓库** [grape-skills](https://gitcode.com/grape-dev/grape-skills)，由构建/部署脚本
+> `scripts/sync_skills.sh` 拉取铺入本目录（方案见
+> `docs/new-version2/skills-standalone-repo-build-time-pull.md`）。本仓库不再直接维护
+> 官方技能文件。
 
-## 如何创建新 Skill
+## 技能清单
 
-1. 在 `skills/` 下创建目录，如 `skills/my-skill/`
-2. 创建 `SKILL.md`，按 [SKILL-SPEC.md](./SKILL-SPEC.md) 规范编写
-3. 在 `configs/event-routing.json` 中添加事件类型 → Skill 映射
-4. （可选）如果指定仓库使用，在 `repo_routing` 中添加
+37 个官方技能的分类与字段以 `configs/skill-description.json` 为准
+（构建期由 `sync_skills.sh` 从技能仓库同步铺入）。
+
+| agent_type | 技能 |
+|---|---|
+| vod | vod、repo-onboarding、event-dialogue、blog-vod、iac-vod |
+| issue | issue、issue-advance、skill-issue、blog-issue、iac-issue |
+| coding | implementation、skill-creator、rest-api-skill-creator、iac-coding、wan-video-generation、qwen-image-generation、ai-blog-generation |
+| qa | qa、pr、skill-pr、skill-tester、rest-api-skill-tester、iac-qa |
+| sre | cloud-deploy、build-debug、deploy-guard、changelog-gen、incident-triage、skill-publish、huawei-cloud、runtime-install、blog-publish、blog-manager、iac-sre、os-disk-list |
+| chat | chat、im-notify |
+
+## 目录结构（单个技能）
+
+```
+skills/<agent_type>/<skill>/
+├── SKILL.md            # 技能指令（frontmatter + 正文）
+├── references/         # 参考文档（API 参考、审查规范等）
+├── scripts/            # 辅助脚本（可选）
+└── templates/          # 模板（可选）
+```
+
+## 技能格式
+
+见 [SKILL-SPEC.md](./SKILL-SPEC.md)。
+
+## 如何新增 / 修改官方技能
+
+技能内容的增删改在独立技能仓库 `grape-skills` 中进行：
+
+1. 在 `grape-skills` 的 `skills/<agent_type>/` 下建/改技能目录；
+2. 同步更新 `grape-skills/skill-description.json`（path = `<agent_type>/<skill>`）；
+3. 提交 PR 合并后打 tag；grape 侧部署时执行 `bash scripts/sync_skills.sh` 更新。
 
 ## 环境变量
 

@@ -796,7 +796,9 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
             agent_sid = row[0] or ""
             runtime_id = row[1] or 0
         if agent_sid:
-            from src.config import SKILLS_DIR
+            from src.config import SKILLS_DIR, resolve_official_skill_path
+            event_dialogue_path = resolve_official_skill_path("event-dialogue") \
+                or os.path.join(SKILLS_DIR, "event-dialogue", "SKILL.md")
             from src.api.event_pipeline import get_agent_workdir
             # Fix 1：cwd 用该 issue 的 agent 目录（与 issue 会话项目一致）
             ws = get_agent_workdir(repo_key, agent_type, issue_id)
@@ -818,7 +820,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
                     event_type="event_conversation",
                     repo_key=repo_key, agent_type=agent_type,
                     skill="event-dialogue",                 # Fix A：打包下发对话技能
-                    skill_path=os.path.join(SKILLS_DIR, "event-dialogue", "SKILL.md"),
+                    skill_path=event_dialogue_path,
                     account=repository, repo_gitcode_token=bot_token,
                     issue_id=issue_id or "#0",
                 )

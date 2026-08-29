@@ -165,10 +165,10 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
     if env_extra:
         env.update(env_extra)
 
-    # 技能路径占位符替换
+    # 技能路径占位符替换（direct 模式：按 skills/<agent_type>/<skill>/ 结构解析）
     try:
-        from src.config import SKILLS_DIR
-        prompt = prompt.replace("{{SKILL_DIR}}", SKILLS_DIR)
+        from src.config import replace_skill_dir_placeholders
+        prompt = replace_skill_dir_placeholders(prompt)
     except Exception:
         pass
 
@@ -288,10 +288,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         env.update(env_extra)
 
     # 技能路径占位符：worker 侧已在物化时把 {{SKILL_DIR}} 替换为随任务下发的目录；
-    # direct（服务端本地）执行在此替换为服务端 SKILLS_DIR，使 read tool 能找到技能文件。
+    # direct（服务端本地）执行在此按 skills/<agent_type>/<skill>/ 结构解析，使 read tool 能找到技能文件。
     try:
-        from src.config import SKILLS_DIR
-        prompt = prompt.replace("{{SKILL_DIR}}", SKILLS_DIR)
+        from src.config import replace_skill_dir_placeholders
+        prompt = replace_skill_dir_placeholders(prompt)
     except Exception:
         pass
 
@@ -600,10 +600,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             "exit_code": proc.returncode, "text": _redact(full_text, _tokens),
             "oc_session_id": new_session_id,
             "errors": error_events, "stderr": _redact(stderr_output, _tokens),
-            "backend": backend.name,
+            "backend": backend.name, "reader_total": _reader_total, "parsed_count": _parsed_count,
         })
 
-    # 执行一次；若因会话失效失败（stderr 含 Session not found），降级重跑一次（不带 session）
+    # 执行一次；若因会话失效失败，降级重跑一次（不带 session）。
+    # 判定覆盖两种情况：
+    #  1. stderr 显式含 "session not found"（旧版 opencode 行为）；
+    #  2. 带 session 启动但进程"无任何输出即失败"（exit!=0 且 text/stderr 均为空）——
+    #     新版 opencode（≥1.17）对失效 session 静默 EOF exit=1，不再打印 Session not found。
     # 注意：run 内部产生的 done 不立即转发，先判定是否需重跑；避免调用方收到多个 done
     run_gen = _run_once(session_id)
     done = None
@@ -616,14 +620,25 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     if done is None:
         return
 
-    session_missing = (
+    _stderr = (done.get("stderr") or "").lower()
+    _errors = " ".join(done.get("errors") or []) or ""
+    # 新版 opencode 对失效 session 静默失败：exit!=0 且无 text/stderr，
+    # 但 stdout 读到过 ≥1 个被解析的事件后即断流（比对 raw=0 parsed=1 的日志形态）。
+    # 用 parsed_count 区分：真实错误（裸行非 NDJSON）parsed_count=0 → 不重跑。
+    _stale_fail = (
         done.get("exit_code", 0) != 0
-        and session_id
-        and ("session not found" in (done.get("stderr") or "").lower()
-             or any("session not found" in (e or "").lower() for e in (done.get("errors") or [])))
+        and not (done.get("text") or "").strip()
+        and not (done.get("stderr") or "").strip()
+        and backend.name == "opencode"
+        and (done.get("parsed_count") or 0) >= 1
+    )
+    session_missing = (
+        session_id
+        and done.get("exit_code", 0) != 0
+        and ("session not found" in _stderr or "session not found" in _errors.lower() or _stale_fail)
     )
     if session_missing:
-        log.warning(f"{label}{backend.name} session {session_id[:20]}... not found on server, retrying without session")
+        log.warning(f"{label}{backend.name} session {session_id[:20]}... invalid/not-found (exit={done.get('exit_code')} empty-out), retrying without session")
         run_gen2 = _run_once("")
         done2 = None
         for evt_type, data in run_gen2:

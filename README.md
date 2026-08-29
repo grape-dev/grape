@@ -134,7 +134,7 @@ Production deployment examples (nginx reverse proxy / systemd / Docker) in `docs
 |------|-------------|
 | `configs/global-bot-token.json` | Global Bot token + GitCode OAuth credentials (gitignored) |
 | `configs/agent-description.json` | Agent type seeds (event subscriptions, default backend) |
-| `configs/skill-description.json` | Official skill seeds |
+| `configs/skill-description.json` | Official skill seeds (synced from the standalone [grape-skills](https://gitcode.com/grape-dev/grape-skills) repo via `scripts/sync_skills.sh`) |
 | `configs/agent-skill-mapping.json` | Dev scenario → Agent × Skill mapping |
 | `configs/project-templates.json` | Project template library |
 | `configs/login-whitelist.json` | GitCode login whitelist |
@@ -173,7 +173,7 @@ Test coverage: event normalization, prompt building, Agent executor (NDJSON pars
 ### Non-code Contributions Welcome
 
 - **Documentation** — Improve README, supplement design docs, fix typos
-- **Skills** — Contribute new Agent skills to `skills/` (Markdown only, no backend changes)
+- **Skills** — Contribute new Agent skills to the standalone [grape-skills](https://gitcode.com/grape-dev/grape-skills) repo (`skills/<agent_type>/<skill>/`, Markdown only, no backend changes)
 - **Templates** — Add new project templates to `configs/project-templates.json`
 - **Bug Reports** — Provide clear repro steps, environment info, and logs
 - **Test Cases** — Add coverage for edge cases

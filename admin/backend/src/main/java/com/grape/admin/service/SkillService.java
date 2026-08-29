@@ -43,8 +43,8 @@ import java.util.zip.ZipOutputStream;
 @Service
 public class SkillService {
 
-    /** skill_path 白名单：仅允许字母数字/下划线/中划线/点（防路径穿越，只读技能目录内文件） */
-    private static final Pattern SAFE_SKILL_PATH = Pattern.compile("^[\\w\\-.]+$");
+    /** skill_path 白名单：允许字母数字/下划线/中划线/点/斜杠（官方技能现按 agent_type 一层分组），防路径穿越，只读技能目录内文件 */
+    private static final Pattern SAFE_SKILL_PATH = Pattern.compile("^[\\w\\-./]+$");
     private static final Pattern SAFE_SKILL_NAME = Pattern.compile("^[a-z0-9-]+$");
     private static final Pattern SEMVER = Pattern.compile("^v?\\d+\\.\\d+(\\.\\d+)?$");
     private static final Set<String> VALID_AGENT_TYPES = Set.of("vod", "issue", "coding", "qa", "sre", "chat");

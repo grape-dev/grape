@@ -8,8 +8,8 @@
 import os
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
-IMPLEMENTATION = os.path.join(ROOT, "skills", "implementation", "SKILL.md")
-SPEC_GEN = os.path.join(ROOT, "skills", "issue-advance", "references", "spec-generation.md")
+IMPLEMENTATION = os.path.join(ROOT, "skills", "coding", "implementation", "SKILL.md")
+SPEC_GEN = os.path.join(ROOT, "skills", "issue", "issue-advance", "references", "spec-generation.md")
 
 
 def _read(p):
