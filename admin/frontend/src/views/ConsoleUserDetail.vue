@@ -88,7 +88,7 @@
       <div class="card" style="padding:0">
         <div class="section-header">
           <h3 class="sh-title">凭证配置</h3>
-          <span class="sh-count">已配置 {{ credentialConfigured }} / 7</span>
+          <span class="sh-count">已配置 {{ credentialConfigured }} / 4</span>
         </div>
         <div style="padding:20px 24px">
           <div class="cred-group-grid">
@@ -154,11 +154,8 @@ const credentialConfigured = computed(() => {
   let count = 0
   if (info.value.hasGitcodeToken) count++
   if (info.value.hasHuaweiAk) count++
-  if (info.value.hasHuaweiSk) count++
   if (info.value.hasFeishu) count++
-  if (info.value.hasFeishuSecret) count++
   if (info.value.hasCodeartsAk) count++
-  if (info.value.hasCodeartsSk) count++
   return count
 })
 
