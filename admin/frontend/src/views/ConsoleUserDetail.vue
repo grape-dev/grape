@@ -137,7 +137,7 @@
       <!-- 最近活动 -->
       <div class="card" style="padding:0">
           <div class="section-header">
-            <h3 class="sh-title">最近活动</h3>
+            <h3 class="sh-title">最近执行</h3>
             <div class="sh-actions">
               <button class="btn btn-sm" :style="activityFilter === 'recent' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'recent'">最近执行</button>
               <button class="btn btn-sm" :style="activityFilter === 'pending' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'pending'">进行中</button>
