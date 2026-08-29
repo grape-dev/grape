@@ -298,7 +298,6 @@ function switchConversation(convId) {
           // 任务仍在执行 → 追加 3 点动画占位 + SSE 重连
           const elId = 't' + Date.now();
           body.innerHTML += '<div class="msg r" id="' + elId + '">'
-            + '<span class="chat-typing">' + I18N.t('chat.querying') + '</span>'
             + '<span class="chat-dots"><span></span><span></span><span></span></span>'
             + '</div>';
           body.scrollTop = body.scrollHeight;
@@ -359,7 +358,6 @@ function doSend(input, body) {
   body.innerHTML += '<div class="msg l">' + msg.replace(/</g,'&lt;') + '</div>';
   const tid = 't' + Date.now();
   body.innerHTML += '<div class="msg r" id="' + tid + '">'
-    + '<span class="chat-typing">' + I18N.t('chat.querying') + '</span>'
     + '<span class="chat-dots"><span></span><span></span><span></span></span>'
     + '</div>';
   body.scrollTop = body.scrollHeight;
@@ -429,6 +427,9 @@ async function streamTask(taskId, elId, convId) {
               if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
             } else if (d.type === 'error') {
               if (el) el.innerHTML = renderMarkdown(d.text || '') || _NO_REPLY;
+            } else if (d.type === '思考中') {
+              // 思考阶段 — 保持三点动画占位，不覆盖文字
+              if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
             } else if (d.text && el) {
               finalText = d.text;
               el.innerHTML = renderMarkdown(finalText);
@@ -447,8 +448,7 @@ async function streamTask(taskId, elId, convId) {
     if (e.name === 'AbortError') return;  // 主动中断（切换会话/离开页面）
     // 连接断开 → 后端继续执行，切回来时 switchConversation 会重连
     // 不清除 _chatTasks[convId] — 保留状态供切回时恢复
-    if (el) el.innerHTML = '<span class="chat-typing">' + I18N.t('chat.querying') + '</span>'
-      + '<span class="chat-dots"><span></span><span></span><span></span></span>';
+    if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
   }
 }
 
@@ -472,7 +472,6 @@ function resumeChatTask() {
           const elId = 't' + Date.now();
           task.el_id = elId;
           body.innerHTML += '<div class="msg r" id="' + elId + '">'
-            + '<span class="chat-typing">' + I18N.t('chat.querying') + '</span>'
             + '<span class="chat-dots"><span></span><span></span><span></span></span>'
             + '</div>';
           body.scrollTop = body.scrollHeight;

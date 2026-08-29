@@ -491,7 +491,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         runtime_id = rid  # 已由本机直连兜底解析（§8.2）；远端引擎才走队列
 
         async def event_stream():
-            yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...', 'conversation_id': conv_id})}\n\n"
+            yield f"data: {json.dumps({'type': '思考中', 'text': '', 'conversation_id': conv_id})}\n\n"
             final_text = ""
             new_sid = runtime_session_id
             if runtime_id:
@@ -636,7 +636,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         # 让 event loop 有机会调度线程池任务
         await asyncio.sleep(0.1)
 
-        yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...', 'conversation_id': conv_id})}\n\n"
+        yield f"data: {json.dumps({'type': '思考中', 'text': '', 'conversation_id': conv_id})}\n\n"
 
         final_text = ""
         _last_sse = 0.0
@@ -1291,7 +1291,7 @@ async def chat_task_stream(task_id: str, user: dict = Depends(get_current_user))
             import time as _t
             conv_id = ""
             # 先发思考中占位
-            yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...'})}\n\n"
+            yield f"data: {json.dumps({'type': '思考中', 'text': ''})}\n\n"
             deadline = _t.time() + 120
             while _t.time() < deadline:
                 with _msg_lock:
@@ -1329,7 +1329,7 @@ async def chat_task_stream(task_id: str, user: dict = Depends(get_current_user))
     async def event_stream():
         # 先发一个思考中占位（如果缓冲为空）
         if not task.events:
-            yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...'})}\n\n"
+            yield f"data: {json.dumps({'type': '思考中', 'text': ''})}\n\n"
         # 消费 queue（重放缓冲 + 实时事件）
         while True:
             try:
