@@ -336,6 +336,8 @@ const selectedRepo = ref('')
 const pendingDetailOpen = ref(false)
 const logModal = ref({ show: false, loading: false, messages: [], info: {} })
 const diagramRefs = {}
+const renderedIssues = ref(new Set())
+const renderingIssues = ref(new Set())
 
 const pendingTotal = computed(() => {
   if (!selectedRepoData.value) return 0
@@ -503,7 +505,10 @@ function fixLifelineHeight(svgStr, eventCount) {
       return Math.abs(x1 - x2) < 2
     })
     vLines.forEach(l => {
-      l.setAttribute('y2', String(minHeight))
+      const y2 = parseFloat(l.getAttribute('y2') || 0)
+      if (y2 < minHeight - 20) {
+        l.setAttribute('y2', String(minHeight - 10))
+      }
     })
     root.setAttribute('height', String(minHeight))
     if (viewBox) {
@@ -526,6 +531,7 @@ function bindMermaidClicks(iss, evTypes) {
   if (!events.length) return
   const msgTexts = Array.from(svg.querySelectorAll('text.messageText'))
   const noteTexts = Array.from(svg.querySelectorAll('text.noteText'))
+  const taskEventMap = {}
   let msgIdx = 0, noteIdx = 0
   events.forEach((ev, i) => {
     const type = evTypes[i] || 'msg'
@@ -540,16 +546,37 @@ function bindMermaidClicks(iss, evTypes) {
     if (!txt) return
     if (ev.taskId) {
       txt.setAttribute('data-task-id', ev.taskId)
+      txt.setAttribute('data-issue-id', iss.issueId)
       txt.style.cursor = 'pointer'
       txt.style.textDecoration = 'underline'
-      txt.addEventListener('click', () => openLogModal(ev.taskId, ev))
+      txt.style.fill = 'var(--primary)'
+      taskEventMap[ev.taskId] = ev
+      // tooltip：引擎名
+      const _eng = ev.engine || ''
+      if (_eng) {
+        const _t = document.createElementNS('http://www.w3.org/2000/svg', 'title')
+        _t.textContent = _eng
+        txt.appendChild(_t)
+      }
     }
   })
+  // 事件委托：避免 Vue v-html 重新渲染导致事件绑定丢失
+  svg.onclick = function(e) {
+    const target = e.target.closest('[data-task-id]')
+    if (!target) return
+    const taskId = target.getAttribute('data-task-id')
+    if (taskId && taskEventMap[taskId]) {
+      e.stopPropagation()
+      openLogModal(taskId, iss)
+    }
+  }
 }
 
 async function renderMermaidForIssue(iss) {
+  if (renderingIssues.value.has(iss.issueId)) return
   const el = diagramRefs[iss.issueId]
   if (!el) return
+  renderingIssues.value = new Set([...renderingIssues.value, iss.issueId])
   try {
     const mmd = await getMermaid()
     const { text, statuses, evTypes } = buildSequence(iss._events)
@@ -560,10 +587,16 @@ async function renderMermaidForIssue(iss) {
     const coloredSvg = applySequenceColors(svg, statuses)
     const fixedSvg = fixLifelineHeight(coloredSvg, iss._events.length)
     el.innerHTML = fixedSvg
+    renderedIssues.value = new Set([...renderedIssues.value, iss.issueId])
     nextTick(() => bindMermaidClicks(iss, evTypes))
   } catch (e) {
     const { text } = buildSequence(iss._events)
     el.innerHTML = `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${e.message || e}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>`
+    renderedIssues.value = new Set([...renderedIssues.value, iss.issueId])
+  } finally {
+    const s = new Set(renderingIssues.value)
+    s.delete(iss.issueId)
+    renderingIssues.value = s
   }
 }
 function eventTypeText(t) {
