@@ -391,7 +391,8 @@ public class ConsoleUserController {
                     "SUM(CASE WHEN t.status='failed' THEN 1 ELSE 0 END) as failed, " +
                     "SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
                     "SUM(CASE WHEN t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE) THEN 1 ELSE 0 END) as stuck, " +
-                    "MAX(t.started_at) as last_task_at " +
+                    "MAX(t.started_at) as last_task_at, " +
+                    "(SELECT COUNT(*) FROM events e WHERE e.issue_id = t.issue_id AND e.repo_key = t.repo_key) as event_count " +
                     joinSql +
                     " GROUP BY t.issue_id" +
                     " ORDER BY last_task_at DESC LIMIT ? OFFSET ?";
@@ -426,6 +427,7 @@ public class ConsoleUserController {
                 r.put("issueId", issueId);
                 r.put("issueTitle", issueTitleMap.getOrDefault(issueId, ""));
                 r.put("taskCount", rs.getInt("task_count"));
+                r.put("eventCount", rs.getInt("event_count"));
                 r.put("completed", rs.getInt("completed"));
                 r.put("failed", rs.getInt("failed"));
                 r.put("queued", rs.getInt("queued"));
@@ -470,13 +472,15 @@ public class ConsoleUserController {
         try {
             events = grapeJdbc.query(
                 "SELECT e.seq, e.event_type, e.agent_type, e.skill, e.status, e.duration, e.created_at, " +
-                "e.repo_key, t.id as task_id, t.runtime_id, " +
-                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
-                "rc.device_name, rc.last_ip " +
+                "e.repo_key, " +
+                "(SELECT t.id FROM agent_tasks t WHERE t.event_seq = e.seq AND t.repo_key = e.repo_key LIMIT 1) as task_id, " +
+                "(SELECT t.runtime_id FROM agent_tasks t WHERE t.event_seq = e.seq AND t.repo_key = e.repo_key LIMIT 1) as runtime_id, " +
+                "(SELECT ar.name FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as engine_name, " +
+                "(SELECT ar.credential_id FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as credential_id, " +
+                "(SELECT ar.host_name FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as host_name, " +
+                "(SELECT rc.device_name FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id JOIN runtime_credentials rc ON ar.credential_id = rc.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as device_name, " +
+                "(SELECT rc.last_ip FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id JOIN runtime_credentials rc ON ar.credential_id = rc.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as last_ip " +
                 "FROM events e " +
-                "LEFT JOIN agent_tasks t ON e.seq = t.event_seq AND e.repo_key = t.repo_key " +
-                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
-                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
                 "WHERE e.repo_key=? AND e.issue_id=? " +
                 "ORDER BY e.created_at",
                 (rs, rowNum) -> {
