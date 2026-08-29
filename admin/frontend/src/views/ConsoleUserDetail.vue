@@ -32,12 +32,10 @@
                 <span>GitCode 发布仓库</span>
                 <router-link to="/repos/manage" style="color:var(--primary);text-decoration:none">{{ info.gitcodePublishRepo }}</router-link>
               </div>
-              <div class="detail-row" v-else><span>GitCode 发布仓库</span>—</div>
               <div class="detail-row" v-if="info.githubPublishRepo">
                 <span>GitHub 发布仓库</span>
                 <router-link to="/repos/manage" style="color:var(--primary);text-decoration:none">{{ info.githubPublishRepo }}</router-link>
               </div>
-              <div class="detail-row" v-else><span>GitHub 发布仓库</span>—</div>
             </div>
           </div>
         </div>

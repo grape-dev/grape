@@ -145,9 +145,12 @@ public class ConsoleUserController {
             }
         } catch (Exception e) { /* ignore */ }
 
-        // 托管仓库数
+        // 托管仓库数（通过 agent_tasks.repo_key 关联 managed_repos）
         try {
-            Long repoCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM managed_repos WHERE repo_key IN (SELECT DISTINCT repo_key FROM agent_tasks WHERE user_id=?)", Long.class, id);
+            Long repoCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(DISTINCT m.repo_key) FROM managed_repos m " +
+                "INNER JOIN agent_tasks t ON m.repo_key = t.repo_key OR m.repo_key = CONCAT('gitcode:', t.repo_key) OR t.repo_key = CONCAT('gitcode:', m.repo_key) " +
+                "WHERE t.user_id=?", Long.class, id);
             info.put("repoCount", repoCount != null ? repoCount : 0);
         } catch (Exception e) { /* ignore */ }
 
