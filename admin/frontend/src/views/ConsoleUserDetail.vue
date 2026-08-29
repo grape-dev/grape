@@ -86,8 +86,8 @@
                     <div class="tl-issue-head" @click="toggleIssueTimeline(iss)">
                       <span class="tl-arrow">{{ expandedIssues.has(iss.issueId) ? '▾' : '▸' }}</span>
                       <b class="tl-issue-id">
-                        <a :href="`https://gitcode.com/${iss.repoName || selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop class="tl-issue-link">
-                          <span class="t3" style="font-size:11px">{{ iss.repoName || selectedRepoData?.fullName }}</span> {{ iss.issueId }}
+                        <a :href="`https://gitcode.com/${iss.repoName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop class="tl-issue-link">
+                          <span class="t3" style="font-size:11px">{{ iss.repoName }}</span> {{ iss.issueId }}
                         </a>
                       </b>
                       <span class="tl-issue-title t3" v-if="iss.issueTitle" :title="iss.issueTitle">{{ iss.issueTitle }}</span>

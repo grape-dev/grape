@@ -223,7 +223,8 @@ public class ConsoleUserController {
 
         // 最近活动（最近 5 条任务）
         try {
-            List<Map<String, Object>> recentTasks = grapeJdbc.query(
+            // 构建 SQL（参数化查询，防注入）
+            StringBuilder sqlBuilder = new StringBuilder(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
                 "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
                 "ar.name as engine_name, ar.credential_id, ar.host_name, " +
@@ -233,12 +234,20 @@ public class ConsoleUserController {
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
                 "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
                 "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
-                "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
-                (repoKey != null && !repoKey.isEmpty() ? " AND t.repo_key='" + repoKey.replace("'", "") + "' " : "") +
-                "ORDER BY t.started_at DESC LIMIT 5",
+                "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>''");
+            List<Object> taskParams = new ArrayList<>();
+            taskParams.add(id);
+            if (repoKey != null && !repoKey.isEmpty()) {
+                sqlBuilder.append(" AND t.repo_key=?");
+                taskParams.add(repoKey);
+            }
+            sqlBuilder.append(" ORDER BY t.started_at DESC LIMIT 5");
+            List<Map<String, Object>> recentTasks = grapeJdbc.query(
+                sqlBuilder.toString(),
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
                     r.put("id", rs2.getString("id"));
+                    r.put("repoKey", rs2.getString("repo_key"));
                     String fullName = rs2.getString("full_name");
                     r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
                     r.put("issueId", rs2.getString("issue_id"));
@@ -248,10 +257,8 @@ public class ConsoleUserController {
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
                     r.put("eventType", rs2.getString("event_type"));
-                    // 引擎实例名（对齐 observability instance_name 逻辑）
                     r.put("engine", buildEngineName(rs2));
                     r.put("engineIp", rs2.getString("last_ip"));
-                    // 耗时（秒）
                     String startedAt = rs2.getString("started_at");
                     String completedAt = rs2.getString("completed_at");
                     if (startedAt != null && completedAt != null) {
@@ -268,15 +275,10 @@ public class ConsoleUserController {
                     } else {
                         r.put("duration", "—");
                     }
-                    // 状态判断（直接用 status 字段，对齐 observability）
                     String taskStatus = rs2.getString("status");
-                    if (taskStatus != null && !taskStatus.isEmpty()) {
-                        r.put("status", taskStatus);
-                    } else {
-                        r.put("status", "unknown");
-                    }
+                    r.put("status", taskStatus != null && !taskStatus.isEmpty() ? taskStatus : "unknown");
                     return r;
-                }, id);
+                }, taskParams.toArray());
             info.put("recentTasks", recentTasks);
             // 批量补 issueTitle
             batchFillIssueTitle(recentTasks);
@@ -284,7 +286,7 @@ public class ConsoleUserController {
 
         // 进行中任务（最近 5 条）
         try {
-            List<Map<String, Object>> recentPending = grapeJdbc.query(
+            StringBuilder sqlP = new StringBuilder(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
                 "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
                 "ar.name as engine_name, ar.credential_id, ar.host_name, " +
@@ -295,12 +297,17 @@ public class ConsoleUserController {
                 "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
                 "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
                 "WHERE u.id=? AND t.status IN ('dispatched','running') " +
-                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
-                (repoKey != null && !repoKey.isEmpty() ? " AND t.repo_key='" + repoKey.replace("'", "") + "' " : "") +
-                "ORDER BY t.started_at DESC LIMIT 5",
+                "AND t.issue_id IS NOT NULL AND t.issue_id<>''");
+            List<Object> pendingParams = new ArrayList<>();
+            pendingParams.add(id);
+            if (repoKey != null && !repoKey.isEmpty()) { sqlP.append(" AND t.repo_key=?"); pendingParams.add(repoKey); }
+            sqlP.append(" ORDER BY t.started_at DESC LIMIT 5");
+            List<Map<String, Object>> recentPending = grapeJdbc.query(
+                sqlP.toString(),
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
                     r.put("id", rs2.getString("id"));
+                    r.put("repoKey", rs2.getString("repo_key"));
                     String fullName = rs2.getString("full_name");
                     r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
                     r.put("issueId", rs2.getString("issue_id"));
@@ -312,19 +319,17 @@ public class ConsoleUserController {
                     r.put("eventType", rs2.getString("event_type"));
                     r.put("engine", buildEngineName(rs2));
                     r.put("engineIp", rs2.getString("last_ip"));
-                    String sa = rs2.getString("started_at");
-                    String ca = rs2.getString("completed_at");
-                    r.put("duration", calcDuration(sa, ca));
+                    r.put("duration", calcDuration(rs2.getString("started_at"), rs2.getString("completed_at")));
                     r.put("status", "pending");
                     return r;
-                }, id);
+                }, pendingParams.toArray());
             info.put("recentPendingTasks", recentPending);
             batchFillIssueTitle(recentPending);
         } catch (Exception e) { /* ignore */ }
 
         // 最近失败任务（最近 5 条）
         try {
-            List<Map<String, Object>> recentFailed = grapeJdbc.query(
+            StringBuilder sqlF = new StringBuilder(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
                 "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
                 "ar.name as engine_name, ar.credential_id, ar.host_name, " +
@@ -335,12 +340,17 @@ public class ConsoleUserController {
                 "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
                 "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
                 "WHERE u.id=? AND t.status='failed' " +
-                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
-                (repoKey != null && !repoKey.isEmpty() ? " AND t.repo_key='" + repoKey.replace("'", "") + "' " : "") +
-                "ORDER BY t.started_at DESC LIMIT 5",
+                "AND t.issue_id IS NOT NULL AND t.issue_id<>''");
+            List<Object> failedParams = new ArrayList<>();
+            failedParams.add(id);
+            if (repoKey != null && !repoKey.isEmpty()) { sqlF.append(" AND t.repo_key=?"); failedParams.add(repoKey); }
+            sqlF.append(" ORDER BY t.started_at DESC LIMIT 5");
+            List<Map<String, Object>> recentFailed = grapeJdbc.query(
+                sqlF.toString(),
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
                     r.put("id", rs2.getString("id"));
+                    r.put("repoKey", rs2.getString("repo_key"));
                     String fullName = rs2.getString("full_name");
                     r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
                     r.put("issueId", rs2.getString("issue_id"));
@@ -352,12 +362,10 @@ public class ConsoleUserController {
                     r.put("eventType", rs2.getString("event_type"));
                     r.put("engine", buildEngineName(rs2));
                     r.put("engineIp", rs2.getString("last_ip"));
-                    String sa = rs2.getString("started_at");
-                    String ca = rs2.getString("completed_at");
-                    r.put("duration", calcDuration(sa, ca));
+                    r.put("duration", calcDuration(rs2.getString("started_at"), rs2.getString("completed_at")));
                     r.put("status", "failed");
                     return r;
-                }, id);
+                }, failedParams.toArray());
             info.put("recentFailedTasks", recentFailed);
             batchFillIssueTitle(recentFailed);
         } catch (Exception e) { /* ignore */ }
@@ -513,14 +521,13 @@ public class ConsoleUserController {
                 t.put("issueTitle", titleCache.get(cacheKey));
                 continue;
             }
-            // 从 repoName 拼 repoKey 查 events payload
-            String repoName = (String) t.get("repoName");
-            String repoKey = repoName != null ? "gitcode:" + repoName : "";
+            // 从 repoKey 查 events payload
+            String repoKeyVal = (String) t.get("repoKey");
             String title = "";
             try {
                 List<Map<String, Object>> evs = grapeJdbc.queryForList(
                     "SELECT payload FROM events WHERE repo_key=? AND issue_id=? AND payload LIKE '%object_attributes%' ORDER BY seq LIMIT 1",
-                    repoKey, issueId);
+                    repoKeyVal, issueId);
                 if (!evs.isEmpty()) {
                     title = extractIssueTitle(evs.get(0).get("payload"), om);
                 }
