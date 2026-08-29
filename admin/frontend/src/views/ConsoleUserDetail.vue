@@ -93,37 +93,64 @@
             </div>
             <!-- 仓库与 Issue tab -->
             <div v-else>
-              <table class="vod-table" v-if="info.repoMatrix && info.repoMatrix.length">
-                <thead>
-                  <tr><th>仓库</th><th style="width:50px">任务</th><th style="width:50px">Issue</th><th style="width:50px">完成</th><th style="width:50px">失败</th><th style="width:60px">成功率</th></tr>
-                </thead>
-                <tbody>
-                  <template v-for="r in info.repoMatrix" :key="r.repoKey">
-                    <tr class="tl-row-clickable" @click="toggleRepoExpand(r.repoKey)">
+              <!-- 仓库选择下拉 -->
+              <div style="margin-bottom:16px">
+                <select v-model="selectedRepo" class="page-size-select" style="width:100%;max-width:400px;padding:8px 12px" @change="loadRepoIssues(0)">
+                  <option value="">请选择仓库</option>
+                  <option v-for="r in info.repoMatrix" :key="r.repoKey" :value="r.repoKey">{{ r.fullName }}（{{ r.taskCount }} 任务 / {{ r.issueCount }} Issue）</option>
+                </select>
+              </div>
+
+              <!-- 仓库总体统计 -->
+              <div v-if="selectedRepoData" class="repo-summary-grid">
+                <div class="activity-card">
+                  <div class="activity-value">{{ selectedRepoData.taskCount }}</div>
+                  <div class="activity-label">任务总数</div>
+                </div>
+                <div class="activity-card">
+                  <div class="activity-value" style="color:#34c759">{{ selectedRepoData.completed }}</div>
+                  <div class="activity-label">已完成</div>
+                </div>
+                <div class="activity-card">
+                  <div class="activity-value" style="color:#ff3b30">{{ selectedRepoData.failed }}</div>
+                  <div class="activity-label">失败</div>
+                </div>
+                <div class="activity-card">
+                  <div class="activity-value" style="color:#006eff">{{ selectedRepoData.issueCount }}</div>
+                  <div class="activity-label">Issue 数</div>
+                </div>
+                <div class="activity-card">
+                  <div class="activity-value" style="color:#5e5ce6">{{ selectedRepoData.taskCount > 0 ? Math.round(selectedRepoData.completed * 1000 / selectedRepoData.taskCount) / 10 + '%' : '—' }}</div>
+                  <div class="activity-label">成功率</div>
+                </div>
+              </div>
+
+              <!-- Issue 分页列表 -->
+              <div v-if="selectedRepo" style="margin-top:16px">
+                <table class="vod-table" v-if="repoIssues.length">
+                  <thead>
+                    <tr><th>Issue</th><th style="width:60px">任务</th><th style="width:60px">完成</th><th style="width:60px">失败</th><th style="width:70px">成功率</th><th style="width:150px">最近活动</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="iss in repoIssues" :key="iss.issueId">
                       <td>
-                        <span style="margin-right:4px;font-size:10px">{{ expandedRepos.includes(r.repoKey) ? '▼' : '▶' }}</span>
-                        <router-link :to="`/repos/manage`" style="color:var(--primary);text-decoration:none" @click.stop>{{ r.fullName }}</router-link>
-                      </td>
-                      <td class="t3">{{ r.taskCount }}</td>
-                      <td class="t3">{{ r.issueCount }}</td>
-                      <td class="t3" style="color:#34c759">{{ r.completed }}</td>
-                      <td class="t3" style="color:#ff3b30">{{ r.failed }}</td>
-                      <td class="t3">{{ r.taskCount > 0 ? Math.round(r.completed * 1000 / r.taskCount) / 10 + '%' : '—' }}</td>
-                    </tr>
-                    <tr v-if="expandedRepos.includes(r.repoKey)" v-for="iss in issuesByRepo(r.repoKey)" :key="iss.issueId">
-                      <td style="padding-left:28px;font-size:12px">
-                        <a :href="`https://gitcode.com/${iss.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none" @click.stop>{{ iss.issueId }}</a>
+                        <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ iss.issueId }}</a>
                       </td>
                       <td class="t3">{{ iss.taskCount }}</td>
-                      <td class="t3">—</td>
                       <td class="t3" style="color:#34c759">{{ iss.completed }}</td>
                       <td class="t3" style="color:#ff3b30">{{ iss.failed }}</td>
                       <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
+                      <td class="t3">{{ formatTime(iss.lastTaskAt) }}</td>
                     </tr>
-                  </template>
-                </tbody>
-              </table>
-              <p v-else class="t2" style="padding:20px;text-align:center">暂无仓库数据</p>
+                    <tr v-if="!repoIssues.length">
+                      <td colspan="6" style="text-align:center;padding:20px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <PaginationBar v-if="repoIssuesTotal > 0" v-model:page="repoIssuesPage" v-model:size="repoIssuesSize" :total="repoIssuesTotal" :total-pages="repoIssuesTotalPages" :size-options="[10, 20, 50]" @change="loadRepoIssues()" />
+                <p v-else-if="!repoIssuesLoading" class="t2" style="padding:20px;text-align:center">该仓库暂无 Issue 数据</p>
+              </div>
+              <p v-else-if="!selectedRepo" class="t2" style="padding:20px;text-align:center">请选择仓库查看 Issue 列表</p>
             </div>
           </div>
         </div>
@@ -166,6 +193,7 @@
 import { onMounted, ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../api'
+import PaginationBar from '../components/PaginationBar.vue'
 
 const route = useRoute()
 const info = ref({})
@@ -173,7 +201,19 @@ const loading = ref(true)
 const resetting = ref(false)
 const activityTab = ref('task')
 const expandedRepos = ref([])
+const selectedRepo = ref('')
+const repoIssues = ref([])
+const repoIssuesPage = ref(0)
+const repoIssuesSize = ref(10)
+const repoIssuesTotal = ref(0)
+const repoIssuesTotalPages = ref(0)
+const repoIssuesLoading = ref(false)
 const toast = ref({ show: false, msg: '', type: 'success' })
+
+const selectedRepoData = computed(() => {
+  if (!selectedRepo.value) return null
+  return (info.value.repoMatrix || []).find(r => r.repoKey === selectedRepo.value)
+})
 
 const credentialConfigured = computed(() => {
   let count = 0
@@ -192,6 +232,26 @@ function toggleRepoExpand(repoKey) {
 
 function issuesByRepo(repoKey) {
   return (info.value.issueDetails || []).filter(i => i.repoKey === repoKey)
+}
+
+async function loadRepoIssues(p) {
+  if (p !== undefined) repoIssuesPage.value = p
+  if (!selectedRepo.value) return
+  repoIssuesLoading.value = true
+  try {
+    const { data } = await http.get(`/console-users/${route.params.id}/repo-issues`, {
+      params: { repoKey: selectedRepo.value, page: repoIssuesPage.value, size: repoIssuesSize.value }
+    })
+    repoIssues.value = data.content || []
+    repoIssuesTotal.value = data.totalElements || 0
+    repoIssuesTotalPages.value = data.totalPages || 0
+  } catch (e) {
+    console.error('[ConsoleUserDetail] loadRepoIssues failed', e)
+    repoIssues.value = []
+    repoIssuesTotal.value = 0
+  } finally {
+    repoIssuesLoading.value = false
+  }
 }
 
 function formatTime(val) {
@@ -254,6 +314,7 @@ onMounted(() => load())
 .cred-chip.on .cred-chip-status { color: #34c759; }
 
 .activity-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.repo-summary-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
 .activity-card { text-align: center; padding: 14px 6px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
 .activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }

@@ -261,6 +261,63 @@ public class ConsoleUserController {
         return info;
     }
 
+    @GetMapping("/{id}/repo-issues")
+    public Map<String, Object> repoIssues(@PathVariable int id,
+                                          @RequestParam String repoKey,
+                                          @RequestParam(defaultValue = "0") int page,
+                                          @RequestParam(defaultValue = "10") int size) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        String fullRepoKey = "gitcode:" + repoKey;
+        String cleanRepoKey = repoKey.replace("gitcode:", "");
+
+        StringBuilder where = new StringBuilder(
+            " FROM agent_tasks t " +
+            "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+            "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?");
+        where.append(" AND (m.repo_key=? OR m.repo_key=? OR m.repo_key=?)");
+        List<Object> params = new ArrayList<>();
+        params.add(id);
+        params.add(repoKey);
+        params.add(fullRepoKey);
+        params.add(cleanRepoKey);
+        where.append(" AND t.issue_id IS NOT NULL AND t.issue_id<>''");
+
+        long total = 0;
+        try {
+            total = grapeJdbc.queryForObject(
+                "SELECT COUNT(DISTINCT t.issue_id)" + where, Long.class, params.toArray());
+        } catch (Exception e) { /* ignore */ }
+
+        List<Map<String, Object>> list = new ArrayList<>();
+        try {
+            String sql = "SELECT t.issue_id, " +
+                    "COUNT(*) as task_count, " +
+                    "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
+                    "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed, " +
+                    "MAX(t.started_at) as last_task_at " + where +
+                    " GROUP BY t.issue_id" +
+                    " ORDER BY last_task_at DESC LIMIT ? OFFSET ?";
+            params.add(size);
+            params.add(page * size);
+            grapeJdbc.query(sql, rs -> {
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("issueId", rs.getString("issue_id"));
+                r.put("taskCount", rs.getInt("task_count"));
+                r.put("completed", rs.getInt("completed"));
+                r.put("failed", rs.getInt("failed"));
+                r.put("lastTaskAt", rs.getString("last_task_at"));
+                list.add(r);
+            }, params.toArray());
+        } catch (Exception e) { /* ignore */ }
+
+        result.put("content", list);
+        result.put("totalElements", total);
+        result.put("totalPages", (total + size - 1) / size);
+        result.put("page", page);
+        result.put("size", size);
+        return result;
+    }
+
     @PostMapping("/{id}/reset-token")
     public Map<String, Object> resetToken(@PathVariable int id) {
         Map<String, Object> result = new LinkedHashMap<>();
