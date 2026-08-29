@@ -232,7 +232,7 @@ onMounted(() => { load(); loadRoles(); loadRoleStats() })
 .um-ops { display: flex; gap: 4px; flex-wrap: wrap; }
 .um-pagination {
   display: flex; align-items: center; justify-content: space-between;
-  margin-top: 16px; padding: 16px 24px; border-top: 1px solid var(--border-soft, #f0f0f0);
+  margin-top: 16px; padding: 16px 24px; border-top: 1px solid var(--border-soft);
 }
 .um-pagination-info { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
 .um-pagination-controls { display: flex; align-items: center; gap: 8px; }

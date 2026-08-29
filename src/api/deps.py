@@ -6,6 +6,19 @@ TOKEN_TYPE_DEVOPS = "devops_bot"
 TOKEN_TYPE_USER = "user"
 TOKEN_TYPE_WEBHOOK = "webhook"
 
+# 用户活跃状态追踪——内存缓冲，定时批量 flush
+_pending_active: set = set()
+
+def mark_user_active(uid: int):
+    """将用户 id 加入待更新集合——O(1)，不阻塞 API"""
+    _pending_active.add(uid)
+
+def get_pending_active() -> set:
+    """获取并清空待更新集合（供定时任务调用）"""
+    uids = set(_pending_active)
+    _pending_active.clear()
+    return uids
+
 
 def get_current_user(authorization: str = Header(None)) -> dict:
     """从 Authorization: Bearer *** 提取并验证 JWT access token。
@@ -31,6 +44,8 @@ def get_current_user(authorization: str = Header(None)) -> dict:
     db_ver = user_db.get_token_version(uid)
     if token_ver != db_ver:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "会话已失效"})
+    # 记录活跃状态——O(1)，不阻塞
+    mark_user_active(uid)
     return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_USER}
 
 

@@ -1,13 +1,8 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
 import json, asyncio, tempfile, os, threading, time
 
-from src.config import WORKSPACE_DIR, log
+from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
 from src.prompt_builder import build_general_chat_prompt
-
-# Chat 工作目录下发的逻辑基准：worker 端 src/runtime/agent.py `_remap_cwd` 的默认映射契约
-# （/home/grape → 该 worker 用户 home）。服务端必须用逻辑基准下发而非本机 WORKSPACE_DIR，
-# 否则非 root 用户 worker（如 mlc）拿 /opt/grape-workspaces/... 映射不到 → 写 /root → Permission denied。
-CHAT_CWD_BASE = "/home/grape"
 
 def _get_chat_cwd(user_id: int, conv_id: str) -> str:
     """每个 conversation 独立工作目录，避免相互影响。

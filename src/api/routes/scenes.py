@@ -83,8 +83,10 @@ async def list_skills_for_agent(agent_type: str, user: dict = Depends(get_curren
         try:
             c.execute(
                 "SELECT skill_name, display_name, scope, owner_id FROM skill "
-                "WHERE agent_type=? AND is_active=1 ORDER BY scope, skill_name",
-                (agent_type,))
+                "WHERE agent_type=? AND is_active=1 "
+                "AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) "
+                "ORDER BY scope, skill_name",
+                (agent_type, user.get("id", 0), user.get("id", 0)))
             for r in c.fetchall():
                 skills.append({"skill_name": r[0], "display_name": r[1] or r[0], "scope": r[2], "owner_id": r[3] or ""})
         except Exception as e:

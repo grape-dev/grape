@@ -240,7 +240,7 @@ function applySequenceColors(svg, statuses) {
     if (svgH > 0) {
       Array.from(root.querySelectorAll('line.actor-line')).forEach(l => l.setAttribute('y2', String(svgH)))
     }
-    const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'pending' ? '#94a3b8' : '#2e9e5b')
+    const colorOf = s => (s === 'failed' ? '#ff3b30' : s === 'pending' ? 'var(--text-tertiary)' : '#34c759')
     const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
     lines.forEach((line, i) => {
       const color = colorOf(statuses[i])
@@ -358,7 +358,7 @@ onMounted(load)
   color: var(--text-tertiary, #8a919c);
   background: #f4f6f8;
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: 6px;
   display: inline-block;
   margin-bottom: 8px;
   max-width: 100%;
@@ -369,7 +369,7 @@ onMounted(load)
 .repo-link {
   margin-left: auto;
   font-size: 12px;
-  color: var(--primary, #4f6ef2);
+  color: var(--primary, #006eff);
   text-decoration: none;
 }
 .repo-link:hover { text-decoration: underline; }
@@ -378,7 +378,7 @@ onMounted(load)
 .act-tag:hover { opacity: 0.85; }
 .tl-row { border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
 .tl-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-.tl-toggle { color: #94a3b8; font-size: 12px; flex-shrink: 0; }
+.tl-toggle { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
 .tl-issue { font-weight: 600; color: var(--primary); }
 .tl-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
 /* mermaid 时序图容器 */
@@ -389,7 +389,7 @@ onMounted(load)
 .dm-stat {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; padding: 3px 10px; border-radius: 12px;
-  background: #f5f7fa; color: var(--text-secondary); border: 1px solid transparent;
+  background: rgba(0,0,0,0.04); color: var(--text-secondary); border: 1px solid transparent;
   cursor: pointer; transition: all 0.15s;
 }
 .dm-stat strong { font-weight: 600; color: var(--text-primary); }

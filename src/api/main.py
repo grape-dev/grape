@@ -128,6 +128,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Local probe loop start failed: {e}")
 
+    # 用户活跃状态追踪：每 30 秒批量更新 last_active_at
+    _active_tracker_task = None
+    try:
+        async def _active_user_tracker():
+            from src.api.deps import get_pending_active
+            from src.user import db as user_db
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    uids = get_pending_active()
+                    if uids:
+                        await asyncio.to_thread(user_db.batch_update_last_active, list(uids))
+                except Exception as e:
+                    log.warning(f"Active user tracker flush failed: {e}")
+
+        _active_tracker_task = asyncio.create_task(_active_user_tracker())
+        log.info("Active user tracker started (30s flush)")
+    except Exception as e:
+        log.warning(f"Active user tracker start failed: {e}")
+
     yield
 
     log.info("IM WS: stopping...")

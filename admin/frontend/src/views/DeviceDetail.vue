@@ -14,7 +14,7 @@
       <!-- 设备信息 -->
       <div class="card" style="padding:16px 20px">
         <div class="detail-grid">
-          <div class="detail-item" :style="{ borderLeftColor: detail.status === 'active' ? '#52c41a' : 'var(--text-tertiary)' }">
+          <div class="detail-item" :style="{ borderLeftColor: detail.status === 'active' ? '#34c759' : 'var(--text-tertiary)' }">
             <span class="t3">状态</span>
             <span :class="['status-tag', detail.status === 'active' ? 'success' : 'default']">{{ detail.status === 'active' ? '有效' : '已吊销' }}</span>
           </div>
@@ -23,8 +23,8 @@
           <div class="detail-item" style="border-left-color:#006eff"><span class="t3">最后心跳</span>{{ formatTime(detail.lastSeenAt) }}</div>
           <div class="detail-item"><span class="t3">IP</span>{{ detail.lastIp || '—' }}</div>
           <div class="detail-item"><span class="t3">创建时间</span>{{ formatTime(detail.createdAt) }}</div>
-          <div class="detail-item" style="border-left-color:#7222ed"><span class="t3">引擎数</span>{{ detail.engines?.length ?? 0 }}</div>
-          <div class="detail-item" style="border-left-color:#1890ff"><span class="t3">任务数</span>{{ detail.tasks?.totalElements ?? 0 }}</div>
+          <div class="detail-item" style="border-left-color:#5e5ce6"><span class="t3">引擎数</span>{{ detail.engines?.length ?? 0 }}</div>
+          <div class="detail-item" style="border-left-color:#006eff"><span class="t3">任务数</span>{{ detail.tasks?.totalElements ?? 0 }}</div>
         </div>
       </div>
 
@@ -99,9 +99,9 @@ let taskChart = null
 const STATUS_META = {
   completed: { label: '完成', color: 'var(--success)' },
   success: { label: '完成', color: 'var(--success)' },
-  failed: { label: '失败', color: '#e5484d' },
-  running: { label: '运行中', color: '#1890ff' },
-  pending: { label: '等待', color: '#ea5a0c' }
+  failed: { label: '失败', color: '#ff3b30' },
+  running: { label: '运行中', color: '#006eff' },
+  pending: { label: '等待', color: '#ff9500' }
 }
 const taskTotal = computed(() => {
   const st = detail.value?.tasks?.filterOptions?.status || {}
@@ -117,7 +117,7 @@ const taskStatList = computed(() => {
 
 const BADGE = {
   online: { color: 'var(--success)', bg: '#dcfce7', label: '在线' },
-  recently_lost: { color: '#ea5a0c', bg: '#fef3c7', label: '刚失联' },
+  recently_lost: { color: '#ff9500', bg: 'rgba(255,149,0,0.1)', label: '刚失联' },
   offline: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '离线' },
   about_to_gc: { color: 'var(--danger)', bg: '#fee2e2', label: '待回收' },
   revoked: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '已吊销' }
@@ -190,7 +190,7 @@ function renderTaskChart() {
       label: { show: true, formatter: '{b}: {c}' },
       data
     }],
-    color: ['#52c41a', '#e5484d', '#1890ff', '#ea5a0c', '#8896a7', '#7222ed']
+    color: ['#34c759', '#ff3b30', '#006eff', '#ff9500', '#aeaeb2', '#5e5ce6']
   })
 }
 function onEngineChange() {
@@ -238,12 +238,12 @@ load()
   background: #fff;
   border: 1px solid var(--border-color);
   border-left: 3px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 14px;
   padding: 10px 14px;
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  transition: all 0.2s ease;
+  transition: all var(--transition);
 }
 .detail-item:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .detail-item .t3 { display: block; font-size: 11px; font-weight: 400; color: var(--text-tertiary); margin-bottom: 3px; }
@@ -261,11 +261,11 @@ load()
   color: var(--text-secondary);
   padding: 6px 14px;
   border-radius: 8px;
-  background: #f5f5f5;
+  background: rgba(0,0,0,0.04);
   border: 1px solid var(--border-color);
   cursor: pointer;
   user-select: none;
-  transition: all 0.2s ease;
+  transition: all var(--transition);
   line-height: 1;
 }
 .back-btn:hover { color: var(--primary); background: #e6f4ff; border-color: #91caff; transform: translateX(-2px); }
@@ -285,11 +285,11 @@ load()
   max-width: 160px;
   background: #fff;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 14px;
   border-left: 3px solid #006eff;
   padding: 12px 16px;
   text-align: center;
-  transition: all 0.2s ease;
+  transition: all var(--transition);
 }
 .task-stat-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .task-stat-card.kpi-primary { border-left-color: #006eff; }
@@ -347,10 +347,10 @@ load()
   padding: 6px 10px;
   font-size: 12px;
   color: var(--text-secondary);
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
   white-space: nowrap;
 }
-.col-filter-opt:hover { background: #f5f7fa; }
+.col-filter-opt:hover { background: rgba(0,0,0,0.04); }
 .col-filter-opt.active { background: var(--primary-bg); color: var(--primary); font-weight: 500; }
 </style>

@@ -682,18 +682,69 @@ def claim(runtime_id) -> dict | None:
                 db.commit()
                 return None
             task_id = row[0]
+
             # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
-            c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
-            _pe_row = c.fetchone()
-            if _pe_row and _pe_row[0]:
-                import json as _json
-                try:
-                    _allowed = _json.loads(_pe_row[0])
-                    if _allowed and runtime_id not in _allowed:
+            # 修复（2026-08-29）：原代码 return None 会阻塞队列——与 claim_by_tag 同一 bug。
+            # 改为循环跳过不匹配的任务，继续尝试下一个。
+            _tried_ids = [task_id]
+            _max_tries = 20
+            while True:
+                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+                _pe_row = c.fetchone()
+                _skip = False
+                if _pe_row and _pe_row[0]:
+                    import json as _json
+                    try:
+                        _allowed = _json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            _skip = True
+                    except Exception:
+                        pass
+                if not _skip:
+                    break
+
+                # 跳过当前，尝试下一个定向任务
+                _tried_str = ','.join(["'"+x+"'" for x in _tried_ids])
+                c.execute(
+                    f"SELECT id FROM agent_tasks "
+                    f"WHERE runtime_id=? AND status='queued' "
+                    f"AND id NOT IN ({_tried_str}) "
+                    f"AND NOT EXISTS ("
+                    f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                    f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
+                    f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
+                    f"  )) ORDER BY created_at ASC LIMIT 1",
+                    (runtime_id,)
+                )
+                row = c.fetchone()
+                if not row:
+                    # 定向任务都试过了，尝试池任务（非插件模式）
+                    _is_plugin = False
+                    try:
+                        from src.api.event_pipeline import is_plugin_mode
+                        _is_plugin = is_plugin_mode()
+                    except Exception:
+                        pass
+                    if not _is_plugin:
+                        c.execute(
+                            f"SELECT id FROM agent_tasks "
+                            f"WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued' "
+                            f"AND id NOT IN ({_tried_str}) "
+                            f"AND NOT EXISTS ("
+                            f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                            f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
+                            f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
+                            f"  )) ORDER BY created_at ASC LIMIT 1"
+                        )
+                        row = c.fetchone()
+                    if not row:
                         db.commit()
-                        return None  # 当前引擎不在限定列表中，跳过
-                except Exception:
-                    pass
+                        return None
+                task_id = row[0]
+                _tried_ids.append(task_id)
+                if len(_tried_ids) >= _max_tries:
+                    db.commit()
+                    return None
             c.execute(
                 "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
                 (runtime_id, datetime.now(timezone.utc).isoformat(), task_id))
@@ -852,17 +903,74 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             if not task_row:
                 return None
             task_id = task_row[0]
+
             # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
-            c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
-            _pe_row = c.fetchone()
-            if _pe_row and _pe_row[0]:
-                import json as _json
-                try:
-                    _allowed = _json.loads(_pe_row[0])
-                    if _allowed and runtime_id not in _allowed:
-                        return None  # 当前引擎不在限定列表中，跳过
-                except Exception:
-                    pass
+            # 修复（2026-08-29）：原代码 return None 会阻塞队列——队首任务如果不匹配，
+            # 后面的任务永远不会被尝试。改为循环跳过不匹配的任务，继续尝试下一个。
+            # pool_engine_ids 是 JSON 数组如 "[76]"，SQL 难以直接过滤，
+            # 这里用 Python 循环 LIMIT N 逐个检查。
+            _tried_ids = [task_id]
+            _max_tries = 20  # 防止全表扫描
+            while True:
+                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+                _pe_row = c.fetchone()
+                _skip = False
+                if _pe_row and _pe_row[0]:
+                    import json as _json
+                    try:
+                        _allowed = _json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            _skip = True
+                    except Exception:
+                        pass
+                if not _skip:
+                    break  # 当前任务可认领
+
+                # 跳过当前任务，尝试下一个
+                _tried_str = ','.join(["'"+x+"'" for x in _tried_ids])
+                if scope == "repo":
+                    c.execute(
+                        f"SELECT t.id FROM agent_tasks t "
+                        f"WHERE {_tag_match} AND t.status='queued' AND t.repo_key=? "
+                        f"AND t.id NOT IN ({_tried_str}) "
+                        f"AND NOT EXISTS ("
+                        f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                        f"    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
+                        f"    OR (t.issue_session_id = '' AND a2.agent_session_id = t.agent_session_id)"
+                        f"  )) ORDER BY t.created_at ASC LIMIT 1",
+                        (*params,)
+                    )
+                elif scope == "user":
+                    c.execute(
+                        f"SELECT t.id FROM agent_tasks t "
+                        f"WHERE {_tag_match} AND t.status='queued' AND t.user_id=? "
+                        f"AND t.id NOT IN ({_tried_str}) "
+                        f"AND NOT EXISTS ("
+                        f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                        f"    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
+                        f"    OR (t.issue_session_id = '' AND a2.agent_session_id = t.agent_session_id)"
+                        f"  )) ORDER BY t.created_at ASC LIMIT 1",
+                        (*params,)
+                    )
+                else:
+                    c.execute(
+                        f"SELECT id FROM agent_tasks "
+                        f"WHERE {_tag_match_noprefix} AND status='queued' "
+                        f"AND id NOT IN ({_tried_str}) "
+                        f"AND NOT EXISTS ("
+                        f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                        f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
+                        f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
+                        f"  )) ORDER BY created_at ASC LIMIT 1"
+                    )
+                task_row = c.fetchone()
+                if not task_row:
+                    return None  # 所有任务都试过了，没有可认领的
+                task_id = task_row[0]
+                _tried_ids.append(task_id)
+                if len(_tried_ids) >= _max_tries:
+                    return None  # 防止无限循环
+
             # 标记 dispatched
             c.execute(
                 "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
@@ -1218,6 +1326,108 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                           task_id=task_id, payload={"exit_code": exit_code}))
     except Exception:
         pass
+    # A2A 自动补触发（2026-08-30 修复）：
+    # hermes ACP premature end_turn bug：agent 说完"触发 A2A"后直接 end_turn，
+    # 没实际调用 A2A API → pipeline 卡住。任务完成后检查 issue_state.stage 是否已推进，
+    # 如果 stage 还等于当前 agent_type（说明 A2A 没被调用），自动补触发下一个 agent。
+    if exit_code == 0 and task:
+        try:
+            _auto_advance_pipeline(task)
+        except Exception as _ae:
+            log.warning(f"auto advance pipeline failed for task {task_id}: {_ae}")
+
+
+def _auto_advance_pipeline(task: dict):
+    """任务完成后检查 pipeline 是否推进，没推进则自动触发下一个 agent。
+
+    通过 pipelines.json 查找当前 agent 的 next agent，然后调 A2A。
+    只在 issue_id 非空 + stage 仍等于当前 agent_type 时触发（说明 agent 没调 A2A）。
+    """
+    import threading
+    _issue_id = (task.get("issue_id") or "").strip()
+    _repo_key = task.get("repo_key") or ""
+    _agent_type = (task.get("agent_type") or "").strip()
+    if not _issue_id or not _repo_key or not _agent_type:
+        return
+    if _agent_type in ("chat", "vod") and not _issue_id:
+        return  # chat 无 issue，vod 是首步不需要补触发
+
+    # 检查 issue_state.stage 是否已推进
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT stage, scene_id FROM issue_state WHERE repo_key=? AND issue_id=?",
+                  (_repo_key, _issue_id))
+        _row = c.fetchone()
+    if not _row:
+        return  # 无 issue_state 记录（非 pipeline 任务）
+    _stage, _scene_id = _row[0], (_row[1] if len(_row) > 1 else "") or ""
+    if _stage != _agent_type:
+        return  # stage 已推进（agent 成功调了 A2A），不需要补触发
+    # stage 还等于当前 agent_type → A2A 没被调用，需要补触发
+
+    # 从 pipelines.json 查找 next agent
+    _next_agent = ""
+    try:
+        import os as _os
+        _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))),
+                                   "configs", "pipelines.json")
+        import json as _json
+        with open(_pipe_path, "r", encoding="utf-8") as _f:
+            _pipes = _json.load(_f)
+        _scene = _pipes.get("scenes", {}).get(_scene_id) or _pipes.get("scenes", {}).get("default") or {}
+        for _node in (_scene.get("nodes") or []):
+            if _node.get("id") == _agent_type:
+                _next_agent = _node.get("next", "")
+                break
+    except Exception:
+        pass
+    if not _next_agent or _next_agent == "done":
+        return  # 没有下一个 agent，或已经是最后一步
+
+    # 检查是否已有下一个 agent 的 running 事件（避免重复触发）
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                  "AND status IN ('running','dispatched') ORDER BY seq DESC LIMIT 1",
+                  (_repo_key, _issue_id, _next_agent))
+        _existing = c.fetchone()
+    if _existing:
+        return  # 已有下一个 agent 的 running 事件，不重复触发
+
+    log.info(f"Auto-advance: issue={_issue_id} agent={_agent_type} -> {_next_agent} "
+             f"(stage stuck at {_stage}, A2A not called by agent)")
+
+    # 异步触发 A2A（不阻塞 complete_task 返回）
+    def _trigger_a2a():
+        try:
+            import requests as _req
+            _issue_num = _issue_id.lstrip("#")
+            _repo_display = _repo_key.split(":", 1)[-1] if ":" in _repo_key else _repo_key
+            # 获取 bot token
+            from src.user.db import get_repo_bot_token_no_global
+            _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
+            _server_url = "https://example.com"
+            try:
+                from src.user.db import get_meta_value
+                _sbu = get_meta_value("server_base_url")
+                if _sbu:
+                    _server_url = _sbu
+            except Exception:
+                pass
+            _resp = _req.post(f"{_server_url}/api/a2a",
+                              json={"agent": _next_agent,
+                                    "payload": {"repository": _repo_display,
+                                                "issue_number": int(_issue_num) if _issue_num.isdigit() else _issue_num,
+                                                "context": f"auto-advance from {_agent_type} (A2A not called by agent)"}},
+                              headers={"Authorization": f"Bearer {_bot_token}",
+                                       "Content-Type": "application/json"},
+                              timeout=30)
+            log.info(f"Auto-advance A2A: status={_resp.status_code} agent={_next_agent} "
+                     f"issue={_issue_id} resp={_resp.text[:100]}")
+        except Exception as _e:
+            log.warning(f"Auto-advance A2A failed: {_e}")
+
+    threading.Thread(target=_trigger_a2a, daemon=True).start()
 
 
 def fail_task(task_id, error, exit_code=-1):

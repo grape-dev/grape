@@ -19,7 +19,9 @@ const routes = [
   { path: '/ai/assistant', name: 'ai.assistant', component: () => import('../views/AiAssistant.vue'), meta: { title: 'AI 助手' } },
   { path: '/ai/history', name: 'ai.history', component: () => import('../views/ChatHistory.vue'), meta: { title: 'AI 历史' } },
   { path: '/sys/users', name: 'sys.users', component: () => import('../views/UserManage.vue'), meta: { title: '用户管理' } },
-  { path: '/sys/roles', name: 'sys.roles', component: () => import('../views/RolePermissionConfig.vue'), meta: { title: '角色权限配置' } }
+  { path: '/sys/console', name: 'sys.console', component: () => import('../views/ConsoleUsers.vue'), meta: { title: '工作台用户' } },
+  { path: '/sys/console/:id', name: 'sys.console-detail', component: () => import('../views/ConsoleUserDetail.vue'), meta: { title: '用户详情' } },
+  { path: '/sys/roles', name: 'sys.roles', component: () => import('../views/RolePermissionConfig.vue'), meta: { title: '角色权限配置' } },
 ]
 
 const router = createRouter({

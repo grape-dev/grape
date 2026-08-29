@@ -100,8 +100,7 @@ function renderDashboard(data) {
       <h2>Scene Center</h2>
       <div class="ap-bar">
         <select id="sceneSelect" class="ap-sel">${sceneOpts}</select>
-        ${isCustomScene ? '<button class="ap-btn ap-btn-p" onclick="toggleEditMode()">编辑场景</button>' : ''}
-        <button class="ap-btn ap-btn-o" onclick="toggleEngineMode()">配置引擎</button>
+        ${isCustomScene ? '<button class="ap-btn ap-btn-o" onclick="toggleEditMode()">编辑场景</button>' : '<button class="ap-btn ap-btn-o" onclick="toggleEngineMode()">配置引擎</button>'}
         <button class="ap-btn ap-btn-o" onclick="applyScene('${owner}', '${name}')">应用</button>
       </div>
     </div>
@@ -109,13 +108,6 @@ function renderDashboard(data) {
 
   html += renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngines, isCustomScene, false, []);
   html += `</div>
-    <div class="ap-chat" onclick="app.nav('chat')">
-      <div class="ap-chat-ic">☎</div>
-      <div style="flex:1">
-        <div class="ap-chat-t">Chat Agent · Personal Assistant</div>
-        <div class="ap-chat-s">Your personal agent connected to the workflow</div>
-      </div>
-    </div>
   </div>`;
 
   el.innerHTML = html;
@@ -242,6 +234,8 @@ function renderDashboard(data) {
     cardsEl.innerHTML = renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngines, true, true, editNodes);
     let btn = document.querySelector('button[onclick="toggleEditMode()"]');
     if (btn) btn.remove();
+    let engBtn = document.querySelector('button[onclick="toggleEngineMode()"]');
+    if (engBtn) engBtn.style.display = 'none';
     const headerDiv = document.querySelector('.ap-bar');
     if (headerDiv) {
       const saveBtn = document.createElement('button');
@@ -267,10 +261,13 @@ function renderDashboard(data) {
   };
 
   window.openEngineModal = function(agentType) {
-    const engines = (agentEngines[agentType] || []);
+    const engines = (agentEngines[agentType] || []).filter(e => e.status === 'online');
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
     const currentIds = node.engine_runtime_ids || [];
+
+    const _ENG_TAG_COLORS = {all:'#6366f1',vod:'#ec4899',issue:'#ef4444',coding:'#3b82f6',qa:'#a855f7',sre:'#f59e0b'};
+    const _tagBadge = (tags) => (tags||['all']).map(t => `<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:${_ENG_TAG_COLORS[t]||'#999'};margin-left:4px;font-weight:500">${t==='all'?'All':t.charAt(0).toUpperCase()+t.slice(1)}</span>`).join('');
 
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
@@ -286,10 +283,10 @@ function renderDashboard(data) {
           return `<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:1px solid ${checked ? '#0071e3' : '#e8e8ed'};border-radius:12px;cursor:pointer;background:${checked ? 'rgba(0,113,227,.04)' : '#f5f5f7'};transition:all .15s">
             <input type="checkbox" data-eid="${e.id}" ${checked ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">
             <div style="flex:1;min-width:0">
-              <div style="font-weight:600;font-size:13px;color:#1d1d1f">${e.name}</div>
-              <div style="font-size:10px;color:#86868b;margin-top:2px">${e.device || ''}${e.cred_name ? ' · ' + e.cred_name : ''}</div>
+              <div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center">${e.name}${_tagBadge(e.tags)}</div>
+              <div style="font-size:10px;color:#86868b;margin-top:3px">${e.device || ''}${e.cred_name ? ' · ' + e.cred_name : ''}</div>
             </div>
-            <span style="font-size:11px;font-weight:500;color:${e.status === 'online' ? '#34c759' : '#86868b'}">${e.status === 'online' ? '● 在线' : '○ 离线'}</span>
+            <span style="font-size:11px;font-weight:500;color:#34c759">● 在线</span>
           </label>`;
         }).join('')}
       </div>
@@ -316,57 +313,34 @@ function renderDashboard(data) {
   };
 
   window.saveCustomScene = function() {
-    const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
-    overlay.innerHTML = `<div style="background:#fff;border-radius:18px;padding:28px;min-width:360px;max-width:460px;box-shadow:0 12px 48px rgba(0,0,0,.15)">
-      <h3 style="margin:0 0 20px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">保存自定义场景</h3>
-      <div style="margin-bottom:14px">
-        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">场景名称</label>
-        <input id="sceneNameInput" type="text" placeholder="如：我的开发流程" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
-      </div>
-      <div style="margin-bottom:14px">
-        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">描述（可选）</label>
-        <input id="sceneDescInput" type="text" placeholder="场景描述..." style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
-      </div>
-      <div style="margin-bottom:20px">
-        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">可见范围</label>
-        <select id="sceneScopeSelect" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
-          <option value="user">个人级（所有仓库可见）</option>
-          <option value="repo">仓库级（仅当前仓库可见）</option>
-        </select>
-      </div>
-      <div style="display:flex;justify-content:flex-end;gap:8px">
-        <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">取消</button>
-        <button class="ap-btn ap-btn-p" id="confirmSaveSceneBtn">保存</button>
-      </div>
-    </div>`;
-    document.body.appendChild(overlay);
-
-    document.getElementById('confirmSaveSceneBtn').onclick = function() {
-      const sceneName = document.getElementById('sceneNameInput').value.trim();
-      if (!sceneName) { app.showToast('请输入场景名称'); return; }
-      const sceneDesc = document.getElementById('sceneDescInput').value.trim();
-      const sceneScope = document.getElementById('sceneScopeSelect').value;
-      const nodesPayload = agentOrder.filter(at => {
-        const n = editNodes.find(e => e.id === at);
-        return n && n.enabled;
-      }).map((at, i, arr) => {
-        const n = editNodes.find(e => e.id === at);
-        const nextAgent = i < arr.length - 1 ? arr[i + 1] : 'done';
-        return {
-          id: at, tag: at, skill: n.skill || '', mode: 'emit',
-          next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete',
-          skip: [], enabled: true,
-          engine_runtime_ids: n.engine_runtime_ids || [],
-        };
-      });
-      API.post('/scenes', { name: sceneName, description: sceneDesc, scope: sceneScope, nodes: nodesPayload }).then(r => {
+    const nodesPayload = agentOrder.filter(at => {
+      const n = editNodes.find(e => e.id === at);
+      return n && n.enabled;
+    }).map((at, i, arr) => {
+      const n = editNodes.find(e => e.id === at);
+      const nextAgent = i < arr.length - 1 ? arr[i + 1] : 'done';
+      return {
+        id: at, tag: at, skill: n.skill || '', mode: 'emit',
+        next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete',
+        skip: [], enabled: true,
+        engine_runtime_ids: n.engine_runtime_ids || [],
+      };
+    });
+    if (currentScene && currentScene !== 'default' && isCustomScene) {
+      // 编辑已有自定义场景：直接 PUT，不弹名称/描述
+      API.put('/scenes/' + currentScene, { nodes: nodesPayload }).then(() => {
         window._dashboardEditing = false;
-        overlay.remove();
+        app.showToast('场景已保存');
+        API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
+      }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
+    } else {
+      // 创建新场景：POST
+      API.post('/scenes', { name: '自定义场景', description: '', scope: 'user', nodes: nodesPayload }).then(r => {
+        window._dashboardEditing = false;
         app.showToast('场景创建成功');
         if (r.scene_id) { applyScene(owner, name, r.scene_id); }
       }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
-    };
+    }
   };
 }
 
@@ -379,6 +353,7 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     const node = isEditing ? editNodes.find(n => n.id === at) : null;
     const enabled = node ? node.enabled : (ag.enabled_in_scene !== false);
     const skill = node ? (node.skill || '') : (ag.skill || '');
+    const skillDisplay = node ? (ag.skill_display_name || ag.skill || node.skill || '') : (ag.skill_display_name || ag.skill || '');
     const engineIds = node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []);
     const accentColor = meta.color || colors[at] || '#86868b';
     const desc = meta.description || descs[at] || '';
@@ -405,7 +380,7 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
         }).catch(() => {});
       }, 50);
     } else if (enabled && skill) {
-      skillHtml = `<span class="ap-nd-val">${skill}</span>`;
+      skillHtml = `<span class="ap-nd-val">${skillDisplay}</span>`;
     } else {
       skillHtml = `<span style="font-size:11px;color:#86868b">none</span>`;
     }

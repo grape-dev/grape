@@ -46,7 +46,7 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by) VALUES (?,?,?,?)",
+            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by, created_at) VALUES (?,?,?,?,datetime('now'))",
                       (username, pw_hash, password, created_by))
             db.commit()
             uid = c.lastrowid
@@ -136,6 +136,23 @@ def increment_token_version(user_id: int) -> None:
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE user_accounts SET token_version=token_version+1 WHERE id=?", (user_id,))
+        db.commit()
+
+
+def batch_update_last_active(uids: list) -> None:
+    """批量更新用户最后活跃时间——定时任务调用，分批每 1000 个"""
+    if not uids:
+        return
+    with db_lock:
+        c = db.cursor()
+        # 分批，每批 1000
+        for i in range(0, len(uids), 1000):
+            batch = uids[i:i+1000]
+            placeholders = ",".join(["?"] * len(batch))
+            c.execute(
+                f"UPDATE user_accounts SET last_active_at=datetime('now') WHERE id IN ({placeholders})",
+                batch,
+            )
         db.commit()
 
 
@@ -1554,7 +1571,7 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             row = c.fetchone()
             if row:
                 c.execute(
-                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
+                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
                     (a.get("display_name", name),
                      1 if a.get("installed") else 0, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
