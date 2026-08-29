@@ -179,7 +179,7 @@ public class ConsoleUserController {
             List<Map<String, Object>> repoMatrix = grapeJdbc.query(
                 "SELECT m.full_name, m.repo_key, " +
                 "COUNT(*) as task_count, " +
-                "COUNT(DISTINCT t.issue_id) as issue_count, " +
+                "COUNT(DISTINCT CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN t.issue_id END) as issue_count, " +
                 "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
                 "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed, " +
                 "SUM(CASE WHEN t.exit_code IS NULL OR t.completed_at IS NULL THEN 1 ELSE 0 END) as pending " +
@@ -340,7 +340,7 @@ public class ConsoleUserController {
         long total = 0;
         try {
             total = grapeJdbc.queryForObject(
-                "SELECT COUNT(DISTINCT t.issue_id)" + joinSql, Long.class, baseParams);
+                "SELECT COUNT(DISTINCT CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN t.issue_id END)" + joinSql, Long.class, baseParams);
         } catch (Exception e) { /* ignore */ }
 
         // Issue 分页列表（GROUP BY issue_id，按最近活动时间倒序）
