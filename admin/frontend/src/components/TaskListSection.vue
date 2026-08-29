@@ -413,6 +413,7 @@ async function renderIssueMermaid() {
 }
 
 const taskChartEl = ref(null)
+let taskChart = null
 function renderTaskChart() {
   const el = taskChartEl.value
   if (!el) return
@@ -420,8 +421,8 @@ function renderTaskChart() {
   if (!fo || !fo.status) return
   const data = Object.entries(fo.status).map(([k, v]) => ({ name: STATUS_MAP[k]?.label || k, value: v, itemStyle: { color: STATUS_MAP[k]?.color || "#999" } })).filter(d => d.value > 0)
   if (data.length === 0) { el.innerHTML = '<div style="text-align:center;padding:40px;color:#999">暂无数据</div>'; return }
-  const chart = echarts.init(el)
-  chart.setOption({ tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" }, legend: { bottom: 0, textStyle: { fontSize: 11 } }, series: [{ type: "pie", radius: ["40%", "70%"], label: { show: true, formatter: "{b}\n{c}", fontSize: 11 }, data }] })
+  if (!taskChart) taskChart = echarts.init(el)
+  taskChart.setOption({ tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" }, legend: { bottom: 0, textStyle: { fontSize: 11 } }, series: [{ type: "pie", radius: ["40%", "70%"], label: { show: true, formatter: "{b}\n{c}", fontSize: 11 }, data }] })
 }
 watch(() => props.tasks, () => {
   filterCount.value = (taskStatus.value || taskSkill.value || taskType.value) ? (props.tasks?.totalElements ?? 0) : 0
