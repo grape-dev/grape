@@ -627,6 +627,7 @@ function _buildSequence(iss) {
   const lines = ['sequenceDiagram', 'autonumber'];
   for (const a of agents) lines.push('    participant ' + _mermaidId(a) + ' as ' + a);
   const statuses = [];
+  const evTypes = [];  // 'msg' or 'note' — 用于 _bindMermaidClicks 精确映射
   let prev = null;
   for (const ev of iss.events) {
     const a = _mermaidId(ev.agentType || '—');
@@ -636,14 +637,16 @@ function _buildSequence(iss) {
       // 跨 agent 交互：prev -> a
       lines.push('    ' + prev + '->>' + a + ': ' + label);
       statuses.push(ev.status);
+      evTypes.push('msg');
     } else {
       // 同 agent 连续事件或首个事件：用 Note 标注（不挤在一行）
       lines.push('    Note over ' + a + ': ' + label);
       statuses.push(ev.status);
+      evTypes.push('note');
     }
     prev = a;
   }
-  return { text: lines.join('\n'), statuses };
+  return { text: lines.join('\n'), statuses, evTypes };
 }
 
 function _applySequenceColors(svg, statuses) {
@@ -674,14 +677,14 @@ async function _renderMermaid(box, iss) {
   try {
     const mmd = await _getMermaid();
     const uid = 'mmd-' + Math.random().toString(36).slice(2, 10);
-    const { text, statuses } = _buildSequence(iss);
+    const { text, statuses, evTypes } = _buildSequence(iss);
     // mermaid v11: 先 parse 验证语法，再 render
     try { await mmd.parse(text); } catch(pe) { /* parse 失败也尝试 render */ }
     const result = await mmd.render(uid, text);
     const svg = result.svg || result;
     box.innerHTML = _applySequenceColors(svg, statuses);
     // 给每个消息/Note 绑定点击事件 → 打开对应事件的日志弹窗
-    _bindMermaidClicks(box, iss);
+    _bindMermaidClicks(box, iss, evTypes);
   } catch (err) {
     box.innerHTML = '<div style="padding:12px;color:var(--r);font-size:12px">时序渲染失败: ' + (err.message || err) + '</div>';
     // 显示原始 mermaid 文本供调试
@@ -690,20 +693,29 @@ async function _renderMermaid(box, iss) {
   }
 }
 
-function _bindMermaidClicks(box, iss) {
-  // mermaid 序列图中每个消息（messageText）和 Note（noteText）按 DOM 顺序对应 events
-  // _buildSequence 中 message 和 Note 混合生成，需要按渲染顺序统一映射
+function _bindMermaidClicks(box, iss, evTypes) {
+  // mermaid 渲染时 message 和 Note 分组排列（不是交替的），
+  // 需要按 evTypes 分别匹配 messageText 和 noteText
   const events = iss.events || [];
   if (!events.length) return;
   const svg = box.querySelector('svg');
   if (!svg) return;
-  // 按 DOM 顺序取所有 messageText + noteText，和 _buildSequence 生成顺序一致
-  const allTexts = Array.from(svg.querySelectorAll('text.messageText, text.noteText'));
-  allTexts.forEach((txt, i) => {
-    if (i >= events.length) return;
-    const ev = events[i];
-    if (!ev || !ev.taskId) return;
-    // 只绑定到 text 元素本身（不向上找 g，避免空白区域可点击）
+  // 分别取 message 和 note 的 text 元素
+  const msgTexts = Array.from(svg.querySelectorAll('text.messageText'));
+  const noteTexts = Array.from(svg.querySelectorAll('text.noteText'));
+  // evTypes 标记每个事件是 'msg' 还是 'note'，分别用独立计数器匹配
+  let msgIdx = 0, noteIdx = 0;
+  events.forEach((ev, i) => {
+    const type = evTypes[i] || 'msg';
+    let txt = null;
+    if (type === 'msg') {
+      txt = msgTexts[msgIdx];
+      msgIdx++;
+    } else {
+      txt = noteTexts[noteIdx];
+      noteIdx++;
+    }
+    if (!txt || !ev.taskId) return;
     txt.style.cursor = 'pointer';
     txt.style.textDecoration = 'underline';
     txt.style.fill = 'var(--a)';
