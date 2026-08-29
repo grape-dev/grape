@@ -44,8 +44,8 @@
               <td class="t3">{{ c.lastIp || '-' }}</td>
               <td class="t3">{{ formatTime(c.createdAt) }}</td>
               <td>
-                <button v-if="c.status === 'active'" class="act-icon-btn" style="color:#fa8c16" @click="openRevoke(c)" title="吊销"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 12l3 3 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-                <button v-if="c.status === 'revoked'" class="act-icon-btn" style="color:#e5484d" @click="openDelete(c)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                <button v-if="c.status === 'active'" class="act-icon-btn" style="color:#ff9500" @click="openRevoke(c)" title="吊销"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 12l3 3 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                <button v-if="c.status === 'revoked'" class="act-icon-btn" style="color:#ff3b30" @click="openDelete(c)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
               </td>
             </tr>
           </tbody>
@@ -69,8 +69,8 @@
             <div class="ellipsis-cell" :title="c.lastIp || '—'"><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ c.lastIp || '—' }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
-            <button v-if="c.status === 'active'" class="act-icon-btn" style="color:#fa8c16" @click="openRevoke(c)" title="吊销"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 12l3 3 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-            <button v-if="c.status === 'revoked'" class="act-icon-btn" style="color:#e5484d" @click="openDelete(c)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <button v-if="c.status === 'active'" class="act-icon-btn" style="color:#ff9500" @click="openRevoke(c)" title="吊销"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 12l3 3 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <button v-if="c.status === 'revoked'" class="act-icon-btn" style="color:#ff3b30" @click="openDelete(c)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           </div>
         </div>
       </div>
@@ -87,7 +87,7 @@
         </div>
         <div class="modal-body">
           <div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary)">范围：<span class="status-tag info" style="font-size:11px;padding:1px 6px">全局</span>（运营管理台仅签发全局凭据）</div>
-          <input v-model="credentialName" placeholder="凭据名称（唯一，≤64字符）" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" @keyup.enter="issue" />
+          <input v-model="credentialName" placeholder="凭据名称（唯一，≤64字符）" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:8px;font-size:14px" @keyup.enter="issue" />
         </div>
         <div class="modal-footer">
           <button class="btn" @click="showIssue = false">取消</button>
@@ -146,7 +146,7 @@
           <p style="margin:0 0 12px">将物理删除凭据 <b>{{ deleteTarget.name }}</b> 及其关联的引擎/任务记录（管理台数据，删除后不可恢复）。<br />
           worker 机器不受影响——重新签发凭据并更新 worker 端 token 后，可重新注册上线。凭据名称将释放，可签发同名凭据。</p>
           <p style="margin:0 0 6px">请输入凭据名 <b>{{ deleteTarget.name }}</b> 确认：</p>
-          <input v-model="deleteWord" class="form-input" placeholder="输入凭据名确认" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" />
+          <input v-model="deleteWord" class="form-input" placeholder="输入凭据名确认" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:8px;font-size:14px" />
         </div>
         <div class="modal-footer">
           <button class="btn" @click="deleteTarget = null">取消</button>
@@ -272,7 +272,7 @@ onMounted(load)
 
 <style scoped>
 /* ===== 工具条 ===== */
-.act-icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 4px; color: var(--text-secondary, #666); display: inline-flex; align-items: center; transition: background 0.15s; }
+.act-icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 8px; color: var(--text-secondary, #666); display: inline-flex; align-items: center; transition: background var(--transition); }
 .act-icon-btn:hover { background: rgba(0, 107, 255, 0.08); color: var(--primary, #006eff); }
 .act-icon-btn + .act-icon-btn { margin-left: 2px; }
 </style>

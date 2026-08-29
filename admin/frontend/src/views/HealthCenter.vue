@@ -106,7 +106,7 @@
             <h3>任务列表</h3>
             <span class="t3" style="font-size:12px">{{ timelineIssues.length }} 个 Issue — 点击展开</span>
             <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
-              <input v-model="timelineRepo" placeholder="仓库名筛选" style="width:160px;padding:5px 8px;border:1px solid var(--border-color);border-radius:6px;font-size:12px" @keyup.enter="loadTimeline" />
+              <input v-model="timelineRepo" placeholder="仓库名筛选" style="width:160px;padding:5px 8px;border:1px solid var(--border-color);border-radius:8px;font-size:12px" @keyup.enter="loadTimeline" />
               <button class="btn btn-sm" @click="loadTimeline">刷新</button>
             </div>
           </div>
@@ -425,7 +425,7 @@ const infraHealth = computed(() => {
 })
 
 const alertSummary = computed(() => {
-  const map = { critical: { label: '严重', color: '#f5222d', bg: '#fff1f0', count: 0 }, warning: { label: '警告', color: '#faad14', bg: '#fffbe6', count: 0 }, info: { label: '提示', color: '#006eff', bg: '#e8f0fe', count: 0 } }
+  const map = { critical: { label: '严重', color: '#ff3b30', bg: 'rgba(255,59,48,0.1)', count: 0 }, warning: { label: '警告', color: '#ff9500', bg: 'rgba(255,149,0,0.1)', count: 0 }, info: { label: '提示', color: '#006eff', bg: 'rgba(0,107,255,0.08)', count: 0 } }
   alerts.value.forEach(a => { if (map[a.severity]) map[a.severity].count++ })
   return Object.fromEntries(Object.entries(map).filter(([, v]) => v.count > 0))
 })
@@ -599,7 +599,7 @@ function applySequenceColors(svg, statuses) {
     const root = doc.documentElement
     const defs = root.querySelector('defs')
     if (!defs) return svg
-    const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'completed' ? '#2e9e5b' : '#94a3b8')
+    const colorOf = s => (s === 'failed' ? '#ff3b30' : s === 'completed' ? '#34c759' : '#aeaeb2')
     const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
     lines.forEach((line, i) => {
       const markerId = root.id + '-seqnum-' + i
@@ -697,7 +697,7 @@ async function renderMermaidForIssue(issueId) {
     nextTick(() => bindMermaidClicks(issueId, iss, evTypes))
   } catch (err) {
     const { text } = buildSequence(iss)
-    issueSvgs.value = { ...issueSvgs.value, [issueId]: `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${err.message || err}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>` }
+    issueSvgs.value = { ...issueSvgs.value, [issueId]: `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${err.message || err}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:8px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>` }
     renderedIssues.value = new Set([...renderedIssues.value, issueId])
   } finally {
     const s = new Set(renderingIssues.value)
@@ -880,32 +880,32 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 <style scoped>
 /* 告警中心横幅 */
-.alert-banner { border: 1px solid #ffa39e; border-radius: var(--radius); background: #fff1f0; margin-bottom: 16px; overflow: hidden; }
+.alert-banner { border-radius: var(--radius); background: rgba(255,59,48,0.1); margin-bottom: 16px; overflow: hidden; }
 .alert-banner-head { display: flex; align-items: center; gap: 10px; padding: 10px 16px; cursor: pointer; user-select: none; }
 .alert-icon { font-size: 16px; }
 .alert-title { font-weight: 600; font-size: 14px; color: var(--danger); }
-.alert-count { font-size: 12px; font-weight: 600; color: #fff; background: var(--danger); padding: 2px 8px; border-radius: 10px; }
+.alert-count { font-size: 12px; font-weight: 600; color: #fff; background: var(--danger); padding: 2px 8px; border-radius: 14px; }
 .alert-summary { display: flex; gap: 6px; margin-left: 8px; }
 .alert-chip { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 8px; }
 .alert-expand-icon { margin-left: auto; font-size: 10px; color: var(--text-secondary); }
-.alert-banner-body { border-top: 1px solid #ffccc7; background: #fff; max-height: 320px; overflow-y: auto; }
+.alert-banner-body { border-top: 1px solid var(--border-color); background: #fff; max-height: 320px; overflow-y: auto; }
 .alert-item { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
 .alert-item:last-child { border-bottom: none; }
-.alert-item-severity { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; white-space: nowrap; }
-.alert-item-severity.critical { background: #fff1f0; color: #f5222d; }
-.alert-item-severity.warning { background: #fffbe6; color: #faad14; }
-.alert-item-severity.info { background: #e8f0fe; color: #006eff; }
-.alert-item-source { font-size: 11px; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
-.alert-item-source.src-tasks { background: #e8f0fe; color: #006eff; }
-.alert-item-source.src-devices { background: #f6ffed; color: #52c41a; }
-.alert-item-source.src-infra { background: #fff7e6; color: #d48806; }
+.alert-item-severity { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 8px; white-space: nowrap; }
+.alert-item-severity.critical { background: rgba(255,59,48,0.1); color: #ff3b30; }
+.alert-item-severity.warning { background: rgba(255,149,0,0.1); color: #ff9500; }
+.alert-item-severity.info { background: rgba(0,107,255,0.08); color: #006eff; }
+.alert-item-source { font-size: 11px; padding: 2px 6px; border-radius: 8px; white-space: nowrap; }
+.alert-item-source.src-tasks { background: rgba(0,107,255,0.08); color: #006eff; }
+.alert-item-source.src-devices { background: rgba(52,199,89,0.1); color: #34c759; }
+.alert-item-source.src-infra { background: rgba(255,149,0,0.1); color: #ff9500; }
 .alert-item-title { font-weight: 500; min-width: 80px; }
 .alert-item-detail { color: var(--text-secondary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alert-item-time { font-size: 11px; white-space: nowrap; }
 
 /* 三维度卡片 */
 .hc-dimensions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-.hc-dim-card { background: var(--bg-white); border: 2px solid transparent; border-radius: var(--radius-lg); padding: 16px; cursor: pointer; transition: all 0.2s; box-shadow: var(--card-shadow); }
+.hc-dim-card { background: var(--bg-white); border: 2px solid transparent; border-radius: var(--radius-lg); padding: 16px; cursor: pointer; transition: all var(--transition); box-shadow: var(--card-shadow); }
 .hc-dim-card:hover { box-shadow: var(--card-shadow-hover); }
 .hc-dim-card.active { border-color: var(--primary); background: var(--primary-bg); }
 .hc-dim-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
@@ -916,7 +916,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .hc-kpi { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .hc-kpi-val { font-size: 22px; font-weight: 700; line-height: 1.2; }
 .hc-kpi-label { font-size: 11px; color: var(--text-tertiary); }
-.hc-dim-bar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: #f0f0f0; }
+.hc-dim-bar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: var(--border-soft); }
 .hc-dim-bar-seg { height: 100%; transition: width 0.3s; }
 .hc-dim-bar-seg.success { background: var(--success); }
 .hc-dim-bar-seg.warning { background: var(--warning); }
@@ -944,7 +944,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 /* Issue 分组列表 */
 .tl-issue { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
-.tl-issue-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; background: #fafbfc; }
+.tl-issue-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; background: rgba(0,0,0,0.02); }
 .tl-issue-head:hover { background: #f5f9ff; }
 .tl-arrow { font-size: 12px; color: var(--text-tertiary); width: 14px; }
 .tl-issue-id { font-size: 13px; min-width: 40px; }
@@ -959,13 +959,13 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .tl-issue-body { border-top: 1px solid var(--border-color); padding: 10px 14px; }
 .tl-view-tabs { display: flex; gap: 0; margin-bottom: 10px; }
 .tl-view-btn { padding: 5px 12px; font-size: 12px; border: 1px solid var(--border-color); background: #fff; color: var(--text-secondary); cursor: pointer; }
-.tl-view-btn:first-child { border-radius: 6px 0 0 6px; }
+.tl-view-btn:first-child { border-radius: 8px 0 0 6px; }
 .tl-view-btn:last-child { border-radius: 0 6px 6px 0; border-left: none; }
 .tl-view-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
 .tl-diagram-container { overflow-x: auto; padding: 8px 0; min-height: 60px; }
 .tl-diagram-loading { padding: 20px; text-align: center; color: var(--text-tertiary); font-size: 12px; }
-.tl-row-fail td { background: #fff1f0 !important; }
-.tl-row-ok td { background: #f6ffed !important; }
+.tl-row-fail td { background: rgba(255,59,48,0.1) !important; }
+.tl-row-ok td { background: rgba(52,199,89,0.1) !important; }
 
 /* 设备概览 */
 .hc-overview-kpi { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; border: 1px solid var(--border-color); border-radius: var(--radius); overflow: hidden; margin: 12px 20px; }
@@ -984,8 +984,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .hc-worker-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font-size: 10px; color: var(--text-tertiary); margin-bottom: 8px; }
 .hc-resource-bar { display: flex; align-items: center; gap: 6px; font-size: 10px; margin-bottom: 4px; }
 .hc-resource-label { color: var(--text-tertiary); min-width: 30px; }
-.hc-resource-track { flex: 1; height: 8px; background: #f0f0f0; border-radius: 4px; overflow: hidden; min-width: 60px; }
-.hc-resource-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+.hc-resource-track { flex: 1; height: 8px; background: var(--border-soft); border-radius: 8px; overflow: hidden; min-width: 60px; }
+.hc-resource-fill { height: 100%; border-radius: 8px; transition: width 0.3s; }
 .hc-resource-val { font-weight: 600; min-width: 30px; text-align: right; }
 
 /* 任务日志弹窗 */
@@ -1004,7 +1004,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .log-tl-status.ok { color: var(--success); } .log-tl-status.fail { color: var(--danger); } .log-tl-status.run { color: var(--warning); }
 .log-modal-body { flex: 1; overflow-y: auto; padding: 14px 18px; }
 .log-empty { text-align: center; padding: 32px; color: var(--text-tertiary); }
-.log-error-info { text-align: left; background: #fff1f0; border: 1px solid #ffa39e; border-radius: 8px; padding: 12px; }
+.log-error-info { text-align: left; background: rgba(255,59,48,0.1); border-radius: 8px; padding: 12px; }
 .log-error-row { font-size: 12px; margin-bottom: 4px; font-family: monospace; }
 .log-terminal { background: #0c1222; border-radius: 8px; padding: 12px; max-height: 60vh; overflow-y: auto; }
 .log-line { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; font-size: 12px; line-height: 1.6; border-bottom: 1px solid rgba(255,255,255,0.04); font-family: Menlo, Monaco, Consolas, monospace; }
@@ -1013,7 +1013,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .log-content { color: #e0e6f0; word-break: break-all; white-space: pre-wrap; }
 .log-type-step_start .log-content { color: #5b9eff; } .log-type-step_finish .log-content { color: #1ca44c; }
 .log-type-text .log-content { color: #e0e6f0; } .log-type-reasoning .log-content { color: #b388ff; }
-.log-type-tool_use .log-content { color: #ea5a0c; } .log-type-error .log-content { color: #dc2828; }
+.log-type-tool_use .log-content { color: #ff9500; } .log-type-error .log-content { color: #ff3b30; }
 .log-type-done .log-content { color: #1ca44c; }
 
 /* 事件行可点击 */

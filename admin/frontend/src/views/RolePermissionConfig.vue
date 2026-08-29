@@ -258,9 +258,9 @@ onMounted(() => { loadMenus(); loadRoles() })
 .rpc-role-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .rpc-role-item {
   padding: 7px 12px;
-  border: 1px solid #e2e6ed;
+  border: 1px solid var(--border-color);
   border-radius: 8px;
-  cursor: pointer; transition: all 0.15s;
+  cursor: pointer; transition: all var(--transition);
   display: inline-flex; align-items: center; gap: 8px;
   white-space: nowrap;
 }
@@ -275,27 +275,27 @@ onMounted(() => { loadMenus(); loadRoles() })
 .rpc-role-right { display: inline-flex; align-items: center; gap: 4px; }
 .rpc-role-del {
   width: 18px; height: 18px; padding: 0; border: none; background: none;
-  color: #bbb; font-size: 14px; cursor: pointer; border-radius: 4px;
+  color: var(--text-tertiary); font-size: 14px; cursor: pointer; border-radius: 8px;
   display: inline-flex; align-items: center; justify-content: center;
   opacity: 0; transition: opacity 0.15s, color 0.15s;
 }
 .rpc-role-item:hover .rpc-role-del { opacity: 1; }
-.rpc-role-del:hover { color: #ff4d4f; background: #fff1f0; }
+.rpc-role-del:hover { color: #ff3b30; background: rgba(255,59,48,0.1); }
 .rpc-body-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
 .rpc-body-header h4 { font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 0; }
-.rpc-right-code { font-size: 12px; color: var(--text-tertiary); background: #f0f0f0; padding: 2px 8px; border-radius: 4px; }
-.rpc-locked { font-size: 12px; color: #fa8c16; margin-left: 8px; }
+.rpc-right-code { font-size: 12px; color: var(--text-tertiary); background: var(--border-soft); padding: 2px 8px; border-radius: 8px; }
+.rpc-locked { font-size: 12px; color: #ff9500; margin-left: 8px; }
 .rpc-perm-row { display: flex; gap: 16px; }
 .rpc-perm-row .rpc-section { flex: 1; min-width: 0; margin-bottom: 0; }
 .rpc-section {
-  padding: 16px; background: #fafbfc;
-  border-radius: var(--radius-lg); border: 1px solid #f0f0f0;
+  padding: 16px; background: rgba(0,0,0,0.02);
+  border-radius: var(--radius-lg); border: 1px solid var(--border-soft);
 }
 .rpc-section h5 { font-size: 13px; font-weight: 600; color: var(--text-primary); margin: 0 0 4px 0; }
 .rpc-section-desc { font-size: 12px; color: var(--text-tertiary); margin: 0 0 12px 0; }
 .rpc-menu-tree { display: flex; flex-direction: column; }
 .rpc-tree-group {
-  border: 1px solid #e8e8e8; border-radius: 8px;
+  border: 1px solid var(--border-color); border-radius: 8px;
   margin-bottom: 6px; overflow: hidden;
 }
 .rpc-tree-row {
@@ -303,19 +303,19 @@ onMounted(() => { loadMenus(); loadRoles() })
   padding: 8px 12px; font-size: 13px; cursor: pointer;
   transition: background 0.1s;
 }
-.rpc-tree-row:hover { background: #f5f5f5; }
+.rpc-tree-row:hover { background: rgba(0,0,0,0.04); }
 .rpc-tree-row input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; flex-shrink: 0; }
 .rpc-tree-parent {
-  background: #f8f9fb; font-weight: 600;
+  background: rgba(0,0,0,0.02); font-weight: 600;
   color: var(--text-primary);
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--border-soft);
 }
 .rpc-tree-child {
   padding-left: 36px; background: #fff;
   color: var(--text-secondary);
 }
 .rpc-tree-leaf {
-  border: 1px solid #e8e8e8; border-radius: 8px;
+  border: 1px solid var(--border-color); border-radius: 8px;
   margin-bottom: 6px; background: #fff;
 }
 .rpc-tree-leaf:hover { border-color: var(--primary); background: #f5f9ff; }
@@ -336,7 +336,7 @@ onMounted(() => { loadMenus(); loadRoles() })
 .rpc-empty {
   display: flex; align-items: center; justify-content: center;
   min-height: 200px; color: var(--text-tertiary);
-  background: #fafbfc; border: 1px dashed var(--border-color);
+  background: rgba(0,0,0,0.02); border: 1px dashed var(--border-color);
   border-radius: var(--radius-lg);
 }
 </style>

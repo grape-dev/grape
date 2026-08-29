@@ -14,7 +14,7 @@
       <!-- KPI 卡片行：用户 → 仓库 → 设备 → 任务 -->
       <div class="kpi-row">
         <div class="kpi-card kpi-cyan" title="Grape 控制台用户数（user_accounts，即托管仓库登录用户）" @click="$router.push('/sys/console')">
-          <div class="kpi-icon" style="background:#e6fffb;color:#13c2c2;">👥</div>
+          <div class="kpi-icon" style="background:rgba(19,194,194,0.08);color:#13c2c2;">👥</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ vc.platformUserTotal || 0 }}</div>
             <div class="kpi-label">控制台用户</div>
@@ -23,7 +23,7 @@
           <div class="kpi-action">控制台用户 →</div>
         </div>
         <div class="kpi-card kpi-green" title="已托管仓库数（managed_repos）" @click="$router.push('/repos/manage')">
-          <div class="kpi-icon" style="background:#f6ffed;color:#52c41a;">📦</div>
+          <div class="kpi-icon" style="background:rgba(52,199,89,0.1);color:#34c759;">📦</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ vc.repoTotal || 0 }}</div>
             <div class="kpi-label">托管仓库</div>
@@ -32,7 +32,7 @@
           <div class="kpi-action">代码仓管理 →</div>
         </div>
         <div class="kpi-card kpi-blue" title="在线设备数（status=online）" @click="$router.push('/runtime/devices')">
-          <div class="kpi-icon" style="background:#e8f0fe;color:#006eff;">🖥️</div>
+          <div class="kpi-icon" style="background:rgba(0,107,255,0.08);color:#006eff;">🖥️</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ vc.onlineDevices || 0 }}<span class="kpi-unit">/{{ vc.totalDevices || 0 }}</span></div>
             <div class="kpi-label">在线设备</div>
@@ -41,7 +41,7 @@
           <div class="kpi-action">设备管理 →</div>
         </div>
         <div class="kpi-card kpi-orange" title="Agent 任务总数（agent_tasks）">
-          <div class="kpi-icon" style="background:#fff7e6;color:#fa8c16;">🤖</div>
+          <div class="kpi-icon" style="background:rgba(255,149,0,0.1);color:#ff9500;">🤖</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ vc.taskTotal || 0 }}</div>
             <div class="kpi-label">Agent 任务</div>
@@ -114,9 +114,9 @@ const deviceStatusRef = ref(null)
 const repoEventRef = ref(null)
 const userCompositionRef = ref(null)
 
-const COLOR_POOL = ['#006eff', '#52c41a', '#faad14', '#f5222d', '#722ed1', '#13c2c2', '#eb2f96', '#fa8c16']
-const TASK_STATUS_COLORS = { completed: '#52c41a', queued: '#faad14', dispatched: '#006eff' }
-const DEVICE_STATUS_COLORS = { online: '#52c41a', offline: '#d9d9d9' }
+const COLOR_POOL = ['#006eff', '#34c759', '#ff9500', '#ff3b30', '#722ed1', '#13c2c2', '#ff2d92', '#ff9500']
+const TASK_STATUS_COLORS = { completed: '#34c759', queued: '#ff9500', dispatched: '#006eff' }
+const DEVICE_STATUS_COLORS = { online: '#34c759', offline: '#aeaeb2' }
 const USER_COMP_COLORS = { '控制台用户': '#13c2c2', '管理台用户': '#006eff' }
 const STATUS_LABELS = { active: '有效', revoked: '已吊销', online: '在线', offline: '离线', completed: '已完成', queued: '排队中', dispatched: '已派发' }
 
@@ -178,7 +178,7 @@ function renderDeviceStatus() {
   const data = Object.keys(dist).filter(k => dist[k]).map(k => ({
     name: STATUS_LABELS[k] || k,
     value: dist[k],
-    itemStyle: { color: DEVICE_STATUS_COLORS[k] || '#d9d9d9' }
+    itemStyle: { color: DEVICE_STATUS_COLORS[k] || '#aeaeb2' }
   }))
   chart.setOption({
     tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
@@ -186,7 +186,7 @@ function renderDeviceStatus() {
     series: [{
       type: 'pie', radius: ['40%', '70%'], center: ['50%', '45%'],
       label: { show: true, formatter: '{b}\n{d}%', fontSize: 11 },
-      data: data.length ? data : [{ name: '暂无数据', value: 0, itemStyle: { color: '#f0f0f0' } }],
+      data: data.length ? data : [{ name: '暂无数据', value: 0, itemStyle: { color: 'rgba(0,0,0,0.04)' } }],
       emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.2)' } }
     }]
   })
@@ -201,7 +201,7 @@ function renderTaskStatus() {
   const data = Object.keys(dist).map(k => ({
     name: STATUS_LABELS[k] || k,
     value: dist[k],
-    itemStyle: { color: TASK_STATUS_COLORS[k] || '#d9d9d9' }
+    itemStyle: { color: TASK_STATUS_COLORS[k] || '#aeaeb2' }
   }))
   chart.setOption({
     tooltip: { trigger: 'axis' },
@@ -245,7 +245,7 @@ function renderRepoEvent() {
     series: [{
       type: 'bar', data: entries.map(([, v]) => v), barMaxWidth: 18,
       label: { show: true, position: 'right', fontSize: 11 },
-      itemStyle: { color: '#52c41a', borderRadius: [0, 4, 4, 0] }
+      itemStyle: { color: '#34c759', borderRadius: [0, 4, 4, 0] }
     }]
   })
 }
@@ -302,9 +302,9 @@ onBeforeUnmount(() => {
 .kpi-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-2px); }
 .kpi-blue { border-left: 3px solid #006eff; }
 .kpi-purple { border-left: 3px solid #7222ed; }
-.kpi-pink { border-left: 3px solid #eb2f96; }
-.kpi-orange { border-left: 3px solid #fa8c16; }
-.kpi-green { border-left: 3px solid #52c41a; }
+.kpi-pink { border-left: 3px solid #ff2d92; }
+.kpi-orange { border-left: 3px solid #ff9500; }
+.kpi-green { border-left: 3px solid #34c759; }
 .kpi-cyan { border-left: 3px solid #13c2c2; }
 .kpi-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
 .kpi-body { flex: 1; min-width: 0; }
@@ -334,7 +334,7 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border-color); color: var(--text-primary);
 }
 .glossary-table td {
-  padding: 6px 12px; border-bottom: 1px solid #f0f0f0;
+  padding: 6px 12px; border-bottom: 1px solid var(--border-soft);
 }
 .glossary-table tr:last-child td { border-bottom: none; }
 .glossary-table td:first-child { width: 120px; color: var(--text-primary); font-weight: 500; }

@@ -4,7 +4,7 @@
       <h1>控制台用户</h1>
       <span class="badge">{{ total }} 个用户</span>
       <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
-        <input v-model="keyword" placeholder="用户名搜索" style="width:180px;padding:5px 10px;border:1px solid var(--border-color);border-radius:6px;font-size:12px" @keyup.enter="load(0)" />
+        <input v-model="keyword" placeholder="用户名搜索" style="width:180px;padding:5px 10px;border:1px solid var(--border-color);border-radius:8px;font-size:12px" @keyup.enter="load(0)" />
         <button class="btn btn-sm" @click="load(0)">查询</button>
         <button class="btn btn-sm" @click="keyword=''; load(0)">重置</button>
       </div>
@@ -117,6 +117,6 @@ onMounted(() => load(0))
 .cu-detail-section { font-size: 13px; font-weight: 600; padding: 12px 0 4px; color: var(--primary); }
 .pagination-bar { display: flex; align-items: center; gap: 12px; padding: 12px 20px; }
 .page-info { font-size: 12px; color: var(--text-tertiary); }
-.page-btn { padding: 4px 10px; font-size: 12px; border: 1px solid var(--border-color); border-radius: 6px; background: #fff; cursor: pointer; }
+.page-btn { padding: 4px 10px; font-size: 12px; border: 1px solid var(--border-color); border-radius: 8px; background: #fff; cursor: pointer; }
 .page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

@@ -175,7 +175,7 @@ onMounted(load)
 .dm-stat {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; padding: 3px 10px; border-radius: 12px;
-  background: #f5f7fa; color: var(--text-secondary); border: 1px solid transparent;
+  background: rgba(0,0,0,0.04); color: var(--text-secondary); border: 1px solid transparent;
   cursor: pointer; transition: all 0.15s;
 }
 .dm-stat strong { font-weight: 600; color: var(--text-primary); }
