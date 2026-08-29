@@ -46,7 +46,7 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by) VALUES (?,?,?,?)",
+            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by, created_at) VALUES (?,?,?,?,NOW())",
                       (username, pw_hash, password, created_by))
             db.commit()
             uid = c.lastrowid
