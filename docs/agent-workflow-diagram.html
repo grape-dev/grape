@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Grape 多 Agent 执行交互流程图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; padding: 40px 20px; }
+  .container { max-width: 1200px; margin: 0 auto; }
+  h1 { text-align: center; font-size: 22px; margin-bottom: 8px; color: #58a6ff; }
+  .subtitle { text-align: center; font-size: 13px; color: #8b949e; margin-bottom: 40px; }
+  
+  .flow { display: flex; flex-direction: column; gap: 0; align-items: center; }
+  
+  .phase { width: 100%; max-width: 900px; }
+  .phase-label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; padding-left: 12px; }
+  
+  .agent-box {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 16px 20px; width: 100%; position: relative;
+  }
+  .agent-box.trigger { border-color: #58a6ff; }
+  .agent-box.vod { border-color: #d2a8ff; }
+  .agent-box.issue { border-color: #7ee787; }
+  .agent-box.coding { border-color: #ffa657; }
+  .agent-box.qa { border-color: #f85149; }
+  .agent-box.sre { border-color: #56d4dd; }
+  
+  .agent-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .agent-icon { width: 32px; height: 32px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; }
+  .agent-icon.trigger { background: #1a3a5c; color: #58a6ff; }
+  .agent-icon.vod { background: #2d1a3d; color: #d2a8ff; }
+  .agent-icon.issue { background: #1a2d1a; color: #7ee787; }
+  .agent-icon.coding { background: #3d2d1a; color: #ffa657; }
+  .agent-icon.qa { background: #3d1a1a; color: #f85149; }
+  .agent-icon.sre { background: #1a2d2d; color: #56d4dd; }
+  
+  .agent-name { font-size: 15px; font-weight: 600; }
+  .agent-skill { font-size: 11px; color: #8b949e; }
+  
+  .agent-body { font-size: 12px; color: #8b949e; line-height: 1.6; }
+  .agent-body strong { color: #c9d1d9; }
+  
+  .arrow {
+    width: 2px; height: 40px; background: #30363d; margin: 0 auto; position: relative;
+  }
+  .arrow::after {
+    content: ''; position: absolute; bottom: -1px; left: 50%; transform: translateX(-50%);
+    border-left: 6px solid transparent; border-right: 6px solid transparent;
+    border-top: 8px solid #30363d;
+  }
+  .arrow-label {
+    position: absolute; left: calc(50% + 12px); top: 50%; transform: translateY(-50%);
+    font-size: 11px; color: #58a6ff; white-space: nowrap;
+    background: #0d1117; padding: 2px 8px;
+  }
+  
+  .a2a-block {
+    background: #1a2332; border: 1px solid #1f4480; border-radius: 6px;
+    padding: 10px 14px; margin: 8px 0; font-family: "SF Mono", Monaco, monospace;
+    font-size: 11px; color: #79c0ff; line-height: 1.5; overflow-x: auto;
+  }
+  .a2a-label { font-size: 10px; color: #d2a8ff; margin-bottom: 4px; font-family: sans-serif; }
+  
+  .branch { display: flex; gap: 20px; width: 100%; max-width: 900px; }
+  .branch-item { flex: 1; }
+  .branch-label { text-align: center; font-size: 11px; color: #8b949e; margin-bottom: 8px; }
+  
+  .legend { margin-top: 40px; padding: 20px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; }
+  .legend-title { font-size: 13px; font-weight: 600; margin-bottom: 12px; color: #58a6ff; }
+  .legend-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+  .legend-item { font-size: 12px; color: #8b949e; }
+  .legend-item strong { color: #c9d1d9; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Grape 多 Agent 执行交互流程图</h1>
+<p class="subtitle">Issue 驱动 · A2A 交棒 · 阶段矩阵路由 · 异步执行</p>
+
+<div class="flow">
+
+  <!-- 触发 -->
+  <div class="phase">
+    <div class="phase-label">触发</div>
+    <div class="agent-box trigger">
+      <div class="agent-header">
+        <div class="agent-icon trigger">⚡</div>
+        <div>
+          <div class="agent-name">Webhook 事件触发</div>
+          <div class="agent-skill">GitCode Issue/PR → grape webhook → event_pipeline 路由</div>
+        </div>
+      </div>
+      <div class="agent-body">
+        <strong>issue_opened</strong> → 路由到 vod（阶段矩阵初始化）<br>
+        <strong>issue_comment</strong> → 按 issue_state.stage 路由到当前阶段 Agent<br>
+        <strong>pull_request_merged</strong> → 按 issue_state.stage 路由（通常 → sre）<br>
+        <strong>A2A API 调用</strong> → 直接路由到指定 Agent
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><span class="arrow-label">issue_opened</span></div>
+
+  <!-- VOD -->
+  <div class="phase">
+    <div class="phase-label">Phase 1: 需求收集</div>
+    <div class="agent-box vod">
+      <div class="agent-header">
+        <div class="agent-icon vod">V</div>
+        <div>
+          <div class="agent-name">VOD Agent <span class="agent-skill">— skill: vod</span></div>
+        </div>
+      </div>
+      <div class="agent-body">
+        <strong>职责</strong>：从开发者声音中收集反馈、聚类分析、提炼价值<br>
+        <strong>动作</strong>：需求收敛为清晰后 → Issue 评论 → A2A 交棒 issue
+      </div>
+      <div class="a2a-block">
+        <div class="a2a-label">A2A 交棒 → issue</div>
+        curl -X POST /api/a2a -d '{"agent":"issue", "payload":{"repository":"...", "issue_number":"9", "context":"需求已收敛，请分类指派"}}'
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><span class="arrow-label">A2A → issue</span></div>
+
+  <!-- Issue -->
+  <div class="phase">
+    <div class="phase-label">Phase 2: Issue 运营</div>
+    <div class="agent-box issue">
+      <div class="agent-header">
+        <div class="agent-icon issue">I</div>
+        <div>
+          <div class="agent-name">Issue Agent <span class="agent-skill">— skill: issue-advance</span></div>
+        </div>
+      </div>
+      <div class="agent-body">
+        <strong>职责</strong>：深度可开发性分析 → 分类/标签/分配 → Spec 生成<br>
+        <strong>动作</strong>：评级 ready → 生成 Spec → 打 spec-ready 标签 → A2A 交棒 coding<br>
+        <strong>回退</strong>：需求不清晰 → A2A 交棒 vod 澄清
+      </div>
+      <div class="a2a-block">
+        <div class="a2a-label">A2A 交棒 → coding</div>
+        curl -X POST /api/a2a -d '{"agent":"coding", "payload":{"repository":"...", "issue_number":"9", "context":"Spec 已生成，请开始开发"}}'
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><span class="arrow-label">A2A → coding</span></div>
+
+  <!-- Coding -->
+  <div class="phase">
+    <div class="phase-label">Phase 3: 代码实现</div>
+    <div class="agent-box coding">
+      <div class="agent-header">
+        <div class="agent-icon coding">C</div>
+        <div>
+          <div class="agent-name">Coding Agent <span class="agent-skill">— skill: implementation / skill-creator</span></div>
+        </div>
+      </div>
+      <div class="agent-body">
+        <strong>职责</strong>：代码实现 + 创建 PR + 自测<br>
+        <strong>动作</strong>：读 Spec → 实现 → 自测 → 创建 PR → Issue 评论 → A2A 交棒 qa<br>
+        <strong>失败</strong>：无法实现 → Issue 评论说明原因，不创建 PR，不交棒
+      </div>
+      <div class="a2a-block">
+        <div class="a2a-label">A2A 交棒 → qa（携带 pr_number）</div>
+        curl -X POST /api/a2a -d '{"agent":"qa", "payload":{"repository":"...", "issue_number":"9", "pr_number":"7", "context":"PR#7 已提交，请测试验证"}}'
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><span class="arrow-label">A2A → qa（携带 PR）</span></div>
+
+  <!-- QA -->
+  <div class="phase">
+    <div class="phase-label">Phase 4: 测试验证</div>
+    <div class="agent-box qa">
+      <div class="agent-header">
+        <div class="agent-icon qa">Q</div>
+        <div>
+          <div class="agent-name">QA Agent <span class="agent-skill">— skill: pr / skill-tester</span></div>
+        </div>
+      </div>
+      <div class="agent-body">
+        <strong>职责</strong>：代码审查 + 功能测试 + 安全扫描<br>
+        <strong>通过</strong>：合并 PR → A2A 交棒 sre 发布<br>
+        <strong>失败</strong>：A2A 回 coding 修复（携带审查意见）
+      </div>
+      <div class="branch" style="margin-top: 12px;">
+        <div class="branch-item">
+          <div class="branch-label">✅ 测试通过</div>
+          <div class="a2a-block">
+            <div class="a2a-label">A2A → sre</div>
+            curl -X POST /api/a2a -d '{"agent":"sre", "payload":{"repository":"...", "issue_number":"9", "context":"测试通过，PR已合并，请发布"}}'
+          </div>
+        </div>
+        <div class="branch-item">
+          <div class="branch-label">🔴 测试失败</div>
+          <div class="a2a-block">
+            <div class="a2a-label">A2A 回 → coding</div>
+            curl -X POST /api/a2a -d '{"agent":"coding", "payload":{"repository":"...", "issue_number":"9", "pr_number":"7", "context":"审查发现 Critical 问题，请修复"}}'
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><span class="arrow-label">A2A → sre（测试通过）</span></div>
+
+  <!-- SRE -->
+  <div class="phase">
+    <div class="phase-label">Phase 5: 部署发布</div>
+    <div class="agent-box sre">
+      <div class="agent-header">
+        <div class="agent-icon sre">S</div>
+        <div>
+          <div class="agent-name">SRE Agent <span class="agent-skill">— skill: cloud-deploy / skill-publish</span></div>
+        </div>
+      </div>
+      <div class="agent-body">
+        <strong>职责</strong>：构建部署 + 发布管理 + 监控运维<br>
+        <strong>动作</strong>：部署/发布 → Issue 评论告知结果 → 流程结束（issue_state → done）
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><span class="arrow-label">完成</span></div>
+
+  <!-- Done -->
+  <div class="phase">
+    <div class="phase-label">结束</div>
+    <div class="agent-box" style="border-color: #30363d; text-align: center; padding: 12px;">
+      <div class="agent-body"><strong>Issue 关闭</strong> — issue_state.stage = done</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- 任务执行机制 -->
+<div class="legend">
+  <div class="legend-title">任务执行机制（每次 A2A 交棒时发生）</div>
+  <div class="legend-grid">
+    <div class="legend-item"><strong>1. 鉴权</strong>：仓库 bot token 校验</div>
+    <div class="legend-item"><strong>2. 创建 event</strong>：status=running，记录到 events 表</div>
+    <div class="legend-item"><strong>3. 查 session</strong>：devops_agent_session 获取绑定的 skill + runtime</div>
+    <div class="legend-item"><strong>4. 组装 prompt</strong>：SKILL.md + Issue 上下文 + A2A context</div>
+    <div class="legend-item"><strong>5. 物化文件</strong>：skill → .skills/，知识库 → .project-info/</div>
+    <div class="legend-item"><strong>6. 注入环境变量</strong>：BOT_TOKEN、AK/SK、PR_NUMBER、ISSUE_NUMBER</div>
+    <div class="legend-item"><strong>7. 选引擎执行</strong>：专属 → 全局 → 本机</div>
+    <div class="legend-item"><strong>8. 完成</strong>：更新 event status=completed + result_text</div>
+    <div class="legend-item"><strong>9. 交棒</strong>：Agent 调 A2A API 触发下一个 Agent</div>
+  </div>
+</div>
+
+<!-- 信息传递载体 -->
+<div class="legend" style="margin-top: 20px;">
+  <div class="legend-title">Agent 间信息传递载体</div>
+  <div class="legend-grid">
+    <div class="legend-item"><strong>A2A context</strong>：上一个 Agent 的结论和建议下一步（prompt 里注入）</div>
+    <div class="legend-item"><strong>Issue 评论</strong>：执行结果公开记录（所有 Agent 和用户可见）</div>
+    <div class="legend-item"><strong>PR 评论</strong>：测试报告、审查意见</div>
+    <div class="legend-item"><strong>issue_state.stage</strong>：当前阶段（vod/issue/coding/qa/sre/done），决定事件路由</div>
+    <div class="legend-item"><strong>project_info_files</strong>：项目知识库（repo-credentials.json 等）随任务物化</div>
+    <div class="legend-item"><strong>env_extra</strong>：环境变量凭据（AK/SK、BOT_TOKEN）</div>
+  </div>
+</div>
+
+</div>
+</body>
+</html>

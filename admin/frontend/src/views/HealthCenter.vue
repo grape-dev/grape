@@ -117,7 +117,10 @@
             <div v-for="iss in timelineIssues" :key="iss.issueId" class="tl-issue">
               <div class="tl-issue-head" @click="toggleIssue(iss.issueId)">
                 <span class="tl-arrow">{{ expandedIssues.has(iss.issueId) ? '▾' : '▸' }}</span>
-                <b class="tl-issue-id">{{ iss.repoName || '' }} {{ iss.issueId }}</b>
+                <b class="tl-issue-id">
+                  <a v-if="iss.repoName" :href="issueUrl(iss)" target="_blank" @click.stop class="tl-issue-link">{{ iss.repoName }} {{ iss.issueId }}</a>
+                  <template v-else>{{ iss.issueId }}</template>
+                </b>
                 <span class="tl-issue-title t3" v-if="iss.title">{{ iss.title }}</span>
                 <span class="tl-issue-count t3">{{ iss.eventCount }} 事件</span>
                 <span class="tl-issue-status" :class="issueHasFailed(iss) ? 'fail' : 'ok'">{{ issueHasFailed(iss) ? '✗ 有失败' : '✓ 正常' }}</span>
@@ -130,8 +133,8 @@
                   <button class="tl-view-btn" :class="{ active: issueViewMode(iss.issueId) !== 'events' }" @click="setIssueView(iss.issueId, 'diagram')">📊 时序图</button>
                   <button class="tl-view-btn" :class="{ active: issueViewMode(iss.issueId) === 'events' }" @click="setIssueView(iss.issueId, 'events')">📋 事件列表</button>
                 </div>
-                <!-- 时序图容器（v-html 让 Vue 管理 DOM，不直接操作 innerHTML） -->
-                <div v-show="issueViewMode(iss.issueId) !== 'events'" class="tl-diagram-container">
+                <!-- 时序图容器（v-once 避免弹窗开关导致的 re-render 重新 diff SVG） -->
+                <div v-show="issueViewMode(iss.issueId) !== 'events'" class="tl-diagram-container" :ref="el => diagramRefs[iss.issueId] = el">
                   <div v-if="!issueRendered(iss.issueId)" class="tl-diagram-loading">渲染中...</div>
                   <div v-else v-html="issueSvg(iss.issueId)" class="tl-diagram-svg"></div>
                 </div>
@@ -139,13 +142,14 @@
                 <div v-show="issueViewMode(iss.issueId) === 'events'">
                   <table class="vod-table">
                     <thead>
-                      <tr><th>Seq</th><th>事件</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr>
+                      <tr><th>Seq</th><th>事件</th><th>Agent</th><th>Engine</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr>
                     </thead>
                     <tbody>
                       <tr v-for="ev in iss.events" :key="ev.seq" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId }" @click="ev.taskId ? openLogModal(ev.taskId, iss) : null">
                         <td class="t3">#{{ ev.seq }}</td>
                         <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
                         <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
+                        <td class="t3" style="font-size:11px">{{ ev.engine || '—' }}</td>
                         <td class="t3">{{ ev.skill || '—' }}</td>
                         <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']">{{ ev.status }}</span></td>
                         <td class="t3">{{ formatDuration2(ev.duration) }}</td>
@@ -202,6 +206,11 @@
                 <span class="hc-resource-val" :style="{ color: resourceColor(wk.memoryPercent) }">{{ Math.round(wk.memoryPercent || 0) }}%</span>
               </div>
               <div class="hc-resource-bar">
+                <span class="hc-resource-label">TMP</span>
+                <div class="hc-resource-track"><div class="hc-resource-fill" :style="{ width: pct(wk.tmpPercent), background: resourceColor(wk.tmpPercent) }"></div></div>
+                <span class="hc-resource-val" :style="{ color: resourceColor(wk.tmpPercent) }">{{ Math.round(wk.tmpPercent || 0) }}%</span>
+              </div>
+              <div class="hc-resource-bar">
                 <span class="hc-resource-label">DISK</span>
                 <div class="hc-resource-track"><div class="hc-resource-fill" :style="{ width: pct(wk.diskPercent), background: resourceColor(wk.diskPercent) }"></div></div>
                 <span class="hc-resource-val" :style="{ color: resourceColor(wk.diskPercent) }">{{ Math.round(wk.diskPercent || 0) }}%</span>
@@ -226,6 +235,7 @@
                 <td><span :style="{ color: healthColor(rt.health), fontWeight: 600 }">{{ rt.health }}</span></td>
                 <td><span :style="{ color: loadColor(rt.running, rt.maxConcurrent) }">{{ rt.running }}/{{ rt.maxConcurrent }}</span></td>
                 <td><span :style="{ color: avgDurColor(rt.avgDuration) }">{{ formatAvgDur(rt.avgDuration) }}</span></td>
+                <td class="t3">{{ rt.workerName || '—' }}<span v-if="rt.workerIp" style="color:var(--text-tertiary);font-size:10px"> ({{ rt.workerIp }})</span></td>
                 <td><span :class="['status-tag', rt.mode === 'local' ? 'info' : 'default']" style="font-size:11px">{{ rt.mode === 'local' ? '本机' : '远端' }}</span></td>
                 <td><span class="status-tag default" style="font-size:11px">{{ rt.scope || 'global' }}</span></td>
                 <td class="t3">{{ formatTime(rt.lastSeenAt) }}</td>
@@ -272,6 +282,7 @@
           <span class="t3" v-if="logModal.info.repoKey">{{ logModal.info.repoKey.replace('gitcode:', '') }}</span>
           <b v-if="logModal.info.issueId">{{ logModal.info.issueId }}</b>
           <span class="t3" v-if="logModal.info.eventSeq">#{{ logModal.info.eventSeq }}</span>
+          <span class="t3" v-if="logModal.info.engine" style="color:var(--primary)">🔧 {{ logModal.info.engine }}</span>
           <span class="t3" v-if="logModal.info.createdAt">{{ formatTime(logModal.info.createdAt) }}</span>
         </h3>
         <button class="btn btn-sm" @click="closeLogModal">✕ 关闭</button>
@@ -284,6 +295,7 @@
         <span class="log-tl-text" v-if="logModal.info.startedAt">开始 {{ formatTime(logModal.info.startedAt).slice(11, 19) }}</span>
         <span class="log-tl-arrow" v-if="logModal.info.completedAt">→</span>
         <span class="log-tl-text" v-if="logModal.info.completedAt">完成 {{ formatTime(logModal.info.completedAt).slice(11, 19) }}</span>
+        <span class="log-tl-dur" v-if="logModal.info.startedAt && logModal.info.completedAt">⏱ {{ formatTaskDur(logModal.info) }}</span>
         <span class="log-tl-status" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'">{{ logModal.info.status.toUpperCase() }}</span>
       </div>
       <!-- 日志列表 -->
@@ -324,7 +336,7 @@
             <thead><tr><th>Issue</th><th>Agent</th><th>Skill</th><th>状态</th><th>开始时间</th></tr></thead>
             <tbody>
               <tr v-for="t in rtTasksModal.running" :key="t.id" class="tl-row-clickable" @click="openLogModal(t.id, { issueId: t.issueId, repoName: (t.repoKey||'').replace('gitcode:','') })">
-                <td><b>{{ t.issueId || '—' }}</b> <span class="t3">#{{ t.eventSeq }}</span></td>
+                <td><span class="t3" style="font-size:11px">{{ (t.repoKey||'').replace('gitcode:','') }}</span> <b>{{ t.issueId || '—' }}</b> <span class="t3">#{{ t.eventSeq }}</span></td>
                 <td><span class="status-tag info" style="font-size:11px">{{ t.agentType }}</span></td>
                 <td class="t3">{{ t.skill || '—' }}</td>
                 <td><span :class="['status-tag', t.status === 'running' ? 'warning' : 'default']">{{ t.status }}</span></td>
@@ -340,7 +352,7 @@
             <thead><tr><th>Issue</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
             <tbody>
               <tr v-for="t in rtTasksModal.history" :key="t.id" class="tl-row-clickable" @click="openLogModal(t.id, { issueId: t.issueId, repoName: (t.repoKey||'').replace('gitcode:','') })">
-                <td><b>{{ t.issueId || '—' }}</b> <span class="t3">#{{ t.eventSeq }}</span></td>
+                <td><span class="t3" style="font-size:11px">{{ (t.repoKey||'').replace('gitcode:','') }}</span> <b>{{ t.issueId || '—' }}</b> <span class="t3">#{{ t.eventSeq }}</span></td>
                 <td><span class="status-tag info" style="font-size:11px">{{ t.agentType }}</span></td>
                 <td class="t3">{{ t.skill || '—' }}</td>
                 <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : 'default']">{{ t.status }}</span></td>
@@ -383,6 +395,7 @@ const issueViewModes = ref({})  // {issueId: 'diagram' | 'events'}
 const renderedIssues = ref(new Set())  // 已渲染 mermaid 的 issue
 const issueSvgs = ref({})  // {issueId: svgHtml}
 const renderingIssues = ref(new Set())  // 正在渲染中的 issue
+const diagramRefs = {}  // DOM 元素引用（用于绑定 mermaid 点击事件）
 
 function issueSvg(issueId) {
   return issueSvgs.value[issueId] || ''
@@ -455,7 +468,8 @@ async function load() {
     alerts.value = data.alerts || []
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     if (timelineIssues.value.length === 0) loadTimeline()
-    if (workersList.value.length === 0) loadOverview()
+    // 自动刷新时也刷新设备概览数据
+    loadOverview()
   } catch (e) {
     console.error('[HealthCenter] load failed', e)
     lastUpdate.value = '加载失败'
@@ -559,6 +573,7 @@ function buildSequence(iss) {
   for (const a of agents) lines.push(`    participant ${mermaidId(a)} as ${a}`)
 
   const statuses = []
+  const evTypes = []  // 'msg' or 'note'
   let prev = null
   for (const ev of iss.events) {
     const a = mermaidId(ev.agentType || '—')
@@ -567,13 +582,15 @@ function buildSequence(iss) {
     if (prev && a !== prev) {
       lines.push(`    ${prev}->>${a}: ${label}`)
       statuses.push(ev.status || '')
+      evTypes.push('msg')
     } else {
       lines.push(`    Note over ${a}: ${label}`)
       statuses.push(ev.status || '')
+      evTypes.push('note')
     }
     prev = a
   }
-  return { text: lines.join('\n'), statuses }
+  return { text: lines.join('\n'), statuses, evTypes }
 }
 
 function applySequenceColors(svg, statuses) {
@@ -605,25 +622,27 @@ function applySequenceColors(svg, statuses) {
 }
 
 async function renderMermaidForIssue(issueId) {
-  // 防止并发渲染同一个 issue
   if (renderingIssues.value.has(issueId)) return
   if (renderedIssues.value.has(issueId)) return
 
   const iss = timelineIssues.value.find(i => i.issueId === issueId)
   if (!iss) return
+  const el = diagramRefs[issueId]
+  if (!el) return
 
   renderingIssues.value = new Set([...renderingIssues.value, issueId])
 
   try {
     const mmd = await getMermaid()
-    const { text, statuses } = buildSequence(iss)
+    const { text, statuses, evTypes } = buildSequence(iss)
     const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
     try { await mmd.parse(text) } catch (e) { /* parse 失败也尝试 render */ }
     const result = await mmd.render(uid, text)
     const svg = result.svg || result
-    // 存 SVG 字符串到响应式 ref，让 Vue 通过 v-html 渲染（不直接操作 DOM）
     issueSvgs.value = { ...issueSvgs.value, [issueId]: applySequenceColors(svg, statuses) }
     renderedIssues.value = new Set([...renderedIssues.value, issueId])
+    // 渲染后绑定点击事件（对齐主服务 _bindMermaidClicks）
+    nextTick(() => bindMermaidClicks(issueId, iss, evTypes))
   } catch (err) {
     const { text } = buildSequence(iss)
     issueSvgs.value = { ...issueSvgs.value, [issueId]: `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${err.message || err}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>` }
@@ -634,7 +653,44 @@ async function renderMermaidForIssue(issueId) {
     renderingIssues.value = s
   }
 }
+
+// 给 mermaid SVG 中的 messageText/noteText 绑定点击 → 打开日志弹窗（对齐主服务 _bindMermaidClicks）
+function bindMermaidClicks(issueId, iss, evTypes) {
+  const el = diagramRefs[issueId]
+  if (!el) return
+  const svg = el.querySelector('svg')
+  if (!svg) return
+  const events = iss.events || []
+  if (!events.length) return
+  const msgTexts = Array.from(svg.querySelectorAll('text.messageText'))
+  const noteTexts = Array.from(svg.querySelectorAll('text.noteText'))
+  let msgIdx = 0, noteIdx = 0
+  events.forEach((ev, i) => {
+    const type = evTypes[i] || 'msg'
+    let txt = null
+    if (type === 'msg') {
+      txt = msgTexts[msgIdx]
+      msgIdx++
+    } else {
+      txt = noteTexts[noteIdx]
+      noteIdx++
+    }
+    if (!txt || !ev.taskId) return
+    txt.style.cursor = 'pointer'
+    txt.style.textDecoration = 'underline'
+    txt.style.fill = 'var(--primary)'
+    txt.addEventListener('click', function(e) {
+      e.stopPropagation()
+      openLogModal(ev.taskId, iss)
+    })
+  })
+}
 function issueHasFailed(iss) { return iss.events.some(e => e.status === 'failed') }
+
+function issueUrl(iss) {
+  const num = (iss.issueId || '').replace('#', '')
+  return `https://gitcode.com/${iss.repoName}/issues/${num}`
+}
 function eventTypeText(t) {
   const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号' }
   return map[t] || t || '—'
@@ -647,7 +703,7 @@ function eventTypeClass(t) {
 }
 function formatDuration2(d) {
   if (!d) return '—'
-  const s = Number(d)
+  const s = Math.round(Number(d))
   if (isNaN(s) || s <= 0) return '—'
   if (s < 60) return s + 's'
   if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60) + 's'
@@ -818,6 +874,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .tl-issue-head:hover { background: #f5f9ff; }
 .tl-arrow { font-size: 12px; color: var(--text-tertiary); width: 14px; }
 .tl-issue-id { font-size: 13px; min-width: 40px; }
+.tl-issue-link { color: var(--primary); text-decoration: none; }
+.tl-issue-link:hover { text-decoration: underline; }
 .tl-issue-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .tl-issue-count { font-size: 11px; white-space: nowrap; }
 .tl-issue-status { font-size: 10px; font-weight: 600; white-space: nowrap; }
@@ -868,6 +926,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .log-tl-dot.ok { background: var(--success); } .log-tl-dot.fail { background: var(--danger); } .log-tl-dot.run { background: var(--warning); }
 .log-tl-arrow { color: var(--text-tertiary); }
 .log-tl-status { margin-left: auto; font-weight: 600; }
+.log-tl-dur { color: var(--primary); font-weight: 600; }
 .log-tl-status.ok { color: var(--success); } .log-tl-status.fail { color: var(--danger); } .log-tl-status.run { color: var(--warning); }
 .log-modal-body { flex: 1; overflow-y: auto; padding: 14px 18px; }
 .log-empty { text-align: center; padding: 32px; color: var(--text-tertiary); }
