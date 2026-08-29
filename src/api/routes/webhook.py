@@ -257,7 +257,45 @@ async def a2a_endpoint(request: Request):
 
         # Issue 生命周期阶段推进（D9/D10，见 vod-skill-upgrade-plan.md §3.0.2）
         # A2A 交办 → issue_state 归属转移到目标 agent（qa 回 coding 允许回退）
+        # Pipeline 顺序校验（2026-08-30 修复）：
+        # VOD agent 有时会跳过 issue 直接触发 coding（premature 判断），
+        # 需要按 pipelines.json 定义强制走 vod→issue→coding→qa→sre 顺序。
+        # 如果 A2A 目标 agent 超前于当前 stage 的 next，自动修正为正确的 next agent。
         if issue_number:
+            try:
+                # 获取当前 stage
+                from src.api.session_store import get_issue_stage
+                _current_stage = get_issue_stage(repo_key, f"#{issue_number}") or ""
+                # 获取 scene_id 对应的 pipeline next 映射
+                _pipeline_next = {}
+                try:
+                    import os as _os, json as _json
+                    from src.api.session_store import get_issue_scene
+                    _scene_id = get_issue_scene(repo_key, f"#{issue_number}") or "default"
+                    _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)),
+                                               "configs", "pipelines.json")
+                    with open(_pipe_path, "r", encoding="utf-8") as _f:
+                        _pipes = _json.load(_f)
+                    _scene = _pipes.get("scenes", {}).get(_scene_id) or _pipes.get("scenes", {}).get("default") or {}
+                    for _node in (_scene.get("nodes") or []):
+                        _pipeline_next[_node.get("id", "")] = _node.get("next", "")
+                except Exception:
+                    pass
+                # 检查是否跳步：当前 stage 的 next 不是目标 agent
+                _expected_next = _pipeline_next.get(_current_stage, "")
+                if _expected_next and _expected_next != "done" and agent_name != _expected_next:
+                    # 允许回退（qa→coding）和允许跳到后续阶段（如 coding 直接触发 sre）
+                    _stage_order = list(_pipeline_next.keys())
+                    _cur_idx = _stage_order.index(_current_stage) if _current_stage in _stage_order else -1
+                    _target_idx = _stage_order.index(agent_name) if agent_name in _stage_order else -1
+                    if _target_idx > _cur_idx + 1:
+                        # 跳步：自动修正为正确的 next agent
+                        log.warning(f"A2A: pipeline order fix — issue=#{issue_number} "
+                                    f"stage={_current_stage} target={agent_name} -> corrected to {_expected_next}")
+                        agent_name = _expected_next
+            except Exception as _pe:
+                log.warning(f"A2A: pipeline order check failed: {_pe}")
+
             try:
                 from src.api.session_store import set_issue_stage
                 _stage = agent_name if agent_name in ("vod", "issue", "coding", "qa", "sre", "done") else "issue"
