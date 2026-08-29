@@ -130,7 +130,10 @@ def _flush_text(buf: list[str], elements: list, max_len: int):
 
 def to_lark_elements(text: str, max_len: int = 2000) -> list[dict]:
     """文本 → 飞书卡片元素列表。表格(≤5列) → column_set；否则 → div 文本。"""
-    lines = (text or "").split("\n")
+    # 清理无效的空 <at> 标签（agent 输出中可能包含 <at id=></at>，
+    # 飞书卡片解析空 at 标签会出错，丢弃后续 elements 包括按钮）
+    text = re.sub(r'<at\s+id=\s*></at>', '', text or '')
+    lines = text.split("\n")
     elements: list[dict] = []
     buf: list[str] = []
     buf_len = 0

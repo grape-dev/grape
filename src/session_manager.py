@@ -665,10 +665,22 @@ def delete_messages_by_conv(conversation_id: str):
 
 
 def delete_conversation(conv_id: str):
+    """删除会话 DB 记录 + 清理文件系统工作目录（防孤儿目录堆积）。"""
+    # 先查 user_id（目录路径需要），删 DB 后就查不到了
+    conv = get_conversation(conv_id)
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM chat_conversations WHERE id=?", (conv_id,))
         db.commit()
+    # 清理 chat 工作目录：{CHAT_CWD_BASE}/chat/{user_id}/{conv_id}/
+    if conv and conv.get("user_id"):
+        try:
+            from src.config import CHAT_CWD_BASE
+            wsd = os.path.join(CHAT_CWD_BASE, "chat", str(conv["user_id"]), conv_id)
+            if os.path.isdir(wsd):
+                shutil.rmtree(wsd, ignore_errors=True)
+        except Exception as e:
+            log.warning(f"delete_conversation cleanup wsd failed: {e}")
 
 
 # ====== chat_config CRUD（合并进 chat_agent_session）======
