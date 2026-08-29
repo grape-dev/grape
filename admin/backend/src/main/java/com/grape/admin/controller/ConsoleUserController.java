@@ -23,7 +23,7 @@ public class ConsoleUserController {
     public Map<String, Object> list(@RequestParam(required = false, defaultValue = "0") int page,
                                     @RequestParam(required = false, defaultValue = "10") int size,
                                     @RequestParam(required = false) String keyword,
-                                    @RequestParam(required = false) String credentialFilter) {
+                                    @RequestParam(required = false) String source) {
         Map<String, Object> result = new LinkedHashMap<>();
 
         StringBuilder where = new StringBuilder(" WHERE 1=1");
@@ -33,15 +33,11 @@ public class ConsoleUserController {
             params.add("%" + keyword + "%");
             params.add("%" + keyword + "%");
         }
-        if (credentialFilter != null && !credentialFilter.isBlank()) {
-            if ("gitcode".equals(credentialFilter)) {
-                where.append(" AND gitcode_api_token IS NOT NULL AND gitcode_api_token<>''");
-            } else if ("huawei".equals(credentialFilter)) {
-                where.append(" AND huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>''");
-            } else if ("feishu".equals(credentialFilter)) {
-                where.append(" AND feishu_app_id IS NOT NULL AND feishu_app_id<>''");
-            } else if ("none".equals(credentialFilter)) {
-                where.append(" AND (gitcode_api_token IS NULL OR gitcode_api_token='') AND (huawei_cloud_ak IS NULL OR huawei_cloud_ak='') AND (feishu_app_id IS NULL OR feishu_app_id='')");
+        if (source != null && !source.isBlank()) {
+            if ("gitcode".equals(source)) {
+                where.append(" AND gitcode_id IS NOT NULL AND gitcode_id<>''");
+            } else if ("other".equals(source)) {
+                where.append(" AND (gitcode_id IS NULL OR gitcode_id='')");
             }
         }
 
@@ -73,14 +69,14 @@ public class ConsoleUserController {
             }, params.toArray());
         } catch (Exception e) { /* ignore */ }
 
-        // 全量凭证统计（不受筛选影响）
-        Map<String, Object> credentialStats = new LinkedHashMap<>();
+        // 全量统计（不受筛选影响）
+        Map<String, Object> stats = new LinkedHashMap<>();
         try {
-            credentialStats.put("total", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts", Long.class));
-            credentialStats.put("hasGitcode", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE gitcode_api_token IS NOT NULL AND gitcode_api_token<>''", Long.class));
-            credentialStats.put("hasHuawei", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>''", Long.class));
-            credentialStats.put("hasFeishu", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE feishu_app_id IS NOT NULL AND feishu_app_id<>''", Long.class));
-            credentialStats.put("noCredential", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE (gitcode_api_token IS NULL OR gitcode_api_token='') AND (huawei_cloud_ak IS NULL OR huawei_cloud_ak='') AND (feishu_app_id IS NULL OR feishu_app_id='')", Long.class));
+            stats.put("total", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts", Long.class));
+            stats.put("gitcodeLogin", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE gitcode_id IS NOT NULL AND gitcode_id<>''", Long.class));
+            stats.put("other", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE gitcode_id IS NULL OR gitcode_id=''", Long.class));
+            stats.put("hasCredential", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE (gitcode_api_token IS NOT NULL AND gitcode_api_token<>'') OR (huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>'') OR (feishu_app_id IS NOT NULL AND feishu_app_id<>'')", Long.class));
+            stats.put("noCredential", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE (gitcode_api_token IS NULL OR gitcode_api_token='') AND (huawei_cloud_ak IS NULL OR huawei_cloud_ak='') AND (feishu_app_id IS NULL OR feishu_app_id='')", Long.class));
         } catch (Exception e) { /* ignore */ }
 
         result.put("content", list);
@@ -88,7 +84,7 @@ public class ConsoleUserController {
         result.put("totalPages", (total + size - 1) / size);
         result.put("page", page);
         result.put("size", size);
-        result.put("credentialStats", credentialStats);
+        result.put("stats", stats);
         return result;
     }
 

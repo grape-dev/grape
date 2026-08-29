@@ -8,20 +8,18 @@
     <div style="padding:20px 28px">
       <!-- 统计卡 -->
       <div class="stats">
-        <div class="stat-card"><div class="stat-label">用户总数</div><div class="stat-value">{{ credentialStats.total ?? 0 }}</div></div>
-        <div class="stat-card"><div class="stat-label">GitCode 凭证</div><div class="stat-value small">{{ credentialStats.hasGitcode ?? 0 }}</div></div>
-        <div class="stat-card"><div class="stat-label">华为云凭证</div><div class="stat-value small">{{ credentialStats.hasHuawei ?? 0 }}</div></div>
-        <div class="stat-card"><div class="stat-label">飞书凭证</div><div class="stat-value small">{{ credentialStats.hasFeishu ?? 0 }}</div></div>
-        <div class="stat-card"><div class="stat-label">未配置凭证</div><div class="stat-value small">{{ credentialStats.noCredential ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">用户总数</div><div class="stat-value">{{ stats.total ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">GitCode 登录</div><div class="stat-value small">{{ stats.gitcodeLogin ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">其他方式</div><div class="stat-value small">{{ stats.other ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">已配置凭证</div><div class="stat-value small">{{ stats.hasCredential ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">未配置凭证</div><div class="stat-value small">{{ stats.noCredential ?? 0 }}</div></div>
       </div>
 
-      <!-- 凭证分布徽章行（点击联动筛选） -->
+      <!-- 来源徽章行（点击联动筛选） -->
       <div class="em-stats">
-        <button class="em-stat" :class="{ on: !credentialFilter }" @click="setCredentialFilter('')">全部 <strong>{{ total }}</strong></button>
-        <button class="em-stat" :class="{ on: credentialFilter === 'gitcode' }" @click="setCredentialFilter('gitcode')"><span class="em-dot" style="background:#006eff"></span>GitCode <strong>{{ credentialStats.hasGitcode ?? 0 }}</strong></button>
-        <button class="em-stat" :class="{ on: credentialFilter === 'huawei' }" @click="setCredentialFilter('huawei')"><span class="em-dot" style="background:#ff9500"></span>华为云 <strong>{{ credentialStats.hasHuawei ?? 0 }}</strong></button>
-        <button class="em-stat" :class="{ on: credentialFilter === 'feishu' }" @click="setCredentialFilter('feishu')"><span class="em-dot" style="background:#34c759"></span>飞书 <strong>{{ credentialStats.hasFeishu ?? 0 }}</strong></button>
-        <button class="em-stat" :class="{ on: credentialFilter === 'none' }" @click="setCredentialFilter('none')"><span class="em-dot" style="background:#aeaeb2"></span>未配置 <strong>{{ credentialStats.noCredential ?? 0 }}</strong></button>
+        <button class="em-stat" :class="{ on: !source }" @click="setSource('')">全部 <strong>{{ stats.total ?? 0 }}</strong></button>
+        <button class="em-stat" :class="{ on: source === 'gitcode' }" @click="setSource('gitcode')"><span class="em-dot" style="background:#006eff"></span>GitCode 登录 <strong>{{ stats.gitcodeLogin ?? 0 }}</strong></button>
+        <button class="em-stat" :class="{ on: source === 'other' }" @click="setSource('other')"><span class="em-dot" style="background:#aeaeb2"></span>其他 <strong>{{ stats.other ?? 0 }}</strong></button>
       </div>
 
       <!-- 工具栏 -->
@@ -115,11 +113,11 @@ const page = ref(0)
 const size = ref(10)
 const totalPages = ref(0)
 const keyword = ref('')
-const credentialFilter = ref('')
+const source = ref('')
 const loading = ref(false)
 const detail = ref({ show: false, loading: false, info: {} })
 const sizeOptions = [10, 20, 50]
-const credentialStats = ref({})
+const stats = ref({})
 
 async function load() {
   loading.value = true
@@ -129,13 +127,13 @@ async function load() {
         page: page.value,
         size: size.value,
         keyword: keyword.value,
-        credentialFilter: credentialFilter.value
+        source: source.value
       }
     })
     list.value = data.content || []
     total.value = data.totalElements || 0
     totalPages.value = data.totalPages || 0
-    credentialStats.value = data.credentialStats || {}
+    stats.value = data.stats || {}
   } catch (e) {
     console.error('[ConsoleUsers] load failed', e)
   } finally {
@@ -144,8 +142,8 @@ async function load() {
 }
 
 function search() { page.value = 0; load() }
-function reset() { keyword.value = ''; credentialFilter.value = ''; page.value = 0; load() }
-function setCredentialFilter(f) { credentialFilter.value = f; page.value = 0; load() }
+function reset() { keyword.value = ''; source.value = ''; page.value = 0; load() }
+function setSource(s) { source.value = s; page.value = 0; load() }
 
 async function showDetail(id) {
   detail.value = { show: true, loading: true, info: {} }
