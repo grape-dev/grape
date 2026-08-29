@@ -56,10 +56,10 @@
               <td class="t3">{{ d.lastIp || '-' }}</td>
               <td class="t3">{{ formatTime(d.createdAt) }}</td>
               <td>
-                <button class="btn btn-sm" @click="$router.push(`/runtime/devices/${d.id}`)">详情</button>
-                <button v-if="d.status === 'active'" class="btn btn-sm" @click="revoke(d)">吊销</button>
-                <button v-if="d.status === 'active'" class="btn btn-sm" @click="recycle(d)">回收</button>
-                <button v-if="d.status === 'revoked'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(d)">删除</button>
+                <button class="act-icon-btn" @click="$router.push(`/runtime/devices/${d.id}`)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+                <button v-if="d.status === 'active'" class="act-icon-btn" style="color:#fa8c16" @click="revoke(d)" title="吊销"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 12l3 3 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                <button v-if="d.status === 'active'" class="act-icon-btn" style="color:#fa8c16" @click="recycle(d)" title="回收"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v5M14 11v5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+                <button v-if="d.status === 'revoked'" class="act-icon-btn" style="color:#e5484d" @click="openDelete(d)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
               </td>
             </tr>
           </tbody>
@@ -86,10 +86,10 @@
             <div style="grid-column:1 / -1"><span class="t3" style="display:inline-block;min-width:46px">任务</span> {{ d.taskCount }} 个</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
-            <button class="btn btn-sm" @click="$router.push(`/runtime/devices/${d.id}`)">详情</button>
-            <button v-if="d.status === 'active'" class="btn btn-sm" @click="revoke(d)">吊销</button>
-            <button v-if="d.status === 'active'" class="btn btn-sm" @click="recycle(d)">回收</button>
-            <button v-if="d.status === 'revoked'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(d)">删除</button>
+            <button class="act-icon-btn" @click="$router.push(`/runtime/devices/${d.id}`)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+            <button v-if="d.status === 'active'" class="act-icon-btn" style="color:#fa8c16" @click="revoke(d)" title="吊销"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 12l3 3 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <button v-if="d.status === 'active'" class="act-icon-btn" style="color:#fa8c16" @click="recycle(d)" title="回收"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v5M14 11v5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+            <button v-if="d.status === 'revoked'" class="act-icon-btn" style="color:#e5484d" @click="openDelete(d)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           </div>
         </div>
       </div>
@@ -308,4 +308,7 @@ onMounted(load)
 .dm-stat.on { background: var(--primary-bg); color: var(--primary); border-color: var(--primary); }
 .dm-stat.on strong { color: var(--primary); }
 .dm-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.act-icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 4px; color: var(--text-secondary, #666); display: inline-flex; align-items: center; transition: background 0.15s; }
+.act-icon-btn:hover { background: rgba(0, 107, 255, 0.08); color: var(--primary, #006eff); }
+.act-icon-btn + .act-icon-btn { margin-left: 2px; }
 </style>
