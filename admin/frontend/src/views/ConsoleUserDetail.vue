@@ -148,7 +148,7 @@
             <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
             <table class="vod-table" v-if="filteredActivity.length">
               <thead>
-                <tr><th style="width:22%;text-align:left">Issue</th><th style="width:15%;text-align:left">事件</th><th style="width:18%;text-align:left">运行时</th><th style="width:10%;text-align:left">耗时</th><th style="width:10%;text-align:left">状态</th><th style="width:25%;text-align:left">时间</th></tr>
+                <tr><th style="width:22%;text-align:left">Issue</th><th style="width:15%;text-align:left">事件</th><th style="width:8%;text-align:center">运行时</th><th style="width:10%;text-align:left">耗时</th><th style="width:10%;text-align:left">状态</th><th style="width:35%;text-align:left">时间</th></tr>
               </thead>
               <tbody>
                 <template v-for="(t, idx) in filteredActivity" :key="t.id">
@@ -158,10 +158,11 @@
                       <div v-if="t.issueTitle" class="t3" :title="t.issueTitle" style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.issueTitle }}</div>
                     </td>
                     <td><span :class="['status-tag', eventTypeClass(t.eventType)]" style="font-size:11px">{{ eventTypeText(t.eventType) }}</span></td>
-                    <td style="font-size:11px;cursor:pointer;white-space:nowrap" @click.stop="runtimeExpanded[t.id] = !runtimeExpanded[t.id]">
-                      <span v-if="t.engine" class="t3" style="display:inline-block;max-width:120px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle">{{ t.engine.split('-').slice(0,2).join('-') }}</span>
-                      <span v-else class="t3">—</span>
-                      <span style="font-size:9px;color:var(--text-tertiary);margin-left:4px;flex-shrink:0">{{ runtimeExpanded[t.id] ? '▲' : '▼' }}</span>
+                    <td style="text-align:center">
+                      <button class="act-icon-btn" @click.stop="runtimeExpanded[t.id] = !runtimeExpanded[t.id]" :title="runtimeExpanded[t.id] ? '收起运行时' : '展开运行时'">
+                        <svg v-if="runtimeExpanded[t.id]" viewBox="0 0 24 24" width="16" height="16"><path d="M18 15l-6-6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        <svg v-else viewBox="0 0 24 24" width="16" height="16"><path d="M9 18l6-6-6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                      </button>
                     </td>
                     <td class="t3">{{ formatDuration(t.duration) }}</td>
                     <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
@@ -714,6 +715,8 @@ watch(() => info.value.repoMatrix, (val) => {
 .tl-row-ok td { background: rgba(52,199,89,0.03) !important; }
 .tl-row-clickable { cursor: pointer; transition: var(--transition); }
 .tl-row-clickable:hover td { background: rgba(0,107,255,0.03) !important; }
+.act-icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 4px; color: var(--text-secondary); display: inline-flex; align-items: center; transition: var(--transition); }
+.act-icon-btn:hover { background: rgba(0,107,255,0.08); color: var(--primary); }
 /* 任务日志弹窗（对齐健康中心 log-* 样式） */
 .log-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .log-modal-overlay.log-layer { z-index: 1200; }
