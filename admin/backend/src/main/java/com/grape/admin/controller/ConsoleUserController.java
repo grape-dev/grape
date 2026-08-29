@@ -174,19 +174,53 @@ public class ConsoleUserController {
             }
         } catch (Exception e) { /* ignore */ }
 
-        // 关联仓库（通过 repo_owner 关联）
+        // 仓库 × Issue 矩阵（Issue 分析 tab 用）
         try {
-            List<Map<String, Object>> repos = grapeJdbc.query(
-                "SELECT DISTINCT m.repo_key, m.full_name FROM managed_repos m " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? ORDER BY m.full_name",
+            List<Map<String, Object>> repoMatrix = grapeJdbc.query(
+                "SELECT m.full_name, m.repo_key, " +
+                "COUNT(*) as task_count, " +
+                "COUNT(DISTINCT t.issue_id) as issue_count, " +
+                "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
+                "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed " +
+                "FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
+                "GROUP BY m.full_name, m.repo_key ORDER BY task_count DESC",
+                (rs2, rowNum) -> {
+                    Map<String, Object> r = new LinkedHashMap<>();
+                    r.put("fullName", rs2.getString("full_name"));
+                    r.put("repoKey", rs2.getString("repo_key"));
+                    r.put("taskCount", rs2.getInt("task_count"));
+                    r.put("issueCount", rs2.getInt("issue_count"));
+                    r.put("completed", rs2.getInt("completed"));
+                    r.put("failed", rs2.getInt("failed"));
+                    return r;
+                }, id);
+            info.put("repoMatrix", repoMatrix);
+            info.put("repoCount", repoMatrix.size());
+
+            // 每个 Issue 的明细
+            List<Map<String, Object>> issueDetails = grapeJdbc.query(
+                "SELECT m.repo_key, m.full_name, t.issue_id, " +
+                "COUNT(*) as task_count, " +
+                "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
+                "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed " +
+                "FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
+                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
+                "GROUP BY m.repo_key, m.full_name, t.issue_id ORDER BY m.full_name, t.issue_id",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
                     r.put("repoKey", rs2.getString("repo_key"));
                     r.put("fullName", rs2.getString("full_name"));
+                    r.put("issueId", rs2.getString("issue_id"));
+                    r.put("taskCount", rs2.getInt("task_count"));
+                    r.put("completed", rs2.getInt("completed"));
+                    r.put("failed", rs2.getInt("failed"));
                     return r;
                 }, id);
-            info.put("repoCount", repos.size());
-            info.put("repos", repos);
+            info.put("issueDetails", issueDetails);
         } catch (Exception e) { /* ignore */ }
 
         return info;

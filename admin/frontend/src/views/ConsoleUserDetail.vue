@@ -74,31 +74,39 @@
               </div>
             </div>
             <!-- Issue 分析 tab -->
-            <div v-else class="activity-grid">
-              <div class="activity-card">
-                <div class="activity-value" style="color:#5e5ce6">{{ info.issueCount ?? 0 }}</div>
-                <div class="activity-label">Issue 数</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value">{{ info.issueTaskCount ?? 0 }}</div>
-                <div class="activity-label">Issue 任务数</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value">{{ info.chatTaskCount ?? 0 }}</div>
-                <div class="activity-label">对话任务数</div>
-              </div>
-              <div class="activity-card" style="grid-column:span 2;cursor:pointer" @click="showRepos = !showRepos">
-                <div class="activity-value">{{ info.repoCount ?? 0 }}</div>
-                <div class="activity-label">关联仓库 {{ showRepos ? '▲' : '▼' }}</div>
-              </div>
-            </div>
-            <!-- 仓库列表展开 -->
-            <div v-if="showRepos && info.repos && info.repos.length" style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">
-              <router-link
-                v-for="r in info.repos" :key="r.repoKey"
-                :to="`/repos/manage`"
-                class="repo-chip"
-              >📦 {{ r.fullName }}</router-link>
+            <div v-else>
+              <table class="vod-table" v-if="info.repoMatrix && info.repoMatrix.length">
+                <thead>
+                  <tr><th>仓库</th><th style="width:70px">任务</th><th style="width:60px">Issue</th><th style="width:60px">完成</th><th style="width:60px">失败</th><th style="width:80px">成功率</th></tr>
+                </thead>
+                <tbody>
+                  <template v-for="r in info.repoMatrix" :key="r.repoKey">
+                    <tr class="tl-row-clickable" @click="toggleRepoExpand(r.repoKey)">
+                      <td>
+                        <span style="margin-right:6px">{{ expandedRepos.includes(r.repoKey) ? '▼' : '▶' }}</span>
+                        <router-link :to="`/repos/manage`" style="color:var(--primary);text-decoration:none" @click.stop>{{ r.fullName }}</router-link>
+                      </td>
+                      <td class="t3">{{ r.taskCount }}</td>
+                      <td class="t3">{{ r.issueCount }}</td>
+                      <td class="t3" style="color:#34c759">{{ r.completed }}</td>
+                      <td class="t3" style="color:#ff3b30">{{ r.failed }}</td>
+                      <td class="t3">{{ r.taskCount > 0 ? Math.round(r.completed * 1000 / r.taskCount) / 10 + '%' : '—' }}</td>
+                    </tr>
+                    <!-- 展开的 Issue 列表 -->
+                    <tr v-if="expandedRepos.includes(r.repoKey)" v-for="iss in issuesByRepo(r.repoKey)" :key="iss.issueId">
+                      <td style="padding-left:32px">
+                        <router-link :to="`/repos/manage`" style="color:var(--text-secondary);text-decoration:none" @click.stop>{{ iss.issueId }}</router-link>
+                      </td>
+                      <td class="t3">{{ iss.taskCount }}</td>
+                      <td class="t3">—</td>
+                      <td class="t3" style="color:#34c759">{{ iss.completed }}</td>
+                      <td class="t3" style="color:#ff3b30">{{ iss.failed }}</td>
+                      <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+              <p v-else class="t2" style="padding:20px;text-align:center">暂无仓库数据</p>
             </div>
           </div>
         </div>
@@ -169,6 +177,20 @@ const loading = ref(true)
 const resetting = ref(false)
 const showRepos = ref(false)
 const activityTab = ref('task')
+const expandedRepos = ref([])
+
+function toggleRepoExpand(repoKey) {
+  const idx = expandedRepos.value.indexOf(repoKey)
+  if (idx >= 0) {
+    expandedRepos.value.splice(idx, 1)
+  } else {
+    expandedRepos.value.push(repoKey)
+  }
+}
+
+function issuesByRepo(repoKey) {
+  return (info.value.issueDetails || []).filter(i => i.repoKey === repoKey)
+}
 const toast = ref({ show: false, msg: '', type: 'success' })
 
 const credentialConfigured = computed(() => {
