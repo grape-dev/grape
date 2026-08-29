@@ -59,116 +59,8 @@
       </div>
 
       <!-- 关联任务 -->
-      <div class="card" style="margin-top:16px;padding:0">
-        <div class="section-header">
-          <h5 class="sh-title">关联任务 <span class="sh-count">共 {{ detail.tasks?.totalElements ?? 0 }} 条<span v-if="filterCount">（已筛选 {{ filterCount }} 条）</span></span></h5>
-          <div class="sh-actions">
-            <select v-model="selectedEngineId" class="page-size-select" style="max-width:260px" @change="onEngineChange">
-              <option :value="null">全部引擎</option>
-              <option v-for="e in detail.engines || []" :key="e.id" :value="e.id">{{ e.name }}</option>
-            </select>
-            <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
-          </div>
-        </div>
-        <div style="padding:14px 20px">
-
-        <!-- 任务状态统计卡（kpi 色带卡片，对齐 AgentManage/Overview 体系） -->
-        <div class="task-stat-cards">
-          <div class="task-stat-card kpi-primary">
-            <div class="task-stat-num primary">{{ taskTotal }}</div>
-            <div class="task-stat-label">任务总数</div>
-          </div>
-          <div v-for="s in taskStatList" :key="s.key" class="task-stat-card" :style="{ borderLeftColor: s.color }">
-            <div class="task-stat-num" :style="{ color: s.color }">{{ s.count }}</div>
-            <div class="task-stat-label">{{ s.label }}</div>
-          </div>
-        </div>
-
-        <!-- 任务状态分布图（对齐 VOD chart-row） -->
-        <div class="task-chart-row">
-          <div class="card chart-card">
-            <div class="section-header"><h5 class="sh-title">任务状态分布</h5></div>
-            <div ref="taskChartEl" style="height:220px;padding:14px 20px"></div>
-          </div>
-        </div>
-
-        <div class="table-loading-wrapper">
-          <div class="table-loading-overlay" v-if="taskLoading">
-            <span class="table-loading-text">加载中...</span>
-          </div>
-          <div style="overflow-x:auto">
-          <table class="vod-table">
-            <thead><tr>
-              <th style="width:70px">ID</th>
-              <th style="width:110px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('agentType')">
-                  类型 <span class="filter-arrow" :class="{ active: taskType }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'agentType'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskType }" @click="setFilter('agentType', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('agentType')" :key="v" :class="{ active: taskType === v }" @click="setFilter('agentType', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:180px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('skill')">
-                  技能 <span class="filter-arrow" :class="{ active: taskSkill }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'skill'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskSkill }" @click="setFilter('skill', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('skill')" :key="v" :class="{ active: taskSkill === v }" @click="setFilter('skill', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:90px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('status')">
-                  状态 <span class="filter-arrow" :class="{ active: taskStatus }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'status'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskStatus }" @click="setFilter('status', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:150px" class="sortable-th" @click="toggleSort">
-                创建时间
-                <span class="sort-arrows">
-                  <span class="sort-dir" :class="{ active: sortOrder === 'asc' }">▲</span>
-                  <span class="sort-dir" :class="{ active: sortOrder === 'desc' }">▼</span>
-                </span>
-              </th>
-            </tr></thead>
-            <tbody>
-              <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
-                <td :colspan="5" class="t2" style="padding:28px 0">
-                  <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
-                  <template v-else>
-                    无匹配任务
-                    <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6;margin-left:10px" @click="clearFilters">清除筛选</button>
-                  </template>
-                </td>
-              </tr>
-              <tr v-for="t in detail.tasks?.content || []" :key="t.id">
-                <td class="t3">{{ t.id }}</td>
-                <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
-                <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
-                <td><span class="status-tag default">{{ t.status }}</span></td>
-                <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
-              </tr>
-            </tbody>
-          </table>
-          </div>
-        </div>
-        <div v-if="detail.tasks?.totalElements > 0" class="pagination-bar" style="border-top:none">
-          <span class="page-info">第 <strong>{{ taskPage + 1 }}</strong> / {{ detail.tasks?.totalPages ?? 1 }} 页（共 {{ detail.tasks?.totalElements ?? 0 }} 条）</span>
-          <select v-model="taskSize" class="page-size-select" @change="taskPage = 0; load()">
-            <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
-          </select>
-          <button class="page-btn" :disabled="taskPage <= 0" @click="taskPage--; load()">上一页</button>
-          <button class="page-btn" :disabled="taskPage >= (detail.tasks?.totalPages ?? 1) - 1" @click="taskPage++; load()">下一页</button>
-        </div>
-        </div>
-      </div>
+      <TaskListSection :tasks="detail.tasks" :loading="taskLoading" :columns="{ engine: true }" @reload="onTaskReload" />
     </div>
-
-    <p v-else class="t2" style="padding:40px;text-align:center">加载中…</p>
   </div>
 </template>
 
@@ -177,6 +69,7 @@ import { computed, nextTick, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import http from '../api'
+import TaskListSection from '../components/TaskListSection.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -258,12 +151,20 @@ async function load() {
   try {
     const { data } = await http.get(`/devices/${route.params.id}`, { params })
     detail.value = data
-    // 「已筛选 N 条」：有列头筛选时显示过滤后总数，无筛选不显示（对齐 VOD）
-    filterCount.value = (taskStatus.value || taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
     nextTick(renderTaskChart)
   } finally {
     taskLoading.value = false
   }
+}
+
+function onTaskReload(params) {
+  taskPage.value = params.taskPage ?? 0
+  taskSize.value = params.taskSize ?? 10
+  sortOrder.value = params.sortOrder ?? 'desc'
+  taskStatus.value = params.taskStatus ?? ''
+  taskSkill.value = params.taskSkill ?? ''
+  taskType.value = params.taskType ?? ''
+  load()
 }
 // 任务状态分布饼图（对齐 VOD chart-row）
 function renderTaskChart() {
