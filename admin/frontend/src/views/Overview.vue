@@ -78,7 +78,14 @@
       <!-- 图表区：4 卡对应 4 图（2×2，对齐 KPI 卡顺序：用户/仓库/设备/任务） -->
       <div class="chart-grid chart-grid-4">
         <div class="chart-card">
-          <div class="chart-title">工作台用户 · 凭证分布</div>
+          <div class="chart-title">
+            <span>工作台用户 · 注册趋势</span>
+            <div class="chart-tabs">
+              <button :class="{ on: regGranularity === 'year' }" @click="switchRegGranularity('year')">年</button>
+              <button :class="{ on: regGranularity === 'month' }" @click="switchRegGranularity('month')">月</button>
+              <button :class="{ on: regGranularity === 'day' }" @click="switchRegGranularity('day')">日</button>
+            </div>
+          </div>
           <div class="chart-body" ref="userCompositionRef"></div>
         </div>
         <div class="chart-card">
@@ -113,6 +120,8 @@ const taskStatusRef = ref(null)
 const deviceStatusRef = ref(null)
 const repoEventRef = ref(null)
 const userCompositionRef = ref(null)
+const regGranularity = ref('month')
+const regData = ref([])
 
 const COLOR_POOL = ['#006eff', '#34c759', '#ff9500', '#ff3b30', '#5e5ce6', '#30b0c7', '#ff2d92', '#ff9500']
 const TASK_STATUS_COLORS = { completed: '#34c759', queued: '#ff9500', dispatched: '#006eff' }
@@ -152,6 +161,7 @@ async function load() {
     vc.value = {}
   }
   loading.value = false
+  await loadRegData()
   await new Promise(r => setTimeout(r, 50))
   renderCharts()
 }
@@ -250,26 +260,38 @@ function renderRepoEvent() {
   })
 }
 
-// 用户构成分布 - 柱状图（对应"用户"卡片）
+// 用户注册趋势 - 柱状图（按年/月/日维度）
+async function loadRegData() {
+  try {
+    const { data } = await http.get('/stats/user-registration', { params: { granularity: regGranularity.value } })
+    regData.value = data.data || []
+  } catch (e) {
+    console.error('[Overview] loadRegData failed', e)
+    regData.value = []
+  }
+}
+
+async function switchRegGranularity(g) {
+  regGranularity.value = g
+  await loadRegData()
+  renderUserComposition()
+}
+
 function renderUserComposition() {
   if (!userCompositionRef.value) return
   const chart = echarts.init(userCompositionRef.value)
   charts.push(chart)
-  const dist = d.value.userCompositionDistribution || {}
-  const data = Object.keys(dist).map(k => ({
-    name: k,
-    value: dist[k],
-    itemStyle: { color: USER_COMP_COLORS[k] || '#006eff' }
-  }))
+  const data = regData.value.map(x => x.count)
+  const labels = regData.value.map(x => x.label)
   chart.setOption({
-    tooltip: { trigger: 'axis' },
+    tooltip: { trigger: 'axis', formatter: p => `${p[0].name}<br/>注册 ${p[0].value} 人` },
     grid: { left: 40, right: 16, top: 24, bottom: 32 },
-    xAxis: { type: 'category', data: data.map(x => x.name), axisLabel: { fontSize: 11 } },
+    xAxis: { type: 'category', data: labels, axisLabel: { fontSize: 11, rotate: labels.length > 6 ? 30 : 0 } },
     yAxis: { type: 'value', minInterval: 1 },
     series: [{
-      type: 'bar', data, barMaxWidth: 60,
+      type: 'bar', data, barMaxWidth: 50,
       label: { show: true, position: 'top', fontSize: 11 },
-      itemStyle: { borderRadius: [4, 4, 0, 0] }
+      itemStyle: { color: '#30b0c7', borderRadius: [4, 4, 0, 0] }
     }]
   })
 }
@@ -346,7 +368,10 @@ onBeforeUnmount(() => {
   background: #fff; border-radius: 14px; border: 1px solid var(--border-soft);
   box-shadow: var(--card-shadow); overflow: hidden;
 }
-.chart-title { font-size: 14px; font-weight: 600; padding: 14px 18px 0; color: var(--text-primary); }
+.chart-title { font-size: 14px; font-weight: 600; padding: 14px 18px 0; color: var(--text-primary); display: flex; align-items: center; justify-content: space-between; }
+.chart-tabs { display: flex; gap: 2px; }
+.chart-tabs button { font-size: 11px; padding: 2px 8px; border: 1px solid var(--border-color); border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; transition: all var(--transition); }
+.chart-tabs button.on { background: var(--primary); color: #fff; border-color: var(--primary); }
 .chart-body { width: 100%; height: 260px; padding: 8px; }
 
 @media (max-width: 1024px) {

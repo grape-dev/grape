@@ -5,11 +5,14 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -127,5 +130,34 @@ public class StatsController {
             }
         });
         return m;
+    }
+
+    @GetMapping("/user-registration")
+    public Map<String, Object> userRegistration(@RequestParam(defaultValue = "month") String granularity) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        String fmt;
+        if ("year".equals(granularity)) {
+            fmt = "%Y";
+        } else if ("day".equals(granularity)) {
+            fmt = "%Y-%m-%d";
+        } else {
+            fmt = "%Y-%m";
+        }
+        List<Map<String, Object>> list = new ArrayList<>();
+        try {
+            grapeJdbc.query(
+                "SELECT DATE_FORMAT(created_at, '" + fmt + "') as label, COUNT(*) as cnt " +
+                "FROM user_accounts WHERE created_at IS NOT NULL AND created_at REGEXP '^[0-9]{4}' " +
+                "GROUP BY label ORDER BY label",
+                rs -> {
+                    Map<String, Object> r = new LinkedHashMap<>();
+                    r.put("label", rs.getString("label"));
+                    r.put("count", rs.getLong("cnt"));
+                    list.add(r);
+                });
+        } catch (Exception e) { /* ignore */ }
+        result.put("granularity", granularity);
+        result.put("data", list);
+        return result;
     }
 }
