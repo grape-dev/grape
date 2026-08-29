@@ -432,6 +432,7 @@ public class ConsoleUserController {
             String rk = (String) evs.get(0).get("repo_key");
             String repoName = rk != null ? rk.replaceFirst("^gitcode:", "") : "";
             g.put("repoName", repoName);
+            g.put("repoKey", rk);
             // 从 payload 提取 title
             String issueTitle = "";
             for (Map<String, Object> ev : evs) {
@@ -510,6 +511,14 @@ public class ConsoleUserController {
         Map<String, Object> result = new LinkedHashMap<>();
         List<Map<String, Object>> events = new ArrayList<>();
         try {
+            // 构建查询：issueId 必填，repoKey 可选
+            StringBuilder where = new StringBuilder(" WHERE e.issue_id=?");
+            List<Object> params = new ArrayList<>();
+            params.add(issueId);
+            if (repoKey != null && !repoKey.isEmpty()) {
+                where.append(" AND e.repo_key=?");
+                params.add(repoKey);
+            }
             events = grapeJdbc.query(
                 "SELECT e.seq, e.event_type, e.agent_type, e.skill, e.status, e.duration, e.created_at, " +
                 "e.repo_key, " +
@@ -520,9 +529,7 @@ public class ConsoleUserController {
                 "(SELECT ar.host_name FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as host_name, " +
                 "(SELECT rc.device_name FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id JOIN runtime_credentials rc ON ar.credential_id = rc.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as device_name, " +
                 "(SELECT rc.last_ip FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id JOIN runtime_credentials rc ON ar.credential_id = rc.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as last_ip " +
-                "FROM events e " +
-                "WHERE e.repo_key=? AND e.issue_id=? " +
-                "ORDER BY e.created_at",
+                "FROM events e " + where + " ORDER BY e.created_at",
                 (rs, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
                     r.put("seq", rs.getInt("seq"));
@@ -537,7 +544,7 @@ public class ConsoleUserController {
                     r.put("engine", buildEngineName(rs));
                     r.put("engineIp", rs.getString("last_ip"));
                     return r;
-                }, repoKey, issueId);
+                }, params.toArray());
         } catch (Exception e) { /* ignore */ }
         result.put("issueId", issueId);
         result.put("events", events);

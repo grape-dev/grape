@@ -303,7 +303,7 @@ async function toggleIssueTimeline(iss) {
       issueEventsLoading.value = { ...issueEventsLoading.value, [id]: true }
       try {
         const { data } = await http.get(`/console-users/${route.params.id}/issue-timeline`, {
-          params: { repoKey: selectedRepo.value, issueId: id }
+          params: { repoKey: iss.repoKey, issueId: id }
         })
         issueEvents.value = { ...issueEvents.value, [id]: data.events || [] }
         issueEventsLoading.value = { ...issueEventsLoading.value, [id]: false }
