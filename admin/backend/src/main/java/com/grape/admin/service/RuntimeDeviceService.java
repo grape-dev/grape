@@ -462,6 +462,8 @@ public class RuntimeDeviceService {
         m.put("createdAt", t.getCreatedAt());
         m.put("completedAt", t.getCompletedAt());
         m.put("repoKey", t.getRepoKey());
+        m.put("issueId", t.getIssueId());
+        m.put("eventSeq", t.getEventSeq());
         return m;
     }
 

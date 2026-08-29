@@ -95,6 +95,7 @@
           <table class="vod-table">
             <thead><tr>
               <th style="width:70px">ID</th>
+              <th style="width:100px">Issue</th>
               <th style="width:110px" class="filterable-th">
                 <span class="th-content" @click="toggleFilter('agentType')">
                   类型 <span class="filter-arrow" :class="{ active: taskType }">▼</span>
@@ -122,6 +123,8 @@
                   <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
                 </div>
               </th>
+              <th style="width:70px">耗时</th>
+              <th style="width:50px">Exit</th>
               <th style="width:150px" class="sortable-th" @click="toggleSort">
                 创建时间
                 <span class="sort-arrows">
@@ -132,7 +135,7 @@
             </tr></thead>
             <tbody>
               <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
-                <td :colspan="5" class="t2" style="padding:28px 0">
+                <td :colspan="8" class="t2" style="padding:28px 0">
                   <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
                   <template v-else>
                     无匹配任务
@@ -140,11 +143,14 @@
                   </template>
                 </td>
               </tr>
-              <tr v-for="t in detail.tasks?.content || []" :key="t.id">
-                <td class="t3">{{ t.id }}</td>
+              <tr v-for="t in detail.tasks?.content || []" :key="t.id" class="tl-row-clickable" @click="openLogModal(t.id, t)">
+                <td class="t3">{{ (t.id || '').substring(0, 8) }}</td>
+                <td><b v-if="t.issueId">{{ t.issueId }}</b> <span class="t3" v-if="t.eventSeq">#{{ t.eventSeq }}</span><span v-if="!t.issueId" class="t3">—</span></td>
                 <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
                 <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
-                <td><span class="status-tag default">{{ t.status }}</span></td>
+                <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'running' ? 'warning' : 'default']">{{ t.status }}</span></td>
+                <td class="t3">{{ formatDuration(t.createdAt, t.completedAt) }}</td>
+                <td class="t3">{{ t.exitCode ?? '—' }}</td>
                 <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
               </tr>
             </tbody>
@@ -164,6 +170,37 @@
     </div>
 
     <p v-else class="t2" style="padding:40px;text-align:center">加载中…</p>
+
+    <!-- 日志弹窗 -->
+    <div v-if="logModal.show" class="log-modal-overlay" @click.self="closeLogModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:8px;width:80%;max-width:900px;max-height:80vh;display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid #eee">
+          <b>任务日志</b>
+          <span class="t3" v-if="logModal.info.repoKey" style="font-size:12px">{{ logModal.info.repoKey.replace('gitcode:', '') }}</span>
+          <b v-if="logModal.info.issueId" style="font-size:13px">{{ logModal.info.issueId }}</b>
+          <span class="t3" v-if="logModal.info.eventSeq" style="font-size:12px">#{{ logModal.info.eventSeq }}</span>
+          <span class="t3" v-if="logModal.info.createdAt" style="font-size:12px">{{ formatTime(logModal.info.createdAt) }}</span>
+          <span style="margin-left:auto;cursor:pointer;font-size:18px;color:#999" @click="closeLogModal">✕</span>
+        </div>
+        <div v-if="logModal.info.status" style="display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid #f5f5f5;font-size:12px">
+          <span class="log-tl-dot" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'" style="width:8px;height:8px;border-radius:50%;display:inline-block"></span>
+          <span class="t3">入队 {{ formatTime(logModal.info.createdAt).slice(11, 19) }}</span>
+          <span v-if="logModal.info.startedAt" class="t3">→ 开始 {{ formatTime(logModal.info.startedAt).slice(11, 19) }}</span>
+          <span v-if="logModal.info.completedAt" class="t3">→ 完成 {{ formatTime(logModal.info.completedAt).slice(11, 19) }}</span>
+          <span :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'" style="font-weight:600">{{ logModal.info.status.toUpperCase() }}</span>
+        </div>
+        <div style="overflow-y:auto;flex:1;padding:14px 20px">
+          <div v-if="logModal.loading" style="text-align:center;padding:30px;color:#999">加载日志...</div>
+          <div v-else-if="logModal.messages.length === 0" style="text-align:center;padding:30px;color:#999">暂无日志</div>
+          <div v-else>
+            <div v-for="(msg, i) in logModal.messages" :key="i" style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #f9f9f9;font-size:13px">
+              <span style="color:#999;font-size:12px;flex-shrink:0">{{ logTypeIcon(msg.type) }}</span>
+              <span style="white-space:pre-wrap;word-break:break-all">{{ msg.content || msg.text || JSON.stringify(msg) }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -245,6 +282,38 @@ function formatTime(ts) {
 function installedText(v) { return v == null ? '—' : v === 1 ? '已安装' : '未安装' }
 function healthyText(v) { return v == null ? '—' : v === 1 ? '正常' : '异常' }
 function deviceStatusText(s) { return s === 'active' ? '有效' : s === 'revoked' ? '已吊销' : (s || '—') }
+
+function formatDuration(start, end) {
+  if (!start || !end) return '—'
+  const ms = new Date(end.replace(' ', 'T')) - new Date(start.replace(' ', 'T'))
+  if (isNaN(ms)) return '—'
+  const s = Math.round(ms / 1000)
+  if (s < 60) return s + 's'
+  return Math.floor(s / 60) + 'm' + (s % 60) + 's'
+}
+
+// ===== 日志弹窗 =====
+const logModal = ref({ show: false, loading: false, messages: [], info: {} })
+
+async function openLogModal(taskId, task) {
+  logModal.value = { show: true, loading: true, messages: [], info: { issueId: task?.issueId, repoKey: task?.repoKey, eventSeq: task?.eventSeq, createdAt: task?.createdAt } }
+  try {
+    const [msgsResp, infoResp] = await Promise.all([
+      http.get(`/health-center/tasks/${taskId}/messages`),
+      http.get(`/health-center/tasks/${taskId}/info`),
+    ])
+    const info = infoResp.data || {}
+    if (!info.repoKey && task?.repoKey) info.repoKey = task.repoKey
+    logModal.value = { show: true, loading: false, messages: msgsResp.data || [], info }
+  } catch (e) {
+    logModal.value = { show: true, loading: false, messages: [], info: { error: e.message } }
+  }
+}
+function closeLogModal() { logModal.value = { show: false, loading: false, messages: [], info: {} } }
+function logTypeIcon(t) {
+  const map = { step_start: '▶', step_finish: '✓', text: '💬', reasoning: '🤔', tool_use: '🔧', error: '❌', done: '✅' }
+  return map[t] || '•'
+}
 
 const STATUS_COLOR = { queued: '#fa8c16', running: '#006eff', completed: '#52c41a', failed: '#eb2f96' }
 const accents = ['kpi-blue', 'kpi-purple', 'kpi-pink', 'kpi-orange', 'kpi-green']
@@ -527,4 +596,14 @@ load()
   margin-right: 4px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===== 日志弹窗 ===== */
+.tl-row-clickable { cursor: pointer; }
+.tl-row-clickable:hover { background: rgba(0, 107, 255, 0.04); }
+.log-tl-dot.ok { background: #52c41a; }
+.log-tl-dot.fail { background: #eb2f96; }
+.log-tl-dot.run { background: #006eff; }
+span.ok { color: #52c41a; }
+span.fail { color: #eb2f96; }
+span.run { color: #006eff; }
 </style>
