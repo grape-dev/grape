@@ -236,15 +236,16 @@
             <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
             <table class="vod-table" v-if="filteredActivity.length">
               <thead>
-                <tr><th style="width:15%">任务ID</th><th style="width:15%">Agent</th><th style="width:20%">Skill</th><th style="width:10%">状态</th><th style="width:15%">Issue</th><th style="width:25%">时间</th></tr>
+                <tr><th style="width:10%">Seq</th><th style="width:20%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:23%">时间</th></tr>
               </thead>
               <tbody>
-                <tr v-for="t in filteredActivity" :key="t.id">
-                  <td class="t3" :title="t.id" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.id?.substring(0, 12) }}…</td>
+                <tr v-for="(t, idx) in filteredActivity" :key="t.id">
+                  <td class="t3">{{ filteredActivity.length - idx }}</td>
+                  <td class="t3">{{ t.eventType || t.agentType || '—' }}</td>
                   <td class="t3">{{ t.agentType || '—' }}</td>
-                  <td class="t3" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.skill || '—' }}</td>
+                  <td class="t3">{{ t.engine || '—' }}</td>
+                  <td class="t3">{{ t.duration || '—' }}</td>
                   <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
-                  <td class="t3"><a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span></td>
                   <td class="t3">{{ formatTime(t.startedAt) }}</td>
                 </tr>
               </tbody>

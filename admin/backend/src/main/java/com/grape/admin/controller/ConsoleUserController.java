@@ -224,11 +224,13 @@ public class ConsoleUserController {
         try {
             List<Map<String, Object>> recentTasks = grapeJdbc.query(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at " +
+                "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
+                "ar.name as engine_name " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
+                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -241,6 +243,25 @@ public class ConsoleUserController {
                     r.put("skill", rs2.getString("skill"));
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
+                    r.put("eventType", rs2.getString("event_type"));
+                    r.put("engine", rs2.getString("engine_name"));
+                    // 耗时（秒）
+                    String startedAt = rs2.getString("started_at");
+                    String completedAt = rs2.getString("completed_at");
+                    if (startedAt != null && completedAt != null) {
+                        try {
+                            String s = startedAt.replace("T", " ").length() > 19 ? startedAt.replace("T", " ").substring(0, 19) : startedAt.replace("T", " ");
+                            String c = completedAt.replace("T", " ").length() > 19 ? completedAt.replace("T", " ").substring(0, 19) : completedAt.replace("T", " ");
+                            java.sql.Timestamp start = java.sql.Timestamp.valueOf(s);
+                            java.sql.Timestamp end = java.sql.Timestamp.valueOf(c);
+                            long durationSec = (end.getTime() - start.getTime()) / 1000;
+                            r.put("duration", durationSec + "s");
+                        } catch (Exception ex) {
+                            r.put("duration", "—");
+                        }
+                    } else {
+                        r.put("duration", "—");
+                    }
                     // 状态判断（直接用 status 字段，对齐 observability）
                     String taskStatus = rs2.getString("status");
                     if (taskStatus != null && !taskStatus.isEmpty()) {
