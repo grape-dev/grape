@@ -236,16 +236,17 @@
             <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
             <table class="vod-table" v-if="filteredActivity.length">
               <thead>
-                <tr><th style="width:10%">Seq</th><th style="width:20%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:23%">时间</th></tr>
+                <tr><th style="width:8%">Seq</th><th style="width:18%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:12%">Issue</th><th style="width:15%">时间</th></tr>
               </thead>
               <tbody>
                 <tr v-for="(t, idx) in filteredActivity" :key="t.id">
-                  <td class="t3">{{ filteredActivity.length - idx }}</td>
-                  <td class="t3">{{ t.eventType || t.agentType || '—' }}</td>
-                  <td class="t3">{{ t.agentType || '—' }}</td>
-                  <td class="t3">{{ t.engine || '—' }}</td>
-                  <td class="t3">{{ t.duration || '—' }}</td>
+                  <td class="t3">#{{ filteredActivity.length - idx }}</td>
+                  <td><span :class="['status-tag', eventTypeClass(t.eventType)]" style="font-size:11px">{{ eventTypeText(t.eventType) }}</span></td>
+                  <td><span class="status-tag info" style="font-size:11px">{{ t.agentType || '—' }}</span></td>
+                  <td class="t3" style="font-size:11px">{{ t.engine || '—' }}</td>
+                  <td class="t3">{{ formatDuration(t.duration) }}</td>
                   <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
+                  <td class="t3"><a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span></td>
                   <td class="t3">{{ formatTime(t.startedAt) }}</td>
                 </tr>
               </tbody>
@@ -283,6 +284,25 @@ const pendingTotal = computed(() => {
 
 function togglePendingDetail() {
   pendingDetailOpen.value = !pendingDetailOpen.value
+}
+function eventTypeText(t) {
+  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号' }
+  return map[t] || t || '—'
+}
+function eventTypeClass(t) {
+  if (t === 'a2a_event') return 'info'
+  if (t === 'pull_request_merged') return 'success'
+  if (t === 'issue_opened') return 'info'
+  return 'default'
+}
+function formatDuration(d) {
+  if (!d) return '—'
+  const m = d.match(/^(\d+)s$/)
+  if (!m) return d
+  const s = parseInt(m[1])
+  if (s < 60) return s + 's'
+  if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60) + 's'
+  return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm'
 }
 const repoIssues = ref([])
 const repoIssuesPage = ref(0)
