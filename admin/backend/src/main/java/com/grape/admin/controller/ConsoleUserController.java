@@ -134,10 +134,12 @@ public class ConsoleUserController {
         try {
             Long taskCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=?", Long.class, id);
             info.put("taskCount", taskCount != null ? taskCount : 0);
-            Long completedCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND status='completed'", Long.class, id);
+            Long completedCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND exit_code=0 AND completed_at IS NOT NULL", Long.class, id);
             info.put("completedCount", completedCount != null ? completedCount : 0);
-            Long failedCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND status='failed'", Long.class, id);
+            Long failedCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND exit_code>0", Long.class, id);
             info.put("failedCount", failedCount != null ? failedCount : 0);
+            Long pendingCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND (exit_code IS NULL OR completed_at IS NULL)", Long.class, id);
+            info.put("pendingCount", pendingCount != null ? pendingCount : 0);
             if (taskCount != null && taskCount > 0 && completedCount != null) {
                 info.put("successRate", Math.round(completedCount * 1000.0 / taskCount) / 10.0 + "%");
             } else {
@@ -145,13 +147,20 @@ public class ConsoleUserController {
             }
         } catch (Exception e) { /* ignore */ }
 
-        // 托管仓库数（通过 agent_tasks.repo_key 关联 managed_repos）
+        // 关联仓库（通过 agent_tasks.repo_key 关联 managed_repos）
         try {
-            Long repoCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(DISTINCT m.repo_key) FROM managed_repos m " +
+            List<Map<String, Object>> repos = grapeJdbc.query(
+                "SELECT DISTINCT m.repo_key, m.full_name FROM managed_repos m " +
                 "INNER JOIN agent_tasks t ON m.repo_key = t.repo_key OR m.repo_key = CONCAT('gitcode:', t.repo_key) OR t.repo_key = CONCAT('gitcode:', m.repo_key) " +
-                "WHERE t.user_id=?", Long.class, id);
-            info.put("repoCount", repoCount != null ? repoCount : 0);
+                "WHERE t.user_id=? ORDER BY m.full_name",
+                (rs2, rowNum) -> {
+                    Map<String, Object> r = new LinkedHashMap<>();
+                    r.put("repoKey", rs2.getString("repo_key"));
+                    r.put("fullName", rs2.getString("full_name"));
+                    return r;
+                }, id);
+            info.put("repoCount", repos.size());
+            info.put("repos", repos);
         } catch (Exception e) { /* ignore */ }
 
         return info;

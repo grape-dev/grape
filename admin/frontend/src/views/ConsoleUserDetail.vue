@@ -56,6 +56,10 @@
                 <div class="activity-label">已完成</div>
               </div>
               <div class="activity-card">
+                <div class="activity-value" style="color:#ff9500">{{ info.pendingCount ?? 0 }}</div>
+                <div class="activity-label">进行中</div>
+              </div>
+              <div class="activity-card">
                 <div class="activity-value" style="color:#ff3b30">{{ info.failedCount ?? 0 }}</div>
                 <div class="activity-label">失败</div>
               </div>
@@ -63,10 +67,18 @@
                 <div class="activity-value" style="color:#006eff">{{ info.successRate || '—' }}</div>
                 <div class="activity-label">成功率</div>
               </div>
-              <div class="activity-card" style="grid-column:span 2">
+              <div class="activity-card" style="grid-column:span 2;cursor:pointer" @click="showRepos = !showRepos">
                 <div class="activity-value">{{ info.repoCount ?? 0 }}</div>
-                <div class="activity-label">关联仓库</div>
+                <div class="activity-label">关联仓库 {{ showRepos ? '▲' : '▼' }}</div>
               </div>
+            </div>
+            <!-- 仓库列表展开 -->
+            <div v-if="showRepos && info.repos && info.repos.length" style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">
+              <router-link
+                v-for="r in info.repos" :key="r.repoKey"
+                :to="`/repos/manage`"
+                class="repo-chip"
+              >📦 {{ r.fullName }}</router-link>
             </div>
           </div>
         </div>
@@ -135,6 +147,7 @@ const route = useRoute()
 const info = ref({})
 const loading = ref(true)
 const resetting = ref(false)
+const showRepos = ref(false)
 const toast = ref({ show: false, msg: '', type: 'success' })
 
 const credentialConfigured = computed(() => {
@@ -198,7 +211,7 @@ onMounted(() => load())
 .detail-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
 .detail-row span:first-child { color: var(--text-tertiary); }
 
-.activity-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.activity-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
 .activity-card { text-align: center; padding: 16px 8px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 22px; font-weight: 700; color: var(--text-primary); }
 .activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
@@ -210,4 +223,7 @@ onMounted(() => load())
 
 .back-btn { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--text-secondary); font-size: 13px; transition: color var(--transition); }
 .back-btn:hover { color: var(--primary); }
+
+.repo-chip { font-size: 12px; color: var(--primary); background: rgba(0,107,255,0.06); border: none; border-radius: 12px; padding: 4px 12px; text-decoration: none; transition: all var(--transition); }
+.repo-chip:hover { background: rgba(0,107,255,0.12); }
 </style>
