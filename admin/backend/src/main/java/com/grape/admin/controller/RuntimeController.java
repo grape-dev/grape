@@ -175,10 +175,12 @@ public class RuntimeController {
             StringBuilder taskSql = new StringBuilder("SELECT event_seq, id, runtime_id FROM agent_tasks WHERE issue_id=?");
             StringBuilder eventSql = new StringBuilder(
                 "SELECT e.seq, e.event_type, e.issue_id, e.agent_type, e.skill, e.status, e.duration, e.created_at, e.actor, e.repo_key, "
-                + "t.id as task_id, t.runtime_id, ar.name as engine_name "
+                + "t.id as task_id, t.runtime_id, ar.name as engine_name, "
+                + "COALESCE(rc.device_name, '本机直连') as engine_device, COALESCE(rc.last_ip, '127.0.0.1') as engine_ip "
                 + "FROM events e "
                 + "LEFT JOIN agent_tasks t ON t.event_seq = e.seq AND t.repo_key = e.repo_key "
                 + "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id "
+                + "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id "
                 + "WHERE e.issue_id=?");
             List<Object> params = new ArrayList<>();
             params.add(issueId);
@@ -208,7 +210,12 @@ public class RuntimeController {
                         s.put("actor", rs.getString("actor"));
                         s.put("repoKey", rs.getString("repo_key"));
                         s.put("taskId", rs.getString("task_id") != null ? rs.getString("task_id") : seqToTaskId.getOrDefault(seq, ""));
-                        s.put("engine", rs.getString("engine_name"));
+                        // 引擎名（格式: engine-device(ip)，对齐健康中心）
+                        String engineName = rs.getString("engine_name");
+                        String engineDevice = rs.getString("engine_device");
+                        String engineIp = rs.getString("engine_ip");
+                        s.put("engine", engineName != null ? engineName + "-" + engineDevice + "(" + engineIp + ")" : "");
+                        s.put("engineIp", engineIp);
                         events.add(s);
                     }, params.toArray());
         } catch (Exception e) { /* ignore */ }
