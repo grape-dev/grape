@@ -61,7 +61,7 @@
       <!-- 仓库与 Issue -->
       <div class="card" style="padding:0">
           <div class="section-header">
-            <h3 class="sh-title">仓库与 Issue</h3>
+            <h3 class="sh-title">Issue 任务列表</h3>
             <div class="sh-actions">
               <button class="btn btn-sm" @click="loadRepoIssues()">刷新</button>
             </div>
