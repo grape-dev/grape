@@ -192,17 +192,6 @@
                       </tr>
                       <tr v-if="expandedIssues.has(iss.issueId)" style="background:rgba(0,0,0,0.02)">
                         <td colspan="4" style="padding:12px 16px">
-                          <!-- 状态统计明细 -->
-                          <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px">
-                            <span class="t3">已完成 <b style="color:#34c759">{{ iss.completed }}</b></span>
-                            <span class="t3">待处理 <b style="color:#ff9500">{{ (iss.queued ?? 0) + (iss.dispatched ?? 0) + (iss.stuck ?? 0) }}</b></span>
-                            <span class="t3" style="color:var(--text-tertiary)">排队 {{ iss.queued ?? 0 }}</span>
-                            <span class="t3" style="color:var(--text-tertiary)">派发 {{ iss.dispatched ?? 0 }}</span>
-                            <span class="t3" style="color:var(--text-tertiary)">卡住 {{ iss.stuck ?? 0 }}</span>
-                            <span class="t3">运行中 <b style="color:#006eff">{{ iss.running ?? 0 }}</b></span>
-                            <span class="t3">失败 <b style="color:#ff3b30">{{ iss.failed }}</b></span>
-                            <span class="t3">已取消 <b style="color:#aeaeb2">{{ iss.cancelled ?? 0 }}</b></span>
-                          </div>
                           <!-- 切换按钮 -->
                           <div style="display:flex;gap:8px;margin-bottom:12px">
                             <button class="btn btn-sm" :style="issueViewModes[iss.issueId] !== 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="switchIssueView(iss, 'diagram')">📊 时序图</button>
