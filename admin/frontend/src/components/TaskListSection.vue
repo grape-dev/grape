@@ -140,11 +140,11 @@
         </div>
         <div style="overflow-y:auto;flex:1;padding:14px 20px">
           <div v-if="issueModal.loading" class="tl-diagram-loading">加载中...</div>
-          <div v-else-if="issueModal.view === 'diagram'" class="tl-diagram-container">
+          <div v-show="!issueModal.loading && issueModal.view === 'diagram'" class="tl-diagram-container">
             <div v-if="!issueModal.svgRendered" class="tl-diagram-loading">渲染中...</div>
             <div v-else v-html="issueModal.svg" class="tl-diagram-svg"></div>
           </div>
-          <div v-else-if="issueModal.view === 'events'">
+          <div v-show="!issueModal.loading && issueModal.view === 'events'">
             <table class="vod-table">
               <thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>Engine</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
               <tbody>
