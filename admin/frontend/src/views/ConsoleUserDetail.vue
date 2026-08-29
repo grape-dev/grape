@@ -574,6 +574,7 @@ function bindMermaidClicks(iss, evTypes) {
 
 async function renderMermaidForIssue(iss) {
   if (renderingIssues.value.has(iss.issueId)) return
+  if (renderedIssues.value.has(iss.issueId)) return
   const el = diagramRefs[iss.issueId]
   if (!el) return
   renderingIssues.value = new Set([...renderingIssues.value, iss.issueId])
@@ -581,7 +582,7 @@ async function renderMermaidForIssue(iss) {
     const mmd = await getMermaid()
     const { text, statuses, evTypes } = buildSequence(iss._events)
     const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
-    try { await mmd.parse(text) } catch (e) { }
+    try { await mmd.parse(text) } catch (e) { /* parse 失败也尝试 render */ }
     const result = await mmd.render(uid, text)
     const svg = result.svg || result
     const coloredSvg = applySequenceColors(svg, statuses)
@@ -589,9 +590,9 @@ async function renderMermaidForIssue(iss) {
     el.innerHTML = fixedSvg
     renderedIssues.value = new Set([...renderedIssues.value, iss.issueId])
     nextTick(() => bindMermaidClicks(iss, evTypes))
-  } catch (e) {
+  } catch (err) {
     const { text } = buildSequence(iss._events)
-    el.innerHTML = `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${e.message || e}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>`
+    el.innerHTML = `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${err.message || err}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>`
     renderedIssues.value = new Set([...renderedIssues.value, iss.issueId])
   } finally {
     const s = new Set(renderingIssues.value)
