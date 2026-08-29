@@ -680,12 +680,62 @@ async function _renderMermaid(box, iss) {
     const result = await mmd.render(uid, text);
     const svg = result.svg || result;
     box.innerHTML = _applySequenceColors(svg, statuses);
+    // 给每个消息/Note 绑定点击事件 → 打开对应事件的日志弹窗
+    _bindMermaidClicks(box, iss);
   } catch (err) {
     box.innerHTML = '<div style="padding:12px;color:var(--r);font-size:12px">时序渲染失败: ' + (err.message || err) + '</div>';
     // 显示原始 mermaid 文本供调试
     const { text } = _buildSequence(iss);
     box.innerHTML += '<pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">' + text.replace(/</g,'&lt;') + '</pre>';
   }
+}
+
+function _bindMermaidClicks(box, iss) {
+  // mermaid 序列图中每个消息和 Note 对应一个 text 元素
+  // 按 DOM 顺序取 messageLine 和 noteLine，映射到 iss.events 数组
+  const events = iss.events || [];
+  if (!events.length) return;
+  // mermaid 渲染的消息行（含 sequence number 的 line）和 Note 行
+  const svg = box.querySelector('svg');
+  if (!svg) return;
+  // 消息文本在 text.messageText 元素中，Note 在 text.noteText 中
+  // 不同 mermaid 版本 class 名可能不同，用通用方式：取所有 messageLine label
+  let msgIndex = 0;
+  // messageLine 的 text 元素（class 含 messageText）
+  const msgTexts = svg.querySelectorAll('text.messageText');
+  msgTexts.forEach((txt, i) => {
+    if (i >= events.length) return;
+    const ev = events[i];
+    if (!ev.taskId) return;
+    // 找到父级 g 元素设为可点击
+    let parent = txt.parentElement;
+    while (parent && parent.tagName.toLowerCase() !== 'g' && parent !== svg) parent = parent.parentElement;
+    if (parent) {
+      parent.style.cursor = 'pointer';
+      const enc = encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''}));
+      parent.addEventListener('click', function() { openTaskLogModal(ev.taskId, enc); });
+    }
+  });
+  // Note 行（class 含 noteText）
+  const noteTexts = svg.querySelectorAll('text.noteText');
+  noteTexts.forEach((txt, i) => {
+    // Note 的索引需要和 events 对齐——Note 也按顺序对应 events
+    // 但 Note 和 message 混合出现，需要按 mermaid 渲染顺序映射
+    // 简单方案：Note 对应的事件是所有事件中"同 agent 连续事件"的索引
+    // 这里用 noteTexts 在 SVG 中的顺序 + msgTexts 的偏移
+    const allTexts = Array.from(svg.querySelectorAll('text.messageText, text.noteText'));
+    const noteIdx = allTexts.indexOf(txt);
+    if (noteIdx >= events.length) return;
+    const ev = events[noteIdx];
+    if (!ev || !ev.taskId) return;
+    let parent = txt.parentElement;
+    while (parent && parent.tagName.toLowerCase() !== 'g' && parent !== svg) parent = parent.parentElement;
+    if (parent) {
+      parent.style.cursor = 'pointer';
+      const enc = encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''}));
+      parent.addEventListener('click', function() { openTaskLogModal(ev.taskId, enc); });
+    }
+  });
 }
 
 function renderTimelineList(container, issues) {
