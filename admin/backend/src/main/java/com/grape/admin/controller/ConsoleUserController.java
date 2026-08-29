@@ -134,6 +134,12 @@ public class ConsoleUserController {
         try {
             Long taskCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=?", Long.class, id);
             info.put("taskCount", taskCount != null ? taskCount : 0);
+            Long issueTaskCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND issue_id IS NOT NULL AND issue_id<>''", Long.class, id);
+            info.put("issueTaskCount", issueTaskCount != null ? issueTaskCount : 0);
+            Long chatTaskCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND (issue_id IS NULL OR issue_id='')", Long.class, id);
+            info.put("chatTaskCount", chatTaskCount != null ? chatTaskCount : 0);
+            Long issueCount = grapeJdbc.queryForObject("SELECT COUNT(DISTINCT issue_id) FROM agent_tasks WHERE user_id=? AND issue_id IS NOT NULL AND issue_id<>''", Long.class, id);
+            info.put("issueCount", issueCount != null ? issueCount : 0);
             Long completedCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND exit_code=0 AND completed_at IS NOT NULL", Long.class, id);
             info.put("completedCount", completedCount != null ? completedCount : 0);
             Long failedCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND exit_code>0", Long.class, id);

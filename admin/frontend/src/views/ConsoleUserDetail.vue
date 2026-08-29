@@ -50,6 +50,9 @@
               <div class="activity-card">
                 <div class="activity-value">{{ info.taskCount ?? 0 }}</div>
                 <div class="activity-label">任务总数</div>
+                <div class="activity-sub" v-if="info.issueTaskCount || info.chatTaskCount">
+                  Issue {{ info.issueCount ?? 0 }} · 对话 {{ info.chatTaskCount ?? 0 }}
+                </div>
               </div>
               <div class="activity-card">
                 <div class="activity-value" style="color:#34c759">{{ info.completedCount ?? 0 }}</div>
@@ -212,6 +215,7 @@ onMounted(() => load())
 .activity-card { text-align: center; padding: 16px 8px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 22px; font-weight: 700; color: var(--text-primary); }
 .activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+.activity-sub { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; }
 
 .cred-group-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
 .cred-group { background: rgba(0,0,0,0.02); border-radius: 10px; padding: 14px 16px; }
