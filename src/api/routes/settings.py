@@ -323,33 +323,34 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
                             "owner": cred.get("owner_name", ""),
                             "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
                             "runtimes": runtimes})
-    # 本机直连引擎（credential_id=0，本地 runtime）：按 host_name 分组为设备列表。
-    # 多台主控机各自探测的引擎行通过 host_name 区分，每台主控机一个设备条目。
-    # 主控机在 runtime_credentials 中的心跳记录（如 grape-main-001/007）没有绑定引擎，
-    # 上面循环会创建空 runtimes 的 device 条目——这里统一过滤掉。
-    _local_devices = {}  # host_name -> {runtimes: [...], scope, owner_id, ...}
+    # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备，
+    # 不再单独创建"本机"设备行（主控机已在 runtime_credentials 中，如 ecs-grape-dev-build-0005）。
+    # 通过 host_name 匹配 runtime_credentials.device_name 找到对应设备。
+    import socket as _sock
+    _local_hostname = ""
+    try:
+        _local_hostname = _sock.gethostname()
+    except Exception:
+        pass
+    # 构建 device_name -> device 索引（已在 devices 列表中的设备）
+    _device_by_name = {d.get("device_name", ""): d for d in devices}
     for rt in visible_runtimes:
         if (rt.get("credential_id") or 0) != 0:
             continue
-        _hn = rt.get("host_name") or "本机"
-        if _hn not in _local_devices:
-            _local_devices[_hn] = {
-                "credential_id": 0, "name": _hn, "device_name": _hn,
-                "credential_status": "active", "last_seen_at": None,
-                "worker_ip": "127.0.0.1", "scope": rt.get("scope") or "global", "owner": "",
-                "owner_id": rt.get("owner_id", ""),
+        # 本机引擎的 host_name 匹配 runtime_credentials 中的 device_name
+        _hn = rt.get("host_name") or _local_hostname or ""
+        target_device = _device_by_name.get(_hn)
+        if target_device:
+            # 关联到已有设备
+            target_device["runtimes"].append({
+                "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
+                "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
+                "instance_name": rt.get("instance_name", rt.get("name", "")),
                 "health": rt.get("health", "offline"),
-                "runtimes": [],
-            }
-        _local_devices[_hn]["runtimes"].append({
-            "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
-            "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
-            "instance_name": rt.get("instance_name", rt.get("name", "")),
-            "health": rt.get("health", "offline"),
-            "local_skills": rt.get("local_skills", []),
-            "skill_scan_result": rt.get("skill_scan_result", []),
-            "agent_tags": rt.get("agent_tags", ["all"])})
-    devices.extend(_local_devices.values())
+                "local_skills": rt.get("local_skills", []),
+                "skill_scan_result": rt.get("skill_scan_result", []),
+                "agent_tags": rt.get("agent_tags", ["all"])})
+        # 如果没匹配到设备，跳过（不创建单独的"本机"行）
     # AI Devspace 创建的凭据：worker 尚未上线注册时没有 agent_runtimes 行，
     # 但用户需要在 Workers 列表看到这个待接入设备（凭据已生成，环境正在启动）。
     # 保留没有承载引擎但凭据 active 的设备，health=offline 让用户知道还没接入。
@@ -357,9 +358,16 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
     # 也保留，但 health 派生会正确反映其离线状态。
     # 本机直连设备（credential_id=0）如果无引擎则过滤（本机探测应该有引擎才显示）。
     devices = [d for d in devices if d.get("runtimes") or (d.get("credential_id", 0) > 0 and d.get("credential_status") == "active")]
-    # 本机设备的 health：至少一个引擎 online 则设备 online（主控机本身不会掉线）
+    # 本机设备的 health：主控机本身不会掉线，直接根据引擎 online 状态判断
+    # （不用心跳时间判断——主控机的 runtime_credentials 心跳可能未定期更新）
+    import socket as _sock2
+    _local_hn = ""
+    try:
+        _local_hn = _sock2.gethostname()
+    except Exception:
+        pass
     for d in devices:
-        if (d.get("credential_id") or 0) == 0:
+        if d.get("device_name") == _local_hn:
             d["health"] = "online" if any(rt.get("health") == "online" for rt in d.get("runtimes", [])) else "offline"
     return {"runtimes": visible_runtimes, "devices": devices}
 
