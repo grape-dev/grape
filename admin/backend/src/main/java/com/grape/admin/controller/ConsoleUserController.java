@@ -97,7 +97,8 @@ public class ConsoleUserController {
     }
 
     @GetMapping("/{id}")
-    public Map<String, Object> detail(@PathVariable int id) {
+    public Map<String, Object> detail(@PathVariable int id,
+                                      @RequestParam(required = false) String repoKey) {
         Map<String, Object> info = new LinkedHashMap<>();
         try {
             grapeJdbc.query("SELECT id, username, nickname, gitcode_id, created_at, last_active_at, "
@@ -233,6 +234,7 @@ public class ConsoleUserController {
                 "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
                 "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
                 "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
+                (repoKey != null && !repoKey.isEmpty() ? " AND t.repo_key='" + repoKey.replace("'", "") + "' " : "") +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -294,6 +296,7 @@ public class ConsoleUserController {
                 "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
                 "WHERE u.id=? AND t.status IN ('dispatched','running') " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
+                (repoKey != null && !repoKey.isEmpty() ? " AND t.repo_key='" + repoKey.replace("'", "") + "' " : "") +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -333,6 +336,7 @@ public class ConsoleUserController {
                 "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
                 "WHERE u.id=? AND t.status='failed' " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
+                (repoKey != null && !repoKey.isEmpty() ? " AND t.repo_key='" + repoKey.replace("'", "") + "' " : "") +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();

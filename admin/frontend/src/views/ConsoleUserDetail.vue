@@ -69,7 +69,7 @@
           <div style="padding:20px 24px">
               <!-- 仓库选择下拉（可选筛选） -->
               <div style="margin-bottom:16px">
-                <select v-model="selectedRepo" class="page-size-select" style="width:100%;max-width:400px;padding:8px 12px" @change="loadRepoIssues(0)">
+                <select v-model="selectedRepo" class="page-size-select" style="width:100%;max-width:400px;padding:8px 12px" @change="onRepoChange">
                   <option value="">全部仓库</option>
                   <option v-for="r in info.repoMatrix" :key="r.repoKey" :value="r.repoKey">{{ r.fullName }}</option>
                 </select>
@@ -621,16 +621,32 @@ function formatTime(val) {
   } catch { return val }
 }
 
-async function load() {
+async function load(repoKey) {
   loading.value = true
   try {
-    const { data } = await http.get(`/console-users/${route.params.id}`)
+    const params = {}
+    if (repoKey) params.repoKey = repoKey
+    const { data } = await http.get(`/console-users/${route.params.id}`, { params })
     info.value = data
+    await loadRepoIssues(0)
   } catch (e) {
     console.error('[ConsoleUserDetail] load failed', e)
   } finally {
     loading.value = false
   }
+}
+
+async function onRepoChange() {
+  // 只刷新最近执行+Issue列表，不触发全局loading
+  try {
+    const params = {}
+    if (selectedRepo.value) params.repoKey = selectedRepo.value
+    const { data } = await http.get(`/console-users/${route.params.id}`, { params })
+    info.value = { ...info.value, recentTasks: data.recentTasks, recentPendingTasks: data.recentPendingTasks, recentFailedTasks: data.recentFailedTasks }
+  } catch (e) {
+    console.error('[ConsoleUserDetail] onRepoChange failed', e)
+  }
+  loadRepoIssues(0)
 }
 
 async function resetToken() {
@@ -656,7 +672,7 @@ async function resetToken() {
 
 onMounted(() => load())
 
-// 页面加载后自动加载 Issue 列表
+// 页面加载后自动加载
 watch(() => info.value.repoMatrix, (val) => {
   if (val && !repoIssues.value.length) {
     loadRepoIssues(0)
