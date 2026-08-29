@@ -95,7 +95,7 @@
                 <td style="white-space:nowrap">
                   <a v-if="t.issueId" :href="issueGitCodeUrl(t)" target="_blank" @click.stop style="color:var(--primary);text-decoration:none;font-weight:600">{{ t.issueId }}</a>
                   <span class="t3" v-if="t.eventSeq">#{{ t.eventSeq }}</span>
-                  <button v-if="t.issueId" class="btn btn-sm" style="padding:1px 6px;margin-left:6px;font-size:11px" @click.stop="openIssueDetail(t.issueId)" title="查看执行详情">📊</button>
+                  <button v-if="t.issueId" class="btn btn-sm" style="padding:1px 6px;margin-left:6px;font-size:11px" @click.stop="openIssueDetail(t.issueId, t.repoKey)" title="查看执行详情">📊</button>
                   <span v-if="!t.issueId" class="t3">—</span>
                 </td>
                 <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
@@ -345,13 +345,15 @@ function formatTaskDur(t) {
 }
 
 const issueModal = ref({ show: false, loading: false, issueId: "", repoName: "", eventCount: 0, events: [], view: "diagram", svg: "", svgRendered: false })
-async function openIssueDetail(issueId) {
+async function openIssueDetail(issueId, repoKey) {
   issueModal.value = { show: true, loading: true, issueId, repoName: "", eventCount: 0, events: [], view: "diagram", svg: "", svgRendered: false }
   try {
-    const { data } = await http.get(`/runtime/issues/${encodeURIComponent(issueId)}/events`)
+    const params = {}
+    if (repoKey) params.repoKey = repoKey
+    const { data } = await http.get(`/runtime/issues/${encodeURIComponent(issueId)}/events`, { params })
     const events = data.events || []
-    const repoKey = events.length > 0 ? (events[0].repoKey || "") : ""
-    issueModal.value = { show: true, loading: false, issueId, repoName: repoKey.replace(/^gitcode:/, ""), eventCount: events.length, events, view: "diagram", svg: "", svgRendered: false }
+    const rk = events.length > 0 ? (events[0].repoKey || "") : ""
+    issueModal.value = { show: true, loading: false, issueId, repoName: rk.replace(/^gitcode:/, ""), eventCount: events.length, events, view: "diagram", svg: "", svgRendered: false }
     setTimeout(() => renderIssueMermaid(), 50)
   } catch (e) { issueModal.value = { show: true, loading: false, issueId, events: [], view: "events", svg: "", svgRendered: false } }
 }
@@ -378,10 +380,6 @@ async function getMermaid() {
   return mermaidEngine
 }
 function mermaidId(agent) { return (agent || "agent").replace(/[^a-zA-Z0-9_-]/g, "_") }
-function actionText(t) {
-  const map = { issue_opened: "Issue创建", issue_comment: "评论", issue_updated: "更新", a2a_event: "A2A交办", pull_request_opened: "PR创建", pull_request_merged: "PR合并", push: "推送", vod_signal: "VOD信号", issue_closed: "Issue关闭" }
-  return map[t] || t || "事件"
-}
 function buildSequence(events) {
   const agents = []
   for (const ev of events) { const a = ev.agentType || "—"; if (!agents.includes(a)) agents.push(a) }
@@ -393,7 +391,7 @@ function buildSequence(events) {
   for (const ev of events) {
     const a = mermaidId(ev.agentType || "—")
     const t = ev.createdAt ? String(ev.createdAt).slice(11, 19) : ""
-    const label = (t ? t + " " : "") + actionText(ev.eventType)
+    const label = (t ? t + " " : "") + eventTypeText(ev.eventType)
     if (prev && a !== prev) { lines.push("    " + prev + "->>" + a + ": " + label); statuses.push(ev.status || ""); evTypes.push("msg") }
     else { lines.push("    Note over " + a + ": " + label); statuses.push(ev.status || ""); evTypes.push("note") }
     prev = a
@@ -406,7 +404,7 @@ function applySequenceColors(svg, statuses) {
     const root = doc.documentElement
     const defs = root.querySelector("defs")
     if (!defs) return svg
-    const colorOf = s => (s === "failed" ? "#ff3b30" : s === "completed" ? "#34c759" : "#aeaeb2")
+    const colorOf = s => (s === "failed" ? "#e5484d" : s === "completed" ? "#2e9e5b" : "#aeaeb2")
     const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
     lines.forEach((line, i) => {
       const markerId = root.id + "-seqnum-" + i

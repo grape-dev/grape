@@ -164,19 +164,37 @@ public class RuntimeController {
 
     /** 按 Issue 获取事件列表（用于时序图 + 事件列表） */
     @GetMapping("/runtime/issues/{issueId}/events")
-    public Map<String, Object> issueEvents(@PathVariable String issueId) {
+    public Map<String, Object> issueEvents(@PathVariable String issueId,
+                                           @RequestParam(required = false) String repoKey) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("issueId", issueId);
 
         List<Map<String, Object>> events = new ArrayList<>();
         try {
-            // 查 agent_tasks 建立 (issue_id, event_seq) → task_id 映射
-            Map<Integer, String> seqToTaskId = new HashMap<>();
-            grapeJdbc.query("SELECT event_seq, id FROM agent_tasks WHERE issue_id=?",
-                    rs -> { seqToTaskId.put(rs.getInt("event_seq"), rs.getString("id")); }, issueId);
+            // 构建 SQL（repoKey 可选过滤，issueId 不唯一）
+            StringBuilder taskSql = new StringBuilder("SELECT event_seq, id, runtime_id FROM agent_tasks WHERE issue_id=?");
+            StringBuilder eventSql = new StringBuilder(
+                "SELECT e.seq, e.event_type, e.issue_id, e.agent_type, e.skill, e.status, e.duration, e.created_at, e.actor, e.repo_key, "
+                + "t.id as task_id, t.runtime_id, ar.name as engine_name "
+                + "FROM events e "
+                + "LEFT JOIN agent_tasks t ON t.event_seq = e.seq AND t.repo_key = e.repo_key "
+                + "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id "
+                + "WHERE e.issue_id=?");
+            List<Object> params = new ArrayList<>();
+            params.add(issueId);
+            if (repoKey != null && !repoKey.isEmpty()) {
+                taskSql.append(" AND repo_key=?");
+                eventSql.append(" AND e.repo_key=?");
+                params.add(repoKey);
+            }
+            eventSql.append(" ORDER BY e.created_at");
 
-            grapeJdbc.query("SELECT seq, event_type, issue_id, agent_type, skill, status, duration, created_at, actor, repo_key "
-                    + "FROM events WHERE issue_id=? ORDER BY created_at",
+            // 查 agent_tasks 建立 (event_seq) → task_id 映射
+            Map<Integer, String> seqToTaskId = new HashMap<>();
+            grapeJdbc.query(taskSql.toString(),
+                    rs -> { seqToTaskId.put(rs.getInt("event_seq"), rs.getString("id")); }, params.toArray());
+
+            grapeJdbc.query(eventSql.toString(),
                     rs -> {
                         Map<String, Object> s = new LinkedHashMap<>();
                         int seq = rs.getInt("seq");
@@ -189,9 +207,10 @@ public class RuntimeController {
                         s.put("createdAt", rs.getString("created_at"));
                         s.put("actor", rs.getString("actor"));
                         s.put("repoKey", rs.getString("repo_key"));
-                        s.put("taskId", seqToTaskId.getOrDefault(seq, ""));
+                        s.put("taskId", rs.getString("task_id") != null ? rs.getString("task_id") : seqToTaskId.getOrDefault(seq, ""));
+                        s.put("engine", rs.getString("engine_name"));
                         events.add(s);
-                    }, issueId);
+                    }, params.toArray());
         } catch (Exception e) { /* ignore */ }
         result.put("events", events);
         return result;
