@@ -206,10 +206,10 @@
                             <button class="btn btn-sm" :style="issueViewModes[iss.issueId] === 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="switchIssueView(iss, 'events')">📋 事件列表</button>
                           </div>
                           <!-- 时序图 -->
-                          <div v-if="issueEventsLoading[iss.issueId]" style="text-align:center;padding:20px;color:var(--text-tertiary)">加载中...</div>
-                          <div v-else-if="issueViewModes[iss.issueId] !== 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length" :ref="el => diagramRefs[iss.issueId] = el" style="overflow:auto"></div>
+                          <div v-show="issueEventsLoading[iss.issueId]" style="text-align:center;padding:20px;color:var(--text-tertiary)">加载中...</div>
+                          <div v-show="!issueEventsLoading[iss.issueId] && issueViewModes[iss.issueId] !== 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length" :ref="el => diagramRefs[iss.issueId] = el" style="overflow:auto;min-height:60px"></div>
                           <!-- 事件列表 -->
-                          <div v-if="issueViewModes[iss.issueId] === 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length">
+                          <div v-show="issueViewModes[iss.issueId] === 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length">
                             <table class="vod-table">
                               <thead>
                                 <tr><th style="width:8%">Seq</th><th style="width:18%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:27%">时间</th></tr>
@@ -227,7 +227,7 @@
                               </tbody>
                             </table>
                           </div>
-                          <div v-else-if="!issueEventsLoading[iss.issueId] && (!issueEvents[iss.issueId] || !issueEvents[iss.issueId].length)" style="text-align:center;padding:20px;color:var(--text-tertiary)">暂无事件记录</div>
+                          <div v-show="!issueEventsLoading[iss.issueId] && (!issueEvents[iss.issueId] || !issueEvents[iss.issueId].length)" style="text-align:center;padding:20px;color:var(--text-tertiary)">暂无事件记录</div>
                         </td>
                       </tr>
                     </template>
@@ -383,38 +383,50 @@ async function toggleIssueTimeline(iss) {
     if (!issueViewModes.value[id]) {
       issueViewModes.value = { ...issueViewModes.value, [id]: 'diagram' }
     }
-    // 首次展开加载事件
+  }
+  expandedIssues.value = s
+  // 展开时渲染
+  if (s.has(id) && issueViewModes.value[id] !== 'events') {
     if (!issueEvents.value[id]) {
+      // 首次展开：加载事件数据
       issueEventsLoading.value = { ...issueEventsLoading.value, [id]: true }
       try {
         const { data } = await http.get(`/console-users/${route.params.id}/issue-timeline`, {
           params: { repoKey: selectedRepo.value, issueId: id }
         })
         issueEvents.value = { ...issueEvents.value, [id]: data.events || [] }
-        // 渲染时序图
+        issueEventsLoading.value = { ...issueEventsLoading.value, [id]: false }
+        // 渲染时序图（setTimeout 等 Vue 渲染完 DOM）
         if (data.events && data.events.length) {
-          await nextTick()
-          renderMermaidForIssue(id, iss)
+          setTimeout(() => renderMermaidForIssue(id, iss), 50)
         }
       } catch (e) {
         issueEvents.value = { ...issueEvents.value, [id]: [] }
-      } finally {
         issueEventsLoading.value = { ...issueEventsLoading.value, [id]: false }
       }
-    } else if (issueViewModes.value[id] === 'diagram' && issueEvents.value[id].length) {
-      // 重新展开时重新渲染（DOM 被销毁后需重画）
-      await nextTick()
-      renderMermaidForIssue(id, iss)
+    } else if (renderedIssues.value.has(id)) {
+      // 已渲染过：重新绑定点击事件（DOM 可能被 Vue 重新渲染销毁）
+      if (issueEvents.value[id] && issueEvents.value[id].length) {
+        const { evTypes } = buildSequence(issueEvents.value[id])
+        nextTick(() => bindMermaidClicks(id, iss, evTypes))
+      }
+    } else if (issueEvents.value[id] && issueEvents.value[id].length) {
+      // 有数据但未渲染
+      setTimeout(() => renderMermaidForIssue(id, iss), 50)
     }
   }
-  expandedIssues.value = s
 }
 
 function switchIssueView(iss, mode) {
   const id = iss.issueId
   issueViewModes.value = { ...issueViewModes.value, [id]: mode }
   if (mode === 'diagram' && issueEvents.value[id] && issueEvents.value[id].length) {
-    nextTick(() => renderMermaidForIssue(id, iss))
+    if (renderedIssues.value.has(id)) {
+      const { evTypes } = buildSequence(issueEvents.value[id])
+      nextTick(() => bindMermaidClicks(id, iss, evTypes))
+    } else {
+      setTimeout(() => renderMermaidForIssue(id, iss), 50)
+    }
   }
 }
 
