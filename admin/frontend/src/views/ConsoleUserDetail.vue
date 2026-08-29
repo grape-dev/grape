@@ -115,7 +115,7 @@
 
               <!-- 仓库总体统计 -->
               <div v-if="selectedRepoData">
-                <!-- Issue总数 + 任务总数 单独一行 -->
+                <!-- Issue总数 + 任务总数 -->
                 <div style="display:flex;gap:24px;margin-bottom:12px;padding:12px 16px;background:rgba(0,0,0,0.02);border-radius:10px">
                   <div style="display:flex;align-items:baseline;gap:6px">
                     <span class="t3" style="font-size:13px">Issue 总数</span>
@@ -124,48 +124,6 @@
                   <div style="display:flex;align-items:baseline;gap:6px">
                     <span class="t3" style="font-size:13px">任务总数</span>
                     <span style="font-size:22px;font-weight:700;color:var(--text-primary)">{{ selectedRepoData.taskCount }}</span>
-                  </div>
-                </div>
-                <!-- 状态枚举统计卡 -->
-                <div class="repo-summary-grid">
-                  <div class="activity-card" style="cursor:pointer" @click="togglePendingDetail">
-                    <div class="activity-value" style="color:#ff9500">{{ pendingTotal }}</div>
-                    <div class="activity-label">待处理 {{ pendingDetailOpen ? '▲' : '▼' }}</div>
-                  </div>
-                  <div class="activity-card">
-                    <div class="activity-value" style="color:#006eff">{{ selectedRepoData.running ?? 0 }}</div>
-                    <div class="activity-label">运行中</div>
-                  </div>
-                  <div class="activity-card">
-                    <div class="activity-value" style="color:#34c759">{{ selectedRepoData.completed }}</div>
-                    <div class="activity-label">已完成</div>
-                  </div>
-                  <div class="activity-card">
-                    <div class="activity-value" style="color:#ff3b30">{{ selectedRepoData.failed }}</div>
-                    <div class="activity-label">失败</div>
-                  </div>
-                  <div class="activity-card">
-                    <div class="activity-value" style="color:#aeaeb2">{{ selectedRepoData.cancelled ?? 0 }}</div>
-                    <div class="activity-label">已取消</div>
-                  </div>
-                  <div class="activity-card">
-                    <div class="activity-value" style="color:#5e5ce6">{{ selectedRepoData.taskCount > 0 ? Math.round(selectedRepoData.completed * 1000 / selectedRepoData.taskCount) / 10 + '%' : '—' }}</div>
-                    <div class="activity-label">成功率</div>
-                  </div>
-                </div>
-                <!-- 待处理明细 -->
-                <div v-if="pendingDetailOpen" style="margin-top:8px;padding:12px 16px;background:rgba(255,149,0,0.04);border-radius:10px;display:flex;gap:24px">
-                  <div style="display:flex;align-items:baseline;gap:4px">
-                    <span class="t3">排队中</span>
-                    <span style="font-size:16px;font-weight:600">{{ selectedRepoData.queued ?? 0 }}</span>
-                  </div>
-                  <div style="display:flex;align-items:baseline;gap:4px">
-                    <span class="t3">已派发</span>
-                    <span style="font-size:16px;font-weight:600;color:#006eff">{{ selectedRepoData.dispatched ?? 0 }}</span>
-                  </div>
-                  <div style="display:flex;align-items:baseline;gap:4px">
-                    <span class="t3">卡住</span>
-                    <span style="font-size:16px;font-weight:600;color:#ff3b30">{{ selectedRepoData.stuck ?? 0 }}</span>
                   </div>
                 </div>
               </div>
@@ -184,7 +142,7 @@
                           <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">
                             <span class="t3" style="font-size:11px">{{ selectedRepoData?.fullName }}</span> {{ iss.issueId }}
                           </a>
-                          <span v-if="iss.issueTitle" class="t3" style="font-size:11px;display:block;margin-top:2px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ iss.issueTitle }}</span>
+                          <span v-if="iss.issueTitle" class="t3" style="font-size:11px;margin-left:6px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">{{ iss.issueTitle }}</span>
                         </td>
                         <td class="t3">{{ iss.taskCount }}</td>
                         <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
