@@ -59,7 +59,7 @@
       </div>
 
       <!-- 关联任务 -->
-      <TaskListSection :tasks="detail.tasks" :loading="taskLoading" :columns="{ engine: true }" @reload="onTaskReload" />
+      <TaskListSection :tasks="detail.tasks" :loading="taskLoading" :columns="{ engine: true }" :engines="detail.engines" @reload="onTaskReload" />
     </div>
   </div>
 </template>
@@ -164,6 +164,7 @@ function onTaskReload(params) {
   taskStatus.value = params.taskStatus ?? ''
   taskSkill.value = params.taskSkill ?? ''
   taskType.value = params.taskType ?? ''
+  selectedEngineId.value = params.engineId ?? null
   load()
 }
 // 任务状态分布饼图（对齐 VOD chart-row）

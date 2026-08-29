@@ -5,6 +5,10 @@
         <div class="section-header">
           <h5 class="sh-title">关联任务 <span class="sh-count">共 {{ tasks?.totalElements ?? 0 }} 条<span v-if="filterCount">（已筛选 {{ filterCount }} 条）</span></span></h5>
           <div class="sh-actions">
+            <select v-if="engines" v-model="selectedEngineId" class="page-size-select" style="max-width:260px" @change="onEngineChange">
+              <option :value="null">全部引擎</option>
+              <option v-for="e in engines || []" :key="e.id" :value="e.id">{{ e.name }}</option>
+            </select>
             <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
           </div>
         </div>
@@ -105,11 +109,11 @@
         </div>
         <div v-if="tasks?.totalElements > 0" class="pagination-bar" style="border-top:none">
           <span class="page-info">第 <strong>{{ taskPage + 1 }}</strong> / {{ tasks?.totalPages ?? 1 }} 页（共 {{ tasks?.totalElements ?? 0 }} 条）</span>
-          <select v-model="taskSize" class="page-size-select" @change="taskPage = 0; load()">
+          <select v-model="taskSize" class="page-size-select" @change="taskPage = 0; emitReload()">
             <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
           </select>
-          <button class="page-btn" :disabled="taskPage <= 0" @click="taskPage--; load()">上一页</button>
-          <button class="page-btn" :disabled="taskPage >= (tasks?.totalPages ?? 1) - 1" @click="taskPage++; load()">下一页</button>
+          <button class="page-btn" :disabled="taskPage <= 0" @click="taskPage--; emitReload()">上一页</button>
+          <button class="page-btn" :disabled="taskPage >= (tasks?.totalPages ?? 1) - 1" @click="taskPage++; emitReload()">下一页</button>
         </div>
         </div>
       </div>
@@ -200,7 +204,8 @@ const props = defineProps({
       id: true, issue: true, agent: true, skill: true,
       status: true, duration: true, engine: false, createdAt: true
     })
-  }
+  },
+  engines: { type: Array, default: null }
 })
 const emit = defineEmits(["reload"])
 
@@ -233,10 +238,11 @@ const sortOrder = ref("desc")
 const filterDropdown = ref("")
 const filterCount = ref(0)
 const taskLoading = ref(false)
-const hasAnyFilter = computed(() => !!(taskStatus.value || taskSkill.value || taskType.value))
+const selectedEngineId = ref(null)
+const hasAnyFilter = computed(() => !!(taskStatus.value || taskSkill.value || taskType.value || selectedEngineId.value))
 
 function emitReload() {
-  emit("reload", { taskPage: taskPage.value, taskSize: taskSize.value, sortOrder: sortOrder.value, taskStatus: taskStatus.value, taskSkill: taskSkill.value, taskType: taskType.value })
+  emit("reload", { taskPage: taskPage.value, taskSize: taskSize.value, sortOrder: sortOrder.value, taskStatus: taskStatus.value, taskSkill: taskSkill.value, taskType: taskType.value, engineId: selectedEngineId.value })
 }
 function toggleFilter(col) { filterDropdown.value = filterDropdown.value === col ? "" : col }
 function setFilter(col, v) {
@@ -247,7 +253,8 @@ function setFilter(col, v) {
   taskPage.value = 0
   emitReload()
 }
-function clearFilters() { taskStatus.value = ""; taskSkill.value = ""; taskType.value = ""; taskPage.value = 0; emitReload() }
+function clearFilters() { taskStatus.value = ""; taskSkill.value = ""; taskType.value = ""; selectedEngineId.value = null; taskPage.value = 0; emitReload() }
+function onEngineChange() { taskPage.value = 0; emitReload() }
 function toggleSort() { sortOrder.value = sortOrder.value === "desc" ? "asc" : "desc"; emitReload() }
 function filterOptions(col) {
   const fo = props.tasks?.filterOptions
