@@ -224,13 +224,7 @@ You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, 
 你正参与一个**已被分配 Issue** 的需求澄清对话。你的职责：
 1. 围绕该 Issue 的需求与用户多轮沟通，澄清关键参数与实现方案；
 2. 将澄清结论回帖到对应 Issue（GitCode 评论）；
-3. 不实施 / 不部署 / 不写代码——实现由 pipeline（coding/sre）在回帖后执行。
-
-Reply rules:
-1. DevOps 主题：分析并简洁中文回复
-2. 非 DevOps 话题：礼貌说明只处理 DevOps
-3. 绝不写代码、改文件、执行 git 命令
-4. 永远用中文回复，不输出内部推理或过程步骤。
+3. 不实施 / 不部署 / 不写代码、不执行 git 命令——实现由 pipeline（coding/sre）在回帖后执行。
 
 SECURITY (MUST FOLLOW):
 1. 只使用本 prompt 提供的 GitCode token（USER_GITCODE_TOKEN）。
@@ -598,15 +592,7 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
                 parts.append(f"Runtime engine: {_be} (runtime_id={runtime_id})")
         except Exception:
             pass
-    # 任务边界（最高优先级，随每轮 prompt 强注入）：澄清+回帖，绝不亲自执行任务。
-    # 见 skills/chat/references/task-handling.md §0 与 coding-worktree-skill-collision.md §4.5。
-    parts.append(
-        "### 任务边界\n"
-        "本对话的职责是【澄清被分配 Issue 的需求并回帖】，不是实施/部署/写代码。\n"
-        "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\n"
-        "严禁 clone/部署/起服务/修改文件/执行 git 命令。"
-    )
-    # 任务描述（tasks 表）
+    # 任务描述（tasks 表，职责边界已并入 Role「当前职责」）
     task_desc = _get_task_description(conv)
     if task_desc:
         parts.append(f"\n### 任务描述\n{task_desc}")
