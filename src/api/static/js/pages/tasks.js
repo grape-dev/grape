@@ -176,6 +176,12 @@ function _detailHtml(t) {
     : isProc ? I18N.t('tasks.status.detail_processing') : I18N.t('tasks.status.detail_pending');
   const detIc = isDone ? 'tsk-det-ic-d' : isProc ? 'tsk-det-ic-pr' : 'tsk-det-ic-p';
   const icon = isDone ? '✓' : isProc ? '⏳' : '#';
+  // 场景名称
+  var _sceneLabels = {default:'默认','cloud-native':'云原生','iac':'IaC','agent-dev':'Agent 开发','skill-dev':'技能开发','api-skill-dev':'API 技能开发','blog-publish':'博客发布'};
+  var sceneName = t.scene_id ? (_sceneLabels[t.scene_id] || t.scene_id) : '—';
+  // 多任务模式
+  var subtaskBadge = t.is_subtask_mode ? '<span class="tg tg-q" style="font-size:10px">多任务模式</span>' : '<span class="ts t3" style="font-size:10px">单任务</span>';
+  var parentIssue = t.parent_issue_number ? ' · 父任务 #' + t.parent_issue_number : '';
   return `
     <div class="tsk-det-ic ${detIc}">${icon}</div>
     <div class="tsk-det-label">Issue #${t.issue_number}</div>
@@ -184,6 +190,8 @@ function _detailHtml(t) {
       <div class="tsk-m"><span>${I18N.t('tasks.detail.status')}</span><b class="${tagCls}">${tagText}</b></div>
       <div class="tsk-m"><span>${I18N.t('tasks.detail.task_id')}</span><b>#${t.id}</b></div>
       <div class="tsk-m"><span>${I18N.t('tasks.detail.repo')}</span><b>${t.repo_key}</b></div>
+      <div class="tsk-m"><span>流水线场景</span><b>${sceneName}</b></div>
+      <div class="tsk-m"><span>任务模式</span><b>${subtaskBadge}${parentIssue}</b></div>
       <div class="tsk-m"><span>${I18N.t('tasks.detail.created_at')}</span><b>${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
       ${t.completed_at ? `<div class="tsk-m"><span>${I18N.t('tasks.detail.completed_at')}</span><b>${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
     </div>

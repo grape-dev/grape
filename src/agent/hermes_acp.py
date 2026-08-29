@@ -405,13 +405,6 @@ class HermesACPBackend:
                     break
 
                 elapsed_silent = time.time() - _last_activity
-                # 收到过文本输出后，8s 无新事件 → prompt 已完成但 turn_end/response 丢失
-                # （hermes 在 LLM 返回后做 title_generation 等后续操作，可能不发 turn_end）
-                # 优化前 15s → 优化后 8s
-                if collected_text and elapsed_silent > 8:
-                    log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s with {len(collected_text)} text chunks, assuming done (turn_end may be lost)")
-                    prompt_result["stopReason"] = "end_turn"
-                    break
 
                 if elapsed_silent > max_exec_seconds:
                     if proc.poll() is None and elapsed_silent < max_exec_seconds * 2:
