@@ -147,7 +147,7 @@ public class StatsController {
         try {
             grapeJdbc.query(
                 "SELECT DATE_FORMAT(created_at, '" + fmt + "') as label, COUNT(*) as cnt " +
-                "FROM user_accounts WHERE created_at IS NOT NULL AND created_at REGEXP '^[0-9]{4}' " +
+                "FROM user_accounts WHERE created_at IS NOT NULL AND created_at LIKE '20%' " +
                 "GROUP BY label ORDER BY label",
                 rs -> {
                     Map<String, Object> r = new LinkedHashMap<>();
