@@ -886,26 +886,15 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
     # 为每个 agent 附带场景信息（skill / enabled_in_scene / engine_runtime_ids）
     # engine_runtime_ids 只从场景 node 读取（为空 = 全广播/兜底）
     scene_by_agent = {n.get("tag") or n.get("id", ""): n for n in scene_nodes}
-    # 构建 skill_name → display_name 映射（官方 skill 优先）
-    skill_display_map = {}
-    try:
-        with db_lock:
-            c.execute("SELECT skill_name, display_name FROM skill WHERE is_active=1 AND scope='official'")
-            skill_display_map = {r[0]: r[1] or r[0] for r in c.fetchall()}
-    except Exception:
-        pass
     for ag in agent_sessions:
         at = ag.get("agent_type", "")
         node = scene_by_agent.get(at)
         if node:
-            _sk = node.get("skill", "")
-            ag["skill"] = _sk
-            ag["skill_display_name"] = skill_display_map.get(_sk, _sk)
+            ag["skill"] = node.get("skill", "")
             ag["enabled_in_scene"] = node.get("enabled", True)
             ag["engine_runtime_ids"] = node.get("engine_runtime_ids", []) or []
         else:
             ag["skill"] = ""
-            ag["skill_display_name"] = ""
             ag["enabled_in_scene"] = False
             ag["engine_runtime_ids"] = []
 
@@ -927,17 +916,51 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")
 
+    # 真实指标统计（替代假数据）
+    metrics = {"total_events": len(recent_events), "active_agents": 0,
+               "pending_events": event_counts["pending"], "failed_events": event_counts["failed"],
+               "auto_resolution": 0.0, "events_week": 0, "avg_response": 0}
+    try:
+        with db_lock:
+            # Auto-Resolution: completed / (completed + failed)
+            c.execute(
+                "SELECT COUNT(*) FROM events WHERE repo_key=? AND status='completed'",
+                (repo_key,)
+            )
+            completed = c.fetchone()[0] or 0
+            c.execute(
+                "SELECT COUNT(*) FROM events WHERE repo_key=? AND status='failed'",
+                (repo_key,)
+            )
+            failed = c.fetchone()[0] or 0
+            total_done = completed + failed
+            metrics["auto_resolution"] = round(completed / total_done * 100, 1) if total_done > 0 else 0.0
+
+            # Events/Week: 最近 7 天事件数
+            c.execute(
+                "SELECT COUNT(*) FROM events WHERE repo_key=? AND created_at >= datetime('now', '-7 days')",
+                (repo_key,)
+            )
+            metrics["events_week"] = c.fetchone()[0] or 0
+
+            # Avg Response: 已完成事件的平均 duration（秒）
+            c.execute(
+                "SELECT AVG(duration) FROM events WHERE repo_key=? AND status='completed' AND duration IS NOT NULL AND duration > 0",
+                (repo_key,)
+            )
+            avg_dur = c.fetchone()[0]
+            metrics["avg_response"] = round(avg_dur, 1) if avg_dur else 0
+    except Exception:
+        pass
+
+    metrics["active_agents"] = sum(1 for a in agent_sessions if a["status"] == "running")
+
     return {
         "repo": repo_key,
         "role": role,
         "dev_scene": dev_scene,
         "_scenes": scenes,
-        "metrics": {
-            "total_events": len(recent_events),
-            "active_agents": sum(1 for a in agent_sessions if a["status"] == "running"),
-            "pending_events": event_counts["pending"],
-            "failed_events": event_counts["failed"],
-        },
+        "metrics": metrics,
         "agents": agent_sessions,
         "agent_engines": agent_engines,
         "scene_nodes": scene_nodes,

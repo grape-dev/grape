@@ -10,7 +10,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user, get_user_token
-from src.config import WORKSPACE_DIR, log
+from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
 from src.api.time_utils import normalize_event_time
 from src.session_manager import (
     db, db_lock, get_chat_config, create_conversation, add_message,
@@ -338,7 +338,7 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
         except Exception:
             pass
         prompt = _build_task_prompt(task_description, repo_key, issue_number, user_id)
-        cwd = os.path.join(WORKSPACE_DIR, "chat", str(user_id), conv_id)
+        cwd = os.path.join(CHAT_CWD_BASE, "chat", str(user_id), conv_id)
         os.makedirs(cwd, exist_ok=True)
 
         final_text = ""
@@ -848,16 +848,22 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
         try:
             c.execute(
                 f"SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
-                f"status, completed_reason, created_at, completed_at FROM tasks WHERE {where} "
+                f"status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number "
+                f"FROM tasks WHERE {where} "
                 f"ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, created_at DESC",
                 params
             )
             rows = c.fetchall()
         except Exception:
             rows = []
+    # 查 issue_state 中的 scene_id（按 repo_key + issue_number 批量查询）
+    from src.api.session_store import get_issue_scene
     return {"tasks": [{
         "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
         "title": r[4] or "", "task_description": r[5] or "",
         "conversation_id": r[6] or "", "status": r[7],
         "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
+        "is_subtask_mode": r[11] or 0,
+        "parent_issue_number": r[12] or 0,
+        "scene_id": (get_issue_scene(to_repo_key(from_repo_key(r[2])), f"#{r[3]}") or ("default", 0))[0],
     } for r in rows]}

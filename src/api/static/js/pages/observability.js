@@ -795,6 +795,7 @@ async function _renderMermaid(box, iss) {
 function _bindMermaidClicks(box, iss, evTypes) {
   // mermaid 渲染时 message 和 Note 分组排列（不是交替的），
   // 需要按 evTypes 分别匹配 messageText 和 noteText
+  // 用事件委托（svg.onclick）避免收起/展开后事件丢失
   const events = iss.events || [];
   if (!events.length) return;
   const svg = box.querySelector('svg');
@@ -811,6 +812,7 @@ function _bindMermaidClicks(box, iss, evTypes) {
   const msgTexts = Array.from(svg.querySelectorAll('text.messageText'));
   const noteTexts = Array.from(svg.querySelectorAll('text.noteText'));
   // evTypes 标记每个事件是 'msg' 还是 'note'，分别用独立计数器匹配
+  const taskEventMap = {};
   let msgIdx = 0, noteIdx = 0;
   events.forEach((ev, i) => {
     const type = evTypes[i] || 'msg';
@@ -825,7 +827,7 @@ function _bindMermaidClicks(box, iss, evTypes) {
     if (!txt) return;
     // tooltip：引擎名 + IP（SVG 用 <title> 子元素显示原生 tooltip）
     const _eng = ev.engine || '';
-    const _devName = _eng.split('-').slice(1).join('-');  // opencode-ecs-... → ecs-...
+    const _devName = _eng.split('-').slice(1).join('-');
     const _ip = _devIpMap[_devName] || '';
     const _tooltip = _eng + (_ip ? ' (' + _ip + ')' : '');
     if (_tooltip) {
@@ -834,15 +836,24 @@ function _bindMermaidClicks(box, iss, evTypes) {
       txt.appendChild(_t);
     }
     if (!ev.taskId) return;
+    // 用 data-task-id 属性标记，事件委托通过属性查找
+    txt.setAttribute('data-task-id', ev.taskId);
     txt.style.cursor = 'pointer';
     txt.style.textDecoration = 'underline';
     txt.style.fill = 'var(--a)';
-    const enc = encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''}));
-    txt.addEventListener('click', function(e) {
-      e.stopPropagation();
-      openTaskLogModal(ev.taskId, enc);
-    });
+    taskEventMap[ev.taskId] = ev;
   });
+  // 事件委托：在 SVG 上监听 click（不绑定到单个 text 元素，避免重绘丢失）
+  const enc = (taskId) => encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:taskEventMap[taskId].seq, created:taskEventMap[taskId].createdAt||''}));
+  svg.onclick = function(e) {
+    const target = e.target.closest('[data-task-id]');
+    if (!target) return;
+    const taskId = target.getAttribute('data-task-id');
+    if (taskId && taskEventMap[taskId]) {
+      e.stopPropagation();
+      openTaskLogModal(taskId, enc(taskId));
+    }
+  };
 }
 
 function renderTimelineList(container, issues, repoKey) {
@@ -952,6 +963,13 @@ function toggleIssueTimeline(issueId) {
     if (box && !box.dataset.rendered && _issueViewMode[issueId] === 'diagram') {
       const iss = _timelineIssues.find(i => i.issueId === issueId);
       if (iss) _renderMermaid(box, iss);
+    } else if (box && box.dataset.rendered && _issueViewMode[issueId] === 'diagram') {
+      // 已渲染过：重新绑定点击事件（DOM 可能被 Vue/浏览器重绘后丢失事件委托）
+      const iss = _timelineIssues.find(i => i.issueId === issueId);
+      if (iss) {
+        const { evTypes } = _buildSequence(iss);
+        _bindMermaidClicks(box, iss, evTypes);
+      }
     }
     const toggle = body.previousElementSibling;
     if (toggle) toggle.querySelector('span').textContent = '\u25be';

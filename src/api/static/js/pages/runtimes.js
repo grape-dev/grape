@@ -64,9 +64,11 @@ function renderRuntimes(data) {
       ${tabBtn('engines')}${tabBtn('workers')}
       <div class="sp"></div>
       ${_runtimeTab === 'workers' ? `<button class="bt bt-p" onclick="openGenCredential()">${I18N.t('runtimes.action.gen_credential')}</button>` : ''}
+      ${_runtimeTab === 'workers' ? `<button class="bt bt-p" onclick="openAiDevspace()" data-tooltip="${I18N.t('runtimes.devspace.ai_devspace_tooltip')}" style="background:linear-gradient(135deg,#60a5fa,#a78bfa);border:none;position:relative;box-shadow:0 2px 8px rgba(96,165,250,.3)">☁ AI Devspace</button>` : ''}
       <button class="bt bt-o" onclick="refreshRuntimes()">⟳ ${I18N.t('runtimes.refresh')}</button>
     </div>`;
   html += _runtimeTab === 'engines' ? renderEngines(data, devices) : renderWorkers(data, devices);
+  html += '<style>[data-tooltip]{position:relative}[data-tooltip]:hover::after{content:attr(data-tooltip);position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#1e2940;color:#fff;padding:6px 14px;border-radius:8px;font-size:11px;font-weight:500;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:100;pointer-events:none;opacity:0;animation:tipIn .2s ease forwards}[data-tooltip]:hover::before{content:"";position:absolute;top:calc(100% + 3px);left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:#1e2940;z-index:100;pointer-events:none;opacity:0;animation:tipIn .2s ease forwards}@keyframes tipIn{to{opacity:1}}</style>';
   html += _legendHtml();
   el.innerHTML = html;
 }
@@ -257,6 +259,7 @@ function openDeviceTasks(credId) {
 }
 
 function refreshRuntimes() {
+  _stopDevspaceAutoRefresh();
   const el = document.getElementById('pageContent');
   if (el) el.innerHTML = `<div class="loading">${I18N.t('runtimes.toast.refreshing')}</div>`;
   API.post('/settings/agent-runtimes/refresh').then(() => {
@@ -485,4 +488,479 @@ function saveEngineTags(runtimeId) {
     // 重新渲染列表页（立即生效，无需手动刷新）
     if (__runtimeData) renderRuntimes(__runtimeData);
   }).catch(e => app.showToast(I18N.t('runtimes.toast.save_failed', {msg: e.message})));
+}
+
+// ====== AI Devspace ======
+
+function _devStatusLabel(s) {
+  var map = {
+    'cde.0000': { color: '#6b7280', bg: '#f3f4f6' },
+    'cde.0001': { color: '#2563eb', bg: '#dbeafe' },
+    'cde.0002': { color: '#16a34a', bg: '#dcfce7' },
+    'cde.0003': { color: '#2563eb', bg: '#dbeafe' },
+    'cde.0004': { color: '#16a34a', bg: '#dcfce7' },
+    'cde.0005': { color: '#d97706', bg: '#fef3c7' },
+    'cde.0006': { color: '#dc2626', bg: '#fee2e2' },
+    'cde.0007': { color: '#d97706', bg: '#fef3c7' },
+    'cde.0008': { color: '#d97706', bg: '#fef3c7' },
+    'cde.0009': { color: '#9ca3af', bg: '#f9fafb' },
+    'cde.0010': { color: '#dc2626', bg: '#fee2e2' },
+  };
+  var m = map[s] || { color: '#6b7280', bg: '#f3f4f6' };
+  var label = I18N.t('runtimes.devspace.status.' + (s || 'unknown').replace(/\./g, '_'));
+  return '<span style="font-size:11px;font-weight:600;color:' + m.color + ';background:' + m.bg + ';padding:2px 8px;border-radius:999px">' + label + '</span>';
+}
+
+function _specHtml(e) {
+  var cs = e.compute_spec || {};
+  var acc = cs.accelerator || {};
+  var parts = [(cs.cpu_cores || '?') + 'vCPU', cs.ram || '?', cs.cpu_arch || ''];
+  if (acc.accel_type) parts.push(acc.accel_type + ' ' + acc.accel_model + 'x' + acc.card_count);
+  return parts.filter(Boolean).join(' . ');
+}
+
+function openAiDevspace() {
+  var el = document.getElementById('pageContent');
+  if (!el) return;
+  var existing = document.getElementById('aiDevspacePanel');
+  if (existing) { existing.remove(); return; }
+  // 滑入动画
+  el.insertAdjacentHTML('afterbegin',
+    '<div id="aiDevspacePanel" style="margin-bottom:16px;max-height:0;overflow:hidden;transition:max-height .3s ease,opacity .3s ease;opacity:0">' +
+    '<div class="cd" style="padding:0;overflow:hidden">' +
+    '<div style="padding:14px 20px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--b);background:linear-gradient(135deg,#60a5fa,#a78bfa);position:relative;overflow:hidden">' +
+    '<div style="position:absolute;inset:0;background:radial-gradient(ellipse at top right,rgba(255,255,255,.2),transparent 60%);pointer-events:none"></div>' +
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position:relative;flex-shrink:0"><path d="M17.5 19a4.5 4.5 0 1 0-1.41-8.78 7 7 0 1 0-13.09 3.78A4.5 4.5 0 0 0 6.5 19z"/></svg>' +
+    '<h3 style="font-size:14px;font-weight:600;margin:0;flex:1;color:#fff;position:relative">' + I18N.t('runtimes.devspace.title') + '</h3>' +
+    '<span id="aiDevspaceAutoTag" style="font-size:10px;color:rgba(255,255,255,.7);position:relative;display:none"></span>' +
+    '<button class="bt bt-s" style="background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.25);position:relative" onclick="_showCreateEnvForm()">' + I18N.t('runtimes.devspace.create') + '</button>' +
+    '<button class="bt bt-s" style="background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.15);position:relative" onclick="_refreshDevspaceList()">&#8635;</button>' +
+    '<button class="bt bt-s" style="background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.15);position:relative" onclick="_closeDevspace()">&#10005;</button></div>' +
+    '<div id="aiDevspaceBody"><div class="loading">' + I18N.t('runtimes.devspace.loading') + '</div></div></div></div>');
+  // 触发动画
+  setTimeout(function() {
+    var p = document.getElementById('aiDevspacePanel');
+    if (p) { p.style.maxHeight = '600px'; p.style.opacity = '1'; }
+  }, 10);
+  _refreshDevspaceList();
+  _startDevspaceAutoRefresh();
+}
+
+function _closeDevspace() {
+  var el = document.getElementById('aiDevspacePanel');
+  if (!el) return;
+  _stopDevspaceAutoRefresh();
+  el.style.maxHeight = '0';
+  el.style.opacity = '0';
+  setTimeout(function() { if (el) el.remove(); }, 300);
+}
+
+// ====== AI Devspace 自动刷新 ======
+var _devspaceAutoTimer = null;
+var _devspaceAutoCountdown = 0;
+var _devspaceCountdownTimer = null;
+var _DEVSPACE_AUTO_INTERVAL = 15; // 秒
+
+function _startDevspaceAutoRefresh() {
+  _stopDevspaceAutoRefresh();
+  _devspaceAutoCountdown = _DEVSPACE_AUTO_INTERVAL;
+  _devspaceAutoTimer = setInterval(function() {
+    var panel = document.getElementById('aiDevspacePanel');
+    if (!panel) { _stopDevspaceAutoRefresh(); return; }
+    _devspaceSilentRefresh();
+    _devspaceAutoCountdown = _DEVSPACE_AUTO_INTERVAL;
+  }, _DEVSPACE_AUTO_INTERVAL * 1000);
+  // 倒计时显示
+  _devspaceCountdownTimer = setInterval(function() {
+    var panel = document.getElementById('aiDevspacePanel');
+    if (!panel) { _stopDevspaceAutoRefresh(); return; }
+    var tag = document.getElementById('aiDevspaceAutoTag');
+    if (!tag) return;
+    _devspaceAutoCountdown--;
+    if (_devspaceAutoCountdown <= 0) _devspaceAutoCountdown = _DEVSPACE_AUTO_INTERVAL;
+    tag.textContent = _DEVSPACE_AUTO_INTERVAL + 's auto';
+    tag.style.display = '';
+  }, 1000);
+}
+
+function _stopDevspaceAutoRefresh() {
+  if (_devspaceAutoTimer) { clearInterval(_devspaceAutoTimer); _devspaceAutoTimer = null; }
+  if (_devspaceCountdownTimer) { clearInterval(_devspaceCountdownTimer); _devspaceCountdownTimer = null; }
+  var tag = document.getElementById('aiDevspaceAutoTag');
+  if (tag) { tag.style.display = 'none'; tag.textContent = ''; }
+}
+
+function _devspaceSilentRefresh() {
+  var body = document.getElementById('aiDevspaceBody');
+  if (!body) return;
+  // 静默刷新：不显示 loading spinner，只在后台拉数据后更新列表
+  API.get('/devstage/environments').then(function(d) {
+    var envs = d.environments || [];
+    if (envs.length === 0) {
+      body.innerHTML = '<div style="padding:36px 20px;text-align:center">' +
+        '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom:10px;opacity:.6"><path d="M17.5 19a4.5 4.5 0 1 0-1.41-8.78 7 7 0 1 0-13.09 3.78A4.5 4.5 0 0 0 6.5 19z"/></svg>' +
+        '<div style="font-size:13px;color:var(--t2);margin-bottom:4px">' + I18N.t('runtimes.devspace.empty') + '</div>' +
+        '<div style="font-size:11px;color:var(--t3)">' + I18N.t('runtimes.devspace.empty_hint') + '</div></div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < envs.length; i++) {
+      var e = envs[i];
+      var id = e.id || '';
+      var st = e.status || '';
+      var stMap = { 'cde.0000':'#6b7280','cde.0001':'#2563eb','cde.0002':'#16a34a','cde.0003':'#2563eb','cde.0004':'#16a34a','cde.0005':'#d97706','cde.0006':'#dc2626','cde.0007':'#d97706','cde.0008':'#d97706','cde.0009':'#9ca3af','cde.0010':'#dc2626' };
+      var dotColor = stMap[st] || '#8d97a8';
+      var isRunning = st === 'cde.0002';
+      var isReady = st === 'cde.0004';
+      var isStopped = st === 'cde.0000' || st === 'cde.0009';
+      var isBusy = ['cde.0001','cde.0003','cde.0005','cde.0006','cde.0007','cde.0008'].indexOf(st) >= 0;
+      html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--b);transition:background .12s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
+        '<div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:' + dotColor + ';box-shadow:0 0 6px ' + dotColor + '50"></div>' +
+        '<div style="flex:1;min-width:0">' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">' +
+        '<span style="font-size:13px;font-weight:600">' + (e.name || id) + '</span>' +
+        _devStatusLabel(st) + '</div>' +
+        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div></div>' +
+        '<div style="display:flex;gap:4px;flex-shrink:0">' +
+        ((isStopped || isReady) && !isBusy ? '<button class="bt bt-p bt-s" onclick="_devAction(\'start\',\'' + id + '\')">' + I18N.t('runtimes.devspace.start') + '</button>' : '') +
+        (isRunning ? '<button class="bt bt-o bt-s" onclick="_devAction(\'stop\',\'' + id + '\')">' + I18N.t('runtimes.devspace.stop') + '</button>' : '') +
+        (!isBusy ? '<button class="bt bt-r bt-s" onclick="_devAction(\'delete\',\'' + id + '\')">' + I18N.t('runtimes.devspace.delete') + '</button>' : '') +
+        '</div></div>';
+    }
+    body.innerHTML = html;
+  }).catch(function() {
+    // 静默失败：不打扰用户，下次定时刷新会重试
+  });
+}
+
+function _refreshDevspaceList() {
+  var body = document.getElementById('aiDevspaceBody');
+  if (!body) return;
+  body.innerHTML = '<div style="padding:32px;text-align:center;color:#a78bfa;font-size:13px"><div style="display:inline-block;width:20px;height:20px;border:2px solid rgba(167,139,250,.2);border-top-color:#a78bfa;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:10px"></div><div>' + I18N.t('runtimes.devspace.loading') + '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style></div>';
+  API.get('/devstage/environments').then(function(d) {
+    var envs = d.environments || [];
+    if (envs.length === 0) {
+      body.innerHTML = '<div style="padding:36px 20px;text-align:center">' +
+        '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom:10px;opacity:.6"><path d="M17.5 19a4.5 4.5 0 1 0-1.41-8.78 7 7 0 1 0-13.09 3.78A4.5 4.5 0 0 0 6.5 19z"/></svg>' +
+        '<div style="font-size:13px;color:var(--t2);margin-bottom:4px">' + I18N.t('runtimes.devspace.empty') + '</div>' +
+        '<div style="font-size:11px;color:var(--t3)">' + I18N.t('runtimes.devspace.empty_hint') + '</div></div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < envs.length; i++) {
+      var e = envs[i];
+      var id = e.id || '';
+      var st = e.status || '';
+      var stMap = { 'cde.0000':'#6b7280','cde.0001':'#2563eb','cde.0002':'#16a34a','cde.0003':'#2563eb','cde.0004':'#16a34a','cde.0005':'#d97706','cde.0006':'#dc2626','cde.0007':'#d97706','cde.0008':'#d97706','cde.0009':'#9ca3af','cde.0010':'#dc2626' };
+      var dotColor = stMap[st] || '#8d97a8';
+      var isRunning = st === 'cde.0002';
+      var isReady = st === 'cde.0004';
+      var isStopped = st === 'cde.0000' || st === 'cde.0009';
+      var isBusy = ['cde.0001','cde.0003','cde.0005','cde.0006','cde.0007','cde.0008'].indexOf(st) >= 0;
+      html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--b);transition:background .12s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
+        '<div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:' + dotColor + ';box-shadow:0 0 6px ' + dotColor + '50"></div>' +
+        '<div style="flex:1;min-width:0">' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">' +
+        '<span style="font-size:13px;font-weight:600">' + (e.name || id) + '</span>' +
+        _devStatusLabel(st) + '</div>' +
+        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div></div>' +
+        '<div style="display:flex;gap:4px;flex-shrink:0">' +
+        ((isStopped || isReady) && !isBusy ? '<button class="bt bt-p bt-s" onclick="_devAction(\'start\',\'' + id + '\')">' + I18N.t('runtimes.devspace.start') + '</button>' : '') +
+        (isRunning ? '<button class="bt bt-o bt-s" onclick="_devAction(\'stop\',\'' + id + '\')">' + I18N.t('runtimes.devspace.stop') + '</button>' : '') +
+        (!isBusy ? '<button class="bt bt-r bt-s" onclick="_devAction(\'delete\',\'' + id + '\')">' + I18N.t('runtimes.devspace.delete') + '</button>' : '') +
+        '</div></div>';
+    }
+    body.innerHTML = html;
+  }).catch(function(e) {
+    body.innerHTML = '<div style="padding:32px 20px;text-align:center">' +
+      '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom:10px;opacity:.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>' +
+      '<div style="font-size:13px;color:var(--t2);margin-bottom:4px">' +
+      (e.message.indexOf('Unauthorized') >= 0 || e.message.indexOf('APIGW.0301') >= 0 ? I18N.t('runtimes.devspace.configure_aksk') : I18N.t('runtimes.devspace.load_failed')) + '</div>' +
+      '<div style="font-size:11px;color:var(--t3)">' +
+      (e.message.indexOf('Unauthorized') >= 0 || e.message.indexOf('APIGW.0301') >= 0 ? I18N.t('runtimes.devspace.configure_aksk_hint') : e.message) + '</div></div>';
+  });
+}
+
+function _showCreateEnvForm() {
+  var repo = app.currentRepo();
+  var repoName = (repo && repo.name) ? repo.name : 'grape';
+  var now = new Date();
+  var ts = String(now.getMonth() + 1).padStart(2, '0') +
+    String(now.getDate()).padStart(2, '0') +
+    String(now.getHours()).padStart(2, '0') +
+    String(now.getMinutes()).padStart(2, '0');
+  var maxRepo = 15 - 1 - ts.length;
+  if (maxRepo < 1) maxRepo = 1;
+  repoName = repoName.replace(/[^a-zA-Z0-9_]/g, '').slice(0, maxRepo);
+  var envName = repoName + '_' + ts;
+
+  var panel = document.getElementById('aiDevspacePanel');
+  if (panel) panel.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">' +
+    '<h3 style="font-size:14px;flex:1;margin:0">AI Devspace</h3>' +
+    '<button class="bt bt-o" onclick="_closeDevspace()">X</button></div>' +
+    '<div class="cd" style="padding:20px;text-align:center"><div class="loading">' + I18N.t('runtimes.devspace.creating') + '</div></div>';
+  _doCreateEnv(envName);
+}
+
+function _genTokenForCreate() {
+  var repo = app.currentRepo();
+  var repoKey = repo ? repo.fullName : '';
+  var name = 'auto_' + Date.now().toString(36).slice(-6);
+  API.post('/settings/runtime-credentials', { name: name, scope: 'repo', repo_key: repoKey }).then(function(d) {
+    var input = document.getElementById('grapeToken');
+    if (input) input.value = d.token || '';
+    app.showToast(I18N.t('runtimes.credential.toast_generated'));
+  }).catch(function(e) {
+    app.showToast(I18N.t('runtimes.credential.toast_gen_failed', {msg: e.message}));
+  });
+}
+
+var _cachedTemplates = [];
+var _cachedFlavors = [];
+
+function _loadTemplates() {
+  API.get('/devstage/templates').then(function(d) {
+    var list = d.templates || [];
+    _cachedTemplates = list;
+    var sel = document.getElementById('envTemplate');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">' + I18N.t('runtimes.devspace.select_template') + '</option>';
+    for (var i = 0; i < list.length; i++) {
+      sel.innerHTML += '<option value="' + list[i].uuid + '">' + list[i].name + '</option>';
+    }
+    sel.onchange = _onTemplateChange;
+  });
+}
+
+function _onTemplateChange() {
+  var tplId = document.getElementById('envTemplate').value;
+  var flavorSel = document.getElementById('envFlavor');
+  if (!flavorSel) return;
+  flavorSel.innerHTML = '<option value="">' + I18N.t('runtimes.devspace.loading') + '</option>';
+  if (!tplId) { flavorSel.innerHTML = '<option value="">' + I18N.t('runtimes.devspace.select_template_first') + '</option>'; return; }
+  API.get('/devstage/specs?template_id=' + encodeURIComponent(tplId)).then(function(d) {
+    var list = d.specs || [];
+    _cachedFlavors = list;
+    flavorSel.innerHTML = '<option value="">' + I18N.t('runtimes.devspace.select_flavor') + '</option>';
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i];
+      flavorSel.innerHTML += '<option value="' + s.flavor_id + '">' + s.env_cpu_size + 'c' + s.env_mem_size + 'g' + (s.env_npu_type ? ' NPU' : '') + '</option>';
+    }
+    // Auto-select if only one flavor
+    if (list.length === 1) {
+      flavorSel.value = list[0].flavor_id;
+      _onFlavorChange();
+    }
+  }).catch(function() {
+    var flavorSel = document.getElementById('envFlavor');
+    if (flavorSel) flavorSel.innerHTML = '<option value="">' + I18N.t('runtimes.devspace.flavor_load_failed') + '</option>';
+  });
+}
+
+function _onFlavorChange() {
+  var sel = document.getElementById('envFlavor');
+  if (!sel || !sel.value) return;
+  var flavorId = sel.value;
+  var flavor = null;
+  for (var i = 0; i < _cachedFlavors.length; i++) {
+    if (_cachedFlavors[i].flavor_id === flavorId) { flavor = _cachedFlavors[i]; break; }
+  }
+  if (!flavor) return;
+  var coresEl = document.getElementById('envCores');
+  var memEl = document.getElementById('envMemory');
+  if (coresEl) coresEl.value = flavor.env_cpu_size || flavor.cores || '';
+  if (memEl) memEl.value = flavor.env_mem_size || flavor.memory || '';
+}
+
+function _showCreateEnvForm() {
+    var repo = app.currentRepo();
+    var repoName = (repo && repo.name) ? repo.name : 'grape';
+    var now = new Date();
+    var ts = String(now.getMonth() + 1).padStart(2, '0') +
+      String(now.getDate()).padStart(2, '0') +
+      String(now.getHours()).padStart(2, '0') +
+      String(now.getMinutes()).padStart(2, '0');
+    var maxRepo = 15 - 1 - ts.length;
+    if (maxRepo < 1) maxRepo = 1;
+    repoName = repoName.replace(/[^a-zA-Z0-9_]/g, '').slice(0, maxRepo);
+    var baseName = repoName + '_' + ts;
+
+    var panel = document.getElementById('aiDevspacePanel');
+    if (panel) {
+      var body = panel.querySelector('#aiDevspaceBody') || panel;
+      body.innerHTML = '<div style="padding:32px;text-align:center;color:#a78bfa;font-size:13px">' +
+        '<div style="display:inline-block;width:20px;height:20px;border:2px solid rgba(167,139,250,.2);border-top-color:#a78bfa;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:10px"></div>' +
+        '<div>' + I18N.t('runtimes.devspace.creating') + '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style></div>';
+    }
+    _doCreateEnvWithRetry(baseName, 0);
+  }
+
+  function _doCreateEnvWithRetry(baseName, attempt) {
+    var envName = attempt === 0 ? baseName : baseName + '_' + attempt;
+    if (envName.length > 15) {
+      // 截断仓库名部分，保留完整时间戳
+      var parts = baseName.split('_');
+      var repoPart = parts[0];
+      var tsPart = parts.slice(1).join('_');
+      var suffix = '_' + attempt;
+      var maxRepo = 15 - tsPart.length - 1 - suffix.length;
+      if (maxRepo < 1) maxRepo = 1;
+      repoPart = repoPart.slice(0, maxRepo);
+      envName = repoPart + '_' + tsPart + suffix;
+    }
+    var repo = app.currentRepo();
+    var repoKey = repo ? repo.fullName : '';
+    var grapeServer = window.location.origin;
+    var credName = envName.slice(0, 20);
+
+    // Step 1: 生成凭据
+    API.post('/settings/runtime-credentials', { name: credName, scope: 'repo', repo_key: repoKey }).then(function(d) {
+      var grapeToken = d.token || '';
+      var credId = d.id || 0;
+      if (!grapeToken) { app.showToast(I18N.t('runtimes.devspace.cred_gen_failed')); _refreshDevspaceList(); return; }
+
+      // Step 2: 创建环境（带凭据注入）
+      API.post('/devstage/environments', {
+        name: envName,
+        grape_server: grapeServer,
+        grape_token: grapeToken,
+      }).then(function(d2) {
+        app.showToast(I18N.t('runtimes.devspace.create_success'));
+        _refreshDevspaceList();
+      }).catch(function(e) {
+        var msg = e.message || '';
+        // 环境名冲突：删除凭据，换名重试
+        if (attempt < 10 && (msg.indexOf('98320005') >= 0 || msg.indexOf('already been used') >= 0)) {
+          API.del('/settings/runtime-credentials/' + credId).then(function() {
+            _doCreateEnvWithRetry(baseName, attempt + 1);
+          }).catch(function() {
+            _doCreateEnvWithRetry(baseName, attempt + 1);
+          });
+        } else if (msg.indexOf('98320022') >= 0 || msg.indexOf('count limit') >= 0) {
+          API.del('/settings/runtime-credentials/' + credId);
+          app.showToast(I18N.t('runtimes.devspace.count_limit'));
+          _refreshDevspaceList();
+        } else {
+          // 其他失败也删除凭据
+          API.del('/settings/runtime-credentials/' + credId);
+          app.showToast(I18N.t('runtimes.devspace.load_failed') + ': ' + msg);
+          _refreshDevspaceList();
+        }
+      });
+    }).catch(function(e) {
+      var msg = e.message || '';
+      if (attempt < 10 && (msg.indexOf('exist') >= 0 || msg.indexOf('exist') >= 0)) {
+        _doCreateEnvWithRetry(baseName, attempt + 1);
+      } else {
+        app.showToast(I18N.t('runtimes.devspace.cred_gen_failed_msg', {msg: msg}));
+        _refreshDevspaceList();
+      }
+    });
+  }
+
+function _devAction(action, devstageId) {
+  if (action === 'delete' && !confirm(I18N.t('runtimes.devspace.confirm_delete'))) return;
+  var body = document.getElementById('aiDevspaceBody');
+  if (body) body.innerHTML = '<div style="padding:32px;text-align:center;color:#a78bfa;font-size:13px"><div style="display:inline-block;width:20px;height:20px;border:2px solid rgba(167,139,250,.2);border-top-color:#a78bfa;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:10px"></div><div>' + I18N.t('runtimes.devspace.operating') + '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style></div>';
+  if (action === 'delete') {
+    API.del('/devstage/environments/' + devstageId).then(function() {
+      app.showToast(I18N.t('runtimes.devspace.deleting'));
+      setTimeout(_refreshDevspaceList, 1000);
+    }).catch(function(e) {
+      var msg = e.message || '';
+      if (msg.indexOf('98320063') >= 0 || msg.indexOf('can not be deleted') >= 0) {
+        app.showToast(I18N.t('runtimes.devspace.cannot_delete_running'));
+      } else {
+        app.showToast(I18N.t('runtimes.devspace.delete_failed', {msg: msg}));
+      }
+      _refreshDevspaceList();
+    });
+  } else {
+    API.post('/devstage/environments/' + action, { devstage_id: devstageId }).then(function() {
+      app.showToast(action === 'start' ? I18N.t('runtimes.devspace.starting') : I18N.t('runtimes.devspace.stopping'));
+      setTimeout(_refreshDevspaceList, 1000);
+    }).catch(function(e) {
+      app.showToast(I18N.t('runtimes.devspace.op_failed', {msg: e.message}));
+      _refreshDevspaceList();
+    });
+  }
+}
+
+function _genCredForEnv(envId, envName) {
+  var defaultName = 'worker_' + envName.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 15);
+  var html = '<div class="modal-overlay" id="credModal_' + envId + '" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center" onclick="if(event.target===this)_closeEnvCredPanel(\'' + envId + '\')">' +
+    '<div class="cd" style="max-width:520px;width:90%;padding:20px;box-shadow:0 4px 24px rgba(0,0,0,0.15)">' +
+    '<h3 style="font-size:15px;font-weight:600;margin-bottom:14px">' + I18N.t('runtimes.devspace.gen_cred_for_env', {name: envName}) + '</h3>' +
+    '<div class="srow"><label>' + I18N.t('runtimes.devspace.cred_name') + '</label><input id="credName_' + envId + '" value="' + defaultName + '" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px"></div>' +
+    '<div class="srow"><label>' + I18N.t('runtimes.devspace.scope') + '</label><select id="credScope_' + envId + '" onchange="_toggleCredRepoKey(\'' + envId + '\')" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px">' +
+    '<option value="user">' + I18N.t('runtimes.scope.user') + '</option><option value="repo">' + I18N.t('runtimes.scope.repo') + '</option><option value="global">' + I18N.t('runtimes.scope.global') + '</option></select></div>' +
+    '<div class="srow" id="credRepoRow_' + envId + '" style="display:none"><label>' + I18N.t('runtimes.devspace.repo') + '</label><input id="credRepoKey_' + envId + '" placeholder="owner/repo" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px"></div>' +
+    '<div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end">' +
+    '<button class="bt bt-p" onclick="_doGenCredForEnv(\'' + envId + '\',\'' + envName + '\')">' + I18N.t('runtimes.action.generate') + '</button>' +
+    '<button class="bt bt-o" onclick="_closeEnvCredPanel(\'' + envId + '\')">' + I18N.t('runtimes.action.cancel') + '</button></div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function _toggleCredRepoKey(envId) {
+  var sel = document.getElementById('credScope_' + envId);
+  var row = document.getElementById('credRepoRow_' + envId);
+  if (row && sel) row.style.display = sel.value === 'repo' ? '' : 'none';
+}
+
+function _doGenCredForEnv(envId, envName) {
+  var nameInput = document.getElementById('credName_' + envId);
+  var scopeInput = document.getElementById('credScope_' + envId);
+  var repoInput = document.getElementById('credRepoKey_' + envId);
+  var credName = (nameInput ? nameInput.value : '').trim();
+  var scope = scopeInput ? scopeInput.value : 'user';
+  var repoKey = (scope === 'repo' && repoInput) ? repoInput.value.trim() : '';
+  if (!credName) { app.showToast(I18N.t('runtimes.devspace.enter_cred_name')); return; }
+  if (scope === 'repo' && !repoKey) { app.showToast(I18N.t('runtimes.devspace.repo_required')); return; }
+
+  var modalId = 'credModal_' + envId;
+  var box = document.getElementById(modalId);
+  if (box) box.innerHTML = '<div class="cd" style="max-width:520px;width:90%;padding:20px;box-shadow:0 4px 24px rgba(0,0,0,0.15);margin:auto"><div class="loading">' + I18N.t('runtimes.devspace.gen_cred_loading') + '</div></div>';
+
+  API.post('/settings/runtime-credentials', { name: credName, scope: scope, repo_key: repoKey }).then(function(d) {
+    var token = d.token || '';
+    var serverUrl = window.location.origin;
+    var oneCmd = 'curl -fsSL ' + serverUrl + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + serverUrl;
+    var box = document.getElementById(modalId);
+    if (!box) return;
+    var cmdEscaped = oneCmd.replace(/'/g, "\\'");
+    box.innerHTML = '<div class="cd" style="max-width:520px;width:90%;padding:20px;box-shadow:0 4px 24px rgba(0,0,0,0.15);margin:auto">' +
+      '<h3 style="font-size:15px;font-weight:600;margin-bottom:14px">' + I18N.t('runtimes.devspace.cred_created_for', {name: envName}) + '</h3>' +
+      '<div style="font-size:12px;margin-bottom:8px;color:var(--r)">' + I18N.t('runtimes.devspace.token_warning') + '</div>' +
+      '<code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-bottom:10px">' + oneCmd + '</code>' +
+      '<button class="bt bt-p" onclick="copyText(\'' + cmdEscaped + '\')">' + I18N.t('runtimes.devspace.copy_cmd') + '</button>' +
+      '<button class="bt bt-g" style="margin-left:6px" onclick="' + "_execCredCmd('" + cmdEscaped + "','" + envId + "')" + '">' + I18N.t('runtimes.devspace.execute') + '</button>' +
+      '<p style="font-size:11px;color:var(--t3);margin-top:8px">' + I18N.t('runtimes.devspace.exec_hint') + '</p>' +
+      '<button class="bt bt-o" style="margin-top:8px" onclick="' + "_closeEnvCredPanel('" + envId + "')" + '">' + I18N.t('runtimes.action.close') + '</button></div>';
+  }).catch(function(e) {
+    var box = document.getElementById(modalId);
+    if (box) box.innerHTML = '<div class="error" style="padding:20px">' + I18N.t('runtimes.devspace.load_failed') + ': ' + e.message + '</div>';
+  });
+}
+
+function _closeEnvCredPanel(envId) {
+  var el = document.getElementById('credModal_' + envId);
+  if (el) el.remove();
+}
+
+function _execCredCmd(cmd, envId) {
+  copyText(cmd);
+  app.showToast(I18N.t('runtimes.devspace.cmd_copied'));
+  // 展开一个引导步骤提示
+  var box = document.getElementById('credModal_' + envId);
+  if (box) {
+    var card = box.querySelector('.cd');
+    if (card) {
+      card.innerHTML = card.innerHTML + 
+        '<div style="margin-top:10px;padding:12px;background:#f0fdf4;border-radius:6px;font-size:12px;border:1px solid #bbf7d0">' +
+        '<div style="font-weight:600;color:#16a34a;margin-bottom:6px">' + I18N.t('runtimes.devspace.cmd_in_clipboard') + '</div>' +
+        '<p style="color:#166534;line-height:1.6">1. <a href="https://devstation.myhuaweicloud.com" target="_blank" style="color:#2563eb">' + I18N.t('runtimes.devspace.open_devstation') + '</a><br>' +
+        '2. ' + I18N.t('runtimes.devspace.find_env_connect') + '<br>' +
+        '3. ' + I18N.t('runtimes.devspace.paste_in_terminal') + '</p></div>';
+    }
+  }
 }

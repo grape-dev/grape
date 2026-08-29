@@ -82,6 +82,7 @@ class BotMetrics:
     messages_failed: int = 0
     reconnect_count: int = 0
     last_message_at: float = 0.0
+    last_user_message_at: float = 0.0  # 仅用户消息更新（空闲超时检测用，PING 不更新）
     connected_at: float = 0.0
     last_error: str = ""
 
@@ -111,11 +112,11 @@ class BotContext:
     token: str = ""
     token_expire: float = 0.0
 
-    semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(10))
-    max_concurrent: int = 10
+    semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(20))
+    max_concurrent: int = 20
 
-    reconnect_delay: float = 5.0
-    max_reconnect_delay: float = 300.0
+    reconnect_delay: float = 2.0
+    max_reconnect_delay: float = 15.0
     # websockets 协议级 ping 禁用（None）：飞书 WS 不回协议级 pong，会导致 ping_timeout 断连。
     # 保活依赖飞书应用层 PING/PONG（run_bot 里收到 PING 帧回 PONG）。
     ws_ping_interval: float = 0.0  # 0 → websockets.connect(ping_interval=None) 禁用协议级 ping
@@ -274,31 +275,37 @@ class FeishuAsync:
             async with session.post(url, json=payload, headers=headers) as resp:
                 data = await resp.json()
                 _code = data.get("code", 0)
+                reply_id = data.get("data", {}).get("message_id", "")
                 if _code != 0:
                     ctx.metrics.messages_failed += 1
                     ctx.metrics.last_error = f"reply_text api code={_code}: {data.get('msg','')}"
-                    log.warning(f"[{ctx.name}] reply_text api error: code={_code} msg={data.get('msg','')} msg_id={message_id}")
-                    return ""
-                reply_id = data.get("data", {}).get("message_id", "")
-                ctx.metrics.messages_sent += 1
-                log.debug(f"[{ctx.name}] reply_text: {text[:50]}")
+                    log.warning(f"[{ctx.name}] reply_text failed: code={_code} msg={data.get('msg','')} text={text[:50]}")
+                else:
+                    ctx.metrics.messages_sent += 1
+                    log.info(f"[{ctx.name}] reply_text ok: text={text[:50]}")
                 return reply_id
         except Exception as e:
             ctx.metrics.messages_failed += 1
             ctx.metrics.last_error = f"reply_text error: {e}"
-            log.warning(f"[{ctx.name}] reply_text failed: {e}")
+            log.warning(f"[{ctx.name}] reply_text exception: {e}")
         return ""
 
     async def reply_card(self, ctx: BotContext, message_id: str, text: str,
                          title: str = "DevOps Bot", template: str = "blue") -> str:
-        """回复交互卡片消息"""
+        """回复交互卡片消息（自动追加[帮助]按钮）"""
         token = await self._ensure_token(ctx)
         if not token:
             return ""
         session = await self._get_session()
         url = f"{FEISHU_BASE}/im/v1/messages/{message_id}/reply"
+        elements = to_lark_elements(text, 2000)
+        # 每条卡片消息底部追加[帮助]按钮
+        elements.append({
+            "tag": "action",
+            "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}}]
+        })
         card = {
-            "elements": to_lark_elements(text, 2000),
+            "elements": elements,
             "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
         }
         payload = {
@@ -324,6 +331,116 @@ class FeishuAsync:
             ctx.metrics.last_error = f"reply_card error: {e}"
             log.warning(f"[{ctx.name}] reply_card failed: {e}")
         return ""
+
+    async def send_card_to_chat(self, ctx: BotContext, chat_id: str, text: str,
+                                    title: str = "DevOps Bot", template: str = "blue",
+                                    fallback_open_id: str = "") -> str:
+            # 主动发卡片消息到聊天（非 reply，主窗口可见）
+            # fallback_open_id: P2P 私聊场景 chat_id 方式可能被飞书拒绝(code=230001)，
+            # 此时用 open_id 重发。
+            token = await self._ensure_token(ctx)
+            if not token:
+                return ""
+            session = await self._get_session()
+            elements = to_lark_elements(text, 2000)
+            elements.append({
+                "tag": "action",
+                "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}}]
+            })
+            card = {
+                "elements": elements,
+                "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
+            }
+            card_content = json.dumps(card, ensure_ascii=False)
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # 第一次尝试：chat_id 方式
+            url = f"{FEISHU_BASE}/im/v1/messages?receive_id={chat_id}&receive_id_type=chat_id"
+            payload = {"msg_type": "interactive", "content": card_content}
+            try:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    data = await resp.json()
+                    code = data.get("code", -1)
+                    msg_id = data.get("data", {}).get("message_id", "")
+                    if code == 0:
+                        ctx.metrics.messages_sent += 1
+                        log.info(f"[{ctx.name}] send_card_to_chat ok: msg_id={msg_id} text={text[:50]}")
+                        return msg_id
+                    # P2P 私聊 chat_id 被拒绝 → 用 open_id 回退
+                    if code == 230001 and fallback_open_id:
+                        log.info(f"[{ctx.name}] chat_id rejected (P2P), retrying with open_id={fallback_open_id[:20]}")
+                    else:
+                        log.warning(f"[{ctx.name}] send_card_to_chat failed: code={code} msg={data.get('msg','')} chat_id={chat_id}")
+                        return ""
+            except Exception as e:
+                ctx.metrics.messages_failed += 1
+                ctx.metrics.last_error = f"send_card_to_chat error: {e}"
+                log.warning(f"[{ctx.name}] send_card_to_chat exception: {e}")
+                return ""
+
+            # 回退：open_id 方式
+            if fallback_open_id:
+                url2 = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=open_id"
+                payload2 = {"receive_id": fallback_open_id, "msg_type": "interactive", "content": card_content}
+                try:
+                    async with session.post(url2, json=payload2, headers=headers) as resp:
+                        data = await resp.json()
+                        code = data.get("code", -1)
+                        msg_id = data.get("data", {}).get("message_id", "")
+                        if code == 0:
+                            ctx.metrics.messages_sent += 1
+                            log.info(f"[{ctx.name}] send_card_to_chat(open_id fallback) ok: msg_id={msg_id} text={text[:50]}")
+                            return msg_id
+                        else:
+                            log.warning(f"[{ctx.name}] send_card_to_chat open_id fallback failed: code={code} msg={data.get('msg','')}")
+                except Exception as e:
+                    ctx.metrics.messages_failed += 1
+                    log.warning(f"[{ctx.name}] send_card_to_chat open_id fallback exception: {e}")
+            return ""
+
+    async def send_text_to_user(self, ctx: BotContext, open_id: str, text: str) -> str:
+        """主动发送文本消息给用户"""
+        token = await self._ensure_token(ctx)
+        if not token:
+            return ""
+        session = await self._get_session()
+        url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=open_id"
+        payload = {
+            "receive_id": open_id,
+            "msg_type": "text",
+            "content": json.dumps({"text": text[:2000]}, ensure_ascii=False),
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                data = await resp.json()
+                msg_id = data.get("data", {}).get("message_id", "")
+                ctx.metrics.messages_sent += 1
+                return msg_id
+        except Exception as e:
+            ctx.metrics.messages_failed += 1
+            log.warning(f"[{ctx.name}] send_text_to_user failed: {e}")
+        return ""
+
+    _SHORTCUT_MENU = [
+        {"name": "📖 帮助", "action": {"tag": "message", "text": "/help"}},
+        {"name": "🔄 新建对话", "action": {"tag": "message", "text": "/new"}},
+        {"name": "📁 选择仓库", "action": {"tag": "message", "text": "/repo"}},
+        {"name": "📋 任务列表", "action": {"tag": "message", "text": "/task"}},
+        {"name": "📍 当前位置", "action": {"tag": "message", "text": "/where"}},
+        {"name": "🧹 清除缓存", "action": {"tag": "message", "text": "/clean"}},
+        {"name": "❌ 取消", "action": {"tag": "message", "text": "/cancel"}},
+    ]
+
+    async def set_bot_menu(self, ctx: BotContext) -> bool:
+        """配置飞书 Bot 对话框上方快捷菜单（消息快捷菜单）
+
+        ⚠️ 飞书开放平台暂无公开 API 设置 Bot 快捷菜单，
+        需要在飞书智能体后台 / 开放平台后台手动配置。
+        此方法仅用于检查 API 可用性。
+        """
+        log.info(f"[{ctx.name}] set_bot_menu: 飞书暂无公开菜单 API，请在智能体后台手动配置快捷提问")
+        return False
 
     async def send_card_to_user(self, ctx: BotContext, open_id: str, text: str,
                                 title: str = "DevOps Bot") -> str:
@@ -353,6 +470,56 @@ class FeishuAsync:
             ctx.metrics.messages_failed += 1
             log.warning(f"[{ctx.name}] send_card_to_user failed: {e}")
         return ""
+
+    async def send_quick_cmd_card(self, ctx: BotContext, open_id: str) -> str:
+            """发送欢迎卡片，包含快捷命令按钮
+
+            用户点击按钮 → 飞书推送 card.action.trigger 事件 →
+            _parse_card_action 解析 cmd → 等同于输入命令文本
+            """
+            token = await self._ensure_token(ctx)
+            if not token:
+                return ""
+            session = await self._get_session()
+            url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=open_id"
+            buttons = [
+                {"tag": "button", "text": {"tag": "plain_text", "content": "📖 帮助"}, "value": {"cmd": "/help"}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "🔄 新建对话"}, "value": {"cmd": "/new"}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "📁 选择仓库"}, "value": {"cmd": "/repo"}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "💬 选择会话"}, "value": {"cmd": "/chat"}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "📋 任务列表"}, "value": {"cmd": "/task"}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "📍 当前位置"}, "value": {"cmd": "/where"}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "🧹 清除缓存"}, "value": {"cmd": "/clean"}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "❌ 取消"}, "value": {"cmd": "/cancel"}},
+            ]
+            card = {
+                "config": {"wide_screen_mode": True},
+                "header": {"title": {"tag": "plain_text", "content": "🤖 Grape DevOps"}, "template": "blue"},
+                "elements": [
+                    {"tag": "div", "text": {"tag": "lark_md", "content": "欢迎使用 Grape DevOps Bot 👋\n点击下方按钮快速执行命令："}},
+                    {"tag": "hr"},
+                    {"tag": "action", "actions": buttons[:3]},
+                    {"tag": "action", "actions": buttons[3:6]},
+                    {"tag": "action", "actions": buttons[6:]},
+                ],
+            }
+            payload = {
+                "receive_id": open_id,
+                "msg_type": "interactive",
+                "content": json.dumps(card, ensure_ascii=False),
+            }
+            headers = {"Authorization": f"Bearer {token}"}
+            try:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    data = await resp.json()
+                    msg_id = data.get("data", {}).get("message_id", "")
+                    ctx.metrics.messages_sent += 1
+                    log.info(f"[{ctx.name}] send_quick_cmd_card sent to {open_id[:20]}: msg_id={msg_id[:20]}")
+                    return msg_id
+            except Exception as e:
+                ctx.metrics.messages_failed += 1
+                log.warning(f"[{ctx.name}] send_quick_cmd_card failed: {e}")
+            return ""
 
     async def update_message(self, ctx: BotContext, message_id: str, text: str) -> bool:
         """编辑/替换已有消息"""
@@ -601,12 +768,59 @@ def _build_ack_frame(frame) -> bytes:
     return frame.SerializeToString()
 
 
+def _parse_card_action(event_data: dict) -> dict | None:
+    """解析飞书消息快捷菜单 / 卡片按钮点击事件（card.action.trigger）
+
+    快捷菜单点击或卡片按钮点击时，飞书推送 card.action.trigger 事件。
+    提取 action.value 中的 cmd 字段作为命令文本，等同于用户发送了该命令。
+    """
+    header = event_data.get("header", {})
+    event_type = header.get("event_type", "")
+    # CARD 类型事件可能无 header，直接从 event_data 取 action
+    if event_type != "card.action.trigger":
+        if "action" not in event_data and "action" not in event_data.get("event", {}):
+            return None
+    event = event_data.get("event", {})
+    action = event.get("action", event_data.get("action", {}))
+    value_raw = action.get("value", "{}")
+    try:
+        value = json.loads(value_raw) if isinstance(value_raw, str) else (value_raw or {})
+    except (json.JSONDecodeError, TypeError):
+        value = {}
+    cmd = (value.get("cmd") or "").strip()
+    if not cmd:
+        log.info(f"card.action.trigger without cmd: {value_raw}")
+        return None
+    # card.action.trigger 字段结构：
+    #   operator.open_id = 点击用户
+    #   context.open_chat_id / open_message_id
+    operator = event.get("operator", {}) or {}
+    context_ = event.get("context", {}) or {}
+    sender_open_id = operator.get("open_id", "") or event.get("open_id") or event_data.get("open_id") or ""
+    chat_id = context_.get("open_chat_id") or event.get("open_chat_id", event.get("chat_id", "")) or ""
+    msg_id = context_.get("open_message_id") or event.get("open_message_id") or ""
+    return {
+        "type": "message",
+        "text": cmd,
+        "chat_id": chat_id,
+        "chat_type": "p2p",
+        "sender_id": event.get("user_id") or event_data.get("user_id") or "",
+        "sender_open_id": sender_open_id,
+        "message_id": header.get("event_id") or msg_id,  # event_id 唯一，用于去重
+        "_reply_id": msg_id,  # 真实消息 ID，用于回复
+        "message_type": "text",
+    }
+
+
 def _parse_event(event_data: dict) -> dict | None:
     """从飞书事件 JSON 提取标准化消息 dict"""
     header = event_data.get("header", {})
     event_type = header.get("event_type", "")
 
     if event_type != "im.message.receive_v1":
+        # 尝试解析 card.action.trigger（可能无 header，直接从 data 取）
+        if event_type == "card.action.trigger" or header.get("event_type") is None:
+            return _parse_card_action(event_data)
         return None
 
     event = event_data.get("event", {})
@@ -737,6 +951,11 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                 ctx._ws = ws
                 ctx.state = BotState.CONNECTED
                 ctx.metrics.connected_at = time.time()
+                # [PITFALL 修复] 必须在 WS 连接建立时初始化 last_message_at / last_user_message_at，
+                # 否则默认值 0 导致空闲超时检测立即触发（time() - 0 > 300）。
+                # last_user_message_at 初始化为当前时间，给新连接 5 分钟宽限期。
+                ctx.metrics.last_message_at = time.time()
+                ctx.metrics.last_user_message_at = time.time()
                 delay = ctx.reconnect_delay
                 log.info(f"[{ctx.name}] connected")
 
@@ -747,7 +966,7 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                         with db_lock:
                             c = db.cursor()
                             c.execute(
-                                "SELECT lease_token FROM global_im_bot_config WHERE bot_app_id=%s",
+                                "SELECT lease_token FROM global_im_bot_config WHERE bot_app_id=?",
                                 (ctx.app_id,),
                             )
                             row = c.fetchone()
@@ -773,6 +992,19 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                             await asyncio.sleep(120)
                             if ws is not ctx._ws:
                                 break
+                            # 空闲超时检测：如果超过 5 分钟没收到用户消息，
+                            # 说明飞书已停推事件（WS URL 过期或飞书侧降级），
+                            # 主动断开触发重连获取新 URL。
+                            # 用 last_user_message_at 而非 last_message_at，
+                            # 因为 PING 也会更新 last_message_at 导致检测失效。
+                            idle_secs = time.time() - ctx.metrics.last_user_message_at
+                            if idle_secs > 300:
+                                log.warning(f"[{ctx.name}] idle {idle_secs:.0f}s > 300s, forcing reconnect")
+                                try:
+                                    await ws.close()
+                                except Exception:
+                                    pass
+                                break
                             ping = Frame()
                             ping.method = FrameType.CONTROL.value
                             ping.service = _ws_service_id
@@ -780,7 +1012,7 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                             ping.LogID = 0
                             ping.headers.add(key="type", value=MessageType.PING.value)
                             await ws.send(ping.SerializeToString())
-                            log.debug(f"[{ctx.name}] keepalive ping sent")
+                            log.info(f"[{ctx.name}] keepalive ping sent")
                         except asyncio.CancelledError:
                             break
                         except Exception as _pe:
@@ -808,14 +1040,13 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                                 # 回 PONG 保活：飞书发应用层 PING，不回 PONG 会被判定死连接，
                                 # 停止推送消息（WS 假死根因 — TCP 未断但消息不再到达）
                                 try:
-                                    # 复用原 PING 帧（含 SeqID/LogID/service 等必填字段），
-                                    # 将 type header 改为 PONG
                                     for h in frame.headers:
                                         if h.key == "type":
                                             h.value = MessageType.PONG.value
                                     await ws.send(frame.SerializeToString())
                                 except Exception as _pe:
                                     log.warning(f"[{ctx.name}] send pong failed: {_pe}")
+                                ctx.metrics.last_message_at = time.time()
                             continue
 
                         if ft != FrameType.DATA:
@@ -823,13 +1054,14 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
 
                         hs = frame.headers
                         type_ = _get_header(hs, "type")
-                        if type_ != MessageType.EVENT.value:
+                        if type_ not in (MessageType.EVENT.value, MessageType.CARD.value):
                             continue
 
                         try:
                             payload_str = frame.payload.decode("utf-8") if frame.payload else ""
                             event_data = json.loads(payload_str)
-                        except Exception:
+                            log.info(f"[WS] event_type={event_data.get('header',{}).get('event_type','?')} type={type_} keys={list(event_data.keys())}")
+                        except Exception as e:
                             # 解析失败也需 ack，否则飞书重推导致死循环
                             try:
                                 await ws.send(_build_ack_frame(frame))
@@ -846,7 +1078,13 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
 
                         parsed = _parse_event(event_data)
                         if not parsed or not parsed.get("text"):
-                            continue
+                            # CARD 类型 → 卡片按钮点击事件（card.action.trigger）
+                            if type_ == MessageType.CARD.value:
+                                parsed = _parse_card_action(event_data)
+                                if parsed and parsed.get("text"):
+                                    log.info(f"[WS] card action parsed: cmd={parsed['text'][:30]}")
+                            if not parsed or not parsed.get("text"):
+                                continue
 
                         msg_id = parsed.get("message_id", "")
                         if msg_id:
@@ -860,15 +1098,15 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                         log.info(f"[{ctx.name}] received message: chat={parsed.get('chat_id','')[:20]} text={parsed.get('text','')[:50]}")
                         ctx.metrics.messages_received += 1
                         ctx.metrics.last_message_at = time.time()
-                        if not ctx.semaphore.locked() or ctx.semaphore._value > 0:
-                            t = asyncio.create_task(
-                                _safe_handle(ctx, api, on_message, parsed),
-                                name=f"msg-{ctx.name}-{ctx.metrics.messages_received}",
-                            )
-                            ctx._handle_tasks.add(t)
-                            t.add_done_callback(ctx._handle_tasks.discard)
-                        else:
-                            log.warning(f"[{ctx.name}] concurrency limit reached, dropping message")
+                        ctx.metrics.last_user_message_at = time.time()
+                        # 不检查 semaphore —— asyncio.Semaphore 自带 FIFO 排队，
+                        # 满时自动阻塞等待，不存在丢消息。
+                        t = asyncio.create_task(
+                            _safe_handle(ctx, api, on_message, parsed),
+                            name=f"msg-{ctx.name}-{ctx.metrics.messages_received}",
+                        )
+                        ctx._handle_tasks.add(t)
+                        t.add_done_callback(ctx._handle_tasks.discard)
                 finally:
                     _ping_task.cancel()
                     try:

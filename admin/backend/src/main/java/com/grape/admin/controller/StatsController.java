@@ -95,16 +95,16 @@ public class StatsController {
         data.put("credentialStatusDistribution", groupCount(
                 "SELECT COALESCE(status,'未知'), COUNT(*) FROM runtime_credentials GROUP BY status"));
 
-        // 仓库事件分布 Top 8（横向条形图，对应"托管仓库"卡片）
+        // 仓库任务分布 Top 10（按 issue 数量统计，对应"托管仓库"卡片）
         data.put("repoEventDistribution", groupCount(
-                "SELECT COALESCE(repo_key,'未知'), COUNT(*) FROM events " +
-                "WHERE repo_key IS NOT NULL AND repo_key<>'' " +
-                "GROUP BY repo_key ORDER BY 2 DESC LIMIT 8"));
+                "SELECT COALESCE(repo_key,'未知'), COUNT(DISTINCT issue_id) FROM events " +
+                "WHERE repo_key IS NOT NULL AND repo_key<>'' AND issue_id IS NOT NULL AND issue_id<>'' " +
+                "GROUP BY repo_key ORDER BY 2 DESC LIMIT 10"));
 
-        // 用户构成分布（管理台用户 vs 平台用户，对应"用户"卡片）
+        // 用户构成分布（控制台用户 vs 管理台用户，对应"用户"卡片）
         LinkedHashMap<String, Object> userComp = new LinkedHashMap<>();
+        userComp.put("控制台用户", count("SELECT COUNT(*) FROM user_accounts"));
         userComp.put("管理台用户", adminJdbc.queryForObject("SELECT COUNT(*) FROM admin_users", Long.class));
-        userComp.put("平台用户", count("SELECT COUNT(*) FROM user_accounts"));
         data.put("userCompositionDistribution", userComp);
 
         // 引擎启停分布
