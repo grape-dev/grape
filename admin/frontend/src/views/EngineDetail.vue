@@ -132,11 +132,10 @@
                   <span class="sort-dir" :class="{ active: sortOrder === 'desc' }">▼</span>
                 </span>
               </th>
-              <th style="width:70px">操作</th>
             </tr></thead>
             <tbody>
               <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
-                <td :colspan="9" class="t2" style="padding:28px 0">
+                <td :colspan="8" class="t2" style="padding:28px 0">
                   <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
                   <template v-else>
                     无匹配任务
@@ -146,9 +145,10 @@
               </tr>
               <tr v-for="t in detail.tasks?.content || []" :key="t.id" class="tl-row-clickable" @click="openLogModal(t.id, t)">
                 <td class="t3">{{ (t.id || '').substring(0, 8) }}</td>
-                <td>
+                <td style="white-space:nowrap">
                   <a v-if="t.issueId" :href="issueGitCodeUrl(t)" target="_blank" @click.stop style="color:var(--primary);text-decoration:none;font-weight:600">{{ t.issueId }}</a>
                   <span class="t3" v-if="t.eventSeq">#{{ t.eventSeq }}</span>
+                  <button v-if="t.issueId" class="btn btn-sm" style="padding:1px 6px;margin-left:6px;font-size:11px" @click.stop="openIssueDetail(t.issueId)" title="查看执行详情">📊</button>
                   <span v-if="!t.issueId" class="t3">—</span>
                 </td>
                 <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
@@ -157,10 +157,6 @@
                 <td class="t3">{{ formatDuration(t.createdAt, t.completedAt) }}</td>
                 <td class="t3">{{ t.exitCode ?? '—' }}</td>
                 <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
-                <td>
-                  <button v-if="t.issueId" class="btn btn-sm" style="padding:1px 6px;font-size:11px" @click.stop="openIssueDetail(t.issueId)" title="查看执行详情">📊</button>
-                  <span v-else class="t3">—</span>
-                </td>
               </tr>
             </tbody>
           </table>
