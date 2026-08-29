@@ -581,13 +581,13 @@ function renderTasksTab(ops, rt, mt) {
   const repoFullName = repo && repo.fullName ? repo.fullName : '';
   // 使用缓存的 timeline 数据（同仓库且 30s 内）
   if (_timelineCache && _timelineCache.repo === repoFullName && (Date.now() - _timelineCache.ts) < 30000) {
-    setTimeout(() => renderTimelineList(document.getElementById('obs-timeline-container'), _timelineCache.issues), 0);
+    setTimeout(() => renderTimelineList(document.getElementById('obs-timeline-container'), _timelineCache.issues, _timelineCache.repoKey), 0);
   } else {
     const repoParam = repoFullName ? '?repo=' + encodeURIComponent(repoFullName) : '';
     fetch('/api/dashboard/ops/timeline' + repoParam).then(r => r.json()).then(d => {
-      _timelineCache = { repo: repoFullName, ts: Date.now(), issues: d.issues || [] };
+      _timelineCache = { repo: repoFullName, ts: Date.now(), issues: d.issues || [], repoKey: d.repoKey || '' };
       _timelineIssues = d.issues || [];
-      renderTimelineList(document.getElementById('obs-timeline-container'), d.issues || []);
+      renderTimelineList(document.getElementById('obs-timeline-container'), d.issues || [], d.repoKey || '');
     }).catch(e => {
       const c = document.getElementById('obs-timeline-container');
       if (c) c.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
@@ -727,19 +727,29 @@ function _bindMermaidClicks(box, iss, evTypes) {
   });
 }
 
-function renderTimelineList(container, issues) {
+function renderTimelineList(container, issues, repoKey) {
   if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">暂无任务事件</div>'; return; }
   _timelineIssues = issues;
+  // 构建 GitCode issue URL：repoKey=gitcode:requiredsa/hello-flask → https://gitcode.com/requiredsa/hello-flask/issues/N
+  const _repoPath = (repoKey || '').replace(/^gitcode:/, '');
+  function _issueUrl(issueId) {
+    const num = (issueId || '').replace(/^#/, '');
+    return _repoPath && num ? 'https://gitcode.com/' + _repoPath + '/issues/' + num : '';
+  }
   let html = section('任务列表', issues.length + ' 个 Issue \u2014 点击展开');
   html += '<div style="display:flex;flex-direction:column;gap:0">';
   issues.forEach(iss => {
     const expanded = _expandedIssues.has(iss.issueId);
     const hasFailed = iss.events.some(e => e.status === 'failed');
     const statusBadge = hasFailed ? '<span style="color:var(--r);font-size:10px;font-weight:600">\u274c 有失败</span>' : '<span style="color:var(--g);font-size:10px;font-weight:600">\u2713 正常</span>';
+    const _url = _issueUrl(iss.issueId);
+    const _issueLink = _url
+      ? '<a href="' + _url + '" target="_blank" onclick="event.stopPropagation()" style="font-size:13px;font-weight:700;color:var(--a);text-decoration:none">' + iss.issueId + ' \u2197</a>'
+      : '<b style="font-size:13px">' + iss.issueId + '</b>';
     html += '<div style="border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:8px">';
     html += '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;background:var(--c)" onclick="toggleIssueTimeline(\'' + iss.issueId + '\')">';
     html += '<span style="font-size:12px">' + (expanded ? '\u25be' : '\u25b8') + '</span>';
-    html += '<b style="font-size:13px">' + iss.issueId + '</b>';
+    html += _issueLink;
     html += iss.title ? '<span class="ts t3" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + iss.title + '</span>' : '<span style="flex:1"></span>';
     html += '<span class="ts t3">' + iss.eventCount + ' 事件</span>' + statusBadge;
     html += '<span class="ts t3">' + (iss.lastAt || '').substring(0,16) + '</span>';
