@@ -2,61 +2,43 @@
   <div class="page-container" style="padding:0">
     <div class="page-header">
       <h1>工作台用户</h1>
-      <span class="badge">{{ total }} 个用户</span>
-      <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
-        <input v-model="keyword" placeholder="用户名搜索" class="toolbar-input" @keyup.enter="load(0)" />
-        <button class="btn btn-sm" @click="load(0)">查询</button>
-        <button class="btn btn-sm" @click="keyword=''; load(0)">重置</button>
-      </div>
+      <span class="badge">{{ total }} 条</span>
     </div>
 
-    <div v-if="loading" class="loading-spinner">加载中...</div>
-
-    <div v-else style="padding:0 40px">
-      <!-- KPI 统计卡 -->
-      <div class="kpi-row">
-        <div class="kpi-card kpi-cyan">
-          <div class="kpi-icon" style="background:rgba(48,176,199,0.1);color:#30b0c7;">👥</div>
-          <div class="kpi-body">
-            <div class="kpi-value">{{ total }}</div>
-            <div class="kpi-label">总用户数</div>
-          </div>
-        </div>
-        <div class="kpi-card kpi-blue">
-          <div class="kpi-icon" style="background:rgba(0,107,255,0.08);color:#006eff;">🔑</div>
-          <div class="kpi-body">
-            <div class="kpi-value">{{ gitcodeCount }}</div>
-            <div class="kpi-label">GitCode 凭证</div>
-          </div>
-        </div>
-        <div class="kpi-card kpi-orange">
-          <div class="kpi-icon" style="background:rgba(255,149,0,0.1);color:#ff9500;">☁️</div>
-          <div class="kpi-body">
-            <div class="kpi-value">{{ huaweiCount }}</div>
-            <div class="kpi-label">华为云凭证</div>
-          </div>
-        </div>
-        <div class="kpi-card kpi-green">
-          <div class="kpi-icon" style="background:rgba(52,199,89,0.1);color:#34c759;">💬</div>
-          <div class="kpi-body">
-            <div class="kpi-value">{{ feishuCount }}</div>
-            <div class="kpi-label">飞书凭证</div>
-          </div>
-        </div>
+    <div style="padding:20px 28px">
+      <!-- 统计卡 -->
+      <div class="stats">
+        <div class="stat-card"><div class="stat-label">用户总数</div><div class="stat-value">{{ credentialStats.total ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">GitCode 凭证</div><div class="stat-value small">{{ credentialStats.hasGitcode ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">华为云凭证</div><div class="stat-value small">{{ credentialStats.hasHuawei ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">飞书凭证</div><div class="stat-value small">{{ credentialStats.hasFeishu ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">未配置凭证</div><div class="stat-value small">{{ credentialStats.noCredential ?? 0 }}</div></div>
       </div>
 
-      <!-- 用户表格 -->
-      <div class="card" style="margin-top:20px;padding:0;overflow:hidden">
-        <div class="section-header">
-          <h3 class="sh-title">用户列表</h3>
-          <span class="sh-count">共 {{ total }} 条</span>
-        </div>
+      <!-- 凭证分布徽章行（点击联动筛选） -->
+      <div class="em-stats">
+        <button class="em-stat" :class="{ on: !credentialFilter }" @click="setCredentialFilter('')">全部 <strong>{{ total }}</strong></button>
+        <button class="em-stat" :class="{ on: credentialFilter === 'gitcode' }" @click="setCredentialFilter('gitcode')"><span class="em-dot" style="background:#006eff"></span>GitCode <strong>{{ credentialStats.hasGitcode ?? 0 }}</strong></button>
+        <button class="em-stat" :class="{ on: credentialFilter === 'huawei' }" @click="setCredentialFilter('huawei')"><span class="em-dot" style="background:#ff9500"></span>华为云 <strong>{{ credentialStats.hasHuawei ?? 0 }}</strong></button>
+        <button class="em-stat" :class="{ on: credentialFilter === 'feishu' }" @click="setCredentialFilter('feishu')"><span class="em-dot" style="background:#34c759"></span>飞书 <strong>{{ credentialStats.hasFeishu ?? 0 }}</strong></button>
+        <button class="em-stat" :class="{ on: credentialFilter === 'none' }" @click="setCredentialFilter('none')"><span class="em-dot" style="background:#aeaeb2"></span>未配置 <strong>{{ credentialStats.noCredential ?? 0 }}</strong></button>
+      </div>
+
+      <!-- 工具栏 -->
+      <div class="toolbar">
+        <input v-model="keyword" placeholder="用户名/昵称搜索" @keyup.enter="search" />
+        <button class="btn" @click="search">查询</button>
+        <button class="btn" @click="reset">重置</button>
+      </div>
+
+      <!-- 列表 -->
+      <div class="card" v-if="!loading">
         <table class="vod-table">
           <thead>
             <tr><th style="width:60px">ID</th><th>用户名</th><th>昵称</th><th>GitCode ID</th><th>凭证配置</th><th>创建时间</th><th style="width:60px">操作</th></tr>
           </thead>
           <tbody>
-            <tr v-for="u in list" :key="u.id">
+            <tr v-for="u in list" :key="u.id" class="tl-row-clickable" @click="showDetail(u.id)">
               <td class="t3">{{ u.id }}</td>
               <td><b>{{ u.username }}</b></td>
               <td class="t3">{{ u.nickname || '—' }}</td>
@@ -68,27 +50,23 @@
                 <span v-if="!u.hasGitcodeToken && !u.hasHuaweiAk && !u.hasFeishu" class="t3" style="font-size:11px">未配置</span>
               </td>
               <td class="t3">{{ u.createdAt || '—' }}</td>
-              <td>
+              <td @click.stop>
                 <button class="act-icon-btn" @click="showDetail(u.id)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
               </td>
             </tr>
             <tr v-if="list.length === 0">
-              <td colspan="7" style="text-align:center;padding:32px;color:var(--text-tertiary)">暂无用户数据</td>
+              <td colspan="7" style="text-align:center;padding:40px;color:var(--text-tertiary)">
+                <div style="font-size:32px;margin-bottom:8px">👤</div>
+                <div>暂无用户数据</div>
+              </td>
             </tr>
           </tbody>
         </table>
-        <div class="pagination-bar" v-if="total > 0">
-          <span class="page-info">共 <strong>{{ total }}</strong> 条</span>
-          <span class="page-info">{{ page + 1 }} / {{ totalPages }}</span>
-          <div style="display:flex;gap:8px;align-items:center">
-            <select v-model="pageSize" class="page-size-select" @change="load(0)">
-              <option v-for="n in [20, 50, 100]" :key="n" :value="n">{{ n }}条/页</option>
-            </select>
-            <button class="page-btn" :disabled="page <= 0" @click="load(page - 1)">上一页</button>
-            <button class="page-btn" :disabled="page >= totalPages - 1" @click="load(page + 1)">下一页</button>
-          </div>
-        </div>
       </div>
+
+      <div v-if="loading" class="loading-spinner">加载中...</div>
+
+      <PaginationBar v-if="total > 0" v-model:page="page" v-model:size="size" :total="total" :total-pages="totalPages" :size-options="sizeOptions" @change="load" />
     </div>
 
     <!-- 详情弹窗 -->
@@ -127,36 +105,47 @@
 </template>
 
 <script setup>
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref } from 'vue'
 import http from '../api'
+import PaginationBar from '../components/PaginationBar.vue'
 
 const list = ref([])
 const total = ref(0)
 const page = ref(0)
+const size = ref(10)
 const totalPages = ref(0)
 const keyword = ref('')
-const pageSize = ref(20)
+const credentialFilter = ref('')
 const loading = ref(false)
 const detail = ref({ show: false, loading: false, info: {} })
+const sizeOptions = [10, 20, 50]
+const credentialStats = ref({})
 
-const gitcodeCount = computed(() => list.value.filter(u => u.hasGitcodeToken).length)
-const huaweiCount = computed(() => list.value.filter(u => u.hasHuaweiAk).length)
-const feishuCount = computed(() => list.value.filter(u => u.hasFeishu).length)
-
-async function load(p) {
-  page.value = p
+async function load() {
   loading.value = true
   try {
-    const { data } = await http.get('/console-users', { params: { page: page.value, size: pageSize.value, keyword: keyword.value } })
+    const { data } = await http.get('/console-users', {
+      params: {
+        page: page.value,
+        size: size.value,
+        keyword: keyword.value,
+        credentialFilter: credentialFilter.value
+      }
+    })
     list.value = data.content || []
     total.value = data.totalElements || 0
     totalPages.value = data.totalPages || 0
+    credentialStats.value = data.credentialStats || {}
   } catch (e) {
     console.error('[ConsoleUsers] load failed', e)
   } finally {
     loading.value = false
   }
 }
+
+function search() { page.value = 0; load() }
+function reset() { keyword.value = ''; credentialFilter.value = ''; page.value = 0; load() }
+function setCredentialFilter(f) { credentialFilter.value = f; page.value = 0; load() }
 
 async function showDetail(id) {
   detail.value = { show: true, loading: true, info: {} }
@@ -168,35 +157,20 @@ async function showDetail(id) {
   }
 }
 
-onMounted(() => load(0))
+onMounted(() => load())
 </script>
 
 <style scoped>
-.toolbar-input {
-  width: 200px; padding: 8px 12px;
-  border: 1px solid var(--border-color); border-radius: 10px;
-  font-size: 13px; outline: none; background: #fff;
-  transition: all var(--transition);
+.em-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.em-stat {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 4px 12px; border-radius: 12px;
+  background: rgba(0,0,0,0.04); color: var(--text-secondary); border: 1px solid transparent;
+  cursor: pointer; transition: all var(--transition);
 }
-.toolbar-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(0,107,255,0.1); }
-
-.kpi-row { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
-.kpi-card {
-  flex: 1; min-width: 150px;
-  background: #fff; border-radius: 14px; border: 1px solid var(--border-soft);
-  padding: 20px; transition: all var(--transition);
-  box-shadow: var(--card-shadow);
-  display: flex; align-items: center; gap: 14px;
-}
-.kpi-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-2px); }
-.kpi-cyan { border-left: 4px solid #30b0c7; }
-.kpi-blue { border-left: 4px solid #006eff; }
-.kpi-orange { border-left: 4px solid #ff9500; }
-.kpi-green { border-left: 4px solid #34c759; }
-.kpi-icon { width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
-.kpi-body { flex: 1; min-width: 0; }
-.kpi-value { font-size: 26px; font-weight: 700; color: var(--text-primary); line-height: 1.2; }
-.kpi-label { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.em-stat strong { font-weight: 600; color: var(--text-primary); }
+.em-stat.on { background: rgba(0,107,255,0.08); color: var(--primary); border-color: rgba(0,107,255,0.2); }
+.em-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 
 .cu-detail-grid { display: flex; flex-direction: column; gap: 6px; }
 .cu-detail-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
@@ -204,4 +178,5 @@ onMounted(() => load(0))
 .cu-detail-section { font-size: 13px; font-weight: 600; padding: 12px 0 4px; color: var(--primary); }
 .act-icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 6px; color: var(--text-secondary); display: inline-flex; align-items: center; transition: all var(--transition); }
 .act-icon-btn:hover { background: rgba(0,107,255,0.08); color: var(--primary); }
+.tl-row-clickable { cursor: pointer; transition: background var(--transition); }
 </style>
