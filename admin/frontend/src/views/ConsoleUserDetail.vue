@@ -152,9 +152,8 @@
                 <p v-else-if="!repoIssuesLoading" class="t2" style="padding:20px;text-align:center">该仓库暂无 Issue 数据</p>
               </div>
               <p v-else-if="!selectedRepo" class="t2" style="padding:20px;text-align:center">请选择仓库查看 Issue 列表</p>
-            </div>
           </div>
-        </div>
+      </div>
 
       <!-- 最近活动 -->
       <div class="card" style="padding:0">
@@ -187,6 +186,7 @@
             </table>
             <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
           </div>
+      </div>
       </div>
       </div>
 
