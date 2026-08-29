@@ -56,55 +56,12 @@
         </div>
       </div>
 
-      <!-- 活动统计 + 最近活动 -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
-        <!-- 活动统计 -->
-        <div class="card" style="padding:0">
+      <!-- 仓库与 Issue -->
+      <div class="card" style="padding:0;margin-bottom:20px">
           <div class="section-header">
-            <h3 class="sh-title">活动统计</h3>
-            <div class="sh-actions">
-              <button class="btn btn-sm" :style="activityTab === 'task' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityTab = 'task'">任务统计</button>
-              <button class="btn btn-sm" :style="activityTab === 'issue' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityTab = 'issue'">仓库与 Issue</button>
-            </div>
+            <h3 class="sh-title">仓库与 Issue</h3>
           </div>
           <div style="padding:20px 24px">
-            <!-- 任务统计 tab -->
-            <div v-if="activityTab === 'task'" class="activity-grid">
-              <div class="activity-card">
-                <div class="activity-value">{{ info.queuedCount ?? 0 }}</div>
-                <div class="activity-label">排队中</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#006eff">{{ info.dispatchedCount ?? 0 }}</div>
-                <div class="activity-label">已派发</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#006eff">{{ info.runningCount ?? 0 }}</div>
-                <div class="activity-label">运行中</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#34c759">{{ info.completedCount ?? 0 }}</div>
-                <div class="activity-label">已完成</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#ff3b30">{{ info.failedCount ?? 0 }}</div>
-                <div class="activity-label">失败</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#aeaeb2">{{ info.cancelledCount ?? 0 }}</div>
-                <div class="activity-label">已取消</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#ff9500">{{ info.inProgressCount ?? 0 }}</div>
-                <div class="activity-label">进行中</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#ff3b30">{{ info.stuckCount ?? 0 }}</div>
-                <div class="activity-label">卡住</div>
-              </div>
-            </div>
-            <!-- 仓库与 Issue tab -->
-            <div v-else>
               <!-- 仓库选择下拉 -->
               <div style="margin-bottom:16px">
                 <select v-model="selectedRepo" class="page-size-select" style="width:100%;max-width:400px;padding:8px 12px" @change="loadRepoIssues(0)">
@@ -197,8 +154,8 @@
           </div>
         </div>
 
-        <!-- 最近活动 -->
-        <div class="card" style="padding:0">
+      <!-- 最近活动 -->
+      <div class="card" style="padding:0;margin-bottom:20px">
           <div class="section-header">
             <h3 class="sh-title">最近活动</h3>
             <div class="sh-actions">
@@ -228,8 +185,6 @@
             </table>
             <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
           </div>
-        </div>
-      </div>
     </div>
 
     <!-- 任务日志弹窗 -->
@@ -283,7 +238,6 @@ const route = useRoute()
 const info = ref({})
 const loading = ref(true)
 const resetting = ref(false)
-const activityTab = ref('task')
 const activityFilter = ref('recent')
 const selectedRepo = ref('')
 const pendingDetailOpen = ref(false)
