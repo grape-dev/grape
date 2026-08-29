@@ -629,14 +629,20 @@ async def get_ops_timeline(repo: str = ""):
             )
         rows = c.fetchall()
 
-        # 查 agent_tasks 建立 (issue_id, event_seq) → task_id 映射
+        # 查 agent_tasks 建立 (issue_id, event_seq) → (task_id, runtime_id) 映射
         c.execute(
-            "SELECT issue_id, event_seq, id FROM agent_tasks "
+            "SELECT issue_id, event_seq, id, runtime_id FROM agent_tasks "
             "WHERE issue_id IS NOT NULL AND issue_id <> ''"
         )
         task_map = {}
+        runtime_map = {}
         for row in c.fetchall():
             task_map[(row[0], row[1])] = row[2]
+            runtime_map[(row[0], row[1])] = row[3] or 0
+
+        # 查 runtime_id → 引擎名映射
+        c.execute("SELECT id, name FROM agent_runtimes")
+        rt_name_map = {r[0]: r[1] for r in c.fetchall()}
 
     # 按 issue_id 分组
     group = {}
@@ -644,12 +650,14 @@ async def get_ops_timeline(repo: str = ""):
         seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload = row
         if issue_id not in group:
             group[issue_id] = []
+        _rt_id = runtime_map.get((issue_id, seq), 0)
         group[issue_id].append({
             "seq": seq, "eventType": event_type, "agentType": agent_type or "",
             "skill": skill or "", "status": status or "",
             "duration": duration or 0, "createdAt": normalize_event_time(created_at),
             "actor": actor or "", "title": title or "",
             "taskId": task_map.get((issue_id, seq), ""),
+            "engine": rt_name_map.get(_rt_id, "") if _rt_id else "",
             "_payload": payload or "",
         })
 
