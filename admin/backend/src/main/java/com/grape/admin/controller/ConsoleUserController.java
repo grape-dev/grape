@@ -195,7 +195,8 @@ public class ConsoleUserController {
                 "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='running' THEN 1 ELSE 0 END) as running, " +
                 "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='completed' THEN 1 ELSE 0 END) as completed, " +
                 "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='failed' THEN 1 ELSE 0 END) as failed, " +
-                "SUM(CASE WHEN t.status='cancelled' AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as cancelled " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE) THEN 1 ELSE 0 END) as stuck " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
@@ -212,6 +213,7 @@ public class ConsoleUserController {
                     r.put("dispatched", rs2.getInt("dispatched"));
                     r.put("running", rs2.getInt("running"));
                     r.put("cancelled", rs2.getInt("cancelled"));
+                    r.put("stuck", rs2.getInt("stuck"));
                     return r;
                 }, id);
             info.put("repoMatrix", repoMatrix);
@@ -343,6 +345,7 @@ public class ConsoleUserController {
                     "SUM(CASE WHEN t.status='completed' THEN 1 ELSE 0 END) as completed, " +
                     "SUM(CASE WHEN t.status='failed' THEN 1 ELSE 0 END) as failed, " +
                     "SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
+                    "SUM(CASE WHEN t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE) THEN 1 ELSE 0 END) as stuck, " +
                     "MAX(t.started_at) as last_task_at " +
                     joinSql +
                     " GROUP BY t.issue_id" +
@@ -358,6 +361,7 @@ public class ConsoleUserController {
                 r.put("dispatched", rs.getInt("dispatched"));
                 r.put("running", rs.getInt("running"));
                 r.put("cancelled", rs.getInt("cancelled"));
+                r.put("stuck", rs.getInt("stuck"));
                 r.put("lastTaskAt", rs.getString("last_task_at"));
                 list.add(r);
             }, params);
