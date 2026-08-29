@@ -171,35 +171,42 @@
       </div>
 
     <!-- 任务日志弹窗 -->
-    <div v-if="logModal.show" class="log-modal-overlay" @click.self="closeLogModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center">
-      <div style="background:#fff;border-radius:14px;width:90%;max-width:800px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.15)">
-        <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border-color)">
-          <h3 style="font-size:15px;font-weight:600;margin:0;flex:1;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <span v-if="logModal.info.repoKey" class="t3" style="font-size:13px">{{ logModal.info.repoKey.replace('gitcode:','') }}</span>
+    <div v-if="logModal.show" class="log-modal-overlay log-layer" @click.self="closeLogModal">
+      <div class="log-modal-dialog">
+        <div class="log-modal-head">
+          <h3 class="log-modal-title">
+            <span class="t3" v-if="logModal.info.repoKey">{{ logModal.info.repoKey.replace('gitcode:', '') }}</span>
             <b v-if="logModal.info.issueId">{{ logModal.info.issueId }}</b>
             <span v-if="logModal.info.agentType" class="status-tag info" style="font-size:11px">{{ logModal.info.agentType }}</span>
-            <span v-if="logModal.info.skill" class="t3" style="font-size:12px">{{ logModal.info.skill }}</span>
-            <span v-if="logModal.info.engine" class="t3" style="font-size:12px;color:var(--primary)">{{ logModal.info.engine }}</span>
+            <span class="t3" v-if="logModal.info.engine" style="color:var(--primary)">🔧 {{ logModal.info.engine }}</span>
           </h3>
           <button class="btn btn-sm" @click="closeLogModal">✕ 关闭</button>
         </div>
-        <div style="padding:12px 20px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;gap:12px;flex-wrap:wrap" v-if="logModal.info.status">
-          <span :class="['status-tag', logModal.info.status === 'completed' ? 'success' : logModal.info.status === 'failed' ? 'danger' : 'warning']" style="font-size:11px">{{ logModal.info.status }}</span>
-          <span v-if="logModal.info.startedAt" class="t3" style="font-size:12px">开始 {{ formatTime(logModal.info.startedAt).slice(11,19) }}</span>
-          <span v-if="logModal.info.completedAt" class="t3" style="font-size:12px">→ 完成 {{ formatTime(logModal.info.completedAt).slice(11,19) }}</span>
-          <span v-if="logModal.info.exitCode != null" class="t3" style="font-size:12px" :style="{color: logModal.info.exitCode !== 0 ? 'var(--danger)' : 'var(--success)'}">Exit: {{ logModal.info.exitCode }}</span>
+        <div class="log-timeline" v-if="logModal.info.status">
+          <span class="log-tl-dot" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'"></span>
+          <span class="log-tl-text" v-if="logModal.info.createdAt">入队 {{ formatTime(logModal.info.createdAt).slice(11, 19) }}</span>
+          <span class="log-tl-arrow" v-if="logModal.info.startedAt">→</span>
+          <span class="log-tl-text" v-if="logModal.info.startedAt">开始 {{ formatTime(logModal.info.startedAt).slice(11, 19) }}</span>
+          <span class="log-tl-arrow" v-if="logModal.info.completedAt">→</span>
+          <span class="log-tl-text" v-if="logModal.info.completedAt">完成 {{ formatTime(logModal.info.completedAt).slice(11, 19) }}</span>
+          <span class="log-tl-dur" v-if="logModal.info.startedAt && logModal.info.completedAt">⏱ {{ formatTaskDur(logModal.info) }}</span>
+          <span class="log-tl-status" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'">{{ logModal.info.status.toUpperCase() }}</span>
         </div>
-        <div style="flex:1;overflow:auto;padding:16px 20px">
-          <div v-if="logModal.loading" style="text-align:center;padding:40px;color:var(--text-tertiary)">加载中...</div>
-          <div v-else-if="logModal.messages.length === 0" style="text-align:center;padding:40px;color:var(--text-tertiary)">
-            <div v-if="logModal.info.resultText" style="text-align:left;background:#f5f5f7;padding:12px 16px;border-radius:10px;margin-bottom:12px;font-size:13px;color:var(--text-secondary);max-height:200px;overflow:auto;white-space:pre-wrap">{{ logModal.info.resultText }}</div>
-            <div v-if="logModal.info.errors" style="text-align:left;color:var(--danger);font-size:13px">{{ logModal.info.errors }}</div>
-            <span v-if="!logModal.info.resultText && !logModal.info.errors">暂无日志记录</span>
+        <div class="log-modal-body">
+          <div v-if="logModal.loading" class="tl-diagram-loading">加载日志...</div>
+          <div v-else-if="logModal.messages.length === 0" class="log-empty">
+            <div v-if="logModal.info.resultText || logModal.info.errors" class="log-error-info">
+              <div v-if="logModal.info.resultText" class="log-error-row">结果: {{ logModal.info.resultText }}</div>
+              <div v-if="logModal.info.exitCode != null" class="log-error-row" :style="{ color: logModal.info.exitCode !== 0 ? 'var(--danger)' : 'var(--success)' }">Exit Code: {{ logModal.info.exitCode }}</div>
+              <div v-if="logModal.info.errors" class="log-error-row" style="color:var(--danger)">{{ logModal.info.errors }}</div>
+            </div>
+            <div v-else>暂无日志记录</div>
           </div>
-          <div v-else style="background:#1d1d1f;border-radius:10px;padding:12px;font-family:monospace;font-size:12px;line-height:1.6;overflow:auto">
-            <div v-for="msg in logModal.messages" :key="msg.seq" style="display:flex;gap:8px;color:#aeaeb2">
-              <span style="color:#6e6e73;flex-shrink:0">{{ (msg.createdAt || '').slice(11,19) }}</span>
-              <span :style="{color: msg.type === 'error' ? '#ff3b30' : msg.type === 'result' ? '#34c759' : msg.type === 'tool' ? '#5e5ce6' : '#aeaeb2'}">{{ msg.content }}</span>
+          <div v-else class="log-terminal">
+            <div v-for="msg in logModal.messages" :key="msg.seq" :class="['log-line', 'log-type-' + msg.type]">
+              <span class="log-time t3">{{ (msg.createdAt || '').slice(11, 19) }}</span>
+              <span class="log-icon">{{ logTypeIcon(msg.type) }}</span>
+              <span class="log-content">{{ msg.content || msg.tool || '' }}</span>
             </div>
           </div>
         </div>
@@ -267,6 +274,16 @@ async function openLogModal(taskId, t) {
 }
 function closeLogModal() {
   logModal.value = { show: false, loading: false, messages: [], info: {} }
+}
+function formatTaskDur(t) {
+  if (!t.startedAt || !t.completedAt) return '—'
+  const s = (new Date(t.completedAt) - new Date(t.startedAt)) / 1000
+  if (isNaN(s) || s <= 0) return '—'
+  return formatDuration(Math.round(s) + 's')
+}
+function logTypeIcon(t) {
+  const map = { step_start: '▶', step_finish: '✓', text: '💬', reasoning: '🤔', tool_use: '🔧', error: '❌', done: '✅' }
+  return map[t] || '•'
 }
 async function toggleIssueTimeline(iss) {
   const id = iss.issueId
@@ -683,6 +700,32 @@ watch(() => info.value.repoMatrix, (val) => {
 .tl-row-fail td { background: #fff1f0 !important; }
 .tl-row-ok td { background: #f6ffed !important; }
 .tl-row-clickable { cursor: pointer; }
+/* 任务日志弹窗（对齐健康中心 log-* 样式） */
+.log-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.log-modal-overlay.log-layer { z-index: 1200; }
+.log-modal-dialog { width: 860px; max-width: 94vw; max-height: 85vh; background: #fff; border-radius: var(--radius-lg); display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.2); }
+.log-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border-color); }
+.log-modal-title { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.log-timeline { display: flex; align-items: center; gap: 6px; padding: 8px 18px; border-bottom: 1px solid var(--border-soft); font-size: 11px; }
+.log-tl-dot { width: 8px; height: 8px; border-radius: 50%; }
+.log-tl-dot.ok { background: var(--success); } .log-tl-dot.fail { background: var(--danger); } .log-tl-dot.run { background: var(--warning); }
+.log-tl-arrow { color: var(--text-tertiary); }
+.log-tl-status { margin-left: auto; font-weight: 600; }
+.log-tl-dur { color: var(--primary); font-weight: 600; }
+.log-tl-status.ok { color: var(--success); } .log-tl-status.fail { color: var(--danger); } .log-tl-status.run { color: var(--warning); }
+.log-modal-body { flex: 1; overflow-y: auto; padding: 14px 18px; }
+.log-empty { text-align: center; padding: 32px; color: var(--text-tertiary); }
+.log-error-info { text-align: left; background: #fff1f0; border: 1px solid #ffa39e; border-radius: 8px; padding: 12px; }
+.log-error-row { font-size: 12px; margin-bottom: 4px; font-family: monospace; }
+.log-terminal { background: #0c1222; border-radius: 8px; padding: 12px; max-height: 60vh; overflow-y: auto; }
+.log-line { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; font-size: 12px; line-height: 1.6; border-bottom: 1px solid rgba(255,255,255,0.04); font-family: Menlo, Monaco, Consolas, monospace; }
+.log-time { color: #5b667b; font-size: 10px; min-width: 55px; flex-shrink: 0; }
+.log-icon { min-width: 16px; flex-shrink: 0; }
+.log-content { color: #e0e6f0; word-break: break-all; white-space: pre-wrap; }
+.log-type-step_start .log-content { color: #5b9eff; } .log-type-step_finish .log-content { color: #1ca44c; }
+.log-type-text .log-content { color: #e0e6f0; } .log-type-reasoning .log-content { color: #b388ff; }
+.log-type-tool_use .log-content { color: #ea5a0c; } .log-type-error .log-content { color: #dc2828; }
+.log-type-done .log-content { color: #1ca44c; }
 
 .timeline { display: flex; flex-direction: column; gap: 0; }
 .timeline-item { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border-soft); }
