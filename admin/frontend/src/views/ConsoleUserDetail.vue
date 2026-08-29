@@ -57,7 +57,7 @@
       </div>
 
       <!-- 仓库与 Issue + 最近活动 -->
-      <div style="display:grid;grid-template-columns:minmax(420px,1fr) minmax(420px,1fr);gap:20px;margin-bottom:20px">
+      <div style="margin-bottom:20px">
       <!-- 仓库与 Issue -->
       <div class="card" style="padding:0">
           <div class="section-header">
@@ -138,48 +138,8 @@
           </div>
       </div>
 
-      <!-- 最近活动 -->
-      <div class="card" style="padding:0">
-          <div class="section-header">
-            <h3 class="sh-title">最近执行 <span style="position:relative;display:inline-flex;align-items:center"><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(0,0,0,0.06);color:var(--text-secondary);font-size:10px;cursor:help;margin-left:4px" @mouseenter="showActivityHelp=true" @mouseleave="showActivityHelp=false">?<span v-if="showActivityHelp" style="position:absolute;top:20px;left:-8px;z-index:100;background:#1d1d1f;color:#fff;padding:8px 12px;border-radius:8px;font-size:11px;font-weight:400;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.15);pointer-events:none">已完成: 任务执行完成<br/>进行中: 已派发/运行中<br/>已失败: 任务执行失败</span></span></span></h3>
-            <div class="sh-actions">
-              <button class="btn btn-sm" :style="activityFilter === 'recent' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'recent'">已完成</button>
-              <button class="btn btn-sm" :style="activityFilter === 'pending' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'pending'">进行中</button>
-              <button class="btn btn-sm" :style="activityFilter === 'failed' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'failed'">已失败</button>
-            </div>
-          </div>
-          <div style="padding:20px 24px">
-            <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
-            <table class="vod-table" v-if="filteredActivity.length">
-              <thead>
-                <tr><th style="width:18%;text-align:left">Issue</th><th style="width:10%;text-align:left">事件</th><th style="width:20%;text-align:left">运行时</th><th style="width:8%;text-align:left">耗时</th><th style="width:8%;text-align:left">状态</th><th style="width:36%;text-align:left">时间</th></tr>
-              </thead>
-              <tbody>
-                <tr v-for="(t, idx) in filteredActivity" :key="t.id" :class="{ 'tl-row-fail': t.status === 'failed', 'tl-row-ok': t.status === 'completed', 'tl-row-clickable': true }" @click="openLogModal(t.id, t)">
-                  <td>
-                    <span v-if="t.repoName" class="t3" style="font-size:10px;color:var(--text-tertiary);display:block">{{ t.repoName }}</span>
-                    <a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span>
-                    <div v-if="t.issueTitle" class="t3" :title="t.issueTitle" style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.issueTitle }}</div>
-                  </td>
-                  <td><span :class="['status-tag', eventTypeClass(t.eventType)]" style="font-size:11px">{{ eventTypeText(t.eventType) }}</span></td>
-                  <td class="t3" style="font-size:11px">
-                    <span v-if="t.agentType" class="status-tag info" style="font-size:10px;margin-right:6px">{{ t.agentType }}</span>
-                    <span v-if="t.engine">{{ t.engine }}</span>
-                    <span v-if="t.skill" style="color:var(--text-secondary);margin-left:6px">· {{ t.skill }}</span>
-                    <span v-if="t.engineIp" style="color:var(--text-tertiary);display:block;font-size:10px;margin-top:2px">{{ t.engineIp }}</span>
-                  </td>
-                  <td class="t3">{{ formatDuration(t.duration) }}</td>
-                  <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
-                  <td class="t3">{{ formatTime(t.startedAt) }}</td>
-                </tr>
-              </tbody>
-            </table>
-            <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
-          </div>
-      </div>
-      </div>
-      </div>
 
+      </div>
     <!-- 任务日志弹窗 -->
     <div v-if="logModal.show" class="log-modal-overlay log-layer" @click.self="closeLogModal">
       <div class="log-modal-dialog">
@@ -225,6 +185,7 @@
 
     <!-- Toast -->
     <div v-if="toast.show" class="toast-message" :class="toast.type">{{ toast.msg }}</div>
+    </div>
   </div>
 </template>
 
@@ -238,8 +199,6 @@ const route = useRoute()
 const info = ref({})
 const loading = ref(true)
 const resetting = ref(false)
-const activityFilter = ref('recent')
-const showActivityHelp = ref(false)
 const selectedRepo = ref('')
 const logModal = ref({ show: false, loading: false, messages: [], info: {} })
 const diagramRefs = {}
@@ -570,11 +529,6 @@ const selectedRepoData = computed(() => {
   return (info.value.repoMatrix || []).find(r => r.repoKey === selectedRepo.value)
 })
 
-const filteredActivity = computed(() => {
-  if (activityFilter.value === 'pending') return info.value.recentPendingTasks || []
-  if (activityFilter.value === 'failed') return info.value.recentFailedTasks || []
-  return info.value.recentTasks || []
-})
 
 const credentialConfigured = computed(() => {
   let count = 0
@@ -612,12 +566,10 @@ function formatTime(val) {
   } catch { return val }
 }
 
-async function load(repoKey) {
+async function load() {
   loading.value = true
   try {
-    const params = {}
-    if (repoKey) params.repoKey = repoKey
-    const { data } = await http.get(`/console-users/${route.params.id}`, { params })
+    const { data } = await http.get(`/console-users/${route.params.id}`)
     info.value = data
     await loadRepoIssues(0)
   } catch (e) {
@@ -627,16 +579,7 @@ async function load(repoKey) {
   }
 }
 
-async function onRepoChange() {
-  // 只刷新最近执行+Issue列表，不触发全局loading
-  try {
-    const params = {}
-    if (selectedRepo.value) params.repoKey = selectedRepo.value
-    const { data } = await http.get(`/console-users/${route.params.id}`, { params })
-    info.value = { ...info.value, recentTasks: data.recentTasks, recentPendingTasks: data.recentPendingTasks, recentFailedTasks: data.recentFailedTasks }
-  } catch (e) {
-    console.error('[ConsoleUserDetail] onRepoChange failed', e)
-  }
+function onRepoChange() {
   loadRepoIssues(0)
 }
 

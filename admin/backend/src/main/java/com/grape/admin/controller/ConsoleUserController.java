@@ -97,8 +97,7 @@ public class ConsoleUserController {
     }
 
     @GetMapping("/{id}")
-    public Map<String, Object> detail(@PathVariable int id,
-                                      @RequestParam(required = false) String repoKey) {
+    public Map<String, Object> detail(@PathVariable int id) {
         Map<String, Object> info = new LinkedHashMap<>();
         try {
             grapeJdbc.query("SELECT id, username, nickname, gitcode_id, created_at, last_active_at, "
@@ -153,154 +152,6 @@ public class ConsoleUserController {
             info.put("repoMatrix", repoMatrix);
         } catch (Exception e) { /* ignore */ }
 
-        // 最近活动（最近 5 条任务）
-        try {
-            // 构建 SQL（参数化查询，防注入）
-            StringBuilder sqlBuilder = new StringBuilder(
-                "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
-                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
-                "rc.device_name, rc.last_ip " +
-                "FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
-                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
-                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
-                "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>''");
-            List<Object> taskParams = new ArrayList<>();
-            taskParams.add(id);
-            if (repoKey != null && !repoKey.isEmpty()) {
-                sqlBuilder.append(" AND t.repo_key=?");
-                taskParams.add(repoKey);
-            }
-            sqlBuilder.append(" ORDER BY t.started_at DESC LIMIT 5");
-            List<Map<String, Object>> recentTasks = grapeJdbc.query(
-                sqlBuilder.toString(),
-                (rs2, rowNum) -> {
-                    Map<String, Object> r = new LinkedHashMap<>();
-                    r.put("id", rs2.getString("id"));
-                    r.put("repoKey", rs2.getString("repo_key"));
-                    String fullName = rs2.getString("full_name");
-                    r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
-                    r.put("issueId", rs2.getString("issue_id"));
-                    r.put("exitCode", rs2.getObject("exit_code"));
-                    r.put("agentType", rs2.getString("agent_type"));
-                    r.put("skill", rs2.getString("skill"));
-                    r.put("startedAt", rs2.getString("started_at"));
-                    r.put("completedAt", rs2.getString("completed_at"));
-                    r.put("eventType", rs2.getString("event_type"));
-                    r.put("engine", buildEngineName(rs2));
-                    r.put("engineIp", rs2.getString("last_ip"));
-                    String startedAt = rs2.getString("started_at");
-                    String completedAt = rs2.getString("completed_at");
-                    if (startedAt != null && completedAt != null) {
-                        try {
-                            String s = startedAt.replace("T", " ").length() > 19 ? startedAt.replace("T", " ").substring(0, 19) : startedAt.replace("T", " ");
-                            String c = completedAt.replace("T", " ").length() > 19 ? completedAt.replace("T", " ").substring(0, 19) : completedAt.replace("T", " ");
-                            java.sql.Timestamp start = java.sql.Timestamp.valueOf(s);
-                            java.sql.Timestamp end = java.sql.Timestamp.valueOf(c);
-                            long durationSec = (end.getTime() - start.getTime()) / 1000;
-                            r.put("duration", durationSec + "s");
-                        } catch (Exception ex) {
-                            r.put("duration", "—");
-                        }
-                    } else {
-                        r.put("duration", "—");
-                    }
-                    String taskStatus = rs2.getString("status");
-                    r.put("status", taskStatus != null && !taskStatus.isEmpty() ? taskStatus : "unknown");
-                    return r;
-                }, taskParams.toArray());
-            info.put("recentTasks", recentTasks);
-            // 批量补 issueTitle
-            batchFillIssueTitle(recentTasks);
-        } catch (Exception e) { /* ignore */ }
-
-        // 进行中任务（最近 5 条）
-        try {
-            StringBuilder sqlP = new StringBuilder(
-                "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
-                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
-                "rc.device_name, rc.last_ip " +
-                "FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
-                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
-                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
-                "WHERE u.id=? AND t.status IN ('dispatched','running') " +
-                "AND t.issue_id IS NOT NULL AND t.issue_id<>''");
-            List<Object> pendingParams = new ArrayList<>();
-            pendingParams.add(id);
-            if (repoKey != null && !repoKey.isEmpty()) { sqlP.append(" AND t.repo_key=?"); pendingParams.add(repoKey); }
-            sqlP.append(" ORDER BY t.started_at DESC LIMIT 5");
-            List<Map<String, Object>> recentPending = grapeJdbc.query(
-                sqlP.toString(),
-                (rs2, rowNum) -> {
-                    Map<String, Object> r = new LinkedHashMap<>();
-                    r.put("id", rs2.getString("id"));
-                    r.put("repoKey", rs2.getString("repo_key"));
-                    String fullName = rs2.getString("full_name");
-                    r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
-                    r.put("issueId", rs2.getString("issue_id"));
-                    r.put("exitCode", rs2.getObject("exit_code"));
-                    r.put("agentType", rs2.getString("agent_type"));
-                    r.put("skill", rs2.getString("skill"));
-                    r.put("startedAt", rs2.getString("started_at"));
-                    r.put("completedAt", rs2.getString("completed_at"));
-                    r.put("eventType", rs2.getString("event_type"));
-                    r.put("engine", buildEngineName(rs2));
-                    r.put("engineIp", rs2.getString("last_ip"));
-                    r.put("duration", calcDuration(rs2.getString("started_at"), rs2.getString("completed_at")));
-                    r.put("status", "pending");
-                    return r;
-                }, pendingParams.toArray());
-            info.put("recentPendingTasks", recentPending);
-            batchFillIssueTitle(recentPending);
-        } catch (Exception e) { /* ignore */ }
-
-        // 最近失败任务（最近 5 条）
-        try {
-            StringBuilder sqlF = new StringBuilder(
-                "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
-                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
-                "rc.device_name, rc.last_ip " +
-                "FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
-                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
-                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
-                "WHERE u.id=? AND t.status='failed' " +
-                "AND t.issue_id IS NOT NULL AND t.issue_id<>''");
-            List<Object> failedParams = new ArrayList<>();
-            failedParams.add(id);
-            if (repoKey != null && !repoKey.isEmpty()) { sqlF.append(" AND t.repo_key=?"); failedParams.add(repoKey); }
-            sqlF.append(" ORDER BY t.started_at DESC LIMIT 5");
-            List<Map<String, Object>> recentFailed = grapeJdbc.query(
-                sqlF.toString(),
-                (rs2, rowNum) -> {
-                    Map<String, Object> r = new LinkedHashMap<>();
-                    r.put("id", rs2.getString("id"));
-                    r.put("repoKey", rs2.getString("repo_key"));
-                    String fullName = rs2.getString("full_name");
-                    r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
-                    r.put("issueId", rs2.getString("issue_id"));
-                    r.put("exitCode", rs2.getObject("exit_code"));
-                    r.put("agentType", rs2.getString("agent_type"));
-                    r.put("skill", rs2.getString("skill"));
-                    r.put("startedAt", rs2.getString("started_at"));
-                    r.put("completedAt", rs2.getString("completed_at"));
-                    r.put("eventType", rs2.getString("event_type"));
-                    r.put("engine", buildEngineName(rs2));
-                    r.put("engineIp", rs2.getString("last_ip"));
-                    r.put("duration", calcDuration(rs2.getString("started_at"), rs2.getString("completed_at")));
-                    r.put("status", "failed");
-                    return r;
-                }, failedParams.toArray());
-            info.put("recentFailedTasks", recentFailed);
-            batchFillIssueTitle(recentFailed);
-        } catch (Exception e) { /* ignore */ }
 
         return info;
     }
@@ -421,53 +272,9 @@ public class ConsoleUserController {
         return result;
     }
 
-    private String extractIssueTitle(Object payload, com.fasterxml.jackson.databind.ObjectMapper om) {
-        if (payload == null) return "";
-        try {
-            String json = payload.toString();
-            com.fasterxml.jackson.databind.JsonNode node = om.readTree(json);
-            com.fasterxml.jackson.databind.JsonNode attrs = node.path("object_attributes");
-            if (!attrs.isMissingNode()) {
-                String title = attrs.path("title").asText("");
-                if (!title.isEmpty()) {
-                    return title.length() > 80 ? title.substring(0, 80) + "..." : title;
-                }
-            }
-        } catch (Exception e) { /* ignore */ }
-        return "";
-    }
 
-    private void batchFillIssueTitle(List<Map<String, Object>> tasks) {
-        if (tasks == null || tasks.isEmpty()) return;
-        // 收集 (repoKey, issueId) 去重
-        Map<String, String> titleCache = new java.util.HashMap<>();
-        com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
-        for (Map<String, Object> t : tasks) {
-            String issueId = (String) t.get("issueId");
-            if (issueId == null || issueId.isEmpty()) {
-                t.put("issueTitle", "");
-                continue;
-            }
-            String cacheKey = issueId;
-            if (titleCache.containsKey(cacheKey)) {
-                t.put("issueTitle", titleCache.get(cacheKey));
-                continue;
-            }
-            // 从 repoKey 查 events payload
-            String repoKeyVal = (String) t.get("repoKey");
-            String title = "";
-            try {
-                List<Map<String, Object>> evs = grapeJdbc.queryForList(
-                    "SELECT payload FROM events WHERE repo_key=? AND issue_id=? AND payload LIKE '%object_attributes%' ORDER BY seq LIMIT 1",
-                    repoKeyVal, issueId);
-                if (!evs.isEmpty()) {
-                    title = extractIssueTitle(evs.get(0).get("payload"), om);
-                }
-            } catch (Exception e) { /* ignore */ }
-            titleCache.put(cacheKey, title);
-            t.put("issueTitle", title);
-        }
-    }
+
+
 
     @PostMapping("/{id}/reset-token")
     public Map<String, Object> resetToken(@PathVariable int id) {
@@ -529,6 +336,20 @@ public class ConsoleUserController {
         result.put("issueId", issueId);
         result.put("events", events);
         return result;
+    }
+
+    private String extractIssueTitle(Object payload, com.fasterxml.jackson.databind.ObjectMapper om) {
+        if (payload == null) return "";
+        try {
+            String json = payload.toString();
+            com.fasterxml.jackson.databind.JsonNode root = om.readTree(json);
+            com.fasterxml.jackson.databind.JsonNode attrs = root.path("object_attributes");
+            if (!attrs.isMissingNode()) {
+                String t = attrs.path("title").asText("");
+                if (!t.isEmpty()) return t;
+            }
+        } catch (Exception e) { /* ignore */ }
+        return "";
     }
 
     private String calcDuration(String startedAt, String completedAt) {
