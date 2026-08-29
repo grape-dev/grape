@@ -132,10 +132,11 @@
                   <span class="sort-dir" :class="{ active: sortOrder === 'desc' }">▼</span>
                 </span>
               </th>
+              <th style="width:70px">操作</th>
             </tr></thead>
             <tbody>
               <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
-                <td :colspan="8" class="t2" style="padding:28px 0">
+                <td :colspan="9" class="t2" style="padding:28px 0">
                   <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
                   <template v-else>
                     无匹配任务
@@ -156,6 +157,10 @@
                 <td class="t3">{{ formatDuration(t.createdAt, t.completedAt) }}</td>
                 <td class="t3">{{ t.exitCode ?? '—' }}</td>
                 <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
+                <td>
+                  <button v-if="t.issueId" class="btn btn-sm" style="padding:1px 6px;font-size:11px" @click.stop="openIssueDetail(t.issueId)" title="查看执行详情">📊</button>
+                  <span v-else class="t3">—</span>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -174,6 +179,45 @@
     </div>
 
     <p v-else class="t2" style="padding:40px;text-align:center">加载中…</p>
+
+    <!-- Issue 详情弹窗（时序图 + 事件列表） -->
+    <div v-if="issueModal.show" class="log-modal-overlay" @click.self="closeIssueModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1100;display:flex;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:8px;width:85%;max-width:1000px;max-height:85vh;display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid #eee">
+          <b>Issue {{ issueModal.issueId }}</b>
+          <span class="t3" v-if="issueModal.repoName" style="font-size:12px">{{ issueModal.repoName }}</span>
+          <span class="t3" v-if="issueModal.eventCount" style="font-size:12px">{{ issueModal.eventCount }} 个事件</span>
+          <span style="margin-left:auto;cursor:pointer;font-size:18px;color:#999" @click="closeIssueModal">✕</span>
+        </div>
+        <div style="padding:8px 20px;border-bottom:1px solid #f5f5f5">
+          <button class="btn btn-sm" :class="{'btn-primary': issueModal.view === 'diagram'}" style="margin-right:8px" @click="issueModal.view = 'diagram'; renderIssueMermaid()">📊 时序图</button>
+          <button class="btn btn-sm" :class="{'btn-primary': issueModal.view === 'events'}" @click="issueModal.view = 'events'">📋 事件列表</button>
+        </div>
+        <div style="overflow-y:auto;flex:1;padding:14px 20px">
+          <div v-if="issueModal.loading" style="text-align:center;padding:30px;color:#999">加载中...</div>
+          <div v-else-if="issueModal.view === 'diagram'" class="tl-diagram-container">
+            <div v-if="!issueModal.svgRendered" class="tl-diagram-loading" style="padding:20px;text-align:center;color:#999">渲染中...</div>
+            <div v-else v-html="issueModal.svg" class="tl-diagram-svg"></div>
+          </div>
+          <div v-else-if="issueModal.view === 'events'">
+            <table class="vod-table">
+              <thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
+              <tbody>
+                <tr v-for="ev in issueModal.events" :key="ev.seq" :class="{'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId}" @click="ev.taskId ? openLogModal(ev.taskId, { issueId: issueModal.issueId, repoKey: ev.repoKey, eventSeq: ev.seq }) : null">
+                  <td class="t3">#{{ ev.seq }}</td>
+                  <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
+                  <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
+                  <td class="t3">{{ ev.skill || '—' }}</td>
+                  <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']">{{ ev.status }}</span></td>
+                  <td class="t3">{{ ev.duration || '—' }}</td>
+                  <td class="t3">{{ formatTime(ev.createdAt) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- 日志弹窗 -->
     <div v-if="logModal.show" class="log-modal-overlay" @click.self="closeLogModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center">
@@ -300,6 +344,123 @@ function issueGitCodeUrl(t) {
   const full = (t.repoKey || '').replace(/^gitcode:/, '')
   if (!full) return '#'
   return 'https://gitcode.com/' + full + '/issues/' + (t.issueId || '').replace('#', '')
+}
+
+// ===== Issue 详情弹窗（时序图 + 事件列表）=====
+const issueModal = ref({ show: false, loading: false, issueId: '', repoName: '', eventCount: 0, events: [], view: 'diagram', svg: '', svgRendered: false })
+
+async function openIssueDetail(issueId) {
+  issueModal.value = { show: true, loading: true, issueId, repoName: '', eventCount: 0, events: [], view: 'diagram', svg: '', svgRendered: false }
+  try {
+    const { data } = await http.get(`/runtime/issues/${encodeURIComponent(issueId)}/events`)
+    const events = data.events || []
+    const repoKey = events.length > 0 ? (events[0].repoKey || '') : ''
+    issueModal.value = {
+      show: true, loading: false, issueId,
+      repoName: repoKey.replace(/^gitcode:/, ''),
+      eventCount: events.length, events,
+      view: 'diagram', svg: '', svgRendered: false
+    }
+    setTimeout(() => renderIssueMermaid(), 50)
+  } catch (e) {
+    issueModal.value = { show: true, loading: false, issueId, events: [], view: 'events', svg: '', svgRendered: false }
+  }
+}
+function closeIssueModal() {
+  issueModal.value = { show: false, loading: false, issueId: '', repoName: '', eventCount: 0, events: [], view: 'diagram', svg: '', svgRendered: false }
+}
+
+function eventTypeText(t) {
+  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号', issue_closed: 'Issue关闭' }
+  return map[t] || t || '事件'
+}
+function eventTypeClass(t) {
+  if (t === 'a2a_event') return 'info'
+  if (t === 'pull_request_merged') return 'success'
+  if (t === 'issue_opened') return 'info'
+  return 'default'
+}
+
+// ===== Mermaid 时序图渲染 =====
+let mermaidEngine = null
+async function getMermaid() {
+  if (!mermaidEngine) {
+    const mod = await import('mermaid')
+    mermaidEngine = mod.default
+    mermaidEngine.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'base', fontFamily: 'inherit', sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 40, noteMargin: 10, boxMargin: 8 } })
+  }
+  return mermaidEngine
+}
+function mermaidId(agent) { return (agent || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_') }
+function actionText(t) {
+  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号', issue_closed: 'Issue关闭' }
+  return map[t] || t || '事件'
+}
+function buildSequence(events) {
+  const agents = []
+  for (const ev of events) {
+    const a = ev.agentType || '—'
+    if (!agents.includes(a)) agents.push(a)
+  }
+  const lines = ['sequenceDiagram', 'autonumber']
+  for (const a of agents) lines.push(`    participant ${mermaidId(a)} as ${a}`)
+  const statuses = []
+  let prev = null
+  for (const ev of events) {
+    const a = mermaidId(ev.agentType || '—')
+    const t = ev.createdAt ? String(ev.createdAt).slice(11, 19) : ''
+    const label = (t ? t + ' ' : '') + actionText(ev.eventType)
+    if (prev && a !== prev) {
+      lines.push(`    ${prev}->>${a}: ${label}`)
+      statuses.push(ev.status || '')
+    } else {
+      lines.push(`    Note over ${a}: ${label}`)
+      statuses.push(ev.status || '')
+    }
+    prev = a
+  }
+  return { text: lines.join('\n'), statuses }
+}
+function applySequenceColors(svg, statuses) {
+  try {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+    const root = doc.documentElement
+    const defs = root.querySelector('defs')
+    if (!defs) return svg
+    const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'completed' ? '#2e9e5b' : '#94a3b8')
+    const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
+    lines.forEach((line, i) => {
+      const markerId = root.id + '-seqnum-' + i
+      const marker = doc.createElementNS('http://www.w3.org/2000/svg', 'marker')
+      marker.setAttribute('id', markerId)
+      marker.setAttribute('refX', '15'); marker.setAttribute('refY', '15')
+      marker.setAttribute('markerWidth', '60'); marker.setAttribute('markerHeight', '40')
+      marker.setAttribute('orient', 'auto')
+      const circle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle')
+      circle.setAttribute('cx', '15'); circle.setAttribute('cy', '15'); circle.setAttribute('r', '6')
+      circle.setAttribute('fill', colorOf(statuses[i] || ''))
+      marker.appendChild(circle)
+      defs.appendChild(marker)
+      line.setAttribute('marker-start', 'url(#' + markerId + ')')
+    })
+    return new XMLSerializer().serializeToString(doc)
+  } catch (e) { return svg }
+}
+async function renderIssueMermaid() {
+  if (issueModal.value.svgRendered || issueModal.value.loading) return
+  const events = issueModal.value.events
+  if (!events || events.length === 0) return
+  try {
+    const mmd = await getMermaid()
+    const { text, statuses } = buildSequence(events)
+    const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
+    try { await mmd.parse(text) } catch (e) { }
+    const result = await mmd.render(uid, text)
+    const svg = result.svg || result
+    issueModal.value = { ...issueModal.value, svg: applySequenceColors(svg, statuses), svgRendered: true }
+  } catch (err) {
+    issueModal.value = { ...issueModal.value, svg: `<div style="padding:12px;color:var(--danger);font-size:12px">时序图渲染失败: ${err.message || err}</div>`, svgRendered: true }
+  }
 }
 
 // ===== 日志弹窗 =====
@@ -610,10 +771,16 @@ load()
 /* ===== 日志弹窗 ===== */
 .tl-row-clickable { cursor: pointer; }
 .tl-row-clickable:hover { background: rgba(0, 107, 255, 0.04); }
+.tl-row-fail { background: rgba(229, 72, 77, 0.03); }
+.tl-row-ok { background: rgba(46, 158, 91, 0.03); }
 .log-tl-dot.ok { background: #52c41a; }
 .log-tl-dot.fail { background: #eb2f96; }
 .log-tl-dot.run { background: #006eff; }
 span.ok { color: #52c41a; }
 span.fail { color: #eb2f96; }
 span.run { color: #006eff; }
+.tl-diagram-container { overflow-x: auto; }
+.tl-diagram-svg svg { max-width: 100%; height: auto; }
+.tl-diagram-loading { padding: 20px; text-align: center; color: var(--text-tertiary, #999); }
+.btn-primary { background: var(--primary, #006eff); color: #fff; border-color: var(--primary, #006eff); }
 </style>
