@@ -148,21 +148,33 @@
             <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
             <table class="vod-table" v-if="filteredActivity.length">
               <thead>
-                <tr><th style="width:20%;text-align:left">Issue</th><th style="width:15%;text-align:left">事件</th><th style="width:10%;text-align:left">Agent</th><th style="width:15%;text-align:left">Engine</th><th style="width:10%;text-align:left">耗时</th><th style="width:10%;text-align:left">状态</th><th style="width:20%;text-align:left">时间</th></tr>
+                <tr><th style="width:22%;text-align:left">Issue</th><th style="width:15%;text-align:left">事件</th><th style="width:18%;text-align:left">运行时</th><th style="width:10%;text-align:left">耗时</th><th style="width:10%;text-align:left">状态</th><th style="width:25%;text-align:left">时间</th></tr>
               </thead>
               <tbody>
-                <tr v-for="(t, idx) in filteredActivity" :key="t.id" style="cursor:pointer" @click="openLogModal(t.id, t)">
-                  <td>
-                    <a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span>
-                    <div v-if="t.issueTitle" class="t3" :title="t.issueTitle" style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.issueTitle }}</div>
-                  </td>
-                  <td><span :class="['status-tag', eventTypeClass(t.eventType)]" style="font-size:11px">{{ eventTypeText(t.eventType) }}</span></td>
-                  <td><span class="status-tag info" style="font-size:11px">{{ t.agentType || '—' }}</span></td>
-                  <td class="t3" style="font-size:11px">{{ t.engine || '—' }}<span v-if="t.engineIp" class="t3" style="font-size:10px;color:var(--text-tertiary);display:block">{{ t.engineIp }}</span></td>
-                  <td class="t3">{{ formatDuration(t.duration) }}</td>
-                  <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
-                  <td class="t3">{{ formatTime(t.startedAt) }}</td>
-                </tr>
+                <template v-for="(t, idx) in filteredActivity" :key="t.id">
+                  <tr style="cursor:pointer" @click="openLogModal(t.id, t)">
+                    <td>
+                      <a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span>
+                      <div v-if="t.issueTitle" class="t3" :title="t.issueTitle" style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.issueTitle }}</div>
+                    </td>
+                    <td><span :class="['status-tag', eventTypeClass(t.eventType)]" style="font-size:11px">{{ eventTypeText(t.eventType) }}</span></td>
+                    <td class="t3" style="font-size:11px;cursor:pointer" @click.stop="runtimeExpanded[t.id] = !runtimeExpanded[t.id]">
+                      {{ t.engine ? t.engine.split('-').slice(0,2).join('-') : '—' }}
+                      <span style="font-size:9px;color:var(--text-tertiary);margin-left:4px">{{ runtimeExpanded[t.id] ? '▲' : '▼' }}</span>
+                    </td>
+                    <td class="t3">{{ formatDuration(t.duration) }}</td>
+                    <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
+                    <td class="t3">{{ formatTime(t.startedAt) }}</td>
+                  </tr>
+                  <tr v-if="runtimeExpanded[t.id]" style="background:rgba(0,0,0,0.02)">
+                    <td colspan="6" style="padding:8px 16px;display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+                      <span v-if="t.agentType" class="status-tag info" style="font-size:11px">Agent: {{ t.agentType }}</span>
+                      <span v-if="t.engine" class="t3" style="font-size:11px">Engine: {{ t.engine }}</span>
+                      <span v-if="t.engineIp" class="t3" style="font-size:11px;color:var(--text-tertiary)">IP: {{ t.engineIp }}</span>
+                      <span v-if="t.skill" class="t3" style="font-size:11px;color:var(--text-secondary)">Skill: {{ t.skill }}</span>
+                    </td>
+                  </tr>
+                </template>
               </tbody>
             </table>
             <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
@@ -230,6 +242,7 @@ const info = ref({})
 const loading = ref(true)
 const resetting = ref(false)
 const activityFilter = ref('recent')
+const runtimeExpanded = ref({})
 const selectedRepo = ref('')
 const pendingDetailOpen = ref(false)
 const logModal = ref({ show: false, loading: false, messages: [], info: {} })
