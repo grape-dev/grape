@@ -945,8 +945,17 @@ def _rebuild_agent_runtimes_inst_key(c):
     if not row or not row[0]:
         return False
     sql = row[0].lower()
-    if "unique" not in sql or "credential_id, name" in sql:
+    if "unique" not in sql:
         return False
+    # 新键应包含 host_name（5 列）；旧键仅 4 列 (credential_id, name, scope, owner_id)
+    # 注意：host_name 作为列定义也出现在 SQL 里，必须只检查 UNIQUE 子句
+    import re as _re
+    uniq_match = _re.search(r'unique\s*\([^)]+\)', sql)
+    if not uniq_match:
+        return False
+    uniq_clause = uniq_match.group(0)
+    if "credential_id" in uniq_clause and "host_name" in uniq_clause:
+        return False  # 已是最新 5 列唯一键
     c.execute("""
         DELETE FROM agent_runtimes
         WHERE credential_id=0 AND id NOT IN (
@@ -955,7 +964,10 @@ def _rebuild_agent_runtimes_inst_key(c):
     """)
     cols = [r[1] for r in c.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
     c.execute(_AGENT_RUNTIMES_DDL.replace("CREATE TABLE IF NOT EXISTS agent_runtimes", "CREATE TABLE agent_runtimes_new"))
-    c.execute(f"INSERT INTO agent_runtimes_new ({','.join(cols)}) SELECT {','.join(cols)} FROM agent_runtimes")
+    # 只复制新旧表共有的列（旧表可能有 busy_slots/max_concurrent/tags 等已废弃列）
+    new_cols = [r[1] for r in c.execute("PRAGMA table_info(agent_runtimes_new)").fetchall()]
+    common_cols = [col for col in cols if col in new_cols]
+    c.execute(f"INSERT INTO agent_runtimes_new ({','.join(common_cols)}) SELECT {','.join(common_cols)} FROM agent_runtimes")
     c.execute("DROP TABLE agent_runtimes")
     c.execute("ALTER TABLE agent_runtimes_new RENAME TO agent_runtimes")
     return True

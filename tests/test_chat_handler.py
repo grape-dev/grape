@@ -65,8 +65,9 @@ class TestProcessChatAsync:
             db.cursor().execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='chat_1'")
             db.commit()
         with patch("src.im.handler_async.detect_bind_intent", return_value="owner/repo"):
-            api = asyncio.run(_run("绑定到 owner/repo"))
-        api.reply_card.assert_called_once()
+            with patch("src.im.handler_async._send_card_reply", new=AsyncMock(return_value=True)) as m_card:
+                api = asyncio.run(_run("绑定到 owner/repo"))
+                m_card.assert_called_once()
         with db_lock:
             row = db.cursor().execute(
                 "SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id='chat_1'").fetchone()
@@ -129,8 +130,8 @@ class TestChatHandlerQueueMode:
         m_wait.assert_called_once_with("t_x")
         m_consume.assert_not_called(), "queue 模式不应本地流式执行"
         # 回复应为任务 result_text
-        assert api.reply_card.call_count >= 1
-        args = api.reply_card.call_args[0]
+        assert api.send_card_to_chat.call_count >= 1
+        args = api.send_card_to_chat.call_args[0]
         assert "HELLO_QUEUE" in args[2]
 
     def test_direct_mode_streams_locally(self, monkeypatch):
@@ -146,5 +147,5 @@ class TestChatHandlerQueueMode:
             api = _run_inner_execute()
 
         m_enq.assert_not_called(), "direct 模式不应入队"
-        args = api.reply_card.call_args[0]
+        args = api.send_card_to_chat.call_args[0]
         assert "LOCAL_OK" in args[2]

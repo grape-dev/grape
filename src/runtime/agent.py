@@ -19,7 +19,7 @@ import zipfile as _zf
 import urllib.request as _urllib
 import shutil as _shutil
 
-from src.config import log
+from src.config import log, CHAT_CWD_BASE
 
 # Worker 日志内存缓冲区——收集最近 ERROR/WARNING 日志，心跳时上报给主控
 import collections as _collections
@@ -276,12 +276,12 @@ def _discover_local_runtimes() -> list[dict]:
 def _remap_cwd(path: str) -> str:
     """将服务端下发的 cwd 路径映射到本地用户 home 目录。
 
-    服务端以 /home/grape 为基准生成 workspaces 路径，但各接入机器的用户不同
-    （lvjuntao、zhangsan 等）。通过 RUNTIME_CWD_PREFIX_MAP 环境变量配置映射：
+    服务端以 CHAT_CWD_BASE（默认 /home/grape）为基准生成 chat 工作路径，但各接入
+    机器的用户不同（lvjuntao、zhangsan 等）。通过 RUNTIME_CWD_PREFIX_MAP 环境变量配置映射：
       RUNTIME_CWD_PREFIX_MAP=/home/grape=/home/lvjuntao
     支持多组映射，用逗号分隔：
       RUNTIME_CWD_PREFIX_MAP=/home/grape=/home/lvjuntao,/opt/data=/data
-    未配置时默认将 /home/grape 映射到当前用户的 home 目录。
+    未配置时默认将 CHAT_CWD_BASE 映射到当前用户的 home 目录。
     """
     if not path:
         return path

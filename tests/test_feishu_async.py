@@ -80,7 +80,7 @@ class TestBotStateContext:
         ctx = fa.BotContext(app_id="cli_abcdef123456", app_secret="s")
         assert ctx.name.startswith("chat_bot_")
         assert ctx.state == fa.BotState.IDLE
-        assert ctx.max_concurrent == 10
+        assert ctx.max_concurrent == 20
         assert isinstance(ctx.metrics, fa.BotMetrics)
 
     def test_context_explicit_name_and_max_concurrent(self):
