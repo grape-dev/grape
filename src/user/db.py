@@ -27,7 +27,11 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     password TEXT DEFAULT '',
     token_version INTEGER DEFAULT 0,  -- JWT 撤销版本号——改密码/logout 时 +1
     created_by INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    hw_iam_domain TEXT DEFAULT '',
+    hw_iam_user TEXT DEFAULT '',
+    hw_iam_password TEXT DEFAULT '',
+    hw_iam_account_type TEXT DEFAULT 'iam'
 )
 """
 
@@ -270,6 +274,11 @@ def init_db():
         for col in ["created_by"]:
             try:
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+            except Exception:
+                pass
+        for col in ["hw_iam_domain", "hw_iam_user", "hw_iam_password", "hw_iam_account_type"]:
+            try:
+                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
             except Exception:
                 pass
         db.commit()
@@ -1218,6 +1227,8 @@ USER_ACCOUNT_FIELDS = [
     "gitcode_publish_repo", "github_publish_repo",
     "password",
     "created_by", "created_at",
+    "hw_iam_domain", "hw_iam_user", "hw_iam_password",
+    "hw_iam_account_type",
 ]
 
 

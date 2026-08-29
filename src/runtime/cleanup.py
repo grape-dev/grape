@@ -3,15 +3,18 @@
 - 仅清理 `issue_state.stage='done'`（终态）的 Issue workdir，进行中绝不清理；
 - 保留 event.json 档案（独立路径）与 issue_agent_session DB 行（审计）；
 - 跳过有 dispatched/running 任务的会话；
-- 对超 TTL 未活跃的僵尸 workdir 兜底清理。
+- 对超 TTL 未活跃的僵尸 workdir 兜底清理；
+- 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
 import asyncio, os, shutil, time
 from src import config
-from src.config import log
+from src.config import log, CHAT_CWD_BASE
 from src.session_manager import db, db_lock
 
 _SWEEP_INTERVAL = int(os.environ.get("SWEEPER_INTERVAL_SECONDS", "900"))  # 15min
 _ZOMBIE_TTL_DAYS = int(os.environ.get("SWEEPER_ZOMBIE_TTL_DAYS", "7"))
+# Chat / feishu / vod 目录 TTL（默认 3 天未活跃清理，比 issue 的 7 天更短——这些是临时会话目录）
+_SESSION_DIR_TTL_DAYS = int(os.environ.get("SWEEPER_SESSION_DIR_TTL_DAYS", "3"))
 
 _GIT_AGENTS = ("vod", "issue", "coding", "qa", "sre")
 
@@ -88,6 +91,122 @@ def _zombie_issue_dirs(ttl: float) -> list[str]:
                         _check(os.path.join(issues, num))
     except Exception as e:
         log.warning(f"sweeper zombie scan failed: {e}")
+    return out
+
+
+def _active_chat_conv_ids() -> set[str]:
+    """有活跃任务的 chat conversation ID 集合（不清理）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM chat_conversations WHERE status='active'")
+            return {r[0] for r in c.fetchall()}
+    except Exception:
+        return set()
+
+
+def _stale_session_dirs(ttl: float) -> list[str]:
+    """超 TTL 未活跃的 chat / feishu / vod / history 目录。
+
+    chat: {CHAT_CWD_BASE}/chat/{user_id}/{conv_id}/  — 跳过 DB 中 status='active' 的会话
+    feishu: {WORKSPACE_DIR}/feishu/{repo}/{sess}/
+    vod: {WORKSPACE_DIR}/vod/{repo}/
+    history: {WORKSPACE_DIR}/history/{account}/{repo}/
+    """
+    out = []
+    now = time.time()
+
+    def _check_dir(p: str):
+        if not os.path.isdir(p):
+            return
+        try:
+            mtime = os.path.getmtime(p)
+        except Exception:
+            return
+        if now - mtime > ttl:
+            out.append(p)
+
+    # --- chat 目录 --- 
+    try:
+        active_convs = _active_chat_conv_ids()
+        chat_base = os.path.join(CHAT_CWD_BASE, "chat")
+        if os.path.isdir(chat_base):
+            for user_dir in os.listdir(chat_base):
+                user_path = os.path.join(chat_base, user_dir)
+                if not os.path.isdir(user_path):
+                    continue
+                for conv_dir in os.listdir(user_path):
+                    conv_path = os.path.join(user_path, conv_dir)
+                    if not os.path.isdir(conv_path):
+                        continue
+                    # 跳过活跃会话
+                    if conv_dir in active_convs:
+                        continue
+                    _check_dir(conv_path)
+    except Exception as e:
+        log.warning(f"sweeper chat dir scan failed: {e}")
+
+    # --- chat 旧残留目录（WORKSPACE_DIR/chat/）---
+    # 2026-08-27 修复前 chat.py/tasks.py 曾误用 WORKSPACE_DIR 而非 CHAT_CWD_BASE，
+    # 导致部分 chat 目录创建在 {WORKSPACE_DIR}/chat/ 下。新代码不再写入此路径，
+    # 但 sweeper 需扫描兜底清理，否则孤儿目录永久堆积。
+    try:
+        legacy_chat_base = os.path.join(config.WORKSPACE_DIR, "chat")
+        if os.path.isdir(legacy_chat_base):
+            for user_dir in os.listdir(legacy_chat_base):
+                user_path = os.path.join(legacy_chat_base, user_dir)
+                if not os.path.isdir(user_path):
+                    continue
+                for conv_dir in os.listdir(user_path):
+                    conv_path = os.path.join(user_path, conv_dir)
+                    if not os.path.isdir(conv_path):
+                        continue
+                    # 旧残留目录无需跳过 active——正确位置在 CHAT_CWD_BASE 下
+                    _check_dir(conv_path)
+            # 如果 legacy_chat_base 本身已空，也清理掉
+            try:
+                if not os.listdir(legacy_chat_base):
+                    os.rmdir(legacy_chat_base)
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning(f"sweeper legacy chat dir scan failed: {e}")
+
+    # --- feishu 目录 ---
+    try:
+        feishu_base = os.path.join(config.WORKSPACE_DIR, "feishu")
+        if os.path.isdir(feishu_base):
+            for repo_dir in os.listdir(feishu_base):
+                repo_path = os.path.join(feishu_base, repo_dir)
+                if not os.path.isdir(repo_path):
+                    continue
+                for sess_dir in os.listdir(repo_path):
+                    _check_dir(os.path.join(repo_path, sess_dir))
+    except Exception as e:
+        log.warning(f"sweeper feishu dir scan failed: {e}")
+
+    # --- vod 目录 ---
+    try:
+        vod_base = os.path.join(config.WORKSPACE_DIR, "vod")
+        if os.path.isdir(vod_base):
+            for repo_dir in os.listdir(vod_base):
+                _check_dir(os.path.join(vod_base, repo_dir))
+    except Exception as e:
+        log.warning(f"sweeper vod dir scan failed: {e}")
+
+    # --- history 目录 ---
+    try:
+        hist_base = os.path.join(config.WORKSPACE_DIR, "history")
+        if os.path.isdir(hist_base):
+            for account_dir in os.listdir(hist_base):
+                account_path = os.path.join(hist_base, account_dir)
+                if not os.path.isdir(account_path):
+                    continue
+                for repo_dir in os.listdir(account_path):
+                    _check_dir(os.path.join(account_path, repo_dir))
+    except Exception as e:
+        log.warning(f"sweeper history dir scan failed: {e}")
+
     return out
 
 
@@ -191,6 +310,18 @@ def sweep_once() -> int:
                 cleaned += 1
             except Exception as e:
                 log.warning(f"sweeper zombie cleanup failed {p}: {e}")
+        # chat / feishu / vod / history 目录 TTL 清理
+        session_ttl = _SESSION_DIR_TTL_DAYS * 86400
+        session_cleaned = 0
+        for p in _stale_session_dirs(session_ttl):
+            try:
+                shutil.rmtree(p, ignore_errors=True)
+                session_cleaned += 1
+            except Exception as e:
+                log.warning(f"sweeper session dir cleanup failed {p}: {e}")
+        if session_cleaned:
+            log.info(f"sweeper cleaned {session_cleaned} stale session dir(s)")
+            cleaned += session_cleaned
         if cleaned:
             log.info(f"sweeper cleaned {cleaned} issue workdir(s)")
         return cleaned

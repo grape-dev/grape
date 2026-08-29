@@ -124,6 +124,12 @@ LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/lo
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
+# Chat 工作目录下发的逻辑基准（远端 worker _remap_cwd 的默认映射契约）。
+# 服务端必须用逻辑基准下发而非本机 WORKSPACE_DIR，否则非 root 用户 worker
+# （如 mlc）拿 /opt/grape-workspaces/... 映射不到 → 写 /root → Permission denied。
+# _remap_cwd 默认将此值映射到 worker 运行用户的 home 目录。
+CHAT_CWD_BASE = os.environ.get("CHAT_CWD_BASE", "/home/grape")
+
 # ====== 对象存储（OBS）配置（见 docs/new-version2/obs-storage/obs-skill-storage-design.md §3 N1）======
 # AK/SK 仅经环境变量注入（gitignored），不入配置文件、不入日志。
 OBS_ENABLED = os.environ.get("OBS_ENABLED", "false").lower() in ("1", "true", "yes")

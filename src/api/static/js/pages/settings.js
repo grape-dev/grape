@@ -23,21 +23,19 @@ function renderSettings(tab) {
     API.get('/settings/credentials' + repoQ).then(d => {
       // AK/SK 回显真实值需 HTML 转义（防引号破坏属性）
       const _esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-      const _akVal = d.huawei_cloud ? _esc(d.huawei_cloud.ak || '') : '';
-      const _skVal = d.huawei_cloud ? _esc(d.huawei_cloud.sk || '') : '';
+      const _akVal = d.huawei_cloud && d.huawei_cloud.ak_exists ? '********' : '';
+      const _skVal = d.huawei_cloud && d.huawei_cloud.sk_exists ? '********' : '';
       document.getElementById('sCredentials').innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.gitcode_api_title')}</h3>
           <div class="srow"><label>${I18N.t('settings.credentials.api_token')}</label><input type="password" value="${d.gitcode && d.gitcode.api_token_exists ? '********' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? '' : `placeholder="${I18N.t('settings.credentials.gitcode_token_placeholder')}"`} style="${d.gitcode && d.gitcode.api_token_exists ? 'background:#f1f5f9' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? 'disabled' : ''}></div>
           <div class="srow"><label>${I18N.t('settings.credentials.account')}</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account + I18N.t('settings.credentials.gitcode_account_suffix') : '—'}" disabled style="background:#f1f5f9;font-size:10px"></div>
         </div>
         <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.huawei_cloud_title')}</h3>
-          <div class="srow"><label>${I18N.t('settings.credentials.access_key')}</label><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.access_key')}"><button class="bt bt-o bt-s" id="huaweiToggleAk" onclick="toggleHuaweiSecret()" title="${I18N.t('settings.theme.show_hide')}" style="padding:2px 8px">👁</button></div>
-          <div class="srow"><label>${I18N.t('settings.credentials.secret_key')}</label><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.secret_key')}"><button class="bt bt-o bt-s" id="huaweiToggleSk" onclick="toggleHuaweiSecret()" title="${I18N.t('settings.theme.show_hide')}" style="padding:2px 8px">👁</button></div>
+          <div class="srow"><label>${I18N.t('settings.credentials.access_key')}</label><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.access_key')}"></div>
+          <div class="srow"><label>${I18N.t('settings.credentials.secret_key')}</label><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.secret_key')}"></div>
           <p class="tx t2 mt8">${I18N.t('settings.credentials.huawei_cloud_desc')}</p>
           <button class="bt bt-p mt8" onclick="saveCredentials()">${I18N.t('settings.common.save')}</button>
         </div>
-
-
 `;
     }).catch(e => document.getElementById('sCredentials').innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}));
   } else if (current === 'notifications') {

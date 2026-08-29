@@ -10,7 +10,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user, get_user_token
-from src.config import WORKSPACE_DIR, log
+from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
 from src.api.time_utils import normalize_event_time
 from src.session_manager import (
     db, db_lock, get_chat_config, create_conversation, add_message,
@@ -338,7 +338,7 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
         except Exception:
             pass
         prompt = _build_task_prompt(task_description, repo_key, issue_number, user_id)
-        cwd = os.path.join(WORKSPACE_DIR, "chat", str(user_id), conv_id)
+        cwd = os.path.join(CHAT_CWD_BASE, "chat", str(user_id), conv_id)
         os.makedirs(cwd, exist_ok=True)
 
         final_text = ""

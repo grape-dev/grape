@@ -350,9 +350,13 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
             "skill_scan_result": rt.get("skill_scan_result", []),
             "agent_tags": rt.get("agent_tags", ["all"])})
     devices.extend(_local_devices.values())
-    # 过滤掉没有承载引擎的 device（如主控机在 runtime_credentials 中的心跳记录，
-    # credential_id=130/131 但无 agent_runtimes 行绑定 → runtimes 为空）
-    devices = [d for d in devices if d.get("runtimes")]
+    # AI Devspace 创建的凭据：worker 尚未上线注册时没有 agent_runtimes 行，
+    # 但用户需要在 Workers 列表看到这个待接入设备（凭据已生成，环境正在启动）。
+    # 保留没有承载引擎但凭据 active 的设备，health=offline 让用户知道还没接入。
+    # 主控机在 runtime_credentials 中的心跳记录（credential_id=130/131 但无 agent_runtimes 行绑定）
+    # 也保留，但 health 派生会正确反映其离线状态。
+    # 本机直连设备（credential_id=0）如果无引擎则过滤（本机探测应该有引擎才显示）。
+    devices = [d for d in devices if d.get("runtimes") or (d.get("credential_id", 0) > 0 and d.get("credential_status") == "active")]
     # 本机设备的 health：至少一个引擎 online 则设备 online（主控机本身不会掉线）
     for d in devices:
         if (d.get("credential_id") or 0) == 0:
@@ -476,6 +480,7 @@ async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(
         try:
             c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key) VALUES (?,?,?,?,?,?)",
                       (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key))
+            cred_id = c.lastrowid
             db.commit()
         except Exception as e:
             msg = str(e)
@@ -491,7 +496,7 @@ async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(
         ensure_package_ready()
     except Exception as _e:
         log.warning(f"预构建 worker 安装包失败: {_e}")
-    return {"token": token, "name": name, "scope": scope, "owner": owner, "message": "token 仅展示一次，请立即保存"}
+    return {"token": token, "id": cred_id, "name": name, "scope": scope, "owner": owner, "message": "token 仅展示一次，请立即保存"}
 
 
 @router.put("/runtime-credentials/{cid}")
