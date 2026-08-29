@@ -139,6 +139,23 @@ def increment_token_version(user_id: int) -> None:
         db.commit()
 
 
+def batch_update_last_active(uids: list) -> None:
+    """批量更新用户最后活跃时间——定时任务调用，分批每 1000 个"""
+    if not uids:
+        return
+    with db_lock:
+        c = db.cursor()
+        # 分批，每批 1000
+        for i in range(0, len(uids), 1000):
+            batch = uids[i:i+1000]
+            placeholders = ",".join(["?"] * len(batch))
+            c.execute(
+                f"UPDATE user_accounts SET last_active_at=NOW() WHERE id IN ({placeholders})",
+                batch,
+            )
+        db.commit()
+
+
 # ====== Token 管理 ======
 # 用户 session token 与 admin token 分开管理
 _user_tokens: dict[str, float] = {}

@@ -9,17 +9,19 @@
       <!-- 统计卡 -->
       <div class="stats">
         <div class="stat-card"><div class="stat-label">用户总数</div><div class="stat-value">{{ stats.total ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">在线</div><div class="stat-value small" style="color:#34c759">{{ stats.online ?? 0 }}</div></div>
+        <div class="stat-card"><div class="stat-label">离线</div><div class="stat-value small" style="color:#aeaeb2">{{ stats.offline ?? 0 }}</div></div>
         <div class="stat-card"><div class="stat-label">GitCode 登录</div><div class="stat-value small">{{ stats.gitcodeLogin ?? 0 }}</div></div>
         <div class="stat-card"><div class="stat-label">其他方式</div><div class="stat-value small">{{ stats.other ?? 0 }}</div></div>
-        <div class="stat-card"><div class="stat-label">已配置凭证</div><div class="stat-value small">{{ stats.hasCredential ?? 0 }}</div></div>
-        <div class="stat-card"><div class="stat-label">未配置凭证</div><div class="stat-value small">{{ stats.noCredential ?? 0 }}</div></div>
       </div>
 
-      <!-- 来源徽章行（点击联动筛选） -->
+      <!-- 状态徽章行（点击联动筛选） -->
       <div class="em-stats">
         <button class="em-stat" :class="{ on: !source }" @click="setSource('')">全部 <strong>{{ stats.total ?? 0 }}</strong></button>
+        <button class="em-stat" :class="{ on: source === 'online' }" @click="setSource('online')"><span class="em-dot" style="background:#34c759"></span>在线 <strong>{{ stats.online ?? 0 }}</strong></button>
+        <button class="em-stat" :class="{ on: source === 'offline' }" @click="setSource('offline')"><span class="em-dot" style="background:#aeaeb2"></span>离线 <strong>{{ stats.offline ?? 0 }}</strong></button>
         <button class="em-stat" :class="{ on: source === 'gitcode' }" @click="setSource('gitcode')"><span class="em-dot" style="background:#006eff"></span>GitCode 登录 <strong>{{ stats.gitcodeLogin ?? 0 }}</strong></button>
-        <button class="em-stat" :class="{ on: source === 'other' }" @click="setSource('other')"><span class="em-dot" style="background:#aeaeb2"></span>其他 <strong>{{ stats.other ?? 0 }}</strong></button>
+        <button class="em-stat" :class="{ on: source === 'other' }" @click="setSource('other')"><span class="em-dot" style="background:#ff9500"></span>其他 <strong>{{ stats.other ?? 0 }}</strong></button>
       </div>
 
       <!-- 工具栏 -->
@@ -33,7 +35,7 @@
       <div class="card" v-if="!loading">
         <table class="vod-table">
           <thead>
-            <tr><th style="width:60px">ID</th><th>用户名</th><th>昵称</th><th>GitCode ID</th><th>凭证配置</th><th>创建时间</th><th style="width:60px">操作</th></tr>
+            <tr><th style="width:60px">ID</th><th>用户名</th><th>昵称</th><th>GitCode ID</th><th>登录状态</th><th>凭证配置</th><th>最后活跃</th><th style="width:60px">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="u in list" :key="u.id" class="tl-row-clickable" @click="showDetail(u.id)">
@@ -41,19 +43,20 @@
               <td><b>{{ u.username }}</b></td>
               <td class="t3">{{ u.nickname || '—' }}</td>
               <td class="t3">{{ u.gitcodeId ? u.gitcodeId.substring(0, 12) + '…' : '—' }}</td>
+              <td><span :class="['status-tag', u.online ? 'success' : 'default']" style="font-size:10px">{{ u.online ? '在线' : '离线' }}</span></td>
               <td>
                 <span v-if="u.hasGitcodeToken" class="status-tag info" style="font-size:10px">GitCode</span>
                 <span v-if="u.hasHuaweiAk" class="status-tag warning" style="font-size:10px">华为AK</span>
                 <span v-if="u.hasFeishu" class="status-tag success" style="font-size:10px">飞书</span>
                 <span v-if="!u.hasGitcodeToken && !u.hasHuaweiAk && !u.hasFeishu" class="t3" style="font-size:11px">未配置</span>
               </td>
-              <td class="t3">{{ u.createdAt || '—' }}</td>
+              <td class="t3">{{ u.lastActiveAt || '—' }}</td>
               <td @click.stop>
                 <button class="act-icon-btn" @click="showDetail(u.id)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
               </td>
             </tr>
             <tr v-if="list.length === 0">
-              <td colspan="7" style="text-align:center;padding:40px;color:var(--text-tertiary)">
+              <td colspan="8" style="text-align:center;padding:40px;color:var(--text-tertiary)">
                 <div style="font-size:32px;margin-bottom:8px">👤</div>
                 <div>暂无用户数据</div>
               </td>

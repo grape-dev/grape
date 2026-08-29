@@ -38,6 +38,10 @@ public class ConsoleUserController {
                 where.append(" AND gitcode_id IS NOT NULL AND gitcode_id<>''");
             } else if ("other".equals(source)) {
                 where.append(" AND (gitcode_id IS NULL OR gitcode_id='')");
+            } else if ("online".equals(source)) {
+                where.append(" AND last_active_at IS NOT NULL AND last_active_at >= NOW() - INTERVAL 30 MINUTE");
+            } else if ("offline".equals(source)) {
+                where.append(" AND (last_active_at IS NULL OR last_active_at < NOW() - INTERVAL 30 MINUTE)");
             }
         }
 
@@ -48,7 +52,7 @@ public class ConsoleUserController {
 
         List<Map<String, Object>> list = new ArrayList<>();
         try {
-            String sql = "SELECT id, username, nickname, gitcode_id, created_at, "
+            String sql = "SELECT id, username, nickname, gitcode_id, created_at, last_active_at, "
                     + "huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>'' as has_huawei_ak, "
                     + "feishu_app_id IS NOT NULL AND feishu_app_id<>'' as has_feishu, "
                     + "gitcode_api_token IS NOT NULL AND gitcode_api_token<>'' as has_gitcode_token "
@@ -62,6 +66,9 @@ public class ConsoleUserController {
                 u.put("nickname", rs.getString("nickname"));
                 u.put("gitcodeId", rs.getString("gitcode_id"));
                 u.put("createdAt", rs.getString("created_at"));
+                String lastActive = rs.getString("last_active_at");
+                u.put("lastActiveAt", lastActive);
+                u.put("online", isOnline(lastActive));
                 u.put("hasHuaweiAk", rs.getBoolean("has_huawei_ak"));
                 u.put("hasFeishu", rs.getBoolean("has_feishu"));
                 u.put("hasGitcodeToken", rs.getBoolean("has_gitcode_token"));
@@ -73,10 +80,10 @@ public class ConsoleUserController {
         Map<String, Object> stats = new LinkedHashMap<>();
         try {
             stats.put("total", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts", Long.class));
+            stats.put("online", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE last_active_at IS NOT NULL AND last_active_at >= NOW() - INTERVAL 30 MINUTE", Long.class));
+            stats.put("offline", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE last_active_at IS NULL OR last_active_at < NOW() - INTERVAL 30 MINUTE", Long.class));
             stats.put("gitcodeLogin", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE gitcode_id IS NOT NULL AND gitcode_id<>''", Long.class));
             stats.put("other", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE gitcode_id IS NULL OR gitcode_id=''", Long.class));
-            stats.put("hasCredential", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE (gitcode_api_token IS NOT NULL AND gitcode_api_token<>'') OR (huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>'') OR (feishu_app_id IS NOT NULL AND feishu_app_id<>'')", Long.class));
-            stats.put("noCredential", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE (gitcode_api_token IS NULL OR gitcode_api_token='') AND (huawei_cloud_ak IS NULL OR huawei_cloud_ak='') AND (feishu_app_id IS NULL OR feishu_app_id='')", Long.class));
         } catch (Exception e) { /* ignore */ }
 
         result.put("content", list);
@@ -120,5 +127,15 @@ public class ConsoleUserController {
             }, id);
         } catch (Exception e) { /* ignore */ }
         return info;
+    }
+
+    private boolean isOnline(String lastActiveAt) {
+        if (lastActiveAt == null || lastActiveAt.isBlank()) return false;
+        try {
+            String ts = lastActiveAt.length() > 19 ? lastActiveAt.substring(0, 19) : lastActiveAt;
+            ts = ts.replace(' ', 'T');
+            java.time.LocalDateTime lat = java.time.LocalDateTime.parse(ts);
+            return java.time.Duration.between(lat, java.time.LocalDateTime.now()).toMinutes() < 30;
+        } catch (Exception e) { return false; }
     }
 }
