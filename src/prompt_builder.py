@@ -460,11 +460,46 @@ context 是传给下一个 Agent 的接力说明，应包含：
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url())
 
 
+_AGENT_TAG_RE = None
+
+
+def _agent_tag_pattern():
+    """匹配 [XXX Agent] 标记（如 [QA Agent]、[Coding Agent][Issue Agent]）。"""
+    global _AGENT_TAG_RE
+    if _AGENT_TAG_RE is None:
+        import re as _re
+        _AGENT_TAG_RE = _re.compile(r'\[[A-Za-z_]+?\s+Agent\]', _re.IGNORECASE)
+    return _AGENT_TAG_RE
+
+
+def _append_chat_history(parts: list, history: list = None, has_valid_session: bool = False):
+    """注入对话历史（chat-prompt-history-injection-design.md §3）。
+
+    - 无有效 session → 注入完整「对话历史」（最近 10 条，每条截 500 字符）；
+    - 有 session → 普通对话历史由 opencode session 承载，**不再重复注入**；
+    - 无论 session，**含 [XXX Agent] 的 Issue 进展始终注入**为「Issue Agent 进展」段。
+    """
+    history = history or []
+    if not history:
+        return
+    agent_items = [m for m in history if _agent_tag_pattern().search((m.get("content") or ""))]
+    if agent_items:
+        parts.append("\n## Issue Agent 进展")
+        for m in agent_items[-10:]:
+            parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
+    if not has_valid_session:
+        norm = [m for m in history if m.get("role") in ("user", "agent")]
+        if norm:
+            parts.append("\n## 对话历史")
+            for m in norm[-10:]:
+                parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
+
+
 def build_general_chat_prompt(message: str, repo_key: str = "", history: list = None,
                               skill_name: str = "", skill_id: int = 0,
                               runtime_id: int = 0, backend_name: str = "",
                               user_info: str = "", skills: list = None,
-                              account: str = "") -> str:
+                              account: str = "", has_valid_session: bool = False) -> str:
     """统一通用 Chat prompt（Web / 飞书共用，方案 B：以简洁英文结构为准）。
 
     原 _build_chat_prompt（web）与旧 build_general_chat_prompt（飞书）二合一：
@@ -498,6 +533,8 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
             pass
     # 项目知识基线（chat-prompt-overview.md §2.1）
     parts.append(_build_project_info_section(repo_key, agent_type="chat"))
+    # 对话历史 / Issue Agent 进展（chat-prompt-history-injection-design.md §3）
+    _append_chat_history(parts, history, has_valid_session)
     # 使用技能：优先 skill_name/skill_id，其次 skills[0]（飞书/tasks 传入）。
     # 兼容旧位置签名：第4参曾为 skills(list)，若收到 list 取其首元素。
     if isinstance(skill_name, list):
@@ -562,7 +599,8 @@ def _get_task_description(conv: dict | None) -> str:
 
 
 def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: dict = None,
-                           account: str = "", runtime_id: int = 0, user_info: str = "") -> str:
+                           account: str = "", runtime_id: int = 0, user_info: str = "",
+                           has_valid_session: bool = False) -> str:
     """任务对话独立 prompt：注入 Issue 上下文 + `场景: task`，Agent 直接走任务处理流程。
 
     见 template-onboarding-task-full-chain-design.md §5.7.1。用于任务中心「去对话」会话
@@ -608,10 +646,8 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     # 项目知识基线
     parts.append(_build_project_info_section(repo_key, agent_type="chat"))
 
-    if history:
-        parts.append("\n## 对话历史")
-        for m in history[-10:]:
-            parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
+    # 对话历史 / Issue Agent 进展（chat-prompt-history-injection-design.md §3）
+    _append_chat_history(parts, history, has_valid_session)
 
     parts.append(f"\n## 本次用户消息\n{user_text}")
 

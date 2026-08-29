@@ -283,13 +283,18 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
+    runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
+    if runtime_session_id and not runtime_session_id.startswith("ses_"):
+        runtime_session_id = ""
+    has_valid_session = bool(runtime_session_id.startswith("ses_"))
     # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
     if conv and conv.get("conv_type") == "task":
         from src.prompt_builder import build_task_chat_prompt
-        prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0))
+        prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)
     else:
         prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id,
-                                           backend_name=backend_name, user_info=_build_web_user_info(user, acc))
+                                           backend_name=backend_name, user_info=_build_web_user_info(user, acc),
+                                           has_valid_session=has_valid_session)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
@@ -399,13 +404,18 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
+    runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
+    if runtime_session_id and not runtime_session_id.startswith("ses_"):
+        runtime_session_id = ""
+    has_valid_session = bool(runtime_session_id.startswith("ses_"))
     # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
     if conv and conv.get("conv_type") == "task":
         from src.prompt_builder import build_task_chat_prompt
-        prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0))
+        prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)
     else:
         prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id,
-                                           backend_name=backend_name, user_info=_build_web_user_info(user, acc))
+                                           backend_name=backend_name, user_info=_build_web_user_info(user, acc),
+                                           has_valid_session=has_valid_session)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
@@ -670,12 +680,14 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     #（见 task-conversation-prompt-align-design.md §3.2）
     conv = get_conversation(conv_id) if conv_id else None
     history = get_messages(conv_id, limit=10) if conv_id else []
+    _rsid = session.get("runtime_session_id") or ""
+    has_valid_session = bool(_rsid.startswith("ses_"))
     if conv and conv.get("conv_type") == "task":
         from src.prompt_builder import build_task_chat_prompt
-        prompt = build_task_chat_prompt(message, repo_key, history, conv, account=user.get("username") or "", runtime_id=runtime_id)
+        prompt = build_task_chat_prompt(message, repo_key, history, conv, account=user.get("username") or "", runtime_id=runtime_id, has_valid_session=has_valid_session)
     else:
         prompt = build_general_chat_prompt(message, repo_key, history, skill_name, skill_id,
-                                           user_info=_build_web_user_info(user, acc))
+                                           user_info=_build_web_user_info(user, acc), has_valid_session=has_valid_session)
     tid = enqueue_task(
         agent_session_id=session.get("id") or "",
         runtime_id=runtime_id,

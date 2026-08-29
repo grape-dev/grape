@@ -313,11 +313,14 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
 
 
 def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_account: str,
-                              chat_runtime_id: int, conv_id: str, user_info: str = "") -> str:
+                              chat_runtime_id: int, conv_id: str, user_info: str = "",
+                              has_valid_session: bool = False) -> str:
     """按当前加入会话的 conv_type 分支构建 Feishu chat prompt（feishu-web-chat-unified-design.md §11）。
 
     task 会话 → build_task_chat_prompt（会话消息 get_messages 作历史，与 web chat 一致）；
     否则 general → build_chat_prompt（事件 history）。
+    has_valid_session：飞书侧按 repo 级 oc_sid 是否有效；无效时注入完整对话历史
+    （chat-prompt-history-injection-design.md §3）。
     """
     conv_obj = None
     if conv_id:
@@ -334,10 +337,11 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
             conv_history = get_messages(conv_id, limit=20)
         except Exception:
             conv_history = []
-        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info)
+        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info, has_valid_session=has_valid_session)
     else:
         body = build_chat_prompt(text, repo_key, history, skills=skills,
-                                 runtime_id=chat_runtime_id, user_info=user_info)
+                                 runtime_id=chat_runtime_id, user_info=user_info,
+                                 has_valid_session=has_valid_session)
     return body
 
 
@@ -710,7 +714,8 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             chat_runtime_id = 0
 
         prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
-                                           chat_runtime_id, conv_id, user_info=user_info)
+                                           chat_runtime_id, conv_id, user_info=user_info,
+                                           has_valid_session=bool((oc_sid or "").startswith("ses_")))
         log.info(f"Chat prompt ({len(prompt)} chars, repo={repository})")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])
