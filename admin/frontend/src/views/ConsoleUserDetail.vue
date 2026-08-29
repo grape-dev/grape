@@ -44,15 +44,17 @@
         <div class="card" style="padding:0">
           <div class="section-header">
             <h3 class="sh-title">活动统计</h3>
+            <div class="sh-actions">
+              <button class="btn btn-sm" :style="activityTab === 'task' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityTab = 'task'">任务总览</button>
+              <button class="btn btn-sm" :style="activityTab === 'issue' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityTab = 'issue'">Issue 分析</button>
+            </div>
           </div>
           <div style="padding:20px 24px">
-            <div class="activity-grid">
+            <!-- 任务总览 tab -->
+            <div v-if="activityTab === 'task'" class="activity-grid">
               <div class="activity-card">
                 <div class="activity-value">{{ info.taskCount ?? 0 }}</div>
                 <div class="activity-label">任务总数</div>
-                <div class="activity-sub" v-if="info.issueTaskCount || info.chatTaskCount">
-                  Issue {{ info.issueCount ?? 0 }} · 对话 {{ info.chatTaskCount ?? 0 }}
-                </div>
               </div>
               <div class="activity-card">
                 <div class="activity-value" style="color:#34c759">{{ info.completedCount ?? 0 }}</div>
@@ -69,6 +71,21 @@
               <div class="activity-card">
                 <div class="activity-value" style="color:#006eff">{{ info.successRate || '—' }}</div>
                 <div class="activity-label">成功率</div>
+              </div>
+            </div>
+            <!-- Issue 分析 tab -->
+            <div v-else class="activity-grid">
+              <div class="activity-card">
+                <div class="activity-value" style="color:#5e5ce6">{{ info.issueCount ?? 0 }}</div>
+                <div class="activity-label">Issue 数</div>
+              </div>
+              <div class="activity-card">
+                <div class="activity-value">{{ info.issueTaskCount ?? 0 }}</div>
+                <div class="activity-label">Issue 任务数</div>
+              </div>
+              <div class="activity-card">
+                <div class="activity-value">{{ info.chatTaskCount ?? 0 }}</div>
+                <div class="activity-label">对话任务数</div>
               </div>
               <div class="activity-card" style="grid-column:span 2;cursor:pointer" @click="showRepos = !showRepos">
                 <div class="activity-value">{{ info.repoCount ?? 0 }}</div>
@@ -151,6 +168,7 @@ const info = ref({})
 const loading = ref(true)
 const resetting = ref(false)
 const showRepos = ref(false)
+const activityTab = ref('task')
 const toast = ref({ show: false, msg: '', type: 'success' })
 
 const credentialConfigured = computed(() => {
@@ -212,10 +230,10 @@ onMounted(() => load())
 .detail-row span:first-child { color: var(--text-tertiary); }
 
 .activity-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.activity-grid:has(.activity-card:only-child) { grid-template-columns: 1fr; }
 .activity-card { text-align: center; padding: 16px 8px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 22px; font-weight: 700; color: var(--text-primary); }
 .activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
-.activity-sub { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; }
 
 .cred-group-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
 .cred-group { background: rgba(0,0,0,0.02); border-radius: 10px; padding: 14px 16px; }
