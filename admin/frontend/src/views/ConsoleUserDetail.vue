@@ -171,6 +171,7 @@
             </div>
           </div>
           <div style="padding:20px 24px">
+            <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
             <div v-if="filteredActivity.length" class="timeline">
               <div v-for="t in filteredActivity" :key="t.id" class="timeline-item">
                 <div class="timeline-dot" :class="t.status"></div>
@@ -199,7 +200,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../api'
 import PaginationBar from '../components/PaginationBar.vue'
@@ -301,6 +302,13 @@ async function resetToken() {
 }
 
 onMounted(() => load())
+
+watch(activityTab, (val) => {
+  if (val === 'issue' && !selectedRepo.value && info.value.repoMatrix && info.value.repoMatrix.length) {
+    selectedRepo.value = info.value.repoMatrix[0].repoKey
+    loadRepoIssues(0)
+  }
+})
 </script>
 
 <style scoped>
