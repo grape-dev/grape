@@ -320,7 +320,7 @@ def _build_task_prompt(task_description: str, repo_key: str, issue_number: int, 
     ctx += f"\n\n## 任务描述\n{task_description}"
     from src.repo_key import split_owner_repo
     _owner, _repo = split_owner_repo(repo_key)
-    return build_chat_prompt(ctx, repo_key, [], ["chat"], account=_owner)
+    return build_chat_prompt(ctx, repo_key, [], skills=["chat"], account=_owner)
 
 
 async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
@@ -617,11 +617,20 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee)
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
-    # 3) 如指定了开发场景 → 写入 issue_state.scene_id（后续 VOD/流水线按此场景执行）
+    # 3) 如指定了开发场景 → 写入 issue_state.scene_id + scene_user_id（后续 VOD/流水线按此场景执行）
     if body.scene_id:
         try:
             from src.api.session_store import set_issue_scene
-            set_issue_scene(repo_key, f"#{issue_num}", body.scene_id)
+            # 查场景的 scope 和 user_id（用户级场景需要记录 user_id 供后续流水线查询）
+            scene_uid = 0
+            try:
+                from src.api.pipeline_config import _query_scene_by_id
+                scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key, user_id=user.get("id", 0))
+                if scene_obj and scene_obj.get("scope") == "user":
+                    scene_uid = user.get("id", 0)
+            except Exception:
+                pass
+            set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
         except Exception as _e:
             from src.config import log
             log.warning(f"create_task: set_issue_scene failed: {_e}")

@@ -337,3 +337,25 @@
 .nd-radar::before{content:"";position:absolute;top:0;left:0;width:100%;height:100%;background:conic-gradient(from 0deg,transparent 0deg,rgba(212,156,15,.12) 40deg,transparent 80deg);animation:radarSweep 3s linear infinite;pointer-events:none;z-index:0}
 .nd-radar>*{position:relative;z-index:1}
 .d-pulse{animation:radarPulse 1.2s ease-in-out infinite}
+
+/* ===== Chat 查询中三点动画（学习 Admin AI loading-dots query-bounce）===== */
+.chat-typing{display:inline-block;font-size:12px;color:var(--t2)}
+.chat-dots{display:inline-flex;gap:6px;padding:8px 4px;align-items:center}
+.chat-dots span{width:8px;height:8px;border-radius:50%;background:var(--a);animation:chatDotBounce 1.2s infinite}
+.chat-dots span:nth-child(1){animation-delay:0s}
+.chat-dots span:nth-child(2){animation-delay:0.2s}
+.chat-dots span:nth-child(3){animation-delay:0.4s}
+@keyframes chatDotBounce{0%,60%,100%{transform:translateY(0);opacity:0.4}30%{transform:translateY(-6px);opacity:1}}
+
+/* ===== Chat 删除确认弹窗（苹果风格）===== */
+.chat-del-overlay{position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.12);opacity:1;transition:opacity .2s}
+.chat-del-overlay .chat-del-pop{position:fixed;z-index:9999;min-width:200px;background:rgba(255,255,255,.82);backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px) saturate(180%);border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08);border:.5px solid rgba(0,0,0,.06);padding:16px 18px;transform:scale(.92) translateY(-4px);opacity:0;transition:all .2s cubic-bezier(.34,1.56,.64,1)}
+.chat-del-overlay .chat-del-pop.show{transform:scale(1) translateY(0);opacity:1}
+.chat-del-pop .chat-del-title{font-size:13px;font-weight:600;color:var(--t);text-align:center;margin-bottom:14px;line-height:1.4}
+.chat-del-pop .chat-del-btns{display:flex;gap:8px}
+.chat-del-pop .chat-del-cancel{flex:1;padding:8px 14px;border-radius:9px;border:none;background:rgba(120,120,128,.12);color:var(--t);font-size:13px;font-weight:500;cursor:pointer;transition:background .12s}
+.chat-del-pop .chat-del-cancel:hover{background:rgba(120,120,128,.2)}
+.chat-del-pop .chat-del-cancel:active{background:rgba(120,120,128,.28)}
+.chat-del-pop .chat-del-ok{flex:1;padding:8px 14px;border-radius:9px;border:none;background:var(--r);color:#fff;font-size:13px;font-weight:600;cursor:pointer;transition:all .12s}
+.chat-del-pop .chat-del-ok:hover{background:#c41e1e}
+.chat-del-pop .chat-del-ok:active{background:#b01a1a}

@@ -545,7 +545,6 @@ async def revoke_runtime_credential(cid: int, user: dict = Depends(get_current_u
     查不到 → 401）、凭据名释放可复用（全局唯一键不再被 revoked 行占用）。
     级联清理：
     - agent_runtimes：该凭据注册的引擎行一并删除
-    - devops_agent_runtime_binding：指向被删行的绑定删除（配置页不出现悬空 id）
     - devops_agent_session.runtime_id：置 0（dashboard 红字「无 engine」，如实反映）
     历史 agent_tasks 绑定旧 runtime_id 的任务恢复走 /api/events/{seq}/redispatch
     （pick_engine 重新绑定后 requeue，见 engine-selection-claim-pool-2026-08.md）。
@@ -560,10 +559,6 @@ async def revoke_runtime_credential(cid: int, user: dict = Depends(get_current_u
         rid_list = [r[0] for r in c.fetchall()]
         if rid_list:
             ph = ",".join("?" for _ in rid_list)
-            try:
-                c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", rid_list)
-            except Exception as _e:
-                log.warning(f"revoke {cid}: 清理 binding 失败: {_e}")
             try:
                 c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
             except Exception as _e:

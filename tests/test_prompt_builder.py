@@ -65,19 +65,13 @@ class TestBuildChatRoleDefinition:
         assert "Code review" in role  # domain list, not capabilities list
 
 
-class TestGetSkillCapabilities:
-    def test_returns_skills_list(self, pb):
-        caps = pb.get_skill_capabilities()
-        assert "能力" in caps
-        assert "DevOps" in caps
-
-
 class TestBuildChatPrompt:
     def test_basic(self, pb):
         prompt = pb.build_chat_prompt("test query", "owner/repo", [])
         assert "test query" in prompt
         assert "owner/repo" in prompt
-        assert "session_history.json" in prompt
+        # v1.6 移除 session_history 文件注入（引擎 --continue 承载历史）
+        assert "session_history.json" not in prompt
 
     def test_with_history(self, pb):
         history = [
@@ -85,8 +79,9 @@ class TestBuildChatPrompt:
             {"type": "issue_comment", "success": False}
         ]
         prompt = pb.build_chat_prompt("hello", "owner/repo", history)
-        assert "history" in prompt or "events" in prompt
-        assert "session_history.json" in prompt
+        # 设计文档 chat-prompt-overview.md：Chat 通用 prompt 不含「近期对话历史」段
+        assert "近期对话历史" not in prompt
+        assert "hello" in prompt
 
     def test_with_skills(self, pb):
         prompt = pb.build_chat_prompt("query", "owner/repo", [], ["chat"])
@@ -94,8 +89,58 @@ class TestBuildChatPrompt:
 
     def test_with_account(self, pb):
         prompt = pb.build_chat_prompt("hello", "owner/repo", [], account="customer-a")
-        assert "customer-a" in prompt
-        assert "session_history.json" in prompt
+        assert "hello" in prompt
+        # v1.6 移除 session_history 文件注入
+        assert "session_history.json" not in prompt
+
+
+class TestHistoryInjection:
+    """看护：对话历史按 has_valid_session 条件注入 + Issue Agent 进展始终注入
+    （chat-prompt-history-injection-design.md §3 / accc2741）。"""
+
+    HISTORY = [
+        {"role": "user", "content": "怎么部署？"},
+        {"role": "agent", "content": "[QA Agent] ✅ PR #1 已合并（merged_at 08-18），Issue #1 已自动关闭。"},
+        {"role": "agent", "content": "让我看下 Issue 情况。"},
+    ]
+
+    def _general(self, has_valid_session):
+        from src.prompt_builder import build_general_chat_prompt
+        return build_general_chat_prompt("hi", "org/repo", self.HISTORY, skill_name="chat",
+                                         has_valid_session=has_valid_session)
+
+    def _task(self, has_valid_session):
+        from src.prompt_builder import build_task_chat_prompt
+        conv = {"conv_type": "task", "issue_number": 7, "title": "t", "repo_key": "org/repo"}
+        return build_task_chat_prompt("hi", "org/repo", self.HISTORY, conv,
+                                      has_valid_session=has_valid_session)
+
+    def test_general_no_session_injects_history(self, pb):
+        p = self._general(False)
+        assert "## 对话历史" in p
+        assert "怎么部署？" in p
+        assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p
+
+    def test_general_with_session_skips_history_keeps_progress(self, pb):
+        p = self._general(True)
+        assert "## 对话历史" not in p                 # session 承载对话，不重复注入
+        assert "怎么部署？" not in p
+        assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p   # 进展始终注入
+
+    def test_task_no_session_injects_history(self, pb):
+        p = self._task(False)
+        assert "## 对话历史" in p and "怎么部署？" in p
+        assert "## Issue Agent 进展" in p
+
+    def test_task_with_session_skips_history_keeps_progress(self, pb):
+        p = self._task(True)
+        assert "## 对话历史" not in p
+        assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p
+
+    def test_no_history_no_sections(self, pb):
+        from src.prompt_builder import build_general_chat_prompt
+        p = build_general_chat_prompt("hi", "org/repo", [], has_valid_session=False)
+        assert "## 对话历史" not in p and "## Issue Agent 进展" not in p
 
 
 class TestBuildPrompt:
@@ -135,7 +180,8 @@ class TestBuildPrompt:
     def test_with_history(self, pb, base_evt):
         history = [{"type": "issue_opened", "success": True}]
         prompt = pb.build_prompt(base_evt, history, "", ["issue"])
-        assert "session_history.json" in prompt
+        # v1.6 移除 session_history 文件注入（正文由事件 payload + A2A context 承载）
+        assert "session_history.json" not in prompt
 
     def test_implementation_skill_role(self, pb, base_evt):
         prompt = pb.build_prompt(base_evt, [], "", ["implementation"])

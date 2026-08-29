@@ -294,5 +294,66 @@ def is_gitcode_user_allowed(gitcode_login: str) -> bool:
         return True
 
 
+# ====== 技能目录解析（按 agent_type 一层分组：skills/<agent_type>/<skill>/SKILL.md）======
+_OFFICIAL_AGENT_TYPES = ("vod", "issue", "coding", "qa", "sre", "chat")
+
+
+def resolve_official_skill_path(skill_name: str) -> str:
+    """官方技能 SKILL.md 绝对路径（skills/<agent_type>/<skill>/SKILL.md）。
+
+    依 skill-description.json 的 agent_type/path 映射解析（skill-description-sync.md），
+    兼容旧平铺布局（找不到 agent_type 目录时回退 skills/<skill>/SKILL.md）。
+    返回空串表示未找到。
+    """
+    if not skill_name:
+        return ""
+    try:
+        _cfg = os.path.join(CONFIG_DIR, "skill-description.json")
+        if os.path.isfile(_cfg):
+            with open(_cfg, "r", encoding="utf-8") as _f:
+                _data = json.load(_f)
+            _info = _data.get(skill_name) or {}
+            _path = (_info.get("path") or "").strip().replace("/", os.sep)
+            if _path:
+                _cand = os.path.join(SKILLS_DIR, _path, "SKILL.md")
+                if os.path.isfile(_cand):
+                    return _cand
+        for _at in _OFFICIAL_AGENT_TYPES:
+            _cand = os.path.join(SKILLS_DIR, _at, skill_name, "SKILL.md")
+            if os.path.isfile(_cand):
+                return _cand
+        _legacy = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
+        if os.path.isfile(_legacy):
+            return _legacy
+    except Exception:
+        pass
+    return ""
+
+
+_os = os
+
+def replace_skill_dir_placeholders(prompt: str, base_dir: str = "") -> str:
+    """将 prompt 中 `{{SKILL_DIR}}/<skill>/SKILL.md` 替换为实际技能路径。
+
+    用于 direct（服务端本地）执行：技能按 agent_type 分组存储在
+    `skills/<agent_type>/<skill>/SKILL.md`。兼容旧平铺布局与 worker 侧
+    只展开 `{{SKILL_DIR}}` 的调用（worker 物化后仍是 <skill>/ 平铺）。
+
+    - 匹配到技能名 → 替换为 resolve_official_skill_path 结果；
+    - 未匹配（如 {{SKILL_DIR}} 单独出现）→ 替换为 base_dir / SKILLS_DIR。
+    """
+    import re as _re
+
+    base = base_dir or SKILLS_DIR
+
+    def _sub(m):
+        name = m.group(1)
+        p = resolve_official_skill_path(name)
+        return p if p else _os.path.join(base, name, "SKILL.md")
+
+    prompt = _re.sub(r"\{\{SKILL_DIR\}\}/([^/\s]+)/SKILL\.md", _sub, prompt)
+    return prompt.replace("{{SKILL_DIR}}", base)
+
+
 # 延迟到 main.py 中显式调用，避免循环导入
 # _load_accounts()

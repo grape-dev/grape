@@ -33,7 +33,6 @@ class TestExecutionModeSwitch:
             # 避免其他测试残留的全局引擎被 pick_engine 选中导致执行模式不确定（随机顺序 flaky）
             db.cursor().execute("DELETE FROM agent_runtimes WHERE credential_id>0")
             db.cursor().execute("DELETE FROM runtime_credentials")
-            db.cursor().execute("DELETE FROM devops_agent_runtime_binding")
             db.commit()
 
     def test_mode_getter_meta(self, monkeypatch):

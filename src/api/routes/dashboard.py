@@ -4,6 +4,7 @@ from src.user import db as user_db
 from src.api.deps import get_current_user
 from src.api.time_utils import normalize_event_time
 from src.observability.engine_probe import get_probe_results
+from src.config import log
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -629,14 +630,36 @@ async def get_ops_timeline(repo: str = ""):
             )
         rows = c.fetchall()
 
-        # 查 agent_tasks 建立 (issue_id, event_seq) → task_id 映射
+        # 查 agent_tasks 建立 (issue_id, event_seq) → (task_id, runtime_id) 映射
         c.execute(
-            "SELECT issue_id, event_seq, id FROM agent_tasks "
+            "SELECT issue_id, event_seq, id, runtime_id FROM agent_tasks "
             "WHERE issue_id IS NOT NULL AND issue_id <> ''"
         )
         task_map = {}
+        runtime_map = {}
         for row in c.fetchall():
             task_map[(row[0], row[1])] = row[2]
+            runtime_map[(row[0], row[1])] = row[3] or 0
+
+        # 查 runtime_id → 引擎实例名映射（type-device_name 格式）
+        c.execute(
+            "SELECT ar.id, ar.name, ar.credential_id, rc.device_name, ar.host_name "
+            "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id"
+        )
+        from src.runtime.instances import instance_name as _inst_name
+        import socket as _sock
+        _local_hostname = ""
+        try:
+            _local_hostname = _sock.gethostname()
+        except Exception:
+            pass
+        rt_name_map = {}
+        for r in c.fetchall():
+            _rid, _name, _cid, _dev, _host = r
+            # 本机引擎（cid=0）：优先用 host_name，其次用本机 hostname
+            if (_cid or 0) == 0:
+                _dev = _host or _local_hostname or ""
+            rt_name_map[_rid] = _inst_name(_name, _dev, _cid)
 
     # 按 issue_id 分组
     group = {}
@@ -644,12 +667,14 @@ async def get_ops_timeline(repo: str = ""):
         seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload = row
         if issue_id not in group:
             group[issue_id] = []
+        _rt_id = runtime_map.get((issue_id, seq), 0)
         group[issue_id].append({
             "seq": seq, "eventType": event_type, "agentType": agent_type or "",
             "skill": skill or "", "status": status or "",
             "duration": duration or 0, "createdAt": normalize_event_time(created_at),
             "actor": actor or "", "title": title or "",
             "taskId": task_map.get((issue_id, seq), ""),
+            "engine": rt_name_map.get(_rt_id, "") if _rt_id else "",
             "_payload": payload or "",
         })
 
@@ -835,7 +860,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         if s in event_counts:
             event_counts[s] += 1
 
-    # 获取当前场景和场景列表
+    # 获取当前场景和场景列表（从 DB 读取）
     dev_scene = "default"
     try:
         with db_lock:
@@ -847,12 +872,49 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         pass
 
     scenes = []
+    scene_nodes = []
     try:
-        from src.api.routes.scenes import _load_scenes
-        for sid, s in _load_scenes().items():
-            scenes.append({"id": sid, "name": s.get("name", sid)})
-    except Exception:
-        pass
+        from src.api.pipeline_config import get_scenes, get_pipeline_config
+        scenes = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
+        # 获取当前场景的 nodes（含 skill / enabled / engine_runtime_ids）
+        cfg = get_pipeline_config(dev_scene, repo_key=repo_key, user_id=user.get("id", 0))
+        if cfg:
+            scene_nodes = cfg.get("nodes", [])
+    except Exception as e:
+        log.warning(f"Dashboard: scene load failed: {e}")
+
+    # 为每个 agent 附带场景信息（skill / enabled_in_scene / engine_runtime_ids）
+    # engine_runtime_ids 只从场景 node 读取（为空 = 全广播/兜底）
+    scene_by_agent = {n.get("tag") or n.get("id", ""): n for n in scene_nodes}
+    for ag in agent_sessions:
+        at = ag.get("agent_type", "")
+        node = scene_by_agent.get(at)
+        if node:
+            ag["skill"] = node.get("skill", "")
+            ag["enabled_in_scene"] = node.get("enabled", True)
+            ag["engine_runtime_ids"] = node.get("engine_runtime_ids", []) or []
+        else:
+            ag["skill"] = ""
+            ag["enabled_in_scene"] = False
+            ag["engine_runtime_ids"] = []
+
+    # 获取可用引擎列表（供前端 engine 下拉）
+    # 照搬 Agent Runtimes 页的显示规则：用 instance_name 唯一命名 + 包含 user scope
+    agent_engines = {}
+    try:
+        from src.runtime.engine_select import query_engines
+        from src.runtime.instances import instance_name
+        for atype in all_types:
+            engines = (query_engines(repo_key, "global")
+                       + query_engines(repo_key, "user")
+                       + query_engines(repo_key, "local"))
+            agent_engines[atype] = [{"id": e["runtime_id"],
+                                     "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
+                                     "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
+                                     "status": e["status"]}
+                                    for e in engines]
+    except Exception as e:
+        log.warning(f"dashboard agent_engines failed: {e}")
 
     return {
         "repo": repo_key,
@@ -866,7 +928,6 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
             "failed_events": event_counts["failed"],
         },
         "agents": agent_sessions,
-        "agent_event_counts": agent_event_counts,
-        "agent_recent_events": agent_recent_events,
-        "activity": recent_events,
+        "agent_engines": agent_engines,
+        "scene_nodes": scene_nodes,
     }

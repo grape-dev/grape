@@ -8,6 +8,8 @@ let _obsTimer = null;
 let _obsData = { ops: null, realtime: null, metrics: null };
 let _obsRendered = false;      // 概览/任务 Tab 是否已用 innerHTML 渲染过骨架
 let _obsRenderedTab = null;    // 已渲染骨架的 tab（切换 tab 时需重新建骨架）
+let _rtSearch = '';            // Runtime 引擎搜索筛选
+let _rtDeviceFilter = '';      // Runtime 设备下拉筛选
 
 function renderObservability() {
   const pc = document.getElementById('pageContent');
@@ -92,6 +94,68 @@ function refreshObs(isAutoRefresh) {
     if (lu) lu.textContent = now;
     renderObsContent(isAutoRefresh);
   });
+}
+
+function _rerenderRuntimeTable() {
+  // 只重新渲染表格行（不重建筛选栏，避免 input 失焦）
+  const { ops } = _obsData;
+  if (!ops || ops.error) return;
+  const r = ops.runtimes || {};
+  const runtimes = (r.list || []).slice().sort((a, b) => (a.device_name || '').localeCompare(b.device_name || ''));
+  const _filteredRuntimes = runtimes.filter(rt => {
+    const _dev = rt.device_name || '';
+    if (_rtDeviceFilter && _dev !== _rtDeviceFilter) return false;
+    if (_rtSearch) {
+      const _q = _rtSearch.toLowerCase();
+      if (!(rt.name || '').toLowerCase().includes(_q) &&
+          !(rt.device_name || '').toLowerCase().includes(_q) &&
+          !(rt.version || '').toLowerCase().includes(_q) &&
+          !(rt.mode || '').toLowerCase().includes(_q)) return false;
+    }
+    return true;
+  });
+  // 只更新表格行容器 + 计数
+  const rowsEl = document.getElementById('obs-runtime-rows');
+  const countEl = document.getElementById('obs-runtime-count');
+  if (countEl) countEl.textContent = _filteredRuntimes.length + '/' + runtimes.length;
+  if (!rowsEl) return;
+  let html = '';
+  if (_filteredRuntimes.length) {
+    html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
+    _filteredRuntimes.forEach(rti => {
+      const rid = rti.id;
+      const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
+      const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
+      const running = rti.running || 0;
+      const maxC = rti.max_concurrent || 0;
+      const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
+      const modeTag = rti.mode === 'local' ? '<span class="tg tg-ch">' + I18N.t('observability.mode_local') + '</span>' : '<span class="tg tg-c">' + I18N.t('observability.mode_remote') + '</span>';
+      const avgDur = rti.avg_duration || 0;
+      const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
+      const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
+      const ps = rti.probe_status || 'pending';
+      const pl = rti.probe_latency || 0;
+      const pe = rti.probe_error || '';
+      const probeIcon = { ok: '✅', fail: '❌', skip: '⏭', pending: '⏳' }[ps] || '⏳';
+      const probeColor = ps === 'ok' ? 'var(--g)' : ps === 'fail' ? 'var(--r)' : 'var(--t3)';
+      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? I18N.t('observability.probe_pending') : ps === 'skip' ? I18N.t('observability.probe_skip') : I18N.t('observability.probe_fail');
+      const probeTitle = pe ? ' title="' + pe.replace(/"/g, '&quot;') + '"' : '';
+      html += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
+        <td>${dot} <b>${rti.name}</b></td>
+        <td><span id="rt-${rid}-version" class="ts t3">${rti.version || '-'}</span></td>
+        <td><span id="rt-${rid}-health" style="color:${hc};font-weight:600">${I18N.t('observability.' + (rti.health || 'offline'))}</span></td>
+        <td><span id="rt-${rid}-load" style="color:${loadColor}">${running}/${maxC}</span></td>
+        <td><span id="rt-${rid}-dur" style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
+        <td><span${probeTitle} style="color:${probeColor}">${probeIcon} ${probeStr}</span></td>
+        <td>${modeTag}</td>
+        <td><span id="rt-${rid}-device" class="ts t3">${rti.device_name || '-'}</span></td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+  } else {
+    html += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
+  }
+  rowsEl.innerHTML = html;
 }
 
 function renderObsContent(isAutoRefresh) {
@@ -230,10 +294,41 @@ function renderOverview(ops, rt, mt) {
 
   // Runtime 表格（行带 id，各 td 带 id 供局部更新）
   const runtimes = r.list || [];
+  // 按设备名排序
+  runtimes.sort((a, b) => (a.device_name || '').localeCompare(b.device_name || ''));
+  // 设备列表（去重，供下拉框）
+  const _devices = [...new Set(runtimes.map(rt => rt.device_name || '-').filter(d => d && d !== '-'))];
+  // 应用筛选
+  const _filteredRuntimes = runtimes.filter(rt => {
+    const _dev = rt.device_name || '';
+    if (_rtDeviceFilter && _dev !== _rtDeviceFilter) return false;
+    if (_rtSearch) {
+      const _q = _rtSearch.toLowerCase();
+      if (!(rt.name || '').toLowerCase().includes(_q) &&
+          !(rt.device_name || '').toLowerCase().includes(_q) &&
+          !(rt.version || '').toLowerCase().includes(_q) &&
+          !(rt.mode || '').toLowerCase().includes(_q)) return false;
+    }
+    return true;
+  });
   let runtimeTable = '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_engine') + '</div>';
   if (runtimes.length) {
-    runtimeTable = '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
-    runtimes.forEach(rti => {
+    // 筛选栏
+    let _filterBar = '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">';
+    _filterBar += '<input type="text" placeholder="' + I18N.t('observability.search_engine_placeholder') + '" value="' + _rtSearch.replace(/"/g,'&quot;') + '" oninput="_rtSearch=this.value;_rerenderRuntimeTable()" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
+    _filterBar += '<select onchange="_rtDeviceFilter=this.value;_rerenderRuntimeTable()" style="padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
+    _filterBar += '<option value="">' + I18N.t('observability.all_devices') + '</option>';
+    _devices.forEach(d => {
+      _filterBar += '<option value="' + d + '"' + (_rtDeviceFilter === d ? ' selected' : '') + '>' + d + '</option>';
+    });
+    _filterBar += '</select>';
+    _filterBar += '<span class="ts t3" id="obs-runtime-count">' + _filteredRuntimes.length + '/' + runtimes.length + '</span>';
+    _filterBar += '</div>';
+    runtimeTable = _filterBar;
+    runtimeTable += '<div id="obs-runtime-rows">';
+    if (_filteredRuntimes.length) {
+    runtimeTable += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
+    _filteredRuntimes.forEach(rti => {
       const rid = rti.id;
       const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
       const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
@@ -264,6 +359,10 @@ function renderOverview(ops, rt, mt) {
       </tr>`;
     });
     runtimeTable += '</tbody></table></div>';
+    } else {
+      runtimeTable += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
+    }
+    runtimeTable += '</div>';
   }
 
   return `
@@ -278,7 +377,7 @@ function renderOverview(ops, rt, mt) {
       ${workerCards}
     </div>
     ${section(I18N.t('observability.runtime_engine'), I18N.t('observability.runtime_subtitle', {online: (r.online || 0), total: (r.total || 0)}))}
-    ${runtimeTable}
+    <div id="obs-runtime-table">${runtimeTable}</div>
   `;
 }
 
@@ -581,13 +680,13 @@ function renderTasksTab(ops, rt, mt) {
   const repoFullName = repo && repo.fullName ? repo.fullName : '';
   // 使用缓存的 timeline 数据（同仓库且 30s 内）
   if (_timelineCache && _timelineCache.repo === repoFullName && (Date.now() - _timelineCache.ts) < 30000) {
-    setTimeout(() => renderTimelineList(document.getElementById('obs-timeline-container'), _timelineCache.issues), 0);
+    setTimeout(() => renderTimelineList(document.getElementById('obs-timeline-container'), _timelineCache.issues, _timelineCache.repoKey), 0);
   } else {
     const repoParam = repoFullName ? '?repo=' + encodeURIComponent(repoFullName) : '';
     fetch('/api/dashboard/ops/timeline' + repoParam).then(r => r.json()).then(d => {
-      _timelineCache = { repo: repoFullName, ts: Date.now(), issues: d.issues || [] };
+      _timelineCache = { repo: repoFullName, ts: Date.now(), issues: d.issues || [], repoKey: d.repoKey || '' };
       _timelineIssues = d.issues || [];
-      renderTimelineList(document.getElementById('obs-timeline-container'), d.issues || []);
+      renderTimelineList(document.getElementById('obs-timeline-container'), d.issues || [], d.repoKey || '');
     }).catch(e => {
       const c = document.getElementById('obs-timeline-container');
       if (c) c.innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
@@ -627,6 +726,7 @@ function _buildSequence(iss) {
   const lines = ['sequenceDiagram', 'autonumber'];
   for (const a of agents) lines.push('    participant ' + _mermaidId(a) + ' as ' + a);
   const statuses = [];
+  const evTypes = [];  // 'msg' or 'note' — 用于 _bindMermaidClicks 精确映射
   let prev = null;
   for (const ev of iss.events) {
     const a = _mermaidId(ev.agentType || '—');
@@ -636,14 +736,16 @@ function _buildSequence(iss) {
       // 跨 agent 交互：prev -> a
       lines.push('    ' + prev + '->>' + a + ': ' + label);
       statuses.push(ev.status);
+      evTypes.push('msg');
     } else {
       // 同 agent 连续事件或首个事件：用 Note 标注（不挤在一行）
       lines.push('    Note over ' + a + ': ' + label);
       statuses.push(ev.status);
+      evTypes.push('note');
     }
     prev = a;
   }
-  return { text: lines.join('\n'), statuses };
+  return { text: lines.join('\n'), statuses, evTypes };
 }
 
 function _applySequenceColors(svg, statuses) {
@@ -674,12 +776,14 @@ async function _renderMermaid(box, iss) {
   try {
     const mmd = await _getMermaid();
     const uid = 'mmd-' + Math.random().toString(36).slice(2, 10);
-    const { text, statuses } = _buildSequence(iss);
+    const { text, statuses, evTypes } = _buildSequence(iss);
     // mermaid v11: 先 parse 验证语法，再 render
     try { await mmd.parse(text); } catch(pe) { /* parse 失败也尝试 render */ }
     const result = await mmd.render(uid, text);
     const svg = result.svg || result;
     box.innerHTML = _applySequenceColors(svg, statuses);
+    // 给每个消息/Note 绑定点击事件 → 打开对应事件的日志弹窗
+    _bindMermaidClicks(box, iss, evTypes);
   } catch (err) {
     box.innerHTML = '<div style="padding:12px;color:var(--r);font-size:12px">' + I18N.t('observability.sequence_render_failed', {msg: (err.message || err)}) + '</div>';
     // 显示原始 mermaid 文本供调试
@@ -688,19 +792,94 @@ async function _renderMermaid(box, iss) {
   }
 }
 
-function renderTimelineList(container, issues) {
+function _bindMermaidClicks(box, iss, evTypes) {
+  // mermaid 渲染时 message 和 Note 分组排列（不是交替的），
+  // 需要按 evTypes 分别匹配 messageText 和 noteText
+  const events = iss.events || [];
+  if (!events.length) return;
+  const svg = box.querySelector('svg');
+  if (!svg) return;
+  // 构建 device_name → IP 映射（从 ops/overview workers 数据）
+  const _devIpMap = {};
+  try {
+    const _workers = (_obsData.ops && _obsData.ops.workers && _obsData.ops.workers.list) || [];
+    _workers.forEach(w => {
+      if (w.device_name) _devIpMap[w.device_name] = w.last_ip || '';
+    });
+  } catch(e) {}
+  // 分别取 message 和 note 的 text 元素
+  const msgTexts = Array.from(svg.querySelectorAll('text.messageText'));
+  const noteTexts = Array.from(svg.querySelectorAll('text.noteText'));
+  // evTypes 标记每个事件是 'msg' 还是 'note'，分别用独立计数器匹配
+  let msgIdx = 0, noteIdx = 0;
+  events.forEach((ev, i) => {
+    const type = evTypes[i] || 'msg';
+    let txt = null;
+    if (type === 'msg') {
+      txt = msgTexts[msgIdx];
+      msgIdx++;
+    } else {
+      txt = noteTexts[noteIdx];
+      noteIdx++;
+    }
+    if (!txt) return;
+    // tooltip：引擎名 + IP（SVG 用 <title> 子元素显示原生 tooltip）
+    const _eng = ev.engine || '';
+    const _devName = _eng.split('-').slice(1).join('-');  // opencode-ecs-... → ecs-...
+    const _ip = _devIpMap[_devName] || '';
+    const _tooltip = _eng + (_ip ? ' (' + _ip + ')' : '');
+    if (_tooltip) {
+      const _t = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      _t.textContent = _tooltip;
+      txt.appendChild(_t);
+    }
+    if (!ev.taskId) return;
+    txt.style.cursor = 'pointer';
+    txt.style.textDecoration = 'underline';
+    txt.style.fill = 'var(--a)';
+    const enc = encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''}));
+    txt.addEventListener('click', function(e) {
+      e.stopPropagation();
+      openTaskLogModal(ev.taskId, enc);
+    });
+  });
+}
+
+function renderTimelineList(container, issues, repoKey) {
   if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_task_events') + '</div>'; return; }
   _timelineIssues = issues;
+  // 构建 device_name → IP 映射（从 ops/overview workers 数据）
+  const _devIpMap = {};
+  try {
+    const _workers = (_obsData.ops && _obsData.ops.workers && _obsData.ops.workers.list) || [];
+    _workers.forEach(w => { if (w.device_name) _devIpMap[w.device_name] = w.last_ip || ''; });
+  } catch(e) {}
+  function _engineWithIp(engine) {
+    if (!engine) return '-';
+    const _devName = engine.split('-').slice(1).join('-');
+    const _ip = _devIpMap[_devName];
+    return _ip ? engine + ' (' + _ip + ')' : engine;
+  }
+  // 构建 GitCode issue URL：repoKey=gitcode:requiredsa/hello-flask → https://gitcode.com/requiredsa/hello-flask/issues/N
+  const _repoPath = (repoKey || '').replace(/^gitcode:/, '');
+  function _issueUrl(issueId) {
+    const num = (issueId || '').replace(/^#/, '');
+    return _repoPath && num ? 'https://gitcode.com/' + _repoPath + '/issues/' + num : '';
+  }
   let html = section(I18N.t('observability.task_list'), I18N.t('observability.task_list_subtitle', {count: issues.length}));
   html += '<div style="display:flex;flex-direction:column;gap:0">';
   issues.forEach(iss => {
     const expanded = _expandedIssues.has(iss.issueId);
     const hasFailed = iss.events.some(e => e.status === 'failed');
     const statusBadge = hasFailed ? '<span style="color:var(--r);font-size:10px;font-weight:600">' + I18N.t('observability.has_failure') + '</span>' : '<span style="color:var(--g);font-size:10px;font-weight:600">' + I18N.t('observability.normal') + '</span>';
+    const _url = _issueUrl(iss.issueId);
+    const _issueLink = _url
+      ? '<a href="' + _url + '" target="_blank" onclick="event.stopPropagation()" style="font-size:13px;font-weight:700;color:var(--a);text-decoration:none">' + iss.issueId + ' \u2197</a>'
+      : '<b style="font-size:13px">' + iss.issueId + '</b>';
     html += '<div style="border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:8px">';
     html += '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;background:var(--c)" onclick="toggleIssueTimeline(\'' + iss.issueId + '\')">';
     html += '<span style="font-size:12px">' + (expanded ? '\u25be' : '\u25b8') + '</span>';
-    html += '<b style="font-size:13px">' + iss.issueId + '</b>';
+    html += _issueLink;
     html += iss.title ? '<span class="ts t3" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + iss.title + '</span>' : '<span style="flex:1"></span>';
     html += '<span class="ts t3">' + I18N.t('observability.events_count', {count: iss.eventCount}) + '</span>' + statusBadge;
     html += '<span class="ts t3">' + (iss.lastAt || '').substring(0,16) + '</span>';
@@ -715,12 +894,12 @@ function renderTimelineList(container, issues) {
     html += '<div id="tl-diagram-' + iss.issueId + '" class="tl-mmd" data-iid="' + iss.issueId + '" style="overflow-x:auto;' + (_issueViewMode[iss.issueId] === 'events' ? 'display:none' : '') + '"></div>';
     // 事件列表容器
     html += '<div id="tl-events-' + iss.issueId + '" style="' + (_issueViewMode[iss.issueId] !== 'events' ? 'display:none' : '') + '">';
-    html += '<table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>' + I18N.t('observability.col_event') + '</th><th>Agent</th><th>Skill</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
+    html += '<table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>' + I18N.t('observability.col_event') + '</th><th>Agent</th><th>' + I18N.t('observability.col_engine') + '</th><th>Skill</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
     html += iss.events.map(ev => {
       const enc = ev.taskId ? encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''})) : '';
       const clickable = ev.taskId ? 'cursor:pointer' : '';
       const onclick = ev.taskId ? " onclick=\"openTaskLogModal('" + ev.taskId + "','" + enc + "')\"" : '';
-      return '<tr style="' + clickable + '"' + onclick + '><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + (ev.createdAt||'').substring(0,19) + '</td></tr>';
+      return '<tr style="' + clickable + '"' + onclick + '><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + _engineWithIp(ev.engine) + '</td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + (ev.createdAt||'').substring(0,19) + '</td></tr>';
     }).join('');
     html += '</tbody></table></div>';
     html += '</div></div>';
@@ -855,9 +1034,8 @@ function openRuntimeSessionModal(rtId, rtName) {
     '</div>';
   document.body.appendChild(modal);
 
-  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
-  const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
-  API.get('/runtime/runtimes/' + rtId + '/sessions' + repoParam).then(d => {
+  // 系统监控是全局运维视图，引擎 session 查询不应按当前选中仓库过滤
+  API.get('/runtime/runtimes/' + rtId + '/sessions').then(d => {
     renderSessionList(document.getElementById('rtSessionModalBody'), d.sessions || [], rtName);
   }).catch(e => {
     document.getElementById('rtSessionModalBody').innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';

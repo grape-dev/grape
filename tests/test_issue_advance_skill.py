@@ -2,7 +2,7 @@
 import os
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
-SKILL = os.path.join(ROOT, "skills", "issue-advance", "SKILL.md")
+SKILL = os.path.join(ROOT, "skills", "issue", "issue-advance", "SKILL.md")
 
 
 def _skill():

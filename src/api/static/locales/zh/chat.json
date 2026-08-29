@@ -67,6 +67,7 @@
   "app_secret": "App Secret",
   "agents": "Agent",
   "thinking": "思考中...",
+  "querying": "查询中",
   "backend": "后端",
   "placeholder": "问我任何问题...",
   "send": "发送"

@@ -47,7 +47,7 @@ class TestEnqueue:
         tid = service.enqueue_task(
             agent_session_id="sess-1", runtime_id=1, prompt="p", event_seq=1,
             issue_id="#5", repo_key="test/repo", agent_type="issue",
-            skill="issue", skill_path=os.path.join(SKILLS_DIR, "issue", "SKILL.md"),
+            skill="issue", skill_path=os.path.join(SKILLS_DIR, "issue", "issue", "SKILL.md"),
             env_extra={"K": "v"},
         )
         t = service.get_task(tid)

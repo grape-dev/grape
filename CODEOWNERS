@@ -9,16 +9,11 @@ src/                       @Jason7602
 configs/                   @Jason7602
 
 # ===== 技能库 =====
-skills/devops-event-ops/   @Jason7602
-skills/issue/              @Jason7602
-skills/pr/                 @Jason7602
-skills/implementation/     @Jason7602
-skills/chat/               @Jason7602
-skills/build-debug/        @Jason7602
-skills/deploy-guard/       @Jason7602
-skills/incident-triage/    @Jason7602
-skills/changelog-gen/      @Jason7602
-skills/agent/              @Jason7602
+# 官方技能已拆分至独立仓库 grape-dev/grape-skills（skills/<agent_type>/<skill>），
+# 本仓库 skills/ 仅含文档（README.md / SKILL-SPEC.md）与运行时目录（custom/、repo/）
+skills/README.md                 @Jason7602
+skills/SKILL-SPEC.md             @Jason7602
+scripts/sync_skills.sh           @Jason7602
 
 # ===== 基础设施 =====
 cloudflare/                @Jason7602

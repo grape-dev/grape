@@ -67,6 +67,7 @@
   "app_secret": "App Secret",
   "agents": "Agents",
   "thinking": "Thinking...",
+  "querying": "Querying",
   "backend": "Backend",
   "placeholder": "Ask me anything...",
   "send": "Send"
