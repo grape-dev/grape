@@ -111,7 +111,9 @@
                       <td class="t3">{{ r.taskCount > 0 ? Math.round(r.completed * 1000 / r.taskCount) / 10 + '%' : '—' }}</td>
                     </tr>
                     <tr v-if="expandedRepos.includes(r.repoKey)" v-for="iss in issuesByRepo(r.repoKey)" :key="iss.issueId">
-                      <td style="padding-left:28px;font-size:12px">{{ iss.issueId }}</td>
+                      <td style="padding-left:28px;font-size:12px">
+                        <a :href="`https://gitcode.com/${iss.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none" @click.stop>{{ iss.issueId }}</a>
+                      </td>
                       <td class="t3">{{ iss.taskCount }}</td>
                       <td class="t3">—</td>
                       <td class="t3" style="color:#34c759">{{ iss.completed }}</td>
@@ -139,7 +141,7 @@
                 <div class="timeline-content">
                   <div class="timeline-header">
                     <span class="timeline-repo">{{ t.repoName }}</span>
-                    <span v-if="t.issueId" class="timeline-issue">{{ t.issueId }}</span>
+                    <a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" class="timeline-issue" @click.stop>{{ t.issueId }}</a>
                     <span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : '进行中' }}</span>
                   </div>
                   <div class="timeline-meta">
@@ -266,6 +268,7 @@ onMounted(() => load())
 .timeline-content { flex: 1; min-width: 0; }
 .timeline-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .timeline-repo { font-size: 13px; font-weight: 500; color: var(--text-primary); }
-.timeline-issue { font-size: 11px; color: var(--primary); background: rgba(0,107,255,0.06); padding: 1px 6px; border-radius: 6px; }
+.timeline-issue { font-size: 11px; color: var(--primary); background: rgba(0,107,255,0.06); padding: 1px 6px; border-radius: 6px; text-decoration: none; cursor: pointer; }
+.timeline-issue:hover { background: rgba(0,107,255,0.12); }
 .timeline-meta { display: flex; gap: 12px; margin-top: 2px; font-size: 11px; }
 </style>
