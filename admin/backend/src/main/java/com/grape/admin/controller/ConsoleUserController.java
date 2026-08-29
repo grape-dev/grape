@@ -364,120 +364,128 @@ public class ConsoleUserController {
                                           @RequestParam(defaultValue = "5") int size) {
         Map<String, Object> result = new LinkedHashMap<>();
 
-        String joinSql = " FROM agent_tasks t" +
-                " INNER JOIN managed_repos m ON t.repo_key = m.repo_key" +
-                " INNER JOIN user_accounts u ON u.username = m.repo_owner" +
-                " WHERE u.id=?" +
-                " AND t.issue_id IS NOT NULL AND t.issue_id<>''";
-        List<Object> paramList = new ArrayList<>();
-        paramList.add(id);
-        if (repoKey != null && !repoKey.isEmpty()) {
-            joinSql += " AND m.repo_key=?";
-            paramList.add(repoKey);
+        // 1. 查该用户关联的所有仓库 repo_key（对齐健康中心，加用户限制）
+        List<String> userRepoKeys = new ArrayList<>();
+        try {
+            userRepoKeys = grapeJdbc.queryForList(
+                "SELECT DISTINCT t.repo_key FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
+                "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>''", String.class, id);
+        } catch (Exception e) { /* ignore */ }
+
+        if (userRepoKeys.isEmpty()) {
+            result.put("content", List.of());
+            result.put("totalElements", 0);
+            result.put("totalPages", 0);
+            result.put("page", page);
+            result.put("size", size);
+            return result;
         }
-        Object[] baseParams = paramList.toArray();
 
-        // Issue 总数
-        long total = 0;
-        try {
-            total = grapeJdbc.queryForObject(
-                "SELECT COUNT(DISTINCT t.issue_id)" + joinSql, Long.class, baseParams);
-        } catch (Exception e) { /* ignore */ }
+        // 2. 查 events（对齐健康中心：直接查 events 表，Java 里分组）
+        StringBuilder where = new StringBuilder(" WHERE issue_id IS NOT NULL AND issue_id<>''");
+        List<Object> params = new ArrayList<>();
+        // 限制用户关联的仓库
+        if (userRepoKeys.size() == 1) {
+            where.append(" AND repo_key=?");
+            params.add(userRepoKeys.get(0));
+        } else {
+            where.append(" AND repo_key IN (");
+            for (int i = 0; i < userRepoKeys.size(); i++) {
+                if (i > 0) where.append(",");
+                where.append("?");
+                params.add(userRepoKeys.get(i));
+            }
+            where.append(")");
+        }
+        // 仓库筛选
+        if (repoKey != null && !repoKey.isEmpty()) {
+            where.append(" AND repo_key=?");
+            params.add(repoKey);
+        }
 
-        // Issue 分页列表（GROUP BY issue_id，按最近活动时间倒序）
-        List<Map<String, Object>> list = new ArrayList<>();
+        List<Map<String, Object>> rows;
         try {
-            String sql = "SELECT t.issue_id, " +
-                    "COUNT(*) as task_count, " +
-                    "SUM(CASE WHEN t.status='queued' THEN 1 ELSE 0 END) as queued, " +
-                    "SUM(CASE WHEN t.status='dispatched' THEN 1 ELSE 0 END) as dispatched, " +
-                    "SUM(CASE WHEN t.status='running' THEN 1 ELSE 0 END) as running, " +
-                    "SUM(CASE WHEN t.status='completed' THEN 1 ELSE 0 END) as completed, " +
-                    "SUM(CASE WHEN t.status='failed' THEN 1 ELSE 0 END) as failed, " +
-                    "SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
-                    "SUM(CASE WHEN t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE) THEN 1 ELSE 0 END) as stuck, " +
-                    "MAX(t.started_at) as last_task_at, " +
-                    "(SELECT COUNT(*) FROM events e WHERE e.issue_id = t.issue_id AND e.repo_key = t.repo_key) as event_count, " +
-                    "MAX(m.full_name) as full_name " +
-                    joinSql +
-                    " GROUP BY t.issue_id" +
-                    " ORDER BY last_task_at DESC LIMIT ? OFFSET ?";
-            List<Object> queryParams = new ArrayList<>(paramList);
-            queryParams.add(size);
-            queryParams.add(page * size);
-            Object[] params = queryParams.toArray();
-            // 批量查 Issue 的 payload（对齐健康中心遍历方式）
-            Map<String, String> issueTitleMap = new java.util.HashMap<>();
-            try {
-                String payloadSql = "SELECT DISTINCT e.issue_id, e.payload FROM events e " +
-                    "WHERE e.issue_id IS NOT NULL AND e.issue_id<>'' " +
-                    "AND e.payload LIKE '%object_attributes%' ORDER BY e.seq";
-                if (repoKey != null && !repoKey.isEmpty()) {
-                    payloadSql = "SELECT DISTINCT e.issue_id, e.payload FROM events e " +
-                        "WHERE e.repo_key=? AND e.issue_id IS NOT NULL AND e.issue_id<>'' " +
-                        "AND e.payload LIKE '%object_attributes%' ORDER BY e.seq";
-                    grapeJdbc.query(payloadSql, rs2 -> {
-                        String iid = rs2.getString("issue_id");
-                        if (issueTitleMap.containsKey(iid)) return;
-                        String payload = rs2.getString("payload");
-                        if (payload == null || payload.isEmpty()) return;
-                        try {
-                            com.fasterxml.jackson.databind.ObjectMapper om2 = new com.fasterxml.jackson.databind.ObjectMapper();
-                            com.fasterxml.jackson.databind.JsonNode attrs = om2.readTree(payload).path("object_attributes");
-                            if (!attrs.isMissingNode()) {
-                                String title = attrs.path("title").asText("");
-                                if (!title.isEmpty()) {
-                                    issueTitleMap.put(iid, title.length() > 80 ? title.substring(0, 80) + "..." : title);
-                                }
-                            }
-                        } catch (Exception e2) { /* ignore */ }
-                    }, repoKey);
-                } else {
-                    grapeJdbc.query(payloadSql, (rs2, rowNum) -> {
-                        String iid = rs2.getString("issue_id");
-                        if (issueTitleMap.containsKey(iid)) return null;
-                        String payload = rs2.getString("payload");
-                        if (payload == null || payload.isEmpty()) return null;
-                        try {
-                            com.fasterxml.jackson.databind.ObjectMapper om2 = new com.fasterxml.jackson.databind.ObjectMapper();
-                            com.fasterxml.jackson.databind.JsonNode attrs = om2.readTree(payload).path("object_attributes");
-                            if (!attrs.isMissingNode()) {
-                                String title = attrs.path("title").asText("");
-                                if (!title.isEmpty()) {
-                                    issueTitleMap.put(iid, title.length() > 80 ? title.substring(0, 80) + "..." : title);
-                                }
-                            }
-                        } catch (Exception e2) { /* ignore */ }
-                        return null;
-                    });
+            rows = grapeJdbc.queryForList(
+                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload, repo_key"
+                + " FROM events" + where + " ORDER BY created_at", params.toArray());
+        } catch (Exception e) {
+            rows = List.of();
+        }
+
+        // 3. 按 issue_id 分组（对齐健康中心）
+        Map<String, List<Map<String, Object>>> group = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String issueId = (String) row.get("issue_id");
+            group.computeIfAbsent(issueId, k -> new ArrayList<>()).add(row);
+        }
+
+        // 4. 构建结果（对齐健康中心）
+        com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+        List<Map<String, Object>> allIssues = new ArrayList<>();
+        for (Map.Entry<String, List<Map<String, Object>>> e : group.entrySet()) {
+            Map<String, Object> g = new LinkedHashMap<>();
+            g.put("issueId", e.getKey());
+            List<Map<String, Object>> evs = e.getValue();
+            // repoName 从 repo_key 提取
+            String rk = (String) evs.get(0).get("repo_key");
+            String repoName = rk != null ? rk.replaceFirst("^gitcode:", "") : "";
+            g.put("repoName", repoName);
+            // 从 payload 提取 title
+            String issueTitle = "";
+            for (Map<String, Object> ev : evs) {
+                if (issueTitle.isEmpty()) {
+                    issueTitle = extractIssueTitle(ev.get("payload"), om);
                 }
-            } catch (Exception e) { /* ignore */ }
-            grapeJdbc.query(sql, rs -> {
-                Map<String, Object> r = new LinkedHashMap<>();
-                String issueId = rs.getString("issue_id");
-                r.put("issueId", issueId);
-                r.put("repoName", rs.getString("full_name"));
-                r.put("issueTitle", issueTitleMap.getOrDefault(issueId, ""));
-                r.put("taskCount", rs.getInt("task_count"));
-                r.put("eventCount", rs.getInt("event_count"));
-                r.put("completed", rs.getInt("completed"));
-                r.put("failed", rs.getInt("failed"));
-                r.put("queued", rs.getInt("queued"));
-                r.put("dispatched", rs.getInt("dispatched"));
-                r.put("running", rs.getInt("running"));
-                r.put("cancelled", rs.getInt("cancelled"));
-                r.put("stuck", rs.getInt("stuck"));
-                r.put("lastTaskAt", rs.getString("last_task_at"));
-                list.add(r);
-            }, params);
-        } catch (Exception e) { /* ignore */ }
+            }
+            g.put("issueTitle", issueTitle);
+            g.put("eventCount", evs.size());
+            g.put("lastTaskAt", evs.get(evs.size() - 1).get("created_at"));
+            // 统计失败数
+            int failed = 0;
+            for (Map<String, Object> ev : evs) {
+                if ("failed".equals(ev.get("status"))) failed++;
+            }
+            g.put("failed", failed);
+            allIssues.add(g);
+        }
 
-        result.put("content", list);
+        // 5. 分页（按 lastTaskAt 倒序后分页）
+        allIssues.sort((a, b) -> {
+            String aT = (String) a.get("lastTaskAt");
+            String bT = (String) b.get("lastTaskAt");
+            if (aT == null) aT = "";
+            if (bT == null) bT = "";
+            return bT.compareTo(aT);
+        });
+        int total = allIssues.size();
+        int from = Math.min(page * size, total);
+        int to = Math.min(from + size, total);
+        List<Map<String, Object>> pagedIssues = allIssues.subList(from, to);
+
+        result.put("content", pagedIssues);
         result.put("totalElements", total);
         result.put("totalPages", (total + size - 1) / size);
         result.put("page", page);
         result.put("size", size);
         return result;
+    }
+
+    private String extractIssueTitle(Object payload, com.fasterxml.jackson.databind.ObjectMapper om) {
+        if (payload == null) return "";
+        try {
+            String json = payload.toString();
+            com.fasterxml.jackson.databind.JsonNode node = om.readTree(json);
+            com.fasterxml.jackson.databind.JsonNode attrs = node.path("object_attributes");
+            if (!attrs.isMissingNode()) {
+                String title = attrs.path("title").asText("");
+                if (!title.isEmpty()) {
+                    return title.length() > 80 ? title.substring(0, 80) + "..." : title;
+                }
+            }
+        } catch (Exception e) { /* ignore */ }
+        return "";
     }
 
     @PostMapping("/{id}/reset-token")
