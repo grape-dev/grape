@@ -25,12 +25,12 @@ function renderObservability() {
         </div>
       </div>
       <div class="stabs" style="padding:0 20px;border-bottom:1px solid var(--b)">
-        <a class="${_obsTab==='overview'?'ac':''}" onclick="switchObsTab('overview',event)">概览</a>
-        <a class="${_obsTab==='tasks'?'ac':''}" onclick="switchObsTab('tasks',event)">任务</a>
-        <a class="${_obsTab==='anomaly'?'ac':''}" onclick="switchObsTab('anomaly',event)">异常任务</a>
-        <a class="${_obsTab==='errorlogs'?'ac':''}" onclick="switchObsTab('errorlogs',event)">错误日志</a>
+        <a class="${_obsTab==='overview'?'ac':''}" onclick="switchObsTab('overview',event)">' + I18N.t('observability.tab.overview') + '</a>
+        <a class="${_obsTab==='tasks'?'ac':''}" onclick="switchObsTab('tasks',event)">' + I18N.t('observability.tab.tasks') + '</a>
+        <a class="${_obsTab==='anomaly'?'ac':''}" onclick="switchObsTab('anomaly',event)">' + I18N.t('observability.tab.anomaly') + '</a>
+        <a class="${_obsTab==='errorlogs'?'ac':''}" onclick="switchObsTab('errorlogs',event)">' + I18N.t('observability.tab.errorlogs') + '</a>
       </div>
-      <div id="obsContent" style="padding:20px"><div class="loading">加载中...</div></div>
+      <div id="obsContent" style="padding:20px">'<div class="loading">' + I18N.t('common.loading') + '</div>'</div>
     </div>
   `;
   refreshObs();
@@ -74,7 +74,7 @@ function refreshObs(isAutoRefresh) {
   if (!c) return;
   // 静默刷新（定时器触发）不显示"加载中"，保留旧数据直到新数据到达
   if (!isAutoRefresh && !_obsRendered) {
-    c.innerHTML = '<div class="loading">加载中...</div>';
+    c.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
   }
   // 手动刷新（非自动）时触发引擎探测（60s 防抖由后端控制）
   if (!isAutoRefresh) {
@@ -121,7 +121,7 @@ function _rerenderRuntimeTable() {
   if (!rowsEl) return;
   let html = '';
   if (_filteredRuntimes.length) {
-    html += '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>探测</th><th>模式</th><th>设备</th></tr></thead><tbody>';
+    html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>探测</th><th>模式</th><th>设备</th></tr></thead><tbody>';
     _filteredRuntimes.forEach(rti => {
       const rid = rti.id;
       const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
@@ -138,7 +138,7 @@ function _rerenderRuntimeTable() {
       const pe = rti.probe_error || '';
       const probeIcon = { ok: '✅', fail: '❌', skip: '⏭', pending: '⏳' }[ps] || '⏳';
       const probeColor = ps === 'ok' ? 'var(--g)' : ps === 'fail' ? 'var(--r)' : 'var(--t3)';
-      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? '等待' : ps === 'skip' ? '跳过' : '失败';
+      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? I18N.t('observability.checking') : ps === 'skip' ? I18N.t('observability.skip') : I18N.t('observability.failed');
       const probeTitle = pe ? ' title="' + pe.replace(/"/g, '&quot;') + '"' : '';
       html += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
         <td>${dot} <b>${rti.name}</b></td>
@@ -153,7 +153,7 @@ function _rerenderRuntimeTable() {
     });
     html += '</tbody></table></div>';
   } else {
-    html += '<div class="ts t2" style="padding:12px">无匹配引擎</div>';
+    html += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
   }
   rowsEl.innerHTML = html;
 }
@@ -311,7 +311,7 @@ function renderOverview(ops, rt, mt) {
     }
     return true;
   });
-  let runtimeTable = '<div class="ts t2" style="padding:12px">无引擎</div>';
+  let runtimeTable = '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_engine') + '</div>';
   if (runtimes.length) {
     // 筛选栏
     let _filterBar = '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">';
@@ -327,7 +327,7 @@ function renderOverview(ops, rt, mt) {
     runtimeTable = _filterBar;
     runtimeTable += '<div id="obs-runtime-rows">';
     if (_filteredRuntimes.length) {
-    runtimeTable += '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>探测</th><th>模式</th><th>设备</th></tr></thead><tbody>';
+    runtimeTable += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>探测</th><th>模式</th><th>设备</th></tr></thead><tbody>';
     _filteredRuntimes.forEach(rti => {
       const rid = rti.id;
       const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
@@ -345,7 +345,7 @@ function renderOverview(ops, rt, mt) {
       const pe = rti.probe_error || '';
       const probeIcon = { ok: '✅', fail: '❌', skip: '⏭', pending: '⏳' }[ps] || '⏳';
       const probeColor = ps === 'ok' ? 'var(--g)' : ps === 'fail' ? 'var(--r)' : 'var(--t3)';
-      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? '等待' : ps === 'skip' ? '跳过' : '失败';
+      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? I18N.t('observability.checking') : ps === 'skip' ? I18N.t('observability.skip') : I18N.t('observability.failed');
       const probeTitle = pe ? ' title="' + pe.replace(/"/g, '&quot;') + '"' : '';
       runtimeTable += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
         <td>${dot} <b>${rti.name}</b></td>
@@ -360,23 +360,23 @@ function renderOverview(ops, rt, mt) {
     });
     runtimeTable += '</tbody></table></div>';
     } else {
-      runtimeTable += '<div class="ts t2" style="padding:12px">无匹配引擎</div>';
+      runtimeTable += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
     }
     runtimeTable += '</div>';
   }
 
   return `
-    ${section('Worker 监控', `${w.online || 0}/${w.total || 0} 在线`)}
+    ${section(I18N.t('observability.worker_monitor'), (w.online || 0) + '/' + (w.total || 0) + ' ' + I18N.t('observability.online'))}
     ${_kpiRowHTML([
-      { label: 'Worker 总数', value: w.total || 0, color: 'var(--a)', id: 'kpi-w-total' },
-      { label: '在线', value: w.online || 0, color: 'var(--g)', id: 'kpi-w-online' },
-      { label: '离线', value: w.offline || 0, color: 'var(--t3)', id: 'kpi-w-offline' },
-      { label: '引擎总数', value: r.total || 0, color: 'var(--pu)', id: 'kpi-r-total' },
+      { label: I18N.t('observability.worker_total'), value: w.total || 0, color: 'var(--a)', id: 'kpi-w-total' },
+      { label: I18N.t('observability.online'), value: w.online || 0, color: 'var(--g)', id: 'kpi-w-online' },
+      { label: I18N.t('observability.offline'), value: w.offline || 0, color: 'var(--t3)', id: 'kpi-w-offline' },
+      { label: I18N.t('observability.engine_total'), value: r.total || 0, color: 'var(--pu)', id: 'kpi-r-total' },
     ])}
     <div id="wk-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:16px">
       ${workerCards}
     </div>
-    ${section('Runtime 引擎', `${r.online || 0}/${r.total || 0} 在线 — 点击引擎查看任务`)}
+    ${section(I18N.t('observability.runtime_engine'), I18N.t('observability.runtime_subtitle', {online: (r.online || 0), total: (r.total || 0)}))}
     <div id="obs-runtime-table">${runtimeTable}</div>
   `;
 }
@@ -500,12 +500,12 @@ function _updateBar(idPrefix, pct) {
 function loadA2aHealth() {
   const container = document.getElementById('obs-a2a-health');
   if (!container) return;
-  container.innerHTML = section('A2A 健康检查', 'server_base_url 可达性') + '<div class="loading">检查中...</div>';
+  container.innerHTML = section(I18N.t('observability.a2a_health'), I18N.t('observability.a2a_health_subtitle')) + '<div class="loading">检查中...</div>';
   fetch('/api/dashboard/ops/a2a-health').then(r => r.json()).then(d => {
     const status = d.reachable
       ? `<span style="color:var(--g)">✓ 可达</span> (${d.latency_ms}ms)`
       : `<span style="color:var(--r)">✗ 不可达</span> ${d.error ? '<span class="ts t3">'+d.error.substring(0,80)+'</span>' : ''}`;
-    let html = section('A2A 健康检查', 'server_base_url 可达性');
+    let html = section(I18N.t('observability.a2a_health'), I18N.t('observability.a2a_health_subtitle'));
     html += kpiRow([
       { label: 'Server URL', value: `<span class="ts" style="font-size:10px">${d.server_base_url}</span>`, color: 'var(--a)' },
       { label: '状态', value: status, color: d.reachable ? 'var(--g)' : 'var(--r)' },
@@ -521,7 +521,7 @@ function loadA2aHealth() {
     }
     container.innerHTML = html;
   }).catch(e => {
-    container.innerHTML = section('A2A 健康检查') + '<div class="error">加载失败: ' + e.message + '</div>';
+    container.innerHTML = section(I18N.t('observability.a2a_health')) + '<div class="error">加载失败: ' + e.message + '</div>';
   });
 }
 
@@ -606,11 +606,11 @@ function loadErrorLogs(container) {
         <button class="bt bt-s ${currentLevel==='WARNING'?'bt-p':'bt-o'}" onclick="_errorLogLevel='WARNING';loadErrorLogs(document.getElementById('obsContent'))">仅 WARNING</button>
       </div>
       <select id="errorLogSource" class="bt bt-s bt-o" style="padding:4px 8px" onchange="_errorLogSource=this.value;loadErrorLogs(document.getElementById('obsContent'))">
-        <option value="">全部来源</option>
+        <option value=""'+' + I18N.t('observability.log_all_sources') + '</option>
       </select>
       <span class="ts t3" id="errorLogCount"></span>
     </div>
-    <div id="errorLogBody"><div class="loading">加载中...</div></div>
+    <div id="errorLogBody">'<div class="loading">' + I18N.t('common.loading') + '</div>'</div>
   `;
   // 加载来源列表
   fetch('/api/dashboard/ops/error-logs/sources').then(r => r.json()).then(d => {
@@ -635,7 +635,7 @@ function loadErrorLogs(container) {
     const bodyEl = document.getElementById('errorLogBody');
     if (countEl) countEl.textContent = entries.length + ' 条（来自 ' + (d.files ? d.files.length : 1) + ' 个日志文件）';
     if (!entries.length) {
-      if (bodyEl) bodyEl.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">无匹配日志</div>';
+      if (bodyEl) bodyEl.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_matching_log') + '</div>';
       return;
     }
     let html = '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.5;border-radius:8px;overflow:hidden;max-height:70vh;overflow-y:auto">';
@@ -643,8 +643,8 @@ function loadErrorLogs(container) {
       const level = e.level || '';
       const color = level === 'ERROR' ? '#dc2828' : '#d49c0f';
       const time = (e.ts || '').substring(0,19);
-      const src = e.source || '主控';
-      const srcTag = src !== '主控' ? '<span style="color:#5b9eff">[' + src + ']</span> ' : '';
+      const src = e.source || I18N.t('observability.source_master');
+      const srcTag = src !== I18N.t('observability.source_master') ? '<span style="color:#5b9eff">[' + src + ']</span> ' : '';
       const rid = e.request_id && e.request_id !== '-' ? ' [' + e.request_id + ']' : '';
       const extra = e.method ? ' ' + e.method + ' ' + (e.path||'') + ' ' + (e.status||'') + ' ' + (e.duration_ms||0) + 'ms' : '';
       html += '<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">' + time + '</span>' + srcTag + rid + ' <span style="color:' + color + '"><b>' + level + '</b></span> <span style="color:#e0e6f0">' + (e.message||'').substring(0,300) + '</span><span style="color:#8d97a8">' + extra + '</span></div>';
@@ -846,7 +846,7 @@ function _bindMermaidClicks(box, iss, evTypes) {
 }
 
 function renderTimelineList(container, issues, repoKey) {
-  if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">暂无任务事件</div>'; return; }
+  if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_task_events') + '</div>'; return; }
   _timelineIssues = issues;
   // 构建 device_name → IP 映射（从 ops/overview workers 数据）
   const _devIpMap = {};
@@ -866,12 +866,12 @@ function renderTimelineList(container, issues, repoKey) {
     const num = (issueId || '').replace(/^#/, '');
     return _repoPath && num ? 'https://gitcode.com/' + _repoPath + '/issues/' + num : '';
   }
-  let html = section('任务列表', issues.length + ' 个 Issue \u2014 点击展开');
+  let html = section(I18N.t('observability.task_list'), I18N.t('observability.task_list_subtitle', {count: issues.length}));
   html += '<div style="display:flex;flex-direction:column;gap:0">';
   issues.forEach(iss => {
     const expanded = _expandedIssues.has(iss.issueId);
     const hasFailed = iss.events.some(e => e.status === 'failed');
-    const statusBadge = hasFailed ? '<span style="color:var(--r);font-size:10px;font-weight:600">\u274c 有失败</span>' : '<span style="color:var(--g);font-size:10px;font-weight:600">\u2713 正常</span>';
+    const statusBadge = hasFailed ? '<span style="color:var(--r);font-size:10px;font-weight:600">\u274c 有失败</span>' : '<span style="color:var(--g);font-size:10px;font-weight:600">\u2713 ' + I18N.t('observability.normal') + '</span>';
     const _url = _issueUrl(iss.issueId);
     const _issueLink = _url
       ? '<a href="' + _url + '" target="_blank" onclick="event.stopPropagation()" style="font-size:13px;font-weight:700;color:var(--a);text-decoration:none">' + iss.issueId + ' \u2197</a>'
@@ -881,20 +881,20 @@ function renderTimelineList(container, issues, repoKey) {
     html += '<span style="font-size:12px">' + (expanded ? '\u25be' : '\u25b8') + '</span>';
     html += _issueLink;
     html += iss.title ? '<span class="ts t3" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + iss.title + '</span>' : '<span style="flex:1"></span>';
-    html += '<span class="ts t3">' + iss.eventCount + ' 事件</span>' + statusBadge;
+    html += '<span class="ts t3">' + iss.eventCount + '' + I18N.t('observability.col_event') + '</span>' + statusBadge;
     html += '<span class="ts t3">' + (iss.lastAt || '').substring(0,16) + '</span>';
     html += '</div>';
     html += '<div id="tl-body-' + iss.issueId + '" style="display:' + (expanded ? 'block' : 'none') + ';padding:10px 14px;border-top:1px solid var(--b)">';
     // 切换按钮
     html += '<div style="display:flex;gap:0;margin-bottom:10px">';
     html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] !== 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'diagram\')">\u{1f4ca} 时序图</button>';
-    html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] === 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'events\')">\u{1f4cb} 事件列表</button>';
+    html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] === 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'events\')">\u{1f4cb} ' + I18N.t('observability.event_list') + '</button>';
     html += '</div>';
     // 时序图容器
     html += '<div id="tl-diagram-' + iss.issueId + '" class="tl-mmd" data-iid="' + iss.issueId + '" style="overflow-x:auto;' + (_issueViewMode[iss.issueId] === 'events' ? 'display:none' : '') + '"></div>';
     // 事件列表容器
     html += '<div id="tl-events-' + iss.issueId + '" style="' + (_issueViewMode[iss.issueId] !== 'events' ? 'display:none' : '') + '">';
-    html += '<table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>引擎</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead><tbody>';
+    html += '<table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>引擎</th><th>Skill</th><th>状态</th><th>耗时</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
     html += iss.events.map(ev => {
       const enc = ev.taskId ? encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''})) : '';
       const clickable = ev.taskId ? 'cursor:pointer' : '';
@@ -1027,10 +1027,10 @@ function openRuntimeSessionModal(rtId, rtName) {
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   modal.innerHTML = '<div class="cd" style="width:760px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
-    '<h3 style="font-size:14px;font-weight:600">' + rtName + ' · Session 列表</h3>' +
-    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtSessionModal\').remove()">✕ 关闭</button>' +
+    '<h3 style="font-size:14px;font-weight:600">' + rtName + ' ' + I18N.t('observability.session_list') + '</h3>' +
+    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtSessionModal\').remove()">' + I18N.t('observability.close') + '</button>' +
     '</div>' +
-    '<div id="rtSessionModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载 session...</div></div>' +
+    '<div id="rtSessionModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">' + I18N.t('observability.loading_session') + '</div></div>' +
     '</div>';
   document.body.appendChild(modal);
 
@@ -1060,7 +1060,7 @@ function renderSessionList(container, sessions, rtName) {
   // 运行中 session 表格（显示 agent + 正在执行的 issue#/seq）
   function runningTable(list) {
     if (!list.length) return '<div class="ts t3" style="padding:8px">无运行中 session</div>';
-    let html = '<div class="tw"><table><thead><tr><th>Agent</th><th>Issue / Seq</th><th>Skill</th><th>状态</th><th>开始时间</th></tr></thead><tbody>';
+    let html = '<div class="tw"><table><thead><tr><th>Agent</th><th>Issue / Seq</th><th>Skill</th><th>' + I18N.t('observability.col_status') + '</th><th>开始时间</th></tr></thead><tbody>';
     list.forEach(s => {
       const ct = s.current_task;
       const is = (ct.issue_id && ct.event_seq) ? ct.issue_id + ' #' + ct.event_seq : (ct.event_seq ? '#' + ct.event_seq : ct.id.substring(0,12));
@@ -1088,7 +1088,7 @@ function renderSessionList(container, sessions, rtName) {
     });
     allTasks.sort((a, b) => (b.event_seq || 0) - (a.event_seq || 0));
     if (!allTasks.length) return '<div class="ts t3" style="padding:8px">无已完成任务</div>';
-    let html = '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent</th><th>状态</th><th>耗时</th><th>Exit</th><th>完成时间</th></tr></thead><tbody>';
+    let html = '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent</th><th>状态</th><th>' + I18N.t('observability.col_duration') + '</th><th>Exit</th><th>完成时间</th></tr></thead><tbody>';
     allTasks.forEach(t => {
       const is = (t.issue_id && t.event_seq) ? t.issue_id + ' #' + t.event_seq : (t.event_seq ? '#' + t.event_seq : t.id.substring(0,12));
       const enc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:'', created:t.completed_at||''}));
@@ -1178,7 +1178,7 @@ function openSessionLogModal(sessionId, infoEnc) {
   modal.innerHTML = '<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
     '<h3 style="font-size:13px;font-weight:600">' + titleHtml + '</h3>' +
-    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtLogModal\').remove()">✕ 关闭</button>' +
+    '<button class="bt bt-o bt-s" onclick="document.getElementById(\'rtLogModal\').remove()">' + I18N.t('observability.close') + '</button>' +
     '</div>' +
     '<div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>' +
     '</div>';
@@ -1222,7 +1222,7 @@ function openRuntimeTaskModal(rtId, rtName) {
   modal.innerHTML = `<div class="cd" style="width:720px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
       <h3 style="font-size:14px;font-weight:600">${rtName} · 任务列表</h3>
-      <button class="bt bt-o bt-s" onclick="document.getElementById('rtTaskModal').remove()">✕ 关闭</button>
+      <button class="bt bt-o bt-s" onclick="document.getElementById('rtTaskModal').remove()">' + I18N.t('observability.close') + '</button>'
     </div>
     <div id="rtTaskModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载任务...</div></div>
   </div>`;
@@ -1291,7 +1291,7 @@ function openTaskLogModal(taskId, infoEnc) {
   modal.innerHTML = '<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
     '<h3 style="font-size:13px;font-weight:600">' + titleHtml + '</h3>' +
-    '<div style="display:flex;align-items:center;gap:8px"><span id="rtLogLiveTag" style="font-size:10px;color:var(--g);display:none">● 实时</span><button class="bt bt-o bt-s" onclick="closeTaskLogModal()">✕ 关闭</button></div>' +
+    '<div style="display:flex;align-items:center;gap:8px"><span id="rtLogLiveTag" style="font-size:10px;color:var(--g);display:none">' + I18N.t('observability.live') + '</span><button class="bt bt-o bt-s" onclick="closeTaskLogModal()">' + I18N.t('observability.close') + '</button>' + '</div>' +
     '</div>' +
     '<div id="rtLogTimeline" style="padding:10px 18px;border-bottom:1px solid var(--b);display:none"></div>' +
     '<div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">加载日志...</div></div>' +
