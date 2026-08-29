@@ -1,11 +1,11 @@
 <template>
   <div class="page-container" style="padding:0">
-    <div class="page-header">
+    <div class="page-header" style="backdrop-filter:saturate(180%) blur(20px);background:rgba(255,255,255,0.72);padding:16px 40px">
       <span class="back-btn" @click="$router.push('/sys/console')">
         <svg viewBox="0 0 24 24" width="16" height="16"><path d="M15 18l-6-6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         返回
       </span>
-      <h1>{{ info.username || '用户详情' }}</h1>
+      <h1 style="font-size:22px;font-weight:600">{{ info.username || '用户详情' }}</h1>
       <span v-if="info.online" class="status-tag success">在线</span>
       <span v-else class="status-tag default">离线</span>
       <span class="t3" style="font-size:12px;margin-left:4px" v-if="info.lastActiveAt">最后活跃 {{ formatTime(info.lastActiveAt) }}</span>
@@ -14,9 +14,9 @@
       </div>
     </div>
 
-    <div v-if="loading" class="loading-spinner">加载中...</div>
+    <div v-if="loading" style="display:flex;align-items:center;justify-content:center;height:60vh;color:var(--text-tertiary);font-size:14px">加载中...</div>
 
-    <div v-else style="padding:20px 40px">
+    <div v-else style="padding:24px 40px">
       <!-- 基本信息（紧凑横排）+ 凭证配置 -->
       <div class="card" style="padding:0;margin-bottom:20px">
         <div class="section-header">
@@ -681,19 +681,20 @@ watch(() => info.value.repoMatrix, (val) => {
 </script>
 
 <style scoped>
-.back-btn { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--text-secondary); font-size: 13px; transition: color var(--transition); }
-.back-btn:hover { color: var(--primary); }
+.back-btn { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--text-secondary); font-size: 13px; transition: color var(--transition); padding: 4px 8px; border-radius: var(--radius-sm); }
+.back-btn:hover { color: var(--primary); background: rgba(0,107,255,0.04); }
 
-.info-row { display: flex; flex-wrap: wrap; gap: 20px 32px; margin-bottom: 16px; }
-.info-item { display: flex; flex-direction: column; gap: 2px; }
-.info-label { font-size: 11px; color: var(--text-tertiary); }
+.info-row { display: flex; flex-wrap: wrap; gap: 24px 40px; margin-bottom: 20px; }
+.info-item { display: flex; flex-direction: column; gap: 4px; }
+.info-label { font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.3px; }
 
-.cred-row { display: flex; gap: 10px; flex-wrap: wrap; padding-top: 16px; border-top: 1px solid var(--border-soft); }
-.cred-chip { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 16px; border-radius: 10px; background: rgba(0,0,0,0.04); min-width: 80px; }
-.cred-chip.on { background: rgba(52,199,89,0.08); }
+.cred-row { display: flex; gap: 12px; flex-wrap: wrap; padding-top: 20px; border-top: 1px solid var(--border-soft); }
+.cred-chip { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 20px; border-radius: var(--radius); background: rgba(0,0,0,0.03); min-width: 90px; transition: var(--transition); }
+.cred-chip:hover { background: rgba(0,0,0,0.05); }
+.cred-chip.on { background: rgba(52,199,89,0.06); }
 .cred-chip-name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
 .cred-chip-status { font-size: 10px; color: var(--text-tertiary); }
-.cred-chip.on .cred-chip-status { color: #34c759; }
+.cred-chip.on .cred-chip-status { color: var(--success); }
 
 .activity-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
 .repo-summary-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
