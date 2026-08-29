@@ -1,5 +1,7 @@
 package com.grape.admin.controller;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
@@ -12,6 +14,8 @@ import java.util.*;
 @RestController
 @RequestMapping("/api/admin/console-users")
 public class ConsoleUserController {
+
+    private static final Logger log = LoggerFactory.getLogger(ConsoleUserController.class);
 
     private final JdbcTemplate grapeJdbc;
 
@@ -48,7 +52,7 @@ public class ConsoleUserController {
         long total = 0;
         try {
             total = grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts" + where, Long.class, params.toArray());
-        } catch (Exception e) { /* ignore */ }
+        } catch (Exception e) { log.warn("console-users count failed: {}", e.getMessage()); }
 
         List<Map<String, Object>> list = new ArrayList<>();
         try {
@@ -75,7 +79,7 @@ public class ConsoleUserController {
                 u.put("hasGitcodeToken", rs.getBoolean("has_gitcode_token"));
                 list.add(u);
             }, params.toArray());
-        } catch (Exception e) { /* ignore */ }
+        } catch (Exception e) { log.warn("console-users query failed: {}", e.getMessage()); }
 
         // 全量统计（不受筛选影响）
         Map<String, Object> stats = new LinkedHashMap<>();
@@ -85,7 +89,7 @@ public class ConsoleUserController {
             stats.put("offline", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE last_active_at IS NULL OR last_active_at < NOW() - INTERVAL 30 MINUTE", Long.class));
             stats.put("gitcodeLogin", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE gitcode_id IS NOT NULL AND gitcode_id<>''", Long.class));
             stats.put("other", grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts WHERE gitcode_id IS NULL OR gitcode_id=''", Long.class));
-        } catch (Exception e) { /* ignore */ }
+        } catch (Exception e) { log.warn("console-users stats failed: {}", e.getMessage()); }
 
         result.put("content", list);
         result.put("totalElements", total);
