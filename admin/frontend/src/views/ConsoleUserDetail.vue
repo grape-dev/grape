@@ -239,19 +239,55 @@
                 <tr><th style="width:8%">Seq</th><th style="width:18%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:12%">Issue</th><th style="width:15%">时间</th></tr>
               </thead>
               <tbody>
-                <tr v-for="(t, idx) in filteredActivity" :key="t.id">
+                <tr v-for="(t, idx) in filteredActivity" :key="t.id" style="cursor:pointer" @click="openLogModal(t.id, t)">
                   <td class="t3">#{{ filteredActivity.length - idx }}</td>
                   <td><span :class="['status-tag', eventTypeClass(t.eventType)]" style="font-size:11px">{{ eventTypeText(t.eventType) }}</span></td>
                   <td><span class="status-tag info" style="font-size:11px">{{ t.agentType || '—' }}</span></td>
                   <td class="t3" style="font-size:11px">{{ t.engine || '—' }}</td>
                   <td class="t3">{{ formatDuration(t.duration) }}</td>
                   <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
-                  <td class="t3"><a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span></td>
+                  <td class="t3"><a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span></td>
                   <td class="t3">{{ formatTime(t.startedAt) }}</td>
                 </tr>
               </tbody>
             </table>
             <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 任务日志弹窗 -->
+    <div v-if="logModal.show" class="log-modal-overlay" @click.self="closeLogModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:14px;width:90%;max-width:800px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.15)">
+        <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border-color)">
+          <h3 style="font-size:15px;font-weight:600;margin:0;flex:1;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span v-if="logModal.info.repoKey" class="t3" style="font-size:13px">{{ logModal.info.repoKey.replace('gitcode:','') }}</span>
+            <b v-if="logModal.info.issueId">{{ logModal.info.issueId }}</b>
+            <span v-if="logModal.info.agentType" class="status-tag info" style="font-size:11px">{{ logModal.info.agentType }}</span>
+            <span v-if="logModal.info.skill" class="t3" style="font-size:12px">{{ logModal.info.skill }}</span>
+            <span v-if="logModal.info.engine" class="t3" style="font-size:12px;color:var(--primary)">{{ logModal.info.engine }}</span>
+          </h3>
+          <button class="btn btn-sm" @click="closeLogModal">✕ 关闭</button>
+        </div>
+        <div style="padding:12px 20px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;gap:12px;flex-wrap:wrap" v-if="logModal.info.status">
+          <span :class="['status-tag', logModal.info.status === 'completed' ? 'success' : logModal.info.status === 'failed' ? 'danger' : 'warning']" style="font-size:11px">{{ logModal.info.status }}</span>
+          <span v-if="logModal.info.startedAt" class="t3" style="font-size:12px">开始 {{ formatTime(logModal.info.startedAt).slice(11,19) }}</span>
+          <span v-if="logModal.info.completedAt" class="t3" style="font-size:12px">→ 完成 {{ formatTime(logModal.info.completedAt).slice(11,19) }}</span>
+          <span v-if="logModal.info.exitCode != null" class="t3" style="font-size:12px" :style="{color: logModal.info.exitCode !== 0 ? 'var(--danger)' : 'var(--success)'}">Exit: {{ logModal.info.exitCode }}</span>
+        </div>
+        <div style="flex:1;overflow:auto;padding:16px 20px">
+          <div v-if="logModal.loading" style="text-align:center;padding:40px;color:var(--text-tertiary)">加载中...</div>
+          <div v-else-if="logModal.messages.length === 0" style="text-align:center;padding:40px;color:var(--text-tertiary)">
+            <div v-if="logModal.info.resultText" style="text-align:left;background:#f5f5f7;padding:12px 16px;border-radius:10px;margin-bottom:12px;font-size:13px;color:var(--text-secondary);max-height:200px;overflow:auto;white-space:pre-wrap">{{ logModal.info.resultText }}</div>
+            <div v-if="logModal.info.errors" style="text-align:left;color:var(--danger);font-size:13px">{{ logModal.info.errors }}</div>
+            <span v-if="!logModal.info.resultText && !logModal.info.errors">暂无日志记录</span>
+          </div>
+          <div v-else style="background:#1d1d1f;border-radius:10px;padding:12px;font-family:monospace;font-size:12px;line-height:1.6;overflow:auto">
+            <div v-for="msg in logModal.messages" :key="msg.seq" style="display:flex;gap:8px;color:#aeaeb2">
+              <span style="color:#6e6e73;flex-shrink:0">{{ (msg.createdAt || '').slice(11,19) }}</span>
+              <span :style="{color: msg.type === 'error' ? '#ff3b30' : msg.type === 'result' ? '#34c759' : msg.type === 'tool' ? '#5e5ce6' : '#aeaeb2'}">{{ msg.content }}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -276,6 +312,7 @@ const activityTab = ref('task')
 const activityFilter = ref('recent')
 const selectedRepo = ref('')
 const pendingDetailOpen = ref(false)
+const logModal = ref({ show: false, loading: false, messages: [], info: {} })
 
 const pendingTotal = computed(() => {
   if (!selectedRepoData.value) return 0
@@ -284,6 +321,28 @@ const pendingTotal = computed(() => {
 
 function togglePendingDetail() {
   pendingDetailOpen.value = !pendingDetailOpen.value
+}
+async function openLogModal(taskId, t) {
+  logModal.value = { show: true, loading: true, messages: [], info: { issueId: t.issueId, repoKey: t.repoName ? 'gitcode:' + t.repoName : '', agentType: t.agentType, skill: t.skill, engine: t.engine, status: t.status } }
+  try {
+    const [msgsResp, infoResp] = await Promise.all([
+      http.get(`/runtime/tasks/${taskId}/messages`),
+      http.get(`/runtime/tasks/${taskId}/info`)
+    ])
+    const info = infoResp.data || {}
+    if (!info.repoKey && t.repoName) info.repoKey = 'gitcode:' + t.repoName
+    if (!info.issueId) info.issueId = t.issueId
+    if (!info.agentType) info.agentType = t.agentType
+    if (!info.skill) info.skill = t.skill
+    if (!info.engine) info.engine = t.engine
+    if (!info.status) info.status = t.status
+    logModal.value = { show: true, loading: false, messages: msgsResp.data || [], info }
+  } catch (e) {
+    logModal.value = { show: true, loading: false, messages: [], info: { error: e.message, issueId: t.issueId, repoKey: t.repoName ? 'gitcode:' + t.repoName : '' } }
+  }
+}
+function closeLogModal() {
+  logModal.value = { show: false, loading: false, messages: [], info: {} }
 }
 function eventTypeText(t) {
   const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号' }
