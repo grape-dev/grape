@@ -179,12 +179,11 @@
                   <tbody>
                     <template v-for="iss in repoIssues" :key="iss.issueId">
                       <tr>
-                        <td>
-                          <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ iss.issueId }}</a>
+                        <td style="cursor:pointer" @click="toggleIssueTimeline(iss)">
+                          <span style="font-size:10px;margin-right:4px">{{ iss._open ? '▼' : '▸' }}</span>
+                          <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">{{ iss.issueId }}</a>
                         </td>
-                        <td class="t3" style="cursor:pointer;color:var(--primary)" @click="toggleIssueTimeline(iss)">
-                          {{ iss.taskCount }} <span style="font-size:10px">{{ iss._open ? '▲' : '▼' }}</span>
-                        </td>
+                        <td class="t3">{{ iss.taskCount }}</td>
                         <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
                         <td class="t3">{{ formatTime(iss.lastTaskAt) }}</td>
                       </tr>
