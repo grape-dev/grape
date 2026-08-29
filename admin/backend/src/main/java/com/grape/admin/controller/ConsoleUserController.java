@@ -359,7 +359,7 @@ public class ConsoleUserController {
 
     @GetMapping("/{id}/repo-issues")
     public Map<String, Object> repoIssues(@PathVariable int id,
-                                          @RequestParam String repoKey,
+                                          @RequestParam(required = false) String repoKey,
                                           @RequestParam(defaultValue = "0") int page,
                                           @RequestParam(defaultValue = "5") int size) {
         Map<String, Object> result = new LinkedHashMap<>();
@@ -368,9 +368,14 @@ public class ConsoleUserController {
                 " INNER JOIN managed_repos m ON t.repo_key = m.repo_key" +
                 " INNER JOIN user_accounts u ON u.username = m.repo_owner" +
                 " WHERE u.id=?" +
-                " AND m.repo_key=?" +
                 " AND t.issue_id IS NOT NULL AND t.issue_id<>''";
-        Object[] baseParams = {id, repoKey};
+        List<Object> paramList = new ArrayList<>();
+        paramList.add(id);
+        if (repoKey != null && !repoKey.isEmpty()) {
+            joinSql += " AND m.repo_key=?";
+            paramList.add(repoKey);
+        }
+        Object[] baseParams = paramList.toArray();
 
         // Issue 总数
         long total = 0;
@@ -392,19 +397,26 @@ public class ConsoleUserController {
                     "SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
                     "SUM(CASE WHEN t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE) THEN 1 ELSE 0 END) as stuck, " +
                     "MAX(t.started_at) as last_task_at, " +
-                    "(SELECT COUNT(*) FROM events e WHERE e.issue_id = t.issue_id AND e.repo_key = t.repo_key) as event_count " +
+                    "(SELECT COUNT(*) FROM events e WHERE e.issue_id = t.issue_id AND e.repo_key = t.repo_key) as event_count, " +
+                    "MAX(m.full_name) as full_name " +
                     joinSql +
                     " GROUP BY t.issue_id" +
                     " ORDER BY last_task_at DESC LIMIT ? OFFSET ?";
-            Object[] params = new Object[]{id, repoKey, size, page * size};
-            // 批量查该仓库所有 Issue 的 payload（对齐健康中心遍历方式）
+            List<Object> queryParams = new ArrayList<>(paramList);
+            queryParams.add(size);
+            queryParams.add(page * size);
+            Object[] params = queryParams.toArray();
+            // 批量查 Issue 的 payload（对齐健康中心遍历方式）
             Map<String, String> issueTitleMap = new java.util.HashMap<>();
             try {
-                grapeJdbc.query(
-                    "SELECT DISTINCT e.issue_id, e.payload FROM events e " +
-                    "WHERE e.repo_key=? AND e.issue_id IS NOT NULL AND e.issue_id<>'' " +
-                    "AND e.payload LIKE '%object_attributes%' ORDER BY e.seq",
-                    rs2 -> {
+                String payloadSql = "SELECT DISTINCT e.issue_id, e.payload FROM events e " +
+                    "WHERE e.issue_id IS NOT NULL AND e.issue_id<>'' " +
+                    "AND e.payload LIKE '%object_attributes%' ORDER BY e.seq";
+                if (repoKey != null && !repoKey.isEmpty()) {
+                    payloadSql = "SELECT DISTINCT e.issue_id, e.payload FROM events e " +
+                        "WHERE e.repo_key=? AND e.issue_id IS NOT NULL AND e.issue_id<>'' " +
+                        "AND e.payload LIKE '%object_attributes%' ORDER BY e.seq";
+                    grapeJdbc.query(payloadSql, rs2 -> {
                         String iid = rs2.getString("issue_id");
                         if (issueTitleMap.containsKey(iid)) return;
                         String payload = rs2.getString("payload");
@@ -420,11 +432,31 @@ public class ConsoleUserController {
                             }
                         } catch (Exception e2) { /* ignore */ }
                     }, repoKey);
+                } else {
+                    grapeJdbc.query(payloadSql, (rs2, rowNum) -> {
+                        String iid = rs2.getString("issue_id");
+                        if (issueTitleMap.containsKey(iid)) return null;
+                        String payload = rs2.getString("payload");
+                        if (payload == null || payload.isEmpty()) return null;
+                        try {
+                            com.fasterxml.jackson.databind.ObjectMapper om2 = new com.fasterxml.jackson.databind.ObjectMapper();
+                            com.fasterxml.jackson.databind.JsonNode attrs = om2.readTree(payload).path("object_attributes");
+                            if (!attrs.isMissingNode()) {
+                                String title = attrs.path("title").asText("");
+                                if (!title.isEmpty()) {
+                                    issueTitleMap.put(iid, title.length() > 80 ? title.substring(0, 80) + "..." : title);
+                                }
+                            }
+                        } catch (Exception e2) { /* ignore */ }
+                        return null;
+                    });
+                }
             } catch (Exception e) { /* ignore */ }
             grapeJdbc.query(sql, rs -> {
                 Map<String, Object> r = new LinkedHashMap<>();
                 String issueId = rs.getString("issue_id");
                 r.put("issueId", issueId);
+                r.put("repoName", rs.getString("full_name"));
                 r.put("issueTitle", issueTitleMap.getOrDefault(issueId, ""));
                 r.put("taskCount", rs.getInt("task_count"));
                 r.put("eventCount", rs.getInt("event_count"));

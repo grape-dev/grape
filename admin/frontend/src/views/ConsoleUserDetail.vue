@@ -67,16 +67,16 @@
             </div>
           </div>
           <div style="padding:20px 24px">
-              <!-- 仓库选择下拉 -->
+              <!-- 仓库选择下拉（可选筛选） -->
               <div style="margin-bottom:16px">
                 <select v-model="selectedRepo" class="page-size-select" style="width:100%;max-width:400px;padding:8px 12px" @change="loadRepoIssues(0)">
-                  <option value="">请选择仓库</option>
+                  <option value="">全部仓库</option>
                   <option v-for="r in info.repoMatrix" :key="r.repoKey" :value="r.repoKey">{{ r.fullName }}</option>
                 </select>
               </div>
 
               <!-- Issue 列表 -->
-              <div v-if="selectedRepo" style="margin-top:16px">
+              <div style="margin-top:16px">
                 <div v-if="repoIssuesLoading" style="text-align:center;padding:32px;color:var(--text-tertiary)">加载中...</div>
                 <div v-else-if="repoIssues.length === 0" style="text-align:center;padding:32px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</div>
                 <div v-else>
@@ -86,8 +86,8 @@
                     <div class="tl-issue-head" @click="toggleIssueTimeline(iss)">
                       <span class="tl-arrow">{{ expandedIssues.has(iss.issueId) ? '▾' : '▸' }}</span>
                       <b class="tl-issue-id">
-                        <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop class="tl-issue-link">
-                          <span class="t3" style="font-size:11px">{{ selectedRepoData?.fullName }}</span> {{ iss.issueId }}
+                        <a :href="`https://gitcode.com/${iss.repoName || selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop class="tl-issue-link">
+                          <span class="t3" style="font-size:11px">{{ iss.repoName || selectedRepoData?.fullName }}</span> {{ iss.issueId }}
                         </a>
                       </b>
                       <span class="tl-issue-title t3" v-if="iss.issueTitle" :title="iss.issueTitle">{{ iss.issueTitle }}</span>
@@ -131,7 +131,6 @@
                   <PaginationBar v-if="repoIssuesTotal > 0" v-model:page="repoIssuesPage" v-model:size="repoIssuesSize" :total="repoIssuesTotal" :total-pages="repoIssuesTotalPages" :size-options="[5, 10]" @change="loadRepoIssues()" />
                 </div>
               </div>
-              <p v-else-if="!selectedRepo" class="t2" style="padding:20px;text-align:center">请选择仓库查看 Issue 列表</p>
           </div>
       </div>
 
@@ -584,12 +583,11 @@ const credentialConfigured = computed(() => {
 
 async function loadRepoIssues(p) {
   if (p !== undefined) repoIssuesPage.value = p
-  if (!selectedRepo.value) return
   repoIssuesLoading.value = true
   try {
-    const { data } = await http.get(`/console-users/${route.params.id}/repo-issues`, {
-      params: { repoKey: selectedRepo.value, page: repoIssuesPage.value, size: repoIssuesSize.value }
-    })
+    const params = { page: repoIssuesPage.value, size: repoIssuesSize.value }
+    if (selectedRepo.value) params.repoKey = selectedRepo.value
+    const { data } = await http.get(`/console-users/${route.params.id}/repo-issues`, { params })
     repoIssues.value = data.content || []
     repoIssuesTotal.value = data.totalElements || 0
     repoIssuesTotalPages.value = data.totalPages || 0
@@ -645,10 +643,9 @@ async function resetToken() {
 
 onMounted(() => load())
 
-// 页面加载后自动选第一个仓库
+// 页面加载后自动加载 Issue 列表
 watch(() => info.value.repoMatrix, (val) => {
-  if (val && val.length && !selectedRepo.value) {
-    selectedRepo.value = val[0].repoKey
+  if (val && !repoIssues.value.length) {
     loadRepoIssues(0)
   }
 })
