@@ -90,13 +90,13 @@ if user_info:                                          # ② 用户基本信息
     parts.append(user_info)
 parts.extend([f"## 场景: task", f"## 任务背景",          # ③ 场景 + 任务背景
               f"仓库: {repo_key}", f"Issue: #{issue_number}"])
-if runtime_id:                                         # ④ Runtime engine
+if conv.get("title"): parts.append(f"标题: {conv['title']}")     # ④ 标题（任务背景段内）
+if runtime_id:                                         # ⑤ Runtime engine
     ...parts.append(f"Runtime engine: {_be} (runtime_id={runtime_id})")
-parts.append("### 任务边界 ... "                       # ⑤ 任务边界（澄清+回帖+不实施）
+parts.append("### 任务边界 ... "                       # ⑥ 任务边界（澄清+回帖+不实施）
              "严禁 clone/部署/起服务/修改文件/执行 git 命令")
-task_desc = _get_task_description(conv)                 # ⑥ 任务描述（tasks 表）
+task_desc = _get_task_description(conv)                 # ⑦ 任务描述（tasks 表）
 if task_desc: parts.append(f"\n### 任务描述\n{task_desc}")
-if conv.get("title"): parts.append(f"标题: {conv['title']}")     # ⑦ 标题（紧随任务描述）
 try:                                                     # ⑧ Issue 摘要
     issue_summary = get_issue_summary(repo_key)
     if issue_summary: parts.append(f"\n{issue_summary}")
@@ -120,8 +120,8 @@ parts.append("## 使用技能 / Skills: chat /            # ⑫ 使用技能（�
 | ⑤ | 事件上下文 | `Repository event context:` + issue_summary | `{issue_summary}`（无前缀标题） | 同数据源，标题格式不同 |
 | ⑥ | 项目知识基线 | `_build_project_info_section(agent_type="chat")` | 同 | **一致** ✅ |
 | ⑦ | 任务边界 | 无 | `### 任务边界`（澄清+回帖+不实施） | **task 独有**（A2A 交办规则已移出到 skill） |
-| ⑧ | 标题 | 无 | `标题: {conv.title}`（位于任务描述之后） | **task 独有** |
-| ⑨ | 任务描述 | 无 | `### 任务描述`（tasks 表，标题紧随其后） | **task 独有**（重点） |
+| ⑧ | 标题 | 无 | `标题: {conv.title}`（位于任务背景段内、Issue 之后） | **task 独有** |
+| ⑨ | 任务描述 | 无 | `### 任务描述`（tasks 表，位于任务边界之后） | **task 独有**（重点，无值不注入） |
 | ⑩ | 对话历史 | 无 | `## 对话历史`（history[-10:]） | **task 独有**（general 已按 v1.6 移除） |
 | ⑪ | 使用技能 | 官方→占位符 / custom→绝对路径 | 恒 `## 使用技能 / Skills: chat / {{SKILL_DIR}}/chat/SKILL.md` | general 支持动态/自定义技能；task 恒 chat |
 | ⑫ | 用户消息 | `User (in repo): msg\nAssistant:` | `## 本次用户消息\nmsg` | 标题格式不同 |
@@ -237,11 +237,11 @@ SECURITY (MUST FOLLOW):
 ## 任务背景
 仓库: org/repo
 Issue: #7
+标题: 优化登录页
 ### 任务边界
 本对话的职责是【澄清被分配 Issue 的需求并回帖】，不是实施/部署/写代码。
 用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。
 严禁 clone/部署/起服务/修改文件/执行 git 命令。
-标题: 优化登录页
 
 ## 项目知识基线（repo 全局）
 [无项目知识基线] 允许降级分析：可基于 README 与 GitCode API 获取基础信息，相关结论标注 [degraded]。
