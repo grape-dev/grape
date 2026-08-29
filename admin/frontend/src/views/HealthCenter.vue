@@ -548,7 +548,7 @@ async function getMermaid() {
       securityLevel: 'loose',
       theme: 'base',
       fontFamily: 'inherit',
-      sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 40, noteMargin: 10, boxMargin: 8 }
+      sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 40, noteMargin: 10, boxMargin: 8, wrap: true, width: 160 }
     })
   }
   return mermaidEngine
@@ -621,6 +621,55 @@ function applySequenceColors(svg, statuses) {
   }
 }
 
+function fixLifelineHeight(svgStr, eventCount) {
+  // mermaid 默认生命线高度固定（约 200-400px），事件多时竖线不够长
+  // 修复：解析 SVG，找到所有 actor 生命线（stereotype line），延长到 SVG 底部
+  try {
+    const doc = new DOMParser().parseFromString(svgStr, 'image/svg+xml')
+    const root = doc.documentElement
+    // 获取 SVG 高度
+    const heightAttr = root.getAttribute('height')
+    const viewBox = root.getAttribute('viewBox')
+    let svgHeight = 0
+    if (viewBox) {
+      const parts = viewBox.split(' ')
+      svgHeight = parseFloat(parts[3]) || 0
+    }
+    if (!svgHeight && heightAttr) {
+      svgHeight = parseFloat(heightAttr) || 0
+    }
+    if (svgHeight <= 0) return svgStr
+    // 事件多时按比例增加高度（每个事件约 40px，最低 400）
+    const minHeight = Math.max(400, eventCount * 45 + 100)
+    if (svgHeight >= minHeight) return svgStr  // 已经够高
+    // 延长生命线：找到所有竖线（actor 下方的 line）
+    const lines = Array.from(root.querySelectorAll('line.actor-line, line.activation0, line.activation1, line.activation2, line.activation3'))
+    // mermaid 用 class 不固定，改用筛选：x1==x2 的竖线
+    const allLines = Array.from(root.querySelectorAll('line'))
+    const vLines = allLines.filter(l => {
+      const x1 = parseFloat(l.getAttribute('x1') || 0)
+      const x2 = parseFloat(l.getAttribute('x2') || 0)
+      return Math.abs(x1 - x2) < 2  // 竖线
+    })
+    vLines.forEach(l => {
+      const y2 = parseFloat(l.getAttribute('y2') || 0)
+      if (y2 < minHeight - 20) {
+        l.setAttribute('y2', String(minHeight - 10))
+      }
+    })
+    // 更新 SVG 高度
+    root.setAttribute('height', String(minHeight))
+    if (viewBox) {
+      const parts = viewBox.split(' ')
+      parts[3] = String(minHeight)
+      root.setAttribute('viewBox', parts.join(' '))
+    }
+    return new XMLSerializer().serializeToString(doc)
+  } catch (e) {
+    return svgStr
+  }
+}
+
 async function renderMermaidForIssue(issueId) {
   if (renderingIssues.value.has(issueId)) return
   if (renderedIssues.value.has(issueId)) return
@@ -639,7 +688,10 @@ async function renderMermaidForIssue(issueId) {
     try { await mmd.parse(text) } catch (e) { /* parse 失败也尝试 render */ }
     const result = await mmd.render(uid, text)
     const svg = result.svg || result
-    issueSvgs.value = { ...issueSvgs.value, [issueId]: applySequenceColors(svg, statuses) }
+    const coloredSvg = applySequenceColors(svg, statuses)
+    // 修复生命线高度：mermaid 默认生命线高度固定，事件多时竖线不够长
+    const fixedSvg = fixLifelineHeight(coloredSvg, iss.events.length)
+    issueSvgs.value = { ...issueSvgs.value, [issueId]: fixedSvg }
     renderedIssues.value = new Set([...renderedIssues.value, issueId])
     // 渲染后绑定点击事件（对齐主服务 _bindMermaidClicks）
     nextTick(() => bindMermaidClicks(issueId, iss, evTypes))
@@ -664,6 +716,8 @@ function bindMermaidClicks(issueId, iss, evTypes) {
   if (!events.length) return
   const msgTexts = Array.from(svg.querySelectorAll('text.messageText'))
   const noteTexts = Array.from(svg.querySelectorAll('text.noteText'))
+  // 构建 taskId → event 映射（用于事件委托）
+  const taskEventMap = {}
   let msgIdx = 0, noteIdx = 0
   events.forEach((ev, i) => {
     const type = evTypes[i] || 'msg'
@@ -675,15 +729,35 @@ function bindMermaidClicks(issueId, iss, evTypes) {
       txt = noteTexts[noteIdx]
       noteIdx++
     }
-    if (!txt || !ev.taskId) return
-    txt.style.cursor = 'pointer'
-    txt.style.textDecoration = 'underline'
-    txt.style.fill = 'var(--primary)'
-    txt.addEventListener('click', function(e) {
-      e.stopPropagation()
-      openLogModal(ev.taskId, iss)
-    })
+    if (!txt) return
+    // 给有 taskId 的 text 元素打标记 + 样式
+    if (ev.taskId) {
+      txt.setAttribute('data-task-id', ev.taskId)
+      txt.setAttribute('data-issue-id', iss.issueId)
+      txt.style.cursor = 'pointer'
+      txt.style.textDecoration = 'underline'
+      txt.style.fill = 'var(--primary)'
+      taskEventMap[ev.taskId] = ev
+    }
+    // tooltip：引擎名 + IP
+    const _eng = ev.engine || ''
+    if (_eng) {
+      const _t = document.createElementNS('http://www.w3.org/2000/svg', 'title')
+      _t.textContent = _eng
+      txt.appendChild(_t)
+    }
   })
+  // 用事件委托：在 SVG 上监听 click，通过 data-task-id 找到对应事件
+  // 避免 Vue v-html 重新渲染导致事件绑定丢失
+  svg.onclick = function(e) {
+    const target = e.target.closest('[data-task-id]')
+    if (!target) return
+    const taskId = target.getAttribute('data-task-id')
+    if (taskId && taskEventMap[taskId]) {
+      e.stopPropagation()
+      openLogModal(taskId, iss)
+    }
+  }
 }
 function issueHasFailed(iss) { return iss.events.some(e => e.status === 'failed') }
 
