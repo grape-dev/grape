@@ -276,6 +276,8 @@ public class ConsoleUserController {
                     return r;
                 }, id);
             info.put("recentTasks", recentTasks);
+            // 批量补 issueTitle
+            batchFillIssueTitle(recentTasks);
         } catch (Exception e) { /* ignore */ }
 
         // 进行中任务（最近 5 条）
@@ -314,6 +316,7 @@ public class ConsoleUserController {
                     return r;
                 }, id);
             info.put("recentPendingTasks", recentPending);
+            batchFillIssueTitle(recentPending);
         } catch (Exception e) { /* ignore */ }
 
         // 最近失败任务（最近 5 条）
@@ -352,6 +355,7 @@ public class ConsoleUserController {
                     return r;
                 }, id);
             info.put("recentFailedTasks", recentFailed);
+            batchFillIssueTitle(recentFailed);
         } catch (Exception e) { /* ignore */ }
 
         return info;
@@ -487,6 +491,39 @@ public class ConsoleUserController {
             }
         } catch (Exception e) { /* ignore */ }
         return "";
+    }
+
+    private void batchFillIssueTitle(List<Map<String, Object>> tasks) {
+        if (tasks == null || tasks.isEmpty()) return;
+        // 收集 (repoKey, issueId) 去重
+        Map<String, String> titleCache = new java.util.HashMap<>();
+        com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+        for (Map<String, Object> t : tasks) {
+            String issueId = (String) t.get("issueId");
+            if (issueId == null || issueId.isEmpty()) {
+                t.put("issueTitle", "");
+                continue;
+            }
+            String cacheKey = issueId;
+            if (titleCache.containsKey(cacheKey)) {
+                t.put("issueTitle", titleCache.get(cacheKey));
+                continue;
+            }
+            // 从 repoName 拼 repoKey 查 events payload
+            String repoName = (String) t.get("repoName");
+            String repoKey = repoName != null ? "gitcode:" + repoName : "";
+            String title = "";
+            try {
+                List<Map<String, Object>> evs = grapeJdbc.queryForList(
+                    "SELECT payload FROM events WHERE repo_key=? AND issue_id=? AND payload LIKE '%object_attributes%' ORDER BY seq LIMIT 1",
+                    repoKey, issueId);
+                if (!evs.isEmpty()) {
+                    title = extractIssueTitle(evs.get(0).get("payload"), om);
+                }
+            } catch (Exception e) { /* ignore */ }
+            titleCache.put(cacheKey, title);
+            t.put("issueTitle", title);
+        }
     }
 
     @PostMapping("/{id}/reset-token")
