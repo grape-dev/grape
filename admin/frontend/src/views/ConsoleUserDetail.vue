@@ -180,14 +180,14 @@
                     <template v-for="iss in repoIssues" :key="iss.issueId">
                       <tr>
                         <td style="cursor:pointer" @click="toggleIssueTimeline(iss)">
-                          <span style="font-size:10px;margin-right:4px">{{ iss._open ? '▼' : '▸' }}</span>
+                          <span style="font-size:10px;margin-right:4px">{{ expandedIssues.has(iss.issueId) ? '▾' : '▸' }}</span>
                           <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">{{ iss.issueId }}</a>
                         </td>
                         <td class="t3">{{ iss.taskCount }}</td>
                         <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
                         <td class="t3">{{ formatTime(iss.lastTaskAt) }}</td>
                       </tr>
-                      <tr v-if="iss._open" style="background:rgba(0,0,0,0.02)">
+                      <tr v-if="expandedIssues.has(iss.issueId)" style="background:rgba(0,0,0,0.02)">
                         <td colspan="4" style="padding:12px 16px">
                           <!-- 状态统计明细 -->
                           <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px">
@@ -202,21 +202,21 @@
                           </div>
                           <!-- 切换按钮 -->
                           <div style="display:flex;gap:8px;margin-bottom:12px">
-                            <button class="btn btn-sm" :style="iss._view !== 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="switchIssueView(iss, 'diagram')">📊 时序图</button>
-                            <button class="btn btn-sm" :style="iss._view === 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="switchIssueView(iss, 'events')">📋 事件列表</button>
+                            <button class="btn btn-sm" :style="issueViewModes[iss.issueId] !== 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="switchIssueView(iss, 'diagram')">📊 时序图</button>
+                            <button class="btn btn-sm" :style="issueViewModes[iss.issueId] === 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="switchIssueView(iss, 'events')">📋 事件列表</button>
                           </div>
                           <!-- 时序图 -->
-                          <div v-if="iss._eventsLoading" style="text-align:center;padding:20px;color:var(--text-tertiary)">加载中...</div>
-                          <div v-else-if="iss._view !== 'events' && iss._events && iss._events.length" :ref="el => diagramRefs[iss.issueId] = el" style="overflow:auto"></div>
+                          <div v-if="issueEventsLoading[iss.issueId]" style="text-align:center;padding:20px;color:var(--text-tertiary)">加载中...</div>
+                          <div v-else-if="issueViewModes[iss.issueId] !== 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length" :ref="el => diagramRefs[iss.issueId] = el" style="overflow:auto"></div>
                           <!-- 事件列表 -->
-                          <div v-if="iss._view === 'events' && iss._events && iss._events.length">
+                          <div v-if="issueViewModes[iss.issueId] === 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length">
                             <table class="vod-table">
                               <thead>
                                 <tr><th style="width:8%">Seq</th><th style="width:18%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:27%">时间</th></tr>
                               </thead>
                               <tbody>
-                                <tr v-for="(ev, eidx) in iss._events" :key="ev.seq" style="cursor:pointer" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
-                                  <td class="t3">#{{ iss._events.length - eidx }}</td>
+                                <tr v-for="(ev, eidx) in issueEvents[iss.issueId]" :key="ev.seq" style="cursor:pointer" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
+                                  <td class="t3">#{{ issueEvents[iss.issueId].length - eidx }}</td>
                                   <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
                                   <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
                                   <td class="t3" style="font-size:11px">{{ ev.engine || '—' }}<span v-if="ev.engineIp" style="font-size:10px;color:var(--text-tertiary);display:block">{{ ev.engineIp }}</span></td>
@@ -227,7 +227,7 @@
                               </tbody>
                             </table>
                           </div>
-                          <div v-else-if="!iss._eventsLoading && (!iss._events || !iss._events.length)" style="text-align:center;padding:20px;color:var(--text-tertiary)">暂无事件记录</div>
+                          <div v-else-if="!issueEventsLoading[iss.issueId] && (!issueEvents[iss.issueId] || !issueEvents[iss.issueId].length)" style="text-align:center;padding:20px;color:var(--text-tertiary)">暂无事件记录</div>
                         </td>
                       </tr>
                     </template>
@@ -338,6 +338,10 @@ const logModal = ref({ show: false, loading: false, messages: [], info: {} })
 const diagramRefs = {}
 const renderedIssues = ref(new Set())
 const renderingIssues = ref(new Set())
+const expandedIssues = ref(new Set())
+const issueViewModes = ref({})
+const issueEvents = ref({})  // {issueId: events[]}
+const issueEventsLoading = ref({})  // {issueId: true/false}
 
 const pendingTotal = computed(() => {
   if (!selectedRepoData.value) return 0
@@ -370,38 +374,47 @@ function closeLogModal() {
   logModal.value = { show: false, loading: false, messages: [], info: {} }
 }
 async function toggleIssueTimeline(iss) {
-  iss._open = !iss._open
-  if (iss._open) {
-    if (!iss._view) iss._view = 'diagram'
-    if (!iss._events) {
-      iss._eventsLoading = true
+  const id = iss.issueId
+  const s = new Set(expandedIssues.value)
+  if (s.has(id)) {
+    s.delete(id)
+  } else {
+    s.add(id)
+    if (!issueViewModes.value[id]) {
+      issueViewModes.value = { ...issueViewModes.value, [id]: 'diagram' }
+    }
+    // 首次展开加载事件
+    if (!issueEvents.value[id]) {
+      issueEventsLoading.value = { ...issueEventsLoading.value, [id]: true }
       try {
         const { data } = await http.get(`/console-users/${route.params.id}/issue-timeline`, {
-          params: { repoKey: selectedRepo.value, issueId: iss.issueId }
+          params: { repoKey: selectedRepo.value, issueId: id }
         })
-        iss._events = data.events || []
-      } catch (e) {
-        iss._events = []
-      } finally {
-        iss._eventsLoading = false
-        // 等 Vue 渲染完 DOM 再画时序图
-        await nextTick()
-        if (iss._events.length && iss._view === 'diagram') {
-          renderMermaidForIssue(iss)
+        issueEvents.value = { ...issueEvents.value, [id]: data.events || [] }
+        // 渲染时序图
+        if (data.events && data.events.length) {
+          await nextTick()
+          renderMermaidForIssue(id, iss)
         }
+      } catch (e) {
+        issueEvents.value = { ...issueEvents.value, [id]: [] }
+      } finally {
+        issueEventsLoading.value = { ...issueEventsLoading.value, [id]: false }
       }
-    } else if (iss._view === 'diagram' && iss._events.length) {
-      // 重新展开时重新渲染（v-html/DOM 被销毁了）
+    } else if (issueViewModes.value[id] === 'diagram' && issueEvents.value[id].length) {
+      // 重新展开时重新渲染（DOM 被销毁后需重画）
       await nextTick()
-      renderMermaidForIssue(iss)
+      renderMermaidForIssue(id, iss)
     }
   }
+  expandedIssues.value = s
 }
 
 function switchIssueView(iss, mode) {
-  iss._view = mode
-  if (mode === 'diagram' && iss._events && iss._events.length) {
-    nextTick(() => renderMermaidForIssue(iss))
+  const id = iss.issueId
+  issueViewModes.value = { ...issueViewModes.value, [id]: mode }
+  if (mode === 'diagram' && issueEvents.value[id] && issueEvents.value[id].length) {
+    nextTick(() => renderMermaidForIssue(id, iss))
   }
 }
 
@@ -522,12 +535,12 @@ function fixLifelineHeight(svgStr, eventCount) {
   }
 }
 
-function bindMermaidClicks(iss, evTypes) {
-  const el = diagramRefs[iss.issueId]
+function bindMermaidClicks(issueId, iss, evTypes) {
+  const el = diagramRefs[issueId]
   if (!el) return
   const svg = el.querySelector('svg')
   if (!svg) return
-  const events = iss._events || []
+  const events = issueEvents.value[issueId] || []
   if (!events.length) return
   const msgTexts = Array.from(svg.querySelectorAll('text.messageText'))
   const noteTexts = Array.from(svg.querySelectorAll('text.noteText'))
@@ -572,31 +585,33 @@ function bindMermaidClicks(iss, evTypes) {
   }
 }
 
-async function renderMermaidForIssue(iss) {
-  if (renderingIssues.value.has(iss.issueId)) return
-  if (renderedIssues.value.has(iss.issueId)) return
-  const el = diagramRefs[iss.issueId]
+async function renderMermaidForIssue(issueId, iss) {
+  if (renderingIssues.value.has(issueId)) return
+  if (renderedIssues.value.has(issueId)) return
+  const el = diagramRefs[issueId]
   if (!el) return
-  renderingIssues.value = new Set([...renderingIssues.value, iss.issueId])
+  const events = issueEvents.value[issueId] || []
+  if (!events.length) return
+  renderingIssues.value = new Set([...renderingIssues.value, issueId])
   try {
     const mmd = await getMermaid()
-    const { text, statuses, evTypes } = buildSequence(iss._events)
+    const { text, statuses, evTypes } = buildSequence(events)
     const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
     try { await mmd.parse(text) } catch (e) { /* parse 失败也尝试 render */ }
     const result = await mmd.render(uid, text)
     const svg = result.svg || result
     const coloredSvg = applySequenceColors(svg, statuses)
-    const fixedSvg = fixLifelineHeight(coloredSvg, iss._events.length)
+    const fixedSvg = fixLifelineHeight(coloredSvg, events.length)
     el.innerHTML = fixedSvg
-    renderedIssues.value = new Set([...renderedIssues.value, iss.issueId])
-    nextTick(() => bindMermaidClicks(iss, evTypes))
+    renderedIssues.value = new Set([...renderedIssues.value, issueId])
+    nextTick(() => bindMermaidClicks(issueId, iss, evTypes))
   } catch (err) {
-    const { text } = buildSequence(iss._events)
+    const { text } = buildSequence(events)
     el.innerHTML = `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${err.message || err}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>`
-    renderedIssues.value = new Set([...renderedIssues.value, iss.issueId])
+    renderedIssues.value = new Set([...renderedIssues.value, issueId])
   } finally {
     const s = new Set(renderingIssues.value)
-    s.delete(iss.issueId)
+    s.delete(issueId)
     renderingIssues.value = s
   }
 }
