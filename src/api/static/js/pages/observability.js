@@ -691,50 +691,27 @@ async function _renderMermaid(box, iss) {
 }
 
 function _bindMermaidClicks(box, iss) {
-  // mermaid 序列图中每个消息和 Note 对应一个 text 元素
-  // 按 DOM 顺序取 messageLine 和 noteLine，映射到 iss.events 数组
+  // mermaid 序列图中每个消息（messageText）和 Note（noteText）按 DOM 顺序对应 events
+  // _buildSequence 中 message 和 Note 混合生成，需要按渲染顺序统一映射
   const events = iss.events || [];
   if (!events.length) return;
-  // mermaid 渲染的消息行（含 sequence number 的 line）和 Note 行
   const svg = box.querySelector('svg');
   if (!svg) return;
-  // 消息文本在 text.messageText 元素中，Note 在 text.noteText 中
-  // 不同 mermaid 版本 class 名可能不同，用通用方式：取所有 messageLine label
-  let msgIndex = 0;
-  // messageLine 的 text 元素（class 含 messageText）
-  const msgTexts = svg.querySelectorAll('text.messageText');
-  msgTexts.forEach((txt, i) => {
+  // 按 DOM 顺序取所有 messageText + noteText，和 _buildSequence 生成顺序一致
+  const allTexts = Array.from(svg.querySelectorAll('text.messageText, text.noteText'));
+  allTexts.forEach((txt, i) => {
     if (i >= events.length) return;
     const ev = events[i];
-    if (!ev.taskId) return;
-    // 找到父级 g 元素设为可点击
-    let parent = txt.parentElement;
-    while (parent && parent.tagName.toLowerCase() !== 'g' && parent !== svg) parent = parent.parentElement;
-    if (parent) {
-      parent.style.cursor = 'pointer';
-      const enc = encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''}));
-      parent.addEventListener('click', function() { openTaskLogModal(ev.taskId, enc); });
-    }
-  });
-  // Note 行（class 含 noteText）
-  const noteTexts = svg.querySelectorAll('text.noteText');
-  noteTexts.forEach((txt, i) => {
-    // Note 的索引需要和 events 对齐——Note 也按顺序对应 events
-    // 但 Note 和 message 混合出现，需要按 mermaid 渲染顺序映射
-    // 简单方案：Note 对应的事件是所有事件中"同 agent 连续事件"的索引
-    // 这里用 noteTexts 在 SVG 中的顺序 + msgTexts 的偏移
-    const allTexts = Array.from(svg.querySelectorAll('text.messageText, text.noteText'));
-    const noteIdx = allTexts.indexOf(txt);
-    if (noteIdx >= events.length) return;
-    const ev = events[noteIdx];
     if (!ev || !ev.taskId) return;
-    let parent = txt.parentElement;
-    while (parent && parent.tagName.toLowerCase() !== 'g' && parent !== svg) parent = parent.parentElement;
-    if (parent) {
-      parent.style.cursor = 'pointer';
-      const enc = encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''}));
-      parent.addEventListener('click', function() { openTaskLogModal(ev.taskId, enc); });
-    }
+    // 只绑定到 text 元素本身（不向上找 g，避免空白区域可点击）
+    txt.style.cursor = 'pointer';
+    txt.style.textDecoration = 'underline';
+    txt.style.fill = 'var(--a)';
+    const enc = encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''}));
+    txt.addEventListener('click', function(e) {
+      e.stopPropagation();
+      openTaskLogModal(ev.taskId, enc);
+    });
   });
 }
 
