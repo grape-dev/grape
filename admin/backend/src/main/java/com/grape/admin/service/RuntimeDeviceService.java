@@ -269,6 +269,9 @@ public class RuntimeDeviceService {
                 .collect(Collectors.toMap(Map.Entry::getKey,
                         e -> e.getValue().getDeviceName() == null || e.getValue().getDeviceName().isBlank()
                                 ? e.getValue().getName() : e.getValue().getDeviceName()));
+        Map<Integer, Long> taskCountByRuntime = taskRepository.findAll().stream()
+                .filter(t -> t.getRuntimeId() != null)
+                .collect(Collectors.groupingBy(AgentTaskRo::getRuntimeId, Collectors.counting()));
 
         List<Map<String, Object>> filtered = new ArrayList<>();
         // 全量健康分布统计（不随过滤/分页变化，供页头徽章行）
@@ -316,6 +319,7 @@ public class RuntimeDeviceService {
             // 引擎归属 = 凭据签发人（credential_id → runtime_credentials.owner_name）
             m.put("ownerName", cred == null ? null : cred.getOwnerName());
             m.put("lastIp", cred == null ? null : cred.getLastIp());
+            m.put("taskCount", taskCountByRuntime.getOrDefault(r.getId(), 0L).intValue());
             filtered.add(m);
         }
         // 页头统计随过滤结果变化（与列表保持一致）
