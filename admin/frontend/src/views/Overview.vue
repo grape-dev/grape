@@ -291,15 +291,15 @@ onBeforeUnmount(() => {
 .dashboard { display: flex; flex-direction: column; gap: 20px; padding: 20px 28px; }
 
 /* ---- KPI 卡片 ---- */
-.kpi-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.kpi-row { display: flex; gap: 20px; flex-wrap: wrap; }
 .kpi-card {
   flex: 1; min-width: 150px;
-  background: #fff; border-radius: 10px; border: 1px solid var(--border-color);
-  padding: 16px 18px; cursor: pointer; transition: all 0.2s;
+  background: #fff; border-radius: 14px; border: 1px solid var(--border-soft);
+  padding: 20px; cursor: pointer; transition: all var(--transition);
   box-shadow: var(--card-shadow);
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 14px;
 }
-.kpi-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
+.kpi-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-2px); }
 .kpi-blue { border-left: 3px solid #006eff; }
 .kpi-purple { border-left: 3px solid #7222ed; }
 .kpi-pink { border-left: 3px solid #eb2f96; }
@@ -316,7 +316,7 @@ onBeforeUnmount(() => {
 
 /* ---- 数据口径说明 ---- */
 .glossary-wrap {
-  background: #fff; border-radius: 10px; border: 1px solid var(--border-color);
+  background: #fff; border-radius: 14px; border: 1px solid var(--border-soft);
   box-shadow: var(--card-shadow);
 }
 .glossary-toggle {
@@ -343,7 +343,7 @@ onBeforeUnmount(() => {
 .chart-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
 .chart-grid-4 { grid-template-columns: repeat(2, 1fr); }
 .chart-card {
-  background: #fff; border-radius: 10px; border: 1px solid var(--border-color);
+  background: #fff; border-radius: 14px; border: 1px solid var(--border-soft);
   box-shadow: var(--card-shadow); overflow: hidden;
 }
 .chart-title { font-size: 14px; font-weight: 600; padding: 14px 18px 0; color: var(--text-primary); }
