@@ -174,7 +174,7 @@
               <div v-if="selectedRepo" style="margin-top:16px">
                 <table class="vod-table" v-if="repoIssues.length">
                   <thead>
-                    <tr><th style="width:25%">Issue</th><th style="width:15%">任务</th><th style="width:15%">成功率</th><th style="width:45%">最近活动</th></tr>
+                    <tr><th style="width:25%">Issue</th><th style="width:15%">事件</th><th style="width:15%">成功率</th><th style="width:45%">最近活动</th></tr>
                   </thead>
                   <tbody>
                     <template v-for="iss in repoIssues" :key="iss.issueId">
