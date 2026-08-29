@@ -168,7 +168,7 @@
                     <td class="t3">{{ formatTime(t.startedAt) }}</td>
                   </tr>
                   <tr v-if="runtimeExpanded[t.id]">
-                    <td colspan="6" style="padding:6px 16px;background:rgba(0,0,0,0.02)">
+                    <td colspan="6" style="padding:8px 16px 8px 20px;border-left:2px solid rgba(0,107,255,0.15)">
                       <span v-if="t.agentType" class="status-tag info" style="font-size:11px">{{ t.agentType }}</span>
                       <span v-if="t.engine" class="t3" style="font-size:11px;margin-left:12px">{{ t.engine }}</span>
                       <span v-if="t.engineIp" class="t3" style="font-size:11px;color:var(--text-tertiary);margin-left:12px">{{ t.engineIp }}</span>
@@ -686,10 +686,11 @@ watch(() => info.value.repoMatrix, (val) => {
 .activity-card { text-align: center; padding: 14px 6px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
 .activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
-/* Issue 卡片列表（对齐健康中心 tl-* 样式） */
-.tl-issue { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
-.tl-issue-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; background: #fafbfc; }
-.tl-issue-head:hover { background: #f5f9ff; }
+/* Issue 卡片列表（对齐健康中心 tl-* 样式 + 苹果风格优化） */
+.tl-issue { border: 1px solid var(--border-color); border-radius: var(--radius); overflow: hidden; margin-bottom: 10px; transition: var(--transition); }
+.tl-issue:hover { box-shadow: var(--card-shadow); transform: translateY(-1px); }
+.tl-issue-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; background: transparent; transition: var(--transition); }
+.tl-issue-head:hover { background: rgba(0,107,255,0.02); }
 .tl-arrow { font-size: 12px; color: var(--text-tertiary); width: 14px; }
 .tl-issue-id { font-size: 13px; min-width: 40px; }
 .tl-issue-link { color: var(--primary); text-decoration: none; }
@@ -700,18 +701,19 @@ watch(() => info.value.repoMatrix, (val) => {
 .tl-issue-status.fail { color: var(--danger); }
 .tl-issue-status.ok { color: var(--success); }
 .tl-issue-time { font-size: 11px; white-space: nowrap; }
-.tl-issue-body { border-top: 1px solid var(--border-color); padding: 10px 14px; }
+.tl-issue-body { border-top: 1px solid var(--border-soft); padding: 12px 16px; }
 .tl-view-tabs { display: flex; gap: 0; margin-bottom: 10px; }
-.tl-view-btn { padding: 5px 12px; font-size: 12px; border: 1px solid var(--border-color); background: #fff; color: var(--text-secondary); cursor: pointer; }
-.tl-view-btn:first-child { border-radius: 6px 0 0 6px; }
-.tl-view-btn:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.tl-view-btn { padding: 6px 14px; font-size: 12px; border: 1px solid var(--border-color); background: transparent; color: var(--text-secondary); cursor: pointer; transition: var(--transition); }
+.tl-view-btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.tl-view-btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; border-left: none; }
 .tl-view-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
 .tl-diagram-container { overflow-x: auto; padding: 8px 0; min-height: 60px; }
 .tl-diagram-loading { padding: 20px; text-align: center; color: var(--text-tertiary); font-size: 12px; }
 .tl-diagram-svg svg { max-width: 100%; }
-.tl-row-fail td { background: #fff1f0 !important; }
-.tl-row-ok td { background: #f6ffed !important; }
-.tl-row-clickable { cursor: pointer; }
+.tl-row-fail td { background: rgba(255,59,48,0.03) !important; }
+.tl-row-ok td { background: rgba(52,199,89,0.03) !important; }
+.tl-row-clickable { cursor: pointer; transition: var(--transition); }
+.tl-row-clickable:hover td { background: rgba(0,107,255,0.03) !important; }
 /* 任务日志弹窗（对齐健康中心 log-* 样式） */
 .log-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .log-modal-overlay.log-layer { z-index: 1200; }
