@@ -234,22 +234,21 @@
           </div>
           <div style="padding:20px 24px">
             <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
-            <div v-if="filteredActivity.length" class="timeline">
-              <div v-for="t in filteredActivity" :key="t.id" class="timeline-item">
-                <div class="timeline-dot" :class="t.status"></div>
-                <div class="timeline-content">
-                  <div class="timeline-header">
-                    <span class="timeline-repo">{{ t.repoName }}</span>
-                    <a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" class="timeline-issue" @click.stop>{{ t.issueId }}</a>
-                    <span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : '进行中' }}</span>
-                  </div>
-                  <div class="timeline-meta">
-                    <span class="t3">{{ t.agentType }} · {{ t.skill || '—' }}</span>
-                    <span class="t3">{{ formatTime(t.startedAt) }}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <table class="vod-table" v-if="filteredActivity.length">
+              <thead>
+                <tr><th style="width:15%">任务ID</th><th style="width:15%">Agent</th><th style="width:20%">Skill</th><th style="width:10%">状态</th><th style="width:15%">Issue</th><th style="width:25%">时间</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in filteredActivity" :key="t.id">
+                  <td class="t3" :title="t.id" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.id?.substring(0, 12) }}…</td>
+                  <td class="t3">{{ t.agentType || '—' }}</td>
+                  <td class="t3" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.skill || '—' }}</td>
+                  <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
+                  <td class="t3"><a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span></td>
+                  <td class="t3">{{ formatTime(t.startedAt) }}</td>
+                </tr>
+              </tbody>
+            </table>
             <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
           </div>
         </div>
