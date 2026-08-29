@@ -122,12 +122,12 @@ class HermesACPBackend:
         new_session_id = session_id
         error_events = []
 
-        # chat 任务完成检测参数（根因1修复）：
-        # chat 任务不输出 JSON 记录块，用 text 输出稳定检测替代。
+        # chat 任务完成检测参数（优化：降低 idle 超时，加快响应）：
         # _CHAT_STABLE_SECONDS: 首次有 text 后至少等 N 秒（给 hermes 时间输出完整回复）
         # _CHAT_IDLE_SECONDS: 最后一条 text 后连续 N 秒无新 text → 认为输出完
-        _CHAT_STABLE_SECONDS = 15
-        _CHAT_IDLE_SECONDS = 10
+        # 优化前：15+10=25s 总延迟；优化后：3+5=8s 总延迟
+        _CHAT_STABLE_SECONDS = 3
+        _CHAT_IDLE_SECONDS = 5
         _chat_first_text_time = 0.0
         _chat_last_text_time = 0.0
         # 判断是否 chat 任务：env 里有 DEVOPS_EVENT_TYPE=chat 或 AGENT_NAME 含 chat
@@ -366,6 +366,8 @@ class HermesACPBackend:
                 msg = {"jsonrpc": "2.0", "id": _prompt_id, "method": "session/prompt",
                        "params": {"sessionId": new_session_id,
                                   "prompt": [{"type": "text", "text": prompt}]}}
+                # 记录 prompt 的 req_id（只有它才触发 prompt_done）
+                client._prompt_req_id = _prompt_id
                 try:
                     client.write_line((json.dumps(msg) + "\n").encode("utf-8"))
                 except Exception as e:
@@ -403,6 +405,14 @@ class HermesACPBackend:
                     break
 
                 elapsed_silent = time.time() - _last_activity
+                # 收到过文本输出后，8s 无新事件 → prompt 已完成但 turn_end/response 丢失
+                # （hermes 在 LLM 返回后做 title_generation 等后续操作，可能不发 turn_end）
+                # 优化前 15s → 优化后 8s
+                if collected_text and elapsed_silent > 8:
+                    log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s with {len(collected_text)} text chunks, assuming done (turn_end may be lost)")
+                    prompt_result["stopReason"] = "end_turn"
+                    break
+
                 if elapsed_silent > max_exec_seconds:
                     if proc.poll() is None and elapsed_silent < max_exec_seconds * 2:
                         # 进程还活着，可能是长命令/长思考
@@ -520,6 +530,7 @@ class _ACPSimpleClient:
         self._pending: dict[int, threading.Event] = {}
         self._pending_results: dict[int, any] = {}
         self._pending_errors: dict[int, str] = {}
+        self._prompt_req_id: int = 0  # session/prompt 的 req_id（只有它才触发 prompt_done）
         self._lock = threading.Lock()
 
     def write_line(self, data: bytes):
@@ -586,6 +597,8 @@ class _ACPSimpleClient:
             # 未匹配的 response，记录但不处理
             return
 
+        is_prompt_response = (req_id == self._prompt_req_id)
+
         if "error" in raw:
             err = raw["error"]
             err_msg = err.get("message", str(err))
@@ -593,26 +606,24 @@ class _ACPSimpleClient:
                 err_msg += f" (data={err['data']})"
             with self._lock:
                 self._pending_errors[req_id] = err_msg
-            # error response 也意味着 prompt 结束
-            self._on_prompt_done({"stopReason": "error", "result": raw})
+            # 只有 session/prompt 的 error 才触发 prompt_done
+            if is_prompt_response:
+                self._on_prompt_done({"stopReason": "error", "result": raw})
         else:
             result = raw.get("result")
-            # 如果是 session/prompt 响应，提取 stopReason 并触发回调
-            if isinstance(result, dict):
-                stop_reason = result.get("stopReason", "")
-                if stop_reason:
-                    # prompt 完成，触发回调
-                    self._on_prompt_done({"stopReason": stop_reason, "result": result})
-                else:
-                    # response 没有 stopReason 字段——可能是 hermes ACP 实现差异
-                    # 仍然视为 prompt 完成（response 到了说明 hermes 已处理完）
-                    log.info(f"{self.label}hermes ACP response without stopReason, treating as done (id={req_id})")
-                    self._on_prompt_done({"stopReason": "end_turn", "result": result})
-            else:
-                # result 不是 dict（可能是 None 或其他类型），也视为完成
-                self._on_prompt_done({"stopReason": "end_turn", "result": result or {}})
             with self._lock:
                 self._pending_results[req_id] = result
+            # 只有 session/prompt 的 response 才触发 prompt_done
+            if is_prompt_response:
+                if isinstance(result, dict):
+                    stop_reason = result.get("stopReason", "")
+                    if stop_reason:
+                        self._on_prompt_done({"stopReason": stop_reason, "result": result})
+                    else:
+                        log.info(f"{self.label}hermes ACP prompt response without stopReason, treating as done (id={req_id})")
+                        self._on_prompt_done({"stopReason": "end_turn", "result": result})
+                else:
+                    self._on_prompt_done({"stopReason": "end_turn", "result": result or {}})
 
         evt.set()
 

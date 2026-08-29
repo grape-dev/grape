@@ -197,7 +197,9 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     conversation_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content MEDIUMTEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    task_id TEXT,
+    generate_status INTEGER DEFAULT NULL
 )
 """
 
@@ -1710,7 +1712,9 @@ def _migrate_tables():
             _ensure_column(c, "issue_state", "is_subtask_mode", "INTEGER DEFAULT 0")
             _ensure_column(c, "tasks", "parent_issue_number", "INTEGER DEFAULT 0")
             _ensure_column(c, "tasks", "is_subtask_mode", "INTEGER DEFAULT 0")
+            _ensure_column(c, "chat_messages", "task_id", "TEXT")
+            _ensure_column(c, "chat_messages", "generate_status", "INTEGER DEFAULT NULL")
             db.commit()
-        log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + tasks")
+        log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + tasks + task_id/generate_status to chat_messages")
     except Exception as e:
         log.warning(f"Add multi-task columns failed: {e}")

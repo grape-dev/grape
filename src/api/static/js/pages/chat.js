@@ -1,6 +1,26 @@
 let _currentConvId = null;
 let _chatAbort = null;
 let _openConvId = null;
+// v31: per-conversation 任务追踪（替代旧 _chatActiveTask 单变量）
+// { conv_id: { task_id, el_id, status, finalText } }
+let _chatTasks = {};
+let _chatStreamAbort = null;  // 当前活跃的 SSE AbortController
+
+// ===== 任务状态持久化（sessionStorage，对齐 Admin AI）=====
+function _getStoredTask(convId) {
+  try { const s = sessionStorage.getItem('chat_task_' + convId); return s ? JSON.parse(s) : null } catch(e) { return null }
+}
+function _setStoredTask(convId, task) {
+  try { sessionStorage.setItem('chat_task_' + convId, JSON.stringify(task)) } catch(e) {}
+}
+function _clearStoredTask(convId) {
+  try { sessionStorage.removeItem('chat_task_' + convId) } catch(e) {}
+}
+// v31: per-conversation 任务状态管理
+function _getTask(convId) { return _chatTasks[convId] || null; }
+function _setTask(convId, task) { _chatTasks[convId] = task; if (convId) _setStoredTask(convId, task); }
+function _clearTask(convId) { delete _chatTasks[convId]; if (convId) _clearStoredTask(convId); }
+
 const _NO_REPLY = I18N.t('chat.no_reply');
 
 /**
@@ -252,24 +272,59 @@ function switchConversation(convId) {
   body.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
   API.get('/chat/messages/' + convId).then(d => {
     const msgs = d.messages || [];
-    // 更新会话标题（如 Issue #4）到页头，Issue #N 渲染为 GitCode 超链接
     const conv = d.conversation || {};
     const hdr = document.querySelector('.chat-hdr h2');
     if (hdr) {
       const titleBase = conv.title || 'Personal Assistant';
-      const repoKey = conv.repo_key || '';
-      // 先转义 HTML，再链接化 Issue #N（renderMarkdown 已转义，这里需手动处理）
       const safeTitle = String(titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      const linkedTitle = linkifyIssueNumbers(safeTitle, repoKey);
-      hdr.innerHTML = I18N.t('chat.header.title_prefix') + linkedTitle;
+      hdr.innerHTML = I18N.t('chat.header.title_prefix') + linkifyIssueNumbers(safeTitle, conv.repo_key || '');
     }
+
+    // 渲染消息列表
     body.innerHTML = msgs.map(m => {
       const rendered = renderMarkdown(m.content);
-      // 消息内容中的 "Issue #N" 渲染为 GitCode 超链接
-      const repoKey = conv.repo_key || '';
-      return `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${linkifyIssueNumbers(rendered, repoKey)}</div>`;
+      return `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${linkifyIssueNumbers(rendered, conv.repo_key || '')}</div>`;
     }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_new') + '</div>';
     body.scrollTop = body.scrollHeight;
+
+    // ★ v31: 检查最后一条消息是否有运行中任务（学习 Admin AI reconnectActiveTask）
+    const lastMsg = msgs[msgs.length - 1];
+    if (lastMsg && lastMsg.role === 'user' && lastMsg.task_id) {
+      // 有 task_id → 查后端 status（内存优先，DB 兜底）
+      fetch('/api/chat/task/' + lastMsg.task_id + '/status', {
+        headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+      }).then(r => r.json()).then(st => {
+        if (st.status === 'running') {
+          // 任务仍在执行 → 追加 3 点动画占位 + SSE 重连
+          const elId = 't' + Date.now();
+          body.innerHTML += '<div class="msg r" id="' + elId + '">'
+            + '<span class="chat-typing">' + I18N.t('chat.querying') + '</span>'
+            + '<span class="chat-dots"><span></span><span></span><span></span></span>'
+            + '</div>';
+          body.scrollTop = body.scrollHeight;
+          _setTask(convId, {task_id: lastMsg.task_id, conv_id: convId, el_id: elId, status: 'running'});
+          // SSE 重连（后端重放缓冲 + 实时追加）
+          streamTask(lastMsg.task_id, elId, convId);
+        } else if (st.status === 'done' || st.status === 'error') {
+          // 任务已完成 → 检查 DB 中 agent 消息是否已显示
+          const hasAgentReply = msgs.some(m => m.role === 'agent' && m.task_id === lastMsg.task_id);
+          if (!hasAgentReply) {
+            // agent 消息不在列表中 → 重新拉取（刚写入 DB）
+            API.get('/chat/messages/' + convId).then(d2 => {
+              renderChatMessages(d2.messages || []);
+              loadConversations();
+            });
+          }
+          _clearTask(convId);
+        } else {
+          // not_found → 任务丢失
+          _clearTask(convId);
+          body.innerHTML += '<div class="msg r" style="color:var(--t3)">（查询已中断，请重新发送消息）</div>';
+          body.scrollTop = body.scrollHeight;
+        }
+      }).catch(() => { _clearTask(convId); });
+    }
+
     if (input) input.disabled = false;
     const sendBtn = document.querySelector('.chat-in button');
     if (sendBtn) sendBtn.disabled = false;
@@ -299,112 +354,168 @@ function sendChatStream() {
   doSend(input, body);
 }
 
+// v31: doSend — submit/stream 分离（学习 Admin AI runQueryAsync）
 function doSend(input, body) {
   const msg = input.value.trim();
   input.value = '';
   body.innerHTML += '<div class="msg l">' + msg.replace(/</g,'&lt;') + '</div>';
   const tid = 't' + Date.now();
-  body.innerHTML += '<div class="msg r" id="' + tid + '">' + I18N.t('chat.thinking') + '</div>';
+  body.innerHTML += '<div class="msg r" id="' + tid + '">'
+    + '<span class="chat-typing">' + I18N.t('chat.querying') + '</span>'
+    + '<span class="chat-dots"><span></span><span></span><span></span></span>'
+    + '</div>';
   body.scrollTop = body.scrollHeight;
 
   const repo = app.currentRepo();
-  const token = localStorage.getItem('token');
-  if (_chatAbort) { _chatAbort.abort(); _chatAbort = null; }
-  const ac = new AbortController();
-  _chatAbort = ac;
-
-  fetch('/api/chat/send/stream', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token},
-    body: JSON.stringify({message: msg, repo_key: repo ? repo.fullName : '', conversation_id: _currentConvId}),
-    signal: ac.signal,
-  }).then(async resp => {
+  // 1. submit → 立即获取 task_id
+  API.post('/chat/submit', {
+    message: msg,
+    repo_key: repo ? repo.fullName : '',
+    conversation_id: _currentConvId,
+  }).then(r => {
+    const convId = r.conversation_id || _currentConvId;
+    if (r.status === 'error') {
+      const el = document.getElementById(tid);
+      if (el) el.innerHTML = renderMarkdown(r.error || _NO_REPLY);
+      _clearTask(convId);
+      loadConversations();
+      return;
+    }
+    // per-conversation 记录
+    _setTask(convId, {task_id: r.task_id, conv_id: convId, el_id: tid, status: 'running'});
+    // 2. SSE 订阅
+    streamTask(r.task_id, tid, convId);
+  }).catch(e => {
     const el = document.getElementById(tid);
-    // M4 D5：queue 模式下 send/stream 返回 {task_id}（非 SSE）→ 轮询任务状态（打字机近似）
-    const ctype = (resp.headers.get('content-type') || '');
-    if (ctype.includes('application/json')) {
-      const data = await resp.json().catch(() => ({}));
-      if (data && data.task_id) { pollTaskStatus(data.task_id, el, body, tid); return; }
-      if (el) el.innerHTML = renderMarkdown(data.reply || '') || _NO_REPLY;
-      loadConversations();
-      return;
-    }
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      if (el) el.innerHTML = I18N.t('common.error') + (err.detail?.message || resp.statusText);
-      return;
-    }
-    if (!resp.body) {
-      // Fallback: read as text
-      const text = await resp.text();
-      try {
-        const lines = text.split('\n');
-        lines.forEach(line => {
-          if (line.startsWith('data: ')) {
-            const d = JSON.parse(line.substring(6));
-            if (d.text && el) el.innerHTML = renderMarkdown(d.text);
-          }
-        });
-      } catch(e) {}
-      if (el) el.innerHTML = renderMarkdown(text) || _NO_REPLY;
-      loadConversations();
+    if (el) el.innerHTML = I18N.t('common.request_failed') + (e.message || '');
+  });
+}
+
+// v31: streamTask — SSE 订阅（可断开重连，后端重放缓冲）
+// 学习 Admin AiAssistant.vue streamTask
+async function streamTask(taskId, elId, convId) {
+  // 中断旧 SSE（同会话新查询 / 不同会话切换让位）
+  if (_chatStreamAbort) { _chatStreamAbort.abort(); _chatStreamAbort = null; }
+  const ac = new AbortController();
+  _chatStreamAbort = ac;
+
+  const body = document.getElementById('chatBody');
+  const el = document.getElementById(elId);
+  let finalText = '';
+
+  try {
+    const resp = await fetch('/api/chat/task/' + taskId + '/stream', {
+      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+      signal: ac.signal
+    });
+    if (!resp.ok || !resp.body) {
+      if (el) el.innerHTML = I18N.t('common.error') + (resp.statusText || '');
+      _clearTask(convId);
       return;
     }
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
-    let buf = '', finalText = '';
-    function read() {
-      reader.read().then(({done, value}) => {
-        if (done) {
-          if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
-          body.scrollTop = body.scrollHeight;
-          _chatAbort = null;
-          loadConversations();
-          return;
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      lines.forEach(line => {
+        if (line.startsWith('data: ')) {
+          try {
+            const d = JSON.parse(line.substring(6));
+            if (d.type === 'done') {
+              finalText = d.text || finalText;
+              if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
+            } else if (d.type === 'error') {
+              if (el) el.innerHTML = renderMarkdown(d.text || '') || _NO_REPLY;
+            } else if (d.text && el) {
+              finalText = d.text;
+              el.innerHTML = renderMarkdown(finalText);
+            }
+          } catch(e) {}
         }
-        buf += dec.decode(value, {stream: true});
-        const lines = buf.split('\n');
-        buf = lines.pop() || '';
-        lines.forEach(line => {
-          if (line.startsWith('data: ')) {
-            try {
-              const d = JSON.parse(line.substring(6));
-              if (d.type === 'done') finalText = d.text;
-              else if (d.text && el) el.innerHTML = renderMarkdown(d.text);
-            } catch(e) {}
-          }
-        });
-        body.scrollTop = body.scrollHeight;
-        read();
-      }).catch(e => { if (e.name !== 'AbortError' && el) el.innerHTML = I18N.t('common.error') + e.message; });
+      });
+      // 只有当前会话才滚动（后台会话不抢滚动）
+      if (_currentConvId === convId && body) body.scrollTop = body.scrollHeight;
     }
-    read();
-  }).catch(e => { const el = document.getElementById(tid); if (el) el.innerHTML = I18N.t('common.request_failed') + e.message; });
+    // 完成 → 清理任务状态
+    _clearTask(convId);
+    // 刷新会话列表（更新最后消息预览）
+    if (_currentConvId === convId) loadConversations();
+  } catch(e) {
+    if (e.name === 'AbortError') return;  // 主动中断（切换会话/离开页面）
+    // 连接断开 → 后端继续执行，切回来时 switchConversation 会重连
+    // 不清除 _chatTasks[convId] — 保留状态供切回时恢复
+    if (el) el.innerHTML = '<span class="chat-typing">' + I18N.t('chat.querying') + '</span>'
+      + '<span class="chat-dots"><span></span><span></span><span></span></span>';
+  }
 }
 
-function pollTaskStatus(taskId, el, body, tid) {
-  if (el) el.innerHTML = I18N.t('chat.task.running');
-  const token = localStorage.getItem('token');
-  let attempts = 0;
-  const timer = setInterval(() => {
-    attempts++;
-    fetch('/api/runtime/tasks/' + taskId + '/status', {
-      headers: {'Authorization': 'Bearer ' + token},
-    }).then(r => r.json()).then(d => {
-      if (!d || !d.status) return;
-      if (d.status === 'completed' || d.status === 'failed' || d.status === 'cancelled') {
-        clearInterval(timer);
-        _chatAbort = null;
-        const text = d.result_text || (d.status === 'completed' ? 'Done' : I18N.t('chat.task.status_prefix', {status: d.status}));
-        if (el) el.innerHTML = renderMarkdown(text);
-        body.scrollTop = body.scrollHeight;
-        loadConversations();
-      } else if (d.status === 'running' || d.status === 'dispatched') {
-        if (el) el.innerHTML = I18N.t('chat.task.running_with_time', {sec: Math.round(attempts * 1)});
+// v31: resumeChatTask — 切换回 Chat 页面时恢复（从 app.js nav 调用）
+function resumeChatTask() {
+  if (!_currentConvId) return;
+  // 从 sessionStorage 恢复或查 DB 最后一条消息
+  const task = _getTask(_currentConvId) || _getStoredTask(_currentConvId);
+  if (task && task.task_id) {
+    // 有 task_id → 查 status
+    fetch('/api/chat/task/' + task.task_id + '/status', {
+      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+    }).then(r => r.json()).then(st => {
+      if (st.status === 'running') {
+        // 仍在执行 → 确保 3 点动画占位 + SSE 重连
+        const body = document.getElementById('chatBody');
+        if (!body) return;
+        // 检查是否已有占位符
+        let el = document.getElementById(task.el_id);
+        if (!el) {
+          const elId = 't' + Date.now();
+          task.el_id = elId;
+          body.innerHTML += '<div class="msg r" id="' + elId + '">'
+            + '<span class="chat-typing">' + I18N.t('chat.querying') + '</span>'
+            + '<span class="chat-dots"><span></span><span></span><span></span></span>'
+            + '</div>';
+          body.scrollTop = body.scrollHeight;
+        }
+        streamTask(task.task_id, task.el_id, _currentConvId);
+      } else {
+        // done/error/not_found → 刷新消息
+        _clearTask(_currentConvId);
+        API.get('/chat/messages/' + _currentConvId).then(d => {
+          renderChatMessages(d.messages || []);
+          loadConversations();
+        }).catch(() => {});
       }
     }).catch(() => {});
-    if (attempts > 180) { clearInterval(timer); _chatAbort = null; if (el) el.innerHTML = I18N.t('chat.task.timeout'); }
-  }, 1000);
+  } else {
+    // 无 task_id → 查 DB 最后一条消息是否有 task_id
+    API.get('/chat/messages/' + _currentConvId).then(d => {
+      const msgs = d.messages || [];
+      const lastMsg = msgs[msgs.length - 1];
+      if (lastMsg && lastMsg.role === 'user' && lastMsg.task_id) {
+        // 有 task_id → 递归调用
+        _setTask(_currentConvId, {task_id: lastMsg.task_id, conv_id: _currentConvId, status: 'running'});
+        resumeChatTask();
+      }
+    }).catch(() => {});
+  }
+}
+
+function renderChatMessages(messages) {
+  const body = document.getElementById('chatBody');
+  if (!body) return;
+  body.innerHTML = '';
+  messages.forEach(m => {
+    const escaped = (m.content || '').replace(/</g, '&lt;');
+    if (m.role === 'user') {
+      body.innerHTML += '<div class="msg l">' + escaped + '</div>';
+    } else {
+      body.innerHTML += '<div class="msg r">' + renderMarkdown(m.content || '') + '</div>';
+    }
+  });
+  body.scrollTop = body.scrollHeight;
 }
 
 function saveChatConfig() {

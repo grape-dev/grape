@@ -230,6 +230,12 @@ function loadAgentTypes() {
     const repo = currentRepo();
     if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability') { loadRepos(); return; }
 
+    // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
+    if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
+      _chatStreamAbort.abort();
+      _chatStreamAbort = null;
+    }
+
     _pushHistory(view, param);
 
     document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));
@@ -279,6 +285,8 @@ function loadAgentTypes() {
     } else if (view === 'chat') {
       title.textContent = I18N.t('app.nav.chat');
       renderChat(param || null);
+      // 切换回 Chat 页面时恢复活跃查询（不中断）
+      if (typeof resumeChatTask === 'function') setTimeout(resumeChatTask, 500);
     } else if (view === 'tasks') {
       title.textContent = I18N.t('app.nav.tasks');
       renderTasks();

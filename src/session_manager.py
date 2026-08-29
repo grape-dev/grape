@@ -630,11 +630,15 @@ def join_feishu_chat(chat_id: str, conv_id: str, user_id: int) -> bool:
 
 # ====== chat_messages CRUD ======
 
-def add_message(conversation_id: str, role: str, content: str) -> int:
+def add_message(conversation_id: str, role: str, content: str, task_id: str = "", generate_status: int = None) -> int:
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT INTO chat_messages (conversation_id, role, content) VALUES (?,?,?)",
-                  (conversation_id, role, content))
+        if task_id:
+            c.execute("INSERT INTO chat_messages (conversation_id, role, content, task_id, generate_status) VALUES (?,?,?,?,?)",
+                      (conversation_id, role, content, task_id, generate_status))
+        else:
+            c.execute("INSERT INTO chat_messages (conversation_id, role, content) VALUES (?,?,?)",
+                      (conversation_id, role, content))
         db.commit()
         return c.lastrowid
 
@@ -643,14 +647,14 @@ def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> l
     with db_lock:
         c = db.cursor()
         if before_id > 0:
-            c.execute("SELECT id, conversation_id, role, content, created_at FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
+            c.execute("SELECT id, conversation_id, role, content, created_at, task_id, generate_status FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
                       (conversation_id, before_id, limit))
         else:
-            c.execute("SELECT id, conversation_id, role, content, created_at FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
+            c.execute("SELECT id, conversation_id, role, content, created_at, task_id, generate_status FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
                       (conversation_id, limit))
         rows = c.fetchall()
         rows.reverse()
-        return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": normalize_event_time(r[4])} for r in rows]
+        return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": normalize_event_time(r[4]), "task_id": r[5] or "", "generate_status": r[6]} for r in rows]
 
 
 def delete_messages_by_conv(conversation_id: str):
