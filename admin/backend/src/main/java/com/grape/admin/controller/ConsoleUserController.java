@@ -167,10 +167,10 @@ public class ConsoleUserController {
         try {
             List<Map<String, Object>> repoMatrix = grapeJdbc.query(
                 "SELECT m.full_name, m.repo_key, " +
-                "COUNT(*) as task_count, " +
+                "COUNT(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 END) as task_count, " +
                 "COUNT(DISTINCT CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN t.issue_id END) as issue_count, " +
-                "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
-                "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed, " +
+                "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as completed, " +
+                "SUM(CASE WHEN t.exit_code>0 AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as failed, " +
                 "SUM(CASE WHEN (t.exit_code IS NULL OR t.completed_at IS NULL) AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as pending " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
