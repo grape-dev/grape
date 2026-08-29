@@ -129,7 +129,7 @@ _TASK_COLUMNS = (
     "skill_id, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
-    "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, "
+    "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
     "status, exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
 )
@@ -315,7 +315,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
                  project_info_file_urls=None, knowledge_file_urls=None,
-                 pool_agent_type="", affinity_runtime_id=0, pool_tag=""):
+                 pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids=""):
     """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
 
     引擎池（agent-cluster-design.md §4.1/§4.2）：runtime_id=0 + pool_agent_type 非空
@@ -428,7 +428,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
              json.dumps(knowledge_files),
             json.dumps(project_info_file_urls), json.dumps(knowledge_file_urls),
-            0, pool_agent_type or "", affinity_runtime_id or 0, pool_tag or "",
+            0, pool_agent_type or "", affinity_runtime_id or 0, pool_tag or "", pool_engine_ids or "",
              "queued", None, "", "", "", "{}", None, None, datetime.now(timezone.utc).isoformat())
         )
         db.commit()
@@ -635,7 +635,7 @@ def claim(runtime_id) -> dict | None:
                 log.warning(f"recover stale dispatched failed: {_e}")
 
             # 确定路由：① 定向任务（runtime_id=?）② 池任务（runtime_id=0 + pool_agent_type，
-            # 该 agent_type 的引擎集合（devops_agent_runtime_binding）含本引擎即可领；
+            # pool_engine_ids 为空或包含本引擎即可领；
             # 回收逻辑会把 dispatched 超时任务归零转池任务，claim 必须兼容，否则永久死任务）
             #
             # 插件模式：广播任务只能走 claim_by_tag（标签匹配），legacy claim 不认领广播任务，
@@ -666,10 +666,6 @@ def claim(runtime_id) -> dict | None:
                     c.execute("""
                         SELECT id FROM agent_tasks
                         WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued'
-                          AND pool_agent_type IN (
-                            SELECT b.agent_type FROM devops_agent_runtime_binding b
-                            WHERE b.runtime_id=? AND b.enabled=1
-                          )
                           AND NOT EXISTS (
                             SELECT 1 FROM agent_tasks a2
                             WHERE a2.status IN ('dispatched','running')
@@ -680,12 +676,24 @@ def claim(runtime_id) -> dict | None:
                               )
                           )
                         ORDER BY created_at ASC LIMIT 1
-                    """, (runtime_id,))
+                    """)
                     row = c.fetchone()
             if not row:
                 db.commit()
                 return None
             task_id = row[0]
+            # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
+            c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+            _pe_row = c.fetchone()
+            if _pe_row and _pe_row[0]:
+                import json as _json
+                try:
+                    _allowed = _json.loads(_pe_row[0])
+                    if _allowed and runtime_id not in _allowed:
+                        db.commit()
+                        return None  # 当前引擎不在限定列表中，跳过
+                except Exception:
+                    pass
             c.execute(
                 "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
                 (runtime_id, datetime.now(timezone.utc).isoformat(), task_id))
@@ -844,6 +852,17 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             if not task_row:
                 return None
             task_id = task_row[0]
+            # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
+            c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+            _pe_row = c.fetchone()
+            if _pe_row and _pe_row[0]:
+                import json as _json
+                try:
+                    _allowed = _json.loads(_pe_row[0])
+                    if _allowed and runtime_id not in _allowed:
+                        return None  # 当前引擎不在限定列表中，跳过
+                except Exception:
+                    pass
             # 标记 dispatched
             c.execute(
                 "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",

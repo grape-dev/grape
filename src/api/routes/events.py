@@ -428,10 +428,21 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
             if old:
                 _sid = old.get("issue_session_id") or ""
                 _env = {}
-                # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物，
-                # 触发 enqueue_task D3 校验失败）。复用 pipeline 同款路由逻辑（pick_engine：
-                # 引擎集合 → 专属/全局/本机；无则回退旧快照 runtime_id，仍无则拒派）。
+                # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物）。
+                # fallback 链：task.runtime_id → session.runtime_id → 拒派。
                 _rid = old.get("runtime_id") or 0
+                if not _rid:
+                    # task runtime_id=0 → 查 session 主引擎
+                    try:
+                        with db_lock:
+                            c3 = db.cursor()
+                            c3.execute("SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                                       (old.get("repo_key") or "", old.get("agent_type") or ""))
+                            _sr = c3.fetchone()
+                            if _sr and _sr[0]:
+                                _rid = _sr[0]
+                    except Exception:
+                        pass
                 try:
                     from src.runtime.engine_select import pick_engine
                     _rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "", fallback_runtime_id=_rid) or 0

@@ -255,8 +255,8 @@ else
 #!/usr/bin/env bash
 # Grape Worker 启动脚本（由 install-worker.sh 生成，可重复执行）
 cd "$INSTALL_DIR"
-# Ensure local bin dirs are in PATH (opencode/hermes installed via npm/pip to ~/.local)
-export PATH="\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
+# Ensure local bin dirs are in PATH (opencode installed via npm to ~/.opencode/bin; hermes via pip to ~/.local)
+export PATH="\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
 set -a; . "$ENV_FILE"; set +a
 exec "$VENV/bin/python" -m src.runtime.agent
 EOF

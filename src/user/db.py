@@ -1452,7 +1452,7 @@ def save_user_repos(user_id: int, repos: list[dict]):
         for r in repos:
             full_name = r.get("full_name", "") or r.get("repo_key", "")
             c.execute(
-                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join) VALUES (?,?,?,?,?,?,?,0)",
+                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join) VALUES (?,?,?,?,?,?,?,1)",
                 (user_id, to_repo_key(full_name), r.get("owner", ""), r.get("name", ""),
                  r.get("description", ""), r.get("role", ""), 1 if r.get("is_admin") else 0)
             )

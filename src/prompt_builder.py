@@ -9,9 +9,11 @@ _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
 def _resolve_server_url(runtime_id: int = 0) -> str:
     """返回服务端可达地址（A2A/tasks 等对外调用用）。
 
-    本地引擎（credential_id=0）走 localhost 直连，避免 NAT 回环不通
+    本地引擎走 localhost 直连，避免 NAT 回环不通
     （服务端无法通过自己的公网 IP 访问自己）；
     远程 worker 走 meta.server_base_url（公网地址）。
+
+    判定本地：credential_id == 0（本机直连引擎）或 credential.last_ip == 127.0.0.1（本机 worker）。
     """
     try:
         from src.user.db import get_server_base_url
@@ -22,8 +24,15 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
                 c = db.cursor()
                 c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
                 row = c.fetchone()
-                if row and row[0] == 0:
-                    return "http://127.0.0.1:3000"
+                if row:
+                    cid = row[0] or 0
+                    if cid == 0:
+                        return "http://127.0.0.1:3000"
+                    # 检查是否本机 worker（last_ip == 127.0.0.1）
+                    c.execute("SELECT last_ip FROM runtime_credentials WHERE id=?", (cid,))
+                    cred_row = c.fetchone()
+                    if cred_row and (cred_row[0] or "").startswith("127."):
+                        return "http://127.0.0.1:3000"
         return public_url
     except Exception:
         pass

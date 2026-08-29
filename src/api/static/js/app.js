@@ -266,11 +266,13 @@ function loadAgentTypes() {
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes'),
       ]).then(([dashData, scenesData]) => {
+        // 编辑中不刷新，避免丢失用户正在进行的修改
+        if (window._dashboardEditing) return;
         dashData._scenes = scenesData.scenes || [];
         dashData._owner = repo.owner;
         dashData._name = repo.name;
         renderDashboard(dashData);
-      }).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      }).catch(e => { if (!window._dashboardEditing) pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {

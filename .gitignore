@@ -56,3 +56,9 @@ temp/
 .codeartsdoer/skills/
 # MCP installed marker (regenerated on use)
 .codeartsdoer/.installed
+python/
+wheels/
+SHA256SUMS
+VERSION
+*.swp
+*.swo

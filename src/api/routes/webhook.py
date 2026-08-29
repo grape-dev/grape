@@ -307,8 +307,10 @@ async def a2a_endpoint(request: Request):
         if _recommended_scene and issue_number:
             try:
                 from src.api.session_store import set_issue_scene
-                set_issue_scene(repo_key, f"#{issue_number}", _recommended_scene)
-                log.info(f"A2A: scene_id={_recommended_scene} set for issue=#{issue_number}")
+                from src.runtime.engine_select import _repo_user_id
+                _scene_uid = _repo_user_id(repo_key)
+                set_issue_scene(repo_key, f"#{issue_number}", _recommended_scene, scene_user_id=_scene_uid)
+                log.info(f"A2A: scene_id={_recommended_scene} uid={_scene_uid} set for issue=#{issue_number}")
             except Exception as _sce:
                 log.warning(f"A2A: set_issue_scene failed: {_sce}")
 
@@ -418,9 +420,19 @@ async def a2a_endpoint(request: Request):
             log.warning(f"A2A plugin event-driven path failed: {e}, falling back to legacy dispatch")
 
         # Legacy dispatch (also serves as fallback for plugin mode)
-        from src.runtime.engine_select import pick_engine, engine_name
+        from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
-        engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0)
+        # A2A 交办的场景来自 issue_state（VOD recommended_scene 已持久化）
+        _a2a_scene, _a2a_scene_uid = "default", 0
+        if issue_number:
+            try:
+                from src.api.session_store import get_issue_scene
+                _a2a_scene, _a2a_scene_uid = get_issue_scene(repo_key, f"#{issue_number}")
+                _a2a_scene = _a2a_scene or "default"
+            except Exception:
+                pass
+        engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0,
+                                scene_id=_a2a_scene, user_id=_a2a_scene_uid)
         if engine_id is None:
             log.info(f"A2A: no available engine for repo={repo_key} agent={agent_name}, seq={seq}, skip")
             try:
@@ -436,10 +448,12 @@ async def a2a_endpoint(request: Request):
         if engine_id == 0 and _is_plugin() and get_execution_mode() != EXEC_MODE_DIRECT:
             from src.api.event_pipeline import _enqueue_pipeline_task
             _be = backend or "opencode"
+            _pool_eids = get_scene_pool_engine_ids(_a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
             _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                    skill_name or agent_name, evt,
                                    skill_id, skill_path or "", engine_id,
-                                   f"#{issue_number}" if issue_number else "")
+                                   f"#{issue_number}" if issue_number else "",
+                                   pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid)
             log.info(f"A2A (plugin broadcast): enqueued pool task for {agent_name}, seq={seq}")
             return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "broadcast"}
         # backend 取已注册引擎的类型名（不沿用字面默认，engine-selection-design.md v2）
@@ -470,7 +484,8 @@ async def a2a_endpoint(request: Request):
             _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                    skill_name or agent_name, evt,
                                    skill_id, skill_path, engine_id,
-                                   f"#{issue_number}" if issue_number else "")
+                                   f"#{issue_number}" if issue_number else "",
+                                   user_id=_a2a_scene_uid)
             log.info(f"A2A: enqueued task for {agent_name}, seq={seq}, engine={engine_id}, mode={kind}")
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")

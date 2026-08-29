@@ -1,9 +1,9 @@
-"""引擎选择 / 派发（见 engine-selection-design.md v2）。
+"""引擎选择 / 派发。
 
-核心模型：每个 (repo_key, agent_type) 绑定一组引擎（引擎集合，存 devops_agent_runtime_binding）。
-- 集合成员可选面：仓库级引擎（owner_id=该仓库）∪ 全局引擎（含本机直连 credential_id=0）。
-- pick_engine：按「专属（仓库级）→ 全局 → 本机直连」优先级 + 健康过滤，从集合选一个引擎派发；
-  集合为空时回退会话主引擎（legacy），否则返回 None（engine_unavailable，绝不回落硬编码默认）。
+核心模型：每个场景 node 的 engine_runtime_ids 指定该 (场景, agent) 可用的引擎列表。
+- pick_engine：plugin 模式统一返回 0（广播），engine_runtime_ids 写入 pool_engine_ids 限定范围；
+  legacy 模式按「专属（仓库级）→ 全局 → 本机直连」优先级 + 健康过滤从列表选一个引擎；
+  列表为空时回退会话主引擎（session.runtime_id），无则 None（engine_unavailable）。
 - 本机直连（credential_id=0）为最低优先级成员：选中即 direct；远端引擎入队该引擎（确定路由）。
 """
 import os
@@ -114,35 +114,25 @@ def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
     return out
 
 
-# ===== 引擎集合（绑定表）读写 =====
+# ===== 引擎档位 / 优先级（供 pick_engine 多引擎选择）=====
 
-def get_binding(repo_key: str, agent_type: str) -> list[dict]:
-    """返回 (repo, agent) 的引擎集合（含引擎实时信息与 scope/priority）。"""
+def _repo_user_id(repo_key: str) -> int:
+    """从 user_repos 表反查 repo_key 对应的 user_id（取第一个 join 的用户）。"""
+    if not repo_key:
+        return 0
     repo = _norm_repo(repo_key)
     db, lock = _db()
     with lock:
-        c = db.cursor()
         try:
+            c = db.cursor()
+            # repo_key 在 user_repos 里可能带 gitcode: 前缀，用 LIKE 匹配
             c.execute(
-                "SELECT b.runtime_id, b.priority, b.enabled, "
-                " r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, r.scope, r.owner_id, "
-                " COALESCE(rc.device_name, ''), COALESCE(rc.owner_name, '') "
-                "FROM devops_agent_runtime_binding b "
-                "LEFT JOIN agent_runtimes r ON r.id = b.runtime_id "
-                "LEFT JOIN runtime_credentials rc ON rc.id = r.credential_id "
-                "WHERE b.repo_key=? AND b.agent_type=? ORDER BY b.priority ASC, b.runtime_id ASC",
-                (repo, agent_type))
-            rows = c.fetchall()
-        except Exception as e:
-            log.warning(f"get_binding failed: {e}")
-            return []
-    return [{
-        "runtime_id": r[0], "priority": r[1] or 0, "enabled": bool(r[2]),
-        "name": r[3] or "", "status": r[4] or "offline", "healthy": bool(r[5]),
-        "installed": bool(r[6]), "credential_id": r[7] or 0, "last_seen_at": r[8] or "",
-        "scope": r[9] or "global", "owner_id": r[10] or "", "device_name": r[11] or "",
-        "owner_name": r[12] or "",
-    } for r in rows]
+                "SELECT user_id FROM user_repos WHERE (repo_key=? OR repo_key=?) AND is_join=1 ORDER BY user_id LIMIT 1",
+                (repo, f"gitcode:{repo}"))
+            row = c.fetchone()
+            return row[0] if row else 0
+        except Exception:
+            return 0
 
 
 def _engine_scope_info(runtime_id: int) -> tuple[str, str]:
@@ -174,120 +164,39 @@ def _default_priority(runtime_id: int, repo: str, cfg: dict) -> int:
     return int(cfg.get("local_priority", _PRIO_LOCAL)) if scope == "local" else _PRIO_GLOBAL
 
 
-def _busy_slots(runtime_id: int) -> int:
-    """返回引擎当前实际活跃任务数（实时 COUNT，与 claim_by_tag 并发检查一致）。
-
-    不使用 busy_slots 字段（该字段在 kill -9/崩溃/快速失败场景下只增不减导致脏数据）。
-    """
-    db, lock = _db()
-    with lock:
-        try:
-            c = db.cursor()
-            c.execute(
-                "SELECT COUNT(*) FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
-                (runtime_id,)
-            )
-            row = c.fetchone()
-            return row[0] if row else 0
-        except Exception:
-            return 0
-
-
-def _pick_least_busy(cand: list[dict]) -> dict:
-    """从候选引擎中选繁忙度最低的（同档位内负载均衡）。
-
-    排序键：(priority, actual_busy, runtime_id)
-    - priority 优先（repo < global < local 档位）
-    - actual_busy 次之（实时 COUNT 活跃任务数，选空闲最多的）
-    - runtime_id 末位（稳定排序兜底）
-    """
-    return min(cand, key=lambda r: (r.get("priority", 0), _busy_slots(r["runtime_id"]), r["runtime_id"]))
-
-
-def set_binding(repo_key: str, agent_type: str, runtime_ids: list[int], priorities: dict | None = None):
-    """替换 (repo, agent) 的引擎集合（先删后插，单事务）。空列表 = 清空集合。"""
-    repo = _norm_repo(repo_key)
-    cfg = load_engine_selection()
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat()
-    db, lock = _db()
-    with lock:
-        c = db.cursor()
-        c.execute("DELETE FROM devops_agent_runtime_binding WHERE repo_key=? AND agent_type=?", (repo, agent_type))
-        for rid in (runtime_ids or []):
-            rid = int(rid)
-            if priorities and rid in priorities:
-                pr = int(priorities[rid])
-            else:
-                pr = _default_priority(rid, repo, cfg)
-            c.execute(
-                "INSERT OR IGNORE INTO devops_agent_runtime_binding (repo_key, agent_type, runtime_id, priority, enabled, created_at) VALUES (?,?,?,?,1,?)",
-                (repo, agent_type, rid, pr, now))
-        db.commit()
-    log.info(f"Binding set: {repo}:{agent_type} -> {runtime_ids or []}")
-
-
-def clear_binding(repo_key: str, agent_type: str):
-    """清空 (repo, agent) 的引擎集合。"""
-    set_binding(repo_key, agent_type, [])
-
-
-def backfill_existing_bindings() -> int:
-    """把存量 `devops_agent_session.runtime_id>0` 的会话回填为绑定集合（单成员），幂等。
-
-    engine-selection-design.md §4.4/§12：新模型上线前托管的存量仓库没有 `devops_agent_runtime_binding`
-    行，导致 Configure/展示读不到引擎。仅作**一次性迁移**（meta 标志 `bindings_backfilled` 防重跑，
-    避免覆盖用户后续改动）；priority 按引擎 scope 派生（repo=10/global=50/local=90）。
-    """
-    from src.repo_key import from_repo_key
-    from src.user.db import get_meta_value, set_meta_value
-    if get_meta_value(_BACKFILL_FLAG) == "1":
-        return 0
-    db, lock = _db()
-    cfg = load_engine_selection()
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat()
-    added = 0
-    with lock:
-        c = db.cursor()
-        try:
-            rows = c.execute(
-                "SELECT repo_key, agent_type, runtime_id FROM devops_agent_session WHERE runtime_id IS NOT NULL AND runtime_id>0"
-            ).fetchall()
-        except Exception as e:
-            log.warning(f"backfill_existing_bindings: query failed: {e}")
-            return 0
-        for repo_key, agent_type, runtime_id in rows:
-            repo = from_repo_key(repo_key or "")
-            if not repo or not agent_type:
-                continue
-            try:
-                exists = c.execute(
-                    "SELECT 1 FROM devops_agent_runtime_binding WHERE repo_key=? AND agent_type=? LIMIT 1",
-                    (repo, agent_type)).fetchone()
-                if exists:
-                    continue
-                pr = _default_priority(runtime_id, repo, cfg)
-                c.execute(
-                    "INSERT OR IGNORE INTO devops_agent_runtime_binding (repo_key, agent_type, runtime_id, priority, enabled, created_at) VALUES (?,?,?,?,1,?)",
-                    (repo, agent_type, runtime_id, pr, now))
-                added += 1
-            except Exception as e:
-                log.warning(f"backfill_existing_bindings: insert {repo}:{agent_type} failed: {e}")
-        db.commit()
-    try:
-        set_meta_value(_BACKFILL_FLAG, "1")
-    except Exception as e:
-        log.warning(f"backfill_existing_bindings: mark flag failed: {e}")
-    if added:
-        log.info(f"backfill_existing_bindings: added {added} binding rows from existing sessions")
-    return added
-
-
-_BACKFILL_FLAG = "bindings_backfilled"
-
-
 # ===== 派发选择 =====
+
+def _engines_by_ids(engine_ids: list[int], repo: str, cfg: dict) -> list[dict]:
+    """按 runtime_id 列表查引擎详情（含 scope/priority），供 pick_engine 多引擎选择。"""
+    if not engine_ids:
+        return []
+    db, lock = _db()
+    members = []
+    with lock:
+        c = db.cursor()
+        try:
+            placeholders = ",".join("?" * len(engine_ids))
+            c.execute(
+                "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                " r.scope, r.owner_id, "
+                " COALESCE(rc.device_name, ''), COALESCE(rc.owner_name, '') "
+                "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id = r.credential_id "
+                f"WHERE r.id IN ({placeholders})",
+                tuple(engine_ids))
+            rows = c.fetchall()
+        except Exception as e:
+            log.warning(f"_engines_by_ids failed: {e}")
+            return []
+    for r in rows:
+        rid = r[0]
+        members.append({
+            "runtime_id": rid, "name": r[1] or "", "status": r[2] or "offline", "healthy": bool(r[3]),
+            "installed": bool(r[4]), "credential_id": r[5] or 0, "last_seen_at": r[6] or "",
+            "scope": r[7] or "global", "owner_id": r[8] or "", "device_name": r[9] or "",
+            "owner_name": r[10] or "", "priority": _default_priority(rid, repo, cfg),
+        })
+    return members
+
 
 def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
     """过滤绑定集合，只保留标签匹配 agent_type 的引擎。"""
@@ -308,48 +217,75 @@ def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
     return result
 
 
-def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0) -> int | None:
-    """按 专属→全局→本机直连 优先级从引擎集合选健康引擎；集合空回退会话主引擎（legacy）。
+def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
+                scene_id: str = "", user_id: int = 0) -> int | None:
+    """从场景 node 的 engine_runtime_ids 选引擎；为空回退会话主引擎（legacy）。
 
-    返回 None = engine_unavailable（调用方跳过执行，禁止回落硬编码默认引擎）。
+    返回 None = engine_unavailable（调用方跳过执行）。
+    返回 0 = 无主池广播（plugin 模式），场景 engine_runtime_ids 限定广播范围（通过 pool_engine_ids 字段）。
 
-    Plugin 模式下绑定表为空时优先走广播（return 0），不走 fallback_runtime_id：
-    fallback 来自 devops_agent_session.runtime_id（历史会话引擎），会绕过广播直接定向
-    到旧引擎（如 0003 的 rt=54 有 121 个历史会话），导致 tag 限制失效。
+    plugin 模式：统一返回 0（广播），不读任何绑定。
+    legacy 模式：engine_runtime_ids 非空 → 按优先级选健康引擎；为空 → 回退 fallback_runtime_id。
     """
     cfg = load_engine_selection()
     if not cfg.get("enabled", True):
         return None
-    repo = _norm_repo(repo_key)
-    members = get_binding(repo_key, agent_type)
-    if members:
-        # 标签过滤：排除不匹配 agent_type 的引擎
-        members = _filter_by_tags(members, agent_type)
-    if members:
-        for scope in cfg.get("scopes") or ["repo", "global", "local"]:
-            cand = _apply_filters([m for m in members if _member_scope(m, repo) == scope], cfg)
-            if not cand:
-                continue
-            if cfg.get("rule") == "order":
-                return _pick_least_busy(cand)["runtime_id"]
-            # random 模式：优先选实际空闲引擎（active=0），无空闲则选最少的
-            _idle = [m for m in cand if _busy_slots(m["runtime_id"]) == 0]
-            if _idle:
-                return random.choice(_idle)["runtime_id"]
-            return _pick_least_busy(cand)["runtime_id"]
-        return None     # 集合存在但无健康成员 → engine_unavailable（不回退 fallback）
-    # Plugin 模式：绑定表为空 → 直接走广播（return 0），不走 fallback_runtime_id。
-    # fallback 来自历史会话，会绕过 tag 限制定向到旧引擎，破坏广播负载均衡。
+    # Plugin 模式：统一广播，engine_runtime_ids 由 get_scene_pool_engine_ids 写入 pool_engine_ids
     try:
         from src.api.event_pipeline import is_plugin_mode
         if is_plugin_mode():
             return 0
     except Exception:
         pass
-    # 传统模式：无绑定 → 回退会话主引擎（legacy），无则 engine_unavailable
+    # Legacy 模式：从场景 node 读 engine_runtime_ids
+    repo = _norm_repo(repo_key)
+    if not user_id:
+        user_id = _repo_user_id(repo_key)
+    if scene_id:
+        try:
+            from src.api.pipeline_config import get_scene_engine_ids
+            engine_ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo, user_id=user_id)
+        except Exception:
+            engine_ids = []
+    else:
+        engine_ids = []
+    if engine_ids:
+        # 多引擎选择：查引擎详情，按优先级选健康引擎
+        members = _engines_by_ids(engine_ids, repo, cfg)
+        members = _filter_by_tags(members, agent_type)
+        if members:
+            for scope in cfg.get("scopes") or ["repo", "global", "local"]:
+                cand = _apply_filters([m for m in members if _member_scope(m, repo) == scope], cfg)
+                if not cand:
+                    continue
+                if cfg.get("rule") == "order":
+                    return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
+                return random.choice(cand)["runtime_id"]
+            return None     # 集合存在但无健康成员 → engine_unavailable
+    # engine_runtime_ids 为空 → 回退会话主引擎（legacy）
     if fallback_runtime_id:
         return int(fallback_runtime_id)
     return None
+
+
+def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0) -> str:
+    """获取限定广播引擎列表，返回 JSON 字符串供 agent_tasks.pool_engine_ids 使用。
+
+    只从场景 node 的 engine_runtime_ids 读取。
+    node 不存在或 engine_runtime_ids 为空 → 空字符串（全量广播）。
+    """
+    import json
+    if not user_id:
+        user_id = _repo_user_id(repo_key)
+    if scene_id:
+        try:
+            from src.api.pipeline_config import get_scene_engine_ids
+            ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
+            if ids:
+                return json.dumps(ids)
+        except Exception as e:
+            log.warning(f"get_scene_pool_engine_ids: scene query failed: {e}")
+    return ""
 
 
 def resolve_local_engine() -> int | None:
@@ -385,7 +321,7 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
         if not cand:
             continue
         if cfg.get("rule") == "order":
-            return _pick_least_busy(cand)["runtime_id"]
+            return min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
         return random.choice(cand)["runtime_id"]
     return None
 
@@ -412,6 +348,13 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
                     "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
                     " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1) "
                     "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
+            elif scope == "user":
+                c.execute(
+                    "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                    "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                    "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' ORDER BY r.id")
             else:
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
