@@ -11,8 +11,6 @@
         <div class="stat-card"><div class="stat-label">用户总数</div><div class="stat-value">{{ stats.total ?? 0 }}</div></div>
         <div class="stat-card"><div class="stat-label">在线</div><div class="stat-value small" style="color:#34c759">{{ stats.online ?? 0 }}</div></div>
         <div class="stat-card"><div class="stat-label">离线</div><div class="stat-value small" style="color:#aeaeb2">{{ stats.offline ?? 0 }}</div></div>
-        <div class="stat-card"><div class="stat-label">GitCode 登录</div><div class="stat-value small">{{ stats.gitcodeLogin ?? 0 }}</div></div>
-        <div class="stat-card"><div class="stat-label">其他方式</div><div class="stat-value small">{{ stats.other ?? 0 }}</div></div>
       </div>
 
       <!-- 状态徽章行（点击联动筛选） -->
