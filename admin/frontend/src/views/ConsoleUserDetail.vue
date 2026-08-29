@@ -109,15 +109,18 @@
                       <div v-show="issueViewModes[iss.issueId] === 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length">
                         <table class="vod-table">
                           <thead>
-                            <tr><th>Seq</th><th>事件</th><th>Agent</th><th>Engine</th><th>Skill</th><th>耗时</th><th>状态</th><th>时间</th></tr>
+                            <tr><th>Seq</th><th>事件</th><th>运行时</th><th>耗时</th><th>状态</th><th>时间</th></tr>
                           </thead>
                           <tbody>
                             <tr v-for="(ev, eidx) in issueEvents[iss.issueId]" :key="eidx" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId }" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
                               <td class="t3">#{{ eidx + 1 }}</td>
                               <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
-                              <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
-                              <td class="t3" style="font-size:11px">{{ ev.engine || '—' }}</td>
-                              <td class="t3" style="font-size:11px">{{ ev.skill || '—' }}</td>
+                              <td class="t3" style="font-size:11px">
+                                <span v-if="ev.agentType" class="status-tag info" style="font-size:10px;margin-right:6px">{{ ev.agentType }}</span>
+                                <span v-if="ev.engine">{{ ev.engine }}</span>
+                                <span v-if="ev.skill" style="color:var(--text-secondary);margin-left:6px">· {{ ev.skill }}</span>
+                                <span v-if="ev.engineIp" style="color:var(--text-tertiary);display:block;font-size:10px;margin-top:2px">{{ ev.engineIp }}</span>
+                              </td>
                               <td class="t3">{{ ev.duration ? Math.round(ev.duration) + 's' : '—' }}</td>
                               <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']" style="font-size:10px">{{ ev.status || '—' }}</span></td>
                               <td class="t3">{{ formatTime(ev.createdAt) }}</td>
@@ -149,7 +152,7 @@
             <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
             <table class="vod-table" v-if="filteredActivity.length">
               <thead>
-                <tr><th style="width:15%;text-align:left">Issue</th><th style="width:12%;text-align:left">事件</th><th style="width:10%;text-align:left">Agent</th><th style="width:12%;text-align:left">Engine</th><th style="width:13%;text-align:left">Skill</th><th style="width:8%;text-align:left">耗时</th><th style="width:10%;text-align:left">状态</th><th style="width:20%;text-align:left">时间</th></tr>
+                <tr><th style="width:18%;text-align:left">Issue</th><th style="width:12%;text-align:left">事件</th><th style="width:22%;text-align:left">运行时</th><th style="width:8%;text-align:left">耗时</th><th style="width:10%;text-align:left">状态</th><th style="width:30%;text-align:left">时间</th></tr>
               </thead>
               <tbody>
                 <tr v-for="(t, idx) in filteredActivity" :key="t.id" :class="{ 'tl-row-fail': t.status === 'failed', 'tl-row-ok': t.status === 'completed', 'tl-row-clickable': true }" @click="openLogModal(t.id, t)">
@@ -158,9 +161,12 @@
                     <div v-if="t.issueTitle" class="t3" :title="t.issueTitle" style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.issueTitle }}</div>
                   </td>
                   <td><span :class="['status-tag', eventTypeClass(t.eventType)]" style="font-size:11px">{{ eventTypeText(t.eventType) }}</span></td>
-                  <td><span class="status-tag info" style="font-size:11px">{{ t.agentType || '—' }}</span></td>
-                  <td class="t3" style="font-size:11px">{{ t.engine || '—' }}</td>
-                  <td class="t3" style="font-size:11px">{{ t.skill || '—' }}</td>
+                  <td class="t3" style="font-size:11px">
+                    <span v-if="t.agentType" class="status-tag info" style="font-size:10px;margin-right:6px">{{ t.agentType }}</span>
+                    <span v-if="t.engine">{{ t.engine }}</span>
+                    <span v-if="t.skill" style="color:var(--text-secondary);margin-left:6px">· {{ t.skill }}</span>
+                    <span v-if="t.engineIp" style="color:var(--text-tertiary);display:block;font-size:10px;margin-top:2px">{{ t.engineIp }}</span>
+                  </td>
                   <td class="t3">{{ formatDuration(t.duration) }}</td>
                   <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
                   <td class="t3">{{ formatTime(t.startedAt) }}</td>
