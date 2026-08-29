@@ -197,7 +197,7 @@
             <table class="vod-table">
               <thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
               <tbody>
-                <tr v-for="ev in issueModal.events" :key="ev.seq" :class="{'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId}" @click="ev.taskId ? openLogModal(ev.taskId, { issueId: issueModal.issueId, repoKey: ev.repoKey, eventSeq: ev.seq }) : null">
+                <tr v-for="ev in issueModal.events" :key="ev.seq" :class="{'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed'}">
                   <td class="t3">#{{ ev.seq }}</td>
                   <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
                   <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
