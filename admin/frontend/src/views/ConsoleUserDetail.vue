@@ -116,6 +116,14 @@
               <!-- 仓库总体统计 -->
               <div v-if="selectedRepoData" class="repo-summary-grid">
                 <div class="activity-card">
+                  <div class="activity-value" style="color:#006eff">{{ selectedRepoData.issueCount }}</div>
+                  <div class="activity-label">Issue 总数</div>
+                </div>
+                <div class="activity-card">
+                  <div class="activity-value">{{ selectedRepoData.taskCount }}</div>
+                  <div class="activity-label">任务总数</div>
+                </div>
+                <div class="activity-card">
                   <div class="activity-value">{{ selectedRepoData.queued ?? 0 }}</div>
                   <div class="activity-label">排队中</div>
                 </div>
@@ -355,7 +363,7 @@ watch(activityTab, (val) => {
 .cred-chip.on .cred-chip-status { color: #34c759; }
 
 .activity-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
-.repo-summary-grid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 4px; }
+.repo-summary-grid { display: grid; grid-template-columns: repeat(11, 1fr); gap: 4px; }
 .activity-card { text-align: center; padding: 14px 6px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
 .activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
