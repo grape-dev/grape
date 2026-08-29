@@ -577,7 +577,7 @@ watch(() => props.tasks, () => {
 }
 .agent-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .agent-card.kpi-blue { border-left-color: #006eff; }
-.agent-card.kpi-purple { border-left-color: #7222ed; }
+.agent-card.kpi-purple { border-left-color: #5e5ce6; }
 .agent-card.kpi-pink { border-left-color: #ff2d92; }
 .agent-card.kpi-orange { border-left-color: #ff9500; }
 .agent-card.kpi-green { border-left-color: #34c759; }

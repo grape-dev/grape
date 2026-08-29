@@ -14,7 +14,7 @@
       <!-- KPI 卡片行：用户 → 仓库 → 设备 → 任务 -->
       <div class="kpi-row">
         <div class="kpi-card kpi-cyan" title="Grape 控制台用户数（user_accounts，即托管仓库登录用户）" @click="$router.push('/sys/console')">
-          <div class="kpi-icon" style="background:rgba(19,194,194,0.08);color:#13c2c2;">👥</div>
+          <div class="kpi-icon" style="background:rgba(19,194,194,0.08);color:#30b0c7;">👥</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ vc.platformUserTotal || 0 }}</div>
             <div class="kpi-label">控制台用户</div>
@@ -114,10 +114,10 @@ const deviceStatusRef = ref(null)
 const repoEventRef = ref(null)
 const userCompositionRef = ref(null)
 
-const COLOR_POOL = ['#006eff', '#34c759', '#ff9500', '#ff3b30', '#722ed1', '#13c2c2', '#ff2d92', '#ff9500']
+const COLOR_POOL = ['#006eff', '#34c759', '#ff9500', '#ff3b30', '#5e5ce6', '#30b0c7', '#ff2d92', '#ff9500']
 const TASK_STATUS_COLORS = { completed: '#34c759', queued: '#ff9500', dispatched: '#006eff' }
 const DEVICE_STATUS_COLORS = { online: '#34c759', offline: '#aeaeb2' }
-const USER_COMP_COLORS = { '控制台用户': '#13c2c2', '管理台用户': '#006eff' }
+const USER_COMP_COLORS = { '控制台用户': '#30b0c7', '管理台用户': '#006eff' }
 const STATUS_LABELS = { active: '有效', revoked: '已吊销', online: '在线', offline: '离线', completed: '已完成', queued: '排队中', dispatched: '已派发' }
 
 function formatAgo(val) {
@@ -301,11 +301,11 @@ onBeforeUnmount(() => {
 }
 .kpi-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-2px); }
 .kpi-blue { border-left: 3px solid #006eff; }
-.kpi-purple { border-left: 3px solid #7222ed; }
+.kpi-purple { border-left: 3px solid #5e5ce6; }
 .kpi-pink { border-left: 3px solid #ff2d92; }
 .kpi-orange { border-left: 3px solid #ff9500; }
 .kpi-green { border-left: 3px solid #34c759; }
-.kpi-cyan { border-left: 3px solid #13c2c2; }
+.kpi-cyan { border-left: 3px solid #30b0c7; }
 .kpi-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
 .kpi-body { flex: 1; min-width: 0; }
 .kpi-value { font-size: 26px; font-weight: 700; color: var(--text-primary); line-height: 1.2; }

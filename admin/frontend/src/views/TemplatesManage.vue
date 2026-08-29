@@ -93,7 +93,7 @@
             </tbody>
           </table>
         </div>
-        <div style="margin-top:12px;display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:nowrap;font-size:13px;color:#64748b">
+        <div style="margin-top:12px;display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:nowrap;font-size:13px;color:var(--text-tertiary)">
           <span class="page-info" style="flex-shrink:0;white-space:nowrap">第 <strong>{{ usagePage + 1 }}</strong> / {{ usageTotalPages }} 页</span>
           <select v-model="usagePageSize" class="page-size-select" style="width:auto;flex-shrink:0;margin-bottom:0" @change="usagePage = 0">
             <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
@@ -191,12 +191,12 @@ onMounted(load)
 .tpl-users { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .tpl-user-tag {
   font-size: 11px; padding: 1px 8px; border-radius: 999px;
-  background: #eef3ff; color: #4f6ef2; white-space: nowrap;
+  background: #eef3ff; color: #006eff; white-space: nowrap;
   text-decoration: none; cursor: pointer;
 }
 .tpl-user-tag:hover { background: #dbe6ff; }
 .tpl-more {
-  font-size: 11px; color: var(--primary, #4f6ef2); cursor: pointer; text-decoration: none;
+  font-size: 11px; color: var(--primary, #006eff); cursor: pointer; text-decoration: none;
 }
 .tpl-more:hover { text-decoration: underline; }
 </style>

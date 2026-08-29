@@ -320,7 +320,7 @@ const AGENT_TYPE_OPTIONS = ['vod', 'issue', 'coding', 'qa', 'sre', 'chat']
 const SCOPE_TEXT = { official: '官方', repo: '仓库', user: '个人' }
 function scopeText(s) { return SCOPE_TEXT[s] || s || '—' }
 const SCOPE_STATS = { official: '官方', repo: '仓库', user: '个人' }
-const SCOPE_COLORS = { official: '#4f6ef2', repo: '#ff9500', user: '#13c2c2' }
+const SCOPE_COLORS = { official: '#006eff', repo: '#ff9500', user: '#30b0c7' }
 const scopeStatsTotal = computed(() => Object.values(scopeStats.value).reduce((a, b) => a + (Number(b) || 0), 0))
 
 function setScope(s) {
@@ -532,7 +532,7 @@ onMounted(load)
   background: #fff;
 }
 .skill-card { cursor: pointer; }
-.skill-card:hover { border-color: var(--primary, #4f6ef2); }
+.skill-card:hover { border-color: var(--primary, #006eff); }
 .skill-name {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;

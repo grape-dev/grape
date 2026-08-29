@@ -240,7 +240,7 @@ function applySequenceColors(svg, statuses) {
     if (svgH > 0) {
       Array.from(root.querySelectorAll('line.actor-line')).forEach(l => l.setAttribute('y2', String(svgH)))
     }
-    const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'pending' ? '#94a3b8' : '#2e9e5b')
+    const colorOf = s => (s === 'failed' ? '#ff3b30' : s === 'pending' ? 'var(--text-tertiary)' : '#34c759')
     const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
     lines.forEach((line, i) => {
       const color = colorOf(statuses[i])
@@ -369,7 +369,7 @@ onMounted(load)
 .repo-link {
   margin-left: auto;
   font-size: 12px;
-  color: var(--primary, #4f6ef2);
+  color: var(--primary, #006eff);
   text-decoration: none;
 }
 .repo-link:hover { text-decoration: underline; }
@@ -378,7 +378,7 @@ onMounted(load)
 .act-tag:hover { opacity: 0.85; }
 .tl-row { border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
 .tl-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-.tl-toggle { color: #94a3b8; font-size: 12px; flex-shrink: 0; }
+.tl-toggle { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
 .tl-issue { font-weight: 600; color: var(--primary); }
 .tl-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
 /* mermaid 时序图容器 */

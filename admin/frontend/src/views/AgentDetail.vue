@@ -49,9 +49,9 @@
           </div>
         </div>
         <div class="kpi-card" :class="a.loadLevel === 'over' ? 'kpi-pink' : 'kpi-cyan'">
-          <div class="kpi-icon" :style="a.loadLevel === 'over' ? { background: 'rgba(255,45,146,0.08)', color: '#ff2d92' } : { background: 'rgba(19,194,194,0.08)', color: '#13c2c2' }">{{ a.loadLevel === 'over' ? '⚠️' : '📈' }}</div>
+          <div class="kpi-icon" :style="a.loadLevel === 'over' ? { background: 'rgba(255,45,146,0.08)', color: '#ff2d92' } : { background: 'rgba(19,194,194,0.08)', color: '#30b0c7' }">{{ a.loadLevel === 'over' ? '⚠️' : '📈' }}</div>
           <div class="kpi-body">
-            <div class="kpi-value" :style="{ color: a.loadLevel === 'over' ? '#ff2d92' : '#13c2c2' }">{{ fmtLoad }}<span class="kpi-unit">%</span></div>
+            <div class="kpi-value" :style="{ color: a.loadLevel === 'over' ? '#ff2d92' : '#30b0c7' }">{{ fmtLoad }}<span class="kpi-unit">%</span></div>
             <div class="kpi-label">负载率<template v-if="a.loadLevel === 'over'">（超预警！）</template></div>
             <div class="kpi-sub">进行中 {{ a.inFlightTasks ?? 0 }} ÷ (在线引擎 {{ a.onlineRuntimes ?? 0 }} × {{ a.maxConcurrentPerRuntime ?? 20 }})</div>
           </div>
@@ -239,7 +239,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart &&
 }
 .kpi-blue { border-left: 3px solid #006eff; }
 .kpi-green { border-left: 3px solid #34c759; }
-.kpi-cyan { border-left: 3px solid #13c2c2; }
+.kpi-cyan { border-left: 3px solid #30b0c7; }
 .kpi-orange { border-left: 3px solid #ff9500; }
 .kpi-pink { border-left: 3px solid #ff2d92; }
 .kpi-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }

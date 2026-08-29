@@ -23,7 +23,7 @@
           <div class="detail-item" style="border-left-color:#006eff"><span class="t3">最后心跳</span>{{ formatTime(detail.lastSeenAt) }}</div>
           <div class="detail-item"><span class="t3">IP</span>{{ detail.lastIp || '—' }}</div>
           <div class="detail-item"><span class="t3">创建时间</span>{{ formatTime(detail.createdAt) }}</div>
-          <div class="detail-item" style="border-left-color:#7222ed"><span class="t3">引擎数</span>{{ detail.engines?.length ?? 0 }}</div>
+          <div class="detail-item" style="border-left-color:#5e5ce6"><span class="t3">引擎数</span>{{ detail.engines?.length ?? 0 }}</div>
           <div class="detail-item" style="border-left-color:#006eff"><span class="t3">任务数</span>{{ detail.tasks?.totalElements ?? 0 }}</div>
         </div>
       </div>
@@ -190,7 +190,7 @@ function renderTaskChart() {
       label: { show: true, formatter: '{b}: {c}' },
       data
     }],
-    color: ['#34c759', '#ff3b30', '#006eff', '#ff9500', '#aeaeb2', '#7222ed']
+    color: ['#34c759', '#ff3b30', '#006eff', '#ff9500', '#aeaeb2', '#5e5ce6']
   })
 }
 function onEngineChange() {

@@ -105,7 +105,7 @@ const STATUS_ORDER = ['queued', 'running', 'completed', 'failed']
 const accents = ['kpi-blue', 'kpi-purple', 'kpi-pink', 'kpi-orange', 'kpi-green']
 const iconPalette = [
   { background: 'rgba(0,107,255,0.08)', color: '#006eff' },
-  { background: '#f0e6ff', color: '#7222ed' },
+  { background: 'rgba(94,92,230,0.1)', color: '#5e5ce6' },
   { background: 'rgba(255,45,146,0.08)', color: '#ff2d92' },
   { background: 'rgba(255,149,0,0.1)', color: '#ff9500' },
   { background: 'rgba(52,199,89,0.1)', color: '#34c759' }
@@ -230,7 +230,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart &&
 }
 .agent-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .agent-card.kpi-blue { border-left-color: #006eff; }
-.agent-card.kpi-purple { border-left-color: #7222ed; }
+.agent-card.kpi-purple { border-left-color: #5e5ce6; }
 .agent-card.kpi-pink { border-left-color: #ff2d92; }
 .agent-card.kpi-orange { border-left-color: #ff9500; }
 .agent-card.kpi-green { border-left-color: #34c759; }
