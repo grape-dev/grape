@@ -181,7 +181,10 @@
                       <tr>
                         <td style="cursor:pointer" @click="toggleIssueTimeline(iss)">
                           <span style="font-size:10px;margin-right:4px">{{ expandedIssues.has(iss.issueId) ? '▾' : '▸' }}</span>
-                          <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">{{ iss.issueId }}</a>
+                          <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">
+                            <span class="t3" style="font-size:11px">{{ selectedRepoData?.fullName }}</span> {{ iss.issueId }}
+                          </a>
+                          <span v-if="iss.issueTitle" class="t3" style="font-size:11px;display:block;margin-top:2px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ iss.issueTitle }}</span>
                         </td>
                         <td class="t3">{{ iss.taskCount }}</td>
                         <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>

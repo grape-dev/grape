@@ -391,7 +391,8 @@ public class ConsoleUserController {
                     "SUM(CASE WHEN t.status='failed' THEN 1 ELSE 0 END) as failed, " +
                     "SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
                     "SUM(CASE WHEN t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE) THEN 1 ELSE 0 END) as stuck, " +
-                    "MAX(t.started_at) as last_task_at " +
+                    "MAX(t.started_at) as last_task_at, " +
+                    "(SELECT e.payload FROM events e WHERE e.issue_id = t.issue_id AND e.repo_key = t.repo_key AND e.event_type='issue_opened' AND e.payload LIKE '%object_attributes%' ORDER BY e.seq LIMIT 1) as issue_payload " +
                     joinSql +
                     " GROUP BY t.issue_id" +
                     " ORDER BY last_task_at DESC LIMIT ? OFFSET ?";
@@ -399,6 +400,23 @@ public class ConsoleUserController {
             grapeJdbc.query(sql, rs -> {
                 Map<String, Object> r = new LinkedHashMap<>();
                 r.put("issueId", rs.getString("issue_id"));
+                // 从 payload 解析 Issue 标题（对齐健康中心 extractIssueTitle）
+                String issueTitle = "";
+                String payload = rs.getString("issue_payload");
+                if (payload != null && !payload.isEmpty()) {
+                    try {
+                        com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+                        com.fasterxml.jackson.databind.JsonNode node = om.readTree(payload);
+                        com.fasterxml.jackson.databind.JsonNode attrs = node.path("object_attributes");
+                        if (!attrs.isMissingNode()) {
+                            String title = attrs.path("title").asText("");
+                            if (!title.isEmpty()) {
+                                issueTitle = title.length() > 80 ? title.substring(0, 80) + "..." : title;
+                            }
+                        }
+                    } catch (Exception e2) { /* ignore */ }
+                }
+                r.put("issueTitle", issueTitle);
                 r.put("taskCount", rs.getInt("task_count"));
                 r.put("completed", rs.getInt("completed"));
                 r.put("failed", rs.getInt("failed"));
