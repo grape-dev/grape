@@ -435,6 +435,45 @@ public class ConsoleUserController {
         return result;
     }
 
+    @GetMapping("/{id}/issue-timeline")
+    public Map<String, Object> issueTimeline(@PathVariable int id,
+                                             @RequestParam String repoKey,
+                                             @RequestParam String issueId) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List<Map<String, Object>> events = new ArrayList<>();
+        try {
+            events = grapeJdbc.query(
+                "SELECT e.seq, e.event_type, e.agent_type, e.skill, e.status, e.duration, e.created_at, " +
+                "e.repo_key, t.id as task_id, t.runtime_id, " +
+                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
+                "rc.device_name, rc.last_ip " +
+                "FROM events e " +
+                "LEFT JOIN agent_tasks t ON e.seq = t.event_seq AND e.repo_key = t.repo_key " +
+                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
+                "WHERE e.repo_key=? AND e.issue_id=? " +
+                "ORDER BY e.created_at",
+                (rs, rowNum) -> {
+                    Map<String, Object> r = new LinkedHashMap<>();
+                    r.put("seq", rs.getInt("seq"));
+                    r.put("eventType", rs.getString("event_type"));
+                    r.put("agentType", rs.getString("agent_type"));
+                    r.put("skill", rs.getString("skill"));
+                    r.put("status", rs.getString("status"));
+                    r.put("duration", rs.getObject("duration"));
+                    r.put("createdAt", rs.getString("created_at"));
+                    r.put("repoKey", rs.getString("repo_key"));
+                    r.put("taskId", rs.getString("task_id"));
+                    r.put("engine", buildEngineName(rs));
+                    r.put("engineIp", rs.getString("last_ip"));
+                    return r;
+                }, repoKey, issueId);
+        } catch (Exception e) { /* ignore */ }
+        result.put("issueId", issueId);
+        result.put("events", events);
+        return result;
+    }
+
     private String calcDuration(String startedAt, String completedAt) {
         if (startedAt == null || completedAt == null) return "—";
         try {

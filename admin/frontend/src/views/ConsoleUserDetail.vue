@@ -182,30 +182,46 @@
                         <td>
                           <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ iss.issueId }}</a>
                         </td>
-                        <td class="t3" style="cursor:pointer;color:var(--primary)" @click="iss._open = !iss._open">
+                        <td class="t3" style="cursor:pointer;color:var(--primary)" @click="toggleIssueTimeline(iss)">
                           {{ iss.taskCount }} <span style="font-size:10px">{{ iss._open ? '▲' : '▼' }}</span>
                         </td>
                         <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
                         <td class="t3">{{ formatTime(iss.lastTaskAt) }}</td>
                       </tr>
                       <tr v-if="iss._open" style="background:rgba(0,0,0,0.02)">
-                        <td colspan="4" style="padding:10px 16px">
-                          <div style="display:flex;gap:20px;flex-wrap:wrap">
+                        <td colspan="4" style="padding:12px 16px">
+                          <!-- 状态统计明细 -->
+                          <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px">
                             <span class="t3">已完成 <b style="color:#34c759">{{ iss.completed }}</b></span>
                             <span class="t3">待处理 <b style="color:#ff9500">{{ (iss.queued ?? 0) + (iss.dispatched ?? 0) + (iss.stuck ?? 0) }}</b></span>
-                            <span class="t3" style="padding-left:12px;border-left:1px solid rgba(0,0,0,0.06)">
-                              <span style="color:var(--text-tertiary)">排队 {{ iss.queued ?? 0 }}</span>
-                            </span>
-                            <span class="t3">
-                              <span style="color:var(--text-tertiary)">派发 {{ iss.dispatched ?? 0 }}</span>
-                            </span>
-                            <span class="t3">
-                              <span style="color:var(--text-tertiary)">卡住 {{ iss.stuck ?? 0 }}</span>
-                            </span>
-                            <span class="t3" style="padding-left:12px;border-left:1px solid rgba(0,0,0,0.06)">运行中 <b style="color:#006eff">{{ iss.running ?? 0 }}</b></span>
+                            <span class="t3" style="color:var(--text-tertiary)">排队 {{ iss.queued ?? 0 }}</span>
+                            <span class="t3" style="color:var(--text-tertiary)">派发 {{ iss.dispatched ?? 0 }}</span>
+                            <span class="t3" style="color:var(--text-tertiary)">卡住 {{ iss.stuck ?? 0 }}</span>
+                            <span class="t3">运行中 <b style="color:#006eff">{{ iss.running ?? 0 }}</b></span>
                             <span class="t3">失败 <b style="color:#ff3b30">{{ iss.failed }}</b></span>
                             <span class="t3">已取消 <b style="color:#aeaeb2">{{ iss.cancelled ?? 0 }}</b></span>
                           </div>
+                          <!-- 事件列表 -->
+                          <div v-if="iss._eventsLoading" style="text-align:center;padding:20px;color:var(--text-tertiary)">加载事件...</div>
+                          <div v-else-if="iss._events && iss._events.length">
+                            <table class="vod-table">
+                              <thead>
+                                <tr><th style="width:8%">Seq</th><th style="width:18%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:27%">时间</th></tr>
+                              </thead>
+                              <tbody>
+                                <tr v-for="(ev, eidx) in iss._events" :key="ev.seq" style="cursor:pointer" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
+                                  <td class="t3">#{{ iss._events.length - eidx }}</td>
+                                  <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
+                                  <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
+                                  <td class="t3" style="font-size:11px">{{ ev.engine || '—' }}<span v-if="ev.engineIp" style="font-size:10px;color:var(--text-tertiary);display:block">{{ ev.engineIp }}</span></td>
+                                  <td class="t3">{{ ev.duration ? Math.round(ev.duration) + 's' : '—' }}</td>
+                                  <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']" style="font-size:10px">{{ ev.status || '—' }}</span></td>
+                                  <td class="t3">{{ formatTime(ev.createdAt) }}</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                          <div v-else style="text-align:center;padding:20px;color:var(--text-tertiary)">暂无事件记录</div>
                         </td>
                       </tr>
                     </template>
@@ -343,6 +359,22 @@ async function openLogModal(taskId, t) {
 }
 function closeLogModal() {
   logModal.value = { show: false, loading: false, messages: [], info: {} }
+}
+async function toggleIssueTimeline(iss) {
+  iss._open = !iss._open
+  if (iss._open && !iss._events) {
+    iss._eventsLoading = true
+    try {
+      const { data } = await http.get(`/console-users/${route.params.id}/issue-timeline`, {
+        params: { repoKey: selectedRepo.value, issueId: iss.issueId }
+      })
+      iss._events = data.events || []
+    } catch (e) {
+      iss._events = []
+    } finally {
+      iss._eventsLoading = false
+    }
+  }
 }
 function eventTypeText(t) {
   const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号' }
