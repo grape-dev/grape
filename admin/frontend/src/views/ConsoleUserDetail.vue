@@ -87,69 +87,61 @@
                 </div>
               </div>
 
-              <!-- Issue 分页列表 -->
+              <!-- Issue 列表 -->
               <div v-if="selectedRepo" style="margin-top:16px">
-                <table class="vod-table" v-if="repoIssues.length">
-                  <thead>
-                    <tr><th style="width:40%;text-align:left">Issue</th><th style="width:15%;text-align:left">事件</th><th style="width:15%;text-align:left">成功率</th><th style="width:30%;text-align:left">最近活动</th></tr>
-                  </thead>
-                  <tbody>
-                    <template v-for="iss in repoIssues" :key="iss.issueId">
-                      <tr>
-                        <td style="cursor:pointer" @click="toggleIssueTimeline(iss)">
-                          <span style="font-size:10px;margin-right:4px">{{ expandedIssues.has(iss.issueId) ? '▾' : '▸' }}</span>
-                          <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">
-                            <span class="t3" style="font-size:11px">{{ selectedRepoData?.fullName }}</span> {{ iss.issueId }}
-                          </a>
-                          <div v-if="iss.issueTitle" class="t3" :title="iss.issueTitle" style="font-size:11px;color:var(--text-secondary);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ iss.issueTitle }}</div>
-                        </td>
-                        <td class="t3">{{ iss.eventCount ?? 0 }}</td>
-                        <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
-                        <td class="t3">{{ formatTime(iss.lastTaskAt) }}</td>
-                      </tr>
-                      <tr v-if="expandedIssues.has(iss.issueId)" style="background:rgba(0,0,0,0.02)">
-                        <td colspan="4" style="padding:12px 16px">
-                          <!-- 切换按钮 -->
-                          <div style="display:flex;gap:8px;margin-bottom:12px">
-                            <button class="btn btn-sm" :style="issueViewModes[iss.issueId] !== 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="switchIssueView(iss, 'diagram')">📊 时序图</button>
-                            <button class="btn btn-sm" :style="issueViewModes[iss.issueId] === 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="switchIssueView(iss, 'events')">📋 事件列表</button>
-                          </div>
-                          <!-- 时序图 -->
-                          <div v-show="issueEventsLoading[iss.issueId]" style="text-align:center;padding:20px;color:var(--text-tertiary)">加载中...</div>
-                          <div v-show="!issueEventsLoading[iss.issueId] && issueViewModes[iss.issueId] !== 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length" class="tl-diagram-container" :ref="el => diagramRefs[iss.issueId] = el" style="overflow:auto;min-height:60px">
-                            <div v-if="!renderedIssues.has(iss.issueId)" style="text-align:center;padding:20px;color:var(--text-tertiary)">渲染中...</div>
-                            <div v-else v-html="issueSvg(iss.issueId)" class="tl-diagram-svg"></div>
-                          </div>
-                          <!-- 事件列表 -->
-                          <div v-show="issueViewModes[iss.issueId] === 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length">
-                            <table class="vod-table">
-                              <thead>
-                                <tr><th style="width:8%">Seq</th><th style="width:18%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:27%">时间</th></tr>
-                              </thead>
-                              <tbody>
-                                <tr v-for="(ev, eidx) in issueEvents[iss.issueId]" :key="eidx" style="cursor:pointer" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
-                                  <td class="t3">#{{ eidx + 1 }}</td>
-                                  <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
-                                  <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
-                                  <td class="t3" style="font-size:11px">{{ ev.engine || '—' }}<span v-if="ev.engineIp" style="font-size:10px;color:var(--text-tertiary);display:block">{{ ev.engineIp }}</span></td>
-                                  <td class="t3">{{ ev.duration ? Math.round(ev.duration) + 's' : '—' }}</td>
-                                  <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']" style="font-size:10px">{{ ev.status || '—' }}</span></td>
-                                  <td class="t3">{{ formatTime(ev.createdAt) }}</td>
-                                </tr>
-                              </tbody>
-                            </table>
-                          </div>
-                          <div v-show="!issueEventsLoading[iss.issueId] && (!issueEvents[iss.issueId] || !issueEvents[iss.issueId].length)" style="text-align:center;padding:20px;color:var(--text-tertiary)">暂无事件记录</div>
-                        </td>
-                      </tr>
-                    </template>
-                    <tr v-if="!repoIssues.length">
-                      <td colspan="4" style="text-align:center;padding:20px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</td>
-                    </tr>
-                  </tbody>
-                </table>
-                <PaginationBar v-if="repoIssuesTotal > 0" v-model:page="repoIssuesPage" v-model:size="repoIssuesSize" :total="repoIssuesTotal" :total-pages="repoIssuesTotalPages" :size-options="[5, 10]" @change="loadRepoIssues()" />
-                <p v-else-if="!repoIssuesLoading" class="t2" style="padding:20px;text-align:center">该仓库暂无 Issue 数据</p>
+                <div v-if="repoIssuesLoading" style="text-align:center;padding:32px;color:var(--text-tertiary)">加载中...</div>
+                <div v-else-if="repoIssues.length === 0" style="text-align:center;padding:32px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</div>
+                <div v-else>
+                  <p class="t3" style="font-size:12px;margin-bottom:8px">{{ repoIssuesTotal }} 个 Issue — 点击展开</p>
+                  <!-- Issue 卡片列表 -->
+                  <div v-for="iss in repoIssues" :key="iss.issueId" class="tl-issue">
+                    <div class="tl-issue-head" @click="toggleIssueTimeline(iss)">
+                      <span class="tl-arrow">{{ expandedIssues.has(iss.issueId) ? '▾' : '▸' }}</span>
+                      <b class="tl-issue-id">
+                        <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop class="tl-issue-link">
+                          <span class="t3" style="font-size:11px">{{ selectedRepoData?.fullName }}</span> {{ iss.issueId }}
+                        </a>
+                      </b>
+                      <span class="tl-issue-title t3" v-if="iss.issueTitle" :title="iss.issueTitle">{{ iss.issueTitle }}</span>
+                      <span class="tl-issue-count t3">{{ iss.eventCount ?? 0 }} 事件</span>
+                      <span class="tl-issue-status" :class="iss.failed > 0 ? 'fail' : 'ok'">{{ iss.failed > 0 ? '✗ 有失败' : '✓ 正常' }}</span>
+                      <span class="t3 tl-issue-time">{{ (iss.lastTaskAt || '').substring(0, 16).replace('T', ' ') }}</span>
+                    </div>
+                    <!-- 展开详情 -->
+                    <div v-if="expandedIssues.has(iss.issueId)" class="tl-issue-body">
+                      <div class="tl-view-tabs">
+                        <button class="tl-view-btn" :class="{ active: issueViewModes[iss.issueId] !== 'events' }" @click="switchIssueView(iss, 'diagram')">📊 时序图</button>
+                        <button class="tl-view-btn" :class="{ active: issueViewModes[iss.issueId] === 'events' }" @click="switchIssueView(iss, 'events')">📋 事件列表</button>
+                      </div>
+                      <div v-show="issueEventsLoading[iss.issueId]" class="tl-diagram-loading">加载中...</div>
+                      <div v-show="!issueEventsLoading[iss.issueId] && issueViewModes[iss.issueId] !== 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length" class="tl-diagram-container" :ref="el => diagramRefs[iss.issueId] = el">
+                        <div v-if="!renderedIssues.has(iss.issueId)" class="tl-diagram-loading">渲染中...</div>
+                        <div v-else v-html="issueSvg(iss.issueId)" class="tl-diagram-svg"></div>
+                      </div>
+                      <div v-show="issueViewModes[iss.issueId] === 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length">
+                        <table class="vod-table">
+                          <thead>
+                            <tr><th>Seq</th><th>事件</th><th>Agent</th><th>Engine</th><th>耗时</th><th>状态</th><th>时间</th></tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(ev, eidx) in issueEvents[iss.issueId]" :key="eidx" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId }" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
+                              <td class="t3">#{{ eidx + 1 }}</td>
+                              <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
+                              <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
+                              <td class="t3" style="font-size:11px">{{ ev.engine || '—' }}<span v-if="ev.engineIp" style="font-size:10px;color:var(--text-tertiary);display:block">{{ ev.engineIp }}</span></td>
+                              <td class="t3">{{ ev.duration ? Math.round(ev.duration) + 's' : '—' }}</td>
+                              <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']" style="font-size:10px">{{ ev.status || '—' }}</span></td>
+                              <td class="t3">{{ formatTime(ev.createdAt) }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <div v-show="!issueEventsLoading[iss.issueId] && (!issueEvents[iss.issueId] || !issueEvents[iss.issueId].length)" class="tl-diagram-loading">暂无事件记录</div>
+                    </div>
+                  </div>
+                  <!-- 分页 -->
+                  <PaginationBar v-if="repoIssuesTotal > 0" v-model:page="repoIssuesPage" v-model:size="repoIssuesSize" :total="repoIssuesTotal" :total-pages="repoIssuesTotalPages" :size-options="[5, 10]" @change="loadRepoIssues()" />
+                </div>
               </div>
               <p v-else-if="!selectedRepo" class="t2" style="padding:20px;text-align:center">请选择仓库查看 Issue 列表</p>
           </div>
@@ -677,8 +669,32 @@ watch(() => info.value.repoMatrix, (val) => {
 .activity-card { text-align: center; padding: 14px 6px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
 .activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+/* Issue 卡片列表（对齐健康中心 tl-* 样式） */
+.tl-issue { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+.tl-issue-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; background: #fafbfc; }
+.tl-issue-head:hover { background: #f5f9ff; }
+.tl-arrow { font-size: 12px; color: var(--text-tertiary); width: 14px; }
+.tl-issue-id { font-size: 13px; min-width: 40px; }
+.tl-issue-link { color: var(--primary); text-decoration: none; }
+.tl-issue-link:hover { text-decoration: underline; }
+.tl-issue-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.tl-issue-count { font-size: 11px; white-space: nowrap; }
+.tl-issue-status { font-size: 10px; font-weight: 600; white-space: nowrap; }
+.tl-issue-status.fail { color: var(--danger); }
+.tl-issue-status.ok { color: var(--success); }
+.tl-issue-time { font-size: 11px; white-space: nowrap; }
+.tl-issue-body { border-top: 1px solid var(--border-color); padding: 10px 14px; }
+.tl-view-tabs { display: flex; gap: 0; margin-bottom: 10px; }
+.tl-view-btn { padding: 5px 12px; font-size: 12px; border: 1px solid var(--border-color); background: #fff; color: var(--text-secondary); cursor: pointer; }
+.tl-view-btn:first-child { border-radius: 6px 0 0 6px; }
+.tl-view-btn:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.tl-view-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
 .tl-diagram-container { overflow-x: auto; padding: 8px 0; min-height: 60px; }
+.tl-diagram-loading { padding: 20px; text-align: center; color: var(--text-tertiary); font-size: 12px; }
 .tl-diagram-svg svg { max-width: 100%; }
+.tl-row-fail td { background: #fff1f0 !important; }
+.tl-row-ok td { background: #f6ffed !important; }
+.tl-row-clickable { cursor: pointer; }
 
 .timeline { display: flex; flex-direction: column; gap: 0; }
 .timeline-item { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border-soft); }
