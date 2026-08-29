@@ -200,9 +200,16 @@
                             <span class="t3">失败 <b style="color:#ff3b30">{{ iss.failed }}</b></span>
                             <span class="t3">已取消 <b style="color:#aeaeb2">{{ iss.cancelled ?? 0 }}</b></span>
                           </div>
+                          <!-- 切换按钮 -->
+                          <div style="display:flex;gap:8px;margin-bottom:12px">
+                            <button class="btn btn-sm" :style="iss._view !== 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="iss._view = 'diagram'">📊 时序图</button>
+                            <button class="btn btn-sm" :style="iss._view === 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="iss._view = 'events'">📋 事件列表</button>
+                          </div>
+                          <!-- 时序图 -->
+                          <div v-if="iss._eventsLoading" style="text-align:center;padding:20px;color:var(--text-tertiary)">加载中...</div>
+                          <div v-else-if="iss._view !== 'events' && iss._events && iss._events.length" :ref="el => diagramRefs[iss.issueId] = el" style="overflow:auto"></div>
                           <!-- 事件列表 -->
-                          <div v-if="iss._eventsLoading" style="text-align:center;padding:20px;color:var(--text-tertiary)">加载事件...</div>
-                          <div v-else-if="iss._events && iss._events.length">
+                          <div v-if="iss._view === 'events' && iss._events && iss._events.length">
                             <table class="vod-table">
                               <thead>
                                 <tr><th style="width:8%">Seq</th><th style="width:18%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:27%">时间</th></tr>
@@ -220,7 +227,7 @@
                               </tbody>
                             </table>
                           </div>
-                          <div v-else style="text-align:center;padding:20px;color:var(--text-tertiary)">暂无事件记录</div>
+                          <div v-else-if="!iss._eventsLoading && (!iss._events || !iss._events.length)" style="text-align:center;padding:20px;color:var(--text-tertiary)">暂无事件记录</div>
                         </td>
                       </tr>
                     </template>
@@ -328,6 +335,7 @@ const activityFilter = ref('recent')
 const selectedRepo = ref('')
 const pendingDetailOpen = ref(false)
 const logModal = ref({ show: false, loading: false, messages: [], info: {} })
+const diagramRefs = {}
 
 const pendingTotal = computed(() => {
   if (!selectedRepoData.value) return 0
@@ -361,18 +369,81 @@ function closeLogModal() {
 }
 async function toggleIssueTimeline(iss) {
   iss._open = !iss._open
-  if (iss._open && !iss._events) {
-    iss._eventsLoading = true
-    try {
-      const { data } = await http.get(`/console-users/${route.params.id}/issue-timeline`, {
-        params: { repoKey: selectedRepo.value, issueId: iss.issueId }
-      })
-      iss._events = data.events || []
-    } catch (e) {
-      iss._events = []
-    } finally {
-      iss._eventsLoading = false
+  if (iss._open) {
+    if (!iss._view) iss._view = 'diagram'
+    if (!iss._events) {
+      iss._eventsLoading = true
+      try {
+        const { data } = await http.get(`/console-users/${route.params.id}/issue-timeline`, {
+          params: { repoKey: selectedRepo.value, issueId: iss.issueId }
+        })
+        iss._events = data.events || []
+        // 渲染时序图
+        if (iss._events.length) {
+          setTimeout(() => renderMermaidForIssue(iss), 50)
+        }
+      } catch (e) {
+        iss._events = []
+      } finally {
+        iss._eventsLoading = false
+      }
     }
+  }
+}
+
+// ===== Mermaid 时序图 =====
+let mermaidEngine = null
+
+async function getMermaid() {
+  if (!mermaidEngine) {
+    const mod = await import('mermaid')
+    mermaidEngine = mod.default
+    mermaidEngine.initialize({
+      startOnLoad: false, securityLevel: 'loose', theme: 'base', fontFamily: 'inherit',
+      sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 40, noteMargin: 10, boxMargin: 8, wrap: true, width: 160 }
+    })
+  }
+  return mermaidEngine
+}
+
+function mermaidId(agent) {
+  return (agent || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_')
+}
+
+function buildSequence(events) {
+  const agents = []
+  for (const ev of events) {
+    const a = ev.agentType || '—'
+    if (!agents.includes(a)) agents.push(a)
+  }
+  const lines = ['sequenceDiagram', 'autonumber']
+  for (const a of agents) lines.push(`    participant ${mermaidId(a)} as ${a}`)
+  let prev = null
+  for (const ev of events) {
+    const a = mermaidId(ev.agentType || '—')
+    const t = ev.createdAt ? ev.createdAt.slice(11, 19) : ''
+    const label = (t ? t + ' ' : '') + eventTypeText(ev.eventType)
+    if (prev && a !== prev) {
+      lines.push(`    ${prev}->>${a}: ${label}`)
+    } else {
+      lines.push(`    Note over ${a}: ${label}`)
+    }
+    prev = a
+  }
+  return lines.join('\n')
+}
+
+async function renderMermaidForIssue(iss) {
+  const el = diagramRefs[iss.issueId]
+  if (!el) return
+  try {
+    const mmd = await getMermaid()
+    const text = buildSequence(iss._events)
+    const id = 'mmd_' + iss.issueId.replace(/[^a-zA-Z0-9]/g, '_')
+    const { svg } = await mmd.render(id, text)
+    el.innerHTML = svg
+  } catch (e) {
+    el.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-tertiary)">时序图渲染失败</div>'
   }
 }
 function eventTypeText(t) {
