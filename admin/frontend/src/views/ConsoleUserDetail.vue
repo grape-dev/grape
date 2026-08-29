@@ -97,7 +97,7 @@
               <div style="margin-bottom:16px">
                 <select v-model="selectedRepo" class="page-size-select" style="width:100%;max-width:400px;padding:8px 12px" @change="loadRepoIssues(0)">
                   <option value="">请选择仓库</option>
-                  <option v-for="r in info.repoMatrix" :key="r.repoKey" :value="r.repoKey">{{ r.fullName }}（{{ r.taskCount }} 任务 / {{ r.issueCount }} Issue）</option>
+                  <option v-for="r in info.repoMatrix" :key="r.repoKey" :value="r.repoKey">{{ r.fullName }}</option>
                 </select>
               </div>
 
@@ -108,16 +108,16 @@
                   <div class="activity-label">任务总数</div>
                 </div>
                 <div class="activity-card">
+                  <div class="activity-value" style="color:#006eff">{{ selectedRepoData.issueCount }}</div>
+                  <div class="activity-label">Issue 总数</div>
+                </div>
+                <div class="activity-card">
                   <div class="activity-value" style="color:#34c759">{{ selectedRepoData.completed }}</div>
                   <div class="activity-label">已完成</div>
                 </div>
                 <div class="activity-card">
                   <div class="activity-value" style="color:#ff3b30">{{ selectedRepoData.failed }}</div>
                   <div class="activity-label">失败</div>
-                </div>
-                <div class="activity-card">
-                  <div class="activity-value" style="color:#006eff">{{ selectedRepoData.issueCount }}</div>
-                  <div class="activity-label">Issue 数</div>
                 </div>
                 <div class="activity-card">
                   <div class="activity-value" style="color:#5e5ce6">{{ selectedRepoData.taskCount > 0 ? Math.round(selectedRepoData.completed * 1000 / selectedRepoData.taskCount) / 10 + '%' : '—' }}</div>
@@ -147,7 +147,7 @@
                     </tr>
                   </tbody>
                 </table>
-                <PaginationBar v-if="repoIssuesTotal > 0" v-model:page="repoIssuesPage" v-model:size="repoIssuesSize" :total="repoIssuesTotal" :total-pages="repoIssuesTotalPages" :size-options="[10, 20, 50]" @change="loadRepoIssues()" />
+                <PaginationBar v-if="repoIssuesTotal > 0" v-model:page="repoIssuesPage" v-model:size="repoIssuesSize" :total="repoIssuesTotal" :total-pages="repoIssuesTotalPages" :size-options="[5, 10]" @change="loadRepoIssues()" />
                 <p v-else-if="!repoIssuesLoading" class="t2" style="padding:20px;text-align:center">该仓库暂无 Issue 数据</p>
               </div>
               <p v-else-if="!selectedRepo" class="t2" style="padding:20px;text-align:center">请选择仓库查看 Issue 列表</p>
@@ -204,7 +204,7 @@ const expandedRepos = ref([])
 const selectedRepo = ref('')
 const repoIssues = ref([])
 const repoIssuesPage = ref(0)
-const repoIssuesSize = ref(10)
+const repoIssuesSize = ref(5)
 const repoIssuesTotal = ref(0)
 const repoIssuesTotalPages = ref(0)
 const repoIssuesLoading = ref(false)

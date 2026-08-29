@@ -265,40 +265,38 @@ public class ConsoleUserController {
     public Map<String, Object> repoIssues(@PathVariable int id,
                                           @RequestParam String repoKey,
                                           @RequestParam(defaultValue = "0") int page,
-                                          @RequestParam(defaultValue = "10") int size) {
+                                          @RequestParam(defaultValue = "5") int size) {
         Map<String, Object> result = new LinkedHashMap<>();
         String fullRepoKey = "gitcode:" + repoKey;
         String cleanRepoKey = repoKey.replace("gitcode:", "");
 
-        StringBuilder where = new StringBuilder(
-            " FROM agent_tasks t " +
-            "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-            "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?");
-        where.append(" AND (m.repo_key=? OR m.repo_key=? OR m.repo_key=?)");
-        List<Object> params = new ArrayList<>();
-        params.add(id);
-        params.add(repoKey);
-        params.add(fullRepoKey);
-        params.add(cleanRepoKey);
-        where.append(" AND t.issue_id IS NOT NULL AND t.issue_id<>''");
+        String joinSql = " FROM agent_tasks t" +
+                " INNER JOIN managed_repos m ON t.repo_key = m.repo_key" +
+                " INNER JOIN user_accounts u ON u.username = m.repo_owner" +
+                " WHERE u.id=?" +
+                " AND (m.repo_key=? OR m.repo_key=? OR m.repo_key=?)" +
+                " AND t.issue_id IS NOT NULL AND t.issue_id<>''";
+        Object[] baseParams = {id, repoKey, fullRepoKey, cleanRepoKey};
 
+        // Issue 总数
         long total = 0;
         try {
             total = grapeJdbc.queryForObject(
-                "SELECT COUNT(DISTINCT t.issue_id)" + where, Long.class, params.toArray());
+                "SELECT COUNT(DISTINCT t.issue_id)" + joinSql, Long.class, baseParams);
         } catch (Exception e) { /* ignore */ }
 
+        // Issue 分页列表（GROUP BY issue_id，按最近活动时间倒序）
         List<Map<String, Object>> list = new ArrayList<>();
         try {
             String sql = "SELECT t.issue_id, " +
                     "COUNT(*) as task_count, " +
                     "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
                     "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed, " +
-                    "MAX(t.started_at) as last_task_at " + where +
+                    "MAX(t.started_at) as last_task_at " +
+                    joinSql +
                     " GROUP BY t.issue_id" +
                     " ORDER BY last_task_at DESC LIMIT ? OFFSET ?";
-            params.add(size);
-            params.add(page * size);
+            Object[] params = new Object[]{id, repoKey, fullRepoKey, cleanRepoKey, size, page * size};
             grapeJdbc.query(sql, rs -> {
                 Map<String, Object> r = new LinkedHashMap<>();
                 r.put("issueId", rs.getString("issue_id"));
@@ -307,7 +305,7 @@ public class ConsoleUserController {
                 r.put("failed", rs.getInt("failed"));
                 r.put("lastTaskAt", rs.getString("last_task_at"));
                 list.add(r);
-            }, params.toArray());
+            }, params);
         } catch (Exception e) { /* ignore */ }
 
         result.put("content", list);
