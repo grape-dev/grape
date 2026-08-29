@@ -116,6 +116,10 @@
                   <div class="activity-label">已完成</div>
                 </div>
                 <div class="activity-card">
+                  <div class="activity-value" style="color:#ff9500">{{ selectedRepoData.pending ?? 0 }}</div>
+                  <div class="activity-label">进行中</div>
+                </div>
+                <div class="activity-card">
                   <div class="activity-value" style="color:#ff3b30">{{ selectedRepoData.failed }}</div>
                   <div class="activity-label">失败</div>
                 </div>
@@ -129,7 +133,7 @@
               <div v-if="selectedRepo" style="margin-top:16px">
                 <table class="vod-table" v-if="repoIssues.length">
                   <thead>
-                    <tr><th>Issue</th><th style="width:60px">任务</th><th style="width:60px">完成</th><th style="width:60px">失败</th><th style="width:70px">成功率</th><th style="width:150px">最近活动</th></tr>
+                    <tr><th>Issue</th><th style="width:50px">任务</th><th style="width:50px">完成</th><th style="width:50px">进行中</th><th style="width:50px">失败</th><th style="width:60px">成功率</th><th style="width:140px">最近活动</th></tr>
                   </thead>
                   <tbody>
                     <tr v-for="iss in repoIssues" :key="iss.issueId">
@@ -138,12 +142,13 @@
                       </td>
                       <td class="t3">{{ iss.taskCount }}</td>
                       <td class="t3" style="color:#34c759">{{ iss.completed }}</td>
+                      <td class="t3" style="color:#ff9500">{{ iss.pending ?? 0 }}</td>
                       <td class="t3" style="color:#ff3b30">{{ iss.failed }}</td>
                       <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
                       <td class="t3">{{ formatTime(iss.lastTaskAt) }}</td>
                     </tr>
                     <tr v-if="!repoIssues.length">
-                      <td colspan="6" style="text-align:center;padding:20px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</td>
+                      <td colspan="7" style="text-align:center;padding:20px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</td>
                     </tr>
                   </tbody>
                 </table>
@@ -314,7 +319,7 @@ onMounted(() => load())
 .cred-chip.on .cred-chip-status { color: #34c759; }
 
 .activity-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
-.repo-summary-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.repo-summary-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
 .activity-card { text-align: center; padding: 14px 6px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
 .activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }

@@ -181,7 +181,8 @@ public class ConsoleUserController {
                 "COUNT(*) as task_count, " +
                 "COUNT(DISTINCT t.issue_id) as issue_count, " +
                 "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
-                "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed " +
+                "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed, " +
+                "SUM(CASE WHEN t.exit_code IS NULL OR t.completed_at IS NULL THEN 1 ELSE 0 END) as pending " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
@@ -194,6 +195,7 @@ public class ConsoleUserController {
                     r.put("issueCount", rs2.getInt("issue_count"));
                     r.put("completed", rs2.getInt("completed"));
                     r.put("failed", rs2.getInt("failed"));
+                    r.put("pending", rs2.getInt("pending"));
                     return r;
                 }, id);
             info.put("repoMatrix", repoMatrix);
@@ -204,7 +206,8 @@ public class ConsoleUserController {
                 "SELECT m.repo_key, m.full_name, t.issue_id, " +
                 "COUNT(*) as task_count, " +
                 "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
-                "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed " +
+                "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed, " +
+                "SUM(CASE WHEN t.exit_code IS NULL OR t.completed_at IS NULL THEN 1 ELSE 0 END) as pending " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
@@ -218,6 +221,7 @@ public class ConsoleUserController {
                     r.put("taskCount", rs2.getInt("task_count"));
                     r.put("completed", rs2.getInt("completed"));
                     r.put("failed", rs2.getInt("failed"));
+                    r.put("pending", rs2.getInt("pending"));
                     return r;
                 }, id);
             info.put("issueDetails", issueDetails);
@@ -292,6 +296,7 @@ public class ConsoleUserController {
                     "COUNT(*) as task_count, " +
                     "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
                     "SUM(CASE WHEN t.exit_code>0 THEN 1 ELSE 0 END) as failed, " +
+                    "SUM(CASE WHEN t.exit_code IS NULL OR t.completed_at IS NULL THEN 1 ELSE 0 END) as pending, " +
                     "MAX(t.started_at) as last_task_at " +
                     joinSql +
                     " GROUP BY t.issue_id" +
@@ -303,6 +308,7 @@ public class ConsoleUserController {
                 r.put("taskCount", rs.getInt("task_count"));
                 r.put("completed", rs.getInt("completed"));
                 r.put("failed", rs.getInt("failed"));
+                r.put("pending", rs.getInt("pending"));
                 r.put("lastTaskAt", rs.getString("last_task_at"));
                 list.add(r);
             }, params);
