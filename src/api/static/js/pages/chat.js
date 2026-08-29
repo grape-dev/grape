@@ -209,7 +209,7 @@ function loadConversations(autoSelect) {
       html += `<div class="conv-item" data-id="${c.id}"${active}>
         <div class="conv-title">${titleHtml}</div>
         <div class="conv-meta">${fmtLocalTime(c.created_at).substring(0,16)}</div>
-        <span class="conv-del" onclick="event.stopPropagation();deleteConversation('${c.id}')">✕</span>
+        <span class="conv-del" onclick="event.stopPropagation();deleteConversation('${c.id}', event)">✕</span>
       </div>`;
     });
     if (convs.length === 0) {
@@ -252,8 +252,55 @@ function newConversation() {
   }).catch(e => app.showToast(I18N.t('chat.conversation.create_failed', {msg: e.message})));
 }
 
-function deleteConversation(convId) {
-  if (!confirm(I18N.t('chat.conversation.delete_confirm'))) return;
+function deleteConversation(convId, ev) {
+  // 苹果风格确认弹窗（在点击位置弹出）
+  _showChatDelPopover(convId, ev);
+}
+
+function _showChatDelPopover(convId, ev) {
+  // 关闭已有弹窗
+  _closeChatDelPopover();
+  var cx = ev.clientX, cy = ev.clientY;
+  var overlay = document.createElement('div');
+  overlay.className = 'chat-del-overlay';
+  overlay.onclick = function(e) { if (e.target === overlay) _closeChatDelPopover(); };
+  var pop = document.createElement('div');
+  pop.className = 'chat-del-pop';
+  // 构建弹窗内容（用 DOM API 而非 innerHTML 避免转义问题）
+  var title = document.createElement('div');
+  title.className = 'chat-del-title';
+  title.textContent = I18N.t('chat.conversation.delete_confirm');
+  pop.appendChild(title);
+  var btns = document.createElement('div');
+  btns.className = 'chat-del-btns';
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'chat-del-cancel';
+  cancelBtn.textContent = I18N.t('common.cancel');
+  cancelBtn.onclick = function() { _closeChatDelPopover(); };
+  btns.appendChild(cancelBtn);
+  var okBtn = document.createElement('button');
+  okBtn.className = 'chat-del-ok';
+  okBtn.textContent = I18N.t('common.confirm');
+  okBtn.onclick = function() { _doDeleteConv(convId); };
+  btns.appendChild(okBtn);
+  pop.appendChild(btns);
+  overlay.appendChild(pop);
+  document.body.appendChild(overlay);
+  // 定位到点击位置（确保不超出视口）
+  pop.style.position = 'fixed';
+  pop.style.left = Math.min(cx, window.innerWidth - 240) + 'px';
+  pop.style.top = Math.min(cy + 8, window.innerHeight - 120) + 'px';
+  // 动画
+  requestAnimationFrame(function() { pop.classList.add('show'); });
+}
+
+function _closeChatDelPopover() {
+  const o = document.querySelector('.chat-del-overlay');
+  if (o) o.remove();
+}
+
+function _doDeleteConv(convId) {
+  _closeChatDelPopover();
   API.del('/chat/conversations/' + convId).then(() => {
     if (_currentConvId === convId) {
       _currentConvId = null;
