@@ -886,32 +886,43 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
     # 为每个 agent 附带场景信息（skill / enabled_in_scene / engine_runtime_ids）
     # engine_runtime_ids 只从场景 node 读取（为空 = 全广播/兜底）
     scene_by_agent = {n.get("tag") or n.get("id", ""): n for n in scene_nodes}
+    # 构建 skill_name → display_name 映射（官方 skill 优先）
+    skill_display_map = {}
+    try:
+        with db_lock:
+            c.execute("SELECT skill_name, display_name FROM skill WHERE is_active=1 AND scope='official'")
+            skill_display_map = {r[0]: r[1] or r[0] for r in c.fetchall()}
+    except Exception:
+        pass
     for ag in agent_sessions:
         at = ag.get("agent_type", "")
         node = scene_by_agent.get(at)
         if node:
-            ag["skill"] = node.get("skill", "")
+            _sk = node.get("skill", "")
+            ag["skill"] = _sk
+            ag["skill_display_name"] = skill_display_map.get(_sk, _sk)
             ag["enabled_in_scene"] = node.get("enabled", True)
             ag["engine_runtime_ids"] = node.get("engine_runtime_ids", []) or []
         else:
             ag["skill"] = ""
+            ag["skill_display_name"] = ""
             ag["enabled_in_scene"] = False
             ag["engine_runtime_ids"] = []
 
     # 获取可用引擎列表（供前端 engine 下拉）
-    # 照搬 Agent Runtimes 页的显示规则：用 instance_name 唯一命名 + 包含 user scope
+    # 按 agent_type 标签过滤：只返回 tags 包含该 agent_type 或 "all" 的引擎
     agent_engines = {}
     try:
         from src.runtime.engine_select import query_engines
         from src.runtime.instances import instance_name
         for atype in all_types:
-            engines = (query_engines(repo_key, "global")
-                       + query_engines(repo_key, "user")
-                       + query_engines(repo_key, "local"))
+            engines = (query_engines(repo_key, "global", agent_type=atype)
+                       + query_engines(repo_key, "user", agent_type=atype)
+                       + query_engines(repo_key, "local", agent_type=atype))
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
-                                     "status": e["status"]}
+                                     "status": e["status"], "tags": e.get("tags", ["all"])}
                                     for e in engines]
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")

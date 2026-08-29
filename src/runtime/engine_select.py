@@ -382,5 +382,6 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
             "runtime_id": r[0], "name": r[1], "status": r[2] or "offline", "healthy": bool(r[3]),
             "installed": bool(r[4]), "credential_id": r[5] or 0, "last_seen_at": r[6] or "",
             "device_name": r[7] or "", "owner_name": r[8] or "",
+            "tags": [t.strip() for t in (r[10] or "").split(",") if t.strip()] or ["all"],
         })
     return out
