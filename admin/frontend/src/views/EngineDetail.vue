@@ -98,7 +98,7 @@
               <th style="width:100px">Issue</th>
               <th style="width:110px" class="filterable-th">
                 <span class="th-content" @click="toggleFilter('agentType')">
-                  类型 <span class="filter-arrow" :class="{ active: taskType }">▼</span>
+                  Agent <span class="filter-arrow" :class="{ active: taskType }">▼</span>
                 </span>
                 <div class="col-filter-drop" v-if="filterDropdown === 'agentType'" @click.stop>
                   <div class="col-filter-opt" :class="{ active: !taskType }" @click="setFilter('agentType', '')">全部</div>
@@ -124,7 +124,6 @@
                 </div>
               </th>
               <th style="width:70px">耗时</th>
-              <th style="width:50px">Exit</th>
               <th style="width:150px" class="sortable-th" @click="toggleSort">
                 创建时间
                 <span class="sort-arrows">
@@ -135,7 +134,7 @@
             </tr></thead>
             <tbody>
               <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
-                <td :colspan="8" class="t2" style="padding:28px 0">
+                <td :colspan="7" class="t2" style="padding:28px 0">
                   <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
                   <template v-else>
                     无匹配任务
@@ -155,7 +154,6 @@
                 <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
                 <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'running' ? 'warning' : 'default']">{{ t.status }}</span></td>
                 <td class="t3">{{ formatDuration(t.createdAt, t.completedAt) }}</td>
-                <td class="t3">{{ t.exitCode ?? '—' }}</td>
                 <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
               </tr>
             </tbody>
