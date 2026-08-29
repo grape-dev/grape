@@ -62,6 +62,9 @@
       <div class="card" style="padding:0">
           <div class="section-header">
             <h3 class="sh-title">仓库与 Issue</h3>
+            <div class="sh-actions">
+              <button class="btn btn-sm" @click="loadRepoIssues()">刷新</button>
+            </div>
           </div>
           <div style="padding:20px 24px">
               <!-- 仓库选择下拉 -->
