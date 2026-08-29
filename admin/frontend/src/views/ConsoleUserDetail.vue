@@ -207,7 +207,10 @@
                           </div>
                           <!-- 时序图 -->
                           <div v-show="issueEventsLoading[iss.issueId]" style="text-align:center;padding:20px;color:var(--text-tertiary)">加载中...</div>
-                          <div v-show="!issueEventsLoading[iss.issueId] && issueViewModes[iss.issueId] !== 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length" :ref="el => diagramRefs[iss.issueId] = el" style="overflow:auto;min-height:60px"></div>
+                          <div v-show="!issueEventsLoading[iss.issueId] && issueViewModes[iss.issueId] !== 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length" class="tl-diagram-container" :ref="el => diagramRefs[iss.issueId] = el" style="overflow:auto;min-height:60px">
+                            <div v-if="!renderedIssues.has(iss.issueId)" style="text-align:center;padding:20px;color:var(--text-tertiary)">渲染中...</div>
+                            <div v-else v-html="issueSvg(iss.issueId)" class="tl-diagram-svg"></div>
+                          </div>
                           <!-- 事件列表 -->
                           <div v-show="issueViewModes[iss.issueId] === 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length">
                             <table class="vod-table">
@@ -342,6 +345,11 @@ const expandedIssues = ref(new Set())
 const issueViewModes = ref({})
 const issueEvents = ref({})  // {issueId: events[]}
 const issueEventsLoading = ref({})  // {issueId: true/false}
+const issueSvgs = ref({})  // {issueId: svgHtml}
+
+function issueSvg(issueId) {
+  return issueSvgs.value[issueId] || ''
+}
 
 const pendingTotal = computed(() => {
   if (!selectedRepoData.value) return 0
@@ -404,15 +412,14 @@ async function toggleIssueTimeline(iss) {
         issueEvents.value = { ...issueEvents.value, [id]: [] }
         issueEventsLoading.value = { ...issueEventsLoading.value, [id]: false }
       }
-    } else if (renderedIssues.value.has(id)) {
-      // 已渲染过：重新绑定点击事件（DOM 可能被 Vue 重新渲染销毁）
-      if (issueEvents.value[id] && issueEvents.value[id].length) {
+    } else if (issueEvents.value[id] && issueEvents.value[id].length) {
+      // 已有数据：重新渲染（v-html 重新渲染会丢失 data-task-id 和 onclick）
+      if (renderedIssues.value.has(id)) {
         const { evTypes } = buildSequence(issueEvents.value[id])
         nextTick(() => bindMermaidClicks(id, iss, evTypes))
+      } else {
+        setTimeout(() => renderMermaidForIssue(id, iss), 50)
       }
-    } else if (issueEvents.value[id] && issueEvents.value[id].length) {
-      // 有数据但未渲染
-      setTimeout(() => renderMermaidForIssue(id, iss), 50)
     }
   }
 }
@@ -599,9 +606,6 @@ function bindMermaidClicks(issueId, iss, evTypes) {
 
 async function renderMermaidForIssue(issueId, iss) {
   if (renderingIssues.value.has(issueId)) return
-  if (renderedIssues.value.has(issueId)) return
-  const el = diagramRefs[issueId]
-  if (!el) return
   const events = issueEvents.value[issueId] || []
   if (!events.length) return
   renderingIssues.value = new Set([...renderingIssues.value, issueId])
@@ -614,12 +618,12 @@ async function renderMermaidForIssue(issueId, iss) {
     const svg = result.svg || result
     const coloredSvg = applySequenceColors(svg, statuses)
     const fixedSvg = fixLifelineHeight(coloredSvg, events.length)
-    el.innerHTML = fixedSvg
+    issueSvgs.value = { ...issueSvgs.value, [issueId]: fixedSvg }
     renderedIssues.value = new Set([...renderedIssues.value, issueId])
     nextTick(() => bindMermaidClicks(issueId, iss, evTypes))
   } catch (err) {
     const { text } = buildSequence(events)
-    el.innerHTML = `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${err.message || err}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>`
+    issueSvgs.value = { ...issueSvgs.value, [issueId]: `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${err.message || err}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>` }
     renderedIssues.value = new Set([...renderedIssues.value, issueId])
   } finally {
     const s = new Set(renderingIssues.value)
@@ -765,6 +769,8 @@ watch(activityTab, (val) => {
 .activity-card { text-align: center; padding: 14px 6px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
 .activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+.tl-diagram-container { overflow-x: auto; padding: 8px 0; min-height: 60px; }
+.tl-diagram-svg svg { max-width: 100%; }
 
 .timeline { display: flex; flex-direction: column; gap: 0; }
 .timeline-item { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border-soft); }
