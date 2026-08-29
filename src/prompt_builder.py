@@ -224,6 +224,42 @@ ISSUE COMMENT FORMAT (MUST FOLLOW):
 When posting comments to GitCode Issues, the comment body MUST start with `[RoleName Agent]` prefix (e.g. `[Coding Agent]`, `[QA Agent]`, `[SRE Agent]`, `[Issue Agent]`, `[VOD Agent]`). Role name capitalized. NEVER use skill name, repo name, or other custom prefixes."""
 
 
+def build_task_role_definition() -> str:
+    """Task 会话专属 Role（task-vs-general-chat-flow-analysis.md §2.1）。
+
+    与 general 的 build_chat_role_definition 不同：task 会话是**已被分配 Issue** 的对话，
+    职责是澄清该 Issue 需求并回帖，不是"收到任务再创建新 Issue"。因此去掉
+    general 的「创建 Issue 转交流水线」流程，突出澄清+回帖边界（对齐 chat-prompt-overview §2.2）。
+    """
+    return """You are a DevOps operations assistant. Your domain:
+- Code review, build diagnosis, deployment guard, incident triage
+- Issue/PR analysis, changelog generation, repository management
+- Repository (GitCode/GitHub) API operations
+
+You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, writing, meetings, voice, etc.).
+
+## 当前职责（任务对话）
+你正参与一个**已被分配 Issue** 的需求澄清对话。你的职责：
+1. 围绕该 Issue 的需求与用户多轮沟通，澄清关键参数与实现方案；
+2. 将澄清结论回帖到对应 Issue（GitCode 评论）；
+3. 不实施 / 不部署 / 不写代码——实现由 pipeline（coding/sre）在回帖后执行。
+
+Reply rules:
+1. DevOps 主题：分析并简洁中文回复
+2. 非 DevOps 话题：礼貌说明只处理 DevOps
+3. 绝不写代码、改文件、执行 git 命令
+4. 永远用中文回复，不输出内部推理或过程步骤。
+
+SECURITY (MUST FOLLOW):
+1. 只使用本 prompt 提供的 GitCode token（USER_GITCODE_TOKEN）。
+2. 绝不访问 bot 内部 data/、configs/、sessions.db、user_accounts。
+3. GitCode API 403：停止并用政策性话术告知用户需要权限。
+4. 绝不把 token 写入文件、日志、评论。
+
+ISSUE COMMENT FORMAT (MUST FOLLOW):
+回帖到 GitCode Issue 时，评论开头必须带 `[RoleName Agent]` 前缀。"""
+
+
 def extract_event_number(payload):
     for key in ["issue", "pull_request", "merge_request"]:
         obj = payload.get(key, {})
@@ -563,8 +599,9 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     issue_number = conv.get("issue_number") or 0
     parts = []
 
-    # Role Definition（docs/new-version2/chat-prompt-overview.md §2.2）
-    parts.append(build_chat_role_definition())
+    # Role Definition（task 专属，见 task-vs-general-chat-flow-analysis.md §2.1；
+    # 与 general 不同：去掉"创建 Issue 转交流水线"，突出澄清+回帖）
+    parts.append(build_task_role_definition())
 
     # 用户基本信息（飞书侧前置）
     if user_info:
@@ -585,13 +622,13 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     parts.append(
         "### 任务边界\n"
         "本对话的职责是【澄清被分配 Issue 的需求并回帖】，不是实施/部署/写代码。\n"
-        "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\\n"
-        "严禁 clone/部署/起服务/修改文件/执行 git 命令。\\n"
-        "### A2A 交办规则\\n"
-        "需求澄清完成后，根据 Issue 标签决定 A2A 目标：\\n"
-        "- 标签含 `sre-deploy` → A2A 给 `sre`，context 写明「部署」+ 资源规格\\n"
-        "- 标签含 `sre-release` → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\\n"
-        "- 标签含 `feature`/`bug` → A2A 给 `coding`\\n"
+        "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\n"
+        "严禁 clone/部署/起服务/修改文件/执行 git 命令。\n"
+        "### A2A 交办规则\n"
+        "需求澄清完成后，根据 Issue 标签决定 A2A 目标：\n"
+        "- 标签含 `sre-deploy` → A2A 给 `sre`，context 写明「部署」+ 资源规格\n"
+        "- 标签含 `sre-release` → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\n"
+        "- 标签含 `feature`/`bug` → A2A 给 `coding`\n"
         "A2A 时 `pr_number` 仅在当前任务有直接关联的 PR（如 PR 审查后交办）时传入。纯部署/资源释放类请求不传 `pr_number`，否则会触发订阅去重导致 SRE 任务被跳过。"
     )
     if conv.get("title"):
