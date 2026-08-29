@@ -37,17 +37,14 @@ public class HealthCenterController {
     public Map<String, Object> overview() {
         Map<String, Object> result = new LinkedHashMap<>();
 
-        // 1. Workers（凭据 = 远端 worker + 本机虚拟 worker）
+        // 1. Workers（全部从 runtime_credentials 表读取，数据由主服务定时更新）
         List<Map<String, Object>> workerList = new ArrayList<>();
         java.util.concurrent.atomic.AtomicInteger workerOnline = new java.util.concurrent.atomic.AtomicInteger(0);
 
-        // 设备监控只显示远端 worker（本机作为运营管理平台不列入设备列表）
-
-        // 远端 worker（runtime_credentials 表，排除 name='本机' 虚拟记录）
         try {
-            grapeJdbc.query("SELECT id, name, device_name, status, last_seen_at, last_ip, " +
-                    "cpu_percent, memory_percent, disk_percent, load_avg, owner_name " +
-                    "FROM runtime_credentials ORDER BY id", rs -> {
+            grapeJdbc.query("SELECT id, name, device_name, status, last_seen_at, last_ip, "
+                    + "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
+                    + "FROM runtime_credentials ORDER BY id", rs -> {
                 Map<String, Object> w = new LinkedHashMap<>();
                 int wid = rs.getInt("id");
                 String wStatus = rs.getString("status");
@@ -62,6 +59,7 @@ public class HealthCenterController {
                 w.put("cpuPercent", rs.getDouble("cpu_percent"));
                 w.put("memoryPercent", rs.getDouble("memory_percent"));
                 w.put("diskPercent", rs.getDouble("disk_percent"));
+                w.put("tmpPercent", rs.getDouble("tmp_percent"));
                 w.put("loadAvg", rs.getString("load_avg"));
                 w.put("ownerName", rs.getString("owner_name"));
                 if ("online".equals(w.get("health"))) workerOnline.incrementAndGet();
@@ -95,9 +93,11 @@ public class HealthCenterController {
         List<Map<String, Object>> runtimeList = new ArrayList<>();
         java.util.concurrent.atomic.AtomicInteger rtOnline = new java.util.concurrent.atomic.AtomicInteger(0);
         try {
-            grapeJdbc.query("SELECT id, name, scope, status, healthy, busy_slots, max_concurrent, " +
-                    "version, last_seen_at, cli_path, credential_id " +
-                    "FROM agent_runtimes ORDER BY CASE WHEN status='online' THEN 0 ELSE 1 END, last_seen_at DESC",
+            grapeJdbc.query("SELECT ar.id, ar.name, ar.scope, ar.status, ar.healthy, ar.busy_slots, ar.max_concurrent, "
+                    + "ar.version, ar.last_seen_at, ar.cli_path, ar.credential_id, "
+                    + "rc.device_name as worker_device, rc.last_ip as worker_ip "
+                    + "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON ar.credential_id=rc.id "
+                    + "ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC",
                     rs -> {
                         Map<String, Object> r = new LinkedHashMap<>();
                         int rid = rs.getInt("id");
@@ -127,6 +127,14 @@ public class HealthCenterController {
                         r.put("lastSeenAt", lastSeen);
                         r.put("credentialId", cid);
                         r.put("scope", rs.getString("scope"));
+                        // 所属 worker 设备信息
+                        if (isLocal) {
+                            r.put("workerName", "本机直连");
+                            r.put("workerIp", "127.0.0.1");
+                        } else {
+                            r.put("workerName", rs.getString("worker_device"));
+                            r.put("workerIp", rs.getString("worker_ip"));
+                        }
                         runtimeList.add(r);
                         if ("online".equals(health)) rtOnline.incrementAndGet();
                     });
@@ -507,9 +515,12 @@ public class HealthCenterController {
     public Map<String, Object> taskInfo(@PathVariable String taskId) {
         Map<String, Object> info = new LinkedHashMap<>();
         try {
-            grapeJdbc.query("SELECT id, repo_key, agent_type, status, issue_id, created_at, completed_at, "
-                    + "started_at, exit_code, result_text, errors, event_seq, skill, runtime_id "
-                    + "FROM agent_tasks WHERE id=?", rs -> {
+            grapeJdbc.query("SELECT t.id, t.repo_key, t.agent_type, t.status, t.issue_id, t.created_at, t.completed_at, "
+                    + "t.started_at, t.exit_code, t.result_text, t.errors, t.event_seq, t.skill, t.runtime_id, "
+                    + "ar.name as engine_name, COALESCE(rc.device_name, '本机直连') as engine_device "
+                    + "FROM agent_tasks t LEFT JOIN agent_runtimes ar ON t.runtime_id=ar.id "
+                    + "LEFT JOIN runtime_credentials rc ON ar.credential_id=rc.id "
+                    + "WHERE t.id=?", rs -> {
                 info.put("id", rs.getString("id"));
                 info.put("repoKey", rs.getString("repo_key"));
                 info.put("agentType", rs.getString("agent_type"));
@@ -523,6 +534,10 @@ public class HealthCenterController {
                 info.put("errors", rs.getString("errors"));
                 info.put("eventSeq", rs.getObject("event_seq"));
                 info.put("skill", rs.getString("skill"));
+                // 引擎名（格式: engine-device）
+                String engineName = rs.getString("engine_name");
+                String engineDevice = rs.getString("engine_device");
+                info.put("engine", engineName != null ? engineName + "-" + engineDevice : "");
             }, taskId);
         } catch (Exception e) { /* ignore */ }
         return info;
@@ -625,15 +640,32 @@ public class HealthCenterController {
             rows = List.of();
         }
 
-        // 查 agent_tasks 建立 (issue_id, event_seq) → task_id 映射
+        // 查 agent_tasks 建立 (issue_id, event_seq) → {taskId, runtimeId} 映射
         Map<String, Map<Integer, String>> taskMap = new HashMap<>();
+        Map<String, Map<Integer, Integer>> taskRuntimeMap = new HashMap<>();
         try {
-            grapeJdbc.query("SELECT issue_id, event_seq, id FROM agent_tasks WHERE issue_id IS NOT NULL AND issue_id <> ''",
+            grapeJdbc.query("SELECT issue_id, event_seq, id, runtime_id FROM agent_tasks WHERE issue_id IS NOT NULL AND issue_id <> ''",
                     rs -> {
                         String iid = rs.getString("issue_id");
                         int seq = rs.getInt("event_seq");
                         String tid = rs.getString("id");
+                        int rid = rs.getInt("runtime_id");
                         taskMap.computeIfAbsent(iid, k -> new HashMap<>()).put(seq, tid);
+                        taskRuntimeMap.computeIfAbsent(iid, k -> new HashMap<>()).put(seq, rid);
+                    });
+        } catch (Exception e) { /* ignore */ }
+
+        // 查 runtime → 引擎名+设备名+IP 映射
+        Map<Integer, String> runtimeNames = new HashMap<>();
+        try {
+            grapeJdbc.query("SELECT ar.id, ar.name, COALESCE(rc.device_name, '本机直连') as device, COALESCE(rc.last_ip, '127.0.0.1') as ip "
+                    + "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON ar.credential_id=rc.id",
+                    rs -> {
+                        int rid = rs.getInt("id");
+                        String engine = rs.getString("name");
+                        String device = rs.getString("device");
+                        String ip = rs.getString("ip");
+                        runtimeNames.put(rid, engine + "-" + device + "(" + ip + ")");
                     });
         } catch (Exception e) { /* ignore */ }
 
@@ -682,6 +714,10 @@ public class HealthCenterController {
                 s.put("createdAt", ev.get("created_at"));
                 s.put("actor", ev.get("actor"));
                 s.put("taskId", issueTasks.getOrDefault(seq, ""));
+                // 引擎名（格式: engine-device，如 opencode-ecs-grape-dev-build-0005）
+                Map<Integer, Integer> issueRtMap = taskRuntimeMap.getOrDefault(e.getKey(), Map.of());
+                Integer rtId = issueRtMap.get(seq);
+                s.put("engine", rtId != null ? runtimeNames.getOrDefault(rtId, "") : "");
                 slim.add(s);
             }
             g.put("events", slim);

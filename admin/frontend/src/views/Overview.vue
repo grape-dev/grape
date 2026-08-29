@@ -13,14 +13,14 @@
 
       <!-- KPI 卡片行：用户 → 仓库 → 设备 → 任务 -->
       <div class="kpi-row">
-        <div class="kpi-card kpi-cyan" title="管理台用户数（admin_users）" @click="$router.push('/sys/users')">
+        <div class="kpi-card kpi-cyan" title="Grape 控制台用户数（user_accounts，即托管仓库登录用户）" @click="$router.push('/sys/console')">
           <div class="kpi-icon" style="background:#e6fffb;color:#13c2c2;">👥</div>
           <div class="kpi-body">
-            <div class="kpi-value">{{ vc.adminUserTotal || 0 }}</div>
-            <div class="kpi-label">用户</div>
-            <div class="kpi-sub">平台用户 {{ vc.platformUserTotal || 0 }}</div>
+            <div class="kpi-value">{{ vc.platformUserTotal || 0 }}</div>
+            <div class="kpi-label">控制台用户</div>
+            <div class="kpi-sub">管理台 {{ vc.adminUserTotal || 0 }} 个</div>
           </div>
-          <div class="kpi-action">用户管理 →</div>
+          <div class="kpi-action">控制台用户 →</div>
         </div>
         <div class="kpi-card kpi-green" title="已托管仓库数（managed_repos）" @click="$router.push('/repos/manage')">
           <div class="kpi-icon" style="background:#f6ffed;color:#52c41a;">📦</div>
@@ -61,7 +61,7 @@
               <tr><th>指标</th><th>计算规则</th></tr>
             </thead>
             <tbody>
-              <tr><td>用户</td><td>管理台用户 admin_users；平台用户 user_accounts</td></tr>
+              <tr><td>用户</td><td>控制台用户 user_accounts（grape 控制台登录用户）；管理台用户 admin_users</td></tr>
               <tr><td>托管仓库</td><td>managed_repos 已托管仓库数</td></tr>
               <tr><td>在线设备</td><td>agent_runtimes 表中 status=online 的设备数（在线 / 总数）</td></tr>
               <tr><td>Agent 任务</td><td>agent_tasks 任务总数；今日新增按创建日期（UTC）统计</td></tr>
@@ -69,7 +69,7 @@
               <tr><td>设备状态图</td><td>agent_runtimes 按 status 分组（在线/离线等）</td></tr>
               <tr><td>任务状态图</td><td>agent_tasks 按 status 分组（completed/queued/dispatched 等）</td></tr>
               <tr><td>仓库事件图</td><td>events 表按 repo_key 聚合的事件量 Top 8（活跃仓库排行）</td></tr>
-              <tr><td>用户构成图</td><td>管理台用户（admin_users）与平台用户（user_accounts）数量对比</td></tr>
+              <tr><td>用户构成图</td><td>控制台用户（user_accounts）与管理台用户（admin_users）数量对比</td></tr>
             </tbody>
           </table>
         </div>
@@ -78,11 +78,11 @@
       <!-- 图表区：4 卡对应 4 图（2×2，对齐 KPI 卡顺序：用户/仓库/设备/任务） -->
       <div class="chart-grid chart-grid-4">
         <div class="chart-card">
-          <div class="chart-title">用户 · 构成分布</div>
+          <div class="chart-title">控制台用户 · 构成分布</div>
           <div class="chart-body" ref="userCompositionRef"></div>
         </div>
         <div class="chart-card">
-          <div class="chart-title">托管仓库 · 事件 Top8</div>
+          <div class="chart-title">托管仓库 · 任务 Top10</div>
           <div class="chart-body" ref="repoEventRef"></div>
         </div>
         <div class="chart-card">
@@ -90,7 +90,7 @@
           <div class="chart-body" ref="deviceStatusRef"></div>
         </div>
         <div class="chart-card">
-          <div class="chart-title">Agent 任务 · 状态分布</div>
+          <div class="chart-title">任务状态分布</div>
           <div class="chart-body" ref="taskStatusRef"></div>
         </div>
       </div>
@@ -117,7 +117,7 @@ const userCompositionRef = ref(null)
 const COLOR_POOL = ['#006eff', '#52c41a', '#faad14', '#f5222d', '#722ed1', '#13c2c2', '#eb2f96', '#fa8c16']
 const TASK_STATUS_COLORS = { completed: '#52c41a', queued: '#faad14', dispatched: '#006eff' }
 const DEVICE_STATUS_COLORS = { online: '#52c41a', offline: '#d9d9d9' }
-const USER_COMP_COLORS = { '管理台用户': '#006eff', '平台用户': '#13c2c2' }
+const USER_COMP_COLORS = { '控制台用户': '#13c2c2', '管理台用户': '#006eff' }
 const STATUS_LABELS = { active: '有效', revoked: '已吊销', online: '在线', offline: '离线', completed: '已完成', queued: '排队中', dispatched: '已派发' }
 
 function formatAgo(val) {
@@ -216,7 +216,7 @@ function renderTaskStatus() {
   })
 }
 
-// 仓库事件 Top8 - 横向条形图（对应"托管仓库"卡片）
+// 仓库任务 Top10 - 横向条形图（对应"托管仓库"卡片）
 function renderRepoEvent() {
   if (!repoEventRef.value) return
   const chart = echarts.init(repoEventRef.value)
@@ -233,7 +233,7 @@ function renderRepoEvent() {
       formatter: params => {
         const p = params[0]
         const full = entries[p.dataIndex] ? entries[p.dataIndex][0] : ''
-        return (p.name === '' ? p.name : p.name + (full ? '<br/>' + full : '')) + '<br/>事件数: ' + p.value
+        return (p.name === '' ? p.name : p.name + (full ? '<br/>' + full : '')) + '<br/>任务数: ' + p.value
       }
     },
     grid: { left: 8, right: 40, top: 16, bottom: 8, containLabel: true },
