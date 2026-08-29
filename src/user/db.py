@@ -1571,7 +1571,7 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             row = c.fetchone()
             if row:
                 c.execute(
-                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
+                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
                     (a.get("display_name", name),
                      1 if a.get("installed") else 0, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,

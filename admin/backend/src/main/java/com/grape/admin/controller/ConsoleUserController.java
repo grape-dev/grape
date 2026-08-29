@@ -132,15 +132,16 @@ public class ConsoleUserController {
             }, id);
         } catch (Exception e) { /* ignore */ }
 
-        // 用户活动统计（通过 repo_owner 关联仓库再关联任务，只统计 Issue 任务，排除对话任务）
+        // 用户活动统计（按状态机6个标准status值，对齐 observability）
         try {
             String issueFilter = " AND t.issue_id IS NOT NULL AND t.issue_id<>''";
-            String notCancelled = " AND (t.status IS NULL OR t.status<>'cancelled')";
             String baseJoin = " FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?";
+            String stdStatus = " AND t.status IN ('queued','dispatched','running','completed','failed','cancelled')";
+            // taskCount 只统计6个标准status
             Long taskCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter, Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + stdStatus, Long.class, id);
             info.put("taskCount", taskCount != null ? taskCount : 0);
             Long issueTaskCount = taskCount;
             info.put("issueTaskCount", issueTaskCount != null ? issueTaskCount : 0);
@@ -150,18 +151,32 @@ public class ConsoleUserController {
             Long issueCount = grapeJdbc.queryForObject(
                 "SELECT COUNT(DISTINCT t.issue_id)" + baseJoin + issueFilter, Long.class, id);
             info.put("issueCount", issueCount != null ? issueCount : 0);
+            // 6个标准状态计数
+            Long queuedCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='queued'", Long.class, id);
+            info.put("queuedCount", queuedCount != null ? queuedCount : 0);
+            Long dispatchedCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='dispatched'", Long.class, id);
+            info.put("dispatchedCount", dispatchedCount != null ? dispatchedCount : 0);
+            Long runningCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='running'", Long.class, id);
+            info.put("runningCount", runningCount != null ? runningCount : 0);
             Long completedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND t.exit_code=0 AND t.completed_at IS NOT NULL", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='completed'", Long.class, id);
             info.put("completedCount", completedCount != null ? completedCount : 0);
             Long failedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND t.exit_code<>0 AND t.exit_code IS NOT NULL", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='failed'", Long.class, id);
             info.put("failedCount", failedCount != null ? failedCount : 0);
-            Long pendingCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND (t.exit_code IS NULL OR t.completed_at IS NULL)", Long.class, id);
-            info.put("pendingCount", pendingCount != null ? pendingCount : 0);
             Long cancelledCount = grapeJdbc.queryForObject(
                 "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='cancelled'", Long.class, id);
             info.put("cancelledCount", cancelledCount != null ? cancelledCount : 0);
+            // 进行中 = dispatched + running
+            long inProgress = (dispatchedCount != null ? dispatchedCount : 0) + (runningCount != null ? runningCount : 0);
+            info.put("inProgressCount", inProgress);
+            // 卡住 = running 且超22分钟
+            Long stuckCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE)", Long.class, id);
+            info.put("stuckCount", stuckCount != null ? stuckCount : 0);
             if (taskCount != null && taskCount > 0 && completedCount != null) {
                 info.put("successRate", Math.round(completedCount * 1000.0 / taskCount) / 10.0 + "%");
             } else {
@@ -173,12 +188,15 @@ public class ConsoleUserController {
         try {
             List<Map<String, Object>> repoMatrix = grapeJdbc.query(
                 "SELECT m.full_name, m.repo_key, " +
-                "COUNT(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 END) as task_count, " +
+                "COUNT(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status IN ('queued','dispatched','running','completed','failed','cancelled') THEN 1 END) as task_count, " +
                 "COUNT(DISTINCT CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN t.issue_id END) as issue_count, " +
-                "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as completed, " +
-                "SUM(CASE WHEN t.exit_code<>0 AND t.exit_code IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as failed, " +
-                "SUM(CASE WHEN (t.exit_code IS NULL OR t.completed_at IS NULL) AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as pending, " +
-                "SUM(CASE WHEN t.status='cancelled' AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as cancelled " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='queued' THEN 1 ELSE 0 END) as queued, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='dispatched' THEN 1 ELSE 0 END) as dispatched, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='running' THEN 1 ELSE 0 END) as running, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='completed' THEN 1 ELSE 0 END) as completed, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='failed' THEN 1 ELSE 0 END) as failed, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE) THEN 1 ELSE 0 END) as stuck " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
@@ -191,8 +209,11 @@ public class ConsoleUserController {
                     r.put("issueCount", rs2.getInt("issue_count"));
                     r.put("completed", rs2.getInt("completed"));
                     r.put("failed", rs2.getInt("failed"));
-                    r.put("pending", rs2.getInt("pending"));
+                    r.put("queued", rs2.getInt("queued"));
+                    r.put("dispatched", rs2.getInt("dispatched"));
+                    r.put("running", rs2.getInt("running"));
                     r.put("cancelled", rs2.getInt("cancelled"));
+                    r.put("stuck", rs2.getInt("stuck"));
                     return r;
                 }, id);
             info.put("repoMatrix", repoMatrix);
@@ -203,11 +224,15 @@ public class ConsoleUserController {
         try {
             List<Map<String, Object>> recentTasks = grapeJdbc.query(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at " +
+                "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
+                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
+                "rc.device_name, rc.last_ip " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
+                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
+                "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -220,15 +245,33 @@ public class ConsoleUserController {
                     r.put("skill", rs2.getString("skill"));
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
-                    // 状态判断
-                    Object exitCode = rs2.getObject("exit_code");
+                    r.put("eventType", rs2.getString("event_type"));
+                    // 引擎实例名（对齐 observability instance_name 逻辑）
+                    r.put("engine", buildEngineName(rs2));
+                    r.put("engineIp", rs2.getString("last_ip"));
+                    // 耗时（秒）
+                    String startedAt = rs2.getString("started_at");
                     String completedAt = rs2.getString("completed_at");
-                    if (exitCode != null && ((Integer) exitCode) == 0 && completedAt != null) {
-                        r.put("status", "completed");
-                    } else if (exitCode != null && ((Integer) exitCode) != 0) {
-                        r.put("status", "failed");
+                    if (startedAt != null && completedAt != null) {
+                        try {
+                            String s = startedAt.replace("T", " ").length() > 19 ? startedAt.replace("T", " ").substring(0, 19) : startedAt.replace("T", " ");
+                            String c = completedAt.replace("T", " ").length() > 19 ? completedAt.replace("T", " ").substring(0, 19) : completedAt.replace("T", " ");
+                            java.sql.Timestamp start = java.sql.Timestamp.valueOf(s);
+                            java.sql.Timestamp end = java.sql.Timestamp.valueOf(c);
+                            long durationSec = (end.getTime() - start.getTime()) / 1000;
+                            r.put("duration", durationSec + "s");
+                        } catch (Exception ex) {
+                            r.put("duration", "—");
+                        }
                     } else {
-                        r.put("status", "pending");
+                        r.put("duration", "—");
+                    }
+                    // 状态判断（直接用 status 字段，对齐 observability）
+                    String taskStatus = rs2.getString("status");
+                    if (taskStatus != null && !taskStatus.isEmpty()) {
+                        r.put("status", taskStatus);
+                    } else {
+                        r.put("status", "unknown");
                     }
                     return r;
                 }, id);
@@ -239,13 +282,16 @@ public class ConsoleUserController {
         try {
             List<Map<String, Object>> recentPending = grapeJdbc.query(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at " +
+                "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
+                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
+                "rc.device_name, rc.last_ip " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND (t.exit_code IS NULL OR t.completed_at IS NULL) " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
+                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
+                "WHERE u.id=? AND t.status IN ('dispatched','running') " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
-                "AND (t.status IS NULL OR t.status<>'cancelled') " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -258,6 +304,12 @@ public class ConsoleUserController {
                     r.put("skill", rs2.getString("skill"));
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
+                    r.put("eventType", rs2.getString("event_type"));
+                    r.put("engine", buildEngineName(rs2));
+                    r.put("engineIp", rs2.getString("last_ip"));
+                    String sa = rs2.getString("started_at");
+                    String ca = rs2.getString("completed_at");
+                    r.put("duration", calcDuration(sa, ca));
                     r.put("status", "pending");
                     return r;
                 }, id);
@@ -268,11 +320,15 @@ public class ConsoleUserController {
         try {
             List<Map<String, Object>> recentFailed = grapeJdbc.query(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at " +
+                "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
+                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
+                "rc.device_name, rc.last_ip " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND t.exit_code<>0 AND t.exit_code IS NOT NULL " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
+                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
+                "WHERE u.id=? AND t.status='failed' " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
@@ -286,6 +342,12 @@ public class ConsoleUserController {
                     r.put("skill", rs2.getString("skill"));
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
+                    r.put("eventType", rs2.getString("event_type"));
+                    r.put("engine", buildEngineName(rs2));
+                    r.put("engineIp", rs2.getString("last_ip"));
+                    String sa = rs2.getString("started_at");
+                    String ca = rs2.getString("completed_at");
+                    r.put("duration", calcDuration(sa, ca));
                     r.put("status", "failed");
                     return r;
                 }, id);
@@ -322,10 +384,13 @@ public class ConsoleUserController {
         try {
             String sql = "SELECT t.issue_id, " +
                     "COUNT(*) as task_count, " +
-                    "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
-                    "SUM(CASE WHEN t.exit_code<>0 AND t.exit_code IS NOT NULL THEN 1 ELSE 0 END) as failed, " +
-                    "SUM(CASE WHEN (t.exit_code IS NULL OR t.completed_at IS NULL) AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as pending, " +
+                    "SUM(CASE WHEN t.status='queued' THEN 1 ELSE 0 END) as queued, " +
+                    "SUM(CASE WHEN t.status='dispatched' THEN 1 ELSE 0 END) as dispatched, " +
+                    "SUM(CASE WHEN t.status='running' THEN 1 ELSE 0 END) as running, " +
+                    "SUM(CASE WHEN t.status='completed' THEN 1 ELSE 0 END) as completed, " +
+                    "SUM(CASE WHEN t.status='failed' THEN 1 ELSE 0 END) as failed, " +
                     "SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
+                    "SUM(CASE WHEN t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE) THEN 1 ELSE 0 END) as stuck, " +
                     "MAX(t.started_at) as last_task_at " +
                     joinSql +
                     " GROUP BY t.issue_id" +
@@ -337,8 +402,11 @@ public class ConsoleUserController {
                 r.put("taskCount", rs.getInt("task_count"));
                 r.put("completed", rs.getInt("completed"));
                 r.put("failed", rs.getInt("failed"));
-                r.put("pending", rs.getInt("pending"));
+                r.put("queued", rs.getInt("queued"));
+                r.put("dispatched", rs.getInt("dispatched"));
+                r.put("running", rs.getInt("running"));
                 r.put("cancelled", rs.getInt("cancelled"));
+                r.put("stuck", rs.getInt("stuck"));
                 r.put("lastTaskAt", rs.getString("last_task_at"));
                 list.add(r);
             }, params);
@@ -365,5 +433,45 @@ public class ConsoleUserController {
             result.put("message", "操作失败: " + e.getMessage());
         }
         return result;
+    }
+
+    private String calcDuration(String startedAt, String completedAt) {
+        if (startedAt == null || completedAt == null) return "—";
+        try {
+            String s = startedAt.replace("T", " ");
+            String c = completedAt.replace("T", " ");
+            if (s.length() > 19) s = s.substring(0, 19);
+            if (c.length() > 19) c = c.substring(0, 19);
+            java.sql.Timestamp start = java.sql.Timestamp.valueOf(s);
+            java.sql.Timestamp end = java.sql.Timestamp.valueOf(c);
+            long durationSec = (end.getTime() - start.getTime()) / 1000;
+            return durationSec + "s";
+        } catch (Exception e) {
+            return "—";
+        }
+    }
+
+    /** 引擎实例名（对齐 grape observability instance_name 逻辑：{type}-{device_suffix}） */
+    private String buildEngineName(java.sql.ResultSet rs) throws java.sql.SQLException {
+        String engineName = rs.getString("engine_name");
+        if (engineName == null || engineName.isEmpty()) return null;
+        int credId = rs.getInt("credential_id");
+        String deviceName = rs.getString("device_name");
+        String hostName = rs.getString("host_name");
+        // 本机引擎（credential_id=0）：优先用 host_name
+        if (credId == 0) {
+            deviceName = hostName != null ? hostName : "";
+        }
+        String et = engineName.trim().toLowerCase();
+        String suffix = "";
+        if (deviceName != null && !deviceName.isEmpty()) {
+            // sanitize: 取最后一段（去掉域名等），转小写
+            String[] parts = deviceName.split("\\.");
+            suffix = parts[0].toLowerCase().replaceAll("[^a-z0-9-]", "");
+        }
+        if (suffix.isEmpty()) {
+            suffix = "cred" + credId;
+        }
+        return et + "-" + suffix;
     }
 }
