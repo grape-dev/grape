@@ -103,8 +103,7 @@ public class StatsController {
 
         // 用户构成分布（控制台用户 vs 管理台用户，对应"用户"卡片）
         LinkedHashMap<String, Object> userComp = new LinkedHashMap<>();
-        userComp.put("控制台用户", count("SELECT COUNT(*) FROM user_accounts"));
-        userComp.put("管理台用户", adminJdbc.queryForObject("SELECT COUNT(*) FROM admin_users", Long.class));
+        userComp.put("工作台用户", count("SELECT COUNT(*) FROM user_accounts"));
         data.put("userCompositionDistribution", userComp);
 
         // 引擎启停分布

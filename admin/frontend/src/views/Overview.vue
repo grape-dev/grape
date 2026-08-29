@@ -13,14 +13,14 @@
 
       <!-- KPI 卡片行：用户 → 仓库 → 设备 → 任务 -->
       <div class="kpi-row">
-        <div class="kpi-card kpi-cyan" title="Grape 控制台用户数（user_accounts，即托管仓库登录用户）" @click="$router.push('/sys/console')">
-          <div class="kpi-icon" style="background:rgba(19,194,194,0.08);color:#30b0c7;">👥</div>
+        <div class="kpi-card kpi-cyan" title="Grape 工作台用户数（user_accounts，即托管仓库登录用户）" @click="$router.push('/sys/console')">
+          <div class="kpi-icon" style="background:rgba(48,176,199,0.1);color:#30b0c7;">👥</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ vc.platformUserTotal || 0 }}</div>
-            <div class="kpi-label">控制台用户</div>
-            <div class="kpi-sub">管理台 {{ vc.adminUserTotal || 0 }} 个</div>
+            <div class="kpi-label">工作台用户</div>
+            <div class="kpi-sub">已注册工作台账号</div>
           </div>
-          <div class="kpi-action">控制台用户 →</div>
+          <div class="kpi-action">工作台用户 →</div>
         </div>
         <div class="kpi-card kpi-green" title="已托管仓库数（managed_repos）" @click="$router.push('/repos/manage')">
           <div class="kpi-icon" style="background:rgba(52,199,89,0.1);color:#34c759;">📦</div>
@@ -61,7 +61,7 @@
               <tr><th>指标</th><th>计算规则</th></tr>
             </thead>
             <tbody>
-              <tr><td>用户</td><td>控制台用户 user_accounts（grape 控制台登录用户）；管理台用户 admin_users</td></tr>
+              <tr><td>用户</td><td>工作台用户 user_accounts（grape 工作台登录用户）</td></tr>
               <tr><td>托管仓库</td><td>managed_repos 已托管仓库数</td></tr>
               <tr><td>在线设备</td><td>agent_runtimes 表中 status=online 的设备数（在线 / 总数）</td></tr>
               <tr><td>Agent 任务</td><td>agent_tasks 任务总数；今日新增按创建日期（UTC）统计</td></tr>
@@ -69,7 +69,7 @@
               <tr><td>设备状态图</td><td>agent_runtimes 按 status 分组（在线/离线等）</td></tr>
               <tr><td>任务状态图</td><td>agent_tasks 按 status 分组（completed/queued/dispatched 等）</td></tr>
               <tr><td>仓库事件图</td><td>events 表按 repo_key 聚合的事件量 Top 8（活跃仓库排行）</td></tr>
-              <tr><td>用户构成图</td><td>控制台用户（user_accounts）与管理台用户（admin_users）数量对比</td></tr>
+              <tr><td>用户构成图</td><td>工作台用户（user_accounts）凭证配置分布</td></tr>
             </tbody>
           </table>
         </div>
@@ -78,7 +78,7 @@
       <!-- 图表区：4 卡对应 4 图（2×2，对齐 KPI 卡顺序：用户/仓库/设备/任务） -->
       <div class="chart-grid chart-grid-4">
         <div class="chart-card">
-          <div class="chart-title">控制台用户 · 构成分布</div>
+          <div class="chart-title">工作台用户 · 凭证分布</div>
           <div class="chart-body" ref="userCompositionRef"></div>
         </div>
         <div class="chart-card">
@@ -117,7 +117,7 @@ const userCompositionRef = ref(null)
 const COLOR_POOL = ['#006eff', '#34c759', '#ff9500', '#ff3b30', '#5e5ce6', '#30b0c7', '#ff2d92', '#ff9500']
 const TASK_STATUS_COLORS = { completed: '#34c759', queued: '#ff9500', dispatched: '#006eff' }
 const DEVICE_STATUS_COLORS = { online: '#34c759', offline: '#aeaeb2' }
-const USER_COMP_COLORS = { '控制台用户': '#30b0c7', '管理台用户': '#006eff' }
+const USER_COMP_COLORS = { '工作台用户': '#30b0c7' }
 const STATUS_LABELS = { active: '有效', revoked: '已吊销', online: '在线', offline: '离线', completed: '已完成', queued: '排队中', dispatched: '已派发' }
 
 function formatAgo(val) {
