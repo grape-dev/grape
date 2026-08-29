@@ -588,7 +588,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 try:
                     final_text = "".join(collected).strip()
                     if not final_text and not worker_error:
-                        final_text = f"收到您的消息：「{message}」\n\n当前使用 {backend_name} 后端处理。"
+                        final_text = f"收到您的消息：「{body.message}」\n\n当前使用 {backend_name} 后端处理。"
                     if final_text:
                         add_message(conv_id, "agent", final_text)
                         touch_conversation(conv_id)
@@ -641,7 +641,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 yield f": ping\n\n"
 
         if not final_text:
-            final_text = f"收到您的消息：「{message}」\n\n当前使用 {backend_name} 后端处理。"
+            final_text = f"收到您的消息：「{body.message}」\n\n当前使用 {backend_name} 后端处理。"
 
         # 回复/落库与 session 回写已由 agent_worker 完成（见 finally）：
         # event_stream 仅负责把最终文本推回前端；但若被取消，此处也不会执行（回复仍已持久化）。

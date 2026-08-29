@@ -205,6 +205,56 @@ class TestSendStream:
         assert r.status_code == 200
         assert "联通成功" in _sse_done_text(r.text)
 
+    def test_stream_worker_persists_reply_and_new_session_even_if_disconnected(self, _client):
+        """看护：即使 SSE 流被客户端提前掐断（event_stream 生成器被取消），agent_worker 的
+        finally 仍会把回复落库 + 新 session 回写 conv（根治会话失效后新 session 永驻问题，
+        见 chat-prompt-history-injection-design.md §5.3 / d8f0592b）。"""
+        rid = _local_engine_id()
+        cid = _new_conv(_client)
+        # 预置一个"过期" session，模拟陈旧 conv（应被新 session 覆盖）
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE chat_conversations SET runtime_session_id='ses_stale_old' WHERE id=?", (cid,))
+            db.commit()
+
+        def _fake_with_new_session(prompt, cwd, session_id="", **kw):
+            # 模拟 session 失效→retry→成功，产出新 session
+            yield ("done", {"exit_code": 1, "text": "", "oc_session_id": session_id or ""})
+            yield ("text", "重试后的回复内容")
+            yield ("done", {"exit_code": 0, "text": "重试后的回复内容", "oc_session_id": "ses_brand_new"})
+
+        with patch("src.api.routes.chat._get_chat_config",
+                          return_value={"backend": "opencode", "runtime_id": rid}), \
+             patch("src.runtime.executor.stream_agent", side_effect=_fake_with_new_session):
+            # 客户端在读 SSE 流前就 abort：仅发出请求即关闭连接（testclient 用 stream=True 断开前读第一段）
+            with _client.stream("POST", "/api/chat/send/stream", json={"message": "hi", "conversation_id": cid}) as resp:
+                assert resp.status_code == 200
+                for _ in resp.iter_lines():  # 只消费开头几行后中断
+                    break
+
+        # agent_worker.finally 已在此前完成（async 后台线程）；等待其落库完成
+        import time as _t
+        for _ in range(50):
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT runtime_session_id FROM chat_conversations WHERE id=?", (cid,)).fetchone()
+                msgs = db.cursor().execute(
+                    "SELECT COUNT(*) FROM chat_messages WHERE conversation_id=?", (cid,)).fetchall()
+                n_agent = db.cursor().execute(
+                    "SELECT COUNT(*) FROM chat_messages WHERE conversation_id=? AND role='agent'", (cid,)).fetchone()[0]
+            if row and row[0] == "ses_brand_new" and n_agent >= 1:
+                break
+            _t.sleep(0.1)
+        # 断言：过期 session 被替换、回复已落库（即使流被掐断）
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT runtime_session_id FROM chat_conversations WHERE id=?", (cid,)).fetchone()
+            final_msgs = db.cursor().execute(
+                "SELECT content FROM chat_messages WHERE conversation_id=? AND role='agent' ORDER BY id", (cid,)).fetchall()
+        assert row and row[0] == "ses_brand_new", f"new session not persisted: {row}"
+        assert any("重试后的回复内容" in (m[0] or "") for m in final_msgs), f"reply not persisted: {final_msgs}"
+        assert n_agent >= 1
+
 
 # ====== 反馈 ======
 

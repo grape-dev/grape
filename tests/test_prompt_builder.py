@@ -94,6 +94,55 @@ class TestBuildChatPrompt:
         assert "session_history.json" not in prompt
 
 
+class TestHistoryInjection:
+    """看护：对话历史按 has_valid_session 条件注入 + Issue Agent 进展始终注入
+    （chat-prompt-history-injection-design.md §3 / accc2741）。"""
+
+    HISTORY = [
+        {"role": "user", "content": "怎么部署？"},
+        {"role": "agent", "content": "[QA Agent] ✅ PR #1 已合并（merged_at 08-18），Issue #1 已自动关闭。"},
+        {"role": "agent", "content": "让我看下 Issue 情况。"},
+    ]
+
+    def _general(self, has_valid_session):
+        from src.prompt_builder import build_general_chat_prompt
+        return build_general_chat_prompt("hi", "org/repo", self.HISTORY, skill_name="chat",
+                                         has_valid_session=has_valid_session)
+
+    def _task(self, has_valid_session):
+        from src.prompt_builder import build_task_chat_prompt
+        conv = {"conv_type": "task", "issue_number": 7, "title": "t", "repo_key": "org/repo"}
+        return build_task_chat_prompt("hi", "org/repo", self.HISTORY, conv,
+                                      has_valid_session=has_valid_session)
+
+    def test_general_no_session_injects_history(self, pb):
+        p = self._general(False)
+        assert "## 对话历史" in p
+        assert "怎么部署？" in p
+        assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p
+
+    def test_general_with_session_skips_history_keeps_progress(self, pb):
+        p = self._general(True)
+        assert "## 对话历史" not in p                 # session 承载对话，不重复注入
+        assert "怎么部署？" not in p
+        assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p   # 进展始终注入
+
+    def test_task_no_session_injects_history(self, pb):
+        p = self._task(False)
+        assert "## 对话历史" in p and "怎么部署？" in p
+        assert "## Issue Agent 进展" in p
+
+    def test_task_with_session_skips_history_keeps_progress(self, pb):
+        p = self._task(True)
+        assert "## 对话历史" not in p
+        assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p
+
+    def test_no_history_no_sections(self, pb):
+        from src.prompt_builder import build_general_chat_prompt
+        p = build_general_chat_prompt("hi", "org/repo", [], has_valid_session=False)
+        assert "## 对话历史" not in p and "## Issue Agent 进展" not in p
+
+
 class TestBuildPrompt:
     @pytest.fixture
     def base_evt(self):
