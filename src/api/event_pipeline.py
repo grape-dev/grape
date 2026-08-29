@@ -893,6 +893,31 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     title = evt.get("title", "") or event_type
     log.info(f"Pipeline: issue_id={issue_id or '(none)'}, title={title}")
 
+    # 5.1 去重检查（2026-08-29 修复）：同 issue + 同 agent_type 已有 queued/running 任务时跳过
+    # 原因：每次 issue_comment webhook 都会创建新 VOD 任务，导致同一 issue 产生大量重复任务。
+    # A2A 事件已有去重（webhook.py:296），但 issue_opened/issue_comment 没有。
+    # 豁免：issue_opened（新 Issue 应该总是创建）；a2a_event（已有自己的去重）
+    if issue_id and agent_type and event_type not in ("issue_opened", "a2a_event"):
+        try:
+            with db_lock:
+                _dc = db.cursor()
+                _dc.execute(
+                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                    "AND status IN ('running','dispatched') "
+                    "AND event_type != 'a2a_event' "
+                    "ORDER BY seq DESC LIMIT 1",
+                    (repo_key, issue_id, agent_type))
+                _existing_evt = _dc.fetchone()
+                if _existing_evt:
+                    log.info(f"Pipeline: dedup skip — issue={issue_id} agent={agent_type} "
+                             f"already has running event seq={_existing_evt[0]}")
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(repo_key, event_type, f"dedup:active_{agent_type}_for_{issue_id}")
+                    result["skipped"] = "duplicate_active_task"
+                    return result
+        except Exception as _de:
+            log.warning(f"Pipeline: dedup check failed: {_de}")
+
     # 5.5 构建摘要描述
     actor = evt.get("actor", "")
     branch = evt.get("branch", "")

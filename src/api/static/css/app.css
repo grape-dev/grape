@@ -438,10 +438,10 @@
 @keyframes radarSweep{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
 @keyframes radarPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(1.3)}}
 @keyframes radarGlow{0%,100%{box-shadow:0 0 0 0 rgba(212,156,15,.3)}50%{box-shadow:0 0 12px 3px rgba(212,156,15,.15)}}
-.nd-radar{position:relative;overflow:hidden;animation:radarGlow 2s ease-in-out infinite}
-.nd-radar::before{content:"";position:absolute;top:0;left:0;width:100%;height:100%;background:conic-gradient(from 0deg,transparent 0deg,rgba(212,156,15,.12) 40deg,transparent 80deg);animation:radarSweep 3s linear infinite;pointer-events:none;z-index:0}
-.nd-radar>*{position:relative;z-index:1}
-.d-pulse{animation:radarPulse 1.2s ease-in-out infinite}
+.nd-heartbeat{position:relative;overflow:hidden;animation:radarGlow 2s ease-in-out infinite}
+.nd-heartbeat::before{content:"";position:absolute;top:0;left:0;width:100%;height:100%;background:conic-gradient(from 0deg,transparent 0deg,rgba(212,156,15,.12) 40deg,transparent 80deg);animation:radarSweep 3s linear infinite;pointer-events:none;z-index:0}
+.nd-heartbeat>*{position:relative;z-index:1}
+.d-heartbeat{animation:radarPulse 1.2s ease-in-out infinite}
 
 /* ===== Chat 查询中三点动画（学习 Admin AI loading-dots query-bounce）===== */
 .chat-typing{display:inline-block;font-size:12px;color:var(--t2)}

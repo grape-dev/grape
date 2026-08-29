@@ -487,9 +487,20 @@ def _cleanup_task_tmp(task: dict):
         "/tmp/tf-state-backup.json",
         "/tmp/inventory_state.json",
         "/tmp/inventory*.json",
-        # bun/opencode 的 libopentui JIT .so 缓存——按 cwd 生成不同 hash，
-        # JSC_diskCachePath 重定向大部分但 FFI 层仍有少量写入 /tmp，需兜底清理。
-        "/tmp/.39ee*.so",
+        # bun/opencode 的 JIT .so 缓存——按 cwd 生成不同 hash，
+        # 前缀会变化（.39ee*/.3cdc*/.3cdf*/.dccf* 等），必须用通配 /tmp/.*.so 全清。
+        "/tmp/.*.so",
+        # hermes ACP 隔离目录（ACP 协议自行创建的 hermes-acp-* 前缀，
+        # executor.py 只清理 hermes-iso-*，ACP 模式的残留在此兜底）
+        "/tmp/hermes-acp-*",
+        "/tmp/hermes-iso-*",
+        # hermes results 缓存（agent 执行后的 call 结果文件，堆积不清理）
+        "/tmp/hermes-results",
+        # hermes sandbox 临时目录
+        "/tmp/hermes-sandbox-*",
+        "/tmp/hermes-snap-*",
+        # tirith 安全扫描安装残留
+        "/tmp/tirith-install-*",
     ]
     cleaned = 0
     for pattern in tmp_patterns:
@@ -808,7 +819,9 @@ async def _execute_task(client, task, engine_name: str = ""):
         "/tmp/tf-deploy-*", "/tmp/tf-sys-xhy*", "/tmp/blog-build-*",
         "/tmp/blog-deploy*", "/tmp/blog-gen*", "/tmp/blog-publish-*",
         "/tmp/blog-sys-*.tar.gz", "/tmp/ptmpl_*", "/tmp/tf-state-backup.json",
-        "/tmp/inventory_state.json", "/tmp/inventory*.json", "/tmp/.39ee*.so",
+        "/tmp/inventory_state.json", "/tmp/inventory*.json", "/tmp/.*.so",
+        "/tmp/hermes-acp-*", "/tmp/hermes-iso-*", "/tmp/hermes-results",
+        "/tmp/hermes-sandbox-*", "/tmp/hermes-snap-*", "/tmp/tirith-install-*",
     ]:
         _res.track_tmp_pattern(pat)
 

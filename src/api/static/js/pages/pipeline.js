@@ -56,12 +56,12 @@ function selPipe(idx) {
     var label = (node.id || tag).charAt(0).toUpperCase() + (node.id || tag).slice(1);
     var modeIcon = _MODE_ICONS[node.mode] || _MODE_ICONS.emit;
     var dimCls = sc === 0 ? ' dim' : sc === 1 ? ' run' : '';
-    flowHtml += '<div class="pl-nd' + dimCls + '" onclick="app.nav(\'' + tag + '\')">'
+    flowHtml += '<div class="pl-nd' + dimCls + (sc === 1 ? ' nd-heartbeat' : '') + '" onclick="app.nav(\'' + tag + '\')">'
       + '<div class="pl-nd-bar" style="background:' + (sc === 0 ? '#d5d9e0' : color) + '"></div>'
       + '<div class="pl-nd-name"><span class="pl-nd-dot" style="background:' + (sc === 0 ? '#c3c9d4' : color) + '"></span>' + label + ' <span style="font-size:9px;color:#86868b">' + modeIcon + '</span></div>'
       + '<div class="pl-nd-ev">' + (ev ? ev.event_type || '—' : '—') + '</div>'
       + '<div class="pl-nd-actor">' + (ev && ev.actor ? '@' + ev.actor : ' ') + '</div>'
-      + '<div class="pl-nd-status"><span class="d" style="background:' + dotc + '"></span>' + (sc === 2 ? I18N.t('pipeline.status_done') : sc === 1 ? I18N.t('pipeline.status_in_progress') : sc === 3 ? I18N.t('pipeline.status_failed') : I18N.t('pipeline.status_pending')) + '</div>'
+      + '<div class="pl-nd-status"><span class="d' + (sc === 1 ? ' d-heartbeat' : '') + '" style="background:' + dotc + '"></span>' + (sc === 2 ? I18N.t('pipeline.status_done') : sc === 1 ? I18N.t('pipeline.status_in_progress') : sc === 3 ? I18N.t('pipeline.status_failed') : I18N.t('pipeline.status_pending')) + '</div>'
       + '</div>';
   });
   flowHtml += '</div></div></div>';
@@ -165,12 +165,12 @@ function renderPipeline(data) {
       var modeIcon = _MODE_ICONS[node.mode] || _MODE_ICONS.emit;
       var dimCls = sc === 0 ? ' dim' : sc === 1 ? ' run' : '';
       var statusText = sc === 2 ? I18N.t('pipeline.status_done') : sc === 1 ? I18N.t('pipeline.status_in_progress') : sc === 3 ? I18N.t('pipeline.status_failed') : I18N.t('pipeline.status_pending');
-      flowHtml += '<div class="pl-nd' + dimCls + '" onclick="app.nav(\'' + tag + '\')">'
+      flowHtml += '<div class="pl-nd' + dimCls + (sc === 1 ? ' nd-heartbeat' : '') + '" onclick="app.nav(\'' + tag + '\')">'
         + '<div class="pl-nd-bar" style="background:' + (sc === 0 ? '#d5d9e0' : color) + '"></div>'
         + '<div class="pl-nd-name"><span class="pl-nd-dot" style="background:' + (sc === 0 ? '#c3c9d4' : color) + '"></span>' + label + ' <span style="font-size:9px;color:#86868b">' + modeIcon + '</span></div>'
         + '<div class="pl-nd-ev">' + (ev ? ev.event_type || '—' : '—') + '</div>'
         + '<div class="pl-nd-actor">' + (ev && ev.actor ? '@' + ev.actor : ' ') + '</div>'
-        + '<div class="pl-nd-status"><span class="d" style="background:' + dotc + '"></span>' + statusText + '</div>'
+        + '<div class="pl-nd-status"><span class="d' + (sc === 1 ? ' d-heartbeat' : '') + '" style="background:' + dotc + '"></span>' + statusText + '</div>'
         + '</div>';
     });
     flowHtml += '</div></div>';
