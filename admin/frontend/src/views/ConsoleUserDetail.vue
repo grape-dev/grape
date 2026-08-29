@@ -158,20 +158,20 @@
                       <div v-if="t.issueTitle" class="t3" :title="t.issueTitle" style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.issueTitle }}</div>
                     </td>
                     <td><span :class="['status-tag', eventTypeClass(t.eventType)]" style="font-size:11px">{{ eventTypeText(t.eventType) }}</span></td>
-                    <td class="t3" style="font-size:11px;cursor:pointer" @click.stop="runtimeExpanded[t.id] = !runtimeExpanded[t.id]">
-                      {{ t.engine ? t.engine.split('-').slice(0,2).join('-') : '—' }}
-                      <span style="font-size:9px;color:var(--text-tertiary);margin-left:4px">{{ runtimeExpanded[t.id] ? '▲' : '▼' }}</span>
+                    <td style="font-size:11px;cursor:pointer;white-space:nowrap" @click.stop="runtimeExpanded[t.id] = !runtimeExpanded[t.id]">
+                      <span v-if="t.engine" class="t3" style="display:inline-block;max-width:120px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle">{{ t.engine.split('-').slice(0,2).join('-') }}</span>
+                      <span v-else class="t3">—</span>
+                      <span style="font-size:9px;color:var(--text-tertiary);margin-left:4px;flex-shrink:0">{{ runtimeExpanded[t.id] ? '▲' : '▼' }}</span>
                     </td>
                     <td class="t3">{{ formatDuration(t.duration) }}</td>
                     <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
                     <td class="t3">{{ formatTime(t.startedAt) }}</td>
                   </tr>
-                  <tr v-if="runtimeExpanded[t.id]" style="background:rgba(0,0,0,0.02)">
-                    <td colspan="6" style="padding:8px 16px;display:flex;gap:16px;align-items:center;flex-wrap:wrap">
-                      <span v-if="t.agentType" class="status-tag info" style="font-size:11px">Agent: {{ t.agentType }}</span>
-                      <span v-if="t.engine" class="t3" style="font-size:11px">Engine: {{ t.engine }}</span>
-                      <span v-if="t.engineIp" class="t3" style="font-size:11px;color:var(--text-tertiary)">IP: {{ t.engineIp }}</span>
-                      <span v-if="t.skill" class="t3" style="font-size:11px;color:var(--text-secondary)">Skill: {{ t.skill }}</span>
+                  <tr v-if="runtimeExpanded[t.id]">
+                    <td colspan="6" style="padding:6px 16px;background:rgba(0,0,0,0.02)">
+                      <span v-if="t.agentType" class="status-tag info" style="font-size:11px">{{ t.agentType }}</span>
+                      <span v-if="t.engine" class="t3" style="font-size:11px;margin-left:12px">{{ t.engine }}</span>
+                      <span v-if="t.engineIp" class="t3" style="font-size:11px;color:var(--text-tertiary);margin-left:12px">{{ t.engineIp }}</span>
                     </td>
                   </tr>
                 </template>
