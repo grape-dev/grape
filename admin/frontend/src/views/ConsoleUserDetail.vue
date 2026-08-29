@@ -127,8 +127,8 @@
                                 <tr><th style="width:8%">Seq</th><th style="width:18%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:27%">时间</th></tr>
                               </thead>
                               <tbody>
-                                <tr v-for="(ev, eidx) in issueEvents[iss.issueId]" :key="ev.seq" style="cursor:pointer" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
-                                  <td class="t3">#{{ issueEvents[iss.issueId].length - eidx }}</td>
+                                <tr v-for="(ev, eidx) in issueEvents[iss.issueId]" :key="eidx" style="cursor:pointer" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
+                                  <td class="t3">#{{ eidx + 1 }}</td>
                                   <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
                                   <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
                                   <td class="t3" style="font-size:11px">{{ ev.engine || '—' }}<span v-if="ev.engineIp" style="font-size:10px;color:var(--text-tertiary);display:block">{{ ev.engineIp }}</span></td>
