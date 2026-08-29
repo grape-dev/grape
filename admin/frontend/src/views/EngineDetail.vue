@@ -87,138 +87,79 @@
           </div>
         </div>
 
-        <!-- 筛选/排序控制栏（保留原有列头筛选） -->
-        <div class="task-filter-bar">
-          <div class="filter-chip-group">
-            <span class="filter-chip" :class="{ active: filterDropdown === 'agentType' }" @click="toggleFilter('agentType')">
-              类型 {{ taskType || '全部' }} <span class="filter-arrow" :class="{ active: taskType }">▼</span>
-              <div class="col-filter-drop" v-if="filterDropdown === 'agentType'" @click.stop>
-                <div class="col-filter-opt" :class="{ active: !taskType }" @click="setFilter('agentType', '')">全部</div>
-                <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('agentType')" :key="v" :class="{ active: taskType === v }" @click="setFilter('agentType', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-              </div>
-            </span>
-            <span class="filter-chip" :class="{ active: filterDropdown === 'skill' }" @click="toggleFilter('skill')">
-              技能 {{ taskSkill || '全部' }} <span class="filter-arrow" :class="{ active: taskSkill }">▼</span>
-              <div class="col-filter-drop" v-if="filterDropdown === 'skill'" @click.stop>
-                <div class="col-filter-opt" :class="{ active: !taskSkill }" @click="setFilter('skill', '')">全部</div>
-                <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('skill')" :key="v" :class="{ active: taskSkill === v }" @click="setFilter('skill', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-              </div>
-            </span>
-            <span class="filter-chip" :class="{ active: filterDropdown === 'status' }" @click="toggleFilter('status')">
-              状态 {{ taskStatus || '全部' }} <span class="filter-arrow" :class="{ active: taskStatus }">▼</span>
-              <div class="col-filter-drop" v-if="filterDropdown === 'status'" @click.stop>
-                <div class="col-filter-opt" :class="{ active: !taskStatus }" @click="setFilter('status', '')">全部</div>
-                <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-              </div>
-            </span>
-            <span class="filter-chip" @click="toggleSort">
-              时间 {{ sortOrder === 'asc' ? '↑' : '↓' }}
-            </span>
-          </div>
-          <span class="t3" style="font-size:12px">{{ issueGroups.length }} 个 Issue · {{ standaloneTasks.length }} 个独立任务</span>
-        </div>
-
         <div class="table-loading-wrapper">
           <div class="table-loading-overlay" v-if="taskLoading">
             <span class="table-loading-text">加载中...</span>
           </div>
-
-          <!-- 按 Issue 分组的任务列表 -->
-          <div v-if="!(detail.tasks?.content || []).length" class="tl-diagram-loading" style="padding:28px 0">
-            <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
-            <template v-else>
-              无匹配任务
-              <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6;margin-left:10px" @click="clearFilters">清除筛选</button>
-            </template>
+          <div style="overflow-x:auto">
+          <table class="vod-table">
+            <thead><tr>
+              <th style="width:70px">ID</th>
+              <th style="width:100px">Issue</th>
+              <th style="width:110px" class="filterable-th">
+                <span class="th-content" @click="toggleFilter('agentType')">
+                  类型 <span class="filter-arrow" :class="{ active: taskType }">▼</span>
+                </span>
+                <div class="col-filter-drop" v-if="filterDropdown === 'agentType'" @click.stop>
+                  <div class="col-filter-opt" :class="{ active: !taskType }" @click="setFilter('agentType', '')">全部</div>
+                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('agentType')" :key="v" :class="{ active: taskType === v }" @click="setFilter('agentType', v)">{{ v || '(空)' }} ({{ cnt }})</div>
+                </div>
+              </th>
+              <th style="width:180px" class="filterable-th">
+                <span class="th-content" @click="toggleFilter('skill')">
+                  技能 <span class="filter-arrow" :class="{ active: taskSkill }">▼</span>
+                </span>
+                <div class="col-filter-drop" v-if="filterDropdown === 'skill'" @click.stop>
+                  <div class="col-filter-opt" :class="{ active: !taskSkill }" @click="setFilter('skill', '')">全部</div>
+                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('skill')" :key="v" :class="{ active: taskSkill === v }" @click="setFilter('skill', v)">{{ v || '(空)' }} ({{ cnt }})</div>
+                </div>
+              </th>
+              <th style="width:90px" class="filterable-th">
+                <span class="th-content" @click="toggleFilter('status')">
+                  状态 <span class="filter-arrow" :class="{ active: taskStatus }">▼</span>
+                </span>
+                <div class="col-filter-drop" v-if="filterDropdown === 'status'" @click.stop>
+                  <div class="col-filter-opt" :class="{ active: !taskStatus }" @click="setFilter('status', '')">全部</div>
+                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
+                </div>
+              </th>
+              <th style="width:70px">耗时</th>
+              <th style="width:50px">Exit</th>
+              <th style="width:150px" class="sortable-th" @click="toggleSort">
+                创建时间
+                <span class="sort-arrows">
+                  <span class="sort-dir" :class="{ active: sortOrder === 'asc' }">▲</span>
+                  <span class="sort-dir" :class="{ active: sortOrder === 'desc' }">▼</span>
+                </span>
+              </th>
+            </tr></thead>
+            <tbody>
+              <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
+                <td :colspan="8" class="t2" style="padding:28px 0">
+                  <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
+                  <template v-else>
+                    无匹配任务
+                    <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6;margin-left:10px" @click="clearFilters">清除筛选</button>
+                  </template>
+                </td>
+              </tr>
+              <tr v-for="t in detail.tasks?.content || []" :key="t.id" class="tl-row-clickable" @click="openLogModal(t.id, t)">
+                <td class="t3">{{ (t.id || '').substring(0, 8) }}</td>
+                <td>
+                  <a v-if="t.issueId" :href="issueGitCodeUrl(t)" target="_blank" @click.stop style="color:var(--primary);text-decoration:none;font-weight:600">{{ t.issueId }}</a>
+                  <span class="t3" v-if="t.eventSeq">#{{ t.eventSeq }}</span>
+                  <span v-if="!t.issueId" class="t3">—</span>
+                </td>
+                <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
+                <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
+                <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'running' ? 'warning' : 'default']">{{ t.status }}</span></td>
+                <td class="t3">{{ formatDuration(t.createdAt, t.completedAt) }}</td>
+                <td class="t3">{{ t.exitCode ?? '—' }}</td>
+                <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
+              </tr>
+            </tbody>
+          </table>
           </div>
-
-          <template v-else>
-            <!-- Issue 分组 -->
-            <div v-for="grp in issueGroups" :key="grp.issueId" class="tl-issue">
-              <div class="tl-issue-head" @click="toggleIssue(grp.issueId)">
-                <span class="tl-arrow">{{ expandedIssues.has(grp.issueId) ? '▾' : '▸' }}</span>
-                <b class="tl-issue-id">{{ grp.issueId }}</b>
-                <span class="tl-issue-count t3">{{ grp.tasks.length }} 任务</span>
-                <span class="tl-issue-status" :class="grp.hasFailed ? 'fail' : 'ok'">{{ grp.hasFailed ? '✗ 有失败' : '✓ 正常' }}</span>
-                <span class="t3 tl-issue-time">{{ (grp.lastTime || '').substring(0, 16) }}</span>
-              </div>
-              <div v-if="expandedIssues.has(grp.issueId)" class="tl-issue-body">
-                <!-- 三个 tab -->
-                <div class="tl-view-tabs">
-                  <button class="tl-view-btn" :class="{ active: issueViewMode(grp.issueId) === 'diagram' }" @click="setIssueView(grp.issueId, 'diagram')">📊 时序图</button>
-                  <button class="tl-view-btn" :class="{ active: issueViewMode(grp.issueId) === 'events' }" @click="setIssueView(grp.issueId, 'events')">📋 事件列表</button>
-                  <button class="tl-view-btn" :class="{ active: issueViewMode(grp.issueId) === 'tasks' }" @click="setIssueView(grp.issueId, 'tasks')">📝 任务列表</button>
-                </div>
-                <!-- 时序图 -->
-                <div v-show="issueViewMode(grp.issueId) === 'diagram'" class="tl-diagram-container">
-                  <div v-if="!issueRendered(grp.issueId)" class="tl-diagram-loading">渲染中...</div>
-                  <div v-else v-html="issueSvg(grp.issueId)" class="tl-diagram-svg"></div>
-                </div>
-                <!-- 事件列表 -->
-                <div v-show="issueViewMode(grp.issueId) === 'events'">
-                  <div v-if="issueEventsLoading(grp.issueId)" class="tl-diagram-loading">加载事件...</div>
-                  <div v-else-if="!issueEvents(grp.issueId).length" class="tl-diagram-loading">暂无事件</div>
-                  <table v-else class="vod-table">
-                    <thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
-                    <tbody>
-                      <tr v-for="ev in issueEvents(grp.issueId)" :key="ev.seq" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId }" @click="ev.taskId ? openLogModal(ev.taskId, { issueId: grp.issueId, repoKey: grp.tasks[0]?.repoKey }) : null">
-                        <td class="t3">#{{ ev.seq }}</td>
-                        <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
-                        <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
-                        <td class="t3">{{ ev.skill || '—' }}</td>
-                        <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']">{{ ev.status }}</span></td>
-                        <td class="t3">{{ formatDurationNum(ev.duration) }}</td>
-                        <td class="t3">{{ formatTime(ev.createdAt) }}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-                <!-- 任务列表 -->
-                <div v-show="issueViewMode(grp.issueId) === 'tasks'">
-                  <table class="vod-table">
-                    <thead><tr><th>ID</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>Exit</th><th>创建时间</th></tr></thead>
-                    <tbody>
-                      <tr v-for="t in grp.tasks" :key="t.id" class="tl-row-clickable" @click="openLogModal(t.id, t)">
-                        <td class="t3">{{ (t.id || '').substring(0, 8) }}</td>
-                        <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
-                        <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
-                        <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'running' ? 'warning' : 'default']">{{ t.status }}</span></td>
-                        <td class="t3">{{ formatDuration(t.createdAt, t.completedAt) }}</td>
-                        <td class="t3">{{ t.exitCode ?? '—' }}</td>
-                        <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-
-            <!-- 独立任务组（无 issueId） -->
-            <div v-if="standaloneTasks.length" class="tl-issue">
-              <div class="tl-issue-head" style="cursor:default">
-                <span class="tl-arrow">▪</span>
-                <b class="tl-issue-id">独立任务</b>
-                <span class="tl-issue-count t3">{{ standaloneTasks.length }} 任务</span>
-                <span class="t3 tl-issue-time">无关联 Issue</span>
-              </div>
-              <div class="tl-issue-body" style="border-top:1px solid var(--border-color)">
-                <table class="vod-table">
-                  <thead><tr><th>ID</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>Exit</th><th>创建时间</th></tr></thead>
-                  <tbody>
-                    <tr v-for="t in standaloneTasks" :key="t.id" class="tl-row-clickable" @click="openLogModal(t.id, t)">
-                      <td class="t3">{{ (t.id || '').substring(0, 8) }}</td>
-                      <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
-                      <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
-                      <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'running' ? 'warning' : 'default']">{{ t.status }}</span></td>
-                      <td class="t3">{{ formatDuration(t.createdAt, t.completedAt) }}</td>
-                      <td class="t3">{{ t.exitCode ?? '—' }}</td>
-                      <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </template>
         </div>
         <div v-if="detail.tasks?.totalElements > 0" class="pagination-bar" style="border-top:none">
           <span class="page-info">第 <strong>{{ taskPage + 1 }}</strong> / {{ detail.tasks?.totalPages ?? 1 }} 页（共 {{ detail.tasks?.totalElements ?? 0 }} 条）</span>
@@ -235,39 +176,30 @@
     <p v-else class="t2" style="padding:40px;text-align:center">加载中…</p>
 
     <!-- 日志弹窗 -->
-    <div v-if="logModal.show" class="log-modal-overlay" @click.self="closeLogModal">
-      <div class="log-modal-dialog">
-        <div class="log-modal-head">
-          <h3 class="log-modal-title">
-            <span class="t3" v-if="logModal.info.repoKey">{{ logModal.info.repoKey.replace('gitcode:', '') }}</span>
-            <b v-if="logModal.info.issueId">{{ logModal.info.issueId }}</b>
-            <span class="t3" v-if="logModal.info.eventSeq">#{{ logModal.info.eventSeq }}</span>
-            <span class="t3" v-if="logModal.info.createdAt">{{ formatTime(logModal.info.createdAt) }}</span>
-          </h3>
-          <button class="btn btn-sm" @click="closeLogModal">✕ 关闭</button>
+    <div v-if="logModal.show" class="log-modal-overlay" @click.self="closeLogModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:8px;width:80%;max-width:900px;max-height:80vh;display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid #eee">
+          <b>任务日志</b>
+          <span class="t3" v-if="logModal.info.repoKey" style="font-size:12px">{{ logModal.info.repoKey.replace('gitcode:', '') }}</span>
+          <b v-if="logModal.info.issueId" style="font-size:13px">{{ logModal.info.issueId }}</b>
+          <span class="t3" v-if="logModal.info.eventSeq" style="font-size:12px">#{{ logModal.info.eventSeq }}</span>
+          <span class="t3" v-if="logModal.info.createdAt" style="font-size:12px">{{ formatTime(logModal.info.createdAt) }}</span>
+          <span style="margin-left:auto;cursor:pointer;font-size:18px;color:#999" @click="closeLogModal">✕</span>
         </div>
-        <div class="log-timeline" v-if="logModal.info.status">
-          <span class="log-tl-dot" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'"></span>
+        <div v-if="logModal.info.status" style="display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid #f5f5f5;font-size:12px">
+          <span class="log-tl-dot" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'" style="width:8px;height:8px;border-radius:50%;display:inline-block"></span>
           <span class="t3">入队 {{ formatTime(logModal.info.createdAt).slice(11, 19) }}</span>
           <span v-if="logModal.info.startedAt" class="t3">→ 开始 {{ formatTime(logModal.info.startedAt).slice(11, 19) }}</span>
           <span v-if="logModal.info.completedAt" class="t3">→ 完成 {{ formatTime(logModal.info.completedAt).slice(11, 19) }}</span>
-          <span :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'" style="margin-left:auto;font-weight:600">{{ logModal.info.status.toUpperCase() }}</span>
+          <span :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'" style="font-weight:600">{{ logModal.info.status.toUpperCase() }}</span>
         </div>
-        <div class="log-modal-body">
-          <div v-if="logModal.loading" class="tl-diagram-loading">加载日志...</div>
-          <div v-else-if="logModal.messages.length === 0" class="log-empty">
-            <div v-if="logModal.info.resultText || logModal.info.errors" class="log-error-info">
-              <div v-if="logModal.info.resultText" class="log-error-row">结果: {{ logModal.info.resultText }}</div>
-              <div v-if="logModal.info.exitCode != null" class="log-error-row" :style="{ color: logModal.info.exitCode !== 0 ? 'var(--danger)' : 'var(--success)' }">Exit Code: {{ logModal.info.exitCode }}</div>
-              <div v-if="logModal.info.errors" class="log-error-row" style="color:var(--danger)">{{ logModal.info.errors }}</div>
-            </div>
-            <div v-else>暂无日志记录</div>
-          </div>
-          <div v-else class="log-terminal">
-            <div v-for="msg in logModal.messages" :key="msg.seq" :class="['log-line', 'log-type-' + msg.type]">
-              <span class="log-time t3">{{ (msg.createdAt || '').slice(11, 19) }}</span>
-              <span class="log-icon">{{ logTypeIcon(msg.type) }}</span>
-              <span class="log-content">{{ msg.content || msg.tool || '' }}</span>
+        <div style="overflow-y:auto;flex:1;padding:14px 20px">
+          <div v-if="logModal.loading" style="text-align:center;padding:30px;color:#999">加载日志...</div>
+          <div v-else-if="logModal.messages.length === 0" style="text-align:center;padding:30px;color:#999">暂无日志</div>
+          <div v-else>
+            <div v-for="(msg, i) in logModal.messages" :key="i" style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #f9f9f9;font-size:13px">
+              <span style="color:#999;font-size:12px;flex-shrink:0">{{ logTypeIcon(msg.type) }}</span>
+              <span style="white-space:pre-wrap;word-break:break-all">{{ msg.content || msg.text || JSON.stringify(msg) }}</span>
             </div>
           </div>
         </div>
@@ -364,6 +296,12 @@ function formatDuration(start, end) {
   return Math.floor(s / 60) + 'm' + (s % 60) + 's'
 }
 
+function issueGitCodeUrl(t) {
+  const full = (t.repoKey || '').replace(/^gitcode:/, '')
+  if (!full) return '#'
+  return 'https://gitcode.com/' + full + '/issues/' + (t.issueId || '').replace('#', '')
+}
+
 // ===== 日志弹窗 =====
 const logModal = ref({ show: false, loading: false, messages: [], info: {} })
 
@@ -371,13 +309,11 @@ async function openLogModal(taskId, task) {
   logModal.value = { show: true, loading: true, messages: [], info: { issueId: task?.issueId, repoKey: task?.repoKey, eventSeq: task?.eventSeq, createdAt: task?.createdAt } }
   try {
     const [msgsResp, infoResp] = await Promise.all([
-      http.get(`/runtime/tasks/${taskId}/messages`),
-      http.get(`/runtime/tasks/${taskId}/info`),
+      http.get(`/health-center/tasks/${taskId}/messages`),
+      http.get(`/health-center/tasks/${taskId}/info`),
     ])
     const info = infoResp.data || {}
     if (!info.repoKey && task?.repoKey) info.repoKey = task.repoKey
-    if (!info.issueId && task?.issueId) info.issueId = task.issueId
-    if (info.eventSeq == null && task?.eventSeq) info.eventSeq = task.eventSeq
     logModal.value = { show: true, loading: false, messages: msgsResp.data || [], info }
   } catch (e) {
     logModal.value = { show: true, loading: false, messages: [], info: { error: e.message } }
@@ -387,231 +323,6 @@ function closeLogModal() { logModal.value = { show: false, loading: false, messa
 function logTypeIcon(t) {
   const map = { step_start: '▶', step_finish: '✓', text: '💬', reasoning: '🤔', tool_use: '🔧', error: '❌', done: '✅' }
   return map[t] || '•'
-}
-
-// ===== 按 Issue 分组 =====
-const issueGroups = computed(() => {
-  const tasks = detail.value?.tasks?.content || []
-  const map = {}
-  for (const t of tasks) {
-    if (!t.issueId) continue
-    if (!map[t.issueId]) {
-      map[t.issueId] = { issueId: t.issueId, tasks: [], hasFailed: false, lastTime: '' }
-    }
-    map[t.issueId].tasks.push(t)
-    if (t.status === 'failed') map[t.issueId].hasFailed = true
-    if (t.createdAt && t.createdAt > map[t.issueId].lastTime) map[t.issueId].lastTime = t.createdAt
-  }
-  return Object.values(map)
-})
-
-const standaloneTasks = computed(() => {
-  const tasks = detail.value?.tasks?.content || []
-  return tasks.filter(t => !t.issueId)
-})
-
-// ===== Issue 展开/折叠 + 三 Tab =====
-const expandedIssues = ref(new Set())
-const issueViewModes = ref({})
-const renderedIssues = ref(new Set())
-const renderingIssues = ref(new Set())
-const issueSvgs = ref({})
-const issueEventsData = ref({})
-const issueEventsLoadingSet = ref(new Set())
-
-function issueSvg(issueId) {
-  return issueSvgs.value[issueId] || ''
-}
-
-function toggleIssue(issueId) {
-  const s = new Set(expandedIssues.value)
-  if (s.has(issueId)) {
-    s.delete(issueId)
-  } else {
-    s.add(issueId)
-    if (!issueViewModes.value[issueId]) {
-      issueViewModes.value = { ...issueViewModes.value, [issueId]: 'diagram' }
-    }
-  }
-  expandedIssues.value = s
-  if (s.has(issueId) && issueViewModes.value[issueId] !== 'events') {
-    setTimeout(() => renderMermaidForIssue(issueId), 50)
-    if (!issueEventsData.value[issueId]) loadIssueEvents(issueId)
-  }
-}
-
-function issueViewMode(issueId) {
-  return issueViewModes.value[issueId] || 'diagram'
-}
-
-function issueRendered(issueId) {
-  return renderedIssues.value.has(issueId)
-}
-
-function setIssueView(issueId, mode) {
-  issueViewModes.value = { ...issueViewModes.value, [issueId]: mode }
-  if (mode === 'diagram' && !renderedIssues.value.has(issueId)) {
-    setTimeout(() => renderMermaidForIssue(issueId), 50)
-  }
-  if (!issueEventsData.value[issueId]) loadIssueEvents(issueId)
-}
-
-function issueEvents(issueId) {
-  return issueEventsData.value[issueId] || []
-}
-
-function issueEventsLoading(issueId) {
-  return issueEventsLoadingSet.value.has(issueId)
-}
-
-async function loadIssueEvents(issueId) {
-  if (issueEventsData.value[issueId] || issueEventsLoadingSet.value.has(issueId)) return
-  issueEventsLoadingSet.value = new Set([...issueEventsLoadingSet.value, issueId])
-  try {
-    const { data } = await http.get(`/runtime/issues/${issueId}/events`)
-    issueEventsData.value = { ...issueEventsData.value, [issueId]: data.events || [] }
-  } catch (e) {
-    issueEventsData.value = { ...issueEventsData.value, [issueId]: [] }
-  } finally {
-    const s = new Set(issueEventsLoadingSet.value)
-    s.delete(issueId)
-    issueEventsLoadingSet.value = s
-  }
-}
-
-// ===== Mermaid 时序图渲染 =====
-let mermaidEngine = null
-
-async function getMermaid() {
-  if (!mermaidEngine) {
-    const mod = await import('mermaid')
-    mermaidEngine = mod.default
-    mermaidEngine.initialize({
-      startOnLoad: false,
-      securityLevel: 'loose',
-      theme: 'base',
-      fontFamily: 'inherit',
-      sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 40, noteMargin: 10, boxMargin: 8 }
-    })
-  }
-  return mermaidEngine
-}
-
-function mermaidId(agent) {
-  return (agent || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_')
-}
-
-function actionText(t) {
-  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号', issue_closed: 'Issue关闭' }
-  return map[t] || t || '事件'
-}
-
-function buildSequence(events) {
-  const agents = []
-  for (const ev of events) {
-    const a = ev.agentType || '—'
-    if (!agents.includes(a)) agents.push(a)
-  }
-  const lines = ['sequenceDiagram', 'autonumber']
-  for (const a of agents) lines.push(`    participant ${mermaidId(a)} as ${a}`)
-  const statuses = []
-  let prev = null
-  for (const ev of events) {
-    const a = mermaidId(ev.agentType || '—')
-    const t = ev.createdAt ? ev.createdAt.slice(11, 19) : ''
-    const label = (t ? t + ' ' : '') + actionText(ev.eventType)
-    if (prev && a !== prev) {
-      lines.push(`    ${prev}->>${a}: ${label}`)
-      statuses.push(ev.status || '')
-    } else {
-      lines.push(`    Note over ${a}: ${label}`)
-      statuses.push(ev.status || '')
-    }
-    prev = a
-  }
-  return { text: lines.join('\n'), statuses }
-}
-
-function applySequenceColors(svg, statuses) {
-  try {
-    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
-    const root = doc.documentElement
-    const defs = root.querySelector('defs')
-    if (!defs) return svg
-    const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'completed' ? '#2e9e5b' : '#94a3b8')
-    const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
-    lines.forEach((line, i) => {
-      const markerId = root.id + '-seqnum-' + i
-      const marker = doc.createElementNS('http://www.w3.org/2000/svg', 'marker')
-      marker.setAttribute('id', markerId)
-      marker.setAttribute('refX', '15'); marker.setAttribute('refY', '15')
-      marker.setAttribute('markerWidth', '60'); marker.setAttribute('markerHeight', '40')
-      marker.setAttribute('orient', 'auto')
-      const circle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle')
-      circle.setAttribute('cx', '15'); circle.setAttribute('cy', '15'); circle.setAttribute('r', '6')
-      circle.setAttribute('fill', colorOf(statuses[i] || ''))
-      marker.appendChild(circle)
-      defs.appendChild(marker)
-      line.setAttribute('marker-start', 'url(#' + markerId + ')')
-    })
-    return new XMLSerializer().serializeToString(doc)
-  } catch (e) {
-    return svg
-  }
-}
-
-async function renderMermaidForIssue(issueId) {
-  if (renderingIssues.value.has(issueId)) return
-  if (renderedIssues.value.has(issueId)) return
-  renderingIssues.value = new Set([...renderingIssues.value, issueId])
-  try {
-    // 确保事件数据已加载
-    if (!issueEventsData.value[issueId]) await loadIssueEvents(issueId)
-    const events = issueEventsData.value[issueId] || []
-    if (!events.length) {
-      issueSvgs.value = { ...issueSvgs.value, [issueId]: '<div style="padding:12px;color:var(--text-tertiary);font-size:12px">暂无事件数据</div>' }
-      renderedIssues.value = new Set([...renderedIssues.value, issueId])
-      return
-    }
-    const mmd = await getMermaid()
-    const { text, statuses } = buildSequence(events)
-    const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
-    try { await mmd.parse(text) } catch (e) { /* parse 失败也尝试 render */ }
-    const result = await mmd.render(uid, text)
-    const svg = result.svg || result
-    issueSvgs.value = { ...issueSvgs.value, [issueId]: applySequenceColors(svg, statuses) }
-    renderedIssues.value = new Set([...renderedIssues.value, issueId])
-  } catch (err) {
-    const events = issueEventsData.value[issueId] || []
-    const { text } = buildSequence(events)
-    issueSvgs.value = { ...issueSvgs.value, [issueId]: `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${err.message || err}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>` }
-    renderedIssues.value = new Set([...renderedIssues.value, issueId])
-  } finally {
-    const s = new Set(renderingIssues.value)
-    s.delete(issueId)
-    renderingIssues.value = s
-  }
-}
-
-function eventTypeText(t) {
-  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号' }
-  return map[t] || t || '—'
-}
-
-function eventTypeClass(t) {
-  if (t === 'a2a_event') return 'info'
-  if (t === 'pull_request_merged') return 'success'
-  if (t === 'issue_opened') return 'info'
-  return 'default'
-}
-
-function formatDurationNum(d) {
-  if (!d) return '—'
-  const s = Number(d)
-  if (isNaN(s) || s <= 0) return '—'
-  if (s < 60) return s + 's'
-  if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60) + 's'
-  return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm'
 }
 
 const STATUS_COLOR = { queued: '#fa8c16', running: '#006eff', completed: '#52c41a', failed: '#eb2f96' }
@@ -898,7 +609,6 @@ load()
 
 /* ===== 日志弹窗 ===== */
 .tl-row-clickable { cursor: pointer; }
-.tl-row-clickable:hover td { background: #f0f5ff !important; }
 .tl-row-clickable:hover { background: rgba(0, 107, 255, 0.04); }
 .log-tl-dot.ok { background: #52c41a; }
 .log-tl-dot.fail { background: #eb2f96; }
@@ -906,60 +616,4 @@ load()
 span.ok { color: #52c41a; }
 span.fail { color: #eb2f96; }
 span.run { color: #006eff; }
-
-/* ===== 筛选/排序控制栏 ===== */
-.task-filter-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
-.filter-chip-group { display: flex; gap: 8px; flex-wrap: wrap; }
-.filter-chip { position: relative; display: inline-flex; align-items: center; gap: 4px; padding: 5px 12px; font-size: 12px; border: 1px solid var(--border-color); border-radius: 16px; background: #fff; color: var(--text-secondary); cursor: pointer; user-select: none; white-space: nowrap; }
-.filter-chip:hover { border-color: var(--primary); color: var(--primary); }
-.filter-chip.active { border-color: var(--primary); background: var(--primary-bg, #e8f0fe); color: var(--primary); }
-
-/* ===== Issue 分组列表 ===== */
-.tl-issue { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
-.tl-issue-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; background: #fafbfc; }
-.tl-issue-head:hover { background: #f5f9ff; }
-.tl-arrow { font-size: 12px; color: var(--text-tertiary); width: 14px; }
-.tl-issue-id { font-size: 13px; min-width: 40px; }
-.tl-issue-count { font-size: 11px; white-space: nowrap; }
-.tl-issue-status { font-size: 10px; font-weight: 600; white-space: nowrap; }
-.tl-issue-status.fail { color: var(--danger); }
-.tl-issue-status.ok { color: var(--success); }
-.tl-issue-time { font-size: 11px; white-space: nowrap; margin-left: auto; }
-.tl-issue-body { border-top: 1px solid var(--border-color); padding: 10px 14px; }
-.tl-view-tabs { display: flex; gap: 0; margin-bottom: 10px; }
-.tl-view-btn { padding: 5px 12px; font-size: 12px; border: 1px solid var(--border-color); background: #fff; color: var(--text-secondary); cursor: pointer; }
-.tl-view-btn:first-child { border-radius: 6px 0 0 6px; }
-.tl-view-btn:not(:first-child) { border-left: none; }
-.tl-view-btn:last-child { border-radius: 0 6px 6px 0; }
-.tl-view-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
-.tl-diagram-container { overflow-x: auto; padding: 8px 0; min-height: 60px; }
-.tl-diagram-svg svg { max-width: 100%; }
-.tl-diagram-loading { padding: 20px; text-align: center; color: var(--text-tertiary); font-size: 12px; }
-.tl-row-fail td { background: #fff1f0 !important; }
-.tl-row-ok td { background: #f6ffed !important; }
-
-/* ===== 日志弹窗（对齐 HealthCenter） ===== */
-.log-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-.log-modal-dialog { width: 860px; max-width: 94vw; max-height: 85vh; background: #fff; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.2); }
-.log-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border-color); }
-.log-modal-title { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
-.log-timeline { display: flex; align-items: center; gap: 6px; padding: 8px 18px; border-bottom: 1px solid var(--border-soft, #f0f0f0); font-size: 11px; }
-.log-tl-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-.log-modal-body { flex: 1; overflow-y: auto; padding: 14px 18px; }
-.log-empty { text-align: center; padding: 32px; color: var(--text-tertiary); }
-.log-error-info { text-align: left; background: #fff1f0; border: 1px solid #ffa39e; border-radius: 8px; padding: 12px; }
-.log-error-row { font-size: 12px; margin-bottom: 4px; font-family: monospace; word-break: break-all; }
-.log-terminal { background: #0c1222; border-radius: 8px; padding: 12px; max-height: 60vh; overflow-y: auto; }
-.log-line { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; font-size: 12px; line-height: 1.6; border-bottom: 1px solid rgba(255,255,255,0.04); font-family: Menlo, Monaco, Consolas, monospace; }
-.log-time { color: #5b667b; font-size: 10px; min-width: 55px; flex-shrink: 0; }
-.log-icon { min-width: 16px; flex-shrink: 0; }
-.log-content { color: #e0e6f0; word-break: break-all; white-space: pre-wrap; }
-.log-type-step_start .log-content { color: #5b9eff; }
-.log-type-step_finish .log-content { color: #1ca44c; }
-.log-type-text .log-content { color: #e0e6f0; }
-.log-type-reasoning .log-content { color: #b388ff; }
-.log-type-tool_use .log-content { color: #ea5a0c; }
-.log-type-error .log-content { color: #dc2828; }
-.log-type-done .log-content { color: #1ca44c; }
-
 </style>
