@@ -210,7 +210,6 @@ const loading = ref(true)
 const resetting = ref(false)
 const activityTab = ref('task')
 const activityFilter = ref('recent')
-const expandedRepos = ref([])
 const selectedRepo = ref('')
 const repoIssues = ref([])
 const repoIssuesPage = ref(0)
@@ -239,16 +238,6 @@ const credentialConfigured = computed(() => {
   if (info.value.hasCodeartsAk) count++
   return count
 })
-
-function toggleRepoExpand(repoKey) {
-  const idx = expandedRepos.value.indexOf(repoKey)
-  if (idx >= 0) expandedRepos.value.splice(idx, 1)
-  else expandedRepos.value.push(repoKey)
-}
-
-function issuesByRepo(repoKey) {
-  return (info.value.issueDetails || []).filter(i => i.repoKey === repoKey)
-}
 
 async function loadRepoIssues(p) {
   if (p !== undefined) repoIssuesPage.value = p
