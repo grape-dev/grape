@@ -46,7 +46,7 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by, created_at) VALUES (?,?,?,?,NOW())",
+            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by, created_at) VALUES (?,?,?,?,datetime('now'))",
                       (username, pw_hash, password, created_by))
             db.commit()
             uid = c.lastrowid
@@ -150,7 +150,7 @@ def batch_update_last_active(uids: list) -> None:
             batch = uids[i:i+1000]
             placeholders = ",".join(["?"] * len(batch))
             c.execute(
-                f"UPDATE user_accounts SET last_active_at=NOW() WHERE id IN ({placeholders})",
+                f"UPDATE user_accounts SET last_active_at=datetime('now') WHERE id IN ({placeholders})",
                 batch,
             )
         db.commit()
