@@ -388,16 +388,17 @@ function buildSequence(events) {
   const lines = ["sequenceDiagram", "autonumber"]
   for (const a of agents) lines.push("    participant " + mermaidId(a) + " as " + a)
   const statuses = []
+  const evTypes = []
   let prev = null
   for (const ev of events) {
     const a = mermaidId(ev.agentType || "—")
     const t = ev.createdAt ? String(ev.createdAt).slice(11, 19) : ""
     const label = (t ? t + " " : "") + actionText(ev.eventType)
-    if (prev && a !== prev) { lines.push("    " + prev + "->>" + a + ": " + label); statuses.push(ev.status || "") }
-    else { lines.push("    Note over " + a + ": " + label); statuses.push(ev.status || "") }
+    if (prev && a !== prev) { lines.push("    " + prev + "->>" + a + ": " + label); statuses.push(ev.status || ""); evTypes.push("msg") }
+    else { lines.push("    Note over " + a + ": " + label); statuses.push(ev.status || ""); evTypes.push("note") }
     prev = a
   }
-  return { text: lines.join("\n"), statuses }
+  return { text: lines.join("\n"), statuses, evTypes }
 }
 function applySequenceColors(svg, statuses) {
   try {
@@ -424,18 +425,86 @@ function applySequenceColors(svg, statuses) {
     return new XMLSerializer().serializeToString(doc)
   } catch (e) { return svg }
 }
+
+function fixLifelineHeight(svgStr, eventCount) {
+  try {
+    const doc = new DOMParser().parseFromString(svgStr, "image/svg+xml")
+    const root = doc.documentElement
+    const heightAttr = root.getAttribute("height")
+    const viewBox = root.getAttribute("viewBox")
+    let svgHeight = 0
+    if (viewBox) { const parts = viewBox.split(" "); svgHeight = parseFloat(parts[3]) || 0 }
+    if (!svgHeight && heightAttr) { svgHeight = parseFloat(heightAttr) || 0 }
+    if (svgHeight <= 0) return svgStr
+    const minHeight = eventCount > 8 ? eventCount * 45 : 0
+    if (minHeight <= 0 || svgHeight >= minHeight) return svgStr
+    const allLines = Array.from(root.querySelectorAll("line"))
+    const vLines = allLines.filter(l => {
+      const x1 = parseFloat(l.getAttribute("x1") || 0)
+      const x2 = parseFloat(l.getAttribute("x2") || 0)
+      return Math.abs(x1 - x2) < 2
+    })
+    vLines.forEach(l => {
+      const y2 = parseFloat(l.getAttribute("y2") || 0)
+      if (y2 < minHeight - 20) { l.setAttribute("y2", String(minHeight - 10)) }
+    })
+    root.setAttribute("height", String(minHeight))
+    if (viewBox) { const parts = viewBox.split(" "); parts[3] = String(minHeight); root.setAttribute("viewBox", parts.join(" ")) }
+    return new XMLSerializer().serializeToString(doc)
+  } catch (e) { return svgStr }
+}
+
+function bindMermaidClicks(events, evTypes) {
+  const el = document.querySelector(".tl-diagram-svg")
+  if (!el) return
+  const svg = el.querySelector("svg")
+  if (!svg) return
+  if (!events.length) return
+  const msgTexts = Array.from(svg.querySelectorAll("text.messageText"))
+  const noteTexts = Array.from(svg.querySelectorAll("text.noteText"))
+  const taskEventMap = {}
+  let msgIdx = 0, noteIdx = 0
+  events.forEach((ev, i) => {
+    const type = evTypes[i] || "msg"
+    let txt = null
+    if (type === "msg") { txt = msgTexts[msgIdx]; msgIdx++ }
+    else { txt = noteTexts[noteIdx]; noteIdx++ }
+    if (!txt) return
+    if (ev.taskId) {
+      txt.setAttribute("data-task-id", ev.taskId)
+      txt.style.cursor = "pointer"
+      txt.style.textDecoration = "underline"
+      txt.style.fill = "var(--primary)"
+      taskEventMap[ev.taskId] = ev
+      const _eng = ev.engine || ""
+      if (_eng) { const _t = document.createElementNS("http://www.w3.org/2000/svg", "title"); _t.textContent = _eng; txt.appendChild(_t) }
+    }
+  })
+  svg.onclick = function(e) {
+    const target = e.target.closest("[data-task-id]")
+    if (!target) return
+    const taskId = target.getAttribute("data-task-id")
+    if (taskId && taskEventMap[taskId]) {
+      e.stopPropagation()
+      openLogModal(taskId, taskEventMap[taskId])
+    }
+  }
+}
 async function renderIssueMermaid() {
   if (issueModal.value.svgRendered || issueModal.value.loading) return
   const events = issueModal.value.events
   if (!events || events.length === 0) return
   try {
     const mmd = await getMermaid()
-    const { text, statuses } = buildSequence(events)
+    const { text, statuses, evTypes } = buildSequence(events)
     const uid = "mmd-" + Math.random().toString(36).slice(2, 10)
     try { await mmd.parse(text) } catch (e) {}
     const result = await mmd.render(uid, text)
     const svg = result.svg || result
-    issueModal.value = { ...issueModal.value, svg: applySequenceColors(svg, statuses), svgRendered: true }
+    const coloredSvg = applySequenceColors(svg, statuses)
+    const fixedSvg = fixLifelineHeight(coloredSvg, events.length)
+    issueModal.value = { ...issueModal.value, svg: fixedSvg, svgRendered: true }
+    nextTick(() => bindMermaidClicks(events, evTypes))
   } catch (err) {
     issueModal.value = { ...issueModal.value, svg: '<div style="padding:12px;color:var(--danger)">时序图渲染失败</div>', svgRendered: true }
   }
