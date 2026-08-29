@@ -243,7 +243,7 @@
                   <td class="t3">#{{ filteredActivity.length - idx }}</td>
                   <td><span :class="['status-tag', eventTypeClass(t.eventType)]" style="font-size:11px">{{ eventTypeText(t.eventType) }}</span></td>
                   <td><span class="status-tag info" style="font-size:11px">{{ t.agentType || '—' }}</span></td>
-                  <td class="t3" style="font-size:11px">{{ t.engine || '—' }}</td>
+                  <td class="t3" style="font-size:11px">{{ t.engine || '—' }}<span v-if="t.engineIp" class="t3" style="font-size:10px;color:var(--text-tertiary);display:block">{{ t.engineIp }}</span></td>
                   <td class="t3">{{ formatDuration(t.duration) }}</td>
                   <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
                   <td class="t3"><a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span></td>

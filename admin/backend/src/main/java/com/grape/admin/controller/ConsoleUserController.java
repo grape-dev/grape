@@ -225,11 +225,13 @@ public class ConsoleUserController {
             List<Map<String, Object>> recentTasks = grapeJdbc.query(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
                 "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
-                "ar.name as engine_name " +
+                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
+                "rc.device_name, rc.last_ip " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
                 "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
                 "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
@@ -244,7 +246,9 @@ public class ConsoleUserController {
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
                     r.put("eventType", rs2.getString("event_type"));
-                    r.put("engine", rs2.getString("engine_name"));
+                    // 引擎实例名（对齐 observability instance_name 逻辑）
+                    r.put("engine", buildEngineName(rs2));
+                    r.put("engineIp", rs2.getString("last_ip"));
                     // 耗时（秒）
                     String startedAt = rs2.getString("started_at");
                     String completedAt = rs2.getString("completed_at");
@@ -279,11 +283,13 @@ public class ConsoleUserController {
             List<Map<String, Object>> recentPending = grapeJdbc.query(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
                 "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
-                "ar.name as engine_name " +
+                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
+                "rc.device_name, rc.last_ip " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
                 "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
                 "WHERE u.id=? AND t.status IN ('dispatched','running') " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
@@ -299,7 +305,8 @@ public class ConsoleUserController {
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
                     r.put("eventType", rs2.getString("event_type"));
-                    r.put("engine", rs2.getString("engine_name"));
+                    r.put("engine", buildEngineName(rs2));
+                    r.put("engineIp", rs2.getString("last_ip"));
                     String sa = rs2.getString("started_at");
                     String ca = rs2.getString("completed_at");
                     r.put("duration", calcDuration(sa, ca));
@@ -314,11 +321,13 @@ public class ConsoleUserController {
             List<Map<String, Object>> recentFailed = grapeJdbc.query(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
                 "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
-                "ar.name as engine_name " +
+                "ar.name as engine_name, ar.credential_id, ar.host_name, " +
+                "rc.device_name, rc.last_ip " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
                 "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
                 "WHERE u.id=? AND t.status='failed' " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
@@ -334,7 +343,8 @@ public class ConsoleUserController {
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
                     r.put("eventType", rs2.getString("event_type"));
-                    r.put("engine", rs2.getString("engine_name"));
+                    r.put("engine", buildEngineName(rs2));
+                    r.put("engineIp", rs2.getString("last_ip"));
                     String sa = rs2.getString("started_at");
                     String ca = rs2.getString("completed_at");
                     r.put("duration", calcDuration(sa, ca));
@@ -439,5 +449,29 @@ public class ConsoleUserController {
         } catch (Exception e) {
             return "—";
         }
+    }
+
+    /** 引擎实例名（对齐 grape observability instance_name 逻辑：{type}-{device_suffix}） */
+    private String buildEngineName(java.sql.ResultSet rs) throws java.sql.SQLException {
+        String engineName = rs.getString("engine_name");
+        if (engineName == null || engineName.isEmpty()) return null;
+        int credId = rs.getInt("credential_id");
+        String deviceName = rs.getString("device_name");
+        String hostName = rs.getString("host_name");
+        // 本机引擎（credential_id=0）：优先用 host_name
+        if (credId == 0) {
+            deviceName = hostName != null ? hostName : "";
+        }
+        String et = engineName.trim().toLowerCase();
+        String suffix = "";
+        if (deviceName != null && !deviceName.isEmpty()) {
+            // sanitize: 取最后一段（去掉域名等），转小写
+            String[] parts = deviceName.split("\\.");
+            suffix = parts[0].toLowerCase().replaceAll("[^a-z0-9-]", "");
+        }
+        if (suffix.isEmpty()) {
+            suffix = "cred" + credId;
+        }
+        return et + "-" + suffix;
     }
 }
