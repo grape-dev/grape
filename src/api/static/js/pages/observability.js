@@ -97,15 +97,11 @@ function refreshObs(isAutoRefresh) {
 }
 
 function _rerenderRuntimeTable() {
-  // 只重新渲染 Runtime 表格（用缓存数据，不重新 fetch）
+  // 只重新渲染表格行（不重建筛选栏，避免 input 失焦）
   const { ops } = _obsData;
   if (!ops || ops.error) return;
-  const realOps = (ops && !ops.error) ? ops : null;
-  if (!realOps) return;
-  const r = realOps.runtimes || {};
-  const runtimes = r.list || [];
-  runtimes.sort((a, b) => (a.device_name || '').localeCompare(b.device_name || ''));
-  const _devices = [...new Set(runtimes.map(rt => rt.device_name || '-').filter(d => d && d !== '-'))];
+  const r = ops.runtimes || {};
+  const runtimes = (r.list || []).slice().sort((a, b) => (a.device_name || '').localeCompare(b.device_name || ''));
   const _filteredRuntimes = runtimes.filter(rt => {
     const _dev = rt.device_name || '';
     if (_rtDeviceFilter && _dev !== _rtDeviceFilter) return false;
@@ -118,21 +114,12 @@ function _rerenderRuntimeTable() {
     }
     return true;
   });
-  // 找到 Runtime 表格容器并替换
-  const container = document.getElementById('obs-runtime-table');
-  if (!container) return;
+  // 只更新表格行容器 + 计数
+  const rowsEl = document.getElementById('obs-runtime-rows');
+  const countEl = document.getElementById('obs-runtime-count');
+  if (countEl) countEl.textContent = _filteredRuntimes.length + '/' + runtimes.length;
+  if (!rowsEl) return;
   let html = '';
-  let _filterBar = '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">';
-  _filterBar += '<input type="text" placeholder="搜索引擎/设备/版本..." value="' + _rtSearch.replace(/"/g,'&quot;') + '" oninput="_rtSearch=this.value;_rerenderRuntimeTable()" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
-  _filterBar += '<select onchange="_rtDeviceFilter=this.value;_rerenderRuntimeTable()" style="padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
-  _filterBar += '<option value="">全部设备</option>';
-  _devices.forEach(d => {
-    _filterBar += '<option value="' + d + '"' + (_rtDeviceFilter === d ? ' selected' : '') + '>' + d + '</option>';
-  });
-  _filterBar += '</select>';
-  _filterBar += '<span class="ts t3">' + _filteredRuntimes.length + '/' + runtimes.length + '</span>';
-  _filterBar += '</div>';
-  html = _filterBar;
   if (_filteredRuntimes.length) {
     html += '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>探测</th><th>模式</th><th>设备</th></tr></thead><tbody>';
     _filteredRuntimes.forEach(rti => {
@@ -168,7 +155,7 @@ function _rerenderRuntimeTable() {
   } else {
     html += '<div class="ts t2" style="padding:12px">无匹配引擎</div>';
   }
-  container.innerHTML = html;
+  rowsEl.innerHTML = html;
 }
 
 function renderObsContent(isAutoRefresh) {
@@ -335,9 +322,10 @@ function renderOverview(ops, rt, mt) {
       _filterBar += '<option value="' + d + '"' + (_rtDeviceFilter === d ? ' selected' : '') + '>' + d + '</option>';
     });
     _filterBar += '</select>';
-    _filterBar += '<span class="ts t3">' + _filteredRuntimes.length + '/' + runtimes.length + '</span>';
+    _filterBar += '<span class="ts t3" id="obs-runtime-count">' + _filteredRuntimes.length + '/' + runtimes.length + '</span>';
     _filterBar += '</div>';
     runtimeTable = _filterBar;
+    runtimeTable += '<div id="obs-runtime-rows">';
     if (_filteredRuntimes.length) {
     runtimeTable += '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>探测</th><th>模式</th><th>设备</th></tr></thead><tbody>';
     _filteredRuntimes.forEach(rti => {
@@ -374,6 +362,7 @@ function renderOverview(ops, rt, mt) {
     } else {
       runtimeTable += '<div class="ts t2" style="padding:12px">无匹配引擎</div>';
     }
+    runtimeTable += '</div>';
   }
 
   return `
