@@ -164,11 +164,15 @@
         <div class="card" style="padding:0">
           <div class="section-header">
             <h3 class="sh-title">最近活动</h3>
-            <span class="sh-count">最近 5 条</span>
+            <div class="sh-actions">
+              <button class="btn btn-sm" :style="activityFilter === 'recent' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'recent'">最近执行</button>
+              <button class="btn btn-sm" :style="activityFilter === 'pending' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'pending'">进行中</button>
+              <button class="btn btn-sm" :style="activityFilter === 'failed' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'failed'">最近失败</button>
+            </div>
           </div>
           <div style="padding:20px 24px">
-            <div v-if="info.recentTasks && info.recentTasks.length" class="timeline">
-              <div v-for="t in info.recentTasks" :key="t.id" class="timeline-item">
+            <div v-if="filteredActivity.length" class="timeline">
+              <div v-for="t in filteredActivity" :key="t.id" class="timeline-item">
                 <div class="timeline-dot" :class="t.status"></div>
                 <div class="timeline-content">
                   <div class="timeline-header">
@@ -183,7 +187,7 @@
                 </div>
               </div>
             </div>
-            <p v-else class="t2" style="padding:20px;text-align:center">暂无活动记录</p>
+            <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
           </div>
         </div>
       </div>
@@ -205,6 +209,7 @@ const info = ref({})
 const loading = ref(true)
 const resetting = ref(false)
 const activityTab = ref('task')
+const activityFilter = ref('recent')
 const expandedRepos = ref([])
 const selectedRepo = ref('')
 const repoIssues = ref([])
@@ -218,6 +223,12 @@ const toast = ref({ show: false, msg: '', type: 'success' })
 const selectedRepoData = computed(() => {
   if (!selectedRepo.value) return null
   return (info.value.repoMatrix || []).find(r => r.repoKey === selectedRepo.value)
+})
+
+const filteredActivity = computed(() => {
+  if (activityFilter.value === 'pending') return info.value.recentPendingTasks || []
+  if (activityFilter.value === 'failed') return info.value.recentFailedTasks || []
+  return info.value.recentTasks || []
 })
 
 const credentialConfigured = computed(() => {

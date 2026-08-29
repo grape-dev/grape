@@ -262,6 +262,60 @@ public class ConsoleUserController {
             info.put("recentTasks", recentTasks);
         } catch (Exception e) { /* ignore */ }
 
+        // 进行中任务（最近 5 条）
+        try {
+            List<Map<String, Object>> recentPending = grapeJdbc.query(
+                "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
+                "t.agent_type, t.skill, t.started_at, t.completed_at " +
+                "FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
+                "AND (t.exit_code IS NULL OR t.completed_at IS NULL) " +
+                "ORDER BY t.started_at DESC LIMIT 5",
+                (rs2, rowNum) -> {
+                    Map<String, Object> r = new LinkedHashMap<>();
+                    r.put("id", rs2.getString("id"));
+                    String fullName = rs2.getString("full_name");
+                    r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
+                    r.put("issueId", rs2.getString("issue_id"));
+                    r.put("exitCode", rs2.getObject("exit_code"));
+                    r.put("agentType", rs2.getString("agent_type"));
+                    r.put("skill", rs2.getString("skill"));
+                    r.put("startedAt", rs2.getString("started_at"));
+                    r.put("completedAt", rs2.getString("completed_at"));
+                    r.put("status", "pending");
+                    return r;
+                }, id);
+            info.put("recentPendingTasks", recentPending);
+        } catch (Exception e) { /* ignore */ }
+
+        // 最近失败任务（最近 5 条）
+        try {
+            List<Map<String, Object>> recentFailed = grapeJdbc.query(
+                "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
+                "t.agent_type, t.skill, t.started_at, t.completed_at " +
+                "FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
+                "AND t.exit_code>0 " +
+                "ORDER BY t.started_at DESC LIMIT 5",
+                (rs2, rowNum) -> {
+                    Map<String, Object> r = new LinkedHashMap<>();
+                    r.put("id", rs2.getString("id"));
+                    String fullName = rs2.getString("full_name");
+                    r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
+                    r.put("issueId", rs2.getString("issue_id"));
+                    r.put("exitCode", rs2.getObject("exit_code"));
+                    r.put("agentType", rs2.getString("agent_type"));
+                    r.put("skill", rs2.getString("skill"));
+                    r.put("startedAt", rs2.getString("started_at"));
+                    r.put("completedAt", rs2.getString("completed_at"));
+                    r.put("status", "failed");
+                    return r;
+                }, id);
+            info.put("recentFailedTasks", recentFailed);
+        } catch (Exception e) { /* ignore */ }
+
         return info;
     }
 
