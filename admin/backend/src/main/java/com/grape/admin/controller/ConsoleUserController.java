@@ -213,20 +213,20 @@ public class ConsoleUserController {
             rows = List.of();
         }
 
-        // 3. 按 issue_id 分组（对齐健康中心）
+        // 3. 按 repo_key + issue_id 组合分组（issue_id不唯一，不同仓库有相同编号）
         Map<String, List<Map<String, Object>>> group = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
-            String issueId = (String) row.get("issue_id");
-            group.computeIfAbsent(issueId, k -> new ArrayList<>()).add(row);
+            String groupKey = row.get("repo_key") + "|" + row.get("issue_id");
+            group.computeIfAbsent(groupKey, k -> new ArrayList<>()).add(row);
         }
 
         // 4. 构建结果（对齐健康中心）
         com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
         List<Map<String, Object>> allIssues = new ArrayList<>();
         for (Map.Entry<String, List<Map<String, Object>>> e : group.entrySet()) {
-            Map<String, Object> g = new LinkedHashMap<>();
-            g.put("issueId", e.getKey());
             List<Map<String, Object>> evs = e.getValue();
+            Map<String, Object> g = new LinkedHashMap<>();
+            g.put("issueId", evs.get(0).get("issue_id"));
             // repoName 从 repo_key 提取
             String rk = (String) evs.get(0).get("repo_key");
             String repoName = rk != null ? rk.replaceFirst("^gitcode:", "") : "";
