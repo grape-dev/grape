@@ -855,9 +855,8 @@ function openRuntimeSessionModal(rtId, rtName) {
     '</div>';
   document.body.appendChild(modal);
 
-  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
-  const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
-  API.get('/runtime/runtimes/' + rtId + '/sessions' + repoParam).then(d => {
+  // 系统监控是全局运维视图，引擎 session 查询不应按当前选中仓库过滤
+  API.get('/runtime/runtimes/' + rtId + '/sessions').then(d => {
     renderSessionList(document.getElementById('rtSessionModalBody'), d.sessions || [], rtName);
   }).catch(e => {
     document.getElementById('rtSessionModalBody').innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';

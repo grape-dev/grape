@@ -1058,6 +1058,8 @@ def _migrate_tables():
         _alter_skill_files_if_needed(),
         # Worker 三级分类——repo_key 字段（scope=user 时关联项目）
         "ALTER TABLE runtime_credentials ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
+        # ===== TMP (/tmp) 使用率指标（liufei 2026-08-28）=====
+        "ALTER TABLE runtime_credentials ADD COLUMN tmp_percent DOUBLE DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
@@ -1079,6 +1081,11 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN worker_version TEXT DEFAULT ''",
         # ===== 多主控机：本机直连引擎按 host_name 区分（credential_id=0 不再全局唯一）=====
         "ALTER TABLE agent_runtimes ADD COLUMN host_name VARCHAR(191) DEFAULT ''",
+        # ===== engine probe 探测结果列（liufei 2026-08-28）=====
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_status VARCHAR(32) DEFAULT 'pending'",
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_latency INT DEFAULT 0",
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_last VARCHAR(64) DEFAULT ''",
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_error TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:

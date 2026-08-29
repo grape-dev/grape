@@ -317,10 +317,8 @@ function switchConversation(convId) {
           }
           _clearTask(convId);
         } else {
-          // not_found → 任务丢失
+          // not_found → 任务状态未知，不显示中断提示（可能是跨机器延迟）
           _clearTask(convId);
-          body.innerHTML += '<div class="msg r" style="color:var(--t3)">（查询已中断，请重新发送消息）</div>';
-          body.scrollTop = body.scrollHeight;
         }
       }).catch(() => { _clearTask(convId); });
     }

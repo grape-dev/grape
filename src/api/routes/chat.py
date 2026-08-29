@@ -1087,16 +1087,20 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
 
-    if conv and conv.get("conv_type") == "task":
-        from src.prompt_builder import build_task_chat_prompt
-        prompt = build_task_chat_prompt(body.message, repo_key, history, conv,
-                                        account=user["username"], runtime_id=cfg.get("runtime_id", 0))
-    else:
-        prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id, backend_name=backend_name)
-
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
+    has_valid_session = bool(runtime_session_id.startswith("ses_"))
+    if conv and conv.get("conv_type") == "task":
+        from src.prompt_builder import build_task_chat_prompt
+        prompt = build_task_chat_prompt(body.message, repo_key, history, conv,
+                                        account=user["username"], runtime_id=cfg.get("runtime_id", 0),
+                                        has_valid_session=has_valid_session)
+    else:
+        prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id,
+                                           backend_name=backend_name,
+                                           user_info=_build_web_user_info(user, acc),
+                                           has_valid_session=has_valid_session)
 
     log.info(f"Chat submit: backend={backend_name or '(none)'}, skill={skill_name}, "
              f"has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
@@ -1278,36 +1282,47 @@ async def chat_task_stream(task_id: str, user: dict = Depends(get_current_user))
     loop = asyncio.get_running_loop()
     q, task = ChatTaskManager.subscribe(task_id, loop)
 
-    # 内存无任务 → DB 兜底
+    # 内存无任务 → 可能是跨机器 submit，DB 有 user 消息但 agent 还在执行
+    # 轮询 DB 等待 agent 回复（最多 120s），而不是立刻报「查询已中断」
     if not q:
         from src.session_manager import db as _msg_db, db_lock as _msg_lock
-        with _msg_lock:
-            c = _msg_db.cursor()
-            c.execute("SELECT role, generate_status, content, conversation_id FROM chat_messages WHERE task_id=? ORDER BY id", (task_id,))
-            rows = c.fetchall()
-        has_user = any(r[0] == "user" for r in rows)
-        has_agent = any(r[0] == "agent" for r in rows)
-        if has_agent:
-            for r in rows:
-                if r[0] == "agent":
-                    content = r[2] or ""
-                    conv_id = r[3] or ""
-                    return StreamingResponse(
-                        iter([f"data: {json.dumps({'type': 'done', 'text': content, 'conversation_id': conv_id, 'task_id': task_id})}\n\n"]),
-                        media_type="text/event-stream",
-                        headers={"Cache-Control": "no-cache"},
-                    )
-        if has_user and not has_agent:
-            conv_id = rows[0][3] if rows else ""
-            return StreamingResponse(
-                iter([f"data: {json.dumps({'type': 'error', 'text': '查询已中断，请重新发送消息', 'conversation_id': conv_id, 'task_id': task_id})}\n\n"]),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache"},
-            )
+
+        async def _poll_db_stream():
+            import time as _t
+            conv_id = ""
+            # 先发思考中占位
+            yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...'})}\n\n"
+            deadline = _t.time() + 120
+            while _t.time() < deadline:
+                with _msg_lock:
+                    c = _msg_db.cursor()
+                    c.execute("SELECT role, generate_status, content, conversation_id FROM chat_messages WHERE task_id=? ORDER BY id", (task_id,))
+                    rows = c.fetchall()
+                if not rows:
+                    # 连 user 消息都没有 → 任务不存在
+                    yield f"data: {json.dumps({'type': 'error', 'text': '任务不存在', 'task_id': task_id})}\n\n"
+                    return
+                has_agent = any(r[0] == "agent" for r in rows)
+                if has_agent:
+                    for r in rows:
+                        if r[0] == "agent":
+                            content = r[2] or ""
+                            conv_id = r[3] or ""
+                            gen_status = r[1]
+                            evt_type = "done" if gen_status == 2 else "error"
+                            yield f"data: {json.dumps({'type': evt_type, 'text': content, 'conversation_id': conv_id, 'task_id': task_id})}\n\n"
+                            return
+                # 有 user 无 agent → agent 仍在执行（可能在另一台机器），继续等
+                conv_id = rows[0][3] if rows else ""
+                await asyncio.sleep(1)
+            # 超时
+            yield f"data: {json.dumps({'type': 'error', 'text': '查询超时（120s），请重试', 'conversation_id': conv_id, 'task_id': task_id})}\n\n"
+
         return StreamingResponse(
-            iter([f"data: {json.dumps({'type': 'error', 'text': '任务不存在', 'task_id': task_id})}\n\n"]),
+            _poll_db_stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                     "X-Accel-Buffering": "no"},
         )
 
     # 内存有任务 → SSE 流
@@ -1406,15 +1421,15 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
 
-    if conv and conv.get("conv_type") == "task":
-        from src.prompt_builder import build_task_chat_prompt
-        prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0))
-    else:
-        prompt = _build_chat_prompt(body.message, repo_key, history, skill_name, skill_id, backend_name=backend_name)
-
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
+    has_valid_session = bool(runtime_session_id.startswith("ses_"))
+    if conv and conv.get("conv_type") == "task":
+        from src.prompt_builder import build_task_chat_prompt
+        prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)
+    else:
+        prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id, backend_name=backend_name, user_info=_build_web_user_info(user, acc), has_valid_session=has_valid_session)
 
     rid = cfg.get("runtime_id") or 0
     if not rid:
@@ -1678,12 +1693,12 @@ async def chat_task_status(task_id: str, user: dict = Depends(get_current_user))
                         "conversation_id": conv_id, "error": "" if gen_status == 2 else "生成失败",
                         "source": "db"}
     if has_user and not has_assistant:
-        # user 已写但 assistant 未写 → 内存无说明服务重启后任务已丢失
-        # 对齐 Admin AI getTaskFinalStatus：hasUser && !hasAssistant → error
+        # user 已写但 assistant 未写 → agent 可能仍在另一台机器执行
+        # 返回 running 让前端继续等待 + 重连 SSE 轮询 DB（跨机器容灾）
         conv_id = rows[0][3] if rows else ""
-        return {"task_id": task_id, "status": "error", "result": "",
+        return {"task_id": task_id, "status": "running", "result": "",
                 "text": "",
-                "conversation_id": conv_id, "error": "查询已中断（服务重启），请重新发送消息",
+                "conversation_id": conv_id, "error": "",
                 "source": "db"}
     return {"task_id": task_id, "status": "not_found"}
 
