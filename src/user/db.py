@@ -27,7 +27,11 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     password TEXT DEFAULT '',
     token_version INTEGER DEFAULT 0,  -- JWT 撤销版本号——改密码/logout 时 +1
     created_by INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    hw_iam_domain TEXT DEFAULT '',
+    hw_iam_user TEXT DEFAULT '',
+    hw_iam_password TEXT DEFAULT '',
+    hw_iam_account_type TEXT DEFAULT 'iam'
 )
 """
 
@@ -42,7 +46,7 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by) VALUES (?,?,?,?)",
+            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by, created_at) VALUES (?,?,?,?,datetime('now'))",
                       (username, pw_hash, password, created_by))
             db.commit()
             uid = c.lastrowid
@@ -132,6 +136,23 @@ def increment_token_version(user_id: int) -> None:
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE user_accounts SET token_version=token_version+1 WHERE id=?", (user_id,))
+        db.commit()
+
+
+def batch_update_last_active(uids: list) -> None:
+    """批量更新用户最后活跃时间——定时任务调用，分批每 1000 个"""
+    if not uids:
+        return
+    with db_lock:
+        c = db.cursor()
+        # 分批，每批 1000
+        for i in range(0, len(uids), 1000):
+            batch = uids[i:i+1000]
+            placeholders = ",".join(["?"] * len(batch))
+            c.execute(
+                f"UPDATE user_accounts SET last_active_at=datetime('now') WHERE id IN ({placeholders})",
+                batch,
+            )
         db.commit()
 
 
@@ -270,6 +291,11 @@ def init_db():
         for col in ["created_by"]:
             try:
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+            except Exception:
+                pass
+        for col in ["hw_iam_domain", "hw_iam_user", "hw_iam_password", "hw_iam_account_type"]:
+            try:
+                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
             except Exception:
                 pass
         db.commit()
@@ -1218,6 +1244,8 @@ USER_ACCOUNT_FIELDS = [
     "gitcode_publish_repo", "github_publish_repo",
     "password",
     "created_by", "created_at",
+    "hw_iam_domain", "hw_iam_user", "hw_iam_password",
+    "hw_iam_account_type",
 ]
 
 

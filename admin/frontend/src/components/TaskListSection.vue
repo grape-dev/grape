@@ -9,7 +9,7 @@
               <option :value="null">全部引擎</option>
               <option v-for="e in engines || []" :key="e.id" :value="e.id">{{ e.name }}</option>
             </select>
-            <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
+            <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#ff3b30;border-color:rgba(255,59,48,0.2)" @click="clearFilters">清除筛选</button>
           </div>
         </div>
         <div style="padding:14px 20px">
@@ -86,7 +86,7 @@
                   <template v-if="(tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
                   <template v-else>
                     无匹配任务
-                    <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6;margin-left:10px" @click="clearFilters">清除筛选</button>
+                    <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#ff3b30;border-color:rgba(255,59,48,0.2);margin-left:10px" @click="clearFilters">清除筛选</button>
                   </template>
                 </td>
               </tr>
@@ -130,7 +130,7 @@
           <span class="t3" v-if="issueModal.eventCount" style="font-size:12px">{{ issueModal.eventCount }} 个事件</span>
           <span style="margin-left:auto;cursor:pointer;font-size:18px;color:#999" @click="closeIssueModal">✕</span>
         </div>
-        <div style="padding:8px 20px;border-bottom:1px solid #f5f5f5">
+        <div style="padding:8px 20px;border-bottom:1px solid rgba(0,0,0,0.04)">
           <button class="btn btn-sm" :class="{'btn-primary': issueModal.view === 'diagram'}" style="margin-right:8px" @click="issueModal.view = 'diagram'; renderIssueMermaid()">📊 时序图</button>
           <button class="btn btn-sm" :class="{'btn-primary': issueModal.view === 'events'}" @click="issueModal.view = 'events'">📋 事件列表</button>
         </div>
@@ -171,7 +171,7 @@
           <span class="t3" v-if="logModal.info.createdAt" style="font-size:12px">{{ formatTime(logModal.info.createdAt) }}</span>
           <span style="margin-left:auto;cursor:pointer;font-size:18px;color:#999" @click="closeLogModal">✕</span>
         </div>
-        <div v-if="logModal.info.status" style="display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid #f5f5f5;font-size:12px">
+        <div v-if="logModal.info.status" style="display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid rgba(0,0,0,0.04);font-size:12px">
           <span class="log-tl-dot" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'" style="width:8px;height:8px;border-radius:50%;display:inline-block"></span>
           <span class="t3">入队 {{ formatTime(logModal.info.createdAt).slice(11, 19) }}</span>
           <span v-if="logModal.info.startedAt" class="t3">→ 开始 {{ formatTime(logModal.info.startedAt).slice(11, 19) }}</span>
@@ -266,10 +266,10 @@ function filterOptions(col) {
 
 const taskTotal = computed(() => props.tasks?.totalElements ?? 0)
 const STATUS_MAP = {
-  completed: { label: "已完成", color: "#52c41a" },
+  completed: { label: "已完成", color: "#34c759" },
   running: { label: "运行中", color: "#006eff" },
-  failed: { label: "失败", color: "#eb2f96" },
-  queued: { label: "排队中", color: "#fa8c16" }
+  failed: { label: "失败", color: "#ff2d92" },
+  queued: { label: "排队中", color: "#ff9500" }
 }
 const taskStatList = computed(() => {
   const fo = props.tasks?.filterOptions
@@ -378,7 +378,7 @@ function applySequenceColors(svg, statuses) {
     const root = doc.documentElement
     const defs = root.querySelector("defs")
     if (!defs) return svg
-    const colorOf = s => (s === "failed" ? "#e5484d" : s === "completed" ? "#2e9e5b" : "#94a3b8")
+    const colorOf = s => (s === "failed" ? "#ff3b30" : s === "completed" ? "#34c759" : "#aeaeb2")
     const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
     lines.forEach((line, i) => {
       const markerId = root.id + "-seqnum-" + i
@@ -444,12 +444,12 @@ watch(() => props.tasks, () => {
   background: #fff;
   border: 1px solid var(--border-color);
   border-left: 3px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 14px;
   padding: 10px 14px;
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  transition: all 0.2s ease;
+  transition: all var(--transition);
   overflow: hidden;
 }
 .detail-item:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
@@ -468,11 +468,11 @@ watch(() => props.tasks, () => {
   color: var(--text-secondary);
   padding: 6px 14px;
   border-radius: 8px;
-  background: #f5f5f5;
+  background: rgba(0,0,0,0.04);
   border: 1px solid var(--border-color);
   cursor: pointer;
   user-select: none;
-  transition: all 0.2s ease;
+  transition: all var(--transition);
   line-height: 1;
 }
 .back-btn:hover { color: var(--primary); background: #e6f4ff; border-color: #91caff; transform: translateX(-2px); }
@@ -492,11 +492,11 @@ watch(() => props.tasks, () => {
   max-width: 160px;
   background: #fff;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 14px;
   border-left: 3px solid #006eff;
   padding: 12px 16px;
   text-align: center;
-  transition: all 0.2s ease;
+  transition: all var(--transition);
 }
 .task-stat-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .task-stat-card.kpi-primary { border-left-color: #006eff; }
@@ -554,11 +554,11 @@ watch(() => props.tasks, () => {
   padding: 6px 10px;
   font-size: 12px;
   color: var(--text-secondary);
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
   white-space: nowrap;
 }
-.col-filter-opt:hover { background: #f5f7fa; }
+.col-filter-opt:hover { background: rgba(0,0,0,0.04); }
 .col-filter-opt.active { background: var(--primary-bg); color: var(--primary); font-weight: 500; }
 .ellipsis-cell {
   overflow: hidden;
@@ -571,21 +571,21 @@ watch(() => props.tasks, () => {
 /* ===== 关联智能体卡片墙（对齐智能体管理页面 AgentManage） ===== */
 .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; margin-bottom: 18px; }
 .agent-card {
-  background: #fff; border: 1px solid var(--border-color); border-radius: 10px;
+  background: #fff; border: 1px solid var(--border-color); border-radius: 14px;
   box-shadow: var(--card-shadow); padding: 14px 16px; border-left: 3px solid #006eff;
   display: flex; flex-direction: column; gap: 10px; cursor: pointer;
 }
 .agent-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .agent-card.kpi-blue { border-left-color: #006eff; }
-.agent-card.kpi-purple { border-left-color: #7222ed; }
-.agent-card.kpi-pink { border-left-color: #eb2f96; }
-.agent-card.kpi-orange { border-left-color: #fa8c16; }
-.agent-card.kpi-green { border-left-color: #52c41a; }
+.agent-card.kpi-purple { border-left-color: #5e5ce6; }
+.agent-card.kpi-pink { border-left-color: #ff2d92; }
+.agent-card.kpi-orange { border-left-color: #ff9500; }
+.agent-card.kpi-green { border-left-color: #34c759; }
 .agent-head { display: flex; align-items: center; gap: 10px; }
 .agent-icon { width: 38px; height: 38px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 19px; flex-shrink: 0; }
 .agent-meta { flex: 1; min-width: 0; }
 .agent-name { font-size: 15px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
-.code-tag { font-size: 11px; font-weight: 500; color: var(--text-tertiary); background: #f5f7fa; border-radius: 4px; padding: 1px 6px; }
+.code-tag { font-size: 11px; font-weight: 500; color: var(--text-tertiary); background: rgba(0,0,0,0.04); border-radius: 8px; padding: 1px 6px; }
 .agent-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
 .agent-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.6; min-height: 38px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .agent-stats { display: flex; gap: 18px; border-top: 1px dashed var(--border-color); padding-top: 10px; }
@@ -593,9 +593,9 @@ watch(() => props.tasks, () => {
 .as-item strong { font-size: 16px; font-weight: 700; color: var(--text-primary); }
 .as-item span { font-size: 11px; color: var(--text-tertiary); }
 .sb-row { display: flex; gap: 6px; flex-wrap: wrap; }
-.sb-seg { font-size: 11px; color: #fff; border-radius: 4px; padding: 1px 7px; }
-.agent-foot { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #f0f0f0; padding-top: 8px; }
-.cat-tag { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+.sb-seg { font-size: 11px; color: #fff; border-radius: 8px; padding: 1px 7px; }
+.agent-foot { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--border-soft); padding-top: 8px; }
+.cat-tag { font-size: 11px; padding: 1px 8px; border-radius: 14px; }
 .cat-official { background: #e6f4ff; color: #006eff; }
 .detail-link { font-size: 12px; color: var(--primary); }
 /* 刷新按钮加载动画 */
@@ -617,11 +617,11 @@ watch(() => props.tasks, () => {
 .tl-row-clickable:hover { background: rgba(0, 107, 255, 0.04); }
 .tl-row-fail { background: rgba(229, 72, 77, 0.03); }
 .tl-row-ok { background: rgba(46, 158, 91, 0.03); }
-.log-tl-dot.ok { background: #52c41a; }
-.log-tl-dot.fail { background: #eb2f96; }
+.log-tl-dot.ok { background: #34c759; }
+.log-tl-dot.fail { background: #ff2d92; }
 .log-tl-dot.run { background: #006eff; }
-span.ok { color: #52c41a; }
-span.fail { color: #eb2f96; }
+span.ok { color: #34c759; }
+span.fail { color: #ff2d92; }
 span.run { color: #006eff; }
 .tl-diagram-container { overflow-x: auto; }
 .tl-diagram-svg svg { max-width: 100%; height: auto; }

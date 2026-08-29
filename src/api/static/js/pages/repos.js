@@ -20,6 +20,7 @@ function renderSelectionShell(tab, innerHtml) {
       <nav class="lobby-tabs">
         <a class="${tabCls('projects')}" onclick="switchSidebarTab('projects')">${I18N.t('repos.tab.projects')}</a>
         <a class="${tabCls('templates')}" onclick="switchSidebarTab('templates')">${I18N.t('repos.tab.templates')}</a>
+        <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">工作台</a>
       </nav>
       <div class="lobby-user" onclick="app.logout()" title="${I18N.t('repos.logout_title')}">
         <span class="lobby-avatar">${avatar}</span>
@@ -36,7 +37,21 @@ function renderSelectionShell(tab, innerHtml) {
 }
 
 function switchSidebarTab(tab) {
-  if (tab === 'templates') {
+  if (tab === 'workspace') {
+    API.get('/repos/member').then(d => {
+      const repos = d.repos || [];
+      const hosted = repos.filter(r => r.is_hosted);
+      if (hosted.length > 0) {
+        const first = hosted[0];
+        selectRepo(first.full_name, first.owner, first.name);
+      } else {
+        app.showToast('暂无已托管项目，请先加入并托管一个项目');
+        switchSidebarTab('projects');
+      }
+    }).catch(() => {
+      switchSidebarTab('projects');
+    });
+  } else if (tab === 'templates') {
     renderTemplates();
   } else {
     if (_projectsContent) {
@@ -49,7 +64,8 @@ function switchSidebarTab(tab) {
 
 // ====== 仓库选择主内容 ======
 let _repoPage = 0;
-const _REPO_PAGE_SIZE = 9;
+const _REPO_PAGE_SIZE = 10;
+let _projectSearchQuery = '';
 
 function renderRepoSelection(repos) {
   const d = document.getElementById('pageContent');
@@ -57,56 +73,76 @@ function renderRepoSelection(repos) {
   _projectsRepos = repos || [];
   const _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
   const user = (_lu && (_lu.nickname || _lu.username)) || 'User';
+  const name = user.split('@')[0];
   const hostedCount = (repos || []).filter(r => r.is_hosted).length;
   const joinedCount = (repos || []).filter(r => r.is_joined && !r.is_hosted).length;
-  const name = (user || I18N.t('repos.lobby.friend')).split('@')[0];
 
-  // 已托管 > 已加入 > 未加入 排序（同等级按 full_name 稳定排序，保证分页不跳动）
   const allRepos = (repos || []).slice().sort((a, b) => {
     const pa = a.is_hosted ? 2 : a.is_joined ? 1 : 0;
     const pb = b.is_hosted ? 2 : b.is_joined ? 1 : 0;
     if (pa !== pb) return pb - pa;
     return (a.full_name || '').localeCompare(b.full_name || '');
   });
+
+  const query = _projectSearchQuery.toLowerCase().trim();
+  const filteredRepos = query
+    ? allRepos.filter(r => (r.full_name || '').toLowerCase().includes(query) || (r.owner || '').toLowerCase().includes(query))
+    : allRepos;
+
   const total = allRepos.length;
-  const pages = Math.max(1, Math.ceil(total / _REPO_PAGE_SIZE));
+  const pages = Math.max(1, Math.ceil(filteredRepos.length / _REPO_PAGE_SIZE));
   if (_repoPage >= pages) _repoPage = 0;
-  const pageRepos = allRepos.slice(_repoPage * _REPO_PAGE_SIZE, (_repoPage + 1) * _REPO_PAGE_SIZE);
+  const pageRepos = filteredRepos.slice(_repoPage * _REPO_PAGE_SIZE, (_repoPage + 1) * _REPO_PAGE_SIZE);
 
   let pagerHtml = '';
   if (pages > 1) {
-    pagerHtml = `<div class="tmpl-pager">
-      <button class="tmpl-page-btn" ${_repoPage === 0 ? 'disabled' : ''} onclick="goRepoPage(-1)">‹</button>
-      <span class="tmpl-page-info">${_repoPage + 1} / ${pages}</span>
-      <button class="tmpl-page-btn" ${_repoPage >= pages - 1 ? 'disabled' : ''} onclick="goRepoPage(1)">›</button>
-    </div>`;
+    pagerHtml = '<div class="project-pager">' +
+      '<button' + (_repoPage === 0 ? ' disabled' : '') + ' onclick="goRepoPage(-1)">‹</button>' +
+      '<span>' + (_repoPage + 1) + ' / ' + pages + '</span>' +
+      '<button' + (_repoPage >= pages - 1 ? ' disabled' : '') + ' onclick="goRepoPage(1)">›</button>' +
+    '</div>';
   }
 
-  let inner = `<button class="lobby-refresh-btn" onclick="refreshRepos(this)" title="${I18N.t('repos.lobby.refresh_title')}">${I18N.t('repos.lobby.refresh_btn')}</button>
-  <div class="lobby-hero">
-    <div class="lobby-eyebrow"><i></i>${I18N.t('repos.lobby.welcome_to_grape')}<i></i></div>
-    <h1 class="lobby-title">${I18N.t('repos.lobby.hello')}<span>${name}</span><span class="lobby-hello">👋</span></h1>
-    <p class="lobby-sub">${I18N.t('repos.lobby.welcome_sub')}</p>
-    <div class="lobby-stats-inline">
-      <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${total}</b><span>${I18N.t('repos.lobby.stat_projects')}</span></div>
-      <div class="lobby-stat"><span class="lobby-stat-ic">✓</span><b>${hostedCount}</b><span>${I18N.t('repos.lobby.stat_hosted')}</span></div>
-      <div class="lobby-stat"><span class="lobby-stat-ic">◇</span><b>${joinedCount}</b><span>${I18N.t('repos.lobby.stat_joined')}</span></div>
-    </div>
-  </div>
+  var cardsHtml = pageRepos.map(function(r) { return _buildProjectCard(r); }).join('');
+  var templatesHtml = _renderProjectTemplates();
 
-  <div class="lobby-grid">
-    ${pageRepos.map(r => _buildLobbyCard(r)).join('')}
-  </div>
-  ${pagerHtml}
-
-  <div class="lobby-empty" id="rsEmpty" style="display:none">
-    <div class="lobby-empty-ic">🔭</div>
-    <h3>${I18N.t('repos.lobby.empty_title')}</h3>
-    <p>${I18N.t('repos.lobby.empty_desc')}</p>
-  </div>`;
+  var inner = '<div class="project-page">' +
+    '<div class="project-hero">' +
+      '<div class="project-hero-left">' +
+        '<h1>' + I18N.t('repos.lobby.project_title') + '</h1>' +
+        '<p>' + I18N.t('repos.lobby.project_sub') + '</p>' +
+        '<button class="project-hero-btn" onclick="openCreateRepoModal()">+ ' + I18N.t('repos.lobby.new_project_btn') + '</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="project-stats">' +
+      '<div class="project-stat"><b>' + total + '</b><span>' + I18N.t('repos.lobby.stat_projects') + '</span></div>' +
+      '<div class="project-stat"><b>' + hostedCount + '</b><span>' + I18N.t('repos.lobby.stat_hosted') + '</span></div>' +
+      '<div class="project-stat"><b>' + joinedCount + '</b><span>' + I18N.t('repos.lobby.stat_joined') + '</span></div>' +
+    '</div>' +
+    '<div class="project-section">' +
+      '<div class="project-section-header">' +
+        '<div class="project-section-header-left"><h2>' + I18N.t('repos.lobby.my_projects') + '</h2></div>' +
+        '<div class="project-section-header-right">' +
+          '<button class="project-refresh-btn" onclick="refreshRepos(this)" title="' + I18N.t('repos.lobby.refresh_title') + '">↻ ' + I18N.t('repos.lobby.refresh_btn') + '</button>' +
+          '<input class="project-search" id="projectSearch" type="text" placeholder="🔍 ' + I18N.t('repos.lobby.search_placeholder') + '" value="' + _projectSearchQuery + '" oninput="onProjectSearch(this.value)">' +
+        '</div>' +
+      '</div>' +
+      '<div class="project-list">' + cardsHtml +
+        (filteredRepos.length === 0 ? '<div class="lobby-empty" style="grid-column:1/-1;margin:0;border:none;background:none"><div class="lobby-empty-ic">🔭</div><h3>' + I18N.t('repos.lobby.empty_title') + '</h3><p>' + I18N.t('repos.lobby.empty_desc') + '</p></div>' : '') +
+      pagerHtml +
+      '</div>' +
+    '</div>' +
+    templatesHtml +
+  '</div>';
 
   _projectsContent = inner;
   renderSelectionShell('projects', inner);
+}
+
+function onProjectSearch(val) {
+  _projectSearchQuery = val;
+  _repoPage = 0;
+  renderRepoSelection(_projectsRepos);
 }
 
 function goRepoPage(dir) {
@@ -116,28 +152,57 @@ function goRepoPage(dir) {
   renderRepoSelection(_projectsRepos);
 }
 
-function _buildLobbyCard(r) {
+function _buildProjectCard(r) {
   const isAdmin = r.role === 'Admin' || r.role === 'Maintainer';
-  const enter = r.is_joined || r.is_hosted;
-  // 卡片本体：点击跳转项目实际代码仓库（GitCode），不直接进入 Grape 工作区
   const repoUrl = 'https://gitcode.com/' + (r.full_name || '');
-  const btnTxt = r.is_hosted ? I18N.t('repos.card.enter_project') : r.is_joined ? I18N.t('repos.card.enter_project') : isAdmin ? I18N.t('repos.card.join_and_host') : I18N.t('repos.card.join');
-  const statusTxt = r.is_hosted ? I18N.t('repos.card.status_hosted') : r.is_joined ? I18N.t('repos.card.status_joined') : I18N.t('repos.card.status_not_joined');
   const initials = (r.name || '?').substring(0, 2).toUpperCase();
+  const statusTxt = r.is_hosted ? I18N.t('repos.card.status_hosted') : r.is_joined ? I18N.t('repos.card.status_joined') : I18N.t('repos.card.status_not_joined');
+  const statusCls = r.is_hosted ? 'project-card-status-hosted' : r.is_joined ? 'project-card-status-joined' : 'project-card-status-none';
 
-  return `<div class="lobby-card" onclick="window.open('${repoUrl}','_blank')">
-    <span class="lobby-card-glow"></span>
-    <div class="lobby-card-head">
-      <span class="lobby-card-ic">${initials}<i></i></span>
-      <span class="lobby-card-status ${enter ? 'in' : ''}"><b></b>${statusTxt}</span>
-    </div>
-    <h3 title="${r.full_name}">${r.name}</h3>
-    <p>${r.description || I18N.t('repos.card.no_description')}</p>
-    <div class="lobby-card-owner"><span class="lobby-owner-dot"></span>${r.owner} · ${r.role}</div>
-    <div class="lobby-card-btn-row">
-      <button class="lobby-btn ${enter ? 'lobby-btn-solid' : 'lobby-btn-ghost'}" onclick="event.stopPropagation();${enter ? `selectRepo('${r.full_name}','${r.owner}','${r.name}')` : `${isAdmin ? 'hostAndSelect' : 'joinAndSelect'}('${r.full_name}','${r.owner}','${r.name}')`}\">${btnTxt}<span class="lobby-btn-ar">→</span></button>
-    </div>
-  </div>`;
+  var actionHtml;
+  if (r.is_hosted) {
+    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();selectRepo(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">' + I18N.t('repos.card.enter_project') + '→</button>';
+  } else {
+    var joinAction = isAdmin ? 'hostAndSelect' : 'joinAndSelect';
+    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();' + joinAction + '(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">' + (isAdmin ? I18N.t('repos.card.join_and_host') : I18N.t('repos.card.join')) + '→</button>';
+  }
+
+  return '<div class="project-card" onclick="window.open(\'' + repoUrl + '\',\'_blank\')">' +
+    '<span class="project-card-ic">' + initials + '</span>' +
+    '<div class="project-card-info">' +
+      '<span class="project-card-name" title="' + (r.full_name || '').replace(/"/g, '&quot;') + '">' + (r.name || '') + '</span>' +
+      '<span class="project-card-meta">' + r.owner + ' · ' + r.role + '</span>' +
+    '</div>' +
+    '<span class="project-card-status ' + statusCls + '">' + statusTxt + '</span>' +
+    '<div class="project-card-actions">' +
+      actionHtml +
+    '</div>' +
+  '</div>';
+}
+
+function _renderProjectTemplates() {
+  var tmpls = [
+    { ic: '🚀', name: I18N.t('repos.template.hello_world'), desc: I18N.t('repos.template.hello_world_desc') },
+    { ic: '🤖', name: I18N.t('repos.template.agent'), desc: I18N.t('repos.template.agent_desc') },
+    { ic: '☁️', name: I18N.t('repos.template.cloud'), desc: I18N.t('repos.template.cloud_desc') },
+    { ic: '🤖', name: I18N.t('repos.template.ai_office'), desc: I18N.t('repos.template.ai_office_desc') },
+    { ic: '🔧', name: I18N.t('repos.template.iac'), desc: I18N.t('repos.template.iac_desc') },
+  ];
+
+  var cards = tmpls.map(function(t) {
+    return '<div class="template-card" onclick="switchSidebarTab(\'templates\')">' +
+      '<span class="template-card-ic">' + t.ic + '</span>' +
+      '<div class="template-card-info">' +
+        '<div class="template-card-name">' + t.name + '</div>' +
+        '<div class="template-card-desc">' + t.desc + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  return '<div class="project-section">' +
+    '<div class="project-section-header"><div class="project-section-header-left"><h2>' + I18N.t('repos.lobby.from_template') + '</h2></div></div>' +
+    '<div class="template-grid">' + cards + '</div>' +
+  '</div>';
 }
 
 // ====== 仓库管理页（侧边栏「＋ 新增仓库托管」）======

@@ -214,7 +214,7 @@
         <div class="modal-body">
           <p style="margin:0 0 12px">更新技能「<b>{{ updateTarget.skillName }}</b>」（agent: {{ updateTarget.agentType }}）：</p>
           <p style="margin:0 0 6px">请选择技能 ZIP 包（包内目录名须与技能名一致）</p>
-          <input type="file" accept=".zip" @change="updateFile = $event.target.files[0] || null" class="form-input" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:6px;font-size:14px" />
+          <input type="file" accept=".zip" @change="updateFile = $event.target.files[0] || null" class="form-input" style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:8px;font-size:14px" />
         </div>
         <div class="modal-footer">
           <button class="btn" @click="updateTarget = null">取消</button>
@@ -320,7 +320,7 @@ const AGENT_TYPE_OPTIONS = ['vod', 'issue', 'coding', 'qa', 'sre', 'chat']
 const SCOPE_TEXT = { official: '官方', repo: '仓库', user: '个人' }
 function scopeText(s) { return SCOPE_TEXT[s] || s || '—' }
 const SCOPE_STATS = { official: '官方', repo: '仓库', user: '个人' }
-const SCOPE_COLORS = { official: '#4f6ef2', repo: '#fa8c16', user: '#13c2c2' }
+const SCOPE_COLORS = { official: '#006eff', repo: '#ff9500', user: '#30b0c7' }
 const scopeStatsTotal = computed(() => Object.values(scopeStats.value).reduce((a, b) => a + (Number(b) || 0), 0))
 
 function setScope(s) {
@@ -526,19 +526,19 @@ onMounted(load)
 .search-input {
   padding: 7px 12px;
   border: 1px solid var(--border, #e2e6ea);
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 13px;
   min-width: 240px;
   background: #fff;
 }
 .skill-card { cursor: pointer; }
-.skill-card:hover { border-color: var(--primary, #4f6ef2); }
+.skill-card:hover { border-color: var(--primary, #006eff); }
 .skill-name {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;
   background: #f4f6f8;
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: 8px;
 }
 /* 名称截断（参考设备管理）：长技能名不挤压 范围/状态 标签，悬停显示全名 */
 .list-name {
@@ -581,8 +581,8 @@ onMounted(load)
 .dm-stat {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; padding: 3px 10px; border-radius: 12px;
-  background: #f5f7fa; color: var(--text-secondary); border: 1px solid transparent;
-  cursor: pointer; transition: all 0.15s;
+  background: rgba(0,0,0,0.04); color: var(--text-secondary); border: 1px solid transparent;
+  cursor: pointer; transition: all var(--transition);
 }
 .dm-stat strong { font-weight: 600; color: var(--text-primary); }
 .dm-stat:hover { border-color: var(--border-color); }
@@ -604,7 +604,7 @@ onMounted(load)
   flex: 1;
   padding: 7px 12px;
   border: 1px solid var(--border, #e2e6ea);
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 13px;
   background: #fff;
 }
@@ -640,7 +640,7 @@ onMounted(load)
   border: 1px solid var(--border, #e2e6ea);
   border-radius: 8px;
   padding: 14px 18px;
-  background: #fafbfc;
+  background: rgba(0,0,0,0.02);
   margin: 0;
 }
 </style>

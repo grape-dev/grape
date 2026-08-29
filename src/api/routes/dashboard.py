@@ -927,17 +927,51 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")
 
+    # 真实指标统计（替代假数据）
+    metrics = {"total_events": len(recent_events), "active_agents": 0,
+               "pending_events": event_counts["pending"], "failed_events": event_counts["failed"],
+               "auto_resolution": 0.0, "events_week": 0, "avg_response": 0}
+    try:
+        with db_lock:
+            # Auto-Resolution: completed / (completed + failed)
+            c.execute(
+                "SELECT COUNT(*) FROM events WHERE repo_key=? AND status='completed'",
+                (repo_key,)
+            )
+            completed = c.fetchone()[0] or 0
+            c.execute(
+                "SELECT COUNT(*) FROM events WHERE repo_key=? AND status='failed'",
+                (repo_key,)
+            )
+            failed = c.fetchone()[0] or 0
+            total_done = completed + failed
+            metrics["auto_resolution"] = round(completed / total_done * 100, 1) if total_done > 0 else 0.0
+
+            # Events/Week: 最近 7 天事件数
+            c.execute(
+                "SELECT COUNT(*) FROM events WHERE repo_key=? AND created_at >= datetime('now', '-7 days')",
+                (repo_key,)
+            )
+            metrics["events_week"] = c.fetchone()[0] or 0
+
+            # Avg Response: 已完成事件的平均 duration（秒）
+            c.execute(
+                "SELECT AVG(duration) FROM events WHERE repo_key=? AND status='completed' AND duration IS NOT NULL AND duration > 0",
+                (repo_key,)
+            )
+            avg_dur = c.fetchone()[0]
+            metrics["avg_response"] = round(avg_dur, 1) if avg_dur else 0
+    except Exception:
+        pass
+
+    metrics["active_agents"] = sum(1 for a in agent_sessions if a["status"] == "running")
+
     return {
         "repo": repo_key,
         "role": role,
         "dev_scene": dev_scene,
         "_scenes": scenes,
-        "metrics": {
-            "total_events": len(recent_events),
-            "active_agents": sum(1 for a in agent_sessions if a["status"] == "running"),
-            "pending_events": event_counts["pending"],
-            "failed_events": event_counts["failed"],
-        },
+        "metrics": metrics,
         "agents": agent_sessions,
         "agent_engines": agent_engines,
         "scene_nodes": scene_nodes,

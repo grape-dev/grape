@@ -6,7 +6,13 @@
   "logout_title": "退出登录",
   "loading": "加载中...",
   "load_failed": "加载失败",
-  "lobby": {
+"lobby": {
+    "project_title": "项目",
+    "project_sub": "多人协同，打造超级团队",
+    "new_project_btn": "新建项目",
+    "my_projects": "我的项目",
+    "search_placeholder": "搜索项目",
+    "from_template": "从模版创建",
     "refresh_btn": "↻ 刷新",
     "refresh_title": "从 GitCode 刷新仓库列表",
     "hello": "你好，",
@@ -17,7 +23,21 @@
     "empty_title": "未找到匹配的项目",
     "empty_desc": "试试更换关键词或筛选条件。",
     "friend": "朋友",
+    "welcome_back": "欢迎回来，{{name}}",
+    "welcome_tip": "今天也要加油哟！",
     "welcome_to_grape": "欢迎使用 Grape"
+  },
+  "template": {
+    "hello_world": "Hello World 新手模板",
+    "hello_world_desc": "快速上手的入门项目模板",
+    "agent": "Agent 最佳实践",
+    "agent_desc": "Agent 开发与部署的最佳实践示例",
+    "cloud": "云原生项目模板",
+    "cloud_desc": "容器化、K8s 编排的云原生脚手架",
+    "ai_office": "AI office 项目模板",
+    "ai_office_desc": "AI 驱动的办公自动化项目模板",
+    "iac": "IaC 项目模板",
+    "iac_desc": "基础设施即代码的项目模板"
   },
   "card": {
     "enter_project": "进入项目",

@@ -33,7 +33,7 @@
       <!-- 指标卡 -->
       <div class="kpi-row" style="margin-top:14px">
         <div class="kpi-card kpi-blue">
-          <div class="kpi-icon" style="background:#e8f0fe;color:#006eff;">💬</div>
+          <div class="kpi-icon" style="background:rgba(0,107,255,0.08);color:#006eff;">💬</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ a.sessionCount ?? 0 }}</div>
             <div class="kpi-label">会话数</div>
@@ -41,7 +41,7 @@
           </div>
         </div>
         <div class="kpi-card kpi-green">
-          <div class="kpi-icon" style="background:#f6ffed;color:#52c41a;">📦</div>
+          <div class="kpi-icon" style="background:rgba(52,199,89,0.1);color:#34c759;">📦</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ a.repoUsageCount ?? 0 }}</div>
             <div class="kpi-label">使用仓库</div>
@@ -49,15 +49,15 @@
           </div>
         </div>
         <div class="kpi-card" :class="a.loadLevel === 'over' ? 'kpi-pink' : 'kpi-cyan'">
-          <div class="kpi-icon" :style="a.loadLevel === 'over' ? { background: '#fff0f6', color: '#eb2f96' } : { background: '#e6fffb', color: '#13c2c2' }">{{ a.loadLevel === 'over' ? '⚠️' : '📈' }}</div>
+          <div class="kpi-icon" :style="a.loadLevel === 'over' ? { background: 'rgba(255,45,146,0.08)', color: '#ff2d92' } : { background: 'rgba(19,194,194,0.08)', color: '#30b0c7' }">{{ a.loadLevel === 'over' ? '⚠️' : '📈' }}</div>
           <div class="kpi-body">
-            <div class="kpi-value" :style="{ color: a.loadLevel === 'over' ? '#eb2f96' : '#13c2c2' }">{{ fmtLoad }}<span class="kpi-unit">%</span></div>
+            <div class="kpi-value" :style="{ color: a.loadLevel === 'over' ? '#ff2d92' : '#30b0c7' }">{{ fmtLoad }}<span class="kpi-unit">%</span></div>
             <div class="kpi-label">负载率<template v-if="a.loadLevel === 'over'">（超预警！）</template></div>
             <div class="kpi-sub">进行中 {{ a.inFlightTasks ?? 0 }} ÷ (在线引擎 {{ a.onlineRuntimes ?? 0 }} × {{ a.maxConcurrentPerRuntime ?? 20 }})</div>
           </div>
         </div>
         <div class="kpi-card kpi-orange">
-          <div class="kpi-icon" style="background:#fff7e6;color:#fa8c16;">🤖</div>
+          <div class="kpi-icon" style="background:rgba(255,149,0,0.1);color:#ff9500;">🤖</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ a.taskCount ?? 0 }}</div>
             <div class="kpi-label">任务总数</div>
@@ -75,7 +75,7 @@
             <input type="number" min="1" max="100" v-model.number="thresholdInput" class="threshold-input" />
             <span class="t3">%</span>
             <button class="btn" :disabled="savingThreshold || thresholdInput === a.alertThresholdPct" @click="saveThreshold">保存</button>
-            <span v-if="thresholdSaved" class="t3" style="color:#52c41a">✓ 已保存</span>
+            <span v-if="thresholdSaved" class="t3" style="color:#34c759">✓ 已保存</span>
           </div>
         </div>
       </div>
@@ -130,7 +130,7 @@ const taskChartRef = ref(null)
 let chart = null
 
 const agentType = computed(() => route.params.type)
-const iconStyle = computed(() => ({ background: '#e8f0fe', color: '#006eff' }))
+const iconStyle = computed(() => ({ background: 'rgba(0,107,255,0.08)', color: '#006eff' }))
 const subscribeCount = computed(() => {
   try { return (JSON.parse(a.value?.subscribeEvents || '[]') || []).length } catch { return 0 }
 })
@@ -196,7 +196,7 @@ async function saveThreshold() {
   }
 }
 
-const STATUS_COLOR = { queued: '#fa8c16', running: '#006eff', completed: '#52c41a', failed: '#eb2f96' }
+const STATUS_COLOR = { queued: '#ff9500', running: '#006eff', completed: '#34c759', failed: '#ff2d92' }
 const STATUS_ORDER = ['queued', 'running', 'completed', 'failed']
 
 function renderChart(breakdown) {
@@ -210,7 +210,7 @@ function renderChart(breakdown) {
     series: [{
       type: 'pie', radius: ['40%', '70%'], center: ['50%', '45%'],
       label: { show: true, formatter: '{b}\n{c}', fontSize: 11 },
-      data: data.length ? data : [{ name: '暂无数据', value: 0, itemStyle: { color: '#f0f0f0' } }],
+      data: data.length ? data : [{ name: '暂无数据', value: 0, itemStyle: { color: 'rgba(0,0,0,0.04)' } }],
       emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.2)' } }
     }]
   })
@@ -223,25 +223,25 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart &&
 </script>
 
 <style scoped>
-.card { background: #fff; border: 1px solid var(--border-color); border-radius: 10px; box-shadow: var(--card-shadow); padding: 16px 20px; }
-.agent-icon { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; }
-.code-tag { font-size: 11px; font-weight: 500; color: var(--text-tertiary); background: #f5f7fa; border-radius: 4px; padding: 1px 6px; }
-.cat-tag { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+.card { background: #fff; border: 1px solid var(--border-color); border-radius: 14px; box-shadow: var(--card-shadow); padding: 16px 20px; }
+.agent-icon { width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; }
+.code-tag { font-size: 11px; font-weight: 500; color: var(--text-tertiary); background: rgba(0,0,0,0.04); border-radius: 8px; padding: 1px 6px; }
+.cat-tag { font-size: 11px; padding: 1px 8px; border-radius: 14px; }
 .cat-official { background: #e6f4ff; color: #006eff; }
 .desc { font-size: 13px; color: var(--text-secondary); line-height: 1.7; margin: 0; }
 
 .kpi-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .kpi-card {
   flex: 1; min-width: 150px;
-  background: #fff; border-radius: 10px; border: 1px solid var(--border-color);
+  background: #fff; border-radius: 14px; border: 1px solid var(--border-color);
   padding: 16px 18px; box-shadow: var(--card-shadow);
   display: flex; align-items: center; gap: 12px;
 }
 .kpi-blue { border-left: 3px solid #006eff; }
-.kpi-green { border-left: 3px solid #52c41a; }
-.kpi-cyan { border-left: 3px solid #13c2c2; }
-.kpi-orange { border-left: 3px solid #fa8c16; }
-.kpi-pink { border-left: 3px solid #eb2f96; }
+.kpi-green { border-left: 3px solid #34c759; }
+.kpi-cyan { border-left: 3px solid #30b0c7; }
+.kpi-orange { border-left: 3px solid #ff9500; }
+.kpi-pink { border-left: 3px solid #ff2d92; }
 .kpi-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
 .kpi-body { flex: 1; min-width: 0; }
 .kpi-value { font-size: 24px; font-weight: 700; color: var(--text-primary); line-height: 1.2; }
@@ -249,7 +249,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart &&
 .kpi-label { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 .kpi-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; line-height: 1.4; }
 
-.threshold-input { width: 90px; padding: 6px 10px; border: 1px solid var(--border-color); border-radius: 6px; font-size: 14px; }
+.threshold-input { width: 90px; padding: 6px 10px; border: 1px solid var(--border-color); border-radius: 8px; font-size: 14px; }
 
 .chart-card { padding: 0; }
 .chart-title { padding: 14px 18px 0; font-size: 14px; font-weight: 600; color: var(--text-primary); }
@@ -257,23 +257,23 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart &&
 
 .vod-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .vod-table th { text-align: left; padding: 8px 10px; background: #fafafa; font-weight: 600; color: var(--text-secondary); border-bottom: 1px solid var(--border-color); white-space: nowrap; }
-.vod-table td { padding: 8px 10px; border-bottom: 1px solid #f0f0f0; }
-.status-tag { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
-.status-tag.success { background: #f6ffed; color: #52c41a; }
-.status-tag.default { background: #f5f7fa; color: var(--text-tertiary); }
+.vod-table td { padding: 8px 10px; border-bottom: 1px solid var(--border-soft); }
+.status-tag { font-size: 11px; padding: 1px 8px; border-radius: 14px; }
+.status-tag.success { background: rgba(52,199,89,0.1); color: #34c759; }
+.status-tag.default { background: rgba(0,0,0,0.04); color: var(--text-tertiary); }
 
 .sw { position: relative; display: inline-block; width: 38px; height: 21px; flex-shrink: 0; cursor: pointer; }
 .sw input { opacity: 0; width: 0; height: 0; }
 .sw-slider {
   position: absolute; inset: 0; background: #c0c4cc;
-  border: 1px solid #a8adb5; border-radius: 20px; transition: all .2s;
+  border: 1px solid rgba(0,0,0,0.15); border-radius: 20px; transition: all var(--transition);
 }
 .sw-slider::before {
   content: ''; position: absolute; width: 15px; height: 15px; left: 2px; top: 2px;
-  background: #fff; border-radius: 50%; transition: all .2s;
-  box-shadow: 0 1px 2px rgba(0,0,0,.3); border: 1px solid #e2e2e2;
+  background: #fff; border-radius: 50%; transition: all var(--transition);
+  box-shadow: var(--card-shadow); border: 1px solid var(--border-color);
 }
-.sw input:checked + .sw-slider { background: #52c41a; border-color: #52c41a; }
+.sw input:checked + .sw-slider { background: #34c759; border-color: #34c759; }
 .sw input:checked + .sw-slider::before { transform: translateX(17px); }
 .sw input:disabled + .sw-slider { opacity: .5; cursor: not-allowed; }
 
