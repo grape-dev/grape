@@ -56,8 +56,10 @@
         </div>
       </div>
 
+      <!-- 仓库与 Issue + 最近活动 -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
       <!-- 仓库与 Issue -->
-      <div class="card" style="padding:0;margin-bottom:20px">
+      <div class="card" style="padding:0">
           <div class="section-header">
             <h3 class="sh-title">仓库与 Issue</h3>
           </div>
@@ -155,7 +157,7 @@
         </div>
 
       <!-- 最近活动 -->
-      <div class="card" style="padding:0;margin-bottom:20px">
+      <div class="card" style="padding:0">
           <div class="section-header">
             <h3 class="sh-title">最近活动</h3>
             <div class="sh-actions">
@@ -185,7 +187,8 @@
             </table>
             <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
           </div>
-    </div>
+      </div>
+      </div>
 
     <!-- 任务日志弹窗 -->
     <div v-if="logModal.show" class="log-modal-overlay" @click.self="closeLogModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center">
