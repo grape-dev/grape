@@ -57,7 +57,7 @@ def build_task_chat_prompt(user_text, repo_key, history, conv=None,
 #### 2.1.2 `build_general_chat_prompt` 源码
 
 ```python
-parts = [build_chat_role_definition()]                 # ① Role（与 task 相同函数）
+parts = [build_chat_role_definition()]                 # ① Role（general 专属，见 §2.1.6）
 if backend_name:                                       # ② Runtime engine
     parts.append(f"Runtime engine: {backend_name}")
 elif runtime_id:
@@ -77,24 +77,26 @@ parts.append("## GitCode API Access ...")              # ⑧ GitCode API 说明
 parts.append(f"\nUser{repo_note}: {message}\nAssistant:")  # ⑨ 用户消息→Assistant
 ```
 
+> general Role（`build_chat_role_definition`）已精简：不含「创建 Issue 转交流水线」流程、
+> 不含 ISSUE COMMENT FORMAT（回帖格式）——该流程/规则改由 skill 承载（§2.1.6）。
+
 #### 2.1.3 `build_task_chat_prompt` 源码
 
 ```python
 conv = conv or {}; issue_number = conv.get("issue_number") or 0
 parts = []
-parts.append(build_chat_role_definition())             # ① Role（同函数）
+parts.append(build_task_role_definition())             # ① Role（task 专属，见 §2.1.6）
 if user_info:                                          # ② 用户基本信息
     parts.append(user_info)
 parts.extend([f"## 场景: task", f"## 任务背景",          # ③ 场景 + 任务背景
               f"仓库: {repo_key}", f"Issue: #{issue_number}"])
 if runtime_id:                                         # ④ Runtime engine
     ...parts.append(f"Runtime engine: {_be} (runtime_id={runtime_id})")
-parts.append("### 任务边界 ... "                       # ⑤ 任务边界 + A2A 交办规则
-             "严禁 clone/部署/起服务... \n"
-             "### A2A 交办规则 ... sre-deploy→sre ... feature/bug→coding")
-if conv.get("title"): parts.append(f"标题: {conv['title']}")     # ⑥ 标题
-task_desc = _get_task_description(conv)                 # ⑦ 任务描述
+parts.append("### 任务边界 ... "                       # ⑤ 任务边界（澄清+回帖+不实施）
+             "严禁 clone/部署/起服务/修改文件/执行 git 命令")
+task_desc = _get_task_description(conv)                 # ⑥ 任务描述（tasks 表）
 if task_desc: parts.append(f"\n### 任务描述\n{task_desc}")
+if conv.get("title"): parts.append(f"标题: {conv['title']}")     # ⑦ 标题（紧随任务描述）
 try:                                                     # ⑧ Issue 摘要
     issue_summary = get_issue_summary(repo_key)
     if issue_summary: parts.append(f"\n{issue_summary}")
@@ -111,67 +113,57 @@ parts.append("## 使用技能 / Skills: chat /            # ⑫ 使用技能（�
 
 | # | 段落 | general | task | 差异 |
 |---|---|---|---|---|
-| ① | Role Definition | `build_chat_role_definition()` | 同（调用同一函数） | **一致** ✅ |
+| ① | Role Definition | `build_chat_role_definition()` | `build_task_role_definition()` | **各自专属**（task 无"建 Issue"流程，见 §2.1.6） |
 | ② | 用户信息 | `user_info` 注入 | `user_info` 注入 | **一致** ✅ |
 | ③ | 场景/背景 | 无 | `## 场景: task` + `## 任务背景` + 仓库 + Issue | **task 独有** |
 | ④ | Runtime engine | `backend_name`（web）或 `engine_name(runtime_id)` | `engine_name(runtime_id) + (runtime_id=n)` | 信息相同，格式不同（general 走 backend_name 优先） |
 | ⑤ | 事件上下文 | `Repository event context:` + issue_summary | `{issue_summary}`（无前缀标题） | 同数据源，标题格式不同 |
 | ⑥ | 项目知识基线 | `_build_project_info_section(agent_type="chat")` | 同 | **一致** ✅ |
-| ⑦ | 任务边界/A2A | 无 | `### 任务边界` + `### A2A 交办规则` | **task 独有** |
-| ⑧ | 标题 | 无 | `标题: {conv.title}` | **task 独有** |
-| ⑨ | 任务描述 | 无 | `### 任务描述`（tasks 表） | **task 独有**（重点） |
+| ⑦ | 任务边界 | 无 | `### 任务边界`（澄清+回帖+不实施） | **task 独有**（A2A 交办规则已移出到 skill） |
+| ⑧ | 标题 | 无 | `标题: {conv.title}`（位于任务描述之后） | **task 独有** |
+| ⑨ | 任务描述 | 无 | `### 任务描述`（tasks 表，标题紧随其后） | **task 独有**（重点） |
 | ⑩ | 对话历史 | 无 | `## 对话历史`（history[-10:]） | **task 独有**（general 已按 v1.6 移除） |
 | ⑪ | 使用技能 | 官方→占位符 / custom→绝对路径 | 恒 `## 使用技能 / Skills: chat / {{SKILL_DIR}}/chat/SKILL.md` | general 支持动态/自定义技能；task 恒 chat |
 | ⑫ | 用户消息 | `User (in repo): msg\nAssistant:` | `## 本次用户消息\nmsg` | 标题格式不同 |
 | ⑬ | GitCode API 说明 | 有 `## GitCode API Access` | 无 | **general 独有** |
+| ⑭ | 回帖格式/建 Issue 流程/A2A 交办 | ❌ 已移出（skill 承载） | ❌ 已移出（skill 承载） | **一致：均不在 prompt**（§2.1.6） |
 
 #### 2.1.5 关键差异总结（功能层面）
 
-1. **task 独有**：`场景: task`、任务背景、任务边界、A2A 交办规则、标题、任务描述（`### 任务描述`）、对话历史 —— 面向"澄清被分配 Issue 需求并回帖"的职责。
+1. **task 独有**：`场景: task`、任务背景、任务边界、标题、任务描述（`### 任务描述`）、对话历史 —— 面向"澄清被分配 Issue 需求并回帖"的职责。
 2. **general 独有**：`GitCode API Access` 段、动态技能（skill_name/skill_id，可指向 custom/repo 用户技能）。
 3. **task 恒用 chat 技能**、general 可用 web 配置的技能/自定义技能。
-4. 共同段：Role、用户信息、项目知识基线、仓库、Issue 摘要均一致。
+4. **共同段**：用户信息、项目知识基线、仓库、Issue 摘要均一致。
+5. **均由 skill 承载（不在 prompt）**：回帖格式、创建 Issue 流程、A2A 交办规则（§2.1.6）。
 
 #### 2.1.6 Role 语义修正（2026-08-29 处理）
 
-**问题**：`build_task_chat_prompt` 原先复用 general 的 `build_chat_role_definition`，
+**原问题**：`build_task_chat_prompt` 原先复用 general 的 `build_chat_role_definition`，
 其 Role 含「接收任务需求 → **创建 Issue 转交流水线**」流程——但 task 会话是**已被分配 Issue**
 的对话（`conv.issue_number` 已存在），职责是澄清该 Issue 需求并回帖，不是再建新 Issue，
 两者语义错位（已在 §1 讨论中确认）。
 
-**处理**：新增 `build_task_role_definition()`（task 专属 Role，去掉"创建 Issue"流程，突出
-澄清+回帖边界），`build_task_chat_prompt` 改用它；general 仍用 `build_chat_role_definition()`。
+**处理（含本轮 4 点精简）**：
+1. 新增 `build_task_role_definition()`（task 专属 Role，去掉"创建 Issue"流程，突出澄清+回帖边界）；`build_task_chat_prompt` 改用它；general 仍用 `build_chat_role_definition()`。
+2. **删除 general Role 的「任务处理（创建 Issue 转交流水线）」**：该流程改由 skill 承载（避免与 skill 冲突/重复）。
+3. **删除 prompt 中的 ISSUE COMMENT FORMAT（回帖[/RoleName Agent/ 前缀]规则）**：回帖格式在 skill 中已有，prompt 不重复规定，以免与 skill 冲突。
+4. **删除 task 的「A2A 交办规则」段**：A2A 引导由 skill 承载。
+5. **task 标题移到「任务描述」之后**（原在任务边界后）。
 
 #### 2.1.7 处理后两个 Role 的实际 Prompt 内容（代码产出，真实样例）
 
 > 注入参数：`repo_key=org/repo`、`user_info="## 用户基本信息 / GitCode login: u1 / 飞书 昵称：F"`、
 > general: `skill_name=chat, backend_name=opencode`；task: `conv={issue_number:7, title:'优化登录页'}`。
 
-**① general（`build_general_chat_prompt`，最前 Role 段 = `build_chat_role_definition`）**
+**① general（`build_general_chat_prompt`，前段 Role = `build_chat_role_definition`）**
 
 ```
 You are a DevOps operations assistant. Your domain:
 - Code review, build diagnosis, deployment guard, incident triage
 - Issue/PR analysis, changelog generation, repository management
 - Repository (GitCode/GitHub) API operations
-- 任务处理：接收用户任务需求，分析、追问、创建 Issue 转交流水线
 
 You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, writing, meetings, voice, etc.).
-
-## 任务处理（超出你直接能力范围的请求）
-当你收到创建资源、部署服务、开发功能等不能直接执行的任务请求时，按以下流程处理：
-1. 分析需求，提取已知参数（如规格/镜像/网络/磁盘等），明确这是一个什么任务
-2. 如果缺少关键参数（如 ECS 要什么规格、部署到什么环境等），追问用户补充（最多2轮）
-3. 信息足够后 → 用 GitCode API 创建 Issue：
-   - API: POST /repos/{{owner}}/{{repo}}/issues
-   - 标题：简明描述需求（如"创建 2C4G Ubuntu 22.04 ECS"）
-   - 正文：将用户已提供的参数整理为结构化清单（核对表格式），标注来源"飞书用户需求"
-   - 标签：按类型打标签 — sre-deploy（云资源创建/部署运维）、sre-release（资源释放/销毁/回收）、
-     feature（新功能/开发）、bug（缺陷修复）
-4. 创建后告知用户 Issue 编号（附链接）和后续流程预期（VOD 审视 → 开发/部署流水线）
-5. 用户询问进度时（如"ECS 建好了吗"），用 GitCode API 查询 Issue 状态：
-   - GET /repos/{{owner}}/{{repo}}/issues/{{number}} 看当前状态和标签
-   - 也有权查看 Issue 评论了解最新处理进展
 
 Reply rules:
 1. DevOps topic: analyze and reply
@@ -184,9 +176,6 @@ SECURITY (MUST FOLLOW):
 2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.
 3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in GitCode). NEVER try other tokens or workarounds.
 4. NEVER write any token into files, logs, or comments.
-
-ISSUE COMMENT FORMAT (MUST FOLLOW):
-When posting comments to GitCode Issues, the comment body MUST start with `[RoleName Agent]` prefix (e.g. `[Coding Agent]`, `[QA Agent]`, `[SRE Agent]`, `[Issue Agent]`, `[VOD Agent]`). Role name capitalized. NEVER use skill name, repo name, or other custom prefixes.
 Runtime engine: opencode
 ## 用户基本信息
   GitCode login: u1
@@ -214,7 +203,7 @@ User (in org/repo): hello
 Assistant:
 ```
 
-**② task（`build_task_chat_prompt`，最前 Role 段 = `build_task_role_definition`）**
+**② task（`build_task_chat_prompt`，前段 Role = `build_task_role_definition`）**
 
 ```
 You are a DevOps operations assistant. Your domain:
@@ -241,9 +230,6 @@ SECURITY (MUST FOLLOW):
 2. 绝不访问 bot 内部 data/、configs/、sessions.db、user_accounts。
 3. GitCode API 403：停止并用政策性话术告知用户需要权限。
 4. 绝不把 token 写入文件、日志、评论。
-
-ISSUE COMMENT FORMAT (MUST FOLLOW):
-回帖到 GitCode Issue 时，评论开头必须带 `[RoleName Agent]` 前缀。
 ## 用户基本信息
   GitCode login: u1
   飞书 昵称：F
@@ -255,12 +241,6 @@ Issue: #7
 本对话的职责是【澄清被分配 Issue 的需求并回帖】，不是实施/部署/写代码。
 用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。
 严禁 clone/部署/起服务/修改文件/执行 git 命令。
-### A2A 交办规则
-需求澄清完成后，根据 Issue 标签决定 A2A 目标：
-- 标签含 `sre-deploy` → A2A 给 `sre`，context 写明「部署」+ 资源规格
-- 标签含 `sre-release` → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单
-- 标签含 `feature`/`bug` → A2A 给 `coding`
-A2A 时 `pr_number` 仅在当前任务有直接关联的 PR（如 PR 审查后交办）时传入。纯部署/资源释放类请求不传 `pr_number`，否则会触发订阅去重导致 SRE 任务被跳过。
 标题: 优化登录页
 
 ## 项目知识基线（repo 全局）
@@ -276,10 +256,8 @@ Skill 文件：{{SKILL_DIR}}/chat/SKILL.md
 **必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令去完成任务（不得跳过读取或凭空猜测）。
 ```
 
-> 注：上例 task 每段之间可能因 markdown 渲染有折行，实际代码输出是连续字符串；
-> 真实 task 会话中 `### 任务描述`（tasks 表）与 `## 对话历史` 会额外出现（见 §2.1.4 ⑨⑩）。
-
----
+> 注：1）真实 task 会话中 `### 任务描述`（tasks 表，标题紧随其后）与 `## 对话历史` 会出现（见 §2.1.4 ⑦⑩）。
+> 2）A2A 交办规则、回帖 [/RoleName Agent/] 前缀、创建 Issue 流程均已移出 prompt，由对应 skill 承载（§2.1.6）。
 
 ## 3. 调用 runtime：两条路径完全一致
 
