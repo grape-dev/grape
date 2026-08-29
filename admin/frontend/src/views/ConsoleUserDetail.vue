@@ -174,7 +174,7 @@
               <div v-if="selectedRepo" style="margin-top:16px">
                 <table class="vod-table" v-if="repoIssues.length">
                   <thead>
-                    <tr><th>Issue</th><th style="width:45px">任务</th><th style="width:45px">完成</th><th style="width:55px">待处理</th><th style="width:45px">运行中</th><th style="width:45px">失败</th><th style="width:45px">取消</th><th style="width:45px">成功率</th><th style="width:120px">最近活动</th></tr>
+                    <tr><th style="width:25%">Issue</th><th style="width:15%">任务</th><th style="width:15%">成功率</th><th style="width:45%">最近活动</th></tr>
                   </thead>
                   <tbody>
                     <template v-for="iss in repoIssues" :key="iss.issueId">
@@ -182,28 +182,35 @@
                         <td>
                           <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ iss.issueId }}</a>
                         </td>
-                        <td class="t3">{{ iss.taskCount }}</td>
-                        <td class="t3" style="color:#34c759">{{ iss.completed }}</td>
-                        <td class="t3" style="color:#ff9500;cursor:pointer" @click="iss._pendingOpen = !iss._pendingOpen">
-                          {{ (iss.queued ?? 0) + (iss.dispatched ?? 0) + (iss.stuck ?? 0) }}
-                          <span style="font-size:10px">{{ iss._pendingOpen ? '▲' : '▼' }}</span>
+                        <td class="t3" style="cursor:pointer;color:var(--primary)" @click="iss._open = !iss._open">
+                          {{ iss.taskCount }} <span style="font-size:10px">{{ iss._open ? '▲' : '▼' }}</span>
                         </td>
-                        <td class="t3" style="color:#006eff">{{ iss.running ?? 0 }}</td>
-                        <td class="t3" style="color:#ff3b30">{{ iss.failed }}</td>
-                        <td class="t3" style="color:#aeaeb2">{{ iss.cancelled ?? 0 }}</td>
                         <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
                         <td class="t3">{{ formatTime(iss.lastTaskAt) }}</td>
                       </tr>
-                      <tr v-if="iss._pendingOpen" style="background:rgba(255,149,0,0.04)">
-                        <td colspan="9" style="padding:8px 16px">
-                          <span class="t3" style="margin-right:24px">排队中 <b>{{ iss.queued ?? 0 }}</b></span>
-                          <span class="t3" style="margin-right:24px">已派发 <b style="color:#006eff">{{ iss.dispatched ?? 0 }}</b></span>
-                          <span class="t3">卡住 <b style="color:#ff3b30">{{ iss.stuck ?? 0 }}</b></span>
+                      <tr v-if="iss._open" style="background:rgba(0,0,0,0.02)">
+                        <td colspan="4" style="padding:10px 16px">
+                          <div style="display:flex;gap:20px;flex-wrap:wrap">
+                            <span class="t3">已完成 <b style="color:#34c759">{{ iss.completed }}</b></span>
+                            <span class="t3">待处理 <b style="color:#ff9500">{{ (iss.queued ?? 0) + (iss.dispatched ?? 0) + (iss.stuck ?? 0) }}</b></span>
+                            <span class="t3" style="padding-left:12px;border-left:1px solid rgba(0,0,0,0.06)">
+                              <span style="color:var(--text-tertiary)">排队 {{ iss.queued ?? 0 }}</span>
+                            </span>
+                            <span class="t3">
+                              <span style="color:var(--text-tertiary)">派发 {{ iss.dispatched ?? 0 }}</span>
+                            </span>
+                            <span class="t3">
+                              <span style="color:var(--text-tertiary)">卡住 {{ iss.stuck ?? 0 }}</span>
+                            </span>
+                            <span class="t3" style="padding-left:12px;border-left:1px solid rgba(0,0,0,0.06)">运行中 <b style="color:#006eff">{{ iss.running ?? 0 }}</b></span>
+                            <span class="t3">失败 <b style="color:#ff3b30">{{ iss.failed }}</b></span>
+                            <span class="t3">已取消 <b style="color:#aeaeb2">{{ iss.cancelled ?? 0 }}</b></span>
+                          </div>
                         </td>
                       </tr>
                     </template>
                     <tr v-if="!repoIssues.length">
-                      <td colspan="9" style="text-align:center;padding:20px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</td>
+                      <td colspan="4" style="text-align:center;padding:20px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</td>
                     </tr>
                   </tbody>
                 </table>
