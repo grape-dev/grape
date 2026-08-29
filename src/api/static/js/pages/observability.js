@@ -823,12 +823,16 @@ function _bindMermaidClicks(box, iss, evTypes) {
       noteIdx++;
     }
     if (!txt) return;
-    // tooltip：引擎名 + IP（从 engine 名中提取 device_name 查 IP）
+    // tooltip：引擎名 + IP（SVG 用 <title> 子元素显示原生 tooltip）
     const _eng = ev.engine || '';
     const _devName = _eng.split('-').slice(1).join('-');  // opencode-ecs-... → ecs-...
     const _ip = _devIpMap[_devName] || '';
     const _tooltip = _eng + (_ip ? ' (' + _ip + ')' : '');
-    txt.setAttribute('title', _tooltip);
+    if (_tooltip) {
+      const _t = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      _t.textContent = _tooltip;
+      txt.appendChild(_t);
+    }
     if (!ev.taskId) return;
     txt.style.cursor = 'pointer';
     txt.style.textDecoration = 'underline';
