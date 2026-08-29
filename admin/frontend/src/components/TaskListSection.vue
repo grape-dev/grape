@@ -71,6 +71,7 @@
                 </div>
               </th>
               <th style="width:70px">耗时</th>
+              <th v-if="cols.engine" style="width:120px">引擎</th>
               <th style="width:150px" class="sortable-th" @click="toggleSort">
                 创建时间
                 <span class="sort-arrows">
@@ -81,7 +82,7 @@
             </tr></thead>
             <tbody>
               <tr v-if="!(tasks?.content || []).length" style="text-align:center">
-                <td :colspan="7" class="t2" style="padding:28px 0">
+                <td :colspan="visibleColumnCount" class="t2" style="padding:28px 0">
                   <template v-if="(tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
                   <template v-else>
                     无匹配任务
@@ -101,6 +102,7 @@
                 <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
                 <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'running' ? 'warning' : 'default']">{{ t.status }}</span></td>
                 <td class="t3">{{ formatDuration(t.createdAt, t.completedAt) }}</td>
+                <td v-if="cols.engine" class="t3" :title="t.engineName">{{ t.engineName || '—' }}</td>
                 <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
               </tr>
             </tbody>
