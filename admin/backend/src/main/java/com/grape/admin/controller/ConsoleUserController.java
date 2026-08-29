@@ -129,7 +129,44 @@ public class ConsoleUserController {
                 info.put("lastScene", rs.getString("last_scene"));
             }, id);
         } catch (Exception e) { /* ignore */ }
+
+        // 用户活动统计
+        try {
+            Long taskCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=?", Long.class, id);
+            info.put("taskCount", taskCount != null ? taskCount : 0);
+            Long completedCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND status='completed'", Long.class, id);
+            info.put("completedCount", completedCount != null ? completedCount : 0);
+            Long failedCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND status='failed'", Long.class, id);
+            info.put("failedCount", failedCount != null ? failedCount : 0);
+            if (taskCount != null && taskCount > 0 && completedCount != null) {
+                info.put("successRate", Math.round(completedCount * 1000.0 / taskCount) / 10.0 + "%");
+            } else {
+                info.put("successRate", "—");
+            }
+        } catch (Exception e) { /* ignore */ }
+
+        // 托管仓库数
+        try {
+            Long repoCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM managed_repos WHERE repo_key IN (SELECT DISTINCT repo_key FROM agent_tasks WHERE user_id=?)", Long.class, id);
+            info.put("repoCount", repoCount != null ? repoCount : 0);
+        } catch (Exception e) { /* ignore */ }
+
         return info;
+    }
+
+    @PostMapping("/{id}/reset-token")
+    public Map<String, Object> resetToken(@PathVariable int id) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        try {
+            grapeJdbc.update("UPDATE user_accounts SET token_version=token_version+1 WHERE id=?", id);
+            grapeJdbc.update("UPDATE user_accounts SET last_active_at=NULL WHERE id=?", id);
+            result.put("success", true);
+            result.put("message", "已强制下线，用户需要重新登录");
+        } catch (Exception e) {
+            result.put("success", false);
+            result.put("message", "操作失败: " + e.getMessage());
+        }
+        return result;
     }
 
     private boolean isOnline(String lastActiveAt) {
