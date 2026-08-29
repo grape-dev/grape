@@ -44,8 +44,8 @@
               <td class="t3">{{ c.lastIp || '-' }}</td>
               <td class="t3">{{ formatTime(c.createdAt) }}</td>
               <td>
-                <button v-if="c.status === 'active'" class="btn btn-sm" @click="openRevoke(c)">吊销</button>
-                <button v-if="c.status === 'revoked'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(c)">删除</button>
+                <button v-if="c.status === 'active'" class="act-icon-btn" style="color:#fa8c16" @click="openRevoke(c)" title="吊销"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 12l3 3 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                <button v-if="c.status === 'revoked'" class="act-icon-btn" style="color:#e5484d" @click="openDelete(c)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
               </td>
             </tr>
           </tbody>
@@ -69,8 +69,8 @@
             <div class="ellipsis-cell" :title="c.lastIp || '—'"><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ c.lastIp || '—' }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
-            <button v-if="c.status === 'active'" class="btn btn-sm" @click="openRevoke(c)">吊销</button>
-            <button v-if="c.status === 'revoked'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(c)">删除</button>
+            <button v-if="c.status === 'active'" class="act-icon-btn" style="color:#fa8c16" @click="openRevoke(c)" title="吊销"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 12l3 3 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <button v-if="c.status === 'revoked'" class="act-icon-btn" style="color:#e5484d" @click="openDelete(c)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           </div>
         </div>
       </div>
@@ -272,4 +272,7 @@ onMounted(load)
 
 <style scoped>
 /* ===== 工具条 ===== */
+.act-icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 4px; color: var(--text-secondary, #666); display: inline-flex; align-items: center; transition: background 0.15s; }
+.act-icon-btn:hover { background: rgba(0, 107, 255, 0.08); color: var(--primary, #006eff); }
+.act-icon-btn + .act-icon-btn { margin-left: 2px; }
 </style>
