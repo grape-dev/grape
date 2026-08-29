@@ -289,9 +289,11 @@ function renderUserComposition() {
     xAxis: { type: 'category', data: labels, axisLabel: { fontSize: 11, rotate: labels.length > 6 ? 30 : 0 } },
     yAxis: { type: 'value', minInterval: 1 },
     series: [{
-      type: 'bar', data, barMaxWidth: 50,
-      label: { show: true, position: 'top', fontSize: 11 },
-      itemStyle: { color: '#30b0c7', borderRadius: [4, 4, 0, 0] }
+      type: 'line', data, smooth: true, symbol: 'circle', symbolSize: 6,
+      lineStyle: { width: 2, color: '#30b0c7' },
+      itemStyle: { color: '#30b0c7' },
+      areaStyle: { color: 'rgba(48,176,199,0.12)' },
+      label: { show: true, position: 'top', fontSize: 11 }
     }]
   })
 }
