@@ -235,7 +235,6 @@
                 <td><span :style="{ color: healthColor(rt.health), fontWeight: 600 }">{{ rt.health }}</span></td>
                 <td><span :style="{ color: loadColor(rt.running, rt.maxConcurrent) }">{{ rt.running }}/{{ rt.maxConcurrent }}</span></td>
                 <td><span :style="{ color: avgDurColor(rt.avgDuration) }">{{ formatAvgDur(rt.avgDuration) }}</span></td>
-                <td class="t3">{{ rt.workerName || '—' }}<span v-if="rt.workerIp" style="color:var(--text-tertiary);font-size:10px"> ({{ rt.workerIp }})</span></td>
                 <td><span :class="['status-tag', rt.mode === 'local' ? 'info' : 'default']" style="font-size:11px">{{ rt.mode === 'local' ? '本机' : '远端' }}</span></td>
                 <td><span class="status-tag default" style="font-size:11px">{{ rt.scope || 'global' }}</span></td>
                 <td class="t3">{{ formatTime(rt.lastSeenAt) }}</td>
@@ -514,9 +513,20 @@ function toggleIssue(issueId) {
     }
   }
   expandedIssues.value = s
-  // 延迟渲染 mermaid，让浏览器先完成 DOM 更新和 display 切换
+  // 展开时：渲染或重新绑定点击事件
   if (s.has(issueId) && issueViewModes.value[issueId] !== 'events') {
-    setTimeout(() => renderMermaidForIssue(issueId), 50)
+    if (renderedIssues.value.has(issueId)) {
+      // 已渲染过：Vue v-html 重新渲染会丢失 data-task-id 和 onclick，
+      // 需要在 nextTick 后重新绑定
+      const iss = timelineIssues.value.find(i => i.issueId === issueId)
+      if (iss) {
+        const { evTypes } = buildSequence(iss)
+        nextTick(() => bindMermaidClicks(issueId, iss, evTypes))
+      }
+    } else {
+      // 第一次展开：渲染 mermaid
+      setTimeout(() => renderMermaidForIssue(issueId), 50)
+    }
   }
 }
 
@@ -530,9 +540,19 @@ function issueRendered(issueId) {
 
 function setIssueView(issueId, mode) {
   issueViewModes.value = { ...issueViewModes.value, [issueId]: mode }
-  // 切到时序图时，如果还没渲染过就触发渲染
-  if (mode === 'diagram' && !renderedIssues.value.has(issueId)) {
-    setTimeout(() => renderMermaidForIssue(issueId), 50)
+  // 切到时序图时：渲染或重新绑定
+  if (mode === 'diagram') {
+    if (renderedIssues.value.has(issueId)) {
+      // 已渲染过：Vue 重新渲染 v-html 丢失了事件绑定，重新绑定
+      const iss = timelineIssues.value.find(i => i.issueId === issueId)
+      if (iss) {
+        const { evTypes } = buildSequence(iss)
+        nextTick(() => bindMermaidClicks(issueId, iss, evTypes))
+      }
+    } else {
+      // 第一次：渲染 mermaid
+      setTimeout(() => renderMermaidForIssue(issueId), 50)
+    }
   }
 }
 
