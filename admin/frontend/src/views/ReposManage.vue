@@ -110,6 +110,7 @@
           <div class="tl-head" style="cursor:pointer" @click="toggleIssue(iss)">
             <span class="tl-toggle">{{ expandedIssues.has(iss.issueId) ? '▾' : '▸' }}</span>
             <code class="tl-issue">{{ iss.issueId }}</code>
+            <a v-if="timelineRepo.repoKey" :href="issueGitCodeUrl(timelineRepo, iss.issueId)" target="_blank" @click.stop style="color:var(--primary);font-size:12px;text-decoration:none;margin-left:4px" title="在 GitCode 中打开">↗</a>
             <span class="t3 tl-title">{{ iss.title || '（无标题）' }}</span>
             <span class="t3" style="margin-left:auto">{{ iss.events.length }} 个事件</span>
           </div>
@@ -306,6 +307,10 @@ function sceneHint(s) { return SCENE_HINTS[s] || '开发场景（agent-skill-map
 function repoUrl(r) {
   const full = r.fullName || (r.repoKey || '').replace(/^gitcode:/, '')
   return 'https://gitcode.com/' + full
+}
+function issueGitCodeUrl(repo, issueId) {
+  const full = repo.fullName || (repo.repoKey || '').replace(/^gitcode:/, '')
+  return 'https://gitcode.com/' + full + '/issues/' + issueId
 }
 function failRate(r) {
   if (!r.eventCount) return 0

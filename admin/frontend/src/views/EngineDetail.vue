@@ -7,7 +7,7 @@
       </span>
       <h1>引擎详情</h1>
       <span class="badge" :style="badgeStyle(detail?.health)">{{ healthText(detail?.health) }}</span>
-      <span class="t3" style="font-size:12px">{{ detail?.displayName || detail?.name || '' }} · {{ detail?.device || '' }}</span>
+      <span class="t3" style="font-size:12px">{{ detail?.displayName || detail?.name || '' }} · {{ detail?.device || '' }} · {{ detail?.lastIp || '' }}</span>
     </div>
 
     <div class="dashboard" style="padding:20px 28px" v-if="detail">

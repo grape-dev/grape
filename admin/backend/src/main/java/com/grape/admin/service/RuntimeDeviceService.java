@@ -315,6 +315,7 @@ public class RuntimeDeviceService {
             m.put("ownerId", r.getOwnerId());
             // 引擎归属 = 凭据签发人（credential_id → runtime_credentials.owner_name）
             m.put("ownerName", cred == null ? null : cred.getOwnerName());
+            m.put("lastIp", cred == null ? null : cred.getLastIp());
             filtered.add(m);
         }
         // 页头统计随过滤结果变化（与列表保持一致）
@@ -398,6 +399,7 @@ public class RuntimeDeviceService {
                 : (cred.getDeviceName() == null || cred.getDeviceName().isBlank() ? cred.getName() : cred.getDeviceName()));
         engine.put("deviceStatus", cred == null ? null : cred.getStatus());
         engine.put("ownerName", cred == null ? null : cred.getOwnerName());
+        engine.put("lastIp", cred == null ? null : cred.getLastIp());
 
         // 关联任务：按 runtime_id，筛选/排序/分页（对齐 deviceDetail 模式）
         List<AgentTaskRo> engineTasks = taskRepository.findAll().stream()

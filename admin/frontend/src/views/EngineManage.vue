@@ -56,7 +56,7 @@
       <div class="card" v-if="view === 'list'">
         <table class="vod-table">
           <thead>
-            <tr><th>实例名</th><th>类型</th><th>版本</th><th>提供方</th><th>设备</th><th>范围</th><th>归属人</th><th>健康</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
+            <tr><th>实例名</th><th>类型</th><th>版本</th><th>提供方</th><th>设备</th><th>范围</th><th>归属人</th><th>IP</th><th>健康</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="e in engines" :key="e.id">
@@ -67,6 +67,7 @@
               <td>{{ e.device || '-' }}</td>
               <td><span class="status-tag info">{{ scopeText(e.scope) }}</span></td>
               <td>{{ e.ownerName || '—' }}</td>
+              <td class="t3">{{ e.lastIp || '—' }}</td>
               <td><span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
               <td class="t3">{{ formatTime(e.lastSeenAt) }}</td>
               <td>
@@ -95,6 +96,7 @@
             <div class="ellipsis-cell" :title="e.version || '-'"><span class="t3" style="display:inline-block;min-width:46px">版本</span> {{ e.version || '-' }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(e.lastSeenAt) }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ e.ownerName || '—' }}</div>
+            <div class="ellipsis-cell" :title="e.lastIp || '—'"><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ e.lastIp || '—' }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
             <button class="btn btn-sm" @click="openDetail(e)">详情</button>
