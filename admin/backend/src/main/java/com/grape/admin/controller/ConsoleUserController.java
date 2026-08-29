@@ -135,90 +135,22 @@ public class ConsoleUserController {
 
         // 用户活动统计（按状态机6个标准status值，对齐 observability）
         try {
-            String issueFilter = " AND t.issue_id IS NOT NULL AND t.issue_id<>''";
-            String baseJoin = " FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?";
-            String stdStatus = " AND t.status IN ('queued','dispatched','running','completed','failed','cancelled')";
-            // taskCount 只统计6个标准status
-            Long taskCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + stdStatus, Long.class, id);
-            info.put("taskCount", taskCount != null ? taskCount : 0);
-            Long issueTaskCount = taskCount;
-            info.put("issueTaskCount", issueTaskCount != null ? issueTaskCount : 0);
-            Long chatTaskCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + " AND (t.issue_id IS NULL OR t.issue_id='')", Long.class, id);
-            info.put("chatTaskCount", chatTaskCount != null ? chatTaskCount : 0);
-            Long issueCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(DISTINCT t.issue_id)" + baseJoin + issueFilter, Long.class, id);
-            info.put("issueCount", issueCount != null ? issueCount : 0);
-            // 6个标准状态计数
-            Long queuedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='queued'", Long.class, id);
-            info.put("queuedCount", queuedCount != null ? queuedCount : 0);
-            Long dispatchedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='dispatched'", Long.class, id);
-            info.put("dispatchedCount", dispatchedCount != null ? dispatchedCount : 0);
-            Long runningCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='running'", Long.class, id);
-            info.put("runningCount", runningCount != null ? runningCount : 0);
-            Long completedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='completed'", Long.class, id);
-            info.put("completedCount", completedCount != null ? completedCount : 0);
-            Long failedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='failed'", Long.class, id);
-            info.put("failedCount", failedCount != null ? failedCount : 0);
-            Long cancelledCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='cancelled'", Long.class, id);
-            info.put("cancelledCount", cancelledCount != null ? cancelledCount : 0);
-            // 进行中 = dispatched + running
-            long inProgress = (dispatchedCount != null ? dispatchedCount : 0) + (runningCount != null ? runningCount : 0);
-            info.put("inProgressCount", inProgress);
-            // 卡住 = running 且超22分钟
-            Long stuckCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE)", Long.class, id);
-            info.put("stuckCount", stuckCount != null ? stuckCount : 0);
-            if (taskCount != null && taskCount > 0 && completedCount != null) {
-                info.put("successRate", Math.round(completedCount * 1000.0 / taskCount) / 10.0 + "%");
-            } else {
-                info.put("successRate", "—");
-            }
         } catch (Exception e) { /* ignore */ }
 
         // 仓库 × Issue 矩阵（Issue 分析 tab 用）
         try {
             List<Map<String, Object>> repoMatrix = grapeJdbc.query(
-                "SELECT m.full_name, m.repo_key, " +
-                "COUNT(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status IN ('queued','dispatched','running','completed','failed','cancelled') THEN 1 END) as task_count, " +
-                "COUNT(DISTINCT CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN t.issue_id END) as issue_count, " +
-                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='queued' THEN 1 ELSE 0 END) as queued, " +
-                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='dispatched' THEN 1 ELSE 0 END) as dispatched, " +
-                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='running' THEN 1 ELSE 0 END) as running, " +
-                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='completed' THEN 1 ELSE 0 END) as completed, " +
-                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='failed' THEN 1 ELSE 0 END) as failed, " +
-                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
-                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE) THEN 1 ELSE 0 END) as stuck " +
-                "FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "SELECT m.full_name, m.repo_key " +
+                "FROM managed_repos m " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "GROUP BY m.full_name, m.repo_key ORDER BY task_count DESC",
+                "ORDER BY m.full_name",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
                     r.put("fullName", rs2.getString("full_name"));
                     r.put("repoKey", rs2.getString("repo_key"));
-                    r.put("taskCount", rs2.getInt("task_count"));
-                    r.put("issueCount", rs2.getInt("issue_count"));
-                    r.put("completed", rs2.getInt("completed"));
-                    r.put("failed", rs2.getInt("failed"));
-                    r.put("queued", rs2.getInt("queued"));
-                    r.put("dispatched", rs2.getInt("dispatched"));
-                    r.put("running", rs2.getInt("running"));
-                    r.put("cancelled", rs2.getInt("cancelled"));
-                    r.put("stuck", rs2.getInt("stuck"));
                     return r;
                 }, id);
             info.put("repoMatrix", repoMatrix);
-            info.put("repoCount", repoMatrix.size());
         } catch (Exception e) { /* ignore */ }
 
         // 最近活动（最近 5 条任务）
