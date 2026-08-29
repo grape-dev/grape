@@ -278,11 +278,13 @@ public class ConsoleUserController {
         try {
             List<Map<String, Object>> recentPending = grapeJdbc.query(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at " +
+                "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
+                "ar.name as engine_name " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND t.status IN ('dispatched','running') " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
+                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "WHERE u.id=? AND t.status IN ('dispatched','running') " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
@@ -296,6 +298,11 @@ public class ConsoleUserController {
                     r.put("skill", rs2.getString("skill"));
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
+                    r.put("eventType", rs2.getString("event_type"));
+                    r.put("engine", rs2.getString("engine_name"));
+                    String sa = rs2.getString("started_at");
+                    String ca = rs2.getString("completed_at");
+                    r.put("duration", calcDuration(sa, ca));
                     r.put("status", "pending");
                     return r;
                 }, id);
@@ -306,11 +313,13 @@ public class ConsoleUserController {
         try {
             List<Map<String, Object>> recentFailed = grapeJdbc.query(
                 "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at " +
+                "t.agent_type, t.skill, t.started_at, t.completed_at, t.event_type, t.runtime_id, " +
+                "ar.name as engine_name " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND t.status='failed' " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
+                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "WHERE u.id=? AND t.status='failed' " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
@@ -324,6 +333,11 @@ public class ConsoleUserController {
                     r.put("skill", rs2.getString("skill"));
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
+                    r.put("eventType", rs2.getString("event_type"));
+                    r.put("engine", rs2.getString("engine_name"));
+                    String sa = rs2.getString("started_at");
+                    String ca = rs2.getString("completed_at");
+                    r.put("duration", calcDuration(sa, ca));
                     r.put("status", "failed");
                     return r;
                 }, id);
@@ -409,5 +423,21 @@ public class ConsoleUserController {
             result.put("message", "操作失败: " + e.getMessage());
         }
         return result;
+    }
+
+    private String calcDuration(String startedAt, String completedAt) {
+        if (startedAt == null || completedAt == null) return "—";
+        try {
+            String s = startedAt.replace("T", " ");
+            String c = completedAt.replace("T", " ");
+            if (s.length() > 19) s = s.substring(0, 19);
+            if (c.length() > 19) c = c.substring(0, 19);
+            java.sql.Timestamp start = java.sql.Timestamp.valueOf(s);
+            java.sql.Timestamp end = java.sql.Timestamp.valueOf(c);
+            long durationSec = (end.getTime() - start.getTime()) / 1000;
+            return durationSec + "s";
+        } catch (Exception e) {
+            return "—";
+        }
     }
 }
