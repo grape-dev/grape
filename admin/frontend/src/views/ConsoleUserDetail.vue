@@ -240,9 +240,7 @@ const loading = ref(true)
 const resetting = ref(false)
 const activityFilter = ref('recent')
 const showActivityHelp = ref(false)
-const runtimeExpanded = ref({})
 const selectedRepo = ref('')
-const pendingDetailOpen = ref(false)
 const logModal = ref({ show: false, loading: false, messages: [], info: {} })
 const diagramRefs = {}
 const renderedIssues = ref(new Set())
@@ -257,14 +255,7 @@ function issueSvg(issueId) {
   return issueSvgs.value[issueId] || ''
 }
 
-const pendingTotal = computed(() => {
-  if (!selectedRepoData.value) return 0
-  return (selectedRepoData.value.queued ?? 0) + (selectedRepoData.value.dispatched ?? 0) + (selectedRepoData.value.stuck ?? 0)
-})
 
-function togglePendingDetail() {
-  pendingDetailOpen.value = !pendingDetailOpen.value
-}
 async function openLogModal(taskId, t) {
   logModal.value = { show: true, loading: true, messages: [], info: { issueId: t.issueId, repoKey: t.repoName ? 'gitcode:' + t.repoName : '', agentType: t.agentType, skill: t.skill, engine: t.engine, status: t.status } }
   try {
@@ -696,11 +687,6 @@ watch(() => info.value.repoMatrix, (val) => {
 .cred-chip-status { font-size: 10px; color: var(--text-tertiary); }
 .cred-chip.on .cred-chip-status { color: var(--success); }
 
-.activity-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
-.repo-summary-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
-.activity-card { text-align: center; padding: 14px 6px; background: rgba(0,0,0,0.02); border-radius: 10px; }
-.activity-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
-.activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
 /* Issue 卡片列表（对齐健康中心 tl-* 样式 + 苹果风格优化） */
 .tl-issue { border: 1px solid var(--border-color); border-radius: var(--radius); overflow: hidden; margin-bottom: 10px; transition: var(--transition); }
 .tl-issue:hover { box-shadow: var(--card-shadow); transform: translateY(-1px); }
@@ -729,8 +715,6 @@ watch(() => info.value.repoMatrix, (val) => {
 .tl-row-ok td { background: rgba(52,199,89,0.03) !important; }
 .tl-row-clickable { cursor: pointer; transition: var(--transition); }
 .tl-row-clickable:hover td { background: rgba(0,107,255,0.03) !important; }
-.act-icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 4px; color: var(--text-secondary); display: inline-flex; align-items: center; transition: var(--transition); }
-.act-icon-btn:hover { background: rgba(0,107,255,0.08); color: var(--primary); }
 /* 任务日志弹窗（对齐健康中心 log-* 样式） */
 .log-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .log-modal-overlay.log-layer { z-index: 1200; }
@@ -758,17 +742,4 @@ watch(() => info.value.repoMatrix, (val) => {
 .log-type-tool_use .log-content { color: #ea5a0c; } .log-type-error .log-content { color: #dc2828; }
 .log-type-done .log-content { color: #1ca44c; }
 
-.timeline { display: flex; flex-direction: column; gap: 0; }
-.timeline-item { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border-soft); }
-.timeline-item:last-child { border-bottom: none; }
-.timeline-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
-.timeline-dot.completed { background: #34c759; }
-.timeline-dot.failed { background: #ff3b30; }
-.timeline-dot.pending { background: #ff9500; }
-.timeline-content { flex: 1; min-width: 0; }
-.timeline-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.timeline-repo { font-size: 13px; font-weight: 500; color: var(--text-primary); }
-.timeline-issue { font-size: 11px; color: var(--primary); background: rgba(0,107,255,0.06); padding: 1px 6px; border-radius: 6px; text-decoration: none; cursor: pointer; }
-.timeline-issue:hover { background: rgba(0,107,255,0.12); }
-.timeline-meta { display: flex; gap: 12px; margin-top: 2px; font-size: 11px; }
 </style>
