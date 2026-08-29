@@ -1,5 +1,5 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
-import json, asyncio, tempfile, os, threading
+import json, asyncio, tempfile, os, threading, time
 
 from src.config import WORKSPACE_DIR, log
 from src.prompt_builder import build_general_chat_prompt
@@ -544,6 +544,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             if not _CHAT_AGENT_SEMAPHORE.acquire(blocking=True):
                 log.warning(f"[Agent:chat|user:{user['username']}] semaphore NOT acquired (exhausted)")
                 return
+            collected = []
+            worker_error = ""
             try:
                 for evt_type, data in stream_agent(
                     prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=runtime_session_id,
@@ -555,6 +557,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     if evt_type == "step_start":
                         log.info(f"  ▶ {data}")
                     elif evt_type == "text":
+                        t = data.get("text", "") if isinstance(data, dict) else str(data)
+                        if t:
+                            collected.append(t)
                         log.info(f"  💬 {data[:120]}")
                     elif evt_type == "reasoning":
                         log.info(f"  🤔 {data[:120]}")
@@ -574,8 +579,24 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 import traceback as _tb
                 log.warning(f"[Agent:chat|user:{user['username']}] agent_worker EXC: {e}")
                 _tb.print_exc()
-                q.put_nowait(("error", str(e)))
+                worker_error = str(e)
+                q.put_nowait(("error", e))
             finally:
+                # 汇总回复并落库 + 回写 session——不依赖 event_stream 是否被客户端取消，
+                # 保证即使 SSE 断连，回复与会话也已持久化/刷新（修复死 session 永驻）。
+                #（chat-prompt-history-injection-design.md §5.3）
+                try:
+                    final_text = "".join(collected).strip()
+                    if not final_text and not worker_error:
+                        final_text = f"收到您的消息：「{message}」\n\n当前使用 {backend_name} 后端处理。"
+                    if final_text:
+                        add_message(conv_id, "agent", final_text)
+                        touch_conversation(conv_id)
+                        # 恒回写新 session（覆盖可能过期的旧值）
+                        if captured_session:
+                            update_conversation(conv_id, runtime_session_id=captured_session)
+                except Exception as e:
+                    log.warning(f"[Agent:chat|user:{user['username']}] persist reply failed: {e}")
                 log.info(f"[Agent:chat|user:{user['username']}] agent_worker finished")
                 q.put_nowait(None)
                 _CHAT_AGENT_SEMAPHORE.release()
@@ -585,6 +606,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
         yield f"data: {json.dumps({'type': '思考中', 'text': '正在连接后端...', 'conversation_id': conv_id})}\n\n"
 
         final_text = ""
+        _last_sse = 0.0
         while True:
             # 看门狗：Agent 长时间无输出（如 opencode 卡住/超慢）时主动报错，
             # 避免 SSE 流一直挂着直到连接被代理/浏览器掐断 → 前端落到无意义兜底
@@ -601,6 +623,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                 text = data.get("text", "") if isinstance(data, dict) else str(data)
                 if text:
                     final_text += text
+                    _last_sse = time.time()
                     yield f"data: {json.dumps({'type': '生成中', 'text': final_text, 'conversation_id': conv_id})}\n\n"
             elif evt_type == "error":
                 err_msg = str(data)
@@ -612,17 +635,17 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     if done_text:
                         final_text = done_text
                 break
+            # SSE 心跳：长时间无事件时主动发 ping，防止代理/浏览器因 idle 掐断长连接
+            elif _last_sse and (time.time() - _last_sse) > 15:
+                _last_sse = time.time()
+                yield f": ping\n\n"
 
         if not final_text:
-            final_text = f"收到您的消息：「{body.message}」\n\n当前使用 {backend_name} 后端处理。"
+            final_text = f"收到您的消息：「{message}」\n\n当前使用 {backend_name} 后端处理。"
 
-        add_message(conv_id, "agent", final_text)
-        touch_conversation(conv_id)
-        # web→飞书推送（feishu-web-chat-unified-design.md §3.2）
+        # 回复/落库与 session 回写已由 agent_worker 完成（见 finally）：
+        # event_stream 仅负责把最终文本推回前端；但若被取消，此处也不会执行（回复仍已持久化）。
         await _push_reply_to_feishu(conv, user, final_text)
-        # Save opencode session ID for continuity：恒回写新 session（覆盖可能过期的旧值）
-        if captured_session:
-            update_conversation(conv_id, runtime_session_id=captured_session)
         yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
 
     return StreamingResponse(
