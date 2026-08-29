@@ -799,6 +799,14 @@ function _bindMermaidClicks(box, iss, evTypes) {
   if (!events.length) return;
   const svg = box.querySelector('svg');
   if (!svg) return;
+  // 构建 device_name → IP 映射（从 ops/overview workers 数据）
+  const _devIpMap = {};
+  try {
+    const _workers = (_obsData.ops && _obsData.ops.workers && _obsData.ops.workers.list) || [];
+    _workers.forEach(w => {
+      if (w.device_name) _devIpMap[w.device_name] = w.last_ip || '';
+    });
+  } catch(e) {}
   // 分别取 message 和 note 的 text 元素
   const msgTexts = Array.from(svg.querySelectorAll('text.messageText'));
   const noteTexts = Array.from(svg.querySelectorAll('text.noteText'));
@@ -814,7 +822,14 @@ function _bindMermaidClicks(box, iss, evTypes) {
       txt = noteTexts[noteIdx];
       noteIdx++;
     }
-    if (!txt || !ev.taskId) return;
+    if (!txt) return;
+    // tooltip：引擎名 + IP（从 engine 名中提取 device_name 查 IP）
+    const _eng = ev.engine || '';
+    const _devName = _eng.split('-').slice(1).join('-');  // opencode-ecs-... → ecs-...
+    const _ip = _devIpMap[_devName] || '';
+    const _tooltip = _eng + (_ip ? ' (' + _ip + ')' : '');
+    txt.setAttribute('title', _tooltip);
+    if (!ev.taskId) return;
     txt.style.cursor = 'pointer';
     txt.style.textDecoration = 'underline';
     txt.style.fill = 'var(--a)';
@@ -829,6 +844,18 @@ function _bindMermaidClicks(box, iss, evTypes) {
 function renderTimelineList(container, issues, repoKey) {
   if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">暂无任务事件</div>'; return; }
   _timelineIssues = issues;
+  // 构建 device_name → IP 映射（从 ops/overview workers 数据）
+  const _devIpMap = {};
+  try {
+    const _workers = (_obsData.ops && _obsData.ops.workers && _obsData.ops.workers.list) || [];
+    _workers.forEach(w => { if (w.device_name) _devIpMap[w.device_name] = w.last_ip || ''; });
+  } catch(e) {}
+  function _engineWithIp(engine) {
+    if (!engine) return '-';
+    const _devName = engine.split('-').slice(1).join('-');
+    const _ip = _devIpMap[_devName];
+    return _ip ? engine + ' (' + _ip + ')' : engine;
+  }
   // 构建 GitCode issue URL：repoKey=gitcode:requiredsa/hello-flask → https://gitcode.com/requiredsa/hello-flask/issues/N
   const _repoPath = (repoKey || '').replace(/^gitcode:/, '');
   function _issueUrl(issueId) {
@@ -868,7 +895,7 @@ function renderTimelineList(container, issues, repoKey) {
       const enc = ev.taskId ? encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''})) : '';
       const clickable = ev.taskId ? 'cursor:pointer' : '';
       const onclick = ev.taskId ? " onclick=\"openTaskLogModal('" + ev.taskId + "','" + enc + "')\"" : '';
-      return '<tr style="' + clickable + '"' + onclick + '><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + (ev.engine||'-') + '</td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + (ev.createdAt||'').substring(0,19) + '</td></tr>';
+      return '<tr style="' + clickable + '"' + onclick + '><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + _engineWithIp(ev.engine) + '</td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + (ev.createdAt||'').substring(0,19) + '</td></tr>';
     }).join('');
     html += '</tbody></table></div>';
     html += '</div></div>';
