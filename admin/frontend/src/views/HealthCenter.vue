@@ -214,12 +214,15 @@
           <div class="hc-section-title">Runtime 引擎</div>
           <table class="vod-table">
             <thead>
-              <tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>模式</th><th>范围</th><th>最后心跳</th></tr>
+              <tr><th>引擎</th><th>版本</th><th>设备</th><th>归属人</th><th>IP</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>模式</th><th>范围</th><th>最后心跳</th></tr>
             </thead>
             <tbody>
               <tr v-for="rt in runtimesList" :key="rt.id" class="tl-row-clickable" @click="openRtTasksModal(rt)">
                 <td><span class="hc-health-dot" :style="{ background: healthColor(rt.health) }"></span> <b>{{ rt.name }}</b></td>
                 <td class="t3">{{ rt.version || '—' }}</td>
+                <td class="t3">{{ rt.device || '—' }}</td>
+                <td class="t3">{{ rt.ownerName || '—' }}</td>
+                <td class="t3">{{ rt.lastIp || '—' }}</td>
                 <td><span :style="{ color: healthColor(rt.health), fontWeight: 600 }">{{ rt.health }}</span></td>
                 <td><span :style="{ color: loadColor(rt.running, rt.maxConcurrent) }">{{ rt.running }}/{{ rt.maxConcurrent }}</span></td>
                 <td><span :style="{ color: avgDurColor(rt.avgDuration) }">{{ formatAvgDur(rt.avgDuration) }}</span></td>
@@ -228,7 +231,7 @@
                 <td class="t3">{{ formatTime(rt.lastSeenAt) }}</td>
               </tr>
               <tr v-if="runtimesList.length === 0">
-                <td colspan="8" style="text-align:center;padding:32px;color:var(--text-tertiary)">暂无引擎数据</td>
+                <td colspan="11" style="text-align:center;padding:32px;color:var(--text-tertiary)">暂无引擎数据</td>
               </tr>
             </tbody>
           </table>

@@ -92,6 +92,21 @@ public class HealthCenterController {
                     (org.springframework.jdbc.core.RowCallbackHandler) rs -> avgDurations.put(rs.getInt(1), Math.round(rs.getDouble(2) * 10) / 10.0));
         } catch (Exception e) { /* ignore */ }
 
+        // 查 runtime_credentials 构建 credentialId → {deviceName, ownerName, lastIp} 映射
+        Map<Integer, Map<String, String>> credMap = new HashMap<>();
+        try {
+            grapeJdbc.query("SELECT id, device_name, owner_name, last_ip, name FROM runtime_credentials",
+                    rs -> {
+                        Map<String, String> m = new HashMap<>();
+                        String devName = rs.getString("device_name");
+                        String name = rs.getString("name");
+                        m.put("deviceName", (devName == null || devName.isBlank()) ? name : devName);
+                        m.put("ownerName", rs.getString("owner_name"));
+                        m.put("lastIp", rs.getString("last_ip"));
+                        credMap.put(rs.getInt("id"), m);
+                    });
+        } catch (Exception e) { /* ignore */ }
+
         List<Map<String, Object>> runtimeList = new ArrayList<>();
         java.util.concurrent.atomic.AtomicInteger rtOnline = new java.util.concurrent.atomic.AtomicInteger(0);
         try {
@@ -127,6 +142,10 @@ public class HealthCenterController {
                         r.put("lastSeenAt", lastSeen);
                         r.put("credentialId", cid);
                         r.put("scope", rs.getString("scope"));
+                        Map<String, String> cred = credMap.getOrDefault(cid, new HashMap<>());
+                        r.put("device", cred.get("deviceName"));
+                        r.put("ownerName", cred.get("ownerName"));
+                        r.put("lastIp", cred.get("lastIp"));
                         runtimeList.add(r);
                         if ("online".equals(health)) rtOnline.incrementAndGet();
                     });
