@@ -72,8 +72,8 @@
               <td><span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
               <td class="t3">{{ formatTime(e.lastSeenAt) }}</td>
               <td>
-                <button class="btn btn-sm" @click="openDetail(e)">详情</button>
-                <button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button>
+                <button class="act-icon-btn" @click="openDetail(e)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+                <button v-if="e.status === 'offline'" class="act-icon-btn" style="color:#e5484d" @click="openDelete(e)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
               </td>
             </tr>
           </tbody>
@@ -101,8 +101,8 @@
             <div><span class="t3" style="display:inline-block;min-width:46px">任务</span> {{ e.taskCount ?? 0 }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
-            <button class="btn btn-sm" @click="openDetail(e)">详情</button>
-            <button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button>
+            <button class="act-icon-btn" @click="openDetail(e)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+            <button v-if="e.status === 'offline'" class="act-icon-btn" style="color:#e5484d" @click="openDelete(e)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           </div>
         </div>
       </div>
@@ -270,4 +270,7 @@ onMounted(() => { load(); loadDevices() })
 .em-stat.on { background: var(--primary-bg); color: var(--primary); border-color: var(--primary); }
 .em-stat.on strong { color: var(--primary); }
 .em-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.act-icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 4px; color: var(--text-secondary, #666); display: inline-flex; align-items: center; transition: background 0.15s; }
+.act-icon-btn:hover { background: rgba(0, 107, 255, 0.08); color: var(--primary, #006eff); }
+.act-icon-btn + .act-icon-btn { margin-left: 2px; }
 </style>
