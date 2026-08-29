@@ -130,42 +130,31 @@ public class ConsoleUserController {
             }, id);
         } catch (Exception e) { /* ignore */ }
 
-        // 用户活动统计（通过 repo_owner 关联仓库再关联任务，因为 agent_tasks.user_id 大量为 0）
+        // 用户活动统计（通过 repo_owner 关联仓库再关联任务，只统计 Issue 任务，排除对话任务）
         try {
+            String issueFilter = " AND t.issue_id IS NOT NULL AND t.issue_id<>''";
+            String baseJoin = " FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?";
             Long taskCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*) FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter, Long.class, id);
             info.put("taskCount", taskCount != null ? taskCount : 0);
-            Long issueTaskCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*) FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>''", Long.class, id);
+            Long issueTaskCount = taskCount;
             info.put("issueTaskCount", issueTaskCount != null ? issueTaskCount : 0);
             Long chatTaskCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*) FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND (t.issue_id IS NULL OR t.issue_id='')", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + " AND (t.issue_id IS NULL OR t.issue_id='')", Long.class, id);
             info.put("chatTaskCount", chatTaskCount != null ? chatTaskCount : 0);
             Long issueCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(DISTINCT t.issue_id) FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>''", Long.class, id);
+                "SELECT COUNT(DISTINCT t.issue_id)" + baseJoin + issueFilter, Long.class, id);
             info.put("issueCount", issueCount != null ? issueCount : 0);
             Long completedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*) FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND t.exit_code=0 AND t.completed_at IS NOT NULL", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.exit_code=0 AND t.completed_at IS NOT NULL", Long.class, id);
             info.put("completedCount", completedCount != null ? completedCount : 0);
             Long failedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*) FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND t.exit_code>0", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.exit_code>0", Long.class, id);
             info.put("failedCount", failedCount != null ? failedCount : 0);
             Long pendingCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*) FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND (t.exit_code IS NULL OR t.completed_at IS NULL)", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND (t.exit_code IS NULL OR t.completed_at IS NULL)", Long.class, id);
             info.put("pendingCount", pendingCount != null ? pendingCount : 0);
             if (taskCount != null && taskCount > 0 && completedCount != null) {
                 info.put("successRate", Math.round(completedCount * 1000.0 / taskCount) / 10.0 + "%");
@@ -235,6 +224,7 @@ public class ConsoleUserController {
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
+                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -271,6 +261,7 @@ public class ConsoleUserController {
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
                 "AND (t.exit_code IS NULL OR t.completed_at IS NULL) " +
+                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -298,6 +289,7 @@ public class ConsoleUserController {
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
                 "AND t.exit_code>0 " +
+                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
