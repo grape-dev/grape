@@ -130,21 +130,42 @@ public class ConsoleUserController {
             }, id);
         } catch (Exception e) { /* ignore */ }
 
-        // 用户活动统计
+        // 用户活动统计（通过 repo_owner 关联仓库再关联任务，因为 agent_tasks.user_id 大量为 0）
         try {
-            Long taskCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=?", Long.class, id);
+            Long taskCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*) FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?", Long.class, id);
             info.put("taskCount", taskCount != null ? taskCount : 0);
-            Long issueTaskCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND issue_id IS NOT NULL AND issue_id<>''", Long.class, id);
+            Long issueTaskCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*) FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>''", Long.class, id);
             info.put("issueTaskCount", issueTaskCount != null ? issueTaskCount : 0);
-            Long chatTaskCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND (issue_id IS NULL OR issue_id='')", Long.class, id);
+            Long chatTaskCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*) FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND (t.issue_id IS NULL OR t.issue_id='')", Long.class, id);
             info.put("chatTaskCount", chatTaskCount != null ? chatTaskCount : 0);
-            Long issueCount = grapeJdbc.queryForObject("SELECT COUNT(DISTINCT issue_id) FROM agent_tasks WHERE user_id=? AND issue_id IS NOT NULL AND issue_id<>''", Long.class, id);
+            Long issueCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(DISTINCT t.issue_id) FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>''", Long.class, id);
             info.put("issueCount", issueCount != null ? issueCount : 0);
-            Long completedCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND exit_code=0 AND completed_at IS NOT NULL", Long.class, id);
+            Long completedCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*) FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND t.exit_code=0 AND t.completed_at IS NOT NULL", Long.class, id);
             info.put("completedCount", completedCount != null ? completedCount : 0);
-            Long failedCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND exit_code>0", Long.class, id);
+            Long failedCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*) FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND t.exit_code>0", Long.class, id);
             info.put("failedCount", failedCount != null ? failedCount : 0);
-            Long pendingCount = grapeJdbc.queryForObject("SELECT COUNT(*) FROM agent_tasks WHERE user_id=? AND (exit_code IS NULL OR completed_at IS NULL)", Long.class, id);
+            Long pendingCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*) FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? AND (t.exit_code IS NULL OR t.completed_at IS NULL)", Long.class, id);
             info.put("pendingCount", pendingCount != null ? pendingCount : 0);
             if (taskCount != null && taskCount > 0 && completedCount != null) {
                 info.put("successRate", Math.round(completedCount * 1000.0 / taskCount) / 10.0 + "%");
@@ -153,12 +174,11 @@ public class ConsoleUserController {
             }
         } catch (Exception e) { /* ignore */ }
 
-        // 关联仓库（通过 agent_tasks.repo_key 关联 managed_repos）
+        // 关联仓库（通过 repo_owner 关联）
         try {
             List<Map<String, Object>> repos = grapeJdbc.query(
                 "SELECT DISTINCT m.repo_key, m.full_name FROM managed_repos m " +
-                "INNER JOIN agent_tasks t ON m.repo_key = t.repo_key OR m.repo_key = CONCAT('gitcode:', t.repo_key) OR t.repo_key = CONCAT('gitcode:', m.repo_key) " +
-                "WHERE t.user_id=? ORDER BY m.full_name",
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? ORDER BY m.full_name",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
                     r.put("repoKey", rs2.getString("repo_key"));
