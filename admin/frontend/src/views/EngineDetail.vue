@@ -58,190 +58,7 @@
       </div>
 
       <!-- 关联任务 -->
-      <div class="card" style="margin-top:16px;padding:0">
-        <div class="section-header">
-          <h5 class="sh-title">关联任务 <span class="sh-count">共 {{ detail.tasks?.totalElements ?? 0 }} 条<span v-if="filterCount">（已筛选 {{ filterCount }} 条）</span></span></h5>
-          <div class="sh-actions">
-            <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
-          </div>
-        </div>
-        <div style="padding:14px 20px">
-
-        <!-- 任务状态统计卡（kpi 色带卡片，对齐 AgentManage/Overview 体系） -->
-        <div class="task-stat-cards">
-          <div class="task-stat-card kpi-primary">
-            <div class="task-stat-num primary">{{ taskTotal }}</div>
-            <div class="task-stat-label">任务总数</div>
-          </div>
-          <div v-for="s in taskStatList" :key="s.key" class="task-stat-card" :style="{ borderLeftColor: s.color }">
-            <div class="task-stat-num" :style="{ color: s.color }">{{ s.count }}</div>
-            <div class="task-stat-label">{{ s.label }}</div>
-          </div>
-        </div>
-
-        <!-- 任务状态分布图（对齐 VOD chart-row） -->
-        <div class="task-chart-row">
-          <div class="card chart-card">
-            <div class="section-header"><h5 class="sh-title">任务状态分布</h5></div>
-            <div ref="taskChartEl" style="height:220px;padding:14px 20px"></div>
-          </div>
-        </div>
-
-        <div class="table-loading-wrapper">
-          <div class="table-loading-overlay" v-if="taskLoading">
-            <span class="table-loading-text">加载中...</span>
-          </div>
-          <div style="overflow-x:auto">
-          <table class="vod-table">
-            <thead><tr>
-              <th style="width:70px">ID</th>
-              <th style="width:100px">Issue</th>
-              <th style="width:110px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('agentType')">
-                  Agent <span class="filter-arrow" :class="{ active: taskType }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'agentType'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskType }" @click="setFilter('agentType', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('agentType')" :key="v" :class="{ active: taskType === v }" @click="setFilter('agentType', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:180px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('skill')">
-                  技能 <span class="filter-arrow" :class="{ active: taskSkill }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'skill'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskSkill }" @click="setFilter('skill', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('skill')" :key="v" :class="{ active: taskSkill === v }" @click="setFilter('skill', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:90px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('status')">
-                  状态 <span class="filter-arrow" :class="{ active: taskStatus }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'status'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskStatus }" @click="setFilter('status', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:70px">耗时</th>
-              <th style="width:150px" class="sortable-th" @click="toggleSort">
-                创建时间
-                <span class="sort-arrows">
-                  <span class="sort-dir" :class="{ active: sortOrder === 'asc' }">▲</span>
-                  <span class="sort-dir" :class="{ active: sortOrder === 'desc' }">▼</span>
-                </span>
-              </th>
-            </tr></thead>
-            <tbody>
-              <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
-                <td :colspan="7" class="t2" style="padding:28px 0">
-                  <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
-                  <template v-else>
-                    无匹配任务
-                    <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6;margin-left:10px" @click="clearFilters">清除筛选</button>
-                  </template>
-                </td>
-              </tr>
-              <tr v-for="t in detail.tasks?.content || []" :key="t.id" class="tl-row-clickable" @click="openLogModal(t.id, t)">
-                <td class="t3">{{ (t.id || '').substring(0, 8) }}</td>
-                <td style="white-space:nowrap">
-                  <a v-if="t.issueId" :href="issueGitCodeUrl(t)" target="_blank" @click.stop style="color:var(--primary);text-decoration:none;font-weight:600">{{ t.issueId }}</a>
-                  <span class="t3" v-if="t.eventSeq">#{{ t.eventSeq }}</span>
-                  <button v-if="t.issueId" class="btn btn-sm" style="padding:1px 6px;margin-left:6px;font-size:11px" @click.stop="openIssueDetail(t.issueId)" title="查看执行详情">📊</button>
-                  <span v-if="!t.issueId" class="t3">—</span>
-                </td>
-                <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
-                <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
-                <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'running' ? 'warning' : 'default']">{{ t.status }}</span></td>
-                <td class="t3">{{ formatDuration(t.createdAt, t.completedAt) }}</td>
-                <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
-              </tr>
-            </tbody>
-          </table>
-          </div>
-        </div>
-        <div v-if="detail.tasks?.totalElements > 0" class="pagination-bar" style="border-top:none">
-          <span class="page-info">第 <strong>{{ taskPage + 1 }}</strong> / {{ detail.tasks?.totalPages ?? 1 }} 页（共 {{ detail.tasks?.totalElements ?? 0 }} 条）</span>
-          <select v-model="taskSize" class="page-size-select" @change="taskPage = 0; load()">
-            <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
-          </select>
-          <button class="page-btn" :disabled="taskPage <= 0" @click="taskPage--; load()">上一页</button>
-          <button class="page-btn" :disabled="taskPage >= (detail.tasks?.totalPages ?? 1) - 1" @click="taskPage++; load()">下一页</button>
-        </div>
-        </div>
-      </div>
-    </div>
-
-    <p v-else class="t2" style="padding:40px;text-align:center">加载中…</p>
-
-    <!-- Issue 详情弹窗（时序图 + 事件列表） -->
-    <div v-if="issueModal.show" class="log-modal-overlay" @click.self="closeIssueModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1100;display:flex;align-items:center;justify-content:center">
-      <div style="background:#fff;border-radius:8px;width:85%;max-width:1000px;max-height:85vh;display:flex;flex-direction:column">
-        <div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid #eee">
-          <b>Issue {{ issueModal.issueId }}</b>
-          <span class="t3" v-if="issueModal.repoName" style="font-size:12px">{{ issueModal.repoName }}</span>
-          <span class="t3" v-if="issueModal.eventCount" style="font-size:12px">{{ issueModal.eventCount }} 个事件</span>
-          <span style="margin-left:auto;cursor:pointer;font-size:18px;color:#999" @click="closeIssueModal">✕</span>
-        </div>
-        <div style="padding:8px 20px;border-bottom:1px solid #f5f5f5">
-          <button class="btn btn-sm" :class="{'btn-primary': issueModal.view === 'diagram'}" style="margin-right:8px" @click="issueModal.view = 'diagram'; renderIssueMermaid()">📊 时序图</button>
-          <button class="btn btn-sm" :class="{'btn-primary': issueModal.view === 'events'}" @click="issueModal.view = 'events'">📋 事件列表</button>
-        </div>
-        <div style="overflow-y:auto;flex:1;padding:14px 20px">
-          <div v-if="issueModal.loading" style="text-align:center;padding:30px;color:#999">加载中...</div>
-          <div v-else-if="issueModal.view === 'diagram'" class="tl-diagram-container">
-            <div v-if="!issueModal.svgRendered" class="tl-diagram-loading" style="padding:20px;text-align:center;color:#999">渲染中...</div>
-            <div v-else v-html="issueModal.svg" class="tl-diagram-svg"></div>
-          </div>
-          <div v-else-if="issueModal.view === 'events'">
-            <table class="vod-table">
-              <thead><tr><th>Seq</th><th>事件</th><th>Agent</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
-              <tbody>
-                <tr v-for="ev in issueModal.events" :key="ev.seq" :class="{'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed'}">
-                  <td class="t3">#{{ ev.seq }}</td>
-                  <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
-                  <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
-                  <td class="t3">{{ ev.skill || '—' }}</td>
-                  <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']">{{ ev.status }}</span></td>
-                  <td class="t3">{{ ev.duration || '—' }}</td>
-                  <td class="t3">{{ formatTime(ev.createdAt) }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 日志弹窗 -->
-    <div v-if="logModal.show" class="log-modal-overlay" @click.self="closeLogModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center">
-      <div style="background:#fff;border-radius:8px;width:80%;max-width:900px;max-height:80vh;display:flex;flex-direction:column">
-        <div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid #eee">
-          <b>任务日志</b>
-          <span class="t3" v-if="logModal.info.repoKey" style="font-size:12px">{{ logModal.info.repoKey.replace('gitcode:', '') }}</span>
-          <b v-if="logModal.info.issueId" style="font-size:13px">{{ logModal.info.issueId }}</b>
-          <span class="t3" v-if="logModal.info.eventSeq" style="font-size:12px">#{{ logModal.info.eventSeq }}</span>
-          <span class="t3" v-if="logModal.info.createdAt" style="font-size:12px">{{ formatTime(logModal.info.createdAt) }}</span>
-          <span style="margin-left:auto;cursor:pointer;font-size:18px;color:#999" @click="closeLogModal">✕</span>
-        </div>
-        <div v-if="logModal.info.status" style="display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid #f5f5f5;font-size:12px">
-          <span class="log-tl-dot" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'" style="width:8px;height:8px;border-radius:50%;display:inline-block"></span>
-          <span class="t3">入队 {{ formatTime(logModal.info.createdAt).slice(11, 19) }}</span>
-          <span v-if="logModal.info.startedAt" class="t3">→ 开始 {{ formatTime(logModal.info.startedAt).slice(11, 19) }}</span>
-          <span v-if="logModal.info.completedAt" class="t3">→ 完成 {{ formatTime(logModal.info.completedAt).slice(11, 19) }}</span>
-          <span :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'" style="font-weight:600">{{ logModal.info.status.toUpperCase() }}</span>
-        </div>
-        <div style="overflow-y:auto;flex:1;padding:14px 20px">
-          <div v-if="logModal.loading" style="text-align:center;padding:30px;color:#999">加载日志...</div>
-          <div v-else-if="logModal.messages.length === 0" style="text-align:center;padding:30px;color:#999">暂无日志</div>
-          <div v-else>
-            <div v-for="(msg, i) in logModal.messages" :key="i" style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #f9f9f9;font-size:13px">
-              <span style="color:#999;font-size:12px;flex-shrink:0">{{ logTypeIcon(msg.type) }}</span>
-              <span style="white-space:pre-wrap;word-break:break-all">{{ msg.content || msg.text || JSON.stringify(msg) }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
+      <TaskListSection :tasks="detail.tasks" :loading="taskLoading" @reload="onTaskReload" />
     </div>
   </div>
 </template>
@@ -251,6 +68,7 @@ import { computed, nextTick, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import http from '../api'
+import TaskListSection from '../components/TaskListSection.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -520,12 +338,20 @@ async function load() {
     const { data } = await http.get(`/engines/${route.params.id}`, { params })
     detail.value = data
     agents.value = data.agents || []
-    // 「已筛选 N 条」：有列头筛选时显示过滤后总数，无筛选不显示（对齐 VOD）
-    filterCount.value = (taskStatus.value || taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
     nextTick(renderTaskChart)
   } finally {
     taskLoading.value = false
   }
+}
+
+function onTaskReload(params) {
+  taskPage.value = params.taskPage ?? 0
+  taskSize.value = params.taskSize ?? 10
+  sortOrder.value = params.sortOrder ?? 'desc'
+  taskStatus.value = params.taskStatus ?? ''
+  taskSkill.value = params.taskSkill ?? ''
+  taskType.value = params.taskType ?? ''
+  load()
 }
 // 任务状态分布饼图（对齐 VOD chart-row）
 function renderTaskChart() {
