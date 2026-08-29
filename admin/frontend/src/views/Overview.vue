@@ -79,11 +79,19 @@
       <div class="chart-grid chart-grid-4">
         <div class="chart-card">
           <div class="chart-title">
-            <span>工作台用户 · 注册趋势</span>
             <div class="chart-tabs">
+              <button :class="{ on: statTab === 'registration' }" @click="switchStatTab('registration')">注册趋势</button>
+              <button :class="{ on: statTab === 'active' }" @click="switchStatTab('active')">活跃用户</button>
+            </div>
+            <div class="chart-tabs" v-if="statTab === 'registration'">
               <button :class="{ on: regGranularity === 'year' }" @click="switchRegGranularity('year')">年</button>
               <button :class="{ on: regGranularity === 'month' }" @click="switchRegGranularity('month')">月</button>
               <button :class="{ on: regGranularity === 'day' }" @click="switchRegGranularity('day')">日</button>
+            </div>
+            <div class="chart-tabs" v-else>
+              <button :class="{ on: activeDays === 7 }" @click="switchActiveDays(7)">近7天</button>
+              <button :class="{ on: activeDays === 30 }" @click="switchActiveDays(30)">近30天</button>
+              <button :class="{ on: activeDays === 90 }" @click="switchActiveDays(90)">近90天</button>
             </div>
           </div>
           <div class="chart-body" ref="userCompositionRef"></div>
@@ -122,6 +130,9 @@ const repoEventRef = ref(null)
 const userCompositionRef = ref(null)
 const regGranularity = ref('month')
 const regData = ref([])
+const statTab = ref('registration')
+const activeDays = ref(30)
+const activeData = ref([])
 
 const COLOR_POOL = ['#006eff', '#34c759', '#ff9500', '#ff3b30', '#5e5ce6', '#30b0c7', '#ff2d92', '#ff9500']
 const TASK_STATUS_COLORS = { completed: '#34c759', queued: '#ff9500', dispatched: '#006eff' }
@@ -277,22 +288,50 @@ async function switchRegGranularity(g) {
   renderUserComposition()
 }
 
+async function loadActiveData() {
+  try {
+    const { data } = await http.get('/stats/active-users', { params: { days: activeDays.value } })
+    activeData.value = data.data || []
+  } catch (e) {
+    console.error('[Overview] loadActiveData failed', e)
+    activeData.value = []
+  }
+}
+
+async function switchActiveDays(d) {
+  activeDays.value = d
+  await loadActiveData()
+  renderUserComposition()
+}
+
+async function switchStatTab(tab) {
+  statTab.value = tab
+  if (tab === 'active') {
+    await loadActiveData()
+  } else {
+    await loadRegData()
+  }
+  renderUserComposition()
+}
+
 function renderUserComposition() {
   if (!userCompositionRef.value) return
   const chart = echarts.init(userCompositionRef.value)
   charts.push(chart)
-  const data = regData.value.map(x => x.count)
-  const labels = regData.value.map(x => x.label)
+  const isReg = statTab.value === 'registration'
+  const source = isReg ? regData.value : activeData.value
+  const data = source.map(x => x.count)
+  const labels = source.map(x => x.label)
   chart.setOption({
-    tooltip: { trigger: 'axis', formatter: p => `${p[0].name}<br/>注册 ${p[0].value} 人` },
+    tooltip: { trigger: 'axis', formatter: p => `${p[0].name}<br/>${isReg ? '注册' : '活跃'} ${p[0].value} 人` },
     grid: { left: 40, right: 16, top: 24, bottom: 32 },
     xAxis: { type: 'category', data: labels, axisLabel: { fontSize: 11, rotate: labels.length > 6 ? 30 : 0 } },
     yAxis: { type: 'value', minInterval: 1 },
     series: [{
       type: 'line', data, smooth: true, symbol: 'circle', symbolSize: 6,
-      lineStyle: { width: 2, color: '#30b0c7' },
-      itemStyle: { color: '#30b0c7' },
-      areaStyle: { color: 'rgba(48,176,199,0.12)' },
+      lineStyle: { width: 2, color: isReg ? '#30b0c7' : '#006eff' },
+      itemStyle: { color: isReg ? '#30b0c7' : '#006eff' },
+      areaStyle: { color: isReg ? 'rgba(48,176,199,0.12)' : 'rgba(0,110,255,0.12)' },
       label: { show: true, position: 'top', fontSize: 11 }
     }]
   })
@@ -370,7 +409,7 @@ onBeforeUnmount(() => {
   background: #fff; border-radius: 14px; border: 1px solid var(--border-soft);
   box-shadow: var(--card-shadow); overflow: hidden;
 }
-.chart-title { font-size: 14px; font-weight: 600; padding: 14px 18px 0; color: var(--text-primary); display: flex; align-items: center; justify-content: space-between; }
+.chart-title { font-size: 14px; font-weight: 600; padding: 14px 18px 0; color: var(--text-primary); display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .chart-tabs { display: flex; gap: 2px; }
 .chart-tabs button { font-size: 11px; padding: 2px 8px; border: 1px solid var(--border-color); border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; transition: all var(--transition); }
 .chart-tabs button.on { background: var(--primary); color: #fff; border-color: var(--primary); }

@@ -160,4 +160,29 @@ public class StatsController {
         result.put("data", list);
         return result;
     }
+
+    @GetMapping("/active-users")
+    public Map<String, Object> activeUsers(@RequestParam(defaultValue = "30") int days) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List<Map<String, Object>> list = new ArrayList<>();
+        try {
+            grapeJdbc.query(
+                "SELECT DATE(t.started_at) as label, COUNT(DISTINCT u.id) as cnt " +
+                "FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
+                "WHERE t.started_at IS NOT NULL " +
+                "AND t.started_at >= DATE_SUB(NOW(), INTERVAL ? DAY) " +
+                "GROUP BY label ORDER BY label",
+                rs -> {
+                    Map<String, Object> r = new LinkedHashMap<>();
+                    r.put("label", rs.getString("label"));
+                    r.put("count", rs.getLong("cnt"));
+                    list.add(r);
+                }, days);
+        } catch (Exception e) { /* ignore */ }
+        result.put("days", days);
+        result.put("data", list);
+        return result;
+    }
 }
