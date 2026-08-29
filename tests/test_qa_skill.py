@@ -8,7 +8,7 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
-QA_SKILL_DIR = os.path.join(ROOT, "skills", "qa")
+QA_SKILL_DIR = os.path.join(ROOT, "skills", "qa", "qa")
 QA_REFS_DIR = os.path.join(QA_SKILL_DIR, "references")
 CONFIGS_DIR = os.path.join(ROOT, "configs")
 
@@ -70,11 +70,11 @@ class TestQaSkillConfig:
         cfg = _load_json("skill-description.json")
         assert "qa" in cfg
         assert cfg["qa"]["agent_type"] == "qa"
-        assert cfg["qa"]["path"] == "qa"
+        assert cfg["qa"]["path"] == "qa/qa"
 
     def test_agent_skill_mapping_qa_defaults_to_pr(self):
         # 默认场景 qa 映射为 pr；使用专属 skill 的场景（iac→iac-qa, skill-dev→skill-tester）例外
-        EXPECTED_QA = {"iac": "iac-qa", "skill-dev": "skill-tester"}
+        EXPECTED_QA = {"iac": "iac-qa", "skill-dev": "skill-tester", "api-skill-dev": "rest-api-skill-tester"}
         cfg = _load_json("agent-skill-mapping.json")
         for scene, info in cfg["scenes"].items():
             qa_skill = info["mapping"]["qa"]

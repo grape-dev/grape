@@ -1,9 +1,10 @@
-"""引擎集合 / 派发选择测试（engine-selection-design.md v2）。
+"""引擎选择 / 派发测试（场景 engine_runtime_ids 模型）。
 
-覆盖：绑定表读写、priority 派生、pick_engine 优先级（专属→全局→本机）+ 健康过滤 + legacy 回退、
-resolve_default_engine（托管种子）、query_engines 档位查询。
+覆盖：pick_engine 优先级（专属→全局→本机）+ 健康过滤 + legacy 回退、
+resolve_default_engine（托管种子）、resolve_local_engine、query_engines 档位查询。
 """
 import datetime
+import json
 import pytest
 
 from src.session_manager import db, db_lock
@@ -14,24 +15,22 @@ from src.runtime import engine_select as es
 def _clean_tables():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM devops_agent_runtime_binding")
         c.execute("DELETE FROM agent_tasks")
         c.execute("DELETE FROM events")
         c.execute("DELETE FROM devops_agent_session")
         c.execute("DELETE FROM agent_runtimes")
         c.execute("DELETE FROM runtime_credentials")
-        c.execute("DELETE FROM meta WHERE key='bindings_backfilled'")
+        c.execute("DELETE FROM devops_pipeline_scene WHERE scope IN ('user','repo')")
         db.commit()
     yield
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM devops_agent_runtime_binding")
         c.execute("DELETE FROM agent_tasks")
         c.execute("DELETE FROM events")
         c.execute("DELETE FROM devops_agent_session")
         c.execute("DELETE FROM agent_runtimes")
         c.execute("DELETE FROM runtime_credentials")
-        c.execute("DELETE FROM meta WHERE key='bindings_backfilled'")
+        c.execute("DELETE FROM devops_pipeline_scene WHERE scope IN ('user','repo')")
         db.commit()
 
 
@@ -65,31 +64,24 @@ def _mk_engine(name, *, credential_id, status="online", healthy=1, installed=1,
         return rid
 
 
-class TestBinding:
-    def test_set_get_binding(self):
-        a = _mk_engine("opencode-a", credential_id=_mk_cred("c-a"))
-        b = _mk_engine("opencode-b", credential_id=_mk_cred("c-b"))
-        es.set_binding("owner/repo", "vod", [a, b])
-        got = es.get_binding("owner/repo", "vod")
-        assert [m["runtime_id"] for m in got] == [a, b]
-        assert all(m["priority"] == 50 for m in got)   # 全局默认 priority
-
-    def test_set_binding_replaces_and_clears(self):
-        a = _mk_engine("opencode-a", credential_id=_mk_cred("c-a"))
-        es.set_binding("owner/repo", "vod", [a])
-        es.set_binding("owner/repo", "vod", [])
-        assert es.get_binding("owner/repo", "vod") == []
-
-    def test_priority_by_scope(self):
-        repo_cid = _mk_cred("c-repo", scope="repo", owner_id="owner/repo")
-        repo_eng = _mk_engine("opencode-r", credential_id=repo_cid, scope="repo", owner_id="owner/repo")
-        glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
-        loc_eng = _mk_engine("opencode", credential_id=0)   # 本机直连
-        es.set_binding("owner/repo", "coding", [loc_eng, glob_eng, repo_eng])
-        by_id = {m["runtime_id"]: m["priority"] for m in es.get_binding("owner/repo", "coding")}
-        assert by_id[repo_eng] == 10    # 仓库级专属优先
-        assert by_id[glob_eng] == 50
-        assert by_id[loc_eng] == 90     # 本机最后兜底
+def _mk_scene(scene_id, agent_type, engine_ids, scope="user", user_id=1, repo_key=""):
+    """Create a scene with a single node containing engine_runtime_ids."""
+    # 确保 user_repos 有记录，让 _repo_user_id 能查到
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("INSERT OR IGNORE INTO user_repos (user_id, repo_key, owner, name, is_join) VALUES (?, 'gitcode:owner/repo', 'owner', 'repo', 1)", (user_id,))
+        except Exception:
+            pass
+        db.commit()
+    nodes = [{"id": agent_type, "tag": agent_type, "skill": "test-skill",
+              "mode": "emit", "next": "done", "handoff": "complete",
+              "engine_runtime_ids": engine_ids}]
+    from src.api.pipeline_config import create_custom_scene
+    create_custom_scene(
+        scene_id=scene_id, name=scene_id, description="",
+        scope=scope, repo_key=repo_key, user_id=user_id,
+        nodes=nodes)
 
 
 class TestPickEngine:
@@ -97,45 +89,41 @@ class TestPickEngine:
         repo_cid = _mk_cred("c-repo", scope="repo", owner_id="owner/repo")
         repo_eng = _mk_engine("opencode-r", credential_id=repo_cid, scope="repo", owner_id="owner/repo")
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
-        es.set_binding("owner/repo", "vod", [glob_eng, repo_eng])
-        assert es.pick_engine("owner/repo", "vod") == repo_eng
+        _mk_scene("test-pr", "vod", [glob_eng, repo_eng])
+        assert es.pick_engine("owner/repo", "vod", scene_id="test-pr") == repo_eng
 
     def test_repo_offline_falls_to_global(self):
         repo_cid = _mk_cred("c-repo", scope="repo", owner_id="owner/repo")
         repo_eng = _mk_engine("opencode-r", credential_id=repo_cid, scope="repo", owner_id="owner/repo", status="offline")
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
-        es.set_binding("owner/repo", "vod", [glob_eng, repo_eng])
-        assert es.pick_engine("owner/repo", "vod") == glob_eng   # 专属离线 → 全局兜底
+        _mk_scene("test-ro", "vod", [glob_eng, repo_eng])
+        assert es.pick_engine("owner/repo", "vod", scene_id="test-ro") == glob_eng
 
     def test_global_offline_falls_to_local(self):
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"), status="offline")
         loc_eng = _mk_engine("opencode", credential_id=0)
-        es.set_binding("owner/repo", "vod", [glob_eng, loc_eng])
-        assert es.pick_engine("owner/repo", "vod") == loc_eng    # 本机最后兜底
+        _mk_scene("test-gl", "vod", [glob_eng, loc_eng])
+        assert es.pick_engine("owner/repo", "vod", scene_id="test-gl") == loc_eng
 
     def test_no_healthy_member_returns_none(self):
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"), status="offline")
-        es.set_binding("owner/repo", "vod", [glob_eng])
-        assert es.pick_engine("owner/repo", "vod") is None       # engine_unavailable
+        _mk_scene("test-nh", "vod", [glob_eng])
+        assert es.pick_engine("owner/repo", "vod", scene_id="test-nh") is None
 
-    def test_fallback_runtime_id_when_no_binding(self):
+    def test_fallback_runtime_id_when_no_scene(self):
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
-        # 无绑定集合 → 回退会话主引擎（legacy）
+        # 无 scene_id → engine_runtime_ids 为空 → 回退会话主引擎（legacy）
         assert es.pick_engine("owner/repo", "vod", fallback_runtime_id=glob_eng) == glob_eng
 
-    def test_empty_binding_falls_back(self):
-        # 绑定集合为空 → 回退会话主引擎（legacy，见 engine-selection-design.md §6）
-        assert es.pick_engine("owner/repo", "vod", fallback_runtime_id=999) == 999
-        # 绑定集合为空且无 fallback → None（无引擎不可用）
-        assert es.pick_engine("owner/repo", "vod") is None
+    def test_empty_engine_ids_falls_back(self):
+        # engine_runtime_ids 为空 → 回退会话主引擎（legacy）
+        _mk_scene("test-eb", "vod", [])
+        assert es.pick_engine("owner/repo", "vod", fallback_runtime_id=999, scene_id="test-eb") == 999
+        # engine_runtime_ids 为空且无 fallback → None
+        assert es.pick_engine("owner/repo", "vod", scene_id="test-eb") is None
 
-    def test_repo_engine_not_shared_to_other_repo(self):
-        repo_cid = _mk_cred("c-repo", scope="repo", owner_id="owner/repo")
-        repo_eng = _mk_engine("opencode-r", credential_id=repo_cid, scope="repo", owner_id="owner/repo")
-        es.set_binding("owner/repo", "vod", [repo_eng])
-        es.set_binding("other/repo", "vod", [repo_eng])   # 模拟误绑：其他仓库的集合也含该引擎
-        # 专属判定按 owner_id：owner/repo 的引擎不归 other/repo 的 repo 档 → 视为 global 档
-        assert es.pick_engine("other/repo", "vod") is None or es.pick_engine("other/repo", "vod") == repo_eng
+    def test_no_scene_no_fallback_returns_none(self):
+        assert es.pick_engine("owner/repo", "vod") is None
 
 
 class TestResolveDefaultEngine:
@@ -143,7 +131,7 @@ class TestResolveDefaultEngine:
         repo_cid = _mk_cred("c-repo", scope="repo", owner_id="owner/repo")
         repo_eng = _mk_engine("opencode-r", credential_id=repo_cid, scope="repo", owner_id="owner/repo")
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
-        assert es.resolve_default_engine("owner/repo") == repo_eng   # 专属优先
+        assert es.resolve_default_engine("owner/repo") == repo_eng
 
     def test_only_global(self):
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
@@ -154,7 +142,7 @@ class TestResolveDefaultEngine:
         assert es.resolve_default_engine("owner/repo") == loc_eng
 
     def test_local_unhealthy_not_selected(self):
-        _mk_engine("opencode-l", credential_id=0, healthy=0)   # 未健康本机引擎
+        _mk_engine("opencode-l", credential_id=0, healthy=0)
         assert es.resolve_default_engine("owner/repo") is None
 
 
@@ -164,47 +152,10 @@ class TestResolveLocalEngine:
         assert es.resolve_local_engine() == loc_eng
 
     def test_resolve_local_engine_ignores_unhealthy_and_falls_back_global(self):
-        _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))          # 远端全局：本机无健康时回退候选
-        _mk_engine("opencode", credential_id=0, healthy=0)          # 本机不健康
-        # 本机无健康候选 → 回退全局健康引擎（#60：无 cred0 引擎时 chat 不硬失败）
+        _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
+        _mk_engine("opencode", credential_id=0, healthy=0)
         assert es.resolve_local_engine() is not None
         assert es.resolve_local_engine() != 0
-
-
-class TestBackfillExistingBindings:
-    def test_backfill_creates_single_member_bindings(self):
-        glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
-        with db_lock:
-            c = db.cursor()
-            for at in ("vod", "issue"):
-                c.execute(
-                    "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status, enable) "
-                    "VALUES (?, 'gitcode:owner/repo', ?, ?, 'idle', 1)",
-                    ("bf-" + at, at, glob_eng))
-            db.commit()
-        added = es.backfill_existing_bindings()
-        assert added >= 2
-        got = es.get_binding("owner/repo", "vod")
-        assert [m["runtime_id"] for m in got] == [glob_eng]
-        # 幂等：再跑不重复
-        assert es.backfill_existing_bindings() == 0
-        # 不覆盖已有绑定（用户改动优先）
-        es.set_binding("owner/repo", "issue", [])
-        assert es.backfill_existing_bindings() == 0
-        assert es.get_binding("owner/repo", "issue") == []
-
-    def test_backfill_priority_by_scope(self):
-        repo_cid = _mk_cred("c-repo", scope="repo", owner_id="owner/repo")
-        repo_eng = _mk_engine("opencode-r", credential_id=repo_cid, scope="repo", owner_id="owner/repo")
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status, enable) "
-                "VALUES ('bf-r', 'gitcode:owner/repo', 'qa', ?, 'idle', 1)", (repo_eng,))
-            db.commit()
-        es.backfill_existing_bindings()
-        got = es.get_binding("owner/repo", "qa")
-        assert got and got[0]["priority"] == 10   # 仓库级专属优先
 
 
 class TestQueryEngines:
@@ -216,3 +167,18 @@ class TestQueryEngines:
         assert len(es.query_engines("owner/repo", "repo")) == 1
         assert len(es.query_engines("owner/repo", "global")) == 1
         assert len(es.query_engines("owner/repo", "local")) == 1
+
+
+class TestScenePoolEngineIds:
+    def test_non_empty_ids(self):
+        glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
+        _mk_scene("test-pe", "vod", [glob_eng])
+        result = es.get_scene_pool_engine_ids("test-pe", "vod", user_id=1)
+        assert json.loads(result) == [glob_eng]
+
+    def test_empty_ids_returns_empty(self):
+        _mk_scene("test-pe2", "vod", [])
+        assert es.get_scene_pool_engine_ids("test-pe2", "vod", user_id=1) == ""
+
+    def test_no_scene_returns_empty(self):
+        assert es.get_scene_pool_engine_ids("nonexistent", "vod", user_id=1) == ""

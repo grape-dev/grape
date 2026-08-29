@@ -1,0 +1,88 @@
+{
+  "tab": {
+    "projects": "工作项目",
+    "templates": "项目模板"
+  },
+  "logout_title": "退出登录",
+  "loading": "加载中...",
+  "load_failed": "加载失败",
+  "lobby": {
+    "refresh_btn": "↻ 刷新",
+    "refresh_title": "从 GitCode 刷新仓库列表",
+    "hello": "你好，",
+    "welcome_sub": "选择一个工作项目，开启由 Agent 驱动的自动化 DevOps 之旅。",
+    "stat_projects": "工作项目",
+    "stat_hosted": "已托管",
+    "stat_joined": "已加入",
+    "empty_title": "未找到匹配的项目",
+    "empty_desc": "试试更换关键词或筛选条件。",
+    "friend": "朋友",
+    "welcome_to_grape": "欢迎使用 Grape"
+  },
+  "card": {
+    "enter_project": "进入项目",
+    "join_and_host": "加入并托管",
+    "join": "加入",
+    "status_hosted": "已托管",
+    "status_joined": "已加入",
+    "status_not_joined": "未加入",
+    "no_description": "暂无描述"
+  },
+  "managed": {
+    "no_hosted": "暂无已托管的仓库",
+    "no_available": "没有可加入的仓库",
+    "unhost_btn": "解除托管",
+    "th_repository": "仓库",
+    "th_role": "角色",
+    "th_description": "描述"
+  },
+  "available_btn": {
+    "hosted": "已托管",
+    "join_and_host": "加入并托管",
+    "join": "加入"
+  },
+  "sync": {
+    "syncing": "↻ 同步中…",
+    "refresh": "↻ 刷新",
+    "sync_success": "同步成功",
+    "sync_failed": "同步失败: {{msg}}",
+    "refresh_success": "刷新成功",
+    "refresh_failed": "刷新失败: {{msg}}",
+    "host_success": "加入并托管成功",
+    "host_failed": "托管失败: {{msg}}",
+    "join_success": "已成功加入仓库",
+    "join_failed": "加入失败: {{msg}}"
+  },
+  "unhost": {
+    "confirm": "⚠️ 确定要解除托管 {{name}} 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。",
+    "done": "已解除托管",
+    "failed": "解除托管失败: {{msg}}",
+    "select_repo": "选择仓库"
+  },
+  "create": {
+    "title": "创建新项目",
+    "desc": "在 GitCode 上新建仓库，创建后可立即进入托管工作流。",
+    "name_label": "仓库名称",
+    "name_placeholder": "例如：my-project",
+    "name_hint": "仅限字母、数字、下划线、连字符和点，将以你的账号命名空间创建。",
+    "desc_label": "项目描述",
+    "desc_placeholder": "简要描述这个项目的用途（可选）",
+    "vis_label": "可见性",
+    "vis_private": "私有",
+    "vis_private_desc": "仅自己和授权协作者可见",
+    "vis_public": "公开",
+    "vis_public_desc": "所有人可见，可克隆",
+    "btn_cancel": "取消",
+    "btn_create": "创建项目",
+    "btn_creating": "创建中…",
+    "err_no_name": "请输入仓库名称",
+    "err_exists": "仓库 {{name}} 已存在，请更换名称",
+    "success": "项目创建成功: {{name}}",
+    "err_create_failed": "创建失败: {{msg}}",
+    "err_check_failed": "检查失败: {{msg}}"
+  },
+  "brand_sub": "Agentic DevOps",
+  "repositories": "仓库",
+  "sync_from_gitcode": "从 GitCode 同步",
+  "hosted": "已托管"
+}

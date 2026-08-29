@@ -3,9 +3,9 @@ let _pipeActiveIdx = 0;
 let _pipePage = 1;
 const _PIPE_PER_PAGE = 15;
 const agentColors = ['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
-const agentLabels = ['VOD','Issue','Coding','QA','SRE'];
+const agentLabels = [I18N.t('pipeline.agent_vod'),I18N.t('pipeline.agent_issue'),I18N.t('pipeline.agent_coding'),I18N.t('pipeline.agent_qa'),I18N.t('pipeline.agent_sre')];
 const agentIds = ['vod','issue','coding','qa','sre'];
-const stageLabels = {vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE',done:'Done'};
+const stageLabels = {vod:I18N.t('pipeline.agent_vod'),issue:I18N.t('pipeline.agent_issue'),coding:I18N.t('pipeline.agent_coding'),qa:I18N.t('pipeline.agent_qa'),sre:I18N.t('pipeline.agent_sre'),done:I18N.t('pipeline.stage_done')};
 const _TAG_COLORS = {vod:'var(--pk)',issue:'var(--r)',coding:'var(--a)',qa:'var(--pu)',sre:'var(--or)',chat:'var(--sk)'};
 const _MODE_ICONS = {emit:'\u2192',waterfall:'\u25c7',serial:'\u21bb',parallel:'\u21c4'};
 
@@ -39,13 +39,13 @@ function selPipe(idx) {
   const num = String(iss).replace(/^#/, '');
   const repoParts = (data.repo || '').replace(/^gitcode:/, '').split('/');
   const issueUrl = repoParts.length === 2 ? `https://gitcode.com/${repoParts[0]}/${repoParts[1]}/issues/${num}` : '';
-  const issHtml = issueUrl ? `<a href="${issueUrl}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${iss}</a>` : `Issue ${iss}`;
+  const issHtml = issueUrl ? `<a href="${issueUrl}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${I18N.t('pipeline.issue_prefix')} ${iss}</a>` : `${I18N.t('pipeline.issue_prefix')} ${iss}`;
   const stages = displayPipe.stages || [];
   const statuses = displayPipe.statuses || [];
   const owner = displayPipe.current_owner || '';
-  const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>' : ' &nbsp;<span class="ts t2">空闲</span>';
+  const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">' + I18N.t('pipeline.executing') + '</span>' : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
 
-  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 \u5f53\u524d\u8d23\u4efb\u4eba: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
+  let flowHtml = `<div class="ts" style="font-weight:600;margin-bottom:8px">${I18N.t('pipeline.label_active')} ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 ${I18N.t('pipeline.current_owner')}: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
   // Dynamic pipeline nodes (event-dispatch-redesign-v2.md Phase 2)
   var pipeNodes = _getPipeNodes(data, displayPipe);
@@ -62,7 +62,7 @@ function selPipe(idx) {
       <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : color}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${label} <span style="font-size:9px;color:var(--t3)">${modeIcon}</span></h4></div>
       <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? ev.event_type || '\u2014' : '\u2014'}</div>
       <div class="nds" style="margin-bottom:1px;font-size:9px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev && ev.actor ? '@' + ev.actor : ' '}</div>
-      <div class="ns"><span class="d${sc === 1 ? ' d-pulse' : ''}" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : 'Pending'}</div>
+      <div class="ns"><span class="d${sc === 1 ? ' d-pulse' : ''}" style="background:${dotc}"></span>${sc === 2 ? I18N.t('pipeline.status_done') : sc === 1 ? I18N.t('pipeline.status_in_progress') : sc === 3 ? I18N.t('pipeline.status_failed') : I18N.t('pipeline.status_pending')}</div>
     </div>`;
   });
   flowHtml += `</div>`;
@@ -85,8 +85,8 @@ function renderPipeline(data) {
   const history = _pipeData.history || [];
 
   let html = `<div class="cd" style="display:flex;flex-direction:column;height:calc(100vh - 120px);overflow:hidden">
-  <div class="cd-h" style="flex-shrink:0"><h2>Pipeline · ${data.repo || ''}</h2>
-  <div class="flex gap12"><span class="ts t2">Active: <b>${data.active_count || 0}</b></span><span class="ts t2">Today: <b>${data.today_count || 0}</b></span></div></div>`;
+  <div class="cd-h" style="flex-shrink:0"><h2>${I18N.t('pipeline.page_title')} · ${data.repo || ''}</h2>
+  <div class="flex gap12"><span class="ts t2">${I18N.t('pipeline.label_active')} <b>${data.active_count || 0}</b></span><span class="ts t2">${I18N.t('pipeline.label_today')} <b>${data.today_count || 0}</b></span></div></div>`;
 
   const allPipes = active ? [active, ...history] : history;
   // 当前选中的 Issue（默认 active，点击历史行后切换）
@@ -102,20 +102,20 @@ function renderPipeline(data) {
       ? `https://gitcode.com/${repoParts[0]}/${repoParts[1]}/issues/${num}`
       : '';
     const issHtml = issueUrl
-      ? `<a href="${issueUrl}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${iss}</a>`
-      : `Issue ${iss}`;
+      ? `<a href="${issueUrl}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${I18N.t('pipeline.issue_prefix')} ${iss}</a>`
+      : `${I18N.t('pipeline.issue_prefix')} ${iss}`;
     const stages = displayPipe.stages || [];
     const statuses = displayPipe.statuses || [];
     const owner = displayPipe.current_owner || '';
     const execBadge = displayPipe.executing
-      ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">执行中</span>'
-      : ' &nbsp;<span class="ts t2">空闲</span>';
+      ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">' + I18N.t('pipeline.executing') + '</span>'
+      : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
     // 触发 SRE 部署按钮：stage 非 done 时显示
     const _issueNum = String(iss).replace(/^#/, '');
     const _repoFullName = (data.repo || '').replace(/^gitcode:/, '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
-    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">Active: ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 \u5f53\u524d\u8d23\u4efb\u4eba: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
+    flowHtml = `<div id="pipeFlow" style="flex-shrink:0;padding:12px 0 8px;border-bottom:1px solid var(--b)"><div class="ts" style="font-weight:600;margin-bottom:8px">${I18N.t('pipeline.label_active')} ${issHtml}${displayPipe.title ? ` &nbsp;·&nbsp; <span style="color:var(--t2);font-weight:500">${displayPipe.title}</span>` : ''}${owner ? ` &nbsp;\u00b7&nbsp; \ud83d\udc64 ${I18N.t('pipeline.current_owner')}: <span style="color:var(--a)">${owner}</span>` : ''}${execBadge}${_sreBtn}</div>
     <div class="af" style="min-height:auto;padding:6px 0">`;
     var pipeNodes2 = _getPipeNodes(data, displayPipe);
     pipeNodes2.forEach(function(node, i) {
@@ -133,7 +133,7 @@ function renderPipeline(data) {
         <div class="nh"><span class="n" style="background:${sc === 0 ? '#c3c9d4' : color}"></span><h4 style="font-size:11px;${sc === 0 ? 'color:#9aa3b2' : ''}">${label} <span style="font-size:9px;color:var(--t3)">${modeIcon}</span></h4></div>
         <div class="nds" style="margin-bottom:1px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev ? ev.event_type || '\u2014' : '\u2014'}</div>
         <div class="nds" style="margin-bottom:1px;font-size:9px;${sc === 0 ? 'color:#a8b0bd' : ''}">${ev && ev.actor ? '@' + ev.actor : ' '}</div>
-        <div class="ns"><span class="d${sc === 1 ? ' d-pulse' : ''}" style="background:${dotc}"></span>${sc === 2 ? 'Done' : sc === 1 ? 'In Progress' : sc === 3 ? 'Failed' : 'Pending'}</div>
+        <div class="ns"><span class="d${sc === 1 ? ' d-pulse' : ''}" style="background:${dotc}"></span>${sc === 2 ? I18N.t('pipeline.status_done') : sc === 1 ? I18N.t('pipeline.status_in_progress') : sc === 3 ? I18N.t('pipeline.status_failed') : I18N.t('pipeline.status_pending')}</div>
       </div>`;
     });
     flowHtml += `</div></div>`;
@@ -163,14 +163,14 @@ function renderPipeline(data) {
       ${pBtn('‹', _pipePage - 1, _pipePage <= 1, false)}
       ${btns}
       ${pBtn('›', _pipePage + 1, _pipePage >= totalPages, false)}
-      <span class="ts t3" style="margin-left:8px;font-size:10px">共 ${totalPipes} 条 · ${_pipePage}/${totalPages} 页</span>
+      <span class="ts t3" style="margin-left:8px;font-size:10px">${I18N.t('pipeline.pagination_total', {total: totalPipes, page: _pipePage, pages: totalPages})}</span>
     </div>`;
   }
 
   html += `${flowHtml}${pagerHtml}`;
 
   // 表格区域（独立滚动）
-  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>Issue</th><th>标题</th><th>父任务</th><th>Duration</th><th>Agents</th><th>阶段</th><th>场景</th><th>责任人</th></tr>`;
+  html += `<div style="flex:1;overflow-y:auto;min-height:0"><div class="tw"><table><tr><th>${I18N.t('pipeline.th_issue')}</th><th>${I18N.t('pipeline.th_title')}</th><th>${I18N.t('pipeline.th_parent_issue')}</th><th>${I18N.t('pipeline.th_duration')}</th><th>${I18N.t('pipeline.th_agents')}</th><th>${I18N.t('pipeline.th_stage')}</th><th>${I18N.t('pipeline.th_scene')}</th><th>${I18N.t('pipeline.th_owner')}</th></tr>`;
   pagePipes.forEach((p, i) => {
     const realIdx = pipeStart + i;
     const s = realIdx === _pipeActiveIdx ? ' sel' : '';
@@ -185,8 +185,8 @@ function renderPipeline(data) {
     const dur = _dur ? (_dur >= 60 ? Math.floor(_dur/60) + 'm ' + Math.round(_dur%60) + 's' : _dur + 's') : '—';
     const owner = p.current_owner || '—';
     const _sceneId = p.scene_id || '';
-    const _sceneLabels = {default:'通用开发','cloud-native':'云原生','iac':'IaC','agent-dev':'Agent开发','skill-dev':'Skill开发','api-skill-dev':'API Skill','blog-publish':'博客发布'};
-    const sceneLabel = _sceneId ? (p.scene_name || _sceneLabels[_sceneId] || _sceneId) : '—';
+    const _sceneLabels = {default:I18N.t('pipeline.scene_default'),'cloud-native':I18N.t('pipeline.scene_cloud_native'),'iac':I18N.t('pipeline.scene_iac'),'agent-dev':I18N.t('pipeline.scene_agent_dev'),'skill-dev':I18N.t('pipeline.scene_skill_dev'),'api-skill-dev':I18N.t('pipeline.scene_api_skill_dev'),'blog-publish':I18N.t('pipeline.scene_blog_publish')};
+    const sceneLabel = _sceneId ? (_sceneLabels[_sceneId] || p.scene_name || _sceneId) : '—';
     const sceneBadge = _sceneId ? `<span class="tg tg-i" style="font-size:10px">${sceneLabel}</span>` : '<span class="ts t3">—</span>';
     const _issueNum = String(p.issue_id || '').replace(/^#/, '');
     const _repoParts2 = (data.repo || '').replace(/^gitcode:/, '').split('/');
@@ -196,8 +196,8 @@ function renderPipeline(data) {
     const _parentIssueHtml = _parentIssueId ? `<a href="${_parentIssueUrl}" target="_blank" rel="noopener" style="color:var(--pu);text-decoration:underline;font-size:11px">#${_parentIssueId}</a>` : '<span class="ts t3">—</span>';
     const _esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const execBadge = p.executing
-      ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ 执行中</span>'
-      : '<span class="ts t2">空闲</span>';
+      ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ ' + I18N.t('pipeline.executing') + '</span>'
+      : '<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
     html += `<tr class="pipe-row${s}" data-idx="${realIdx}" onclick="selPipe(${realIdx})" ondblclick="pipeRowDblClick(${realIdx})">
       <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
       <td><a href="${_issueUrl || '#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${_esc(p.title || '—')}</a></td>
@@ -209,17 +209,17 @@ function renderPipeline(data) {
       <td>${owner}</td></tr>`;
   });
   html += `</table></div></div>`;
-  html += `</div><div class="tx t2 mt8">点击历史表中的 Issue 会切换上方工作流状态展示</div>`;
+  html += `</div><div class="tx t2 mt8">${I18N.t('pipeline.click_issue_hint')}</div>`;
 
   el.innerHTML = html;
 }
 
 function triggerSREDeploy(repoFullName, issueNum, stage) {
-  if (!confirm(`确认触发 SRE Agent 处理 Issue #${issueNum}？\n\n仓库：${repoFullName}\n当前阶段：${stage}\n\nSRE Agent 将根据 Issue 内容自动判断部署或资源释放。`))
+  if (!confirm(I18N.t('pipeline.sre_confirm_title', {issueNum: issueNum}) + I18N.t('pipeline.sre_confirm_body', {repoFullName: repoFullName, stage: stage})))
     return;
   const ctx = stage === 'sre'
-    ? `手动触发 SRE 处理 Issue #${issueNum}（当前阶段 sre，可能需要部署或资源释放）`
-    : `手动触发 SRE 部署 Issue #${issueNum}（从 ${stage} 阶段跳转）`;
+    ? I18N.t('pipeline.sre_context_sre', {issueNum: issueNum})
+    : I18N.t('pipeline.sre_context_jump', {issueNum: issueNum, stage: stage});
   API.post('/a2a', {
     agent: 'sre',
     payload: {
@@ -230,16 +230,16 @@ function triggerSREDeploy(repoFullName, issueNum, stage) {
     }
   }).then(d => {
     if (d.skipped) {
-      alert(`SRE 任务被跳过：${d.skipped}\n\n可能原因：SRE 已配置订阅且本次请求被判定为重复。请检查 SRE Agent 订阅配置。`);
+      alert(I18N.t('pipeline.sre_skipped', {skipped: d.skipped}));
     } else if (d.seq > 0) {
-      alert(`✅ SRE Agent 已触发！\n\n事件编号：seq=${d.seq}\n可在 Events 页面查看执行进度。`);
+      alert(I18N.t('pipeline.sre_triggered', {seq: d.seq}));
       // 刷新 pipeline
       if (typeof loadPipeline === 'function') loadPipeline();
     } else {
-      alert(`SRE 触发结果：${JSON.stringify(d)}`);
+      alert(I18N.t('pipeline.sre_result', {result: JSON.stringify(d)}));
     }
   }).catch(e => {
-    alert('触发 SRE 失败：' + (e.message || e));
+    alert(I18N.t('pipeline.sre_trigger_failed', {msg: (e.message || e)}));
   });
 }
 

@@ -15,13 +15,13 @@ function renderSelectionShell(tab, innerHtml) {
       <div class="lobby-brand">
         <img class="lobby-logo" src="/static/logo.png" alt="Grape">
         <span class="lobby-brand-name">Grape</span>
-        <span class="lobby-brand-sub">Agentic DevOps</span>
+        <span class="lobby-brand-sub">${I18N.t('repos.brand_sub')}</span>
       </div>
       <nav class="lobby-tabs">
-        <a class="${tabCls('projects')}" onclick="switchSidebarTab('projects')">工作项目</a>
-        <a class="${tabCls('templates')}" onclick="switchSidebarTab('templates')">项目模板</a>
+        <a class="${tabCls('projects')}" onclick="switchSidebarTab('projects')">${I18N.t('repos.tab.projects')}</a>
+        <a class="${tabCls('templates')}" onclick="switchSidebarTab('templates')">${I18N.t('repos.tab.templates')}</a>
       </nav>
-      <div class="lobby-user" onclick="app.logout()" title="退出登录">
+      <div class="lobby-user" onclick="app.logout()" title="${I18N.t('repos.logout_title')}">
         <span class="lobby-avatar">${avatar}</span>
         <span class="lobby-user-name">${user}</span>
         <span class="lobby-out">↩</span>
@@ -59,7 +59,7 @@ function renderRepoSelection(repos) {
   const user = (_lu && (_lu.nickname || _lu.username)) || 'User';
   const hostedCount = (repos || []).filter(r => r.is_hosted).length;
   const joinedCount = (repos || []).filter(r => r.is_joined && !r.is_hosted).length;
-  const name = (user || '朋友').split('@')[0];
+  const name = (user || I18N.t('repos.lobby.friend')).split('@')[0];
 
   // 已托管 > 已加入 > 未加入 排序（同等级按 full_name 稳定排序，保证分页不跳动）
   const allRepos = (repos || []).slice().sort((a, b) => {
@@ -82,15 +82,15 @@ function renderRepoSelection(repos) {
     </div>`;
   }
 
-  let inner = `<button class="lobby-refresh-btn" onclick="refreshRepos(this)" title="从 GitCode 刷新仓库列表">↻ 刷新</button>
+  let inner = `<button class="lobby-refresh-btn" onclick="refreshRepos(this)" title="${I18N.t('repos.lobby.refresh_title')}">${I18N.t('repos.lobby.refresh_btn')}</button>
   <div class="lobby-hero">
-    <div class="lobby-eyebrow"><i></i>WELCOME TO GRAPE<i></i></div>
-    <h1 class="lobby-title">你好，<span>${name}</span><span class="lobby-hello">👋</span></h1>
-    <p class="lobby-sub">选择一个工作项目，开启由 Agent 驱动的自动化 DevOps 之旅。</p>
+    <div class="lobby-eyebrow"><i></i>${I18N.t('repos.lobby.welcome_to_grape')}<i></i></div>
+    <h1 class="lobby-title">${I18N.t('repos.lobby.hello')}<span>${name}</span><span class="lobby-hello">👋</span></h1>
+    <p class="lobby-sub">${I18N.t('repos.lobby.welcome_sub')}</p>
     <div class="lobby-stats-inline">
-      <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${total}</b><span>工作项目</span></div>
-      <div class="lobby-stat"><span class="lobby-stat-ic">✓</span><b>${hostedCount}</b><span>已托管</span></div>
-      <div class="lobby-stat"><span class="lobby-stat-ic">◇</span><b>${joinedCount}</b><span>已加入</span></div>
+      <div class="lobby-stat"><span class="lobby-stat-ic">◧</span><b>${total}</b><span>${I18N.t('repos.lobby.stat_projects')}</span></div>
+      <div class="lobby-stat"><span class="lobby-stat-ic">✓</span><b>${hostedCount}</b><span>${I18N.t('repos.lobby.stat_hosted')}</span></div>
+      <div class="lobby-stat"><span class="lobby-stat-ic">◇</span><b>${joinedCount}</b><span>${I18N.t('repos.lobby.stat_joined')}</span></div>
     </div>
   </div>
 
@@ -101,8 +101,8 @@ function renderRepoSelection(repos) {
 
   <div class="lobby-empty" id="rsEmpty" style="display:none">
     <div class="lobby-empty-ic">🔭</div>
-    <h3>未找到匹配的项目</h3>
-    <p>试试更换关键词或筛选条件。</p>
+    <h3>${I18N.t('repos.lobby.empty_title')}</h3>
+    <p>${I18N.t('repos.lobby.empty_desc')}</p>
   </div>`;
 
   _projectsContent = inner;
@@ -121,8 +121,8 @@ function _buildLobbyCard(r) {
   const enter = r.is_joined || r.is_hosted;
   // 卡片本体：点击跳转项目实际代码仓库（GitCode），不直接进入 Grape 工作区
   const repoUrl = 'https://gitcode.com/' + (r.full_name || '');
-  const btnTxt = r.is_hosted ? '进入项目' : r.is_joined ? '进入项目' : isAdmin ? '加入并托管' : '加入';
-  const statusTxt = r.is_hosted ? '已托管' : r.is_joined ? '已加入' : '未加入';
+  const btnTxt = r.is_hosted ? I18N.t('repos.card.enter_project') : r.is_joined ? I18N.t('repos.card.enter_project') : isAdmin ? I18N.t('repos.card.join_and_host') : I18N.t('repos.card.join');
+  const statusTxt = r.is_hosted ? I18N.t('repos.card.status_hosted') : r.is_joined ? I18N.t('repos.card.status_joined') : I18N.t('repos.card.status_not_joined');
   const initials = (r.name || '?').substring(0, 2).toUpperCase();
 
   return `<div class="lobby-card" onclick="window.open('${repoUrl}','_blank')">
@@ -132,10 +132,10 @@ function _buildLobbyCard(r) {
       <span class="lobby-card-status ${enter ? 'in' : ''}"><b></b>${statusTxt}</span>
     </div>
     <h3 title="${r.full_name}">${r.name}</h3>
-    <p>${r.description || '暂无描述'}</p>
+    <p>${r.description || I18N.t('repos.card.no_description')}</p>
     <div class="lobby-card-owner"><span class="lobby-owner-dot"></span>${r.owner} · ${r.role}</div>
     <div class="lobby-card-btn-row">
-      <button class="lobby-btn ${enter ? 'lobby-btn-solid' : 'lobby-btn-ghost'}" onclick="event.stopPropagation();${enter ? `selectRepo('${r.full_name}','${r.owner}','${r.name}')` : `${isAdmin ? 'hostAndSelect' : 'joinAndSelect'}('${r.full_name}','${r.owner}','${r.name}')`}">${btnTxt}<span class="lobby-btn-ar">→</span></button>
+      <button class="lobby-btn ${enter ? 'lobby-btn-solid' : 'lobby-btn-ghost'}" onclick="event.stopPropagation();${enter ? `selectRepo('${r.full_name}','${r.owner}','${r.name}')` : `${isAdmin ? 'hostAndSelect' : 'joinAndSelect'}('${r.full_name}','${r.owner}','${r.name}')`}\">${btnTxt}<span class="lobby-btn-ar">→</span></button>
     </div>
   </div>`;
 }
@@ -144,7 +144,7 @@ function _buildLobbyCard(r) {
 function renderRepos() {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  renderSelectionShell('projects', '<div class="loading">加载中...</div>');
+  renderSelectionShell('projects', '<div class="loading">' + I18N.t('repos.loading') + '</div>');
 
   API.get('/repos/member').then(d => {
     const allRepos = d.repos || [];
@@ -152,13 +152,13 @@ function renderRepos() {
     const availableRepos = allRepos.filter(r => !r.is_joined && !r.is_hosted);
 
     let html = `<div class="flex fc jbtw" style="margin-bottom:20px">
-      <h2 style="font-size:15px;font-weight:600">Repositories</h2>
-      <button class="bt bt-p bt-s" onclick="syncRepos()">↻ Sync from GitCode</button>
+      <h2 style="font-size:15px;font-weight:600">${I18N.t('repos.repositories')}</h2>
+      <button class="bt bt-p bt-s" onclick="syncRepos()">↻ ${I18N.t('repos.sync_from_gitcode')}</button>
     </div>`;
 
-    html += `<div class="cd"><div class="cd-h"><h2>Hosted <span class="c">${managedRepos.length}</span></h2></div>`;
+    html += `<div class="cd"><div class="cd-h"><h2>${I18N.t('repos.hosted')} <span class="c">${managedRepos.length}</span></h2></div>`;
     if (managedRepos.length === 0) {
-      html += '<div class="ts t2" style="padding:12px 0">暂无已托管的仓库</div>';
+      html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_hosted') + '</div>';
     } else {
       managedRepos.forEach(r => {
         const statusClass = r.is_hosted ? 'tg-s' : 'tg-d';
@@ -168,7 +168,7 @@ function renderRepos() {
           <span class="ts t2">${r.role}</span>
           <span class="ts t3">${r.is_hosted ? 'Webhook OK' : ''} · ★ ${r.name}</span>
           <span class="tg ${statusClass}" style="margin-left:auto">${statusText}</span>
-          <button class="bt bt-o bt-s" onclick="event.stopPropagation();unhostRepo('${r.full_name}')" style="color:var(--r);border-color:var(--r)">解除托管</button>
+          <button class="bt bt-o bt-s" onclick="event.stopPropagation();unhostRepo('${r.full_name}')" style="color:var(--r);border-color:var(--r)">${I18N.t('repos.managed.unhost_btn')}</button>
         </div>`;
       });
     }
@@ -176,17 +176,17 @@ function renderRepos() {
 
     html += `<div class="cd"><div class="cd-h"><h2>Available to Join <span class="c">${availableRepos.length}</span></h2></div>`;
     if (availableRepos.length === 0) {
-      html += '<div class="ts t2" style="padding:12px 0">没有可加入的仓库</div>';
+      html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_available') + '</div>';
     } else {
       html += `<div class="tw"><table>
-        <tr><th>Repository</th><th>Role</th><th>Description</th><th></th></tr>`;
+        <tr><th>${I18N.t('repos.managed.th_repository')}</th><th>${I18N.t('repos.managed.th_role')}</th><th>${I18N.t('repos.managed.th_description')}</th><th></th></tr>`;
       availableRepos.forEach(r => {
         const isAdmin = r.role === 'Admin' || r.role === 'Maintainer';
         const roleTag = r.role === 'Admin' ? `<span class="tg tg-s">${r.role}</span>` :
                         r.role === 'Maintainer' ? `<span class="tg tg-i">${r.role}</span>` : r.role;
         const btnHtml = isAdmin
-          ? `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}')">${r.is_hosted ? '已托管' : '加入并托管'}</button>`
-          : `<button class="bt bt-o bt-s" onclick="event.stopPropagation();joinAndSelect('${r.full_name}','${r.owner}','${r.name}')">加入</button>`;
+          ? `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}')">${r.is_hosted ? I18N.t('repos.available_btn.hosted') : I18N.t('repos.available_btn.join_and_host')}</button>`
+          : `<button class="bt bt-o bt-s" onclick="event.stopPropagation();joinAndSelect('${r.full_name}','${r.owner}','${r.name}')">${I18N.t('repos.available_btn.join')}</button>`;
         html += `<tr><td><b>${r.full_name}</b></td><td>${roleTag}</td><td>${r.description || ''}</td><td>${btnHtml}</td></tr>`;
       });
       html += `</table></div>`;
@@ -198,43 +198,43 @@ function renderRepos() {
     if (pc) pc.innerHTML = html;
   }).catch(() => {
     const pc = document.getElementById('ptContent');
-    if (pc) pc.innerHTML = '<div class="error">加载失败</div>';
+    if (pc) pc.innerHTML = '<div class="error">' + I18N.t('repos.load_failed') + '</div>';
   });
 }
 
 // ====== 操作函数 ======
 function syncRepos() {
   API.post('/repos/sync').then(d => {
-    app.showToast('同步成功');
+    app.showToast(I18N.t('repos.sync.sync_success'));
     renderRepos();
-  }).catch(e => app.showToast('同步失败: ' + e.message));
+  }).catch(e => app.showToast(I18N.t('repos.sync.sync_failed', {msg: e.message})));
 }
 
 function refreshRepos(btn) {
-  if (btn) { btn.disabled = true; btn.textContent = '↻ 同步中…'; }
+  if (btn) { btn.disabled = true; btn.textContent = I18N.t('repos.sync.syncing'); }
   API.post('/repos/sync').then(d => {
     const repos = (d.repos || []);
     _repoPage = 0;
     renderRepoSelection(repos);
-    app.showToast('刷新成功');
+    app.showToast(I18N.t('repos.sync.refresh_success'));
   }).catch(e => {
-    app.showToast('刷新失败: ' + (e.message || e));
-    if (btn) { btn.disabled = false; btn.textContent = '↻ 刷新'; }
+    app.showToast(I18N.t('repos.sync.refresh_failed', {msg: (e.message || e)}));
+    if (btn) { btn.disabled = false; btn.textContent = I18N.t('repos.sync.refresh'); }
   });
 }
 
 function hostAndSelect(fullName, owner, name) {
   API.post('/repos/host', {full_name: fullName}).then(r => {
-    app.showToast('加入并托管成功');
+    app.showToast(I18N.t('repos.sync.host_success'));
     app.loadProfile().then(() => selectRepo(fullName, owner, name));
-  }).catch(e => app.showToast('托管失败: ' + e.message));
+  }).catch(e => app.showToast(I18N.t('repos.sync.host_failed', {msg: e.message})));
 }
 
 function joinAndSelect(fullName, owner, name) {
   API.post('/repos/join', {full_name: fullName}).then(r => {
-    app.showToast('已成功加入仓库');
+    app.showToast(I18N.t('repos.sync.join_success'));
     app.loadProfile().then(() => selectRepo(fullName, owner, name));
-  }).catch(e => app.showToast('加入失败: ' + e.message));
+  }).catch(e => app.showToast(I18N.t('repos.sync.join_failed', {msg: e.message})));
 }
 
 function selectRepo(fullName, owner, name) {
@@ -251,15 +251,15 @@ function selectRepo(fullName, owner, name) {
   }
   if (sidebar) sidebar.style.display = 'flex';
   if (tb) tb.style.display = 'flex';
-  if (title) title.textContent = 'Dashboard';
+  if (title) title.textContent = I18N.t('app.nav.dashboard');
   app.initSidebarRepos();
   app.nav('dash');
 }
 
 function unhostRepo(fullName) {
-  if (!confirm('⚠️ 确定要解除托管 ' + fullName + ' 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。')) return;
+  if (!confirm(I18N.t('repos.unhost.confirm', {name: fullName}))) return;
   API.post('/repos/remove', {full_name: fullName}).then(r => {
-    app.showToast('已解除托管');
+    app.showToast(I18N.t('repos.unhost.done'));
     app.loadProfile().then(() => {
       const cur = app.currentRepo();
       const wasCurrent = cur && cur.fullName === fullName;
@@ -277,16 +277,16 @@ function unhostRepo(fullName) {
             mv.style.position = 'fixed';
             mv.style.inset = '0';
             mv.style.zIndex = '100';
-            document.getElementById('pageTitle').textContent = '选择仓库';
+            document.getElementById('pageTitle').textContent = I18N.t('repos.unhost.select_repo');
             renderRepoSelection(repos);
           });
         } else {
-          document.getElementById('pageTitle').textContent = '选择仓库';
+          document.getElementById('pageTitle').textContent = I18N.t('repos.unhost.select_repo');
           renderRepos();
         }
       });
     });
-  }).catch(e => app.showToast('解除托管失败: ' + e.message));
+  }).catch(e => app.showToast(I18N.t('repos.unhost.failed', {msg: e.message})));
 }
 
 // ====== 创建新项目弹窗 ======
@@ -300,34 +300,34 @@ function openCreateRepoModal() {
       <div class="create-repo-title">
         <span class="create-repo-ic">＋</span>
         <div>
-          <h3>创建新项目</h3>
-          <p>在 GitCode 上新建仓库，创建后可立即进入托管工作流。</p>
+          <h3>${I18N.t('repos.create.title')}</h3>
+          <p>${I18N.t('repos.create.desc')}</p>
         </div>
       </div>
       <button class="create-repo-x" onclick="closeCreateRepoModal()">✕</button>
     </div>
     <form class="create-repo-form" onsubmit="submitCreateRepo(event)">
       <div class="create-repo-field">
-        <label for="crName">仓库名称 <span class="cr-req">*</span></label>
-        <input id="crName" type="text" placeholder="例如：my-project" autocomplete="off" maxlength="64" required>
-        <p class="cr-hint">仅限字母、数字、下划线、连字符和点，将以你的账号命名空间创建。</p>
+        <label for="crName">${I18N.t('repos.create.name_label')} <span class="cr-req">*</span></label>
+        <input id="crName" type="text" placeholder="${I18N.t('repos.create.name_placeholder')}" autocomplete="off" maxlength="64" required>
+        <p class="cr-hint">${I18N.t('repos.create.name_hint')}</p>
       </div>
       <div class="create-repo-field">
-        <label for="crDesc">项目描述</label>
-        <textarea id="crDesc" rows="3" placeholder="简要描述这个项目的用途（可选）" maxlength="255"></textarea>
+        <label for="crDesc">${I18N.t('repos.create.desc_label')}</label>
+        <textarea id="crDesc" rows="3" placeholder="${I18N.t('repos.create.desc_placeholder')}" maxlength="255"></textarea>
       </div>
       <div class="create-repo-field">
-        <label>可见性</label>
+        <label>${I18N.t('repos.create.vis_label')}</label>
         <div class="create-repo-vis">
-          <button type="button" class="cr-vis-btn cr-vis-act" data-vis="private" onclick="selectVisibility(this)"><span class="cr-vis-ic">🔒</span><div><b>私有</b><em>仅自己和授权协作者可见</em></div></button>
-          <button type="button" class="cr-vis-btn" data-vis="public" onclick="selectVisibility(this)"><span class="cr-vis-ic">🌐</span><div><b>公开</b><em>所有人可见，可克隆</em></div></button>
+          <button type="button" class="cr-vis-btn cr-vis-act" data-vis="private" onclick="selectVisibility(this)"><span class="cr-vis-ic">🔒</span><div><b>${I18N.t('repos.create.vis_private')}</b><em>${I18N.t('repos.create.vis_private_desc')}</em></div></button>
+          <button type="button" class="cr-vis-btn" data-vis="public" onclick="selectVisibility(this)"><span class="cr-vis-ic">🌐</span><div><b>${I18N.t('repos.create.vis_public')}</b><em>${I18N.t('repos.create.vis_public_desc')}</em></div></button>
         </div>
       </div>
       <div class="create-repo-actions">
-        <button type="button" class="cr-btn cr-btn-ghost" onclick="closeCreateRepoModal()">取消</button>
+        <button type="button" class="cr-btn cr-btn-ghost" onclick="closeCreateRepoModal()">${I18N.t('repos.create.btn_cancel')}</button>
         <button type="submit" class="cr-btn cr-btn-primary" id="crSubmit">
-          <span class="cr-btn-txt">创建项目</span>
-          <span class="cr-btn-loading" style="display:none">创建中…</span>
+          <span class="cr-btn-txt">${I18N.t('repos.create.btn_create')}</span>
+          <span class="cr-btn-loading" style="display:none">${I18N.t('repos.create.btn_creating')}</span>
         </button>
       </div>
     </form>
@@ -352,7 +352,7 @@ function selectVisibility(btn) {
 function submitCreateRepo(e) {
   e.preventDefault();
   const name = (document.getElementById('crName').value || '').trim();
-  if (!name) return app.showToast('请输入仓库名称');
+  if (!name) return app.showToast(I18N.t('repos.create.err_no_name'));
   const desc = document.getElementById('crDesc').value.trim();
   const visBtn = document.querySelector('.cr-vis-btn.cr-vis-act');
   const visibility = visBtn ? visBtn.getAttribute('data-vis') : 'private';
@@ -371,12 +371,12 @@ function submitCreateRepo(e) {
         btn.disabled = false;
         if (txt) txt.style.display = '';
         if (ld) ld.style.display = 'none';
-        app.showToast('仓库 ' + check.full_name + ' 已存在，请更换名称');
+        app.showToast(I18N.t('repos.create.err_exists', {name: check.full_name}));
         return;
       }
       API.post('/repos/create', {name, description: desc, visibility})
         .then(r => {
-          app.showToast('项目创建成功: ' + (r.full_name || name));
+          app.showToast(I18N.t('repos.create.success', {name: (r.full_name || name)}));
           closeCreateRepoModal();
           if (typeof _projectsRepos !== 'undefined') {
             API.get('/repos/member').then(d => {
@@ -388,7 +388,7 @@ function submitCreateRepo(e) {
           }
         })
         .catch(err => {
-          app.showToast('创建失败: ' + (err.message || err));
+          app.showToast(I18N.t('repos.create.err_create_failed', {msg: (err.message || err)}));
           btn.disabled = false;
           if (txt) txt.style.display = '';
           if (ld) ld.style.display = 'none';
@@ -398,6 +398,6 @@ function submitCreateRepo(e) {
       btn.disabled = false;
       if (txt) txt.style.display = '';
       if (ld) ld.style.display = 'none';
-      app.showToast('检查失败: ' + (err.message || err));
+      app.showToast(I18N.t('repos.create.err_check_failed', {msg: (err.message || err)}));
     });
 }

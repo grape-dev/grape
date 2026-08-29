@@ -337,3 +337,12 @@
 .nd-radar::before{content:"";position:absolute;top:0;left:0;width:100%;height:100%;background:conic-gradient(from 0deg,transparent 0deg,rgba(212,156,15,.12) 40deg,transparent 80deg);animation:radarSweep 3s linear infinite;pointer-events:none;z-index:0}
 .nd-radar>*{position:relative;z-index:1}
 .d-pulse{animation:radarPulse 1.2s ease-in-out infinite}
+
+/* ===== Chat 查询中三点动画（学习 Admin AI loading-dots query-bounce）===== */
+.chat-typing{display:inline-block;font-size:12px;color:var(--t2)}
+.chat-dots{display:inline-flex;gap:6px;padding:8px 4px;align-items:center}
+.chat-dots span{width:8px;height:8px;border-radius:50%;background:var(--a);animation:chatDotBounce 1.2s infinite}
+.chat-dots span:nth-child(1){animation-delay:0s}
+.chat-dots span:nth-child(2){animation-delay:0.2s}
+.chat-dots span:nth-child(3){animation-delay:0.4s}
+@keyframes chatDotBounce{0%,60%,100%{transform:translateY(0);opacity:0.4}30%{transform:translateY(-6px);opacity:1}}

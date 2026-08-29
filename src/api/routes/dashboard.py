@@ -4,6 +4,7 @@ from src.user import db as user_db
 from src.api.deps import get_current_user
 from src.api.time_utils import normalize_event_time
 from src.observability.engine_probe import get_probe_results
+from src.config import log
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -265,14 +266,13 @@ async def get_ops_overview(repo: str = ""):
             c.execute(
                 "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
                 "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, "
-                "rc.device_name, rc.status AS cred_status, ar.host_name, "
-                "ar.probe_status, ar.probe_latency, ar.probe_last, ar.probe_error "
+                "rc.device_name, rc.status AS cred_status, ar.host_name "
                 "FROM agent_runtimes ar "
                 "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id "
                 "ORDER BY ar.id"
             )
             for r in c.fetchall():
-                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcred_status, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error = r
+                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcred_status, rhost = r
                 # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）
                 if (cid or 0) > 0 and rcred_status == 'revoked':
                     continue
@@ -313,11 +313,12 @@ async def get_ops_overview(repo: str = ""):
                 if (cid or 0) == 0:
                     _probe = _probe_results.get(rname or "", {})
                 else:
+                    # 远端引擎 probe 信息由 worker 心跳上报，DB 无独立列，用空值兜底
                     _probe = {
-                        "status": rprobe_status or "pending",
-                        "latency": rprobe_latency or 0,
-                        "last_probe": rprobe_last or "",
-                        "error": rprobe_error or "",
+                        "status": "pending",
+                        "latency": 0,
+                        "last_probe": "",
+                        "error": "",
                     }
                 # 本机直连引擎的 device_name 用 host_name（区分多台主控机）
                 _dev_name = rdev or ""
@@ -859,7 +860,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         if s in event_counts:
             event_counts[s] += 1
 
-    # 获取当前场景和场景列表
+    # 获取当前场景和场景列表（从 DB 读取）
     dev_scene = "default"
     try:
         with db_lock:
@@ -871,12 +872,49 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         pass
 
     scenes = []
+    scene_nodes = []
     try:
-        from src.api.routes.scenes import _load_scenes
-        for sid, s in _load_scenes().items():
-            scenes.append({"id": sid, "name": s.get("name", sid)})
-    except Exception:
-        pass
+        from src.api.pipeline_config import get_scenes, get_pipeline_config
+        scenes = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
+        # 获取当前场景的 nodes（含 skill / enabled / engine_runtime_ids）
+        cfg = get_pipeline_config(dev_scene, repo_key=repo_key, user_id=user.get("id", 0))
+        if cfg:
+            scene_nodes = cfg.get("nodes", [])
+    except Exception as e:
+        log.warning(f"Dashboard: scene load failed: {e}")
+
+    # 为每个 agent 附带场景信息（skill / enabled_in_scene / engine_runtime_ids）
+    # engine_runtime_ids 只从场景 node 读取（为空 = 全广播/兜底）
+    scene_by_agent = {n.get("tag") or n.get("id", ""): n for n in scene_nodes}
+    for ag in agent_sessions:
+        at = ag.get("agent_type", "")
+        node = scene_by_agent.get(at)
+        if node:
+            ag["skill"] = node.get("skill", "")
+            ag["enabled_in_scene"] = node.get("enabled", True)
+            ag["engine_runtime_ids"] = node.get("engine_runtime_ids", []) or []
+        else:
+            ag["skill"] = ""
+            ag["enabled_in_scene"] = False
+            ag["engine_runtime_ids"] = []
+
+    # 获取可用引擎列表（供前端 engine 下拉）
+    # 照搬 Agent Runtimes 页的显示规则：用 instance_name 唯一命名 + 包含 user scope
+    agent_engines = {}
+    try:
+        from src.runtime.engine_select import query_engines
+        from src.runtime.instances import instance_name
+        for atype in all_types:
+            engines = (query_engines(repo_key, "global")
+                       + query_engines(repo_key, "user")
+                       + query_engines(repo_key, "local"))
+            agent_engines[atype] = [{"id": e["runtime_id"],
+                                     "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
+                                     "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
+                                     "status": e["status"]}
+                                    for e in engines]
+    except Exception as e:
+        log.warning(f"dashboard agent_engines failed: {e}")
 
     return {
         "repo": repo_key,
@@ -890,7 +928,6 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
             "failed_events": event_counts["failed"],
         },
         "agents": agent_sessions,
-        "agent_event_counts": agent_event_counts,
-        "agent_recent_events": agent_recent_events,
-        "activity": recent_events,
+        "agent_engines": agent_engines,
+        "scene_nodes": scene_nodes,
     }

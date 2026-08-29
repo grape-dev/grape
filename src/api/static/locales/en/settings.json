@@ -1,0 +1,103 @@
+{
+  "page_title": "Settings",
+  "tab": {
+    "credentials": "Credentials",
+    "notifications": "Notifications",
+    "appearance": "Appearance",
+    "advanced": "Advanced"
+  },
+  "common": {
+    "loading": "Loading...",
+    "load_failed": "Failed to load: {{msg}}",
+    "save": "Save",
+    "update_failed": "Update failed",
+    "config_updated": "Configuration updated",
+    "cred_updated": "Credentials updated"
+  },
+  "appearance": {
+    "title": "Interface Theme",
+    "theme_desc": "Choose the visual style of the Grape console. Liquid Glass features a frosted sidebar, system font stack, refined corners and pill buttons for a clean, transparent feel.",
+    "default": "Grape Default",
+    "default_desc": "Dark sidebar + light content",
+    "apple": "Liquid Glass",
+    "apple_desc": "Frosted sidebar + system fonts",
+    "current": "✓ Current",
+    "mode_title": "Appearance Mode",
+    "mode_desc": "Liquid Glass only — follows system dark/light preference.",
+    "light": "☀️ Light",
+    "auto": "🌓 Follow System"
+  },
+  "theme": {
+    "switch_unavailable": "Theme switching unavailable",
+    "switched_default": "Switched to Default theme",
+    "switched_apple": "Switched to Liquid Glass theme",
+    "show_hide": "Show/Hide plaintext"
+  },
+  "language": {
+    "title": "Language",
+    "desc": "Select the interface language. The page will refresh automatically.",
+    "zh": "中文",
+    "en": "English"
+  },
+  "pipeline": {
+    "title": "Pipeline Mode",
+    "plugin_desc": "Plugin mode: uses pipelines.json + tag broadcast preemption, tasks enqueued by pool_tag, idle engines claim_by_tag.",
+    "traditional_desc": "Traditional mode: uses agent-skill-mapping.json + runtime_id binding, tasks assigned directly to specific engines.",
+    "plugin": "Plugin ✦",
+    "traditional": "Traditional",
+    "status_plugin": "Currently using tag broadcast preemption",
+    "status_legacy": "Currently using directed engine assignment",
+    "warning": "⚠️ Takes effect immediately, affecting dispatch for all subsequent new events. In-progress tasks are unaffected.",
+    "switch_failed": "Switch failed: {{msg}}",
+    "unknown_error": "Unknown error"
+  },
+  "credentials": {
+    "gitcode_token": "GitCode Token",
+    "feishu_config": "Feishu Config",
+    "bot_config": "Bot Config",
+    "add": "Add",
+    "remove": "Remove",
+    "test": "Test",
+    "token_invalid": "Token invalid",
+    "token_valid": "Token valid",
+    "gitcode_api_title": "GitCode API (auto-filled on OAuth login)",
+    "gitcode_token_placeholder": "Not configured",
+    "gitcode_account_suffix": " · auto-filled on login",
+    "huawei_cloud_title": "Huawei Cloud",
+    "huawei_cloud_desc": "Huawei Cloud CodeArts provides free cloud dev environment for Coding Agent.",
+    "devops_bot_title": "DevOps Bot Token",
+    "bot_token_placeholder_configured": "Configured, leave empty to keep",
+    "bot_token_placeholder_empty": "Not set, will use Grape official bot by default",
+    "bot_configured": "✓ Configured",
+    "repo_config_updated": "GitCode Repo config updated",
+    "scope": "Scope",
+    "api_token": "API Token",
+    "account": "Account",
+    "access_key": "Access Key",
+    "secret_key": "Secret Key",
+    "bot_token": "Bot Token"
+  },
+  "host": {
+    "title": "Hosted Repositories",
+    "unhost_title": "Unhost",
+    "unhost_warning": "⚠️ After unhosting, all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files) will be deleted and cannot be recovered.",
+    "confirm_remove": "⚠️ Are you sure you want to unhost {{name}}?\n\nThis will delete all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files). This cannot be undone.\n\nPlease proceed with caution if you need to keep historical data.",
+    "unhost_done": "Unhosted successfully",
+    "unhost_failed": "Unhost failed: {{msg}}",
+    "select_repo_first": "Please select a repository first",
+    "select_repo": "Select Repository"
+  },
+  "scene": {
+    "select_first": "Please select a scene",
+    "applied": "Scene applied",
+    "apply_failed": "Failed to apply scene: {{msg}}"
+  },
+  "notifications": {
+    "title": "Notification Preferences",
+    "issue_events": "Issue events",
+    "pr_events": "PR events",
+    "build_failures": "Build failures",
+    "release_events": "Release events",
+    "vod_signals": "VOD signals"
+  }
+}

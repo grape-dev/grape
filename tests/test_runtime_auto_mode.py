@@ -25,7 +25,6 @@ def _clean():
         # 避免其他测试残留的全局引擎被 pick_engine 选中导致执行模式不确定（随机顺序 flaky）
         c.execute("DELETE FROM agent_runtimes WHERE credential_id>0")
         c.execute("DELETE FROM runtime_credentials")
-        c.execute("DELETE FROM devops_agent_runtime_binding")
         db.commit()
 
 

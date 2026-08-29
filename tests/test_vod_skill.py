@@ -3,8 +3,8 @@ import os, json
 import pytest
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
-VOD_SKILL = os.path.join(ROOT, "skills", "vod", "SKILL.md")
-ELICIT_GUIDE = os.path.join(ROOT, "skills", "vod", "references", "requirement-elicit-guide.md")
+VOD_SKILL = os.path.join(ROOT, "skills", "vod", "vod", "SKILL.md")
+ELICIT_GUIDE = os.path.join(ROOT, "skills", "vod", "vod", "references", "requirement-elicit-guide.md")
 
 
 def _skill():

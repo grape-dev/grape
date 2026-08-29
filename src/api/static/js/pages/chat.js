@@ -1,7 +1,27 @@
 let _currentConvId = null;
 let _chatAbort = null;
 let _openConvId = null;
-const _NO_REPLY = '⚠️ 未收到回复，连接可能中断，请重试。';
+// v31: per-conversation 任务追踪（替代旧 _chatActiveTask 单变量）
+// { conv_id: { task_id, el_id, status, finalText } }
+let _chatTasks = {};
+let _chatStreamAbort = null;  // 当前活跃的 SSE AbortController
+
+// ===== 任务状态持久化（sessionStorage，对齐 Admin AI）=====
+function _getStoredTask(convId) {
+  try { const s = sessionStorage.getItem('chat_task_' + convId); return s ? JSON.parse(s) : null } catch(e) { return null }
+}
+function _setStoredTask(convId, task) {
+  try { sessionStorage.setItem('chat_task_' + convId, JSON.stringify(task)) } catch(e) {}
+}
+function _clearStoredTask(convId) {
+  try { sessionStorage.removeItem('chat_task_' + convId) } catch(e) {}
+}
+// v31: per-conversation 任务状态管理
+function _getTask(convId) { return _chatTasks[convId] || null; }
+function _setTask(convId, task) { _chatTasks[convId] = task; if (convId) _setStoredTask(convId, task); }
+function _clearTask(convId) { delete _chatTasks[convId]; if (convId) _clearStoredTask(convId); }
+
+const _NO_REPLY = I18N.t('chat.no_reply');
 
 /**
  * 将 "Issue #N" 文本渲染为 GitCode Issue 超链接。
@@ -38,11 +58,11 @@ function renderChat(openConvId) {
   el.innerHTML = `<div class="chat-wrap" style="height:calc(100vh - 96px)">
     <div class="chat-convlist" id="convList"></div>
     <div class="chat-main">
-      <div class="chat-hdr"><h2>Chat Agent · Personal Assistant</h2><button class="chat-cfg-btn" id="chatCfgBtn" onclick="toggleChatSide()">⚙ 配置</button></div>
+      <div class="chat-hdr"><h2>${I18N.t('chat.header.title')}</h2><button class="chat-cfg-btn" id="chatCfgBtn" onclick="toggleChatSide()">${I18N.t('chat.header.config_btn')}</button></div>
       <div class="chat-body" id="chatBody">
-        <div style="text-align:center;color:var(--t3);padding:60px 20px">加载中...</div>
+        <div style="text-align:center;color:var(--t3);padding:60px 20px">${I18N.t('common.loading')}</div>
       </div>
-      <div class="chat-in"><input id="chatInput" placeholder="Ask me anything..." style="flex:1"><button class="bt bt-p" onclick="sendChatStream()">Send</button></div>
+      <div class="chat-in"><input id="chatInput" placeholder="${I18N.t('chat.placeholder')}" style="flex:1"><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
     </div>
     <div class="chat-side" id="chatSide"></div>
   </div>`;
@@ -82,14 +102,14 @@ function _loadChatSkillOptions() {
     const allSkills = d.skills || [];
     const filtered = allSkills.filter(s => s.agent_type === 'chat');
     const matchCurrent = filtered.find(s => String(s.id) === currentSkillId);
-    const defaultOpt = scope === 'official' ? '<option value="0">默认官方技能（自动）</option>' : '';
+    const defaultOpt = scope === 'official' ? '<option value="0">' + I18N.t('chat.skill.default_official') + '</option>' : '';
     let html = defaultOpt +
       filtered.map((s, i) => {
         const selected = matchCurrent ? (String(s.id) === currentSkillId) : (i === 0);
         return `<option value="${s.id}" ${selected ? 'selected' : ''}>${s.display_name || s.name}</option>`;
       }).join('');
     if (filtered.length === 0) {
-      html = `<option value="0" disabled>${scope === 'repo' ? '该仓库暂无项目技能' : '暂无个人技能'}</option>`;
+      html = `<option value="0" disabled>${scope === 'repo' ? I18N.t('chat.skill.no_repo_skill') : I18N.t('chat.skill.no_personal_skill')}</option>`;
     }
     skillSelect.innerHTML = html;
   }).catch(() => {});
@@ -102,7 +122,7 @@ function loadSideConfig() {
     const feishu = d.im?.feishu || {};
     const backend = d.backend || {};
     const backendsOpts = (d._backends || []).map(b =>
-      `<option value="${b.name}" data-rid="${b.runtime_id || ''}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${b.display_name || b.name}</option>`
+      `<option value="${b.name}" data-rid="${b.runtime_id || ''}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${(b.display_name || b.name) + (b.scope === 'local' ? ' (' + I18N.t('chat.local_direct') + ')' : '')}</option>`
     ).join('') || '<option value="">Default</option>';
     const side = document.getElementById('chatSide');
     if (!side) return;
@@ -110,20 +130,20 @@ function loadSideConfig() {
     _chatSkillScope = (d.skill_scope === 'repo') ? 'repo' : (d.skill_scope === 'user') ? 'user' : 'official';
     side.innerHTML = `
       <div class="cd" style="padding:12px;font-size:11px">
-        <div style="font-weight:600;margin-bottom:8px">Backend</div>
+        <div style="font-weight:600;margin-bottom:8px">${I18N.t('chat.backend')}</div>
         <select id="cfgBackend" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${backendsOpts}</select>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span style="font-weight:600;flex-shrink:0">Skill</span>
+          <span style="font-weight:600;flex-shrink:0">${I18N.t('chat.skill_label')}</span>
           <select id="cfgSkillScope" onchange="_switchChatSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:5px 6px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg);outline:none">
-            <option value="official">全局</option>
-            <option value="repo">项目</option>
-            <option value="user">个人</option>
+            <option value="official">${I18N.t('chat.scope_short.global')}</option>
+            <option value="repo">${I18N.t('chat.scope_short.repo')}</option>
+            <option value="user">${I18N.t('chat.scope_short.user')}</option>
           </select>
         </div>
         <select id="cfgSkill" data-skill-id="${d.skill_id || 0}" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">
-          <option value="0">默认官方技能（自动）</option>
+          <option value="0">${I18N.t('chat.skill.default_official')}</option>
         </select>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
@@ -133,15 +153,15 @@ function loadSideConfig() {
           <option value="wecom" ${d.im?.wecom?.app_id ? 'selected' : ''}>WeCom</option>
           <option value="dingtalk" ${d.im?.dingtalk?.app_id ? 'selected' : ''}>DingTalk</option>
         </select>
-        <div style="margin-bottom:4px"><span class="t3">App ID</span></div>
+        <div style="margin-bottom:4px"><span class="t3">${I18N.t('chat.app_id')}</span></div>
         <input id="cfgImAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:4px">
-        <div style="margin-bottom:4px"><span class="t3">App Secret</span></div>
+        <div style="margin-bottom:4px"><span class="t3">${I18N.t('chat.app_secret')}</span></div>
         <input id="cfgImSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
-        <button class="bt bt-o bt-s" onclick="startFeishuOnboard('chat_bot')" style="width:100%;margin-bottom:6px">扫码配置</button>
-        <button class="bt bt-p bt-s" onclick="saveChatConfig()" style="width:100%">Save</button>
+        <button class="bt bt-o bt-s" onclick="startFeishuOnboard('chat_bot')" style="width:100%;margin-bottom:6px">${I18N.t('chat.scan_config')}</button>
+        <button class="bt bt-p bt-s" onclick="saveChatConfig()" style="width:100%">${I18N.t('common.save')}</button>
       </div>
       <div class="cd" style="padding:12px;font-size:11px">
-        <div style="font-weight:600;margin-bottom:6px">Agents</div>
+        <div style="font-weight:600;margin-bottom:6px">${I18N.t('chat.agents')}</div>
         <div class="chat-agents" id="chatAgents"></div>
       </div>`;
     // 设置 scope 下拉框初始值
@@ -182,10 +202,10 @@ function loadConversations(autoSelect) {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
     if (!list) return;
-    let html = '<div style="padding:10px 12px;border-bottom:1px solid var(--b)"><button class="bt bt-p bt-s" onclick="newConversation()" style="width:100%">＋ 新对话</button></div>';
+    let html = '<div style="padding:10px 12px;border-bottom:1px solid var(--b)"><button class="bt bt-p bt-s" onclick="newConversation()" style="width:100%">' + I18N.t('chat.conversation.new') + '</button></div>';
     convs.forEach(c => {
       const active = c.id === _currentConvId ? ' style="background:var(--b)"' : '';
-      const titleHtml = c.title ? linkifyIssueNumbers(c.title, c.repo_key) : '新对话';
+      const titleHtml = c.title ? linkifyIssueNumbers(c.title, c.repo_key) : I18N.t('chat.conversation.default_title');
       html += `<div class="conv-item" data-id="${c.id}"${active}>
         <div class="conv-title">${titleHtml}</div>
         <div class="conv-meta">${fmtLocalTime(c.created_at).substring(0,16)}</div>
@@ -193,8 +213,8 @@ function loadConversations(autoSelect) {
       </div>`;
     });
     if (convs.length === 0) {
-      html += '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">暂无对话，开始输入即可自动创建</div>';
-      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">输入消息即可开始新对话</div>';
+      html += '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">' + I18N.t('chat.conversation.empty_hint') + '</div>';
+      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
     }
     list.innerHTML = html;
     list.querySelectorAll('.conv-item').forEach(item => {
@@ -228,20 +248,20 @@ function newConversation() {
     document.getElementById('chatInput').disabled = false;
     document.querySelector('.chat-in button').disabled = false;
     const hdr = document.querySelector('.chat-hdr h2');
-    if (hdr) hdr.textContent = 'Chat Agent · Personal Assistant';
-  }).catch(e => app.showToast('创建失败: ' + e.message));
+    if (hdr) hdr.textContent = I18N.t('chat.header.title');
+  }).catch(e => app.showToast(I18N.t('chat.conversation.create_failed', {msg: e.message})));
 }
 
 function deleteConversation(convId) {
-  if (!confirm('确定删除此对话及其所有消息？')) return;
+  if (!confirm(I18N.t('chat.conversation.delete_confirm'))) return;
   API.del('/chat/conversations/' + convId).then(() => {
     if (_currentConvId === convId) {
       _currentConvId = null;
-      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">输入消息即可开始新对话</div>';
+      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
     }
     loadConversations();
-    app.showToast('对话已删除');
-  }).catch(e => app.showToast('删除失败: ' + e.message));
+    app.showToast(I18N.t('chat.conversation.deleted'));
+  }).catch(e => app.showToast(I18N.t('chat.conversation.delete_failed', {msg: e.message})));
 }
 
 function switchConversation(convId) {
@@ -249,32 +269,64 @@ function switchConversation(convId) {
   loadConversations();
   const body = document.getElementById('chatBody');
   const input = document.getElementById('chatInput');
-  body.innerHTML = '<div class="loading">加载中...</div>';
+  body.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
   API.get('/chat/messages/' + convId).then(d => {
     const msgs = d.messages || [];
-    // 更新会话标题（如 Issue #4）到页头，Issue #N 渲染为 GitCode 超链接
     const conv = d.conversation || {};
     const hdr = document.querySelector('.chat-hdr h2');
     if (hdr) {
       const titleBase = conv.title || 'Personal Assistant';
-      const repoKey = conv.repo_key || '';
-      // 先转义 HTML，再链接化 Issue #N（renderMarkdown 已转义，这里需手动处理）
       const safeTitle = String(titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      const linkedTitle = linkifyIssueNumbers(safeTitle, repoKey);
-      hdr.innerHTML = 'Chat Agent · ' + linkedTitle;
+      hdr.innerHTML = I18N.t('chat.header.title_prefix') + linkifyIssueNumbers(safeTitle, conv.repo_key || '');
     }
+
+    // 渲染消息列表
     body.innerHTML = msgs.map(m => {
       const rendered = renderMarkdown(m.content);
-      // 消息内容中的 "Issue #N" 渲染为 GitCode 超链接
-      const repoKey = conv.repo_key || '';
-      return `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${linkifyIssueNumbers(rendered, repoKey)}</div>`;
-    }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">开始新对话</div>';
+      return `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${linkifyIssueNumbers(rendered, conv.repo_key || '')}</div>`;
+    }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_new') + '</div>';
     body.scrollTop = body.scrollHeight;
+
+    // ★ v31: 检查最后一条消息是否有运行中任务（学习 Admin AI reconnectActiveTask）
+    const lastMsg = msgs[msgs.length - 1];
+    if (lastMsg && lastMsg.role === 'user' && lastMsg.task_id) {
+      // 有 task_id → 查后端 status（内存优先，DB 兜底）
+      fetch('/api/chat/task/' + lastMsg.task_id + '/status', {
+        headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+      }).then(r => r.json()).then(st => {
+        if (st.status === 'running') {
+          // 任务仍在执行 → 追加 3 点动画占位 + SSE 重连
+          const elId = 't' + Date.now();
+          body.innerHTML += '<div class="msg r" id="' + elId + '">'
+            + '<span class="chat-dots"><span></span><span></span><span></span></span>'
+            + '</div>';
+          body.scrollTop = body.scrollHeight;
+          _setTask(convId, {task_id: lastMsg.task_id, conv_id: convId, el_id: elId, status: 'running'});
+          // SSE 重连（后端重放缓冲 + 实时追加）
+          streamTask(lastMsg.task_id, elId, convId);
+        } else if (st.status === 'done' || st.status === 'error') {
+          // 任务已完成 → 检查 DB 中 agent 消息是否已显示
+          const hasAgentReply = msgs.some(m => m.role === 'agent' && m.task_id === lastMsg.task_id);
+          if (!hasAgentReply) {
+            // agent 消息不在列表中 → 重新拉取（刚写入 DB）
+            API.get('/chat/messages/' + convId).then(d2 => {
+              renderChatMessages(d2.messages || []);
+              loadConversations();
+            });
+          }
+          _clearTask(convId);
+        } else {
+          // not_found → 任务状态未知，不显示中断提示（可能是跨机器延迟）
+          _clearTask(convId);
+        }
+      }).catch(() => { _clearTask(convId); });
+    }
+
     if (input) input.disabled = false;
     const sendBtn = document.querySelector('.chat-in button');
     if (sendBtn) sendBtn.disabled = false;
   }).catch(() => {
-    body.innerHTML = '<div class="error">加载失败</div>';
+    body.innerHTML = '<div class="error">' + I18N.t('chat.load_failed') + '</div>';
   });
 }
 
@@ -293,118 +345,174 @@ function sendChatStream() {
       _currentConvId = d.conversation_id;
       loadConversations();
       doSend(input, body);
-    }).catch(e => app.showToast('创建对话失败: ' + e.message));
+    }).catch(e => app.showToast(I18N.t('chat.conversation.create_conv_failed', {msg: e.message})));
     return;
   }
   doSend(input, body);
 }
 
+// v31: doSend — submit/stream 分离（学习 Admin AI runQueryAsync）
 function doSend(input, body) {
   const msg = input.value.trim();
   input.value = '';
   body.innerHTML += '<div class="msg l">' + msg.replace(/</g,'&lt;') + '</div>';
   const tid = 't' + Date.now();
-  body.innerHTML += '<div class="msg r" id="' + tid + '">Thinking...</div>';
+  body.innerHTML += '<div class="msg r" id="' + tid + '">'
+    + '<span class="chat-dots"><span></span><span></span><span></span></span>'
+    + '</div>';
   body.scrollTop = body.scrollHeight;
 
   const repo = app.currentRepo();
-  const token = localStorage.getItem('token');
-  if (_chatAbort) { _chatAbort.abort(); _chatAbort = null; }
-  const ac = new AbortController();
-  _chatAbort = ac;
-
-  fetch('/api/chat/send/stream', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token},
-    body: JSON.stringify({message: msg, repo_key: repo ? repo.fullName : '', conversation_id: _currentConvId}),
-    signal: ac.signal,
-  }).then(async resp => {
+  // 1. submit → 立即获取 task_id
+  API.post('/chat/submit', {
+    message: msg,
+    repo_key: repo ? repo.fullName : '',
+    conversation_id: _currentConvId,
+  }).then(r => {
+    const convId = r.conversation_id || _currentConvId;
+    if (r.status === 'error') {
+      const el = document.getElementById(tid);
+      if (el) el.innerHTML = renderMarkdown(r.error || _NO_REPLY);
+      _clearTask(convId);
+      loadConversations();
+      return;
+    }
+    // per-conversation 记录
+    _setTask(convId, {task_id: r.task_id, conv_id: convId, el_id: tid, status: 'running'});
+    // 2. SSE 订阅
+    streamTask(r.task_id, tid, convId);
+  }).catch(e => {
     const el = document.getElementById(tid);
-    // M4 D5：queue 模式下 send/stream 返回 {task_id}（非 SSE）→ 轮询任务状态（打字机近似）
-    const ctype = (resp.headers.get('content-type') || '');
-    if (ctype.includes('application/json')) {
-      const data = await resp.json().catch(() => ({}));
-      if (data && data.task_id) { pollTaskStatus(data.task_id, el, body, tid); return; }
-      if (el) el.innerHTML = renderMarkdown(data.reply || '') || _NO_REPLY;
-      loadConversations();
-      return;
-    }
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      if (el) el.innerHTML = 'Error: ' + (err.detail?.message || resp.statusText);
-      return;
-    }
-    if (!resp.body) {
-      // Fallback: read as text
-      const text = await resp.text();
-      try {
-        const lines = text.split('\n');
-        lines.forEach(line => {
-          if (line.startsWith('data: ')) {
-            const d = JSON.parse(line.substring(6));
-            if (d.text && el) el.innerHTML = renderMarkdown(d.text);
-          }
-        });
-      } catch(e) {}
-      if (el) el.innerHTML = renderMarkdown(text) || _NO_REPLY;
-      loadConversations();
+    if (el) el.innerHTML = I18N.t('common.request_failed') + (e.message || '');
+  });
+}
+
+// v31: streamTask — SSE 订阅（可断开重连，后端重放缓冲）
+// 学习 Admin AiAssistant.vue streamTask
+async function streamTask(taskId, elId, convId) {
+  // 中断旧 SSE（同会话新查询 / 不同会话切换让位）
+  if (_chatStreamAbort) { _chatStreamAbort.abort(); _chatStreamAbort = null; }
+  const ac = new AbortController();
+  _chatStreamAbort = ac;
+
+  const body = document.getElementById('chatBody');
+  const el = document.getElementById(elId);
+  let finalText = '';
+
+  try {
+    const resp = await fetch('/api/chat/task/' + taskId + '/stream', {
+      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+      signal: ac.signal
+    });
+    if (!resp.ok || !resp.body) {
+      if (el) el.innerHTML = I18N.t('common.error') + (resp.statusText || '');
+      _clearTask(convId);
       return;
     }
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
-    let buf = '', finalText = '';
-    function read() {
-      reader.read().then(({done, value}) => {
-        if (done) {
-          if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
-          body.scrollTop = body.scrollHeight;
-          _chatAbort = null;
-          loadConversations();
-          return;
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      lines.forEach(line => {
+        if (line.startsWith('data: ')) {
+          try {
+            const d = JSON.parse(line.substring(6));
+            if (d.type === 'done') {
+              finalText = d.text || finalText;
+              if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
+            } else if (d.type === 'error') {
+              if (el) el.innerHTML = renderMarkdown(d.text || '') || _NO_REPLY;
+            } else if (d.type === '思考中') {
+              // 思考阶段 — 保持三点动画占位，不覆盖文字
+              if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
+            } else if (d.text && el) {
+              finalText = d.text;
+              el.innerHTML = renderMarkdown(finalText);
+            }
+          } catch(e) {}
         }
-        buf += dec.decode(value, {stream: true});
-        const lines = buf.split('\n');
-        buf = lines.pop() || '';
-        lines.forEach(line => {
-          if (line.startsWith('data: ')) {
-            try {
-              const d = JSON.parse(line.substring(6));
-              if (d.type === 'done') finalText = d.text;
-              else if (d.text && el) el.innerHTML = renderMarkdown(d.text);
-            } catch(e) {}
-          }
-        });
-        body.scrollTop = body.scrollHeight;
-        read();
-      }).catch(e => { if (e.name !== 'AbortError' && el) el.innerHTML = 'Error: ' + e.message; });
+      });
+      // 只有当前会话才滚动（后台会话不抢滚动）
+      if (_currentConvId === convId && body) body.scrollTop = body.scrollHeight;
     }
-    read();
-  }).catch(e => { const el = document.getElementById(tid); if (el) el.innerHTML = 'Request failed: ' + e.message; });
+    // 完成 → 清理任务状态
+    _clearTask(convId);
+    // 刷新会话列表（更新最后消息预览）
+    if (_currentConvId === convId) loadConversations();
+  } catch(e) {
+    if (e.name === 'AbortError') return;  // 主动中断（切换会话/离开页面）
+    // 连接断开 → 后端继续执行，切回来时 switchConversation 会重连
+    // 不清除 _chatTasks[convId] — 保留状态供切回时恢复
+    if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
+  }
 }
 
-function pollTaskStatus(taskId, el, body, tid) {
-  if (el) el.innerHTML = '⏳ 任务执行中…';
-  const token = localStorage.getItem('token');
-  let attempts = 0;
-  const timer = setInterval(() => {
-    attempts++;
-    fetch('/api/runtime/tasks/' + taskId + '/status', {
-      headers: {'Authorization': 'Bearer ' + token},
-    }).then(r => r.json()).then(d => {
-      if (!d || !d.status) return;
-      if (d.status === 'completed' || d.status === 'failed' || d.status === 'cancelled') {
-        clearInterval(timer);
-        _chatAbort = null;
-        const text = d.result_text || (d.status === 'completed' ? 'Done' : '任务' + d.status);
-        if (el) el.innerHTML = renderMarkdown(text);
-        body.scrollTop = body.scrollHeight;
-        loadConversations();
-      } else if (d.status === 'running' || d.status === 'dispatched') {
-        if (el) el.innerHTML = '⏳ 任务执行中… (' + Math.round(attempts * 1) + 's)';
+// v31: resumeChatTask — 切换回 Chat 页面时恢复（从 app.js nav 调用）
+function resumeChatTask() {
+  if (!_currentConvId) return;
+  // 从 sessionStorage 恢复或查 DB 最后一条消息
+  const task = _getTask(_currentConvId) || _getStoredTask(_currentConvId);
+  if (task && task.task_id) {
+    // 有 task_id → 查 status
+    fetch('/api/chat/task/' + task.task_id + '/status', {
+      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+    }).then(r => r.json()).then(st => {
+      if (st.status === 'running') {
+        // 仍在执行 → 确保 3 点动画占位 + SSE 重连
+        const body = document.getElementById('chatBody');
+        if (!body) return;
+        // 检查是否已有占位符
+        let el = document.getElementById(task.el_id);
+        if (!el) {
+          const elId = 't' + Date.now();
+          task.el_id = elId;
+          body.innerHTML += '<div class="msg r" id="' + elId + '">'
+            + '<span class="chat-dots"><span></span><span></span><span></span></span>'
+            + '</div>';
+          body.scrollTop = body.scrollHeight;
+        }
+        streamTask(task.task_id, task.el_id, _currentConvId);
+      } else {
+        // done/error/not_found → 刷新消息
+        _clearTask(_currentConvId);
+        API.get('/chat/messages/' + _currentConvId).then(d => {
+          renderChatMessages(d.messages || []);
+          loadConversations();
+        }).catch(() => {});
       }
     }).catch(() => {});
-    if (attempts > 180) { clearInterval(timer); _chatAbort = null; if (el) el.innerHTML = '⏱ 等待超时'; }
-  }, 1000);
+  } else {
+    // 无 task_id → 查 DB 最后一条消息是否有 task_id
+    API.get('/chat/messages/' + _currentConvId).then(d => {
+      const msgs = d.messages || [];
+      const lastMsg = msgs[msgs.length - 1];
+      if (lastMsg && lastMsg.role === 'user' && lastMsg.task_id) {
+        // 有 task_id → 递归调用
+        _setTask(_currentConvId, {task_id: lastMsg.task_id, conv_id: _currentConvId, status: 'running'});
+        resumeChatTask();
+      }
+    }).catch(() => {});
+  }
+}
+
+function renderChatMessages(messages) {
+  const body = document.getElementById('chatBody');
+  if (!body) return;
+  body.innerHTML = '';
+  messages.forEach(m => {
+    const escaped = (m.content || '').replace(/</g, '&lt;');
+    if (m.role === 'user') {
+      body.innerHTML += '<div class="msg l">' + escaped + '</div>';
+    } else {
+      body.innerHTML += '<div class="msg r">' + renderMarkdown(m.content || '') + '</div>';
+    }
+  });
+  body.scrollTop = body.scrollHeight;
 }
 
 function saveChatConfig() {
@@ -415,7 +523,7 @@ function saveChatConfig() {
   const skillId = parseInt(skillVal) || 0;
   // 项目/个人 scope 下不允许保存空值（无"默认技能"选项）
   if (_chatSkillScope !== 'official' && !skillId) {
-    if (app && app.showToast) app.showToast('请选择技能');
+    if (app && app.showToast) app.showToast(I18N.t('chat.skill.select_required'));
     return;
   }
   const provider = document.getElementById('cfgImProvider')?.value || 'feishu';
@@ -429,8 +537,8 @@ function saveChatConfig() {
   const _body = {backend, skill_id: skillId, im};
   if (rid) _body.runtime_id = parseInt(rid, 10);
   API.put('/chat/config' + _qs, _body).then(() => {
-    app.showToast('配置已保存');
-  }).catch(e => app.showToast('保存失败: ' + e.message));
+    app.showToast(I18N.t('chat.config.saved'));
+  }).catch(e => app.showToast(I18N.t('chat.config.save_failed', {msg: e.message})));
 }
 
 function switchImProvider() {
@@ -461,8 +569,8 @@ function startFeishuOnboard(botType, repoKey) {
     pollOnboardStatus();
   }).catch(e => {
     // 409：已有进行中的任务
-    if (e.status === 409) app.showToast(e.message || '已有扫码配置正在进行，请稍候');
-    else app.showToast('启动扫码配置失败: ' + e.message);
+    if (e.status === 409) app.showToast(e.message || I18N.t('chat.onboard.in_progress'));
+    else app.showToast(I18N.t('chat.onboard.start_failed', {msg: e.message}));
   });
 }
 
@@ -474,10 +582,10 @@ function showOnboardModal() {
   mask.innerHTML = `
     <div style="width:340px;background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:20px;box-shadow:0 8px 32px rgba(0,0,0,.25);font-size:12px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-        <b style="font-size:14px">🔗 飞书扫码配置</b>
+        <b style="font-size:14px">${I18N.t('chat.onboard.modal_title')}</b>
         <span style="cursor:pointer;color:var(--t3)" onclick="cancelOnboard()">✕</span>
       </div>
-      <div id="onboardBody" style="text-align:center;color:var(--t3);padding:30px 0">正在生成二维码…</div>
+      <div id="onboardBody" style="text-align:center;color:var(--t3);padding:30px 0">${I18N.t('chat.onboard.generating_qr')}</div>
     </div>`;
   document.body.appendChild(mask);
   mask.addEventListener('click', e => { if (e.target === mask) cancelOnboard(); });
@@ -505,7 +613,7 @@ function renderOnboardStatus(d) {
   const body = document.getElementById('onboardBody');
   if (!body) return;
   const map = {
-    pending: () => { body.innerHTML = '⏳ 正在生成二维码…'; },
+    pending: () => { body.innerHTML = I18N.t('chat.onboard.generating_qr'); },
     waiting_confirm: () => {
       if (!d.qr_url) return;
       // 仅在二维码首次就绪时初始化过期时间与渲染二维码；
@@ -515,9 +623,9 @@ function renderOnboardStatus(d) {
         _onboardExpireAt = d.expire_in ? Date.now() + d.expire_in * 1000 : 0;
         body.innerHTML = `
           <div style="background:#fff;border:1px solid var(--b);border-radius:8px;padding:12px;display:inline-block;margin-bottom:10px" id="onboardQr"></div>
-          <div style="color:var(--t);margin-bottom:4px">1. 打开飞书 App，扫描上方二维码</div>
-          <div style="color:var(--t3);margin-bottom:10px">2. 在飞书内确认「创建应用/授权」页面</div>
-          <div style="color:var(--pk);font-size:11px" id="onboardCountdown">等待确认…</div>`;
+          <div style="color:var(--t);margin-bottom:4px">${I18N.t('chat.onboard.step1_scan')}</div>
+          <div style="color:var(--t3);margin-bottom:10px">${I18N.t('chat.onboard.step2_confirm')}</div>
+          <div style="color:var(--pk);font-size:11px" id="onboardCountdown">${I18N.t('chat.onboard.waiting_confirm')}</div>`;
         new QRCode(document.getElementById('onboardQr'), {text: d.qr_url, width: 200, height: 200});
         startCountdown();
       }
@@ -525,21 +633,21 @@ function renderOnboardStatus(d) {
     connected: () => {
       body.innerHTML = `
         <div style="font-size:34px;margin-bottom:8px">✅</div>
-        <div style="color:var(--t);font-weight:600;margin-bottom:8px">配置成功</div>
+        <div style="color:var(--t);font-weight:600;margin-bottom:8px">${I18N.t('chat.onboard.success_title')}</div>
         <div style="color:var(--t2);font-size:11px;margin-bottom:2px">App ID: <span style="font-family:monospace">${d.app_id || ''}</span></div>
-        <div style="color:var(--t2);font-size:11px;margin-bottom:4px">App Secret 已保存（回显为 ******）</div>
-        <div style="color:var(--pk);font-size:11px;margin-bottom:12px">Bot 已连接 · 🟢 在线</div>
-        <button class="bt bt-p bt-s" onclick="closeOnboardModal(true)" style="width:100%">关闭</button>`;
+        <div style="color:var(--t2);font-size:11px;margin-bottom:4px">${I18N.t('chat.onboard.secret_saved')}</div>
+        <div style="color:var(--pk);font-size:11px;margin-bottom:12px">${I18N.t('chat.onboard.bot_connected')}</div>
+        <button class="bt bt-p bt-s" onclick="closeOnboardModal(true)" style="width:100%">${I18N.t('chat.onboard.close')}</button>`;
     },
     failed: () => {
       const msg = onboardErrorText(d.error || '');
       body.innerHTML = `
         <div style="font-size:34px;margin-bottom:8px">❌</div>
-        <div style="color:var(--r);font-weight:600;margin-bottom:8px">配置失败</div>
+        <div style="color:var(--r);font-weight:600;margin-bottom:8px">${I18N.t('chat.onboard.failed_title')}</div>
         <div style="color:var(--t2);font-size:11px;margin-bottom:12px">${msg}</div>
         <div style="display:flex;gap:8px">
-          <button class="bt bt-o bt-s" onclick="restartOnboard()" style="flex:1">重新扫码</button>
-          <button class="bt bt-p bt-s" onclick="closeOnboardModal()" style="flex:1">取消</button>
+          <button class="bt bt-o bt-s" onclick="restartOnboard()" style="flex:1">${I18N.t('chat.onboard.rescan')}</button>
+          <button class="bt bt-p bt-s" onclick="closeOnboardModal()" style="flex:1">${I18N.t('chat.onboard.cancel')}</button>
         </div>`;
     },
   };
@@ -549,10 +657,10 @@ function renderOnboardStatus(d) {
 
 function onboardErrorText(err) {
   const t = String(err || '');
-  if (t.includes('access_denied')) return '用户拒绝了授权请求';
-  if (t.includes('expired') || t.includes('timeout')) return '二维码已过期，请重新扫码';
+  if (t.includes('access_denied')) return I18N.t('chat.onboard.error_access_denied');
+  if (t.includes('expired') || t.includes('timeout')) return I18N.t('chat.onboard.qr_expired');
   if (t.includes('已被')) return t;
-  return t || '未知错误';
+  return t || I18N.t('chat.onboard.error_unknown');
 }
 
 function startCountdown() {
@@ -562,12 +670,12 @@ function startCountdown() {
     if (!_onboardExpireAt) return;
     const remain = Math.max(0, Math.round((_onboardExpireAt - Date.now()) / 1000));
     if (remain <= 0) {
-      el.textContent = '二维码已过期，请重新扫码';
+      el.textContent = I18N.t('chat.onboard.qr_expired');
       return;
     }
     const mm = String(Math.floor(remain / 60)).padStart(2, '0');
     const ss = String(remain % 60).padStart(2, '0');
-    el.textContent = `等待确认… 二维码将在 ${mm}:${ss} 后过期`;
+    el.textContent = I18N.t('chat.onboard.waiting_countdown', {time: mm + ':' + ss});
     setTimeout(tick, 1000);
   };
   tick();

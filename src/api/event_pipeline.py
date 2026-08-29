@@ -36,10 +36,11 @@ def is_plugin_mode() -> bool:
     return os.environ.get("GRAPE_PIPELINE_MODE", "").lower() == "plugin"
 
 
-def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = "") -> str:
-    """Look up skill name from pipelines.json (plugin mode).
+def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = "", user_id: int = 0) -> str:
+    """Look up skill name from DB (plugin mode).
 
     scene_id 非空时优先使用（Issue 级场景），否则回退到仓库默认场景。
+    user_id > 0 时可查用户级场景。
     Returns skill name or empty string.
     """
     try:
@@ -50,7 +51,7 @@ def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = 
                 scene_id = get_repo_scene(repo_key) or "default"
             except Exception:
                 scene_id = "default"
-        node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key)
+        node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
         if node:
             return node.get("skill", "")
     except Exception as e:
@@ -114,7 +115,7 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
                 (task_id, agent_session_id, engine_id, seq, issue_id, repo_key or "",
                  agent_type or "", skill_name or "", skill_id or 0,
                  "", "", "", "", "", 0, repo_gitcode_token or "", "{}",
-                 "{}", "", "", "{}", "{}", "{}", 0, "", 0, "",
+                 "{}", "", "", "{}", "{}", "{}", 0, "", 0, "", "",
                  "queued", None, "", "", "", "{}", now, None, now)
             )
             db.commit()
@@ -597,8 +598,10 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                 repo_key, seq, agent_type, _be, skill_name, evt, engine_id, _direct_tid,
             ), name=f"sub-{agent_type}-{seq}")
         else:
+            from src.runtime.engine_select import _repo_user_id
+            _sub_uid = _repo_user_id(repo_key)
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
-                                   skill_id, skill_path, engine_id, issue_id)
+                                   skill_id, skill_path, engine_id, issue_id, user_id=_sub_uid)
         log.info(f"Pipeline subscription: dispatched seq={seq} agent={agent_type} mode={kind}")
     except Exception as e:
         log.warning(f"Pipeline subscription dispatch failed: {e}")
@@ -636,8 +639,22 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         from src.user.db import get_all_bot_usernames
         bot_usernames = get_all_bot_usernames()
         if actor in bot_usernames:
-            log.info(f"Pipeline skip: self-comment from bot={actor}")
-            return result
+            # 多任务模式豁免：bot 创建的子任务 issue_opened（body 含「## 父任务」）不跳过
+            _allow_through = False
+            if event_type == "issue_opened":
+                try:
+                    _payload = evt.get("payload", {}) or {}
+                    _oa = _payload.get("object_attributes", {}) or {}
+                    _body = _oa.get("description", "") or ""
+                    if "## 父任务" in _body:
+                        _allow_through = True
+                except Exception:
+                    pass
+            if _allow_through:
+                log.info(f"Pipeline: bot={actor} created subtask issue, allow through")
+            else:
+                log.info(f"Pipeline skip: self-comment from bot={actor}")
+                return result
         log.info(f"Pipeline: comment from {actor}, not a bot ({bot_usernames})")
 
     # 2.1 issue_updated 纯标签变更（changes.labels 有变化、其余内容未动）→ bot 打标签回声，跳过
@@ -799,22 +816,31 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     except Exception as e:
         log.warning(f"Pipeline: agent session lookup failed: {e}")
 
+    # 提前解析 issue_id + 场景（所有路径都需要，pick_engine 用 _issue_scene 选引擎）
+    _issue_scene = "default"
+    _issue_scene_uid = 0
+    _early_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+    if not _early_issue_id and event_type in PR_EVENT_TYPES:
+        _early_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}) or ""
+    if _early_issue_id:
+        try:
+            from src.api.session_store import get_issue_scene
+            _issue_scene, _issue_scene_uid = get_issue_scene(repo_key, _early_issue_id)
+            _issue_scene = _issue_scene or "default"
+        except Exception:
+            pass
+    # scene_user_id=0 时兜底反查（旧数据 is_join=0 导致 scene_user_id 未写入）
+    if not _issue_scene_uid:
+        try:
+            from src.runtime.engine_select import _repo_user_id
+            _issue_scene_uid = _repo_user_id(repo_key)
+        except Exception:
+            pass
+    log.info(f"Pipeline: scene resolved -> scene_id={_issue_scene} uid={_issue_scene_uid} issue={_early_issue_id or '(none)'}")
     if not backend or not skill_name:
-        # 提前解析 issue_id，供 Issue 级场景查找使用
-        _early_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
-        if not _early_issue_id and event_type in PR_EVENT_TYPES:
-            _early_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}) or ""
-        # 读取 Issue 级开发场景（VOD 判定），回退到仓库默认
-        _issue_scene = "default"
-        if _early_issue_id:
-            try:
-                from src.api.session_store import get_issue_scene
-                _issue_scene = get_issue_scene(repo_key, _early_issue_id) or "default"
-            except Exception:
-                pass
         # Plugin mode: try pipelines.json first（用 Issue 级场景）
         if is_plugin_mode():
-            _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene)
+            _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene, user_id=_issue_scene_uid)
             if _pipe_skill:
                 skill_name = _pipe_skill
                 backend = backend or ""
@@ -932,9 +958,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
     # 选中 remote → 入队该引擎（queue_remote）；选中本机 → direct 就地执行。
-    from src.runtime.engine_select import pick_engine, engine_name
+    from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
     from src.runtime.service import runtime_execution_kind, enqueue_task, EXEC_MODE_DIRECT, get_execution_mode
-    engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0)
+    engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0,
+                            scene_id=_issue_scene, user_id=_issue_scene_uid)
     if engine_id is None:
         log.info(f"Pipeline: no available engine for repo={repo_key} agent={agent_type}, seq={seq}, skip")
         # 创建 failed 状态的 task 快照（供重派复用参数，否则重派报"无关联任务"）
@@ -944,13 +971,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         return result
     # Plugin 模式 + engine_id=0：无主池任务（广播），多个引擎通过 claim_by_tag 竞争认领。
     # 但强制 direct 模式（DEVOPS_EXECUTION_MODE=direct）不走广播，走本机 direct。
-    # backend 取 pipelines.json 配置的引擎类型（兜底 agent_type）；入队后由认领引擎覆盖。
+    # 场景 engine_runtime_ids 限定广播范围（写入 pool_engine_ids 字段）。
     if engine_id == 0 and is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
         _be = backend or "opencode"
-        log.info(f"Pipeline (plugin broadcast): engine_id=0 pool_tag={agent_type} seq={seq}")
+        _pool_engine_ids = get_scene_pool_engine_ids(_issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid)
+        log.info(f"Pipeline (plugin broadcast): engine_id=0 pool_tag={agent_type} pool_engine_ids={_pool_engine_ids} seq={seq}")
         if _be and skill_name and seq > 0:
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
-                                   skill_id, skill_path, engine_id, issue_id)
+                                   skill_id, skill_path, engine_id, issue_id,
+                                   pool_engine_ids=_pool_engine_ids, user_id=_issue_scene_uid)
         return result
     # backend 必须取已注册引擎的类型名（不沿用会话/字面默认），确保执行 CLI 与选中引擎一致
     _be = engine_name(engine_id) or backend
@@ -964,7 +993,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     kind = runtime_execution_kind(engine_id)
     if kind != EXEC_MODE_DIRECT and _be and skill_name and seq > 0:
         _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
-                               skill_id, skill_path, engine_id, issue_id)
+                               skill_id, skill_path, engine_id, issue_id, user_id=_issue_scene_uid)
     elif _be and skill_name and seq > 0:
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
         evt["_skill_id"] = skill_id
@@ -1109,7 +1138,7 @@ def _fail_event(seq: int, reason: str):
 
 
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
-                           skill_id, skill_path, runtime_id, issue_id=""):
+                           skill_id, skill_path, runtime_id, issue_id="", pool_engine_ids="", user_id=0):
     """init_event_json -> enqueue_task (deterministic routing runtime_id).
     Local worker / remote RuntimeAgent consume.
 
@@ -1180,7 +1209,12 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
         return
 
-    env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
+    from src.prompt_builder import _resolve_server_url
+    env_extra = {
+        "REPO_FULL_NAME": repository,
+        "ACCOUNT": evt.get("account") or repository,
+        "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
+    }
     _inject_cloud_credentials(env_extra, repo_key)
     # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
     if agent_type == "sre":
@@ -1235,12 +1269,14 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             issue_session_id=issue_session_id,
             event_type=evt.get("type", ""),
             account=evt.get("account") or "",
+            user_id=user_id,
             repo_gitcode_token=repo_gitcode_token,
             env_extra=env_extra,
             skill_path=skill_path,
             skill_id=skill_id,
             pool_tag=_pool_tag,
             pool_agent_type=_pool_agent_type,
+            pool_engine_ids=pool_engine_ids,
         )
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
@@ -1453,9 +1489,16 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             prompt = prompt.replace("{{SKILL_DIR}}", os.path.dirname(os.path.dirname(_full)))
             else:
                 # 向后兼容：无 skill_id 时走老逻辑
-                _real_skill_dir = os.path.dirname(evt.get("_skill_path", "")) if evt.get("_skill_path") else ""
-                if _real_skill_dir:
-                    prompt = prompt.replace("{{SKILL_DIR}}", _real_skill_dir)
+                from src.config import resolve_official_skill_path as _resolve_skill_path
+                _sp = evt.get("_skill_path", "") or ""
+                _skill_name_only = os.path.basename(_sp) if _sp else ""
+                _real_skill_md = _resolve_skill_path(_skill_name_only) if _skill_name_only else ""
+                if _real_skill_md:
+                    prompt = prompt.replace("{{SKILL_DIR}}", os.path.dirname(_real_skill_md))
+                else:
+                    _real_skill_dir = os.path.dirname(_sp) if _sp else ""
+                    if _real_skill_dir:
+                        prompt = prompt.replace("{{SKILL_DIR}}", _real_skill_dir)
         except Exception:
             pass
         log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
@@ -1575,8 +1618,10 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                         if _scene_out and _scene_out.get("recommended_scene"):
                             _rec_scene = _scene_out["recommended_scene"]
                             from src.api.session_store import set_issue_scene
-                            set_issue_scene(repo_key, issue_id, _rec_scene)
-                            log.info(f"VOD done: recommended_scene={_rec_scene} set for {issue_id}")
+                            from src.runtime.engine_select import _repo_user_id
+                            _vod_uid = _repo_user_id(repo_key)
+                            set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
+                            log.info(f"VOD done: recommended_scene={_rec_scene} uid={_vod_uid} set for {issue_id}")
                     except Exception as _se:
                         log.warning(f"VOD done: scene parse failed: {_se}")
             elif evt_type == "error":

@@ -3,9 +3,13 @@ services:
     build: .
     container_name: grape-backend
     ports:
-      - "127.0.0.1:3000:3000"   # 宿主机 nginx 反代到容器 3000
-    env_file:
-      - .env
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      # 官方技能由独立技能仓库构建期铺入宿主 ./skills（scripts/sync_skills.sh），卷挂载免重建镜像
+      - ./skills:/app/skills
     environment:
       - TZ=Asia/Shanghai
     volumes:

@@ -341,7 +341,7 @@ class TestDashboard:
         assert "metrics" in d
         assert "agents" in d
         assert len(d["agents"]) == 5  # VOD/Issue/Coding/QA/SRE
-        assert "activity" in d
+        assert "agent_engines" in d  # Scene Center: engine 列表替代 activity
 
 
 # ===================== 5. Pipeline =====================

@@ -1092,10 +1092,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 heartbeat_fail_streak = 0
             last_reregister = asyncio.get_running_loop().time()
 
-        # 随机打乱引擎轮询顺序，避免固定靠前引擎包揽所有广播任务
-        _shuffled_ids = list(runtime_ids)
-        random.shuffle(_shuffled_ids)
-        for rid in _shuffled_ids:
+        # 同 worker 多引擎：随机打乱 rid 顺序，避免固定轮询导致排前面的引擎吃满、后面的引擎闲置
+        _shuffled_rids = list(runtime_ids)
+        random.shuffle(_shuffled_rids)
+        for rid in _shuffled_rids:
             try:
                 # Tags from server DB (single source of truth, managed via console)
                 # claim_by_tag 和 claim 都返回完整 dict {task, scan_request}

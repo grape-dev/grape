@@ -197,7 +197,9 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     conversation_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content MEDIUMTEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    task_id TEXT,
+    generate_status INTEGER DEFAULT NULL
 )
 """
 
@@ -295,6 +297,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     knowledge_files    MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content},共享知识快照交付(event-conversation-design.md §3.1.1)
     project_info_file_urls TEXT DEFAULT '',       -- project-info 文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
     knowledge_file_urls    TEXT DEFAULT '',       -- 知识文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
+    pool_engine_ids    TEXT DEFAULT '',           -- 限定广播引擎列表（JSON 数组如[76,77]，空=全量广播）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/completed/failed/cancelled
     exit_code         INTEGER DEFAULT NULL,
     result_text       MEDIUMTEXT DEFAULT '',
@@ -338,19 +341,6 @@ CREATE TABLE IF NOT EXISTS agent_type_runtime_pool (
 )
 """
 
-# ===== engine-selection-design.md §4.4:每 (仓库, agent) 引擎集合绑定 =====
-_DEVOPS_AGENT_RUNTIME_BINDING_DDL = """
-CREATE TABLE IF NOT EXISTS devops_agent_runtime_binding (
-    repo_key    TEXT NOT NULL,              -- 仓库全名(owner/repo,归一化)
-    agent_type  TEXT NOT NULL,              -- vod / issue / coding / qa / sre / chat
-    runtime_id  INTEGER NOT NULL,           -- agent_runtimes.id(本机直连或远端引擎)
-    priority    INTEGER NOT NULL DEFAULT 50, -- 小=高优先;默认按 scope:repo=10 / global=50 / local=90
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    created_at  TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (repo_key, agent_type, runtime_id)
-)
-"""
-
 # ===== new-version2 M3:runtime_credentials 独立凭据(rta_ token,见 agent-runtime-event-full-design.md §4.1)=====
 _RUNTIME_CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS runtime_credentials (
@@ -383,6 +373,7 @@ CREATE TABLE IF NOT EXISTS issue_state (
     scene_id     TEXT DEFAULT '',          -- Issue 级开发场景（VOD 判定，空=回退仓库默认）
     parent_issue_id TEXT DEFAULT '',      -- 父任务 Issue ID（如 "#20"，空=普通任务）
     is_subtask_mode INTEGER DEFAULT 0,    -- 1=多任务模式（Issue Agent 应拆分子任务）
+    scene_user_id INTEGER DEFAULT 0,       -- 用户级场景的创建者 ID（0=非用户级）
     updated_at   TEXT DEFAULT (datetime('now')),
     created_at   TEXT DEFAULT (datetime('now')),
     UNIQUE (repo_key, issue_id)
@@ -455,13 +446,31 @@ CREATE TABLE IF NOT EXISTS engine_capabilities (
 )
 """
 
+# ===== Scene Center: 场景配置表（替代 configs/pipelines.json 运行时读取）=====
+_PIPELINE_SCENE_DDL = """
+CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_id    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    scope       TEXT DEFAULT 'official',
+    repo_key    TEXT DEFAULT '',
+    user_id     INTEGER DEFAULT 0,
+    nodes_json  TEXT DEFAULT '[]',
+    onboarding  TEXT DEFAULT 'repo-onboarding',
+    is_active   INTEGER DEFAULT 1,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (scene_id, scope, repo_key, user_id)
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
     ("task_messages", _TASK_MESSAGES_DDL),
     ("agent_type_runtime_pool", _AGENT_TYPE_RUNTIME_POOL_DDL),
-    ("devops_agent_runtime_binding", _DEVOPS_AGENT_RUNTIME_BINDING_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
     ("issue_state", _ISSUE_STATE_DDL),
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
@@ -487,6 +496,7 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     seen_at REAL NOT NULL,
     PRIMARY KEY (app_id, message_id)
 )"""),
+    ("devops_pipeline_scene", _PIPELINE_SCENE_DDL),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -736,12 +746,6 @@ def init_database():
                 _align_agent_enable()
                 _cleanup_stale_meta()
                 _cleanup_chat_shared_worker_runtime()
-                # engine-selection-design.md §4.4/§12:存量会话 runtime_id>0 -> 回填绑定集合(单成员,幂等)
-                try:
-                    from src.runtime.engine_select import backfill_existing_bindings
-                    backfill_existing_bindings()
-                except Exception as e:
-                    log.warning(f"Backfill existing runtime bindings failed: {e}")
             finally:
                 c.execute("SELECT RELEASE_LOCK('grape_migrate')")
     else:
@@ -754,13 +758,7 @@ def init_database():
         _align_agent_enable()
         _cleanup_stale_meta()
         _cleanup_chat_shared_worker_runtime()
-        # engine-selection-design.md §4.4/§12:存量会话 runtime_id>0 -> 回填绑定集合(单成员,幂等)
-        try:
-            from src.runtime.engine_select import backfill_existing_bindings
-            backfill_existing_bindings()
-        except Exception as e:
-            log.warning(f"Backfill existing runtime bindings failed: {e}")
-
+    # MySQL with session_manager
 
 def _sync_official_skills():
     """启动时从 configs/skill-description.json 同步官方技能到 skill 表(幂等).
@@ -791,10 +789,22 @@ def _sync_official_skills():
                     (skill_name,)
                 ).fetchone()[0]
                 if existed:
-                    c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, skill_name)
-                    )
+                    # 更新元信息；本地（非 OBS 集群模式，file_path 为空）同时刷新 skill_path，
+                    # 保证目录按 agent_type 分组后（skills/<agent_type>/<skill>/）DB 路径与磁盘一致。
+                    _fp = c.execute(
+                        "SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''",
+                        (skill_name,)
+                    ).fetchone()
+                    if _fp:
+                        c.execute(
+                            "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, skill_name)
+                        )
+                    else:
+                        c.execute(
+                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=? WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, skill_path, skill_name)
+                        )
                     updated += 1
                 else:
                     c.execute(
@@ -1044,6 +1054,8 @@ def _migrate_tables():
         _alter_skill_files_if_needed(),
         # Worker 三级分类——repo_key 字段（scope=user 时关联项目）
         "ALTER TABLE runtime_credentials ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
+        # ===== TMP (/tmp) 使用率指标（liufei 2026-08-28）=====
+        "ALTER TABLE runtime_credentials ADD COLUMN tmp_percent DOUBLE DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
@@ -1065,6 +1077,11 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN worker_version TEXT DEFAULT ''",
         # ===== 多主控机：本机直连引擎按 host_name 区分（credential_id=0 不再全局唯一）=====
         "ALTER TABLE agent_runtimes ADD COLUMN host_name VARCHAR(191) DEFAULT ''",
+        # ===== engine probe 探测结果列（liufei 2026-08-28）=====
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_status VARCHAR(32) DEFAULT 'pending'",
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_latency INT DEFAULT 0",
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_last VARCHAR(64) DEFAULT ''",
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_error TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
@@ -1628,15 +1645,6 @@ def _migrate_tables():
             log.info("Added local_skills / pending_skill_scan / skill_scan_result / agent_tags columns to agent_runtimes")
     except Exception as e:
         log.warning(f"Add local_skills column failed: {e}")
-    # ===== engine-selection-design.md §4.4：绑定表索引（repo, agent 前缀查询加速）===== Stashed changes
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("CREATE INDEX IF NOT EXISTS idx_binding_repo_agent ON devops_agent_runtime_binding(repo_key, agent_type)")
-            db.commit()
-            log.info("Binding index idx_binding_repo_agent ready")
-    except Exception as e:
-        log.warning(f"Create binding index failed: {e}")
     # ===== 修复 chat_agent_session 陈旧 UNIQUE(repo_key) 约束(多用户 chat 配置互斥顶掉,见 session_manager 注释)=====
     try:
         with db_lock:
@@ -1710,7 +1718,51 @@ def _migrate_tables():
             _ensure_column(c, "issue_state", "is_subtask_mode", "INTEGER DEFAULT 0")
             _ensure_column(c, "tasks", "parent_issue_number", "INTEGER DEFAULT 0")
             _ensure_column(c, "tasks", "is_subtask_mode", "INTEGER DEFAULT 0")
+            _ensure_column(c, "chat_messages", "task_id", "TEXT")
+            _ensure_column(c, "chat_messages", "generate_status", "INTEGER DEFAULT NULL")
             db.commit()
-        log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + tasks")
+        log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + tasks + task_id/generate_status to chat_messages")
     except Exception as e:
         log.warning(f"Add multi-task columns failed: {e}")
+    # ===== Scene Center: issue_state.scene_user_id =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "issue_state", "scene_user_id", "INTEGER DEFAULT 0")
+            db.commit()
+        log.info("Added scene_user_id column to issue_state")
+    except Exception as e:
+        log.warning(f"Add issue_state.scene_user_id column failed: {e}")
+    # ===== Scene Center: agent_tasks.pool_engine_ids + 官方场景种子导入 =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "agent_tasks", "pool_engine_ids", "TEXT DEFAULT ''")
+            db.commit()
+        log.info("Added pool_engine_ids column to agent_tasks")
+    except Exception as e:
+        log.warning(f"Add pool_engine_ids column failed: {e}")
+    # 官方场景种子导入（从 pipelines.json → DB，仅首次）
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        if get_meta_value("scenes_seeded") != "1":
+            import json as _json
+            _pp = os.path.join(_CONFIG_DIR, "pipelines.json")
+            if os.path.exists(_pp):
+                with open(_pp, "r", encoding="utf-8") as _f:
+                    _pdata = _json.load(_f)
+                _imported = 0
+                with db_lock:
+                    c = db.cursor()
+                    for _sid, _scene in (_pdata.get("scenes") or {}).items():
+                        _nodes = _json.dumps(_scene.get("nodes", []), ensure_ascii=False)
+                        c.execute(
+                            "INSERT OR IGNORE INTO devops_pipeline_scene (scene_id, name, description, scope, nodes_json, onboarding, is_active) "
+                            "VALUES (?,?, '', 'official', ?, ?, 1)",
+                            (_sid, _scene.get("name", _sid), _nodes, _scene.get("onboarding", "repo-onboarding")))
+                        _imported += 1
+                    db.commit()
+                set_meta_value("scenes_seeded", "1")
+                log.info(f"Seeded {_imported} official scenes from pipelines.json into devops_pipeline_scene")
+    except Exception as e:
+        log.warning(f"Scene seed import failed: {e}")

@@ -1,0 +1,88 @@
+{
+  "tab": {
+    "projects": "Projects",
+    "templates": "Templates"
+  },
+  "logout_title": "Logout",
+  "loading": "Loading...",
+  "load_failed": "Failed to load",
+  "lobby": {
+    "refresh_btn": "↻ Refresh",
+    "refresh_title": "Refresh repository list from GitCode",
+    "hello": "Hello, ",
+    "welcome_sub": "Select a project to start your Agent-driven automated DevOps journey.",
+    "stat_projects": "Projects",
+    "stat_hosted": "Hosted",
+    "stat_joined": "Joined",
+    "empty_title": "No matching projects found",
+    "empty_desc": "Try different keywords or filter conditions.",
+    "friend": "Friend",
+    "welcome_to_grape": "WELCOME TO GRAPE"
+  },
+  "card": {
+    "enter_project": "Enter Project",
+    "join_and_host": "Join & Host",
+    "join": "Join",
+    "status_hosted": "Hosted",
+    "status_joined": "Joined",
+    "status_not_joined": "Not Joined",
+    "no_description": "No description"
+  },
+  "managed": {
+    "no_hosted": "No hosted repositories",
+    "no_available": "No repositories available to join",
+    "unhost_btn": "Unhost",
+    "th_repository": "Repository",
+    "th_role": "Role",
+    "th_description": "Description"
+  },
+  "available_btn": {
+    "hosted": "Hosted",
+    "join_and_host": "Join & Host",
+    "join": "Join"
+  },
+  "sync": {
+    "syncing": "↻ Syncing…",
+    "refresh": "↻ Refresh",
+    "sync_success": "Synced successfully",
+    "sync_failed": "Sync failed: {{msg}}",
+    "refresh_success": "Refreshed successfully",
+    "refresh_failed": "Refresh failed: {{msg}}",
+    "host_success": "Joined and hosted successfully",
+    "host_failed": "Host failed: {{msg}}",
+    "join_success": "Successfully joined repository",
+    "join_failed": "Join failed: {{msg}}"
+  },
+  "unhost": {
+    "confirm": "⚠️ Are you sure you want to unhost {{name}}?\n\nAfter unhosting, all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files) will be deleted and cannot be recovered.",
+    "done": "Unhosted successfully",
+    "failed": "Unhost failed: {{msg}}",
+    "select_repo": "Select Repository"
+  },
+  "create": {
+    "title": "Create New Project",
+    "desc": "Create a new repository on GitCode. You can enter the hosting workflow immediately after creation.",
+    "name_label": "Repository Name",
+    "name_placeholder": "e.g. my-project",
+    "name_hint": "Only letters, numbers, underscores, hyphens and dots allowed. Will be created under your account namespace.",
+    "desc_label": "Project Description",
+    "desc_placeholder": "Briefly describe the purpose of this project (optional)",
+    "vis_label": "Visibility",
+    "vis_private": "Private",
+    "vis_private_desc": "Visible only to you and authorized collaborators",
+    "vis_public": "Public",
+    "vis_public_desc": "Visible to everyone, can be cloned",
+    "btn_cancel": "Cancel",
+    "btn_create": "Create Project",
+    "btn_creating": "Creating…",
+    "err_no_name": "Please enter a repository name",
+    "err_exists": "Repository {{name}} already exists, please choose another name",
+    "success": "Project created successfully: {{name}}",
+    "err_create_failed": "Create failed: {{msg}}",
+    "err_check_failed": "Check failed: {{msg}}"
+  },
+  "brand_sub": "Agentic DevOps",
+  "repositories": "Repositories",
+  "sync_from_gitcode": "Sync from GitCode",
+  "hosted": "Hosted"
+}

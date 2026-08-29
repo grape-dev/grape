@@ -268,7 +268,9 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
            "actor": owner or "", "account": repository, "issue_id": issue_id,
            "payload": {"repository": repository, "owner": owner, "onboarding_target": target}}
     try:
-        prompt = build_prompt(evt, [], "", [skill], skill_path=os.path.join(SKILLS_DIR, skill, "SKILL.md"),
+        from src.config import resolve_official_skill_path as _resolve_skill
+        _skill_p = _resolve_skill(skill) or os.path.join(SKILLS_DIR, skill, "SKILL.md")
+        prompt = build_prompt(evt, [], "", [skill], skill_path=_skill_p,
                               runtime_id=runtime_id, agent_type="vod")
     except Exception as e:
         log.warning(f"[Onboarding|repo:{repo_key}] prompt build failed: {e}")
@@ -280,7 +282,7 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
         runtime_session_id="", event_type="onboarding",
         account=repository,
         repo_gitcode_token=get_gitcode_token(repo_key=repo_key) or "",
-        skill_path=os.path.join(SKILLS_DIR, skill, "SKILL.md"),
+        skill_path=_skill_p,
         skill_id=skill_id,
         issue_session_id=issue_session_id,
         env_extra={"REPO_FULL_NAME": repository, "REPO_OWNER": owner,

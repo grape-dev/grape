@@ -1,0 +1,124 @@
+{
+  "scope": {
+    "global": "Global",
+    "repo": "Repo",
+    "user": "Personal"
+  },
+  "health": {
+    "online": "Online",
+    "recently_lost": "Recently Lost",
+    "offline": "Offline",
+    "about_to_gc": "Pending GC"
+  },
+  "tab": {
+    "engines": "Engines",
+    "workers": "Workers"
+  },
+  "action": {
+    "gen_credential": "＋ Generate Credential",
+    "refresh": "⟳ Refresh",
+    "rename": "Rename",
+    "revoke": "Revoke",
+    "tasks": "Tasks",
+    "close": "Close",
+    "save_tags": "Save Tags",
+    "refresh_skills": "⟳ Refresh",
+    "cancel": "Cancel",
+    "generate": "Generate",
+    "copy_one_cmd": "📋 Copy Install Command",
+    "copy_token": "📋 Copy Token"
+  },
+  "label": {
+    "local_direct": "Local Direct",
+    "local": "Local",
+    "remote": "Remote",
+    "skills_count": "{{count}}",
+    "tags": "Tags",
+    "credential": "Credential",
+    "hosted_engines": "Hosted Engines",
+    "cred_name": "Credential Name",
+    "cred_name_placeholder": "e.g. CI-Worker-01",
+    "owner_user": "Owner User",
+    "scope": "Scope",
+    "repo_key": "Repo (owner/repo)",
+    "engine_type": "Engine Type",
+    "version": "Version",
+    "health_status": "Health",
+    "healthy": "✓ Healthy",
+    "unhealthy": "✗ Unhealthy",
+    "worker": "Worker",
+    "ip": "IP",
+    "scope_label": "Scope",
+    "owner": "Owner",
+    "installed": "Installed",
+    "yes": "Yes",
+    "no": "No",
+    "role_tags": "Role Tags",
+    "local_skill_list": "Local Skill List",
+    "skill_count_paren": "({{count}})",
+    "description": "Description",
+    "provider": "Provider",
+    "local_path": "Local Path",
+    "file_count": "Files",
+    "task_id": "Task ID",
+    "repo_agent": "Repo/Agent",
+    "status": "Status",
+    "exit": "Exit",
+    "result": "Result",
+    "skills_label": "Skills"
+  },
+  "empty": {
+    "no_engines": "No engines",
+    "no_workers": "No Workers",
+    "no_tasks": "No tasks",
+    "no_local_skill": "No local skill",
+    "unassigned": "Unassigned"
+  },
+  "time": {
+    "not_online": "Not online",
+    "seconds_ago": "{{n}}s ago",
+    "minutes_ago": "{{n}}m ago",
+    "hours_ago": "{{n}}h ago"
+  },
+  "credential": {
+    "gen_title": "Generate Credential",
+    "toast_name_required": "Please enter credential name",
+    "toast_repo_required": "Repo scope requires repo owner/repo",
+    "token_warning": "⚠️ Token is shown only once. Save it now (name: {{name}}, scope: {{scope}}):",
+    "install_hint": "📦 Install on the Worker machine (regular user) with one command:",
+    "install_desc": "This command downloads the runtime package (grape-worker.tar.gz) from the controller, extracts it to the home directory, writes the credential and controller address, and starts registration in the background; no root needed. Re-run to upgrade.",
+    "manual_start": "Or start RuntimeAgent manually:",
+    "toast_generated": "Credential generated",
+    "toast_gen_failed": "Generation failed: {{msg}}",
+    "rename_prompt": "New credential name (globally unique):",
+    "toast_renamed": "Renamed",
+    "toast_rename_failed": "Rename failed: {{msg}}",
+    "toast_copied": "Copied",
+    "revoke_confirm": "Confirm revoke and delete this credential? This action is irreversible. The worker will no longer be able to connect. The credential name can be reused.",
+    "toast_revoked": "Revoked and deleted",
+    "toast_revoke_failed": "Revoke failed: {{msg}}",
+    "tasks_title": "Credential #{{id}} · Tasks"
+  },
+  "toast": {
+    "load_tasks_failed": "Failed to load tasks: {{msg}}",
+    "refreshing": "Refreshing...",
+    "refresh_success": "Refreshed successfully",
+    "refresh_failed": "Refresh failed: {{msg}}",
+    "scan_timeout": "Scan timed out, please try again later",
+    "scan_complete": "Scan complete: {{count}} skills",
+    "tags_saved": "Tags saved",
+    "save_failed": "Save failed: {{msg}}",
+    "scanning": "Scanning..."
+  },
+  "skill": {
+    "no_desc": "No description",
+    "click_detail": "Click to view details",
+    "detail_unavailable": "Details unavailable (click refresh to get details)"
+  },
+  "tag": {
+    "all": "All",
+    "all_desc": "Can serve all roles",
+    "single_desc": "{{label}} role only"
+  },
+  "refresh": "Refresh"
+}

@@ -228,11 +228,26 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
         # 上游 runtime_id 来自发起 A2A 的 agent 自己运行的引擎（如 QA 跑在 0003 的 rt=54 上，
         # 传 54 给 coding），直接用它会绕过 tag 限制把任务定向到 0003。
         # 非 plugin 模式：保留原逻辑（有 runtime_id 直接用，无则 pick_engine）。
+        _pool_eids = ""
+        _scene_uid = 0
         if is_plugin_mode():
-            _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0)
+            # 获取 issue 级场景（A2A 交办时场景已持久化到 issue_state）
+            _scene_id = "default"
+            _scene_uid = 0
+            try:
+                from src.api.session_store import get_issue_scene
+                _scene_id, _scene_uid = get_issue_scene(repo_key, issue_id)
+                _scene_id = _scene_id or "default"
+            except Exception:
+                pass
+            _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0,
+                                  scene_id=_scene_id, user_id=_scene_uid)
             if _picked is None:
                 return {"error": "no engine available"}
             runtime_id = _picked
+            # 场景 engine 限定广播范围
+            from src.runtime.engine_select import get_scene_pool_engine_ids
+            _pool_eids = get_scene_pool_engine_ids(_scene_id, agent_type, repo_key=repo_key, user_id=_scene_uid)
         elif not runtime_id:
             _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0)
             if _picked is None:
@@ -242,7 +257,9 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
         _enqueue_pipeline_task(
             repo_key, seq, agent_type, "", skill_name, evt,
             skill_id, skill_path, runtime_id, issue_id,
+            pool_engine_ids=_pool_eids, user_id=_scene_uid if is_plugin_mode() else 0,
         )
         return {"task_id": "enqueued"}
     except Exception as e:
         return {"error": str(e)[:200]}
+

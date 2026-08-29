@@ -65,6 +65,7 @@ class HeartbeatBody(BaseModel):
     cpu_percent: float = 0.0
     memory_percent: float = 0.0
     disk_percent: float = 0.0
+    tmp_percent: float = 0.0
     load_avg: str = ""
     log_lines: list[LogLineBody] = []
     probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
@@ -216,28 +217,16 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
     cancelled_tasks = []
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, load_avg=? WHERE id=?",
-                  (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.load_avg, credential_id))
+        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
+                  (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
                       [now] + body.runtime_ids + [credential_id])
-            # 写入 worker 上报的引擎探测结果到 agent_runtimes
-            if body.probe_results:
-                for rid in body.runtime_ids:
-                    # 查引擎名
-                    c.execute("SELECT name FROM agent_runtimes WHERE id=? AND credential_id=?", (rid, credential_id))
-                    row = c.fetchone()
-                    if not row:
-                        continue
-                    rt_name = row[0] or ""
-                    pr = body.probe_results.get(rt_name) or body.probe_results.get(rt_name.lower()) or {}
-                    if pr:
-                        c.execute(
-                            "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=? "
-                            "WHERE id=? AND credential_id=?",
-                            (pr.get("status", "pending"), pr.get("latency", 0),
-                             pr.get("last_probe", ""), pr.get("error", ""), rid, credential_id))
+            # worker 上报的引擎探测结果：agent_runtimes 无 probe_* 列，
+            # 仅在内存中保留（下次 /api/runtime/heartbeat 由 _probe_results 汇总）
+            # if body.probe_results:
+            #     ... (DB 写入已移除，probe_* 列不存在)
             # 查该 worker 的已取消任务——通知 worker 立即杀进程
             ph2 = ",".join("?" for _ in body.runtime_ids)
             rows = c.execute(

@@ -17,16 +17,16 @@ function _repoQS() {
 function renderKnowledge() {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  el.innerHTML = '<div class="loading">加载中...</div>';
+  el.innerHTML = '<div class="loading">' + I18N.t('knowledge.loading') + '</div>';
   const repo = _currentRepo();
   if (!repo) {
-    el.innerHTML = '<div class="ts t2" style="padding:12px">未选择仓库，请先在仓库页面选择当前仓库。</div>';
+    el.innerHTML = '<div class="ts t2" style="padding:12px">' + I18N.t('knowledge.no_repo_selected') + '</div>';
     return;
   }
   API.get('/knowledge' + _repoQS()).then(d => {
     _renderKnowledgeBoard(el, d);
   }).catch(e => {
-    el.innerHTML = '<div class="error">加载项目知识失败: ' + e.message + '</div>';
+    el.innerHTML = '<div class="error">' + I18N.t('knowledge.load_project_failed', {msg: e.message}) + '</div>';
   });
 }
 
@@ -36,15 +36,15 @@ function _renderKnowledgeBoard(el, d) {
   const repo = _currentRepo();
 
   let html = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
-    <input placeholder="搜索知识..." id="knowledgeSearch" onkeyup="filterKnowledge(this)" style="padding:8px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);width:220px">`;
+    <input placeholder="${I18N.t('knowledge.search_placeholder')}" id="knowledgeSearch" onkeyup="filterKnowledge(this)" style="padding:8px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);width:220px">`;
 
   ['project','agent'].forEach(tab => {
     const active = _knowledgeTab === tab ? 'background:var(--a);color:#fff' : '';
-    const label = tab === 'project' ? '项目级' : 'Agent 维度';
+    const label = tab === 'project' ? I18N.t('knowledge.tab_project') : I18N.t('knowledge.tab_agent');
     html += `<button onclick="_knowledgeTab='${tab}';renderKnowledge()" style="padding:7px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;cursor:pointer;${active}">${label}</button>`;
   });
 
-  html += `<button onclick="showKnowledgeUpload()" style="padding:7px 14px;border:1px solid var(--a);border-radius:var(--rd);font-size:12px;cursor:pointer;color:var(--a);margin-left:auto">＋ 上传知识</button>`;
+  html += `<button onclick="showKnowledgeUpload()" style="padding:7px 14px;border:1px solid var(--a);border-radius:var(--rd);font-size:12px;cursor:pointer;color:var(--a);margin-left:auto">${I18N.t('knowledge.upload_btn')}</button>`;
   html += `</div>`;
 
   if (_knowledgeTab === 'project') {
@@ -58,16 +58,16 @@ function _renderKnowledgeBoard(el, d) {
 
 function _renderProjectTab(d) {
   const meta = d.project.meta || {};
-  const degraded = meta.degraded ? '<span class="tr" style="font-size:10px">⚠ 降级生成</span>' : '';
+  const degraded = meta.degraded ? '<span class="tr" style="font-size:10px">⚠ ' + I18N.t('knowledge.degraded') + '</span>' : '';
   const updated = meta.last_updated ? (meta.last_updated || '').replace('T',' ').substring(0,19) : '—';
 
-  let html = '<div class="grp-title" style="font-size:13px;font-weight:600;margin:14px 0 10px;color:var(--t)">📦 项目知识基线（DevOps Agent 自动生成）</div>';
-  if (degraded) html += `<div class="ts" style="padding:6px 10px;margin-bottom:8px;font-size:11px;color:var(--or)">${degraded} ${meta.note || ''} · 更新 ${updated}</div>`;
-  else if (updated && updated !== '—') html += `<div class="ts t3" style="padding:2px 0 8px;font-size:11px">更新 ${updated} · commit ${meta.last_commit_sha || '-'}</div>`;
+  let html = '<div class="grp-title" style="font-size:13px;font-weight:600;margin:14px 0 10px;color:var(--t)">📦 ' + I18N.t('knowledge.project_baseline_title') + '</div>';
+  if (degraded) html += `<div class="ts" style="padding:6px 10px;margin-bottom:8px;font-size:11px;color:var(--or)">${degraded} ${meta.note || ''} · ${I18N.t('knowledge.updated_commit', {updated: updated, sha: (meta.last_commit_sha || '-')})}</div>`;
+  else if (updated && updated !== '—') html += `<div class="ts t3" style="padding:2px 0 8px;font-size:11px">${I18N.t('knowledge.updated_commit', {updated: updated, sha: (meta.last_commit_sha || '-')})}</div>`;
 
   const files = d.project.files || [];
   if (files.length === 0) {
-    html += '<div class="ts t2" style="padding:12px">暂无项目知识基线（project-info 未生成或降级）。</div>';
+    html += '<div class="ts t2" style="padding:12px">' + I18N.t('knowledge.no_baseline') + '</div>';
   } else {
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     files.forEach(f => {
@@ -79,7 +79,7 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
         </div>
         <div style="font-size:11px;color:var(--t2);line-height:1.4">${f.name.split('/').pop()}</div>
         <div style="font-size:10px;color:var(--t3);margin-top:4px">${f.updated || ''}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${f.obs_key || f.name}')">View</button>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${f.obs_key || f.name}')">${I18N.t('knowledge.view')}</button>
       </div>`;
     });
     html += '</div>';
@@ -88,19 +88,19 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
   // 项目级知识沉淀（knowledge.md）
   const krows = d.project.knowledge || [];
   if (krows.length) {
-    html += '<div class="grp-title" style="font-size:13px;font-weight:600;margin:16px 0 10px">📄 项目知识沉淀</div>';
+    html += '<div class="grp-title" style="font-size:13px;font-weight:600;margin:16px 0 10px">📄 ' + I18N.t('knowledge.knowledge_sediment_title') + '</div>';
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     krows.forEach(k => {
       const preview = (k.content || '').split('\n').filter(l => l.trim()).slice(-3).map(l => l.replace(/^- \[[^\]]*\]\s*/, '')).join(' · ');
-      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="知识沉淀" onclick="loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">
+      html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-name="${I18N.t('knowledge.knowledge_sediment_title')}" onclick="loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="color:var(--pk)">📄</span>
           <span style="font-size:12px;font-weight:600">knowledge.md</span>
           <span class="tg tg-d" style="margin-left:auto;font-size:9px">project</span>
         </div>
-        <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:6px">${preview ? escapeHtml(preview).substring(0,120) : '(空)'}</div>
+        <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:6px">${preview ? escapeHtml(preview).substring(0,120) : I18N.t('knowledge.empty')}</div>
         <div style="font-size:10px;color:var(--t3)">${k.created_by || ''} · ${fmtLocalTime(k.created_at).substring(0,16)} · seq ${k.source_seq || 0}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">View</button>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">${I18N.t('knowledge.view')}</button>
       </div>`;
     });
     html += '</div>';
@@ -108,9 +108,9 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
 
   // 成员上传文档
   const docs = d.project.member_docs || [];
-  html += '<div class="grp-title" style="font-size:13px;font-weight:600;margin:16px 0 10px">👥 成员上传文档</div>';
+  html += '<div class="grp-title" style="font-size:13px;font-weight:600;margin:16px 0 10px">👥 ' + I18N.t('knowledge.member_docs_title') + '</div>';
   if (docs.length === 0) {
-    html += '<div class="ts t2" style="padding:12px">暂无成员上传文档，点击「＋ 上传知识」添加。</div>';
+    html += '<div class="ts t2" style="padding:12px">' + I18N.t('knowledge.no_member_docs') + '</div>';
   } else {
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     docs.forEach(doc => {
@@ -125,8 +125,8 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
         <div style="font-size:11px;color:var(--t2);line-height:1.4">@${doc.owner} · ${doc.size} bytes</div>
         <div style="font-size:10px;color:var(--t3);margin-top:4px">${doc.updated_at || ''}</div>
         <div style="display:flex;gap:6px;margin-top:8px">
-          <button class="bt bt-o bt-s" onclick="event.stopPropagation();loadKnowledgeContent('${doc.obs_key || doc.path}')">View</button>
-          ${canDel ? `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteKnowledgeDoc('${doc.path}')">Delete</button>` : ''}
+          <button class="bt bt-o bt-s" onclick="event.stopPropagation();loadKnowledgeContent('${doc.obs_key || doc.path}')">${I18N.t('knowledge.view')}</button>
+          ${canDel ? `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteKnowledgeDoc('${doc.path}')">${I18N.t('knowledge.delete')}</button>` : ''}
         </div>
       </div>`;
     });
@@ -144,7 +144,7 @@ function _renderAgentTab(d) {
   const order = types.filter(t => present.includes(t)).concat(present.filter(k => !types.includes(k)));
 
   if (order.length === 0) {
-    return '<div class="ts t2" style="padding:12px">暂无 Agent 维度知识沉淀（来自 Issue 对话的 accepted 知识）。</div>';
+    return '<div class="ts t2" style="padding:12px">' + I18N.t('knowledge.no_agent_knowledge') + '</div>';
   }
 
   let html = '';
@@ -155,10 +155,10 @@ function _renderAgentTab(d) {
     const ico = meta.icon || '◈';
     const entries = agents[at] || [];
     html += `<div class="skill-group" style="margin-bottom:18px">
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${color}">${ico} ${label} · ${entries.length} 条知识</h3>`;
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${color}">${ico} ${label} · ${I18N.t('knowledge.agent_knowledge_count', {label: label, count: entries.length})}</h3>`;
     entries.forEach(k => {
       const preview = (k.content || '').split('\n').filter(l => l.trim()).slice(-2).map(l => l.replace(/^- \[[^\]]*\]\s*/, '')).join(' · ');
-      const scopeLabel = k.scope === 'member_agent' ? '成员上传' : (k.scope === 'issue_agent' ? 'Agent 级' : 'Issue 级');
+      const scopeLabel = k.scope === 'member_agent' ? I18N.t('knowledge.scope_member') : (k.scope === 'issue_agent' ? I18N.t('knowledge.scope_issue_agent') : I18N.t('knowledge.scope_issue'));
       const issueTag = (k.scope !== 'member_agent' && k.issue_num) ? ' · Issue #' + k.issue_num : '';
       html += `<div class="cd skill-card" style="padding:14px;cursor:pointer;margin-bottom:8px" data-name="${label}" onclick="loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
@@ -166,9 +166,9 @@ function _renderAgentTab(d) {
           <span style="font-size:12px;font-weight:600">${scopeLabel}${issueTag}</span>
           <span class="tg ${k.scope === 'member_agent' ? 'tg-i' : 'tg-d'}" style="margin-left:auto;font-size:9px">${k.scope === 'member_agent' ? 'member' : k.scope}</span>
         </div>
-        <div style="font-size:11px;color:var(--t2);line-height:1.4">${preview ? escapeHtml(preview).substring(0,140) : '(空)'}</div>
-<div style="font-size:10px;color:var(--t3);margin-top:4px">${k.scope === 'member_agent' ? '成员上传 · 定向该 Agent' : 'seq ' + (k.source_seq || 0) + ' · ' + fmtLocalTime(k.created_at).substring(0,16)}</div>
-        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">View</button>
+        <div style="font-size:11px;color:var(--t2);line-height:1.4">${preview ? escapeHtml(preview).substring(0,140) : I18N.t('knowledge.empty')}</div>
+<div style="font-size:10px;color:var(--t3);margin-top:4px">${k.scope === 'member_agent' ? '' + I18N.t('knowledge.scope_member_directed') + '' : 'seq ' + (k.source_seq || 0) + ' · ' + fmtLocalTime(k.created_at).substring(0,16)}</div>
+        <button class="bt bt-o bt-s" style="margin-top:8px" onclick="event.stopPropagation();loadKnowledgeContent('${k.obs_key || k.path || k.file_path}')">${I18N.t('knowledge.view')}</button>
       </div>`;
     });
     html += '</div>';
@@ -192,7 +192,7 @@ function filterKnowledge(input) {
 function loadKnowledgeContent(key) {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  el.innerHTML = '<div class="loading">加载中...</div>';
+  el.innerHTML = '<div class="loading">' + I18N.t('knowledge.loading') + '</div>';
   // 统一传 obs_key 和 file 两个参数，后端优先用 obs_key，查不到回退 file
   // obs_key 和 file 可能是同一个值（非 OBS 模式下 obs_key 为空，前端传的是 path）
   // 后端逻辑：有 obs_key 且非空 → 读 OBS；否则 → 走 _read_file
@@ -201,7 +201,7 @@ function loadKnowledgeContent(key) {
   API.get('/knowledge/content?repo=' + encodeURIComponent(_currentRepo()) + '&obs_key=' + encodeURIComponent(key)).then(d => {
     renderKnowledgeDetail(d);
   }).catch(e => {
-    el.innerHTML = '<div class="error">加载知识详情失败: ' + e.message + '</div>';
+    el.innerHTML = '<div class="error">' + I18N.t('knowledge.load_detail_failed', {msg: e.message}) + '</div>';
   });
 }
 
@@ -216,16 +216,16 @@ function renderKnowledgeDetail(d) {
     : renderMarkdown(content);
 
   el.innerHTML = `
-    <button class="bt bt-o bt-s" onclick="app.nav('knowledge')" style="margin-bottom:12px">← 返回 Project Knowledge</button>
+    <button class="bt bt-o bt-s" onclick="app.nav('knowledge')" style="margin-bottom:12px">${I18N.t('knowledge.back_to_knowledge')}</button>
     <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
       <div class="cd" style="padding:16px 20px;overflow-y:auto">
         <h3 style="font-size:15px;font-weight:600;margin-bottom:12px">📄 ${fileLabel}</h3>
-        ${rendered || '<div class="ts t2">(空)</div>'}
+        ${rendered || '<div class="ts t2">' + I18N.t('knowledge.empty') + '</div>'}
       </div>
       <div class="cd" style="padding:16px 20px;font-size:12px">
-        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">Knowledge Info</h3>
-        <div class="srow"><label>File</label><span>${fileLabel}</span></div>
-        <div class="srow"><label>Repo</label><span>${d.repo_key || ''}</span></div>
+        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">${I18N.t('knowledge.info_title')}</h3>
+        <div class="srow"><label>${I18N.t('knowledge.info_file')}</label><span>${fileLabel}</span></div>
+        <div class="srow"><label>${I18N.t('knowledge.info_repo')}</label><span>${d.repo_key || ''}</span></div>
       </div>
     </div>`;
 }
@@ -238,17 +238,17 @@ function showKnowledgeUpload() {
   modal.id = 'knowledgeUploadModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
   modal.innerHTML = `<div class="cd" style="width:460px;padding:20px;border-radius:10px">
-    <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">上传项目知识</h3>
-    <div class="srow" style="margin-bottom:10px"><label>仓库</label><span>${repo}</span></div>
-    <div class="srow" style="margin-bottom:10px"><label>维度 *</label>
+    <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">${I18N.t('knowledge.upload_modal_title')}</h3>
+    <div class="srow" style="margin-bottom:10px"><label>${I18N.t('knowledge.upload_repo')}</label><span>${repo}</span></div>
+    <div class="srow" style="margin-bottom:10px"><label>${I18N.t('knowledge.upload_scope')}</label>
       <span style="display:flex;gap:8px;font-size:12px">
-        <label style="cursor:pointer"><input type="radio" name="kScope" value="project" checked onchange="toggleKnowledgeAgentSel()"> 项目级</label>
-        <label style="cursor:pointer"><input type="radio" name="kScope" value="agent" onchange="toggleKnowledgeAgentSel()"> Agent 维度</label>
+        <label style="cursor:pointer"><input type="radio" name="kScope" value="project" checked onchange="toggleKnowledgeAgentSel()"> ${I18N.t('knowledge.tab_project')}</label>
+        <label style="cursor:pointer"><input type="radio" name="kScope" value="agent" onchange="toggleKnowledgeAgentSel()"> ${I18N.t('knowledge.tab_agent')}</label>
       </span>
     </div>
-    <div class="srow" style="margin-bottom:10px" id="knowledgeAgentRow" style="display:none"><label>Agent *</label>
+    <div class="srow" style="margin-bottom:10px" id="knowledgeAgentRow" style="display:none"><label>${I18N.t('knowledge.agent_label')}</label>
       <select id="knowledgeAgentType" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">
-        <option value="">-- 选择 Agent --</option>
+        <option value="">${I18N.t('knowledge.select_agent')}</option>
         <option value="vod">VOD Agent</option>
         <option value="issue">Issue Agent</option>
         <option value="coding">Coding Agent</option>
@@ -258,18 +258,18 @@ function showKnowledgeUpload() {
       </select>
     </div>
     <div style="margin-bottom:14px">
-      <label style="font-size:11px;color:var(--t2);display:block;margin-bottom:6px">选择知识文档（.md / .txt / .json，≤10MB）</label>
+      <label style="font-size:11px;color:var(--t2);display:block;margin-bottom:6px">${I18N.t('knowledge.select_file')}</label>
       <input type="file" id="knowledgeFile" accept=".md,.txt,.json" style="font-size:12px">
     </div>
     <div id="knowledgeUploadProgress" style="display:none;margin-bottom:12px">
-      <div style="font-size:11px;color:var(--t2);margin-bottom:4px">上传中... <span id="knowledgeUploadPct">0%</span></div>
+      <div style="font-size:11px;color:var(--t2);margin-bottom:4px">${I18N.t('knowledge.uploading')} <span id="knowledgeUploadPct">0%</span></div>
       <div style="background:var(--bg);border-radius:8px;height:8px;overflow:hidden">
         <div id="knowledgeUploadBar" style="background:var(--a);height:100%;width:0%;transition:width .2s"></div>
       </div>
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button class="bt bt-o bt-s" onclick="document.getElementById('knowledgeUploadModal').remove()">取消</button>
-      <button class="bt bt-p bt-s" onclick="doKnowledgeUpload()">上传</button>
+      <button class="bt bt-o bt-s" onclick="document.getElementById('knowledgeUploadModal').remove()">${I18N.t('knowledge.cancel')}</button>
+      <button class="bt bt-p bt-s" onclick="doKnowledgeUpload()">${I18N.t('knowledge.upload_btn_confirm')}</button>
     </div>
   </div>`;
   document.body.appendChild(modal);
@@ -285,7 +285,7 @@ function toggleKnowledgeAgentSel() {
 function doKnowledgeUpload() {
   const fileInput = document.getElementById('knowledgeFile');
   if (!fileInput || !fileInput.files || !fileInput.files[0]) {
-    if (app && app.showToast) app.showToast('请选择知识文档');
+    if (app && app.showToast) app.showToast(I18N.t('knowledge.please_select_file'));
     return;
   }
   const scope = document.querySelector('input[name="kScope"]:checked')?.value || 'project';
@@ -293,7 +293,7 @@ function doKnowledgeUpload() {
   if (scope === 'agent') {
     agentType = document.getElementById('knowledgeAgentType')?.value || '';
     if (!agentType) {
-      if (app && app.showToast) app.showToast('请选择 Agent');
+      if (app && app.showToast) app.showToast(I18N.t('knowledge.please_select_agent'));
       return;
     }
   }
@@ -310,24 +310,24 @@ function doKnowledgeUpload() {
   if (prog) prog.style.display = 'block';
   API.upload('/knowledge', fd, (p) => { if (bar) bar.style.width = p + '%'; if (pct) pct.textContent = p + '%'; }).then(r => {
     document.getElementById('knowledgeUploadModal')?.remove();
-    if (app && app.showToast) app.showToast(r.message || '上传成功');
+    if (app && app.showToast) app.showToast(r.message || I18N.t('knowledge.upload_success'));
     renderKnowledge();
   }).catch(e => {
     if (prog) prog.style.display = 'none';
     if (e && e.errors && e.errors.length) {
-      if (app && app.showToast) app.showToast('校验失败：\n' + e.errors.join('\n'));
+      if (app && app.showToast) app.showToast(I18N.t('knowledge.validation_failed', {errors: e.errors.join('\n')}));
     } else if (app && app.showToast) {
-      app.showToast('上传失败: ' + e.message);
+      app.showToast(I18N.t('knowledge.upload_failed', {msg: e.message}));
     }
   });
 }
 
 function deleteKnowledgeDoc(path) {
-  if (!confirm('确定删除该知识文档吗？')) return;
+  if (!confirm(I18N.t('knowledge.delete_confirm'))) return;
   API.del('/knowledge?repo=' + encodeURIComponent(_currentRepo()) + '&file=' + encodeURIComponent(path)).then(r => {
-    if (app && app.showToast) app.showToast(r.message || '已删除');
+    if (app && app.showToast) app.showToast(r.message || I18N.t('knowledge.deleted'));
     renderKnowledge();
   }).catch(e => {
-    if (app && app.showToast) app.showToast('删除失败: ' + e.message);
+    if (app && app.showToast) app.showToast(I18N.t('knowledge.delete_failed', {msg: e.message}));
   });
 }

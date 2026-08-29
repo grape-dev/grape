@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.session_manager import get_or_create_session, update_session, db
-from src.prompt_builder import build_chat_prompt, get_skill_capabilities
+from src.prompt_builder import build_chat_prompt
 from src.runtime.executor import consume_stream_async
 from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
@@ -313,11 +313,14 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
 
 
 def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_account: str,
-                              chat_runtime_id: int, conv_id: str, user_info: str = "") -> str:
+                              chat_runtime_id: int, conv_id: str, user_info: str = "",
+                              has_valid_session: bool = False) -> str:
     """按当前加入会话的 conv_type 分支构建 Feishu chat prompt（feishu-web-chat-unified-design.md §11）。
 
     task 会话 → build_task_chat_prompt（会话消息 get_messages 作历史，与 web chat 一致）；
     否则 general → build_chat_prompt（事件 history）。
+    has_valid_session：飞书侧按 repo 级 oc_sid 是否有效；无效时注入完整对话历史
+    （chat-prompt-history-injection-design.md §3）。
     """
     conv_obj = None
     if conv_id:
@@ -334,9 +337,11 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
             conv_history = get_messages(conv_id, limit=20)
         except Exception:
             conv_history = []
-        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info)
+        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info, has_valid_session=has_valid_session)
     else:
-        body = build_chat_prompt(text, repo_key, history, skills, exec_account, runtime_id=chat_runtime_id, user_info=user_info)
+        body = build_chat_prompt(text, repo_key, history, skills=skills,
+                                 runtime_id=chat_runtime_id, user_info=user_info,
+                                 has_valid_session=has_valid_session)
     return body
 
 
@@ -520,16 +525,6 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                                 return
             except Exception as e:
                 log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
-
-        capability_patterns = [
-            r'(?:你|您)(?:有|会|能|可以)?\s*什么\s*(?:能力|功能|本领|技能|用处|作用)',
-            r'(?:你|您)(?:会|能|可以)\s*(?:做|干|处理|干嘛)\s*(?:什么|哪些)',
-            r'what\s*(?:can|are)\s*(?:you|your)\s*(?:do|capabilities|skills|features)',
-            r'(?:介绍|说说|告诉)(?:一下|下)?\s*(?:你|你自己)',
-        ]
-        if any(re.search(p, text, re.IGNORECASE) for p in capability_patterns):
-            await api.reply_text(ctx, msg_id, get_skill_capabilities())
-            return
 
         if detect_clean_intent(text):
             result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id)
@@ -719,7 +714,8 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             chat_runtime_id = 0
 
         prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
-                                           chat_runtime_id, conv_id, user_info=user_info)
+                                           chat_runtime_id, conv_id, user_info=user_info,
+                                           has_valid_session=bool((oc_sid or "").startswith("ses_")))
         log.info(f"Chat prompt ({len(prompt)} chars, repo={repository})")
 
         wsd = os.path.join(WORKSPACE_DIR, "feishu", repository.replace("/", "_"), sess.split("-")[-1])
