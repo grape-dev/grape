@@ -587,6 +587,8 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
         parts.append(user_info)
 
     parts.extend([f"## 场景: task", f"## 任务背景", f"仓库: {repo_key}", f"Issue: #{issue_number}"])
+    if conv.get("title"):
+        parts.append(f"标题: {conv['title']}")
     # 注入当前执行的 runtime 引擎信息
     if runtime_id:
         try:
@@ -604,12 +606,10 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
         "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\n"
         "严禁 clone/部署/起服务/修改文件/执行 git 命令。"
     )
-    # 任务描述（标题紧随其后）
+    # 任务描述（tasks 表）
     task_desc = _get_task_description(conv)
     if task_desc:
         parts.append(f"\n### 任务描述\n{task_desc}")
-    if conv.get("title"):
-        parts.append(f"标题: {conv['title']}")
 
     try:
         from src.api.event_store import get_issue_summary
