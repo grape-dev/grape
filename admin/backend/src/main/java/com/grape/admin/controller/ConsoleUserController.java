@@ -135,6 +135,7 @@ public class ConsoleUserController {
         // 用户活动统计（通过 repo_owner 关联仓库再关联任务，只统计 Issue 任务，排除对话任务）
         try {
             String issueFilter = " AND t.issue_id IS NOT NULL AND t.issue_id<>''";
+            String notCancelled = " AND (t.status IS NULL OR t.status<>'cancelled')";
             String baseJoin = " FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?";
@@ -150,14 +151,17 @@ public class ConsoleUserController {
                 "SELECT COUNT(DISTINCT t.issue_id)" + baseJoin + issueFilter, Long.class, id);
             info.put("issueCount", issueCount != null ? issueCount : 0);
             Long completedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.exit_code=0 AND t.completed_at IS NOT NULL", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND t.exit_code=0 AND t.completed_at IS NOT NULL", Long.class, id);
             info.put("completedCount", completedCount != null ? completedCount : 0);
             Long failedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.exit_code<>0 AND t.exit_code IS NOT NULL", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND t.exit_code<>0 AND t.exit_code IS NOT NULL", Long.class, id);
             info.put("failedCount", failedCount != null ? failedCount : 0);
             Long pendingCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND (t.exit_code IS NULL OR t.completed_at IS NULL)", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND (t.exit_code IS NULL OR t.completed_at IS NULL)", Long.class, id);
             info.put("pendingCount", pendingCount != null ? pendingCount : 0);
+            Long cancelledCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='cancelled'", Long.class, id);
+            info.put("cancelledCount", cancelledCount != null ? cancelledCount : 0);
             if (taskCount != null && taskCount > 0 && completedCount != null) {
                 info.put("successRate", Math.round(completedCount * 1000.0 / taskCount) / 10.0 + "%");
             } else {
@@ -171,9 +175,10 @@ public class ConsoleUserController {
                 "SELECT m.full_name, m.repo_key, " +
                 "COUNT(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 END) as task_count, " +
                 "COUNT(DISTINCT CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN t.issue_id END) as issue_count, " +
-                "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as completed, " +
-                "SUM(CASE WHEN t.exit_code<>0 AND t.exit_code IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as failed, " +
-                "SUM(CASE WHEN (t.exit_code IS NULL OR t.completed_at IS NULL) AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as pending " +
+                "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as completed, " +
+                "SUM(CASE WHEN t.exit_code<>0 AND t.exit_code IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as failed, " +
+                "SUM(CASE WHEN (t.exit_code IS NULL OR t.completed_at IS NULL) AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as pending, " +
+                "SUM(CASE WHEN t.status='cancelled' AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as cancelled " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
@@ -187,6 +192,7 @@ public class ConsoleUserController {
                     r.put("completed", rs2.getInt("completed"));
                     r.put("failed", rs2.getInt("failed"));
                     r.put("pending", rs2.getInt("pending"));
+                    r.put("cancelled", rs2.getInt("cancelled"));
                     return r;
                 }, id);
             info.put("repoMatrix", repoMatrix);
@@ -239,6 +245,7 @@ public class ConsoleUserController {
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
                 "AND (t.exit_code IS NULL OR t.completed_at IS NULL) " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
+                "AND (t.status IS NULL OR t.status<>'cancelled') " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -317,7 +324,8 @@ public class ConsoleUserController {
                     "COUNT(*) as task_count, " +
                     "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
                     "SUM(CASE WHEN t.exit_code<>0 AND t.exit_code IS NOT NULL THEN 1 ELSE 0 END) as failed, " +
-                    "SUM(CASE WHEN t.exit_code IS NULL OR t.completed_at IS NULL THEN 1 ELSE 0 END) as pending, " +
+                    "SUM(CASE WHEN (t.exit_code IS NULL OR t.completed_at IS NULL) AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as pending, " +
+                    "SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
                     "MAX(t.started_at) as last_task_at " +
                     joinSql +
                     " GROUP BY t.issue_id" +
@@ -330,6 +338,7 @@ public class ConsoleUserController {
                 r.put("completed", rs.getInt("completed"));
                 r.put("failed", rs.getInt("failed"));
                 r.put("pending", rs.getInt("pending"));
+                r.put("cancelled", rs.getInt("cancelled"));
                 r.put("lastTaskAt", rs.getString("last_task_at"));
                 list.add(r);
             }, params);
