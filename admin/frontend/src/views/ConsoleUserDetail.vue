@@ -82,9 +82,9 @@
                 <div v-else>
                   <p class="t3" style="font-size:12px;margin-bottom:8px">{{ repoIssuesTotal }} 个 Issue — 点击展开</p>
                   <!-- Issue 卡片列表 -->
-                  <div v-for="iss in repoIssues" :key="iss.issueId" class="tl-issue">
+                  <div v-for="iss in repoIssues" :key="iss.repoKey + '|' + iss.issueId" class="tl-issue">
                     <div class="tl-issue-head" @click="toggleIssueTimeline(iss)">
-                      <span class="tl-arrow">{{ expandedIssues.has(iss.issueId) ? '▾' : '▸' }}</span>
+                      <span class="tl-arrow">{{ expandedIssues.has(iss.repoKey + '|' + iss.issueId) ? '▾' : '▸' }}</span>
                       <b class="tl-issue-id">
                         <a :href="`https://gitcode.com/${iss.repoName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop class="tl-issue-link">
                           <span class="t3" style="font-size:11px">{{ iss.repoName }}</span> {{ iss.issueId }}
@@ -96,23 +96,23 @@
                       <span class="t3 tl-issue-time">{{ (iss.lastTaskAt || '').substring(0, 16).replace('T', ' ') }}</span>
                     </div>
                     <!-- 展开详情 -->
-                    <div v-if="expandedIssues.has(iss.issueId)" class="tl-issue-body">
+                    <div v-if="expandedIssues.has(iss.repoKey + '|' + iss.issueId)" class="tl-issue-body">
                       <div class="tl-view-tabs">
-                        <button class="tl-view-btn" :class="{ active: issueViewModes[iss.issueId] !== 'events' }" @click="switchIssueView(iss, 'diagram')">📊 时序图</button>
-                        <button class="tl-view-btn" :class="{ active: issueViewModes[iss.issueId] === 'events' }" @click="switchIssueView(iss, 'events')">📋 事件列表</button>
+                        <button class="tl-view-btn" :class="{ active: issueViewModes[iss.repoKey + '|' + iss.issueId] !== 'events' }" @click="switchIssueView(iss, 'diagram')">📊 时序图</button>
+                        <button class="tl-view-btn" :class="{ active: issueViewModes[iss.repoKey + '|' + iss.issueId] === 'events' }" @click="switchIssueView(iss, 'events')">📋 事件列表</button>
                       </div>
-                      <div v-show="issueEventsLoading[iss.issueId]" class="tl-diagram-loading">加载中...</div>
-                      <div v-show="!issueEventsLoading[iss.issueId] && issueViewModes[iss.issueId] !== 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length" class="tl-diagram-container" :ref="el => diagramRefs[iss.issueId] = el">
-                        <div v-if="!renderedIssues.has(iss.issueId)" class="tl-diagram-loading">渲染中...</div>
-                        <div v-else v-html="issueSvg(iss.issueId)" class="tl-diagram-svg"></div>
+                      <div v-show="issueEventsLoading[iss.repoKey + '|' + iss.issueId]" class="tl-diagram-loading">加载中...</div>
+                      <div v-show="!issueEventsLoading[iss.repoKey + '|' + iss.issueId] && issueViewModes[iss.repoKey + '|' + iss.issueId] !== 'events' && issueEvents[iss.repoKey + '|' + iss.issueId] && issueEvents[iss.repoKey + '|' + iss.issueId].length" class="tl-diagram-container" :ref="el => diagramRefs[iss.repoKey + '|' + iss.issueId] = el">
+                        <div v-if="!renderedIssues.has(iss.repoKey + '|' + iss.issueId)" class="tl-diagram-loading">渲染中...</div>
+                        <div v-else v-html="issueSvg(iss.repoKey + '|' + iss.issueId)" class="tl-diagram-svg"></div>
                       </div>
-                      <div v-show="issueViewModes[iss.issueId] === 'events' && issueEvents[iss.issueId] && issueEvents[iss.issueId].length">
+                      <div v-show="issueViewModes[iss.repoKey + '|' + iss.issueId] === 'events' && issueEvents[iss.repoKey + '|' + iss.issueId] && issueEvents[iss.repoKey + '|' + iss.issueId].length">
                         <table class="vod-table">
                           <thead>
                             <tr><th>Seq</th><th>事件</th><th>运行时</th><th>耗时</th><th>状态</th><th>时间</th></tr>
                           </thead>
                           <tbody>
-                            <tr v-for="(ev, eidx) in issueEvents[iss.issueId]" :key="eidx" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId }" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
+                            <tr v-for="(ev, eidx) in issueEvents[iss.repoKey + '|' + iss.issueId]" :key="eidx" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId }" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
                               <td class="t3">#{{ eidx + 1 }}</td>
                               <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
                               <td class="t3" style="font-size:11px">
@@ -128,7 +128,7 @@
                           </tbody>
                         </table>
                       </div>
-                      <div v-show="!issueEventsLoading[iss.issueId] && (!issueEvents[iss.issueId] || !issueEvents[iss.issueId].length)" class="tl-diagram-loading">暂无事件记录</div>
+                      <div v-show="!issueEventsLoading[iss.repoKey + '|' + iss.issueId] && (!issueEvents[iss.repoKey + '|' + iss.issueId] || !issueEvents[iss.repoKey + '|' + iss.issueId].length)" class="tl-diagram-loading">暂无事件记录</div>
                     </div>
                   </div>
                   <!-- 分页 -->
@@ -248,7 +248,7 @@ function logTypeIcon(t) {
   return map[t] || '•'
 }
 async function toggleIssueTimeline(iss) {
-  const id = iss.issueId
+  const id = iss.repoKey + '|' + iss.issueId
   const s = new Set(expandedIssues.value)
   if (s.has(id)) {
     s.delete(id)
@@ -291,7 +291,7 @@ async function toggleIssueTimeline(iss) {
 }
 
 function switchIssueView(iss, mode) {
-  const id = iss.issueId
+  const id = iss.repoKey + '|' + iss.issueId
   issueViewModes.value = { ...issueViewModes.value, [id]: mode }
   if (mode === 'diagram' && issueEvents.value[id] && issueEvents.value[id].length) {
     if (renderedIssues.value.has(id)) {
