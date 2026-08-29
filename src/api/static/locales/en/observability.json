@@ -128,5 +128,7 @@
   "col_probe": "Probe",
   "probe_pending": "Pending",
   "probe_skip": "Skip",
-  "probe_fail": "Fail"
+  "probe_fail": "Fail",
+  "search_engine_placeholder": "Search engine/device/version...",
+  "all_devices": "All devices"
 }

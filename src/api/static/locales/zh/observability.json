@@ -128,5 +128,7 @@
   "col_probe": "探活",
   "probe_pending": "等待",
   "probe_skip": "跳过",
-  "probe_fail": "失败"
+  "probe_fail": "失败",
+  "search_engine_placeholder": "搜索引擎/设备/版本...",
+  "all_devices": "全部设备"
 }
