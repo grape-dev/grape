@@ -99,7 +99,7 @@
                           <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">
                             <span class="t3" style="font-size:11px">{{ selectedRepoData?.fullName }}</span> {{ iss.issueId }}
                           </a>
-                          <span v-if="iss.issueTitle" class="t3" style="font-size:11px;margin-left:6px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">{{ iss.issueTitle }}</span>
+                          <span v-if="iss.issueTitle" class="t3" :title="iss.issueTitle" style="font-size:11px;margin-left:6px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:350px;display:inline-block;vertical-align:middle">{{ iss.issueTitle }}</span>
                         </td>
                         <td class="t3">{{ iss.taskCount }}</td>
                         <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
