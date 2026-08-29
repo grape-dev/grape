@@ -524,10 +524,7 @@ const repoIssuesTotalPages = ref(0)
 const repoIssuesLoading = ref(false)
 const toast = ref({ show: false, msg: '', type: 'success' })
 
-const selectedRepoData = computed(() => {
-  if (!selectedRepo.value) return null
-  return (info.value.repoMatrix || []).find(r => r.repoKey === selectedRepo.value)
-})
+
 
 
 const credentialConfigured = computed(() => {
