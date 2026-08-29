@@ -33,7 +33,7 @@
       <div class="card" v-if="!loading">
         <table class="vod-table">
           <thead>
-            <tr><th style="width:60px">ID</th><th>用户名</th><th>昵称</th><th>GitCode ID</th><th>登录状态</th><th>凭证配置</th><th>最后活跃</th><th style="width:60px">操作</th></tr>
+            <tr><th style="width:60px">ID</th><th>用户名</th><th>昵称</th><th>GitCode ID</th><th>登录状态</th><th>凭证配置</th><th>创建时间</th><th>最后活跃</th><th style="width:60px">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="u in list" :key="u.id" class="tl-row-clickable" @click="$router.push(`/sys/console/${u.id}`)">
@@ -48,13 +48,14 @@
                 <span v-if="u.hasFeishu" class="status-tag success" style="font-size:10px">飞书</span>
                 <span v-if="!u.hasGitcodeToken && !u.hasHuaweiAk && !u.hasFeishu" class="t3" style="font-size:11px">未配置</span>
               </td>
+              <td class="t3">{{ u.createdAt ? u.createdAt.substring(0, 19).replace('T', ' ') : '—' }}</td>
               <td class="t3">{{ u.lastActiveAt || '—' }}</td>
               <td @click.stop>
                 <button class="act-icon-btn" @click.stop="$router.push(`/sys/console/${u.id}`)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
               </td>
             </tr>
             <tr v-if="list.length === 0">
-              <td colspan="8" style="text-align:center;padding:40px;color:var(--text-tertiary)">
+              <td colspan="9" style="text-align:center;padding:40px;color:var(--text-tertiary)">
                 <div style="font-size:32px;margin-bottom:8px">👤</div>
                 <div>暂无用户数据</div>
               </td>
