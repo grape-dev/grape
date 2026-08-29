@@ -430,6 +430,8 @@ function buildSequence(events) {
   }
   const lines = ['sequenceDiagram', 'autonumber']
   for (const a of agents) lines.push(`    participant ${mermaidId(a)} as ${a}`)
+  const statuses = []
+  const evTypes = []
   let prev = null
   for (const ev of events) {
     const a = mermaidId(ev.agentType || '—')
@@ -437,12 +439,112 @@ function buildSequence(events) {
     const label = (t ? t + ' ' : '') + eventTypeText(ev.eventType)
     if (prev && a !== prev) {
       lines.push(`    ${prev}->>${a}: ${label}`)
+      statuses.push(ev.status || '')
+      evTypes.push('msg')
     } else {
       lines.push(`    Note over ${a}: ${label}`)
+      statuses.push(ev.status || '')
+      evTypes.push('note')
     }
     prev = a
   }
-  return lines.join('\n')
+  return { text: lines.join('\n'), statuses, evTypes }
+}
+
+function applySequenceColors(svg, statuses) {
+  try {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+    const root = doc.documentElement
+    const defs = root.querySelector('defs')
+    if (!defs) return svg
+    const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'completed' ? '#2e9e5b' : '#94a3b8')
+    const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
+    lines.forEach((line, i) => {
+      const markerId = root.id + '-seqnum-' + i
+      const marker = doc.createElementNS('http://www.w3.org/2000/svg', 'marker')
+      marker.setAttribute('id', markerId)
+      marker.setAttribute('refX', '15'); marker.setAttribute('refY', '15')
+      marker.setAttribute('markerWidth', '60'); marker.setAttribute('markerHeight', '40')
+      marker.setAttribute('orient', 'auto')
+      const circle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle')
+      circle.setAttribute('cx', '15'); circle.setAttribute('cy', '15'); circle.setAttribute('r', '6')
+      circle.setAttribute('fill', colorOf(statuses[i] || ''))
+      marker.appendChild(circle)
+      defs.appendChild(marker)
+      line.setAttribute('marker-start', 'url(#' + markerId + ')')
+    })
+    return new XMLSerializer().serializeToString(doc)
+  } catch (e) {
+    return svg
+  }
+}
+
+function fixLifelineHeight(svgStr, eventCount) {
+  try {
+    const doc = new DOMParser().parseFromString(svgStr, 'image/svg+xml')
+    const root = doc.documentElement
+    const heightAttr = root.getAttribute('height')
+    const viewBox = root.getAttribute('viewBox')
+    let svgHeight = 0
+    if (viewBox) {
+      const parts = viewBox.split(' ')
+      svgHeight = parseFloat(parts[3]) || 0
+    }
+    if (!svgHeight && heightAttr) {
+      svgHeight = parseFloat(heightAttr) || 0
+    }
+    if (svgHeight <= 0) return svgStr
+    const minHeight = eventCount > 8 ? eventCount * 45 + 100 : 0
+    if (minHeight <= 0 || svgHeight >= minHeight) return svgStr
+    const allLines = Array.from(root.querySelectorAll('line'))
+    const vLines = allLines.filter(l => {
+      const x1 = parseFloat(l.getAttribute('x1') || 0)
+      const x2 = parseFloat(l.getAttribute('x2') || 0)
+      return Math.abs(x1 - x2) < 2
+    })
+    vLines.forEach(l => {
+      l.setAttribute('y2', String(minHeight))
+    })
+    root.setAttribute('height', String(minHeight))
+    if (viewBox) {
+      const parts = viewBox.split(' ')
+      parts[3] = String(minHeight)
+      root.setAttribute('viewBox', parts.join(' '))
+    }
+    return new XMLSerializer().serializeToString(doc)
+  } catch (e) {
+    return svgStr
+  }
+}
+
+function bindMermaidClicks(iss, evTypes) {
+  const el = diagramRefs[iss.issueId]
+  if (!el) return
+  const svg = el.querySelector('svg')
+  if (!svg) return
+  const events = iss._events || []
+  if (!events.length) return
+  const msgTexts = Array.from(svg.querySelectorAll('text.messageText'))
+  const noteTexts = Array.from(svg.querySelectorAll('text.noteText'))
+  let msgIdx = 0, noteIdx = 0
+  events.forEach((ev, i) => {
+    const type = evTypes[i] || 'msg'
+    let txt = null
+    if (type === 'msg') {
+      txt = msgTexts[msgIdx]
+      msgIdx++
+    } else {
+      txt = noteTexts[noteIdx]
+      noteIdx++
+    }
+    if (!txt) return
+    if (ev.taskId) {
+      txt.setAttribute('data-task-id', ev.taskId)
+      txt.style.cursor = 'pointer'
+      txt.style.textDecoration = 'underline'
+      txt.addEventListener('click', () => openLogModal(ev.taskId, ev))
+    }
+  })
 }
 
 async function renderMermaidForIssue(iss) {
@@ -450,16 +552,22 @@ async function renderMermaidForIssue(iss) {
   if (!el) return
   try {
     const mmd = await getMermaid()
-    const text = buildSequence(iss._events)
-    const id = 'mmd_' + iss.issueId.replace(/[^a-zA-Z0-9]/g, '_')
-    const { svg } = await mmd.render(id, text)
-    el.innerHTML = svg
+    const { text, statuses, evTypes } = buildSequence(iss._events)
+    const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
+    try { await mmd.parse(text) } catch (e) { }
+    const result = await mmd.render(uid, text)
+    const svg = result.svg || result
+    const coloredSvg = applySequenceColors(svg, statuses)
+    const fixedSvg = fixLifelineHeight(coloredSvg, iss._events.length)
+    el.innerHTML = fixedSvg
+    nextTick(() => bindMermaidClicks(iss, evTypes))
   } catch (e) {
-    el.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-tertiary)">时序图渲染失败</div>'
+    const { text } = buildSequence(iss._events)
+    el.innerHTML = `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${e.message || e}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>`
   }
 }
 function eventTypeText(t) {
-  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号' }
+  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号', issue_closed: 'Issue关闭', onboarding_exp: 'VOD接入' }
   return map[t] || t || '—'
 }
 function eventTypeClass(t) {
