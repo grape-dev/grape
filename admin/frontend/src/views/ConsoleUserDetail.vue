@@ -152,12 +152,12 @@
             <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
             <table class="vod-table" v-if="filteredActivity.length">
               <thead>
-                <tr><th style="width:14%;text-align:left">仓库</th><th style="width:10%;text-align:left">Issue</th><th style="width:10%;text-align:left">事件</th><th style="width:20%;text-align:left">运行时</th><th style="width:8%;text-align:left">耗时</th><th style="width:8%;text-align:left">状态</th><th style="width:30%;text-align:left">时间</th></tr>
+                <tr><th style="width:18%;text-align:left">Issue</th><th style="width:10%;text-align:left">事件</th><th style="width:20%;text-align:left">运行时</th><th style="width:8%;text-align:left">耗时</th><th style="width:8%;text-align:left">状态</th><th style="width:36%;text-align:left">时间</th></tr>
               </thead>
               <tbody>
                 <tr v-for="(t, idx) in filteredActivity" :key="t.id" :class="{ 'tl-row-fail': t.status === 'failed', 'tl-row-ok': t.status === 'completed', 'tl-row-clickable': true }" @click="openLogModal(t.id, t)">
-                  <td class="t3" style="font-size:11px">{{ t.repoName || '—' }}</td>
                   <td>
+                    <span v-if="t.repoName" class="t3" style="font-size:10px;color:var(--text-tertiary);display:block">{{ t.repoName }}</span>
                     <a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span>
                     <div v-if="t.issueTitle" class="t3" :title="t.issueTitle" style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.issueTitle }}</div>
                   </td>
