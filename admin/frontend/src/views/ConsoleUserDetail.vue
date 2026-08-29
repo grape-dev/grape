@@ -202,8 +202,8 @@
                           </div>
                           <!-- 切换按钮 -->
                           <div style="display:flex;gap:8px;margin-bottom:12px">
-                            <button class="btn btn-sm" :style="iss._view !== 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="iss._view = 'diagram'">📊 时序图</button>
-                            <button class="btn btn-sm" :style="iss._view === 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="iss._view = 'events'">📋 事件列表</button>
+                            <button class="btn btn-sm" :style="iss._view !== 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="switchIssueView(iss, 'diagram')">📊 时序图</button>
+                            <button class="btn btn-sm" :style="iss._view === 'events' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="switchIssueView(iss, 'events')">📋 事件列表</button>
                           </div>
                           <!-- 时序图 -->
                           <div v-if="iss._eventsLoading" style="text-align:center;padding:20px;color:var(--text-tertiary)">加载中...</div>
@@ -321,7 +321,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref, computed, watch } from 'vue'
+import { onMounted, ref, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../api'
 import PaginationBar from '../components/PaginationBar.vue'
@@ -378,16 +378,28 @@ async function toggleIssueTimeline(iss) {
           params: { repoKey: selectedRepo.value, issueId: iss.issueId }
         })
         iss._events = data.events || []
-        // 渲染时序图
-        if (iss._events.length) {
-          setTimeout(() => renderMermaidForIssue(iss), 50)
-        }
       } catch (e) {
         iss._events = []
       } finally {
         iss._eventsLoading = false
+        // 等 Vue 渲染完 DOM 再画时序图
+        await nextTick()
+        if (iss._events.length && iss._view === 'diagram') {
+          renderMermaidForIssue(iss)
+        }
       }
+    } else if (iss._view === 'diagram' && iss._events.length) {
+      // 重新展开时重新渲染（v-html/DOM 被销毁了）
+      await nextTick()
+      renderMermaidForIssue(iss)
     }
+  }
+}
+
+function switchIssueView(iss, mode) {
+  iss._view = mode
+  if (mode === 'diagram' && iss._events && iss._events.length) {
+    nextTick(() => renderMermaidForIssue(iss))
   }
 }
 
