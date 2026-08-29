@@ -134,8 +134,8 @@
         </div>
         <div style="padding:8px 20px;border-bottom:1px solid rgba(0,0,0,0.04)">
           <div class="tl-view-tabs">
-            <button class="tl-view-btn" :class="{ active: issueModal.view === 'diagram' }" @click="issueModal.view = 'diagram'; renderIssueMermaid()">📊 时序图</button>
-            <button class="tl-view-btn" :class="{ active: issueModal.view === 'events' }" @click="issueModal.view = 'events'">📋 事件列表</button>
+            <button class="tl-view-btn" :class="{ active: issueModal.view === 'diagram' }" @click="switchIssueView('diagram')">📊 时序图</button>
+            <button class="tl-view-btn" :class="{ active: issueModal.view === 'events' }" @click="switchIssueView('events')">📋 事件列表</button>
           </div>
         </div>
         <div style="overflow-y:auto;flex:1;padding:14px 20px">
@@ -488,6 +488,20 @@ function bindMermaidClicks(events, evTypes) {
     }
   }
 }
+function switchIssueView(mode) {
+  issueModal.value = { ...issueModal.value, view: mode }
+  if (mode === 'diagram') {
+    if (issueModal.value.svgRendered) {
+      // 已渲染过：v-html 可能丢失事件绑定，重新绑定
+      const { evTypes } = buildSequence(issueModal.value.events)
+      nextTick(() => bindMermaidClicks(issueModal.value.events, evTypes))
+    } else {
+      // 第一次：渲染 mermaid
+      renderIssueMermaid()
+    }
+  }
+}
+
 async function renderIssueMermaid() {
   if (issueModal.value.svgRendered || issueModal.value.loading) return
   const events = issueModal.value.events
