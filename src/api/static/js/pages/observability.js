@@ -8,6 +8,8 @@ let _obsTimer = null;
 let _obsData = { ops: null, realtime: null, metrics: null };
 let _obsRendered = false;      // 概览/任务 Tab 是否已用 innerHTML 渲染过骨架
 let _obsRenderedTab = null;    // 已渲染骨架的 tab（切换 tab 时需重新建骨架）
+let _rtSearch = '';            // Runtime 引擎搜索筛选
+let _rtDeviceFilter = '';      // Runtime 设备下拉筛选
 
 function renderObservability() {
   const pc = document.getElementById('pageContent');
@@ -92,6 +94,81 @@ function refreshObs(isAutoRefresh) {
     if (lu) lu.textContent = now;
     renderObsContent(isAutoRefresh);
   });
+}
+
+function _rerenderRuntimeTable() {
+  // 只重新渲染 Runtime 表格（用缓存数据，不重新 fetch）
+  const { ops } = _obsData;
+  if (!ops || ops.error) return;
+  const realOps = (ops && !ops.error) ? ops : null;
+  if (!realOps) return;
+  const r = realOps.runtimes || {};
+  const runtimes = r.list || [];
+  runtimes.sort((a, b) => (a.device_name || '').localeCompare(b.device_name || ''));
+  const _devices = [...new Set(runtimes.map(rt => rt.device_name || '-').filter(d => d && d !== '-'))];
+  const _filteredRuntimes = runtimes.filter(rt => {
+    const _dev = rt.device_name || '';
+    if (_rtDeviceFilter && _dev !== _rtDeviceFilter) return false;
+    if (_rtSearch) {
+      const _q = _rtSearch.toLowerCase();
+      if (!(rt.name || '').toLowerCase().includes(_q) &&
+          !(rt.device_name || '').toLowerCase().includes(_q) &&
+          !(rt.version || '').toLowerCase().includes(_q) &&
+          !(rt.mode || '').toLowerCase().includes(_q)) return false;
+    }
+    return true;
+  });
+  // 找到 Runtime 表格容器并替换
+  const container = document.getElementById('obs-runtime-table');
+  if (!container) return;
+  let html = '';
+  let _filterBar = '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">';
+  _filterBar += '<input type="text" placeholder="搜索引擎/设备/版本..." value="' + _rtSearch.replace(/"/g,'&quot;') + '" oninput="_rtSearch=this.value;_rerenderRuntimeTable()" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
+  _filterBar += '<select onchange="_rtDeviceFilter=this.value;_rerenderRuntimeTable()" style="padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
+  _filterBar += '<option value="">全部设备</option>';
+  _devices.forEach(d => {
+    _filterBar += '<option value="' + d + '"' + (_rtDeviceFilter === d ? ' selected' : '') + '>' + d + '</option>';
+  });
+  _filterBar += '</select>';
+  _filterBar += '<span class="ts t3">' + _filteredRuntimes.length + '/' + runtimes.length + '</span>';
+  _filterBar += '</div>';
+  html = _filterBar;
+  if (_filteredRuntimes.length) {
+    html += '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>探测</th><th>模式</th><th>设备</th></tr></thead><tbody>';
+    _filteredRuntimes.forEach(rti => {
+      const rid = rti.id;
+      const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
+      const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
+      const running = rti.running || 0;
+      const maxC = rti.max_concurrent || 0;
+      const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
+      const modeTag = rti.mode === 'local' ? '<span class="tg tg-ch">本机</span>' : '<span class="tg tg-c">远端</span>';
+      const avgDur = rti.avg_duration || 0;
+      const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
+      const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
+      const ps = rti.probe_status || 'pending';
+      const pl = rti.probe_latency || 0;
+      const pe = rti.probe_error || '';
+      const probeIcon = { ok: '✅', fail: '❌', skip: '⏭', pending: '⏳' }[ps] || '⏳';
+      const probeColor = ps === 'ok' ? 'var(--g)' : ps === 'fail' ? 'var(--r)' : 'var(--t3)';
+      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? '等待' : ps === 'skip' ? '跳过' : '失败';
+      const probeTitle = pe ? ' title="' + pe.replace(/"/g, '&quot;') + '"' : '';
+      html += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
+        <td>${dot} <b>${rti.name}</b></td>
+        <td><span class="ts t3">${rti.version || '-'}</span></td>
+        <td><span style="color:${hc};font-weight:600">${rti.health}</span></td>
+        <td><span style="color:${loadColor}">${running}/${maxC}</span></td>
+        <td><span style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
+        <td><span${probeTitle} style="color:${probeColor}">${probeIcon} ${probeStr}</span></td>
+        <td>${modeTag}</td>
+        <td><span class="ts t3">${rti.device_name || '-'}</span></td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+  } else {
+    html += '<div class="ts t2" style="padding:12px">无匹配引擎</div>';
+  }
+  container.innerHTML = html;
 }
 
 function renderObsContent(isAutoRefresh) {
@@ -230,10 +307,40 @@ function renderOverview(ops, rt, mt) {
 
   // Runtime 表格（行带 id，各 td 带 id 供局部更新）
   const runtimes = r.list || [];
+  // 按设备名排序
+  runtimes.sort((a, b) => (a.device_name || '').localeCompare(b.device_name || ''));
+  // 设备列表（去重，供下拉框）
+  const _devices = [...new Set(runtimes.map(rt => rt.device_name || '-').filter(d => d && d !== '-'))];
+  // 应用筛选
+  const _filteredRuntimes = runtimes.filter(rt => {
+    const _dev = rt.device_name || '';
+    if (_rtDeviceFilter && _dev !== _rtDeviceFilter) return false;
+    if (_rtSearch) {
+      const _q = _rtSearch.toLowerCase();
+      if (!(rt.name || '').toLowerCase().includes(_q) &&
+          !(rt.device_name || '').toLowerCase().includes(_q) &&
+          !(rt.version || '').toLowerCase().includes(_q) &&
+          !(rt.mode || '').toLowerCase().includes(_q)) return false;
+    }
+    return true;
+  });
   let runtimeTable = '<div class="ts t2" style="padding:12px">无引擎</div>';
   if (runtimes.length) {
-    runtimeTable = '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>探测</th><th>模式</th><th>设备</th></tr></thead><tbody>';
-    runtimes.forEach(rti => {
+    // 筛选栏
+    let _filterBar = '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">';
+    _filterBar += '<input type="text" placeholder="搜索引擎/设备/版本..." value="' + _rtSearch.replace(/"/g,'&quot;') + '" oninput="_rtSearch=this.value;_rerenderRuntimeTable()" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
+    _filterBar += '<select onchange="_rtDeviceFilter=this.value;_rerenderRuntimeTable()" style="padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
+    _filterBar += '<option value="">全部设备</option>';
+    _devices.forEach(d => {
+      _filterBar += '<option value="' + d + '"' + (_rtDeviceFilter === d ? ' selected' : '') + '>' + d + '</option>';
+    });
+    _filterBar += '</select>';
+    _filterBar += '<span class="ts t3">' + _filteredRuntimes.length + '/' + runtimes.length + '</span>';
+    _filterBar += '</div>';
+    runtimeTable = _filterBar;
+    if (_filteredRuntimes.length) {
+    runtimeTable += '<div class="tw"><table><thead><tr><th>引擎</th><th>版本</th><th>健康度</th><th>繁忙</th><th>平均耗时</th><th>探测</th><th>模式</th><th>设备</th></tr></thead><tbody>';
+    _filteredRuntimes.forEach(rti => {
       const rid = rti.id;
       const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
       const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
@@ -264,6 +371,9 @@ function renderOverview(ops, rt, mt) {
       </tr>`;
     });
     runtimeTable += '</tbody></table></div>';
+    } else {
+      runtimeTable += '<div class="ts t2" style="padding:12px">无匹配引擎</div>';
+    }
   }
 
   return `
@@ -278,7 +388,7 @@ function renderOverview(ops, rt, mt) {
       ${workerCards}
     </div>
     ${section('Runtime 引擎', `${r.online || 0}/${r.total || 0} 在线 — 点击引擎查看任务`)}
-    ${runtimeTable}
+    <div id="obs-runtime-table">${runtimeTable}</div>
   `;
 }
 
