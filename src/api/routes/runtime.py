@@ -234,6 +234,26 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
                 body.runtime_ids
             ).fetchall()
             cancelled_tasks = [r[0] for r in rows]
+
+            # busy_slots 对账（2026-08-29 修复）：
+            # 原代码只在 claim 成功时对账，但 claim 不到任务时永远不对账 → 泄漏永久不修复。
+            # 在心跳中定期对账：busy_slots 与实际 running/dispatched 任务数不一致时重置。
+            try:
+                for _rid in body.runtime_ids:
+                    c.execute(
+                        "SELECT COUNT(*) FROM agent_tasks "
+                        "WHERE runtime_id=? AND status IN ('dispatched','running')",
+                        (_rid,))
+                    _actual = c.fetchone()[0] or 0
+                    c.execute("SELECT busy_slots FROM agent_runtimes WHERE id=?", (_rid,))
+                    _busy = c.fetchone()[0] or 0
+                    if _busy != _actual:
+                        log.info(f"heartbeat busy_slots reconcile: runtime={_rid} "
+                                 f"busy={_busy} actual={_actual} -> reset")
+                        c.execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?",
+                                  (_actual, _rid))
+            except Exception as _bre:
+                log.warning(f"heartbeat busy_slots reconcile failed: {_bre}")
         db.commit()
 
     # 写入 worker 上报的日志到 data/logs/workers/{credential_id}.log
