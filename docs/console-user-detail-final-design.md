@@ -185,7 +185,28 @@ grape 主服务每次 API 请求 → `get_current_user` → `_pending_active.add
 | 9 | `src/user/db.py` | `batch_update_last_active` + `create_user` 写 `created_at` |
 | 10 | `src/api/main.py` | 定时 flush `active_user_tracker` |
 
-## 九、验证结果
+## 九、性能优化
+
+### 索引
+
+- `agent_tasks.started_at` 加前缀索引 `idx_started_at(19)`——覆盖 YYYY-MM-DD HH:MM:SS
+- 注意：TEXT 类型前缀索引只对 `LIKE 'prefix%'` 有效，`>=` 范围查询不走索引（MySQL 限制）
+- 当前 1441 行全表扫描 6ms，性能足够；未来 10 万行需改字段类型为 DATETIME
+
+### SQL 优化
+
+- 注册趋势：`REGEXP '^[0-9]{4}'` → `LIKE '20%'`（LIKE 比 REGEXP CPU 开销低）
+- 活跃用户：保持 `t.started_at >= DATE_SUB(NOW(), INTERVAL ? DAY)`（尝试 LEFT()/FORCE INDEX 均不改善）
+
+### 性能验证
+
+| 查询 | 数据量 | 耗时 |
+|------|--------|------|
+| 注册趋势(月) | 18 行 | 50ms（含网络） |
+| 活跃用户(30天) | 1441 行 | 29ms（含网络） |
+| 活跃用户(90天) | 1441 行 | 29ms（含网络） |
+
+## 十、验证结果
 
 - mvn compile: OK ✅
 - vite build: OK ✅
@@ -194,7 +215,7 @@ grape 主服务每次 API 请求 → `get_current_user` → `_pending_active.add
 - 统计口径一致：taskCount=291, completed+failed+pending=291, 差异=0 ✅
 - 注册趋势 API：年/月/日三个维度正常 ✅
 
-## 十、commit 历史
+## 十一、commit 历史
 
 | commit | 说明 |
 |--------|------|
@@ -213,3 +234,5 @@ grape 主服务每次 API 请求 → `get_current_user` → `_pending_active.add
 | `008724d9` | 注册趋势图（年/月/日切换） |
 | `d630dd63` | 列表加创建时间列（时分秒） |
 | `fad39a17` | 注册趋势改为平滑折线图 |
+| `31edd29b` | 总览页加tab切换——注册趋势/活跃用户 |
+| `a170040e` | 活跃用户查询性能优化——加索引+REGEXP改LIKE |
