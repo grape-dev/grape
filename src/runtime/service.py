@@ -682,18 +682,69 @@ def claim(runtime_id) -> dict | None:
                 db.commit()
                 return None
             task_id = row[0]
+
             # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
-            c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
-            _pe_row = c.fetchone()
-            if _pe_row and _pe_row[0]:
-                import json as _json
-                try:
-                    _allowed = _json.loads(_pe_row[0])
-                    if _allowed and runtime_id not in _allowed:
+            # 修复（2026-08-29）：原代码 return None 会阻塞队列——与 claim_by_tag 同一 bug。
+            # 改为循环跳过不匹配的任务，继续尝试下一个。
+            _tried_ids = [task_id]
+            _max_tries = 20
+            while True:
+                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+                _pe_row = c.fetchone()
+                _skip = False
+                if _pe_row and _pe_row[0]:
+                    import json as _json
+                    try:
+                        _allowed = _json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            _skip = True
+                    except Exception:
+                        pass
+                if not _skip:
+                    break
+
+                # 跳过当前，尝试下一个定向任务
+                _tried_str = ','.join(["'"+x+"'" for x in _tried_ids])
+                c.execute(
+                    f"SELECT id FROM agent_tasks "
+                    f"WHERE runtime_id=? AND status='queued' "
+                    f"AND id NOT IN ({_tried_str}) "
+                    f"AND NOT EXISTS ("
+                    f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                    f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
+                    f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
+                    f"  )) ORDER BY created_at ASC LIMIT 1",
+                    (runtime_id,)
+                )
+                row = c.fetchone()
+                if not row:
+                    # 定向任务都试过了，尝试池任务（非插件模式）
+                    _is_plugin = False
+                    try:
+                        from src.api.event_pipeline import is_plugin_mode
+                        _is_plugin = is_plugin_mode()
+                    except Exception:
+                        pass
+                    if not _is_plugin:
+                        c.execute(
+                            f"SELECT id FROM agent_tasks "
+                            f"WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued' "
+                            f"AND id NOT IN ({_tried_str}) "
+                            f"AND NOT EXISTS ("
+                            f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                            f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
+                            f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
+                            f"  )) ORDER BY created_at ASC LIMIT 1"
+                        )
+                        row = c.fetchone()
+                    if not row:
                         db.commit()
-                        return None  # 当前引擎不在限定列表中，跳过
-                except Exception:
-                    pass
+                        return None
+                task_id = row[0]
+                _tried_ids.append(task_id)
+                if len(_tried_ids) >= _max_tries:
+                    db.commit()
+                    return None
             c.execute(
                 "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
                 (runtime_id, datetime.now(timezone.utc).isoformat(), task_id))
@@ -852,17 +903,74 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             if not task_row:
                 return None
             task_id = task_row[0]
+
             # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
-            c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
-            _pe_row = c.fetchone()
-            if _pe_row and _pe_row[0]:
-                import json as _json
-                try:
-                    _allowed = _json.loads(_pe_row[0])
-                    if _allowed and runtime_id not in _allowed:
-                        return None  # 当前引擎不在限定列表中，跳过
-                except Exception:
-                    pass
+            # 修复（2026-08-29）：原代码 return None 会阻塞队列——队首任务如果不匹配，
+            # 后面的任务永远不会被尝试。改为循环跳过不匹配的任务，继续尝试下一个。
+            # pool_engine_ids 是 JSON 数组如 "[76]"，SQL 难以直接过滤，
+            # 这里用 Python 循环 LIMIT N 逐个检查。
+            _tried_ids = [task_id]
+            _max_tries = 20  # 防止全表扫描
+            while True:
+                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+                _pe_row = c.fetchone()
+                _skip = False
+                if _pe_row and _pe_row[0]:
+                    import json as _json
+                    try:
+                        _allowed = _json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            _skip = True
+                    except Exception:
+                        pass
+                if not _skip:
+                    break  # 当前任务可认领
+
+                # 跳过当前任务，尝试下一个
+                _tried_str = ','.join(["'"+x+"'" for x in _tried_ids])
+                if scope == "repo":
+                    c.execute(
+                        f"SELECT t.id FROM agent_tasks t "
+                        f"WHERE {_tag_match} AND t.status='queued' AND t.repo_key=? "
+                        f"AND t.id NOT IN ({_tried_str}) "
+                        f"AND NOT EXISTS ("
+                        f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                        f"    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
+                        f"    OR (t.issue_session_id = '' AND a2.agent_session_id = t.agent_session_id)"
+                        f"  )) ORDER BY t.created_at ASC LIMIT 1",
+                        (*params,)
+                    )
+                elif scope == "user":
+                    c.execute(
+                        f"SELECT t.id FROM agent_tasks t "
+                        f"WHERE {_tag_match} AND t.status='queued' AND t.user_id=? "
+                        f"AND t.id NOT IN ({_tried_str}) "
+                        f"AND NOT EXISTS ("
+                        f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                        f"    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
+                        f"    OR (t.issue_session_id = '' AND a2.agent_session_id = t.agent_session_id)"
+                        f"  )) ORDER BY t.created_at ASC LIMIT 1",
+                        (*params,)
+                    )
+                else:
+                    c.execute(
+                        f"SELECT id FROM agent_tasks "
+                        f"WHERE {_tag_match_noprefix} AND status='queued' "
+                        f"AND id NOT IN ({_tried_str}) "
+                        f"AND NOT EXISTS ("
+                        f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                        f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
+                        f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
+                        f"  )) ORDER BY created_at ASC LIMIT 1"
+                    )
+                task_row = c.fetchone()
+                if not task_row:
+                    return None  # 所有任务都试过了，没有可认领的
+                task_id = task_row[0]
+                _tried_ids.append(task_id)
+                if len(_tried_ids) >= _max_tries:
+                    return None  # 防止无限循环
+
             # 标记 dispatched
             c.execute(
                 "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",

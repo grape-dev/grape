@@ -12,7 +12,7 @@ from src.config import log, CHAT_CWD_BASE
 from src.session_manager import db, db_lock
 
 _SWEEP_INTERVAL = int(os.environ.get("SWEEPER_INTERVAL_SECONDS", "900"))  # 15min
-_ZOMBIE_TTL_DAYS = int(os.environ.get("SWEEPER_ZOMBIE_TTL_DAYS", "7"))
+_ZOMBIE_TTL_DAYS = int(os.environ.get("SWEEPER_ZOMBIE_TTL_DAYS", "3"))  # 非 done issue workdir 3 天不活跃清理
 # Chat / feishu / vod 目录 TTL（默认 3 天未活跃清理，比 issue 的 7 天更短——这些是临时会话目录）
 _SESSION_DIR_TTL_DAYS = int(os.environ.get("SWEEPER_SESSION_DIR_TTL_DAYS", "3"))
 
@@ -322,6 +322,21 @@ def sweep_once() -> int:
         if session_cleaned:
             log.info(f"sweeper cleaned {session_cleaned} stale session dir(s)")
             cleaned += session_cleaned
+        # /tmp 全局兜底清理（2026-08-29 修复）：
+        # worker /tmp 是 tmpfs（3.7G），被 hermes-acp-*/hermes-results/hermes-iso-*/
+        # pytest-of-root/pip-unpack-* 等残留堆积撑满 → curl ENOSPC → 静默安装失败。
+        # _cleanup_task_tmp 在任务完成时清理已知的 agent 工作产物，但异常退出/进程被杀
+        # 时残留不被清理。这里在 sweeper 周期（15min）兜底扫描 /tmp 清理过期文件。
+        tmp_cleaned = _sweep_tmp_residuals()
+        if tmp_cleaned:
+            log.info(f"sweeper cleaned {tmp_cleaned} /tmp residual dir(s)/file(s)")
+            cleaned += tmp_cleaned
+        # workspace repo 级别清理：project-info/codebase 目录在不活跃 repo 上堆积严重
+        # （单个 project-info 可达 496M，多个 repo 合计 GB 级）
+        ws_cleaned = _sweep_stale_workspace_repos()
+        if ws_cleaned:
+            log.info(f"sweeper cleaned {ws_cleaned} stale workspace repo dir(s)")
+            cleaned += ws_cleaned
         if cleaned:
             log.info(f"sweeper cleaned {cleaned} issue workdir(s)")
         return cleaned
@@ -333,9 +348,182 @@ def sweep_once() -> int:
 _POLL_INTERVAL = int(os.environ.get("GRAPE_POLL_INTERVAL_SECONDS", "60"))
 
 
+def _sweep_tmp_residuals() -> int:
+    """兜底清理 /tmp 下 agent 残留（sweeper 每 15min 调一次）。
+
+    清理目标：
+    - hermes-acp-* / hermes-iso-* / hermes-sandbox-* / hermes-snap-*：hermes 引擎隔离目录残留
+    - hermes-results：agent call 结果缓存（只增不删）
+    - pytest-of-root：测试残留
+    - pip-unpack-* / pip-metadata-*：pip 安装临时目录
+    - tf-deploy-* / blog-* / ptmpl_*：SRE/VOD agent 工作产物
+
+    安全策略：
+    - 只清理 /tmp 下已知前缀的文件/目录，不碰其他进程
+    - 目录按 mtime 判断：超过 1 小时未修改才清理（避免清到正在执行的任务）
+    - 单文件（如 hermes-results 内的文件）同样按 mtime 判断
+    """
+    import glob as _glob
+    import time as _time
+
+    _TMP_TTL_SECONDS = 3600  # 1 小时
+    _now = _time.time()
+    cleaned = 0
+
+    # 目录类清理（按前缀 glob + mtime 判断）
+    _dir_prefixes = [
+        "/tmp/hermes-acp-*",
+        "/tmp/hermes-iso-*",
+        "/tmp/hermes-sandbox-*",
+        "/tmp/hermes-snap-*",
+        "/tmp/tf-deploy-*",
+        "/tmp/tf-sys-xhy*",
+        "/tmp/blog-build-*",
+        "/tmp/blog-deploy*",
+        "/tmp/blog-gen*",
+        "/tmp/blog-publish-*",
+        "/tmp/pip-unpack-*",
+        "/tmp/pip-metadata-*",
+        "/tmp/pytest-of-root",
+        "/tmp/tirith-install-*",
+    ]
+    for pattern in _dir_prefixes:
+        for path in _glob.glob(pattern):
+            try:
+                mtime = os.path.getmtime(path)
+                if _now - mtime < _TMP_TTL_SECONDS:
+                    continue  # 仍在使用中
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                    cleaned += 1
+                elif os.path.isfile(path):
+                    os.remove(path)
+                    cleaned += 1
+            except Exception:
+                pass
+
+    # 文件类清理（hermes-results 目录内的文件 + 散落文件）
+    _file_targets = [
+        "/tmp/hermes-results",
+        "/tmp/tf-state-backup.json",
+        "/tmp/inventory_state.json",
+        "/tmp/inventory*.json",
+        "/tmp/blog-sys-*.tar.gz",
+        "/tmp/.*.so",
+    ]
+    for pattern in _file_targets:
+        for path in _glob.glob(pattern):
+            try:
+                if os.path.isdir(path):
+                    # 目录内逐文件清理（保留目录本身）
+                    for f in os.listdir(path):
+                        fp = os.path.join(path, f)
+                        try:
+                            mtime = os.path.getmtime(fp)
+                            if _now - mtime < _TMP_TTL_SECONDS:
+                                continue
+                            if os.path.isfile(fp):
+                                os.remove(fp)
+                                cleaned += 1
+                        except Exception:
+                            pass
+                elif os.path.isfile(path):
+                    mtime = os.path.getmtime(path)
+                    if _now - mtime < _TMP_TTL_SECONDS:
+                        continue
+                    os.remove(path)
+                    cleaned += 1
+            except Exception:
+                pass
+
+    return cleaned
+
+
+def _sweep_stale_workspace_repos() -> int:
+    """清理不活跃 repo 的 project-info / codebase 目录。
+
+    grape-workspaces/{owner}/{repo}/ 下有两个 repo 级别的大目录：
+    - project-info/：codegraph 基线数据（单个可达 496M）
+    - codebase/：代码克隆快照（单个可达 275M）
+
+    这些目录不属于单个 issue workdir，sweeper 的 issue 清理逻辑覆盖不到。
+    当 repo 没有任何活跃 issue（dispatched/running）且目录超过 TTL 未修改时清理。
+
+    安全策略：
+    - 只清理 project-info 和 codebase 两个子目录，不删整个 repo 目录
+    - 只清理非活跃 repo（无 dispatched/running 任务）
+    - 超过 3 天未修改才清理
+    """
+    import time as _time
+    _REPO_TTL = 3 * 86400  # 3 天
+    _now = _time.time()
+    cleaned = 0
+
+    # 获取有活跃任务的 repo_key 集合
+    active_repos = set()
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT DISTINCT repo_key FROM agent_tasks WHERE status IN ('dispatched','running')")
+            active_repos = {r[0] for r in c.fetchall()}
+    except Exception:
+        pass
+
+    workspace = config.WORKSPACE_DIR
+    if not os.path.isdir(workspace):
+        return 0
+
+    try:
+        for owner in os.listdir(workspace):
+            owner_dir = os.path.join(workspace, owner)
+            if not os.path.isdir(owner_dir):
+                continue
+            for repo_name in os.listdir(owner_dir):
+                repo_dir = os.path.join(owner_dir, repo_name)
+                if not os.path.isdir(repo_dir):
+                    continue
+                # 构造 repo_key（workspace 用 owner/repo 结构，repo_key 是 gitcode:owner/repo）
+                repo_key = f"gitcode:{owner}/{repo_name}"
+                if repo_key in active_repos:
+                    continue  # 有活跃任务，跳过
+                # 检查 issue 目录是否有活跃任务
+                issues_root = os.path.join(repo_dir, "issues")
+                has_active_issue = False
+                if os.path.isdir(issues_root):
+                    for num in os.listdir(issues_root):
+                        issue_dir = os.path.join(issues_root, num)
+                        if not os.path.isdir(issue_dir):
+                            continue
+                        try:
+                            mtime = os.path.getmtime(issue_dir)
+                            if _now - mtime < _REPO_TTL:
+                                has_active_issue = True
+                                break
+                        except Exception:
+                            pass
+                if has_active_issue:
+                    continue
+                # 清理 project-info 和 codebase
+                for subdir in ("project-info", "codebase"):
+                    target = os.path.join(repo_dir, subdir)
+                    if not os.path.isdir(target):
+                        continue
+                    try:
+                        mtime = os.path.getmtime(target)
+                        if _now - mtime < _REPO_TTL:
+                            continue
+                        shutil.rmtree(target, ignore_errors=True)
+                        cleaned += 1
+                        log.info(f"sweeper cleaned stale workspace dir: {target}")
+                    except Exception as e:
+                        log.warning(f"sweeper workspace cleanup failed {target}: {e}")
+    except Exception as e:
+        log.warning(f"sweeper workspace repo scan failed: {e}")
+    return cleaned
+
+
 def _poll_gitcode_issues_once() -> int:
     """Poll GitCode for new issues on managed repos (webhook fallback).
-
     For each managed repo with a bot token, fetch recent open issues via GitCode API.
     If an issue has no corresponding event in DB (no issue_opened event),
     inject a synthetic webhook to trigger the pipeline.
