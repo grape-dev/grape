@@ -75,21 +75,6 @@
                 </select>
               </div>
 
-              <!-- 仓库总体统计 -->
-              <div v-if="selectedRepoData">
-                <!-- Issue总数 + 任务总数 -->
-                <div style="display:flex;gap:24px;margin-bottom:12px;padding:12px 16px;background:rgba(0,0,0,0.02);border-radius:10px">
-                  <div style="display:flex;align-items:baseline;gap:6px">
-                    <span class="t3" style="font-size:13px">Issue 总数</span>
-                    <span style="font-size:22px;font-weight:700;color:#006eff">{{ selectedRepoData.issueCount }}</span>
-                  </div>
-                  <div style="display:flex;align-items:baseline;gap:6px">
-                    <span class="t3" style="font-size:13px">任务总数</span>
-                    <span style="font-size:22px;font-weight:700;color:var(--text-primary)">{{ selectedRepoData.taskCount }}</span>
-                  </div>
-                </div>
-              </div>
-
               <!-- Issue 列表 -->
               <div v-if="selectedRepo" style="margin-top:16px">
                 <div v-if="repoIssuesLoading" style="text-align:center;padding:32px;color:var(--text-tertiary)">加载中...</div>
