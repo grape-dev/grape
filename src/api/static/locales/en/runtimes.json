@@ -179,7 +179,10 @@
       "cde_0007": "Archiving",
       "cde_0008": "Restarting",
       "cde_0009": "Deleted",
-      "cde_0010": "Create Failed",
+      "cde_1001": "Error",
+      "cde_1002": "Error",
+      "cde_1003": "Error",
+      "cde_1004": "Error",
       "unknown": "Unknown"
     }
   }

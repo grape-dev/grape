@@ -71,36 +71,28 @@
             <!-- 任务统计 tab -->
             <div v-if="activityTab === 'task'" class="activity-grid">
               <div class="activity-card">
-                <div class="activity-value">{{ info.queuedCount ?? 0 }}</div>
-                <div class="activity-label">排队中</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#006eff">{{ info.dispatchedCount ?? 0 }}</div>
-                <div class="activity-label">已派发</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#006eff">{{ info.runningCount ?? 0 }}</div>
-                <div class="activity-label">运行中</div>
+                <div class="activity-value">{{ info.taskCount ?? 0 }}</div>
+                <div class="activity-label">任务总数</div>
               </div>
               <div class="activity-card">
                 <div class="activity-value" style="color:#34c759">{{ info.completedCount ?? 0 }}</div>
                 <div class="activity-label">已完成</div>
               </div>
               <div class="activity-card">
-                <div class="activity-value" style="color:#ff3b30">{{ info.failedCount ?? 0 }}</div>
-                <div class="activity-label">失败</div>
+                <div class="activity-value" style="color:#ff9500">{{ info.pendingCount ?? 0 }}</div>
+                <div class="activity-label">进行中</div>
               </div>
               <div class="activity-card">
                 <div class="activity-value" style="color:#aeaeb2">{{ info.cancelledCount ?? 0 }}</div>
                 <div class="activity-label">已取消</div>
               </div>
               <div class="activity-card">
-                <div class="activity-value" style="color:#ff9500">{{ info.inProgressCount ?? 0 }}</div>
-                <div class="activity-label">进行中</div>
+                <div class="activity-value" style="color:#ff3b30">{{ info.failedCount ?? 0 }}</div>
+                <div class="activity-label">失败</div>
               </div>
               <div class="activity-card">
-                <div class="activity-value" style="color:#ff3b30">{{ info.stuckCount ?? 0 }}</div>
-                <div class="activity-label">卡住</div>
+                <div class="activity-value" style="color:#006eff">{{ info.successRate || '—' }}</div>
+                <div class="activity-label">成功率</div>
               </div>
             </div>
             <!-- 仓库与 Issue tab -->
@@ -114,59 +106,34 @@
               </div>
 
               <!-- 仓库总体统计 -->
-              <div v-if="selectedRepoData">
-                <!-- Issue总数 + 任务总数 单独一行 -->
-                <div style="display:flex;gap:24px;margin-bottom:12px;padding:12px 16px;background:rgba(0,0,0,0.02);border-radius:10px">
-                  <div style="display:flex;align-items:baseline;gap:6px">
-                    <span class="t3" style="font-size:13px">Issue 总数</span>
-                    <span style="font-size:22px;font-weight:700;color:#006eff">{{ selectedRepoData.issueCount }}</span>
-                  </div>
-                  <div style="display:flex;align-items:baseline;gap:6px">
-                    <span class="t3" style="font-size:13px">任务总数</span>
-                    <span style="font-size:22px;font-weight:700;color:var(--text-primary)">{{ selectedRepoData.taskCount }}</span>
-                  </div>
+              <div v-if="selectedRepoData" class="repo-summary-grid">
+                <div class="activity-card">
+                  <div class="activity-value">{{ selectedRepoData.taskCount }}</div>
+                  <div class="activity-label">任务总数</div>
                 </div>
-                <!-- 状态枚举统计卡 -->
-                <div class="repo-summary-grid">
-                  <div class="activity-card" style="cursor:pointer" @click="togglePendingDetail">
-                    <div class="activity-value" style="color:#ff9500">{{ pendingTotal }}</div>
-                    <div class="activity-label">待处理 {{ pendingDetailOpen ? '▲' : '▼' }}</div>
-                  </div>
-                  <div class="activity-card">
-                    <div class="activity-value" style="color:#006eff">{{ selectedRepoData.running ?? 0 }}</div>
-                    <div class="activity-label">运行中</div>
-                  </div>
-                  <div class="activity-card">
-                    <div class="activity-value" style="color:#34c759">{{ selectedRepoData.completed }}</div>
-                    <div class="activity-label">已完成</div>
-                  </div>
-                  <div class="activity-card">
-                    <div class="activity-value" style="color:#ff3b30">{{ selectedRepoData.failed }}</div>
-                    <div class="activity-label">失败</div>
-                  </div>
-                  <div class="activity-card">
-                    <div class="activity-value" style="color:#aeaeb2">{{ selectedRepoData.cancelled ?? 0 }}</div>
-                    <div class="activity-label">已取消</div>
-                  </div>
-                  <div class="activity-card">
-                    <div class="activity-value" style="color:#5e5ce6">{{ selectedRepoData.taskCount > 0 ? Math.round(selectedRepoData.completed * 1000 / selectedRepoData.taskCount) / 10 + '%' : '—' }}</div>
-                    <div class="activity-label">成功率</div>
-                  </div>
+                <div class="activity-card">
+                  <div class="activity-value" style="color:#006eff">{{ selectedRepoData.issueCount }}</div>
+                  <div class="activity-label">Issue 总数</div>
                 </div>
-                <!-- 待处理明细 -->
-                <div v-if="pendingDetailOpen" style="margin-top:8px;padding:12px 16px;background:rgba(255,149,0,0.04);border-radius:10px;display:flex;gap:24px">
-                  <div style="display:flex;align-items:baseline;gap:4px">
-                    <span class="t3">排队中</span>
-                    <span style="font-size:16px;font-weight:600">{{ selectedRepoData.queued ?? 0 }}</span>
-                  </div>
-                  <div style="display:flex;align-items:baseline;gap:4px">
-                    <span class="t3">已派发</span>
-                    <span style="font-size:16px;font-weight:600;color:#006eff">{{ selectedRepoData.dispatched ?? 0 }}</span>
-                  </div>
-                  <div style="display:flex;align-items:baseline;gap:4px">
-                    <span class="t3">卡住</span>
-                    <span style="font-size:16px;font-weight:600;color:#ff3b30">{{ selectedRepoData.stuck ?? 0 }}</span>
-                  </div>
+                <div class="activity-card">
+                  <div class="activity-value" style="color:#34c759">{{ selectedRepoData.completed }}</div>
+                  <div class="activity-label">已完成</div>
+                </div>
+                <div class="activity-card">
+                  <div class="activity-value" style="color:#ff9500">{{ selectedRepoData.pending ?? 0 }}</div>
+                  <div class="activity-label">进行中</div>
+                </div>
+                <div class="activity-card">
+                  <div class="activity-value" style="color:#aeaeb2">{{ selectedRepoData.cancelled ?? 0 }}</div>
+                  <div class="activity-label">已取消</div>
+                </div>
+                <div class="activity-card">
+                  <div class="activity-value" style="color:#ff3b30">{{ selectedRepoData.failed }}</div>
+                  <div class="activity-label">失败</div>
+                </div>
+                <div class="activity-card">
+                  <div class="activity-value" style="color:#5e5ce6">{{ selectedRepoData.taskCount > 0 ? Math.round(selectedRepoData.completed * 1000 / selectedRepoData.taskCount) / 10 + '%' : '—' }}</div>
+                  <div class="activity-label">成功率</div>
                 </div>
               </div>
 
@@ -174,43 +141,23 @@
               <div v-if="selectedRepo" style="margin-top:16px">
                 <table class="vod-table" v-if="repoIssues.length">
                   <thead>
-                    <tr><th style="width:25%">Issue</th><th style="width:15%">任务</th><th style="width:15%">成功率</th><th style="width:45%">最近活动</th></tr>
+                    <tr><th>Issue</th><th style="width:45px">任务</th><th style="width:45px">完成</th><th style="width:45px">进行中</th><th style="width:45px">已取消</th><th style="width:45px">失败</th><th style="width:55px">成功率</th><th style="width:130px">最近活动</th></tr>
                   </thead>
                   <tbody>
-                    <template v-for="iss in repoIssues" :key="iss.issueId">
-                      <tr>
-                        <td>
-                          <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ iss.issueId }}</a>
-                        </td>
-                        <td class="t3" style="cursor:pointer;color:var(--primary)" @click="iss._open = !iss._open">
-                          {{ iss.taskCount }} <span style="font-size:10px">{{ iss._open ? '▲' : '▼' }}</span>
-                        </td>
-                        <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
-                        <td class="t3">{{ formatTime(iss.lastTaskAt) }}</td>
-                      </tr>
-                      <tr v-if="iss._open" style="background:rgba(0,0,0,0.02)">
-                        <td colspan="4" style="padding:10px 16px">
-                          <div style="display:flex;gap:20px;flex-wrap:wrap">
-                            <span class="t3">已完成 <b style="color:#34c759">{{ iss.completed }}</b></span>
-                            <span class="t3">待处理 <b style="color:#ff9500">{{ (iss.queued ?? 0) + (iss.dispatched ?? 0) + (iss.stuck ?? 0) }}</b></span>
-                            <span class="t3" style="padding-left:12px;border-left:1px solid rgba(0,0,0,0.06)">
-                              <span style="color:var(--text-tertiary)">排队 {{ iss.queued ?? 0 }}</span>
-                            </span>
-                            <span class="t3">
-                              <span style="color:var(--text-tertiary)">派发 {{ iss.dispatched ?? 0 }}</span>
-                            </span>
-                            <span class="t3">
-                              <span style="color:var(--text-tertiary)">卡住 {{ iss.stuck ?? 0 }}</span>
-                            </span>
-                            <span class="t3" style="padding-left:12px;border-left:1px solid rgba(0,0,0,0.06)">运行中 <b style="color:#006eff">{{ iss.running ?? 0 }}</b></span>
-                            <span class="t3">失败 <b style="color:#ff3b30">{{ iss.failed }}</b></span>
-                            <span class="t3">已取消 <b style="color:#aeaeb2">{{ iss.cancelled ?? 0 }}</b></span>
-                          </div>
-                        </td>
-                      </tr>
-                    </template>
+                    <tr v-for="iss in repoIssues" :key="iss.issueId">
+                      <td>
+                        <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ iss.issueId }}</a>
+                      </td>
+                      <td class="t3">{{ iss.taskCount }}</td>
+                      <td class="t3" style="color:#34c759">{{ iss.completed }}</td>
+                      <td class="t3" style="color:#ff9500">{{ iss.pending ?? 0 }}</td>
+                      <td class="t3" style="color:#aeaeb2">{{ iss.cancelled ?? 0 }}</td>
+                      <td class="t3" style="color:#ff3b30">{{ iss.failed }}</td>
+                      <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
+                      <td class="t3">{{ formatTime(iss.lastTaskAt) }}</td>
+                    </tr>
                     <tr v-if="!repoIssues.length">
-                      <td colspan="4" style="text-align:center;padding:20px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</td>
+                      <td colspan="8" style="text-align:center;padding:20px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</td>
                     </tr>
                   </tbody>
                 </table>
@@ -234,60 +181,23 @@
           </div>
           <div style="padding:20px 24px">
             <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
-            <table class="vod-table" v-if="filteredActivity.length">
-              <thead>
-                <tr><th style="width:8%">Seq</th><th style="width:18%">事件</th><th style="width:12%">Agent</th><th style="width:15%">Engine</th><th style="width:10%">耗时</th><th style="width:10%">状态</th><th style="width:12%">Issue</th><th style="width:15%">时间</th></tr>
-              </thead>
-              <tbody>
-                <tr v-for="(t, idx) in filteredActivity" :key="t.id" style="cursor:pointer" @click="openLogModal(t.id, t)">
-                  <td class="t3">#{{ filteredActivity.length - idx }}</td>
-                  <td><span :class="['status-tag', eventTypeClass(t.eventType)]" style="font-size:11px">{{ eventTypeText(t.eventType) }}</span></td>
-                  <td><span class="status-tag info" style="font-size:11px">{{ t.agentType || '—' }}</span></td>
-                  <td class="t3" style="font-size:11px">{{ t.engine || '—' }}<span v-if="t.engineIp" class="t3" style="font-size:10px;color:var(--text-tertiary);display:block">{{ t.engineIp }}</span></td>
-                  <td class="t3">{{ formatDuration(t.duration) }}</td>
-                  <td><span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : t.status === 'cancelled' ? 'default' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : t.status === 'cancelled' ? '取消' : t.status }}</span></td>
-                  <td class="t3"><a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" @click.stop style="color:var(--primary);text-decoration:none">{{ t.issueId }}</a><span v-else>—</span></td>
-                  <td class="t3">{{ formatTime(t.startedAt) }}</td>
-                </tr>
-              </tbody>
-            </table>
-            <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 任务日志弹窗 -->
-    <div v-if="logModal.show" class="log-modal-overlay" @click.self="closeLogModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center">
-      <div style="background:#fff;border-radius:14px;width:90%;max-width:800px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.15)">
-        <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border-color)">
-          <h3 style="font-size:15px;font-weight:600;margin:0;flex:1;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <span v-if="logModal.info.repoKey" class="t3" style="font-size:13px">{{ logModal.info.repoKey.replace('gitcode:','') }}</span>
-            <b v-if="logModal.info.issueId">{{ logModal.info.issueId }}</b>
-            <span v-if="logModal.info.agentType" class="status-tag info" style="font-size:11px">{{ logModal.info.agentType }}</span>
-            <span v-if="logModal.info.skill" class="t3" style="font-size:12px">{{ logModal.info.skill }}</span>
-            <span v-if="logModal.info.engine" class="t3" style="font-size:12px;color:var(--primary)">{{ logModal.info.engine }}</span>
-          </h3>
-          <button class="btn btn-sm" @click="closeLogModal">✕ 关闭</button>
-        </div>
-        <div style="padding:12px 20px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;gap:12px;flex-wrap:wrap" v-if="logModal.info.status">
-          <span :class="['status-tag', logModal.info.status === 'completed' ? 'success' : logModal.info.status === 'failed' ? 'danger' : 'warning']" style="font-size:11px">{{ logModal.info.status }}</span>
-          <span v-if="logModal.info.startedAt" class="t3" style="font-size:12px">开始 {{ formatTime(logModal.info.startedAt).slice(11,19) }}</span>
-          <span v-if="logModal.info.completedAt" class="t3" style="font-size:12px">→ 完成 {{ formatTime(logModal.info.completedAt).slice(11,19) }}</span>
-          <span v-if="logModal.info.exitCode != null" class="t3" style="font-size:12px" :style="{color: logModal.info.exitCode !== 0 ? 'var(--danger)' : 'var(--success)'}">Exit: {{ logModal.info.exitCode }}</span>
-        </div>
-        <div style="flex:1;overflow:auto;padding:16px 20px">
-          <div v-if="logModal.loading" style="text-align:center;padding:40px;color:var(--text-tertiary)">加载中...</div>
-          <div v-else-if="logModal.messages.length === 0" style="text-align:center;padding:40px;color:var(--text-tertiary)">
-            <div v-if="logModal.info.resultText" style="text-align:left;background:#f5f5f7;padding:12px 16px;border-radius:10px;margin-bottom:12px;font-size:13px;color:var(--text-secondary);max-height:200px;overflow:auto;white-space:pre-wrap">{{ logModal.info.resultText }}</div>
-            <div v-if="logModal.info.errors" style="text-align:left;color:var(--danger);font-size:13px">{{ logModal.info.errors }}</div>
-            <span v-if="!logModal.info.resultText && !logModal.info.errors">暂无日志记录</span>
-          </div>
-          <div v-else style="background:#1d1d1f;border-radius:10px;padding:12px;font-family:monospace;font-size:12px;line-height:1.6;overflow:auto">
-            <div v-for="msg in logModal.messages" :key="msg.seq" style="display:flex;gap:8px;color:#aeaeb2">
-              <span style="color:#6e6e73;flex-shrink:0">{{ (msg.createdAt || '').slice(11,19) }}</span>
-              <span :style="{color: msg.type === 'error' ? '#ff3b30' : msg.type === 'result' ? '#34c759' : msg.type === 'tool' ? '#5e5ce6' : '#aeaeb2'}">{{ msg.content }}</span>
+            <div v-if="filteredActivity.length" class="timeline">
+              <div v-for="t in filteredActivity" :key="t.id" class="timeline-item">
+                <div class="timeline-dot" :class="t.status"></div>
+                <div class="timeline-content">
+                  <div class="timeline-header">
+                    <span class="timeline-repo">{{ t.repoName }}</span>
+                    <a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" class="timeline-issue" @click.stop>{{ t.issueId }}</a>
+                    <span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : '进行中' }}</span>
+                  </div>
+                  <div class="timeline-meta">
+                    <span class="t3">{{ t.agentType }} · {{ t.skill || '—' }}</span>
+                    <span class="t3">{{ formatTime(t.startedAt) }}</span>
+                  </div>
+                </div>
+              </div>
             </div>
+            <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
           </div>
         </div>
       </div>
@@ -311,58 +221,6 @@ const resetting = ref(false)
 const activityTab = ref('task')
 const activityFilter = ref('recent')
 const selectedRepo = ref('')
-const pendingDetailOpen = ref(false)
-const logModal = ref({ show: false, loading: false, messages: [], info: {} })
-
-const pendingTotal = computed(() => {
-  if (!selectedRepoData.value) return 0
-  return (selectedRepoData.value.queued ?? 0) + (selectedRepoData.value.dispatched ?? 0) + (selectedRepoData.value.stuck ?? 0)
-})
-
-function togglePendingDetail() {
-  pendingDetailOpen.value = !pendingDetailOpen.value
-}
-async function openLogModal(taskId, t) {
-  logModal.value = { show: true, loading: true, messages: [], info: { issueId: t.issueId, repoKey: t.repoName ? 'gitcode:' + t.repoName : '', agentType: t.agentType, skill: t.skill, engine: t.engine, status: t.status } }
-  try {
-    const [msgsResp, infoResp] = await Promise.all([
-      http.get(`/runtime/tasks/${taskId}/messages`),
-      http.get(`/runtime/tasks/${taskId}/info`)
-    ])
-    const info = infoResp.data || {}
-    if (!info.repoKey && t.repoName) info.repoKey = 'gitcode:' + t.repoName
-    if (!info.issueId) info.issueId = t.issueId
-    if (!info.agentType) info.agentType = t.agentType
-    if (!info.skill) info.skill = t.skill
-    if (!info.engine) info.engine = t.engine
-    if (!info.status) info.status = t.status
-    logModal.value = { show: true, loading: false, messages: msgsResp.data || [], info }
-  } catch (e) {
-    logModal.value = { show: true, loading: false, messages: [], info: { error: e.message, issueId: t.issueId, repoKey: t.repoName ? 'gitcode:' + t.repoName : '' } }
-  }
-}
-function closeLogModal() {
-  logModal.value = { show: false, loading: false, messages: [], info: {} }
-}
-function eventTypeText(t) {
-  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号' }
-  return map[t] || t || '—'
-}
-function eventTypeClass(t) {
-  if (t === 'a2a_event') return 'info'
-  if (t === 'pull_request_merged') return 'success'
-  if (t === 'issue_opened') return 'info'
-  return 'default'
-}
-function formatDuration(d) {
-  if (!d) return '—'
-  const m = d.match(/^(\d+)s$/)
-  if (!m) return d
-  const s = parseInt(m[1])
-  if (s < 60) return s + 's'
-  if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60) + 's'
-  return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm'
-}
 const repoIssues = ref([])
 const repoIssuesPage = ref(0)
 const repoIssuesSize = ref(5)
@@ -477,8 +335,8 @@ watch(activityTab, (val) => {
 .cred-chip-status { font-size: 10px; color: var(--text-tertiary); }
 .cred-chip.on .cred-chip-status { color: #34c759; }
 
-.activity-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
-.repo-summary-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.activity-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.repo-summary-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
 .activity-card { text-align: center; padding: 14px 6px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
 .activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }

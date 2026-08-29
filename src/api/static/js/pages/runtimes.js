@@ -504,7 +504,10 @@ function _devStatusLabel(s) {
     'cde.0007': { color: '#d97706', bg: '#fef3c7' },
     'cde.0008': { color: '#d97706', bg: '#fef3c7' },
     'cde.0009': { color: '#9ca3af', bg: '#f9fafb' },
-    'cde.0010': { color: '#dc2626', bg: '#fee2e2' },
+    'cde.1001': { color: '#dc2626', bg: '#fee2e2' },
+    'cde.1002': { color: '#dc2626', bg: '#fee2e2' },
+    'cde.1003': { color: '#dc2626', bg: '#fee2e2' },
+    'cde.1004': { color: '#dc2626', bg: '#fee2e2' },
   };
   var m = map[s] || { color: '#6b7280', bg: '#f3f4f6' };
   var label = I18N.t('runtimes.devspace.status.' + (s || 'unknown').replace(/\./g, '_'));
@@ -608,11 +611,13 @@ function _devspaceSilentRefresh() {
       var e = envs[i];
       var id = e.id || '';
       var st = e.status || '';
-      var stMap = { 'cde.0000':'#6b7280','cde.0001':'#2563eb','cde.0002':'#16a34a','cde.0003':'#2563eb','cde.0004':'#16a34a','cde.0005':'#d97706','cde.0006':'#dc2626','cde.0007':'#d97706','cde.0008':'#d97706','cde.0009':'#9ca3af','cde.0010':'#dc2626' };
+      var stMap = { 'cde.0000':'#6b7280','cde.0001':'#2563eb','cde.0002':'#16a34a','cde.0003':'#2563eb','cde.0004':'#16a34a','cde.0005':'#d97706','cde.0006':'#dc2626','cde.0007':'#d97706','cde.0008':'#d97706','cde.0009':'#9ca3af','cde.1001':'#dc2626','cde.1002':'#dc2626','cde.1003':'#dc2626','cde.1004':'#dc2626' };
       var dotColor = stMap[st] || '#8d97a8';
       var isRunning = st === 'cde.0002';
       var isReady = st === 'cde.0004';
-      var isStopped = st === 'cde.0000' || st === 'cde.0009';
+      var isStopped = st === 'cde.0000';
+      var isDeleted = st === 'cde.0009';
+      var isError = ['cde.1001','cde.1002','cde.1003','cde.1004'].indexOf(st) >= 0;
       var isBusy = ['cde.0001','cde.0003','cde.0005','cde.0006','cde.0007','cde.0008'].indexOf(st) >= 0;
       html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--b);transition:background .12s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
         '<div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:' + dotColor + ';box-shadow:0 0 6px ' + dotColor + '50"></div>' +
@@ -624,7 +629,7 @@ function _devspaceSilentRefresh() {
         '<div style="display:flex;gap:4px;flex-shrink:0">' +
         ((isStopped || isReady) && !isBusy ? '<button class="bt bt-p bt-s" onclick="_devAction(\'start\',\'' + id + '\')">' + I18N.t('runtimes.devspace.start') + '</button>' : '') +
         (isRunning ? '<button class="bt bt-o bt-s" onclick="_devAction(\'stop\',\'' + id + '\')">' + I18N.t('runtimes.devspace.stop') + '</button>' : '') +
-        (!isBusy ? '<button class="bt bt-r bt-s" onclick="_devAction(\'delete\',\'' + id + '\')">' + I18N.t('runtimes.devspace.delete') + '</button>' : '') +
+        (!(isBusy || isDeleted) ? '<button class="bt bt-r bt-s" onclick="_devAction(\'delete\',\'' + id + '\')">' + I18N.t('runtimes.devspace.delete') + '</button>' : '') +
         '</div></div>';
     }
     body.innerHTML = html;
@@ -651,11 +656,13 @@ function _refreshDevspaceList() {
       var e = envs[i];
       var id = e.id || '';
       var st = e.status || '';
-      var stMap = { 'cde.0000':'#6b7280','cde.0001':'#2563eb','cde.0002':'#16a34a','cde.0003':'#2563eb','cde.0004':'#16a34a','cde.0005':'#d97706','cde.0006':'#dc2626','cde.0007':'#d97706','cde.0008':'#d97706','cde.0009':'#9ca3af','cde.0010':'#dc2626' };
+      var stMap = { 'cde.0000':'#6b7280','cde.0001':'#2563eb','cde.0002':'#16a34a','cde.0003':'#2563eb','cde.0004':'#16a34a','cde.0005':'#d97706','cde.0006':'#dc2626','cde.0007':'#d97706','cde.0008':'#d97706','cde.0009':'#9ca3af','cde.1001':'#dc2626','cde.1002':'#dc2626','cde.1003':'#dc2626','cde.1004':'#dc2626' };
       var dotColor = stMap[st] || '#8d97a8';
       var isRunning = st === 'cde.0002';
       var isReady = st === 'cde.0004';
-      var isStopped = st === 'cde.0000' || st === 'cde.0009';
+      var isStopped = st === 'cde.0000';
+      var isDeleted = st === 'cde.0009';
+      var isError = ['cde.1001','cde.1002','cde.1003','cde.1004'].indexOf(st) >= 0;
       var isBusy = ['cde.0001','cde.0003','cde.0005','cde.0006','cde.0007','cde.0008'].indexOf(st) >= 0;
       html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--b);transition:background .12s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
         '<div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:' + dotColor + ';box-shadow:0 0 6px ' + dotColor + '50"></div>' +
@@ -667,7 +674,7 @@ function _refreshDevspaceList() {
         '<div style="display:flex;gap:4px;flex-shrink:0">' +
         ((isStopped || isReady) && !isBusy ? '<button class="bt bt-p bt-s" onclick="_devAction(\'start\',\'' + id + '\')">' + I18N.t('runtimes.devspace.start') + '</button>' : '') +
         (isRunning ? '<button class="bt bt-o bt-s" onclick="_devAction(\'stop\',\'' + id + '\')">' + I18N.t('runtimes.devspace.stop') + '</button>' : '') +
-        (!isBusy ? '<button class="bt bt-r bt-s" onclick="_devAction(\'delete\',\'' + id + '\')">' + I18N.t('runtimes.devspace.delete') + '</button>' : '') +
+        (!(isBusy || isDeleted) ? '<button class="bt bt-r bt-s" onclick="_devAction(\'delete\',\'' + id + '\')">' + I18N.t('runtimes.devspace.delete') + '</button>' : '') +
         '</div></div>';
     }
     body.innerHTML = html;

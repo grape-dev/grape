@@ -459,6 +459,8 @@ async function streamTask(taskId, elId, convId) {
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
+    let finalText = '';
+    let stepText = '';  // 步骤/思考信息（与正文分开）
     while (true) {
       const {done, value} = await reader.read();
       if (done) break;
@@ -470,16 +472,45 @@ async function streamTask(taskId, elId, convId) {
           try {
             const d = JSON.parse(line.substring(6));
             if (d.type === 'done') {
+              // 思考完成 — 收起步骤区，只显示最终结果
               finalText = d.text || finalText;
-              if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
+              if (el) {
+                if (stepText) {
+                  el.innerHTML = '<div class="chat-steps collapsed" onclick="this.classList.toggle(\'expanded\')">' + renderMarkdown(stepText) + '</div>' + (renderMarkdown(finalText) || _NO_REPLY);
+                } else {
+                  el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
+                }
+              }
             } else if (d.type === 'error') {
               if (el) el.innerHTML = renderMarkdown(d.text || '') || _NO_REPLY;
             } else if (d.type === '思考中') {
               // 思考阶段 — 保持三点动画占位，不覆盖文字
               if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
+            } else if (d.type === 'reasoning') {
+              // 思考步骤 — 累加到折叠滚动区（单行高度，hover/click 展开）
+              stepText += d.text + '\n';
+              const html = '<div class="chat-steps" onclick="this.classList.toggle(\'expanded\')">' + renderMarkdown(stepText) + '</div>' + (finalText ? renderMarkdown(finalText) : '<span class="chat-dots"><span></span><span></span><span></span></span>');
+              if (el) el.innerHTML = html;
+            } else if (d.type === 'text' && d.text && el) {
+              // 流式 text chunk — 追加到正文
+              finalText += d.text;
+              const html = stepText ? '<div class="chat-steps" onclick="this.classList.toggle(\'expanded\')">' + renderMarkdown(stepText) + '</div>' + renderMarkdown(finalText) : renderMarkdown(finalText);
+              el.innerHTML = html;
+            } else if (d.type === 'step_start' && d.text && el) {
+              // 执行步骤开始 — 追加到折叠滚动区
+              stepText += '▸ ' + d.text + '\n';
+              const html = '<div class="chat-steps" onclick="this.classList.toggle(\'expanded\')">' + renderMarkdown(stepText) + '</div>' + (finalText ? renderMarkdown(finalText) : '<span class="chat-dots"><span></span><span></span><span></span></span>');
+              el.innerHTML = html;
+            } else if (d.type === 'step_finish' && d.text && el) {
+              // 执行步骤完成 — 追加到折叠滚动区
+              stepText += '✓ ' + d.text + '\n';
+              const html = '<div class="chat-steps" onclick="this.classList.toggle(\'expanded\')">' + renderMarkdown(stepText) + '</div>' + (finalText ? renderMarkdown(finalText) : '<span class="chat-dots"><span></span><span></span><span></span></span>');
+              el.innerHTML = html;
             } else if (d.text && el) {
-              finalText = d.text;
-              el.innerHTML = renderMarkdown(finalText);
+              // 其他事件（tool_use/tool_result 等）— 追加到折叠滚动区
+              stepText += d.text + '\n';
+              const html = '<div class="chat-steps" onclick="this.classList.toggle(\'expanded\')">' + renderMarkdown(stepText) + '</div>' + (finalText ? renderMarkdown(finalText) : '<span class="chat-dots"><span></span><span></span><span></span></span>');
+              el.innerHTML = html;
             }
           } catch(e) {}
         }
