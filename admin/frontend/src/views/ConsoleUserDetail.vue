@@ -645,9 +645,10 @@ async function resetToken() {
 
 onMounted(() => load())
 
-watch(activityTab, (val) => {
-  if (val === 'issue' && !selectedRepo.value && info.value.repoMatrix && info.value.repoMatrix.length) {
-    selectedRepo.value = info.value.repoMatrix[0].repoKey
+// 页面加载后自动选第一个仓库
+watch(() => info.value.repoMatrix, (val) => {
+  if (val && val.length && !selectedRepo.value) {
+    selectedRepo.value = val[0].repoKey
     loadRepoIssues(0)
   }
 })
