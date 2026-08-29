@@ -190,9 +190,11 @@ public class ConsoleUserController {
                 "SELECT m.full_name, m.repo_key, " +
                 "COUNT(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status IN ('queued','dispatched','running','completed','failed','cancelled') THEN 1 END) as task_count, " +
                 "COUNT(DISTINCT CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN t.issue_id END) as issue_count, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='queued' THEN 1 ELSE 0 END) as queued, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='dispatched' THEN 1 ELSE 0 END) as dispatched, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='running' THEN 1 ELSE 0 END) as running, " +
                 "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='completed' THEN 1 ELSE 0 END) as completed, " +
                 "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='failed' THEN 1 ELSE 0 END) as failed, " +
-                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status IN ('dispatched','running') THEN 1 ELSE 0 END) as pending, " +
                 "SUM(CASE WHEN t.status='cancelled' AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as cancelled " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
@@ -206,7 +208,9 @@ public class ConsoleUserController {
                     r.put("issueCount", rs2.getInt("issue_count"));
                     r.put("completed", rs2.getInt("completed"));
                     r.put("failed", rs2.getInt("failed"));
-                    r.put("pending", rs2.getInt("pending"));
+                    r.put("queued", rs2.getInt("queued"));
+                    r.put("dispatched", rs2.getInt("dispatched"));
+                    r.put("running", rs2.getInt("running"));
                     r.put("cancelled", rs2.getInt("cancelled"));
                     return r;
                 }, id);
@@ -333,9 +337,11 @@ public class ConsoleUserController {
         try {
             String sql = "SELECT t.issue_id, " +
                     "COUNT(*) as task_count, " +
+                    "SUM(CASE WHEN t.status='queued' THEN 1 ELSE 0 END) as queued, " +
+                    "SUM(CASE WHEN t.status='dispatched' THEN 1 ELSE 0 END) as dispatched, " +
+                    "SUM(CASE WHEN t.status='running' THEN 1 ELSE 0 END) as running, " +
                     "SUM(CASE WHEN t.status='completed' THEN 1 ELSE 0 END) as completed, " +
                     "SUM(CASE WHEN t.status='failed' THEN 1 ELSE 0 END) as failed, " +
-                    "SUM(CASE WHEN t.status IN ('dispatched','running') THEN 1 ELSE 0 END) as pending, " +
                     "SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
                     "MAX(t.started_at) as last_task_at " +
                     joinSql +
@@ -348,7 +354,9 @@ public class ConsoleUserController {
                 r.put("taskCount", rs.getInt("task_count"));
                 r.put("completed", rs.getInt("completed"));
                 r.put("failed", rs.getInt("failed"));
-                r.put("pending", rs.getInt("pending"));
+                r.put("queued", rs.getInt("queued"));
+                r.put("dispatched", rs.getInt("dispatched"));
+                r.put("running", rs.getInt("running"));
                 r.put("cancelled", rs.getInt("cancelled"));
                 r.put("lastTaskAt", rs.getString("last_task_at"));
                 list.add(r);
