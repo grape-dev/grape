@@ -640,9 +640,25 @@ async def get_ops_timeline(repo: str = ""):
             task_map[(row[0], row[1])] = row[2]
             runtime_map[(row[0], row[1])] = row[3] or 0
 
-        # 查 runtime_id → 引擎名映射
-        c.execute("SELECT id, name FROM agent_runtimes")
-        rt_name_map = {r[0]: r[1] for r in c.fetchall()}
+        # 查 runtime_id → 引擎实例名映射（type-device_name 格式）
+        c.execute(
+            "SELECT ar.id, ar.name, ar.credential_id, rc.device_name, ar.host_name "
+            "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id"
+        )
+        from src.runtime.instances import instance_name as _inst_name
+        import socket as _sock
+        _local_hostname = ""
+        try:
+            _local_hostname = _sock.gethostname()
+        except Exception:
+            pass
+        rt_name_map = {}
+        for r in c.fetchall():
+            _rid, _name, _cid, _dev, _host = r
+            # 本机引擎（cid=0）：优先用 host_name，其次用本机 hostname
+            if (_cid or 0) == 0:
+                _dev = _host or _local_hostname or ""
+            rt_name_map[_rid] = _inst_name(_name, _dev, _cid)
 
     # 按 issue_id 分组
     group = {}
