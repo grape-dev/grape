@@ -132,15 +132,16 @@ public class ConsoleUserController {
             }, id);
         } catch (Exception e) { /* ignore */ }
 
-        // 用户活动统计（通过 repo_owner 关联仓库再关联任务，只统计 Issue 任务，排除对话任务）
+        // 用户活动统计（按状态机6个标准status值，对齐 observability）
         try {
             String issueFilter = " AND t.issue_id IS NOT NULL AND t.issue_id<>''";
-            String notCancelled = " AND (t.status IS NULL OR t.status<>'cancelled')";
             String baseJoin = " FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?";
+            String stdStatus = " AND t.status IN ('queued','dispatched','running','completed','failed','cancelled')";
+            // taskCount 只统计6个标准status
             Long taskCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter, Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + stdStatus, Long.class, id);
             info.put("taskCount", taskCount != null ? taskCount : 0);
             Long issueTaskCount = taskCount;
             info.put("issueTaskCount", issueTaskCount != null ? issueTaskCount : 0);
@@ -150,18 +151,32 @@ public class ConsoleUserController {
             Long issueCount = grapeJdbc.queryForObject(
                 "SELECT COUNT(DISTINCT t.issue_id)" + baseJoin + issueFilter, Long.class, id);
             info.put("issueCount", issueCount != null ? issueCount : 0);
+            // 6个标准状态计数
+            Long queuedCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='queued'", Long.class, id);
+            info.put("queuedCount", queuedCount != null ? queuedCount : 0);
+            Long dispatchedCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='dispatched'", Long.class, id);
+            info.put("dispatchedCount", dispatchedCount != null ? dispatchedCount : 0);
+            Long runningCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='running'", Long.class, id);
+            info.put("runningCount", runningCount != null ? runningCount : 0);
             Long completedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND t.exit_code=0 AND t.completed_at IS NOT NULL", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='completed'", Long.class, id);
             info.put("completedCount", completedCount != null ? completedCount : 0);
             Long failedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND t.exit_code<>0 AND t.exit_code IS NOT NULL", Long.class, id);
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='failed'", Long.class, id);
             info.put("failedCount", failedCount != null ? failedCount : 0);
-            Long pendingCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND (t.exit_code IS NULL OR t.completed_at IS NULL)", Long.class, id);
-            info.put("pendingCount", pendingCount != null ? pendingCount : 0);
             Long cancelledCount = grapeJdbc.queryForObject(
                 "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='cancelled'", Long.class, id);
             info.put("cancelledCount", cancelledCount != null ? cancelledCount : 0);
+            // 进行中 = dispatched + running
+            long inProgress = (dispatchedCount != null ? dispatchedCount : 0) + (runningCount != null ? runningCount : 0);
+            info.put("inProgressCount", inProgress);
+            // 卡住 = running 且超22分钟
+            Long stuckCount = grapeJdbc.queryForObject(
+                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='running' AND t.started_at IS NOT NULL AND t.started_at < DATE_SUB(NOW(), INTERVAL 22 MINUTE)", Long.class, id);
+            info.put("stuckCount", stuckCount != null ? stuckCount : 0);
             if (taskCount != null && taskCount > 0 && completedCount != null) {
                 info.put("successRate", Math.round(completedCount * 1000.0 / taskCount) / 10.0 + "%");
             } else {
@@ -173,11 +188,11 @@ public class ConsoleUserController {
         try {
             List<Map<String, Object>> repoMatrix = grapeJdbc.query(
                 "SELECT m.full_name, m.repo_key, " +
-                "COUNT(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 END) as task_count, " +
+                "COUNT(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status IN ('queued','dispatched','running','completed','failed','cancelled') THEN 1 END) as task_count, " +
                 "COUNT(DISTINCT CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN t.issue_id END) as issue_count, " +
-                "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as completed, " +
-                "SUM(CASE WHEN t.exit_code<>0 AND t.exit_code IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as failed, " +
-                "SUM(CASE WHEN (t.exit_code IS NULL OR t.completed_at IS NULL) AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as pending, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='completed' THEN 1 ELSE 0 END) as completed, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status='failed' THEN 1 ELSE 0 END) as failed, " +
+                "SUM(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' AND t.status IN ('dispatched','running') THEN 1 ELSE 0 END) as pending, " +
                 "SUM(CASE WHEN t.status='cancelled' AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as cancelled " +
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
@@ -220,15 +235,12 @@ public class ConsoleUserController {
                     r.put("skill", rs2.getString("skill"));
                     r.put("startedAt", rs2.getString("started_at"));
                     r.put("completedAt", rs2.getString("completed_at"));
-                    // 状态判断
-                    Object exitCode = rs2.getObject("exit_code");
-                    String completedAt = rs2.getString("completed_at");
-                    if (exitCode != null && ((Integer) exitCode) == 0 && completedAt != null) {
-                        r.put("status", "completed");
-                    } else if (exitCode != null && ((Integer) exitCode) != 0) {
-                        r.put("status", "failed");
+                    // 状态判断（直接用 status 字段，对齐 observability）
+                    String taskStatus = rs2.getString("status");
+                    if (taskStatus != null && !taskStatus.isEmpty()) {
+                        r.put("status", taskStatus);
                     } else {
-                        r.put("status", "pending");
+                        r.put("status", "unknown");
                     }
                     return r;
                 }, id);
@@ -243,9 +255,8 @@ public class ConsoleUserController {
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND (t.exit_code IS NULL OR t.completed_at IS NULL) " +
+                "AND t.status IN ('dispatched','running') " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
-                "AND (t.status IS NULL OR t.status<>'cancelled') " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -272,7 +283,7 @@ public class ConsoleUserController {
                 "FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
                 "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND t.exit_code<>0 AND t.exit_code IS NOT NULL " +
+                "AND t.status='failed' " +
                 "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
                 "ORDER BY t.started_at DESC LIMIT 5",
                 (rs2, rowNum) -> {
@@ -322,9 +333,9 @@ public class ConsoleUserController {
         try {
             String sql = "SELECT t.issue_id, " +
                     "COUNT(*) as task_count, " +
-                    "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
-                    "SUM(CASE WHEN t.exit_code<>0 AND t.exit_code IS NOT NULL THEN 1 ELSE 0 END) as failed, " +
-                    "SUM(CASE WHEN (t.exit_code IS NULL OR t.completed_at IS NULL) AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as pending, " +
+                    "SUM(CASE WHEN t.status='completed' THEN 1 ELSE 0 END) as completed, " +
+                    "SUM(CASE WHEN t.status='failed' THEN 1 ELSE 0 END) as failed, " +
+                    "SUM(CASE WHEN t.status IN ('dispatched','running') THEN 1 ELSE 0 END) as pending, " +
                     "SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
                     "MAX(t.started_at) as last_task_at " +
                     joinSql +

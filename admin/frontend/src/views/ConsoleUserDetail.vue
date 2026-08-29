@@ -71,28 +71,36 @@
             <!-- 任务统计 tab -->
             <div v-if="activityTab === 'task'" class="activity-grid">
               <div class="activity-card">
-                <div class="activity-value">{{ info.taskCount ?? 0 }}</div>
-                <div class="activity-label">任务总数</div>
+                <div class="activity-value">{{ info.queuedCount ?? 0 }}</div>
+                <div class="activity-label">排队中</div>
+              </div>
+              <div class="activity-card">
+                <div class="activity-value" style="color:#006eff">{{ info.dispatchedCount ?? 0 }}</div>
+                <div class="activity-label">已派发</div>
+              </div>
+              <div class="activity-card">
+                <div class="activity-value" style="color:#006eff">{{ info.runningCount ?? 0 }}</div>
+                <div class="activity-label">运行中</div>
               </div>
               <div class="activity-card">
                 <div class="activity-value" style="color:#34c759">{{ info.completedCount ?? 0 }}</div>
                 <div class="activity-label">已完成</div>
               </div>
               <div class="activity-card">
-                <div class="activity-value" style="color:#ff9500">{{ info.pendingCount ?? 0 }}</div>
-                <div class="activity-label">进行中</div>
+                <div class="activity-value" style="color:#ff3b30">{{ info.failedCount ?? 0 }}</div>
+                <div class="activity-label">失败</div>
               </div>
               <div class="activity-card">
                 <div class="activity-value" style="color:#aeaeb2">{{ info.cancelledCount ?? 0 }}</div>
                 <div class="activity-label">已取消</div>
               </div>
               <div class="activity-card">
-                <div class="activity-value" style="color:#ff3b30">{{ info.failedCount ?? 0 }}</div>
-                <div class="activity-label">失败</div>
+                <div class="activity-value" style="color:#ff9500">{{ info.inProgressCount ?? 0 }}</div>
+                <div class="activity-label">进行中</div>
               </div>
               <div class="activity-card">
-                <div class="activity-value" style="color:#006eff">{{ info.successRate || '—' }}</div>
-                <div class="activity-label">成功率</div>
+                <div class="activity-value" style="color:#ff3b30">{{ info.stuckCount ?? 0 }}</div>
+                <div class="activity-label">卡住</div>
               </div>
             </div>
             <!-- 仓库与 Issue tab -->
@@ -335,7 +343,7 @@ watch(activityTab, (val) => {
 .cred-chip-status { font-size: 10px; color: var(--text-tertiary); }
 .cred-chip.on .cred-chip-status { color: #34c759; }
 
-.activity-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.activity-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
 .repo-summary-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
 .activity-card { text-align: center; padding: 14px 6px; background: rgba(0,0,0,0.02); border-radius: 10px; }
 .activity-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
