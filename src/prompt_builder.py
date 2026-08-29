@@ -190,23 +190,8 @@ def build_chat_role_definition() -> str:
 - Code review, build diagnosis, deployment guard, incident triage
 - Issue/PR analysis, changelog generation, repository management
 - Repository (GitCode/GitHub) API operations
-- 任务处理：接收用户任务需求，分析、追问、创建 Issue 转交流水线
 
 You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, writing, meetings, voice, etc.).
-
-## 任务处理（超出你直接能力范围的请求）
-当你收到创建资源、部署服务、开发功能等不能直接执行的任务请求时，按以下流程处理：
-1. 分析需求，提取已知参数（如规格/镜像/网络/磁盘等），明确这是一个什么任务
-2. 如果缺少关键参数（如 ECS 要什么规格、部署到什么环境等），追问用户补充（最多2轮）
-3. 信息足够后 → 用 GitCode API 创建 Issue：
-   - API: POST /repos/{{owner}}/{{repo}}/issues
-   - 标题：简明描述需求（如"创建 2C4G Ubuntu 22.04 ECS"）
-   - 正文：将用户已提供的参数整理为结构化清单（核对表格式），标注来源"飞书用户需求"
-   - 标签：按类型打标签 — sre-deploy（云资源创建/部署运维）、sre-release（资源释放/销毁/回收）、feature（新功能/开发）、bug（缺陷修复）
-4. 创建后告知用户 Issue 编号（附链接）和后续流程预期（VOD 审视 → 开发/部署流水线）
-5. 用户询问进度时（如"ECS 建好了吗"），用 GitCode API 查询 Issue 状态：
-   - GET /repos/{{owner}}/{{repo}}/issues/{{number}} 看当前状态和标签
-   - 也有权查看 Issue 评论了解最新处理进展
 
 Reply rules:
 1. DevOps topic: analyze and reply
@@ -218,10 +203,7 @@ SECURITY (MUST FOLLOW):
 1. Use ONLY the GitCode token provided in this prompt (USER_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.
 2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.
 3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in GitCode). NEVER try other tokens or workarounds.
-4. NEVER write any token into files, logs, or comments.
-
-ISSUE COMMENT FORMAT (MUST FOLLOW):
-When posting comments to GitCode Issues, the comment body MUST start with `[RoleName Agent]` prefix (e.g. `[Coding Agent]`, `[QA Agent]`, `[SRE Agent]`, `[Issue Agent]`, `[VOD Agent]`). Role name capitalized. NEVER use skill name, repo name, or other custom prefixes."""
+4. NEVER write any token into files, logs, or comments."""
 
 
 def build_task_role_definition() -> str:
@@ -254,10 +236,7 @@ SECURITY (MUST FOLLOW):
 1. 只使用本 prompt 提供的 GitCode token（USER_GITCODE_TOKEN）。
 2. 绝不访问 bot 内部 data/、configs/、sessions.db、user_accounts。
 3. GitCode API 403：停止并用政策性话术告知用户需要权限。
-4. 绝不把 token 写入文件、日志、评论。
-
-ISSUE COMMENT FORMAT (MUST FOLLOW):
-回帖到 GitCode Issue 时，评论开头必须带 `[RoleName Agent]` 前缀。"""
+4. 绝不把 token 写入文件、日志、评论。"""
 
 
 def extract_event_number(payload):
@@ -623,20 +602,14 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
         "### 任务边界\n"
         "本对话的职责是【澄清被分配 Issue 的需求并回帖】，不是实施/部署/写代码。\n"
         "用户选择的部署方式/实现方案属于需求澄清内容，回帖后由 pipeline（coding/sre）执行。\n"
-        "严禁 clone/部署/起服务/修改文件/执行 git 命令。\n"
-        "### A2A 交办规则\n"
-        "需求澄清完成后，根据 Issue 标签决定 A2A 目标：\n"
-        "- 标签含 `sre-deploy` → A2A 给 `sre`，context 写明「部署」+ 资源规格\n"
-        "- 标签含 `sre-release` → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\n"
-        "- 标签含 `feature`/`bug` → A2A 给 `coding`\n"
-        "A2A 时 `pr_number` 仅在当前任务有直接关联的 PR（如 PR 审查后交办）时传入。纯部署/资源释放类请求不传 `pr_number`，否则会触发订阅去重导致 SRE 任务被跳过。"
+        "严禁 clone/部署/起服务/修改文件/执行 git 命令。"
     )
-    if conv.get("title"):
-        parts.append(f"标题: {conv['title']}")
-    # 任务描述
+    # 任务描述（标题紧随其后）
     task_desc = _get_task_description(conv)
     if task_desc:
         parts.append(f"\n### 任务描述\n{task_desc}")
+    if conv.get("title"):
+        parts.append(f"标题: {conv['title']}")
 
     try:
         from src.api.event_store import get_issue_summary
