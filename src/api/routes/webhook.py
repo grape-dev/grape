@@ -469,14 +469,8 @@ async def a2a_endpoint(request: Request):
                 _a2a_scene = _a2a_scene or "default"
             except Exception:
                 pass
-        # 引擎选择：session 已有 runtime_id 时直接用，不重复调 pick_engine
-        # （pick_engine 在 get_or_create_agent_session 创建 session 时已调用过，
-        #  重复调用可能因场景/健康态变化返回不同引擎，导致 session.runtime_id 与实际不一致）
-        if runtime_id:
-            engine_id = runtime_id
-        else:
-            engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=0,
-                                    scene_id=_a2a_scene, user_id=_a2a_scene_uid)
+        engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0,
+                                scene_id=_a2a_scene, user_id=_a2a_scene_uid)
         if engine_id is None:
             log.info(f"A2A: no available engine for repo={repo_key} agent={agent_name}, seq={seq}, skip")
             try:
