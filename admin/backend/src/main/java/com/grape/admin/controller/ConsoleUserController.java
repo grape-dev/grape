@@ -290,10 +290,6 @@ public class ConsoleUserController {
         return result;
     }
 
-
-
-
-
     @PostMapping("/{id}/reset-token")
     public Map<String, Object> resetToken(@PathVariable int id) {
         Map<String, Object> result = new LinkedHashMap<>();
@@ -393,22 +389,6 @@ public class ConsoleUserController {
             }
         } catch (Exception e) { /* ignore */ }
         return "";
-    }
-
-    private String calcDuration(String startedAt, String completedAt) {
-        if (startedAt == null || completedAt == null) return "—";
-        try {
-            String s = startedAt.replace("T", " ");
-            String c = completedAt.replace("T", " ");
-            if (s.length() > 19) s = s.substring(0, 19);
-            if (c.length() > 19) c = c.substring(0, 19);
-            java.sql.Timestamp start = java.sql.Timestamp.valueOf(s);
-            java.sql.Timestamp end = java.sql.Timestamp.valueOf(c);
-            long durationSec = (end.getTime() - start.getTime()) / 1000;
-            return durationSec + "s";
-        } catch (Exception e) {
-            return "—";
-        }
     }
 
     /** 引擎实例名（对齐健康中心格式: name-device(ip)） */

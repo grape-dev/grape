@@ -223,7 +223,7 @@ async function openLogModal(taskId, t) {
       http.get(`/runtime/tasks/${taskId}/info`)
     ])
     const info = infoResp.data || {}
-    if (!info.repoKey && t.repoName) info.repoKey = 'gitcode:' + t.repoName
+    if (!info.repoKey && t.repoKey) info.repoKey = t.repoKey
     if (!info.issueId) info.issueId = t.issueId
     if (!info.agentType) info.agentType = t.agentType
     if (!info.skill) info.skill = t.skill
@@ -231,7 +231,7 @@ async function openLogModal(taskId, t) {
     if (!info.status) info.status = t.status
     logModal.value = { show: true, loading: false, messages: msgsResp.data || [], info }
   } catch (e) {
-    logModal.value = { show: true, loading: false, messages: [], info: { error: e.message, issueId: t.issueId, repoKey: t.repoName ? 'gitcode:' + t.repoName : '' } }
+    logModal.value = { show: true, loading: false, messages: [], info: { error: e.message, issueId: t.issueId, repoKey: t.repoKey || '' } }
   }
 }
 function closeLogModal() {
