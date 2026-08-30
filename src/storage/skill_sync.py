@@ -82,7 +82,6 @@ async def sync_official_skills_to_obs() -> dict:
     result = {"added": 0, "updated": 0, "skipped": 0}
 
     for skill_name, info in data.items():
-        agent_type = info.get("agent_type", "")
         skill_path = info.get("path", skill_name)
 
         # 解析本地目录路径
@@ -132,9 +131,6 @@ async def sync_official_skills_to_obs() -> dict:
             else:
                 result["added"] += 1
                 logger.info(f"skill added: {skill_name} (hash: {current_hash[:8]}...)")
-        else:
-            # DB 里没有这个技能记录，db_setup.py 的 _sync_official_skills 会负责 INSERT
-            result["skipped"] += 1
 
     logger.info(f"sync done: +{result['added']} ~{result['updated']} skipped={result['skipped']}")
     return result
