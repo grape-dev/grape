@@ -572,7 +572,7 @@ function doCreateFromTemplate(templateId) {
         var modal = document.getElementById('ptCreateModal');
         if (modal) setTimeout(function() { modal.remove(); }, 800);
         if (r.host_warning) {
-          app.showToast('⚠️ ' + r.host_warning);
+          app.showToast('⚠️ 重要提醒：请到 GitCode 仓库设置 → 成员管理，将机器人账号（grace_bot）添加为维护者，然后手动托管仓库以完成自动化配置。', 10000);
         } else {
           app.showToast('✅ ' + (r.message || '创建成功'));
         }
