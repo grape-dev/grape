@@ -54,10 +54,114 @@ def _load_global_bot_config() -> tuple[str, str]:
     return bot_token, bot_username
 
 
+# ====== 模板使用量（精选推荐：按「创建过该模板的不同用户数」倒序）======
+
+def _usage_db():
+    from src.session_manager import db, db_lock
+    return db, db_lock
+
+
+def _load_template_usage() -> dict[str, int]:
+    """返回 {template_id: 创建过该模板的不同用户数}"""
+    db, db_lock = _usage_db()
+    try:
+        with db_lock:
+            cur = db.execute(
+                "SELECT template_id, COUNT(DISTINCT user_key) FROM template_usage GROUP BY template_id")
+            return {r[0]: int(r[1]) for r in cur.fetchall()}
+    except Exception as e:
+        log.warning(f"load template usage failed: {e}")
+        return {}
+
+
+def _incr_template_usage(template_id: str, user_key: str):
+    """记录某个用户创建过该模板（同用户去重，INSERT OR IGNORE）"""
+    if not template_id or not user_key:
+        return
+    db, db_lock = _usage_db()
+    try:
+        with db_lock:
+            db.execute(
+                "INSERT OR IGNORE INTO template_usage (template_id, user_key) VALUES (?,?)",
+                (template_id, user_key))
+            db.commit()
+    except Exception as e:
+        log.warning(f"incr template usage failed: {template_id} {user_key}: {e}")
+
+
+def _match_template_id(repo_name: str) -> str | None:
+    """将模板创建的仓库名回映射到 template_id。
+
+    规则：default_repo_name 精确匹配 → 最长的前缀匹配（防止 hello-blog 抢占 HELLO-BLOG-SYS）。
+    """
+    rules = []
+    for cat in _load_templates().get("categories", []):
+        for t in cat.get("templates", []):
+            dn = (t.get("default_repo_name") or t.get("id") or "").strip()
+            if dn:
+                rules.append((dn.lower(), t.get("id")))
+    if not rules:
+        return None
+    base = (repo_name or "").split("/")[-1].lower()
+    # 1) 精确
+    for dn, tid in rules:
+        if base == dn:
+            return tid
+    # 2) 按 default_repo_name 长度降序做前缀匹配
+    for dn, tid in sorted(rules, key=lambda r: -len(r[0])):
+        if base.startswith(dn):
+            return tid
+    return None
+
+
+def _backfill_template_usage(force: bool = False):
+    """从 events(source=template) 幂等回填历史模板创建用户数到 template_usage。
+
+    events 中 source='template' 的 onboarding 事件（onboarding_exp/onboarding_explore）
+    只由「模板一键创建」（本路由 create_from_template → trigger_onboarding）产生，
+    每一行都代表一次模板创建。按仓库 owner 去重得到「不同用户数」。
+    """
+    from src.user.db import get_meta_value, set_meta_value
+    if not force and get_meta_value("tmpl_usage_backfilled") == "1":
+        return
+    db, db_lock = _usage_db()
+    added = 0
+    try:
+        with db_lock:
+            rows = db.execute(
+                "SELECT DISTINCT repo_key FROM events WHERE source='template' "
+                "AND event_type IN ('onboarding_exp','onboarding_explore')").fetchall()
+            for (repo_key,) in rows:
+                repo_key = (repo_key or "").replace("gitcode:", "")
+                if "/" not in repo_key:
+                    continue
+                owner, rname = repo_key.split("/", 1)
+                tid = _match_template_id(rname)
+                if not tid:
+                    log.info(f"template usage backfill: skip unmatched repo {repo_key}")
+                    continue
+                cur = db.execute(
+                    "INSERT OR IGNORE INTO template_usage (template_id, user_key) VALUES (?,?)",
+                    (tid, owner))
+                added += cur.rowcount
+            db.commit()
+    except Exception as e:
+        log.warning(f"backfill template usage failed: {e}")
+        return
+    if added:
+        log.info(f"template usage backfill: added {added} records")
+    set_meta_value("tmpl_usage_backfilled", "1")
+
+
 @router.get("")
 async def list_templates(user: dict = Depends(get_current_user)):
-    """返回配置化的模板分类与模板列表"""
+    """返回配置化的模板分类与模板列表；每个模板附带 create_count（创建过它的不同用户数）"""
+    _backfill_template_usage()
+    usage = _load_template_usage()
     data = _load_templates()
+    for cat in data.get("categories", []):
+        for t in cat.get("templates", []):
+            t["create_count"] = usage.get(t.get("id", ""), 0)
     return {"categories": data.get("categories", [])}
 
 
@@ -149,6 +253,9 @@ async def create_from_template(body: CreateTemplateRequest,
         trigger_onboarding(repo_key, owner)
     except Exception as e:
         log.warning(f"template onboarding trigger failed: {e}")
+
+    # 6. 记录模板使用量（精选推荐按「不同用户数」排序；同用户重复创建只算一次）
+    _incr_template_usage(body.template_id, gitcode_login)
 
     return {"full_name": full_name, "webhook_id": webhook_id, "scene_id": scene_id,
             "message": f"项目 {full_name} 创建并托管成功"}
