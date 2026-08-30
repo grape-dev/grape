@@ -92,6 +92,16 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
         log.warning(f"create_direct_task: no agent_session_id for {repo_key}/{agent_type}")
         return ""
 
+    # 更新 session 的 runtime_id 为实际执行引擎（pick_engine 结果可能与创建时不同）
+    if engine_id:
+        try:
+            with db_lock:
+                c2 = db.cursor()
+                c2.execute("UPDATE devops_agent_session SET runtime_id=? WHERE id=?", (engine_id, agent_session_id))
+                db.commit()
+        except Exception:
+            pass
+
     task_id = "t_" + uuid.uuid4().hex[:12]
     # issue_id 优先用传参，兜底从 evt 解析
     if not issue_id:
@@ -1209,6 +1219,15 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     from src.api.event_store import update_event_config
     update_event_config(seq, inst_name, skill_name, datetime.now(timezone.utc).isoformat())
     session = get_or_create_agent_session(repo_key, agent_type, backend or "")
+    # 更新 session 的 runtime_id 为实际执行引擎
+    if runtime_id:
+        try:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute("UPDATE devops_agent_session SET runtime_id=? WHERE id=?", (runtime_id, session.get("id","")))
+                db.commit()
+        except Exception:
+            pass
     oc_session_id = session.get("runtime_session_id") or ""
     issue_session_id = ""
     if _issue_num_from(issue_id):
