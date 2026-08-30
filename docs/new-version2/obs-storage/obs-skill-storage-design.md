@@ -349,6 +349,52 @@ scope 固定枚举。对象访问安全依赖**临时签名 URL + 私有桶**（
   to-cluster（官方技能转集群）与 download（临时 URL）接口复用同一固定 key 规范；
   isObjectKey 改判 file_path 非空（v2.5）
 
+### N15d ObsStorageClient 异常处理规范（v3.1 补充）
+
+> 背景：admin Java 侧 ObsStorageClient 各方法对 OBS SDK 异常（`ObsException`）
+> 捕获不一致——`readBytes`/`saveBytes` 未 catch OBS 异常导致裸抛 500；
+> `temporaryUrl` catch 后转 `RuntimeException` 仍被全局兜底拦截成 500；
+> `normalizeSkillZip` 声明 `throws IOException` 但调用方未 catch。
+> 2026-08-30 技能 id=2002（file_path 指向不存在的 OBS 对象）触发 `getObject` 404 →
+> `ObsException` 裸抛 → `GlobalExceptionHandler.handleOther` 返回 500
+> "服务器内部错误"（无任何业务信息），暴露此缺陷。
+
+#### 异常映射规范
+
+| ObsStorageClient 方法 | OBS 失败场景 | 期望 HTTP 状态码 | 响应体 message |
+|----------------------|-------------|-----------------|---------------|
+| `readBytes(key)` | 对象不存在（404） | 404 | `技能文件不存在（OBS 对象缺失）：{key}` |
+| `readBytes(key)` | OBS 不可达/权限/其他 | 502 | `OBS 读取失败：{key}` |
+| `saveBytes(key, data)` | putObject 失败（任何原因） | 502 | `OBS 写入失败：{key}` |
+| `temporaryUrl(key)` | 签名失败 | 502 | `OBS 临时 URL 签发失败：{key}` |
+| `normalizeSkillZip(dir, name)` | IO 失败（磁盘/文件） | 500 | `技能打包失败：{skillName}` |
+
+#### 实现规则
+
+1. **ObsStorageClient 层**：每个 OBS 操作方法 catch `ObsException`（OBS SDK 根异常），
+   按"对象不存在 vs 其他"区分：
+   - 对象不存在（HTTP 404 / `obs_object_not_found`）→ 抛 `NotFoundException`
+   - 其他 OBS 错误 → 抛 `BizException`（502 语义，由 GlobalExceptionHandler 映射）
+   - `saveBytes`：putObject 无 404 语义，统一 catch → `BizException("OBS 写入失败")`
+   - `temporaryUrl`：签名失败统一 catch → `BizException("OBS 临时 URL 签发失败")`
+
+2. **SkillService 调用方**：
+   - 调 `normalizeSkillZip`（throws IOException）处须 try-catch，转 `BizException`
+   - 调 `readBytes`/`saveBytes`/`temporaryUrl` 不需额外 try-catch（ObsStorageClient
+     已转为业务异常，由 GlobalExceptionHandler 统一映射）
+
+3. **GlobalExceptionHandler 不变**：已有 `NotFoundException → 404`、
+   `BizException → 400`、`Exception → 500` 三级映射；
+   新增 `BizException` 可带 HttpStatus 参数以区分 400/502，或新增
+   `ObsException` 专用 handler（推荐前者，最小改动）
+
+4. **已有的安全方法不变**：`copyObject`/`deleteObject`/`deletePrefix`
+   已有 catch(Exception) 返回 false/0，不抛异常（调用方判断返回值处理），
+   保持现状
+
+- 关键点：OBS 404 → 业务 404（不是 500）；OBS 故障 → 502（不是 500）；
+  避免用户看到无信息量的"服务器内部错误"；异常 message 带 key 便于运维排查
+
 ### N16 前端 src/api/static/js/ —— 模板下载适配 + 可选增强
 
 - 改前：downloadSkillTemplate() 直接 window.open('/api/skills/template?token=...')
