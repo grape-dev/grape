@@ -871,11 +871,12 @@ function renderTimelineList(container, issues, repoKey) {
     const _ip = _devIpMap[_devName];
     return _ip ? engine + ' (' + _ip + ')' : engine;
   }
-  // 构建 GitCode issue URL：repoKey=gitcode:requiredsa/hello-flask → https://gitcode.com/requiredsa/hello-flask/issues/N
-  const _repoPath = (repoKey || '').replace(/^gitcode:/, '');
-  function _issueUrl(issueId) {
+  // 构建 GitCode issue URL：优先用 issue 自身 repoKey，回退全局 repoKey
+  const _globalRepoPath = (repoKey || '').replace(/^gitcode:/, '');
+  function _issueUrl(issueId, issueRepoKey) {
     const num = (issueId || '').replace(/^#/, '');
-    return _repoPath && num ? 'https://gitcode.com/' + _repoPath + '/issues/' + num : '';
+    const repoPath = (issueRepoKey || '').replace(/^gitcode:/, '') || _globalRepoPath;
+    return repoPath && num ? 'https://gitcode.com/' + repoPath + '/issues/' + num : '';
   }
   let html = section(I18N.t('observability.task_list'), I18N.t('observability.task_list_subtitle', {count: issues.length}));
   html += '<div style="display:flex;flex-direction:column;gap:0">';
@@ -883,7 +884,7 @@ function renderTimelineList(container, issues, repoKey) {
     const expanded = _expandedIssues.has(iss.issueId);
     const hasFailed = iss.events.some(e => e.status === 'failed');
     const statusBadge = hasFailed ? '<span style="color:var(--r);font-size:10px;font-weight:600">' + I18N.t('observability.has_failure') + '</span>' : '<span style="color:var(--g);font-size:10px;font-weight:600">' + I18N.t('observability.normal') + '</span>';
-    const _url = _issueUrl(iss.issueId);
+    const _url = _issueUrl(iss.issueId, iss.repoKey);
     const _issueLink = _url
       ? '<a href="' + _url + '" target="_blank" onclick="event.stopPropagation()" style="font-size:13px;font-weight:700;color:var(--a);text-decoration:none">' + iss.issueId + ' \u2197</a>'
       : '<b style="font-size:13px">' + iss.issueId + '</b>';

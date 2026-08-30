@@ -717,6 +717,10 @@ def get_chat_config(user_id: int) -> dict:
                 else:
                     # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
                     log.warning(f"get_chat_config: runtime_id={row[0]} 指向未知引擎 '{brow[0]}'，按未配置处理")
+            else:
+                # runtime_id 指向的引擎行已不存在（被删除）：视为未绑定，走本机直连兜底
+                log.warning(f"get_chat_config: runtime_id={row[0]} 不存在（引擎行已删除），按未配置处理")
+                row = (0,) + row[1:]  # runtime_id 置零，使 _chat_config_with_local_backend 走兜底
         return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
                                                row[3] or "", row[4] or "", row[5] or "", "")
 

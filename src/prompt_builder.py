@@ -141,7 +141,7 @@ def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
         _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")
 
 
-def build_role_definition(skills=None) -> str:
+def build_role_definition(skills=None, agent_type="") -> str:
     rules = [
         "You are a DevOps operations assistant. Your domain:",
         "- Code review, build diagnosis, deployment guard, incident triage",
@@ -160,7 +160,7 @@ def build_role_definition(skills=None) -> str:
         "3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs admin/maintainer permission (configure it manually in GitCode). NEVER try other tokens or workarounds.",
         "4. NEVER write any token into files, logs, or comments.",
     ]
-    if skills and "implementation" in skills:
+    if agent_type == "coding":
         rules.append("3. You MAY write code, modify files, create branches, and execute git commands — within the scope of the current Issue")
     else:
         rules.append("3. Never write code, modify files, or execute git commands")
@@ -446,7 +446,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         repo_key = f"{evt['source']}:{evt['repository']}"
         parts.append(_build_feishu_context_section(repo_key, feishu_ctx))
 
-    parts.append(build_role_definition(skills))
+    parts.append(build_role_definition(skills, agent_type=agent_type))
 
     # A2A protocol instructions + available agents
     try:

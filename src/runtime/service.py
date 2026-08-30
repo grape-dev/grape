@@ -1326,6 +1326,128 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                           task_id=task_id, payload={"exit_code": exit_code}))
     except Exception:
         pass
+    # A2A 自动补触发（2026-08-30 修复）：
+    # hermes ACP premature end_turn bug：agent 说完"触发 A2A"后直接 end_turn，
+    # 没实际调用 A2A API → pipeline 卡住。任务完成后检查 issue_state.stage 是否已推进，
+    # 如果 stage 还等于当前 agent_type（说明 A2A 没被调用），自动补触发下一个 agent。
+    if exit_code == 0 and task:
+        try:
+            _auto_advance_pipeline(task)
+        except Exception as _ae:
+            log.warning(f"auto advance pipeline failed for task {task_id}: {_ae}")
+
+
+def _auto_advance_pipeline(task: dict):
+    """任务完成后检查 pipeline 是否推进，没推进则自动触发下一个 agent。
+
+    通过 pipelines.json 查找当前 agent 的 next agent，然后调 A2A。
+    只在 issue_id 非空 + stage 仍等于当前 agent_type 时触发（说明 agent 没调 A2A）。
+    """
+    import threading
+    _issue_id = (task.get("issue_id") or "").strip()
+    _repo_key = task.get("repo_key") or ""
+    _agent_type = (task.get("agent_type") or "").strip()
+    if not _issue_id or not _repo_key or not _agent_type:
+        return
+    if _agent_type in ("chat", "vod") and not _issue_id:
+        return  # chat 无 issue，vod 是首步不需要补触发
+
+    # 检查 issue_state.stage 是否已推进
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT stage, scene_id FROM issue_state WHERE repo_key=? AND issue_id=?",
+                  (_repo_key, _issue_id))
+        _row = c.fetchone()
+    if not _row:
+        return  # 无 issue_state 记录（非 pipeline 任务）
+    _stage, _scene_id = _row[0], (_row[1] if len(_row) > 1 else "") or ""
+    if _stage != _agent_type:
+        return  # stage 已推进（agent 成功调了 A2A），不需要补触发
+    # stage 还等于当前 agent_type → A2A 没被调用，需要补触发
+
+    # 从 pipelines.json 查找 next agent
+    _next_agent = ""
+    try:
+        import os as _os
+        _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))),
+                                   "configs", "pipelines.json")
+        import json as _json
+        with open(_pipe_path, "r", encoding="utf-8") as _f:
+            _pipes = _json.load(_f)
+        _scene = _pipes.get("scenes", {}).get(_scene_id) or _pipes.get("scenes", {}).get("default") or {}
+        for _node in (_scene.get("nodes") or []):
+            if _node.get("id") == _agent_type:
+                _next_agent = _node.get("next", "")
+                break
+    except Exception:
+        pass
+    if not _next_agent or _next_agent == "done":
+        return  # 没有下一个 agent，或已经是最后一步
+
+    # 最小产物校验：检查 agent 是否有实际产出
+    # coding agent 应该有代码变更（result_text 非空且不是纯错误说明）
+    # 没产出的 agent 不推进 pipeline，避免假完成
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, result_text, exit_code, errors FROM agent_tasks "
+                  "WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                  "ORDER BY id DESC LIMIT 1",
+                  (_repo_key, _issue_id, _agent_type))
+        _task_row = c.fetchone()
+    if _task_row:
+        _result_text = (_task_row[1] or "").strip()
+        _exit_code = _task_row[2]
+        _errors = (_task_row[3] or "").strip()
+        # 产物为空或只有错误信息 → 不推进
+        if not _result_text or (len(_result_text) < 50 and _errors):
+            log.warning(f"Auto-advance skipped: issue={_issue_id} agent={_agent_type} "
+                        f"no meaningful output (result_len={len(_result_text)}, errors={_errors[:100]})")
+            return
+
+    # 检查是否已有下一个 agent 的 running 事件（避免重复触发）
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                  "AND status IN ('running','dispatched') ORDER BY seq DESC LIMIT 1",
+                  (_repo_key, _issue_id, _next_agent))
+        _existing = c.fetchone()
+    if _existing:
+        return  # 已有下一个 agent 的 running 事件，不重复触发
+
+    log.info(f"Auto-advance: issue={_issue_id} agent={_agent_type} -> {_next_agent} "
+             f"(stage stuck at {_stage}, A2A not called by agent)")
+
+    # 异步触发 A2A（不阻塞 complete_task 返回）
+    def _trigger_a2a():
+        try:
+            import requests as _req
+            _issue_num = _issue_id.lstrip("#")
+            _repo_display = _repo_key.split(":", 1)[-1] if ":" in _repo_key else _repo_key
+            # 获取 bot token
+            from src.user.db import get_repo_bot_token_no_global
+            _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
+            _server_url = "https://example.com"
+            try:
+                from src.user.db import get_meta_value
+                _sbu = get_meta_value("server_base_url")
+                if _sbu:
+                    _server_url = _sbu
+            except Exception:
+                pass
+            _resp = _req.post(f"{_server_url}/api/a2a",
+                              json={"agent": _next_agent,
+                                    "payload": {"repository": _repo_display,
+                                                "issue_number": int(_issue_num) if _issue_num.isdigit() else _issue_num,
+                                                "context": f"auto-advance from {_agent_type} (A2A not called by agent)"}},
+                              headers={"Authorization": f"Bearer {_bot_token}",
+                                       "Content-Type": "application/json"},
+                              timeout=30)
+            log.info(f"Auto-advance A2A: status={_resp.status_code} agent={_next_agent} "
+                     f"issue={_issue_id} resp={_resp.text[:100]}")
+        except Exception as _e:
+            log.warning(f"Auto-advance A2A failed: {_e}")
+
+    threading.Thread(target=_trigger_a2a, daemon=True).start()
 
 
 def fail_task(task_id, error, exit_code=-1):

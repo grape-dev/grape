@@ -1,0 +1,60 @@
+# 华为云Skills分析Agent 配置文件
+# 通过 --config 参数指定此文件，或放置在项目根目录下自动加载
+
+# ===== 必填参数 =====
+# Skills仓库路径
+skills_repo: "./cache/skills-repo"
+
+# ===== 可选参数 =====
+# 指定分析的Skill名称列表（为空则分析全部）
+skill_names: []
+
+# SDK源码缓存目录
+sdk_cache_dir: "./cache/sdk-source"
+
+# CLI工具安装目录
+cli_install_dir: "./cache/koo-cli"
+
+# 报告输出目录
+output_dir: "./reports"
+
+# 检查点存储目录
+checkpoint_dir: "./cache/checkpoints"
+
+# 跳过CLI工具自动安装
+skip_cli_install: false
+
+# 从检查点恢复分析
+resume: false
+
+# 日志级别: DEBUG / INFO / WARNING / ERROR
+log_level: "INFO"
+
+# SDK仓库URL
+sdk_repo_url: "https://github.com/huaweicloud/huaweicloud-sdk-python-v3"
+
+# 最大重试次数
+max_retries: 3
+
+# ===== LLM配置 =====
+llm:
+  # LLM提供商: openai / pangu / custom
+  provider: ""
+
+  # 模型名称
+  model: ""
+
+  # API Key（也可通过环境变量 LLM_API_KEY 设置）
+  api_key: ""
+
+  # API Base URL（为空则使用默认值）
+  base_url: ""
+
+  # 温度参数
+  temperature: 0.1
+
+  # 最大Token数
+  max_tokens: 4096
+
+  # 是否禁用LLM增强分析
+  disabled: false

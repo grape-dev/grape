@@ -6,6 +6,7 @@ let _taskSel = null;          // 选中的任务
 let _taskQuery = '';          // 搜索关键字
 let _taskPage = 1;            // 当前页码
 const _TASKS_PER_PAGE = 15;   // 每页任务数
+let _taskPollTimer = null;    // 场景识别轮询定时器
 
 function renderTasks() {
   const el = document.getElementById('pageContent');
@@ -13,6 +14,29 @@ function renderTasks() {
   _taskSel = null;   // 进入页面重置选中（避免切换 repo 后详情残留旧仓库任务）
   el.innerHTML = '<div class="loading">' + I18N.t('tasks.loading') + '</div>';
   loadTasks();
+  _startScenePoll();
+}
+
+// 场景识别轮询：有待处理任务且场景未识别时，定期刷新
+function _startScenePoll() {
+  if (_taskPollTimer) clearInterval(_taskPollTimer);
+  _taskPollTimer = setInterval(function() {
+    // 只在有 active/processing 任务且场景未被 VOD 识别时才刷新
+    var needRefresh = _tasksAll.some(function(t) {
+      return (t.status === 'active' || t.status === 'processing') && t.scene_source !== 'vod';
+    });
+    if (needRefresh) {
+      loadTasks();
+    } else {
+      // 所有任务场景已识别（或无待处理任务）→ 停止轮询
+      clearInterval(_taskPollTimer);
+      _taskPollTimer = null;
+    }
+  }, 15000);  // 15 秒轮询
+}
+
+function _stopScenePoll() {
+  if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
 }
 
 function loadTasks() {
@@ -178,7 +202,8 @@ function _detailHtml(t) {
   const icon = isDone ? '✓' : isProc ? '⏳' : '#';
   // 场景名称
   var _sceneLabels = {default:'默认','cloud-native':'云原生','iac':'IaC','agent-dev':'Agent 开发','skill-dev':'技能开发','api-skill-dev':'API 技能开发','blog-publish':'博客发布'};
-  var sceneName = t.scene_id ? (_sceneLabels[t.scene_id] || t.scene_id) : '—';
+  var sceneName = t.scene_id ? (t.scene_name || _sceneLabels[t.scene_id] || t.scene_id) : '—';
+  var sceneBadge = t.scene_source === 'vod' ? '' : (t.scene_id && t.scene_source === 'repo_default' ? ' <span style="font-size:10px;color:var(--t3)">（默认）</span>' : '');
   // 多任务模式
   var subtaskBadge = t.is_subtask_mode ? '<span class="tg tg-q" style="font-size:10px">多任务模式</span>' : '<span class="ts t3" style="font-size:10px">单任务</span>';
   var parentIssue = t.parent_issue_number ? ' · 父任务 #' + t.parent_issue_number : '';
@@ -190,7 +215,7 @@ function _detailHtml(t) {
       <div class="tsk-m"><span>${I18N.t('tasks.detail.status')}</span><b class="${tagCls}">${tagText}</b></div>
       <div class="tsk-m"><span>${I18N.t('tasks.detail.task_id')}</span><b>#${t.id}</b></div>
       <div class="tsk-m"><span>${I18N.t('tasks.detail.repo')}</span><b>${t.repo_key}</b></div>
-      <div class="tsk-m"><span>流水线场景</span><b>${sceneName}</b></div>
+      <div class="tsk-m"><span>流水线场景</span><b>${sceneName}${sceneBadge}</b></div>
       <div class="tsk-m"><span>任务模式</span><b>${subtaskBadge}${parentIssue}</b></div>
       <div class="tsk-m"><span>${I18N.t('tasks.detail.created_at')}</span><b>${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
       ${t.completed_at ? `<div class="tsk-m"><span>${I18N.t('tasks.detail.completed_at')}</span><b>${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
@@ -238,10 +263,10 @@ function openTaskCreateModal() {
     <h3 style="margin:0 0 14px;font-size:15px;color:#111">${I18N.t('tasks.create.modal_title')}</h3>
     <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
       <div style="font-size:11px;color:#555">${I18N.t('tasks.create.repo_label')}<b>${esc(defaultRepo) || I18N.t('tasks.create.repo_empty')}</b></div>
-      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.title_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</span>
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span> <span style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</span>
         <input id="tcCreateTitle" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" placeholder="${I18N.t('tasks.create.title_placeholder')}">
       </label>
-      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.desc_label')}
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span> <span style="font-size:11px;color:#888">${I18N.t('tasks.create.desc_hint')}</span>
         <textarea id="tcCreateDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical" placeholder="${I18N.t('tasks.create.desc_placeholder')}"></textarea>
       </label>
       <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.scene_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.scene_hint')}</span>
@@ -293,6 +318,13 @@ function createTaskSubmit() {
   const showErr = (msg) => { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
   if (!repoKey.trim()) { showErr(I18N.t('tasks.create.err_no_repo')); return; }
   if (!title.trim()) { showErr(I18N.t('tasks.create.err_no_title')); return; }
+  if (!desc.trim()) { showErr(I18N.t('tasks.create.err_no_desc')); return; }
+  // 本地查重：同仓库同标题已存在 → 提示用户
+  var _dup = _tasksAll.filter(function(t) { return (t.title || '').trim() === title.trim(); });
+  if (_dup.length > 0) {
+    showErr(I18N.t('tasks.create.err_dup_title', {issue: '#' + (_dup[0].issue_number || _dup[0].id)}));
+    return;
+  }
   const btn = document.getElementById('tcSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.create.btn_creating'); }
   API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId, is_subtask_mode: subtaskMode})

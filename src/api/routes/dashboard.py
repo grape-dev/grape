@@ -619,13 +619,13 @@ async def get_ops_timeline(repo: str = ""):
         c = db.cursor()
         if repo_key:
             c.execute(
-                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload "
+                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload, repo_key "
                 "FROM events WHERE repo_key=? AND issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at",
                 (repo_key,)
             )
         else:
             c.execute(
-                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload "
+                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload, repo_key "
                 "FROM events WHERE issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at"
             )
         rows = c.fetchall()
@@ -661,12 +661,15 @@ async def get_ops_timeline(repo: str = ""):
                 _dev = _host or _local_hostname or ""
             rt_name_map[_rid] = _inst_name(_name, _dev, _cid)
 
-    # 按 issue_id 分组
+    # 按 issue_id 分组（同时记录每个 issue 的 repo_key）
     group = {}
+    issue_repo = {}
     for row in rows:
-        seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload = row
+        seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload, ev_repo_key = row
         if issue_id not in group:
             group[issue_id] = []
+            if ev_repo_key:
+                issue_repo[issue_id] = ev_repo_key
         _rt_id = runtime_map.get((issue_id, seq), 0)
         group[issue_id].append({
             "seq": seq, "eventType": event_type, "agentType": agent_type or "",
@@ -697,6 +700,7 @@ async def get_ops_timeline(repo: str = ""):
             del ev["_payload"]
         issues.append({
             "issueId": issue_id, "title": issue_title,
+            "repoKey": issue_repo.get(issue_id, repo_key),
             "eventCount": len(evs),
             "firstAt": evs[0]["createdAt"] if evs else "",
             "lastAt": evs[-1]["createdAt"] if evs else "",

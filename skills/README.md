@@ -1,30 +1,25 @@
-# DevOps Grape Skills
+# Grape Skills
 
-本目录是 DevOps Grape 的**官方技能库**，技能按 `agent_type` 一层分组存放：
+Grape 官方技能仓库。技能内容按 `agent_type` 分组存放于 `skills/` 目录，供
+Grape 系统在构建/部署时拉取使用（方案：构建期 clone / 卷挂载，见 grape 仓库
+`docs/new-version2/skills-standalone-repo-build-time-pull.md`）。
+
+## 仓库结构
 
 ```
-skills/
-├── vod/            # VOD Agent 技能（开发者声音分析）
-├── issue/          # Issue Agent 技能（Issue 运营）
-├── coding/         # Coding Agent 技能（代码实现）
-├── qa/             # QA Agent 技能（审查验证）
-├── sre/            # SRE Agent 技能（构建部署/运维）
-├── chat/           # Chat Agent 技能（对话/IM 通知）
-├── custom/         # 运行时：用户上传技能（不入 git）
-├── repo/           # 运行时：仓库技能（不入 git）
-└── _template/      # 技能模板
+grape-skills/
+├── skill-description.json     # 官方技能清单（agent_type/path/description），随本仓发版
+├── skills/
+│   ├── vod/                   # VOD Agent 技能（开发者声音分析）
+│   ├── issue/                 # Issue Agent 技能（Issue 运营）
+│   ├── coding/                # Coding Agent 技能（代码实现）
+│   ├── qa/                    # QA Agent 技能（审查验证）
+│   ├── sre/                   # SRE Agent 技能（构建部署/运维）
+│   ├── chat/                  # Chat Agent 技能（对话/IM 通知）
+│   └── _template/             # 技能模板（上传/创建的脚手架）
 ```
-
-> **重要**：官方技能内容（`vod/ issue/ coding/ qa/ sre/ chat/ _template`）已拆分至
-> **独立技能仓库** [grape-skills](https://gitcode.com/grape-dev/grape-skills)，由构建/部署脚本
-> `scripts/sync_skills.sh` 拉取铺入本目录（方案见
-> `docs/new-version2/skills-standalone-repo-build-time-pull.md`）。本仓库不再直接维护
-> 官方技能文件。
 
 ## 技能清单
-
-37 个官方技能的分类与字段以 `configs/skill-description.json` 为准
-（构建期由 `sync_skills.sh` 从技能仓库同步铺入）。
 
 | agent_type | 技能 |
 |---|---|
@@ -35,31 +30,42 @@ skills/
 | sre | cloud-deploy、build-debug、deploy-guard、changelog-gen、incident-triage、skill-publish、huawei-cloud、runtime-install、blog-publish、blog-manager、iac-sre、os-disk-list |
 | chat | chat、im-notify |
 
-## 目录结构（单个技能）
-
-```
-skills/<agent_type>/<skill>/
-├── SKILL.md            # 技能指令（frontmatter + 正文）
-├── references/         # 参考文档（API 参考、审查规范等）
-├── scripts/            # 辅助脚本（可选）
-└── templates/          # 模板（可选）
-```
+> 完整字段（name/agent_type/path/description）以 `skill-description.json` 为准。
 
 ## 技能格式
 
-见 [SKILL-SPEC.md](./SKILL-SPEC.md)。
+每个技能是一个独立目录，含 `SKILL.md`（frontmatter 含 `name`/`description`/`version`
+等元信息），以及可选的 `references/`、`scripts/`、`templates/`：
 
-## 如何新增 / 修改官方技能
+```
+skills/<agent_type>/<skill>/
+├── SKILL.md
+├── references/        # 可选的参考资料
+├── scripts/           # 可选的辅助脚本
+└── templates/         # 可选的模板
+```
 
-技能内容的增删改在独立技能仓库 `grape-skills` 中进行：
+新增技能时：在对应 `agent_type` 下建目录，并同步更新
+`skill-description.json`（path = `<agent_type>/<skill>`）。
 
-1. 在 `grape-skills` 的 `skills/<agent_type>/` 下建/改技能目录；
-2. 同步更新 `grape-skills/skill-description.json`（path = `<agent_type>/<skill>`）；
-3. 提交 PR 合并后打 tag；grape 侧部署时执行 `bash scripts/sync_skills.sh` 更新。
+## 版本管理
 
-## 环境变量
+- `main` 为默认分支；
+- 版本 tag 语义化（如 `v1.0.0`）；向后不兼容变更升主版本号，Grape 发布物锁定
+  `tag` 或 `commit`。
 
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `DEVOPS_SKILLS_DIR` | Skills 目录的绝对路径 | `/app/skills` |
-| `DEVOPS_EVENT_TYPE` | 当前事件类型 | `issue_opened` |
+## 运行时目录说明
+
+`skills/custom/`（用户上传技能）与 `skills/repo/`（仓库技能）是 Grape 运行时
+动态产生的目录，**不属于本仓库**，勿提交。
+
+## 使用
+
+本仓库不直接运行；由 Grape 系统在构建/部署时拉取并铺入其部署根 `skills/`：
+
+```bash
+# 预览
+git clone https://gitcode.com/grape-dev/grape-skills.git
+# 部署侧（Grape 维护的 sync 脚本）
+# git clone --depth 1 --branch <SKILLS_REF> <SKILLS_REPO> <stage>
+# cp -a <stage>/skills/<agent> <deploy-root>/skills/<agent>

@@ -14,7 +14,7 @@
 # =====================================================================
 set -euo pipefail
 
-SKILLS_REPO="${SKILLS_REPO:-https://gitcode.com/grape-dev/grape-skills.git}"
+SKILLS_REPO="${SKILLS_REPO:-https://Jason7602:shhnrXxGm1E1SJ-FxKxQ9M2Q@gitcode.com/grape-dev/grape-skills.git}"
 SKILLS_REF="${SKILLS_REF:-main}"
 
 # 官方技能 agent_type 目录（+ _template），按部署结构铺入

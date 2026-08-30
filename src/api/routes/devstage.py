@@ -110,13 +110,36 @@ async def list_specs(template_id: str = "", user: dict = Depends(get_current_use
         raise HTTPException(status_code=502, detail={"code": e.code, "message": str(e)})
 
 
+GRAPE_AI_DEVSPACE_TEMPLATE = "4ef59a2b4d3d4909aacd80f6007c00b2"
+
+
 @router.get("/environments")
 async def list_environments(user: dict = Depends(get_current_user)):
-    """查询所有 DevStage 开发环境"""
+    """查询所有 DevStage 开发环境（仅返回 Grape AI Devspace 模板创建的环境）"""
     ak, sk = _get_ak_sk(user)
     try:
         envs = _list_envs(ak, sk)
-        return {"environments": envs}
+        # 过滤：只显示通过 Grape 创建的环境
+        # 条件 1: template_id 匹配 Grape AI Devspace 模板
+        # 条件 2: environment_variables 中含 GRAPE_DEV_SERVER（Grape 创建时注入，
+        #         用户在控制台手动用同模板创建的环境不会有此变量）
+        filtered = []
+        for e in envs:
+            tpl = (e.get("template_id") or "").strip()
+            env_vars = e.get("_env_vars") or {}
+            if tpl == GRAPE_AI_DEVSPACE_TEMPLATE and env_vars.get("GRAPE_DEV_SERVER"):
+                filtered.append(e)
+        # 防御：如果过滤后为空但原始列表非空，说明 v1 detail 可能获取失败，
+        # 此时回退到仅按 template_id 过滤（放宽条件，至少排除非 Grape 模板的环境）
+        if not filtered and envs:
+            tpl_only = [e for e in envs if (e.get("template_id") or "").strip() == GRAPE_AI_DEVSPACE_TEMPLATE]
+            if tpl_only:
+                log.warning(f"GRAPE_DEV_SERVER 过滤后为空，回退到仅按 template_id 过滤，匹配 {len(tpl_only)} 个")
+                return {"environments": tpl_only}
+            # template_id 也匹配不到，全部回退
+            log.warning(f"过滤后为空但原始列表有 {len(envs)} 个环境，回退返回全部")
+            return {"environments": envs}
+        return {"environments": filtered}
     except DevStageError as e:
         raise HTTPException(status_code=502, detail={"code": e.code, "message": str(e)})
 

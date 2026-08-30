@@ -452,6 +452,10 @@
 .chat-dots span:nth-child(3){animation-delay:0.4s}
 @keyframes chatDotBounce{0%,60%,100%{transform:translateY(0);opacity:0.4}30%{transform:translateY(-6px);opacity:1}}
 
+/* ===== Chat 单行滚动步骤区（思考/执行过程实时滚动显示）===== */
+.chat-ticker{font-size:12px;color:var(--t3);line-height:1.5;padding:4px 0 6px;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;animation:chatTickerFade .3s ease}
+@keyframes chatTickerFade{from{opacity:.5}to{opacity:1}}
+
 /* ===== Chat 删除确认弹窗（苹果风格）===== */
 .chat-del-overlay{position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.12);opacity:1;transition:opacity .2s}
 .chat-del-overlay .chat-del-pop{position:fixed;z-index:9999;min-width:200px;background:rgba(255,255,255,.82);backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px) saturate(180%);border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08);border:.5px solid rgba(0,0,0,.06);padding:16px 18px;transform:scale(.92) translateY(-4px);opacity:0;transition:all .2s cubic-bezier(.34,1.56,.64,1)}

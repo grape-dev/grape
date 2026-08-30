@@ -592,16 +592,22 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     """
     from src.repo_key import to_repo_key, split_owner_repo
     if not body.repo_key or not body.title.strip():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key / title 必填"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库和标题必填"})
+    if not (body.description or "").strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "任务描述必填"})
     repo_key = to_repo_key(body.repo_key)
     owner, rname = split_owner_repo(repo_key)
     api_token = get_user_token(user["username"])
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
     assignee = (body.assignee or "").strip() or user["username"]  # General Settings Account：登录用户 gitcode 账号
-    # 1) 幂等：同 title open issue 复用
+    # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
     issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip())
     created = False
+    if issue_num is not None:
+        raise HTTPException(status_code=409, detail={"code": 409,
+                                                     "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
+                                                     "issue_number": issue_num})
     if issue_num is None:
         resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
                                    (body.description or "").strip(), assignee=assignee)
@@ -858,12 +864,38 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
             rows = []
     # 查 issue_state 中的 scene_id（按 repo_key + issue_number 批量查询）
     from src.api.session_store import get_issue_scene
-    return {"tasks": [{
-        "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
-        "title": r[4] or "", "task_description": r[5] or "",
-        "conversation_id": r[6] or "", "status": r[7],
-        "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
-        "is_subtask_mode": r[11] or 0,
-        "parent_issue_number": r[12] or 0,
-        "scene_id": (get_issue_scene(to_repo_key(from_repo_key(r[2])), f"#{r[3]}") or ("default", 0))[0],
-    } for r in rows]}
+    from src.api.pipeline_config import get_pipeline_config
+    from src.api.session_store import get_issue_stage
+    tasks_out = []
+    for r in rows:
+        _rk = to_repo_key(from_repo_key(r[2]))
+        _issue_id = f"#{r[3]}"
+        # 区分场景来源：issue_state.scene_id（VOD 识别）vs 仓库默认场景
+        _st = get_issue_stage(_rk, _issue_id)
+        _issue_scene_id = (_st.get("scene_id") or "") if _st else ""
+        if _issue_scene_id:
+            _scene_id = _issue_scene_id
+            _scene_source = "vod"  # VOD 识别
+        else:
+            # 回退到仓库默认场景
+            _scene_id = (get_issue_scene(_rk, _issue_id) or ("default", 0))[0]
+            _scene_source = "repo_default"
+        _scene_name = ""
+        try:
+            _cfg = get_pipeline_config(_scene_id, repo_key=_rk)
+            if _cfg:
+                _scene_name = _cfg.get("name", _scene_id)
+        except Exception:
+            pass
+        tasks_out.append({
+            "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
+            "title": r[4] or "", "task_description": r[5] or "",
+            "conversation_id": r[6] or "", "status": r[7],
+            "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
+            "is_subtask_mode": r[11] or 0,
+            "parent_issue_number": r[12] or 0,
+            "scene_id": _scene_id,
+            "scene_name": _scene_name,
+            "scene_source": _scene_source,
+        })
+    return {"tasks": tasks_out}

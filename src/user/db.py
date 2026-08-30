@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     hw_iam_domain TEXT DEFAULT '',
     hw_iam_user TEXT DEFAULT '',
     hw_iam_password TEXT DEFAULT '',
-    hw_iam_account_type TEXT DEFAULT 'iam'
+    hw_iam_account_type TEXT DEFAULT 'iam',
+    last_active_at TEXT DEFAULT NULL  -- 最后活跃时间（用户在线状态判定）
 )
 """
 
@@ -590,6 +591,11 @@ def init_db():
                 db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
             except Exception:
                 pass
+        # 兼容旧列迁移（幂等）：last_active_at（用户在线状态判定）
+        try:
+            db.execute("ALTER TABLE user_accounts ADD COLUMN last_active_at TEXT DEFAULT NULL")
+        except Exception:
+            pass
         db.execute(_CREDENTIALS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
@@ -1571,7 +1577,7 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             row = c.fetchone()
             if row:
                 c.execute(
-                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
+                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
                     (a.get("display_name", name),
                      1 if a.get("installed") else 0, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,

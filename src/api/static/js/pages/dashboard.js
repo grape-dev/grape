@@ -326,21 +326,63 @@ function renderDashboard(data) {
         engine_runtime_ids: n.engine_runtime_ids || [],
       };
     });
-    if (currentScene && currentScene !== 'default' && isCustomScene) {
-      // 编辑已有自定义场景：直接 PUT，不弹名称/描述
-      API.put('/scenes/' + currentScene, { nodes: nodesPayload }).then(() => {
-        window._dashboardEditing = false;
-        app.showToast('场景已保存');
-        API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
-      }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
-    } else {
-      // 创建新场景：POST
-      API.post('/scenes', { name: '自定义场景', description: '', scope: 'user', nodes: nodesPayload }).then(r => {
-        window._dashboardEditing = false;
-        app.showToast('场景创建成功');
-        if (r.scene_id) { applyScene(owner, name, r.scene_id); }
-      }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
-    }
+
+    // 弹框设置场景名称 / 描述 / 可见范围
+    const isEditingExisting = currentScene && currentScene !== 'default' && isCustomScene;
+    const existingName = (currentSceneObj && currentSceneObj.name) || '';
+    const existingDesc = (currentSceneObj && currentSceneObj.description) || '';
+    const existingScope = (currentSceneObj && currentSceneObj.scope) || 'user';
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+    overlay.innerHTML = `<div style="background:#fff;border-radius:18px;padding:28px;min-width:360px;max-width:460px;box-shadow:0 12px 48px rgba(0,0,0,.15)">
+      <h3 style="margin:0 0 20px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${isEditingExisting ? '编辑自定义场景' : '保存自定义场景'}</h3>
+      <div style="margin-bottom:14px">
+        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">场景名称</label>
+        <input id="sceneNameInput" type="text" value="${(existingName||'').replace(/"/g,'&quot;')}" placeholder="如：我的开发流程" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
+      </div>
+      <div style="margin-bottom:14px">
+        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">描述（可选）</label>
+        <input id="sceneDescInput" type="text" value="${(existingDesc||'').replace(/"/g,'&quot;')}" placeholder="场景描述..." style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
+      </div>
+      <div style="margin-bottom:20px">
+        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">可见范围</label>
+        <select id="sceneScopeSelect" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
+          <option value="user" ${existingScope==='user'?'selected':''}>个人级（所有仓库可见）</option>
+          <option value="repo" ${existingScope==='repo'?'selected':''}>仓库级（仅当前仓库可见）</option>
+        </select>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">取消</button>
+        <button class="ap-btn ap-btn-p" id="confirmSaveSceneBtn">保存</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+
+    document.getElementById('confirmSaveSceneBtn').onclick = function() {
+      const sceneName = document.getElementById('sceneNameInput').value.trim();
+      if (!sceneName) { app.showToast('请输入场景名称'); return; }
+      const sceneDesc = document.getElementById('sceneDescInput').value.trim();
+      const sceneScope = document.getElementById('sceneScopeSelect').value;
+
+      if (isEditingExisting) {
+        // 编辑已有自定义场景：PUT（含名称/描述更新）
+        API.put('/scenes/' + currentScene, { name: sceneName, description: sceneDesc, nodes: nodesPayload }).then(() => {
+          window._dashboardEditing = false;
+          overlay.remove();
+          app.showToast('场景已保存');
+          API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
+        }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
+      } else {
+        // 创建新场景：POST
+        API.post('/scenes', { name: sceneName, description: sceneDesc, scope: sceneScope, nodes: nodesPayload }).then(r => {
+          window._dashboardEditing = false;
+          overlay.remove();
+          app.showToast('场景创建成功');
+          if (r.scene_id) { applyScene(owner, name, r.scene_id); }
+        }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
+      }
+    };
   };
 }
 
