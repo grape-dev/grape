@@ -190,7 +190,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref, computed, watch, nextTick } from 'vue'
+import { onMounted, ref, computed, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../api'
 import PaginationBar from '../components/PaginationBar.vue'
@@ -216,7 +216,7 @@ function issueSvg(issueId) {
 
 
 async function openLogModal(taskId, t) {
-  logModal.value = { show: true, loading: true, messages: [], info: { issueId: t.issueId, repoKey: t.repoName ? 'gitcode:' + t.repoName : '', agentType: t.agentType, skill: t.skill, engine: t.engine, status: t.status } }
+  logModal.value = { show: true, loading: true, messages: [], info: { issueId: t.issueId, repoKey: t.repoKey || '', agentType: t.agentType, skill: t.skill, engine: t.engine, status: t.status } }
   try {
     const [msgsResp, infoResp] = await Promise.all([
       http.get(`/runtime/tasks/${taskId}/messages`),
@@ -602,13 +602,6 @@ async function resetToken() {
 }
 
 onMounted(() => load())
-
-// 页面加载后自动加载
-watch(() => info.value.repoMatrix, (val) => {
-  if (val && !repoIssues.value.length) {
-    loadRepoIssues(0)
-  }
-})
 </script>
 
 <style scoped>

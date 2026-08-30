@@ -5,14 +5,6 @@
       <span class="badge">{{ totalElements }} 条</span>
     </div>
     <div style="padding:20px 28px">
-      <!-- 引擎类型统计 -->
-      <div class="stats">
-        <div class="stat-card"><div class="stat-label">引擎总数</div><div class="stat-value">{{ total }}</div></div>
-        <div v-for="(cnt, t) in stats" :key="t" class="stat-card">
-          <div class="stat-label">{{ t }}</div><div class="stat-value small">{{ cnt }}</div>
-        </div>
-      </div>
-
       <!-- 健康分布徽章行（点击联动筛选，对齐设备管理页） -->
       <div class="em-stats">
         <button class="em-stat" :class="{ on: !health }" @click="setHealth('')">全部 <strong>{{ totalElements }}</strong></button>
@@ -206,7 +198,6 @@ function dotStyle(h) {
 }
 
 const typeOptions = computed(() => Object.keys(stats.value))
-const total = computed(() => Object.values(stats.value).reduce((s, n) => s + n, 0))
 
 async function loadDevices() {
   const { data } = await http.get('/devices', { params: { size: 100 } })

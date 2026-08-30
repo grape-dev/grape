@@ -142,7 +142,7 @@
           <div v-if="issueModal.loading" class="tl-diagram-loading">加载中...</div>
           <div v-show="!issueModal.loading && issueModal.view === 'diagram'" class="tl-diagram-container">
             <div v-if="!issueModal.svgRendered" class="tl-diagram-loading">渲染中...</div>
-            <div v-else v-html="issueModal.svg" class="tl-diagram-svg"></div>
+            <div v-else v-html="issueModal.svg" class="tl-diagram-svg" ref="diagramSvgRef"></div>
           </div>
           <div v-show="!issueModal.loading && issueModal.view === 'events'">
             <table class="vod-table">
@@ -345,6 +345,7 @@ function formatTaskDur(t) {
 }
 
 const issueModal = ref({ show: false, loading: false, issueId: "", repoName: "", eventCount: 0, events: [], view: "diagram", svg: "", svgRendered: false })
+const diagramSvgRef = ref(null)
 async function openIssueDetail(issueId, repoKey) {
   issueModal.value = { show: true, loading: true, issueId, repoName: "", eventCount: 0, events: [], view: "diagram", svg: "", svgRendered: false }
   try {
@@ -453,7 +454,7 @@ function fixLifelineHeight(svgStr, eventCount) {
 }
 
 function bindMermaidClicks(events, evTypes) {
-  const el = document.querySelector(".tl-diagram-svg")
+  const el = diagramSvgRef.value
   if (!el) return
   const svg = el.querySelector("svg")
   if (!svg) return

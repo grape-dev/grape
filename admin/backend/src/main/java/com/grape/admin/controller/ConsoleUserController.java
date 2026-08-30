@@ -132,10 +132,6 @@ public class ConsoleUserController {
             }, id);
         } catch (Exception e) { /* ignore */ }
 
-        // 用户活动统计（按状态机6个标准status值，对齐 observability）
-        try {
-        } catch (Exception e) { /* ignore */ }
-
         // 仓库 × Issue 矩阵（Issue 分析 tab 用）
         try {
             List<Map<String, Object>> repoMatrix = grapeJdbc.query(
@@ -293,30 +289,55 @@ public class ConsoleUserController {
 
     @GetMapping("/{id}/issue-timeline")
     public Map<String, Object> issueTimeline(@PathVariable int id,
-                                             @RequestParam String repoKey,
+                                             @RequestParam(required = false) String repoKey,
                                              @RequestParam String issueId) {
         Map<String, Object> result = new LinkedHashMap<>();
         List<Map<String, Object>> events = new ArrayList<>();
         try {
-            // 构建查询：issueId 必填，repoKey 可选
+            // 1. 限制到当前用户关联的仓库（安全：admin 不能查非自己用户的 issue）
+            List<String> userRepoKeys = grapeJdbc.queryForList(
+                "SELECT DISTINCT m.repo_key FROM managed_repos m " +
+                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?", String.class, id);
+            if (userRepoKeys.isEmpty()) {
+                result.put("issueId", issueId);
+                result.put("events", events);
+                return result;
+            }
+
+            // 2. 构建 WHERE：issueId + 用户仓库限制 + 可选 repoKey 筛选
             StringBuilder where = new StringBuilder(" WHERE e.issue_id=?");
             List<Object> params = new ArrayList<>();
             params.add(issueId);
+            if (userRepoKeys.size() == 1) {
+                where.append(" AND e.repo_key=?");
+                params.add(userRepoKeys.get(0));
+            } else {
+                where.append(" AND e.repo_key IN (");
+                for (int i = 0; i < userRepoKeys.size(); i++) {
+                    if (i > 0) where.append(",");
+                    where.append("?");
+                    params.add(userRepoKeys.get(i));
+                }
+                where.append(")");
+            }
             if (repoKey != null && !repoKey.isEmpty()) {
                 where.append(" AND e.repo_key=?");
                 params.add(repoKey);
             }
+
+            // 3. LEFT JOIN 一次性查出 events + task_id + engine 信息（对齐 RuntimeController.issueEvents）
             events = grapeJdbc.query(
                 "SELECT e.seq, e.event_type, e.agent_type, e.skill, e.status, e.duration, e.created_at, " +
                 "e.repo_key, " +
-                "(SELECT t.id FROM agent_tasks t WHERE t.event_seq = e.seq AND t.repo_key = e.repo_key LIMIT 1) as task_id, " +
-                "(SELECT t.runtime_id FROM agent_tasks t WHERE t.event_seq = e.seq AND t.repo_key = e.repo_key LIMIT 1) as runtime_id, " +
-                "(SELECT ar.name FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as engine_name, " +
-                "(SELECT ar.credential_id FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as credential_id, " +
-                "(SELECT ar.host_name FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as host_name, " +
-                "(SELECT rc.device_name FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id JOIN runtime_credentials rc ON ar.credential_id = rc.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as device_name, " +
-                "(SELECT rc.last_ip FROM agent_tasks t2 JOIN agent_runtimes ar ON t2.runtime_id = ar.id JOIN runtime_credentials rc ON ar.credential_id = rc.id WHERE t2.event_seq = e.seq AND t2.repo_key = e.repo_key LIMIT 1) as last_ip " +
-                "FROM events e " + where + " ORDER BY e.created_at",
+                "t.id as task_id, " +
+                "ar.name as engine_name, " +
+                "COALESCE(rc.device_name, '本机直连') as engine_device, " +
+                "COALESCE(rc.last_ip, '127.0.0.1') as last_ip " +
+                "FROM events e " +
+                "LEFT JOIN agent_tasks t ON t.event_seq = e.seq AND t.repo_key = e.repo_key " +
+                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
+                where + " ORDER BY e.created_at",
                 (rs, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
                     r.put("seq", rs.getInt("seq"));
@@ -368,27 +389,14 @@ public class ConsoleUserController {
         }
     }
 
-    /** 引擎实例名（对齐 grape observability instance_name 逻辑：{type}-{device_suffix}） */
+    /** 引擎实例名（对齐健康中心格式: name-device(ip)） */
     private String buildEngineName(java.sql.ResultSet rs) throws java.sql.SQLException {
         String engineName = rs.getString("engine_name");
         if (engineName == null || engineName.isEmpty()) return null;
-        int credId = rs.getInt("credential_id");
-        String deviceName = rs.getString("device_name");
-        String hostName = rs.getString("host_name");
-        // 本机引擎（credential_id=0）：优先用 host_name
-        if (credId == 0) {
-            deviceName = hostName != null ? hostName : "";
-        }
-        String et = engineName.trim().toLowerCase();
-        String suffix = "";
-        if (deviceName != null && !deviceName.isEmpty()) {
-            // sanitize: 取最后一段（去掉域名等），转小写
-            String[] parts = deviceName.split("\\.");
-            suffix = parts[0].toLowerCase().replaceAll("[^a-z0-9-]", "");
-        }
-        if (suffix.isEmpty()) {
-            suffix = "cred" + credId;
-        }
-        return et + "-" + suffix;
+        String device = rs.getString("engine_device");
+        String ip = rs.getString("last_ip");
+        if (device == null || device.isEmpty()) device = "本机直连";
+        if (ip == null || ip.isEmpty()) ip = "127.0.0.1";
+        return engineName + "-" + device + "(" + ip + ")";
     }
 }

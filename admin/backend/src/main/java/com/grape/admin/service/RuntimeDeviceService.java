@@ -228,11 +228,20 @@ public class RuntimeDeviceService {
         taskFilterOptions.put("agentType", countBy(engineTasks, AgentTaskRo::getAgentType));
 
         // runtimeId → 引擎名映射（对齐健康中心格式: name-device(ip)）
+        // 批量查 credentials 避免 N+1
+        Set<Integer> credIds = engines.stream()
+                .map(AgentRuntimeRo::getCredentialId)
+                .filter(cid -> cid != null)
+                .collect(Collectors.toSet());
+        Map<Integer, RuntimeCredentialRo> credById = credIds.isEmpty()
+                ? Map.of()
+                : credentialRepository.findAllById(credIds).stream()
+                        .collect(Collectors.toMap(RuntimeCredentialRo::getId, cred -> cred, (a, b) -> a));
         Map<Integer, String> engineNameById = engines.stream()
                 .collect(Collectors.toMap(AgentRuntimeRo::getId,
                         r -> {
                             RuntimeCredentialRo rc = r.getCredentialId() == null ? null
-                                    : credentialRepository.findById(r.getCredentialId()).orElse(null);
+                                    : credById.get(r.getCredentialId());
                             String devName = rc != null && rc.getDeviceName() != null && !rc.getDeviceName().isBlank()
                                     ? rc.getDeviceName() : "本机直连";
                             String ip = rc != null && rc.getLastIp() != null ? rc.getLastIp() : "127.0.0.1";
