@@ -6,6 +6,7 @@ let _taskSel = null;          // 选中的任务
 let _taskQuery = '';          // 搜索关键字
 let _taskPage = 1;            // 当前页码
 const _TASKS_PER_PAGE = 15;   // 每页任务数
+let _taskPollTimer = null;    // 场景识别轮询定时器
 
 function renderTasks() {
   const el = document.getElementById('pageContent');
@@ -13,6 +14,29 @@ function renderTasks() {
   _taskSel = null;   // 进入页面重置选中（避免切换 repo 后详情残留旧仓库任务）
   el.innerHTML = '<div class="loading">' + I18N.t('tasks.loading') + '</div>';
   loadTasks();
+  _startScenePoll();
+}
+
+// 场景识别轮询：有待处理任务且场景未识别时，定期刷新
+function _startScenePoll() {
+  if (_taskPollTimer) clearInterval(_taskPollTimer);
+  _taskPollTimer = setInterval(function() {
+    // 只在有 active/processing 任务且 scene_id 为空时才刷新
+    var needRefresh = _tasksAll.some(function(t) {
+      return (t.status === 'active' || t.status === 'processing') && !t.scene_id;
+    });
+    if (needRefresh) {
+      loadTasks();
+    } else {
+      // 所有任务场景已识别（或无待处理任务）→ 停止轮询
+      clearInterval(_taskPollTimer);
+      _taskPollTimer = null;
+    }
+  }, 15000);  // 15 秒轮询
+}
+
+function _stopScenePoll() {
+  if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
 }
 
 function loadTasks() {

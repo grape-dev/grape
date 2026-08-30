@@ -258,6 +258,8 @@ function loadAgentTypes() {
     pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+    // 离开任务中心时停止场景识别轮询
+    if (view !== 'tasks' && typeof _stopScenePoll === 'function') _stopScenePoll();
 
     if (repo) {
       repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.fullName || (repo.owner + '/' + repo.name)}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
