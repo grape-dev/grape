@@ -810,8 +810,8 @@ def _sync_official_skills():
                     updated += 1
                 else:
                     c.execute(
-                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
-                        (skill_name, display_name, description, agent_type, skill_path)
+                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash) VALUES (?,?,?,?,?,'official','',?)",
+                        (skill_name, display_name, description, agent_type, skill_path, "")
                     )
                     added += 1
             db.commit()
@@ -1790,3 +1790,12 @@ def _migrate_tables():
                 log.info(f"Seeded {_imported} official scenes from pipelines.json into devops_pipeline_scene")
     except Exception as e:
         log.warning(f"Scene seed import failed: {e}")
+    # ===== 官方技能 OBS 同步：skill 表新增 content_hash 字段（official-skill-obs-sync-design.md §4.4）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "skill", "content_hash", "VARCHAR(256) DEFAULT ''")
+            db.commit()
+        log.info("Added content_hash column to skill")
+    except Exception as e:
+        log.warning(f"Add skill.content_hash column failed: {e}")

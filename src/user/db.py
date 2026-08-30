@@ -765,13 +765,13 @@ def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
 
 
 def get_skill_by_id(skill_id) -> dict | None:
-    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type）"""
+    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type、content_hash）"""
     if not skill_id:
         return None
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
+            c.execute("SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id, content_hash FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
             row = c.fetchone()
             if not row:
                 return None
@@ -780,10 +780,97 @@ def get_skill_by_id(skill_id) -> dict | None:
                 "description": row[3] or "", "agent_type": row[4] or "",
                 "skill_path": row[5] or row[1], "file_path": row[6] or "",
                 "scope": row[7] or "official", "owner_id": row[8] or "",
+                "content_hash": row[9] or "",
             }
     except Exception as e:
         log.warning(f"get_skill_by_id failed: {e}")
         return None
+
+
+def get_skill_by_name(skill_name: str, scope: str = "official") -> dict | None:
+    """按 skill_name + scope 查询技能记录（含 is_active=0 的，用于软删除恢复检测）"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id, skill_name, skill_path, file_path, content_hash, is_active FROM skill WHERE skill_name=? AND scope=? LIMIT 1", (skill_name, scope))
+            row = c.fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0], "skill_name": row[1], "skill_path": row[2] or row[1],
+                "file_path": row[3] or "", "content_hash": row[4] or "",
+                "is_active": row[5],
+            }
+    except Exception as e:
+        log.warning(f"get_skill_by_name failed: {e}")
+        return None
+
+
+def get_skill_content_hash(skill_name: str, scope: str = "official") -> str:
+    """读取官方技能的 content_hash（变更检测用）"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT content_hash FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1", (skill_name, scope))
+            row = c.fetchone()
+            return row[0] if row else ""
+    except Exception as e:
+        log.warning(f"get_skill_content_hash failed: {e}")
+        return ""
+
+
+def update_skill_content_hash(skill_name: str, scope: str, content_hash: str, file_path: str = "") -> bool:
+    """更新技能的 content_hash 和 file_path（OBS 同步后调用）"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            if file_path:
+                c.execute("UPDATE skill SET content_hash=?, file_path=? WHERE skill_name=? AND scope=?", (content_hash, file_path, skill_name, scope))
+            else:
+                c.execute("UPDATE skill SET content_hash=? WHERE skill_name=? AND scope=?", (content_hash, skill_name, scope))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"update_skill_content_hash failed: {e}")
+        return False
+
+
+def deactivate_skill(skill_name: str, scope: str = "official") -> bool:
+    """软删除：标记 is_active=0（本地技能目录被删除时调用）"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE skill SET is_active=0 WHERE skill_name=? AND scope=? AND is_active=1", (skill_name, scope))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"deactivate_skill failed: {e}")
+        return False
+
+
+def reactivate_skill(skill_name: str, scope: str = "official") -> bool:
+    """重新激活：标记 is_active=1（本地技能目录恢复时调用）"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE skill SET is_active=1 WHERE skill_name=? AND scope=? AND is_active=0", (skill_name, scope))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"reactivate_skill failed: {e}")
+        return False
+
+
+def list_active_official_skills() -> list[dict]:
+    """列出所有 is_active=1 的官方技能（软删除检测用）"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT skill_name, skill_path, content_hash FROM skill WHERE scope='official' AND is_active=1")
+            return [{"skill_name": r[0], "skill_path": r[1] or r[0], "content_hash": r[2] or ""} for r in c.fetchall()]
+    except Exception as e:
+        log.warning(f"list_active_official_skills failed: {e}")
+        return []
 
 
 def resolve_skill_id(skill_name: str, owner_id: str = "") -> int:

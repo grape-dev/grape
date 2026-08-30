@@ -93,6 +93,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Knowledge sync loop start failed: {e}")
 
+    # 官方技能 OBS 自动同步：定时扫描本地技能变更，上传 OBS + 软删除检测（每 30 分钟）
+    try:
+        from src.storage.skill_sync import start_skill_sync_scheduler
+        start_skill_sync_scheduler()
+    except Exception as e:
+        log.warning(f"Skill sync scheduler start failed: {e}")
+
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
     _probe_task = None
@@ -164,6 +171,12 @@ async def lifespan(app: FastAPI):
         _sweep_task.cancel()
     if _probe_task:
         _probe_task.cancel()
+    # 官方技能 OBS 同步：优雅关闭定时任务
+    try:
+        from src.storage.skill_sync import stop_skill_sync_scheduler
+        await stop_skill_sync_scheduler()
+    except Exception:
+        pass
     # 终止运行中的 agent 子进程（opencode），使 executor 线程尽快结束，
     # 避免 uvicorn 优雅停机等待超时被 systemd SIGKILL（grape-main timeout 重启根因，2026-08-18）
     try:
