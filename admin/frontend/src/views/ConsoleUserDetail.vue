@@ -1,11 +1,11 @@
 <template>
   <div class="page-container" style="padding:0">
-    <div class="page-header" style="backdrop-filter:saturate(180%) blur(20px);background:rgba(255,255,255,0.72);padding:16px 40px">
+    <div class="page-header">
       <span class="back-btn" @click="$router.push('/sys/console')">
         <svg viewBox="0 0 24 24" width="16" height="16"><path d="M15 18l-6-6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         返回
       </span>
-      <h1 style="font-size:22px;font-weight:600">{{ info.username || '用户详情' }}</h1>
+      <h1>{{ info.username || '用户详情' }}</h1>
       <span v-if="info.online" class="status-tag success">在线</span>
       <span v-else class="status-tag default">离线</span>
       <span class="t3" style="font-size:12px;margin-left:4px" v-if="info.lastActiveAt">最后活跃 {{ formatTime(info.lastActiveAt) }}</span>
@@ -14,7 +14,7 @@
       </div>
     </div>
 
-    <div v-if="loading" style="display:flex;align-items:center;justify-content:center;height:60vh;color:var(--text-tertiary);font-size:14px">加载中...</div>
+    <div v-if="loading" class="loading-state">加载中...</div>
 
     <div v-else style="padding:24px 40px">
       <!-- 基本信息（紧凑横排）+ 凭证配置 -->
