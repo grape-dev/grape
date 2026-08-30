@@ -75,7 +75,6 @@ function renderRepoSelection(repos) {
   const user = (_lu && (_lu.nickname || _lu.username)) || 'User';
   const name = user.split('@')[0];
   const hostedCount = (repos || []).filter(r => r.is_hosted).length;
-  const joinedCount = (repos || []).filter(r => r.is_joined && !r.is_hosted).length;
 
   const allRepos = (repos || []).slice().sort((a, b) => {
     const pa = a.is_hosted ? 2 : a.is_joined ? 1 : 0;
@@ -117,7 +116,6 @@ function renderRepoSelection(repos) {
     '<div class="project-stats">' +
       '<div class="project-stat"><b>' + total + '</b><span>' + I18N.t('repos.lobby.stat_projects') + '</span></div>' +
       '<div class="project-stat"><b>' + hostedCount + '</b><span>' + I18N.t('repos.lobby.stat_hosted') + '</span></div>' +
-      '<div class="project-stat"><b>' + joinedCount + '</b><span>' + I18N.t('repos.lobby.stat_joined') + '</span></div>' +
     '</div>' +
     '<div class="project-section">' +
       '<div class="project-section-header">' +
