@@ -227,11 +227,17 @@ public class RuntimeDeviceService {
         taskFilterOptions.put("skill", countBy(engineTasks, AgentTaskRo::getSkill));
         taskFilterOptions.put("agentType", countBy(engineTasks, AgentTaskRo::getAgentType));
 
-        // runtimeId → 引擎名映射（设备详情任务列表显示引擎列）
+        // runtimeId → 引擎名映射（对齐健康中心格式: name-device(ip)）
         Map<Integer, String> engineNameById = engines.stream()
                 .collect(Collectors.toMap(AgentRuntimeRo::getId,
-                        r -> r.getName() + (r.getDisplayName() != null && !r.getDisplayName().isBlank()
-                                ? "(" + r.getDisplayName() + ")" : ""),
+                        r -> {
+                            RuntimeCredentialRo rc = r.getCredentialId() == null ? null
+                                    : credentialRepository.findById(r.getCredentialId()).orElse(null);
+                            String devName = rc != null && rc.getDeviceName() != null && !rc.getDeviceName().isBlank()
+                                    ? rc.getDeviceName() : "本机直连";
+                            String ip = rc != null && rc.getLastIp() != null ? rc.getLastIp() : "127.0.0.1";
+                            return r.getName() + "-" + devName + "(" + ip + ")";
+                        },
                         (a, b) -> a));
 
         List<AgentTaskRo> allTasks = engineTasks.stream()
@@ -435,8 +441,13 @@ public class RuntimeDeviceService {
         int total = allTasks.size();
         int from = Math.min(taskPage * taskSize, total);
         int to = Math.min(from + taskSize, total);
+        // runtimeId → 引擎名映射（对齐健康中心格式: name-device(ip)）
+        Map<Integer, String> engineNameById = new java.util.HashMap<>();
+        engineNameById.put(runtimeId, e.getName() + "-"
+                + (cred != null && cred.getDeviceName() != null && !cred.getDeviceName().isBlank() ? cred.getDeviceName() : "本机直连")
+                + "(" + (cred != null && cred.getLastIp() != null ? cred.getLastIp() : "127.0.0.1") + ")");
         Map<String, Object> taskPageObj = new LinkedHashMap<>();
-        taskPageObj.put("content", allTasks.subList(from, to).stream().map(this::toTaskMap).collect(Collectors.toList()));
+        taskPageObj.put("content", allTasks.subList(from, to).stream().map(t -> toTaskMap(t, engineNameById)).collect(Collectors.toList()));
         taskPageObj.put("totalElements", total);
         taskPageObj.put("totalPages", taskSize > 0 ? (total + taskSize - 1) / taskSize : 0);
         taskPageObj.put("page", taskPage);
