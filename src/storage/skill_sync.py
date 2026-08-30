@@ -101,10 +101,10 @@ async def sync_official_skills_to_obs() -> dict:
         if not current_hash:
             continue
 
-        # 查 DB 的 content_hash
-        db_hash = get_skill_content_hash(skill_name)
+        # 查 DB 的 content_hash（按 skill_name + scope 查主键 id + hash）
+        skill_id, db_hash = get_skill_content_hash(skill_name)
 
-        if db_hash == current_hash:
+        if db_hash == current_hash and skill_id:
             result["skipped"] += 1
             continue
 
@@ -123,8 +123,13 @@ async def sync_official_skills_to_obs() -> dict:
                 logger.error(f"upload skill {skill_name} to OBS failed: {e}")
                 continue
 
-        # 更新 DB
-        updated = update_skill_content_hash(skill_name, "official", current_hash, object_key)
+        # 按主键 id 更新 DB
+        if not skill_id:
+            # DB 里没有这个技能记录，db_setup.py 的 _sync_official_skills 会负责 INSERT
+            result["skipped"] += 1
+            continue
+
+        updated = update_skill_content_hash(skill_id, current_hash, object_key)
         if updated:
             if db_hash:
                 result["updated"] += 1

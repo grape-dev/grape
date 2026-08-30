@@ -117,9 +117,9 @@ ALTER TABLE skill ADD COLUMN content_hash VARCHAR(256) DEFAULT '';
 2. 遍历每个技能：
    a. 解析本地目录路径：skills/<agent_type>/<skill>/
    b. 计算当前 content_hash
-   c. 查 DB 该技能的 content_hash
+   c. 查 DB 该技能的 content_hash（按 skill_name + scope 查主键 id，再读 content_hash）
    d. hash 相同 → 跳过（无变更）
-   e. hash 不同或技能不存在 → 打包 zip → 上传 OBS（OBS 模式）→ 更新 DB
+   e. hash 不同或技能不存在 → 打包 zip → 上传 OBS（OBS 模式）→ 按主键 id 更新 DB
 3. 返回同步结果（新增/更新/跳过数量）
 ```
 
@@ -203,7 +203,7 @@ async def stop_skill_sync_scheduler():
 | 1 | src/api/db_setup.py | 新增 content_hash 字段 DDL 迁移 | ALTER TABLE 幂等，VARCHAR(256) |
 | 2 | src/api/db_setup.py | _sync_official_skills INSERT 加 content_hash | 启动时 seed 写空 hash |
 | 3 | src/user/db.py | get_skill_by_id 返回 content_hash | SELECT 加 content_hash 列 |
-| 4 | src/user/db.py | 新增 get_skill_content_hash + update_skill_content_hash | 读取/更新 hash |
+| 4 | src/user/db.py | 新增 get_skill_content_hash + update_skill_content_hash | 读取/更新 hash，基于主键 id |
 | 5 | src/storage/skill_sync.py（新增） | _compute_skill_hash | 计算 hash（完整 SHA-256 64 字符） |
 | 6 | src/storage/skill_sync.py（新增） | _pack_skill_zip | 打包技能目录为 zip |
 | 7 | src/storage/skill_sync.py（新增） | sync_official_skills_to_obs | 同步逻辑（hash 检测 + 上传 OBS） |

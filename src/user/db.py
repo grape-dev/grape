@@ -787,28 +787,32 @@ def get_skill_by_id(skill_id) -> dict | None:
         return None
 
 
-def get_skill_content_hash(skill_name: str, scope: str = "official") -> str:
-    """读取官方技能的 content_hash（变更检测用）"""
+def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[int, str]:
+    """读取技能的主键 id 和 content_hash（变更检测用）。
+    返回 (id, content_hash)，id=0 表示不存在。
+    """
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT content_hash FROM skill WHERE skill_name=? AND scope=? LIMIT 1", (skill_name, scope))
+            c.execute("SELECT id, content_hash FROM skill WHERE skill_name=? AND scope=? LIMIT 1", (skill_name, scope))
             row = c.fetchone()
-            return row[0] if row else ""
+            if not row:
+                return (0, "")
+            return (row[0], row[1] or "")
     except Exception as e:
         log.warning(f"get_skill_content_hash failed: {e}")
-        return ""
+        return (0, "")
 
 
-def update_skill_content_hash(skill_name: str, scope: str, content_hash: str, file_path: str = "") -> bool:
-    """更新技能的 content_hash 和 file_path（OBS 同步后调用）"""
+def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str = "") -> bool:
+    """按主键 id 更新技能的 content_hash 和 file_path（OBS 同步后调用）"""
     try:
         with db_lock:
             c = db.cursor()
             if file_path:
-                c.execute("UPDATE skill SET content_hash=?, file_path=? WHERE skill_name=? AND scope=?", (content_hash, file_path, skill_name, scope))
+                c.execute("UPDATE skill SET content_hash=?, file_path=? WHERE id=?", (content_hash, file_path, skill_id))
             else:
-                c.execute("UPDATE skill SET content_hash=? WHERE skill_name=? AND scope=?", (content_hash, skill_name, scope))
+                c.execute("UPDATE skill SET content_hash=? WHERE id=?", (content_hash, skill_id))
             db.commit()
             return c.rowcount > 0
     except Exception as e:
