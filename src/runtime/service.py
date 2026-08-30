@@ -1384,6 +1384,26 @@ def _auto_advance_pipeline(task: dict):
     if not _next_agent or _next_agent == "done":
         return  # 没有下一个 agent，或已经是最后一步
 
+    # 最小产物校验：检查 agent 是否有实际产出
+    # coding agent 应该有代码变更（result_text 非空且不是纯错误说明）
+    # 没产出的 agent 不推进 pipeline，避免假完成
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, result_text, exit_code, errors FROM agent_tasks "
+                  "WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                  "ORDER BY id DESC LIMIT 1",
+                  (_repo_key, _issue_id, _agent_type))
+        _task_row = c.fetchone()
+    if _task_row:
+        _result_text = (_task_row[1] or "").strip()
+        _exit_code = _task_row[2]
+        _errors = (_task_row[3] or "").strip()
+        # 产物为空或只有错误信息 → 不推进
+        if not _result_text or (len(_result_text) < 50 and _errors):
+            log.warning(f"Auto-advance skipped: issue={_issue_id} agent={_agent_type} "
+                        f"no meaningful output (result_len={len(_result_text)}, errors={_errors[:100]})")
+            return
+
     # 检查是否已有下一个 agent 的 running 事件（避免重复触发）
     with db_lock:
         c = db.cursor()
